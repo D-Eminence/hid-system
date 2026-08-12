@@ -1,0 +1,17 @@
+import React,{useCallback,useEffect,useState}from'react'
+import{Card,EmptyState,PageLoader,showToast}from'../../../components/ui'
+import type{MigrationProjectAccess}from'../domain'
+import{listMigrationResource}from'../api/migrationOperations'
+type Metrics={folders:number;pages:number;jobs_queued:number;jobs_dead_letter:number;validation_open:number;qa_open:number;imports_completed:number;imports_failed:number;cost_minor:number}
+type Audit={event_id:string;resource_type:string;action:string;reason:string|null;request_id:string|null;created_at:string}
+export function OperationsWorkspace({project,mode='dashboard'}:{project:MigrationProjectAccess;mode?:'dashboard'|'audit'|'reports'}){
+ const[metrics,setMetrics]=useState<Metrics|null>(null),[events,setEvents]=useState<Audit[]>([]),[loading,setLoading]=useState(true)
+ const load=useCallback(async()=>{setLoading(true);try{const result=await listMigrationResource<Metrics>('operations',project.id);setMetrics(result.data[0]??null);if(mode==='audit')setEvents((await listMigrationResource<Audit>('audit',project.id)).data)}catch(e){showToast(e instanceof Error?e.message:'Project operations could not be loaded.','error')}finally{setLoading(false)}},[mode,project.id])
+ useEffect(()=>{void load()},[load]);if(loading)return <PageLoader label="Loading project operations..."/>
+ if(!metrics)return <EmptyState icon={<span>-</span>} title="No operational data" description="Project metrics appear when capture and processing begin."/>
+ const cards:Array<[string,string,string]>=[['Source folders',metrics.folders.toLocaleString(),`${metrics.pages.toLocaleString()} pages`],['Queued jobs',metrics.jobs_queued.toLocaleString(),`${metrics.jobs_dead_letter} dead letter`],['Human review',String(metrics.validation_open),`${metrics.qa_open} QA tasks`],['Canonical imports',metrics.imports_completed.toLocaleString(),`${metrics.imports_failed} failed`]]
+ return <><div className="migrate-pagehead"><div><h1>{mode==='audit'?'Migration audit':mode==='reports'?'Operational report':'Migration dashboard'}</h1><p>{project.name} · live project-scoped operational data.</p></div></div>
+ <div className="migrate-kpis">{cards.map(([label,value,foot])=><Card key={label} padding={0} style={{borderRadius:10}}><div className="migrate-kpi"><div className="migrate-kpi-label">{label}</div><div className="migrate-kpi-value">{value}</div><div className="migrate-kpi-foot">{foot}</div></div></Card>)}</div>
+ {mode==='reports'&&<section className="migrate-card migrate-section"><div className="migrate-section-head"><h2>Cost and throughput</h2></div><div className="migrate-source"><div><small>Attributed provider cost</small><strong>{metrics.cost_minor.toLocaleString()} minor units</strong></div><div><small>Pages per completed import</small><strong>{metrics.imports_completed?Math.round(metrics.pages/metrics.imports_completed):0}</strong></div><div><small>Open review work</small><strong>{metrics.validation_open+metrics.qa_open}</strong></div></div></section>}
+ {mode==='audit'&&<section className="migrate-card migrate-section">{events.length===0?<p style={{color:'var(--t3)'}}>No project audit events are available.</p>:events.map(event=><div className="migrate-attention" key={event.event_id}><div><strong>{event.action.replace(/_/g,' ')}</strong><small>{event.resource_type.replace(/_/g,' ')} · {new Date(event.created_at).toLocaleString()}</small></div>{event.request_id&&<span className="migrate-mono">{event.request_id.slice(0,8)}</span>}</div>)}</section>}</>
+}

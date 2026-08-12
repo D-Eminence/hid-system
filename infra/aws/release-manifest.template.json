@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "release": "${RELEASE_ID}",
+  "git_sha": "${GIT_SHA_40_HEX}",
+  "environment": "${ENVIRONMENT}",
+  "generated_at": "${GENERATED_AT_RFC3339}",
+  "components": [
+    {
+      "component": "${COMPONENT}",
+      "repository": "${ECR_REPOSITORY_URI}",
+      "image_digest": "sha256:${IMAGE_DIGEST_64_HEX}",
+      "image_uri": "${ECR_REPOSITORY_URI}@sha256:${IMAGE_DIGEST_64_HEX}",
+      "built_at": "${BUILT_AT_RFC3339}",
+      "sbom": {
+        "format": "CycloneDX-JSON",
+        "uri": "s3://${RELEASE_EVIDENCE_BUCKET}/${RELEASE_ID}/${COMPONENT}/sbom.cdx.json",
+        "sha256": "sha256:${SBOM_DIGEST_64_HEX}"
+      },
+      "scan": {
+        "scanner": "${SCANNER_AND_VERSION}",
+        "uri": "s3://${RELEASE_EVIDENCE_BUCKET}/${RELEASE_ID}/${COMPONENT}/scan.json",
+        "completed_at": "${SCAN_COMPLETED_AT_RFC3339}",
+        "critical": 0,
+        "high": 0,
+        "decision": "pass"
+      }
+    }
+  ]
+}

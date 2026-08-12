@@ -1,0 +1,60 @@
+server {
+  listen 3000;
+  server_name _;
+  server_tokens off;
+
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+  add_header Cross-Origin-Opener-Policy "same-origin" always;
+
+  location = /gateway-health/live {
+    access_log off;
+    default_type application/json;
+    return 200 '{"status":"ok"}';
+  }
+
+  location = /gateway-health/ready {
+    access_log off;
+    default_type application/json;
+    return 200 '{"status":"ready"}';
+  }
+
+  error_page 502 503 504 = @upstream_unavailable;
+  location @upstream_unavailable {
+    default_type application/problem+json;
+    add_header Cache-Control "no-store" always;
+    return 503 '{"type":"about:blank","title":"Service unavailable","status":503,"detail":"A required platform service is temporarily unavailable.","code":"UPSTREAM_UNAVAILABLE"}';
+  }
+
+  location = /api/v1/auth { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+  location ^~ /api/v1/auth/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+  location = /api/v1/identity { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+  location ^~ /api/v1/identity/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+  location = /api/v1/audit { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+  location ^~ /api/v1/audit/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+  location = /api/v1/admin { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+  location ^~ /api/v1/admin/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+
+  location = /api/v1/lab { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${LAB_API_UPSTREAM}; }
+  location ^~ /api/v1/lab/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${LAB_API_UPSTREAM}; }
+  location = /api/v1/pharmacy { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${PHARMACY_API_UPSTREAM}; }
+  location ^~ /api/v1/pharmacy/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${PHARMACY_API_UPSTREAM}; }
+  location = /api/v1/ocr { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${OCR_API_UPSTREAM}; }
+  location ^~ /api/v1/ocr/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${OCR_API_UPSTREAM}; }
+  location = /api/v1/outreach { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${OUTREACH_API_UPSTREAM}; }
+  location ^~ /api/v1/outreach/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${OUTREACH_API_UPSTREAM}; }
+  location = /api/v1/ehr { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${EHR_API_UPSTREAM}; }
+  location ^~ /api/v1/ehr/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${EHR_API_UPSTREAM}; }
+  location ^~ /api/ {
+    default_type application/problem+json;
+    add_header Cache-Control "no-store" always;
+    return 404 '{"type":"about:blank","title":"Not found","status":404,"code":"API_ROUTE_NOT_FOUND"}';
+  }
+
+  location / {
+    default_type application/problem+json;
+    add_header Cache-Control "no-store" always;
+    return 404 '{"type":"about:blank","title":"Not found","status":404,"code":"API_ONLY_ORIGIN"}';
+  }
+}

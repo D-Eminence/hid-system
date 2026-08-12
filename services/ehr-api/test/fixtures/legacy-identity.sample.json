@@ -1,0 +1,52 @@
+{
+  "accounts": [
+    {
+      "source_pk": "20000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-01T00:00:00.000Z",
+      "payload": {
+        "id": "20000000-0000-4000-8000-000000000001",
+        "email": "migration-fixture@example.invalid",
+        "encrypted_password": "$2b$10$fixture.hash.is.not.a.real.user.credential",
+        "email_confirmed_at": "2025-01-01T00:00:00.000Z",
+        "created_at": "2025-01-01T00:00:00.000Z",
+        "updated_at": "2026-01-01T00:00:00.000Z"
+      }
+    }
+  ],
+  "user_profiles": [
+    {
+      "source_pk": "21000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-01T00:00:00.000Z",
+      "payload": {
+        "id": "21000000-0000-4000-8000-000000000001",
+        "auth_user_id": "20000000-0000-4000-8000-000000000001",
+        "display_name": "Migration Fixture"
+      }
+    }
+  ],
+  "organizations": [],
+  "facilities": [],
+  "patients": [
+    {
+      "source_pk": "30000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-01T00:00:00.000Z",
+      "payload": {
+        "id": "30000000-0000-4000-8000-000000000001",
+        "auth_user_id": "20000000-0000-4000-8000-000000000001",
+        "hid_code": "HID-ABCDEFGH",
+        "first_name": "Fixture",
+        "last_name": "Patient",
+        "full_name": "Fixture Patient",
+        "email": "migration-fixture@example.invalid",
+        "created_at": "2025-01-01T00:00:00.000Z",
+        "updated_at": "2026-01-01T00:00:00.000Z"
+      }
+    }
+  ],
+  "patient_identifiers": [],
+  "staff": [],
+  "memberships": [],
+  "access_requests": [],
+  "consent_grants": [],
+  "audit_events": []
+}

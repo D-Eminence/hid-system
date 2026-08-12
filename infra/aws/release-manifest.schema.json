@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hid.example.invalid/schemas/release-manifest.schema.json",
+  "title": "HID immutable container release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release", "git_sha", "environment", "generated_at", "components"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "release": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "git_sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "environment": { "enum": ["development", "staging", "production"] },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "components": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/component" },
+      "allOf": [
+        { "$ref": "#/$defs/identityApiPresent" },
+        { "$ref": "#/$defs/ehrApiPresent" },
+        { "$ref": "#/$defs/labApiPresent" },
+        { "$ref": "#/$defs/pharmacyApiPresent" },
+        { "$ref": "#/$defs/ocrApiPresent" },
+        { "$ref": "#/$defs/ocrWorkerPresent" },
+        { "$ref": "#/$defs/outreachApiPresent" },
+        { "$ref": "#/$defs/notificationApiPresent" },
+        { "$ref": "#/$defs/notificationWorkerPresent" },
+        { "$ref": "#/$defs/eventDispatcherPresent" },
+        { "$ref": "#/$defs/gatewayPresent" },
+        { "$ref": "#/$defs/databaseMigrationPresent" }
+      ]
+    }
+  },
+  "$defs": {
+    "identityApiPresent": { "contains": { "properties": { "component": { "const": "identity-api" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "ehrApiPresent": { "contains": { "properties": { "component": { "const": "ehr-api" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "labApiPresent": { "contains": { "properties": { "component": { "const": "lab-api" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "pharmacyApiPresent": { "contains": { "properties": { "component": { "const": "pharmacy-api" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "ocrApiPresent": { "contains": { "properties": { "component": { "const": "ocr-api" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "ocrWorkerPresent": { "contains": { "properties": { "component": { "const": "ocr-worker" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "outreachApiPresent": { "contains": { "properties": { "component": { "const": "outreach-api" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "notificationApiPresent": { "contains": { "properties": { "component": { "const": "notification-api" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "notificationWorkerPresent": { "contains": { "properties": { "component": { "const": "notification-worker" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "eventDispatcherPresent": { "contains": { "properties": { "component": { "const": "event-dispatcher" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "gatewayPresent": { "contains": { "properties": { "component": { "const": "gateway" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "databaseMigrationPresent": { "contains": { "properties": { "component": { "const": "database-migration" } }, "required": ["component"] }, "minContains": 1, "maxContains": 1 },
+    "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "evidenceUri": { "type": "string", "pattern": "^(s3|https)://" },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "repository", "image_digest", "image_uri", "built_at", "sbom", "scan"],
+      "properties": {
+        "component": {
+          "enum": [
+            "identity-api", "ehr-api", "lab-api", "pharmacy-api", "ocr-api",
+            "ocr-worker", "outreach-api", "notification-api", "notification-worker",
+            "event-dispatcher", "gateway", "database-migration"
+          ]
+        },
+        "repository": { "type": "string", "minLength": 1 },
+        "image_digest": { "$ref": "#/$defs/sha256" },
+        "image_uri": { "type": "string", "pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$" },
+        "built_at": { "type": "string", "format": "date-time" },
+        "sbom": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "uri", "sha256"],
+          "properties": {
+            "format": { "enum": ["CycloneDX-JSON", "SPDX-JSON"] },
+            "uri": { "$ref": "#/$defs/evidenceUri" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "scan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scanner", "uri", "completed_at", "critical", "high", "decision"],
+          "properties": {
+            "scanner": { "type": "string", "minLength": 1 },
+            "uri": { "$ref": "#/$defs/evidenceUri" },
+            "completed_at": { "type": "string", "format": "date-time" },
+            "critical": { "type": "integer", "minimum": 0 },
+            "high": { "type": "integer", "minimum": 0 },
+            "decision": { "enum": ["pass", "approved_exception"] },
+            "exception_id": { "type": "string", "minLength": 1 }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "decision": { "const": "approved_exception" } } },
+              "then": { "required": ["exception_id"] }
+            },
+            {
+              "if": { "properties": { "decision": { "const": "pass" } } },
+              "then": { "properties": { "critical": { "const": 0 }, "high": { "const": 0 } } }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

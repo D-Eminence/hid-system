@@ -1,0 +1,28 @@
+# Dependencies and generated output
+**/node_modules/
+**/node_modules
+**/dist/
+**/build/
+**/.vite/
+**/.vercel/
+**/supabase/.temp/
+
+# Local configuration and secrets
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Logs, coverage, and local caches
+*.log
+**/coverage/
+*.tsbuildinfo
+.DS_Store
+
+# Local agent/editor state and read-only historical/reference material
+**/.agents/
+**/.codex
+/identity/
+/upstream_snapshot/

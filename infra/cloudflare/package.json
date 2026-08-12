@@ -1,0 +1,11 @@
+{
+  "name": "@hid/cloudflare-edge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "HID Cloudflare Workers Static Assets deployment contracts",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "verify": "node scripts/verify-config.mjs"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "name": "@hid/web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run verify:identity && tsc && vite build",
+    "preview": "vite preview",
+    "perf:load": "node ./scripts/load-test.mjs",
+    "security:audit": "npm audit --audit-level=high",
+    "security:deps": "npm outdated",
+    "verify:api": "node ./scripts/verify-api-response-contracts.mjs",
+    "verify:identity": "node ./scripts/verify-identity-contracts.mjs",
+    "verify:migrate": "node ./scripts/verify-migrate-contracts.mjs"
+  },
+  "overrides": {
+    "dompurify": "^3.4.11",
+    "protobufjs": "^7.6.4"
+  },
+  "dependencies": {
+    "@hid/api-client": "file:../../packages/api-client",
+    "@hid/identity-browser-client": "file:../../packages/identity-browser-client",
+    "@hid/offline": "file:../../packages/offline",
+    "@hid/telemetry": "file:../../packages/telemetry",
+    "@hid/ui": "file:../../packages/ui",
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@sentry/react": "^10.58.0",
+    "posthog-js": "^1.388.1",
+    "posthog-node": "^5.38.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.21.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-legacy": "^8.0.2",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^5.3.0",
+    "vite": "^8.0.16"
+  }
+}

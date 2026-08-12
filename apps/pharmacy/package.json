@@ -1,0 +1,37 @@
+{
+  "name": "@hid/pharmacy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@hid/api-client": "file:../../packages/api-client",
+    "@hid/identity-browser-client": "file:../../packages/identity-browser-client",
+    "@hid/offline": "file:../../packages/offline",
+    "@hid/telemetry": "file:../../packages/telemetry",
+    "@hid/ui": "file:../../packages/ui",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.21.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.8.3",
+    "vite": "^8.0.16",
+    "vitest": "^3.2.4"
+  }
+}

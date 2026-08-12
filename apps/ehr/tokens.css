@@ -1,0 +1,145 @@
+/* ============================================================================
+   DESIGN SYSTEM TOKENS  -  canonical, WCAG 2.2 AA verified
+   Source of truth: Figma-canonical (ratified 2026-05-28).
+   ✓ = confirmed from Figma/code   ＋ = system-completed (harmonized + contrast-checked)
+   Drop into the root stylesheet. Components consume vars only - never raw hex.
+   ============================================================================ */
+:root {
+  /* ---- NEUTRALS (ramp) ---------------------------------------------------- */
+  --neutral-0:#ffffff;     /* ✓ surface */
+  --neutral-50:#f6f7f8;    /* ✓ muted surface / track */
+  --neutral-100:#f2f2f2;   /* ✓ hairline border */
+  --neutral-200:#e6e6e6;   /* ✓ divider */
+  --neutral-300:#c2c9cd;   /* ✓ subtle outline */
+  --neutral-400:#9aa6ad;   /* ✓ decorative only - NOT readable text (2.49:1) */
+  --neutral-500:#79838d;   /* ＋ control borders (3.86:1, meets 1.4.11) */
+  --neutral-600:#5f6873;   /* ＋ inactive nav / secondary labels (5.65:1 AA) */
+  --neutral-700:#484f58;   /* ✓ body text (8.28:1 AAA) */
+  --neutral-800:#2e3034;   /* ✓ strong text / values (13.2:1 AAA) */
+  --neutral-900:#121212;   /* ✓ headings (18.7:1 AAA) */
+
+  /* ---- PRIMARY / INFO (brand blue) --------------------------------------- */
+  --primary-50:#e6f7ff;    /* ✓ light fill (avatar bg, info surface) */
+  --primary-100:#cfecff;   /* ＋ */
+  --primary-200:#a3d8ff;   /* ＋ */
+  --primary-300:#6ec0ff;   /* ＋ */
+  --primary-400:#2e9bf5;   /* ＋ */
+  --primary-500:#086dd9;   /* ✓ core brand; white-on AA 5.0; on-white AA 5.0 */
+  --primary-600:#0a539e;   /* ＋ text/links on white (7.65:1 AAA) */
+  --primary-700:#0a4783;   /* ＋ */
+  --primary-800:#0a3a69;   /* ＋ */
+  --primary-900:#082c4f;   /* ＋ */
+
+  /* ---- DANGER (also: break-glass/emergency framing) ---------------------- */
+  --danger-50:#fdeaea;     /* ＋ badge/surface tint */
+  --danger-100:#fbd5d7;    /* ＋ */
+  --danger-300:#f4222d;    /* ✓ framing/fills + LARGE/bold text only (4.11:1) */
+  --danger-500:#cf1322;    /* ✓ body-size danger text (5.57:1 AA) */
+  --danger-700:#5d0012;    /* ✓ deepest (notification dot; white-on 14.2:1 AAA) */
+  --danger-badge-text:#b91c1c; /* ＋ on --danger-50 = 5.59:1 AA */
+
+  /* ---- SUCCESS ----------------------------------------------------------- */
+  --success-50:#e7f6ec;    /* ＋ */
+  --success-500:#15803d;   /* ＋ text on white 5.02:1 AA */
+  --success-600:#166534;   /* ＋ badge text on --success-50 (AA) */
+
+  /* ---- WARNING ----------------------------------------------------------- */
+  --warning-50:#fdf1dd;    /* ＋ */
+  --warning-500:#b45309;   /* ＋ text on white 5.02:1 AA */
+  --warning-600:#9a4f08;   /* ＋ badge text on --warning-50 = 5.38:1 AA */
+
+  /* ---- SEMANTIC ALIASES (use these in components, not the ramps) --------- */
+  --text-heading:var(--neutral-900);
+  --text-strong:var(--neutral-800);
+  --text-body:var(--neutral-700);
+  --text-secondary:var(--neutral-600);   /* min readable secondary */
+  --text-disabled:var(--neutral-400);    /* visually disabled ONLY */
+  --text-link:var(--primary-600);
+  --text-on-accent:var(--neutral-0);
+
+  --surface:var(--neutral-0);
+  --surface-muted:var(--neutral-50);
+  --surface-info:var(--primary-50);
+
+  --border-subtle:var(--neutral-100);    /* decorative dividers */
+  --border-default:var(--neutral-300);   /* card/section edges */
+  --border-control:var(--neutral-500);   /* inputs - meets 3:1 (1.4.11) */
+  --border-focus:var(--primary-500);
+
+  --accent:var(--primary-500);
+  --accent-hover:var(--primary-600);
+
+  /* ---- TYPOGRAPHY -------------------------------------------------------- */
+  --font-body:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  --font-display:var(--font-body);       /* single-family system; swap if a display face is adopted */
+
+  --fs-caption:11px;  --lh-caption:16px;   /* ＋ metadata only, use sparingly */
+  --fs-sm:12px;       --lh-sm:16px;        /* ✓ labels, chips, dense UI */
+  --fs-md:16px;       --lh-md:24px;        /* ✓ default body (lh raised 20→24 for readability) */
+  --fs-lg:20px;       --lh-lg:32px;        /* ✓ lead / large */
+  --fs-h-sm:24px;     --lh-h-sm:32px;      /* ＋ */
+  --fs-h-md:30px;     --lh-h-md:38px;      /* ＋ */
+  --fs-h-lg:36px;     --lh-h-lg:44px;      /* ＋ */
+  --fs-display:48px;  --lh-display:56px;   /* ＋ */
+
+  --fw-regular:400; --fw-medium:500; --fw-semibold:600; --fw-bold:700;
+  --tracking-tight:-0.01em; --tracking-normal:0;
+
+  /* ---- SPACING (4px base scale) ------------------------------------------ */
+  --space-100:4px;   /* ✓ */  --space-150:6px;  /* ✓ */  --space-200:8px;  /* ✓ */
+  --space-300:12px;  /* ✓ */  --space-400:16px; /* ✓ */  --space-500:20px; /* ✓ */
+  --space-600:24px;  /* ✓ */  --space-700:32px; /* ＋ */  --space-800:36px; /* ✓ */
+  --space-900:44px;  /* ✓ */  --space-1000:48px;/* ＋ */  --space-1100:60px;/* ✓ */
+  --space-1200:68px; /* ✓ */
+
+  /* ---- RADIUS ------------------------------------------------------------ */
+  --radius-sm:4px;   /* ✓ */  --radius-md:8px;  /* ✓ */  --radius-lg:12px; /* ✓ */
+  --radius-xl:16px;  /* ＋ */  --radius-2xl:24px;/* ✓ cards */  --radius-pill:9999px;
+
+  /* ---- ELEVATION (border-first, shadow-light) ---------------------------- */
+  --shadow-xs:0 1px 2px rgba(16,24,40,.05);
+  --shadow-sm:0 1px 4px rgba(16,24,40,.06);
+  --shadow-md:0 4px 16px rgba(16,24,40,.08);
+  --shadow-lg:0 20px 60px rgba(16,24,40,.15);
+
+  /* ---- MOTION ------------------------------------------------------------ */
+  --dur-instant:80ms; --dur-fast:120ms; --dur-base:200ms; --dur-slow:320ms;
+  --ease-standard:cubic-bezier(.2,0,0,1);
+  --ease-decelerate:cubic-bezier(0,0,0,1);
+  --ease-accelerate:cubic-bezier(.3,0,1,1);
+
+  /* ---- LAYERING ---------------------------------------------------------- */
+  --z-base:0; --z-dropdown:100; --z-sticky:200; --z-overlay:1000;
+  --z-toast:1100; --z-tooltip:1200;
+
+  /* ---- BREAKPOINTS (reference; use in media queries) --------------------- */
+  --bp-sm:480px; --bp-md:768px; --bp-lg:1024px; --bp-xl:1280px; --bp-2xl:1440px;
+}
+
+/* ---- BASE RESET -------------------------------------------------------- */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  font-family:var(--font-body);
+  font-size:var(--fs-md);            /* 16px base - resolves the 14/12 conflict toward readability */
+  line-height:var(--lh-md);
+  color:var(--text-body);
+  background:var(--surface-muted);
+  -webkit-font-smoothing:antialiased;
+  min-width:320px;overflow-x:hidden;
+}
+a{color:var(--text-link);text-decoration:none}
+button{cursor:pointer;font-family:inherit}
+input,select,textarea{font-family:inherit}
+img{display:block;max-width:100%}
+
+/* ---- ACCESSIBILITY: focus, always visible (2.4.7 / 2.4.11) ------------- */
+:focus-visible{outline:2px solid var(--border-focus);outline-offset:2px;border-radius:2px}
+
+/* ---- ACCESSIBILITY: honour reduced motion (2.3.3) ---------------------- */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{
+    animation-duration:.001ms!important;animation-iteration-count:1!important;
+    transition-duration:.001ms!important;scroll-behavior:auto!important;
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "app": "node --import tsx bin/hid-infrastructure.ts",
+  "context": {
+    "@aws-cdk/aws-cloudfront:defaultSecurityPolicyTLSv1.2_2021": true,
+    "@aws-cdk/aws-ecs:removeDefaultDeploymentAlarm": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true
+  }
+}

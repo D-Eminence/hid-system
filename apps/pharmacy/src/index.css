@@ -1,0 +1,12 @@
+@import '@hid/ui/base.css';
+
+body { margin: 0; background: var(--color-background); color: var(--color-text-primary); }
+.workspace-grid { display: grid; gap: 16px; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.metric { padding: 16px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); }
+.metric strong { display: block; font-size: 28px; margin-top: 6px; }
+.workspace-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.work-item { border-top: 1px solid var(--color-border); padding: 16px 0; display: grid; gap: 10px; }
+.work-item:first-child { border-top: 0; }
+.inline-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; align-items: end; }
+.safe-note { border-left: 4px solid var(--color-brand-primary); background: var(--color-brand-primary-soft); padding: 12px; }

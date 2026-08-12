@@ -1,0 +1,11 @@
+@import '@hid/ui/base.css';
+
+body { margin: 0; background: var(--color-background); color: var(--color-text-primary); }
+.ocr-grid { display: grid; gap: 16px; }
+.ocr-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.ocr-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.ocr-metric { border: 1px solid var(--color-border); background: var(--color-surface); border-radius: 12px; padding: 16px; }
+.ocr-metric strong { display: block; font-size: 24px; margin-top: 6px; }
+.ocr-row { border-top: 1px solid var(--color-border); padding: 14px 0; display: grid; gap: 8px; }
+.ocr-safe { border-left: 4px solid var(--color-brand-primary); background: var(--color-brand-primary-soft); padding: 12px; }
+.ocr-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; align-items: end; }

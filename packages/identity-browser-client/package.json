@@ -1,0 +1,13 @@
+{
+  "name": "@hid/identity-browser-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/identityClient.ts",
+    "./config": "./src/identityApiConfig.ts"
+  },
+  "dependencies": {
+    "@hid/api-client": "file:../api-client"
+  }
+}

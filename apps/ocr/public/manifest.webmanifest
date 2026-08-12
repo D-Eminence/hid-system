@@ -1,0 +1,12 @@
+{
+  "name": "HID OCR Operations",
+  "short_name": "HID OCR",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#f4f8fc",
+  "theme_color": "#1a6fd4",
+  "icons": [
+    { "src": "hid-app-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

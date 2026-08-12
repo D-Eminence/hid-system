@@ -1,0 +1,31 @@
+{
+  "name": "@hid/notification-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Durable ordinary-notification inbox consumer and Novu orchestration boundary",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=22.0.0" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "start:local": "ts-node src/main.ts",
+    "start:dev": "node --watch -r ts-node/register src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "jest --runInBand"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.850.0",
+    "pg": "^8.16.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.4",
+    "jest": "^30.0.5",
+    "ts-jest": "^29.4.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}

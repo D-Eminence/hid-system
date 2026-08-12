@@ -1,0 +1,1396 @@
+/* ============================================================================
+   HID EHR THEME  -  brand layer, scoped to body.ehr-green
+   Imports tokens.css (loaded first in HTML).
+   ============================================================================ */
+
+/* ---- GOOGLE FONTS ---- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ---- MONOSPACE CLASS ---- */
+.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+/* ---- EHR ROOT LAYOUT ---- */
+body.ehr-green {
+  background: var(--surface-muted);
+  font-family: var(--font-body);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* App shell */
+.ehr-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ---- TOPBAR ---- */
+.ehr-topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-subtle);
+  height: 56px;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-600);
+  gap: var(--space-400);
+  box-shadow: var(--shadow-xs);
+}
+
+.ehr-topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  flex-shrink: 0;
+  text-decoration: none;
+}
+
+.ehr-topbar-brand-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+}
+
+.ehr-topbar-brand-name {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-bold);
+  color: var(--text-heading);
+  letter-spacing: -0.01em;
+}
+
+.ehr-topbar-search {
+  flex: 1;
+  max-width: 480px;
+  position: relative;
+}
+
+.ehr-topbar-search-input {
+  width: 100%;
+  height: 36px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  padding: 0 var(--space-400) 0 var(--space-800);
+  font-size: var(--fs-sm);
+  color: var(--text-body);
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-standard);
+}
+
+.ehr-topbar-search-input:focus {
+  border-color: var(--border-focus);
+  background: var(--surface);
+}
+
+.ehr-topbar-search-icon {
+  position: absolute;
+  left: var(--space-300);
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-secondary);
+}
+
+.ehr-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  margin-left: auto;
+}
+
+.ehr-topbar-icon-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+
+.ehr-topbar-icon-btn:hover {
+  background: var(--surface-muted);
+  color: var(--text-body);
+}
+
+.ehr-avatar-chip {
+  height: 36px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-info);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  padding: 0 var(--space-300) 0 var(--space-200);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-standard);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--accent);
+}
+
+.ehr-avatar-chip:hover {
+  background: var(--primary-100);
+}
+
+.ehr-avatar-initials {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: var(--fw-bold);
+}
+
+/* Notification badge */
+.ehr-notif-badge {
+  position: relative;
+}
+
+.ehr-notif-badge::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--danger-700);
+  border: 2px solid var(--surface);
+}
+
+/* ---- TOP NAV (module tabs) ---- */
+.ehr-topnav {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 0 var(--space-600);
+  gap: var(--space-100);
+}
+
+.ehr-topnav::-webkit-scrollbar { display: none; }
+
+.ehr-topnav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  padding: 0 var(--space-300);
+  height: 44px;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-secondary);
+  border: none;
+  background: transparent;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+}
+
+.ehr-topnav-item:hover {
+  color: var(--text-body);
+}
+
+.ehr-topnav-item.active {
+  color: var(--text-heading);
+  font-weight: var(--fw-semibold);
+  border-bottom-color: var(--text-heading);
+}
+
+/* ---- PAGE CONTENT ---- */
+.ehr-content {
+  flex: 1;
+  padding: var(--space-600);
+  max-width: 1400px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ---- PAGE HEAD ---- */
+.ehr-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: var(--space-700);
+  gap: var(--space-400);
+}
+
+.ehr-page-head-title {
+  font-size: var(--fs-h-sm);
+  font-weight: var(--fw-bold);
+  color: var(--text-heading);
+  line-height: var(--lh-h-sm);
+}
+
+.ehr-page-head-sub {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  margin-top: var(--space-100);
+}
+
+/* ---- CARDS & SECTIONS ---- */
+.hid-card {
+  background: var(--surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-sm);
+}
+
+.hid-card-pad {
+  padding: var(--space-600);
+}
+
+.hid-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-400);
+}
+
+.hid-section-title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ---- GRID LAYOUTS ---- */
+.ehr-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-500); }
+.ehr-grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-500); }
+.ehr-grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--space-500); }
+
+/* ---- KPI CARDS ---- */
+.ehr-kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2xl);
+  padding: var(--space-600);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-300);
+}
+
+.ehr-kpi-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ehr-kpi-label {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  font-weight: var(--fw-medium);
+}
+
+.ehr-kpi-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-info);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.ehr-kpi-value {
+  font-size: var(--fs-h-sm);
+  font-weight: var(--fw-bold);
+  color: var(--text-heading);
+  line-height: 1;
+}
+
+.ehr-kpi-footer {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  padding-top: var(--space-300);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* ---- QUICK ACTION ROW ---- */
+.ehr-quick-actions {
+  display: flex;
+  gap: var(--space-300);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-700);
+}
+
+/* ---- TABLE ---- */
+.ehr-table-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2xl);
+  overflow-x: auto;
+  box-shadow: var(--shadow-sm);
+}
+
+.ehr-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ehr-table th {
+  background: var(--surface-muted);
+  padding: var(--space-300) var(--space-500);
+  text-align: left;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+.ehr-table td {
+  padding: var(--space-400) var(--space-500);
+  font-size: var(--fs-sm);
+  color: var(--text-body);
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+
+.ehr-table tr:last-child td { border-bottom: none; }
+
+.ehr-table tr:hover td { background: var(--surface-muted); }
+
+.ehr-table-link {
+  color: var(--text-link);
+  cursor: pointer;
+  font-weight: var(--fw-medium);
+}
+
+.ehr-table-link:hover { text-decoration: underline; }
+
+/* ---- BADGE ---- */
+.hid-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--space-200);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
+.hid-badge-blue   { background: var(--primary-50);  color: var(--primary-600); }
+.hid-badge-neutral{ background: var(--neutral-100); color: var(--neutral-700); }
+.hid-badge-dark   { background: var(--neutral-200); color: var(--neutral-800); }
+.hid-badge-danger { background: var(--danger-50);   color: var(--danger-badge-text); }
+.hid-badge-success{ background: var(--success-50);  color: var(--success-600); }
+.hid-badge-warning{ background: var(--warning-50);  color: var(--warning-600); }
+
+/* ---- BUTTON ---- */
+.hid-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-200);
+  border-radius: var(--radius-md);
+  font-family: var(--font-body);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.hid-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Sizes */
+.hid-btn-sm  { height: 32px; padding: 0 var(--space-300); font-size: var(--fs-sm); }
+.hid-btn-md  { height: 40px; padding: 0 var(--space-500); font-size: var(--fs-sm); }
+.hid-btn-lg  { height: 48px; padding: 0 var(--space-600); font-size: var(--fs-md); }
+
+/* Variants */
+.hid-btn-primary {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+.hid-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.hid-btn-secondary {
+  background: var(--surface);
+  color: var(--text-body);
+  border-color: var(--border-default);
+}
+.hid-btn-secondary:hover:not(:disabled) {
+  background: var(--surface-muted);
+  border-color: var(--border-control);
+}
+
+.hid-btn-ghost {
+  background: transparent;
+  color: var(--text-body);
+  border-color: transparent;
+}
+.hid-btn-ghost:hover:not(:disabled) {
+  background: var(--surface-muted);
+}
+
+.hid-btn-danger {
+  background: var(--danger-300);
+  color: var(--neutral-0);
+  border-color: var(--danger-300);
+}
+.hid-btn-danger:hover:not(:disabled) {
+  background: var(--danger-500);
+  border-color: var(--danger-500);
+}
+
+.hid-btn-icon {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  border-color: var(--border-subtle);
+  color: var(--text-secondary);
+}
+.hid-btn-icon:hover:not(:disabled) {
+  background: var(--surface-muted);
+  color: var(--text-body);
+}
+
+/* ---- INPUT ---- */
+.hid-field { display: flex; flex-direction: column; gap: var(--space-150); }
+
+.hid-label {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-body);
+}
+
+.hid-input {
+  height: 40px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-md);
+  padding: 0 var(--space-400);
+  font-size: var(--fs-sm);
+  color: var(--text-body);
+  background: var(--surface);
+  font-family: var(--font-body);
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-standard);
+  width: 100%;
+}
+
+.hid-input:focus { border-color: var(--border-focus); }
+.hid-input::placeholder { color: var(--text-disabled); }
+.hid-input.error { border-color: var(--danger-500); }
+
+.hid-select {
+  height: 40px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-md);
+  padding: 0 var(--space-400);
+  font-size: var(--fs-sm);
+  color: var(--text-body);
+  background: var(--surface);
+  font-family: var(--font-body);
+  outline: none;
+  cursor: pointer;
+  width: 100%;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235f6873' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--space-300) center;
+  padding-right: var(--space-700);
+  transition: border-color var(--dur-fast) var(--ease-standard);
+}
+
+.hid-select:focus { border-color: var(--border-focus); }
+
+.hid-textarea {
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-md);
+  padding: var(--space-300) var(--space-400);
+  font-size: var(--fs-sm);
+  color: var(--text-body);
+  background: var(--surface);
+  font-family: var(--font-body);
+  outline: none;
+  resize: vertical;
+  min-height: 100px;
+  width: 100%;
+  transition: border-color var(--dur-fast) var(--ease-standard);
+}
+
+.hid-textarea:focus { border-color: var(--border-focus); }
+
+.hid-hint { font-size: var(--fs-caption); color: var(--text-secondary); }
+.hid-error { font-size: var(--fs-caption); color: var(--danger-500); }
+
+/* ---- MODAL ---- */
+.hid-modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(18, 18, 18, 0.5);
+  z-index: var(--z-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-600);
+  animation: scrimIn var(--dur-base) var(--ease-decelerate);
+}
+
+@keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
+
+.hid-modal {
+  background: var(--surface);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-lg);
+  max-width: 560px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  animation: modalIn var(--dur-base) var(--ease-decelerate);
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(20px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+.hid-modal-head {
+  padding: var(--space-600) var(--space-600) var(--space-400);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-400);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.hid-modal-title {
+  font-size: var(--fs-h-sm);
+  font-weight: var(--fw-bold);
+  color: var(--text-heading);
+}
+
+.hid-modal-body {
+  padding: var(--space-600);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-500);
+}
+
+.hid-modal-foot {
+  padding: var(--space-400) var(--space-600) var(--space-600);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-300);
+}
+
+/* ---- BREAK GLASS MODAL (danger framing) ---- */
+.hid-breakglass-modal {
+  border: 2px solid var(--danger-300);
+}
+
+.hid-breakglass-head {
+  background: var(--danger-50);
+  border-bottom: 1px solid var(--danger-100);
+}
+
+.hid-breakglass-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-lg);
+  background: var(--danger-300);
+  color: var(--neutral-0);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---- PATIENT RECORD PANELS ---- */
+.ehr-record-panel {
+  background: var(--surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2xl);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  margin-bottom: var(--space-500);
+}
+
+.ehr-record-panel-head {
+  padding: var(--space-400) var(--space-600);
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ehr-record-panel-body {
+  padding: var(--space-600);
+}
+
+.ehr-record-row {
+  display: flex;
+  gap: var(--space-300);
+  margin-bottom: var(--space-400);
+}
+
+.ehr-record-field {
+  flex: 1;
+}
+
+.ehr-record-label {
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-100);
+}
+
+.ehr-record-value {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-strong);
+}
+
+/* ---- VITALS ROW ---- */
+.ehr-vitals-row {
+  display: flex;
+  gap: var(--space-400);
+  flex-wrap: wrap;
+}
+
+.ehr-vital {
+  flex: 1;
+  min-width: 100px;
+  background: var(--surface-muted);
+  border-radius: var(--radius-lg);
+  padding: var(--space-400);
+  text-align: center;
+}
+
+.ehr-vital-value {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  color: var(--text-heading);
+  line-height: 1;
+}
+
+.ehr-vital-unit {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  margin-top: var(--space-100);
+}
+
+.ehr-vital-label {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  margin-top: var(--space-100);
+}
+
+/* ---- AUTH SCREEN ---- */
+.ehr-auth-root {
+  display: flex;
+  min-height: 100vh;
+}
+
+.ehr-auth-panel {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-1000);
+  background: var(--surface);
+}
+
+.ehr-auth-photo {
+  flex: 1.2;
+  background: var(--accent);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: var(--space-1000);
+}
+
+.ehr-auth-photo-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.3;
+}
+
+.ehr-auth-photo-caption {
+  position: relative;
+  color: var(--neutral-0);
+  z-index: 1;
+}
+
+.ehr-auth-form {
+  width: 100%;
+  max-width: 400px;
+}
+
+.ehr-auth-logo {
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  margin-bottom: var(--space-800);
+}
+
+.ehr-auth-logo-img {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+}
+
+.ehr-auth-logo-name {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-bold);
+  color: var(--text-heading);
+}
+
+.ehr-auth-title {
+  font-size: var(--fs-h-sm);
+  font-weight: var(--fw-bold);
+  color: var(--text-heading);
+  margin-bottom: var(--space-200);
+}
+
+.ehr-auth-sub {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-700);
+}
+
+.ehr-auth-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-500);
+}
+
+/* ---- SETUP WIZARD ---- */
+.ehr-setup-root {
+  min-height: 100vh;
+  background: var(--surface-muted);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--space-1000) var(--space-600);
+}
+
+.ehr-setup-card {
+  width: 100%;
+  max-width: 720px;
+  background: var(--surface);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.ehr-setup-head {
+  padding: var(--space-800) var(--space-800) var(--space-600);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ehr-setup-steps {
+  display: flex;
+  gap: var(--space-200);
+  margin-bottom: var(--space-600);
+}
+
+.ehr-setup-step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--border-default);
+  transition: background var(--dur-base) var(--ease-standard), width var(--dur-base) var(--ease-standard);
+}
+
+.ehr-setup-step-dot.active {
+  background: var(--accent);
+  width: 24px;
+}
+
+.ehr-setup-step-dot.done {
+  background: var(--accent);
+}
+
+.ehr-setup-body {
+  padding: var(--space-800);
+  min-height: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-600);
+}
+
+.ehr-setup-foot {
+  padding: var(--space-600) var(--space-800);
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* ---- DEPT GRID ---- */
+.ehr-dept-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-300);
+}
+
+.ehr-dept-card {
+  border: 1.5px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--space-400);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-300);
+}
+
+.ehr-dept-card:hover { border-color: var(--border-control); background: var(--surface-muted); }
+.ehr-dept-card.selected { border-color: var(--accent); background: var(--surface-info); }
+
+/* ---- TABS ---- */
+.ehr-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: var(--space-600);
+  gap: var(--space-100);
+}
+
+.ehr-tab {
+  padding: var(--space-300) var(--space-400);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-secondary);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+  white-space: nowrap;
+}
+
+.ehr-tab:hover { color: var(--text-body); }
+.ehr-tab.active { color: var(--text-heading); border-bottom-color: var(--text-heading); font-weight: var(--fw-semibold); }
+
+/* ---- PATIENT SEARCH BAR ---- */
+.ehr-patient-search {
+  display: flex;
+  gap: var(--space-300);
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2xl);
+  padding: var(--space-400) var(--space-500);
+  box-shadow: var(--shadow-sm);
+  margin-bottom: var(--space-600);
+}
+
+.ehr-patient-search-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: var(--fs-md);
+  color: var(--text-body);
+  background: transparent;
+  font-family: var(--font-body);
+}
+
+.ehr-patient-search-input::placeholder { color: var(--text-disabled); }
+
+/* ---- PATIENT CARD ---- */
+.ehr-patient-card {
+  background: var(--surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2xl);
+  padding: var(--space-500) var(--space-600);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  align-items: center;
+  gap: var(--space-400);
+  cursor: pointer;
+  transition: box-shadow var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+}
+
+.ehr-patient-card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: var(--border-control);
+}
+
+.ehr-patient-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-info);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  flex-shrink: 0;
+}
+
+.ehr-patient-name {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--text-heading);
+}
+
+.ehr-patient-meta {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  margin-top: var(--space-100);
+}
+
+/* ---- CONSULTATION WORKSPACE ---- */
+.ehr-consult-layout {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: var(--space-600);
+  align-items: flex-start;
+}
+
+.ehr-consult-sidebar {
+  position: sticky;
+  top: calc(56px + 44px + var(--space-600));
+}
+
+/* ---- AUDIT LOG ---- */
+.ehr-audit-entry {
+  display: flex;
+  gap: var(--space-400);
+  padding: var(--space-400) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ehr-audit-entry:last-child { border-bottom: none; }
+
+.ehr-audit-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--border-control);
+  margin-top: 6px;
+  flex-shrink: 0;
+}
+
+.ehr-audit-time {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 80px;
+}
+
+.ehr-audit-action {
+  font-size: var(--fs-sm);
+  color: var(--text-body);
+  flex: 1;
+}
+
+.ehr-audit-actor {
+  font-weight: var(--fw-semibold);
+  color: var(--text-strong);
+}
+
+/* ---- STATUS CHIP ---- */
+.ehr-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-semibold);
+  padding: 3px var(--space-200);
+  border-radius: var(--radius-pill);
+}
+
+.ehr-status::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.ehr-status-active { background: var(--success-50); color: var(--success-600); }
+.ehr-status-active::before { background: var(--success-500); }
+
+.ehr-status-pending { background: var(--warning-50); color: var(--warning-600); }
+.ehr-status-pending::before { background: var(--warning-500); }
+
+.ehr-status-inactive { background: var(--neutral-100); color: var(--neutral-700); }
+.ehr-status-inactive::before { background: var(--neutral-500); }
+
+.ehr-status-critical { background: var(--danger-50); color: var(--danger-badge-text); }
+.ehr-status-critical::before { background: var(--danger-500); }
+
+/* ---- EMPTY STATE ---- */
+.ehr-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: var(--space-1100) var(--space-600);
+  gap: var(--space-400);
+}
+
+.ehr-empty-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-xl);
+  background: var(--surface-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  color: var(--text-disabled);
+}
+
+.ehr-empty-title {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--text-body);
+}
+
+.ehr-empty-sub {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  max-width: 360px;
+}
+
+/* ---- LOADER ---- */
+.ehr-spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.ehr-page-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 300px;
+}
+
+/* ---- ROLE SWITCHER DROPDOWN ---- */
+.ehr-role-dropdown {
+  position: relative;
+}
+
+.ehr-role-menu {
+  position: absolute;
+  top: calc(100% + var(--space-200));
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  min-width: 260px;
+  z-index: var(--z-dropdown);
+  overflow: hidden;
+  animation: dropIn var(--dur-fast) var(--ease-decelerate);
+}
+
+@keyframes dropIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.ehr-role-menu-head {
+  padding: var(--space-400) var(--space-500);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ehr-role-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  padding: var(--space-300) var(--space-500);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-standard);
+  font-size: var(--fs-sm);
+  color: var(--text-body);
+  border: none;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+}
+
+.ehr-role-menu-item:hover { background: var(--surface-muted); }
+.ehr-role-menu-item.active { background: var(--surface-info); color: var(--text-link); font-weight: var(--fw-semibold); }
+
+.ehr-role-tier {
+  font-size: var(--fs-caption);
+  color: var(--text-disabled);
+  margin-left: auto;
+}
+
+/* ---- MOBILE NAVIGATION ---- */
+.ehr-mobilenav {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border-subtle);
+  height: 64px;
+  z-index: var(--z-sticky);
+  align-items: center;
+  justify-content: space-around;
+  padding: 0 var(--space-200);
+}
+
+.ehr-mobilenav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  flex: 1;
+  padding: var(--space-200);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: color var(--dur-fast) var(--ease-standard);
+  font-size: var(--fs-caption);
+}
+
+.ehr-mobilenav-item.active { color: var(--accent); }
+.ehr-mobilenav-item span { font-size: 11px; font-weight: var(--fw-semibold); }
+
+/* ---- RESPONSIVE ---- */
+@media (max-width: 768px) {
+  .ehr-topnav { display: none; }
+  .ehr-mobilenav { display: flex; }
+  .ehr-content { padding: var(--space-400); padding-bottom: 80px; }
+  .ehr-grid-3, .ehr-grid-4 { grid-template-columns: 1fr; }
+  .ehr-grid-2 { grid-template-columns: 1fr; }
+  .ehr-dept-grid { grid-template-columns: repeat(2, 1fr); }
+  .ehr-page-head { flex-direction: column; }
+  .ehr-consult-layout { grid-template-columns: 1fr; }
+  .ehr-auth-photo { display: none; }
+  .ehr-setup-body { padding: var(--space-500); }
+  .ehr-setup-head { padding: var(--space-500); }
+  .ehr-setup-foot { padding: var(--space-400) var(--space-500); }
+  .ehr-topbar { padding: 0 var(--space-400); }
+  .ehr-topbar-search { display: none; }
+  .hid-modal { border-radius: var(--radius-2xl) var(--radius-2xl) 0 0; max-width: 100%; margin-top: auto; }
+  .hid-modal-scrim { align-items: flex-end; padding: 0; }
+}
+
+@media (max-width: 480px) {
+  .ehr-dept-grid { grid-template-columns: 1fr; }
+  .ehr-vitals-row { gap: var(--space-200); }
+}
+
+/* ---- TRANSITION UTILITIES ---- */
+.fade-in {
+  animation: fadeIn var(--dur-base) var(--ease-decelerate);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---- PROGRESS BAR ---- */
+.ehr-progress-track {
+  height: 4px;
+  background: var(--border-subtle);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.ehr-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width var(--dur-slow) var(--ease-standard);
+}
+
+/* ---- TIMELINE ---- */
+.ehr-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.ehr-timeline-item {
+  display: flex;
+  gap: var(--space-400);
+  padding-bottom: var(--space-500);
+  position: relative;
+}
+
+.ehr-timeline-item::before {
+  content: '';
+  position: absolute;
+  left: 11px;
+  top: 24px;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-subtle);
+}
+
+.ehr-timeline-item:last-child::before { display: none; }
+
+.ehr-timeline-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--surface-info);
+  border: 2px solid var(--accent);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--accent);
+  z-index: 1;
+}
+
+.ehr-timeline-content {
+  flex: 1;
+  padding-top: 2px;
+}
+
+/* ---- DRUG/PRESCRIPTION CARD ---- */
+.ehr-rx-card {
+  background: var(--surface-muted);
+  border-radius: var(--radius-lg);
+  padding: var(--space-400) var(--space-500);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-300);
+  margin-bottom: var(--space-300);
+}
+
+.ehr-rx-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--surface-info);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* ---- LAB ORDER CARD ---- */
+.ehr-lab-card {
+  background: var(--surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  padding: var(--space-500);
+  margin-bottom: var(--space-300);
+  display: flex;
+  align-items: center;
+  gap: var(--space-400);
+}
+
+.ehr-lab-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ---- SCROLLABLE LIST ---- */
+.ehr-scroll-list {
+  max-height: 400px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-default) transparent;
+}
+
+/* ---- DIVIDER ---- */
+.ehr-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: var(--space-500) 0;
+}
+
+/* ---- CHIP ---- */
+.ehr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-200);
+  padding: var(--space-150) var(--space-300);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-control);
+  font-size: var(--fs-sm);
+  color: var(--text-body);
+  cursor: pointer;
+  transition: background var(--dur-fast), border-color var(--dur-fast);
+  background: var(--surface);
+}
+
+.ehr-chip:hover { background: var(--surface-muted); }
+.ehr-chip.selected { border-color: var(--accent); background: var(--surface-info); color: var(--text-link); }
+
+/* ---- SEARCH RESULT DROPDOWN ---- */
+.ehr-search-results {
+  position: absolute;
+  top: calc(100% + var(--space-200));
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  z-index: var(--z-dropdown);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.ehr-search-result-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  padding: var(--space-300) var(--space-400);
+  cursor: pointer;
+  transition: background var(--dur-fast);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ehr-search-result-item:last-child { border-bottom: none; }
+.ehr-search-result-item:hover { background: var(--surface-muted); }

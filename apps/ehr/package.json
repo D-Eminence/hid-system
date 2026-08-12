@@ -1,0 +1,31 @@
+{
+  "name": "@hid/ehr",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@hid/api-client": "file:../../packages/api-client",
+    "@hid/offline": "file:../../packages/offline",
+    "@hid/telemetry": "file:../../packages/telemetry",
+    "@hid/ui": "file:../../packages/ui",
+    "@hookform/resolvers": "^3.9.0",
+    "lucide-react": "^0.420.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-hook-form": "^7.52.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.3"
+  }
+}

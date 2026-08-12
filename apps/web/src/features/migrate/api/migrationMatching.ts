@@ -1,0 +1,5 @@
+import{invokeApiFunction}from'../../../lib/functionApi'
+export type MatchCandidate={id:string;source_folder_id:string;patient_id:string;score:number;band:'exact'|'strong'|'possible'|'weak';features:Record<string,number>;conflicts:string[];masked_patient_snapshot:{hid_code:string;full_name:string;dob:string|null;gender:string|null;phone:string|null;email:string|null}}
+export type MatchDecision={id:string;decision:string;patient_id:string|null}
+export async function getMatches(projectId:string,folderId:string){return invokeApiFunction<{data:{candidates:MatchCandidate[];decision:MatchDecision|null}}>(`migration-matching?project_id=${encodeURIComponent(projectId)}&source_folder_id=${encodeURIComponent(folderId)}`,{method:'GET'},'Patient match suggestions could not be loaded right now.')}
+export async function matchingCommand<T>(projectId:string,folderId:string,action:string,payload:Record<string,unknown>={}){return invokeApiFunction<{data:T}>('migration-matching',{method:'POST',body:{project_id:projectId,source_folder_id:folderId,action,...payload}},'The patient matching action could not be completed right now.')}

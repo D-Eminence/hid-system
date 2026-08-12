@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PublishOnlyToTheHidEventBus",
+      "Effect": "Allow",
+      "Action": ["events:DescribeEventBus", "events:PutEvents"],
+      "Resource": "arn:aws:events:REGION:ACCOUNT_ID:event-bus/HID_EVENT_BUS_NAME"
+    }
+  ]
+}

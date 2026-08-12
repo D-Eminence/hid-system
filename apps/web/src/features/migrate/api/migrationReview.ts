@@ -1,0 +1,6 @@
+import{invokeApiFunction}from'../../../lib/functionApi'
+export type ReviewField={value:unknown;confidence:number|null;source_spans:Array<{page_id:string;start:number;end:number}>}
+export type ValidationTask={id:string;status:string;lease_owner_staff_account_id:string|null;lease_expires_at:string|null;document:{id:string;document_reference:string;title:string|null};extraction:{id:string;schema_name:string;schema_version:string;overall_confidence:number|null;fields:Record<string,ReviewField>}}
+export type QaTask={id:string;status:string;lease_owner_staff_account_id:string|null;lease_expires_at:string|null;sampling_reason:string;validation_task:ValidationTask}
+export async function listReviewTasks<T>(projectId:string,type:'validation'|'qa'){return invokeApiFunction<{data:T[];page:{next_cursor:string|null}}>(`migration-review?project_id=${encodeURIComponent(projectId)}&type=${type}`,{method:'GET'},'Migration review tasks could not be loaded right now.')}
+export async function reviewCommand<T>(projectId:string,taskType:'validation'|'qa',taskId:string,action:string,payload:Record<string,unknown>={}){return invokeApiFunction<{data:T}>('migration-review',{method:'POST',body:{project_id:projectId,task_type:taskType,task_id:taskId,action,...payload}},'The migration review action could not be completed right now.')}
