@@ -5,12 +5,39 @@ import apexWorker from '../src/apex-redirect-worker.mjs'
 
 const worker = createFrontendWorker()
 const originalFetch = globalThis.fetch
+const TEST_ORIGIN_AUTH_TOKEN = 'test-origin-authorization-token-not-a-secret-123456'
+
+const deploymentProfiles = Object.freeze({
+  production: Object.freeze({
+    apiOrigin: 'https://api.healthidentitydirectory.com',
+    hosts: Object.freeze({
+      web: 'www.healthidentitydirectory.com', ehr: 'ehr.healthidentitydirectory.com',
+      lab: 'lab.healthidentitydirectory.com', pharmacy: 'pharmacy.healthidentitydirectory.com',
+      ocr: 'ocr.healthidentitydirectory.com', outreach: 'outreach.healthidentitydirectory.com',
+      admin: 'admin.healthidentitydirectory.com',
+    }),
+  }),
+  staging: Object.freeze({
+    apiOrigin: 'https://api.staging.healthidentitydirectory.com',
+    hosts: Object.freeze({
+      web: 'staging.healthidentitydirectory.com', ehr: 'ehr.staging.healthidentitydirectory.com',
+      lab: 'lab.staging.healthidentitydirectory.com', pharmacy: 'pharmacy.staging.healthidentitydirectory.com',
+      ocr: 'ocr.staging.healthidentitydirectory.com', outreach: 'outreach.staging.healthidentitydirectory.com',
+      admin: 'admin.staging.healthidentitydirectory.com',
+    }),
+  }),
+})
 
 function environment(overrides = {}) {
+  const deployment = overrides.DEPLOYMENT_ENV ?? 'production'
+  const app = overrides.APP_NAME ?? 'ehr'
+  const profile = deploymentProfiles[deployment]
   return {
-    API_ORIGIN: 'https://api.healthidentitydirectory.com',
-    EXPECTED_HOST: 'ehr.healthidentitydirectory.com',
-    APP_NAME: 'ehr',
+    DEPLOYMENT_ENV: deployment,
+    API_ORIGIN: profile.apiOrigin,
+    EXPECTED_HOST: profile.hosts[app],
+    APP_NAME: app,
+    ORIGIN_AUTH_TOKEN: TEST_ORIGIN_AUTH_TOKEN,
     ASSETS: { fetch: async request => new Response(`<p>${new URL(request.url).pathname}</p>`, {
       status: 200, headers: { 'content-type': 'text/html' },
     }) },
@@ -29,32 +56,37 @@ test('serves the application asset binding with security headers', async () => {
 })
 
 test('grants device capabilities only to the application host that needs them', async () => {
-  const ocr = await worker.fetch(new Request('https://ocr.healthidentitydirectory.com/'),
-    environment({ EXPECTED_HOST: 'ocr.healthidentitydirectory.com' }))
+  const ocr = await worker.fetch(new Request('https://ocr.healthidentitydirectory.com/'), environment({ APP_NAME: 'ocr' }))
   assert.equal(ocr.headers.get('permissions-policy'), 'camera=(self), microphone=(), geolocation=()')
-  const outreach = await worker.fetch(new Request('https://outreach.healthidentitydirectory.com/'),
-    environment({ EXPECTED_HOST: 'outreach.healthidentitydirectory.com' }))
+  const outreach = await worker.fetch(new Request('https://outreach.healthidentitydirectory.com/'), environment({ APP_NAME: 'outreach' }))
   assert.equal(outreach.headers.get('permissions-policy'), 'camera=(self), microphone=(), geolocation=(self)')
 })
 
-test('proxies only /api/v1 to the one fixed AWS origin without shared caching', async () => {
-  let received
-  globalThis.fetch = async (url, init) => {
-    received = { url: String(url), init }
-    return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })
+for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
+  for (const [app, host] of Object.entries(profile.hosts)) {
+    test(`${deployment} ${app} proxies only to its environment API origin`, async () => {
+      let received
+      globalThis.fetch = async (url, init) => {
+        received = { url: String(url), init }
+        return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })
+      }
+      const response = await worker.fetch(new Request(`https://${host}/api/v1/auth/session?view=safe`, {
+        headers: {
+          origin: `https://${host}`, cookie: 'opaque=1', 'x-forwarded-host': 'attacker.example',
+          'x-correlation-id': 'safe-correlation-123',
+        },
+      }), environment({ DEPLOYMENT_ENV: deployment, APP_NAME: app }))
+      assert.equal(received.url, `${profile.apiOrigin}/api/v1/auth/session?view=safe`)
+      assert.equal(received.init.headers.get('origin'), `https://${host}`)
+      assert.equal(received.init.headers.get('cookie'), 'opaque=1')
+      assert.equal(received.init.headers.get('x-forwarded-host'), host)
+      assert.equal(received.init.headers.get('x-hid-edge-origin'), `https://${host}`)
+      assert.equal(received.init.headers.get('x-hid-origin-authorization'), TEST_ORIGIN_AUTH_TOKEN)
+      assert.equal(response.headers.get('cache-control'), 'private, no-store, max-age=0')
+      assert.equal(response.headers.get('cloudflare-cdn-cache-control'), 'no-store')
+    })
   }
-  const request = new Request('https://ehr.healthidentitydirectory.com/api/v1/auth/session?view=safe', {
-    headers: { origin: 'https://ehr.healthidentitydirectory.com', cookie: 'opaque=1', 'x-forwarded-host': 'attacker.example', 'x-correlation-id': 'safe-correlation-123' },
-  })
-  const response = await worker.fetch(request, environment())
-  assert.equal(received.url, 'https://api.healthidentitydirectory.com/api/v1/auth/session?view=safe')
-  assert.equal(received.init.headers.get('origin'), 'https://ehr.healthidentitydirectory.com')
-  assert.equal(received.init.headers.get('cookie'), 'opaque=1')
-  assert.equal(received.init.headers.get('x-forwarded-host'), 'ehr.healthidentitydirectory.com')
-  assert.equal(received.init.headers.get('x-hid-edge-origin'), 'https://ehr.healthidentitydirectory.com')
-  assert.equal(response.headers.get('cache-control'), 'private, no-store, max-age=0')
-  assert.equal(response.headers.get('cloudflare-cdn-cache-control'), 'no-store')
-})
+}
 
 test('preserves mutation bodies and methods', async () => {
   globalThis.fetch = async (_url, init) => new Response(await new Response(init.body).text(), { status: 202 })
@@ -70,9 +102,21 @@ test('rejects other API namespaces and misdirected hosts', async () => {
   assert.equal((await worker.fetch(new Request('https://attacker.example/api/v1/auth/session'), environment())).status, 421)
 })
 
-test('fails safely when the fixed origin configuration is changed', async () => {
+test('rejects cross-environment and arbitrary upstream overrides', async () => {
+  const staging = environment({ DEPLOYMENT_ENV: 'staging', APP_NAME: 'ehr' })
+  const productionOrigin = await worker.fetch(new Request('https://ehr.staging.healthidentitydirectory.com/api/v1/auth/session'), {
+    ...staging, API_ORIGIN: deploymentProfiles.production.apiOrigin,
+  })
+  assert.equal(productionOrigin.status, 502)
+  const arbitraryOrigin = await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/auth/session?origin=https://attacker.example'), {
+    ...environment(), API_ORIGIN: 'https://attacker.example',
+  })
+  assert.equal(arbitraryOrigin.status, 502)
+})
+
+test('fails closed when origin authorization is absent', async () => {
   const response = await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/auth/session'),
-    environment({ API_ORIGIN: 'https://attacker.example' }))
+    environment({ ORIGIN_AUTH_TOKEN: '' }))
   assert.equal(response.status, 502)
   assert.equal((await response.json()).code, 'EDGE_CONFIGURATION_INVALID')
 })

@@ -48,6 +48,11 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.equal(configuration.name, 'production');
   assert.equal(configuration.databaseMultiAz, true);
   assert.equal(configuration.availabilityZones, 3);
+  assert.equal(configuration.publicApiSubdomain, 'api');
+  assert.equal(environmentConfig('staging').publicApiSubdomain, 'api.staging');
+  assert.deepEqual(environmentConfig('staging').browserSubdomains, [
+    'staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'ocr.staging', 'outreach.staging', 'admin.staging',
+  ]);
 });
 
 test('account and region are both external or both absent', () => {
@@ -193,6 +198,18 @@ test('CloudFront is absent because Cloudflare owns frontend and edge delivery', 
   assert.equal(regional.Parameters.ApplicationDomainName, undefined);
 });
 
+test('staging and production synthesize distinct fixed public API hostnames and browser origins', () => {
+  const productionText = JSON.stringify(regional);
+  const stagingText = JSON.stringify(stagingRegional);
+  assert.match(productionText, /api\./);
+  assert.match(stagingText, /api\.staging\./);
+  assert.match(productionText, /www\./);
+  assert.match(stagingText, /ehr\.staging\./);
+  assert.doesNotMatch(stagingText, /api\.healthidentitydirectory\.com/);
+  assert.equal(regional.Parameters.OriginDomainName, undefined);
+  assert.equal(stagingRegional.Parameters.OriginDomainName, undefined);
+});
+
 test('task definitions contain secret references rather than plaintext secrets', () => {
   const serialized = JSON.stringify(regional);
   assert.doesNotMatch(serialized, /postgresql:\/\//);
@@ -288,10 +305,25 @@ test('regional API WAF requires the Cloudflare origin secret and baseline protec
   const [acl] = properties(regional, 'AWS::WAFv2::WebACL');
   const serialized = JSON.stringify(acl!.Rules);
   assert.match(serialized, /x-hid-origin-authorization/);
-  assert.match(serialized, /CloudflareOriginSecret/);
+  assert.match(serialized, /ProductionCloudflareOriginSecret/);
+  assert.doesNotMatch(serialized, /StagingCloudflareOriginSecret/);
   assert.match(serialized, /AWSManagedRulesCommonRuleSet/);
   assert.match(serialized, /AWSManagedRulesKnownBadInputsRuleSet/);
   assert.match(serialized, /RateBasedStatement/);
+});
+
+test('staging and production require independently named Cloudflare origin authorization inputs', () => {
+  assert.ok(regional.Parameters.ProductionCloudflareOriginSecret);
+  assert.equal(regional.Parameters.StagingCloudflareOriginSecret, undefined);
+  assert.ok(stagingRegional.Parameters.StagingCloudflareOriginSecret);
+  assert.equal(stagingRegional.Parameters.ProductionCloudflareOriginSecret, undefined);
+  for (const parameter of [
+    regional.Parameters.ProductionCloudflareOriginSecret,
+    stagingRegional.Parameters.StagingCloudflareOriginSecret,
+  ]) {
+    assert.equal(parameter!.NoEcho, true);
+    assert.equal(parameter!.Default, undefined);
+  }
 });
 
 test('both ALB listeners enforce modern TLS', () => {

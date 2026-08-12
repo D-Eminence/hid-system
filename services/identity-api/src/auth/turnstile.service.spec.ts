@@ -12,6 +12,7 @@ describe('TurnstileService', () => {
       AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
       AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
       TURNSTILE_MODE: 'required',
+      HID_DEPLOYMENT_ENV: 'production',
       // Official Cloudflare always-pass test secret; fetch is still mocked.
       TURNSTILE_SECRET_KEY: '1x0000000000000000000000000000000AA', TURNSTILE_TIMEOUT_MS: '250',
     });
@@ -79,6 +80,20 @@ describe('TurnstileService', () => {
     await expect(new TurnstileService().verify({
       token: 'recovery-token', action: 'patient-reset-start',
       origin: 'https://admin.healthidentitydirectory.com', remoteIp: '203.0.113.4',
+    })).rejects.toMatchObject({ code: 'TURNSTILE_CONTEXT_MISMATCH' });
+  });
+
+  it('accepts only staging evidence under the staging deployment profile', async () => {
+    process.env.HID_DEPLOYMENT_ENV = 'staging';
+    resetEnvironmentForTests();
+    result({ success: true, hostname: 'admin.staging.healthidentitydirectory.com', action: 'admin-login' });
+    await expect(new TurnstileService().verifyLogin({
+      token: 'staging-token', action: 'admin-login', origin: 'https://admin.staging.healthidentitydirectory.com',
+    })).resolves.toBeUndefined();
+
+    result({ success: true, hostname: 'admin.healthidentitydirectory.com', action: 'admin-login' });
+    await expect(new TurnstileService().verifyLogin({
+      token: 'production-token', action: 'admin-login', origin: 'https://admin.healthidentitydirectory.com',
     })).rejects.toMatchObject({ code: 'TURNSTILE_CONTEXT_MISMATCH' });
   });
 });

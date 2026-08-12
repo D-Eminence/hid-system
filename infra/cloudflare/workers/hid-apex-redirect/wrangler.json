@@ -1,1 +1,1 @@
-{"name":"hid-apex-redirect","main":"../../src/apex-redirect-worker.mjs","compatibility_date":"2026-08-12","workers_dev":false,"preview_urls":false,"routes":[{"pattern":"healthidentitydirectory.com","custom_domain":true}]}
+{"name":"hid-apex-redirect","main":"../../src/apex-redirect-worker.mjs","compatibility_date":"2026-08-12","workers_dev":false,"preview_urls":false,"env":{"production":{"name":"hid-apex-redirect-production","routes":[{"pattern":"healthidentitydirectory.com","custom_domain":true}]}}}

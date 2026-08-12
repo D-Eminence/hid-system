@@ -16,7 +16,7 @@ describe('Identity production database transport', () => {
       AUTH_MODE: 'oidc', AUTH_COOKIE_SECURE: 'true', OIDC_ISSUER_URL: 'https://issuer.example',
       OIDC_AUDIENCE: 'hid-api', OIDC_JWKS_URL: 'https://issuer.example/jwks',
       IDENTITY_SERVICE_IDENTITY_MODE: 'jwt',
-      WORKLOAD_ISSUER_URL: 'https://workloads.example', WORKLOAD_AUDIENCE: 'hid-identity-api',
+      WORKLOAD_ISSUER_URL: 'https://workloads.example', WORKLOAD_AUDIENCE: 'hid-identity-api', HID_DEPLOYMENT_ENV: 'production',
       WORKLOAD_JWKS_URL: 'https://workloads.example/jwks', IDENTITY_EHR_CALLER_SUBJECT: 'workload:ehr',
       IDENTITY_LAB_CALLER_SUBJECT: 'workload:lab', IDENTITY_PHARMACY_CALLER_SUBJECT: 'workload:pharmacy',
       IDENTITY_OCR_CALLER_SUBJECT: 'workload:ocr', OUTREACH_CALLER_SUBJECT: 'workload:outreach',
@@ -40,5 +40,10 @@ describe('Identity production database transport', () => {
     expect(() => getEnvironment()).toThrow(/host-only cookies/);
     production(); delete process.env.TURNSTILE_SECRET_KEY; resetEnvironmentForTests();
     expect(() => getEnvironment()).toThrow(/Turnstile secret/);
+  });
+
+  it('requires an explicit staging or production deployment profile', () => {
+    production(); delete process.env.HID_DEPLOYMENT_ENV; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/deployment profile/);
   });
 });

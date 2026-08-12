@@ -2,12 +2,17 @@
 
 ## Current edge, authentication, and messaging controls
 
-- Every production frontend has its own Cloudflare Worker and host-only cookie;
-  `.healthidentitydirectory.com` cookies are prohibited.
-- Workers accept only their exact hostname and `/api/v1/*`, use one fixed AWS
-  origin, preserve bounded correlation/origin evidence, and set API
+- Every production and staging frontend has its own Cloudflare Worker and
+  host-only cookie; `.healthidentitydirectory.com` cookies are prohibited.
+- Workers accept only their exact environment-paired hostname and `/api/v1/*`,
+  use one fixed allowlisted AWS origin, preserve bounded correlation/origin evidence, and set API
   `private, no-store` controls. Request bodies, cookies, authorization, OTP,
   NIN, and PHI are never edge logs.
+- Staging Workers can only reach `api.staging.healthidentitydirectory.com` and
+  production Workers can only reach `api.healthidentitydirectory.com`; an
+  origin header, Host header, path, or query value cannot override that pair.
+  Each environment requires an independently stored `ORIGIN_AUTH_TOKEN` and
+  fails closed when it is absent or malformed.
 - Turnstile requires both the client widget token and Identity server
   Siteverify. Production requires an exact approved hostname/action and a
   server-only secret and fails closed on absence, timeout, rejection, mismatch,

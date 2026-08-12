@@ -309,7 +309,7 @@ export class HidRegionalStack extends Stack {
     this.createDatabaseAlarms(database);
     this.createRuntimeAlarms(resources);
 
-    new CfnOutput(this, 'OriginDomainNameOutput', { value: this.parameter('OriginDomainName').valueAsString });
+    new CfnOutput(this, 'OriginDomainNameOutput', { value: this.publicApiHostname() });
     new CfnOutput(this, 'ApplicationLoadBalancerDnsName', { value: this.applicationLoadBalancer.loadBalancerDnsName });
     new CfnOutput(this, 'DatabaseEndpoint', { value: database.dbInstanceEndpointAddress });
     if (database.secret) new CfnOutput(this, 'BootstrapDatabaseSecretArn', { value: database.secret.secretArn });
@@ -333,10 +333,12 @@ export class HidRegionalStack extends Stack {
   private addParameterContract(): void {
     const domainPattern = '^(?=.{1,253}$)(?!-)(?:[A-Za-z0-9-]+\\.)+[A-Za-z]{2,63}$';
     this.requiredParameter('RootDomainName', 'HID root domain used only for private service naming; Cloudflare owns public DNS', domainPattern);
-    this.requiredParameter('OriginDomainName', 'Exact Cloudflare-to-regional-ALB API origin hostname', domainPattern);
-    this.requiredParameter('RegionalCertificateArn', 'Regional ACM certificate ARN covering OriginDomainName');
+    this.requiredParameter('RegionalCertificateArn', `Regional ACM certificate ARN covering ${this.configuration.publicApiSubdomain}.<root-domain>`);
     this.requiredParameter('InternalCertificateArn', 'Regional ACM certificate ARN covering *.internal.<environment>.<root-domain>');
-    this.requiredSecretParameter('CloudflareOriginSecret', 'Independent header secret configured only in Cloudflare Workers and the regional WAF');
+    this.requiredSecretParameter(
+      this.configuration.originAuthorizationSecretParameter,
+      `Independent ${this.configuration.name} Cloudflare origin authorization secret; never shared with another environment`,
+    );
     this.requiredParameter('S3PrefixListId', 'Region-specific Amazon S3 managed prefix list ID', '^pl-[a-f0-9]+$');
     this.requiredParameter('RdsCaBundleBase64', 'Base64-encoded current AWS RDS trust bundle; public certificate material, not a secret');
     this.requiredParameter('WorkloadIssuerUrl', 'Approved HTTPS workload issuer; external prerequisite', '^https://');
@@ -401,6 +403,10 @@ export class HidRegionalStack extends Stack {
     const value = this.parameters[id];
     if (!value) throw new Error(`Missing infrastructure parameter ${id}`);
     return value;
+  }
+
+  private publicApiHostname(): string {
+    return `${this.configuration.publicApiSubdomain}.${this.parameter('RootDomainName').valueAsString}`;
   }
 
   private createAwsEndpoints(vpc: ec2.Vpc, securityGroup: ec2.SecurityGroup): void {
@@ -574,11 +580,12 @@ export class HidRegionalStack extends Stack {
   ): Record<string, string> {
     const commonApi = {
       NODE_ENV: 'production',
+      HID_DEPLOYMENT_ENV: this.configuration.name === 'staging' ? 'staging' : 'production',
       DATABASE_SSL: 'true',
       DATABASE_SSL_ROOT_CERT_BASE64: this.parameter('RdsCaBundleBase64').valueAsString,
       DATABASE_POOL_MAX: '10',
-      CORS_ORIGINS: ['www', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
-        .map((label) => `https://${label}.${this.parameter('RootDomainName').valueAsString}`).join(','),
+      CORS_ORIGINS: this.configuration.browserSubdomains
+        .map((subdomain) => `https://${subdomain}.${this.parameter('RootDomainName').valueAsString}`).join(','),
       TRUST_PROXY_CIDRS: this.configuration.vpcCidr,
     };
     const issuer = this.parameter('WorkloadIssuerUrl').valueAsString;
@@ -879,7 +886,8 @@ export class HidRegionalStack extends Stack {
             fieldToMatch: { singleHeader: {
               Name: 'x-hid-origin-authorization',
             } as unknown as wafv2.CfnWebACL.SingleHeaderProperty },
-            positionalConstraint: 'EXACTLY', searchString: this.parameter('CloudflareOriginSecret').valueAsString,
+            positionalConstraint: 'EXACTLY',
+            searchString: this.parameter(this.configuration.originAuthorizationSecretParameter).valueAsString,
             textTransformations: [{ priority: 0, type: 'NONE' }],
           } } } },
           visibilityConfig: { cloudWatchMetricsEnabled: true,

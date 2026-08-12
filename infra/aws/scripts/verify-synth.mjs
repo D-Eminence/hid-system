@@ -5,6 +5,14 @@ import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const output = resolve(root, 'cdk.out')
+const environment = process.env.HID_INFRA_ENV ?? 'development'
+const environmentContracts = {
+  development: { apiSubdomain: 'api.development', originSecretParameter: 'DevelopmentCloudflareOriginSecret' },
+  staging: { apiSubdomain: 'api.staging', originSecretParameter: 'StagingCloudflareOriginSecret' },
+  production: { apiSubdomain: 'api', originSecretParameter: 'ProductionCloudflareOriginSecret' },
+}
+const contract = environmentContracts[environment]
+assert.ok(contract, `unknown HID_INFRA_ENV ${environment}`)
 const names = (await readdir(output)).filter(name => name.endsWith('.template.json'))
 assert.equal(names.length, 1, 'synth must produce exactly one regional template; Cloudflare owns the frontend edge')
 
@@ -66,6 +74,16 @@ assert.equal(resources(regional, 'AWS::CloudFront::Distribution').length, 0)
 assert.equal(resources(regional, 'AWS::SQS::Queue').length, 2)
 assert.equal(resources(regional, 'AWS::Events::Rule').length, 1)
 assert.equal(resources(regional, 'AWS::Lambda::Function').length, 0)
+assert.equal(regional.Parameters.OriginDomainName, undefined)
+assert.ok(regional.Parameters[contract.originSecretParameter])
+assert.equal(regional.Parameters[contract.originSecretParameter].Default, undefined)
+assert.equal(regional.Parameters[contract.originSecretParameter].NoEcho, true)
+assert.match(regionalText, new RegExp(`${contract.apiSubdomain.replace('.', '\\.') }\\.`))
+for (const parameter of Object.keys(regional.Parameters)) {
+  if (parameter.endsWith('CloudflareOriginSecret') && parameter !== contract.originSecretParameter) {
+    assert.fail(`${environment} must not synthesize another environment's origin authorization secret parameter`)
+  }
+}
 
 const notificationRule = resources(regional, 'AWS::Events::Rule')[0]
 const notificationTypes = notificationRule.Properties.EventPattern['detail-type']
@@ -97,7 +115,7 @@ const webAcl = resources(regional, 'AWS::WAFv2::WebACL')[0]
 assert.ok(webAcl)
 const webAclText = JSON.stringify(webAcl)
 assert.match(webAclText, /x-hid-origin-authorization/)
-assert.match(webAclText, /CloudflareOriginSecret/)
+assert.match(webAclText, new RegExp(contract.originSecretParameter))
 assert.match(webAclText, /AWSManagedRulesCommonRuleSet/)
 assert.match(webAclText, /AWSManagedRulesKnownBadInputsRuleSet/)
 assert.match(webAclText, /RateBasedStatement/)

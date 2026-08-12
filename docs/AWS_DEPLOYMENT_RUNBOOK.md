@@ -13,8 +13,10 @@ Record and approve:
 
 - exact Git SHA and release ID;
 - AWS account/region and `development`, `staging`, or `production` profile;
-- Cloudflare account/zone, seven application hostnames, apex redirect, and the
-  fixed API origin `api.healthidentitydirectory.com`;
+- Cloudflare account/zone and one selected profile: production uses the seven
+  approved production hostnames, apex redirect, and
+  `api.healthidentitydirectory.com`; staging uses its seven `.staging`
+  hostnames and `api.staging.healthidentitydirectory.com`;
 - regional ACM certificate covering that API origin and the internal wildcard
   certificate;
 - RDS CA bundle and regional S3 managed prefix-list ID;
@@ -25,8 +27,9 @@ Record and approve:
 - Notification provider secret material for SES sender, Termii, Meta, Infobip,
   and Novu; FCM server credentials/token acquisition remain an external
   provider integration; and
-- one independently generated origin secret stored only in Cloudflare Worker
-  secrets and the AWS WAF parameter.
+- one independently generated origin secret per environment, stored only in
+  that environment's Cloudflare Worker secret binding and its matching AWS WAF
+  parameter; staging and production values must differ.
 
 Do not reuse local, historical Vercel, Supabase, or Brevo credentials. Any
 previously exposed live-looking credentials must be rotated/revoked by their
@@ -145,8 +148,9 @@ Before raising task counts, prove in staging:
 
 ## 7. Cloudflare rollout
 
-For each frontend, bind the exact custom hostname, static asset directory,
-compatibility date, and Worker origin secret. Validate apex redirect, TLS,
+For each frontend, bind the exact selected-environment custom hostname, static
+asset directory, compatibility date, and matching Worker origin secret.
+Validate apex redirect where applicable, TLS,
 security headers, application-specific camera/geolocation permissions,
 root-scoped service worker, direct refresh, cache rules, and `/api/v1/*` proxy
 behavior. The AWS origin must reject a direct request without the origin secret.

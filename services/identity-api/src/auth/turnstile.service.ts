@@ -15,17 +15,35 @@ interface SiteverifyResponse {
   'error-codes'?: unknown;
 }
 
-const ACTIONS_BY_HOST: Readonly<Record<string, readonly TurnstileAction[]>> = Object.freeze({
-  'www.healthidentitydirectory.com': [
-    'patient-login', 'staff-login', 'admin-login', 'patient-reset-start',
-    'staff-reset', 'admin-reset', 'legacy-recovery',
-  ],
-  'ehr.healthidentitydirectory.com': ['ehr-login', 'staff-login'],
-  'lab.healthidentitydirectory.com': ['lab-login'],
-  'pharmacy.healthidentitydirectory.com': ['pharmacy-login'],
-  'ocr.healthidentitydirectory.com': ['ocr-login'],
-  'outreach.healthidentitydirectory.com': ['outreach-login'],
-  'admin.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
+function deploymentActions(value: Record<string, readonly TurnstileAction[]>): Readonly<Record<string, readonly TurnstileAction[]>> {
+  return Object.freeze(value);
+}
+
+const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<Record<string, readonly TurnstileAction[]>>>> = Object.freeze({
+  production: deploymentActions({
+    'www.healthidentitydirectory.com': [
+      'patient-login', 'staff-login', 'admin-login', 'patient-reset-start',
+      'staff-reset', 'admin-reset', 'legacy-recovery',
+    ],
+    'ehr.healthidentitydirectory.com': ['ehr-login', 'staff-login'],
+    'lab.healthidentitydirectory.com': ['lab-login'],
+    'pharmacy.healthidentitydirectory.com': ['pharmacy-login'],
+    'ocr.healthidentitydirectory.com': ['ocr-login'],
+    'outreach.healthidentitydirectory.com': ['outreach-login'],
+    'admin.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
+  }),
+  staging: deploymentActions({
+    'staging.healthidentitydirectory.com': [
+      'patient-login', 'staff-login', 'admin-login', 'patient-reset-start',
+      'staff-reset', 'admin-reset', 'legacy-recovery',
+    ],
+    'ehr.staging.healthidentitydirectory.com': ['ehr-login', 'staff-login'],
+    'lab.staging.healthidentitydirectory.com': ['lab-login'],
+    'pharmacy.staging.healthidentitydirectory.com': ['pharmacy-login'],
+    'ocr.staging.healthidentitydirectory.com': ['ocr-login'],
+    'outreach.staging.healthidentitydirectory.com': ['outreach-login'],
+    'admin.staging.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
+  }),
 });
 
 @Injectable()
@@ -106,7 +124,8 @@ export class TurnstileService {
     } catch {
       throw new DomainProblem(403, 'ORIGIN_DENIED', 'Request origin is not allowed');
     }
-    const allowedActions = ACTIONS_BY_HOST[parsed.hostname];
+    const deployment = this.environment.HID_DEPLOYMENT_ENV;
+    const allowedActions = deployment ? ACTIONS_BY_DEPLOYMENT[deployment][parsed.hostname] : undefined;
     if (parsed.origin !== origin || parsed.protocol !== 'https:' || !allowedActions?.includes(action)) {
       throw new DomainProblem(403, 'TURNSTILE_CONTEXT_MISMATCH', 'The security check context is not allowed');
     }

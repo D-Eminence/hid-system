@@ -48,6 +48,7 @@ const environmentSchema = z.object({
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('hid_access'),
   AUTH_COOKIE_SECURE: booleanString,
   AUTH_COOKIE_DOMAIN: optionalString,
+  HID_DEPLOYMENT_ENV: z.enum(['staging', 'production']).optional(),
   TURNSTILE_MODE: z.enum(['disabled', 'required']).default('disabled'),
   TURNSTILE_SECRET_KEY: optionalString,
   TURNSTILE_SITEVERIFY_URL: z.string().url().default('https://challenges.cloudflare.com/turnstile/v0/siteverify'),
@@ -155,6 +156,7 @@ const environmentSchema = z.object({
     if (!environment.DATABASE_SSL_ROOT_CERT_BASE64) context.addIssue({ code: 'custom', path: ['DATABASE_SSL_ROOT_CERT_BASE64'], message: 'The trusted PostgreSQL CA certificate is required in production' });
     if (!environment.AUTH_COOKIE_SECURE) context.addIssue({ code: 'custom', path: ['AUTH_COOKIE_SECURE'], message: 'Secure cookies are required in production' });
     if (environment.AUTH_COOKIE_DOMAIN) context.addIssue({ code: 'custom', path: ['AUTH_COOKIE_DOMAIN'], message: 'Production sessions must use host-only cookies; AUTH_COOKIE_DOMAIN must be absent' });
+    if (!environment.HID_DEPLOYMENT_ENV) context.addIssue({ code: 'custom', path: ['HID_DEPLOYMENT_ENV'], message: 'A production or staging deployment profile is required' });
     if (environment.TURNSTILE_MODE !== 'required') context.addIssue({ code: 'custom', path: ['TURNSTILE_MODE'], message: 'Turnstile is required for public production authentication' });
     if (!environment.TURNSTILE_SECRET_KEY) context.addIssue({ code: 'custom', path: ['TURNSTILE_SECRET_KEY'], message: 'The server-only Turnstile secret is required in production' });
     if (new URL(environment.TURNSTILE_SITEVERIFY_URL).origin !== 'https://challenges.cloudflare.com') context.addIssue({ code: 'custom', path: ['TURNSTILE_SITEVERIFY_URL'], message: 'Production Turnstile validation must use Cloudflare Siteverify' });

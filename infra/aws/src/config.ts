@@ -7,6 +7,9 @@ export type EnvironmentName = typeof environmentNames[number];
 
 export interface HidEnvironmentConfig {
   readonly name: EnvironmentName;
+  readonly publicApiSubdomain: string;
+  readonly browserSubdomains: readonly string[];
+  readonly originAuthorizationSecretParameter: string;
   readonly vpcCidr: string;
   readonly availabilityZones: number;
   readonly natGateways: number;
@@ -28,6 +31,9 @@ export interface HidEnvironmentConfig {
 const configurations: Record<EnvironmentName, HidEnvironmentConfig> = {
   development: {
     name: 'development',
+    publicApiSubdomain: 'api.development',
+    browserSubdomains: ['development', 'ehr.development', 'lab.development', 'pharmacy.development', 'ocr.development', 'outreach.development', 'admin.development'],
+    originAuthorizationSecretParameter: 'DevelopmentCloudflareOriginSecret',
     vpcCidr: '10.20.0.0/16',
     availabilityZones: 2,
     natGateways: 1,
@@ -47,6 +53,9 @@ const configurations: Record<EnvironmentName, HidEnvironmentConfig> = {
   },
   staging: {
     name: 'staging',
+    publicApiSubdomain: 'api.staging',
+    browserSubdomains: ['staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'ocr.staging', 'outreach.staging', 'admin.staging'],
+    originAuthorizationSecretParameter: 'StagingCloudflareOriginSecret',
     vpcCidr: '10.30.0.0/16',
     availabilityZones: 2,
     natGateways: 2,
@@ -66,6 +75,9 @@ const configurations: Record<EnvironmentName, HidEnvironmentConfig> = {
   },
   production: {
     name: 'production',
+    publicApiSubdomain: 'api',
+    browserSubdomains: ['www', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin'],
+    originAuthorizationSecretParameter: 'ProductionCloudflareOriginSecret',
     vpcCidr: '10.40.0.0/16',
     availabilityZones: 3,
     natGateways: 2,

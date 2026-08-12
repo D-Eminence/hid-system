@@ -8,7 +8,7 @@ The target edge/runtime split is:
 Browser
   -> app-specific Cloudflare Worker Static Assets hostname
        -> static artifact, or fixed same-origin /api/v1/* proxy
-          -> https://api.healthidentitydirectory.com
+          -> environment-paired API origin
              -> regional AWS WAF + ALB
                 -> API-only Gateway
                    -> private ECS owner service
@@ -20,6 +20,13 @@ API/runtime services, documents/OCR, events, and notifications. There is no
 CloudFront distribution in the approved target. Novu orchestrates ordinary
 notifications only; authentication OTP bypasses Novu and is delivered through
 the workload-authenticated Notification API.
+
+Production Workers use the approved production hostnames and fixed
+`https://api.healthidentitydirectory.com`; staging Workers use the corresponding
+`.staging` hostnames and fixed `https://api.staging.healthidentitydirectory.com`.
+The Worker deployment environment, application name, hostname, and API origin
+are an allowlisted tuple, never request-controlled values. Each environment has
+an independently managed Cloudflare-to-AWS origin authorization secret.
 
 Identity remains the sole patient and human-session authority. Canonical
 runtime authentication is local imported credentials or OIDC. The retired

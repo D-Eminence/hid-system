@@ -44,30 +44,64 @@ for (const path of files.map((value) => relative(root, value))) {
 }
 
 const appByWorker = {
-  'hid-web': ['apps/web/dist', 'www.healthidentitydirectory.com'],
-  'hid-ehr': ['apps/ehr/dist', 'ehr.healthidentitydirectory.com'],
-  'hid-lab': ['apps/lab/dist', 'lab.healthidentitydirectory.com'],
-  'hid-pharmacy': ['apps/pharmacy/dist', 'pharmacy.healthidentitydirectory.com'],
-  'hid-ocr': ['apps/ocr/dist', 'ocr.healthidentitydirectory.com'],
-  'hid-outreach': ['apps/outreach/dist', 'outreach.healthidentitydirectory.com'],
-  'hid-admin': ['apps/admin/dist', 'admin.healthidentitydirectory.com'],
+  'hid-web': ['apps/web/dist', 'web'],
+  'hid-ehr': ['apps/ehr/dist', 'ehr'],
+  'hid-lab': ['apps/lab/dist', 'lab'],
+  'hid-pharmacy': ['apps/pharmacy/dist', 'pharmacy'],
+  'hid-ocr': ['apps/ocr/dist', 'ocr'],
+  'hid-outreach': ['apps/outreach/dist', 'outreach'],
+  'hid-admin': ['apps/admin/dist', 'admin'],
 }
-for (const [worker, [assets, hostname]] of Object.entries(appByWorker)) {
+const cloudflareDeployments = {
+  production: {
+    apiOrigin: 'https://api.healthidentitydirectory.com',
+    hostFor: (app) => app === 'web'
+      ? 'www.healthidentitydirectory.com'
+      : `${app}.healthidentitydirectory.com`,
+  },
+  staging: {
+    apiOrigin: 'https://api.staging.healthidentitydirectory.com',
+    hostFor: (app) => app === 'web'
+      ? 'staging.healthidentitydirectory.com'
+      : `${app}.staging.healthidentitydirectory.com`,
+  },
+}
+for (const [worker, [assets, app]] of Object.entries(appByWorker)) {
   const configPath = resolve(root, `infra/cloudflare/workers/${worker}/wrangler.json`)
   assert.ok((await stat(configPath)).isFile(), `${worker} Wrangler configuration is missing`)
   const config = JSON.parse(await readFile(configPath, 'utf8'))
   assert.equal(config.name, worker)
   assert.ok(String(config.assets?.directory).endsWith(assets), `${worker} does not own ${assets}`)
-  assert.ok(config.routes?.some((route) => route.pattern === hostname && route.custom_domain === true),
-    `${worker} does not map ${hostname}`)
+  assert.equal(config.routes, undefined, `${worker} must use named deployment environments`)
+  assert.equal(config.vars, undefined, `${worker} must not expose shared deployment variables`)
+  for (const [deployment, expected] of Object.entries(cloudflareDeployments)) {
+    const environment = config.env?.[deployment]
+    const hostname = expected.hostFor(app)
+    assert.equal(environment?.name, `${worker}-${deployment}`)
+    assert.ok(environment.routes?.some((route) => route.pattern === hostname && route.custom_domain === true),
+      `${worker} does not map ${hostname} for ${deployment}`)
+    assert.deepEqual(environment.vars, {
+      DEPLOYMENT_ENV: deployment,
+      API_ORIGIN: expected.apiOrigin,
+      EXPECTED_HOST: hostname,
+      APP_NAME: app,
+    })
+    assert.equal(JSON.stringify(environment).includes('ORIGIN_AUTH_TOKEN'), false,
+      `${worker} must bind its origin token as a Cloudflare secret, not config`)
+  }
 }
 
 const apex = JSON.parse(await readFile(resolve(root, 'infra/cloudflare/workers/hid-apex-redirect/wrangler.json'), 'utf8'))
-assert.ok(apex.routes?.some((route) => route.pattern === 'healthidentitydirectory.com' && route.custom_domain === true))
+assert.equal(apex.routes, undefined)
+assert.ok(apex.env?.production?.routes?.some((route) => route.pattern === 'healthidentitydirectory.com' && route.custom_domain === true))
+assert.equal(apex.env?.staging, undefined)
 const cloudflareWorker = await readFile(resolve(root, 'infra/cloudflare/src/frontend-worker.mjs'), 'utf8')
-assert.match(cloudflareWorker, /https:\/\/api\.healthidentitydirectory\.com/)
+for (const { apiOrigin } of Object.values(cloudflareDeployments)) {
+  assert.match(cloudflareWorker, new RegExp(apiOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+}
 assert.match(cloudflareWorker, /API_PATH = \/\^\\\/api\\\/v1/)
 assert.match(cloudflareWorker, /cache-control[^\n]+no-store/i)
+assert.match(cloudflareWorker, /ORIGIN_AUTH_TOKEN/)
 
 const regionalStack = await readFile(resolve(root, 'infra/aws/src/hid-regional-stack.ts'), 'utf8')
 assert.doesNotMatch(regionalStack, /cloudfront/i, 'CloudFront must not be part of the target IaC')

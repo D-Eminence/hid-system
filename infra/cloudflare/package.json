@@ -6,6 +6,8 @@
   "description": "HID Cloudflare Workers Static Assets deployment contracts",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "verify": "node scripts/verify-config.mjs"
+    "verify": "node scripts/verify-config.mjs",
+    "dry-run:production": "node scripts/wrangler-dry-run.mjs production",
+    "dry-run:staging": "node scripts/wrangler-dry-run.mjs staging"
   }
 }

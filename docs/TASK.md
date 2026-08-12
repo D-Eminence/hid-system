@@ -2,6 +2,51 @@
 
 ## Current authoritative stage — 2026-08-12
 
+Classification: **STAGING ISOLATION IMPLEMENTED LOCALLY; EXTERNAL ENVIRONMENT
+VERIFICATION PENDING**.
+
+The immutable canonical source baseline is commit
+`4f5e5140b33cf351962dad9903459d20c51f8f0a` on `platform-baseline`; it is
+preserved unchanged. The staging-isolation release-source successor is prepared
+on `staging-readiness` without a merge to `main`. No Cloudflare Worker, DNS,
+Turnstile widget, AWS resource, Hostinger setting, HID 1.0 system, provider, or
+production database has been changed.
+
+Seven Cloudflare Workers now require an explicit named `production` or
+`staging` environment. Each deployment environment binds one exact application
+host, an allowlisted `API_ORIGIN`, and an application identity. Production
+continues to use `api.healthidentitydirectory.com`; staging uses only
+`api.staging.healthidentitydirectory.com`. The Worker rejects missing or
+mismatched environment configuration and does not derive an upstream from the
+browser request, Host header, path, or query. It accepts only `/api/v1/*`,
+preserves request method/body and required Origin/CSRF/correlation evidence,
+and applies `private, no-store` controls to API responses.
+
+`ORIGIN_AUTH_TOKEN` remains a Worker secret binding, never a Wrangler `vars`
+value or frontend artifact. Production and staging require independently
+generated external values and AWS now requires respectively named no-echo WAF
+inputs. Both configuration boundaries fail closed if absent. Identity uses a
+required `HID_DEPLOYMENT_ENV` profile in runtime production mode so server-side
+Turnstile Siteverify accepts only the corresponding production or staging
+hostname/action matrix while retaining host-only cookies. The existing
+production Turnstile widget remains untouched; a staging widget and its
+independent site-key/secret pair are external prerequisites.
+
+AWS typed profiles derive public API hostnames and CORS origins from the
+environment: staging produces only `api.staging` and the seven staging browser
+origins, while production produces only `api` and the approved production
+origins. CloudFront remains absent; the topology remains eleven ECS services,
+eleven ECR repositories, and twelve governed image identities.
+
+Local Worker tests/config checks, Identity Turnstile tests/typecheck/build,
+and development/staging/production offline IaC synth-policy checks pass. A
+real Wrangler `deploy --dry-run` is scripted for both environments but has not
+run in this session because the local approval system rejected its package
+download before execution; no Cloudflare action was attempted. Final root,
+database, and release-source checks remain in progress for this stage.
+
+## Previous authoritative stage — 2026-08-12
+
 Classification: **IMPLEMENTED, EXTERNAL ENVIRONMENT VERIFICATION PENDING**.
 
 This section supersedes conflicting deployment statements in the older

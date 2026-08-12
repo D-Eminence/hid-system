@@ -34,6 +34,19 @@ incorrect value before the ALB target path. This is defense in depth and does
 not replace browser authentication, CSRF, authorization, or owner-service
 checks.
 
+## Environment isolation
+
+Production and staging are separate edge-to-origin trust boundaries. Production
+uses `api.healthidentitydirectory.com`, while staging uses
+`api.staging.healthidentitydirectory.com`. CDK derives each active hostname
+from its typed environment profile and `RootDomainName`; staging therefore
+never synthesizes production as its API hostname or browser CORS allowlist.
+Each regional stack requires its own no-echo origin authorization parameter
+(`ProductionCloudflareOriginSecret` or `StagingCloudflareOriginSecret`). Those
+values must be independently generated and installed into the matching
+Cloudflare Worker named environment as `ORIGIN_AUTH_TOKEN`; no value is stored
+in source, frontend artifacts, or CloudFormation defaults.
+
 ## Frontend ownership
 
 Cloudflare publishes seven independent static applications:
@@ -53,6 +66,12 @@ its own build, applies its own service-worker scope and permissions policy, and
 proxies only `/api/v1/*` to the fixed AWS API hostname. HTML, service workers,
 and API responses are not cached as durable PHI. Gateway contains no static
 frontend output and returns `API_ONLY_ORIGIN` for non-API paths.
+
+Staging has the exact parallel namespace: `staging`, `ehr.staging`,
+`lab.staging`, `pharmacy.staging`, `ocr.staging`, `outreach.staging`, and
+`admin.staging` under `healthidentitydirectory.com`. A staging Worker can only
+proxy to the staging API hostname; it cannot select an origin from request
+headers, a path, or a query value.
 
 ## Regional AWS resources
 
