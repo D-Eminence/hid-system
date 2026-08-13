@@ -1,6 +1,37 @@
 # HID Platform Container Acceptance
 
-## Current production-convergence checkpoint — 2026-08-12
+## Current container-security checkpoint — 2026-08-13
+
+All twelve governed local targets now build with pinned non-root final bases.
+The ten Node services and EHR migration target use Distroless Node 22 Debian
+13 as UID/GID 65532; the API-only Gateway uses pinned unprivileged Nginx as UID
+101. Docker Scout reports zero vulnerabilities for each Node/migration image
+and zero critical/high findings for Gateway. All twelve final filesystems
+produced zero high-confidence secret findings, and twelve SPDX SBOMs passed
+checksum verification.
+
+Representative and full-topology container acceptance passed locally. Seven
+APIs reached liveness/readiness, six database-backed APIs and both dispatchers
+failed readiness closed and recovered across a disposable PostgreSQL outage,
+two OCR workers polled concurrently through a non-owner login, two dispatchers
+were ready, disabled Notification Worker remained live but not ready without
+providers, and Gateway preserved its API-only response and proxy contracts.
+Node processes handled SIGTERM and Gateway handled SIGQUIT. The migration
+target applied migrations `0001`–`0028` and returned zero pending for plan and
+dry-run. No external provider or deployment system was contacted.
+
+Runtime testing found and corrected two packaging-visible lifecycle defects:
+Notification API now treats its provider override as optional Nest injection,
+and disabled Notification Worker closes its status server on SIGTERM/SIGINT.
+Both corrected images were rebuilt, rescanned, and retested successfully.
+
+Source `df4f41328375c9a2235c2e6d48dd482ff6f432af` remains a permanently rejected
+release candidate. The complete image, SBOM, scan, filesystem, runtime, and
+frontend evidence must be regenerated from the exact clean remediation commit
+before promotion. ECR, Inspector, AWS, and Cloudflare deployment evidence
+remains externally pending.
+
+## Previous production-convergence checkpoint — 2026-08-12
 
 The current static contract covers ten backend executables (Identity, EHR,
 Lab, Pharmacy, OCR API, OCR Worker, Outreach, Notification API, Notification

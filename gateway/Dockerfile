@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-FROM nginxinc/nginx-unprivileged:1.27-alpine AS configuration
+FROM nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3 AS configuration
 COPY gateway/nginx.conf.template /tmp/default.conf.template
 COPY gateway/proxy-headers.conf /tmp/hid-proxy-headers.conf
 
-FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+FROM nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3 AS runtime
 ENV IDENTITY_API_UPSTREAM=http://identity-api:3001 \
     EHR_API_UPSTREAM=http://ehr-api:3002 \
     LAB_API_UPSTREAM=http://lab-api:3003 \

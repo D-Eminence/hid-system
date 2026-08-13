@@ -1,6 +1,7 @@
 # HID Release Artifact Gate
 
-Status: implemented schema and local policy; Docker/ECR/Inspector execution is externally pending.
+Status: the container critical/high remediation passes locally; no deployment is
+approved and the rejected predecessor remains permanently blocked.
 
 ## 1. Purpose
 
@@ -117,7 +118,14 @@ normal correction is an additive migration/forward fix.
 | ECR immutable/scanning/lifecycle policy | Synthesized, not deployed |
 | Web high dependency finding | Resolved locally |
 | Lab/Outreach attribution | Resolved locally |
-| Docker builds/digests/layers/SBOM/image scans | Externally pending; Docker is available locally, but no release image/evidence run is authorized in this stage |
+| Failed source candidate `df4f41328375c9a2235c2e6d48dd482ff6f432af` | Blocked: Docker Scout 1.24.0 found 3 critical and 9 high final-image findings in both representative Node Bookworm-slim images; see RF-004 |
+| Remediated Identity/EHR representative images | Built locally from pinned Distroless Node 22 Debian 13 final stages; native modules, ready health, UID 65532, and SIGTERM passed; Docker Scout SARIF reports have 0 critical and 0 high findings |
+| Full Docker builds/final-filesystem secret scans/SBOM/image scans | Passed locally for all twelve governed targets. The ten Node services and EHR `migration` report zero vulnerabilities; Gateway reports zero critical/high findings. Twelve SPDX SBOMs and their checksums were generated, all final filesystems produced zero high-confidence secret findings, and all images run non-root. Evidence must be regenerated from the clean committed release-source SHA before promotion. |
+| Gateway independent remediation | Pinned `nginxinc/nginx-unprivileged` digest `sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3`; UID 101, API-only routes, health, upstream proxy, and SIGQUIT passed. Scout reports 0 critical, 0 high, 3 low, and 1 unspecified finding. |
+| Runtime topology | Seven APIs reached live/ready, six database-backed APIs and two dispatchers failed readiness closed and recovered, two OCR workers polled under one non-owner role without claim errors, disabled Notification Worker returned live 200/ready 503 and handled SIGTERM, two dispatchers handled SIGTERM, and the migration image reported zero pending for plan and dry-run. No external provider was called. |
 | ECR push/registry digest/Inspector | Externally pending; no AWS account configured |
 
-No release manifest has been fabricated for this stage.
+The preceding candidate remains blocked and may not be promoted. A clean
+remediation commit plus a complete rebuild from that exact SHA is required
+before the local image set can become release evidence; ECR/Inspector and all
+deployment evidence remain external.

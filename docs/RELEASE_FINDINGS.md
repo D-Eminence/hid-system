@@ -50,3 +50,18 @@ After remediation:
 | Outreach | 0 | 0 | 2 | exact |
 
 This table records npm package audit evidence only. Container operating-system packages, base-image findings, and final-layer evidence remain unavailable until a Docker-capable release host executes the artifact gate.
+
+## Finding RF-004: Node Bookworm-slim final-image critical/high findings
+
+| Field | Record |
+|---|---|
+| Affected candidate | Local candidate source `df4f41328375c9a2235c2e6d48dd482ff6f432af` on `staging-readiness`; the source and branch are preserved unchanged. |
+| Scanner evidence | Docker Scout 1.24.0 SARIF for the local Identity and EHR final images reported 3 critical and 9 high findings in each image. No waiver or approved exception exists. |
+| Exact provenance | SARIF locations place `brace-expansion`, `picomatch`, `sigstore`, `ip-address`, and `tar` under `/usr/local/lib/node_modules/npm/node_modules/` in the Node base image. Debian CVE locations point to `/usr/share/doc/perl-base/copyright`. The scanner did not locate these critical/high findings in HID application dependency trees. |
+| Findings | Critical: CVE-2026-12087, CVE-2026-13221 (unfixed Debian Perl), and CVE-2026-59873 (`tar`, fixed in 7.5.19). High: CVE-2026-48962 and CVE-2026-48959 (unfixed Debian Perl); CVE-2026-14257, CVE-2026-69152, and CVE-2026-13149 (`brace-expansion`); CVE-2026-33671 (`picomatch`); CVE-2026-48815 (`sigstore`); CVE-2026-69192 (`ip-address`); and CVE-2026-59874 (`tar`). |
+| Decision | Block the candidate and remediate the final-image boundary. Do not use a severity exception, suppress the scanner, or promote the candidate. |
+| Change | Keep `node:22-bookworm-slim` only in build and production-dependency stages. All Node service final stages and EHR's separate migration target now use the pinned `gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167` runtime, with only compiled output and production dependencies copied in. |
+| Representative verification | Identity and EHR images built locally, loaded their native modules, reached ready/healthy state as UID/GID 65532, handled SIGTERM, generated SPDX SBOMs, and produced zero-result Docker Scout SARIF reports. |
+| Full-matrix verification | All ten Node services plus EHR `migration` rebuilt on the accepted Distroless runtime with zero Scout vulnerabilities. Gateway was independently moved to the pinned maintained unprivileged Nginx digest and reports 0 critical/0 high findings. All twelve SPDX SBOMs, checksum verification, non-root checks, final-filesystem secret scans, and runtime topology checks passed locally. Notification API container startup and disabled Notification Worker SIGTERM defects exposed by runtime acceptance were corrected and retested. |
+| Required closure | Commit the verified tree, rebuild and rescan all twelve governed targets and seven frontend artifacts from that exact clean SHA, and preserve the resulting local evidence. External ECR/Inspector/deployment evidence remains separately required. |
+| Status | **REMEDIATED LOCALLY — PREDECESSOR CANDIDATE PERMANENTLY BLOCKED; EXTERNAL RELEASE EVIDENCE PENDING** |

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
 import { InfobipFallbackProvider } from '../providers/infobip.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
@@ -6,13 +6,19 @@ import type { OtpMessage, OtpProvider, ProviderResult } from '../providers/provi
 import { SesEmailProvider } from '../providers/ses.provider';
 import { TermiiSmsProvider } from '../providers/termii.provider';
 
+const NOTIFICATION_PROVIDER_OVERRIDES = Symbol('NOTIFICATION_PROVIDER_OVERRIDES');
+
 @Injectable()
 export class NotificationService {
   private readonly environment = getEnvironment();
   private readonly primary: Readonly<Record<OtpMessage['channel'], OtpProvider>>;
   private readonly fallback: OtpProvider;
 
-  constructor(providers?: { primary: Readonly<Record<OtpMessage['channel'], OtpProvider>>; fallback: OtpProvider }) {
+  constructor(
+    @Optional()
+    @Inject(NOTIFICATION_PROVIDER_OVERRIDES)
+    providers?: { primary: Readonly<Record<OtpMessage['channel'], OtpProvider>>; fallback: OtpProvider },
+  ) {
     this.primary = providers?.primary ?? {
       email: new SesEmailProvider(this.environment), sms: new TermiiSmsProvider(this.environment),
       whatsapp: new MetaWhatsAppProvider(this.environment),

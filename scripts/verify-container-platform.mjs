@@ -20,6 +20,8 @@ const backends = [
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
 const bases = { web: '/', ehr: '/ehr/', lab: '/lab/', pharmacy: '/pharmacy/',
   ocr: '/ocr/', outreach: '/outreach/', admin: '/admin/' }
+const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167'
+const unprivilegedNginxRuntime = 'nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3'
 
 const textExtensions = new Set([
   '', '.cjs', '.conf', '.css', '.env', '.example', '.html', '.js', '.json', '.jsx',
@@ -80,8 +82,12 @@ for (const [service, port, hasHttpHealth] of backends) {
   assert.match(dockerfile, /FROM node:22-bookworm-slim AS build/, `${service} build Node must match the platform major`)
   assert.match(dockerfile, /npm ci/, `${service} must use its lockfile`)
   assert.match(dockerfile, /npm ci --omit=dev/, `${service} runtime must omit development dependencies`)
-  assert.match(dockerfile, /USER node/, `${service} runtime must be non-root`)
-  assert.match(dockerfile, /CMD \["node", "dist\/main\.js"\]/, `${service} must use exec-form Node startup`)
+  assert.ok(dockerfile.includes(`FROM ${distrolessNodeRuntime} AS runtime`),
+    `${service} final runtime must use the pinned Distroless Node image`)
+  const runtime = dockerfile.slice(dockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
+  assert.match(runtime, /USER 65532:65532/, `${service} runtime must be non-root`)
+  assert.match(runtime, /CMD \["dist\/main\.js"\]/, `${service} must use Distroless exec-form Node startup`)
+  assert.doesNotMatch(runtime, /^RUN /m, `${service} final runtime must not include package-manager or build commands`)
   assert.match(dockerfile, /STOPSIGNAL SIGTERM/, `${service} must receive its graceful stop signal`)
   assert.doesNotMatch(dockerfile, /COPY\s+\.\s+\./, `${service} must not copy the entire context`)
   assert.doesNotMatch(dockerfile, /chmod\s+777/, `${service} must not use world-writable permissions`)
@@ -92,14 +98,15 @@ for (const [service, port, hasHttpHealth] of backends) {
   if (hasHttpHealth && service !== 'event-dispatcher') {
     assert.match(dockerfile, /HEALTHCHECK[\s\S]*\/api\/v1\/health\/ready/,
       `${service} image health must use readiness`)
-    assert.match(dockerfile, /CMD \["node", "-e"/, `${service} health tooling must be the Node runtime already in the image`)
+    assert.match(runtime, /CMD \["\/nodejs\/bin\/node", "-e"/,
+      `${service} health tooling must use the Distroless Node runtime`)
   }
 }
 
 const ehrDockerfile = await readFile(join(repository, 'services/ehr-api/Dockerfile'), 'utf8')
-assert.match(ehrDockerfile, /FROM production-dependencies AS migration[\s\S]*scripts\/apply-migrations\.mjs/,
+assert.match(ehrDockerfile, new RegExp(`FROM ${distrolessNodeRuntime} AS migration[\\s\\S]*scripts\\/apply-migrations\\.mjs`),
   'EHR must expose a controlled, separate migration job target')
-const ehrRuntime = ehrDockerfile.slice(ehrDockerfile.indexOf('FROM production-dependencies AS runtime'))
+const ehrRuntime = ehrDockerfile.slice(ehrDockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
 assert.doesNotMatch(ehrRuntime, /services\/ehr-api\/(?:database|scripts)/,
   'the EHR API runtime image must not contain the migration executor or ledger')
 
@@ -113,6 +120,8 @@ for (const contract of ['acceptingClaims = false', 'shutdown.abort', 'repository
 const dispatcherDockerfile = await readFile(join(repository, 'services/event-dispatcher/Dockerfile'), 'utf8')
 assert.match(dispatcherDockerfile, /HEALTHCHECK[\s\S]*\/api\/v1\/health\/ready/,
   'dispatcher image health must use readiness')
+assert.match(dispatcherDockerfile, /CMD \["\/nodejs\/bin\/node", "-e"/,
+  'dispatcher image health must use the Distroless Node runtime')
 const dispatcherSource = await readFile(join(repository, 'services/event-dispatcher/src/dispatcher.ts'), 'utf8')
 for (const contract of ['acceptingDispatch = false', 'drain_timeout', 'repository.close()', 'transportAbort.abort']) {
   assert.ok(dispatcherSource.includes(contract), `dispatcher graceful-drain contract is missing ${contract}`)
@@ -145,8 +154,10 @@ for (const path of allFrontendSource) {
 }
 
 const gatewayDockerfile = await readFile(join(repository, 'gateway/Dockerfile'), 'utf8')
-assert.match(gatewayDockerfile, /FROM nginxinc\/nginx-unprivileged:1\.27-alpine AS configuration/)
-assert.match(gatewayDockerfile, /FROM nginxinc\/nginx-unprivileged:1\.27-alpine AS runtime/)
+assert.ok(gatewayDockerfile.includes(`FROM ${unprivilegedNginxRuntime} AS configuration`),
+  'gateway configuration stage must use the pinned unprivileged Nginx runtime')
+assert.ok(gatewayDockerfile.includes(`FROM ${unprivilegedNginxRuntime} AS runtime`),
+  'gateway final stage must use the pinned unprivileged Nginx runtime')
 for (const app of apps) {
   assert.doesNotMatch(gatewayDockerfile, new RegExp(`apps/${app}/dist/`),
     `API-only gateway must not package the Cloudflare-hosted ${app} frontend`)

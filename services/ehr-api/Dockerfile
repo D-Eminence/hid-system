@@ -18,19 +18,28 @@ COPY --from=build /app/packages/api-client/dist ./packages/api-client/dist
 
 # Controlled deployment job target. APIs never race the central ledger at
 # startup; an orchestrator may run this target once before rolling services.
-FROM production-dependencies AS migration
-COPY services/ehr-api/database ./services/ehr-api/database
-COPY services/ehr-api/scripts ./services/ehr-api/scripts
+FROM gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167 AS migration
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --chown=65532:65532 --from=production-dependencies /app/services/ehr-api/node_modules ./services/ehr-api/node_modules
+COPY --chown=65532:65532 scripts/local-environment.mjs ./scripts/local-environment.mjs
+COPY --chown=65532:65532 services/ehr-api/database ./services/ehr-api/database
+COPY --chown=65532:65532 services/ehr-api/scripts ./services/ehr-api/scripts
 WORKDIR /app/services/ehr-api
-USER node
-CMD ["node", "scripts/apply-migrations.mjs"]
+USER 65532:65532
+CMD ["scripts/apply-migrations.mjs"]
 
-FROM production-dependencies AS runtime
-COPY --from=build /app/services/ehr-api/dist ./services/ehr-api/dist
+FROM gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167 AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --chown=65532:65532 --from=production-dependencies /app/services/ehr-api/node_modules ./services/ehr-api/node_modules
+COPY --chown=65532:65532 --from=production-dependencies /app/packages/api-client/package.json ./packages/api-client/package.json
+COPY --chown=65532:65532 --from=build /app/packages/api-client/dist ./packages/api-client/dist
+COPY --chown=65532:65532 --from=build /app/services/ehr-api/dist ./services/ehr-api/dist
 WORKDIR /app/services/ehr-api
-USER node
+USER 65532:65532
 EXPOSE 3002
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-  CMD ["node", "-e", "const port=process.env.PORT||'3002';fetch('http://127.0.0.1:'+port+'/api/v1/health/ready').then((response)=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-CMD ["node", "dist/main.js"]
+  CMD ["/nodejs/bin/node", "-e", "const port=process.env.PORT||'3002';fetch('http://127.0.0.1:'+port+'/api/v1/health/ready').then((response)=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+CMD ["dist/main.js"]

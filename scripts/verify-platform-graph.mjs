@@ -248,22 +248,26 @@ assert.deepEqual(dispatcherIam.Statement[0].Action.sort(),
 assert.doesNotMatch(dispatcherIam.Statement[0].Resource, /\*/,
   'Event dispatcher IAM example must bind an exact event bus ARN')
 
+const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167'
 const dockerContracts = new Map([
-  ['identity-api', 'node", "dist/main.js'],
-  ['ehr-api', 'node", "dist/main.js'],
-  ['lab-api', 'node", "dist/main.js'],
-  ['pharmacy-api', 'node", "dist/main.js'],
-  ['ocr-api', 'node", "dist/main.js'],
-  ['ocr-worker', 'node", "dist/main.js'],
-  ['outreach-api', 'node", "dist/main.js'],
-  ['event-dispatcher', 'node", "dist/main.js'],
+  ['identity-api', 'CMD ["dist/main.js"]'],
+  ['ehr-api', 'CMD ["dist/main.js"]'],
+  ['lab-api', 'CMD ["dist/main.js"]'],
+  ['pharmacy-api', 'CMD ["dist/main.js"]'],
+  ['ocr-api', 'CMD ["dist/main.js"]'],
+  ['ocr-worker', 'CMD ["dist/main.js"]'],
+  ['outreach-api', 'CMD ["dist/main.js"]'],
+  ['event-dispatcher', 'CMD ["dist/main.js"]'],
 ])
 for (const [directory, command] of dockerContracts) {
   const dockerfile = await readFile(join(repository, 'services', directory, 'Dockerfile'), 'utf8')
-  assert.match(dockerfile, /FROM node:22-/)
+  assert.match(dockerfile, /FROM node:22-bookworm-slim AS build/)
   assert.match(dockerfile, /npm ci/)
-  assert.match(dockerfile, /USER node/)
-  assert.ok(dockerfile.includes(command), `${directory} Dockerfile has the wrong production command`)
+  assert.ok(dockerfile.includes(`FROM ${distrolessNodeRuntime} AS runtime`),
+    `${directory} Dockerfile must use the pinned Distroless final runtime`)
+  const runtime = dockerfile.slice(dockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
+  assert.match(runtime, /USER 65532:65532/)
+  assert.ok(runtime.includes(command), `${directory} Dockerfile has the wrong production command`)
 }
 
 process.stdout.write(JSON.stringify({

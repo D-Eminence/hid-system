@@ -1,3 +1,4 @@
+import { Test } from '@nestjs/testing';
 import type { OtpProvider, ProviderResult } from '../providers/provider.types';
 import { resetEnvironmentForTests } from '../config/environment';
 import { NotificationService } from './notification.service';
@@ -9,6 +10,12 @@ describe('NotificationService fallback safety', () => {
   const message = { channel: 'sms' as const, recipient: '+2348000000000', code: '000001', purpose: 'PASSWORD_RESET', idempotencyKey: 'otp:00000000-0000-4000-8000-000000000001' };
   function provider(name: ProviderResult['provider'], outcome: ProviderResult['outcome']): OtpProvider { return { name, send: jest.fn().mockResolvedValue({ provider: name, outcome }) }; }
   function service(primary: OtpProvider, fallback: OtpProvider) { return new NotificationService({ primary: { email: primary, sms: primary, whatsapp: primary }, fallback }); }
+
+  it('resolves without a provider override in the Nest application container', async () => {
+    const module = await Test.createTestingModule({ providers: [NotificationService] }).compile();
+    expect(module.get(NotificationService)).toBeInstanceOf(NotificationService);
+    await module.close();
+  });
 
   it('uses fallback only after a definitive primary failure', async () => {
     const primary = provider('termii', 'definitive_failure'); const fallback = provider('infobip', 'accepted');

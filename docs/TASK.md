@@ -1,6 +1,61 @@
 # Current HID Platform Task
 
-## Current authoritative stage — 2026-08-12
+## Current authoritative stage — 2026-08-13
+
+Classification: **CONTAINER CRITICAL/HIGH REMEDIATED LOCALLY; NO DEPLOYMENT IS
+AUTHORIZED**.
+
+The failed local release-artifact candidate
+`df4f41328375c9a2235c2e6d48dd482ff6f432af` remains preserved unchanged on
+`staging-readiness`. Remediation is isolated on
+`release-security-remediation`, created directly from that candidate. Neither
+`platform-baseline` nor `main` has been changed. No tag, Cloudflare, AWS, ECR,
+Hostinger, HID 1.0, external database, or notification-provider action is
+authorized by this stage.
+
+Docker Scout 1.24.0 found three critical and nine high findings in the failed
+Identity and EHR final images. SARIF locations attribute the npm findings to
+the old Node base image's bundled npm tree (`brace-expansion`, `picomatch`,
+`sigstore`, `ip-address`, and `tar`) and the Debian findings to the Bookworm
+Perl base package; they do not attribute a critical/high finding to HID
+application dependencies. The failed source, report locations, and exact CVE
+disposition are retained in `RELEASE_FINDINGS.md`; no exception was created.
+
+All ten Node-service final stages and the separate EHR `migration` target now
+use the pinned `gcr.io/distroless/nodejs22-debian13` digest, retain
+Bookworm-only build and production-dependency stages, copy only production
+dependencies plus compiled output into final images, run as UID/GID 65532, and
+use Distroless-compatible Node command and health-check forms. The static
+container policy pins this final-stage contract. Representative local Identity
+and EHR images built successfully, loaded `argon2`, `pg`, and the shared API
+client where applicable, reached ready/healthy state as UID 65532, and exited
+cleanly on SIGTERM. Their Docker Scout SARIF reports contain zero findings.
+
+The pattern was then proven across all twelve governed targets. All ten Node
+services plus EHR `migration` report zero Scout vulnerabilities. Gateway was
+independently pinned to
+`nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3`
+and reports zero critical/high findings. All twelve images built, generated
+checksummed SPDX SBOMs, ran non-root, and produced zero high-confidence final
+filesystem secret findings. Node final filesystems contain no npm, Perl, or
+shell. Gateway remains API-only and shuts down with SIGQUIT.
+
+Container topology acceptance passed for seven APIs, two OCR workers, two
+event dispatchers, the disabled-provider Notification Worker, Gateway, and the
+migration target. Six database-backed APIs and both dispatchers failed
+readiness closed during a disposable PostgreSQL outage and recovered without
+restart. Two OCR replicas resumed authorized claim polling through a non-owner
+login. Runtime acceptance exposed and corrected Notification API optional
+provider injection and disabled Notification Worker SIGTERM handling; both
+rebuilt images retained zero critical/high findings and passed their runtime
+contracts. No live provider or external system was contacted.
+
+The local artifact evidence is valid only when regenerated from the exact
+clean remediation commit. Images, SBOMs, scans, and frontend checksums from
+`df4f41328375c9a2235c2e6d48dd482ff6f432af` remain diagnostic history and are
+never promotable. See `RELEASE_ARTIFACT_GATE.md` and `RELEASE_FINDINGS.md`.
+
+## Previous authoritative stage — 2026-08-12
 
 Classification: **STAGING ISOLATION IMPLEMENTED LOCALLY; EXTERNAL ENVIRONMENT
 VERIFICATION PENDING**.

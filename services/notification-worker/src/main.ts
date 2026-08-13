@@ -9,6 +9,9 @@ async function main(): Promise<void> {
   if (!config.NOTIFICATION_WORKER_ENABLED) {
     const status = new StatusServer(config);
     await status.start();
+    const shutdown = async () => { await status.close(); };
+    process.once('SIGTERM', () => { void shutdown(); });
+    process.once('SIGINT', () => { void shutdown(); });
     process.stdout.write('notification_worker_disabled\n');
     return;
   }
