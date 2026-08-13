@@ -28,13 +28,16 @@ import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
 import type { HidEnvironmentConfig } from './config.js';
 import {
   serviceHostLabels,
   tokenRoot,
+  validateDatabaseConnectionBudget,
   workloadNames,
+  workloadScale,
   workloads,
   type WorkloadDefinition,
   type WorkloadName,
@@ -71,7 +74,7 @@ const databaseSecretFields: Partial<Record<WorkloadName, string>> = {
 const apiNames = workloadNames.filter((name) => workloads[name].browserRouted && name !== 'gateway');
 
 export class HidRegionalStack extends Stack {
-  public readonly applicationLoadBalancer: elasticloadbalancingv2.ApplicationLoadBalancer;
+  public readonly applicationLoadBalancer?: elasticloadbalancingv2.ApplicationLoadBalancer;
   public readonly eventBus: events.EventBus;
   public readonly notificationQueue: sqs.Queue;
   public readonly documentBucket: s3.Bucket;
@@ -83,6 +86,21 @@ export class HidRegionalStack extends Stack {
   public constructor(scope: Construct, id: string, props: HidRegionalStackProps) {
     super(scope, id, props);
     this.configuration = props.configuration;
+
+    validateDatabaseConnectionBudget(
+      this.configuration.profile,
+      this.configuration.databaseConnectionBudget,
+      this.configuration.reviewedEmergencyConnectionBudget,
+    );
+    for (const [key, value] of Object.entries({
+      Project: 'HID',
+      Environment: this.configuration.name,
+      Service: 'platform-shared',
+      ManagedBy: 'CDK',
+      Owner: 'HID',
+      CostCenter: 'HID',
+      DataClassification: 'healthcare-restricted',
+    })) Tags.of(this).add(key, value);
 
     this.addParameterContract();
 
@@ -146,6 +164,7 @@ export class HidRegionalStack extends Stack {
       deletionProtection: this.configuration.databaseDeletionProtection,
       monitoringInterval: Duration.seconds(60),
       enablePerformanceInsights: true,
+      databaseInsightsMode: rds.DatabaseInsightsMode.STANDARD,
       performanceInsightRetention: rds.PerformanceInsightRetention.DEFAULT,
       parameterGroup: databaseParameterGroup,
       cloudwatchLogsExports: ['postgresql'],
@@ -167,12 +186,46 @@ export class HidRegionalStack extends Stack {
       encryptionKey: documentKey,
       bucketKeyEnabled: true,
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
-      lifecycleRules: [{
-        id: 'noncurrent-version-retention',
-        enabled: true,
-        noncurrentVersionExpiration: Duration.days(this.configuration.name === 'production' ? 365 : 90),
-        abortIncompleteMultipartUploadAfter: Duration.days(7),
-      }],
+      lifecycleRules: [
+        {
+          id: 'clinical-records-never-expire-by-generic-lifecycle',
+          enabled: true,
+          prefix: 'clinical/',
+          abortIncompleteMultipartUploadAfter: Duration.days(7),
+        },
+        {
+          id: 'legacy-clinical-records-never-expire-by-generic-lifecycle',
+          enabled: true,
+          prefix: 'objects/',
+          abortIncompleteMultipartUploadAfter: Duration.days(7),
+        },
+        {
+          id: 'temporary-object-cleanup',
+          enabled: true,
+          prefix: 'temporary/',
+          expiration: Duration.days(30),
+          noncurrentVersionExpiration: Duration.days(7),
+          abortIncompleteMultipartUploadAfter: Duration.days(7),
+        },
+        {
+          id: 'release-evidence-lower-cost-storage',
+          enabled: true,
+          prefix: 'release-evidence/',
+          transitions: [{ storageClass: s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+            transitionAfter: Duration.days(90) }],
+          noncurrentVersionTransitions: [{ storageClass: s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+            transitionAfter: Duration.days(90) }],
+          abortIncompleteMultipartUploadAfter: Duration.days(7),
+        },
+        {
+          id: 'nonclinical-test-staging-cleanup',
+          enabled: true,
+          prefix: 'test-staging/',
+          expiration: Duration.days(this.configuration.name === 'production' ? 90 : 30),
+          noncurrentVersionExpiration: Duration.days(30),
+          abortIncompleteMultipartUploadAfter: Duration.days(7),
+        },
+      ],
       removalPolicy: this.configuration.removalPolicy,
     });
 
@@ -202,6 +255,8 @@ export class HidRegionalStack extends Stack {
       deadLetterQueue: { queue: notificationDeadLetterQueue, maxReceiveCount: 8 },
       removalPolicy: this.configuration.removalPolicy,
     });
+    this.tagService(notificationDeadLetterQueue, 'notification-worker');
+    this.tagService(this.notificationQueue, 'notification-worker');
     new events.Rule(this, 'OrdinaryNotificationEvents', {
       eventBus: this.eventBus,
       description: 'Minimum-necessary ordinary notification events; authentication OTP never enters this rule',
@@ -234,8 +289,10 @@ export class HidRegionalStack extends Stack {
 
     const runtimeSecrets = this.importRuntimeSecrets();
     const securityGroups = this.createRuntimeSecurityGroups(vpc);
-    for (const securityGroup of Object.values(securityGroups)) {
-      endpointSecurityGroup.addIngressRule(securityGroup, ec2.Port.tcp(443), 'Private tasks use approved AWS interface endpoints');
+    if (this.configuration.interfaceEndpoints.length > 0) {
+      for (const securityGroup of Object.values(securityGroups)) {
+        endpointSecurityGroup.addIngressRule(securityGroup, ec2.Port.tcp(443), 'Private tasks use approved AWS interface endpoints');
+      }
     }
 
     const privateZone = new route53.PrivateHostedZone(this, 'InternalServiceZone', {
@@ -243,33 +300,38 @@ export class HidRegionalStack extends Stack {
       vpc,
       comment: 'Private TLS service names; never browser-addressable',
     });
-    const internalLoadBalancerSecurityGroup = new ec2.SecurityGroup(this, 'InternalLoadBalancerSecurityGroup', {
-      vpc,
-      allowAllOutbound: false,
-      description: 'Internal HTTPS service boundary for server-to-server calls',
-    });
-    const internalLoadBalancer = new elasticloadbalancingv2.ApplicationLoadBalancer(this, 'InternalLoadBalancer', {
-      vpc,
-      internetFacing: false,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroup: internalLoadBalancerSecurityGroup,
-      deletionProtection: this.configuration.name === 'production',
-    });
-    const internalCertificate = acm.Certificate.fromCertificateArn(
-      this,
-      'InternalCertificate',
-      this.parameter('InternalCertificateArn').valueAsString,
-    );
-    const internalListener = internalLoadBalancer.addListener('InternalHttpsListener', {
-      port: 443,
-      protocol: elasticloadbalancingv2.ApplicationProtocol.HTTPS,
-      certificates: [internalCertificate],
-      sslPolicy: elasticloadbalancingv2.SslPolicy.RECOMMENDED_TLS,
-      defaultAction: elasticloadbalancingv2.ListenerAction.fixedResponse(404, {
-        contentType: 'application/problem+json',
-        messageBody: '{"title":"Not found","status":404}',
-      }),
-    });
+    let internalLoadBalancerSecurityGroup: ec2.SecurityGroup | undefined;
+    let internalLoadBalancer: elasticloadbalancingv2.ApplicationLoadBalancer | undefined;
+    let internalListener: elasticloadbalancingv2.ApplicationListener | undefined;
+    if (this.configuration.runtimeIngressEnabled) {
+      internalLoadBalancerSecurityGroup = new ec2.SecurityGroup(this, 'InternalLoadBalancerSecurityGroup', {
+        vpc,
+        allowAllOutbound: false,
+        description: 'Internal HTTPS service boundary for server-to-server calls',
+      });
+      internalLoadBalancer = new elasticloadbalancingv2.ApplicationLoadBalancer(this, 'InternalLoadBalancer', {
+        vpc,
+        internetFacing: false,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        securityGroup: internalLoadBalancerSecurityGroup,
+        deletionProtection: this.configuration.name === 'production',
+      });
+      const internalCertificate = acm.Certificate.fromCertificateArn(
+        this,
+        'InternalCertificate',
+        this.parameter('InternalCertificateArn').valueAsString,
+      );
+      internalListener = internalLoadBalancer.addListener('InternalHttpsListener', {
+        port: 443,
+        protocol: elasticloadbalancingv2.ApplicationProtocol.HTTPS,
+        certificates: [internalCertificate],
+        sslPolicy: elasticloadbalancingv2.SslPolicy.RECOMMENDED_TLS,
+        defaultAction: elasticloadbalancingv2.ListenerAction.fixedResponse(404, {
+          contentType: 'application/problem+json',
+          messageBody: '{"title":"Not found","status":404}',
+        }),
+      });
+    }
 
     const apiServiceUrls = Object.fromEntries(Object.entries(serviceHostLabels).map(([name, label]) => [
       name,
@@ -298,19 +360,29 @@ export class HidRegionalStack extends Stack {
 
     this.attachBusinessIam(resources, documentKey);
     this.connectRuntimeNetwork(resources, endpointSecurityGroup, internalLoadBalancerSecurityGroup);
-    this.attachInternalTlsRoutes(resources, privateZone, internalLoadBalancer, internalListener);
+    const internalTargetGroups = internalLoadBalancer && internalListener
+      ? this.attachInternalTlsRoutes(resources, privateZone, internalLoadBalancer, internalListener)
+      : new Map<WorkloadName, elasticloadbalancingv2.ApplicationTargetGroup>();
 
     const migration = this.createMigrationTask(runtimeSecrets, securityGroups, documentKey);
     migration.securityGroup.addEgressRule(databaseSecurityGroup, ec2.Port.tcp(5432), 'Migration PostgreSQL only');
     databaseSecurityGroup.addIngressRule(migration.securityGroup, ec2.Port.tcp(5432), 'Migration administrator only');
-    endpointSecurityGroup.addIngressRule(migration.securityGroup, ec2.Port.tcp(443), 'Migration image, logs, and secret endpoints');
+    if (this.configuration.interfaceEndpoints.length > 0) {
+      endpointSecurityGroup.addIngressRule(migration.securityGroup, ec2.Port.tcp(443), 'Migration image, logs, and secret endpoints');
+    }
 
-    this.applicationLoadBalancer = this.createPublicEntry(vpc, resources.get('gateway')!);
+    const publicEntry = this.configuration.runtimeIngressEnabled
+      ? this.createPublicEntry(vpc, resources.get('gateway')!) : undefined;
+    this.applicationLoadBalancer = publicEntry?.loadBalancer;
+    this.configureRuntimeScaling(resources, internalTargetGroups, publicEntry?.targetGroup);
+    if (this.configuration.profile === 'sleep') this.createStagingRdsRestopSchedule(database);
     this.createDatabaseAlarms(database);
     this.createRuntimeAlarms(resources);
 
     new CfnOutput(this, 'OriginDomainNameOutput', { value: this.publicApiHostname() });
-    new CfnOutput(this, 'ApplicationLoadBalancerDnsName', { value: this.applicationLoadBalancer.loadBalancerDnsName });
+    if (this.applicationLoadBalancer) {
+      new CfnOutput(this, 'ApplicationLoadBalancerDnsName', { value: this.applicationLoadBalancer.loadBalancerDnsName });
+    }
     new CfnOutput(this, 'DatabaseEndpoint', { value: database.dbInstanceEndpointAddress });
     if (database.secret) new CfnOutput(this, 'BootstrapDatabaseSecretArn', { value: database.secret.secretArn });
     new CfnOutput(this, 'DocumentBucketName', { value: this.documentBucket.bucketName });
@@ -322,23 +394,19 @@ export class HidRegionalStack extends Stack {
       value: Fn.join(',', vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds),
     });
 
-    for (const [key, value] of Object.entries({
-      Environment: this.configuration.name,
-      System: 'hid',
-      ManagedBy: 'aws-cdk',
-      DataClassification: 'healthcare-restricted',
-    })) Tags.of(this).add(key, value);
   }
 
   private addParameterContract(): void {
     const domainPattern = '^(?=.{1,253}$)(?!-)(?:[A-Za-z0-9-]+\\.)+[A-Za-z]{2,63}$';
     this.requiredParameter('RootDomainName', 'HID root domain used only for private service naming; Cloudflare owns public DNS', domainPattern);
-    this.requiredParameter('RegionalCertificateArn', `Regional ACM certificate ARN covering ${this.configuration.publicApiSubdomain}.<root-domain>`);
-    this.requiredParameter('InternalCertificateArn', 'Regional ACM certificate ARN covering *.internal.<environment>.<root-domain>');
-    this.requiredSecretParameter(
-      this.configuration.originAuthorizationSecretParameter,
-      `Independent ${this.configuration.name} Cloudflare origin authorization secret; never shared with another environment`,
-    );
+    if (this.configuration.runtimeIngressEnabled) {
+      this.requiredParameter('RegionalCertificateArn', `Regional ACM certificate ARN covering ${this.configuration.publicApiSubdomain}.<root-domain>`);
+      this.requiredParameter('InternalCertificateArn', 'Regional ACM certificate ARN covering *.internal.<environment>.<root-domain>');
+      this.requiredSecretParameter(
+        this.configuration.originAuthorizationSecretParameter,
+        `Independent ${this.configuration.name} Cloudflare origin authorization secret; never shared with another environment`,
+      );
+    }
     this.requiredParameter('S3PrefixListId', 'Region-specific Amazon S3 managed prefix list ID', '^pl-[a-f0-9]+$');
     this.requiredParameter('RdsCaBundleBase64', 'Base64-encoded current AWS RDS trust bundle; public certificate material, not a secret');
     this.requiredParameter('WorkloadIssuerUrl', 'Approved HTTPS workload issuer; external prerequisite', '^https://');
@@ -352,9 +420,18 @@ export class HidRegionalStack extends Stack {
     this.requiredParameter('AuthSecretArn', 'Secrets Manager JSON secret containing authSigningSecret and authLoginPepper');
     this.requiredParameter('IdentitySensitiveSecretArn', 'Secrets Manager JSON secret containing NIN keys, OTP HMAC key, and Turnstile secret');
     this.requiredParameter('NotificationProviderSecretArn', 'Secrets Manager JSON secret containing Novu, SES sender, Termii, Meta, and Infobip configuration');
-    this.numberParameter('GatewayDesiredCount', `Gateway task count after all prerequisites pass; recommended ${this.configuration.gatewayDesiredCount}`, this.configuration.maxApiTasks);
-    this.numberParameter('ApiDesiredCount', `Per-API task count after migration and workload identity pass; recommended ${this.configuration.apiDesiredCount}`, this.configuration.maxApiTasks);
-    this.numberParameter('WorkerDesiredCount', `OCR, notification worker, and dispatcher task count after provider/transport gates pass; recommended ${this.configuration.workerDesiredCount}`, this.configuration.maxApiTasks);
+    if (this.configuration.profile !== 'sleep') {
+      for (const name of workloadNames) {
+        const id = pascal(name);
+        const scale = workloadScale(this.configuration.profile, name);
+        this.numberParameter(`${id}DesiredCount`,
+          `${name} task count after prerequisites pass; live minimum ${scale.minimumLiveTasks}, recommended ${scale.recommendedTasks}`,
+          scale.recommendedTasks, scale.normalMaxTasks);
+        this.boundedNumberParameter(`${id}ScalingCeiling`,
+          `${name} autoscaling ceiling; values above ${scale.normalMaxTasks} require externally recorded emergency approval`,
+          scale.normalMaxTasks, scale.normalMaxTasks, scale.reviewedEmergencyMaxTasks);
+      }
+    }
 
     for (const name of workloadNames.filter((item) => workloads[item].hasDatabase)) {
       this.requiredParameter(`${pascal(name)}DatabaseSecretArn`, `Secrets Manager JSON secret containing url for the ${name} non-owner LOGIN`);
@@ -387,13 +464,23 @@ export class HidRegionalStack extends Stack {
     return parameter;
   }
 
-  private numberParameter(id: string, description: string, maximum: number): CfnParameter {
+  private numberParameter(id: string, description: string, defaultValue: number,
+    maximum: number): CfnParameter {
     const parameter = new CfnParameter(this, id, {
       type: 'Number',
       description,
-      default: 0,
+      default: defaultValue,
       minValue: 0,
       maxValue: maximum,
+    });
+    this.parameters[id] = parameter;
+    return parameter;
+  }
+
+  private boundedNumberParameter(id: string, description: string, defaultValue: number,
+    minimum: number, maximum: number): CfnParameter {
+    const parameter = new CfnParameter(this, id, {
+      type: 'Number', description, default: defaultValue, minValue: minimum, maxValue: maximum,
     });
     this.parameters[id] = parameter;
     return parameter;
@@ -411,22 +498,25 @@ export class HidRegionalStack extends Stack {
 
   private createAwsEndpoints(vpc: ec2.Vpc, securityGroup: ec2.SecurityGroup): void {
     vpc.addGatewayEndpoint('S3GatewayEndpoint', { service: ec2.GatewayVpcEndpointAwsService.S3 });
-    const services: ReadonlyArray<[string, ec2.InterfaceVpcEndpointService]> = [
-      ['EcrApi', ec2.InterfaceVpcEndpointAwsService.ECR],
-      ['EcrDocker', ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER],
-      ['CloudWatchLogs', ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS],
-      ['SecretsManager', ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER],
-      ['Kms', ec2.InterfaceVpcEndpointAwsService.KMS],
-      ['EventBridge', new ec2.InterfaceVpcEndpointService(`com.amazonaws.${Aws.REGION}.events`, 443)],
-      ['Sqs', ec2.InterfaceVpcEndpointAwsService.SQS],
-      ['Textract', new ec2.InterfaceVpcEndpointService(`com.amazonaws.${Aws.REGION}.textract`, 443)],
-    ];
-    for (const [id, service] of services) {
+    const services = {
+      'ecr-api': ['EcrApi', ec2.InterfaceVpcEndpointAwsService.ECR],
+      'ecr-docker': ['EcrDocker', ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER],
+      logs: ['CloudWatchLogs', ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS],
+      'secrets-manager': ['SecretsManager', ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER],
+      kms: ['Kms', ec2.InterfaceVpcEndpointAwsService.KMS],
+      eventbridge: ['EventBridge', new ec2.InterfaceVpcEndpointService(`com.amazonaws.${Aws.REGION}.events`, 443)],
+      sqs: ['Sqs', ec2.InterfaceVpcEndpointAwsService.SQS],
+      textract: ['Textract', new ec2.InterfaceVpcEndpointService(`com.amazonaws.${Aws.REGION}.textract`, 443)],
+    } as const;
+    for (const endpointName of this.configuration.interfaceEndpoints) {
+      const [id, service] = services[endpointName];
       vpc.addInterfaceEndpoint(`${id}Endpoint`, {
         service,
         privateDnsEnabled: true,
         securityGroups: [securityGroup],
-        subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        subnets: this.configuration.interfaceEndpointAzCount === 1
+          ? { subnets: [vpc.privateSubnets[0]!] }
+          : { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       });
     }
   }
@@ -445,6 +535,7 @@ export class HidRegionalStack extends Stack {
           { description: 'Bound retained immutable releases', maxImageCount: this.configuration.repositoryImageCount },
         ],
       });
+      this.tagService(repository, name);
       new CfnOutput(this, `${pascal(name)}RepositoryUri`, { value: repository.repositoryUri });
     }
   }
@@ -510,6 +601,8 @@ export class HidRegionalStack extends Stack {
       retention: this.configuration.logRetention,
       removalPolicy: this.configuration.removalPolicy,
     });
+    this.tagService(taskDefinition, definition.name);
+    this.tagService(logGroup, definition.name);
     const environment = this.environmentFor(definition.name, input.apiServiceUrls, input.documentKey);
     const secrets = this.secretsFor(definition.name, input.runtimeSecrets);
     const container = taskDefinition.addContainer(`${id}Container`, {
@@ -535,11 +628,8 @@ export class HidRegionalStack extends Stack {
       container.addMountPoints({ containerPath: tokenRoot, sourceVolume: 'workload-tokens', readOnly: true });
     }
 
-    const desiredCount = definition.name === 'gateway'
-      ? this.parameter('GatewayDesiredCount').valueAsNumber
-      : definition.port === undefined || ['event-dispatcher', 'notification-worker'].includes(definition.name)
-        ? this.parameter('WorkerDesiredCount').valueAsNumber
-        : this.parameter('ApiDesiredCount').valueAsNumber;
+    const desiredCount = this.configuration.profile === 'sleep'
+      ? 0 : this.parameter(`${id}DesiredCount`).valueAsNumber;
     const service = new ecs.FargateService(this, `${id}Service`, {
       serviceName: `hid-${this.configuration.name}-${definition.name}`,
       cluster: this.cluster,
@@ -559,15 +649,15 @@ export class HidRegionalStack extends Stack {
         ? undefined
         : { cloudMapNamespace: input.namespace, name: definition.name, dnsRecordType: cloudmap.DnsRecordType.A },
     });
-    if (definition.name === 'gateway' || (definition.port && definition.name !== 'event-dispatcher')) {
-      const scaling = service.autoScaleTaskCount({ minCapacity: desiredCount, maxCapacity: this.configuration.maxApiTasks });
-      scaling.scaleOnCpuUtilization(`${id}CpuScaling`, { targetUtilizationPercent: 65, scaleInCooldown: Duration.minutes(5), scaleOutCooldown: Duration.minutes(1) });
-      scaling.scaleOnMemoryUtilization(`${id}MemoryScaling`, { targetUtilizationPercent: 75, scaleInCooldown: Duration.minutes(5), scaleOutCooldown: Duration.minutes(1) });
-    }
+    this.tagService(service, definition.name);
 
-    input.securityGroup.addEgressRule(input.endpointSecurityGroup, ec2.Port.tcp(443), 'ECR, logs, Secrets Manager, KMS, and approved AWS APIs');
+    if (this.configuration.interfaceEndpoints.length > 0) {
+      input.securityGroup.addEgressRule(input.endpointSecurityGroup, ec2.Port.tcp(443),
+        'ECR, logs, Secrets Manager, KMS, and approved AWS APIs');
+    }
     input.securityGroup.addEgressRule(ec2.Peer.prefixList(this.parameter('S3PrefixListId').valueAsString), ec2.Port.tcp(443), 'Amazon S3 only');
-    if (!['gateway', 'ocr-worker', 'event-dispatcher'].includes(definition.name)) {
+    if (this.configuration.natGateways > 0
+        && !['gateway', 'ocr-worker', 'event-dispatcher'].includes(definition.name)) {
       input.securityGroup.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'Approved HTTPS issuer/provider egress through NAT');
     }
     return { definition, taskDefinition, service, container, logGroup, securityGroup: input.securityGroup };
@@ -583,7 +673,7 @@ export class HidRegionalStack extends Stack {
       HID_DEPLOYMENT_ENV: this.configuration.name === 'staging' ? 'staging' : 'production',
       DATABASE_SSL: 'true',
       DATABASE_SSL_ROOT_CERT_BASE64: this.parameter('RdsCaBundleBase64').valueAsString,
-      DATABASE_POOL_MAX: '10',
+      DATABASE_POOL_MAX: String(name === 'ehr-api' ? 8 : workloads[name].databaseConnectionsPerTask),
       CORS_ORIGINS: this.configuration.browserSubdomains
         .map((subdomain) => `https://${subdomain}.${this.parameter('RootDomainName').valueAsString}`).join(','),
       TRUST_PROXY_CIDRS: this.configuration.vpcCidr,
@@ -621,7 +711,7 @@ export class HidRegionalStack extends Stack {
           EHR_SERVICE_IDENTITY_MODE: 'jwt', EHR_WORKLOAD_ISSUER_URL: issuer, EHR_WORKLOAD_JWKS_URL: jwks,
           EHR_WORKLOAD_AUDIENCE: 'hid-ehr-api', EHR_OCR_CALLER_SUBJECT: subjects.ocr,
           OUTREACH_IDENTITY_SERVICE_IDENTITY_MODE: 'jwt', OUTREACH_CALLER_SUBJECT: subjects.outreach,
-          STORAGE_MODE: 's3', S3_REGION: Aws.REGION, S3_BUCKET: this.documentBucket.bucketName,
+          WORKLOAD_DATABASE_POOL_MAX: '3', STORAGE_MODE: 's3', S3_REGION: Aws.REGION, S3_BUCKET: this.documentBucket.bucketName,
           S3_FORCE_PATH_STYLE: 'false', S3_KMS_KEY_ID: documentKey.keyArn };
       case 'lab-api':
         return { ...commonApi, ...base, PORT: '3003', IDENTITY_API_URL: urls['identity-api']!,
@@ -653,15 +743,18 @@ export class HidRegionalStack extends Stack {
           NOTIFICATION_WORKER_STATUS_HOST: '0.0.0.0', NOTIFICATION_WORKER_STATUS_PORT: '3008',
           NOTIFICATION_WORKER_DATABASE_SSL: 'true',
           NOTIFICATION_WORKER_DATABASE_SSL_ROOT_CERT_BASE64: this.parameter('RdsCaBundleBase64').valueAsString,
+          NOTIFICATION_WORKER_DATABASE_POOL_MAX: String(workloads[name].databaseConnectionsPerTask),
           NOTIFICATION_WORKER_QUEUE_URL: this.notificationQueue.queueUrl,
           NOVU_MODE: 'live', AWS_REGION: Aws.REGION };
       case 'ocr-worker':
         return { NODE_ENV: 'production', OCR_PROVIDER: 'textract', OCR_WORKER_SUBJECT: subjects.ocr,
           OCR_WORKER_DATABASE_SSL: 'true', OCR_WORKER_DATABASE_SSL_ROOT_CERT_BASE64: this.parameter('RdsCaBundleBase64').valueAsString,
-          OCR_WORKER_POOL_MAX: '4', OCR_WORKER_CONCURRENCY: '2', AWS_REGION: Aws.REGION, S3_FORCE_PATH_STYLE: 'false' };
+          OCR_WORKER_POOL_MAX: String(workloads[name].databaseConnectionsPerTask), OCR_WORKER_CONCURRENCY: '2',
+          AWS_REGION: Aws.REGION, S3_FORCE_PATH_STYLE: 'false' };
       case 'event-dispatcher':
         return { NODE_ENV: 'production', EVENT_DISPATCHER_ENABLED: 'true', EVENT_DISPATCHER_TRANSPORT: 'eventbridge',
           EVENT_DISPATCHER_DATABASE_SSL: 'true', EVENT_DISPATCHER_DATABASE_SSL_ROOT_CERT_BASE64: this.parameter('RdsCaBundleBase64').valueAsString,
+          EVENT_DISPATCHER_POOL_MAX: String(workloads[name].databaseConnectionsPerTask),
           EVENT_DISPATCHER_STATUS_HOST: '0.0.0.0', EVENT_DISPATCHER_STATUS_PORT: '3010',
           EVENTBRIDGE_EVENT_BUS_NAME: this.eventBus.eventBusName, AWS_REGION: Aws.REGION };
       case 'gateway': {
@@ -755,7 +848,7 @@ export class HidRegionalStack extends Stack {
   private connectRuntimeNetwork(
     resources: Map<WorkloadName, RuntimeResource>,
     endpointSecurityGroup: ec2.SecurityGroup,
-    internalLoadBalancerSecurityGroup: ec2.SecurityGroup,
+    internalLoadBalancerSecurityGroup?: ec2.SecurityGroup,
   ): void {
     const gateway = resources.get('gateway')!;
     for (const name of apiNames.filter((item) => item !== 'event-dispatcher')) {
@@ -764,17 +857,20 @@ export class HidRegionalStack extends Stack {
       gateway.securityGroup.addEgressRule(target.securityGroup, ec2.Port.tcp(target.definition.port!), `Route to ${name}`);
     }
     for (const resource of resources.values()) {
-      if (serviceHostLabels[resource.definition.name]) {
+      if (internalLoadBalancerSecurityGroup && serviceHostLabels[resource.definition.name]) {
         resource.securityGroup.addIngressRule(internalLoadBalancerSecurityGroup, ec2.Port.tcp(resource.definition.port!), 'Internal TLS load balancer only');
         internalLoadBalancerSecurityGroup.addEgressRule(resource.securityGroup, ec2.Port.tcp(resource.definition.port!), `${resource.definition.name} target only`);
       }
-      if (!['gateway', 'ocr-worker', 'event-dispatcher'].includes(resource.definition.name)) {
+      if (internalLoadBalancerSecurityGroup
+          && !['gateway', 'ocr-worker', 'event-dispatcher'].includes(resource.definition.name)) {
         resource.securityGroup.addEgressRule(internalLoadBalancerSecurityGroup, ec2.Port.tcp(443), 'HTTPS owner-service calls');
         internalLoadBalancerSecurityGroup.addIngressRule(resource.securityGroup, ec2.Port.tcp(443), `${resource.definition.name} HTTPS calls`);
       }
     }
-    for (const resource of resources.values()) {
-      resource.securityGroup.addEgressRule(endpointSecurityGroup, ec2.Port.tcp(443), 'Operational AWS endpoints');
+    if (this.configuration.interfaceEndpoints.length > 0) {
+      for (const resource of resources.values()) {
+        resource.securityGroup.addEgressRule(endpointSecurityGroup, ec2.Port.tcp(443), 'Operational AWS endpoints');
+      }
     }
   }
 
@@ -783,12 +879,13 @@ export class HidRegionalStack extends Stack {
     privateZone: route53.PrivateHostedZone,
     loadBalancer: elasticloadbalancingv2.ApplicationLoadBalancer,
     listener: elasticloadbalancingv2.ApplicationListener,
-  ): void {
+  ): Map<WorkloadName, elasticloadbalancingv2.ApplicationTargetGroup> {
+    const targetGroups = new Map<WorkloadName, elasticloadbalancingv2.ApplicationTargetGroup>();
     let priority = 10;
     for (const [name, label] of Object.entries(serviceHostLabels) as Array<[WorkloadName, string]>) {
       const resource = resources.get(name)!;
       const hostName = `${label}.${privateZone.zoneName}`;
-      listener.addTargets(`${pascal(name)}InternalTarget`, {
+      const targetGroup = listener.addTargets(`${pascal(name)}InternalTarget`, {
         priority: priority++,
         conditions: [elasticloadbalancingv2.ListenerCondition.hostHeaders([hostName])],
         port: resource.definition.port!,
@@ -797,12 +894,14 @@ export class HidRegionalStack extends Stack {
         deregistrationDelay: Duration.seconds(name === 'event-dispatcher' ? 60 : 30),
         healthCheck: { path: resource.definition.healthPath, healthyHttpCodes: '200', interval: Duration.seconds(30) },
       });
+      targetGroups.set(name, targetGroup);
       new route53.ARecord(this, `${pascal(name)}InternalAlias`, {
         zone: privateZone,
         recordName: label,
         target: route53.RecordTarget.fromAlias(new route53Targets.LoadBalancerTarget(loadBalancer)),
       });
     }
+    return targetGroups;
   }
 
   private createMigrationTask(
@@ -834,6 +933,8 @@ export class HidRegionalStack extends Stack {
       retention: this.configuration.logRetention,
       removalPolicy: this.configuration.removalPolicy,
     });
+    this.tagService(taskDefinition, 'database-migration');
+    this.tagService(logGroup, 'database-migration');
     taskDefinition.addContainer('MigrationContainer', {
       containerName: 'database-migration',
       image: ecs.ContainerImage.fromRegistry(this.parameter('MigrationImageUri').valueAsString),
@@ -851,7 +952,123 @@ export class HidRegionalStack extends Stack {
     return { taskDefinition, securityGroup };
   }
 
-  private createPublicEntry(vpc: ec2.Vpc, gateway: RuntimeResource): elasticloadbalancingv2.ApplicationLoadBalancer {
+  private configureRuntimeScaling(
+    resources: Map<WorkloadName, RuntimeResource>,
+    internalTargetGroups: Map<WorkloadName, elasticloadbalancingv2.ApplicationTargetGroup>,
+    gatewayTargetGroup?: elasticloadbalancingv2.ApplicationTargetGroup,
+  ): void {
+    if (!this.configuration.autoscalingEnabled) return;
+    for (const [name, resource] of resources) {
+      const id = pascal(name);
+      const definition = resource.definition;
+      const desiredCount = this.parameter(`${id}DesiredCount`).valueAsNumber;
+      const scaling = resource.service.autoScaleTaskCount({
+        minCapacity: desiredCount,
+        maxCapacity: this.parameter(`${id}ScalingCeiling`).valueAsNumber,
+      });
+      const cooldowns = {
+        scaleInCooldown: Duration.seconds(definition.scaleInCooldownSeconds),
+        scaleOutCooldown: Duration.seconds(definition.scaleOutCooldownSeconds),
+      };
+      scaling.scaleOnCpuUtilization(`${id}CpuScaling`, {
+        targetUtilizationPercent: definition.cpuTargetPercent, ...cooldowns,
+      });
+      scaling.scaleOnMemoryUtilization(`${id}MemoryScaling`, {
+        targetUtilizationPercent: definition.memoryTargetPercent, ...cooldowns,
+      });
+
+      if (definition.scalingKind === 'request') {
+        const targetGroup = name === 'gateway' ? gatewayTargetGroup : internalTargetGroups.get(name);
+        if (targetGroup && definition.requestTargetPerMinute) {
+          scaling.scaleOnRequestCount(`${id}RequestScaling`, {
+            requestsPerTarget: definition.requestTargetPerMinute, targetGroup, ...cooldowns,
+          });
+          this.createRequestSignalAlarms(name, targetGroup);
+        }
+      } else if (definition.scalingKind === 'notification-queue') {
+        scaling.scaleToTrackCustomMetric(`${id}VisibleBacklogScaling`, {
+          metric: this.notificationQueue.metricApproximateNumberOfMessagesVisible({ period: Duration.minutes(1) }),
+          targetValue: 20,
+          ...cooldowns,
+        });
+      } else if (definition.scalingKind === 'ocr-backlog') {
+        scaling.scaleToTrackCustomMetric(`${id}QueueDepthScaling`, {
+          metric: this.operationalMetric('HID/OCR', 'QueueDepth'), targetValue: 10, ...cooldowns,
+        });
+      } else {
+        scaling.scaleToTrackCustomMetric(`${id}OutboxDepthScaling`, {
+          metric: this.operationalMetric('HID/EventDelivery', 'PendingCount'), targetValue: 25, ...cooldowns,
+        });
+      }
+    }
+  }
+
+  private createRequestSignalAlarms(name: WorkloadName,
+    targetGroup: elasticloadbalancingv2.ApplicationTargetGroup): void {
+    const latency = new cloudwatch.Alarm(this, `${pascal(name)}TargetLatencyAlarm`, {
+      alarmDescription: `${name} p95 target latency requires review; dimensions are low-cardinality and PHI-free`,
+      metric: targetGroup.metrics.targetResponseTime({ statistic: 'p95', period: Duration.minutes(5) }),
+      threshold: 2,
+      evaluationPeriods: 3,
+      datapointsToAlarm: 2,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const errors = new cloudwatch.Alarm(this, `${pascal(name)}TargetErrorAlarm`, {
+      alarmDescription: `${name} safe aggregate target 5xx signal requires review`,
+      metric: targetGroup.metrics.httpCodeTarget(elasticloadbalancingv2.HttpCodeTarget.TARGET_5XX_COUNT, {
+        statistic: 'Sum', period: Duration.minutes(5),
+      }),
+      threshold: 5,
+      evaluationPeriods: 2,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    this.tagService(latency, name);
+    this.tagService(errors, name);
+  }
+
+  private operationalMetric(namespace: string, metricName: string): cloudwatch.Metric {
+    return new cloudwatch.Metric({
+      namespace,
+      metricName,
+      dimensionsMap: { Environment: this.configuration.name },
+      statistic: 'Average',
+      period: Duration.minutes(1),
+    });
+  }
+
+  private createStagingRdsRestopSchedule(database: rds.DatabaseInstance): void {
+    if (this.configuration.name !== 'staging') {
+      throw new Error('The stopped-RDS re-stop guard is staging-only');
+    }
+    const role = new iam.Role(this, 'StagingRdsRestopRole', {
+      assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com'),
+      description: 'Sleep-mode only: re-stop the exact staging RDS instance after AWS automatic restart',
+    });
+    role.addToPolicy(new iam.PolicyStatement({
+      sid: 'StopExactStagingDatabaseOnly',
+      actions: ['rds:StopDBInstance'],
+      resources: [database.instanceArn],
+    }));
+    new scheduler.CfnSchedule(this, 'StagingRdsRestopSchedule', {
+      name: 'hid-staging-sleep-rds-restop',
+      description: 'One bounded daily attempt while the sleep profile is deployed; zero Scheduler retries',
+      flexibleTimeWindow: { mode: 'OFF' },
+      scheduleExpression: 'cron(0 3 * * ? *)',
+      scheduleExpressionTimezone: 'UTC',
+      state: 'ENABLED',
+      target: {
+        arn: 'arn:aws:scheduler:::aws-sdk:rds:stopDBInstance',
+        roleArn: role.roleArn,
+        input: JSON.stringify({ DbInstanceIdentifier: `hid-${this.configuration.name}-postgres` }),
+        retryPolicy: { maximumEventAgeInSeconds: 60, maximumRetryAttempts: 0 },
+      },
+    });
+  }
+
+  private createPublicEntry(vpc: ec2.Vpc, gateway: RuntimeResource): {
+    readonly loadBalancer: elasticloadbalancingv2.ApplicationLoadBalancer;
+    readonly targetGroup: elasticloadbalancingv2.ApplicationTargetGroup;
+  } {
     const loadBalancerSecurityGroup = new ec2.SecurityGroup(this, 'PublicLoadBalancerSecurityGroup', {
       vpc,
       allowAllOutbound: false,
@@ -918,7 +1135,7 @@ export class HidRegionalStack extends Stack {
         messageBody: '{"title":"Service unavailable","status":503}',
       }),
     });
-    listener.addTargets('GatewayTarget', {
+    const targetGroup = listener.addTargets('GatewayTarget', {
       priority: 1,
       conditions: [elasticloadbalancingv2.ListenerCondition.pathPatterns(['/*'])],
       port: 3000,
@@ -928,29 +1145,48 @@ export class HidRegionalStack extends Stack {
       healthCheck: { path: '/gateway-health/ready', healthyHttpCodes: '200', interval: Duration.seconds(30) },
     });
 
-    return loadBalancer;
+    return { loadBalancer, targetGroup };
   }
 
   private createDatabaseAlarms(database: rds.DatabaseInstance): void {
-    new cloudwatch.Alarm(this, 'DatabaseCpuAlarm', {
+    const missingData = this.configuration.profile === 'sleep'
+      ? cloudwatch.TreatMissingData.NOT_BREACHING : cloudwatch.TreatMissingData.BREACHING;
+    const cpu = new cloudwatch.Alarm(this, 'DatabaseCpuAlarm', {
       alarmDescription: 'Sustained RDS CPU requires investigation; no PHI is emitted',
       metric: database.metricCPUUtilization({ period: Duration.minutes(5) }),
       threshold: 80,
       evaluationPeriods: 3,
       datapointsToAlarm: 3,
-      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      treatMissingData: missingData,
     });
-    new cloudwatch.Alarm(this, 'DatabaseFreeStorageAlarm', {
+    const storage = new cloudwatch.Alarm(this, 'DatabaseFreeStorageAlarm', {
       alarmDescription: 'RDS free storage below 20 GiB',
       metric: database.metricFreeStorageSpace({ period: Duration.minutes(5) }),
       threshold: 20 * 1_024 * 1_024 * 1_024,
       comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
       evaluationPeriods: 2,
-      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      treatMissingData: missingData,
     });
+    const connections = new cloudwatch.Alarm(this, 'DatabaseConnectionsAlarm', {
+      alarmDescription: 'RDS connections approach the reviewed environment connection budget',
+      metric: database.metricDatabaseConnections({ period: Duration.minutes(5), statistic: 'Maximum' }),
+      threshold: Math.max(1, Math.floor(this.configuration.databaseConnectionBudget * 0.85)),
+      evaluationPeriods: 3,
+      treatMissingData: missingData,
+    });
+    const freeMemory = new cloudwatch.Alarm(this, 'DatabaseFreeMemoryAlarm', {
+      alarmDescription: 'RDS free memory is below 256 MiB and requires capacity/query review',
+      metric: database.metricFreeableMemory({ period: Duration.minutes(5), statistic: 'Minimum' }),
+      threshold: 256 * 1_024 * 1_024,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      evaluationPeriods: 3,
+      treatMissingData: missingData,
+    });
+    for (const alarm of [cpu, storage, connections, freeMemory]) this.tagService(alarm, 'platform-database');
   }
 
   private createRuntimeAlarms(resources: Map<WorkloadName, RuntimeResource>): void {
+    if (this.configuration.profile === 'sleep') return;
     for (const name of ['gateway', 'identity-api', 'ehr-api', 'ocr-worker',
       'notification-api', 'notification-worker', 'event-dispatcher'] as const) {
       const resource = resources.get(name)!;
@@ -961,14 +1197,16 @@ export class HidRegionalStack extends Stack {
         statistic: 'Minimum',
         period: Duration.minutes(1),
       });
-      new cloudwatch.Alarm(this, `${pascal(name)}RunningTaskAlarm`, {
-        alarmDescription: `${name} running task count fell below one`,
+      const liveMinimum = workloadScale(this.configuration.profile, name).minimumLiveTasks;
+      const alarm = new cloudwatch.Alarm(this, `${pascal(name)}RunningTaskAlarm`, {
+        alarmDescription: `${name} running task count fell below its live-mode minimum`,
         metric,
-        threshold: 1,
+        threshold: Math.max(1, liveMinimum),
         comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
         evaluationPeriods: 2,
         treatMissingData: cloudwatch.TreatMissingData.BREACHING,
       });
+      this.tagService(alarm, name);
     }
     const terminalMetric = new logs.MetricFilter(this, 'DispatcherTerminalFailureMetric', {
       logGroup: resources.get('event-dispatcher')!.logGroup,
@@ -978,13 +1216,14 @@ export class HidRegionalStack extends Stack {
       metricValue: '1',
       defaultValue: 0,
     });
-    new cloudwatch.Alarm(this, 'DispatcherTerminalFailureAlarm', {
+    const dispatcherTerminal = new cloudwatch.Alarm(this, 'DispatcherTerminalFailureAlarm', {
       alarmDescription: 'At least one event reached terminal delivery failure; payload is never a metric dimension',
       metric: terminalMetric.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
       threshold: 1,
       evaluationPeriods: 1,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+    this.tagService(dispatcherTerminal, 'event-dispatcher');
     const ocrFailureMetric = new logs.MetricFilter(this, 'OcrWorkerFailureMetric', {
       logGroup: resources.get('ocr-worker')!.logGroup,
       filterPattern: logs.FilterPattern.stringValue('$.event', '=', 'ocr.worker.loop_error'),
@@ -993,13 +1232,123 @@ export class HidRegionalStack extends Stack {
       metricValue: '1',
       defaultValue: 0,
     });
-    new cloudwatch.Alarm(this, 'OcrWorkerFailureAlarm', {
+    const ocrFailures = new cloudwatch.Alarm(this, 'OcrWorkerFailureAlarm', {
       alarmDescription: 'OCR worker loop failures exceed the bounded threshold; no OCR text is emitted',
       metric: ocrFailureMetric.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
       threshold: 3,
       evaluationPeriods: 2,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+    this.tagService(ocrFailures, 'ocr-worker');
+
+    const structuredLogMetric = (id: string, logGroup: logs.ILogGroup, event: string,
+      namespace: string, metricName: string, metricValue: string): logs.MetricFilter =>
+      new logs.MetricFilter(this, id, {
+        logGroup,
+        filterPattern: logs.FilterPattern.stringValue('$.event', '=', event),
+        metricNamespace: namespace,
+        metricName,
+        metricValue,
+        dimensions: { Environment: this.configuration.name },
+      });
+    const ocrLogGroup = resources.get('ocr-worker')!.logGroup;
+    const ocrApiLogGroup = resources.get('ocr-api')!.logGroup;
+    structuredLogMetric('OcrQueueDepthMetric', ocrLogGroup, 'ocr.job.claimed',
+      'HID/OCR', 'QueueDepth', '$.queueDepth');
+    structuredLogMetric('OcrQueueAgeMetric', ocrLogGroup, 'ocr.job.claimed',
+      'HID/OCR', 'OldestQueueAgeSeconds', '$.oldestQueueAgeSeconds');
+    structuredLogMetric('OcrClaimThroughputMetric', ocrLogGroup, 'ocr.job.claimed',
+      'HID/OCR', 'ClaimThroughput', '$.claimedJobs');
+    structuredLogMetric('OcrPagesProcessedMetric', ocrLogGroup, 'ocr.job.completed',
+      'HID/OCR', 'PagesProcessed', '$.pagesProcessed');
+    structuredLogMetric('OcrCompletedRetryMetric', ocrLogGroup, 'ocr.job.completed',
+      'HID/OCR', 'RetryCount', '$.retryCount');
+    structuredLogMetric('OcrFailedRetryMetric', ocrLogGroup, 'ocr.job.failed',
+      'HID/OCR', 'RetryCount', '$.retryCount');
+    structuredLogMetric('OcrFailedPagesMetric', ocrLogGroup, 'ocr.job.failed',
+      'HID/OCR', 'FailedPages', '$.failedPages');
+    structuredLogMetric('OcrDuplicateAvoidedMetric', ocrApiLogGroup, 'ocr.job.duplicate_avoided',
+      'HID/OCR', 'DuplicateAvoided', '$.duplicateAvoided');
+
+    const dispatcherLogGroup = resources.get('event-dispatcher')!.logGroup;
+    structuredLogMetric('DispatcherPendingMetric', dispatcherLogGroup, 'event_dispatcher.backlog',
+      'HID/EventDelivery', 'PendingCount', '$.pendingCount');
+    structuredLogMetric('DispatcherOldestPendingMetric', dispatcherLogGroup, 'event_dispatcher.backlog',
+      'HID/EventDelivery', 'OldestPendingAgeSeconds', '$.oldestPendingAgeSeconds');
+    structuredLogMetric('DispatcherDrainRateMetric', dispatcherLogGroup, 'event_dispatcher.backlog',
+      'HID/EventDelivery', 'DrainRate', '$.drainRate');
+
+    const notificationAge = new cloudwatch.Alarm(this, 'NotificationQueueAgeAlarm', {
+      alarmDescription: 'Ordinary notification queue oldest message age exceeds the drain objective',
+      metric: this.notificationQueue.metricApproximateAgeOfOldestMessage({ period: Duration.minutes(1) }),
+      threshold: 300,
+      evaluationPeriods: 3,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    this.tagService(notificationAge, 'notification-worker');
+    const notificationVisible = this.notificationQueue.metricApproximateNumberOfMessagesVisible({
+      period: Duration.minutes(5), statistic: 'Maximum',
+    });
+    const notificationDeleted = this.notificationQueue.metricNumberOfMessagesDeleted({
+      period: Duration.minutes(5), statistic: 'Sum',
+    });
+    const notificationBacklog = new cloudwatch.Alarm(this, 'NotificationQueueBacklogAlarm', {
+      alarmDescription: 'Ordinary notification visible backlog exceeds the reviewed operating boundary',
+      metric: notificationVisible,
+      threshold: 100,
+      evaluationPeriods: 3,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const notificationDrain = new cloudwatch.Alarm(this, 'NotificationQueueDrainAlarm', {
+      alarmDescription: 'Ordinary notification backlog exists without message-deletion drain progress',
+      metric: new cloudwatch.MathExpression({
+        expression: 'IF(visible > 0, deleted, 1)',
+        usingMetrics: { visible: notificationVisible, deleted: notificationDeleted },
+        period: Duration.minutes(5),
+      }),
+      threshold: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      evaluationPeriods: 3,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    this.tagService(notificationBacklog, 'notification-worker');
+    this.tagService(notificationDrain, 'notification-worker');
+    for (const [id, namespace, metricName, threshold, service] of [
+      ['OcrQueueAgeAlarm', 'HID/OCR', 'OldestQueueAgeSeconds', 300, 'ocr-worker'],
+      ['OcrDrainRateAlarm', 'HID/OCR', 'ClaimThroughput', 1, 'ocr-worker'],
+      ['DispatcherOutboxAgeAlarm', 'HID/EventDelivery', 'OldestPendingAgeSeconds', 300, 'event-dispatcher'],
+      ['DispatcherDrainRateAlarm', 'HID/EventDelivery', 'DrainRate', 1, 'event-dispatcher'],
+    ] as const) {
+      const alarm = new cloudwatch.Alarm(this, id, {
+        alarmDescription: `${service} PHI-free backlog/drain boundary requires operator review`,
+        metric: this.operationalMetric(namespace, metricName),
+        threshold,
+        comparisonOperator: metricName.includes('Age')
+          ? cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD
+          : cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        evaluationPeriods: 3,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      this.tagService(alarm, service);
+    }
+
+    for (const [name, resource] of resources) {
+      const alarm = new cloudwatch.Alarm(this, `${pascal(name)}LogVolumeAlarm`, {
+        alarmDescription: `${name} log ingestion volume requires scan/retention review; logs must remain PHI-free`,
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Logs', metricName: 'IncomingBytes', statistic: 'Sum',
+          dimensionsMap: { LogGroupName: resource.logGroup.logGroupName }, period: Duration.minutes(5),
+        }),
+        threshold: this.configuration.name === 'production' ? 2_000_000_000 : 500_000_000,
+        evaluationPeriods: 2,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      this.tagService(alarm, name);
+    }
+  }
+
+  private tagService(resource: Construct, service: string): void {
+    Tags.of(resource).add('Service', service, { priority: 200 });
   }
 }
 

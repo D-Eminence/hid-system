@@ -14,7 +14,7 @@ export class NotificationRepository {
       } : {}),
     } : false;
     this.pool = new Pool({ connectionString: config.NOTIFICATION_WORKER_DATABASE_URL,
-      application_name: 'hid-notification-worker', max: 4, ssl,
+      application_name: 'hid-notification-worker', max: config.NOTIFICATION_WORKER_DATABASE_POOL_MAX, ssl,
       connectionTimeoutMillis: 5_000, statement_timeout: 15_000, query_timeout: 20_000 });
   }
 

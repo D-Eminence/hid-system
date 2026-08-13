@@ -19,7 +19,12 @@ const event: ClaimedEvent = { producer: 'identity',
 function harness(events: ClaimedEvent[] = [event]) {
   const repository: jest.Mocked<DeliveryRepository> = { checkReadiness: jest.fn(),
     claim: jest.fn().mockResolvedValue(events), delivered: jest.fn(),
-    failed: jest.fn().mockResolvedValue('retry_scheduled'), metrics: jest.fn(),
+    failed: jest.fn().mockResolvedValue('retry_scheduled'), metrics: jest.fn().mockResolvedValue({
+      pendingCount: events.length, claimedCount: events.length, retryScheduledCount: 0,
+      deliveredCount: 0, terminalFailureCount: 0, oldestPendingAgeSeconds: 1,
+      dispatchSuccessCount: 0, dispatchFailureCount: 0, retryCount: 0,
+      averageDispatchLatencyMs: 0,
+    }),
     terminalFailures: jest.fn().mockResolvedValue([]), close: jest.fn() };
   const transport: jest.Mocked<EventTransport> = { name: 'test-transport', checkReadiness: jest.fn(),
     publish: jest.fn().mockResolvedValue(events.map((item) => ({ eventId: item.eventId,

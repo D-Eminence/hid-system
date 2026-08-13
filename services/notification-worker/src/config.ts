@@ -14,6 +14,7 @@ const schema = z.object({
   NOTIFICATION_WORKER_STATUS_HOST: z.string().trim().min(1).default('127.0.0.1'),
   NOTIFICATION_WORKER_STATUS_PORT: z.coerce.number().int().min(1).max(65_535).default(3008),
   NOTIFICATION_WORKER_DATABASE_URL: optional,
+  NOTIFICATION_WORKER_DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(20).default(4),
   NOTIFICATION_WORKER_DATABASE_SSL: bool,
   NOTIFICATION_WORKER_DATABASE_SSL_ROOT_CERT_BASE64: optional,
   NOTIFICATION_WORKER_QUEUE_URL: optionalUrl,

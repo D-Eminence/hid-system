@@ -69,7 +69,9 @@ export class DocumentService {
       if (existing) throw new ConflictException('An identical request is already being processed');
 
       const documentId = randomUUID();
-      const storageKey = `objects/${randomUUID()}`;
+      // Clinical objects live under a non-expiring lifecycle prefix. The
+      // version ID captured after upload remains the immutable OCR boundary.
+      const storageKey = `clinical/objects/${randomUUID()}`;
       const result = await client.query<DocumentRow>(
         `insert into ehr.documents (
            id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,

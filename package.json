@@ -89,7 +89,13 @@
     "verify:frontends": "node scripts/verify-frontend-platform.mjs",
     "verify:offline": "npm --prefix packages/offline run verify",
     "verify:telemetry": "npm --prefix packages/telemetry run verify",
-    "verify:infra": "npm --prefix infra/aws run lint && npm --prefix infra/aws run synth && npm --prefix infra/aws run verify:synth",
-    "verify:cloudflare": "npm --prefix infra/cloudflare run verify"
+    "verify:infra": "npm --prefix infra/aws run lint && npm --prefix infra/aws run cost:inventory:check && npm --prefix infra/aws run synth && npm --prefix infra/aws run verify:synth && npm --prefix infra/aws run verify:policy",
+    "verify:cloudflare": "npm --prefix infra/cloudflare run verify",
+    "staging:start": "npm --prefix infra/aws run staging:start",
+    "staging:sleep": "npm --prefix infra/aws run staging:sleep",
+    "staging:fidelity:enable": "npm --prefix infra/aws run staging:fidelity:enable",
+    "staging:fidelity:disable": "npm --prefix infra/aws run staging:fidelity:disable",
+    "staging:teardown": "npm --prefix infra/aws run staging:teardown",
+    "aws:cost-inventory": "npm --prefix infra/aws run cost:inventory:check"
   }
 }

@@ -11,6 +11,11 @@ interface ClaimRow extends QueryResultRow {
   claim_expires_at: Date; correlation_id: string;
 }
 
+interface QueueMetricsRow extends QueryResultRow {
+  queue_depth: string;
+  oldest_queue_age_seconds: string;
+}
+
 export class PostgresWorkerRepository implements WorkerRepository {
   private readonly pool: Pool;
   constructor(private readonly config: OcrWorkerConfig) {
@@ -40,6 +45,19 @@ export class PostgresWorkerRepository implements WorkerRepository {
     await this.transaction(job.correlationId, async (client) => {
       await client.query('select ocr.renew_worker_claim($1, $2, $3)', [job.jobId, job.claimToken, leaseSeconds]);
     });
+  }
+
+  async metrics(): Promise<Readonly<{ queueDepth: number; oldestQueueAgeSeconds: number }>> {
+    const result = await this.pool.query<QueueMetricsRow>(
+      `select count(*)::text as queue_depth,
+              coalesce(extract(epoch from (clock_timestamp() - min(queued_at))), 0)::bigint::text
+                as oldest_queue_age_seconds
+         from ocr.jobs where status = 'queued'`,
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error('OCR queue metrics returned no row');
+    return { queueDepth: Number(row.queue_depth),
+      oldestQueueAgeSeconds: Number(row.oldest_queue_age_seconds) };
   }
 
   async complete(job: ClaimedOcrJob, extraction: ProviderExtraction): Promise<string> {

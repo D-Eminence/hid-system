@@ -16,4 +16,12 @@ describe('standalone OCR composition', () => {
     expect(source).not.toMatch(/\b(?:from|join|insert\s+into|update|delete\s+from)\s+ehr\./i);
     expect(source).toMatch(/EhrApiService/);
   });
+
+  it('reuses only exact immutable-source and versioned processing-contract work', () => {
+    const source = readFileSync(resolve(__dirname, 'ocr/ocr.service.ts'), 'utf8');
+    expect(source).toMatch(/source_object_version_id = \$3/);
+    expect(source).toMatch(/source_sha256_hex = \$4/);
+    expect(source).toMatch(/extraction\.provenance ->> 'processingContract' = \$6/);
+    expect(source).toMatch(/ocr\.job\.duplicate_avoided/);
+  });
 });

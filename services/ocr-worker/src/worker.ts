@@ -39,13 +39,15 @@ export class OcrWorker {
       const extraction = await this.provider.extract(document, this.shutdown.signal);
       await this.repository.complete(job, extraction);
       this.log('info', 'ocr.job.completed', { jobId: job.jobId, correlationId: job.correlationId,
-        provider: this.provider.name, attempt: job.attemptNo });
+        provider: this.provider.name, attempt: job.attemptNo, pagesProcessed: extraction.pages.length,
+        retryCount: Math.max(0, job.attemptNo - 1) });
     } catch (error) {
       const failure = this.toSafeFailure(error);
       try {
         await this.repository.fail(job, failure);
         this.log('warn', 'ocr.job.failed', { jobId: job.jobId, correlationId: job.correlationId,
-          code: failure.code, retryable: failure.retryable, attempt: job.attemptNo });
+          code: failure.code, retryable: failure.retryable, attempt: job.attemptNo,
+          failedPages: 1, retryCount: Math.max(0, job.attemptNo - 1) });
       } catch (persistenceError) {
         this.log('error', 'ocr.job.failure_persistence_failed', { jobId: job.jobId,
           correlationId: job.correlationId, code: safeErrorCode(persistenceError) });
@@ -60,7 +62,19 @@ export class OcrWorker {
         const job = await this.repository.claim(this.provider.name, this.config.OCR_WORKER_LEASE_SECONDS,
           `ocr-worker-${randomUUID()}`);
         consecutiveErrors = 0;
-        if (job) await this.processOne(job);
+        if (job) {
+          const metrics = await this.repository.metrics().catch((error) => {
+            this.log('warn', 'ocr.queue.metrics_unavailable', {
+              correlationId: job.correlationId, code: safeErrorCode(error),
+            });
+            return undefined;
+          });
+          this.log('info', 'ocr.job.claimed', { jobId: job.jobId, correlationId: job.correlationId,
+            provider: this.provider.name, attempt: job.attemptNo, claimedJobs: 1,
+            ...(metrics ? { queueDepth: metrics.queueDepth,
+              oldestQueueAgeSeconds: metrics.oldestQueueAgeSeconds } : {}) });
+          await this.processOne(job);
+        }
         else await delay(this.config.OCR_WORKER_POLL_MS, this.shutdown.signal);
       } catch (error) {
         if (this.shutdown.signal.aborted) break;

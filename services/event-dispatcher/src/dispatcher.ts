@@ -64,6 +64,16 @@ export class EventDispatcher {
   async processOnce(): Promise<number> {
     const events = await this.repository.claim(this.dispatcherId);
     if (events.length === 0) return 0;
+    try {
+      const metrics = await this.repository.metrics();
+      this.log('info', 'event_dispatcher.backlog', {
+        pendingCount: metrics.pendingCount,
+        oldestPendingAgeSeconds: metrics.oldestPendingAgeSeconds,
+        drainRate: events.length,
+      });
+    } catch (error) {
+      this.log('warn', 'event_dispatcher.metrics_unavailable', { code: safeErrorCode(error) });
+    }
     const deliverable: Array<{ claimed: ClaimedEvent; envelope: HidEventEnvelopeV1 }> = [];
     for (const event of events) {
       try {

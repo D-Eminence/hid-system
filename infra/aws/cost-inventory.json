@@ -1,0 +1,530 @@
+{
+  "generatedFrom": "typed IaC configuration; quantities only; no fabricated prices",
+  "profiles": [
+    {
+      "environment": "development",
+      "profile": "development",
+      "availabilityZones": 2,
+      "natGateways": 1,
+      "interfaceEndpointAzAttachments": 16,
+      "publicAlbs": 1,
+      "internalAlbs": 1,
+      "estimatedPublicIpv4Count": 3,
+      "ecsTasks": {
+        "identity-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "ehr-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "lab-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "pharmacy-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "ocr-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "ocr-worker": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "outreach-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "notification-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "notification-worker": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "event-dispatcher": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "gateway": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        }
+      },
+      "rds": {
+        "instanceClass": "db.t4g.small",
+        "multiAz": false,
+        "allocatedStorageGiB": 50,
+        "maxStorageGiB": 100,
+        "backupRetentionDays": 7,
+        "deletionProtection": false,
+        "expectedComputeState": "available"
+      },
+      "logRetentionDays": 30,
+      "ecrImagesPerRepository": 25,
+      "kmsKeys": 3,
+      "secretInterfaces": 14,
+      "wafs": 1,
+      "sqsQueuesAndDlqs": 2,
+      "s3Buckets": 1
+    },
+    {
+      "environment": "staging",
+      "profile": "sleep",
+      "availabilityZones": 2,
+      "natGateways": 0,
+      "interfaceEndpointAzAttachments": 0,
+      "publicAlbs": 0,
+      "internalAlbs": 0,
+      "estimatedPublicIpv4Count": 0,
+      "ecsTasks": {
+        "identity-api": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        },
+        "ehr-api": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        },
+        "lab-api": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        },
+        "pharmacy-api": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        },
+        "ocr-api": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        },
+        "ocr-worker": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        },
+        "outreach-api": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        },
+        "notification-api": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        },
+        "notification-worker": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        },
+        "event-dispatcher": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        },
+        "gateway": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 0,
+          "reviewedEmergencyMax": 0
+        }
+      },
+      "rds": {
+        "instanceClass": "db.t4g.small",
+        "multiAz": false,
+        "allocatedStorageGiB": 100,
+        "maxStorageGiB": 300,
+        "backupRetentionDays": 14,
+        "deletionProtection": true,
+        "expectedComputeState": "stopped-by-operation"
+      },
+      "logRetentionDays": 30,
+      "ecrImagesPerRepository": 25,
+      "kmsKeys": 3,
+      "secretInterfaces": 14,
+      "wafs": 0,
+      "sqsQueuesAndDlqs": 2,
+      "s3Buckets": 1
+    },
+    {
+      "environment": "staging",
+      "profile": "economy",
+      "availabilityZones": 2,
+      "natGateways": 1,
+      "interfaceEndpointAzAttachments": 4,
+      "publicAlbs": 1,
+      "internalAlbs": 1,
+      "estimatedPublicIpv4Count": 3,
+      "ecsTasks": {
+        "identity-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "ehr-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "lab-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "pharmacy-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "ocr-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "ocr-worker": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "outreach-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "notification-api": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "notification-worker": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "event-dispatcher": {
+          "cloudFormationDefault": 0,
+          "minimumLive": 0,
+          "recommended": 0,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        },
+        "gateway": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 2,
+          "reviewedEmergencyMax": 3
+        }
+      },
+      "rds": {
+        "instanceClass": "db.t4g.small",
+        "multiAz": false,
+        "allocatedStorageGiB": 100,
+        "maxStorageGiB": 300,
+        "backupRetentionDays": 14,
+        "deletionProtection": true,
+        "expectedComputeState": "available"
+      },
+      "logRetentionDays": 30,
+      "ecrImagesPerRepository": 25,
+      "kmsKeys": 3,
+      "secretInterfaces": 14,
+      "wafs": 1,
+      "sqsQueuesAndDlqs": 2,
+      "s3Buckets": 1
+    },
+    {
+      "environment": "staging",
+      "profile": "fidelity",
+      "availabilityZones": 2,
+      "natGateways": 2,
+      "interfaceEndpointAzAttachments": 16,
+      "publicAlbs": 1,
+      "internalAlbs": 1,
+      "estimatedPublicIpv4Count": 4,
+      "ecsTasks": {
+        "identity-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 4,
+          "reviewedEmergencyMax": 8
+        },
+        "ehr-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 4,
+          "reviewedEmergencyMax": 8
+        },
+        "lab-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 4,
+          "reviewedEmergencyMax": 8
+        },
+        "pharmacy-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 4,
+          "reviewedEmergencyMax": 8
+        },
+        "ocr-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 4,
+          "reviewedEmergencyMax": 8
+        },
+        "ocr-worker": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 3,
+          "reviewedEmergencyMax": 6
+        },
+        "outreach-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 4,
+          "reviewedEmergencyMax": 8
+        },
+        "notification-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 4,
+          "reviewedEmergencyMax": 8
+        },
+        "notification-worker": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 3,
+          "reviewedEmergencyMax": 6
+        },
+        "event-dispatcher": {
+          "cloudFormationDefault": 1,
+          "minimumLive": 1,
+          "recommended": 1,
+          "normalMax": 3,
+          "reviewedEmergencyMax": 6
+        },
+        "gateway": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 4,
+          "reviewedEmergencyMax": 8
+        }
+      },
+      "rds": {
+        "instanceClass": "db.t4g.medium",
+        "multiAz": true,
+        "allocatedStorageGiB": 100,
+        "maxStorageGiB": 300,
+        "backupRetentionDays": 14,
+        "deletionProtection": true,
+        "expectedComputeState": "available"
+      },
+      "logRetentionDays": 90,
+      "ecrImagesPerRepository": 50,
+      "kmsKeys": 3,
+      "secretInterfaces": 14,
+      "wafs": 1,
+      "sqsQueuesAndDlqs": 2,
+      "s3Buckets": 1
+    },
+    {
+      "environment": "production",
+      "profile": "production",
+      "availabilityZones": 3,
+      "natGateways": 2,
+      "interfaceEndpointAzAttachments": 24,
+      "publicAlbs": 1,
+      "internalAlbs": 1,
+      "estimatedPublicIpv4Count": 5,
+      "ecsTasks": {
+        "identity-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 8,
+          "reviewedEmergencyMax": 16
+        },
+        "ehr-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 8,
+          "reviewedEmergencyMax": 16
+        },
+        "lab-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 6,
+          "reviewedEmergencyMax": 12
+        },
+        "pharmacy-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 6,
+          "reviewedEmergencyMax": 12
+        },
+        "ocr-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 6,
+          "reviewedEmergencyMax": 12
+        },
+        "ocr-worker": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 4,
+          "reviewedEmergencyMax": 8
+        },
+        "outreach-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 6,
+          "reviewedEmergencyMax": 12
+        },
+        "notification-api": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 6,
+          "reviewedEmergencyMax": 12
+        },
+        "notification-worker": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 4,
+          "reviewedEmergencyMax": 8
+        },
+        "event-dispatcher": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 6,
+          "reviewedEmergencyMax": 12
+        },
+        "gateway": {
+          "cloudFormationDefault": 2,
+          "minimumLive": 2,
+          "recommended": 2,
+          "normalMax": 12,
+          "reviewedEmergencyMax": 24
+        }
+      },
+      "rds": {
+        "instanceClass": "db.r6g.large",
+        "multiAz": true,
+        "allocatedStorageGiB": 200,
+        "maxStorageGiB": 1000,
+        "backupRetentionDays": 35,
+        "deletionProtection": true,
+        "expectedComputeState": "available"
+      },
+      "logRetentionDays": 365,
+      "ecrImagesPerRepository": 100,
+      "kmsKeys": 3,
+      "secretInterfaces": 14,
+      "wafs": 1,
+      "sqsQueuesAndDlqs": 2,
+      "s3Buckets": 1
+    }
+  ]
+}

@@ -1115,3 +1115,45 @@ Consequences:
 
 Related ADRs: ADR-001, ADR-002, ADR-003, ADR-005, ADR-007, ADR-021, ADR-025,
 ADR-026, ADR-029, ADR-031, ADR-032.
+
+# ADR-034: Cost-Safe Staging Modes with Scale-Preserving Production Guardrails
+
+Status: Accepted
+
+Date: 2026-08-14
+
+Decision:
+
+Keep the production reliability/security topology unchanged while making
+staging an explicit `sleep`, `economy`, or `fidelity` profile. Sleep removes
+ephemeral runtime/ingress fixed costs and stops staging RDS through a separately
+confirmed operation, but retains protected data, backups, keys, secrets,
+artifacts, logs and event state. Economy is the ordinary bounded staging mode;
+fidelity restores release/failover/load parity. No mode is inferred.
+
+Each service owns a typed scaling and database-pool contract. Normal and
+reviewed-emergency task ceilings are separate, and synthesis rejects their
+aggregate database connection demand when it exceeds the corresponding budget.
+Production never scales to zero and no million-user capacity claim exists
+without representative load evidence.
+
+Clinical S3 versions never receive generic expiration. OCR duplicate billing is
+controlled by exact immutable-source/processing-contract reuse and deterministic
+async Textract idempotency, without a price-based clinical quality rejection.
+Cost reporting separates gross consumption, credits applied, and cash exposure.
+Optional AWS Budgets and Cost Anomaly Detection notify humans only; they cannot
+stop production.
+
+Consequences:
+
+- staging runtime spend can be deliberately reduced without weakening
+  production or deleting protected clinical evidence;
+- sleep remains non-zero cost and stopped RDS requires bounded re-stop handling;
+- emergency scaling requires external approval and database/cost evidence;
+- deterministic IaC quantity inventories replace fabricated price claims; and
+- AWS/Cloudflare/provider deployment remains a separately authorized action.
+
+Supersedes or extends:
+
+ADR-033 for AWS staging operating modes; ADR-033 remains authoritative for the
+Cloudflare edge, notification boundary, and legacy migration convergence.

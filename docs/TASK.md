@@ -1,5 +1,59 @@
 # Current HID Platform Task
 
+## Current authoritative stage — 2026-08-14
+
+Classification: **COST-SAFE ELASTIC AWS STAGING CONTROLS IMPLEMENTED IN SOURCE;
+NO DEPLOYMENT IS AUTHORIZED**.
+
+The work is isolated on `aws-cost-safety`, created directly from accepted
+security-remediated release source
+`6a247e5ecac5b34947c924bc75b6ca9d54c96733`. Production quality controls remain
+intact: three AZs, Multi-AZ private encrypted PostgreSQL, deletion protection,
+35-day backup/PITR retention, KMS/TLS/WAF, full endpoints, two ALBs, multiple
+replicas, per-service autoscaling, immutable rollback images, RLS/audit/workload
+identity, observability and provider isolation. The existing 3-AZ/2-NAT
+production shape is unchanged; a third NAT or alternate egress is a measured
+future capability, not an unapproved cost increase.
+
+Staging now requires explicit `sleep`, `economy`, or `fidelity` mode. Sleep has
+zero ECS desired tasks and no ALB, WAF association, NAT, interface endpoint,
+public load-balancer IPv4, or autoscaling target while retaining protected RDS
+storage/backups, S3/KMS, secrets, ECR, logs, EventBridge/SQS and metadata. Its
+guarded operation stops the exact staging RDS instance; a staging-only,
+exact-ARN, zero-retry daily schedule handles AWS automatic restart. Economy is
+the bounded two-AZ/one-NAT/single-AZ-small-RDS default. Fidelity restores two
+NATs, full two-AZ endpoints, Multi-AZ RDS and multiple replicas for release,
+failover, load, migration, provider and rollback exercises. Sleep is explicitly
+not zero cost.
+
+Every service has typed CPU/memory, pool size, desired/minimum/normal maximum,
+separately reviewed emergency maximum, scaling signal/target and cooldown.
+Synth fails an unsafe normal or emergency database connection sum without
+raising PostgreSQL `max_connections`. Request, notification, OCR and dispatcher
+backlog/latency/drain visibility are mode-aware and PHI-free. No permanent
+million-user ceiling or untested capacity claim is introduced.
+
+Clinical and legacy document versions have no generic lifecycle expiration;
+temporary, release-evidence and test/staging prefixes are separately governed.
+OCR reuses an exact completed source/processing contract, uses a deterministic
+Textract PDF start token, distinguishes unknown outcomes, and emits bounded
+pages/retries/failure/duplicate signals without reducing clinical quality.
+No migration `0029` is needed.
+
+The optional cost-governance stack models cash exposure with credits and gross
+consumption without credits, using required email/optional SNS threshold alerts
+and account/service plus `Project=HID` anomaly detection. It creates no Budget
+Action or automatic shutdown. The $10,000 Activate planning balance and
+$416.67/month 24-month reference are not spending targets; the earlier $1,000
+runway assumption is corrected. Deterministic quantities are committed in
+`infra/aws/cost-inventory.json` without fabricated prices.
+
+All AWS, ECR, Cloudflare, Hostinger, HID 1.0, provider, DNS and production-data
+operations remain externally pending. The guarded staging commands require
+exact account/region/SHA/confirmation, clean source, readiness, migration,
+queue/outbox, billing, RDS-state and CDK-diff gates; their names never silently
+deploy.
+
 ## Current authoritative stage — 2026-08-13
 
 Classification: **CONTAINER CRITICAL/HIGH REMEDIATED LOCALLY; NO DEPLOYMENT IS

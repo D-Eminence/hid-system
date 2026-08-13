@@ -3,8 +3,11 @@ import test from 'node:test';
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { environmentConfig, externalAwsEnvironment } from '../src/config.js';
+import { HidCostGovernanceStack } from '../src/cost-governance-stack.js';
 import { HidRegionalStack } from '../src/hid-regional-stack.js';
-import { browserPaths, workloadNames } from '../src/workloads.js';
+import { costInventory } from '../src/cost-inventory.js';
+import { browserPaths, databaseConnectionDemand, validateDatabaseConnectionBudget,
+  workloadNames, workloadScale } from '../src/workloads.js';
 
 interface Resource {
   readonly Type: string;
@@ -22,12 +25,22 @@ const regional = Template.fromStack(regionalStack).toJSON() as {
 };
 const stagingApplication = new App();
 const stagingRegionalStack = new HidRegionalStack(stagingApplication, 'StagingRegionalTest', {
-  configuration: environmentConfig('staging'),
+  configuration: environmentConfig('staging', 'economy'),
 });
 const stagingRegional = Template.fromStack(stagingRegionalStack).toJSON() as {
   readonly Parameters: Record<string, Record<string, unknown>>;
   readonly Resources: Record<string, Resource>;
 };
+const sleepConfiguration = environmentConfig('staging', 'sleep');
+const sleepApplication = new App();
+const sleepRegional = Template.fromStack(new HidRegionalStack(sleepApplication, 'SleepRegionalTest', {
+  configuration: sleepConfiguration,
+})).toJSON() as typeof regional;
+const fidelityConfiguration = environmentConfig('staging', 'fidelity');
+const fidelityApplication = new App();
+const fidelityRegional = Template.fromStack(new HidRegionalStack(fidelityApplication, 'FidelityRegionalTest', {
+  configuration: fidelityConfiguration,
+})).toJSON() as typeof regional;
 
 function resources(template: typeof regional, type: string): Array<[string, Resource]> {
   return Object.entries(template.Resources).filter(([, resource]) => resource.Type === type);
@@ -49,8 +62,10 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.equal(configuration.databaseMultiAz, true);
   assert.equal(configuration.availabilityZones, 3);
   assert.equal(configuration.publicApiSubdomain, 'api');
-  assert.equal(environmentConfig('staging').publicApiSubdomain, 'api.staging');
-  assert.deepEqual(environmentConfig('staging').browserSubdomains, [
+  assert.throws(() => environmentConfig('staging'), /HID_STAGING_MODE/);
+  assert.throws(() => environmentConfig('production', 'sleep'), /valid only/);
+  assert.equal(environmentConfig('staging', 'economy').publicApiSubdomain, 'api.staging');
+  assert.deepEqual(environmentConfig('staging', 'economy').browserSubdomains, [
     'staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'ocr.staging', 'outreach.staging', 'admin.staging',
   ]);
 });
@@ -178,6 +193,20 @@ test('document bucket is versioned and production-retained', () => {
   assert.equal(bucket.DeletionPolicy, 'Retain');
 });
 
+test('clinical object versions have no generic current or noncurrent expiration', () => {
+  const [bucket] = properties(regional, 'AWS::S3::Bucket');
+  const rules = bucket!.LifecycleConfiguration as { readonly Rules: Array<Record<string, unknown>> };
+  for (const prefix of ['clinical/', 'objects/']) {
+    const rule = rules.Rules.find((candidate) => JSON.stringify(candidate).includes(prefix));
+    assert.ok(rule, `missing ${prefix} clinical lifecycle boundary`);
+    assert.equal(rule!.ExpirationInDays, undefined);
+    assert.equal(rule!.NoncurrentVersionExpiration, undefined);
+  }
+  assert.ok(rules.Rules.some((rule) => JSON.stringify(rule).includes('temporary/')));
+  assert.ok(rules.Rules.some((rule) => JSON.stringify(rule).includes('release-evidence/')));
+  assert.ok(rules.Rules.some((rule) => JSON.stringify(rule).includes('test-staging/')));
+});
+
 test('OCR KMS use is exact-key and constrained to S3 via-service', () => {
   const statement = statements().find((candidate) => candidate.Sid === 'DecryptDocumentObjects')!;
   assert.deepEqual(statement.Action, 'kms:Decrypt');
@@ -264,11 +293,20 @@ test('the canonical seven browser roots remain explicit', () => {
 });
 
 test('all deployable resources receive governance tags', () => {
-  for (const type of ['AWS::ECS::Service', 'AWS::ECR::Repository', 'AWS::RDS::DBInstance']) {
+  const required = {
+    Project: 'HID', Environment: 'production', ManagedBy: 'CDK', Owner: 'HID',
+    CostCenter: 'HID', DataClassification: 'healthcare-restricted',
+  } as const;
+  for (const type of ['AWS::ECS::Service', 'AWS::ECS::TaskDefinition', 'AWS::ECR::Repository',
+    'AWS::RDS::DBInstance', 'AWS::S3::Bucket', 'AWS::KMS::Key', 'AWS::SQS::Queue',
+    'AWS::Events::EventBus', 'AWS::Logs::LogGroup', 'AWS::ElasticLoadBalancingV2::LoadBalancer',
+    'AWS::WAFv2::WebACL', 'AWS::CloudWatch::Alarm']) {
     for (const item of properties(regional, type)) {
       const tags = item.Tags as Array<{ readonly Key: string; readonly Value: string }>;
-      assert.ok(tags.some((tag) => tag.Key === 'Environment' && tag.Value === 'production'));
-      assert.ok(tags.some((tag) => tag.Key === 'DataClassification' && tag.Value === 'healthcare-restricted'));
+      assert.ok(tags.some((tag) => tag.Key === 'Service'), `${type} lacks a Service tag`);
+      for (const [key, value] of Object.entries(required)) {
+        assert.ok(tags.some((tag) => tag.Key === key && tag.Value === value), `${type} lacks ${key}=${value}`);
+      }
     }
   }
 });
@@ -365,7 +403,84 @@ test('workload identity issuer, JWKS, and subjects are required external inputs'
 });
 
 test('monitoring is focused on RDS, task health, OCR, and event delivery', () => {
-  assert.equal(properties(regional, 'AWS::CloudWatch::Alarm').length, 11);
-  assert.equal(properties(regional, 'AWS::Logs::MetricFilter').length, 2);
+  assert.equal(properties(regional, 'AWS::CloudWatch::Alarm').length, 47);
+  assert.equal(properties(regional, 'AWS::Logs::MetricFilter').length, 13);
   assert.doesNotMatch(JSON.stringify(properties(regional, 'AWS::CloudWatch::Alarm')), /patient|\bnin\b|document_text/i);
+});
+
+test('sleep removes fixed-cost runtime ingress while retaining protected data controls', () => {
+  assert.equal(resources(sleepRegional, 'AWS::EC2::NatGateway').length, 0);
+  assert.equal(resources(sleepRegional, 'AWS::EC2::VPCEndpoint')
+    .filter(([, item]) => String(item.Properties?.VpcEndpointType) === 'Interface').length, 0);
+  assert.equal(resources(sleepRegional, 'AWS::ElasticLoadBalancingV2::LoadBalancer').length, 0);
+  assert.equal(resources(sleepRegional, 'AWS::WAFv2::WebACL').length, 0);
+  assert.equal(resources(sleepRegional, 'AWS::ApplicationAutoScaling::ScalableTarget').length, 0);
+  assert.equal(resources(sleepRegional, 'AWS::Scheduler::Schedule').length, 1);
+  assert.equal(Object.keys(sleepRegional.Parameters).some((name) => name.endsWith('DesiredCount')), false);
+  for (const service of properties(sleepRegional, 'AWS::ECS::Service')) assert.equal(service.DesiredCount, 0);
+  const [database] = properties(sleepRegional, 'AWS::RDS::DBInstance');
+  assert.equal(database!.DeletionProtection, true);
+  assert.equal(database!.MultiAZ, false);
+  assert.equal(database!.BackupRetentionPeriod, 14);
+  assert.equal(resources(sleepRegional, 'AWS::S3::Bucket').length, 1);
+  assert.equal(resources(sleepRegional, 'AWS::KMS::Key').length, 3);
+});
+
+test('economy and fidelity are explicit, bounded staging modes', () => {
+  assert.equal(resources(stagingRegional, 'AWS::EC2::NatGateway').length, 1);
+  assert.equal(resources(stagingRegional, 'AWS::ElasticLoadBalancingV2::LoadBalancer').length, 2);
+  assert.equal(resources(stagingRegional, 'AWS::EC2::VPCEndpoint')
+    .filter(([, item]) => String(item.Properties?.VpcEndpointType) === 'Interface').length, 4);
+  assert.equal(stagingRegional.Parameters.GatewayDesiredCount!.Default, 1);
+  assert.equal(stagingRegional.Parameters.OcrWorkerDesiredCount!.Default, 0);
+  assert.equal(properties(stagingRegional, 'AWS::RDS::DBInstance')[0]!.MultiAZ, false);
+
+  assert.equal(resources(fidelityRegional, 'AWS::EC2::NatGateway').length, 2);
+  assert.equal(resources(fidelityRegional, 'AWS::EC2::VPCEndpoint')
+    .filter(([, item]) => String(item.Properties?.VpcEndpointType) === 'Interface').length, 8);
+  assert.equal(fidelityRegional.Parameters.GatewayDesiredCount!.Default, 2);
+  assert.equal(fidelityRegional.Parameters.OcrWorkerDesiredCount!.Default, 1);
+  assert.equal(properties(fidelityRegional, 'AWS::RDS::DBInstance')[0]!.MultiAZ, true);
+});
+
+test('every live workload has typed resource and autoscaling boundaries', () => {
+  assert.equal(resources(regional, 'AWS::ApplicationAutoScaling::ScalableTarget').length, workloadNames.length);
+  assert.equal(resources(regional, 'AWS::ApplicationAutoScaling::ScalingPolicy').length, 33);
+  for (const name of workloadNames) {
+    const scale = workloadScale('production', name);
+    assert.ok(scale.minimumLiveTasks >= 2);
+    assert.ok(scale.normalMaxTasks < scale.reviewedEmergencyMaxTasks);
+  }
+});
+
+test('database connection budgets fail synthesis policy before unsafe ceilings ship', () => {
+  assert.equal(databaseConnectionDemand('production'), 312);
+  assert.equal(databaseConnectionDemand('production', true), 624);
+  assert.doesNotThrow(() => validateDatabaseConnectionBudget('production', 400, 650));
+  assert.throws(() => validateDatabaseConnectionBudget('production', 311, 650), /normal scaling requires 312/);
+  assert.throws(() => validateDatabaseConnectionBudget('production', 400, 623), /reviewed-emergency scaling requires 624/);
+});
+
+test('cost inventory is deterministic and never labels sleep zero-cost', () => {
+  const sleep = costInventory(sleepConfiguration);
+  assert.deepEqual({ nat: sleep.natGateways, endpoints: sleep.interfaceEndpointAzAttachments,
+    publicAlbs: sleep.publicAlbs, internalAlbs: sleep.internalAlbs,
+    publicIpv4: sleep.estimatedPublicIpv4Count },
+  { nat: 0, endpoints: 0, publicAlbs: 0, internalAlbs: 0, publicIpv4: 0 });
+  assert.equal(sleep.rds.expectedComputeState, 'stopped-by-operation');
+  assert.equal(sleep.s3Buckets, 1);
+  assert.equal(sleep.kmsKeys, 3);
+});
+
+test('optional billing governance notifies without creating cost actions', () => {
+  const costApp = new App();
+  const cost = Template.fromStack(new HidCostGovernanceStack(costApp, 'CostTest')).toJSON() as typeof regional;
+  assert.equal(resources(cost, 'AWS::Budgets::Budget').length, 3);
+  assert.equal(resources(cost, 'AWS::Budgets::BudgetsAction').length, 0);
+  assert.equal(resources(cost, 'AWS::CE::AnomalyMonitor').length, 2);
+  assert.equal(resources(cost, 'AWS::CE::AnomalySubscription').length, 1);
+  const text = JSON.stringify(cost);
+  assert.match(text, /IncludeCredit/);
+  assert.match(text, /CostNotificationEmail/);
+  assert.doesNotMatch(text, /StopInstances|UpdateService|ExecutePolicy|iam:Attach/);
 });

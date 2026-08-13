@@ -18,6 +18,7 @@ const extraction = { providerModel: 'model', providerRequestReference: 'request'
 
 function mocks() {
   const repository: jest.Mocked<WorkerRepository> = { checkReadiness: jest.fn(), claim: jest.fn(),
+    metrics: jest.fn().mockResolvedValue({ queueDepth: 0, oldestQueueAgeSeconds: 0 }),
     renew: jest.fn(), complete: jest.fn().mockResolvedValue('extraction'), fail: jest.fn(), close: jest.fn() };
   const reader: jest.Mocked<DocumentReader> = { readExact: jest.fn().mockResolvedValue(document) };
   const provider: jest.Mocked<WorkerOcrProvider> = { name: 'test', checkReadiness: jest.fn(),

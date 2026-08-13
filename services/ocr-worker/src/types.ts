@@ -43,6 +43,7 @@ export interface WorkerOcrProvider {
 export interface WorkerRepository {
   checkReadiness(): Promise<void>;
   claim(provider: string, leaseSeconds: number, correlationId: string): Promise<ClaimedOcrJob | null>;
+  metrics(): Promise<Readonly<{ queueDepth: number; oldestQueueAgeSeconds: number }>>;
   renew(job: ClaimedOcrJob, leaseSeconds: number): Promise<void>;
   complete(job: ClaimedOcrJob, extraction: ProviderExtraction): Promise<string>;
   fail(job: ClaimedOcrJob, failure: SafeWorkerFailure): Promise<void>;

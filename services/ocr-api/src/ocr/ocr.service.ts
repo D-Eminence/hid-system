@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
@@ -78,8 +78,12 @@ const JOB_SELECT = `
              where confirmation.job_id=ocr.jobs.id order by confirmation.confirmation_version desc limit 1) as confirmed_at
     from ocr.jobs`;
 
+const OCR_PROCESSING_CONTRACT = 'hid-textract-v1';
+
 @Injectable()
 export class OcrService {
+  private readonly logger = new Logger(OcrService.name);
+
   constructor(
     private readonly database: DatabaseService,
     private readonly identity: IdentityApiService,
@@ -128,6 +132,31 @@ export class OcrService {
         source.patientId, 'read_records', context.purposeOfUse, context,
       );
       if (!authorization.allowed) throw new DomainProblem(403, 'OCR_ACCESS_DENIED', 'OCR source access is not authorized');
+
+      // A different HTTP idempotency key must not buy the same extraction
+      // twice. Reuse is limited to exact immutable source evidence, provider,
+      // and the versioned processing contract stored in extraction provenance.
+      const reusable = await client.query<OcrJobRow>(
+        `${JOB_SELECT} where facility_id = $1 and document_id = $2
+           and source_object_version_id = $3 and source_sha256_hex = $4 and provider = $5
+           and exists (
+             select 1 from ocr.extractions extraction
+              where extraction.job_id = ocr.jobs.id
+                and extraction.provenance ->> 'processingContract' = $6
+           )
+         order by created_at desc, id desc limit 1`,
+        [context.facilityId, source.id, source.objectVersionId, source.sha256Hex,
+          input.provider, OCR_PROCESSING_CONTRACT],
+      );
+      const reusableJob = reusable.rows[0];
+      if (reusableJob) {
+        await this.audit.recordWithClient(client,
+          this.auditEvent(context, 'ocr.job.reuse', reusableJob));
+        this.logger.log(JSON.stringify({ event: 'ocr.job.duplicate_avoided', duplicateAvoided: 1,
+          jobId: reusableJob.id, correlationId: context.correlationId,
+          provider: input.provider, processingContract: OCR_PROCESSING_CONTRACT }));
+        return this.project(reusableJob);
+      }
 
       const inserted = await client.query<OcrJobRow>(
         `insert into ocr.jobs (

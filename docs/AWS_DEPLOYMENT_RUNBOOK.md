@@ -47,17 +47,23 @@ npm run verify:migration
 npm --prefix infra/aws run lint
 npm --prefix infra/aws run typecheck
 npm --prefix infra/aws test
+npm --prefix infra/aws run cost:inventory:check
 ```
 
 Synthesize and policy-scan every environment without deploying:
 
 ```bash
-HID_INFRA_ENV=development npm --prefix infra/aws run synth
+npm --prefix infra/aws run synth:dev
 HID_INFRA_ENV=development npm --prefix infra/aws run verify:synth
-HID_INFRA_ENV=staging npm --prefix infra/aws run synth
-HID_INFRA_ENV=staging npm --prefix infra/aws run verify:synth
-HID_INFRA_ENV=production npm --prefix infra/aws run synth
+npm --prefix infra/aws run synth:staging:sleep
+HID_INFRA_ENV=staging HID_STAGING_MODE=sleep npm --prefix infra/aws run verify:synth
+npm --prefix infra/aws run synth:staging:economy
+HID_INFRA_ENV=staging HID_STAGING_MODE=economy npm --prefix infra/aws run verify:synth
+npm --prefix infra/aws run synth:staging:fidelity
+HID_INFRA_ENV=staging HID_STAGING_MODE=fidelity npm --prefix infra/aws run verify:synth
+npm --prefix infra/aws run synth:prod
 HID_INFRA_ENV=production npm --prefix infra/aws run verify:synth
+npm --prefix infra/aws run verify:policy
 ```
 
 Expected topology is one regional stack, eleven ECS services, eleven ECR
@@ -82,11 +88,12 @@ Populate ECS parameters only with digest-qualified URIs. Gateway is API-only.
 Cloudflare frontend artifacts are built, hashed, checked for source-map/secret
 leakage, and released independently per application.
 
-## 4. Provision the regional foundation at zero tasks
+## 4. Provision the regional foundation
 
-Bootstrap and deploy only after change approval. Keep
-`GatewayDesiredCount=0`, `ApiDesiredCount=0`, and `WorkerDesiredCount=0` while
-validating:
+Bootstrap and deploy only after change approval. Live profiles default to the
+typed recommended counts. For a first foundation-only change, explicitly pass
+every `*DesiredCount=0` through reviewed `HID_CDK_EXTRA_ARGS_JSON`; never rely
+on an implicit zero or a shared count. Validate:
 
 - private RDS placement, TLS, encryption, backups, deletion behavior, and logs;
 - no world database/task ingress and no public task IPs;
@@ -101,7 +108,47 @@ Provision the database LOGIN roles and apply `runtime-grants.sql`. Verify every
 LOGIN is non-owner, non-superuser, non-BYPASSRLS and cannot mutate another
 domain.
 
-## 5. Migrate identity and data
+## 5. Guarded staging operations
+
+The following commands are the only repository staging-mode entry points:
+
+```bash
+npm run staging:start
+npm run staging:sleep
+npm run staging:fidelity:enable
+npm run staging:fidelity:disable
+npm run staging:teardown
+```
+
+Their names alone never deploy. Every command refuses to proceed unless all of
+these are present and consistent:
+
+- exact 12-digit `HID_AWS_ACCOUNT`, region, clean checked-out 40-character
+  `HID_RELEASE_SHA`, and non-`main` branch;
+- caller identity matching the account and an exact operation/account/region/
+  SHA `HID_CONFIRM` value printed by the command contract;
+- `HID_OPERATION_EXECUTE=true` plus explicit readiness, migration, drained
+  queue, drained outbox, and billing-summary acknowledgements;
+- current RDS state, an offline synth, and a visible CDK diff before deploy;
+- digest-qualified image/secret/certificate parameters supplied as a reviewed
+  JSON string array in `HID_CDK_EXTRA_ARGS_JSON`; and
+- the additional exact teardown confirmation for `staging:teardown`.
+
+`staging:start` selects economy and starts the exact staging RDS instance before
+runtime deployment. Fidelity enable/disable transitions between fidelity and
+economy. `staging:sleep` first deploys zero ECS/no-ingress/no-NAT/no-interface-
+endpoint topology and only then stops the exact RDS instance from an expected
+state. AWS can restart a stopped instance after its bounded stop period; the
+sleep profile's exact-resource Scheduler rule reissues one daily stop with zero
+retries. It cannot target production. Sleep continues to bill for protected
+storage/backups, S3/KMS, secrets, ECR, logs, queues/events and metadata.
+
+Teardown is distinct from sleep. It destroys the staging stack only after its
+second confirmation; retention/snapshot policies preserve the declared data
+evidence but the operator must independently verify snapshots and exports.
+Never run any of these commands for production.
+
+## 6. Migrate identity and data
 
 Never edit migrations `0001`–`0027`. Apply the ledger through `0028` using the
 one-shot migration task. First record snapshot/PITR readiness and run `--plan`.
@@ -127,7 +174,7 @@ rollback/PITR decision point. Do not trust a raw HID 1.0 session token: the
 issuer/signature/audience/expiry contract is not proven. Use local/OIDC login
 or the six-digit contact-OTP fallback mapped to the existing patient.
 
-## 6. Provider and workload preflight
+## 7. Provider and workload preflight
 
 Before raising task counts, prove in staging:
 
@@ -146,7 +193,7 @@ Before raising task counts, prove in staging:
   and
 - telemetry redaction with PostHog autocapture/replay disabled.
 
-## 7. Cloudflare rollout
+## 8. Cloudflare rollout
 
 For each frontend, bind the exact selected-environment custom hostname, static
 asset directory, compatibility date, and matching Worker origin secret.
@@ -158,7 +205,7 @@ behavior. The AWS origin must reject a direct request without the origin secret.
 Release and roll back each application independently. A frontend rollback must
 not change an API image or database schema.
 
-## 8. Progressive runtime rollout
+## 9. Progressive runtime rollout
 
 Raise minimum dependencies first: Identity and Notification API, then owner
 APIs and Gateway, then OCR Worker, Event Dispatcher, and Notification Worker.
@@ -171,7 +218,34 @@ age/DLQ, event terminal failure, provider outcomes, OCR failures, S3/KMS denies,
 and sanitized telemetry. Stop on unexplained authentication, duplicate patient,
 OTP, notification, or migration behavior.
 
-## 9. Rollback and evidence
+Normal scaling ceilings are not million-user capacity evidence. Any move above
+a normal ceiling must use the separately bounded emergency parameter, have an
+external approval record, and confirm representative load/soak, latency/error,
+backlog/drain, RDS connections/I/O, restoration and dated cost evidence. Do not
+raise PostgreSQL `max_connections` to bypass the synthesized connection budget.
+
+Use CloudWatch Logs Insights only with narrow time and log-group bounds; record
+bytes scanned. Do not query or emit PHI, OCR text, raw NIN, tokens, or patient/
+request IDs as dimensions. Validate Database Insights Standard, log-volume
+alarms, OCR pages/retries/duplicate-avoidance, notification visible/oldest/
+deleted signals, and dispatcher outbox age/drain signals.
+
+## 10. Optional billing alerts
+
+The cost-governance stack is opt-in and separate:
+
+```bash
+HID_COST_GOVERNANCE_ENABLED=true HID_INFRA_ENV=development \
+  npm --prefix infra/aws run synth
+```
+
+Before an authorized deployment, supply a reviewed `CostNotificationEmail`,
+optional existing SNS ARN, cash/gross monthly limits, and anomaly threshold
+equal to at least `max($10, 2% of reviewed monthly gross)`. Inspect both
+templates and policy output. The stack contains notifications only—no Budget
+Action and no automatic production shutdown.
+
+## 11. Rollback and evidence
 
 Application rollback selects an earlier accepted digest/task-definition.
 Frontend rollback selects the previous per-host Cloudflare artifact. Database
@@ -179,6 +253,6 @@ rollback is not a down migration: use additive correction or the approved
 PITR/incident path. Preserve deployment parameters, manifest, approvals,
 redacted test evidence, reconciliation totals, and rollback decision.
 
-Local implementation leaves every operation in sections 3–9 externally
+Local implementation leaves every operation in sections 3–11 externally
 pending; no account, DNS, provider, database, or production state is mutated by
 repository acceptance.

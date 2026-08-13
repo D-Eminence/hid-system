@@ -97,6 +97,70 @@ The CDK v2 application under `infra/aws` synthesizes:
 There is no API Gateway, Lambda, SNS, Redis, search cluster, Bedrock resource,
 CloudFront distribution, or duplicate frontend host in the current design.
 
+## Cost-safe staging modes
+
+Staging has no implicit configuration. `HID_STAGING_MODE` must be exactly one
+of:
+
+- `sleep`: all ECS desired counts zero; no ALB, WAF association, NAT gateway,
+  interface endpoint, public load-balancer IPv4, or autoscaling target. RDS is
+  single-AZ and retained with deletion protection, backups and storage; the
+  controlled operation stops compute and a staging-only daily schedule re-stops
+  the exact instance after AWS automatic restart. S3/KMS, secrets, ECR, logs,
+  EventBridge/SQS and DNS metadata remain.
+- `economy`: two AZs, one NAT, selected Secrets Manager/EventBridge/SQS/Textract
+  endpoints in one AZ plus S3 gateway, two ALBs and regional WAF, one Gateway/
+  request API replica, workers default zero, bounded worker/API scaling, and a
+  single-AZ `db.t4g.small` database with 100 GiB initial storage.
+- `fidelity`: two AZs, two NAT gateways, all eight interface endpoints in both
+  AZs, two ALBs/WAF, multiple request replicas, live workers, Multi-AZ RDS, and
+  release/failover/load/migration/provider/rollback parity testing.
+
+Persistent data/security resources and ephemeral ingress/runtime resources are
+selected independently by the profile. A sleep transition removes runtime
+ingress while retaining protected data. It is never described as zero cost.
+Production remains three AZs, Multi-AZ RDS, two NAT gateways, full endpoints,
+two ALBs/WAF, and at least two replicas per service. The current 3-AZ/2-NAT
+shape means one application AZ can share cross-AZ egress during an AZ failure;
+a measured third-NAT or alternative-egress evolution is documented capability,
+not silently provisioned cost.
+
+## Elasticity and observability
+
+Each runtime has an independent desired count, normal maximum, reviewed
+emergency maximum, CPU/memory targets and cooldowns. Request services also use
+ALB request count; their p95 latency and aggregate 5xx rates are alarms rather
+than high-cardinality scaling dimensions. Notification Worker scales on SQS
+visible backlog with oldest age/drain visibility. OCR Worker scales on PHI-free
+queue depth and emits age, claims, processed pages, retries, failed pages and
+duplicates avoided. Event Dispatcher scales on PHI-free outbox depth and emits
+oldest age/drain rate without weakening at-least-once delivery.
+
+Typed database pool sizes are part of this contract. Synthesis sums each
+service's maximum task count times its pool size and fails if it exceeds the
+normal or separately reviewed emergency budget. RDS uses the currently
+supported Database Insights Standard mode; the design does not raise
+PostgreSQL `max_connections` to make an unsafe scale plan appear viable.
+
+This topology preserves an elastic path but does not prove million-user
+capacity. Ceiling changes require representative load/soak, latency/error,
+queue, database I/O/connection, restoration and cost evidence.
+
+## Document lifecycle and OCR cost identity
+
+The versioned document bucket separates `clinical/`, `temporary/`,
+`release-evidence/`, and `test-staging/` prefixes. Clinical current and
+noncurrent versions, including legacy `objects/` keys, have no generic expiry.
+Temporary/test artifacts have bounded expiry; release evidence transitions to
+lower-cost storage without losing rollback evidence.
+
+OCR completed-work reuse requires an exact object version and SHA-256 plus the
+same provider and versioned operation/features/model contract. Async PDF
+Textract starts use a deterministic client request token. Unknown async start
+outcomes are retryable because the token prevents a duplicate start; unknown
+image outcomes are not blindly retried. This reduces duplicate billing without
+reducing extraction quality or hard-rejecting clinical work on price.
+
 ## Runtime inventory
 
 | Runtime | Port/route | Database | Business AWS authority |
@@ -132,9 +196,10 @@ application secrets.
 
 Workload JWT issuer, JWKS, exact subjects, audiences, and rotating file delivery
 are externally governed inputs. Empty task-local volumes describe the mount
-contract; they do not prove credential delivery. Desired counts default to zero
-until migration, certificates, secrets, workload identity, providers, and live
-negative tests pass.
+contract; they do not prove credential delivery. Live profiles encode their
+reviewed recommended defaults, but the guarded staging operations require
+readiness, migration, queue/outbox, billing, diff, account/region and exact-SHA
+acknowledgements before any deployment.
 
 ## Migration and release
 

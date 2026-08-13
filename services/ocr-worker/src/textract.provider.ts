@@ -2,8 +2,29 @@ import {
   AnalyzeDocumentCommand, GetDocumentTextDetectionCommand, StartDocumentTextDetectionCommand,
   TextractClient, type Block,
 } from '@aws-sdk/client-textract';
+import { createHash } from 'node:crypto';
 import type { OcrWorkerConfig } from './config';
 import { SafeWorkerFailure, type ProviderExtraction, type VerifiedDocument, type WorkerOcrProvider } from './types';
+
+export const TEXTRACT_PROCESSING_CONTRACT = 'hid-textract-v1';
+const IMAGE_OPERATION = 'AnalyzeDocument';
+const IMAGE_FEATURES = ['FORMS', 'TABLES'] as const;
+const PDF_OPERATION = 'StartDocumentTextDetection';
+
+export function textractPdfClientRequestToken(document: Pick<VerifiedDocument,
+  'bucket' | 'key' | 'versionId' | 'sha256Hex'>): string {
+  return createHash('sha256').update(JSON.stringify({
+    contract: TEXTRACT_PROCESSING_CONTRACT,
+    provider: 'amazon-textract',
+    model: 'amazon-textract-detect-document-text',
+    operation: PDF_OPERATION,
+    features: [],
+    bucket: document.bucket,
+    key: document.key,
+    versionId: document.versionId,
+    sha256Hex: document.sha256Hex,
+  })).digest('hex');
+}
 
 export class TextractOcrProvider implements WorkerOcrProvider {
   readonly name = 'textract';
@@ -31,6 +52,13 @@ export class TextractOcrProvider implements WorkerOcrProvider {
       if (error instanceof SafeWorkerFailure) throw error;
       const name = error instanceof Error ? error.name : 'unknown';
       const terminal = ['UnsupportedDocumentException', 'BadDocumentException', 'DocumentTooLargeException'].includes(name);
+      const uncertain = ['AbortError', 'TimeoutError', 'RequestTimeout', 'RequestTimeoutException'].includes(name);
+      if (uncertain) {
+        const duplicateSafe = document.mediaType === 'application/pdf';
+        throw new SafeWorkerFailure('PROVIDER_OUTCOME_UNKNOWN',
+          'OCR provider outcome is unknown after the bounded request deadline', duplicateSafe,
+          duplicateSafe ? 20 : 0);
+      }
       throw new SafeWorkerFailure(terminal ? 'PROVIDER_REJECTED_DOCUMENT' : 'PROVIDER_UNAVAILABLE',
         terminal ? 'OCR provider rejected the document format' : 'OCR provider is temporarily unavailable',
         !terminal, terminal ? 0 : 20);
@@ -42,15 +70,17 @@ export class TextractOcrProvider implements WorkerOcrProvider {
       throw new SafeWorkerFailure('UNSUPPORTED_MEDIA_TYPE', 'Document media type is not supported for OCR', false, 0);
     }
     const result = await this.client.send(new AnalyzeDocumentCommand({ Document: { Bytes: document.bytes },
-      FeatureTypes: ['FORMS', 'TABLES'] }), { abortSignal: this.requestSignal(signal) });
+      FeatureTypes: [...IMAGE_FEATURES] }), { abortSignal: this.requestSignal(signal) });
     return { providerModel: 'amazon-textract-analyze-document',
       providerRequestReference: result.$metadata.requestId ?? null,
       pages: this.linesToPages(result.Blocks ?? []),
-      provenance: { adapter: 'amazon-textract', operation: 'AnalyzeDocument', sourceVersionBound: true } };
+      provenance: { processingContract: TEXTRACT_PROCESSING_CONTRACT, adapter: 'amazon-textract',
+        operation: IMAGE_OPERATION, features: IMAGE_FEATURES, sourceVersionBound: true } };
   }
 
   private async extractPdf(document: VerifiedDocument, signal: AbortSignal): Promise<ProviderExtraction> {
-    const started = await this.client.send(new StartDocumentTextDetectionCommand({ DocumentLocation: {
+    const started = await this.client.send(new StartDocumentTextDetectionCommand({ ClientRequestToken:
+      textractPdfClientRequestToken(document), DocumentLocation: {
       S3Object: { Bucket: document.bucket, Name: document.key, Version: document.versionId },
     } }), { abortSignal: this.requestSignal(signal) });
     if (!started.JobId) throw new SafeWorkerFailure('PROVIDER_PROTOCOL_ERROR', 'OCR provider did not return a job reference', true, 15);
@@ -73,7 +103,9 @@ export class TextractOcrProvider implements WorkerOcrProvider {
     } while (nextToken);
     return { providerModel: 'amazon-textract-detect-document-text',
       providerRequestReference: started.JobId, pages: this.linesToPages(blocks),
-      provenance: { adapter: 'amazon-textract', operation: 'StartDocumentTextDetection', sourceVersionBound: true } };
+      provenance: { processingContract: TEXTRACT_PROCESSING_CONTRACT, adapter: 'amazon-textract',
+        operation: PDF_OPERATION, features: [], deterministicStartToken: true,
+        sourceVersionBound: true } };
   }
 
   private linesToPages(blocks: readonly Block[]) {

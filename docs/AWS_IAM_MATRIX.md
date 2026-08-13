@@ -24,6 +24,8 @@ business AWS API authority.
 | Event Dispatcher | its DB | `events:PutEvents` on the exact HID bus | no rule/target management, queue consumption, archive/replay, or provider authority |
 | Gateway | none beyond ECS execution/logging | none | no frontend secrets, DB, application secret, S3/KMS, provider, or administrative credential |
 | Migration task | deployment-only migration DB | none | no service, runtime DB secret, master-secret read, or business AWS API |
+| Staging RDS re-stop scheduler | none | `rds:StopDBInstance` on the exact staging DB ARN, sleep profile only | no production ARN, start/modify/delete/snapshot authority, wildcard resource, or retry loop |
+| Cost governance stack | notification destinations only | none | no Budget Action, IAM execution role, ECS/RDS mutation, or shutdown authority |
 
 Only Identity receives `AUTH_SIGNING_SECRET` and `AUTH_LOGIN_PEPPER`. This
 negative boundary is asserted so EHR and every other task cannot receive them.
