@@ -9,6 +9,9 @@
   "scripts": {
     "pretest": "npm run build:test-prerequisites",
     "build:test-prerequisites": "npm run build:api-client",
+    "preverify": "npm run build:verification-prerequisites",
+    "build:verification-prerequisites": "npm run build:cloudflare && npm run build:container-verification-prerequisites",
+    "build:container-verification-prerequisites": "npm run build:identity-api && npm run build:ehr-api && npm run build:lab-api && npm run build:pharmacy-api && npm run build:ocr-api && npm run build:ocr-worker && npm run build:outreach-api && npm run build:notification-api && npm run build:notification-worker && npm run build:event-dispatcher",
     "dev": "node scripts/dev.mjs",
     "build": "npm run build:api-client && npm run build:offline && npm run build:telemetry && npm run build:web && npm run build:ehr && npm run build:lab && npm run build:pharmacy && npm run build:ocr && npm run build:outreach && npm run build:admin && npm run build:identity-api && npm run build:ehr-api && npm run build:lab-api && npm run build:pharmacy-api && npm run build:ocr-api && npm run build:ocr-worker && npm run build:outreach-api && npm run build:notification-api && npm run build:notification-worker && npm run build:event-dispatcher && npm run build:infra",
     "test": "npm run test:cloudflare && npm run test:admin && npm run test:pharmacy && npm run test:ocr && npm run test:identity-api && npm run test:ehr-api && npm run test:lab-api && npm run test:pharmacy-api && npm run test:ocr-api && npm run test:ocr-worker && npm run test:outreach-api && npm run test:notification-api && npm run test:notification-worker && npm run test:event-dispatcher && npm run test:infra",

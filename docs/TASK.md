@@ -2,6 +2,33 @@
 
 ## Current authoritative stage — 2026-08-14
 
+Classification: **CLEAN-CHECKOUT VERIFY PREREQUISITE CORRECTED LOCALLY;
+NO DEPLOYMENT IS AUTHORIZED**.
+
+Release candidate `4aca7933ae1e041fdacca432fa5cbf98658ddaa7` passed the
+mandatory pristine-checkout root `npm test` before any root build, including
+the automatic API-client prerequisite and all 19 Admin tests. Its complete
+release provenance run then stopped correctly because root `npm run verify`
+did not declare the generated artifacts required when verification precedes
+the root build. The first failure was the seven governed frontend artifacts
+required by `verify:secret-readiness`; isolated fresh-checkout validation also
+confirmed that the unchanged container verifier requires all ten backend
+`dist` artifacts.
+
+The secret-readiness verifier's security intent is correct: canonical source
+and all seven built Cloudflare frontend artifacts must be scanned, and a
+missing required artifact must not be treated as a pass, skip, or warning. The
+deterministic lifecycle correction is isolated on
+`release-verify-reproducibility-fix` and makes root verification reuse the
+existing governed Cloudflare artifact build plus the ten existing backend
+builds before running the unchanged verification suite. No application, AWS
+IaC, cost-safety, database, migration,
+Cloudflare topology, or security rule is changed. No deployment or AWS,
+Cloudflare, ECR, Hostinger, HID 1.0, provider, DNS, or production-resource
+mutation has occurred.
+
+## Previous authoritative stage — 2026-08-14
+
 Classification: **CLEAN-CHECKOUT TEST PREREQUISITE CORRECTED LOCALLY;
 NO DEPLOYMENT IS AUTHORIZED**.
 

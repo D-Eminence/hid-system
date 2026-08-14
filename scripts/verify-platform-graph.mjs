@@ -191,11 +191,34 @@ const [rootPackage, apiClientPackage, webPackage, ehrUiPackage, labUiPackage, ph
 ])
 const pretestScripts = reachableRootScripts(rootPackage.scripts, 'pretest')
 const testScripts = reachableRootScripts(rootPackage.scripts, 'test')
+const preverifyScripts = reachableRootScripts(rootPackage.scripts, 'preverify')
+const verifyScripts = reachableRootScripts(rootPackage.scripts, 'verify')
 assert.ok(pretestScripts.has('build:test-prerequisites'),
   'root pretest must declare the generated shared-package prerequisite phase')
 assert.ok(pretestScripts.has('build:api-client'),
   'root pretest must build the API client before tests consume its generated entrypoint')
 assert.ok(testScripts.has('test:admin'), 'root test must retain the Admin test suite')
+assert.ok(preverifyScripts.has('build:verification-prerequisites'),
+  'root preverify must declare the generated verification-artifact prerequisite phase')
+assert.ok(preverifyScripts.has('build:cloudflare'),
+  'root preverify must transitively reach the governed Cloudflare frontend build')
+for (const app of ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']) {
+  assert.ok(preverifyScripts.has(`build:cloudflare:${app}`),
+    `root preverify must generate the ${app} frontend artifact`)
+}
+assert.ok(preverifyScripts.has('build:container-verification-prerequisites'),
+  'root preverify must declare the generated container-artifact prerequisite phase')
+for (const service of [
+  'identity-api', 'ehr-api', 'lab-api', 'pharmacy-api', 'ocr-api', 'ocr-worker', 'outreach-api',
+  'notification-api', 'notification-worker', 'event-dispatcher',
+]) {
+  assert.ok(preverifyScripts.has(`build:${service}`),
+    `root preverify must generate the ${service} container artifact`)
+}
+assert.ok(verifyScripts.has('verify:secret-readiness'),
+  'root verify must retain canonical and built-frontend secret scanning')
+assert.ok(verifyScripts.has('verify:containers'),
+  'root verify must retain built-container artifact scanning')
 assert.equal(apiClientPackage.main, 'dist/index.js',
   'API client runtime consumers must keep the compiled package entrypoint')
 assert.equal(apiClientPackage.types, 'dist/index.d.ts',
