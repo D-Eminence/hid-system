@@ -2,6 +2,28 @@
 
 ## Current authoritative stage — 2026-08-14
 
+Classification: **CLEAN-CHECKOUT TEST PREREQUISITE CORRECTED LOCALLY;
+NO DEPLOYMENT IS AUTHORIZED**.
+
+Release candidate `328faee9522f66051067c9a522725e4b7e370f8d` remains blocked
+for promotion because its first clean-checkout provenance run exposed an
+incomplete root test prerequisite: Admin consumes `@hid/api-client` through
+the package's generated `dist` entrypoint, but root `npm test` did not build
+that package first. The failure was a build/test orchestration defect, not an
+application runtime, AWS, Docker, container-security, or deployment failure.
+
+The deliberate correction is isolated on `release-reproducibility-fix` and
+makes the root test lifecycle build only the required generated API-client
+prerequisite before running the unchanged test suites. A semantic repository
+assertion protects that lifecycle, the compiled package contract remains
+unchanged, and generated `dist` output remains untracked. No AWS, ECR,
+Cloudflare, Hostinger, HID 1.0, provider, DNS, external database, or production resource
+has been accessed or mutated. A new committed SHA must pass clean-worktree
+`npm test` before `npm run build`, after which the complete release provenance
+gate restarts from that new exact SHA.
+
+## Previous authoritative stage — 2026-08-14
+
 Classification: **COST-SAFE ELASTIC AWS STAGING CONTROLS IMPLEMENTED IN SOURCE;
 NO DEPLOYMENT IS AUTHORIZED**.
 

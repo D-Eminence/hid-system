@@ -7,6 +7,22 @@ import { resolveDevelopmentPorts } from './ports.mjs'
 
 const repository = resolve(import.meta.dirname, '..')
 
+function reachableRootScripts(scripts, entrypoint) {
+  const reachable = new Set()
+  const pending = [entrypoint]
+  while (pending.length > 0) {
+    const script = pending.pop()
+    if (reachable.has(script)) continue
+    reachable.add(script)
+    const command = scripts[script]
+    if (typeof command !== 'string') continue
+    for (const match of command.matchAll(/(?:^|\s|&&)npm\s+run\s+([a-z0-9:_-]+)/gi)) {
+      pending.push(match[1])
+    }
+  }
+  return reachable
+}
+
 async function sourceFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true })
   const nested = await Promise.all(entries.map(async (entry) => {
@@ -158,8 +174,9 @@ for (const excluded of ['**/.aws', '**/workload-token.*', '**/secrets/**', '**/p
     `.dockerignore must exclude ${excluded}`)
 }
 
-const [rootPackage, webPackage, ehrUiPackage, labUiPackage, pharmacyUiPackage, ocrUiPackage, outreachUiPackage, adminPackage, ehrPackage, labPackage, workerPackage, dispatcherPackage] = await Promise.all([
+const [rootPackage, apiClientPackage, webPackage, ehrUiPackage, labUiPackage, pharmacyUiPackage, ocrUiPackage, outreachUiPackage, adminPackage, ehrPackage, labPackage, workerPackage, dispatcherPackage] = await Promise.all([
   readFile(join(repository, 'package.json'), 'utf8').then(JSON.parse),
+  readFile(join(repository, 'packages/api-client/package.json'), 'utf8').then(JSON.parse),
   readFile(join(repository, 'apps/web/package.json'), 'utf8').then(JSON.parse),
   readFile(join(repository, 'apps/ehr/package.json'), 'utf8').then(JSON.parse),
   readFile(join(repository, 'apps/lab/package.json'), 'utf8').then(JSON.parse),
@@ -172,6 +189,19 @@ const [rootPackage, webPackage, ehrUiPackage, labUiPackage, pharmacyUiPackage, o
   readFile(join(repository, 'services/ocr-worker/package.json'), 'utf8').then(JSON.parse),
   readFile(join(repository, 'services/event-dispatcher/package.json'), 'utf8').then(JSON.parse),
 ])
+const pretestScripts = reachableRootScripts(rootPackage.scripts, 'pretest')
+const testScripts = reachableRootScripts(rootPackage.scripts, 'test')
+assert.ok(pretestScripts.has('build:test-prerequisites'),
+  'root pretest must declare the generated shared-package prerequisite phase')
+assert.ok(pretestScripts.has('build:api-client'),
+  'root pretest must build the API client before tests consume its generated entrypoint')
+assert.ok(testScripts.has('test:admin'), 'root test must retain the Admin test suite')
+assert.equal(apiClientPackage.main, 'dist/index.js',
+  'API client runtime consumers must keep the compiled package entrypoint')
+assert.equal(apiClientPackage.types, 'dist/index.d.ts',
+  'API client type consumers must keep the compiled declaration entrypoint')
+assert.equal(adminPackage.dependencies['@hid/api-client'], 'file:../../packages/api-client',
+  'Admin must consume the shared API client package')
 assert.equal(rootPackage.scripts['dev:ocr-worker'],
   'npm --prefix services/ocr-worker run start:dev')
 assert.equal(workerPackage.scripts.start, 'node dist/main.js')
