@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { AdminApiError } from './api';
 import type { AdminActor, AdminSession, Facility, Principal } from './types';
@@ -33,6 +33,10 @@ const facility: Facility = {
 function mount(path = '/') {
   return render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>);
 }
+
+beforeEach(() => {
+  expect(document.body).toBeEmptyDOMElement();
+});
 
 afterEach(() => {
   apiMock.mockReset();

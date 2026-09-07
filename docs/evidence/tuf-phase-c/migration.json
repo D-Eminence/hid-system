@@ -1,0 +1,265 @@
+{
+  "schema_version": 1,
+  "scope": "local-synthetic-only",
+  "status": "passed",
+  "staging_accepted": false,
+  "started_at": "2026-09-06T21:49:24.956Z",
+  "checks": {
+    "schema": {
+      "dry_run_rolled_back": true,
+      "applied": 28,
+      "rerun_pending": 0,
+      "schema_rls_suite": "passed"
+    },
+    "pre_migration_integrity": {
+      "foreign_keys_checked": 328,
+      "orphan_rows": 0,
+      "unvalidated_constraints": 0,
+      "encoding": "UTF8"
+    },
+    "migration": {
+      "status": "verified",
+      "mode": "reconcile",
+      "source_counts": {
+        "staff": 1,
+        "accounts": 2,
+        "patients": 1,
+        "facilities": 1,
+        "memberships": 1,
+        "audit_events": 1,
+        "organizations": 1,
+        "user_profiles": 0,
+        "consent_grants": 1,
+        "access_requests": 1,
+        "patient_identifiers": 1
+      },
+      "target_counts": {
+        "staff": 1,
+        "accounts": 2,
+        "patients": 1,
+        "facilities": 1,
+        "memberships": 1,
+        "audit_events": 1,
+        "organizations": 1,
+        "user_profiles": 0,
+        "consent_grants": 1,
+        "access_requests": 1,
+        "external_identities": 2,
+        "patient_identifiers": 1,
+        "legacy_clinical_quarantine": 1
+      },
+      "source_checksum_sha256": "19b225ae9418963434820baecc7dc008271f8f7a95cf42da10821e8ccd576856",
+      "target_checksum_sha256": "cb618ebd0967f6128e749ca2d0a208668999db5c25b9419d7192b479a1cba16f",
+      "source_scan_reproducible": true,
+      "promotion_retry": "unchanged application tables",
+      "ids_hid_accounts_unicode_timestamps": "passed",
+      "legacy_consent_hold": "preserved"
+    },
+    "post_migration_integrity": {
+      "foreign_keys_checked": 328,
+      "orphan_rows": 0,
+      "unvalidated_constraints": 0,
+      "encoding": "UTF8"
+    },
+    "restore_integrity": {
+      "foreign_keys_checked": 328,
+      "orphan_rows": 0,
+      "unvalidated_constraints": 0,
+      "encoding": "UTF8"
+    },
+    "restore": {
+      "all_table_checksums_and_sequences_match": true,
+      "runtime_roles": "passed",
+      "schema_authorization_suite": "passed",
+      "application_http": "not executed"
+    },
+    "constraint_denials": [
+      "unique HID",
+      "not null",
+      "foreign key",
+      "enum/check"
+    ],
+    "retry_conflict": {
+      "inactive_facility_suspended": true,
+      "exact_retry_passed": true,
+      "inactive_membership_roles_revoked_with_provenance": true,
+      "changed_destination_rejected": true,
+      "changed_destination_preserved": true
+    },
+    "partial_failure": {
+      "orphan_rejected": true,
+      "run_blocked": true,
+      "earlier_batches_preserved": true,
+      "blocked_retry_rejected": true,
+      "recovery": "restore pre-migration backup to a new isolated destination; reconcile writes before switching"
+    }
+  },
+  "artifacts": [
+    {
+      "name": "pre-migration.dump",
+      "bytes": 941298,
+      "sha256": "669895a9d13e34dbc887a01edd3bb1777072f5b79097a0ac0c306c2a589c5b00"
+    },
+    {
+      "name": "before-counts-checksums.json",
+      "bytes": 14081,
+      "sha256": "176d4cf196d79ba624a097065362bba2545cca41acb6890b7ddf15910967179e"
+    },
+    {
+      "name": "after-counts-checksums.json",
+      "bytes": 14083,
+      "sha256": "a1c5b8c5f837cbdd2d6b08245601b67abe771c02d28fe2b40ab35f574f2a9aef"
+    },
+    {
+      "name": "commands.json",
+      "bytes": 191253,
+      "sha256": "20b7d131650ec37215ad790b6b53a4ebc59d8359ca572539e1a35ac4cedb344c"
+    }
+  ],
+  "actual_staging_gates": [
+    "protected CI",
+    "authorized staging database and backup",
+    "restored staging application HTTP validation",
+    "TUF forward-version operational rollback",
+    "DNS/CDN and monitoring validation"
+  ],
+  "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+  "worktree_dirty": true,
+  "postgresql": "postgres (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+  "migration_ledger": [
+    {
+      "name": "0001_platform_and_migration_control.sql",
+      "sha256": "0658978c5f01dea74f3f4183f809e3a39198ac11484658ddb7844d1dd692f842"
+    },
+    {
+      "name": "0002_auth_and_canonical_identity.sql",
+      "sha256": "9c0dd720cf8f474191a2deee3889655519b9afca665c457c974b41144809ec7b"
+    },
+    {
+      "name": "0003_consent_and_audit.sql",
+      "sha256": "0f24ece14b73e39461798b4acc74f93433a22393c3f8d9c9dce8dc58a53e7ea4"
+    },
+    {
+      "name": "0004_ehr_clinical_records.sql",
+      "sha256": "8cb2222c26f1f74e959965058445b1c2584cb38d4ea8f5f4f6617c28db104d72"
+    },
+    {
+      "name": "0005_database_authorization.sql",
+      "sha256": "f9431059ddcec475ae591c8c542b387dacc8a0b2191cf99ea923e0ca8ed1b2ab"
+    },
+    {
+      "name": "0006_phase1_authorization_vocabulary.sql",
+      "sha256": "39b78e964545bb415260f9ec43d6a12cc528d267d18d4f915c086fa4b2fbe757"
+    },
+    {
+      "name": "0007_least_privilege_password_upgrade.sql",
+      "sha256": "7be31ac82ed4fa34a7022649d3b9f1a5064770f299e7460045cb0e8b1c9f6794"
+    },
+    {
+      "name": "0008_identity_consent_integrity.sql",
+      "sha256": "8e0769ae7b889988be61f6983f24cf726faf4e2feddf1f71be267611f2babde9"
+    },
+    {
+      "name": "0009_document_scan_object_binding.sql",
+      "sha256": "7b6f442d87a9d2b2770bae94d393e8a618a93ae1fc61d86fe50ebdb4d11c2e33"
+    },
+    {
+      "name": "0010_consent_commands_and_audit_reads.sql",
+      "sha256": "8ec056d960ff75d8c9db26b55c6d953a680ce7d85f4e4b37fcf8c44d4891c8b6"
+    },
+    {
+      "name": "0011_governed_nin_registration.sql",
+      "sha256": "8221a54a0bf3fe8db0a22d467dfd484a7709afd9a7b0910ce8b03edecd2ead15"
+    },
+    {
+      "name": "0012_narrow_break_glass_authorization.sql",
+      "sha256": "8fef1dedd4c3e4b47b49353d9f5264fcf7f38746070a20effc71e716bce732e5"
+    },
+    {
+      "name": "0013_durable_ocr_persistence.sql",
+      "sha256": "dcda6ef782248722ae3440f104d89fdeb747bf674b0e5347368f8c745239a20d"
+    },
+    {
+      "name": "0014_ocr_worker_leases.sql",
+      "sha256": "d6d7495ef8a35750c999e38d06bfda8477c60fb2e27c95d558774a8a5f17bc7b"
+    },
+    {
+      "name": "0015_ocr_claim_column_resolution.sql",
+      "sha256": "718b455dfc9b9667bf82b403884e613bb08eefb145501c340d377e873822215f"
+    },
+    {
+      "name": "0016_governed_ocr_validation_publication.sql",
+      "sha256": "e4bb1e57131cab2bc31a17a14d7ea5a59fc270aa3e7880c9e876810a05687d4e"
+    },
+    {
+      "name": "0017_lab_imported_evidence.sql",
+      "sha256": "d16c010051c0656c5920416f463c6f877132a3b60202cc0122eec48bce35f7fb"
+    },
+    {
+      "name": "0018_lab_work_items.sql",
+      "sha256": "0c4323966698a8834a1c7a718fa78c5d064f40a516f8286e04229b47a9cd620e"
+    },
+    {
+      "name": "0019_lab_accessions_specimens.sql",
+      "sha256": "cf2c9ba1097bda3e47b742191b6fa4c36c587f9430c4425a678a32e882ff285a"
+    },
+    {
+      "name": "0020_lab_test_execution_results.sql",
+      "sha256": "f0197b82912a8d3653e3f88cddc20b18452dd6d5bab0ba64ab4bd6bedbddc932"
+    },
+    {
+      "name": "0021_lab_result_verification_release.sql",
+      "sha256": "b85b587ce59aaafd7818d5ccbccdd33a874b4d68094a02dce85d1ebda8d7d5f2"
+    },
+    {
+      "name": "0022_lab_result_revision_kind_compatibility.sql",
+      "sha256": "03442b7281f7c56381f4fe8b817c588926da1df1da278f8f8b33defc88c77d35"
+    },
+    {
+      "name": "0023_pharmacy_domain_foundation.sql",
+      "sha256": "f05f66c9d28ff571b1e88290ba39fb54c1cbf7f52ef100a801d605c5e246c654"
+    },
+    {
+      "name": "0024_outreach_registration_foundation.sql",
+      "sha256": "65d30c48853c39188694ce95ed0c5cb489b37ec4b5d131eb955af0b43513d5f9"
+    },
+    {
+      "name": "0025_identity_transactional_outbox.sql",
+      "sha256": "1a4242fb12db180bbd2cd32fb134df77c2910a7ccb10d02d17892e5bb38adc08"
+    },
+    {
+      "name": "0026_transactional_event_delivery.sql",
+      "sha256": "1a2c2f5269397fb54e6df5bf3ae08bf373b62f68cec3f2104994faa2d8a32f3f"
+    },
+    {
+      "name": "0027_super_admin_foundation.sql",
+      "sha256": "59a74a198d9b773d6a80e87b55556e569f18a47a633d6ba4107d5bb68101839f"
+    },
+    {
+      "name": "0028_identity_notification_migration_state.sql",
+      "sha256": "c074a44a1e98946721de9763a230762b28aa8639b302dd57afa4edc5c92de200"
+    }
+  ],
+  "migration_ledger_sha256": "a9e936c97bcc0b4c42e496a9b36fe7c09bff2a7c0f2be23f14b0e69572127fd9",
+  "source_schema": {
+    "bootstrap": "empty",
+    "data_rehearsal": "0028",
+    "external_legacy_schema": "unverified"
+  },
+  "destination_schema": "0028",
+  "fixture_sha256": "e314844eb55e02c8f4aff345cc9b171230bede56cdd5b0c9a20a6e7c0d17379d",
+  "backup_started_at": "2026-09-06T21:49:30.351Z",
+  "backup": {
+    "name": "pre-migration.dump",
+    "bytes": 941298,
+    "sha256": "669895a9d13e34dbc887a01edd3bb1777072f5b79097a0ac0c306c2a589c5b00"
+  },
+  "backup_completed_at": "2026-09-06T21:49:30.588Z",
+  "restore": {
+    "destination": "disposable Unix-socket database hid_restored",
+    "duration_ms": 1725,
+    "backup_sha256": "669895a9d13e34dbc887a01edd3bb1777072f5b79097a0ac0c306c2a589c5b00"
+  },
+  "temporary_cluster_removed": true,
+  "completed_at": "2026-09-06T21:49:40.183Z"
+}

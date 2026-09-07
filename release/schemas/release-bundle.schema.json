@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://updates.healthidentitydirectory.com/schemas/release-bundle.schema.json",
+  "title": "HID TUF-governed release bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release", "environment", "oci_images", "frontends", "edge", "migration", "promotion"],
+  "properties": {
+    "schema_version": { "const": "2.0.0" },
+    "release": { "$ref": "#/$defs/releaseIdentity" },
+    "environment": { "$ref": "#/$defs/environmentIdentity" },
+    "oci_images": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "prefixItems": [
+        { "$ref": "#/$defs/identityApi" },
+        { "$ref": "#/$defs/ehrApi" },
+        { "$ref": "#/$defs/labApi" },
+        { "$ref": "#/$defs/pharmacyApi" },
+        { "$ref": "#/$defs/ocrApi" },
+        { "$ref": "#/$defs/ocrWorker" },
+        { "$ref": "#/$defs/outreachApi" },
+        { "$ref": "#/$defs/notificationApi" },
+        { "$ref": "#/$defs/notificationWorker" },
+        { "$ref": "#/$defs/eventDispatcher" },
+        { "$ref": "#/$defs/gateway" },
+        { "$ref": "#/$defs/databaseMigration" }
+      ],
+      "items": false
+    },
+    "frontends": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "prefixItems": [
+        { "$ref": "#/$defs/webFrontend" },
+        { "$ref": "#/$defs/ehrFrontend" },
+        { "$ref": "#/$defs/labFrontend" },
+        { "$ref": "#/$defs/pharmacyFrontend" },
+        { "$ref": "#/$defs/ocrFrontend" },
+        { "$ref": "#/$defs/outreachFrontend" },
+        { "$ref": "#/$defs/adminFrontend" }
+      ],
+      "items": false
+    },
+    "edge": { "$ref": "#/$defs/edge" },
+    "migration": { "$ref": "#/$defs/migration" },
+    "promotion": {
+      "oneOf": [
+        { "$ref": "#/$defs/candidatePromotion" },
+        { "$ref": "#/$defs/stagingValidatedPromotion" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": { "environment": { "type": "object", "properties": { "name": { "const": "staging" } }, "required": ["name"] } },
+        "required": ["environment"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "promotion": { "$ref": "#/$defs/candidatePromotion" },
+          "edge": { "type": "object", "properties": { "apex_redirect": { "type": "null" } }, "required": ["apex_redirect"] }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": { "environment": { "type": "object", "properties": { "name": { "const": "production" } }, "required": ["name"] } },
+        "required": ["environment"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "promotion": { "$ref": "#/$defs/stagingValidatedPromotion" },
+          "edge": { "type": "object", "properties": { "apex_redirect": { "$ref": "#/$defs/apexRedirect" } }, "required": ["apex_redirect"] }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256Hex": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "ociDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "releaseId": { "type": "string", "pattern": "^r[0-9]{10}-g[a-f0-9]{40}$" },
+    "canonicalDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+    },
+    "targetRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "length", "sha256", "media_type"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^environments/(staging|production)/releases/r[0-9]{10}-g[a-f0-9]{40}/[a-z0-9][a-z0-9._/-]*$"
+        },
+        "length": { "type": "integer", "minimum": 1, "maximum": 26214400 },
+        "sha256": { "$ref": "#/$defs/sha256Hex" },
+        "media_type": { "type": "string", "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]+/[a-z0-9][a-z0-9!#$&^_.+-]+$" }
+      }
+    },
+    "releaseIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sequence", "source_repository", "git_sha", "created_at", "artifact_set_sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/releaseId" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 9999999999 },
+        "source_repository": { "const": "https://github.com/D-Eminence/hid-system.git" },
+        "git_sha": { "$ref": "#/$defs/gitSha" },
+        "created_at": { "$ref": "#/$defs/canonicalDateTime" },
+        "artifact_set_sha256": { "$ref": "#/$defs/sha256Hex" }
+      }
+    },
+    "environmentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tuf_repository_id", "update_origin", "target_prefix", "aws_account_id", "aws_region"],
+      "properties": {
+        "name": { "enum": ["staging", "production"] },
+        "tuf_repository_id": { "enum": ["hid-staging-v1", "hid-production-v1"] },
+        "update_origin": { "enum": ["https://updates.staging.healthidentitydirectory.com", "https://updates.healthidentitydirectory.com"] },
+        "target_prefix": { "enum": ["environments/staging", "environments/production"] },
+        "aws_account_id": { "type": "string", "pattern": "^[0-9]{12}$" },
+        "aws_region": { "type": "string", "pattern": "^[a-z]{2}(?:-gov)?-[a-z]+-[0-9]$" }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture"],
+      "properties": {
+        "os": { "const": "linux" },
+        "architecture": { "const": "amd64" }
+      }
+    },
+    "sbom": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "target"],
+      "properties": {
+        "format": { "const": "SPDX-JSON" },
+        "target": { "$ref": "#/$defs/targetRef" }
+      }
+    },
+    "exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "approved_by", "approved_at", "expires_at", "issue_uri"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Z][A-Z0-9_-]{2,63}$" },
+        "approved_by": { "type": "string", "minLength": 3, "maxLength": 128 },
+        "approved_at": { "$ref": "#/$defs/canonicalDateTime" },
+        "expires_at": { "$ref": "#/$defs/canonicalDateTime" },
+        "issue_uri": { "type": "string", "format": "uri", "pattern": "^https://" }
+      }
+    },
+    "scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanner", "scanner_version", "completed_at", "critical", "high", "decision", "target"],
+      "properties": {
+        "scanner": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "scanner_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "completed_at": { "$ref": "#/$defs/canonicalDateTime" },
+        "critical": { "type": "integer", "minimum": 0 },
+        "high": { "type": "integer", "minimum": 0 },
+        "decision": { "enum": ["pass", "approved_exception"] },
+        "target": { "$ref": "#/$defs/targetRef" },
+        "exception": { "$ref": "#/$defs/exception" }
+      },
+      "allOf": [
+        {
+          "if": { "type": "object", "properties": { "decision": { "const": "pass" } }, "required": ["decision"] },
+          "then": {
+            "type": "object",
+            "properties": { "critical": { "const": 0 }, "high": { "const": 0 }, "exception": { "$ref": "#/$defs/exception" } },
+            "not": { "type": "object", "properties": { "exception": true }, "required": ["exception"] }
+          }
+        },
+        {
+          "if": { "type": "object", "properties": { "decision": { "const": "approved_exception" } }, "required": ["decision"] },
+          "then": { "required": ["exception"] }
+        }
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "predicate_type", "target"],
+      "properties": {
+        "format": { "const": "in-toto-jsonl" },
+        "predicate_type": { "const": "https://slsa.dev/provenance/v1" },
+        "target": { "$ref": "#/$defs/targetRef" }
+      }
+    },
+    "ociImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "repository_uri", "digest", "size_bytes", "platform", "built_at", "sbom", "scan", "provenance"],
+      "properties": {
+        "component": {
+          "enum": ["identity-api", "ehr-api", "lab-api", "pharmacy-api", "ocr-api", "ocr-worker", "outreach-api", "notification-api", "notification-worker", "event-dispatcher", "gateway", "database-migration"]
+        },
+        "repository_uri": {
+          "type": "string",
+          "pattern": "^[0-9]{12}\\.dkr\\.ecr\\.[a-z]{2}(?:-gov)?-[a-z]+-[0-9]\\.amazonaws\\.com/(staging|production)/hid/[a-z0-9][a-z0-9._/-]*$"
+        },
+        "digest": { "$ref": "#/$defs/ociDigest" },
+        "size_bytes": { "type": "integer", "minimum": 1, "maximum": 10737418240 },
+        "platform": { "$ref": "#/$defs/platform" },
+        "built_at": { "$ref": "#/$defs/canonicalDateTime" },
+        "sbom": { "$ref": "#/$defs/sbom" },
+        "scan": { "$ref": "#/$defs/scan" },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "identityApi": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "identity-api" } } }] },
+    "ehrApi": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "ehr-api" } } }] },
+    "labApi": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "lab-api" } } }] },
+    "pharmacyApi": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "pharmacy-api" } } }] },
+    "ocrApi": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "ocr-api" } } }] },
+    "ocrWorker": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "ocr-worker" } } }] },
+    "outreachApi": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "outreach-api" } } }] },
+    "notificationApi": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "notification-api" } } }] },
+    "notificationWorker": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "notification-worker" } } }] },
+    "eventDispatcher": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "event-dispatcher" } } }] },
+    "gateway": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "gateway" } } }] },
+    "databaseMigration": { "allOf": [{ "$ref": "#/$defs/ociImage" }, { "type": "object", "properties": { "component": { "const": "database-migration" } } }] },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "script", "compatibility_date", "hostname", "api_origin", "cache_generation"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^hid-(web|ehr|lab|pharmacy|ocr|outreach|admin)-(staging|production)$" },
+        "script": { "$ref": "#/$defs/targetRef" },
+        "compatibility_date": { "const": "2026-08-12" },
+        "hostname": { "type": "string", "pattern": "^[a-z0-9.-]+\\.healthidentitydirectory\\.com$" },
+        "api_origin": { "enum": ["https://api.staging.healthidentitydirectory.com", "https://api.healthidentitydirectory.com"] },
+        "cache_generation": { "$ref": "#/$defs/gitSha" }
+      }
+    },
+    "frontend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["app", "archive", "content_manifest", "worker", "sbom", "scan", "provenance"],
+      "properties": {
+        "app": { "enum": ["web", "ehr", "lab", "pharmacy", "ocr", "outreach", "admin"] },
+        "archive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "file_count", "uncompressed_size_bytes", "target"],
+          "properties": {
+            "format": { "const": "ustar" },
+            "file_count": { "type": "integer", "minimum": 3, "maximum": 20000 },
+            "uncompressed_size_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400 },
+            "target": { "$ref": "#/$defs/targetRef" }
+          }
+        },
+        "content_manifest": { "$ref": "#/$defs/targetRef" },
+        "worker": { "$ref": "#/$defs/worker" },
+        "sbom": { "$ref": "#/$defs/sbom" },
+        "scan": { "$ref": "#/$defs/scan" },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "webFrontend": { "allOf": [{ "$ref": "#/$defs/frontend" }, { "type": "object", "properties": { "app": { "const": "web" } } }] },
+    "ehrFrontend": { "allOf": [{ "$ref": "#/$defs/frontend" }, { "type": "object", "properties": { "app": { "const": "ehr" } } }] },
+    "labFrontend": { "allOf": [{ "$ref": "#/$defs/frontend" }, { "type": "object", "properties": { "app": { "const": "lab" } } }] },
+    "pharmacyFrontend": { "allOf": [{ "$ref": "#/$defs/frontend" }, { "type": "object", "properties": { "app": { "const": "pharmacy" } } }] },
+    "ocrFrontend": { "allOf": [{ "$ref": "#/$defs/frontend" }, { "type": "object", "properties": { "app": { "const": "ocr" } } }] },
+    "outreachFrontend": { "allOf": [{ "$ref": "#/$defs/frontend" }, { "type": "object", "properties": { "app": { "const": "outreach" } } }] },
+    "adminFrontend": { "allOf": [{ "$ref": "#/$defs/frontend" }, { "type": "object", "properties": { "app": { "const": "admin" } } }] },
+    "apexRedirect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "script", "hostname", "destination_origin"],
+      "properties": {
+        "name": { "const": "hid-apex-redirect-production" },
+        "script": { "$ref": "#/$defs/targetRef" },
+        "hostname": { "const": "healthidentitydirectory.com" },
+        "destination_origin": { "const": "https://www.healthidentitydirectory.com" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frontend_worker", "apex_redirect"],
+      "properties": {
+        "frontend_worker": { "$ref": "#/$defs/targetRef" },
+        "apex_redirect": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/apexRedirect" }] }
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_component", "first", "last", "count", "ledger", "verification"],
+      "properties": {
+        "image_component": { "const": "database-migration" },
+        "first": { "const": "0001" },
+        "last": { "const": "0028" },
+        "count": { "const": 28 },
+        "ledger": { "$ref": "#/$defs/targetRef" },
+        "verification": { "$ref": "#/$defs/targetRef" }
+      }
+    },
+    "candidatePromotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": { "kind": { "const": "candidate" } }
+    },
+    "promotionTargets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["staging_acceptance", "migration_dry_run", "staging_copy_migration", "backup_restore", "rollback_drill", "approval"],
+      "properties": {
+        "staging_acceptance": { "$ref": "#/$defs/targetRef" },
+        "migration_dry_run": { "$ref": "#/$defs/targetRef" },
+        "staging_copy_migration": { "$ref": "#/$defs/targetRef" },
+        "backup_restore": { "$ref": "#/$defs/targetRef" },
+        "rollback_drill": { "$ref": "#/$defs/targetRef" },
+        "approval": { "$ref": "#/$defs/targetRef" }
+      }
+    },
+    "stagingValidatedPromotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "staging_release_id", "staging_artifact_set_sha256", "evidence"],
+      "properties": {
+        "kind": { "const": "staging-validated" },
+        "staging_release_id": { "$ref": "#/$defs/releaseId" },
+        "staging_artifact_set_sha256": { "$ref": "#/$defs/sha256Hex" },
+        "evidence": { "$ref": "#/$defs/promotionTargets" }
+      }
+    }
+  }
+}

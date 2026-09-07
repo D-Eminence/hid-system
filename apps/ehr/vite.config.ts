@@ -3,15 +3,23 @@ import react from '@vitejs/plugin-react';
 import fs from 'node:fs';
 import path from 'path';
 import { resolveDevelopmentPorts } from '../../scripts/ports.mjs';
+import {
+  releaseBoundServiceWorkerPlugin,
+  resolveBuildReleaseSha,
+} from './scripts/service-worker-release.mjs';
 
-const canonicalEhrHtml = path.resolve(__dirname, './ehr.html');
-const canonicalPlatformRuntime = path.resolve(__dirname, './src/canonical-platform-runtime.ts');
+const canonicalEhrHtml = path.resolve(import.meta.dirname, './ehr.html');
+const canonicalPlatformRuntime = path.resolve(import.meta.dirname, './src/canonical-platform-runtime.ts');
 const ports = resolveDevelopmentPorts();
 
 export default defineConfig(({ command }) => {
   const publicBase = process.env.HID_PUBLIC_BASE ?? '/ehr/';
+  const releaseSha = resolveBuildReleaseSha();
   return ({
   base: publicBase,
+  define: {
+    __HID_EHR_RELEASE_SHA__: JSON.stringify(releaseSha),
+  },
   plugins: [
     react(),
     {
@@ -27,11 +35,12 @@ export default defineConfig(({ command }) => {
         );
       },
     },
+    releaseBoundServiceWorkerPlugin(releaseSha),
   ],
   resolve: {
     dedupe: ['react', 'react-dom'],
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   optimizeDeps: {
@@ -40,7 +49,7 @@ export default defineConfig(({ command }) => {
   build: {
     rollupOptions: {
       input: {
-        index: path.resolve(__dirname, './index.html'),
+        index: path.resolve(import.meta.dirname, './index.html'),
         'canonical-platform-runtime': canonicalPlatformRuntime,
       },
       output: {

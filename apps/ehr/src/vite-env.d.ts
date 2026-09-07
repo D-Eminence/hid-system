@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 
+declare const __HID_EHR_RELEASE_SHA__: string;
+
 interface ImportMetaEnv {
   readonly VITE_HID_API_URL?: string;
   readonly VITE_HID_AUTH_COOKIE_NAME?: string;

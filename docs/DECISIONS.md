@@ -1157,3 +1157,131 @@ Supersedes or extends:
 
 ADR-033 for AWS staging operating modes; ADR-033 remains authoritative for the
 Cloudflare edge, notification boundary, and legacy migration convergence.
+
+# ADR-035: TUF Release Admission with Isolated Trust and Atomic Edge Repositories
+
+Status: Accepted for source implementation; live provisioning remains gated
+
+Date: 2026-08-31
+
+Context:
+
+HID releases consist of twelve independently governed OCI identities and seven
+independently deployed frontend trees. ECR digest pinning authenticates OCI
+bytes, but the platform has no executable authority binding the approved digest
+set, frontend bytes, migration ledger, and security evidence to one release.
+The current document-bucket `release-evidence/` prefix is not a valid trust
+boundary because application roles can access that bucket. There is no end-user
+binary updater; the release operator/deployer is the artifact consumer.
+
+Decision:
+
+Use TUF at release admission. The primary target binds the exact Git SHA,
+twelve ECR repository/digest records, seven deterministic frontend archives,
+edge-worker source, migration ledger, and bounded evidence summaries. OCI blobs
+remain in ECR. Browsers, clinical downloads, services, and databases do not
+become TUF clients. The release verifier emits the only accepted ECS and
+Cloudflare deployment plan.
+
+Give staging and production unrelated roots, signing keys, metadata sequences,
+durable client state, archives, publisher credentials, and hostnames. Serve
+each complete consistent-snapshot repository as one Cloudflare Worker Static
+Assets version at `updates.staging.healthidentitydirectory.com` or
+`updates.healthidentitydirectory.com`. Upload and verify a versioned preview,
+then deploy exactly that version to 100% traffic. Do not use split TUF traffic,
+a write endpoint, R2 mutable state, the PHI bucket, Hostinger, Vercel, or
+CloudFront for this repository.
+
+Archive every generation and publication journal before promotion in a
+dedicated private, versioned, KMS-encrypted, object-locked S3 bucket with S3
+data-event audit. ECS receives no access. Retain all root versions permanently;
+retain production targets for at least ten accepted releases and 180 days, and
+staging targets for at least five releases and 90 days. ECR deletion must obey
+the same reference rule.
+
+Production root and targets use separate 2-of-3 offline hardware-backed
+custodians. Snapshot and timestamp each authorize two independent non-exportable
+AWS KMS keys at threshold 1. The pinned online algorithm is P-256 ECDSA with
+SHA-256 unless a separately approved and interoperability-tested policy changes
+it. Root, targets, snapshot, and timestamp expire within 365, 90, 7, and 1 day
+respectively. Production hardware/provider/custodian selection and every live
+key ceremony remain explicit approval gates.
+
+Build, offline signing, online freshness signing, publication, deployment, and
+independent canary capabilities are separate. CI uses protected GitHub
+environments and OIDC for exact AWS roles; it never stores private signing keys.
+GitHub-assumable roles also never receive direct `kms:Sign`: protected workflow
+code is still caller-controlled code and must not be able to bypass metadata
+policy by invoking KMS itself. A fixed AWS-side broker alone receives one exact
+candidate key permission. It obtains environment, repository, key ARN/SPKI,
+bootstrap root, current root chain, current published versions/hashes, pending
+decisions, and durable online-role high-water marks from deployment
+configuration and broker state rather than from the signing request. Before
+signing, it authenticates the candidate against that state, enforces the exact
+successor of the selected role's durable high-water and narrow wall-clock
+bounds, and records enough context for timestamp signing to select only a
+broker-authorized snapshot.
+GitHub may submit a bounded immutable request and retrieve its result, but may
+not mutate broker trust state or call KMS directly.
+The repository-owned go-tuf v2.4.2 client requires an out-of-band root hash,
+isolated durable state, exact origins and environment/release identity, bounded
+downloads, verified target references, safe archive extraction, and atomic
+outputs. Trust-on-first-use and silent state reset are forbidden.
+
+Implementation clarification (2026-09-04): an exact retry replays its committed
+bytes even after publication or supersession. A different request may replace
+a pending online role only after authenticated metadata falls below its hard
+publication-freshness floor; the replacement consumes the next high-water
+version and never reuses the exposed one. Snapshot replacement clears a
+dependent timestamp while preserving its consumed timestamp high-water. Root
+and targets remain sequential and cannot skip an unpublished next version.
+New output is committed only with a 30-minute operational publication margin.
+The ordinary plan/materializer remains strict `+1`; recovered gaps require a
+separate durable-checkpoint authorization before upload and deploy, which is
+still an open staging gate.
+
+Implementation clarification (2026-09-05): the read-only publication operator
+now authenticates the exact current/pending tuples before upload and again
+before deployment, and materializes recovered online gaps through the same
+policy with final reauthorization before atomic commit. The ordinary operator
+remains strict `+1`. A separately protected predecessor repository hash, taken
+from retained publication evidence, protects the full immutable history;
+checkpoint role hashes do not alone prove that history. Upload/deployment
+receipts are schema `2.0.0` and bind the fixed operator/configuration pins,
+checkpoint revision, predecessor/candidate hashes and role identities. These
+fresh five-minute decisions are neither bearer credentials nor distributed
+locks. An isolated protected runner and per-environment serialization through
+public canary/checkpoint advancement remain required; failed or ambiguous
+external operations require reconciliation before another publisher proceeds.
+Source implementation and local tests do not close that live gate.
+
+The local coordination policy is separate from signing state. It conditionally
+claims one environment, records ordered effect intent and verified receipts,
+retains the confirmed predecessor hash, and closes only on fresh read-only
+published-state confirmation. Unresolved attempts have no automatic expiry or
+takeover. The policy has concurrency/crash tests but only an in-memory test
+store; durable history-preserving storage, receipt-verifying orchestration and
+independently governed reconciliation remain implementation/live gates. No
+publisher write to the signing checkpoint is introduced by this decision.
+
+Production promotion reuses the exact staging artifact-set hash and bytes after
+the staging application, migration-copy, backup restore, rollback, and
+monitoring gates pass. Rollback publishes a new higher-version release selecting
+retained old targets. It never restores stale metadata or an old Worker version.
+
+Consequences:
+
+- a compromised repository/publisher cannot forge an approved release without
+  role thresholds, while durable state and expiry expose rollback/freeze;
+- private signing keys never enter Git, GitHub secrets, Cloudflare, environment
+  files, logs, or application runtimes;
+- compromised or changed protected-workflow code cannot turn an assigned KMS
+  key into an arbitrary or caller-rooted signing oracle;
+- public repository targets must be PHI-free, secret-scanned, and explicitly
+  allowlisted because TUF provides authenticity, not confidentiality;
+- Object Lock, production key creation, account identifiers, DNS, provider
+  credentials, staging, and production remain external gated actions; and
+- exact layouts, role operations, expiry response, recovery, and gate evidence
+  are maintained in `TUF-PRODUCTION-IMPLEMENTATION.md`.
+
+Related ADRs: ADR-025, ADR-026, ADR-032, ADR-033, ADR-034.

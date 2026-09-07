@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0.0",
+  "verified_at": "2026-08-31",
+  "project": "github.com/theupdateframework/go-tuf/v2/examples/cli/tuf-client",
+  "go_tuf": {
+    "module": "github.com/theupdateframework/go-tuf/v2",
+    "version": "v2.4.2",
+    "commit": "f5edbde31e5507f46db2069402dc38903fe6d9d4",
+    "source_tree_sha256": "6ceb2d9979e910310c37243d27040c310c279748c57142301f980b29c2b25ebd",
+    "source_tree_hash_algorithm": "sha256 of the exact git ls-tree -r HEAD stdout bytes",
+    "go_mod_sha256": "d0e895542701e1bb30a3a4bbcbaddc889777968ee8d4b49bd971152d04c9e947",
+    "go_sum_sha256": "153125c407a41dfbab9b1b27b1b3c854475103c5077f3a0fa06f847f73b4f436",
+    "module_sum": "h1:w7976/W8uTwlsegP5nRymlpjPgrwSh+AXUf85is6nJk=",
+    "go_mod_sum": "h1:JqBrIUnNLAaNq/8GmBcEMFWfAFBbqp/MkJEJseXKbks="
+  },
+  "go": {
+    "version": "go1.25.0",
+    "platform": "linux/amd64",
+    "distribution_filename": "go1.25.0.linux-amd64.tar.gz",
+    "distribution_sha256": "2852af0cb20a13139b3448992e69b868e50ed0f8a1e5940ee1de9e19a123b613",
+    "distribution_size_bytes": 59659213,
+    "binary_path": "/opt/hid-release-tools/go/1.25.0/bin/go",
+    "binary_sha256": "b93cdfdbc72f1afc3f21498c80bf3d155a44a9b95e2d690c940511051574bc25"
+  },
+  "reference_client": {
+    "main_package": "github.com/theupdateframework/go-tuf/v2/examples/cli/tuf-client",
+    "binary_path": "/opt/hid-release-tools/tuf-client/2.4.2/tuf-client",
+    "binary_sha256": "6933984fa57625a361896db52b9eb8fdd9658f98327b7bd44d806096114fb351",
+    "size_bytes": 12857047,
+    "build_a_sha256": "6933984fa57625a361896db52b9eb8fdd9658f98327b7bd44d806096114fb351",
+    "build_b_sha256": "6933984fa57625a361896db52b9eb8fdd9658f98327b7bd44d806096114fb351",
+    "installed_artifact_sha256": "6933984fa57625a361896db52b9eb8fdd9658f98327b7bd44d806096114fb351",
+    "installed_artifact_size_bytes": 12857047,
+    "reproducibility_result": "build-a and build-b were byte-identical",
+    "build_command": [
+      "go",
+      "build",
+      "-mod=readonly",
+      "-trimpath",
+      "-buildvcs=false",
+      "-ldflags=-buildid=",
+      "./examples/cli/tuf-client"
+    ],
+    "build_environment": {
+      "GOENV": "off",
+      "GOTOOLCHAIN": "local",
+      "GOOS": "linux",
+      "GOARCH": "amd64",
+      "GOAMD64": "v1",
+      "CGO_ENABLED": "0",
+      "GOPROXY": "off",
+      "SOURCE_DATE_EPOCH": "0",
+      "TZ": "UTC",
+      "LC_ALL": "C",
+      "LANG": "C"
+    }
+  },
+  "policy": {
+    "production_updater": false,
+    "allowed_use": "local and staging interoperability/attack-test oracle",
+    "private_keys_present": false,
+    "module_verification": "all modules verified"
+  }
+}

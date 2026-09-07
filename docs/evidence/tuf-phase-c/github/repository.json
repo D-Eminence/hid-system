@@ -1,0 +1,17 @@
+{
+  "read_at": "2026-09-06T21:45:05.723189+00:00",
+  "endpoint": "repos/D-Eminence/hid-system",
+  "exit_code": 0,
+  "response": {
+    "id": 1317340803,
+    "name": "hid-system",
+    "full_name": "D-Eminence/hid-system",
+    "private": false,
+    "default_branch": "main",
+    "owner": {
+      "id": 182018869,
+      "login": "D-Eminence",
+      "type": "User"
+    }
+  }
+}

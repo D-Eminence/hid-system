@@ -1,0 +1,738 @@
+[
+  {
+    "schema_version": "hid.tuf.offline-infrastructure-plan/v1",
+    "environment": "staging",
+    "mode": "--foundation",
+    "authorization": "NOT_AUTHORIZED",
+    "live_diff": false,
+    "cloud_calls": false,
+    "template_file": "Hid-staging-ReleaseTrust.template.json",
+    "template_sha256": "e7e0d98e4daea73a3740465464e4b8952bd510de1820f1c5396ac13eb3fc1ca1",
+    "changes": [
+      {
+        "logical_id": "RepositoryEncryptionKey70A4CB84",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "EvidenceArchiveEncryptionKey3F40D27F",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "AuditLogEncryptionKey08F350F7",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "BrokerImageEncryptionKeyF24DE67C",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "BrokerImageRepository276C3BEB",
+        "type": "AWS::ECR::Repository",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "ReleaseRepository460B8FD0",
+        "type": "AWS::S3::Bucket",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "ReleaseRepositoryPolicyDC543742",
+        "type": "AWS::S3::BucketPolicy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "EvidenceArchiveAC3FE155",
+        "type": "AWS::S3::Bucket",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "EvidenceArchivePolicy021DBB9A",
+        "type": "AWS::S3::BucketPolicy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "AuditLogArchive7AF3177A",
+        "type": "AWS::S3::Bucket",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "AuditLogArchivePolicyD6EDDF0D",
+        "type": "AWS::S3::BucketPolicy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "ReleaseTrustAuditTrailDE8BDEC4",
+        "type": "AWS::CloudTrail::Trail",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "SnapshotSigningCandidateOne86D87735",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "SnapshotSigningCandidateTwoD2BBE737",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TimestampSigningCandidateOne5F0BA28A",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TimestampSigningCandidateTwoED6794A3",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "BuildRole41B77417",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "BuildRoleDefaultPolicy05D1D9FE",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "PublisherRoleFDE2F285",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "PublisherRoleDefaultPolicy04D6B219",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "EvidenceWriterRole81BB291A",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "EvidenceWriterRoleDefaultPolicy48604583",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "AuditorRoleB9C8BBB2",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "AuditorRoleDefaultPolicy2347C9C6",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "SnapshotSignerOneRole71CADA05",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "SnapshotSignerOneRoleDefaultPolicyB79255A9",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "SnapshotSignerTwoRole40269C4E",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "SnapshotSignerTwoRoleDefaultPolicyF3892ACE",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TimestampSignerOneRole37358A40",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TimestampSignerOneRoleDefaultPolicyD297053C",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TimestampSignerTwoRole475E05B1",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TimestampSignerTwoRoleDefaultPolicy60753CFF",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      }
+    ],
+    "scope": "synthetic identifier source model only; no actual AWS diff",
+    "review_id": "foundation"
+  },
+  {
+    "schema_version": "hid.tuf.offline-infrastructure-plan/v1",
+    "environment": "staging",
+    "mode": "--broker",
+    "authorization": "NOT_AUTHORIZED",
+    "live_diff": false,
+    "cloud_calls": false,
+    "template_file": "Hid-staging-ReleaseTrust.template.json",
+    "template_sha256": "3f0339967a390b74af83efda4d1f78a44148c367f7d21b4b537866ac9afdf356",
+    "changes": [
+      {
+        "logical_id": "RepositoryEncryptionKey70A4CB84",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "EvidenceArchiveEncryptionKey3F40D27F",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "AuditLogEncryptionKey08F350F7",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "BrokerImageEncryptionKeyF24DE67C",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "BrokerImageRepository276C3BEB",
+        "type": "AWS::ECR::Repository",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "ReleaseRepository460B8FD0",
+        "type": "AWS::S3::Bucket",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "ReleaseRepositoryPolicyDC543742",
+        "type": "AWS::S3::BucketPolicy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "EvidenceArchiveAC3FE155",
+        "type": "AWS::S3::Bucket",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "EvidenceArchivePolicy021DBB9A",
+        "type": "AWS::S3::BucketPolicy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "AuditLogArchive7AF3177A",
+        "type": "AWS::S3::Bucket",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "AuditLogArchivePolicyD6EDDF0D",
+        "type": "AWS::S3::BucketPolicy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "ReleaseTrustAuditLogGroup94AA8539",
+        "type": "AWS::Logs::LogGroup",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "ReleaseTrustAuditLogGroupKmsSignAttemptsB254CFE8",
+        "type": "AWS::Logs::MetricFilter",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "ReleaseTrustAuditLogGroupRejectedKmsSignAttempts9DA83919",
+        "type": "AWS::Logs::MetricFilter",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "ReleaseTrustAuditLogGroupUnexpectedStateWrites67E69279",
+        "type": "AWS::Logs::MetricFilter",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "ReleaseTrustAuditLogGroupDestructiveStateWritesA4893B77",
+        "type": "AWS::Logs::MetricFilter",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "ReleaseTrustAuditTrailLogsRole6D07BA3F",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "ReleaseTrustAuditTrailLogsRoleDefaultPolicy75C9252A",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "ReleaseTrustAuditTrailDE8BDEC4",
+        "type": "AWS::CloudTrail::Trail",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "SnapshotSigningCandidateOne86D87735",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "SnapshotSigningCandidateTwoD2BBE737",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TimestampSigningCandidateOne5F0BA28A",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TimestampSigningCandidateTwoED6794A3",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "BuildRole41B77417",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "BuildRoleDefaultPolicy05D1D9FE",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "PublisherRoleFDE2F285",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "PublisherRoleDefaultPolicy04D6B219",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "EvidenceWriterRole81BB291A",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "EvidenceWriterRoleDefaultPolicy48604583",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "AuditorRoleB9C8BBB2",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "AuditorRoleDefaultPolicy2347C9C6",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "SnapshotSignerOneRole71CADA05",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "SnapshotSignerOneRoleDefaultPolicyB79255A9",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "SnapshotSignerTwoRole40269C4E",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "SnapshotSignerTwoRoleDefaultPolicyF3892ACE",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TimestampSignerOneRole37358A40",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TimestampSignerOneRoleDefaultPolicyD297053C",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TimestampSignerTwoRole475E05B1",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TimestampSignerTwoRoleDefaultPolicy60753CFF",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerStateEncryptionKeyE4B1F048",
+        "type": "AWS::KMS::Key",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TufSigningBrokerStateTable2C4DC214",
+        "type": "AWS::DynamoDB::Table",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotOneExecutionRole0C25C9ED",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotOneExecutionRoleDefaultPolicy076DB069",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotOneLogGroupC2B54DC6",
+        "type": "AWS::Logs::LogGroup",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotOneFunctionBBFB62CE",
+        "type": "AWS::Lambda::Function",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotOneFunctionCurrentVersionE03F25F8f673c3c6cb2d5ab92bed363e053c2b06",
+        "type": "AWS::Lambda::Version",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotTwoExecutionRole35957997",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotTwoExecutionRoleDefaultPolicyDB258839",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotTwoLogGroupE5E5BE00",
+        "type": "AWS::Logs::LogGroup",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotTwoFunction63D8B675",
+        "type": "AWS::Lambda::Function",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotTwoFunctionCurrentVersionBC79A1693c256a66d9e10e5b6fa2537868427f14",
+        "type": "AWS::Lambda::Version",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampOneExecutionRole5BB1A7B9",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampOneExecutionRoleDefaultPolicy5B0AC5C0",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampOneLogGroup5CEB2651",
+        "type": "AWS::Logs::LogGroup",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampOneFunction23D7E09A",
+        "type": "AWS::Lambda::Function",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampOneFunctionCurrentVersion3D59DA4192ad837cbbb152b1fb7fe2fc725aec43",
+        "type": "AWS::Lambda::Version",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampTwoExecutionRole0AAC8AE2",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampTwoExecutionRoleDefaultPolicy47253184",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampTwoLogGroup3AF34526",
+        "type": "AWS::Logs::LogGroup",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampTwoFunctionD80194AC",
+        "type": "AWS::Lambda::Function",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampTwoFunctionCurrentVersion95FECF83e6822ae2b229f122f4a4a2da5bf7d97f",
+        "type": "AWS::Lambda::Version",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotOneErrorAlarm8F96DD23",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotOneThrottleAlarm72369600",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotTwoErrorAlarmFED8C7C6",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerSnapshotTwoThrottleAlarm94A6B90F",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampOneErrorAlarmDFECC210",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampOneThrottleAlarmD9D08E78",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampTwoErrorAlarmA374694B",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerTimestampTwoThrottleAlarm7FC8CDDA",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointExecutionRole048DAFEB",
+        "type": "AWS::IAM::Role",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointExecutionRoleDefaultPolicy1807B770",
+        "type": "AWS::IAM::Policy",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointLogGroupCC958500",
+        "type": "AWS::Logs::LogGroup",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": "Retain"
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointFunction36A7DBB4",
+        "type": "AWS::Lambda::Function",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointFunctionCurrentVersionCC07E9E1d5ee44d689ae61eaedf916e0e659de3a",
+        "type": "AWS::Lambda::Version",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointErrorAlarmD5ED45ED",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointThrottleAlarm945A4158",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointSchedule74E421E5",
+        "type": "AWS::Events::Rule",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointScheduleAllowEventRuleHidstagingReleaseTrustTufSigningBrokerCheckpointFunctionCurrentVersion40D15FD1CA0F139C",
+        "type": "AWS::Lambda::Permission",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointScheduleFailedInvocationAlarmF8F57BC8",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerCheckpointInvocationHeartbeatAlarmCE43A9A4",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerKmsSignVolumeAlarm694BF07E",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerRejectedKmsSignAlarmD2F2A849",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerUnexpectedStateWriteAlarm5C1F1619",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerDestructiveStateWriteAlarm641042F1",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerStateConditionalWriteFailureAlarm2696F398",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      },
+      {
+        "logical_id": "TufSigningBrokerStateSystemErrorAlarm1001DF81",
+        "type": "AWS::CloudWatch::Alarm",
+        "proposed_action": "create-if-confirmed-absent",
+        "deletion_policy": null
+      }
+    ],
+    "scope": "synthetic identifier source model only; no actual AWS diff",
+    "review_id": "broker"
+  }
+]

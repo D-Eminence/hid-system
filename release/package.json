@@ -1,0 +1,19 @@
+{
+  "name": "@hid/release-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "verify": "node scripts/verify-release-contract.mjs"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "json-dup-key-validator": "1.0.3",
+    "yaml": "2.9.0"
+  }
+}

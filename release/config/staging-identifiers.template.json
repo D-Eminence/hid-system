@@ -1,0 +1,203 @@
+{
+  "schema_version": "hid.tuf.staging-identifiers/v1",
+  "environment": "staging",
+  "authorization": "NOT_AUTHORIZED",
+  "github": {
+    "repository": "D-Eminence/hid-system",
+    "repository_id": "1317340803",
+    "owner_id": "182018869",
+    "protected_ref": "<PROTECTED_REF>",
+    "capabilities": {
+      "build": {
+        "environment": "staging-build",
+        "workflow_ref": "<WORKFLOW_REF>",
+        "role_arn": "<ROLE_ARN>"
+      },
+      "publisher": {
+        "environment": "staging-publisher",
+        "workflow_ref": "<WORKFLOW_REF>",
+        "role_arn": "<ROLE_ARN>"
+      },
+      "evidenceWriter": {
+        "environment": "staging-evidence-writer",
+        "workflow_ref": "<WORKFLOW_REF>",
+        "role_arn": "<ROLE_ARN>"
+      },
+      "auditor": {
+        "environment": "staging-auditor",
+        "workflow_ref": "<WORKFLOW_REF>",
+        "role_arn": "<ROLE_ARN>"
+      },
+      "snapshotSignerOne": {
+        "environment": "staging-snapshot-signer-one",
+        "workflow_ref": "<WORKFLOW_REF>",
+        "role_arn": "<ROLE_ARN>"
+      },
+      "snapshotSignerTwo": {
+        "environment": "staging-snapshot-signer-two",
+        "workflow_ref": "<WORKFLOW_REF>",
+        "role_arn": "<ROLE_ARN>"
+      },
+      "timestampSignerOne": {
+        "environment": "staging-timestamp-signer-one",
+        "workflow_ref": "<WORKFLOW_REF>",
+        "role_arn": "<ROLE_ARN>"
+      },
+      "timestampSignerTwo": {
+        "environment": "staging-timestamp-signer-two",
+        "workflow_ref": "<WORKFLOW_REF>",
+        "role_arn": "<ROLE_ARN>"
+      }
+    },
+    "candidate_workflow_path": "<WORKFLOW_PATH>",
+    "publisher_config_sha256": "<SHA256>",
+    "tooling_archive_sha256": "<SHA256>"
+  },
+  "aws": {
+    "account_id": "<AWS_ACCOUNT_ID>",
+    "region": "<AWS_REGION>",
+    "oidc_provider_arn": "<OIDC_ARN>",
+    "release_stack_name": "Hid-staging-ReleaseTrust",
+    "regional_stack_name": "Hid-staging-Regional",
+    "buckets": {
+      "repository": "<STAGING_BUCKET>",
+      "evidence": "<STAGING_BUCKET>",
+      "audit": "<STAGING_BUCKET>",
+      "clinical_documents": "<STAGING_BUCKET>"
+    },
+    "kms_keys": {
+      "repository": "<KMS_ARN>",
+      "evidence": "<KMS_ARN>",
+      "audit": "<KMS_ARN>",
+      "broker_image": "<KMS_ARN>",
+      "snapshot_one": "<KMS_ARN>",
+      "snapshot_two": "<KMS_ARN>",
+      "timestamp_one": "<KMS_ARN>",
+      "timestamp_two": "<KMS_ARN>",
+      "state": "<KMS_ARN>"
+    },
+    "broker_image_uri": "<ECR_DIGEST_URI>",
+    "bootstrap_root_object_version_id": "<OBJECT_VERSION>",
+    "candidate_spki_sha256": {
+      "snapshot_one": "<SHA256>",
+      "snapshot_two": "<SHA256>",
+      "timestamp_one": "<SHA256>",
+      "timestamp_two": "<SHA256>"
+    },
+    "state_table": "hid-staging-tuf-broker-state",
+    "state_id": "hid-staging-broker-v1",
+    "journal_id": "hid-staging-publication-v1",
+    "journal_prefix": "tuf-publication-journal/hid-staging-publication-v1/",
+    "object_lock": {
+      "mode": "COMPLIANCE",
+      "default_retention_days": 90,
+      "journal_and_evidence_retention_days": 36500,
+      "legal_hold": "OFF",
+      "approved": false
+    },
+    "cloudflare_secret_arn": "<SECRET_ARN>",
+    "cloudflare_secret_version_id": "<SECRET_VERSION>",
+    "cloudflare_secret_kms_key_arn": "<KMS_ARN_OR_AWS_MANAGED>",
+    "alarm_topic_arn": "<SNS_ARN>",
+    "audit_trail_name": "hid-staging-release-trust-audit",
+    "audit_log_group": "/aws/cloudtrail/hid-staging-release-trust-audit",
+    "ecs_cluster_arn": "<ECS_CLUSTER_ARN>",
+    "rds_instance_arn": "<RDS_ARN>",
+    "restore_instance_arn": "<RDS_ARN>",
+    "pre_migration_snapshot_arn": "<RDS_SNAPSHOT_ARN>",
+    "database_secret_arn": "<SECRET_ARN>",
+    "database_ca_sha256": "<SHA256>",
+    "api_certificate_arn": "<ACM_ARN>",
+    "api_load_balancer_arn": "<ELB_ARN>",
+    "oci_images": {
+      "identity-api": "<ECR_DIGEST_URI>",
+      "ehr-api": "<ECR_DIGEST_URI>",
+      "lab-api": "<ECR_DIGEST_URI>",
+      "pharmacy-api": "<ECR_DIGEST_URI>",
+      "ocr-api": "<ECR_DIGEST_URI>",
+      "ocr-worker": "<ECR_DIGEST_URI>",
+      "outreach-api": "<ECR_DIGEST_URI>",
+      "notification-api": "<ECR_DIGEST_URI>",
+      "notification-worker": "<ECR_DIGEST_URI>",
+      "event-dispatcher": "<ECR_DIGEST_URI>",
+      "gateway": "<ECR_DIGEST_URI>",
+      "database-migration": "<ECR_DIGEST_URI>"
+    },
+    "cloudfront_distribution_id": null,
+    "broker_functions": {
+      "snapshot-one": "hid-staging-tuf-broker-snapshot-one",
+      "snapshot-two": "hid-staging-tuf-broker-snapshot-two",
+      "timestamp-one": "hid-staging-tuf-broker-timestamp-one",
+      "timestamp-two": "hid-staging-tuf-broker-timestamp-two",
+      "checkpoint": "hid-staging-tuf-broker-checkpoint"
+    },
+    "workload_and_provider_secret_references": "<REVIEWED_REFERENCE>",
+    "workload_issuer_and_jwks_evidence": "<REVIEWED_REFERENCE>",
+    "network_queue_eventbridge_log_inventory": "<REVIEWED_REFERENCE>"
+  },
+  "cloudflare": {
+    "account_id": "<CLOUDFLARE_ID>",
+    "zone_id": "<CLOUDFLARE_ID>",
+    "zone_name": "healthidentitydirectory.com",
+    "tuf_worker": "hid-tuf-staging",
+    "update_origin": "https://updates.staging.healthidentitydirectory.com",
+    "api_origin": "https://api.staging.healthidentitydirectory.com",
+    "frontend_hosts": {
+      "web": "staging.healthidentitydirectory.com",
+      "ehr": "ehr.staging.healthidentitydirectory.com",
+      "lab": "lab.staging.healthidentitydirectory.com",
+      "pharmacy": "pharmacy.staging.healthidentitydirectory.com",
+      "ocr": "ocr.staging.healthidentitydirectory.com",
+      "outreach": "outreach.staging.healthidentitydirectory.com",
+      "admin": "admin.staging.healthidentitydirectory.com"
+    },
+    "frontend_workers": {
+      "web": "hid-web-staging",
+      "ehr": "hid-ehr-staging",
+      "lab": "hid-lab-staging",
+      "pharmacy": "hid-pharmacy-staging",
+      "ocr": "hid-ocr-staging",
+      "outreach": "hid-outreach-staging",
+      "admin": "hid-admin-staging"
+    },
+    "r2_bucket": null,
+    "publisher_permissions": [
+      "Account:Workers Scripts:Edit",
+      "Zone:Workers Routes:Edit (bootstrap custom domain only)"
+    ],
+    "application_secret_references": "<REVIEWED_REFERENCE>"
+  },
+  "release": {
+    "source_sha": "<GIT_SHA>",
+    "tooling_sha": "<GIT_SHA>",
+    "candidate_run_id": "<GITHUB_ID>",
+    "candidate_artifact_id": "<GITHUB_ID>",
+    "release_id": "<RELEASE_ID>",
+    "target": "<TARGET>",
+    "artifact_sha256": "<SHA256>",
+    "artifact_set_sha256": "<SHA256>",
+    "repository_sha256": "<SHA256>",
+    "bootstrap_root_sha256": "<SHA256>",
+    "metadata_versions": {
+      "root": "<POSITIVE_INTEGER>",
+      "targets": "<POSITIVE_INTEGER>",
+      "snapshot": "<POSITIVE_INTEGER>",
+      "timestamp": "<POSITIVE_INTEGER>"
+    },
+    "metadata_sha256": {
+      "root": "<SHA256>",
+      "targets": "<SHA256>",
+      "snapshot": "<SHA256>",
+      "timestamp": "<SHA256>"
+    },
+    "aws_cli_sha256": "<SHA256>"
+  },
+  "migration": {
+    "source_schema_evidence": "<REVIEWED_REFERENCE>",
+    "authorized_dataset_reference": "<REVIEWED_REFERENCE>",
+    "destination_schema": "0028",
+    "backup_evidence": "<REVIEWED_REFERENCE>",
+    "restore_evidence": "<REVIEWED_REFERENCE>",
+    "rollback_evidence": "<REVIEWED_REFERENCE>"
+  }
+}

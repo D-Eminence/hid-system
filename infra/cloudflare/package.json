@@ -8,6 +8,23 @@
     "test": "node --test test/*.test.mjs",
     "verify": "node scripts/verify-config.mjs",
     "dry-run:production": "node scripts/wrangler-dry-run.mjs production",
-    "dry-run:staging": "node scripts/wrangler-dry-run.mjs staging"
+    "dry-run:staging": "node scripts/wrangler-dry-run.mjs staging",
+    "tuf:dry-run:staging": "node scripts/tuf-wrangler.mjs dry-run staging",
+    "tuf:dry-run:production": "node scripts/tuf-wrangler.mjs dry-run production",
+    "tuf:bootstrap:staging": "node scripts/tuf-wrangler.mjs bootstrap-parent staging",
+    "tuf:bootstrap:production": "node scripts/tuf-wrangler.mjs bootstrap-parent production",
+    "tuf:upload:staging": "node scripts/tuf-wrangler.mjs versions-upload staging",
+    "tuf:upload:production": "node scripts/tuf-wrangler.mjs versions-upload production",
+    "tuf:validate": "node scripts/tuf-validate-repository.mjs",
+    "tuf:preview": "node scripts/tuf-preview-gate.mjs",
+    "tuf:deploy:staging": "node scripts/tuf-wrangler.mjs versions-deploy staging",
+    "tuf:deploy:production": "node scripts/tuf-wrangler.mjs versions-deploy production",
+    "tuf:activate:staging": "node scripts/tuf-wrangler.mjs activate-route staging",
+    "tuf:activate:production": "node scripts/tuf-wrangler.mjs activate-route production"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260831.1",
+    "json-dup-key-validator": "1.0.3",
+    "wrangler": "4.127.1"
   }
 }

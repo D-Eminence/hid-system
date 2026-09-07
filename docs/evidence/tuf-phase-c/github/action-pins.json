@@ -1,0 +1,32 @@
+[
+  {
+    "action": "actions/checkout",
+    "pin": "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+    "exists": true
+  },
+  {
+    "action": "actions/setup-node",
+    "pin": "820762786026740c76f36085b0efc47a31fe5020",
+    "exists": true
+  },
+  {
+    "action": "actions/setup-go",
+    "pin": "b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
+    "exists": true
+  },
+  {
+    "action": "actions/upload-artifact",
+    "pin": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "exists": true
+  },
+  {
+    "action": "actions/download-artifact",
+    "pin": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "exists": true
+  },
+  {
+    "action": "aws-actions/configure-aws-credentials",
+    "pin": "7474bc4690e29a8392af63c5b98e7449536d5c3a",
+    "exists": true
+  }
+]

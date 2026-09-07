@@ -238,7 +238,18 @@ async function insertExact(client, entityType, sourceRow, tableName, data, compa
   }
   if (inserted.rowCount > 0) return;
 
-  const expected = Object.fromEntries(comparisonColumns.map((column) => [column, data[column]]));
+  const expectedInput = Object.fromEntries(comparisonColumns.map((column) => [column,
+    Buffer.isBuffer(data[column]) ? `\\x${data[column].toString('hex')}` : data[column],
+  ]));
+  // Read the proposed values through the same PostgreSQL column types as the
+  // existing row. pg returns bigint as text and date/timestamptz as Date;
+  // comparing untyped JS input falsely blocks exact retries. No row is changed.
+  const expectedResult = await client.query(
+    `select ${comparisonColumns.map(quoteIdentifier).join(', ')}
+       from jsonb_populate_record(null::${quoteIdentifier(schema)}.${quoteIdentifier(table)}, $1::jsonb)`,
+    [JSON.stringify(expectedInput)],
+  );
+  const expected = expectedResult.rows[0];
   const existing = await client.query(
     `select ${comparisonColumns.map(quoteIdentifier).join(', ')}
        from ${quoteIdentifier(schema)}.${quoteIdentifier(table)}
@@ -428,6 +439,12 @@ async function main() {
         name: source.name,
         code: source.code,
         active: source.active,
+        // Match the immutable 0027 upgrade for facilities imported after that
+        // migration has run. Leaving the new default 'pending' contradicts an
+        // active legacy row and fails facilities_active_status_ck.
+        lifecycle_status: source.active ? 'verified' : 'suspended',
+        status_reason: 'Migrated from the pre-foundation active flag',
+        status_changed_at: new Date(source.updated_at ?? source.created_at),
         timezone,
         row_version: 1,
         source_system: 'legacy_identity',
@@ -624,7 +641,13 @@ async function main() {
             facility_id: source.facility_id,
             granted_at: createdAt,
             granted_by: null,
+            grant_reason: 'Legacy assignment retained during governed administration migration',
             revoked_at: source.active ? null : new Date(source.updated_at ?? source.created_at),
+            // Match 0027's provenance fallback when the legacy source has no
+            // revoking actor. Do not invent a privileged administrator.
+            revoked_by: source.active ? null : staff.rows[0].account_id,
+            revocation_reason: source.active ? null
+              : 'Legacy revocation retained during governed administration migration',
           });
         }
       }

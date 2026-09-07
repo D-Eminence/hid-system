@@ -1,6 +1,7 @@
 import { registerScopedServiceWorker } from '@hid/offline'
 import { captureProductEvent, captureSafeException, initializeTelemetry } from '@hid/telemetry'
 import { OFFLINE_MESSAGE } from '@hid/ui/Offline'
+import { registerReleaseBoundServiceWorker } from './release-service-worker'
 
 initializeTelemetry({
   app: 'ehr',
@@ -48,10 +49,16 @@ new MutationObserver(renderConnectivity).observe(document, { childList: true, su
 renderConnectivity()
 
 function registerWorker(): void {
-  void registerScopedServiceWorker({
-    scriptUrl: `${import.meta.env.BASE_URL}service-worker.js`,
+  void registerReleaseBoundServiceWorker({
+    scriptUrl: `${import.meta.env.BASE_URL}service-worker.js?release=${__HID_EHR_RELEASE_SHA__}`,
     scope: import.meta.env.BASE_URL,
+    releaseSha: __HID_EHR_RELEASE_SHA__,
     enabled: import.meta.env.PROD,
+    serviceWorker: typeof navigator !== 'undefined' && 'serviceWorker' in navigator
+      ? navigator.serviceWorker
+      : undefined,
+    reload: () => window.location.reload(),
+    register: registerScopedServiceWorker,
   })
 }
 if (document.readyState === 'complete') registerWorker()

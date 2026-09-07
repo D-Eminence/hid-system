@@ -26,3 +26,12 @@
 **/.codex
 /identity/
 /upstream_snapshot/
+
+# Local TUF execution material; only reviewed, sanitized summaries belong in Git.
+/tools/tuf-release/bin/
+/release/local/
+/release/private/
+/release/artifacts/
+**/.wrangler/
+**/.dev.vars
+**/.dev.vars.*

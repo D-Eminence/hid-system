@@ -1,0 +1,49 @@
+{
+  "go_version": "go1.26.8",
+  "platform": "linux/amd64",
+  "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+  "worktree_dirty": true,
+  "build_flags": [
+    "-mod=readonly",
+    "-trimpath",
+    "-buildvcs=false",
+    "-ldflags=-buildid="
+  ],
+  "results": [
+    {
+      "command": "hid-tuf",
+      "size_bytes": 15050352,
+      "sha256": "7b4424f4d86201977fb537059ce8b16ec128f5c405defef438d499d9df167165",
+      "identical": true,
+      "independent_caches": true
+    },
+    {
+      "command": "hid-tuf-repo",
+      "size_bytes": 22352759,
+      "sha256": "45f775be8eca9200c660616f8b446fc4afdc332fa1af29b34bb3c56e1568e527",
+      "identical": true,
+      "independent_caches": true
+    },
+    {
+      "command": "hid-tuf-publication",
+      "size_bytes": 30827409,
+      "sha256": "425b4a217d8b5f50ccc1629d97ad173b9cb17e75435d0eeab61008a9cfd7c0fb",
+      "identical": true,
+      "independent_caches": true
+    },
+    {
+      "command": "hid-tuf-journal",
+      "size_bytes": 30467636,
+      "sha256": "c43d68fec21bf9aaf8b76e22f24f5f3d7afe8c39027eb08c31d2ba9731582e30",
+      "identical": true,
+      "independent_caches": true
+    },
+    {
+      "command": "hid-tuf-signing-broker",
+      "size_bytes": 34289505,
+      "sha256": "5e698b267315f1a1b273a59702394a92058d27a536dab5bee38a87055d86999c",
+      "identical": true,
+      "independent_caches": true
+    }
+  ]
+}

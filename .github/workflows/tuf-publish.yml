@@ -1,0 +1,243 @@
+name: Protected TUF publication
+on:
+  workflow_call:
+    inputs:
+      tooling_sha:
+        required: true
+        type: string
+      plan_json:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: tuf-publication-${{ fromJSON(inputs.plan_json).environment }}
+  cancel-in-progress: false
+jobs:
+  tooling:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.archive.outputs.artifact-id }}
+    env:
+      GOTOOLCHAIN: local
+      TOOLING_SHA: ${{ inputs.tooling_sha }}
+      PLAN_JSON: ${{ inputs.plan_json }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.tooling_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.23.2
+          package-manager-cache: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: 1.26.8
+          check-latest: false
+          cache: false
+      - name: Install locked tooling without cloud authority
+        run: |
+          npm --prefix release ci --ignore-scripts
+          npm --prefix infra/cloudflare ci --ignore-scripts
+          npm --prefix infra/aws ci --ignore-scripts
+      - name: Verify source, publication contracts and infrastructure policy
+        id: policy
+        run: |
+          test "$(git rev-parse HEAD)" = "${TOOLING_SHA}"
+          node release/scripts/verify-publication-workflow.mjs
+          npm --prefix release test
+          npm --prefix release run verify
+          npm --prefix infra/cloudflare test
+          npm --prefix infra/aws run typecheck
+          npm --prefix infra/aws test
+      - name: Audit all publication tooling dependencies
+        id: audit
+        run: |
+          npm --prefix release audit --audit-level=moderate
+          npm --prefix infra/cloudflare audit --audit-level=moderate
+          npm --prefix infra/aws audit --audit-level=moderate
+      - name: Verify patched Go and reject reachable vulnerabilities
+        id: go_audit
+        run: |-
+          node tools/tuf-release/scripts/verify-production-toolchain.mjs
+          node release/scripts/go-vulnerability-gate.mjs "${RUNNER_TEMP}/go-vulnerability-evidence.json"
+      - name: Test and reproducibly build all protected Go commands
+        id: reproducibility
+        working-directory: tools/tuf-release
+        run: |
+          go test -race -count=1 ./...
+          go vet ./...
+          go mod verify
+          mkdir -p bin
+          for tool in hid-tuf hid-tuf-repo hid-tuf-publication hid-tuf-journal hid-tuf-signing-broker; do
+            for build in a b; do
+              env GOENV=off GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 SOURCE_DATE_EPOCH=0 TZ=UTC LC_ALL=C LANG=C go build -mod=readonly -trimpath -buildvcs=false -ldflags=-buildid= -o "bin/${tool}-${build}" "./cmd/${tool}"
+            done
+            cmp "bin/${tool}-a" "bin/${tool}-b"
+            cp "bin/${tool}-a" "bin/${tool}"
+          done
+      - name: Package deterministic tooling for independent hash approval
+        id: package
+        run: |
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf "${RUNNER_TEMP}/tooling.tar" release/node_modules infra/cloudflare/node_modules tools/tuf-release/bin
+          gzip -n "${RUNNER_TEMP}/tooling.tar"
+          sha256sum "${RUNNER_TEMP}/tooling.tar.gz"
+      - name: Record credential-free tooling verification evidence
+        env:
+          GATE_STEPS_JSON: ${{ toJSON(steps) }}
+        run: node release/scripts/collect-ci-evidence.mjs "${RUNNER_TEMP}/tooling-evidence.json"
+      - id: archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-verified-tooling-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |-
+            ${{ runner.temp }}/tooling.tar.gz
+            ${{ runner.temp }}/tooling-evidence.json
+
+            ${{ runner.temp }}/go-vulnerability-evidence.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+  publish:
+    needs: tooling
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment:
+      name: ${{ fromJSON(inputs.plan_json).environment }}-publisher
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      TOOLING_SHA: ${{ inputs.tooling_sha }}
+      PLAN_JSON: ${{ inputs.plan_json }}
+      APPROVED_WORKFLOW_SHA: ${{ vars.TUF_PUBLISHER_WORKFLOW_SHA }}
+      APPROVED_TOOLING_SHA256: ${{ vars.TUF_TOOLING_ARCHIVE_SHA256 }}
+      PUBLISHER_CONFIG_JSON: ${{ vars.TUF_PUBLISHER_CONFIG_JSON }}
+      PUBLISHER_CONFIG_SHA256: ${{ vars.TUF_PUBLISHER_CONFIG_SHA256 }}
+      APPROVED_REPOSITORY_ID: ${{ vars.TUF_REPOSITORY_ID }}
+      APPROVED_OWNER_ID: ${{ vars.TUF_REPOSITORY_OWNER_ID }}
+      APPROVED_REF: ${{ vars.TUF_PROTECTED_REF }}
+      APPROVED_CANDIDATE_WORKFLOW_PATH: ${{ vars.TUF_CANDIDATE_WORKFLOW_PATH }}
+    steps:
+      - name: Bind immutable reusable workflow and protected caller identity
+        shell: bash
+        env:
+          GH_ENVIRONMENT_READ_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFile, writeFile } from 'node:fs/promises';
+          const e = process.env;
+          const reject = () => { throw Error('protected workflow identity rejected'); };
+          if (!/^[a-f0-9]{40}$/.test(e.TOOLING_SHA) || e.TOOLING_SHA !== e.APPROVED_WORKFLOW_SHA) reject();
+          const plan = JSON.parse(e.PLAN_JSON);
+          if (!/^[a-f0-9]{40}$/.test(e.GITHUB_SHA) || plan.git_sha !== e.GITHUB_SHA) reject();
+          if (!['staging', 'production'].includes(plan.environment) || !/^refs\/heads\/[A-Za-z0-9._/-]+$/.test(e.APPROVED_REF)
+            || e.GITHUB_REF_PROTECTED !== 'true' || e.GITHUB_REF !== e.APPROVED_REF) reject();
+          const environmentResponse = await fetch(`https://api.github.com/repos/${e.GITHUB_REPOSITORY}/environments/${plan.environment}-publisher`, {
+            headers: { Authorization: `Bearer ${e.GH_ENVIRONMENT_READ_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+            redirect: 'error', signal: AbortSignal.timeout(30000) });
+          if (!environmentResponse.ok) reject();
+          const environment = await environmentResponse.json();
+          const approval = environment.protection_rules?.find(rule => rule.type === 'required_reviewers');
+          if (!approval?.prevent_self_review || !Array.isArray(approval.reviewers) || approval.reviewers.length === 0
+            || environment.can_admins_bypass !== false || environment.deployment_branch_policy?.protected_branches !== true
+            || environment.deployment_branch_policy?.custom_branch_policies !== false) reject();
+          const url = new URL(e.ACTIONS_ID_TOKEN_REQUEST_URL);
+          if (url.protocol !== 'https:' || !url.hostname.endsWith('.actions.githubusercontent.com')) reject();
+          url.searchParams.set('audience', 'sts.amazonaws.com');
+          const response = await fetch(url, { headers: { Authorization: `Bearer ${e.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` }, redirect: 'error', signal: AbortSignal.timeout(30000) });
+          if (!response.ok) reject();
+          const token = (await response.json()).value;
+          const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+          const expected = { iss: 'https://token.actions.githubusercontent.com', aud: 'sts.amazonaws.com', repository: e.GITHUB_REPOSITORY,
+            repository_id: e.APPROVED_REPOSITORY_ID, repository_owner_id: e.APPROVED_OWNER_ID, ref: e.APPROVED_REF,
+            environment: `${plan.environment}-publisher`, job_workflow_sha: e.APPROVED_WORKFLOW_SHA,
+            job_workflow_ref: `${e.GITHUB_REPOSITORY}/.github/workflows/tuf-publish.yml@${e.APPROVED_WORKFLOW_SHA}`,
+            actor_id: e.GITHUB_ACTOR_ID, run_id: e.GITHUB_RUN_ID, run_attempt: e.GITHUB_RUN_ATTEMPT, runner_environment: 'github-hosted' };
+          expected.sha = e.GITHUB_SHA;
+          for (const [key, value] of Object.entries(expected)) if (!value || claims[key] !== value) reject();
+          if (claims.ref_type !== 'branch' || !['push', 'workflow_dispatch'].includes(claims.event_name)) reject();
+          await writeFile(`${e.RUNNER_TEMP}/hid-publication-identity.json`, JSON.stringify({
+            schema_version: 'hid.tuf.protected-identity/v1', recorded_at: new Date().toISOString(), claims: expected,
+            environment_id: environment.id, prevent_self_review: true, can_admins_bypass: false,
+            protected_branches: true, reviewer_ids: approval.reviewers.map(item => ({ type: item.type, id: item.reviewer.id }))
+          }), { flag: 'wx', mode: 0o600 });
+          await appendFile(e.GITHUB_ENV, `HID_TUF_IDENTITY_VERIFIED=true\nHID_TUF_VERIFIED_WORKFLOW_SHA=${e.APPROVED_WORKFLOW_SHA}\n`);
+          NODE
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.tooling_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.23.2
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.tooling.outputs.artifact_id }}
+          path: ${{ runner.temp }}/hid-tooling
+      - name: Verify independently approved tooling and configuration before loading code
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { readFile, writeFile } from 'node:fs/promises';
+          const e = process.env;
+          const hash = data => createHash('sha256').update(data).digest('hex');
+          if (!/^[a-f0-9]{64}$/.test(e.APPROVED_TOOLING_SHA256) || hash(await readFile(`${e.RUNNER_TEMP}/hid-tooling/tooling.tar.gz`)) !== e.APPROVED_TOOLING_SHA256) throw Error('unapproved tooling');
+          if (!/^[a-f0-9]{64}$/.test(e.PUBLISHER_CONFIG_SHA256) || hash(e.PUBLISHER_CONFIG_JSON) !== e.PUBLISHER_CONFIG_SHA256) throw Error('unapproved configuration');
+          await writeFile(`${e.RUNNER_TEMP}/hid-publisher-config.json`, e.PUBLISHER_CONFIG_JSON, { flag: 'wx', mode: 0o600 });
+          await writeFile(`${e.RUNNER_TEMP}/hid-publication-plan.json`, e.PLAN_JSON, { flag: 'wx', mode: 0o600 });
+          NODE
+          tar --no-same-owner --no-same-permissions -xzf "${RUNNER_TEMP}/hid-tooling/tooling.tar.gz"
+      - name: Download candidate data without checking out or executing candidate source
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ fromJSON(inputs.plan_json).candidate_artifact_id }}
+          run-id: ${{ fromJSON(inputs.plan_json).candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/hid-candidate
+      - name: Download retained predecessor data
+        if: ${{ !fromJSON(inputs.plan_json).bootstrap }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ fromJSON(inputs.plan_json).previous_artifact_id }}
+          run-id: ${{ fromJSON(inputs.plan_json).previous_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/hid-previous
+      - name: Verify candidate source provenance and repository digest before cloud authority
+        env:
+          GH_EVIDENCE_READ_TOKEN: ${{ github.token }}
+        run: node release/scripts/verify-ci-candidate.mjs
+      - name: Obtain only immutable-workflow-bound publisher authority
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ vars.TUF_PUBLISHER_ROLE_ARN }}
+          aws-region: ${{ vars.TUF_AWS_REGION }}
+          allowed-account-ids: ${{ vars.TUF_AWS_ACCOUNT_ID }}
+          audience: sts.amazonaws.com
+          role-session-name: tuf-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+          retry-max-attempts: 1
+      - name: Execute the journal-owned publication pipeline
+        run: node release/scripts/run-protected-publication.mjs "${RUNNER_TEMP}/hid-publisher-config.json" "${PUBLISHER_CONFIG_SHA256}" "${RUNNER_TEMP}/hid-publication-plan.json" "${RUNNER_TEMP}/hid-publication-evidence"
+      - name: Preserve public journal and evidence references even after failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |-
+            ${{ runner.temp }}/hid-publication-identity.json
+            ${{ runner.temp }}/hid-publication-inputs.json
+            ${{ runner.temp }}/hid-tooling/tooling-evidence.json
+            ${{ runner.temp }}/hid-publication-evidence/result-*.json
+            ${{ runner.temp }}/hid-publication-evidence/summary.json
+
+            ${{ runner.temp }}/hid-tooling/go-vulnerability-evidence.json
+          if-no-files-found: warn
+          retention-days: 90

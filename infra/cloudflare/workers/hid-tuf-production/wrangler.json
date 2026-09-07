@@ -1,0 +1,38 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "hid-tuf-production",
+  "main": "../../src/tuf-repository-worker.mjs",
+  "compatibility_date": "2026-08-31",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": true,
+  "routes": [
+    {
+      "pattern": "updates.healthidentitydirectory.com",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "DEPLOYMENT_ENV": "production",
+    "EXPECTED_HOST": "updates.healthidentitydirectory.com",
+    "WORKER_NAME": "hid-tuf-production"
+  },
+  "assets": {
+    "directory": "./repository",
+    "binding": "ASSETS",
+    "html_handling": "none",
+    "not_found_handling": "none",
+    "run_worker_first": true
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": false
+    },
+    "traces": {
+      "enabled": false
+    }
+  }
+}

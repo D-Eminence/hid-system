@@ -1,0 +1,37 @@
+# syntax=docker.io/docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+
+# Both values are mandatory full image references ending in @sha256:<digest>.
+# The reviewed build invocation records those two digests with the resulting
+# ECR image digest; this Dockerfile intentionally supplies no mutable default.
+ARG GO_BUILD_IMAGE
+ARG LAMBDA_RUNTIME_IMAGE
+FROM ${GO_BUILD_IMAGE} AS build
+
+ARG GO_BUILD_IMAGE
+ARG LAMBDA_RUNTIME_IMAGE
+RUN test "${GO_BUILD_IMAGE}" = "docker.io/library/golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81" \
+    && test "${LAMBDA_RUNTIME_IMAGE}" = "public.ecr.aws/lambda/provided:al2023@sha256:7dea43facdd67ffd71aa540527b6af413dfdae0133a0423ee9c329bf1e5adb6c"
+
+WORKDIR /src
+ENV CGO_ENABLED=0 \
+    GOARCH=amd64 \
+    GOAMD64=v1 \
+    GOENV=off \
+    GOOS=linux \
+    GOTOOLCHAIN=local
+
+COPY go.mod go.sum ./
+RUN test "$(go env GOVERSION)" = "go1.26.8" && go mod download && go mod verify
+COPY . ./
+RUN go build \
+      -mod=readonly \
+      -trimpath \
+      -buildvcs=false \
+      -ldflags=-buildid= \
+      -o /out/bootstrap \
+      ./cmd/hid-tuf-signing-broker
+
+FROM ${LAMBDA_RUNTIME_IMAGE}
+
+COPY --from=build --chmod=0555 /out/bootstrap /var/runtime/bootstrap
+ENTRYPOINT ["/var/runtime/bootstrap"]

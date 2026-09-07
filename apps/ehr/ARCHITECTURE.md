@@ -25,6 +25,25 @@ server truth. It initializes the shared replay-disabled telemetry layer,
 registers the `/ehr/` worker, reports sanitized runtime failures, and maintains
 the standard offline indicator.
 
+### Release-bound offline shell
+
+Production builds bind the EHR worker registration, cache generation, and
+complete generated `dist/assets/` shell inventory to the exact 40-character
+release Git SHA. `HID_RELEASE_SHA`, when supplied by a release build, must match
+the checked-out commit; ordinary local builds derive the same value from
+`HEAD`. The source worker contains build tokens and is not a deployable
+artifact. Only the post-processed `dist/service-worker.js` belongs in the
+verified frontend archive.
+
+A new generation precaches the fresh document, manifest, icon, canonical
+runtime, and every generated runtime dependency before it calls
+`skipWaiting()`. Activation then removes prior EHR cache generations and claims
+clients. The browser reloads once on a controller change, while the first
+transition from the former fixed `hid-ehr-shell-v2` generation also refreshes
+already-open scoped clients. Navigations and the stable canonical runtime are
+network-first with current-generation offline fallback; hashed assets are
+cache-first within that generation. API requests never enter Cache Storage.
+
 The bundle owns its local demonstration state. It must not be connected to
 production patient data, production authentication, or privileged credentials.
 

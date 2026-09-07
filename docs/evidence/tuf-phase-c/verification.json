@@ -1,0 +1,491 @@
+{
+  "schema_version": 1,
+  "scope": "dirty local worktree; no CI or deployment claim",
+  "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+  "records": [
+    {
+      "label": "actionlint-final",
+      "command": [
+        "<ACTIONLINT_1_7_7>",
+        ".github/workflows/tuf-local-gates.yml",
+        ".github/workflows/tuf-publish.yml"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:47:58.493817+00:00",
+      "completed_at": "2026-09-06T21:47:58.504962+00:00",
+      "exit_code": 0,
+      "log": "actionlint-final.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "actionlint",
+      "command": [
+        "<ACTIONLINT_1_7_7>",
+        ".github/workflows/tuf-local-gates.yml",
+        ".github/workflows/tuf-publish.yml"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:43:22.071847+00:00",
+      "completed_at": "2026-09-06T21:43:22.082315+00:00",
+      "exit_code": 0,
+      "log": "actionlint.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "audit-aws",
+      "command": [
+        "npm",
+        "--prefix",
+        "infra/aws",
+        "audit",
+        "--audit-level=moderate"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:43:24.535023+00:00",
+      "completed_at": "2026-09-06T21:43:25.808511+00:00",
+      "exit_code": 0,
+      "log": "audit-aws.log",
+      "log_sha256": "6d8c5c8f3d7684adb070417bd608d01ae90aa3dc26a65af03ffda4955f38d9a3"
+    },
+    {
+      "label": "audit-cloudflare",
+      "command": [
+        "npm",
+        "--prefix",
+        "infra/cloudflare",
+        "audit",
+        "--audit-level=moderate"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:43:25.866971+00:00",
+      "completed_at": "2026-09-06T21:43:27.570811+00:00",
+      "exit_code": 0,
+      "log": "audit-cloudflare.log",
+      "log_sha256": "6d8c5c8f3d7684adb070417bd608d01ae90aa3dc26a65af03ffda4955f38d9a3"
+    },
+    {
+      "label": "audit-ehr",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/ehr",
+        "audit",
+        "--audit-level=moderate"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:43:27.665039+00:00",
+      "completed_at": "2026-09-06T21:43:30.050761+00:00",
+      "exit_code": 0,
+      "log": "audit-ehr.log",
+      "log_sha256": "6d8c5c8f3d7684adb070417bd608d01ae90aa3dc26a65af03ffda4955f38d9a3"
+    },
+    {
+      "label": "audit-release",
+      "command": [
+        "npm",
+        "--prefix",
+        "release",
+        "audit",
+        "--audit-level=moderate"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:43:22.155801+00:00",
+      "completed_at": "2026-09-06T21:43:24.471715+00:00",
+      "exit_code": 0,
+      "log": "audit-release.log",
+      "log_sha256": "6d8c5c8f3d7684adb070417bd608d01ae90aa3dc26a65af03ffda4955f38d9a3"
+    },
+    {
+      "label": "build",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:40:43.884539+00:00",
+      "completed_at": "2026-09-06T21:43:14.102396+00:00",
+      "exit_code": 0,
+      "log": "build.log",
+      "log_sha256": "021ad5fa7077485bc1efe14d7e71b73f739e8bc8fc675f9742411b47f44e934c"
+    },
+    {
+      "label": "docker-check-pinned",
+      "command": [
+        "docker",
+        "buildx",
+        "build",
+        "--check",
+        "--platform",
+        "linux/amd64",
+        "--file",
+        "tools/tuf-release/Dockerfile.signing-broker",
+        "--build-arg",
+        "GO_BUILD_IMAGE=docker.io/library/golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81",
+        "--build-arg",
+        "LAMBDA_RUNTIME_IMAGE=public.ecr.aws/lambda/provided:al2023@sha256:7dea43facdd67ffd71aa540527b6af413dfdae0133a0423ee9c329bf1e5adb6c",
+        "tools/tuf-release"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:45:42.661599+00:00",
+      "completed_at": "2026-09-06T21:46:06.709171+00:00",
+      "exit_code": 0,
+      "log": "docker-check-pinned.log",
+      "log_sha256": "ae61917620bfee79914f3e4e49e70301a2f97f0c6a4cdeb8f20296fc925a7157"
+    },
+    {
+      "label": "docker-check",
+      "command": [
+        "docker",
+        "buildx",
+        "build",
+        "--check",
+        "--platform",
+        "linux/amd64",
+        "--file",
+        "tools/tuf-release/Dockerfile.signing-broker",
+        "tools/tuf-release"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:43:22.071012+00:00",
+      "completed_at": "2026-09-06T21:43:25.737199+00:00",
+      "exit_code": 1,
+      "log": "docker-check.log",
+      "log_sha256": "d4995cb90079337844caa8970e72bdf05499fe08b38fb17f0dac4503b9f88df2"
+    },
+    {
+      "label": "ehr-release-tests",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/ehr",
+        "test"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T22:00:54.305776+00:00",
+      "completed_at": "2026-09-06T22:00:55.199050+00:00",
+      "exit_code": 0,
+      "log": "ehr-release-tests.log",
+      "log_sha256": "0d95f107d73c029febb076d7bc82c016bdc4b0ed835f742a10d29a68021745cf"
+    },
+    {
+      "label": "final-diff-check",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T22:01:53.128347+00:00",
+      "completed_at": "2026-09-06T22:01:53.150053+00:00",
+      "exit_code": 0,
+      "log": "final-diff-check.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "final-secret-readiness",
+      "command": [
+        "node",
+        "scripts/verify-secret-readiness.mjs"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T22:00:55.259785+00:00",
+      "completed_at": "2026-09-06T22:00:56.741017+00:00",
+      "exit_code": 0,
+      "log": "final-secret-readiness.log",
+      "log_sha256": "e481eab8ad58652b4247d5de171358d55e51b6359dbf5e60e4ab48b148fef830"
+    },
+    {
+      "label": "go-mod",
+      "command": [
+        "env",
+        "GOTOOLCHAIN=local",
+        "<VERIFIED_GO_1_26_8>",
+        "-C",
+        "tools/tuf-release",
+        "mod",
+        "verify"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:43:04.247880+00:00",
+      "completed_at": "2026-09-06T21:43:05.378973+00:00",
+      "exit_code": 0,
+      "log": "go-mod.log",
+      "log_sha256": "b4537ed75f533f993f371954de47e42a793b8e5b0587577de7e27fb3e50696bd"
+    },
+    {
+      "label": "go-race",
+      "command": [
+        "env",
+        "GOTOOLCHAIN=local",
+        "HID_REQUIRE_CLOUDFLARE_VALIDATOR=1",
+        "<VERIFIED_GO_1_26_8>",
+        "-C",
+        "tools/tuf-release",
+        "test",
+        "-race",
+        "-count=1",
+        "./..."
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:41:14.506126+00:00",
+      "completed_at": "2026-09-06T21:42:59.353551+00:00",
+      "exit_code": 0,
+      "log": "go-race.log",
+      "log_sha256": "2ec87125915e1cd15796eca23342210a57b5caf24cfa7b5135e51cfacac93029"
+    },
+    {
+      "label": "go-test",
+      "command": [
+        "env",
+        "GOTOOLCHAIN=local",
+        "HID_REQUIRE_CLOUDFLARE_VALIDATOR=1",
+        "<VERIFIED_GO_1_26_8>",
+        "-C",
+        "tools/tuf-release",
+        "test",
+        "-count=1",
+        "./..."
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:40:47.823900+00:00",
+      "completed_at": "2026-09-06T21:41:14.445855+00:00",
+      "exit_code": 0,
+      "log": "go-test.log",
+      "log_sha256": "ca0a4d58df565390c3e67bde572469b808c4659b2a3a3155bd5dfbe6a7dd70cd"
+    },
+    {
+      "label": "go-vet",
+      "command": [
+        "env",
+        "GOTOOLCHAIN=local",
+        "<VERIFIED_GO_1_26_8>",
+        "-C",
+        "tools/tuf-release",
+        "vet",
+        "./..."
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:42:59.423759+00:00",
+      "completed_at": "2026-09-06T21:43:04.201248+00:00",
+      "exit_code": 0,
+      "log": "go-vet.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "historical-toolchain",
+      "command": [
+        "node",
+        "tools/tuf-release/scripts/verify-toolchain.mjs",
+        "--require-installed"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:46:06.780360+00:00",
+      "completed_at": "2026-09-06T21:46:07.927483+00:00",
+      "exit_code": 0,
+      "log": "historical-toolchain.log",
+      "log_sha256": "9820ff8121bf2cac4856b3f80a6d2cabc0c0a455119de38756cad26d6c7f7d81"
+    },
+    {
+      "label": "migration-static-final",
+      "command": [
+        "npm",
+        "--prefix",
+        "services/ehr-api",
+        "run",
+        "migration:verify"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:49:40.274549+00:00",
+      "completed_at": "2026-09-06T21:49:40.508324+00:00",
+      "exit_code": 0,
+      "log": "migration-static-final.log",
+      "log_sha256": "56619f93f15b102ff1c57c76741f6d19b7c025f8e943a2d76f3323e72aa5ece6"
+    },
+    {
+      "label": "offline-broker",
+      "command": [
+        "node",
+        "--import",
+        "./infra/aws/node_modules/tsx/dist/loader.mjs",
+        "infra/aws/scripts/plan-tuf-staging.mjs",
+        "--broker",
+        "<PRIVATE_EVIDENCE>/synthetic-broker-identifiers.json",
+        "<PRIVATE_EVIDENCE>/synthetic-broker-plan"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:48:16.832233+00:00",
+      "completed_at": "2026-09-06T21:48:19.650080+00:00",
+      "exit_code": 0,
+      "log": "offline-broker.log",
+      "log_sha256": "fbb7340ff4da09c4d18d15a2842e7f95fc644780175653312fc7986362f8d61c"
+    },
+    {
+      "label": "offline-foundation",
+      "command": [
+        "node",
+        "--import",
+        "./infra/aws/node_modules/tsx/dist/loader.mjs",
+        "infra/aws/scripts/plan-tuf-staging.mjs",
+        "--foundation",
+        "<PRIVATE_EVIDENCE>/synthetic-plan-identifiers.json",
+        "<PRIVATE_EVIDENCE>/synthetic-foundation-plan"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:45:04.737544+00:00",
+      "completed_at": "2026-09-06T21:45:07.293408+00:00",
+      "exit_code": 0,
+      "log": "offline-foundation.log",
+      "log_sha256": "e9d7ee31f7383be54f6d1d671736335e1d649f34b7839fc5c4a86c638b8e5c29"
+    },
+    {
+      "label": "production-toolchain",
+      "command": [
+        "env",
+        "HID_TUF_BUILD_GO=<VERIFIED_GO_1_26_8>",
+        "node",
+        "tools/tuf-release/scripts/verify-production-toolchain.mjs"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T22:01:52.925445+00:00",
+      "completed_at": "2026-09-06T22:01:53.048501+00:00",
+      "exit_code": 0,
+      "log": "production-toolchain.log",
+      "log_sha256": "a250728ff67abf1419221c3699c1c4f11e3c638f89f9c9387f3828326dda6ae7"
+    },
+    {
+      "label": "release-tests-final",
+      "command": [
+        "npm",
+        "--prefix",
+        "release",
+        "test"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:47:55.157339+00:00",
+      "completed_at": "2026-09-06T21:47:58.423568+00:00",
+      "exit_code": 0,
+      "log": "release-tests-final.log",
+      "log_sha256": "96bb7fc8b0342b002a60c133bb527e189fb0ff622dc731113d845615c07b0900"
+    },
+    {
+      "label": "release-tests",
+      "command": [
+        "npm",
+        "--prefix",
+        "release",
+        "test"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:40:43.900304+00:00",
+      "completed_at": "2026-09-06T21:40:47.001251+00:00",
+      "exit_code": 0,
+      "log": "release-tests.log",
+      "log_sha256": "aa410baba650c06d4821e166ec338172072d060616dc483e727217fec34cd08b"
+    },
+    {
+      "label": "release-verify",
+      "command": [
+        "npm",
+        "--prefix",
+        "release",
+        "run",
+        "verify"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:40:47.091277+00:00",
+      "completed_at": "2026-09-06T21:40:47.757917+00:00",
+      "exit_code": 0,
+      "log": "release-verify.log",
+      "log_sha256": "a0a240e490d841d64d3dabefafee6efd7a4e8292d1208f73d26e72afeccecf0a"
+    },
+    {
+      "label": "reproducibility",
+      "command": [
+        "python3",
+        "<PRIVATE_REPRODUCIBILITY_HARNESS>"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:43:22.074015+00:00",
+      "completed_at": "2026-09-06T21:44:21.958203+00:00",
+      "exit_code": 0,
+      "log": "reproducibility.log",
+      "log_sha256": "ccfff80c8720be3ac0699ad0f02dd2c339d9d614e110225ae2c1493cb1179cc0"
+    },
+    {
+      "label": "secret-readiness",
+      "command": [
+        "node",
+        "scripts/verify-secret-readiness.mjs"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:47:58.633857+00:00",
+      "completed_at": "2026-09-06T21:48:00.533153+00:00",
+      "exit_code": 0,
+      "log": "secret-readiness.log",
+      "log_sha256": "35b7d8158d4be903d3500fb0a7dae9613f1fcaedeec609036971cc890137509d"
+    },
+    {
+      "label": "test",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:43:14.166896+00:00",
+      "completed_at": "2026-09-06T21:44:46.783278+00:00",
+      "exit_code": 0,
+      "log": "test.log",
+      "log_sha256": "35675b19718485c5aaa6aea653604ede82a57996e409134e058a27e6852543e9"
+    },
+    {
+      "label": "verify",
+      "command": [
+        "npm",
+        "run",
+        "verify"
+      ],
+      "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "worktree_dirty": true,
+      "started_at": "2026-09-06T21:44:46.844517+00:00",
+      "completed_at": "2026-09-06T21:46:59.480753+00:00",
+      "exit_code": 0,
+      "log": "verify.log",
+      "log_sha256": "6d38f574d049b5d8596bda7211305963254b1989784a73afc76c41ca4eb87b1d"
+    }
+  ],
+  "notes": [
+    "docker-check failed because invocation omitted mandatory image arguments; docker-check-pinned passed with immutable image arguments",
+    "Root build/test/verify passed before the final inactive-membership fix; final real PostgreSQL rehearsal and migration static checks cover that script-only change.",
+    "Raw logs are private persistent local files; this package retains command results and SHA-256, not fabricated original logs.",
+    "CI Node 22.23.2 execution is still unverified; local Node v24.13.1"
+  ],
+  "command_path_redaction": "Angle-bracket path tokens name private local executable/evidence locations; exact versions, build flags and identities are retained separately."
+}

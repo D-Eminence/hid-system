@@ -124,6 +124,11 @@ totals. `AWS_DEPLOYMENT_RUNBOOK.md` defines account through rollback gates.
 `RELEASE_ARTIFACT_GATE.md` and `RELEASE_FINDINGS.md` govern immutable digests,
 SBOM/scans and the dependency findings resolved before release.
 
+`TUF-PRODUCTION-IMPLEMENTATION.md` is the canonical trusted-release execution
+record. It contains the release surface, TUF trust architecture, exact key and
+role boundaries, implementation milestones, verification evidence, staging
+gates, blockers, and the explicit production prohibition/status.
+
 ### `EVENT_DELIVERY_ARCHITECTURE.md`
 
 Records the active outbox inventory, normalized event envelope, dispatcher
@@ -182,3 +187,10 @@ A significant architecture change must update:
 * Roadmap when implementation phases change
 
 Documentation updates are part of implementation, not optional cleanup.
+
+### Phase C staging preparation
+
+- [Execution sequence and binary acceptance](TUF-STAGING-EXECUTION.md)
+- [GitHub protection and CI evidence](TUF-CI-PROTECTION.md)
+- [Identifier binding and irreversible infrastructure plan](TUF-STAGING-INFRASTRUCTURE.md)
+- [Synthetic migration, restore and forward rollback](TUF-STAGING-MIGRATION.md)

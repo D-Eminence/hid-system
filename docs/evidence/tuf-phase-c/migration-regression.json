@@ -1,0 +1,8 @@
+{
+  "scope": "synthetic local test before inactive-role fix",
+  "expected_result": "regression reproduced",
+  "status": "failed",
+  "failure": "promote suspended facility failed: Legacy promotion failed: invalid_source_value for memberships/a6000000-0000-4000-8000-000000000001\n\n\n1 !== 0\n",
+  "original_evidence_sha256": "e412cd32ca647eaece4f24da9a10a0fabcf16cfce7f226549c0f7cf8c62c5f17",
+  "fixed_result": "migration.json"
+}

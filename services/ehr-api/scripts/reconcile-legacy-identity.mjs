@@ -5,6 +5,9 @@ import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
 
 const { Client } = pg;
+// PostgreSQL DATE is a calendar date, not a midnight instant in the runner's
+// timezone. Preserve its YYYY-MM-DD representation for source reconciliation.
+pg.types.setTypeParser(1082, (value) => value);
 const databaseUrl = process.env.DATABASE_URL;
 const runId = process.env.MIGRATION_RUN_ID;
 const encryptionKey = decodeKey('MIGRATION_FIELD_ENCRYPTION_KEY_B64', 32);
@@ -156,9 +159,10 @@ const definitions = [
   }), (target) => ({ id: target.id, name: target.name, slug: target.slug, active: target.active })),
   definition('facilities', 'identity.facilities', (source) => source.id, (source) => ({
     id: source.id, organization_id: source.organization_id, name: source.name, code: source.code,
-    active: source.active, timezone: facilityTimezones[source.id] ?? null,
+    active: source.active, lifecycle_status: source.active ? 'verified' : 'suspended',
+    timezone: facilityTimezones[source.id] ?? null,
   }), (target) => ({ id: target.id, organization_id: target.organization_id, name: target.name,
-    code: target.code, active: target.active, timezone: target.timezone })),
+    code: target.code, active: target.active, lifecycle_status: target.lifecycle_status, timezone: target.timezone })),
   definition('patients', 'identity.patients', (source) => source.id, (source) => {
     const phone = normalizePhone(source.phone_e164);
     const email = normalizeEmail(source.email);

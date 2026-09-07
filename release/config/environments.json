@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0.0",
+  "aws_identity": {
+    "account_id_source": "approved out-of-band HID_AWS_ACCOUNT",
+    "region_source": "approved out-of-band HID_AWS_REGION",
+    "account_id_pattern": "^[0-9]{12}$",
+    "region_pattern": "^[a-z]{2}(?:-gov)?-[a-z]+-[0-9]$"
+  },
+  "environments": [
+    {
+      "name": "staging",
+      "tuf_repository_id": "hid-staging-v1",
+      "update_origin": "https://updates.staging.healthidentitydirectory.com",
+      "target_prefix": "environments/staging",
+      "api_origin": "https://api.staging.healthidentitydirectory.com",
+      "frontend_hosts": {
+        "web": "staging.healthidentitydirectory.com",
+        "ehr": "ehr.staging.healthidentitydirectory.com",
+        "lab": "lab.staging.healthidentitydirectory.com",
+        "pharmacy": "pharmacy.staging.healthidentitydirectory.com",
+        "ocr": "ocr.staging.healthidentitydirectory.com",
+        "outreach": "outreach.staging.healthidentitydirectory.com",
+        "admin": "admin.staging.healthidentitydirectory.com"
+      },
+      "apex_redirect": null,
+      "retention": { "minimum_accepted_releases": 5, "minimum_days": 90 }
+    },
+    {
+      "name": "production",
+      "tuf_repository_id": "hid-production-v1",
+      "update_origin": "https://updates.healthidentitydirectory.com",
+      "target_prefix": "environments/production",
+      "api_origin": "https://api.healthidentitydirectory.com",
+      "frontend_hosts": {
+        "web": "www.healthidentitydirectory.com",
+        "ehr": "ehr.healthidentitydirectory.com",
+        "lab": "lab.healthidentitydirectory.com",
+        "pharmacy": "pharmacy.healthidentitydirectory.com",
+        "ocr": "ocr.healthidentitydirectory.com",
+        "outreach": "outreach.healthidentitydirectory.com",
+        "admin": "admin.healthidentitydirectory.com"
+      },
+      "apex_redirect": {
+        "worker": "hid-apex-redirect-production",
+        "hostname": "healthidentitydirectory.com",
+        "destination_origin": "https://www.healthidentitydirectory.com"
+      },
+      "retention": { "minimum_accepted_releases": 10, "minimum_days": 180 }
+    }
+  ],
+  "rollback": {
+    "strategy": "forward-only",
+    "requires_higher_release_sequence": true,
+    "requires_retained_verified_targets": true,
+    "allow_metadata_reversion": false
+  },
+  "root_retention": "permanent"
+}

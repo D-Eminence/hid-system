@@ -1,6 +1,273 @@
 # Current HID Platform Task
 
-## Current authoritative stage — 2026-08-14
+## Current authoritative stage — 2026-09-06
+
+Phase C local preparation is verified on `tuf-production-release`; HEAD remains
+`abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`. No commit, push, cloud mutation,
+staging deployment or production action is authorized or performed.
+
+The protected publisher now binds the caller SHA, OIDC SHA and candidate CI
+run/artifact provenance before credentials. Value-free staging identifiers,
+GitHub protection, offline Object Lock planning, migration/restore and forward
+rollback procedures are prepared in the linked canonical runbook.
+
+The local synthetic PostgreSQL rehearsal passed all 28 migrations, promotion,
+reconciliation, idempotent retry, per-table/sequence backup restore equality,
+328 foreign-key checks, schema/RLS tests and partial-failure/orphan rejection.
+It exposed and fixed importer lifecycle/grant-reason compatibility and typed
+retry/DOB comparisons without changing the immutable migration ledger.
+Actual staging restore and application rollback remain unexecuted.
+
+Go 1.25.0 is retained only for historical reference interoperability after the
+broader security audit found reachable standard-library vulnerabilities.
+Release tooling is pinned to Go 1.26.8; its current scan has zero reachable
+findings. All five patched builds reproduce across separate caches. Root
+build/test/verify, release 24/24 tests, Go normal/race/vet/module verification,
+actionlint, four scoped npm audits and immutable-image Dockerfile checks pass.
+The final real PostgreSQL rehearsal and static migration checks also pass after
+fixing inactive-role provenance; applied migration files are unchanged.
+
+Fresh read-only GitHub inspection at 21:45 UTC found the repository now public
+with unchanged numeric IDs, but main is unprotected, the release branch is
+absent, and rulesets/environments/workflows are empty. The agent made no GitHub
+mutation; earlier private-plan observations are superseded. Exact AWS/Cloudflare
+identities and protected staging authority remain missing. The unrelated
+pre-existing `docs/SECURITY.md` edit is untouched and excluded from the proposed
+TUF commit.
+
+Classification: **PHASE C LOCAL PREPARATION VERIFIED; NOT READY FOR
+PROTECTED STAGING EXECUTION; STAGING NOT ACCEPTED; PRODUCTION LOCKED**.
+
+Final review binds 193 proposed files and excludes the untouched SECURITY edit.
+Tracked and untracked whitespace checks pass; the index remains empty.
+
+Next: obtain authorization for the reviewed commit proposal in
+[Phase C evidence](evidence/tuf-phase-c/README.md), excluding `docs/SECURITY.md`.
+The candidate/signing/canary execution and custody arrangement still requires
+a concrete security review before staging can execute.
+Push, protection configuration, exact cloud identifiers, concrete irreversible
+infrastructure approval and staging execution each retain their own gates.
+See [canonical record](TUF-PRODUCTION-IMPLEMENTATION.md).
+
+## Historical implementation trail
+
+Continuation on 2026-09-05: a read-only pending-publication authorizer now
+reloads durable state twice, exact-matches both predecessor and candidate
+metadata, reserves the 30-minute freshness margin, and emits a five-minute
+decision bound to state revision and all role hashes. Focused signing-broker
+tests pass, including recovered version-3 authorization over an expired
+version-1 predecessor, superseded-output rejection, changed metadata,
+concurrent state changes, slow reads, cancellation, and clock rollback.
+The read-only `hid-tuf-publication` operator and upload/deploy/initial-route
+integration now use that decision. Upload/deployment receipts are schema
+`2.0.0`; preview trust is bound to the broker bootstrap root and exact versions.
+Uploads use a private, revalidated copy. The 12 focused publication/preview
+tests pass, including authorization failure, changed operator pins, caller
+edits during upload, malformed output and expired decisions. AWS typechecking
+and all 54 infrastructure tests pass; the publisher gains only exact state
+reads and S3-context-bound decryption, with no state writes or signing.
+Root `npm test` and `npm run verify`, release 9/9 tests plus contract verification,
+and EHR 5/5 tests also passed on this working tree. Root checks preceded the
+latest wrapper/IaC edits, which have their focused tests. Per-environment
+publication serialization, final combined gates, and pristine
+checkout evidence remain under implementation. No cloud API was called.
+
+Recovered materialization now also passes its full policy path: the ordinary
+operator rejects a version-1-to-3 online gap; the state-authenticated constructor
+accepts the exact pending version 3, retains published version 1, excludes
+superseded private version 2, and reauthorizes before its atomic directory
+commit. The independent Node validator agrees on the whole repository hash.
+Failed final authorization leaves no destination or temporary generation.
+All 12 Go packages pass the validator-backed run (10 tested, 2 with no tests),
+and the updated complete Cloudflare suite passes 49/49 plus configuration
+verification. Cross-publisher serialization remains a required live gate;
+fresh authorization alone is not a distributed lock.
+
+Continuation review: the full root `npm run build` and validator-backed Go
+race suite, `go vet`, and `go mod verify` passed. All four local TUF commands
+produced identical bytes across paired builds; the publication binary was
+rebuilt after the subsequent predecessor-pin and confirmation changes. Receipt
+paths are now checked before any mutation; malformed preview artifact hashes
+cannot reach deployment, and a
+deployment receipt's release must match its authorization. All 51 Cloudflare
+tests pass. A separate protected predecessor repository hash now prevents a
+pruned but otherwise valid predecessor from discarding published history;
+the Go regression passed, including the full 12-package race run, vet and module
+verification. A direct Cloudflare config check after the normal subpath build
+correctly rejected its non-root artifact paths; `npm run verify` rebuilt them
+through its declared prerequisites and the complete `npm run verify` passed.
+A subsequent root `npm test` initially stopped at an Admin test-teardown error after all
+19 assertions passed (`window` disappeared before a queued React commit);
+that run remains recorded as failed. The cause was missing Testing Library
+cleanup with Vitest globals disabled. Explicit teardown plus an empty-DOM
+regression check now passes Admin typechecking and five consecutive 19/19
+runs. The corrected full root suite passed. The read-only post-canary `confirm`
+operation passes focused Go tests: pending metadata, non-advanced revisions,
+substitution, concurrent state changes, cancellation, clock rollback and
+freshness-floor crossings are rejected without state writes. Durable serialized
+orchestration remains the next local boundary. The corrected full root
+`npm test` now passes, including all 54 AWS tests. No cloud mutation occurred.
+
+The storage-independent publication journal now passes seven race-enabled test
+groups. It claims one attempt per environment before external mutation, binds
+the exact authorization/predecessor/candidate/operator identity, records ordered intent
+and receipt transitions, and closes only on fresh exact post-canary confirmation.
+Unresolved attempts cannot expire, be stolen, or automatically resume after restart.
+Tests cover 32 competing claims/intents, interruption at all 11 pre-completion
+phases, lost commit responses, post-commit cancellation, stale owner/revision,
+bootstrap-only parent creation, and successor predecessor-hash continuity.
+All 13 Go packages pass the validator-backed full race run (11 tested, 2 without
+tests), vet and module verification; parent-stage refinements also pass focused
+race tests. The four commands remain reproducible and their final hashes are
+recorded in the canonical runbook.
+This journal is separate from the signing checkpoint; no publisher checkpoint
+write grant is authorized. Durable storage, wrapper orchestration and live
+concurrency evidence remain required before this can protect actual deployment.
+
+Work is isolated on `tuf-production-release`, created from clean audited source
+`abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`. Three independent read-only audits
+and a primary-agent inspection found no existing TUF metadata, generator,
+publisher, verifier, client state, signing adapter, attack suite, or active
+repository-root CI workflow. No cloud, DNS, external database, staging, or
+production system was contacted or changed, and no signing key was generated,
+imported, printed, or stored.
+
+The governed release surface is twelve OCI identities (eleven ECS workloads
+plus the EHR migration image) and seven independently deployed Cloudflare
+frontend artifacts. The existing manifest authenticates only the twelve image
+records. There is no end-user software updater; the release operator/deployer
+is the correct TUF verification boundary. Clinical downloads and exports are
+not software updates and remain outside TUF. The clinical document bucket's
+`release-evidence/` prefix is not a safe TUF boundary because application roles
+can access that bucket broadly; trusted repository/evidence storage must be
+separate and inaccessible to ECS runtimes.
+
+The supplied upstream go-tuf example client remains a test/interoperability
+oracle, not an HID production updater. Its installed Linux/amd64 binary at
+`/opt/hid-release-tools/tuf-client/2.4.2/tuf-client` was reverified at 12,857,047
+bytes with SHA-256
+`6933984fa57625a361896db52b9eb8fdd9658f98327b7bd44d806096114fb351`.
+The pinned `go1.25.0` binary SHA-256 is
+`b93cdfdbc72f1afc3f21498c80bf3d155a44a9b95e2d690c940511051574bc25`;
+it was byte-compared with the binary inside the official
+`go1.25.0.linux-amd64.tar.gz` distribution whose SHA-256 is
+`2852af0cb20a13139b3448992e69b868e50ed0f8a1e5940ee1de9e19a123b613`.
+
+Local implementation now includes a repository-owned go-tuf v2.4.2 verifier
+with pinned bootstrap trust, private durable rollback state, an exclusive state
+lock, strict HTTPS/origin/path bounds, deterministic USTAR frontend
+pack/extract, and disposable P-256 attack repositories. A review found and the
+implementation corrected a critical cross-invocation root-rotation defect: the
+client now checkpoints and reloads the latest verified root and rejects replay
+under a revoked timestamp key. Its strict batch command resolves a complete
+target set through one authenticated refresh before output writes and rejects
+overlapping destinations. It also rejects duplicate/trailing JSON,
+post-archive payloads, non-USTAR input, link traversal, destination overwrite,
+and unsafe target paths. Race-enabled tests and `go vet ./...` pass.
+
+Strict Draft 2020-12 release/channel/frontend/evidence schemas and a semantic
+machine contract now compile under AJV strict mode, bind the exact twelve OCI
+and seven frontend identities, and cap every public target at Cloudflare's
+25 MiB Static Assets limit. Bundle admission now requires exact caller-supplied
+environment/account/region/release/Git/admission-time context, recomputes the
+artifact-set hash, validates the six mandatory promotion evidence types and
+their chronology, and emits a deterministic digest-only deployment plan.
+Bounded no-follow duplicate-key JSON parsing and mutation tests cover identity
+confusion, target substitution, frontend path attacks, evidence substitution,
+expiry/order failures, and the formerly unbound CLI path. `npm --prefix
+release test` passes 9/9 and `npm --prefix release run verify` passes. The
+end-to-end admission command also pins the verifier executable hash, downloads
+the complete post-bundle set through one bounded strict batch request,
+independently rechecks every TUF target, validates/extracts frontend content,
+and emits an exclusive fsynced plan record; it accepts no raw image or frontend
+deployment override and never seals evidence after partial batch failure.
+
+The Cloudflare publication boundary now passes 51 local tests. It verifies
+go-tuf-compatible OLPC signatures/key IDs, exact role thresholds and ten
+distinct cryptographic keys, metadata/target closure and freshness, immutable
+release targets, hostile repository layouts, exact version upload/preview
+receipts, 100-percent deployment, and separate route activation. The wrapper
+uses audited local Wrangler 4.127.1 bytes; no Cloudflare API was called. A
+credential-free five-job CI workflow is present and locally linted, but has not
+yet produced a real clean-checkout GitHub run.
+
+The AWS release-trust source now passes all 54 infrastructure tests with eight
+distinct OIDC capabilities, Object-Locked KMS-bound archives, isolated P-256
+signer candidates, and a fixed five-function signing/checkpoint broker. No
+GitHub-assumable role can call `kms:Sign`: each protected signing identity can
+write only its candidate request namespace and invoke one exact immutable
+Lambda version. Runtime signing is bound to canonical versioned request bytes,
+the exact root/state/candidate pins, one KMS key, `DIGEST` plus
+`ECDSA_SHA_256`, and the exact unqualified source function ARN. DynamoDB CAS
+state is paired with a 100-year Object-Locked S3 manifest chain. Checkpoint
+schema `2.0.0` and state-manifest `v3` persist independent snapshot and
+timestamp version high-water marks, so an exposed pending version remains
+consumed when stale metadata is superseded. Completed decision indexes are
+create-only and are accepted only when their exact request
+provenance and metadata references appear in the reachable journal at the
+original state revision; replay after publication returns those retained bytes
+without another signer call. Tests reject lost-index, substituted-version,
+altered-output, expired-history, and unauthenticated-head cases. ECR retrieval
+is deny-bounded to the exact five functions and reviewed account, CloudTrail
+selects those five functions, and every broker alarm targets the exact imported
+environment SNS topic. The stack remains deliberately uninstantiated; no AWS
+call or key creation occurred. The EHR cache-generation correction passes 5/5
+focused tests and local build verification: its generated worker is
+exact-Git-SHA bound, preloads the complete shell, and treats the stable
+canonical runtime network-first. Focused AWS and EHR npm audits are now clean
+after compatible CDK and build-tool updates. The provider-neutral repository
+constructor now validates the exact ten-key root policy and sequential root
+rotation, creates the canonical targets payload, imports exactly 2-of-3
+context-bound offline signatures, and constructs snapshot/timestamp metadata
+only after authorizing the supplied signer against the selected root role. The
+local operator now builds an exclusive whole repository generation, binds all
+four planned versions, requires and hashes the exact predecessor, validates its
+full retained root/metadata/target closure, and produces bytes accepted by the
+independent Node validator with the same repository hash. Ordinary online
+preflight enforces a narrow wall clock, JSON-safe versions, authenticated
+previous root and role metadata, exact output increments, and
+unchanged-or-one selected-input transitions before AWS initialization. Only
+the stateful broker may advance one from its protected online-role high-water.
+It preserves exact archived replay without KMS, clears a dependent stale
+timestamp when replacing a snapshot, and never reuses either burned version.
+New signing also reserves a 30-minute publication margin, checks root/targets
+or the complete authorized snapshot context before KMS, and rechecks the
+request and complete output immediately before CAS. Offline targets evidence
+now carries a
+same-custodian domain-separated attestation over the full request, TUF
+signature, and signing time. Component-wise descriptor reads reject ancestor
+symlinks. Validator-backed tests across all 12 Go packages, the full race run,
+`go vet ./...`, and `go mod verify` pass after the recovery change. The
+ordinary generation plan and materializer deliberately remain strict `+1`
+boundaries: a gapped recovered generation must not be uploaded until a
+publisher reloads and exact-matches the durable pending checkpoint immediately
+before upload and again before deploy. That hook is implemented locally;
+serialized publication, remaining failure coverage, the clean-checkout gate, and
+every live staging, migration, restore, rollback, and monitoring proof remain
+open gates, not accepted risk. Recovery also fails closed if an
+already-unpublished next root or targets expires; retained intermediate offline
+lineage/manual recovery is not implemented.
+
+Architecture and local implementation may continue without external access.
+ADR-035 now fixes the implementation boundary: isolated staging/production
+roots and durable client state; public read-only whole-generation Cloudflare
+TUF repositories at the two dedicated `updates` hostnames; a separate private,
+versioned, KMS-encrypted, object-locked AWS evidence archive with no ECS access;
+2-of-3 offline production root/targets custody; independently authorized
+KMS-backed snapshot/timestamp freshness; pinned-root noninteractive release
+verification; exact staging artifact promotion; and only forward-version
+rollback. The technical KMS baseline is P-256 ECDSA/SHA-256 because that is the
+direct stock go-tuf v2.4.2 interoperability path. No key was created.
+
+Production key creation requires an approved algorithm, custody, provider,
+threshold, recovery, and ceremony decision. Live work remains ordered and
+mandatory: successful staging TUF/application deployment and adversarial
+validation, migration dry-run and staging-copy migration, backup/archive
+restore and forward-version rollback proof, monitoring proof, and only then an
+explicitly approved production action. The canonical evidence and gate ledger
+is `docs/TUF-PRODUCTION-IMPLEMENTATION.md`.
+
+## Previous authoritative stage — 2026-08-14
 
 Classification: **CLEAN-CHECKOUT VERIFY PREREQUISITE CORRECTED LOCALLY;
 NO DEPLOYMENT IS AUTHORIZED**.

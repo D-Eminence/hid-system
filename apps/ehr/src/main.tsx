@@ -6,6 +6,7 @@ import { App } from './ehr-app';
 import { registerScopedServiceWorker, useConnectivity } from '@hid/offline';
 import { ApplicationErrorBoundary, initializeTelemetry } from '@hid/telemetry';
 import { OfflineBanner } from '@hid/ui/Offline';
+import { registerReleaseBoundServiceWorker } from './release-service-worker';
 
 initializeTelemetry({
   app: 'ehr', environment: import.meta.env.MODE, release: import.meta.env.VITE_HID_RELEASE,
@@ -29,8 +30,14 @@ ReactDOM.createRoot(rootEl).render(
   </React.StrictMode>
 );
 
-void registerScopedServiceWorker({
-  scriptUrl: `${import.meta.env.BASE_URL}service-worker.js`,
+void registerReleaseBoundServiceWorker({
+  scriptUrl: `${import.meta.env.BASE_URL}service-worker.js?release=${__HID_EHR_RELEASE_SHA__}`,
   scope: import.meta.env.BASE_URL,
+  releaseSha: __HID_EHR_RELEASE_SHA__,
   enabled: import.meta.env.PROD,
+  serviceWorker: typeof navigator !== 'undefined' && 'serviceWorker' in navigator
+    ? navigator.serviceWorker
+    : undefined,
+  reload: () => window.location.reload(),
+  register: registerScopedServiceWorker,
 });

@@ -1,0 +1,15 @@
+{
+  "schema_version": "hid.tuf.production-build-toolchain/v1",
+  "verified_at": "2026-09-06",
+  "go_version": "go1.26.8",
+  "platform": "linux/amd64",
+  "distribution_filename": "go1.26.8.linux-amd64.tar.gz",
+  "distribution_size_bytes": 66897291,
+  "distribution_sha256": "d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b",
+  "go_binary_sha256": "d9a2fa19c7ef8b57f420012c21f49f235c46f08a68c12077d9c753dbb6ccdc34",
+  "build_image": "docker.io/library/golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81",
+  "build_image_linux_amd64_manifest": "sha256:bc6beb46032d45f421cf400036bf031cdc64f683ba9cdc124e31d063e71670bd",
+  "govulncheck_module": "golang.org/x/vuln/cmd/govulncheck@v1.1.4",
+  "upstream_reference_manifest": "verified-upstream-build.json",
+  "policy": "Go 1.25.0 and its historical reference binary are preserved for isolated interoperability only; never use them for release builds or live publication."
+}

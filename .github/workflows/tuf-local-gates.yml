@@ -1,0 +1,473 @@
+name: TUF local security gates
+on:
+  pull_request: null
+  push: null
+  workflow_dispatch: null
+permissions:
+  contents: read
+concurrency:
+  group: tuf-local-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+env:
+  CI: "true"
+  NODE_VERSION: 22.23.2
+  GO_VERSION: 1.26.8
+  BROKER_GO_BUILD_IMAGE: docker.io/library/golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81
+  BROKER_LAMBDA_RUNTIME_IMAGE: public.ecr.aws/lambda/provided:al2023@sha256:7dea43facdd67ffd71aa540527b6af413dfdae0133a0423ee9c329bf1e5adb6c
+jobs:
+  release-contracts:
+    name: Release contracts and admission
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Set up the minimum supported Node.js runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Install release verifier dependencies from the lockfile
+        run: npm --prefix release ci
+        id: gate_1
+      - name: Audit release verifier dependencies
+        run: npm --prefix release audit --audit-level=moderate
+        id: gate_2
+      - name: Test release admission and adversarial contracts
+        run: npm --prefix release test
+        id: gate_3
+      - name: Verify release schemas and machine configuration
+        run: npm --prefix release run verify
+        id: gate_4
+      - name: Record credential-free job evidence
+        env:
+          GATE_STEPS_JSON: ${{ toJSON(steps) }}
+        run: node release/scripts/collect-local-gate-evidence.mjs
+      - name: Retain independent job evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-local-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/local-gate-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+  tuf-client:
+    name: Pinned TUF client and reproducibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Set up Node.js for the toolchain evidence verifier
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Set up the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: true
+          cache-dependency-path: tools/tuf-release/go.sum
+      - name: Verify the patched release-build toolchain
+        run: node tools/tuf-release/scripts/verify-production-toolchain.mjs
+        id: gate_1
+      - name: Reject reachable Go vulnerabilities
+        run: node release/scripts/go-vulnerability-gate.mjs "${RUNNER_TEMP}/go-vulnerability-evidence.json"
+        id: gate_2
+      - name: Run race-enabled TUF client tests
+        working-directory: tools/tuf-release
+        run: go test -count=1 -race ./...
+        id: gate_3
+      - name: Vet the TUF client
+        working-directory: tools/tuf-release
+        run: go vet ./...
+        id: gate_4
+      - name: Verify pinned Go modules
+        working-directory: tools/tuf-release
+        run: go mod verify
+        id: gate_9
+      - name: Prove the HID client build is reproducible
+        working-directory: tools/tuf-release
+        run: |
+          build_root="${RUNNER_TEMP}/hid-tuf-client-reproducibility"
+          mkdir -p "${build_root}"
+          for build_label in a b; do
+            env \
+              GOENV=off \
+              GOTOOLCHAIN=local \
+              GOOS=linux \
+              GOARCH=amd64 \
+              GOAMD64=v1 \
+              CGO_ENABLED=0 \
+              SOURCE_DATE_EPOCH=0 \
+              TZ=UTC \
+              LC_ALL=C \
+              LANG=C \
+              go build \
+                -mod=readonly \
+                -trimpath \
+                -buildvcs=false \
+                -ldflags=-buildid= \
+                -o "${build_root}/hid-tuf-${build_label}" \
+                ./cmd/hid-tuf
+          done
+          cmp "${build_root}/hid-tuf-a" "${build_root}/hid-tuf-b"
+        id: gate_5
+      - name: Prove the AWS signing-broker binary build is reproducible
+        working-directory: tools/tuf-release
+        run: |
+          build_root="${RUNNER_TEMP}/hid-tuf-signing-broker-reproducibility"
+          mkdir -p "${build_root}"
+          for build_label in a b; do
+            env \
+              GOENV=off \
+              GOTOOLCHAIN=local \
+              GOOS=linux \
+              GOARCH=amd64 \
+              GOAMD64=v1 \
+              CGO_ENABLED=0 \
+              SOURCE_DATE_EPOCH=0 \
+              TZ=UTC \
+              LC_ALL=C \
+              LANG=C \
+              go build \
+                -mod=readonly \
+                -trimpath \
+                -buildvcs=false \
+                -ldflags=-buildid= \
+                -o "${build_root}/bootstrap-${build_label}" \
+                ./cmd/hid-tuf-signing-broker
+          done
+          cmp "${build_root}/bootstrap-a" "${build_root}/bootstrap-b"
+        id: gate_6
+      - name: Prove the metadata and publication operators are reproducible
+        working-directory: tools/tuf-release
+        run: |
+          build_root="${RUNNER_TEMP}/hid-tuf-operator-reproducibility"
+          mkdir -p "${build_root}"
+          for command in hid-tuf-repo hid-tuf-publication hid-tuf-journal; do
+            for build_label in a b; do
+              env \
+                GOENV=off \
+                GOTOOLCHAIN=local \
+                GOOS=linux \
+                GOARCH=amd64 \
+                GOAMD64=v1 \
+                CGO_ENABLED=0 \
+                SOURCE_DATE_EPOCH=0 \
+                TZ=UTC \
+                LC_ALL=C \
+                LANG=C \
+                go build \
+                  -mod=readonly \
+                  -trimpath \
+                  -buildvcs=false \
+                  -ldflags=-buildid= \
+                  -o "${build_root}/${command}-${build_label}" \
+                  "./cmd/${command}"
+            done
+            cmp "${build_root}/${command}-a" "${build_root}/${command}-b"
+          done
+        id: gate_7
+      - name: Validate the digest-pinned signing-broker Dockerfile
+        run: docker buildx build --check --platform linux/amd64 --file tools/tuf-release/Dockerfile.signing-broker --build-arg GO_BUILD_IMAGE="${BROKER_GO_BUILD_IMAGE}" --build-arg LAMBDA_RUNTIME_IMAGE="${BROKER_LAMBDA_RUNTIME_IMAGE}" tools/tuf-release
+        id: gate_8
+      - name: Record credential-free job evidence
+        env:
+          GATE_STEPS_JSON: ${{ toJSON(steps) }}
+        run: node release/scripts/collect-local-gate-evidence.mjs
+      - name: Retain independent job evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-local-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |-
+            ${{ runner.temp }}/local-gate-evidence.json
+            ${{ runner.temp }}/go-vulnerability-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+  aws-release-trust:
+    name: AWS release-trust source policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Set up the minimum supported Node.js runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Install AWS infrastructure dependencies from the lockfile
+        run: npm --prefix infra/aws ci
+        id: gate_1
+      - name: Audit AWS infrastructure dependencies
+        run: npm --prefix infra/aws audit --audit-level=moderate
+        id: gate_2
+      - name: Type-check release-trust infrastructure
+        run: npm --prefix infra/aws run typecheck
+        id: gate_3
+      - name: Test release-trust policy and synthesized resources
+        run: npm --prefix infra/aws test
+        id: gate_4
+      - name: Record credential-free job evidence
+        env:
+          GATE_STEPS_JSON: ${{ toJSON(steps) }}
+        run: node release/scripts/collect-local-gate-evidence.mjs
+      - name: Retain independent job evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-local-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/local-gate-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+  cloudflare-tuf:
+    name: Cloudflare TUF Workers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Set up the minimum supported Node.js runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Set up Go for the repository cross-validator
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: true
+          cache-dependency-path: tools/tuf-release/go.sum
+      - name: Install the audited Cloudflare toolchain from the lockfile
+        run: npm --prefix infra/cloudflare ci
+        id: gate_1
+      - name: Install the release admission dependency used by preview tests
+        run: npm --prefix release ci --ignore-scripts
+        id: gate_2
+      - name: Audit Cloudflare toolchain dependencies
+        run: npm --prefix infra/cloudflare audit --audit-level=moderate
+        id: gate_3
+      - name: Cross-check Go materialization with the Cloudflare validator
+        working-directory: tools/tuf-release
+        env:
+          GOTOOLCHAIN: local
+          HID_REQUIRE_CLOUDFLARE_VALIDATOR: "1"
+        run: go test -count=1 -run TestMaterializedGenerationPassesCloudflareValidator ./internal/repository
+        id: gate_4
+      - name: Test TUF layout, Worker policy, and deployment boundaries
+        run: npm --prefix infra/cloudflare test
+        id: gate_5
+      - name: Prepare disposable assets for credential-free bundle checks
+        run: |
+          node --input-type=module <<'EOF'
+          import { mkdir, readFile, writeFile } from 'node:fs/promises'
+          import { resolve } from 'node:path'
+
+          const cloudflareRoot = resolve('infra/cloudflare')
+          for (const deployment of ['staging', 'production']) {
+            const workerRoot = resolve(cloudflareRoot, 'workers', `hid-tuf-${deployment}`)
+            const config = JSON.parse(await readFile(resolve(workerRoot, 'wrangler.json'), 'utf8'))
+            const repository = resolve(process.env.RUNNER_TEMP, `hid-tuf-${deployment}-dry-run-assets`)
+            await mkdir(repository, { recursive: true })
+            await writeFile(resolve(repository, 'ci-placeholder.txt'), 'credential-free Wrangler dry run\n')
+            config.$schema = resolve(cloudflareRoot, 'node_modules/wrangler/config-schema.json')
+            config.main = resolve(workerRoot, config.main)
+            config.assets.directory = repository
+            await writeFile(
+              resolve(process.env.RUNNER_TEMP, `hid-tuf-${deployment}-wrangler.json`),
+              `${JSON.stringify(config, null, 2)}\n`,
+            )
+          }
+          EOF
+        id: gate_6
+      - name: Compile the staging TUF Worker without deployment
+        run: infra/cloudflare/node_modules/.bin/wrangler deploy --dry-run --config "${RUNNER_TEMP}/hid-tuf-staging-wrangler.json"
+        id: gate_7
+      - name: Compile the production TUF Worker without deployment
+        run: infra/cloudflare/node_modules/.bin/wrangler deploy --dry-run --config "${RUNNER_TEMP}/hid-tuf-production-wrangler.json"
+        id: gate_8
+      - name: Record credential-free job evidence
+        env:
+          GATE_STEPS_JSON: ${{ toJSON(steps) }}
+        run: node release/scripts/collect-local-gate-evidence.mjs
+      - name: Retain independent job evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-local-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/local-gate-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+  ehr-release-cache:
+    name: EHR release-bound offline cache
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Set up the minimum supported Node.js runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Install EHR dependencies from the lockfile
+        run: npm --prefix apps/ehr ci
+        id: gate_1
+      - name: Audit EHR dependencies
+        run: npm --prefix apps/ehr audit --audit-level=moderate
+        id: gate_2
+      - name: Test release-bound cache generation and failure behavior
+        run: npm --prefix apps/ehr test
+        id: gate_3
+      - name: Build the root-hosted release artifact
+        env:
+          HID_PUBLIC_BASE: /
+        run: npm --prefix apps/ehr run build
+        id: gate_4
+      - name: Verify the built worker is bound to the checked-out release
+        run: |
+          HID_CI_RELEASE_SHA="$(git rev-parse --verify HEAD)" node --input-type=module <<'EOF'
+          import assert from 'node:assert/strict'
+          import { readFile } from 'node:fs/promises'
+
+          const serviceWorker = await readFile('apps/ehr/dist/service-worker.js', 'utf8')
+          const html = await readFile('apps/ehr/dist/index.html', 'utf8')
+          assert.match(process.env.HID_CI_RELEASE_SHA, /^[a-f0-9]{40}$/)
+          assert.ok(serviceWorker.includes(process.env.HID_CI_RELEASE_SHA))
+          assert.ok(!serviceWorker.includes('__HID_EHR_RELEASE_SHA__'))
+          assert.ok(!serviceWorker.includes('__HID_EHR_SHELL_ASSETS__'))
+          assert.match(serviceWorker, /assets\/canonical-platform-runtime\.js/)
+          assert.match(html, /(?:src|href)="\/assets\//)
+          EOF
+        id: gate_5
+      - name: Record credential-free job evidence
+        env:
+          GATE_STEPS_JSON: ${{ toJSON(steps) }}
+        run: node release/scripts/collect-local-gate-evidence.mjs
+      - name: Retain independent job evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-local-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/local-gate-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+  workspace:
+    name: Complete workspace verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Install all tracked lockfiles without cloud authority
+        run: |-
+          node --input-type=module <<'NODE'
+          import {execFileSync} from 'node:child_process';
+          import {dirname} from 'node:path';
+          const paths=execFileSync('git',['ls-files','-z','**/package-lock.json'],{encoding:'utf8'}).split('\0').filter(Boolean);
+          for(const path of paths) execFileSync('npm',['--prefix',dirname(path),'ci'],{stdio:'inherit'});
+          NODE
+      - name: Run and record complete workspace gates
+        run: node release/scripts/run-workspace-gates.mjs
+      - name: Retain workspace evidence even after failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-workspace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workspace-gates
+          if-no-files-found: warn
+          retention-days: 90
+  upstream-reference:
+    name: Historical upstream reference oracle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: 1.25.0
+          check-latest: false
+          cache: false
+      - name: Verify the pinned module graph and upstream identity
+        run: node tools/tuf-release/scripts/verify-toolchain.mjs
+        id: gate_1
+      - name: Reproduce and verify the pinned upstream reference client
+        run: |
+          build_root="${RUNNER_TEMP}/upstream-tuf-client-reproducibility"
+          tuf_source="$(go env GOMODCACHE)/github.com/theupdateframework/go-tuf/v2@v2.4.2"
+          test -d "${tuf_source}"
+          GOTOOLCHAIN=local go -C "${tuf_source}" mod download
+          mkdir -p "${build_root}"
+          for build_label in a b; do
+            env \
+              GOENV=off \
+              GOTOOLCHAIN=local \
+              GOOS=linux \
+              GOARCH=amd64 \
+              GOAMD64=v1 \
+              CGO_ENABLED=0 \
+              GOPROXY=off \
+              SOURCE_DATE_EPOCH=0 \
+              TZ=UTC \
+              LC_ALL=C \
+              LANG=C \
+              go -C "${tuf_source}" build \
+                -mod=readonly \
+                -trimpath \
+                -buildvcs=false \
+                -ldflags=-buildid= \
+                -o "${build_root}/tuf-client-${build_label}" \
+                ./examples/cli/tuf-client
+          done
+          cmp "${build_root}/tuf-client-a" "${build_root}/tuf-client-b"
+          node tools/tuf-release/scripts/verify-toolchain.mjs \
+            --build-a "${build_root}/tuf-client-a" \
+            --build-b "${build_root}/tuf-client-b"
+        id: gate_2
+      - name: Record credential-free job evidence
+        env:
+          GATE_STEPS_JSON: ${{ toJSON(steps) }}
+        run: node release/scripts/collect-local-gate-evidence.mjs
+      - name: Retain historical oracle evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-local-upstream-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/local-gate-evidence.json
+          if-no-files-found: error
+          retention-days: 90

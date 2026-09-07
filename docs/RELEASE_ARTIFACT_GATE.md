@@ -14,7 +14,13 @@ separate `migration` target. The seven frontends are independent Cloudflare
 Workers Static Assets releases; they are not embedded in Gateway or counted as
 ECR images.
 
-The machine contract is [release-manifest.schema.json](../infra/aws/release-manifest.schema.json). [release-manifest.template.json](../infra/aws/release-manifest.template.json) contains substitution tokens, deliberately not fabricated digests.
+The legacy container-only machine contract is
+[release-manifest.schema.json](../infra/aws/release-manifest.schema.json).
+The TUF release bundle being implemented under ADR-035 becomes the authoritative
+promotion contract because it binds those twelve records to the seven frontend
+artifacts, migration ledger, artifact-set hash, and promotion evidence. TUF is
+the detached signed envelope; the JSON manifest does not invent an embedded
+signature field.
 
 ## 2. Required evidence per component
 
@@ -42,8 +48,10 @@ locked source checkout
   -> complete container topology acceptance
   -> immutable ECR push
   -> registry digest re-read and comparison
-  -> signed/retained release manifest
+  -> strict release bundle plus deterministic frontend targets
+  -> TUF targets threshold and retained repository generation
   -> CDK lint / typecheck / assertions / offline synth
+  -> pinned-root verification and sealed deployment plan
   -> staging approval
 ```
 
@@ -86,17 +94,28 @@ The future authorized pipeline stages are:
 3. all Docker targets built on a Docker-capable runner;
 4. SBOM, dependency, OS/image, layer, secret, UID, health and signal gates;
 5. topology acceptance and browser/offline acceptance;
-6. manifest creation and schema validation;
-7. authenticated ECR push, digest comparison, manifest finalization;
-8. CDK synth and policy assertions using the finalized digest inputs;
-9. staging approval;
-10. foundation deploy with desired counts zero;
-11. migration plan, snapshot/PITR check, dry run, apply and zero-pending verification;
-12. token delivery/issuer, secret, TLS and provider preflight;
-13. staging service rollout and acceptance;
-14. production approval, migration, progressive rollout and acceptance.
+6. deterministic frontend archives, content manifests, complete release bundle,
+   artifact-set calculation, and schema/cross-field validation;
+7. authenticated ECR push, digest comparison, and target finalization;
+8. TUF targets signing, snapshot/timestamp signing, archive, publication preview,
+   pinned-root verification, and atomic repository promotion;
+9. sealed-plan CDK synth and policy assertions using only verified digest inputs;
+10. staging approval;
+11. foundation deploy with desired counts zero;
+12. migration plan, snapshot/PITR check, dry run, apply and zero-pending verification;
+13. token delivery/issuer, secret, TLS and provider preflight;
+14. staging service/frontend rollout, attack tests, restore, rollback, monitoring,
+   and acceptance;
+15. exact-artifact production promotion, offline threshold, explicit production
+   approval, migration, progressive rollout and acceptance.
 
 GitHub OIDC is the intended future CI credential mechanism. No trust provider, repository subject, AWS role, or account policy is created here because the account/repository governance inputs are not authorized. Static AWS keys are forbidden.
+
+Private TUF signing keys are also forbidden in GitHub secrets. Builder,
+offline targets/root custody, online freshness signing, publication, workload
+deployment, and independent verification are separate capabilities. A scoped
+Cloudflare publisher token is not a signing key, but staging and production
+must still use independent protected credentials.
 
 ## 8. Rollback and database rule
 

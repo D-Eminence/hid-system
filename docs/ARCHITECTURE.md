@@ -1417,3 +1417,63 @@ Migration `0027` adds only Identity/security lifecycle and administration
 needs plus a PHI-minimal neutral dispatcher-failure read. All runtime roles
 remain NOLOGIN, non-owner, and non-BYPASSRLS. See
 `SUPER_ADMIN_FOUNDATION.md` and ADR-029.
+
+## 35. Trusted Release and Update Architecture
+
+The release operator is the TUF client. Browsers and ECS services do not fetch
+or install HID software, so adding in-browser or runtime-service verification
+would create a second trust boundary without protecting deployment admission.
+
+```text
+locked source + evidence
+        |
+        v
+unprivileged deterministic builder ----> immutable OCI blobs in ECR
+        |                                  (content addressed by digest)
+        v
+offline targets threshold + bounded signing request
+                                   |
+                                   v
+                    state-pinned AWS freshness broker
+                    (only broker may call exact KMS key)
+                    |
+                    +----> private versioned/object-locked AWS evidence archive
+                    |
+                    `----> complete Cloudflare TUF Worker version
+                         |
+                  pinned-root verifier
+                         |
+               sealed deployment plan
+                    /           \
+           12 ECS digests    7 frontend trees
+```
+
+Staging and production have different roots, keys, metadata histories, state,
+archives, credentials, and update hostnames. Repositories are public read-only
+because artifacts are already public or PHI-free release evidence; TUF supplies
+authenticity, integrity, freshness, and rollback resistance, not secrecy. The
+clinical document bucket and all application task roles remain outside this
+boundary.
+
+Protected GitHub OIDC jobs can submit role-specific immutable requests, but
+cannot invoke KMS directly or update broker trust state. The fixed broker
+derives current root/version/hash authority from its own durable checkpoint and
+deployment pins, enforces clock and exact version transitions, and only then
+uses one assigned snapshot or timestamp candidate key.
+
+Whole Worker versions make each repository generation atomic. Consistent
+snapshots retain every root and use version/hash-addressed metadata/targets.
+Before upload and deployment, a separate read-only operator authenticates the
+durable published/pending metadata tuple. A protected predecessor repository
+hash preserves complete immutable history, and upload consumes a private
+revalidated copy. Schema-2 upload/deployment receipts bind operator pins,
+checkpoint revision and exact repository/role hashes. State-authenticated
+materialization can skip burned unpublished online versions; the ordinary
+constructor and offline root/targets lineage remain sequential. Fresh
+authorization is not a distributed lock: the protected publisher must serialize
+each environment through public canary/checkpoint advancement and reconcile
+unknown external outcomes before retry. That live workflow remains unproven.
+Production consumes the exact staging artifact set and never rebuilds it.
+Rollback is a newly signed higher metadata version pointing to retained old
+bytes. Detailed schemas, thresholds, retention, recovery, and gating are in
+`TUF-PRODUCTION-IMPLEMENTATION.md` and ADR-035.
