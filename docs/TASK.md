@@ -4,26 +4,87 @@
 
 **PHASE C LOCALLY VERIFIED AND COMMITTED — STAGING NOT ACCEPTED**.
 
-Previous SHA: `abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`.
-New immutable local SHA: `46e76cecf9e846061203c8fd68a0fcfd0c2825a5`.
+GitHub protection preparation now has live, read-back-verified PR/check/no-bypass
+rules on `main` and `tuf-production-release`, restricted SHA-pinned Actions,
+external-contributor approval, and four distinct staging/production and publisher
+environments. All use the verified owner with self-review/admin bypass disabled;
+independent reviewer coverage remains missing. CODEOWNERS and readiness source
+are local preparation only. **PROTECTED CI READINESS: BLOCKED**.
+
+Ordinary run `34103460898` failed (four jobs passed, three failed). Two local
+fixes address missing EHR shared dependencies and an unsafe test-fixture
+executable assumption; isolated EHR build/tests, Cloudflare 52 tests, actionlint,
+full `npm test` and `npm run verify` pass. No remote rerun or protected run was
+performed. Exact state, changes and remaining inputs are recorded in the
+[canonical protection milestone](TUF-PRODUCTION-IMPLEMENTATION.md#github-protection-preparation--2026-09-07)
+and [non-secret prerequisites](../release/config/protected-ci-prerequisites.json).
+
+## Historical Phase C commit and push records
+
+Original implementation previous SHA: `abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`.
+Phase C implementation SHA: `46e76cecf9e846061203c8fd68a0fcfd0c2825a5`.
 Message: `Implement TUF release trust and prepare protected staging gates`.
 Commit timestamp: `2026-09-07T04:11:04+01:00`. Branch: `tuf-production-release`.
-Exactly one local commit includes the 193 reviewed files; no amend/history
+The original local commit includes the 193 reviewed files; no amend/history
 rewrite occurred. Every committed blob matches the approved inventory.
 The unrelated `docs/SECURITY.md` edit remains untouched and excluded.
 Pre-/post-commit diff, scope, evidence and security checks pass with zero secret
 findings. Prior local suite results remain recorded in the canonical document.
 
-The user's later correction sets immutable journal/evidence retention to
-**2 years (730 days)**. The original commit contains the superseded retention
-proposal. Go/configuration/IAM/tests/plans/runbooks are corrected locally;
-58 AWS tests/typecheck, Go normal/race/vet/modules, 24 release tests, configuration
-and secret checks, regenerated source-model plans and five paired builds pass.
-These changes and the post-commit canonical records remain uncommitted; no
-further commit is authorized.
+The separately authorized correction sets immutable journal/evidence retention
+to **2 years (730 days)** and is now committed:
 
-- No push occurred; separate push authorization is required.
-- No protected CI run exists; GitHub protections await owner configuration.
+| Correction commit evidence | Verified value |
+| --- | --- |
+| Previous SHA | `46e76cecf9e846061203c8fd68a0fcfd0c2825a5` |
+| New correction SHA / HEAD | `ba2cd3290e7c1fe72817c3bdfb806dd306b2c633` |
+| Exact message | `Correct immutable evidence retention to two years` |
+| Commit timestamp | `2026-09-07T09:48:21+01:00` |
+| Scope and statistics | Exactly 22 reviewed files; 789 insertions and 159 deletions |
+| Verification | PASS: every reviewed blob hash, parent, single new commit and recomputed commit object hash |
+
+The original commit retains the superseded proposal as history. The correction
+covers Go implementation, IAM/configuration, tests, plans and runbooks; its exact
+paths and reviewed hashes are in
+[retention evidence](evidence/tuf-phase-c/retention-correction.json), resolved at
+the new correction SHA. Its pre-commit status fields are historical and are
+superseded by this record.
+
+All requested checks were rerun before committing: 58 AWS tests/typecheck,
+Go 1.26.8 normal/race/vet/module verification, 24 release tests, configuration
+and security validation, both synthetic plans and five paired builds passed.
+No active obsolete retention settings or secrets/private signing material were
+found. The index was empty before staging, and status/diff/cached-diff/whitespace
+checks passed. Immediately after committing, only ` M docs/SECURITY.md` remained
+and the index was empty. The original commit was not amended or rewritten.
+
+`git log -2 --oneline`:
+
+```text
+ba2cd32 Correct immutable evidence retention to two years
+46e76ce Implement TUF release trust and prepare protected staging gates
+```
+
+At the correction-commit milestone, the two canonical records remained
+unstaged/uncommitted alongside the untouched unrelated SECURITY edit. The later
+GitHub-preparation request separately authorizes a new logical local commit; no
+additional push is authorized. Exact historical commit evidence is recorded
+in the [canonical implementation record](TUF-PRODUCTION-IMPLEMENTATION.md).
+
+```text
+PHASE C IMPLEMENTATION: COMMITTED
+RETENTION CORRECTION: COMMITTED
+PUSH: COMPLETE
+PROTECTED CI: NOT RUN
+GITHUB PROTECTIONS: PARTIAL — OWNER REVIEWER COVERAGE PENDING
+OBJECT LOCK: UNAPPROVED / NOT CREATED
+STAGING: NOT ACCEPTED
+DATA MIGRATION: NOT AUTHORIZED
+PRODUCTION: LOCKED
+```
+
+- The separately authorized exact-history push is complete; no AWS or Cloudflare mutation occurred.
+- No protected CI run exists; branch/Actions/environment settings are active, with independent reviewer coverage and remote CODEOWNERS still pending.
 - Exact AWS/Cloudflare identifiers remain pending.
 - **OBJECT LOCK: UNAPPROVED / NOT CREATED**; retention correction grants no creation authority.
 - Signing/custody and candidate/signing/canary execution review remain pending.
@@ -31,12 +92,41 @@ further commit is authorized.
 - Staging authorization remains pending; **STAGING NOT ACCEPTED**.
 - **DATA MIGRATION: NOT AUTHORIZED. PRODUCTION: LOCKED.**
 
-Next: review the corrected file scope in
-[retention evidence](evidence/tuf-phase-c/retention-correction.json) and obtain
-separate authorization before a new commit. After correction-commit
-authorization, request push permission for the exact SHA/repository/branch, followed by owner-installed
-protections and protected CI readiness. Do not execute any external step
-automatically. See [canonical record](TUF-PRODUCTION-IMPLEMENTATION.md).
+Push completed at `2026-09-07T08:58:39.696382+00:00` to configured repository
+`https://github.com/D-Eminence/hid-system.git`, branch `tuf-production-release`.
+At `2026-09-07T08:59:27.303148+00:00`, independent `git ls-remote` and GitHub API
+checks both verified remote HEAD equals local HEAD:
+`ba2cd3290e7c1fe72817c3bdfb806dd306b2c633`, with parent
+`46e76cecf9e846061203c8fd68a0fcfd0c2825a5`. The upstream is
+`origin/tuf-production-release`, 0 ahead and 0 behind. Only the target branch
+was created; before/after remote heads and tags show no unexpected changes.
+
+Executed command (exit 0):
+
+```sh
+git push --porcelain --no-follow-tags --recurse-submodules=no --set-upstream origin refs/heads/tuf-production-release:refs/heads/tuf-production-release
+```
+
+No force, history rewrite, amend, tags, releases or additional commit occurred
+during that original push.
+The two existing commits preserve the exact reviewed scopes; all 215 changed
+committed blobs were scanned with zero secret/private-signing-material findings.
+The existing SECURITY edit remains untouched and excluded. Both canonical
+documentation updates remain unstaged/uncommitted and were not pushed.
+
+The push automatically started ordinary credential-free
+[TUF local security gates](https://github.com/D-Eminence/hid-system/actions/runs/34103460898),
+observed `in_progress` at the verification time above. No workflow was manually
+dispatched and no protected workflow ran. No completed CI result or staging
+acceptance is claimed; monitoring did not continue under this authorization.
+The canonical implementation record retains the full push evidence and hashes.
+
+Current next action: owner-supplied independent reviewers and production
+approval coverage, then separately authorized exact-SHA publication of the local
+preparation through a review branch/protected PR. Keep branch and environment
+protections intact. Successful ordinary CI, default-branch dispatch availability,
+a staging-only approved SHA variable and explicit readiness dispatch remain
+required. No protected CI or cloud action follows automatically.
 
 ## Historical implementation trail
 

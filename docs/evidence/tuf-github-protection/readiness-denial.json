@@ -1,0 +1,12 @@
+{
+  "schema_version": "hid.tuf.live-snapshot-readiness-denial/v1",
+  "source": "independently fetched live GitHub environment metadata",
+  "actor_id": "182018869",
+  "result": "EXPECTED_DENIAL",
+  "reason": "Independent reviewer coverage unavailable",
+  "oidc_requested": false,
+  "cloud_calls": false,
+  "protected_ci_executed": false,
+  "retention_days": 730,
+  "unresolved_external_template_fields": 96
+}

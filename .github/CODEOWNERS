@@ -1,0 +1,18 @@
+# Verified current repository owner. Independent reviewer coverage is pending.
+# Branch rules require code-owner reviews; self-approval/bypass remains forbidden.
+# Require code-owner reviews in branch protection; prohibit bypass.
+/.github/                           @D-Eminence
+/release/                           @D-Eminence
+/tools/tuf-release/                  @D-Eminence
+/infra/                             @D-Eminence
+/scripts/tuf-*                      @D-Eminence
+/services/ehr-api/database/          @D-Eminence
+/services/ehr-api/scripts/           @D-Eminence
+/apps/ehr/scripts/                  @D-Eminence
+/apps/ehr/public/service-worker.js  @D-Eminence
+/apps/ehr/src/release-service-worker.ts @D-Eminence
+/docs/TUF-*                         @D-Eminence
+/CODEX.md                           @D-Eminence
+/.gitignore                         @D-Eminence
+/package.json                       @D-Eminence
+**/package-lock.json                @D-Eminence

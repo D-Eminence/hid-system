@@ -1,0 +1,68 @@
+name: Protected staging readiness probe
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact separately approved source commit; this probe never publishes or deploys
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: tuf-protected-staging-readiness
+  cancel-in-progress: false
+jobs:
+  staging-readiness:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'D-Eminence/hid-system' && github.ref == 'refs/heads/tuf-production-release' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: staging
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      READINESS_SOURCE_SHA: ${{ inputs.source_sha }}
+      TUF_READINESS_APPROVED_SHA: ${{ vars.TUF_READINESS_APPROVED_SHA }}
+      READINESS_ENVIRONMENT: staging
+    steps:
+      - name: Reject unapproved source before checkout or token access
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          const e = process.env;
+          const expected = {
+            GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch',
+            GITHUB_REPOSITORY: 'D-Eminence/hid-system', GITHUB_REPOSITORY_ID: '1317340803',
+            GITHUB_REPOSITORY_OWNER_ID: '182018869', GITHUB_REF: 'refs/heads/tuf-production-release',
+            GITHUB_REF_TYPE: 'branch', GITHUB_REF_PROTECTED: 'true', READINESS_ENVIRONMENT: 'staging',
+            RUNNER_ENVIRONMENT: 'github-hosted', GITHUB_RUN_ATTEMPT: '1',
+            GITHUB_WORKFLOW_REF: 'D-Eminence/hid-system/.github/workflows/tuf-protected-readiness.yml@refs/heads/tuf-production-release',
+          };
+          if (Object.entries(expected).some(([key, value]) => e[key] !== value)
+            || !/^[a-f0-9]{40}$/.test(e.GITHUB_SHA ?? '')
+            || [e.READINESS_SOURCE_SHA, e.TUF_READINESS_APPROVED_SHA, e.GITHUB_WORKFLOW_SHA].some(value => value !== e.GITHUB_SHA)
+            || e.GITHUB_HEAD_REF || e.GITHUB_BASE_REF) {
+            throw Error('Protected readiness source approval rejected');
+          }
+          NODE
+      - name: Check out only the independently approved commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Set up the pinned verification runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.23.2
+          package-manager-cache: false
+      - name: Verify approval, environment separation and readiness-only OIDC
+        env:
+          GH_READINESS_READ_TOKEN: ${{ github.token }}
+        run: node release/scripts/verify-protected-readiness.mjs
+      - name: Retain only the bounded public readiness summary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-protected-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tuf-protected-readiness.json
+          if-no-files-found: error
+          retention-days: 90

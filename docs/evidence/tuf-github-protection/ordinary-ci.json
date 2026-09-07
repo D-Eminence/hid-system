@@ -1,0 +1,101 @@
+{
+  "schema_version": "hid.tuf.ordinary-ci-inspection/v1",
+  "run_id": 34103460898,
+  "url": "https://github.com/D-Eminence/hid-system/actions/runs/34103460898",
+  "workflow": ".github/workflows/tuf-local-gates.yml",
+  "workflow_name": "TUF local security gates",
+  "source_sha": "ba2cd3290e7c1fe72817c3bdfb806dd306b2c633",
+  "event": "push",
+  "attempt": 1,
+  "created_at": "2026-09-07T08:58:44Z",
+  "completed_at": "2026-09-07T09:02:31Z",
+  "conclusion": "failure",
+  "jobs": [
+    {
+      "id": 101682997194,
+      "name": "EHR release-bound offline cache",
+      "conclusion": "failure",
+      "failed_steps": [
+        "Build the root-hosted release artifact"
+      ]
+    },
+    {
+      "id": 101682997371,
+      "name": "Release contracts and admission",
+      "conclusion": "success",
+      "failed_steps": []
+    },
+    {
+      "id": 101682997400,
+      "name": "Cloudflare TUF Workers",
+      "conclusion": "failure",
+      "failed_steps": [
+        "Test TUF layout, Worker policy, and deployment boundaries"
+      ]
+    },
+    {
+      "id": 101682997417,
+      "name": "Historical upstream reference oracle",
+      "conclusion": "success",
+      "failed_steps": []
+    },
+    {
+      "id": 101682997438,
+      "name": "Complete workspace verification",
+      "conclusion": "failure",
+      "failed_steps": [
+        "Run and record complete workspace gates"
+      ]
+    },
+    {
+      "id": 101682997447,
+      "name": "AWS release-trust source policy",
+      "conclusion": "success",
+      "failed_steps": []
+    },
+    {
+      "id": 101682997517,
+      "name": "Pinned TUF client and reproducibility",
+      "conclusion": "success",
+      "failed_steps": []
+    }
+  ],
+  "protected_ci": false,
+  "findings": [
+    {
+      "scope": "EHR build",
+      "cause": "Only apps/ehr lockfile installed, leaving linked packages/offline, packages/telemetry and packages/ui without their source-local React/Sentry/PostHog dependencies.",
+      "local_fix": "Install and audit all three shared source dependency lockfiles with EHR."
+    },
+    {
+      "scope": "Cloudflare tests and complete workspace test",
+      "cause": "Publication fixture pins process.execPath directly; hosted run rejects this executable at strict readPinnedFile file/size/permission validation. Ambient writable toolcache permissions are the inferred cause, reproduced locally with mode0775; hosted mode/size were not logged.",
+      "local_fix": "Copy runtime to private fixture executable and set 0500; add rejection assertions for group- and other-writable modes; production validator unchanged."
+    }
+  ],
+  "workspace_verification": "build passed; test failed at same Cloudflare fixture; verify/release/migration gates not reached",
+  "security_observations": [
+    "Ordinary workflow has contents:read only and no id-token:write, GitHub environment, or secrets references.",
+    "All actions pinned to exact40-character commit SHAs; checkout persist-credentials:false.",
+    "AWS/Cloudflare cloud authority absent from workflow; dry-run bundle checks skipped after test failure; no release publication or cloud deployment steps.",
+    "Four successful jobs include release contracts, AWS source policy, Go reproducibility/race/vulnerability and upstream reference oracle.",
+    "Raw logs retained privately; credentials/secret values were not queried."
+  ],
+  "artifacts": [
+    {
+      "name": "job-101682997438.log",
+      "sha256": "9ddc7ddd3a50e4532b722e8e036fc8c87a973ad5b73480c9ad8e93707edac7cc",
+      "size_bytes": 51571
+    },
+    {
+      "name": "job-101682997400.log",
+      "sha256": "9c3b2dea90ad8c50db4d68cdc09d4442b991b9cb54a8cc97b80b7fac670f5356",
+      "size_bytes": 50657
+    },
+    {
+      "name": "job-101682997194.log",
+      "sha256": "a8867a1e5a656203737d1f7e7752aca7cf6365992c453a9eb14eee1e8bf26883",
+      "size_bytes": 27328
+    }
+  ]
+}

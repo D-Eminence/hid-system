@@ -325,11 +325,17 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
-      - name: Install EHR dependencies from the lockfile
-        run: npm --prefix apps/ehr ci
+      - name: Install EHR and shared source dependencies from their lockfiles
+        run: |
+          for package in packages/offline packages/telemetry packages/ui apps/ehr; do
+            npm --prefix "${package}" ci
+          done
         id: gate_1
-      - name: Audit EHR dependencies
-        run: npm --prefix apps/ehr audit --audit-level=moderate
+      - name: Audit EHR and shared source dependencies
+        run: |
+          for package in packages/offline packages/telemetry packages/ui apps/ehr; do
+            npm --prefix "${package}" audit --audit-level=moderate
+          done
         id: gate_2
       - name: Test release-bound cache generation and failure behavior
         run: npm --prefix apps/ehr test

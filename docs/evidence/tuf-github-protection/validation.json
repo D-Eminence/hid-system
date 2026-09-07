@@ -1,0 +1,96 @@
+{
+  "schema_version": "hid.tuf.github-preparation-validation/v1",
+  "recorded_at": "2026-09-07T14:22:29.912918+00:00",
+  "source_base_sha": "ba2cd3290e7c1fe72817c3bdfb806dd306b2c633",
+  "worktree_dirty": true,
+  "commands": [
+    {
+      "command": [
+        "npm",
+        "--prefix",
+        "release",
+        "test"
+      ],
+      "exit_code": 0,
+      "tests": 29,
+      "scope": "existing publication/source/digest boundaries plus five new readiness groups"
+    },
+    {
+      "command": [
+        "/home/l2e/.local/share/hid-release-tools/actionlint/actionlint",
+        "-color"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "node",
+        "release/scripts/verify-publication-workflow.mjs"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "npm",
+        "--prefix",
+        "release",
+        "run",
+        "verify"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "node",
+        "scripts/verify-secret-readiness.mjs"
+      ],
+      "exit_code": 0,
+      "findings": 0
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "binding_race": {
+    "command": [
+      "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+      "test",
+      "-race",
+      "-count=1",
+      "./internal/publicationjournal",
+      "./internal/signingbroker",
+      "./internal/awsbroker"
+    ],
+    "started_at": "2026-09-07T14:17:38.666914+00:00",
+    "completed_at": "2026-09-07T14:18:04.262127+00:00",
+    "exit_code": 0,
+    "log_sha256": "b382be9891b8392f66ffcd2fff86b17a590218a3fc682d606f4ae9803ea58ba1"
+  },
+  "ordinary_ci_fixes": "ci-fix-validation.json",
+  "live_configuration": "state.json",
+  "protected_ci_run": false,
+  "readiness_probe_cases": [
+    "manual-only fixed staging/repository/ref",
+    "wrong source SHA or approved pin denied before checkout",
+    "PR/fork/tag and rerun attempt denied",
+    "distinct staging/production environment IDs and rules",
+    "owner-only/self review and admin bypass denied",
+    "staging approval cannot authorize production",
+    "RSA signature, exact issuer/audience/subject/SHA/ref/workflow/run/actor and bounded freshness",
+    "trusted GitHub endpoints only; no redirects",
+    "no token request before approved source and environment review",
+    "no token bytes or raw claims in evidence"
+  ],
+  "limits": [
+    "Local tests use synthetic in-memory keys and mock GitHub responses; no protected workflow was executed.",
+    "Current live owner-only reviewer coverage deliberately fails the readiness probe.",
+    "Ordinary GitHub run remains failure; local fixes require separately authorized publication and fresh remote CI.",
+    "No AWS/Cloudflare/production authority, Object Lock, metadata publication or live migration was exercised.",
+    "Existing publisher source is unchanged; live IAM/custody/candidate/canary execution remains independently blocked."
+  ]
+}
