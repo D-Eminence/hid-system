@@ -1,8 +1,9 @@
 {
   "go_version": "go1.26.8",
   "platform": "linux/amd64",
-  "source_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+  "source_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
   "worktree_dirty": true,
+  "retention_days": 730,
   "build_flags": [
     "-mod=readonly",
     "-trimpath",
@@ -26,22 +27,22 @@
     },
     {
       "command": "hid-tuf-publication",
-      "size_bytes": 30827409,
-      "sha256": "425b4a217d8b5f50ccc1629d97ad173b9cb17e75435d0eeab61008a9cfd7c0fb",
+      "size_bytes": 30827305,
+      "sha256": "4a3538b7feda8b37f09e7e089c0a43c1e7c13ebd1a3549d2d22b1b014031d881",
       "identical": true,
       "independent_caches": true
     },
     {
       "command": "hid-tuf-journal",
-      "size_bytes": 30467636,
-      "sha256": "c43d68fec21bf9aaf8b76e22f24f5f3d7afe8c39027eb08c31d2ba9731582e30",
+      "size_bytes": 30467324,
+      "sha256": "d6f22b046339659eb6b6d176cf01486158fa15574b9aaa69ddccc3a4600c7eba",
       "identical": true,
       "independent_caches": true
     },
     {
       "command": "hid-tuf-signing-broker",
-      "size_bytes": 34289505,
-      "sha256": "5e698b267315f1a1b273a59702394a92058d27a536dab5bee38a87055d86999c",
+      "size_bytes": 34288881,
+      "sha256": "706b30c877cc769370a120b6830c95889844d89658ce184eb5b60b7c876c77d6",
       "identical": true,
       "independent_caches": true
     }

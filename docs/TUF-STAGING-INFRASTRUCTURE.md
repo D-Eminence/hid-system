@@ -1,6 +1,6 @@
 # Staging infrastructure plan and irreversible-action gate
 
-Status: **NOT AUTHORIZED; NO LIVE PLAN OR INFRASTRUCTURE ACCEPTANCE**.
+Status: **OBJECT LOCK: UNAPPROVED / NOT CREATED; NO LIVE PLAN OR INFRASTRUCTURE ACCEPTANCE**.
 Only local source synthesis is permitted. Production is excluded from this
 package. The expected topology remains AWS private services/database plus
 Cloudflare Workers Static Assets; there is no TUF R2 bucket or CloudFront
@@ -37,6 +37,12 @@ reused role/key pins, invalid Git refs and attempted authorization flags fail.
 The validator does not prove ownership of opaque KMS/account IDs. A successful
 validation still states `NOT_AUTHORIZED` and `live_ownership_verified=false`.
 It is never a deployment gate substitute.
+The corrected source-model plans in `docs/evidence/tuf-phase-c/offline-plans.json`
+were regenerated using clearly synthetic identifiers. Their policy now fixes
+730-day object retention; a 729–730-day IAM remaining-duration interval accounts
+for request-transit rounding while code independently verifies the original
+730-day lifetime. Upper bounds reject unintended longer retention.
+No live plan, resource or approval was created.
 
 Before use, independently read AWS caller identity, resource ARNs/tags, bucket
 owner/encryption/retention, KMS public-key/SPKI/usage/state, role trust and
@@ -93,6 +99,12 @@ CloudFormation change-set creation is itself an external mutation and is not
 performed by local planning. Do not present the source inventory as a real
 account-specific diff.
 
+The authoritative journal/evidence duration is **2 years (730 days)**. This
+local correction grants no infrastructure authority. Staging/production bucket
+defaults remain their separate 90/180-day policies; journal, state and evidence
+objects explicitly request 730 days. Expiry of the lock does not authorize
+deletion or bypass append-only journal/recovery checks.
+
 ## Object Lock approval record to complete
 
 | Decision | Proposed staging setting / implication |
@@ -101,16 +113,16 @@ account-specific diff.
 | Exact resources | The three named logical buckets in `Hid-staging-ReleaseTrust`; account/region and final physical IDs remain `<REQUIRED>` |
 | Environment | Staging only; no production bucket/key/credential substitution |
 | Mode | Proposed COMPLIANCE; 90-day bucket default. Owner must explicitly approve this choice before creation |
-| Journal/evidence retention | Adapter explicitly requests **36,500 days**, approximately 100 years, for publication journal slots, evidence and archived generation objects; state policy enforces the long floor. This is materially longer than the 90-day default |
+| Journal/evidence retention | Adapter explicitly requests **730 days (2 years)** for publication journal slots, evidence and archived generation objects; state policy enforces the corrected floor. This is materially longer than the 90-day default |
 | Legal holds | No hold is configured. Ordinary operators receive no hold/bypass/delete capability. Any future legal-hold change is independently governed |
 | Lifecycle | No automatic purge is approved. Roots remain permanent; retain at least five accepted staging releases and 90 days, whichever is greater, and every referenced rollback artifact |
 | Deletion | Compliance-locked versions cannot be deleted or have retention shortened before expiry, even by the account root. Stack deletion/replacement retains resources |
-| Cost | Ongoing S3 version/object growth, requests/checksums, KMS keys/requests, CloudTrail data events, DynamoDB PITR, ECR bytes, Lambda and CloudWatch retention/alarms; immutable 100-year evidence cannot be purged to recover costs |
+| Cost | Ongoing S3 version/object growth, requests/checksums, KMS keys/requests, CloudTrail data events, DynamoDB PITR, ECR bytes, Lambda and CloudWatch retention/alarms; immutable 730-day evidence cannot be purged to recover costs |
 | Cost estimate | Requires region, release/file/byte counts, publication/renewal frequency, log volume and retention. No price or numeric total has been invented. Use approved current pricing and include renewal-driven journal growth |
 | DR | Preserve KMS decrypt ability, exact object version IDs/hashes, all root history, full journal and current CAS/high-water. Test archive readback and DynamoDB reconstruction without trusting an older head |
 | Rollback | No undo for Object Lock enablement. Before creation, abandon the plan; afterward, stop writers and retain locked resources. Correct configuration through a reviewed forward change/new isolated stack, never erase history |
 | Can it change later? | Object Lock cannot be disabled and versioning cannot be suspended. Bucket defaults may affect future objects; existing compliance deadlines cannot be shortened. Longer retention increases irreversible obligations |
-| Blast radius | Wrong account/key/retention can lock inaccessible or unintended bytes for decades, accumulate costs, or destroy decryption recovery. Never upload PHI or secrets to the release archive |
+| Blast radius | Wrong account/key/retention can lock inaccessible or unintended bytes for 2 years, accumulate costs, or destroy decryption recovery. Never upload PHI or secrets to the release archive |
 | Authorization | **NOT REQUESTED / NOT GRANTED**: exact account-specific plan and custody inputs must exist before a concrete approval request |
 
 AWS documents the irreversible bucket/versioning behavior, encryption-key loss,

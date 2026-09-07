@@ -225,7 +225,7 @@ func runtimeEnvironment(operation string) map[string]string {
 		"HID_STATE_TABLE_NAME": "hid-staging-tuf-broker-state", "HID_STATE_BUCKET_NAME": "hid-staging-evidence-123456",
 		"HID_STATE_OBJECT_PREFIX": "tuf-signing-broker/state/hid-staging-broker-v1/",
 		"HID_STORAGE_KMS_KEY_ARN": "arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-		"HID_OBJECT_LOCK_MODE":    "COMPLIANCE", "HID_STATE_RETENTION_DAYS": "36500",
+		"HID_OBJECT_LOCK_MODE":    "COMPLIANCE", "HID_STATE_RETENTION_DAYS": "730",
 		"HID_EVIDENCE_RETENTION_DAYS": "365",
 		"HID_EXPECTED_AWS_ACCOUNT_ID": "123456789012", "HID_EXPECTED_AWS_REGION": "us-east-1",
 	}
@@ -258,7 +258,7 @@ func TestRuntimeEnvironmentIsCompleteAndFixed(t *testing.T) {
 				t.Fatal(err)
 			}
 			if config.Operation != operation || config.ExpectedAWSRegion != "us-east-1" ||
-				config.StateRetentionDays != StateRetentionDays || config.EvidenceRetentionDays != 365 {
+				config.StateRetentionDays != 730 || config.EvidenceRetentionDays != 365 {
 				t.Fatalf("unexpected parsed runtime configuration: %+v", config)
 			}
 		})
@@ -269,6 +269,9 @@ func TestRuntimeEnvironmentIsCompleteAndFixed(t *testing.T) {
 		value string
 	}{
 		{"schema", "HID_BROKER_CONFIG_SCHEMA", "v2"},
+		{"short state retention", "HID_STATE_RETENTION_DAYS", "729"},
+		{"long state retention", "HID_STATE_RETENTION_DAYS", "731"},
+		{"evidence exceeds fixed state retention", "HID_EVIDENCE_RETENTION_DAYS", "731"},
 		{"plan age", "HID_MAX_PLAN_AGE_SECONDS", "301"},
 		{"request bucket", "HID_REQUEST_BUCKET_NAME", "other-bucket"},
 		{"state trust reset", "HID_STATE_ID", "hid-staging-broker-v2"},

@@ -248,7 +248,7 @@ export function validateTufSigningBrokerConfig(
 }
 
 const brokerSchema = 'hid.tuf.signing-broker.config/v1';
-const stateRetentionDays = 36500;
+const stateRetentionDays = 730;
 const maximumExpectedSignaturesPerFiveMinutes = 8;
 const lambdaImagePullActions = [
   'ecr:BatchCheckLayerAvailability',
@@ -1202,9 +1202,10 @@ export class TufSigningBroker extends Construct {
       conditions: {
         StringEquals: { 's3:object-lock-mode': props.evidenceObjectLockMode },
         // Request time elapses between computing RetainUntilDate and AWS's
-        // evaluation. Code writes 36500 days and authenticates the original
+        // evaluation. Code writes 730 days and authenticates the original
         // record lifetime; the IAM floor allows only that day-boundary drift.
-        NumericGreaterThanEquals: { 's3:object-lock-remaining-retention-days': '36499' },
+        NumericGreaterThanEquals: { 's3:object-lock-remaining-retention-days': '729' },
+        NumericLessThanEquals: { 's3:object-lock-remaining-retention-days': String(stateRetentionDays) },
       },
     }));
     props.publisherRole.addToPrincipalPolicy(new iam.PolicyStatement({
@@ -1260,12 +1261,20 @@ export class TufSigningBroker extends Construct {
       conditions: { StringNotEquals: { 's3:object-lock-mode': props.evidenceObjectLockMode } },
     }));
     props.evidenceBucket.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'DenyPublicationJournalRetentionBelowOneHundredYears',
+      sid: 'DenyPublicationJournalRetentionBelowTwoYears',
       effect: iam.Effect.DENY,
       principals: [new iam.AnyPrincipal()],
       actions: ['s3:PutObjectRetention'],
       resources: [journalObjects],
-      conditions: { NumericLessThan: { 's3:object-lock-remaining-retention-days': '36499' } },
+      conditions: { NumericLessThan: { 's3:object-lock-remaining-retention-days': '729' } },
+    }));
+    props.evidenceBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'DenyPublicationJournalRetentionAboveTwoYears',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:PutObjectRetention'],
+      resources: [journalObjects],
+      conditions: { NumericGreaterThan: { 's3:object-lock-remaining-retention-days': String(stateRetentionDays) } },
     }));
     new CfnOutput(this, 'PublicationJournalStorageConfiguration', {
       description: 'Separate append-only publication lineage in existing broker storage; no checkpoint mutation authority',
@@ -1280,7 +1289,7 @@ export class TufSigningBroker extends Construct {
         expected_aws_region: props.approvedRegion,
         encryption_key_arn: props.evidenceEncryptionKey.keyArn,
         object_lock_mode: props.evidenceObjectLockMode,
-        retention_days: 36500,
+        retention_days: stateRetentionDays,
       }),
     });
   }

@@ -174,6 +174,16 @@ func TestImmutableReaderAndRequestLoaderConfigurationsArePinned(t *testing.T) {
 	if _, err := NewImmutableObjectReader(badReader, newFakeS3()); err == nil {
 		t.Fatal("cross-account encryption key was accepted")
 	}
+	readerConfig.MinimumRemainingRetention = 730 * 24 * time.Hour
+	if _, err := NewImmutableObjectReader(readerConfig, newFakeS3()); err != nil {
+		t.Fatalf("730-day reader retention was rejected: %v", err)
+	}
+	badReader = readerConfig
+	badReader.MinimumRemainingRetention += time.Second
+	if _, err := NewImmutableObjectReader(badReader, newFakeS3()); err == nil {
+		t.Fatal("reader accepted a retention requirement exceeding 730 days")
+	}
+	readerConfig.MinimumRemainingRetention = 0
 	reader, err := NewImmutableObjectReader(readerConfig, newFakeS3())
 	if err != nil {
 		t.Fatal(err)

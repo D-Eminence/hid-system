@@ -29,6 +29,9 @@ func TestPublicationArchiveReadsEveryImmutableVersionBeforeAcceptingReplay(t *te
 	if s3Client.lastPut.ChecksumAlgorithm != s3types.ChecksumAlgorithmSha256 || aws.ToString(s3Client.lastPut.IfNoneMatch) != "*" {
 		t.Fatal("archive lacks conditional Object Lock checksum headers")
 	}
+	if !aws.ToTime(s3Client.lastPut.ObjectLockRetainUntilDate).Equal(now.Add(730 * 24 * time.Hour)) {
+		t.Fatal("archive did not request exactly 730 days of Object Lock retention")
+	}
 	second, err := store.archiveBytes(context.Background(), data, suffix, "application/octet-stream")
 	if err != nil || second != ref || s3Client.putCalls != 1 || s3Client.getCalls != 2 {
 		t.Fatalf("safe data readback differs: %v", err)
@@ -121,7 +124,7 @@ func TestPublicationGenerationArchiveBindsCompleteManifestAndRejectsChangedDirec
 }
 
 func TestPublicationEvidenceAndReferenceRequireExactReadback(t *testing.T) {
-	store, controller, s3Client, _, binding, _ := journalFixture(t)
+	store, controller, s3Client, _, binding, now := journalFixture(t)
 	if _, err := store.Reference(); err == nil {
 		t.Fatal("absent journal yielded reference")
 	}
@@ -145,6 +148,9 @@ func TestPublicationEvidenceAndReferenceRequireExactReadback(t *testing.T) {
 	}
 	if ref.Key != store.config.ObjectPrefix+"evidence/"+digestHex(data)+".json" {
 		t.Fatal("evidence namespace drift")
+	}
+	if !aws.ToTime(s3Client.lastPut.ObjectLockRetainUntilDate).Equal(now.Add(730 * 24 * time.Hour)) {
+		t.Fatal("evidence did not request exactly 730 days of Object Lock retention")
 	}
 	if s3Client.retentionCalls != retentionCalls+2 {
 		t.Fatal("evidence did not verify both active and original long-term retention")

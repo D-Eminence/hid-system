@@ -246,12 +246,15 @@ evidence bucket for fixed create-only revision slots. Each slot records and
 authenticates its exact predecessor object version/hash; every read replays the
 whole transition chain, compares the head twice, checks for an occupied next
 slot, and revalidates checksum, KMS envelope, exact metadata, and the original
-100-year retention deadline.
+2-year (730-day) retention deadline.
 
 Before publication, `archive` preserves every repository file as immutable
 content-addressed data and seals a complete manifest after a second whole-tree
 inspection. `evidence` accepts only the bounded structured publication envelope,
-uses a digest-derived key, and reads back its bytes and century-long retention.
+uses a digest-derived key, and reads back its bytes and 2-year (730-day) retention.
+This local configuration does not authorize infrastructure creation: Object Lock
+remains **UNAPPROVED / NOT CREATED**.
+
 The live protected driver records an intent with a new five-minute state
 authorization immediately before each Cloudflare side effect and records only
 validated structured receipts afterward. Hashes in journal records reference

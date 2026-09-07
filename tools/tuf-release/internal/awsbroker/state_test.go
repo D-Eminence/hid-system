@@ -306,8 +306,8 @@ func TestStateStoreRoundTripReusesImmutableBlobsAndCASesManifest(t *testing.T) {
 	}
 	initialJournalObject, ok := s3Client.objects[objectMapKey(initialJournal.Key, initialJournal.VersionID)]
 	if !ok || !bytes.Equal(initialJournalObject.data, initialManifestBytes) ||
-		initialJournalObject.retainUntil != now.Add(StateRetentionDays*24*time.Hour) {
-		t.Fatal("genesis state pointer is not bound to its 100-year immutable journal")
+		initialJournalObject.retainUntil != now.Add(730*24*time.Hour) {
+		t.Fatal("genesis state pointer is not bound to its 730-day immutable journal")
 	}
 	loaded, err := store.Load(context.Background(), initial.StateID)
 	if err != nil {
@@ -947,7 +947,8 @@ func TestStateStoreConfigurationAndTransitionAreFailClosed(t *testing.T) {
 			config.EncryptionKeyARN = "arn:aws:kms:us-east-1:123456789012:alias/state"
 		}},
 		{"wrong owner", func(config *StateStoreConfig) { config.ExpectedBucketOwner = "123" }},
-		{"short retention", func(config *StateStoreConfig) { config.RetentionDays = StateRetentionDays - 1 }},
+		{"short retention", func(config *StateStoreConfig) { config.RetentionDays = 729 }},
+		{"long retention", func(config *StateStoreConfig) { config.RetentionDays = 731 }},
 		{"nil clock", func(config *StateStoreConfig) { config.Clock = nil }},
 	}
 	for _, testCase := range cases {

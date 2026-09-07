@@ -15,11 +15,13 @@ The authoritative state and verification ledger are
 ## Exact identity and present evidence limits
 
 The local branch is `tuf-production-release`; HEAD is
-`abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`. Pending Phase A/B/C files are
-uncommitted. This existing commit does not contain the pending implementation
-and must not be entered as its release SHA. No resulting commit SHA, remote
-publication, protected CI run, signed staging candidate, or deployment receipt
-exists for this work.
+`46e76cecf9e846061203c8fd68a0fcfd0c2825a5`, created as one authorized local
+commit from `abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`. The user subsequently
+corrected immutable journal/evidence retention to **2 years (730 days)**.
+The correction is uncommitted and needs separate commit authorization; the
+unchanged committed retention proposal must not be used for execution.
+No push, protected CI run, signed staging candidate or deployment receipt exists.
+Object Lock remains **UNAPPROVED / NOT CREATED**.
 
 Use [the non-secret identifier template](../release/config/staging-identifiers.template.json)
 as the single inventory. Known GitHub identity is `D-Eminence/hid-system`,
@@ -89,7 +91,7 @@ CI run in step 2; step 4 installs/verifies the separate deployment environments.
 
 | Step | Required execution | Completion evidence / current gate |
 | --- | --- | --- |
-| 1. Immutable source commit | Review final diff, secret/artifact exclusions and required verification; obtain commit authorization, then record exact SHA. Obtain separate push authorization and verify remote SHA before CI | No commit/push authorization or resulting SHA; blocked |
+| 1. Immutable source commit | Review final diff, secret/artifact exclusions and required verification; obtain commit authorization, then record exact SHA. Obtain separate push authorization and verify remote SHA before CI | Original local commit exists; corrected retention scope still requires separate commit/push authorization |
 | 2. Protected CI execution | Run all committed local security jobs on the exact protected source and isolated publisher-tooling checks without cloud credentials | No protected run; blocked |
 | 3. CI evidence verification | Independently verify run/jobs/logs, provenance, dependency audits, paired build digests and complete artifact inventory against source | No run evidence; blocked |
 | 4. Protected GitHub environment configuration | Verify owner-installed environments, reviewers, self-review/bypass denial, branch restrictions, permissions and immutable workflow/config pins | Current public repository has no environments, branch protection or rulesets; required controls remain absent |
@@ -247,7 +249,7 @@ After those inputs and missing source orchestration are resolved, generate the
 concrete account-specific infrastructure plan and custody package. Only then
 request explicit Object Lock/key actions, followed by explicit staging
 publication/application/migration/test scope approval. The proposed 90-day
-Object Lock default and 36,500-day journal/evidence retention require review
+Object Lock default and 730-day journal/evidence retention require review
 of their exact cost, deletion, key-recovery and rollback implications; no
 approval has been requested or granted. Staging approval cannot authorize any
 of the production steps.

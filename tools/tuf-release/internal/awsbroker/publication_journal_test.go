@@ -51,8 +51,8 @@ func (client *journalFakeS3) PutObject(ctx context.Context, input *s3.PutObjectI
 		key := objectMapKey(aws.ToString(input.Key), aws.ToString(output.VersionId))
 		object := client.objects[key]
 		// Leave a still-active year so the shared immutable reader succeeds;
-		// ArchiveEvidence must independently reject loss of its original century.
-		object.retainUntil = aws.ToTime(input.ObjectLockRetainUntilDate).Add(-time.Duration(StateRetentionDays-365) * 24 * time.Hour)
+		// ArchiveEvidence must independently reject loss of its original 730 days.
+		object.retainUntil = aws.ToTime(input.ObjectLockRetainUntilDate).Add(-365 * 24 * time.Hour)
 		client.objects[key] = object
 		client.mu.Unlock()
 	}
@@ -193,7 +193,7 @@ func TestDurablePublicationJournalRoundTripAndExactStorageEnvelope(t *testing.T)
 	}
 	put := s3Client.lastPut
 	if aws.ToString(put.IfNoneMatch) != "*" || aws.ToString(put.ExpectedBucketOwner) != store.config.ExpectedBucketOwner ||
-		aws.ToString(put.SSEKMSKeyId) != store.config.EncryptionKeyARN || !aws.ToTime(put.ObjectLockRetainUntilDate).Equal(now.Add(time.Duration(StateRetentionDays)*24*time.Hour)) {
+		aws.ToString(put.SSEKMSKeyId) != store.config.EncryptionKeyARN || !aws.ToTime(put.ObjectLockRetainUntilDate).Equal(now.Add(730*24*time.Hour)) {
 		t.Fatal("immutable journal put omitted fixed integrity/retention pins")
 	}
 	if dynamo.lastUpdate.Key["state_id"].(*dynamotypes.AttributeValueMemberS).Value != store.journalID() ||
@@ -203,7 +203,7 @@ func TestDurablePublicationJournalRoundTripAndExactStorageEnvelope(t *testing.T)
 }
 
 func TestDurablePublicationJournalRejectsTamperingTruncationAndReplay(t *testing.T) {
-	for _, scenario := range []string{"old-head", "deleted-head", "missing-middle", "changed-middle", "duplicate-version", "delete-marker", "wrong-head-version", "head-duplicate-json", "head-environment", "weak-retention", "wrong-kms", "wrong-checksum"} {
+	for _, scenario := range []string{"old-head", "deleted-head", "missing-middle", "changed-middle", "duplicate-version", "delete-marker", "wrong-head-version", "head-duplicate-json", "head-environment", "weak-retention", "shortened-active-retention", "wrong-kms", "wrong-checksum"} {
 		t.Run(scenario, func(t *testing.T) {
 			store, controller, s3Client, dynamo, binding, _ := journalFixture(t)
 			buildJournal(t, controller, binding)
@@ -231,6 +231,9 @@ func TestDurablePublicationJournalRejectsTamperingTruncationAndReplay(t *testing
 				s3Client.deleteMarker = true
 			case "weak-retention":
 				object.retainUntil = time.Unix(1, 0)
+				s3Client.objects[middleKey] = object
+			case "shortened-active-retention":
+				object.retainUntil = object.retainUntil.Add(-24 * time.Hour)
 				s3Client.objects[middleKey] = object
 			case "wrong-kms":
 				object.kmsKey = "other-key"

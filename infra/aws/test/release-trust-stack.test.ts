@@ -337,7 +337,7 @@ test('ambiguous identity, cross-environment subjects, and weak retention fail cl
 
   assert.throws(
     () => synthesize({ evidenceRetentionDays: 179 }),
-    /from 180 through 36500 for production/u,
+    /from 180 through 730 for production/u,
   );
   assert.throws(
     () =>
@@ -346,11 +346,16 @@ test('ambiguous identity, cross-environment subjects, and weak retention fail cl
         githubProtectedEnvironmentSubjects: protectedEnvironmentSubjects('staging'),
         evidenceRetentionDays: 89,
       }),
-    /from 90 through 36500 for staging/u,
+    /from 90 through 730 for staging/u,
   );
   assert.throws(
     () => synthesize({ evidenceRetentionDays: 365.5 }),
     /must be an integer/u,
+  );
+  assert.doesNotThrow(() => synthesize({ evidenceRetentionDays: 730 }));
+  assert.throws(
+    () => synthesize({ evidenceRetentionDays: 731 }),
+    /from 180 through 730 for production/u,
   );
   assert.throws(
     () => synthesize({ evidenceObjectLockMode: 'GOVERNANCE' }),
@@ -403,7 +408,7 @@ test('immutable workflow trust excludes direct developers, tags, PRs, transfers 
 });
 
 test('publication history reuses existing storage with conditional writes and no deletion or checkpoint authority', () => {
-  const { template } = synthesize({ signingBroker: signingBrokerConfig });
+  const { stack, template } = synthesize({ signingBroker: signingBrokerConfig });
   assert.equal(properties(template, 'AWS::DynamoDB::Table').length, 1);
   const publisher = policyStatements(policyForRoleDescription(template, 'repository publisher'));
   const append = statementBySid(publisher, 'PublicationJournalAppendConditionalLockedSlots');
@@ -412,13 +417,34 @@ test('publication history reuses existing storage with conditional writes and no
   const versions = statementBySid(publisher, 'PublicationJournalInspectOnlyExactSlotVersions');
   assert.deepEqual(actionList(versions), ['s3:ListBucketVersions']);
   assert.deepEqual((versions.Condition as Record<string, unknown>).NumericEquals, { 's3:max-keys': '2' });
+  const retention = statementBySid(publisher, 'PublicationJournalRequireExactLongTermRetention');
+  assert.deepEqual(actionList(retention), ['s3:PutObjectRetention']);
+  assert.deepEqual(retention.Condition, {
+    StringEquals: { 's3:object-lock-mode': 'COMPLIANCE' },
+    NumericGreaterThanEquals: { 's3:object-lock-remaining-retention-days': '729' },
+    NumericLessThanEquals: { 's3:object-lock-remaining-retention-days': '730' },
+  });
+  const journalOutputs = Object.values(Template.fromStack(stack).findOutputs('*'))
+    .filter((output) => output.Description === 'Separate append-only publication lineage in existing broker storage; no checkpoint mutation authority');
+  assert.equal(journalOutputs.length, 1);
+  const journalOutput = journalOutputs[0]?.Value as { 'Fn::Join': [string, unknown[]] };
+  const publicJournalConfiguration = JSON.parse(journalOutput['Fn::Join'][1]
+    .filter((part) => typeof part === 'string').join('')) as { retention_days: number };
+  assert.equal(publicJournalConfiguration.retention_days, 730);
   const bucketPolicy = bucketPolicyStatements(template, 'EvidenceArchivePolicy');
   for (const sid of ['DenyPublicationJournalWritesFromEveryOtherPrincipal', 'DenyPublicationJournalDeletionAndRetentionBypass',
-    'DenyPublicationJournalNonConditionalWrites', 'DenyPublicationJournalMissingExplicitRetention', 'DenyPublicationJournalWrongRetentionMode', 'DenyPublicationJournalRetentionBelowOneHundredYears']) {
+    'DenyPublicationJournalNonConditionalWrites', 'DenyPublicationJournalMissingExplicitRetention', 'DenyPublicationJournalWrongRetentionMode',
+    'DenyPublicationJournalRetentionBelowTwoYears', 'DenyPublicationJournalRetentionAboveTwoYears']) {
     const deny = statementBySid(bucketPolicy, sid);
     assert.equal(deny.Effect, 'Deny');
     assert.deepEqual(deny.Principal, { AWS: '*' });
   }
+  assert.deepEqual(statementBySid(bucketPolicy, 'DenyPublicationJournalRetentionBelowTwoYears').Condition, {
+    NumericLessThan: { 's3:object-lock-remaining-retention-days': '729' },
+  });
+  assert.deepEqual(statementBySid(bucketPolicy, 'DenyPublicationJournalRetentionAboveTwoYears').Condition, {
+    NumericGreaterThan: { 's3:object-lock-remaining-retention-days': '730' },
+  });
   assert.deepEqual(actionList(statementBySid(bucketPolicy, 'DenyPublicationJournalDeletionAndRetentionBypass')).sort(), ['s3:BypassGovernanceRetention', 's3:DeleteObject', 's3:DeleteObjectVersion']);
   const table = properties(template, 'AWS::DynamoDB::Table')[0];
   const resourcePolicy = statementsFromDocument((table?.ResourcePolicy as { PolicyDocument: unknown }).PolicyDocument);
@@ -430,6 +456,22 @@ test('publication history reuses existing storage with conditional writes and no
   for (const description of ['Build-only role', 'Append-only', 'Snapshot signing-request submitter for candidate one']) {
     const policy = policyStatements(policyForRoleDescription(template, description));
     assert.doesNotMatch(JSON.stringify(policy.filter((entry) => entry.Effect === 'Allow')), /tuf-publication-journal/u);
+  }
+});
+
+test('a 730-day bucket default preserves the immutable writer request-transit allowance', () => {
+  const { template } = synthesize({ signingBroker: signingBrokerConfig, evidenceRetentionDays: 730 });
+  const bucketPolicy = bucketPolicyStatements(template, 'EvidenceArchivePolicy');
+  assert.deepEqual(statementBySid(bucketPolicy, 'DenyEvidenceRetentionBelowEnvironmentMinimum').Condition, {
+    NumericLessThan: { 's3:object-lock-remaining-retention-days': '729' },
+  });
+  for (const [sid, limit] of [
+    ['DenyBrokerStateRetentionAboveTwoYears', '730'],
+    ['DenyPublicationJournalRetentionAboveTwoYears', '730'],
+  ]) {
+    assert.deepEqual(statementBySid(bucketPolicy, sid as string).Condition, {
+      NumericGreaterThan: { 's3:object-lock-remaining-retention-days': limit },
+    });
   }
 });
 
@@ -1035,7 +1077,7 @@ test('enabled broker pins five immutable Lambda versions and durable CAS state',
       /EvidenceArchiveEncryptionKey/u,
     );
     assert.equal(variables.HID_OBJECT_LOCK_MODE, 'COMPLIANCE');
-    assert.equal(variables.HID_STATE_RETENTION_DAYS, '36500');
+    assert.equal(variables.HID_STATE_RETENTION_DAYS, '730');
     assert.equal(variables.HID_EVIDENCE_RETENTION_DAYS, '365');
     assert.equal(variables.HID_EXPECTED_AWS_ACCOUNT_ID, '111122223333');
     assert.equal(variables.HID_EXPECTED_AWS_REGION, 'eu-west-1');
@@ -1248,14 +1290,20 @@ test('enabled broker pins five immutable Lambda versions and durable CAS state',
   );
   const stateRetention = statementBySid(
     evidencePolicy,
-    'DenyBrokerStateRetentionBelowOneHundredYears',
+    'DenyBrokerStateRetentionBelowTwoYears',
   );
   assert.deepEqual(stateRetention.Condition, {
     NumericLessThan: {
-      's3:object-lock-remaining-retention-days': '36500',
+      's3:object-lock-remaining-retention-days': '729',
     },
   });
   assert.match(JSON.stringify(stateRetention.Resource), /tuf-signing-broker\/state/u);
+  const maximumStateRetention = statementBySid(evidencePolicy, 'DenyBrokerStateRetentionAboveTwoYears');
+  assert.equal(maximumStateRetention.Effect, 'Deny');
+  assert.deepEqual(maximumStateRetention.Resource, stateRetention.Resource);
+  assert.deepEqual(maximumStateRetention.Condition, {
+    NumericGreaterThan: { 's3:object-lock-remaining-retention-days': '730' },
+  });
 
   const stateWriterBoundary = statementBySid(
     evidencePolicy,

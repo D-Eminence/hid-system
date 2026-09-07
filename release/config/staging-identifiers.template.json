@@ -91,7 +91,7 @@
     "object_lock": {
       "mode": "COMPLIANCE",
       "default_retention_days": 90,
-      "journal_and_evidence_retention_days": 36500,
+      "journal_and_evidence_retention_days": 730,
       "legal_hold": "OFF",
       "approved": false
     },

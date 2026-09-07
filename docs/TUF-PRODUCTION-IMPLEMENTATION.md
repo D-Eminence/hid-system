@@ -7,10 +7,11 @@ staging or production deployment claim.
 
 ## STATUS
 
-Date: 2026-09-06
+Date: 2026-09-07
 
-Classification: **PHASE C LOCAL PREPARATION VERIFIED; GITHUB PROTECTION
-AND IMMUTABLE SOURCE GATES BLOCKED; STAGING NOT ACCEPTED; PRODUCTION LOCKED**.
+Classification: **PHASE C LOCALLY VERIFIED AND COMMITTED — STAGING NOT ACCEPTED**.
+The subsequent 730-day retention correction is locally verified and remains
+uncommitted pending separate authorization. Object Lock remains **UNAPPROVED / NOT CREATED**; production is locked.
 
 Working branch: `tuf-production-release`
 
@@ -33,6 +34,83 @@ The mandatory order is unchanged:
 
 Production deployment is forbidden until every preceding gate has recorded
 evidence in this document.
+
+## LOCAL COMMIT AND RETENTION CORRECTION — 2026-09-07
+
+| Evidence | Verified value |
+| --- | --- |
+| Previous SHA | `abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0` |
+| New immutable local SHA | `46e76cecf9e846061203c8fd68a0fcfd0c2825a5` |
+| Commit message | `Implement TUF release trust and prepare protected staging gates` |
+| Commit timestamp | `2026-09-07T04:11:04+01:00` |
+| Commit tree | `689609263c58d9c002ad656ced78e402a072edcc` |
+| Scope | 193 exact reviewed files; 46,165 insertions and 1,375 deletions |
+| Reviewed inventory SHA-256 | `11dc85ec4dbbaeecbb63ba72ce8127e85026499a44a7ea39a1eb36e85503c0d1` |
+| Parent/history verification | Exactly one new commit with the stated parent; no amend or history rewrite |
+| Commit integrity | Commit object hash recomputed; every committed blob matched the reviewed inventory |
+| Exclusion | `docs/SECURITY.md` absent from the commit diff and unchanged in the working tree |
+| Security review | Independent proposed-file scan and repository secret-readiness scan reported zero findings; no secrets/private signing material or unintended artifacts found |
+
+Pre-commit status, full worktree/index diffs, exact file inventory, tracked and
+untracked whitespace checks, evidence JSON integrity and cached blob hashes
+passed. Immediately after the commit, `git status --short` contained only the
+untouched `docs/SECURITY.md` edit and the index was empty. The immutable file
+list is recoverable with `git diff-tree --no-commit-id --name-only -r 46e76cecf9e846061203c8fd68a0fcfd0c2825a5`.
+The [reviewed inventory](evidence/tuf-phase-c/files.json) is a snapshot of that
+commit, not an authorization for subsequent edits; resolve its original blobs
+from this exact SHA when comparing later working-tree corrections.
+
+The user corrected retention immediately after the authorized commit completed.
+That commit retains the erroneous proposal as immutable history. This correction
+changes the working tree only; no new commit, amendment or push is authorized.
+Post-commit canonical documentation updates also remain uncommitted so the
+single-commit authorization is preserved.
+
+> HID immutable journal/evidence retention requirement is 2 years (730 days). Any previous reference to 36,500 days was an erroneous proposal and must not be implemented.
+
+The correction covers fixed Go journal/state/archive/evidence retention and
+input bounds, AWS broker configuration/IAM limits, non-secret templates,
+source-model plans, tests and runbooks. Existing staging/production bucket
+defaults of 90/180 days are separate from the explicit 730-day object policy.
+It does not grant creation authority or authorize shortening an existing object
+lock, deletion, key creation, credential changes or a live migration.
+
+Correction validation passed: 58 AWS tests and typecheck, all 13 Go packages
+under normal/race tests with the independent Cloudflare validator required, Go
+vet/module verification, 24 release tests, release/schema/template validation,
+secret-readiness and whitespace checks. Tests assert literal 730-day retention
+on state, publication journal, archive and evidence writes, reject 729/731-day
+fixed runtime settings and shortened still-active retention, and verify IAM
+limits. IAM uses 729–730 remaining days only for request-transit rounding;
+writers and original-lifetime readback still require the exact 730-day duration.
+No bypass, deletion, signing or cross-environment authority was added.
+
+Both synthetic source-model plans were regenerated with 730-day policy and
+verified locally: foundation SHA-256
+`ac4dab2869c07fd62cb9a9417eee8067a0939f933059fd518b0eb69101ed5888`;
+broker SHA-256
+`e52aadcc4f685869107408709b910b288f8479c4db3843189ffccf7166d3b601`.
+Their 32/86 resources remain uncreated; these are not actual account diffs.
+All five corrected Go tools reproduce across separate build caches.
+The old committed binaries/templates are superseded for execution. The
+[retention correction evidence](evidence/tuf-phase-c/retention-correction.json)
+records current hashes, changed files, commands and scoped results. Prior full
+workspace/migration evidence remains historical; unrelated suites were not
+rerun for this retention-only change.
+
+The repository-wide source/documentation search found no active obsolete
+retention configuration, including the former one-day IAM floor equivalent.
+The required erratum above intentionally preserves the incorrect duration as
+a rejected historical proposal. Two matches in an unrelated public facility
+name dataset refer to business names, not retention, and remain untouched.
+
+**No push occurred. No protected CI run exists.** GitHub protections remain
+pending owner configuration; the last read-only snapshot is 2026-09-06 and was
+not refreshed by any external call during this commit/correction work.
+AWS/Cloudflare identifiers remain pending. Object Lock is unapproved and has not
+been created. Signing/custody review remains pending. Live restore remains
+unverified. Live rollback remains unverified. Staging authorization remains
+pending. Data migration is not authorized; production is locked.
 
 ## COMPLETED
 
@@ -815,7 +893,7 @@ metadata, output increment, KMS ARN, P-256 SPKI pin, message type, and signing
 algorithm before exposing output.
 
 The state store uses a conditionally advanced DynamoDB head whose exact
-manifest bytes and predecessor reference are chained through 100-year
+manifest bytes and predecessor reference are chained through 730-day
 Object-Locked, checksum-verified, KMS-encrypted S3 journal versions. A completed
 decision record is only an index: replay walks the exact journal-version chain
 from the authenticated head and requires the original manifest to contain the
@@ -929,7 +1007,7 @@ boundaries. The Object-Locked S3/DynamoDB adapter, strict operator CLI,
 whole-generation archive, structured evidence archive, storage IAM, reusable
 protected workflow, live pipeline adapter, and wrapper-boundary integration are
 implemented in source. Evidence writes now re-read both exact bytes and the
-original century-long retention deadline rather than relying only on the
+original 730-day retention deadline rather than relying only on the
 requested Object Lock headers. No cloud API, secret value, key, protected
 environment, staging system, or production system was used.
 
@@ -951,7 +1029,7 @@ strongly consistent head, and checks the next immutable slot. A missing head
 with an occupied first slot, an old head with an occupied successor, or an
 orphan slot from interrupted commit fails closed for reconciliation; none is
 treated as permission to repeat an external action. Retention follows the
-existing 100-year signing-state journal policy. No signing checkpoint write is
+existing 730-day signing-state journal policy. No signing checkpoint write is
 granted to the publisher.
 
 The policy explicitly binds release Git SHA, artifact target/digest and
@@ -1169,18 +1247,12 @@ cloud deployment.
 
 ## CURRENT
 
-Phase C local preparation is verified. **NOT READY FOR PROTECTED STAGING
-EXECUTION; STAGING NOT ACCEPTED; PRODUCTION LOCKED.** HEAD remains
-`abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`; the pending implementation has no
-immutable commit, remote SHA, workflow run, candidate artifact or deployment.
-The index is empty. No commit, push, GitHub configuration, AWS/Cloudflare
-mutation, operational key/secret creation or external migration occurred.
-Final review covers 193 proposed files and one preserved exclusion. Both tracked
-and untracked additions pass whitespace checks; two trailing blank lines were
-removed from Cloudflare source/ignore files without a behavior change. The
-[exact file inventory](evidence/tuf-phase-c/files.json) binds the reviewed bytes;
-a fresh private archive preserves the current worktree, without claiming to
-replace the lost original starting archive.
+**PHASE C LOCALLY VERIFIED AND COMMITTED — STAGING NOT ACCEPTED.**
+HEAD is `46e76cecf9e846061203c8fd68a0fcfd0c2825a5`. The 193-file reviewed scope was committed
+once under explicit local-only authorization; no remote publication, protected
+workflow run, signed candidate or deployment exists. The current retention
+correction and post-commit records remain unstaged/uncommitted; the unrelated
+SECURITY edit remains untouched. Local validation of the correction passed; no further commit is authorized.
 
 The Phase C changes strengthen protected source/OIDC/candidate-run SHA binding
 before credentials, collect auditable CI evidence, separate the patched Go
@@ -1197,7 +1269,8 @@ and no remote release branch. This supersedes the earlier private/plan-blocked
 observation; no visibility change was made by this agent. All six full action
 commit pins resolve upstream. See [actual protection checklist](TUF-CI-PROTECTION.md).
 
-The root build/test/verify suite passed. Final focused release tests pass 24/24;
+The committed pre-correction root build/test/verify suite passed. Its focused
+release tests passed 24/24;
 Go 1.26.8 normal/race tests cover all 13 packages with the Cloudflare validator
 required, and vet/module verification pass. Four scoped npm audits report zero
 vulnerabilities; Go's symbol scan reports zero reachable findings on 1.26.8.
@@ -1228,18 +1301,22 @@ archive disappeared across the resumed environment; their historical hashes
 remain recorded, but those original artifacts cannot presently be audited.
 Fresh raw logs and synthetic backups are retained privately outside the repository.
 
-Five Linux/amd64 builds using Go 1.26.8 and separate A/B caches are identical:
+The corrected Go 1.26.8 Linux/amd64 builds below use 730-day retention and
+independent A/B caches. Each pair is byte-identical:
 
 | Command | Bytes | SHA-256 (both builds) |
 | --- | --- | --- |
 | `hid-tuf` | 15050352 | `7b4424f4d86201977fb537059ce8b16ec128f5c405defef438d499d9df167165` |
 | `hid-tuf-repo` | 22352759 | `45f775be8eca9200c660616f8b446fc4afdc332fa1af29b34bb3c56e1568e527` |
-| `hid-tuf-publication` | 30827409 | `425b4a217d8b5f50ccc1629d97ad173b9cb17e75435d0eeab61008a9cfd7c0fb` |
-| `hid-tuf-journal` | 30467636 | `c43d68fec21bf9aaf8b76e22f24f5f3d7afe8c39027eb08c31d2ba9731582e30` |
-| `hid-tuf-signing-broker` | 34289505 | `5e698b267315f1a1b273a59702394a92058d27a536dab5bee38a87055d86999c` |
+| `hid-tuf-publication` | 30827305 | `4a3538b7feda8b37f09e7e089c0a43c1e7c13ebd1a3549d2d22b1b014031d881` |
+| `hid-tuf-journal` | 30467324 | `d6f22b046339659eb6b6d176cf01486158fa15574b9aaa69ddccc3a4600c7eba` |
+| `hid-tuf-signing-broker` | 34288881 | `706b30c877cc769370a120b6830c95889844d89658ce184eb5b60b7c876c77d6` |
 
-These are dirty-worktree tooling hashes, not an admitted application release or
-approved tooling archive. CI must reproduce the final immutable source.
+These remain uncommitted-worktree tooling hashes, not an admitted release or
+approved tooling archive. The correction needs separate commit authorization
+and protected CI verification. The original pre-correction hashes are preserved
+in Git at `46e76cecf9e846061203c8fd68a0fcfd0c2825a5`; they must not be used
+for execution.
 
 ### Historical Phase A/B Go 1.25.0 hashes — no release authorization
 
@@ -1255,7 +1332,8 @@ The preceding hashes are preserved as historical comparison evidence only:
 
 ## BLOCKED
 
-- Authorization for the reviewed commit and, separately, its push and CI execution.
+- Separate authorization for the retention-correction commit and any push/CI
+  execution; the original local-only commit authorization has been consumed.
 - Actual branch/ruleset/status-check/CODEOWNERS and environment protections,
   exact protected caller ref, reviewer identities and environment variables.
 - Concrete independently governed candidate generation, signer/evidence/auditor
@@ -1266,7 +1344,7 @@ The preceding hashes are preserved as historical comparison evidence only:
   existing credential ARN/version references, public root/SPKI custody evidence,
   immutable candidate images/archives/metadata and reviewed tooling/config hashes.
 - A concrete account-specific infrastructure diff and explicit Object Lock/key
-  authorization: COMPLIANCE 90-day defaults plus **36,500-day journal/evidence**
+  authorization: COMPLIANCE 90-day defaults plus **730-day journal/evidence**
   retention have no approval. No irreversible mutation has been requested.
 - Explicit staging publication/application/migration execution authority and
   authorized source inventory/dataset; live restore, rollback, monitoring and
@@ -1278,13 +1356,13 @@ artifacts. The non-secret template lists required references only.
 
 ## NEXT
 
-The exact next action is owner authorization of the reviewed commit proposal in
-[the Phase C evidence index](evidence/tuf-phase-c/README.md), excluding the
-untouched unrelated `docs/SECURITY.md` edit. No commit command has run.
-After authorization: verify the reviewed file inventory and index, create the
-proposed commit, record its SHA, and request separately authorized push/remote
-verification. Install/verify actual GitHub protections and complete the missing
-execution/custody arrangement before a protected candidate run can be accepted.
+Local retention validation is complete. Review the recorded changed scope and
+obtain separate authorization before any new commit. Once the correction is independently reviewed/committed under new
+authorization, the next external package is separate push authorization naming
+the exact source SHA, `origin` repository and destination branch, followed by
+owner-installed GitHub branch/ruleset/CODEOWNERS/status-check/environment
+protections and protected CI readiness. No push or CI is performed automatically.
+The original commit with superseded retention must not be used for execution.
 
 Follow [the complete 23-step execution package](TUF-STAGING-EXECUTION.md).
 The sequence places infrastructure readiness before protected publication,
@@ -1308,7 +1386,7 @@ explicit authorization.
 | Strict release schemas/config | PASS | `npm --prefix release run verify`; four schemas compile under AJV strict Draft 2020-12 and 28 migration hashes match |
 | Context-bound release admission | PASS | `npm --prefix release test`: 24/24 adversarial/admission/workflow tests; exact environment/account/region/release/Git/admission binding, target rechecks, deterministic plan and protected-workflow attacks |
 | Production promotion evidence validator | PASS (LOCAL ONLY) | six evidence types, mandatory checks, exact subject/artifact binding, chronology, and approval validity tested; no live gate evidence exists |
-| AWS release-trust IaC | PASS (SOURCE/LOCAL ONLY) | typecheck and 57/57 tests; exact immutable OIDC identities, fixed five-function broker, separate publisher secret version, conditional publication journal/storage policy and no publisher signing/checkpoint writes; stack not instantiated |
+| AWS release-trust IaC | PASS (SOURCE/LOCAL ONLY) | corrected retention typecheck and 58/58 tests; exact immutable OIDC identities, fixed five-function broker, separate publisher secret version, conditional publication journal/storage policy and no publisher signing/checkpoint writes; stack not instantiated |
 | EHR release cache generation | PASS (LOCAL ONLY) | `npm --prefix apps/ehr test`: 5/5; TypeScript/build/platform verification; exact-SHA generated worker with complete shell; no deployment |
 | KMS freshness signer | PARTIAL PASS (LOCAL ONLY) | low-level pinned ARN/SPKI/P-256 adapter and independently stateful broker pass normal/race tests; completed and superseded outputs replay from reachable immutable journal evidence without re-signing; online versions advance from durable high-water with a 30-minute commit margin; live AWS proof remains; no AWS call or key creation |
 | Focused npm dependency audits | PASS | `npm audit --audit-level=moderate` reports zero vulnerabilities for release, AWS, Cloudflare, and EHR lockfiles; all focused tests/builds pass |
@@ -1319,7 +1397,7 @@ explicit authorization.
 | Protected publication workflow | PASS (SOURCE/LOCAL ONLY) | reusable-only two-job workflow, exact action/workflow pins, protected staging/production environments, live GitHub identity-rule execution tests, independently approved tooling/config hashes, OIDC only in publisher, retained references; no live run |
 | Historical reference toolchain manifest | PASS (REFERENCE ONLY) | `node tools/tuf-release/scripts/verify-toolchain.mjs --require-installed`; official Go distribution/binary and reference-client pins checked |
 | Five-command reproducibility | PASS (LOCAL ONLY) | paired isolated Linux/amd64 builds were byte-identical; exact hashes are recorded in CURRENT |
-| Clean-checkout full verification | BLOCKED | implementation is not yet an immutable reviewed commit and no GitHub workflow was invoked |
+| Clean-checkout full verification | BLOCKED | original reviewed scope is committed, but retention correction is not; no GitHub workflow was invoked |
 | Staging repository deployment | BLOCKED | credentials/account/key setup not supplied |
 | Staging application deployment | BLOCKED | TUF staging gate must pass first |
 | Synthetic migration and restore | PASS (LOCAL ONLY) | final actual PostgreSQL rehearsal and 328-FK integrity/restore checks; external source/schema and staging HTTP validation remain unavailable |

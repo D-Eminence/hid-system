@@ -122,7 +122,7 @@ func (store *PublicationJournalStore) archiveBytes(ctx context.Context, data []b
 	}
 	retention, err := store.s3.GetObjectRetention(ctx, &s3.GetObjectRetentionInput{Bucket: aws.String(store.config.BucketName), Key: aws.String(key), VersionId: aws.String(version), ExpectedBucketOwner: aws.String(store.config.ExpectedBucketOwner)})
 	// Reused content must still cover at least the complete release acceptance
-	// and recovery window; normal new archives use 100-year retention.
+	// and recovery window; normal new archives use 2 years (730 days) of retention.
 	if err != nil || retention == nil || retention.Retention == nil || string(retention.Retention.Mode) != store.config.ObjectLockMode ||
 		retention.Retention.RetainUntilDate == nil || retention.Retention.RetainUntilDate.Before(store.clock().Add(365*24*time.Hour)) {
 		return PublicationEvidenceReference{}, errors.New("archive retention is insufficient")

@@ -1,53 +1,42 @@
 # Current HID Platform Task
 
-## Current authoritative stage — 2026-09-06
+## Current authoritative stage — 2026-09-07
 
-Phase C local preparation is verified on `tuf-production-release`; HEAD remains
-`abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`. No commit, push, cloud mutation,
-staging deployment or production action is authorized or performed.
+**PHASE C LOCALLY VERIFIED AND COMMITTED — STAGING NOT ACCEPTED**.
 
-The protected publisher now binds the caller SHA, OIDC SHA and candidate CI
-run/artifact provenance before credentials. Value-free staging identifiers,
-GitHub protection, offline Object Lock planning, migration/restore and forward
-rollback procedures are prepared in the linked canonical runbook.
+Previous SHA: `abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`.
+New immutable local SHA: `46e76cecf9e846061203c8fd68a0fcfd0c2825a5`.
+Message: `Implement TUF release trust and prepare protected staging gates`.
+Commit timestamp: `2026-09-07T04:11:04+01:00`. Branch: `tuf-production-release`.
+Exactly one local commit includes the 193 reviewed files; no amend/history
+rewrite occurred. Every committed blob matches the approved inventory.
+The unrelated `docs/SECURITY.md` edit remains untouched and excluded.
+Pre-/post-commit diff, scope, evidence and security checks pass with zero secret
+findings. Prior local suite results remain recorded in the canonical document.
 
-The local synthetic PostgreSQL rehearsal passed all 28 migrations, promotion,
-reconciliation, idempotent retry, per-table/sequence backup restore equality,
-328 foreign-key checks, schema/RLS tests and partial-failure/orphan rejection.
-It exposed and fixed importer lifecycle/grant-reason compatibility and typed
-retry/DOB comparisons without changing the immutable migration ledger.
-Actual staging restore and application rollback remain unexecuted.
+The user's later correction sets immutable journal/evidence retention to
+**2 years (730 days)**. The original commit contains the superseded retention
+proposal. Go/configuration/IAM/tests/plans/runbooks are corrected locally;
+58 AWS tests/typecheck, Go normal/race/vet/modules, 24 release tests, configuration
+and secret checks, regenerated source-model plans and five paired builds pass.
+These changes and the post-commit canonical records remain uncommitted; no
+further commit is authorized.
 
-Go 1.25.0 is retained only for historical reference interoperability after the
-broader security audit found reachable standard-library vulnerabilities.
-Release tooling is pinned to Go 1.26.8; its current scan has zero reachable
-findings. All five patched builds reproduce across separate caches. Root
-build/test/verify, release 24/24 tests, Go normal/race/vet/module verification,
-actionlint, four scoped npm audits and immutable-image Dockerfile checks pass.
-The final real PostgreSQL rehearsal and static migration checks also pass after
-fixing inactive-role provenance; applied migration files are unchanged.
+- No push occurred; separate push authorization is required.
+- No protected CI run exists; GitHub protections await owner configuration.
+- Exact AWS/Cloudflare identifiers remain pending.
+- **OBJECT LOCK: UNAPPROVED / NOT CREATED**; retention correction grants no creation authority.
+- Signing/custody and candidate/signing/canary execution review remain pending.
+- Live restore and live rollback remain unverified.
+- Staging authorization remains pending; **STAGING NOT ACCEPTED**.
+- **DATA MIGRATION: NOT AUTHORIZED. PRODUCTION: LOCKED.**
 
-Fresh read-only GitHub inspection at 21:45 UTC found the repository now public
-with unchanged numeric IDs, but main is unprotected, the release branch is
-absent, and rulesets/environments/workflows are empty. The agent made no GitHub
-mutation; earlier private-plan observations are superseded. Exact AWS/Cloudflare
-identities and protected staging authority remain missing. The unrelated
-pre-existing `docs/SECURITY.md` edit is untouched and excluded from the proposed
-TUF commit.
-
-Classification: **PHASE C LOCAL PREPARATION VERIFIED; NOT READY FOR
-PROTECTED STAGING EXECUTION; STAGING NOT ACCEPTED; PRODUCTION LOCKED**.
-
-Final review binds 193 proposed files and excludes the untouched SECURITY edit.
-Tracked and untracked whitespace checks pass; the index remains empty.
-
-Next: obtain authorization for the reviewed commit proposal in
-[Phase C evidence](evidence/tuf-phase-c/README.md), excluding `docs/SECURITY.md`.
-The candidate/signing/canary execution and custody arrangement still requires
-a concrete security review before staging can execute.
-Push, protection configuration, exact cloud identifiers, concrete irreversible
-infrastructure approval and staging execution each retain their own gates.
-See [canonical record](TUF-PRODUCTION-IMPLEMENTATION.md).
+Next: review the corrected file scope in
+[retention evidence](evidence/tuf-phase-c/retention-correction.json) and obtain
+separate authorization before a new commit. After correction-commit
+authorization, request push permission for the exact SHA/repository/branch, followed by owner-installed
+protections and protected CI readiness. Do not execute any external step
+automatically. See [canonical record](TUF-PRODUCTION-IMPLEMENTATION.md).
 
 ## Historical implementation trail
 
@@ -199,7 +188,7 @@ write only its candidate request namespace and invoke one exact immutable
 Lambda version. Runtime signing is bound to canonical versioned request bytes,
 the exact root/state/candidate pins, one KMS key, `DIGEST` plus
 `ECDSA_SHA_256`, and the exact unqualified source function ARN. DynamoDB CAS
-state is paired with a 100-year Object-Locked S3 manifest chain. Checkpoint
+state is paired with a 730-day Object-Locked S3 manifest chain. Checkpoint
 schema `2.0.0` and state-manifest `v3` persist independent snapshot and
 timestamp version high-water marks, so an exposed pending version remains
 consumed when stale metadata is superseded. Completed decision indexes are

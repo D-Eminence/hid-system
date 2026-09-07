@@ -7,7 +7,7 @@
     "live_diff": false,
     "cloud_calls": false,
     "template_file": "Hid-staging-ReleaseTrust.template.json",
-    "template_sha256": "e7e0d98e4daea73a3740465464e4b8952bd510de1820f1c5396ac13eb3fc1ca1",
+    "template_sha256": "ac4dab2869c07fd62cb9a9417eee8067a0939f933059fd518b0eb69101ed5888",
     "changes": [
       {
         "logical_id": "RepositoryEncryptionKey70A4CB84",
@@ -203,7 +203,10 @@
       }
     ],
     "scope": "synthetic identifier source model only; no actual AWS diff",
-    "review_id": "foundation"
+    "review_id": "foundation",
+    "retention_days": 730,
+    "source_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+    "worktree_dirty": true
   },
   {
     "schema_version": "hid.tuf.offline-infrastructure-plan/v1",
@@ -213,7 +216,7 @@
     "live_diff": false,
     "cloud_calls": false,
     "template_file": "Hid-staging-ReleaseTrust.template.json",
-    "template_sha256": "3f0339967a390b74af83efda4d1f78a44148c367f7d21b4b537866ac9afdf356",
+    "template_sha256": "e52aadcc4f685869107408709b910b288f8479c4db3843189ffccf7166d3b601",
     "changes": [
       {
         "logical_id": "RepositoryEncryptionKey70A4CB84",
@@ -486,7 +489,7 @@
         "deletion_policy": null
       },
       {
-        "logical_id": "TufSigningBrokerSnapshotOneFunctionCurrentVersionE03F25F8f673c3c6cb2d5ab92bed363e053c2b06",
+        "logical_id": "TufSigningBrokerSnapshotOneFunctionCurrentVersionE03F25F8679c4a350388bf1a1ee0eb8e33e26e65",
         "type": "AWS::Lambda::Version",
         "proposed_action": "create-if-confirmed-absent",
         "deletion_policy": null
@@ -516,7 +519,7 @@
         "deletion_policy": null
       },
       {
-        "logical_id": "TufSigningBrokerSnapshotTwoFunctionCurrentVersionBC79A1693c256a66d9e10e5b6fa2537868427f14",
+        "logical_id": "TufSigningBrokerSnapshotTwoFunctionCurrentVersionBC79A1696c6acca21fa980236ecc17e92688dda2",
         "type": "AWS::Lambda::Version",
         "proposed_action": "create-if-confirmed-absent",
         "deletion_policy": null
@@ -546,7 +549,7 @@
         "deletion_policy": null
       },
       {
-        "logical_id": "TufSigningBrokerTimestampOneFunctionCurrentVersion3D59DA4192ad837cbbb152b1fb7fe2fc725aec43",
+        "logical_id": "TufSigningBrokerTimestampOneFunctionCurrentVersion3D59DA41df9fd290b588b9afee2a8b0d50ef313a",
         "type": "AWS::Lambda::Version",
         "proposed_action": "create-if-confirmed-absent",
         "deletion_policy": null
@@ -576,7 +579,7 @@
         "deletion_policy": null
       },
       {
-        "logical_id": "TufSigningBrokerTimestampTwoFunctionCurrentVersion95FECF83e6822ae2b229f122f4a4a2da5bf7d97f",
+        "logical_id": "TufSigningBrokerTimestampTwoFunctionCurrentVersion95FECF83dcb16d6636a4c311e78cafc0e2a329f3",
         "type": "AWS::Lambda::Version",
         "proposed_action": "create-if-confirmed-absent",
         "deletion_policy": null
@@ -654,7 +657,7 @@
         "deletion_policy": null
       },
       {
-        "logical_id": "TufSigningBrokerCheckpointFunctionCurrentVersionCC07E9E1d5ee44d689ae61eaedf916e0e659de3a",
+        "logical_id": "TufSigningBrokerCheckpointFunctionCurrentVersionCC07E9E15464d55790b7f2532eba00681cda0a01",
         "type": "AWS::Lambda::Version",
         "proposed_action": "create-if-confirmed-absent",
         "deletion_policy": null
@@ -733,6 +736,9 @@
       }
     ],
     "scope": "synthetic identifier source model only; no actual AWS diff",
-    "review_id": "broker"
+    "review_id": "broker",
+    "retention_days": 730,
+    "source_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+    "worktree_dirty": true
   }
 ]

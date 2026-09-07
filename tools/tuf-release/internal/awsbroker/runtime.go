@@ -20,7 +20,7 @@ import (
 const RuntimeConfigSchema = "hid.tuf.signing-broker.config/v1"
 
 const (
-	StateRetentionDays    = 36500
+	StateRetentionDays    = 730
 	requestRetentionGrace = 10 * time.Minute
 )
 

@@ -249,10 +249,10 @@ function validateProps(props: HidReleaseTrustStackProps): ValidatedReleaseTrustP
   if (
     !Number.isSafeInteger(props.evidenceRetentionDays) ||
     props.evidenceRetentionDays < minimumRetentionDays ||
-    props.evidenceRetentionDays > 36500
+    props.evidenceRetentionDays > 730
   ) {
     throw new Error(
-      `evidenceRetentionDays must be an integer from ${minimumRetentionDays} through 36500 for ${props.environmentName}`,
+      `evidenceRetentionDays must be an integer from ${minimumRetentionDays} through 730 for ${props.environmentName}`,
     );
   }
   if (props.acknowledgeObjectLockIsIrreversible !== true) {
@@ -424,15 +424,27 @@ export class HidReleaseTrustStack extends Stack {
     this.enforceMinimumObjectLockRetention(
       this.evidenceArchiveBucket,
       '*',
-      evidenceRetentionDays,
+      // A 730-day bucket default must not override the immutable writers'
+      // 729-day IAM floor for request-transit rounding.
+      Math.min(evidenceRetentionDays, 729),
       'DenyEvidenceRetentionBelowEnvironmentMinimum',
     );
     this.enforceMinimumObjectLockRetention(
       this.evidenceArchiveBucket,
       'tuf-signing-broker/state/*',
-      36500,
-      'DenyBrokerStateRetentionBelowOneHundredYears',
+      // The writer sets an exact 730-day lifetime; request transit can cross a
+      // remaining-day boundary before S3 evaluates the retention condition.
+      729,
+      'DenyBrokerStateRetentionBelowTwoYears',
     );
+    this.evidenceArchiveBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'DenyBrokerStateRetentionAboveTwoYears',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:PutObjectRetention'],
+      resources: [this.evidenceArchiveBucket.arnForObjects('tuf-signing-broker/state/*')],
+      conditions: { NumericGreaterThan: { 's3:object-lock-remaining-retention-days': '730' } },
+    }));
 
     this.auditLogBucket = this.privateRetainedBucket(
       'AuditLogArchive',

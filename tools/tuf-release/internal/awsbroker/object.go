@@ -38,7 +38,7 @@ func NewImmutableObjectReader(config ImmutableObjectReaderConfig, client S3Clien
 		!awsAccountPattern.MatchString(config.ExpectedBucketOwner) || !kmsKeyARNPattern.MatchString(config.EncryptionKeyARN) ||
 		!strings.Contains(config.EncryptionKeyARN, ":"+config.ExpectedBucketOwner+":key/") ||
 		config.ObjectLockMode != string(s3types.ObjectLockModeGovernance) && config.ObjectLockMode != string(s3types.ObjectLockModeCompliance) ||
-		config.MinimumRemainingRetention < 0 || config.MinimumRemainingRetention > 36500*24*time.Hour ||
+		config.MinimumRemainingRetention < 0 || config.MinimumRemainingRetention > time.Duration(StateRetentionDays)*24*time.Hour ||
 		config.Clock == nil || config.Clock().IsZero() {
 		return nil, errors.New("immutable S3 reader configuration is invalid")
 	}

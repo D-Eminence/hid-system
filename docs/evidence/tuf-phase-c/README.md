@@ -1,16 +1,24 @@
 # Phase C local evidence and commit proposal
 
 Decision: **NOT READY FOR PROTECTED STAGING EXECUTION; STAGING NOT ACCEPTED**.
-Production remains locked. HEAD is
-`abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0` on `tuf-production-release`.
-The index is empty; these files remain uncommitted. This HEAD does not contain
-the implementation represented by the pending files.
+Production remains locked. The reviewed 193-file scope was committed locally as
+`46e76cecf9e846061203c8fd68a0fcfd0c2825a5` at `2026-09-07T04:11:04+01:00`,
+with parent `abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`. No push or external
+mutation occurred. The subsequent **730-day (2-year)** retention correction and
+canonical commit records remain uncommitted and require new commit authorization.
 
-## Reviewable commit
+`files.json` and the original verification/migration/GitHub records remain the
+reviewed historical snapshot. Their exact committed bytes are available at the
+SHA above; later correction files do not silently inherit that verification.
+Updated source-model plans and corrected build/test evidence are identified in
+[retention-correction.json](retention-correction.json). The original retention
+proposal must not be implemented. Object Lock remains **UNAPPROVED / NOT CREATED**.
 
-Proposed message: `Implement TUF release trust and prepare protected staging gates`
+## Reviewed commit — created locally
 
-The proposed single logical commit includes the Phase A/B TUF verifier,
+Commit message: `Implement TUF release trust and prepare protected staging gates`
+
+The single logical commit includes the Phase A/B TUF verifier,
 threshold metadata construction, pinned AWS broker, immutable publication
 journal/recovery/evidence, protected publication workflow, Cloudflare gates,
 release-bound EHR service worker, required dependency updates, Admin test
@@ -24,7 +32,9 @@ not enter this commit. The inventory does not hash itself; preserve its final
 hash independently with the review decision. No generated binary, database
 backup, operational journal request, private key or credential belongs in Git.
 
-Before an authorized commit, compare actual files to that inventory, stage
+For any separately authorized correction commit, review the new correction
+scope; the original inventory is historical. Compare actual files to the
+newly approved inventory and stage
 only its proposed paths, inspect the complete cached diff and secret/artifact
 exclusions, and run `git diff --cached --check`. Record the resulting SHA.
 Commit authorization does not imply push or workflow dispatch authorization;
@@ -36,6 +46,13 @@ prove the absent protected environments, candidate/signing/canary execution,
 key custody, publication, migration or staging acceptance.
 
 ## Verification records
+
+Original full-workspace records below are the committed pre-correction evidence.
+The current 730-day correction passed 58 AWS tests/typecheck, Go normal/race/
+vet/modules, 24 release tests, configuration/security checks, offline plans and
+all five paired builds. `offline-plans.json` and `reproducibility.json` now record
+that corrected uncommitted state; the originals remain available in Git.
+The changed scope and exact current results are in `retention-correction.json`.
 
 | Record | Evidence and scope |
 | --- | --- |
@@ -124,9 +141,10 @@ steps and binary acceptance criteria. No protected run IDs, signed staging
 targets/digests/versions, deployed identifiers or approval receipts exist.
 Actual owner protections, the execution/custody arrangement, non-secret
 AWS/Cloudflare identifiers, a concrete Object Lock plan/approval and explicit
-staging authority remain required. The proposed 36,500-day journal/evidence
-retention is unapproved. Production planning starts only after staging acceptance.
+staging authority remain required. The corrected 730-day journal/evidence
+retention requirement does not authorize Object Lock creation. Production planning starts only after staging acceptance.
 
-Next executable action, after explicit owner authorization: create the reviewed
-commit above, record its SHA, then proceed through separately authorized push,
-GitHub protection verification and the remaining execution gates.
+Retention validation passed; next obtain separate correction-commit
+authorization. Push requires its own exact SHA/repository/branch authorization,
+then owner-installed GitHub protections and protected CI readiness. No external
+step is executed automatically.

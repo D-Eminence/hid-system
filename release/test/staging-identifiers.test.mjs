@@ -7,6 +7,8 @@ test('the value-free staging template is structurally valid but cannot authorize
   const result = validateStagingIdentifiers(template)
   assert.equal(result.valid, false); assert.ok(result.missing.length > 60)
   assert.equal(result.authorization, 'NOT_AUTHORIZED')
+  assert.equal(template.aws.object_lock.journal_and_evidence_retention_days, 730)
+  assert.equal(template.aws.object_lock.approved, false)
 })
 
 test('supplied identifiers reject production substitution, unknown secret fields, mismatched accounts and bypasses', () => {
@@ -16,6 +18,8 @@ test('supplied identifiers reject production substitution, unknown secret fields
     m => { m.cloudflare.account_id = 'bad' }, m => { m.cloudflare.api_token = 'unexpected' },
     m => { m.cloudflare.frontend_hosts.ehr = 'ehr.healthidentitydirectory.com' },
     m => { m.aws.object_lock.default_retention_days = 1 },
+    m => { m.aws.object_lock.journal_and_evidence_retention_days = 729 },
+    m => { m.aws.object_lock.journal_and_evidence_retention_days = 731 },
     m => { m.aws.account_id = '111122223333'; m.aws.region = 'eu-west-1'; m.github.capabilities.publisher.role_arn = 'arn:aws:iam::444455556666:role/hid-staging-publisher' },
     m => { m.aws.account_id = '111122223333'; m.aws.region = 'eu-west-1'; m.github.capabilities.publisher.role_arn = 'arn:aws:iam::111122223333:role/hid-production-publisher' },
     m => { m.github.protected_ref = 'refs/heads/../main' },
