@@ -9,9 +9,11 @@ import { pathToFileURL } from 'node:url'
 
 export const REPOSITORY = 'D-Eminence/hid-system'
 export const REPOSITORY_ID = '1317340803'
+export const OWNER_LOGIN = 'D-Eminence'
 export const OWNER_ID = '182018869'
 export const PROTECTED_REF = 'refs/heads/tuf-production-release'
 export const WORKFLOW = '.github/workflows/tuf-protected-readiness.yml'
+export const WORKFLOW_NAME = 'Protected staging readiness probe'
 export const AUDIENCE = 'hid-protected-ci-readiness'
 export const ISSUER = 'https://token.actions.githubusercontent.com'
 export const JWKS_URL = `${ISSUER}/.well-known/jwks`
@@ -25,22 +27,23 @@ const numericId = value => Number.isSafeInteger(value) && value > 0
 export function verifyReadinessContext(e, checkedOutSha) {
   const expected = {
     GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REPOSITORY: REPOSITORY,
-    GITHUB_REPOSITORY_ID: REPOSITORY_ID, GITHUB_REPOSITORY_OWNER_ID: OWNER_ID,
+    GITHUB_REPOSITORY_ID: REPOSITORY_ID, GITHUB_REPOSITORY_OWNER: OWNER_LOGIN, GITHUB_REPOSITORY_OWNER_ID: OWNER_ID,
     GITHUB_REF: PROTECTED_REF, GITHUB_REF_TYPE: 'branch', GITHUB_REF_PROTECTED: 'true',
     READINESS_ENVIRONMENT: 'staging', RUNNER_ENVIRONMENT: 'github-hosted',
     // Approval history has no attempt binding. A fresh dispatch is required
     // rather than treating a previous attempt's approval as new evidence.
-    GITHUB_RUN_ATTEMPT: '1', GITHUB_WORKFLOW_REF: `${REPOSITORY}/${WORKFLOW}@${PROTECTED_REF}`,
+    GITHUB_RUN_ATTEMPT: '1', GITHUB_WORKFLOW: WORKFLOW_NAME, GITHUB_WORKFLOW_REF: `${REPOSITORY}/${WORKFLOW}@${PROTECTED_REF}`,
   }
   requireCondition(Object.entries(expected).every(([key, value]) => e[key] === value), 'Readiness context rejected')
   requireCondition(SHA.test(e.GITHUB_SHA ?? '') && [checkedOutSha, e.READINESS_SOURCE_SHA,
     e.TUF_READINESS_APPROVED_SHA, e.GITHUB_WORKFLOW_SHA].every(value => value === e.GITHUB_SHA), 'Readiness source pin rejected')
   requireCondition(!e.GITHUB_HEAD_REF && !e.GITHUB_BASE_REF, 'Pull request context rejected')
-  requireCondition(ID.test(e.GITHUB_RUN_ID ?? '') && ID.test(e.GITHUB_ACTOR_ID ?? ''), 'Readiness run identity rejected')
+  requireCondition(ID.test(e.GITHUB_RUN_ID ?? '') && ID.test(e.GITHUB_ACTOR_ID ?? '')
+    && typeof e.GITHUB_ACTOR === 'string' && e.GITHUB_ACTOR.length > 0 && e.GITHUB_ACTOR.length <= 100, 'Readiness run identity rejected')
   return { sourceSha: e.GITHUB_SHA, runId: e.GITHUB_RUN_ID, actorId: e.GITHUB_ACTOR_ID }
 }
 
-export function verifyEnvironmentProtections(environments, actorId) {
+export function verifyEnvironmentProtections(environments) {
   requireCondition(Array.isArray(environments) && environments.length === ENVIRONMENTS.length, 'Environment inventory rejected')
   const ids = new Set()
   return ENVIRONMENTS.map(name => {
@@ -53,28 +56,32 @@ export function verifyEnvironmentProtections(environments, actorId) {
       && environment.deployment_branch_policy?.protected_branches === true
       && environment.deployment_branch_policy?.custom_branch_policies === false, 'Environment bypass or branch policy rejected')
     const rules = environment.protection_rules?.filter(rule => rule.type === 'required_reviewers')
-    requireCondition(rules?.length === 1 && rules[0].prevent_self_review === true, 'Environment review policy rejected')
+    requireCondition(rules?.length === 1 && rules[0].prevent_self_review === false, 'Environment review policy rejected')
     const reviewers = rules[0].reviewers
-    requireCondition(Array.isArray(reviewers) && reviewers.length > 0 && reviewers.length <= 6
-      && reviewers.every(value => ['User', 'Team'].includes(value.type) && numericId(value.reviewer?.id)), 'Environment reviewers rejected')
-    const userIds = reviewers.filter(value => value.type === 'User').map(value => value.reviewer.id)
-    // Do not infer team membership from an opaque team ID. This repository's
-    // probe requires an explicit User reviewer distinct from the initiator.
-    requireCondition(userIds.some(id => String(id) !== actorId), 'Independent reviewer coverage unavailable')
-    return { name, id: environment.id, prevent_self_review: true, can_admins_bypass: false,
+    // GitHub accepts one approval from the configured reviewer list. Keep that
+    // list limited to the actual owner so another reviewer cannot replace owner
+    // authorization. Self-approval is intentional under HID's solo-owner model.
+    requireCondition(Array.isArray(reviewers) && reviewers.length === 1
+      && reviewers[0].type === 'User' && reviewers[0].reviewer?.id === Number(OWNER_ID)
+      && reviewers[0].reviewer.login === OWNER_LOGIN, 'Owner-only environment reviewer policy rejected')
+    return { name, id: environment.id, prevent_self_review: false, can_admins_bypass: false,
       protected_branches: true, custom_branch_policies: false,
-      reviewers: reviewers.map(value => ({ type: value.type, id: value.reviewer.id })) }
+      reviewers: reviewers.map(value => ({ type: value.type, id: value.reviewer.id, login: value.reviewer.login })) }
   })
 }
 
-export function verifyStagingApproval(history, staging, actorId) {
+export function verifyStagingApproval(history, staging) {
   requireCondition(Array.isArray(history) && history.length > 0 && history.length <= 100, 'Approval history rejected')
-  const authorized = staging.reviewers.filter(value => value.type === 'User' && String(value.id) !== actorId).map(value => value.id)
+  requireCondition(staging?.name === 'staging' && numericId(staging.id)
+    && staging.reviewers?.length === 1 && staging.reviewers[0].type === 'User'
+    && staging.reviewers[0].id === Number(OWNER_ID) && staging.reviewers[0].login === OWNER_LOGIN,
+  'Owner staging approval policy rejected')
   const relevant = history.filter(value => value.environments?.some(environment => environment.id === staging.id || environment.name === 'staging'))
   requireCondition(relevant.length > 0 && relevant.every(value => value.state === 'approved'
     && Array.isArray(value.environments) && value.environments.length === 1
     && value.environments[0].name === 'staging' && value.environments[0].id === staging.id
-    && value.user?.type === 'User' && authorized.includes(value.user.id)), 'Independent staging approval rejected')
+    && value.user?.type === 'User' && value.user.id === Number(OWNER_ID)
+    && value.user.login === OWNER_LOGIN), 'Owner staging approval rejected')
   return [...new Set(relevant.map(value => value.user.id))]
 }
 
@@ -119,14 +126,17 @@ export function verifyReadinessToken(token, jwks, e, now = Date.now()) {
   requireCondition(validSignature, 'OIDC signature rejected')
   const expected = {
     iss: ISSUER, aud: AUDIENCE, sub: `repo:${REPOSITORY}:environment:staging`,
-    repository: REPOSITORY, repository_id: REPOSITORY_ID, repository_owner_id: OWNER_ID,
+    repository: REPOSITORY, repository_id: REPOSITORY_ID, repository_owner: OWNER_LOGIN, repository_owner_id: OWNER_ID,
     ref: PROTECTED_REF, ref_type: 'branch', sha: e.GITHUB_SHA, environment: 'staging',
-    workflow_ref: `${REPOSITORY}/${WORKFLOW}@${PROTECTED_REF}`, workflow_sha: e.GITHUB_SHA,
-    event_name: 'workflow_dispatch', runner_environment: 'github-hosted', actor_id: e.GITHUB_ACTOR_ID,
+    workflow: WORKFLOW_NAME, workflow_ref: `${REPOSITORY}/${WORKFLOW}@${PROTECTED_REF}`, workflow_sha: e.GITHUB_SHA,
+    event_name: 'workflow_dispatch', runner_environment: 'github-hosted', actor: e.GITHUB_ACTOR, actor_id: e.GITHUB_ACTOR_ID,
     run_id: e.GITHUB_RUN_ID, run_attempt: e.GITHUB_RUN_ATTEMPT,
   }
   requireCondition(claims && Object.entries(expected).every(([key, value]) => claims[key] === value)
-    && !claims.head_ref && !claims.base_ref, 'OIDC identity claims rejected')
+    && !claims.head_ref && !claims.base_ref
+    // This job is not reusable; reusable-workflow identity claims must not be
+    // substituted for the direct readiness workflow's exact identity.
+    && !claims.job_workflow_ref && !claims.job_workflow_sha, 'OIDC identity claims rejected')
   const seconds = Math.floor(now / 1000)
   requireCondition(['exp', 'iat', 'nbf'].every(key => Number.isSafeInteger(claims[key]))
     && claims.exp > seconds && claims.iat <= seconds + 30 && claims.iat >= seconds - 300
@@ -158,9 +168,9 @@ export async function collectProtectedReadiness(e, { checkedOutSha, fetcher = fe
   const headers = { Authorization: `Bearer ${e.GH_READINESS_READ_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
   const metadata = []
   for (const name of ENVIRONMENTS) metadata.push(await readJson(fetcher, `https://api.github.com/repos/${REPOSITORY}/environments/${name}`, headers))
-  const protections = verifyEnvironmentProtections(metadata, context.actorId)
+  const protections = verifyEnvironmentProtections(metadata)
   const history = await readJson(fetcher, `https://api.github.com/repos/${REPOSITORY}/actions/runs/${context.runId}/approvals`, headers)
-  const reviewerIds = verifyStagingApproval(history, protections.find(value => value.name === 'staging'), context.actorId)
+  const reviewerIds = verifyStagingApproval(history, protections.find(value => value.name === 'staging'))
   // No OIDC request occurs until source, live protections and approval pass.
   const jwks = await readJson(fetcher, JWKS_URL)
   const response = await readJson(fetcher, endpoint, { Authorization: `Bearer ${e.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` })
@@ -169,6 +179,7 @@ export async function collectProtectedReadiness(e, { checkedOutSha, fetcher = fe
     repository: REPOSITORY, repository_id: REPOSITORY_ID, repository_owner_id: OWNER_ID,
     source_sha: context.sourceSha, workflow_sha: context.sourceSha, ref: PROTECTED_REF,
     run_id: context.runId, run_attempt: e.GITHUB_RUN_ATTEMPT, environment: 'staging',
+    governance_model: 'sole-owner-approval', owner_self_approval_permitted: true,
     approval_reviewer_ids: reviewerIds, environment_protections: protections, oidc,
     readiness_result: 'approval-and-oidc-verified', publication_result: 'not-attempted',
     cloud_mutation: false, staging_status: 'NOT ACCEPTED', data_migration: 'NOT AUTHORIZED', production: 'LOCKED',

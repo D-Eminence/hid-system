@@ -6,8 +6,8 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseWorkflow } from '../scripts/verify-publication-workflow.mjs'
-import { AUDIENCE, ENVIRONMENTS, ISSUER, JWKS_URL, OWNER_ID, PROTECTED_REF, REPOSITORY,
-  REPOSITORY_ID, WORKFLOW, collectProtectedReadiness, trustedTokenRequestUrl,
+import { AUDIENCE, ENVIRONMENTS, ISSUER, JWKS_URL, OWNER_ID, OWNER_LOGIN, PROTECTED_REF, REPOSITORY,
+  REPOSITORY_ID, WORKFLOW, WORKFLOW_NAME, collectProtectedReadiness, trustedTokenRequestUrl,
   verifyEnvironmentProtections, verifyReadinessContext, verifyReadinessToken,
   verifyStagingApproval } from '../scripts/verify-protected-readiness.mjs'
 
@@ -19,22 +19,22 @@ const publicKey = { ...pair.publicKey.export({ format: 'jwk' }), kid: 'fixture-k
 const jwks = { keys: [publicKey] }
 function fixture() {
   const e = { GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REPOSITORY: REPOSITORY,
-    GITHUB_REPOSITORY_ID: REPOSITORY_ID, GITHUB_REPOSITORY_OWNER_ID: OWNER_ID,
+    GITHUB_REPOSITORY_ID: REPOSITORY_ID, GITHUB_REPOSITORY_OWNER: OWNER_LOGIN, GITHUB_REPOSITORY_OWNER_ID: OWNER_ID,
     GITHUB_REF: PROTECTED_REF, GITHUB_REF_TYPE: 'branch', GITHUB_REF_PROTECTED: 'true',
     READINESS_ENVIRONMENT: 'staging', RUNNER_ENVIRONMENT: 'github-hosted', GITHUB_RUN_ATTEMPT: '1',
-    GITHUB_WORKFLOW_REF: `${REPOSITORY}/${WORKFLOW}@${PROTECTED_REF}`, GITHUB_SHA: 'a'.repeat(40),
+    GITHUB_WORKFLOW: WORKFLOW_NAME, GITHUB_WORKFLOW_REF: `${REPOSITORY}/${WORKFLOW}@${PROTECTED_REF}`, GITHUB_SHA: 'a'.repeat(40),
     READINESS_SOURCE_SHA: 'a'.repeat(40), TUF_READINESS_APPROVED_SHA: 'a'.repeat(40), GITHUB_WORKFLOW_SHA: 'a'.repeat(40),
-    GITHUB_RUN_ID: '123', GITHUB_ACTOR_ID: OWNER_ID, GH_READINESS_READ_TOKEN: 'fixture-read-token',
+    GITHUB_RUN_ID: '123', GITHUB_ACTOR: OWNER_LOGIN, GITHUB_ACTOR_ID: OWNER_ID, GH_READINESS_READ_TOKEN: 'fixture-read-token',
     ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'fixture-request-token', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://fixture.actions.githubusercontent.com/token' }
   const environments = ENVIRONMENTS.map((name, i) => ({ name, id: i + 1, can_admins_bypass: false,
     deployment_branch_policy: { protected_branches: true, custom_branch_policies: false },
-    protection_rules: [{ type: 'required_reviewers', prevent_self_review: true,
-      reviewers: [{ type: 'User', reviewer: { id: 999 } }] }] }))
-  const history = [{ state: 'approved', user: { id: 999, type: 'User' }, environments: [{ name: 'staging', id: 1 }] }]
+    protection_rules: [{ type: 'required_reviewers', prevent_self_review: false,
+      reviewers: [{ type: 'User', reviewer: { id: Number(OWNER_ID), login: OWNER_LOGIN } }] }] }))
+  const history = [{ state: 'approved', user: { id: Number(OWNER_ID), login: OWNER_LOGIN, type: 'User' }, environments: [{ name: 'staging', id: 1 }] }]
   const claims = { iss: ISSUER, aud: AUDIENCE, sub: `repo:${REPOSITORY}:environment:staging`, repository: REPOSITORY,
-    repository_id: REPOSITORY_ID, repository_owner_id: OWNER_ID, ref: PROTECTED_REF, ref_type: 'branch', sha: e.GITHUB_SHA,
-    environment: 'staging', workflow_ref: e.GITHUB_WORKFLOW_REF, workflow_sha: e.GITHUB_SHA, event_name: 'workflow_dispatch',
-    runner_environment: 'github-hosted', actor_id: e.GITHUB_ACTOR_ID, run_id: e.GITHUB_RUN_ID, run_attempt: '1',
+    repository_id: REPOSITORY_ID, repository_owner: OWNER_LOGIN, repository_owner_id: OWNER_ID, ref: PROTECTED_REF, ref_type: 'branch', sha: e.GITHUB_SHA,
+    environment: 'staging', workflow: WORKFLOW_NAME, workflow_ref: e.GITHUB_WORKFLOW_REF, workflow_sha: e.GITHUB_SHA, event_name: 'workflow_dispatch',
+    runner_environment: 'github-hosted', actor: e.GITHUB_ACTOR, actor_id: e.GITHUB_ACTOR_ID, run_id: e.GITHUB_RUN_ID, run_attempt: '1',
     iat: now / 1000 - 10, nbf: now / 1000 - 10, exp: now / 1000 + 290 }
   return { e, environments, history, claims }
 }
@@ -77,6 +77,8 @@ test('real pre-checkout gate and verifier reject PRs, source/ref substitution, m
     e => { e.GITHUB_REF_PROTECTED = 'false' }, e => { e.READINESS_SOURCE_SHA = 'b'.repeat(40) },
     e => { e.TUF_READINESS_APPROVED_SHA = '' }, e => { e.GITHUB_WORKFLOW_SHA = 'b'.repeat(40) },
     e => { e.GITHUB_REPOSITORY_ID = '1' }, e => { e.GITHUB_REPOSITORY_OWNER_ID = '1' },
+    e => { e.GITHUB_REPOSITORY_OWNER = 'attacker' }, e => { e.GITHUB_WORKFLOW = 'Other workflow' },
+    e => { e.GITHUB_ACTOR = '' }, e => { e.GITHUB_ACTOR_ID = 'invalid' }, e => { e.GITHUB_RUN_ID = 'invalid' },
     e => { e.GITHUB_REPOSITORY = 'attacker/fork' }, e => { e.READINESS_ENVIRONMENT = 'production' },
     e => { e.RUNNER_ENVIRONMENT = 'self-hosted' }, e => { e.GITHUB_HEAD_REF = 'fork' },
     e => { e.GITHUB_RUN_ATTEMPT = '2' }, e => { e.GITHUB_REF_TYPE = 'tag' },
@@ -96,37 +98,44 @@ test('real pre-checkout gate and verifier reject PRs, source/ref substitution, m
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
-test('live protection validation fails on owner-only coverage, admin bypass and mixed environments', () => {
+test('live protections permit owner self-approval but reject substitute reviewers, bypass and mixed environments', () => {
   const attacks = [f => { f.environments.pop() }, f => { f.environments[1].id = 1 },
     f => { f.environments[1].name = 'staging' }, f => { f.environments[0].can_admins_bypass = true },
     f => { delete f.environments[0].can_admins_bypass }, f => { f.environments[0].protection_rules = [] },
-    f => { f.environments[0].protection_rules[0].prevent_self_review = false },
+    f => { f.environments[0].protection_rules[0].prevent_self_review = true },
+    f => { delete f.environments[0].protection_rules[0].prevent_self_review },
     f => { f.environments[0].protection_rules[0].reviewers = [] },
-    f => { f.environments[0].protection_rules[0].reviewers[0].reviewer.id = Number(OWNER_ID) },
+    f => { f.environments[0].protection_rules[0].reviewers[0].reviewer.id = 999 },
+    f => { f.environments[0].protection_rules[0].reviewers[0].reviewer.login = 'attacker' },
     f => { f.environments[0].protection_rules[0].reviewers[0].type = 'Team' },
+    f => { f.environments[0].protection_rules[0].reviewers.push({ type: 'User', reviewer: { id: 999, login: 'contributor' } }) },
     f => { f.environments[0].deployment_branch_policy.protected_branches = false },
     f => { f.environments[0].deployment_branch_policy.custom_branch_policies = true }]
-  for (const attack of attacks) { const f = fixture(); attack(f); assert.throws(() => verifyEnvironmentProtections(f.environments, f.e.GITHUB_ACTOR_ID)) }
-  const f = fixture(), protections = verifyEnvironmentProtections(f.environments, f.e.GITHUB_ACTOR_ID)
-  assert.deepEqual(verifyStagingApproval(f.history, protections[0], f.e.GITHUB_ACTOR_ID), [999])
-  for (const mutate of [h => { h[0].state = 'rejected' }, h => { h[0].user.id = Number(OWNER_ID) },
+  for (const attack of attacks) { const f = fixture(); attack(f); assert.throws(() => verifyEnvironmentProtections(f.environments)) }
+  const f = fixture(), protections = verifyEnvironmentProtections(f.environments)
+  assert.equal(f.e.GITHUB_ACTOR_ID, OWNER_ID)
+  assert.equal(protections[0].prevent_self_review, false)
+  assert.deepEqual(verifyStagingApproval(f.history, protections[0]), [Number(OWNER_ID)])
+  for (const mutate of [h => { h.length = 0 }, h => { h[0].state = 'rejected' }, h => { h[0].user.id = 999 },
+    h => { h[0].user.login = 'attacker' }, h => { h[0].user.type = 'Bot' },
     h => { h[0].environments[0].name = 'production' }, h => { h[0].environments[0].id = 2 },
     h => { h[0].environments.push({ name: 'production', id: 2 }) }]) {
     const history = structuredClone(f.history); mutate(history)
-    assert.throws(() => verifyStagingApproval(history, protections[0], f.e.GITHUB_ACTOR_ID))
+    assert.throws(() => verifyStagingApproval(history, protections[0]))
   }
 })
 
 test('OIDC verifies signatures, exact readiness audience and identity, freshness and trusted endpoints', () => {
   const f = fixture()
   assert.equal(verifyReadinessToken(token(f.claims), jwks, f.e, now).signature_verified, true)
-  for (const key of ['iss', 'aud', 'sub', 'repository', 'repository_id', 'repository_owner_id', 'ref', 'ref_type', 'sha',
-    'environment', 'workflow_ref', 'workflow_sha', 'event_name', 'runner_environment', 'actor_id', 'run_id', 'run_attempt']) {
+  for (const key of ['iss', 'aud', 'sub', 'repository', 'repository_id', 'repository_owner', 'repository_owner_id', 'ref', 'ref_type', 'sha',
+    'environment', 'workflow', 'workflow_ref', 'workflow_sha', 'event_name', 'runner_environment', 'actor', 'actor_id', 'run_id', 'run_attempt']) {
     const claims = { ...f.claims, [key]: key === 'aud' ? 'sts.amazonaws.com' : 'wrong' }
     assert.throws(() => verifyReadinessToken(token(claims), jwks, f.e, now), undefined, key)
   }
   for (const changes of [{ exp: now / 1000 }, { iat: now / 1000 - 301 }, { nbf: now / 1000 + 31 },
-    { exp: now / 1000 + 1000 }, { head_ref: 'attacker' }]) {
+    { exp: now / 1000 + 1000 }, { head_ref: 'attacker' },
+    { job_workflow_ref: `${REPOSITORY}/.github/workflows/tuf-publish.yml@${'a'.repeat(40)}` }, { job_workflow_sha: 'a'.repeat(40) }]) {
     assert.throws(() => verifyReadinessToken(token({ ...f.claims, ...changes }), jwks, f.e, now))
   }
   const signed = token(f.claims).split('.'); signed[1] = Buffer.from(JSON.stringify({ ...f.claims, run_id: '999' })).toString('base64url')
@@ -140,7 +149,7 @@ test('OIDC verifies signatures, exact readiness audience and identity, freshness
   assert.equal(trustedTokenRequestUrl(f.e.ACTIONS_ID_TOKEN_REQUEST_URL + '?audience=sts.amazonaws.com').searchParams.get('audience'), AUDIENCE)
 })
 
-test('end-to-end probe obtains no OIDC token until approval and retains no raw credentials or claims', async () => {
+test('end-to-end owner-approved probe obtains no OIDC token before authorization and retains no raw credentials or claims', async () => {
   const f = fixture(), calls = []
   const fetcher = async (url, options) => {
     calls.push(String(url)); assert.equal(options.method, 'GET'); assert.equal(options.redirect, 'error')
@@ -158,11 +167,29 @@ test('end-to-end probe obtains no OIDC token until approval and retains no raw c
   assert.equal(evidence.cloud_mutation, false)
   assert.equal(evidence.staging_status, 'NOT ACCEPTED')
   assert.equal(evidence.production, 'LOCKED')
+  assert.equal(evidence.governance_model, 'sole-owner-approval')
+  assert.equal(evidence.owner_self_approval_permitted, true)
+  assert.deepEqual(evidence.approval_reviewer_ids, [Number(OWNER_ID)])
   assert.doesNotMatch(JSON.stringify(evidence), /fixture-read-token|fixture-request-token|"exp"|"iat"|"nbf"|"value"/)
   assert.equal(calls.length, 7)
   calls.length = 0
-  f.environments[0].protection_rules[0].reviewers[0].reviewer.id = Number(OWNER_ID)
-  await assert.rejects(collectProtectedReadiness(f.e, { checkedOutSha: f.e.GITHUB_SHA, fetcher, now }), /Independent reviewer/)
+  f.environments[0].protection_rules[0].reviewers[0].reviewer.id = 999
+  await assert.rejects(collectProtectedReadiness(f.e, { checkedOutSha: f.e.GITHUB_SHA, fetcher, now }), /Owner-only environment reviewer/)
   assert.equal(calls.length, 4)
   assert.ok(!calls.some(url => url.startsWith('https://fixture.actions.githubusercontent.com/')))
+  calls.length = 0
+  f.environments[0].protection_rules[0].reviewers[0].reviewer.id = Number(OWNER_ID)
+  f.history[0].user.id = 999
+  await assert.rejects(collectProtectedReadiness(f.e, { checkedOutSha: f.e.GITHUB_SHA, fetcher, now }), /Owner staging approval/)
+  assert.equal(calls.length, 5)
+  assert.ok(!calls.includes(JWKS_URL))
+  assert.ok(!calls.some(url => url.startsWith('https://fixture.actions.githubusercontent.com/')))
+  // Contributors may initiate a probe, but cannot replace the owner's approval.
+  calls.length = 0
+  f.e.GITHUB_ACTOR_ID = '999'; f.claims.actor_id = '999'
+  f.e.GITHUB_ACTOR = 'contributor'; f.claims.actor = 'contributor'
+  f.history[0].user.id = Number(OWNER_ID)
+  const contributorEvidence = await collectProtectedReadiness(f.e, { checkedOutSha: f.e.GITHUB_SHA, fetcher, now })
+  assert.deepEqual(contributorEvidence.approval_reviewer_ids, [Number(OWNER_ID)])
+  assert.equal(calls.length, 7)
 })

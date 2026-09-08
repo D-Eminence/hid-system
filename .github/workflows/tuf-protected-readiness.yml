@@ -33,6 +33,7 @@ jobs:
           const expected = {
             GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch',
             GITHUB_REPOSITORY: 'D-Eminence/hid-system', GITHUB_REPOSITORY_ID: '1317340803',
+            GITHUB_REPOSITORY_OWNER: 'D-Eminence', GITHUB_WORKFLOW: 'Protected staging readiness probe',
             GITHUB_REPOSITORY_OWNER_ID: '182018869', GITHUB_REF: 'refs/heads/tuf-production-release',
             GITHUB_REF_TYPE: 'branch', GITHUB_REF_PROTECTED: 'true', READINESS_ENVIRONMENT: 'staging',
             RUNNER_ENVIRONMENT: 'github-hosted', GITHUB_RUN_ATTEMPT: '1',
@@ -41,11 +42,13 @@ jobs:
           if (Object.entries(expected).some(([key, value]) => e[key] !== value)
             || !/^[a-f0-9]{40}$/.test(e.GITHUB_SHA ?? '')
             || [e.READINESS_SOURCE_SHA, e.TUF_READINESS_APPROVED_SHA, e.GITHUB_WORKFLOW_SHA].some(value => value !== e.GITHUB_SHA)
+            || !/^[1-9][0-9]{0,19}$/.test(e.GITHUB_RUN_ID ?? '') || !/^[1-9][0-9]{0,19}$/.test(e.GITHUB_ACTOR_ID ?? '')
+            || typeof e.GITHUB_ACTOR !== 'string' || !e.GITHUB_ACTOR.length || e.GITHUB_ACTOR.length > 100
             || e.GITHUB_HEAD_REF || e.GITHUB_BASE_REF) {
             throw Error('Protected readiness source approval rejected');
           }
           NODE
-      - name: Check out only the independently approved commit
+      - name: Check out only the owner-approved commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ inputs.source_sha }}
@@ -55,7 +58,7 @@ jobs:
         with:
           node-version: 22.23.2
           package-manager-cache: false
-      - name: Verify approval, environment separation and readiness-only OIDC
+      - name: Verify owner approval, environment separation and readiness-only OIDC
         env:
           GH_READINESS_READ_TOKEN: ${{ github.token }}
         run: node release/scripts/verify-protected-readiness.mjs
