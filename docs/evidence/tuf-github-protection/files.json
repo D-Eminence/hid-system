@@ -1,0 +1,103 @@
+{
+  "schema_version": "hid.tuf.github-preparation-files/v1",
+  "recorded_at": "2026-09-07T14:24:03.405589+00:00",
+  "base_sha": "ba2cd3290e7c1fe72817c3bdfb806dd306b2c633",
+  "proposed_commit_message": "Harden GitHub release protections and prepare staging readiness checks",
+  "files": [
+    {
+      "path": ".github/CODEOWNERS",
+      "sha256": "0534d71501077d5f027a291286edf916a77c3f8d32af3e235904bacf20cddca4",
+      "size_bytes": 957
+    },
+    {
+      "path": ".github/workflows/tuf-local-gates.yml",
+      "sha256": "d6538c8a3ce34963cd1215858955a02b1e0a1b8f1744805ba47222bf35d9c325",
+      "size_bytes": 20299
+    },
+    {
+      "path": ".github/workflows/tuf-protected-readiness.yml",
+      "sha256": "8c8e47512d0125bdd7e5cd8de21a88b4a815cba64f5f9ae230d0d13952f7681f",
+      "size_bytes": 3115
+    },
+    {
+      "path": "docs/TASK.md",
+      "sha256": "772fdd6c6423863282a872b44a09c4a3c65ae1e1910103b745060318ea819e6c",
+      "size_bytes": 134165
+    },
+    {
+      "path": "docs/TUF-CI-PROTECTION.md",
+      "sha256": "eb18a972d7bcc2c008bf8e65046f8b3fba5d8f31eb497c872d3a7da25c17a76a",
+      "size_bytes": 18224
+    },
+    {
+      "path": "docs/TUF-PRODUCTION-IMPLEMENTATION.md",
+      "sha256": "1f43d92116a3b8844c996a91073a42f7b98af41f30bc62b00fe32ed58521bb14",
+      "size_bytes": 101697
+    },
+    {
+      "path": "docs/evidence/tuf-github-protection/README.md",
+      "sha256": "7bd6a641a724c5e8e059b4362a9a8730b0542a1b1f077d235c76217aafe8044b",
+      "size_bytes": 2590
+    },
+    {
+      "path": "docs/evidence/tuf-github-protection/ci-fix-validation.json",
+      "sha256": "257043fdb845f3d941671779efe8c1a1a3809d31c6e2833a3bd0647fa37b9317",
+      "size_bytes": 2719
+    },
+    {
+      "path": "docs/evidence/tuf-github-protection/files.json",
+      "sha256": null,
+      "size_bytes": null,
+      "note": "self hash retained independently with commit evidence"
+    },
+    {
+      "path": "docs/evidence/tuf-github-protection/ordinary-ci.json",
+      "sha256": "0676e165d98b5e661323ab2da93db19fa3b67f7269db460a7636b81a24d0b3f5",
+      "size_bytes": 3845
+    },
+    {
+      "path": "docs/evidence/tuf-github-protection/readiness-denial.json",
+      "sha256": "76838cf6ec1287bc38387bf89fdc2d5dcbfe0c6624d70a65d8b83e5fd1916e52",
+      "size_bytes": 408
+    },
+    {
+      "path": "docs/evidence/tuf-github-protection/state.json",
+      "sha256": "14fa70bcaca241e4f98a4e4a3fb7318c6a7668d9c889d86a949701a650e0575c",
+      "size_bytes": 10791
+    },
+    {
+      "path": "docs/evidence/tuf-github-protection/validation.json",
+      "sha256": "3bb69c188fe37ea5ed25dd0836e0e416cf6921c3138c3b994703e0d7994d640a",
+      "size_bytes": 2966
+    },
+    {
+      "path": "infra/cloudflare/test/tuf-publication-authorization.test.mjs",
+      "sha256": "99e39c40d0faa0fbbfa07ee7e058e6f7a0e32fec0eef0eb38035c5ec3ab9e587",
+      "size_bytes": 11564
+    },
+    {
+      "path": "release/config/protected-ci-prerequisites.json",
+      "sha256": "19a50e767b2fb3dc45154d5893c3ecfdcf19478a18b5113a8f75b821356a2c9e",
+      "size_bytes": 7503
+    },
+    {
+      "path": "release/scripts/verify-protected-readiness.mjs",
+      "sha256": "7e975cb6dec261de59a0663f025daab19770e1869be3efe938604285222fee9e",
+      "size_bytes": 13254
+    },
+    {
+      "path": "release/test/protected-readiness.test.mjs",
+      "sha256": "e54dd7d0274e0a3d93b5cf998d3b4077f395fb30dafbd62a9352b02fc71b15d2",
+      "size_bytes": 12260
+    }
+  ],
+  "exclusions": [
+    {
+      "path": "docs/SECURITY.md",
+      "sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93"
+    }
+  ],
+  "push_authorized": false,
+  "protected_ci_executed": false,
+  "readiness": "BLOCKED_OWNER_REVIEWER_COVERAGE_AND_UNPUBLISHED_PREPARATION"
+}

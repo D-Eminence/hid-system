@@ -133,6 +133,8 @@ jobs:
           import { appendFile, writeFile } from 'node:fs/promises';
           const e = process.env;
           const reject = () => { throw Error('protected workflow identity rejected'); };
+          if (e.GITHUB_REPOSITORY !== 'D-Eminence/hid-system' || e.APPROVED_REPOSITORY_ID !== '1317340803'
+            || e.APPROVED_OWNER_ID !== '182018869') reject();
           if (!/^[a-f0-9]{40}$/.test(e.TOOLING_SHA) || e.TOOLING_SHA !== e.APPROVED_WORKFLOW_SHA) reject();
           const plan = JSON.parse(e.PLAN_JSON);
           if (!/^[a-f0-9]{40}$/.test(e.GITHUB_SHA) || plan.git_sha !== e.GITHUB_SHA) reject();
@@ -143,8 +145,15 @@ jobs:
             redirect: 'error', signal: AbortSignal.timeout(30000) });
           if (!environmentResponse.ok) reject();
           const environment = await environmentResponse.json();
-          const approval = environment.protection_rules?.find(rule => rule.type === 'required_reviewers');
-          if (!approval?.prevent_self_review || !Array.isArray(approval.reviewers) || approval.reviewers.length === 0
+          const approvalRules = environment.protection_rules?.filter(rule => rule.type === 'required_reviewers');
+          const approval = approvalRules?.[0];
+          const ownerReviewer = approval?.reviewers?.[0];
+          // GitHub gates this job on environment approval. The sole owner may approve their own run;
+          // this policy readback does not independently retrieve the run's approval-history record.
+          if (approvalRules?.length !== 1 || approval?.prevent_self_review !== false
+            || !Array.isArray(approval.reviewers) || approval.reviewers.length !== 1
+            || ownerReviewer?.type !== 'User' || ownerReviewer?.reviewer?.id !== Number(e.APPROVED_OWNER_ID)
+            || ownerReviewer?.reviewer?.login !== 'D-Eminence'
             || environment.can_admins_bypass !== false || environment.deployment_branch_policy?.protected_branches !== true
             || environment.deployment_branch_policy?.custom_branch_policies !== false) reject();
           const url = new URL(e.ACTIONS_ID_TOKEN_REQUEST_URL);
@@ -164,7 +173,8 @@ jobs:
           if (claims.ref_type !== 'branch' || !['push', 'workflow_dispatch'].includes(claims.event_name)) reject();
           await writeFile(`${e.RUNNER_TEMP}/hid-publication-identity.json`, JSON.stringify({
             schema_version: 'hid.tuf.protected-identity/v1', recorded_at: new Date().toISOString(), claims: expected,
-            environment_id: environment.id, prevent_self_review: true, can_admins_bypass: false,
+            environment_id: environment.id, prevent_self_review: false, can_admins_bypass: false,
+            governance_model: 'sole-owner-approval', approval_evidence_source: 'github-environment-runtime-gate',
             protected_branches: true, reviewer_ids: approval.reviewers.map(item => ({ type: item.type, id: item.reviewer.id }))
           }), { flag: 'wx', mode: 0o600 });
           await appendFile(e.GITHUB_ENV, `HID_TUF_IDENTITY_VERIFIED=true\nHID_TUF_VERIFIED_WORKFLOW_SHA=${e.APPROVED_WORKFLOW_SHA}\n`);

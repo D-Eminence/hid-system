@@ -55,7 +55,10 @@ export function verifyPublicationWorkflow(source) {
   assert.match(steps[0].run, /e\.TOOLING_SHA !== e\.APPROVED_WORKFLOW_SHA/)
   for (const required of ['job_workflow_sha', 'job_workflow_ref', 'repository_id', 'repository_owner_id', 'actor_id', 'run_attempt',
     'plan.git_sha !== e.GITHUB_SHA', 'expected.sha = e.GITHUB_SHA',
-    "e.GITHUB_REF_PROTECTED !== 'true'", 'approval?.prevent_self_review', 'environment.can_admins_bypass !== false', 'environment.deployment_branch_policy?.protected_branches !== true']) {
+    "e.GITHUB_REPOSITORY !== 'D-Eminence/hid-system'", "e.APPROVED_REPOSITORY_ID !== '1317340803'", "e.APPROVED_OWNER_ID !== '182018869'",
+    "e.GITHUB_REF_PROTECTED !== 'true'", 'approvalRules?.length !== 1', 'approval?.prevent_self_review !== false', 'approval.reviewers.length !== 1',
+    "ownerReviewer?.type !== 'User'", 'ownerReviewer?.reviewer?.id !== Number(e.APPROVED_OWNER_ID)', "ownerReviewer?.reviewer?.login !== 'D-Eminence'",
+    'environment.can_admins_bypass !== false', 'environment.deployment_branch_policy?.protected_branches !== true']) {
     assert.ok(steps[0].run.includes(required), `missing protected identity/approval check ${required}`)
   }
   const identity = 0

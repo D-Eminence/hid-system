@@ -1,6 +1,6 @@
 # Protected staging execution and acceptance package
 
-Date: 2026-09-06. Decision: **STAGING NOT ACCEPTED**.
+Date: 2026-09-08. Decision: **STAGING NOT ACCEPTED**.
 Readiness: **BLOCKED; NOT READY FOR PROTECTED STAGING EXECUTION**.
 Production remains locked. This package authorizes no commit, push, workflow
 dispatch, cloud mutation, secret/key creation, migration, or deployment.
@@ -14,14 +14,27 @@ The authoritative state and verification ledger are
 
 ## Exact identity and present evidence limits
 
-The local branch is `tuf-production-release`; HEAD is
-`46e76cecf9e846061203c8fd68a0fcfd0c2825a5`, created as one authorized local
-commit from `abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0`. The user subsequently
-corrected immutable journal/evidence retention to **2 years (730 days)**.
-The correction is uncommitted and needs separate commit authorization; the
-unchanged committed retention proposal must not be used for execution.
-No push, protected CI run, signed staging candidate or deployment receipt exists.
-Object Lock remains **UNAPPROVED / NOT CREATED**.
+The local branch is `tuf-production-release`; unchanged original preparation is
+`5ee3118688e04c364b6d351d1b3ef3385c71abb4`, parent and verified remote release SHA
+`ba2cd3290e7c1fe72817c3bdfb806dd306b2c633`. The original implementation and
+730-day retention correction are committed and pushed. Preparation `5ee3118` is
+verified on `review/tuf-preparation-5ee3118` in open
+[PR #1](https://github.com/D-Eminence/hid-system/pull/1), not merged. Local source
+correction `11b52d1ea59e572ad649d8f71fd84997d10749aa` is its child; synchronized
+documentation/evidence is a separate local commit. Both scopes passed local
+verification and remain excluded from the remote PR until a separately
+authorized exact-SHA push. Old-head push CI `34167766797` and PR CI `34168206030`
+passed all seven jobs each; corrected-head remote CI is unverified.
+No protected run, signed staging candidate or deployment receipt exists.
+Object Lock remains **UNAPPROVED / NOT CREATED**, journal/evidence retention
+exactly **730 days / 2 years**.
+
+The user confirmed the PR exposes “Merge without waiting for requirements to
+be met (bypass rules)”; this is user-provided evidence and the option is unused.
+Normal author PR self-approval is impossible. Existing owner-only PR exception
+use and merge require separate authorization after corrected-head CI passes.
+No independent developer is required, and no staging/production authorization
+is inferred from owner environment self-approval being permitted.
 
 Use [the non-secret identifier template](../release/config/staging-identifiers.template.json)
 as the single inventory. Known GitHub identity is `D-Eminence/hid-system`,
@@ -29,17 +42,19 @@ repository ID `1317340803`, owner ID `182018869`. Reverify these after any
 ownership change. Planned resource names and hostnames below identify the
 design; they do not prove resources or DNS exist.
 
-Fresh read-only GitHub evidence at 21:45 UTC reports public visibility, the
-same repository/owner IDs, zero environments/workflows, no `main` branch
-protection, no remote `tuf-production-release` branch and an empty ruleset
-list. All six pinned action commits exist. Earlier private-repository plan
-restrictions are historical; the visibility changed externally and was not
-changed by this preparation. Existing approval protections are still absent.
+GitHub GET/GraphQL readback at `2026-09-08T09:47:40Z` verifies both protected branches,
+review ruleset `22459937`, and four distinct environments. The sole owner may
+merge their own PR through the narrow owner review exception; CI and branch
+safety remain enforced. Contributors require owner review once CODEOWNERS is
+installed on the base branches. Each environment requires the owner, allows
+owner self-review, denies admin bypass and permits protected branches only.
+Production approval is separate; no secrets or variables are configured.
+See [current protection evidence](evidence/tuf-solo-governance/README.md).
 
 | Execution binding | Required value and current state |
 | --- | --- |
-| Source and tooling | Two explicit immutable Git SHAs, with the publisher/tooling workflow pin reviewed independently; unavailable until authorized commits exist |
-| Protected ref | Exact owner-selected `refs/heads/...`; no wildcard, tag or PR caller; unavailable |
+| Source and tooling | Two explicit immutable Git SHAs, with the publisher/tooling workflow pin reviewed independently; final execution pins remain unassigned |
+| Protected ref | Preparation ref is `refs/heads/tuf-production-release`; exact execution pin requires owner review; no wildcard, tag or PR caller |
 | Candidate provenance | Successful approved candidate workflow path, run ID/attempt and immutable artifact ID, name, size and GitHub digest; unavailable |
 | Release identity | `r<10-digit-sequence>-g<40-character-source-SHA>` allocated under release state policy; unavailable |
 | TUF target | `environments/staging/releases/<release_id>/release-bundle.json`; its exact identity and SHA-256 remain unavailable |
@@ -47,7 +62,7 @@ changed by this preparation. Existing approval protections are still absent.
 | Aggregate hashes | Release-bundle, artifact-set, whole-repository, bootstrap-root, tooling-archive and publisher-config SHA-256 values; unavailable |
 | Metadata | Exact root/targets/snapshot/timestamp versions, hashes, expiry and retained object versions; unavailable; never substitute fixture metadata |
 | Workflow | Immutable `.github/workflows/tuf-publish.yml@<tooling_sha>`, called through reviewed committed orchestration; the literal caller pin does not yet exist |
-| Approval | Actual `staging-publisher` environment deployment approval for the execution, independently retained reviewer/run evidence and no self-review/admin bypass; environment absent |
+| Approval | Actual `staging-publisher` environment deployment approval for the execution, retained owner/run evidence, self-review allowed and admin bypass false; environment configured, actual run approval absent |
 | Infrastructure | Manifest account/region, role/key/bucket/state/credential-version/application/Cloudflare identifiers and readback evidence; missing |
 | Journal | Planned ID `hid-staging-publication-v1`, prefix `tuf-publication-journal/hid-staging-publication-v1/`; actual bucket, chain head/object versions and checkpoint evidence unavailable |
 
@@ -91,10 +106,10 @@ CI run in step 2; step 4 installs/verifies the separate deployment environments.
 
 | Step | Required execution | Completion evidence / current gate |
 | --- | --- | --- |
-| 1. Immutable source commit | Review final diff, secret/artifact exclusions and required verification; obtain commit authorization, then record exact SHA. Obtain separate push authorization and verify remote SHA before CI | Original local commit exists; corrected retention scope still requires separate commit/push authorization |
+| 1. Immutable source commit | Review final diff, secret/artifact exclusions and required verification; obtain commit authorization, then record exact SHA. Obtain separate push authorization and verify remote SHA before CI | Original implementation/retention commits pushed; preparation remains local, solo-owner corrections uncommitted; separate push/PR/merge authorization required |
 | 2. Protected CI execution | Run all committed local security jobs on the exact protected source and isolated publisher-tooling checks without cloud credentials | No protected run; blocked |
 | 3. CI evidence verification | Independently verify run/jobs/logs, provenance, dependency audits, paired build digests and complete artifact inventory against source | No run evidence; blocked |
-| 4. Protected GitHub environment configuration | Verify owner-installed environments, reviewers, self-review/bypass denial, branch restrictions, permissions and immutable workflow/config pins | Current public repository has no environments, branch protection or rulesets; required controls remain absent |
+| 4. Protected GitHub environment configuration | Verify owner-installed environments, exact owner reviewer, self-review allowance/admin bypass denial, branch restrictions, permissions and immutable workflow/config pins | All four environments, branch protections and owner review ruleset configured; source publication, remote CI and immutable execution pins pending |
 | 5. Exact AWS/Cloudflare identifier binding | Validate the filled non-secret manifest and independently read actual ownership, scopes, versions, TLS, roles and keys | Exact identifiers unavailable; blocked |
 | 6. Irreversible infrastructure authorization | Review account-specific source plan/read-only diff and request explicit approval of exact Object Lock resources/retention and signing-key custody actions | Not requested or granted; no concrete live plan |
 | 7. Staging infrastructure readiness | Execute only approved changes; verify resource policies, state, retention, archives, alarms, private database/runtime and denied cross-environment access | No live infrastructure acceptance |
@@ -109,8 +124,8 @@ CI run in step 2; step 4 installs/verifies the separate deployment environments.
 | 16. Production migration preparation | Only after step 15, prepare source inventory, mappings, rehearsal-derived estimates and production-specific recovery gates | Locked; not prepared by this package |
 | 17. Production cutover plan | Prepare exact artifact/resource identities, write freeze, routing, checkpoints, owners and abort/recovery criteria | Locked pending staging acceptance |
 | 18. Explicit production authorization | Obtain new explicit approval covering infrastructure, publication, migration, application deployment and cutover | Not requested or granted |
-| 19. Production migration | Execute only the approved production plan with hard integrity and restore gates | Forbidden in Phase C |
-| 20. Production deployment | Deploy only separately approved, verified production artifacts | Forbidden in Phase C |
+| 19. Production deployment | Deploy only separately approved, verified production artifacts after staging acceptance | Forbidden in Phase C |
+| 20. Production migration | Execute only the approved production plan with hard integrity and restore gates after production deployment | Forbidden in Phase C |
 | 21. Post-cutover verification | Verify production data, application, TUF, journal, access and routing evidence | Locked |
 | 22. Monitoring/hypercare | Execute approved observation, alert ownership, recovery and incident coverage | Locked |
 | 23. Final production acceptance | Independent explicit acceptance after all production evidence exists | Locked; no production readiness claim |
@@ -221,24 +236,33 @@ The reusable publisher is not a complete release orchestrator. Source execution
 for the other IAM-pinned build, evidence-writer, auditor and signer workflows,
 the candidate builder/attestation/signing orchestration, an immutable caller,
 and a witnessed publication/expiry canary is not supplied by this package.
-Root/targets custody and the independent review arrangement must also be
+Root/targets custody and the owner-authorized isolated capability arrangement must also be
 settled. These materially affect security; filling identifiers alone cannot
 make staging executable. Implement and review the selected orchestration,
 including deterministic artifacts, SBOM/scans/provenance and isolated signer
 roles, before requesting staging execution authorization.
 
-The smallest immediate owner inputs are:
+The current next gate is separate authorization to push the final local
+correction/documentation SHA to the existing review branch and update PR #1.
+Verify the new remote SHA and ordinary CI before separate owner-exception/merge
+authorization. No merge, protected dispatch or cloud action is authorized.
+The pre-PR plan below is retained as historical ordering; do not replay its
+preparation-only push or create another PR.
 
-1. Select the exact protected caller branch, actual code owners/reviewer IDs
-   and independent custody/orchestration owners; install and independently
-   verify the required branch/ruleset/environment protections in the current
-   repository. Reverify repository IDs, visibility and supported controls after
-   any ownership/visibility change. The earlier private-plan restriction is
-   not the current blocker; the required protections are absent.
-2. Review the proposed final file set and explicitly authorize its logical
-   commit. Push authorization is separate; verify the exact remote SHA after
-   an authorized push. An authorized immutable commit still does not authorize
-   cloud access or deployment.
+The smallest immediate owner inputs were:
+
+1. The exact preparation push is ready for separate authorization:
+   `5ee3118688e04c364b6d351d1b3ef3385c71abb4` → `review/tuf-preparation-5ee3118`.
+   The branch is currently absent. Independently verify that remote SHA before
+   a separately authorized PR into `tuf-production-release`. Ordinary CI and
+   owner review follow; merge requires explicit authorization. No second
+   developer is required and no protected workflow is dispatched.
+2. Review the eight-file solo-owner source correction and cohesive nine-file
+   documentation scope as two separate logical commits, only after explicit
+   authorization. They are uncommitted and excluded from the exact5ee push.
+   Corrected protected checks and CODEOWNERS must land through review before
+   relying on owner-specific base-branch enforcement or running readiness.
+   Owner-pinned final staging SHA and explicit dispatch approval remain required.
 3. Supply only non-secret staging AWS account/region, Cloudflare account/zone,
    existing provider/credential metadata references, allocated resource names
    and approved schema/dataset inventory. Complete the remaining manifest

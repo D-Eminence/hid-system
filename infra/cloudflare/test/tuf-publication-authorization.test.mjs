@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -167,7 +167,12 @@ test('live operator invocation requires and independently binds the protected pr
     decision.authorization.current = structuredClone(decision.authorization.candidate)
     delete decision.config_sha256
     delete decision.executable_sha256
-    const executable = await realpath(process.execPath)
+    // Hosted toolcache executables can be group-writable. Pin a private copy
+    // whose permissions satisfy the same invariant as a protected operator.
+    const privateExecutable = resolve(runner, 'pinned-node')
+    await copyFile(process.execPath, privateExecutable)
+    await chmod(privateExecutable, 0o500)
+    const executable = await realpath(privateExecutable)
     const config = resolve(runner, 'pinned-test-operator.cjs')
     const script = Buffer.from(`const assert = require('node:assert/strict');\nassert.deepEqual(process.argv.slice(2), ${JSON.stringify([fixture.repository, 'f'.repeat(64), fixture.repository, repository.repositorySha256])});\nprocess.stdout.write(${JSON.stringify(JSON.stringify(decision))});\n`)
     await writeFile(config, script, { mode: 0o600 })
@@ -177,6 +182,11 @@ test('live operator invocation requires and independently binds the protected pr
       HID_TUF_PUBLICATION_CONFIG: config, HID_TUF_PUBLICATION_CONFIG_SHA256: digest(script),
       HID_TUF_PREVIOUS_REPOSITORY: fixture.repository, HID_TUF_PREVIOUS_REPOSITORY_SHA256: 'f'.repeat(64),
     })
+    for (const mode of [0o520, 0o502]) {
+      await chmod(executable, mode)
+      await assert.rejects(obtainPublicationAuthorization(repository, { now }), /not writable by group or others/)
+    }
+    await chmod(executable, 0o500)
     assert.equal((await obtainPublicationAuthorization(repository, { now })).previous_repository_sha256, 'f'.repeat(64))
     delete process.env.HID_TUF_PREVIOUS_REPOSITORY_SHA256
     await assert.rejects(obtainPublicationAuthorization(repository, { now }), /pins and predecessor are required/)
