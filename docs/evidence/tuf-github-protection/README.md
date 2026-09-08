@@ -1,11 +1,25 @@
 # GitHub protection preparation evidence
 
-Status: **PROTECTED CI READINESS BLOCKED**. The remote reviewed SHA is
+This bundle is the immutable-preparation milestone's historical snapshot. Its
+independent-reviewer requirement and owner self-review denial were superseded
+by the user's sole-owner governance instruction. See the
+[current correction evidence](../tuf-solo-governance/README.md); retained JSON
+snapshots and original commit manifests are not rewritten as new observations.
+
+The 2026-09-08 correction is now locally committed as
+`11b52d1ea59e572ad649d8f71fd84997d10749aa`, with separate synchronized records.
+The complete relevant local suite passed. Original PR head `5ee3118` has 14/14
+ordinary checks passing; the corrected local history has not been pushed.
+The owner reports the existing bypass UI is exposed and unused. No merge or
+protected execution is authorized. Current correction evidence is authoritative
+for these facts; the historical denial below is not current owner policy.
+
+Historical milestone status: **PROTECTED CI READINESS BLOCKED**. The remote reviewed SHA is
 `ba2cd3290e7c1fe72817c3bdfb806dd306b2c633`. The new local preparation is separate from that immutable remote source; no
 additional push or protected workflow run occurred.
 
 - [Actual GitHub state](state.json): initial facts and independently read-back
-  branch/Actions/four-environment protections; current reviewer coverage gap.
+  branch/Actions/four-environment protections; reviewer coverage gap in that historical policy.
 - [Ordinary run](ordinary-ci.json): run `34103460898`, exact source, seven jobs,
   four passes/three failures and bounded failure evidence. Not protected CI.
 - [CI fix validation](ci-fix-validation.json): isolated EHR and fixture
@@ -25,13 +39,13 @@ verification logs and remote refs are retained privately at
 Ordinary CI logs and isolated reproduction evidence are retained at
 `/home/l2e/.local/state/hid-phase-c/github-protection-ci-audit/`.
 
-GitHub PR/check/admin/Actions rules and four distinct environment gates are
-active. Remote CODEOWNERS is absent and only the owner can review environments,
-so owner-initiated runs cannot self-approve. A verified owner-only CODEOWNERS file
+At that historical milestone, GitHub PR/check/admin/Actions rules and four
+distinct environment gates were active. CODEOWNERS was absent remotely and the historical policy prevented owner
+self-approval. That self-review policy is now superseded. A verified owner-only CODEOWNERS file
 and staging-only readiness workflow are local preparation, not effective remote
 controls. No bypass or additional reviewer identity was invented.
 
-Next: owner designates independent reviewer membership and production approval
+Historical next step (superseded): owner designates independent reviewer membership and production approval
 coverage, followed by separately authorized publication through a review branch
 and protected PR, successful ordinary CI and a staging-approved immutable SHA.
 Do not dispatch a protected probe, configure credentials, deploy or migrate

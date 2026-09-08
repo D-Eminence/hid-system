@@ -1,43 +1,66 @@
 # TUF protected CI configuration and evidence
 
-Status on 2026-09-07: **BRANCH/ACTIONS/ENVIRONMENT PROTECTIONS APPLIED;
-PROTECTED CI READINESS BLOCKED BY OWNER REVIEWER COVERAGE AND UNPUBLISHED SOURCE**.
-Protected CI has not run. No cloud credentials, Object Lock, release publication
-or staging deployment is authorized by this preparation.
+Status on 2026-09-08: **SOLO-OWNER CORRECTION LOCALLY VERIFIED AND COMMITTED;
+PR #1 UPDATE PENDING — NOT MERGED**.
+[PR #1](https://github.com/D-Eminence/hid-system/pull/1) introduces exact
+`5ee3118688e04c364b6d351d1b3ef3385c71abb4` from `review/tuf-preparation-5ee3118`
+into `tuf-production-release`. Ordinary push run `34167766797` and PR run
+`34168206030` passed all seven jobs each: 14/14 checks on that old head.
+Source correction `11b52d1ea59e572ad649d8f71fd84997d10749aa` is committed locally
+as its child, with synchronized records in a separate documentation commit.
+The corrected history requires a separately authorized exact-SHA push to the
+existing review branch and fresh ordinary CI before any separately authorized
+merge. No protected workflow ran; no cloud or environment setting was changed.
+Current [evidence](evidence/tuf-solo-governance/README.md) and canonical records
+supersede historical preparation statements below.
 
-## Actual GitHub state and applied controls
+The user confirmed GitHub displays “Merge without waiting for requirements to
+be met (bypass rules)”. This user-provided UI evidence is not an agent browser
+observation. The option remains unused. Normal PR author approval is impossible;
+owner PR exception use and owner environment self-approval are distinct.
 
-Live API inspection verified public repository `D-Eminence/hid-system`, ID
-`1317340803`, owner `D-Eminence` ID `182018869`, default branch `main`, and
-administrator permissions. Remote `tuf-production-release` remains at
-`ba2cd3290e7c1fe72817c3bdfb806dd306b2c633`. Before this phase, eight branches
-were unprotected and rulesets, environments and CODEOWNERS were absent.
-[Sanitized state and API readback](evidence/tuf-github-protection/state.json)
-separate the initial snapshot from applied settings.
+## Actual GitHub state and owner/contributor controls
 
-| Control | Actual state |
+Repository `D-Eminence/hid-system` is public, ID `1317340803`, owner `D-Eminence`
+ID `182018869`, default branch `main`. Remote `tuf-production-release` remains
+`ba2cd3290e7c1fe72817c3bdfb806dd306b2c633`; immutable preparation commit
+`5ee3118688e04c364b6d351d1b3ef3385c71abb4` remains the remote PR head.
+Fresh GitHub GET/GraphQL readback at `2026-09-08T09:47:40Z` confirms the controls
+below. New local correction commits have not been pushed or checked remotely.
+
+The owner may develop/review/merge their own work through a PR without a second
+reviewer. Contributors use PRs, CI and owner review. On both `main` and
+`tuf-production-release`, the controls are layered:
+
+| Control | Verified configuration |
 | --- | --- |
-| `main` and `tuf-production-release` | Protected: PR required, one approval, stale-review dismissal, latest-push approval, code-owner review required, resolved conversations |
-| Checks | All seven observed check names below, strict up-to-date requirement, each pinned to GitHub Actions app ID `15368` |
-| Force push/deletion/admin bypass | Force push and deletion denied; restrictions enforced for admins; no bypass allowance installed |
-| CODEOWNERS | Local file names verified owner `@D-Eminence`; absent from both remote base branches until separately authorized publication and reviewed merge |
-| Actions policy | Six exact reviewed action SHAs allowed; GitHub-owned/Marketplace blanket allowances disabled; SHA pinning required |
-| PR workflow approval | All external contributors require approval; workflow execution remains untrusted read-only code |
+| Classic branch protection | PR required, seven strict app-bound checks, conversations resolved, administrator enforcement, no force pushes or deletion |
+| Classic duplicate review fields | Approval count 0, code-owner review false, latest-push approval false; review requirements live in the ruleset below |
+| Active review ruleset `22459937` | Exact two refs only; one approval, code-owner review, stale-review dismissal, conversations; latest-push approval false |
+| Review exception | Only User `182018869`, mode `pull_request`; no CI/deletion/force-push exception |
+| CODEOWNERS | Local default owner for all changes plus explicit existing sensitive paths; not yet installed in either remote base branch |
+| Actions | Six exact allowed action SHAs; SHA pinning; no blanket GitHub-owned/Marketplace allowance; all external contributors require approval |
 | Default token | Read-only; Actions cannot approve PRs |
-| Environments | Four distinct protected environments listed below; no secrets/variables configured |
-| Runners | No self-hosted runners; workflows select ephemeral GitHub-hosted runners |
-| OIDC | Default subject mode unchanged; no AWS trust or credential configuration performed |
-| Release tags | No tag-dependent release workflow exists; tags are rejected by publisher identity policy; no invented tag pattern configured |
+| Environments | Four distinct owner-approved gates; no configured secrets/variables |
+| Runners/OIDC | No self-hosted runners; default OIDC subject mode unchanged; no AWS trust configuration |
+| Release tags | No tag-dependent release workflow; publisher rejects tags; no new tags or tag rules |
 
-The temporary release-preparation branch is protected while it carries security
-code. The production execution ref remains unassigned. A future tag-based
-protocol needs a reviewed exact tag pattern and protection before use.
-Classic branch protections supply the controls; no ruleset was needed.
-The first API request mixed deprecated `contexts` with `checks` and returned
-422 without mutation. Removing only `contexts` retained the exact app-bound
-checks; the corrected request and independent readback passed.
+The review ruleset was created and its exact User/PR exception verified before
+changing duplicate classic review requirements. All other classic fields match
+the previous readback exactly. The owner still needs a PR and passing technical
+checks. Owner use of the review exception is an explicit, auditable merge
+decision, rather than an approving review submitted by a PR author; other contributors have no bypass. CODEOWNERS must be installed on
+both bases before its ownership policy is effective. No collaborator was added.
+No actual PR merge was performed to test these settings.
 
-The check names are:
+The narrow ruleset avoids the organization-only classic bypass feature on this
+personal repository. GitHub layers rulesets with classic protections; review
+exceptions do not remove the separate technical requirements.
+[Branch protections](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches),
+[ruleset API](https://docs.github.com/en/rest/repos/rules) and
+[rule layering](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets).
+
+Required check names, each bound to GitHub Actions app ID `15368`:
 
 1. `Release contracts and admission`
 2. `Pinned TUF client and reproducibility`
@@ -48,39 +71,39 @@ The check names are:
 7. `Historical upstream reference oracle`
 
 GitHub required checks alone can accept skipped/neutral conclusions. Release
-admission still requires an independently verified successful candidate run,
-source/artifact identity, signed TUF targets and fresh durable authorization;
-no skipped check is release evidence. Changes to workflow logic require review.
-[Branch protection API](https://docs.github.com/en/rest/branches/branch-protection)
-and [Actions policy API](https://docs.github.com/en/rest/actions/permissions)
-document the applied settings.
+admission still requires verified successful candidate provenance, source/
+artifact identity, signed targets and fresh durable authorization.
 
-## Distinct environment gates and remaining owner action
+## Separate owner-approved environments
 
-| Environment | GitHub ID | Purpose |
-| --- | --- | --- |
-| `staging` | `21412878104` | Staging application/approval readiness gate; local probe only |
-| `production` | `21412879562` | Separate explicit production approval; no production workflow/credentials prepared |
-| `staging-publisher` | `21412881394` | Existing reusable publisher capability identity |
-| `production-publisher` | `21412883002` | Separate production publisher capability; production remains locked |
+| Environment | GitHub ID | Required reviewer | Prevent self-review | Admin bypass | Deployment restriction | Secrets / variables |
+| --- | --- | --- | --- | --- | --- | --- |
+| `staging` | `21412878104` | `D-Eminence` / `182018869` | false | false | Protected branches only | 0 / 0 |
+| `production` | `21412879562` | `D-Eminence` / `182018869` | false | false | Protected branches only | 0 / 0 |
+| `staging-publisher` | `21412881394` | `D-Eminence` / `182018869` | false | false | Protected branches only | 0 / 0 |
+| `production-publisher` | `21412883002` | `D-Eminence` / `182018869` | false | false | Protected branches only | 0 / 0 |
 
-Each requires `D-Eminence` (`182018869`), prevents self-review, disables admin
-bypass and permits protected branches only. Publisher code and IAM preparation
-further pin one exact caller ref; protected-branch membership alone is not
-publication authorization. Named staging/production environments do not replace
-or rename the capability-specific subjects already reviewed in AWS source.
+Only self-review prevention changed on these environments; owner approval,
+identities, branch policy and administrator bypass restrictions remain.
+Production changes were announced before application. There are no additional
+wait timers or custom deployment protection rules in the inspected metadata.
+Production approval remains a separate explicit action; merging source or
+approving staging grants no production authority. Future credentials remain
+isolated by environment/capability, with OIDC and exact workflow/source pins.
+Live rollback remains a mandatory unverified gate. Production is locked.
+[GitHub environment controls](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
 
-Only the owner is currently a collaborator. An owner-initiated run cannot
-self-approve. The owner must designate independent reviewers, provide accepted
-membership/access and a production-specific approval decision, then verify the
-installed IDs and CODEOWNERS coverage. No identities were guessed or invitations
-sent. One approval is the GitHub environment minimum; multiple listed reviewers
-do not enforce multiple approvals. Offline TUF thresholds remain separate.
-See [GitHub environment approvals](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
+The required reviewer list remains restricted to `D-Eminence`. Allowing self-
+review permits that owner to approve an owner-initiated run; it does not permit
+other contributors to approve any protected deployment. Contributor access
+cannot replace the named required reviewer. A production environment approval
+is a separate action from a PR merge or staging approval.
 
-The repository owner can still edit repository protections. Administrative,
-reviewer and signing-custodian separation remains an explicit governance gate;
-setting `enforce_admins` is not evidence of independent custody.
+Technical capability and signing-key separation remain required. Human approval
+is centralized with the owner; no independent second developer is required.
+The owner may still edit repository settings, so configuration evidence is not
+proof against a malicious or compromised owner. Signing custody remains a
+separate unapproved design/ceremony gate; this phase creates no keys.
 
 ## Workflow-by-workflow authority audit
 
@@ -89,12 +112,12 @@ setting `enforce_admins` is not evidence of independent custody.
 | `tuf-local-gates.yml`, seven jobs | Push, pull request, manual dispatch; PR source is untrusted; no privileged trigger or reusable workflow call | `contents: read`, no environment/OIDC/secrets; SHA-pinned actions and no persisted checkout credentials; builds/tests/local synth and bounded CI evidence upload only; cannot publish TUF or releases |
 | `tuf-publish.yml`, tooling | Reusable-only; caller selects data inputs and tooling SHA; tooling remains unprivileged | `contents: read`, no environment/OIDC/secrets; produces immutable-ID tooling artifact; privileged consumer separately requires approved source/archive digest |
 | `tuf-publish.yml`, publish | Reusable-only, no installed caller; rejects PR/tag events, wrong ref/SHA/repository/owner/hosted-runner/workflow claims | Approval-gated `${environment}-publisher`; `contents: read`, `actions: read`, `id-token: write`; IAM preparation binds exact subject/audience/ref/immutable reusable workflow; only after identity/tooling/provenance gates may assume publisher role and run durable TUF publication; no private signing key or direct KMS signing capability |
-| `tuf-protected-readiness.yml`, local preparation | Manual-only; fixed staging environment/ref/repository; independently approved source SHA before checkout; no reusable publisher call | Only GitHub metadata/approval reads and signature-verified OIDC with `hid-protected-ci-readiness` audience; no AWS STS action, SDK, secrets, credentials, deployment or release output; bounded public evidence only |
+| `tuf-protected-readiness.yml`, local preparation | Manual-only; fixed staging environment/ref/repository; owner-approved source SHA before checkout; no reusable publisher call | Only GitHub metadata/approval reads and signature-verified OIDC with `hid-protected-ci-readiness` audience; no AWS STS action, SDK, secrets, credentials, deployment or release output; bounded public evidence only |
 
 PR source cannot reach privileged jobs in these reviewed workflows. A fork or
 arbitrary branch cannot substitute publisher checkout code: protected variables
 pin the immutable reusable workflow SHA and tooling archive hash, while candidate
-source is downloaded only as data. GitHub settings, review coverage and future
+source is downloaded only as data. GitHub settings, owner approval and future
 IAM enforcement are all required; repository defaults alone are not a token
 permission ceiling. No repository or environment secret currently exists.
 
@@ -129,8 +152,11 @@ fixture executable, retaining rejection of writable executables. No production
 validator or dependency lockfile changed.
 
 Isolated EHR build/5 tests, Cloudflare 52 tests, actionlint, full `npm test` and
-`npm run verify` pass locally. Local Node is 24.13.1; remote Node 22.23.2 has not
-rerun. [Run/job evidence](evidence/tuf-github-protection/ordinary-ci.json) and
+`npm run verify` pass locally. Both ordinary runs on original `5ee3118` now pass
+remotely. The newer solo-owner correction passed the full local build/test/verify,
+release/readiness/publication, Go/race/vet/module and reproducibility checks;
+remote CI on its updated PR head remains pending a separately authorized push.
+[Historical run/job evidence](evidence/tuf-github-protection/ordinary-ci.json) and
 [fix validation](evidence/tuf-github-protection/ci-fix-validation.json) record
 precise scope and limits. This run is ordinary credential-free CI, not protected CI.
 
@@ -138,17 +164,19 @@ precise scope and limits. This run is ordinary credential-free CI, not protected
 
 The locally prepared probe requires a fresh manual dispatch (attempt 1), exact
 repository IDs, `refs/heads/tuf-production-release`, protected ref, requested
-SHA equal to caller/workflow/checkout SHA, and independently set staging
+SHA equal to caller/workflow/checkout SHA, and owner-set staging
 `TUF_READINESS_APPROVED_SHA`. It checks all four live environment identities,
-review rules, non-initiator User reviewer coverage, staging approval history and
-GitHub-signed short-lived OIDC claims. It requests audience
+review rules requiring only User `D-Eminence` / `182018869`, explicit self-review
+allowance, staging owner approval history and GitHub-signed short-lived OIDC
+claims. The owner can approve their own dispatch. A contributor-initiated run
+still requires the owner approval; contributor approval cannot substitute. It requests audience
 `hid-protected-ci-readiness`, never `sts.amazonaws.com`, and saves no token bytes.
 Negative tests exercise the real inline gate and verifier with synthetic data.
 A synthetic pass is not an executed protected run.
 
 Do not dispatch yet. The workflow must first be separately published through
-review and made dispatchable from the default branch, reviewer coverage must be
-resolved, ordinary CI must pass on updated source, and the owner must pin the
+owner review and made dispatchable from the default branch, ordinary CI must
+pass on updated source, and the owner must pin the
 reviewed SHA in the staging environment. That variable is unset. A successful
 future probe would prove only staging approval/OIDC; it cannot approve
 publication, Object Lock, staging acceptance, production or migration.
@@ -170,9 +198,10 @@ publication, Object Lock, staging acceptance, production or migration.
 | Direct unapproved Wrangler publication | Protected wrapper requires exact fresh authorization and committed intent callback; IAM and scoped credential custody remain live verification gates |
 
 Code checks cannot protect against an owner deliberately replacing both
-protection rules and trusted IAM policy. Review/administration/custodian
-separation, key custody, and live deny tests are required. No evidence here
-claims those controls have been deployed.
+protection rules and trusted IAM policy. The accepted model centralizes human
+authority while retaining technical capability isolation, exact identity pins,
+key-custody review, audit evidence and live denial tests. No evidence here claims
+cloud trust or custody has been deployed, or requires a second developer.
 
 ## Exact first-run evidence contract
 
@@ -242,6 +271,10 @@ retention. GitHub's artifact expiry window is not the long-term archive.
 
 ## Remaining execution inputs
 
+Current Git/PR state: PR #1 exists and is not merged. Its correction is locally
+verified and committed; an exact-SHA push/update remains separately authorized.
+
+
 [Non-secret prerequisite manifest](../release/config/protected-ci-prerequisites.json)
 records the exact known GitHub identities and all 96 unresolved template fields.
 AWS account/region/IAM roles/KMS/Secrets Manager/S3 references, Cloudflare account/
@@ -249,9 +282,48 @@ zone/resource identifiers, candidate/signing/canary execution, approved tooling
 and configuration hashes, signed metadata and custody review remain pending.
 No placeholders may be treated as deployed resources or authorized credentials.
 
-Stop for owner-supplied independent reviewer coverage and separate authorization
-to publish the new local preparation via a review branch/protected PR. No direct
-push bypass, protected workflow dispatch, cloud mutation or production operation
-is authorized. Object Lock remains **UNAPPROVED / NOT CREATED**, with immutable
-journal/evidence retention **2 years (730 days)**. Staging is not accepted;
-data migration is not authorized; production remains locked.
+The next push, only after authorization, targets existing
+`review/tuf-preparation-5ee3118` and updates PR #1 into `tuf-production-release`.
+Use the final immutable documentation-commit SHA and its parent correction;
+do not replay an old preparation-only push or create another PR. Independently
+verify remote equality and ordinary CI on that new head before separate merge
+authorization. The eight source files and nine documentation/evidence files
+are separate local commits. No amend, rebase, squash, cherry-pick, force push,
+direct protected-branch push or history rewrite is permitted. The original
+`5ee3118` still has superseded protected checks; the committed correction must
+land before any readiness execution. No protected dispatch or cloud action is
+authorized here.
+Object Lock remains **UNAPPROVED / NOT CREATED**, with immutable journal/evidence
+retention **2 years (730 days)**. Staging is not accepted; data migration is not
+authorized; production remains locked.
+
+## Expected OIDC identity — prepared, not live acceptance
+
+Live OIDC configuration is `use_default: true`, `use_immutable_subject: false`.
+The API also returns an immutable prefix; it is inactive in this configuration.
+Do not silently adopt it or broaden a subject. The complete machine-readable
+expectations are in the [prerequisite manifest](../release/config/protected-ci-prerequisites.json).
+
+| Claim | Readiness | Future publisher trust |
+| --- | --- | --- |
+| Repository / owner | `D-Eminence/hid-system` / `D-Eminence`, numeric IDs `1317340803` / `182018869` | Same exact repository and owner |
+| Ref | `refs/heads/tuf-production-release` | Exact approved protected caller ref; production ref not assigned |
+| SHA | Requested = approved = checkout = workflow = `GITHUB_SHA` | Caller = plan = candidate source SHA; reusable tooling SHA separately pinned |
+| Workflow | `Protected staging readiness probe`; exact readiness path/ref and SHA | Exact caller workflow remains to be selected; reusable workflow separately pinned |
+| Job workflow ref | Absent: direct job | `D-Eminence/hid-system/.github/workflows/tuf-publish.yml@<exact-approved-SHA>`; no branch/tag alias |
+| Environment | `staging` | Exact `staging-publisher` or `production-publisher` for that role |
+| Actor | Exact runtime login and ID; owner approval separately verified | Exact runtime actor ID; caller/login arrangement remains to be reviewed |
+| Audience | `hid-protected-ci-readiness` | `sts.amazonaws.com` |
+| Subject | `repo:D-Eminence/hid-system:environment:staging` | Exact environment subject ending `:staging-publisher` or `:production-publisher` |
+
+The probe verifies RS256 signatures using fixed GitHub JWKS and bounded time
+claims, rejects wrong repository/owner/workflow/actor claims, and never requests
+AWS audience or calls AWS. The publisher's inline claim checks precede cloud
+authority; AWS STS must enforce its own cryptographic trust policy. Current
+publisher code uses the GitHub environment runtime gate for approval; it does
+not separately fetch approval history. No signed live token or AWS assumption
+was performed in this phase. Expected caller claims are pending inputs rather
+than implemented cloud controls.
+[GitHub OIDC claims](https://docs.github.com/en/actions/reference/security/oidc),
+[reusable workflow identity](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows),
+[AWS condition keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html).

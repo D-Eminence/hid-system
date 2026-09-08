@@ -1,0 +1,174 @@
+{
+  "schema_version": "hid.tuf.solo-governance-files/v1",
+  "recorded_at": "2026-09-08T10:38:50.313124+00:00",
+  "base_commit": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+  "base_parent": "ba2cd3290e7c1fe72817c3bdfb806dd306b2c633",
+  "status": "LOCAL_SOURCE_COMMITTED / DOCUMENTATION_IN_CONTAINING_COMMIT / PUSH_NOT_AUTHORIZED",
+  "excluded": [
+    "docs/SECURITY.md"
+  ],
+  "file_count": 17,
+  "logical_commit_scopes": [
+    {
+      "purpose": "Correct sole-owner approval policy in source and configuration",
+      "files": [
+        ".github/CODEOWNERS",
+        ".github/workflows/tuf-protected-readiness.yml",
+        ".github/workflows/tuf-publish.yml",
+        "release/config/protected-ci-prerequisites.json",
+        "release/scripts/verify-protected-readiness.mjs",
+        "release/scripts/verify-publication-workflow.mjs",
+        "release/test/protected-readiness.test.mjs",
+        "release/test/publication-workflow.test.mjs"
+      ],
+      "proposed_message": "Align protected workflow approval with solo-owner governance",
+      "commit": {
+        "sha": "11b52d1ea59e572ad649d8f71fd84997d10749aa",
+        "parent": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "message": "Align protected workflow approval with solo-owner governance",
+        "timestamp": "2026-09-08T11:32:34+01:00",
+        "files": [
+          ".github/CODEOWNERS",
+          ".github/workflows/tuf-protected-readiness.yml",
+          ".github/workflows/tuf-publish.yml",
+          "release/config/protected-ci-prerequisites.json",
+          "release/scripts/verify-protected-readiness.mjs",
+          "release/scripts/verify-publication-workflow.mjs",
+          "release/test/protected-readiness.test.mjs",
+          "release/test/publication-workflow.test.mjs"
+        ],
+        "statistics": ".github/CODEOWNERS                              |  10 +-\n .github/workflows/tuf-protected-readiness.yml   |   7 +-\n .github/workflows/tuf-publish.yml               |  16 ++-\n release/config/protected-ci-prerequisites.json  | 139 +++++++++++++++++++++---\n release/scripts/verify-protected-readiness.mjs  |  55 ++++++----\n release/scripts/verify-publication-workflow.mjs |   5 +-\n release/test/protected-readiness.test.mjs       |  77 ++++++++-----\n release/test/publication-workflow.test.mjs      |  35 ++++--\n 8 files changed, 263 insertions(+), 81 deletions(-)"
+      }
+    },
+    {
+      "purpose": "Synchronize canonical governance records, runbooks and evidence",
+      "files": [
+        "docs/TASK.md",
+        "docs/TUF-CI-PROTECTION.md",
+        "docs/TUF-PRODUCTION-IMPLEMENTATION.md",
+        "docs/TUF-STAGING-EXECUTION.md",
+        "docs/evidence/tuf-github-protection/README.md",
+        "docs/evidence/tuf-solo-governance/README.md",
+        "docs/evidence/tuf-solo-governance/state.json",
+        "docs/evidence/tuf-solo-governance/validation.json",
+        "docs/evidence/tuf-solo-governance/files.json"
+      ],
+      "proposed_message": "Record verified solo-owner correction and PR update readiness",
+      "parent_sha": "11b52d1ea59e572ad649d8f71fd84997d10749aa",
+      "commit_identity": "Git commit containing this manifest; exact SHA recorded in private post-commit receipt and final report"
+    }
+  ],
+  "file_hashes": [
+    {
+      "path": ".github/CODEOWNERS",
+      "size_bytes": 1066,
+      "sha256": "6f6ec5250aca144b962ac43e07d217dfa51c52ad139d45ab33fe95606ed06cfa"
+    },
+    {
+      "path": ".github/workflows/tuf-protected-readiness.yml",
+      "size_bytes": 3445,
+      "sha256": "79b09470988c8624a5d1d06fcdb53bb6637d71434878320908127f6db33c6734"
+    },
+    {
+      "path": ".github/workflows/tuf-publish.yml",
+      "size_bytes": 14227,
+      "sha256": "38c6a6ea98315c6389904779c4c11f482e9ce1a4a9c20bc5c19ebdaa60c764bf"
+    },
+    {
+      "path": "release/config/protected-ci-prerequisites.json",
+      "size_bytes": 12187,
+      "sha256": "e51c968f8a66706761807bfe741eefffdd43fc831833e10aa8c0a0197e26a92b"
+    },
+    {
+      "path": "release/scripts/verify-protected-readiness.mjs",
+      "size_bytes": 13982,
+      "sha256": "4771b541acd41112052b1d9a454bd60f66dbd3effaaa1f292bef9a1c980f05b0"
+    },
+    {
+      "path": "release/scripts/verify-publication-workflow.mjs",
+      "size_bytes": 6667,
+      "sha256": "52ce106598e0e114c005f3eb44487fceb51fff52285b0ab5216102a44b2229b7"
+    },
+    {
+      "path": "release/test/protected-readiness.test.mjs",
+      "size_bytes": 14481,
+      "sha256": "99a76ab0b212889d148837cbe7bf86bed14131976ed4e678ca3a771add78db14"
+    },
+    {
+      "path": "release/test/publication-workflow.test.mjs",
+      "size_bytes": 10173,
+      "sha256": "9f2f743ebf06e9ca044d7396e71b19f56d4cc6f229d2bb90e6417de9b51e9460"
+    },
+    {
+      "path": "docs/TASK.md",
+      "size_bytes": 145659,
+      "sha256": "e571db8787fd7df2ebe579f2c2d53ab9f215d27ab1c781e1ef95a11d5f246bf6"
+    },
+    {
+      "path": "docs/TUF-CI-PROTECTION.md",
+      "size_bytes": 23839,
+      "sha256": "2f563f5b60fea5584292c216e6bc6df4b6d49083a2079341402c40777d3f186a"
+    },
+    {
+      "path": "docs/TUF-PRODUCTION-IMPLEMENTATION.md",
+      "size_bytes": 119118,
+      "sha256": "991cf346cd000565882977349d14adba737dba5cd38e47579d1478b0ec9c9685"
+    },
+    {
+      "path": "docs/TUF-STAGING-EXECUTION.md",
+      "size_bytes": 22994,
+      "sha256": "76f1d13e09540f94546fd2c7825d07b1512106793468f67786ab293cbd694d54"
+    },
+    {
+      "path": "docs/evidence/tuf-github-protection/README.md",
+      "size_bytes": 3593,
+      "sha256": "3883b34ae3e04ac2fc0a9280547cd7555f570944afeb37084a8625f8cac12ba4"
+    },
+    {
+      "path": "docs/evidence/tuf-solo-governance/README.md",
+      "size_bytes": 7977,
+      "sha256": "019fe6f0ee5f6ea35ddbce0337d5a0d6501c4a961812469f37368db9793c8ad3"
+    },
+    {
+      "path": "docs/evidence/tuf-solo-governance/state.json",
+      "size_bytes": 46095,
+      "sha256": "db23b496ebbddae42ab4361c6c6f3982a814bb84a7865cdb456568a7551f4712"
+    },
+    {
+      "path": "docs/evidence/tuf-solo-governance/validation.json",
+      "size_bytes": 55092,
+      "sha256": "04677efcd2e94e5a8b9781f050965b31c450881e24cee4d5deadf60473c607a4"
+    }
+  ],
+  "self_hash_note": "This manifest and its containing commit cannot embed their own final hashes. Exact post-commit identities are retained in private receipt.",
+  "scope_decision": "Two logical commits: eight source/configuration/test files, then nine synchronized documentation/evidence files. SECURITY excluded.",
+  "commit_authorized": true,
+  "exact_preparation_push": {
+    "source_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+    "review_branch": "review/tuf-preparation-5ee3118",
+    "pr_base": "tuf-production-release",
+    "authorized": false,
+    "includes_this_uncommitted_scope": false,
+    "observation": "Remote review branch already existed at exact SHA at PR preflight; no push performed by agent in PR phase"
+  },
+  "authorized_pr_creation": {
+    "number": 1,
+    "url": "https://github.com/D-Eminence/hid-system/pull/1",
+    "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+    "base_branch": "tuf-production-release",
+    "created": true,
+    "merge_authorized": false,
+    "includes_uncommitted_scope": false
+  },
+  "current_pr_update": {
+    "pr_number": 1,
+    "head_branch": "review/tuf-preparation-5ee3118",
+    "base_branch": "tuf-production-release",
+    "remote_head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+    "source_correction_sha": "11b52d1ea59e572ad649d8f71fd84997d10749aa",
+    "push_authorized": false,
+    "merge_authorized": false,
+    "bypass_exercised": false,
+    "new_head_remote_ci_verified": false
+  }
+}
