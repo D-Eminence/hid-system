@@ -1,0 +1,14 @@
+{
+  "source": "https://truststore.pki.rds.amazonaws.com/eu-west-1/eu-west-1-bundle.pem",
+  "documentation": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html",
+  "awsRegion": "eu-west-1",
+  "certificateIdentifier": "rds-ca-rsa2048-g1",
+  "observedDefaultAt": "2026-09-09",
+  "verifiedAt": "2026-09-10T08:28:31.833Z",
+  "subject": "C=US\nO=Amazon Web Services\\, Inc.\nOU=Amazon RDS\nST=WA\nCN=Amazon RDS eu-west-1 Root CA RSA2048 G1\nL=Seattle",
+  "validTo": "May 20 17:49:12 2061 GMT",
+  "pemSha256": "8a132c29210ebccf151c733fbb4c29167427dd26ce50b238b750dd055dc59b4c",
+  "derSha256": "6f7e01b62af24058417130b21e5fb9ad9f29b29c775c5107b657419010975886",
+  "base64Bytes": 1932,
+  "selection": "Matches AWS describe-certificates default thumbprint. Reconfirm deployed DB CA before migration; no DB exists yet."
+}

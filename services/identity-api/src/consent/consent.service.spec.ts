@@ -93,4 +93,21 @@ describe('ConsentService', () => {
       code: 'CONSENT_COMMAND_CONFLICT',
     });
   });
+  it.each(['42501', 'P0001', '55000'])(
+    'fails emergency activation closed for database denial %s', async (code) => {
+      query.mockRejectedValueOnce({ code });
+      const expected = { '42501': 'CONSENT_COMMAND_DENIED', P0001: 'EMERGENCY_RATE_LIMITED', '55000': 'CONSENT_COMMAND_CONFLICT' }[code];
+      await expect(service.activateBreakGlass({ ...context, purposeOfUse: 'emergency' }, {
+        hid: 'HID-ABCDEFGH', reason: 'Emergency care required', durationMinutes: 30,
+      })).rejects.toMatchObject({ code: expected });
+    },
+  );
+  it('propagates audit/outbox failure without returning a grant', async () => {
+    const outage = new Error('Synthetic durable audit outage');
+    query.mockRejectedValueOnce(outage);
+    await expect(service.activateBreakGlass({ ...context, purposeOfUse: 'emergency' }, {
+      hid: 'HID-ABCDEFGH', reason: 'Emergency care required', durationMinutes: 30,
+    })).rejects.toBe(outage);
+  });
+
 });

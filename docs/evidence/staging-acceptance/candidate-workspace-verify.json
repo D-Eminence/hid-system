@@ -1,0 +1,15 @@
+{
+  "base_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "source": "uncommitted staging remediation candidate; not the approved release",
+  "patch_sha256": "9560d59f42b924edab6a635a245b98b4ec2d1a4f30edfa948afaa9beaa009094",
+  "command": [
+    "npm",
+    "run",
+    "verify"
+  ],
+  "exit_code": 0,
+  "started_at": "2026-09-09T08:31:36.704161+00:00",
+  "completed_at": "2026-09-09T08:34:06.140860+00:00",
+  "log": "candidate-workspace-verify.log",
+  "log_sha256": "8dea1e1a122f41f74347b6b851a74bc5db490a8315def35d457dd69f7e9839e0"
+}

@@ -1,0 +1,650 @@
+{
+  "schema_version": "hid.staging.audit-evidence-index/v1",
+  "recorded_at": "2026-09-09T08:35:43.235990+00:00",
+  "raw_evidence_root": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance",
+  "scope": "local/read-only evidence; not signed release provenance",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 2725,
+      "sha256": "76c3562194f67fd9c07b164b0a1d48796267ab7bd94eda87a3c01724f5371700"
+    },
+    {
+      "path": "acceptance-decision.json",
+      "bytes": 1458,
+      "sha256": "e4f73c47943590b3079a96c35d47282c1b3cb8ff359549a04a61598cc439b9eb"
+    },
+    {
+      "path": "application-database-audit.md",
+      "bytes": 18808,
+      "sha256": "57018f31d0ba9a3a73ec4be1ccc09fbbe1d07d5ca53fbf00724561da6781da69"
+    },
+    {
+      "path": "application-route-proof.json",
+      "bytes": 5196,
+      "sha256": "807170baf1db7e56c0eabb51f841af3d8bdf9d392218fabeba38f720f5ad017d"
+    },
+    {
+      "path": "aws-access-final.json",
+      "bytes": 312,
+      "sha256": "c4de29eab0f554aba57b6801db373e7ec57247e06d555ead14dcb191175a9415"
+    },
+    {
+      "path": "aws-audit.json",
+      "bytes": 13435,
+      "sha256": "313cfe85aeb25c7a6315a1f995b9ca62935d8043e4565939b78366ca4b29a294"
+    },
+    {
+      "path": "aws-audit.md",
+      "bytes": 15508,
+      "sha256": "57d3520874f79d2468158be18e16681f0a1fa77dd6d3ed43b0b5029de94bff35"
+    },
+    {
+      "path": "aws-candidate-template-equivalence.json",
+      "bytes": 1237,
+      "sha256": "115644571f8d0d75ec49c231986f18459776864f803332ea8a72ed46178b8a85"
+    },
+    {
+      "path": "aws-independent-review-checks.json",
+      "bytes": 4680,
+      "sha256": "c53360747b5a54b6f406678a636c3e01960b74cf7b873e48b14652866142b4cb"
+    },
+    {
+      "path": "aws-independent-review.md",
+      "bytes": 5482,
+      "sha256": "e85469727e890ddf152c278d31b70984dd5be06a40625b2b799898189c878b47"
+    },
+    {
+      "path": "aws-remediation.json",
+      "bytes": 6786,
+      "sha256": "3893172c1843d821573d6c2b40f629de6f12f6c069bef1bd9693ca475796528f"
+    },
+    {
+      "path": "aws-remediation.md",
+      "bytes": 3926,
+      "sha256": "b3a57960e080f83f78421bee49999d4e48475976af83d61a1de1c1d12d743cb8"
+    },
+    {
+      "path": "baseline.json",
+      "bytes": 1447,
+      "sha256": "e44d90697049198f15628bb6fe6477eff83f696154e78e6013802b6b0730e80b"
+    },
+    {
+      "path": "candidate-workspace-verify.json",
+      "bytes": 536,
+      "sha256": "ba77dfd90d9c942fdbec28aa0f85ab2204fe57ce489ea07629a86f93913a1e57"
+    },
+    {
+      "path": "checks.json",
+      "bytes": 1663,
+      "sha256": "f1b7cd6a7fa8fce02d6cd38f5c50e38d36781a82ec04ccb177c89f511aaadcbc"
+    },
+    {
+      "path": "ci-readback-validation.json",
+      "bytes": 3330,
+      "sha256": "d8091cf0102bcc812b6456ae713b2775f01a5c914f131a98b5a4f68a1d5304eb"
+    },
+    {
+      "path": "ci-toolchain.json",
+      "bytes": 4442,
+      "sha256": "42c1dcedf99da4cd3bd77666b0179f726d80d7536eb0981e0163179087b9c4e6"
+    },
+    {
+      "path": "ci-workspace.json",
+      "bytes": 3535,
+      "sha256": "c1646042605a1f15c116cb0b8b0a615848f383c980b41e33ae55d1f758fb2641"
+    },
+    {
+      "path": "cloudflare-release-audit.md",
+      "bytes": 11490,
+      "sha256": "c3fb7530ed562d63c6a0f313103f0d51f4de6c73e0813222e206659fd5cd842a"
+    },
+    {
+      "path": "cloudflare-release-status.json",
+      "bytes": 4298,
+      "sha256": "9b4d3dc531586557854cd85d74242873156a51dd9c2b00b8f8e348a75811f893"
+    },
+    {
+      "path": "github-artifacts.json",
+      "bytes": 5928,
+      "sha256": "1ab8b3f6c862cff5f114a3cf0c1968d38e4859309d5c3838c4b5d963978943b1"
+    },
+    {
+      "path": "github-download-validation.json",
+      "bytes": 989,
+      "sha256": "b354954275251c623f5bce86efda95516676547afce465d5ba6a6f9717b5247d"
+    },
+    {
+      "path": "github-staging-publisher.json",
+      "bytes": 668,
+      "sha256": "6629a717881aa14be298af68a4c954fbebe1738ced8b960138da1f5b1d720e71"
+    },
+    {
+      "path": "github-staging.json",
+      "bytes": 658,
+      "sha256": "7dfa648505ad21d2ee95595757f6ab09d4c09e0e804c16b2438e121b90c0aef1"
+    },
+    {
+      "path": "migration-summary.json",
+      "bytes": 9011,
+      "sha256": "92720305e3fb518b8838e423beb2ecac0de36118e7f6aac4cc799df6e3f62770"
+    },
+    {
+      "path": "otp-role-proof.json",
+      "bytes": 639,
+      "sha256": "af9421f3f7f760d10be11a508f9233cedfad42b162f07732f63f3107bc8ff940"
+    },
+    {
+      "path": "phase2-readiness.json",
+      "bytes": 4379,
+      "sha256": "3a9958a71bb8d3f78a676138be5ac0ba7b39c418145f51057f6749f65725eebc"
+    },
+    {
+      "path": "pr.json",
+      "bytes": 188,
+      "sha256": "c85efcd8eaa1891fcd60bc2f9528ee6f175de248da404d97d55106167f4a7325"
+    },
+    {
+      "path": "remote-release-final.json",
+      "bytes": 283,
+      "sha256": "194f1f99a144d5e77095ea4b4c5a0434c0ef6752d76c6e79f60ee3bea41d07db"
+    },
+    {
+      "path": "staging-dns.json",
+      "bytes": 1649,
+      "sha256": "23480b71fe67bac7abd899ff47fdc64ddaf634a6d13f70550415a3c2b504dfa5"
+    },
+    {
+      "path": "workspace-validation.json",
+      "bytes": 1735,
+      "sha256": "ace6ebc6af5ed13653a705f866952b3b6044f8ac55b4faf0f7be4cfc78c7ee77"
+    }
+  ],
+  "external_raw_files": [
+    {
+      "path": "application-evidence-manifest.json",
+      "bytes": 1512,
+      "sha256": "c1b08ac2c26a7dc5860b9cbc12281682c9750242d7544cb0f35f7f063f397e6f"
+    },
+    {
+      "path": "application-route-proof.json",
+      "bytes": 5196,
+      "sha256": "807170baf1db7e56c0eabb51f841af3d8bdf9d392218fabeba38f720f5ad017d"
+    },
+    {
+      "path": "application-route-proof.log",
+      "bytes": 5196,
+      "sha256": "807170baf1db7e56c0eabb51f841af3d8bdf9d392218fabeba38f720f5ad017d"
+    },
+    {
+      "path": "application-route-proof.mjs",
+      "bytes": 4466,
+      "sha256": "b0b1aa63b46e12c559cd00bf8e77ea7aef3641a854bb6a40296c45304c63b860"
+    },
+    {
+      "path": "application-source-audit.json",
+      "bytes": 391982,
+      "sha256": "28314a943359fc61866659d83b8e3e9e748c3575973c7a74aa9bcf32f3552fa1"
+    },
+    {
+      "path": "aws-access-final.json",
+      "bytes": 312,
+      "sha256": "c4de29eab0f554aba57b6801db373e7ec57247e06d555ead14dcb191175a9415"
+    },
+    {
+      "path": "aws-access.json",
+      "bytes": 334,
+      "sha256": "b6dfb9696468834a43e6c52900a9f774fbe94ee8becc2ed66a23c02b7d617e5f"
+    },
+    {
+      "path": "aws-audit.json",
+      "bytes": 13435,
+      "sha256": "313cfe85aeb25c7a6315a1f995b9ca62935d8043e4565939b78366ca4b29a294"
+    },
+    {
+      "path": "aws-candidate-command-results.json",
+      "bytes": 5908,
+      "sha256": "720c51e3b98e6b9e0a2c783f5bf86d58dc04eabf3d763269c947a2e9d325d946"
+    },
+    {
+      "path": "aws-candidate-cost-inventory.log",
+      "bytes": 150,
+      "sha256": "81e2d837d7c61fb22d46475b3dcfa0e537c828ca522d58c80407ee5acf853337"
+    },
+    {
+      "path": "aws-candidate-default-synth.log",
+      "bytes": 437049,
+      "sha256": "44ed9604c51f04fcce5034109a0ac891b0961aee5fd2e354158821abf0ee55f2"
+    },
+    {
+      "path": "aws-candidate-default-verify-policy.log",
+      "bytes": 130,
+      "sha256": "84ffd5cdf9b3c4eb8fe0cd71dc97a09c1eae18a818503b630d081e489e0bead7"
+    },
+    {
+      "path": "aws-candidate-default-verify-synth.log",
+      "bytes": 169,
+      "sha256": "7c36a0ab31f341407b3be9f7a2d265c44136584db2f8c8a7ac0af40cd90297a5"
+    },
+    {
+      "path": "aws-candidate-diff-check.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "aws-candidate-economy-synth.log",
+      "bytes": 432694,
+      "sha256": "4413f09225610260f50a928c5c7399c5e75efbf753f70962d0e744a71cc12386"
+    },
+    {
+      "path": "aws-candidate-economy-verify-policy.log",
+      "bytes": 130,
+      "sha256": "84ffd5cdf9b3c4eb8fe0cd71dc97a09c1eae18a818503b630d081e489e0bead7"
+    },
+    {
+      "path": "aws-candidate-economy-verify-synth.log",
+      "bytes": 165,
+      "sha256": "0083e13e74c8c7d5372dedf90f019eb1e5dd3b8338ca8cdf45d204c4a0a1cbe6"
+    },
+    {
+      "path": "aws-candidate-fidelity-synth.log",
+      "bytes": 435595,
+      "sha256": "3ef9cb6565c6bf4eb09bb540415c6cf37cfb99e473bad03e4638135d961f41e1"
+    },
+    {
+      "path": "aws-candidate-fidelity-verify-policy.log",
+      "bytes": 130,
+      "sha256": "84ffd5cdf9b3c4eb8fe0cd71dc97a09c1eae18a818503b630d081e489e0bead7"
+    },
+    {
+      "path": "aws-candidate-fidelity-verify-synth.log",
+      "bytes": 166,
+      "sha256": "61e0ffcbb4054696c99d245fe4abf11d085ff09efaac883f518ed01fd37b6093"
+    },
+    {
+      "path": "aws-candidate-production-synth.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "aws-candidate-sleep-synth.log",
+      "bytes": 230436,
+      "sha256": "6df55701b1676a5e6159aadc93d68978e52b18fa9b6e7c40e1b74f8e09f5c3ae"
+    },
+    {
+      "path": "aws-candidate-sleep-verify-policy.log",
+      "bytes": 130,
+      "sha256": "84ffd5cdf9b3c4eb8fe0cd71dc97a09c1eae18a818503b630d081e489e0bead7"
+    },
+    {
+      "path": "aws-candidate-sleep-verify-synth.log",
+      "bytes": 163,
+      "sha256": "0b5c5142babaf3be671be6238c436c6a09ffb4ec080a0915d29ad004a983c082"
+    },
+    {
+      "path": "aws-candidate-template-equivalence.json",
+      "bytes": 1237,
+      "sha256": "115644571f8d0d75ec49c231986f18459776864f803332ea8a72ed46178b8a85"
+    },
+    {
+      "path": "aws-candidate-tests-final.log",
+      "bytes": 5552,
+      "sha256": "22d5cda80bdbc031524fac38be37987e71636d8ed3772e672d63b3430849d0d2"
+    },
+    {
+      "path": "aws-candidate-tests.log",
+      "bytes": 6509,
+      "sha256": "e72eb1fe19f9bfe9b71443b575de60adb6402e9b552772c3bf869c3294409bf0"
+    },
+    {
+      "path": "aws-candidate-typecheck-final.log",
+      "bytes": 76,
+      "sha256": "ec7030a0d6bcf65e073f311f54d73558d0c24c0b4f1291f6955096f000e470db"
+    },
+    {
+      "path": "aws-candidate-typecheck.log",
+      "bytes": 76,
+      "sha256": "ec7030a0d6bcf65e073f311f54d73558d0c24c0b4f1291f6955096f000e470db"
+    },
+    {
+      "path": "aws-command-results.json",
+      "bytes": 6616,
+      "sha256": "5e9c410eea60404e493d7acdc5ebcfd18904bcbf9a7b15eb78cb64f4620fb110"
+    },
+    {
+      "path": "aws-cost-inventory.log",
+      "bytes": 150,
+      "sha256": "81e2d837d7c61fb22d46475b3dcfa0e537c828ca522d58c80407ee5acf853337"
+    },
+    {
+      "path": "aws-default-synth.log",
+      "bytes": 437049,
+      "sha256": "44ed9604c51f04fcce5034109a0ac891b0961aee5fd2e354158821abf0ee55f2"
+    },
+    {
+      "path": "aws-default-verify-policy.log",
+      "bytes": 130,
+      "sha256": "84ffd5cdf9b3c4eb8fe0cd71dc97a09c1eae18a818503b630d081e489e0bead7"
+    },
+    {
+      "path": "aws-default-verify-synth.log",
+      "bytes": 169,
+      "sha256": "7c36a0ab31f341407b3be9f7a2d265c44136584db2f8c8a7ac0af40cd90297a5"
+    },
+    {
+      "path": "aws-economy-bound-fixture-synth.log",
+      "bytes": 342,
+      "sha256": "d5139aeb1e06d02fc1e87384bafd5c145677d91becbe4c7415dbebc72693b8fd"
+    },
+    {
+      "path": "aws-economy-synth.log",
+      "bytes": 428443,
+      "sha256": "2adfb02808bf79c8e48e0fc90e170b8bdba9b7ec215b7ff35b4aaf3d86ceaa6c"
+    },
+    {
+      "path": "aws-economy-verify-policy.log",
+      "bytes": 130,
+      "sha256": "84ffd5cdf9b3c4eb8fe0cd71dc97a09c1eae18a818503b630d081e489e0bead7"
+    },
+    {
+      "path": "aws-economy-verify-synth.log",
+      "bytes": 165,
+      "sha256": "0083e13e74c8c7d5372dedf90f019eb1e5dd3b8338ca8cdf45d204c4a0a1cbe6"
+    },
+    {
+      "path": "aws-fidelity-synth.log",
+      "bytes": 434402,
+      "sha256": "4d47ebe36443f5616441c925efc59b5b551167432195f3433c3871a3a4fcc7d0"
+    },
+    {
+      "path": "aws-fidelity-verify-policy.log",
+      "bytes": 130,
+      "sha256": "84ffd5cdf9b3c4eb8fe0cd71dc97a09c1eae18a818503b630d081e489e0bead7"
+    },
+    {
+      "path": "aws-fidelity-verify-synth.log",
+      "bytes": 166,
+      "sha256": "61e0ffcbb4054696c99d245fe4abf11d085ff09efaac883f518ed01fd37b6093"
+    },
+    {
+      "path": "aws-independent-review-checks.json",
+      "bytes": 4680,
+      "sha256": "c53360747b5a54b6f406678a636c3e01960b74cf7b873e48b14652866142b4cb"
+    },
+    {
+      "path": "aws-install.log",
+      "bytes": 138,
+      "sha256": "64fd69cb8353c2193da8cd91cebaa141c30eda9064eee542ff87cd6dab761baa"
+    },
+    {
+      "path": "aws-production-baseline.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "aws-rds-selected-root-options.json",
+      "bytes": 1554,
+      "sha256": "68c3e5c6bda8f4a8b0e48e42bfcbd2638cec8c8a573942b1d1bd0fa165195c2b"
+    },
+    {
+      "path": "aws-remediation.json",
+      "bytes": 6786,
+      "sha256": "3893172c1843d821573d6c2b40f629de6f12f6c069bef1bd9693ca475796528f"
+    },
+    {
+      "path": "aws-sleep-synth.log",
+      "bytes": 230368,
+      "sha256": "dc8eb181abe1639b3a2e8355f5399d07e563cc33041b6beed7ef40da3096fe55"
+    },
+    {
+      "path": "aws-sleep-verify-policy.log",
+      "bytes": 130,
+      "sha256": "84ffd5cdf9b3c4eb8fe0cd71dc97a09c1eae18a818503b630d081e489e0bead7"
+    },
+    {
+      "path": "aws-sleep-verify-synth.log",
+      "bytes": 163,
+      "sha256": "0b5c5142babaf3be671be6238c436c6a09ffb4ec080a0915d29ad004a983c082"
+    },
+    {
+      "path": "aws-staging-remediation-candidate.patch",
+      "bytes": 17101,
+      "sha256": "9560d59f42b924edab6a635a245b98b4ec2d1a4f30edfa948afaa9beaa009094"
+    },
+    {
+      "path": "aws-template-measurements.json",
+      "bytes": 14833,
+      "sha256": "db0edc08e6a1d0e2a39c877cfc932a2d89381258ede0f5699c0c1d34e4bba7ff"
+    },
+    {
+      "path": "aws-tests.log",
+      "bytes": 5188,
+      "sha256": "1d0fe5bd192019de901e80729734d87cbbbd2dcccb85bcf7b65fced594e269a7"
+    },
+    {
+      "path": "aws-typecheck.log",
+      "bytes": 76,
+      "sha256": "ec7030a0d6bcf65e073f311f54d73558d0c24c0b4f1291f6955096f000e470db"
+    },
+    {
+      "path": "baseline.json",
+      "bytes": 1447,
+      "sha256": "e44d90697049198f15628bb6fe6477eff83f696154e78e6013802b6b0730e80b"
+    },
+    {
+      "path": "candidate-workspace-verify.json",
+      "bytes": 536,
+      "sha256": "ba77dfd90d9c942fdbec28aa0f85ab2204fe57ce489ea07629a86f93913a1e57"
+    },
+    {
+      "path": "candidate-workspace-verify.log",
+      "bytes": 484746,
+      "sha256": "8dea1e1a122f41f74347b6b851a74bc5db490a8315def35d457dd69f7e9839e0"
+    },
+    {
+      "path": "checks.json",
+      "bytes": 1663,
+      "sha256": "f1b7cd6a7fa8fce02d6cd38f5c50e38d36781a82ec04ccb177c89f511aaadcbc"
+    },
+    {
+      "path": "ci-readback-validation.json",
+      "bytes": 3330,
+      "sha256": "d8091cf0102bcc812b6456ae713b2775f01a5c914f131a98b5a4f68a1d5304eb"
+    },
+    {
+      "path": "cloudflare-frontend-staging-dry-run.log",
+      "bytes": 7180,
+      "sha256": "2dea2c09c57fd438c898b9b2b4b7d4ad5ec0d2c5664a4c7c3a3b9b9872533082"
+    },
+    {
+      "path": "cloudflare-release-status.json",
+      "bytes": 4298,
+      "sha256": "9b4d3dc531586557854cd85d74242873156a51dd9c2b00b8f8e348a75811f893"
+    },
+    {
+      "path": "cloudflare-test.log",
+      "bytes": 6093,
+      "sha256": "b3a92a4302c21e51e83f46a70cfafbf50b828046b18e291cd62db74447b9aed0"
+    },
+    {
+      "path": "cloudflare-value-free-prerequisites.json",
+      "bytes": 590,
+      "sha256": "5989b3066ba8ff9e4e42b1bdaf3735381c142fbdea7ae77ba8e9a4f335abbe33"
+    },
+    {
+      "path": "cloudflare-verify.log",
+      "bytes": 472,
+      "sha256": "d666fda883d4e54654cf9b455a445341e65e1ce3adff8ced1ce96745ade86647"
+    },
+    {
+      "path": "cloudflare-whoami.log",
+      "bytes": 283,
+      "sha256": "b07a595f3fc7cc5998f972f8c4b8cb68edd2c7b8c7e48c2a886c2da93d468284"
+    },
+    {
+      "path": "dependency-install.json",
+      "bytes": 6819,
+      "sha256": "2a740caa66b5105068929772687b450c9f2f107f121c51b2461317282c55cd18"
+    },
+    {
+      "path": "ehr-release-cache-test.log",
+      "bytes": 655,
+      "sha256": "717c4fd8541206feb36b26a69af5d5a1467273d23c94589686729b344e2a86d7"
+    },
+    {
+      "path": "infra-cloudflare-npm-audit.json",
+      "bytes": 162,
+      "sha256": "e7d70d69bd6982f0ab767511e2566dd5bc696909a84f31bbd885e896b4b4f9bb"
+    },
+    {
+      "path": "infra-cloudflare-npm-ci.log",
+      "bytes": 25,
+      "sha256": "7c6197b475a5904f238815e39dd7e94fa302a8ba244d0456a2f0252184b7c276"
+    },
+    {
+      "path": "otp-role-proof-commands.json",
+      "bytes": 3629,
+      "sha256": "38cc09a60035c45be5e3ec7fc22b5f78873db3a77708e77575c423ad95443777"
+    },
+    {
+      "path": "otp-role-proof-failed-bootstrap-commands.json",
+      "bytes": 3700,
+      "sha256": "23345292304ab62666d9efd8110091f6244954d513b8a07b9d59c58cce89a429"
+    },
+    {
+      "path": "otp-role-proof-failed-bootstrap.json",
+      "bytes": 349,
+      "sha256": "8b13d600bc4cec8181f42705b1698c47dec8a0d60086e421a82af46cc3ec8f09"
+    },
+    {
+      "path": "otp-role-proof-failed-bootstrap.log",
+      "bytes": 349,
+      "sha256": "8b13d600bc4cec8181f42705b1698c47dec8a0d60086e421a82af46cc3ec8f09"
+    },
+    {
+      "path": "otp-role-proof-failed-bootstrap.mjs",
+      "bytes": 6712,
+      "sha256": "de1dbb133d5a221feb3e9f8adfe7cfb0c46f1434b0766cf980df13bd96802d8b"
+    },
+    {
+      "path": "otp-role-proof.json",
+      "bytes": 639,
+      "sha256": "af9421f3f7f760d10be11a508f9233cedfad42b162f07732f63f3107bc8ff940"
+    },
+    {
+      "path": "otp-role-proof.log",
+      "bytes": 639,
+      "sha256": "af9421f3f7f760d10be11a508f9233cedfad42b162f07732f63f3107bc8ff940"
+    },
+    {
+      "path": "otp-role-proof.mjs",
+      "bytes": 6688,
+      "sha256": "fc510957640f379a8911eb83555677f7af1a42f2f10eef44772b3d06dfee2cc0"
+    },
+    {
+      "path": "phase2-readiness.json",
+      "bytes": 4379,
+      "sha256": "3a9958a71bb8d3f78a676138be5ac0ba7b39c418145f51057f6749f65725eebc"
+    },
+    {
+      "path": "pr.json",
+      "bytes": 188,
+      "sha256": "c85efcd8eaa1891fcd60bc2f9528ee6f175de248da404d97d55106167f4a7325"
+    },
+    {
+      "path": "publication-workflow-verify.log",
+      "bytes": 93,
+      "sha256": "9df38951f21f2089ea2043edeeafd7b500eb00e51b0e00ad552b43e4f44d0905"
+    },
+    {
+      "path": "release-npm-audit.json",
+      "bytes": 162,
+      "sha256": "e7d70d69bd6982f0ab767511e2566dd5bc696909a84f31bbd885e896b4b4f9bb"
+    },
+    {
+      "path": "release-npm-ci.log",
+      "bytes": 27,
+      "sha256": "c74570f4a41e4516832135d473966099d9d42139090caef38bac6eb366a171ed"
+    },
+    {
+      "path": "release-test.log",
+      "bytes": 3960,
+      "sha256": "fc4c6d70ca70de20ff05bdc741dd931019504940b43eaf9a3b92efe951124351"
+    },
+    {
+      "path": "release-verify.log",
+      "bytes": 359,
+      "sha256": "e159289cd00b69b7997bc350d76dbec52978fe52a752aebb8804bc9488d76dcd"
+    },
+    {
+      "path": "remote-release-final.json",
+      "bytes": 283,
+      "sha256": "194f1f99a144d5e77095ea4b4c5a0434c0ef6752d76c6e79f60ee3bea41d07db"
+    },
+    {
+      "path": "staging-dns.json",
+      "bytes": 1649,
+      "sha256": "23480b71fe67bac7abd899ff47fdc64ddaf634a6d13f70550415a3c2b504dfa5"
+    },
+    {
+      "path": "staging-identifiers-strict-check.json",
+      "bytes": 3735,
+      "sha256": "79e888fe07a5371c0d6f6a687f146e94feaaeeccb19c254ce682efcf927c7708"
+    },
+    {
+      "path": "staging-identifiers-template-check.json",
+      "bytes": 3734,
+      "sha256": "bfe59b91b86550eddd24e91ed25cbaea7870dc36c0b11e2e87c0ed7ce5dbe42f"
+    },
+    {
+      "path": "tuf-synthetic-staging-dry-run.log",
+      "bytes": 1173,
+      "sha256": "3a8bc3457788be52c798c61fd09bca2b2c9fbfa6b83a421cf82fac08a534eb41"
+    },
+    {
+      "path": "workspace-build.log",
+      "bytes": 41101,
+      "sha256": "5c8b21f5e8bda54be6710f337563d576f01b930426ed8c340a0f0c34299648d6"
+    },
+    {
+      "path": "workspace-test.log",
+      "bytes": 25471,
+      "sha256": "ade8ba1c76ea8cde69bfceb7060e8f79988fe83bc763e0276f1bbf124520d517"
+    },
+    {
+      "path": "workspace-validation.json",
+      "bytes": 1735,
+      "sha256": "ace6ebc6af5ed13653a705f866952b3b6044f8ac55b4faf0f7be4cfc78c7ee77"
+    },
+    {
+      "path": "workspace-verify.log",
+      "bytes": 484499,
+      "sha256": "0a9f43c84680eddede3f0d4309e1d9d94bb4f8711be6f545382256746f3d5acd"
+    },
+    {
+      "path": "migration/commands.json",
+      "bytes": 190035,
+      "sha256": "0462421af8de977b3a29ad6a76e30e5987956db1fbbe56dbec64f7c8a8d4cc9d"
+    },
+    {
+      "path": "migration/pre-migration.dump",
+      "bytes": 941273,
+      "sha256": "c0d0d084fdb7b60ba807043386cc772a1335c09646fa4295577d1a39874eff1e"
+    },
+    {
+      "path": "migration/evidence.json",
+      "bytes": 9011,
+      "sha256": "92720305e3fb518b8838e423beb2ecac0de36118e7f6aac4cc799df6e3f62770"
+    },
+    {
+      "path": "github/artifacts.json",
+      "bytes": 5928,
+      "sha256": "1ab8b3f6c862cff5f114a3cf0c1968d38e4859309d5c3838c4b5d963978943b1"
+    },
+    {
+      "path": "github/download-validation.json",
+      "bytes": 989,
+      "sha256": "b354954275251c623f5bce86efda95516676547afce465d5ba6a6f9717b5247d"
+    }
+  ]
+}

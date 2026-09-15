@@ -1,7 +1,7 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuditService } from '../audit/audit.service';
-import { AuditFailuresOnly, FacilityOptional, Public } from '../common/decorators';
+import { AuditFailuresOnly, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -37,6 +37,24 @@ export class AuthController {
     @Req() request: HidRequest,
     @Res({ passthrough: true }) response: Response,
   ) {
+    return this.performLogin(input, request, response, 'staff');
+  }
+
+  @Post('patient/login')
+  @Public()
+  @HttpCode(200)
+  async patientLogin(
+    @Body() input: LoginDto,
+    @Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    if (input.turnstileAction !== 'patient-login') {
+      throw new DomainProblem(400, 'INVALID_LOGIN_ACTION', 'Patient login action is required');
+    }
+    return this.performLogin(input, request, response, 'patient');
+  }
+
+  private async performLogin(input: LoginDto, request: HidRequest, response: Response, kind: 'staff' | 'patient') {
     this.assertAllowedOrigin(request);
     await this.turnstile.verifyLogin({
       token: input.turnstileToken,
@@ -45,7 +63,7 @@ export class AuthController {
       remoteIp: request.ip,
     });
     try {
-      const result = await this.auth.login(input, this.event(request));
+      const result = await this.auth.login(input, this.event(request), kind);
       await this.recordSuccess('auth.login', result.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
@@ -92,6 +110,7 @@ export class AuthController {
 
   @Get('session')
   @FacilityOptional()
+  @PatientAllowed()
   async session(
     @Req() request: HidRequest,
     @Res({ passthrough: true }) response: Response,
@@ -100,7 +119,7 @@ export class AuthController {
     if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
     await this.audit.record({
       correlationId: request.correlationId,
-      actorType: 'staff',
+      actorType: actor.kind === 'patient' ? 'patient' : 'staff',
       actorSubject: actor.subject,
       actorAccountId: actor.accountId,
       actorMembershipId: actor.facility?.membershipId,
@@ -120,6 +139,7 @@ export class AuthController {
 
   @Get('service-session')
   @FacilityOptional()
+  @PatientAllowed()
   async serviceSession(
     @Req() request: HidRequest,
     @Res({ passthrough: true }) response: Response,
@@ -134,6 +154,7 @@ export class AuthController {
 
   @Post('service-session')
   @FacilityOptional()
+  @PatientAllowed()
   @HttpCode(200)
   async validateServiceMutation(
     @Req() request: HidRequest,
@@ -144,6 +165,7 @@ export class AuthController {
 
   @Post('logout')
   @FacilityOptional()
+  @PatientAllowed()
   @HttpCode(204)
   async logout(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response): Promise<void> {
     await this.auth.revoke(request.actor?.sessionId, request.actor?.subject, this.event(request));
@@ -200,7 +222,7 @@ export class AuthController {
   private recordSuccess(action: string, actor: ActorContext, request: HidRequest): Promise<void> {
     return this.audit.record({
       correlationId: request.correlationId,
-      actorType: 'staff',
+      actorType: actor.kind === 'patient' ? 'patient' : 'staff',
       actorSubject: actor.subject,
       actorAccountId: actor.accountId,
       actorMembershipId: actor.facility?.membershipId,
@@ -219,7 +241,6 @@ export class AuthController {
     const common = {
       secure: this.environment.AUTH_COOKIE_SECURE,
       sameSite: 'strict' as const,
-      domain: this.environment.AUTH_COOKIE_DOMAIN,
     };
     response.cookie(this.environment.AUTH_COOKIE_NAME, result.accessToken, {
       ...common, httpOnly: true, path: '/', expires: result.expiresAt,
@@ -236,7 +257,6 @@ export class AuthController {
     const common = {
       secure: this.environment.AUTH_COOKIE_SECURE,
       sameSite: 'strict' as const,
-      domain: this.environment.AUTH_COOKIE_DOMAIN,
     };
     response.clearCookie(this.environment.AUTH_COOKIE_NAME, { ...common, httpOnly: true, path: '/' });
     response.clearCookie(`${this.environment.AUTH_COOKIE_NAME}_refresh`, { ...common, httpOnly: true, path: '/api/v1/auth' });

@@ -1,0 +1,32 @@
+{
+  "name": "staging-publisher",
+  "id": 21412881394,
+  "can_admins_bypass": false,
+  "protection_rules": [
+    {
+      "id": 64848242,
+      "node_id": "GA_kwDOToUGg84D3YFy",
+      "type": "required_reviewers",
+      "prevent_self_review": false,
+      "reviewers": [
+        {
+          "type": "User",
+          "id": 182018869,
+          "login": "D-Eminence"
+        }
+      ]
+    },
+    {
+      "id": 64848243,
+      "node_id": "GA_kwDOToUGg84D3YFz",
+      "type": "branch_policy"
+    }
+  ],
+  "deployment_branch_policy": {
+    "protected_branches": true,
+    "custom_branch_policies": false
+  },
+  "secrets": 0,
+  "variables_count": 0,
+  "variable_names": []
+}

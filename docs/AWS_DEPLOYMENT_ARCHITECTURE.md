@@ -94,8 +94,13 @@ The CDK v2 application under `infra/aws` synthesizes:
 - S3 gateway plus ECR, Logs, Secrets Manager, KMS, EventBridge, SQS, and
   Textract interface endpoints.
 
-There is no API Gateway, Lambda, SNS, Redis, search cluster, Bedrock resource,
-CloudFront distribution, or duplicate frontend host in the current design.
+Staging additionally has a regional API Gateway and Lambda workload-token
+issuer backed by a retained P-256 KMS signing key. `POST /token` requires AWS
+IAM authentication; `GET /.well-known/jwks.json` publishes only the public key.
+This issuer is present in every staging mode, including sleep. Development and
+production retain their external workload-identity contract and have no issuer
+API Gateway or Lambda. There is no SNS, Redis, search cluster, Bedrock resource,
+CloudFront distribution, or duplicate frontend host in the regional design.
 
 ## Cost-safe staging modes
 
@@ -107,18 +112,26 @@ of:
   single-AZ and retained with deletion protection, backups and storage; the
   controlled operation stops compute and a staging-only daily schedule re-stops
   the exact instance after AWS automatic restart. S3/KMS, secrets, ECR, logs,
-  EventBridge/SQS and DNS metadata remain.
-- `economy`: two AZs, one NAT, selected Secrets Manager/EventBridge/SQS/Textract
-  endpoints in one AZ plus S3 gateway, two ALBs and regional WAF, one Gateway/
+  EventBridge/SQS and DNS metadata remain, as do the stable workload issuer,
+  public JWKS endpoint, and fourth KMS key. Token-agent task definitions remain
+  present, but zero ECS tasks means no running token agents.
+- `economy`: two AZs, one NAT, ECR API/Docker, Logs, Secrets Manager,
+  EventBridge, SQS, and Textract endpoints in one AZ plus S3 gateway, two ALBs
+  and regional WAF, one Gateway/
   request API replica, workers default zero, bounded worker/API scaling, and a
   single-AZ `db.t4g.small` database with 100 GiB initial storage.
+  ECR and Logs endpoints let Gateway and restricted workers bootstrap without
+  public HTTPS egress. The live staging migration task can reach only its
+  database, the endpoint security group on HTTPS, and the S3 managed prefix
+  list for image layers; sleep keeps those migration HTTPS paths closed.
 - `fidelity`: two AZs, two NAT gateways, all eight interface endpoints in both
   AZs, two ALBs/WAF, multiple request replicas, live workers, Multi-AZ RDS, and
   release/failover/load/migration/provider/rollback parity testing.
 
 Persistent data/security resources and ephemeral ingress/runtime resources are
-selected independently by the profile. A sleep transition removes runtime
-ingress while retaining protected data. It is never described as zero cost.
+selected independently by the profile. A sleep transition removes application
+ingress while retaining protected data and the workload issuer. It is never
+described as zero cost.
 Production remains three AZs, Multi-AZ RDS, two NAT gateways, full endpoints,
 two ALBs/WAF, and at least two replicas per service. The current 3-AZ/2-NAT
 shape means one application AZ can share cross-AZ egress during an AZ failure;
@@ -180,6 +193,9 @@ reducing extraction quality or hard-rejecting clinical work on price.
 
 The migration target shares EHR's repository but has its own required image
 digest, giving twelve governed image identities for eleven repositories.
+Six staging API task definitions also run a token-agent sidecar from the same
+admitted Identity API image digest. This adds neither a thirteenth image
+identity nor another ECS service.
 
 ## Identity, data, and secrets
 
@@ -194,18 +210,39 @@ NIN, OTP-HMAC, and Turnstile material. Notification provider configuration is
 injected only into Notification API/Worker as required. Gateway receives no
 application secrets.
 
-Workload JWT issuer, JWKS, exact subjects, audiences, and rotating file delivery
-are externally governed inputs. Empty task-local volumes describe the mount
-contract; they do not prove credential delivery. Live profiles encode their
-reviewed recommended defaults, but the guarded staging operations require
-readiness, migration, queue/outbox, billing, diff, account/region and exact-SHA
+Staging workload identity is implemented by the regional stack and token agent.
+The issuer maps exactly six IAM task roles to fixed `hid:staging:<service>`
+subjects and eleven allowed caller/audience bindings, listed in the
+[IAM matrix](AWS_IAM_MATRIX.md#workload-identity). A caller can request only an
+audience; IAM request context supplies its identity. Only the issuer Lambda can
+sign with the exact KMS key, using `ECDSA_SHA_256`. Tasks receive no KMS signing
+authority. The issuer signs ES256 JWTs with a 300-second lifetime, and receivers
+enforce the configured issuer, JWKS, subject, and audience.
+
+The six agents run as UID/GID 65532 with read-only root filesystems, validate
+the returned JWT signature and claims, and atomically replace mode-0600 files
+in an owned mode-0700 task volume. Each application mounts that volume read-only
+and waits for the agent's one-shot readiness check to pass. Agents renew about
+every 90 seconds, retry failures after 10 seconds, and remove expiring files.
+This renews tokens; it does not rotate the retained KMS signing key.
+
+Staging has no external issuer/JWKS/subject parameters. Development and
+production retain those external inputs and delivery requirements; the staging
+implementation preserves the production template byte for byte against the
+recorded baseline. Local tests do not establish deployed token delivery.
+Live profiles encode their reviewed recommended defaults, but the guarded
+staging operations require readiness, migration, queue/outbox, billing, diff,
+account/region and exact-SHA
 acknowledgements before any deployment.
 
 ## Migration and release
 
-Migrations `0001`–`0027` are immutable. Additive migration `0028` introduces
-the identity/notification migration state needed for OTP, progressive KYC,
-legacy mapping, encrypted device registration, and delivery reconciliation.
+Migrations `0001`–`0028` are immutable. Migration `0028` introduced the
+identity/notification migration state needed for OTP, progressive KYC, legacy
+mapping, encrypted device registration, and delivery reconciliation. The
+current release applies all 32 migrations through `0032`: additive migrations
+`0029`–`0032` implement governed OTP recovery, patient self-service, emergency
+notification/rate controls, and governed patient account enrollment.
 Migration is a controlled ECS RunTask operation: snapshot/PITR gate, plan,
 fixture/source dry run, apply once, reconciliation, runtime-role verification,
 then progressive service rollout.

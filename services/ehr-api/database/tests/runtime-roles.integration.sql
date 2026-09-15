@@ -105,6 +105,15 @@ begin
      or pg_has_role('hid_notification_worker', 'hid_event_dispatcher', 'member') then
     raise exception 'notification aggregate role boundaries are inconsistent';
   end if;
+  if has_table_privilege('hid_identity_api_runtime', 'auth.accounts', 'UPDATE')
+     or not has_function_privilege('hid_identity_api_runtime',
+       'auth.complete_recovery_otp(uuid,text,text,text)', 'EXECUTE')
+     or has_function_privilege('hid_ehr_api_runtime',
+       'auth.complete_recovery_otp(uuid,text,text,text)', 'EXECUTE')
+     or has_function_privilege('hid_notification_worker',
+       'auth.complete_recovery_otp(uuid,text,text,text)', 'EXECUTE') then
+    raise exception 'OTP recovery must use the isolated Identity command without generic account mutation';
+  end if;
   if not has_table_privilege('hid_identity_runtime', 'auth.otp_challenges', 'SELECT,INSERT,UPDATE')
      or not has_table_privilege('hid_identity_runtime', 'auth.otp_rate_limits', 'SELECT,INSERT,UPDATE')
      or not has_table_privilege('hid_identity_runtime', 'identity.patient_assurance_states', 'SELECT,INSERT,UPDATE')

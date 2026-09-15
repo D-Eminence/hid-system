@@ -1,0 +1,69 @@
+{
+  "observed_at": "2026-09-10T08:31:10.652416+00:00",
+  "scope": "READ_ONLY_CLOUDFLARE_STATUS_AND_SOURCE_DRYRUN",
+  "account_id": "20c809ffe35ccb2c240d19a664dff97a",
+  "zone_id": "69d385b9f6a3233a7113c525524f14fe",
+  "authentication": {
+    "login_succeeded_previously": true,
+    "automatic_oauth_refresh_succeeded": true,
+    "refreshed_expiry_utc": "2026-09-10T09:29:18.066Z",
+    "whoami_exit_code": 1,
+    "whoami_failure_category": "TRANSIENT_FETCH_CONNECTIVITY_ERROR",
+    "direct_api_authentication_confirmed_at_observation": true,
+    "oauth_scopes": [
+      "user:read",
+      "offline_access",
+      "account:read",
+      "zone:read",
+      "workers_scripts:write",
+      "workers_routes:write"
+    ]
+  },
+  "resource_summary": {
+    "account": "HTTP200_EXPECTED_ACCOUNT",
+    "zone": "HTTP200_ACTIVE_EXPECTED_ACCOUNT_AND_ZONE",
+    "workers": "HTTP200_ZERO_UPLOADED_WORKERS_IN_ACCOUNT",
+    "worker_routes": "HTTP200_ZERO_ROUTES_IN_ZONE",
+    "worker_custom_domains": "HTTP200_ZERO_CUSTOM_DOMAINS_FOR_ZONE",
+    "dns": "HTTP403_CODE10000_ALL_NINE_STAGING_HOST_QUERIES_UNVERIFIED",
+    "turnstile": "HTTP403_CODE10000_WIDGETS_UNVERIFIED"
+  },
+  "dry_run": {
+    "command": "npm run dry-run:staging",
+    "pinned_wrangler_version": "4.127.1",
+    "exit_code": 0,
+    "worker_count": 7,
+    "explicit_dryrun_markers": 7,
+    "all_seven_marker": true,
+    "deployment_performed": false
+  },
+  "aws_auth": {
+    "private_log": "aws-login-sept10-private.log",
+    "failure_category": "PENDING_SSO_AUTHORIZATION_EXPIRED",
+    "next_step": "Root may restart the same authorized AWS SSO browser login and complete it before expiry, then verify identity; no new login initiated by this audit."
+  },
+  "unavoidable_cloudflare_inputs": [
+    {
+      "purpose": "Read DNS inventory",
+      "permission": "Zone DNS Read on zone69d385b9f6a3233a7113c525524f14fe",
+      "alternative": "Owner provides verified staging-only DNS inventory."
+    },
+    {
+      "purpose": "Read/configure staging Turnstile widget",
+      "permission": "Turnstile Sites Read for discovery; Turnstile Sites Write if provisioning is authorized, scoped to account20c809ffe35ccb2c240d19a664dff97a",
+      "alternative": "Owner provisions the staging widget and supplies its public sitekey and secret through the approved secret channel."
+    },
+    {
+      "purpose": "Apply approved staging DNS records later",
+      "permission": "DNS Write/Edit for the exact zone, with execution constrained to approved staging hostnames",
+      "alternative": "Owner applies the reviewed staging DNS records."
+    }
+  ],
+  "not_user_identifier_inputs": [
+    "Cloudflare account ID",
+    "Cloudflare zone ID/name",
+    "frontend Worker names/hostnames",
+    "fresh Workers-only browser login while the refreshed session remains valid"
+  ],
+  "protected_publication_remaining": "Session OAuth is not a substitute for the protected publisher capability/secret, independently signed candidate, trust/custody/journal and owner-approved source/artifact bindings. Missing Workers can be provisioned only through the authorized release path."
+}

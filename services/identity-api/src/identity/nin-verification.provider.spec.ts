@@ -43,3 +43,22 @@ describe('NIN verification providers', () => {
     }));
   });
 });
+
+
+describe('NIN provider runtime boundary', () => {
+  const valid = { verified: true, provider: 'verified-provider', reference: 'opaque-reference',
+    verifiedAt: new Date().toISOString(), demographics: request.claimedDemographics };
+  it.each([null, undefined, [], {}, { ...valid, verified: 'true' },
+    { ...valid, demographics: null }, { ...valid, reference: 123 },
+    { ...valid, reference: '12345-678901' }, { ...valid, reference: 'bad\nreference' },
+    { ...valid, demographics: { ...request.claimedDemographics, dateOfBirth: '2001-02-29' } },
+    { ...valid, demographics: { ...request.claimedDemographics, dateOfBirth: '2999-01-01' } },
+  ])('rejects malformed external payload without leaking it (%#)', (payload) => {
+    expect(() => assertSafeNinVerificationResult(payload as typeof valid, valid.provider, request.nin))
+      .toThrow(expect.objectContaining({ code: 'NIN_PROVIDER_RESPONSE_INVALID', status: 502 }));
+  });
+  it('accepts a real calendar leap day and a verified negative response', () => {
+    expect(() => assertSafeNinVerificationResult({ ...valid, verified: false,
+      demographics: { ...request.claimedDemographics, dateOfBirth: '2000-02-29' } }, valid.provider, request.nin)).not.toThrow();
+  });
+});

@@ -7,8 +7,11 @@ import { DatabaseService } from '../database/database.service';
 import type { ActorContext } from '../common/request-context';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
 import { CurrentStaffContextService } from './current-staff-context.service';
+import { CurrentPatientContextService } from './current-patient-context.service';
 
 interface SessionRow {
+  session_kind?: 'staff' | 'patient';
+  patient_id?: string | null;
   id: string;
   account_id: string;
   actor_subject: string;
@@ -44,6 +47,7 @@ export class TokenService {
   constructor(
     private readonly database: DatabaseService,
     private readonly currentStaff: CurrentStaffContextService,
+    private readonly currentPatient?: CurrentPatientContextService,
   ) {}
 
   async issue(identity: CredentialIdentity, event: SessionEventMetadata): Promise<LoginResult> {
@@ -51,7 +55,7 @@ export class TokenService {
       throw new Error('OIDC identities are not issued internal password sessions');
     }
     const authenticationMethod = identity.authenticationMethod;
-    const actor = await this.currentStaff.resolve(identity.subject, identity.authenticationMethod);
+    const actor = await this.resolveActor(identity.subject, identity.authenticationMethod, identity.actorKind ?? 'staff');
     const sessionId = randomUUID();
     const accessJti = randomUUID();
     const refreshToken = this.newRefreshToken(sessionId, authenticationMethod);
@@ -92,6 +96,8 @@ export class TokenService {
         accessJti,
         accountTokenVersion: tokenVersion,
         authenticationMethod,
+        actorKind: actor.kind ?? 'staff',
+        patientId: actor.patientId,
         issuedAt: now,
         expiresAt: refreshExpiresAt,
         absoluteExpiresAt,
@@ -112,7 +118,7 @@ export class TokenService {
       `select session.id::text, session.account_id::text,
               account.subject as actor_subject, session.family_id::text,
               session.access_jti::text, session.account_token_version::text as token_version,
-              session.authentication_method,
+              session.authentication_method, session.session_kind, session.patient_id::text,
               session.expires_at, session.absolute_expires_at, session.revoked_at
          from auth.sessions session
          join auth.accounts account on account.id = session.account_id
@@ -153,9 +159,12 @@ export class TokenService {
     if (this.databaseMethod(authenticationMethod) !== oldSession.authentication_method) {
       throw new UnauthorizedException('Invalid refresh session');
     }
-    const actor = await this.currentStaff.resolve(oldSession.actor_subject, authenticationMethod);
+    const actor = await this.resolveActor(oldSession.actor_subject, authenticationMethod, oldSession.session_kind ?? 'staff');
     if (actor.accountId !== oldSession.account_id) {
       throw new UnauthorizedException('Invalid refresh session');
+    }
+    if (actor.kind === 'patient' && actor.patientId !== oldSession.patient_id) {
+      throw new UnauthorizedException('Patient account association changed');
     }
     const accountTokenVersion = Number(oldSession.token_version);
     if (!Number.isSafeInteger(accountTokenVersion) || accountTokenVersion < 1) {
@@ -184,6 +193,8 @@ export class TokenService {
           accessJti,
           accountTokenVersion,
           authenticationMethod,
+          actorKind: actor.kind ?? 'staff',
+          patientId: actor.patientId,
           issuedAt: now,
           expiresAt: refreshExpiresAt,
           absoluteExpiresAt: oldSession.absolute_expires_at,
@@ -228,7 +239,10 @@ export class TokenService {
     }).catch(() => { throw new UnauthorizedException('Invalid or expired access token'); });
     const claims = this.parseInternalClaims(payload);
     await this.assertSessionActive(claims);
-    const actor = await this.currentStaff.resolve(claims.sub, claims.auth_method, claims.sid);
+    const actor = await this.resolveActor(claims.sub, claims.auth_method, claims.actor_kind ?? 'staff', claims.sid);
+    if (actor.kind === 'patient' && actor.patientId !== claims.patient_id) {
+      throw new UnauthorizedException('Patient account association changed');
+    }
     return { actor, claims };
   }
 
@@ -294,6 +308,8 @@ export class TokenService {
   ): Promise<string> {
     if (!this.signingKey) throw new Error('Internal token signing is not configured');
     return new SignJWT({
+      actor_kind: actor.kind ?? 'staff',
+      patient_id: actor.patientId,
       sid: sessionId,
       email: actor.email,
       name: actor.displayName,
@@ -323,6 +339,12 @@ export class TokenService {
     }
     const method = payload.auth_method;
     if (method !== 'local') throw new UnauthorizedException('Invalid authentication method');
+    if (payload.actor_kind !== undefined && payload.actor_kind !== 'staff' && payload.actor_kind !== 'patient') {
+      throw new UnauthorizedException('Invalid actor context');
+    }
+    if (payload.actor_kind === 'patient' && typeof payload.patient_id !== 'string') {
+      throw new UnauthorizedException('Patient identity binding is missing');
+    }
     return {
       ...payload,
       sub: payload.sub,
@@ -333,6 +355,8 @@ export class TokenService {
       platform_permissions: this.stringArrayClaim(payload.platform_permissions),
       facility_ids: this.stringArrayClaim(payload.facility_ids),
       auth_method: method,
+      actor_kind: payload.actor_kind ?? 'staff',
+      patient_id: typeof payload.patient_id === 'string' ? payload.patient_id : undefined,
       csrf_hash: typeof payload.csrf_hash === 'string' ? payload.csrf_hash : undefined,
       token_version: payload.token_version,
     };
@@ -348,12 +372,15 @@ export class TokenService {
           and session.access_jti = $3
           and session.account_token_version = $4
           and session.authentication_method = $5
+          and session.session_kind = $6
+          and session.patient_id is not distinct from $7::uuid
           and account.token_version = session.account_token_version
           and account.status = 'active'
           and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
           and session.revoked_at is null
-          and session.expires_at > clock_timestamp()`,
-      [claims.sid, claims.sub, claims.jti, claims.token_version, this.databaseMethod(claims.auth_method)],
+          and session.expires_at > clock_timestamp()
+          and session.absolute_expires_at > clock_timestamp()`,
+      [claims.sid, claims.sub, claims.jti, claims.token_version, this.databaseMethod(claims.auth_method), claims.actor_kind ?? 'staff', claims.patient_id ?? null],
     );
     if (result.rowCount !== 1) throw new UnauthorizedException('Session is no longer active');
   }
@@ -375,6 +402,8 @@ export class TokenService {
     input: {
       id: string; accountId: string; familyId: string; refreshToken: string; accessJti: string;
       accountTokenVersion: number; authenticationMethod: 'local';
+      actorKind: 'staff' | 'patient';
+      patientId?: string;
       issuedAt: Date; expiresAt: Date; absoluteExpiresAt: Date; event: SessionEventMetadata;
     },
   ): Promise<void> {
@@ -382,13 +411,15 @@ export class TokenService {
       `insert into auth.sessions (
          id, account_id, family_id, refresh_token_sha256, access_jti,
          account_token_version, authentication_method,
-         issued_at, expires_at, absolute_expires_at, source_ip, user_agent_sha256
-       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+         issued_at, expires_at, absolute_expires_at, source_ip, user_agent_sha256, session_kind, patient_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [
         input.id, input.accountId, input.familyId, this.sha256(input.refreshToken), input.accessJti,
         input.accountTokenVersion, this.databaseMethod(input.authenticationMethod),
         input.issuedAt, input.expiresAt, input.absoluteExpiresAt, input.event.sourceIp ?? null,
         input.event.userAgent ? this.sha256(input.event.userAgent) : null,
+        input.actorKind,
+        input.patientId ?? null,
       ],
     );
   }
@@ -451,6 +482,14 @@ export class TokenService {
 
   private newRefreshToken(sessionId: string, method: 'local'): string {
     return `${sessionId}.${randomBytes(48).toString('base64url')}.${method}`;
+  }
+
+  private resolveActor(subject: string, method: ActorContext['authenticationMethod'], kind: 'staff' | 'patient', sessionId?: string) {
+    if (kind === 'patient') {
+      if (!this.currentPatient || method !== 'local') throw new UnauthorizedException('Patient session is unavailable');
+      return this.currentPatient.resolve(subject, sessionId);
+    }
+    return this.currentStaff.resolve(subject, method, sessionId);
   }
 
   private refreshMethod(token: string): 'local' {

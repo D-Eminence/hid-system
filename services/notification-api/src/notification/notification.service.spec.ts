@@ -31,4 +31,24 @@ describe('NotificationService fallback safety', () => {
     const primary = provider('termii', 'accepted'); const fallback = provider('infobip', 'accepted');
     await service(primary, fallback).deliverOtp(message); expect(fallback.send).not.toHaveBeenCalled();
   });
+
+  it.each(['accepted', 'unknown', 'definitive_failure'] as const)
+  ('staging email-only preserves the SES %s outcome without attempting fallback', async outcome => {
+    Object.assign(process.env, { HID_DEPLOYMENT_ENV: 'staging', NOTIFICATION_DELIVERY_PROFILE: 'email-only' });
+    resetEnvironmentForTests();
+    const primary = provider('ses', outcome); const fallback = provider('infobip', 'accepted');
+    await expect(service(primary, fallback).deliverOtp({ ...message, channel: 'email', recipient: 'patient@example.test' }))
+      .resolves.toEqual({ primary: { provider: 'ses', outcome }, outcome });
+    expect(primary.send).toHaveBeenCalledTimes(1);
+    expect(fallback.send).not.toHaveBeenCalled();
+  });
+
+  it.each(['sms', 'whatsapp'] as const)('staging email-only rejects %s before any provider attempt', async channel => {
+    Object.assign(process.env, { HID_DEPLOYMENT_ENV: 'staging', NOTIFICATION_DELIVERY_PROFILE: 'email-only' });
+    resetEnvironmentForTests();
+    const primary = provider('termii', 'accepted'); const fallback = provider('infobip', 'accepted');
+    await expect(service(primary, fallback).deliverOtp({ ...message, channel })).rejects.toThrow('supports email OTP only');
+    expect(primary.send).not.toHaveBeenCalled();
+    expect(fallback.send).not.toHaveBeenCalled();
+  });
 });

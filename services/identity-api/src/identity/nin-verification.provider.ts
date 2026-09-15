@@ -15,31 +15,30 @@ export function assertSafeNinVerificationResult(
   expectedProvider: string,
   rawNin: string,
 ): void {
-  const verifiedAt = Date.parse(result.verifiedAt);
-  const demographics = result.demographics;
-  const validGender = demographics.gender === undefined
-    || ['female', 'male', 'intersex', 'other', 'unknown'].includes(demographics.gender);
-  if (
-    result.provider !== expectedProvider
+  // Provider payloads are untrusted runtime data even when an adapter is typed.
+  const invalid = () => new DomainProblem(502, 'NIN_PROVIDER_RESPONSE_INVALID', 'The NIN provider returned an invalid response');
+  if (!result || typeof result !== 'object' || Array.isArray(result)
+    || typeof result.verified !== 'boolean'
+    || typeof result.provider !== 'string' || result.provider !== expectedProvider
     || !PROVIDER_NAME.test(result.provider)
-    || !result.reference
-    || result.reference.length > 255
-    || result.reference.includes(rawNin)
-    || !Number.isFinite(verifiedAt)
-    || verifiedAt > Date.now() + 5 * 60 * 1000
-    || typeof demographics.firstName !== 'string'
-    || demographics.firstName.trim().length < 1
-    || demographics.firstName.trim().length > 100
-    || typeof demographics.lastName !== 'string'
-    || demographics.lastName.trim().length < 1
-    || demographics.lastName.trim().length > 100
-    || typeof demographics.dateOfBirth !== 'string'
-    || !ISO_DATE.test(demographics.dateOfBirth)
-    || Number.isNaN(Date.parse(`${demographics.dateOfBirth}T00:00:00Z`))
-    || !validGender
-  ) {
-    throw new DomainProblem(502, 'NIN_PROVIDER_RESPONSE_INVALID', 'The NIN provider returned an invalid response');
-  }
+    || typeof result.reference !== 'string' || result.reference.trim().length < 1
+    || result.reference.length > 255 || /[\x00-\x1f\x7f]/.test(result.reference)
+    || result.reference.replace(/[\s-]/g, '').includes(rawNin)
+    || typeof result.verifiedAt !== 'string') throw invalid();
+  const verifiedAt = Date.parse(result.verifiedAt);
+  if (!Number.isFinite(verifiedAt) || verifiedAt > Date.now() + 5 * 60 * 1000) throw invalid();
+  const demographics = result.demographics;
+  if (!demographics || typeof demographics !== 'object' || Array.isArray(demographics)) throw invalid();
+  const validName = (value: unknown) => typeof value === 'string' && value.trim().length >= 1
+    && value.trim().length <= 100 && !/[\x00-\x1f\x7f]/.test(value);
+  const birthDate = typeof demographics.dateOfBirth === 'string' && ISO_DATE.test(demographics.dateOfBirth)
+    ? new Date(`${demographics.dateOfBirth}T00:00:00Z`) : new Date(NaN);
+  if (!validName(demographics.firstName) || !validName(demographics.lastName)
+    || !Number.isFinite(birthDate.getTime())
+    || birthDate.toISOString().slice(0, 10) !== demographics.dateOfBirth
+    || birthDate.getTime() > Date.now()
+    || (demographics.gender !== undefined
+      && !['female', 'male', 'intersex', 'other', 'unknown'].includes(demographics.gender))) throw invalid();
 }
 
 @Injectable()
@@ -52,6 +51,15 @@ export class UnavailableNinVerificationProvider implements NinVerificationProvid
       'NIN_PROVIDER_UNAVAILABLE',
       'NIN verification is not configured',
     );
+  }
+}
+
+@Injectable()
+export class DeferredNinVerificationProvider implements NinVerificationProvider {
+  readonly name = 'deferred';
+
+  async verify(_request: NinVerificationRequest): Promise<NinVerificationResult> {
+    throw new DomainProblem(503, 'NIN_PROVIDER_DEFERRED', 'NIN verification is deferred for this staging environment');
   }
 }
 

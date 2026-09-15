@@ -14,6 +14,8 @@ export interface IdentityFacilityAssignment {
 }
 
 export interface IdentityActorContext {
+  kind?: 'staff' | 'patient';
+  patientId?: string;
   id: string;
   subject: string;
   accountId: string;
@@ -79,6 +81,15 @@ export interface IdentityClientOptions {
   workloadHeaders: () => Promise<Readonly<Record<string, string>>>;
 }
 
+export interface PatientSelfAuthorization {
+  allowed: true;
+  patientId: string;
+  accountId: string;
+  subject: string;
+  sessionId: string;
+  expiresAt: string;
+}
+
 export class IdentityApiProblem extends Error {
   readonly code: string | null;
 
@@ -106,6 +117,20 @@ export class IdentityApiClient {
       ? (payload as { actor?: unknown }).actor : undefined;
     if (!validActor(actor)) throw new IdentityApiProblem(502, payload);
     return actor;
+  }
+
+  async authorizePatientSelf(context: IdentityDelegatedContext): Promise<PatientSelfAuthorization> {
+    const payload = await this.request('/api/v1/identity/service/patient-self-authorization', 'GET', undefined, context);
+    if (typeof payload !== 'object' || payload === null) throw new IdentityApiProblem(502, payload);
+    const value = payload as Partial<PatientSelfAuthorization>;
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (value.allowed !== true || !uuid.test(value.patientId ?? '') || !uuid.test(value.accountId ?? '')
+      || !uuid.test(value.sessionId ?? '') || typeof value.subject !== 'string' || !value.subject
+      || typeof value.expiresAt !== 'string' || !Number.isFinite(Date.parse(value.expiresAt))
+      || Date.parse(value.expiresAt) <= Date.now() || Date.parse(value.expiresAt) > Date.now() + 60_000) {
+      throw new IdentityApiProblem(502, payload);
+    }
+    return value as PatientSelfAuthorization;
   }
 
   async authorizePatient(
@@ -250,6 +275,9 @@ export class IdentityApiClient {
 function validActor(value: unknown): value is IdentityActorContext {
   if (typeof value !== 'object' || value === null) return false;
   const actor = value as Partial<IdentityActorContext>;
+  if (actor.kind === 'patient' && (typeof actor.patientId !== 'string'
+    || actor.roles?.length !== 0 || actor.permissions?.length !== 0
+    || actor.facilityIds?.length !== 0 || actor.facilities?.length !== 0 || actor.facility)) return false;
   return typeof actor.id === 'string' && typeof actor.subject === 'string'
     && typeof actor.accountId === 'string' && Array.isArray(actor.roles)
     && Array.isArray(actor.permissions) && Array.isArray(actor.facilityIds)

@@ -2,6 +2,8 @@ import type { JWTPayload } from 'jose';
 import type { ActorContext, FacilityAssignment } from '../common/request-context';
 
 export interface HidJwtClaims extends JWTPayload {
+  actor_kind?: 'staff' | 'patient';
+  patient_id?: string;
   sub: string;
   sid: string;
   email?: string;
@@ -26,6 +28,7 @@ export interface LoginResult {
 }
 
 export interface CredentialIdentity {
+  actorKind?: 'staff' | 'patient';
   subject: string;
   accountId?: string;
   email: string;

@@ -10,6 +10,7 @@ import { getEnvironment } from '../config/environment';
 import {
   FACILITY_OPTIONAL,
   PUBLIC_ROUTE,
+  PATIENT_ALLOWED,
   REQUIRED_PERMISSIONS,
 } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
@@ -38,6 +39,9 @@ export class SecurityGuard implements CanActivate {
       const verified = await this.tokens.verify(token);
       request.actor = verified.actor;
       request.authTransport = transport;
+      if (verified.actor.kind === 'patient' && !this.metadata<boolean>(PATIENT_ALLOWED, context)) {
+        throw new DomainProblem(403, 'PATIENT_SCOPE_DENIED', 'This operation requires workforce authorization');
+      }
       if (transport === 'cookie' && !SAFE_METHODS.has(request.method)) {
         this.assertCookieMutationSecurity(request, verified.claims);
       }
@@ -86,7 +90,7 @@ export class SecurityGuard implements CanActivate {
       if (request.actor && request.facilityId) {
         await this.audit.record({
           correlationId: request.correlationId,
-          actorType: 'staff',
+          actorType: request.actor.kind === 'patient' ? 'patient' : 'staff',
           actorSubject: request.actor.subject,
           actorAccountId: request.actor.accountId,
           actorMembershipId: request.actor.facility?.membershipId,
@@ -102,7 +106,7 @@ export class SecurityGuard implements CanActivate {
       } else if (request.actor) {
         await this.audit.record({
           correlationId: request.correlationId,
-          actorType: 'staff',
+          actorType: request.actor.kind === 'patient' ? 'patient' : 'staff',
           actorSubject: request.actor.subject,
           actorAccountId: request.actor.accountId,
           action: 'auth.authorization.denied',

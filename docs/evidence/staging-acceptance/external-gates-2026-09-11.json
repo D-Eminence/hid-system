@@ -1,0 +1,204 @@
+{
+  "schema_version": "hid.staging-external-gates-preparation/v1",
+  "recorded_at": "2026-09-10T23:47:37.375517+00:00",
+  "environment": "staging",
+  "staging_accepted": false,
+  "deployment_authorized": false,
+  "production_locked": true,
+  "committed": false,
+  "scope": "Bounded external-gate preparation; no broad architecture change",
+  "provider_classification": {
+    "aws_ses": "REQUIRED",
+    "termii": "OPTIONAL",
+    "meta_whatsapp": "OPTIONAL",
+    "infobip": "FALLBACK_DISABLED",
+    "novu": "REQUIRED"
+  },
+  "configuration": {
+    "notification_delivery_profile": "email-only",
+    "required_notification_secret_fields": [
+      "sesFromAddress",
+      "novuApiKey"
+    ],
+    "optional_provider_accounts_requested": false,
+    "nin_real_adapter_implemented": false
+  },
+  "checks": {
+    "repository_tests": {
+      "exit_code": 0,
+      "log_sha256": "7deb8e9403cbd5c748ce4975fadf86473ad75506b4847cb3d889fc9057635fd4",
+      "infrastructure_tests": 84,
+      "notification_api_tests": 31
+    },
+    "repository_verify": {
+      "exit_code": 0,
+      "log_sha256": "850ba46fcfe058b9a8a96247effbcdf3bf57bb84921a8e795aa379e919cca4ba"
+    },
+    "release_regression_tests": 44,
+    "edge_regression_tests": 52,
+    "public_custody_final_tests": {
+      "count": 11,
+      "exit_code": 0,
+      "log_sha256": "874657ad2a32e0849981bbee36c7a1ba4d62800dbd50de05642e17cacc4b8b42"
+    },
+    "preflight_tests": {
+      "count": 5,
+      "exit_code": 0,
+      "log_sha256": "6e3ea6767af35d9745ae6e87154256505970aff0153c70d72db5a1fe9550144c"
+    },
+    "nin_provider_source_unchanged": true,
+    "secret_readiness": {
+      "exit_code": 0,
+      "canonical_findings": 0,
+      "frontend_artifact_findings": 0,
+      "log_sha256": "b2a4a390cdcae2a48e819872fd13c6b5a7cd601b165313fc368a19f8cdcae0cb"
+    },
+    "container_after_secret_preservation": {
+      "exit_code": 0,
+      "log_sha256": "bd4502b77fd5aa2a98d19a7889c249de9cbc387eb2ca254083862c2c044ce6aa"
+    }
+  },
+  "production_template": {
+    "baseline": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-production-baseline-assembly/Hid-production-Regional.template.json",
+    "current": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260910-external-gates/notification-profile-production-final-assembly/Hid-production-Regional.template.json",
+    "baseline_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+    "current_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+    "baseline_bytes": 464453,
+    "current_bytes": 464453,
+    "byte_identical": true
+  },
+  "current_staging_template": {
+    "command_exit": 0,
+    "template_sha256": "b8069b85ccf710c690c1485332754feaa786c02fde38d0a7c966db1f33f31707",
+    "template_bytes": 545864,
+    "resources": 434,
+    "parameters": 54,
+    "missing_cdk_context": false,
+    "deployment_authorized": false,
+    "account": "659225405023",
+    "region": "eu-west-1",
+    "mode": "economy"
+  },
+  "external_status": {
+    "nin_contract": "waiting_for_named_licensed_provider_and_versioned_documentation",
+    "aws_browser_auth": "latest_attempt_expired_without_completed_authorization",
+    "cloudflare_auth": "latest_oauth_token_expired_renewal_failed",
+    "dns_turnstile_scope": "unverified_previous_reads_forbidden",
+    "ses_novu_delivery": "not_verified",
+    "public_release_custody": "not_verified",
+    "live_deployment": "not_performed"
+  },
+  "new_resource_mutations": false,
+  "messages_sent": false,
+  "security_document_sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+  "source_files": [
+    {
+      "path": ".gitignore",
+      "sha256": "d7ee36aae8ee165bf0894b1d57e5db05a07b4134035a5374685e2a9143c4bbf5"
+    },
+    {
+      "path": "scripts/staging-external-preflight.py",
+      "sha256": "0ebf0610196bcf944b2ab27c35b76ace4187bf411c2feb41bef3f1ca49e24276"
+    },
+    {
+      "path": "scripts/tests/test_staging_external_preflight.py",
+      "sha256": "82f6f4db78e2b9fd0387482a1594900788a62cc3c6de7f09191a663037bd3711"
+    },
+    {
+      "path": "release/config/staging-nin-contract.template.json",
+      "sha256": "089ca93870cf75778983b32a4e31857ebf032dc2e452473676eca7f64c759a96"
+    },
+    {
+      "path": "release/config/staging-public-custody.template.json",
+      "sha256": "b5150973e2523dd49e25d76b0dccd30502a351acd3d642329f28d712f1f2dcce"
+    },
+    {
+      "path": "release/scripts/validate-staging-public-custody.mjs",
+      "sha256": "bff737d6368bb5d4702a537f66b121cabf3217aeb52f6cf9e3e9dcd139d555b3"
+    },
+    {
+      "path": "release/test/staging-public-custody.test.mjs",
+      "sha256": "329d566a1e86dad74ff0247081f445a1230cd3b54cea66280cddfef31a5d7156"
+    },
+    {
+      "path": "infra/cloudflare/scripts/tuf-repository-layout.mjs",
+      "sha256": "d31997cfe0cad21343ec8ba7b42bc73e8612efb53eaa8d63e01e8b060b7d8adb"
+    },
+    {
+      "path": "services/notification-api/.env.example",
+      "sha256": "f6881f91b41f845459f367b9f269bd6b9b1cce868b41dd2304a1e1c09b5f45ac"
+    },
+    {
+      "path": "services/notification-api/src/config/environment.ts",
+      "sha256": "e8f4964832a08af9cc7eee90b81d66f1e9beb98ae913aa40d6cd548774aa06cd"
+    },
+    {
+      "path": "services/notification-api/src/config/environment.spec.ts",
+      "sha256": "31d76f038a16f0c8a11cab585ddcffba1244224e26923d50d2d607af0b703411"
+    },
+    {
+      "path": "services/notification-api/src/notification/notification.service.ts",
+      "sha256": "b35b6851e56e1ef600b8b19fbcb9200e6259fb225b0d4dd1945d10de0b021098"
+    },
+    {
+      "path": "services/notification-api/src/notification/notification.service.spec.ts",
+      "sha256": "2ddc141bfaca814156d7201bacbba7c0fc228fc000d1de94f53a82bbf905cf25"
+    },
+    {
+      "path": "infra/aws/src/hid-regional-stack.ts",
+      "sha256": "d66eefdb89a52983dd0093c41233b1fb69807b4bb0b3bc3e4d54425cd1def4ba"
+    },
+    {
+      "path": "infra/aws/test/infrastructure.test.ts",
+      "sha256": "365832722955f39c92f75b0286fc25a26f82881be38732fdfae0825324c7ea8e"
+    },
+    {
+      "path": "docs/STAGING_EXTERNAL_PREFLIGHT.md",
+      "sha256": "b1ec323a92860dbf1feb99285410a4dbe9f0f77aacfaad2ac17e67a1539ebe1f"
+    },
+    {
+      "path": "docs/STAGING_PROVIDER_ACCOUNTS.md",
+      "sha256": "526ff94394cefb441363b020b1cd4822e1664ccb75e8e92785ca62491156aa6b"
+    },
+    {
+      "path": "docs/TUF_STAGING_PUBLIC_CUSTODY.md",
+      "sha256": "879516af738e0316657c9c583b8a5e8ad8ffcf00b1b169f76dbab562df3daa3d"
+    },
+    {
+      "path": "docs/AWS_DEPLOYMENT_RUNBOOK.md",
+      "sha256": "22ad658f49dd88d9510920af2a6433749859fac82286156d70fe10354d569ab8"
+    },
+    {
+      "path": "docs/TUF-STAGING-EXECUTION.md",
+      "sha256": "e44dab8687e362b12c819158d5fca1944ced18f94e2696f8fc767ff8703f9351"
+    },
+    {
+      "path": "docs/TASK.md",
+      "sha256": "5a0b1bc7d14203312dbf0df7cf528a5256ed5af2c80f742e7153b3fac5f5fb07"
+    },
+    {
+      "path": "docs/TUF-PRODUCTION-IMPLEMENTATION.md",
+      "sha256": "f6b08c73b673222f1d15ef4db9727765c9beca8bd5663129c801797283af88c6"
+    },
+    {
+      "path": "docs/README.md",
+      "sha256": "163722d7d6a3cd82b1976ac75a39a968e8ab4af4e532305ece7463161b906208"
+    }
+  ],
+  "evidence_root": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260910-external-gates",
+  "limitations": [
+    "Field presence is not credential validity or delivery",
+    "Novu key alone does not prove workflow/subscriber/channel setup",
+    "Novu demo email is a bounded channel, not SES-backed Novu delivery",
+    "Valid public root signatures do not prove custody, staging provenance or authorization",
+    "Earlier fixture scanner failure is retained; final fixture uses an ephemeral generated test key"
+  ],
+  "local_secret_preservation": {
+    "field": "TERMII_API_KEY",
+    "ignored_file": "services/notification-api/.env.staging-providers.local",
+    "mode": "0600",
+    "value_preserved": true,
+    "value_printed": false,
+    "provider_call_made": false
+  }
+}

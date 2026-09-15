@@ -14,12 +14,12 @@ export class AuthService {
     private readonly tokens: TokenService,
   ) {}
 
-  async login(input: LoginDto, event: SessionEventMetadata): Promise<LoginResult> {
+  async login(input: LoginDto, event: SessionEventMetadata, actorKind: 'staff' | 'patient' = 'staff'): Promise<LoginResult> {
     if (this.environment.AUTH_MODE === 'oidc') {
       throw new MethodNotAllowedException('Password login is disabled; use the configured OIDC authorization flow');
     }
     const identity = await this.localProvider.authenticate(input.email, input.password);
-    return this.tokens.issue(identity, {
+    return this.tokens.issue({ ...identity, actorKind }, {
       ...event,
       principalHmac: this.localProvider.principalHash(input.email),
       pepperVersion: this.environment.AUTH_LOGIN_PEPPER_VERSION,

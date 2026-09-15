@@ -137,7 +137,7 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the ledger reaches `0028`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0032`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
@@ -224,7 +224,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0028`, runtime grants, RLS and purpose/deny behavior.
+6. Verify `0032`, runtime grants, RLS and purpose/deny behavior.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.
@@ -247,7 +247,7 @@ Before target write traffic, rollback can restore source authority after
 disposing of the failed target run under policy. After target writes begin,
 rollback requires a named reconciliation strategy for those writes; a blind
 DNS reversal is unsafe. Database migrations are forward-only—use additive
-correction or approved PITR, never edit/down-run `0001`–`0028`.
+correction or approved PITR, never edit/down-run applied migrations.
 
 Retain the approved snapshot/LSN, tool Git SHA, migration checksums, operators,
 start/end times, counts/checksums, conflict/resolution evidence, object mapping
@@ -257,3 +257,21 @@ password hashes, encryption keys, raw contacts and clinical payloads.
 
 Until these live gates pass, the correct classification is:
 `IMPLEMENTED, EXTERNAL ENVIRONMENT VERIFICATION PENDING`.
+
+## Additive staging recovery correction after the approved 0028 baseline
+
+The staging implementation candidate adds `0029_governed_otp_recovery.sql`.
+Previously issued OTP challenges lack the new account token-version binding
+and cannot complete recovery after this migration; users request a fresh code.
+This is deliberate fail-closed credential invalidation, not account or patient
+migration. Existing accounts, patient UUIDs/HIDs, passwords and clinical rows
+are not rewritten by the migration itself.
+
+Use the current reviewed migration ledger and release contract for the final
+candidate schema; do not label the changed tree as approved source
+`a709e643a731b444f7cb775b2b16fe28164146a7`. Preserve all prior applied migration
+hashes and run the isolated full schema/role/OTP/backup/restore rehearsal before
+an actual staging migration. No generic UPDATE on accounts is granted to solve
+recovery. Database rollback remains forward correction or an approved isolated
+restore with write reconciliation. Provider delivery, staging TLS/roles and
+restored application login remain external acceptance evidence.

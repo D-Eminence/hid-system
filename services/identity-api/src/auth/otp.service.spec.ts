@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import * as argon2 from 'argon2';
 jest.mock('argon2', () => ({
   argon2id: 2,
   hash: jest.fn().mockResolvedValue('$argon2id$test-password-hash'),
@@ -140,19 +141,22 @@ describe('Identity OTP credentials', () => {
     expect(completion?.values).not.toContain(result.verificationToken);
   });
 
-  it('allows password completion only once and revokes prior sessions', async () => {
+  it('uses the narrow recovery command and rejects an already consumed credential', async () => {
     const challengeId = '86e1e934-dac3-40a4-b15f-bd76904a9a32';
     const verificationToken = 'opaque-completion-token-with-more-than-32-characters';
     let consumed = false;
     const sqlCalls: string[] = [];
     const client = { query: jest.fn(async (sql: string) => {
       sqlCalls.push(sql);
-      if (sql.includes('select id::text, account_id::text')) return { rows: consumed ? [] : [{
+      if (sql.includes('select challenge.id::text, challenge.account_id::text')) return { rows: consumed ? [] : [{
         id: challengeId, account_id: 'account-1',
         completion_token_hmac: hmac('otp-completion', challengeId, verificationToken),
         completion_expires_at: new Date(Date.now() + 60_000),
       }] };
-      if (sql.includes('set consumed_at = clock_timestamp()')) consumed = true;
+      if (sql.includes('select auth.complete_recovery_otp')) {
+        consumed = true;
+        return { rows: [{ completed: true }] };
+      }
       return { rows: [] };
     }) } as unknown as PoolClient;
     const service = new OtpService(
@@ -163,9 +167,61 @@ describe('Identity OTP credentials', () => {
 
     await expect(service.complete(input)).resolves.toEqual({ completed: true });
     await expect(service.complete(input)).rejects.toMatchObject({ code: 'OTP_INVALID_OR_EXPIRED' });
-    expect(sqlCalls.some((sql) => sql.includes("password_algorithm = 'argon2id'"))).toBe(true);
-    expect(sqlCalls.some((sql) => sql.includes("revocation_reason = 'password_recovered_with_otp'"))).toBe(true);
-    expect(sqlCalls.filter((sql) => sql.includes('set consumed_at = clock_timestamp()'))).toHaveLength(1);
+    expect(sqlCalls.some((sql) => /update auth.accounts|update auth.sessions/.test(sql))).toBe(false);
+    expect(sqlCalls.filter((sql) => sql.includes('select auth.complete_recovery_otp'))).toHaveLength(1);
+  });
+
+  it('rejects completion when current database authority changes after the precheck', async () => {
+    const challengeId = '86e1e934-dac3-40a4-b15f-bd76904a9a32';
+    const verificationToken = 'opaque-completion-token-with-more-than-32-characters';
+    const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
+      if (sql.includes('select challenge.id::text, challenge.account_id::text')) return { rows: [{
+        id: challengeId, account_id: 'account-1',
+        completion_token_hmac: hmac('otp-completion', challengeId, verificationToken),
+        completion_expires_at: new Date(Date.now() + 60_000),
+      }] };
+      expect(sql).toContain('auth.complete_recovery_otp');
+      expect(values).not.toContain(verificationToken);
+      expect(values).not.toContain('a-strong-test-password');
+      expect(values[2]).toBe(hmac('otp-completion', challengeId, verificationToken));
+      return { rows: [{ completed: false }] };
+    }) } as unknown as PoolClient;
+    await expect(new OtpService(transactionDatabase(client), {} as NotificationOtpClient).complete({
+      challengeId, purpose: 'PASSWORD_RESET', verificationToken,
+      newPassword: 'a-strong-test-password', correlationId: 'otp-race-denial-0001',
+    })).rejects.toMatchObject({ code: 'OTP_INVALID_OR_EXPIRED' });
+  });
+
+  it('does not hash a password or complete recovery for an ineligible account or invalid token', async () => {
+    const hashesBefore = (argon2.hash as jest.Mock).mock.calls.length;
+    const client = { query: jest.fn().mockResolvedValue({ rows: [] }) } as unknown as PoolClient;
+    await expect(new OtpService(transactionDatabase(client), {} as NotificationOtpClient).complete({
+      challengeId: '86e1e934-dac3-40a4-b15f-bd76904a9a32', purpose: 'PASSWORD_RESET',
+      verificationToken: 'opaque-completion-token-with-more-than-32-characters',
+      newPassword: 'a-strong-test-password', correlationId: 'otp-disabled-denial-0001',
+    })).rejects.toMatchObject({ code: 'OTP_INVALID_OR_EXPIRED' });
+    expect((argon2.hash as jest.Mock).mock.calls.length).toBe(hashesBefore);
+    expect(client.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a rate-limit denial without sending another code', async () => {
+    const statements: string[] = [];
+    const client = { query: jest.fn(async (sql: string) => {
+      statements.push(sql);
+      if (sql.includes('from auth.accounts account')) return { rows: [] };
+      if (sql.includes('from auth.otp_rate_limits')) return { rows: [{
+        request_count: 5, window_started_at: new Date(), blocked_until: null,
+      }] };
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    const notification = { deliver: jest.fn() };
+    await expect(new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient).start({
+      identifier: 'person@example.test', purpose: 'PASSWORD_RESET',
+      remoteIp: '192.0.2.12', correlationId: 'otp-rate-denial-0001',
+    })).rejects.toMatchObject({ code: 'OTP_RATE_LIMITED' });
+    expect(notification.deliver).not.toHaveBeenCalled();
+    expect(statements.findIndex(sql => sql.includes('pg_advisory_xact_lock')))
+      .toBeLessThan(statements.findIndex(sql => sql.includes('from auth.otp_rate_limits')));
   });
 
   it('invalidates the old active code before inserting and delivering a resend', async () => {

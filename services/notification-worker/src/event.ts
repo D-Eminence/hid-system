@@ -4,6 +4,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const PRODUCERS = new Set(['identity', 'ocr', 'lab', 'pharmacy', 'outreach']);
 
 export const WORKFLOW_BY_EVENT: Readonly<Record<string, string>> = Object.freeze({
+  EmergencyAccessActivated: 'patient-update-v1',
   PatientRegistered: 'identity-registration-update-v1',
   PatientIdentityResolved: 'identity-resolution-update-v1',
   OcrPublicationSucceeded: 'document-update-v1',
@@ -24,6 +25,12 @@ export function parseSqsEvent(body: string | undefined): HidEventEnvelope {
       || !event.context || !UUID.test(String(event.context.patientId))
       || typeof event.payload !== 'object' || event.payload === null || Array.isArray(event.payload)) {
     throw new Error('INVALID_EVENT_CONTRACT');
+  }
+  if (event.type === 'EmergencyAccessActivated'
+      && (event.producer !== 'identity' || !UUID.test(String(event.context.facilityId))
+        || Object.keys(event.payload).length !== 2
+        || !UUID.test(String(event.payload.consentGrantId)) || event.payload.reviewRequired !== true)) {
+    throw new Error('INVALID_EMERGENCY_NOTIFICATION_CONTRACT');
   }
   return event as HidEventEnvelope;
 }

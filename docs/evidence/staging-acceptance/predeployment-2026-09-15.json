@@ -1,0 +1,476 @@
+{
+  "schema_version": "hid.staging-predeployment-preparation/v1",
+  "recorded_at": "2026-09-15T14:08:32.003858+00:00",
+  "environment": "staging",
+  "production": "LOCKED",
+  "staging_accepted": false,
+  "deployment_authorized": false,
+  "approved_source_base": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "review_successor_status": "local source preparation; no approved successor or protected execution",
+  "quota": {
+    "last_successful_read": {
+      "schema_version": "hid.staging-fargate-quota/v1",
+      "environment": "staging",
+      "checked_at": "2026-09-14T21:04:25.314723+00:00",
+      "account_id": "659225405023",
+      "region": "eu-west-1",
+      "quota_code": "L-3032A538",
+      "request_id": "53cf4fecbdee43808970dadf399dce15KHtG3UD0",
+      "request_status": "CASE_OPENED",
+      "requested_vcpu": 32,
+      "value": 6.0,
+      "requested_capacity_applied": false,
+      "request_pending": true,
+      "quota_gate_cleared": false,
+      "existing_account_usage": "unverified",
+      "available_capacity_verified": false,
+      "decision": "PENDING_REQUEST_DEPLOYMENT_HOLD",
+      "deployment_authorized": false,
+      "staging_accepted": false,
+      "duplicate_request_prohibited": true,
+      "cloud_mutations": false
+    },
+    "latest_attempt": {
+      "recorded_at": "2026-09-15T14:08:32.003858+00:00",
+      "result": "READ_OR_BINDING_FAILED",
+      "aws_status": "expired_browser_session",
+      "quota_status_observed": false
+    },
+    "new_request_submitted": false,
+    "capacity_available_for_deployment": "UNVERIFIED"
+  },
+  "completed_external_changes": {
+    "staging_github_environments": [
+      {
+        "name": "staging-auditor",
+        "id": 21925496209,
+        "action": "created",
+        "owner_review_verified": true,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true
+      },
+      {
+        "name": "staging-build",
+        "id": 21925499645,
+        "action": "created",
+        "owner_review_verified": true,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true
+      },
+      {
+        "name": "staging-candidate",
+        "id": 21925503041,
+        "action": "created",
+        "owner_review_verified": true,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true
+      },
+      {
+        "name": "staging-evidence-writer",
+        "id": 21925506230,
+        "action": "created",
+        "owner_review_verified": true,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true
+      },
+      {
+        "name": "staging-snapshot-signer-one",
+        "id": 21925509704,
+        "action": "created",
+        "owner_review_verified": true,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true
+      },
+      {
+        "name": "staging-snapshot-signer-two",
+        "id": 21925512703,
+        "action": "created",
+        "owner_review_verified": true,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true
+      },
+      {
+        "name": "staging-timestamp-signer-one",
+        "id": 21925515500,
+        "action": "created",
+        "owner_review_verified": true,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true
+      },
+      {
+        "name": "staging-timestamp-signer-two",
+        "id": 21925518646,
+        "action": "created",
+        "owner_review_verified": true,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true
+      }
+    ],
+    "aws_changes_this_continuation": false,
+    "dns_or_turnstile_changes": false,
+    "provider_messages": 0,
+    "workflow_dispatches": 0,
+    "deployments": 0
+  },
+  "local_prepared": {
+    "workflow_files": [
+      {
+        "path": ".github/workflows/tuf-staging-candidate.yml",
+        "sha256": "df953cd1d9b46178634a8a978cce625c49d4a54eb793c9dd286c6dc70e2f4877",
+        "bytes": 4537
+      },
+      {
+        "path": ".github/workflows/tuf-audit.yml",
+        "sha256": "bd659ebd607857a422680fd13a8df452d81f42822d302b7c6d6cdaaa4f5f72ef",
+        "bytes": 3944
+      },
+      {
+        "path": ".github/workflows/tuf-build.yml",
+        "sha256": "e9cd7d3de5dba5727c6e916267e3fbef1c92118ba9041f6a688e03bb12b53fc4",
+        "bytes": 4734
+      },
+      {
+        "path": ".github/workflows/tuf-evidence.yml",
+        "sha256": "a2ac8d3374743e28df57fbea9ec2f36a00fa9e655223bcd3838c0d1f9058e124",
+        "bytes": 5224
+      },
+      {
+        "path": ".github/workflows/tuf-snapshot-signer-one.yml",
+        "sha256": "bd8c6e3aaab342a11435b1d756e9e0045974003e96d47180f55d54fb470d9add",
+        "bytes": 4896
+      },
+      {
+        "path": ".github/workflows/tuf-snapshot-signer-two.yml",
+        "sha256": "6d4dc72d902e8bc5b7a82b2ed584b311f7f0f916ae8f8e7019bbedeaf3b68178",
+        "bytes": 4896
+      },
+      {
+        "path": ".github/workflows/tuf-timestamp-signer-one.yml",
+        "sha256": "0657ed6338765f9e7d5250175709010531df05c0d0fbe955c401e383e78e29d6",
+        "bytes": 4902
+      },
+      {
+        "path": ".github/workflows/tuf-timestamp-signer-two.yml",
+        "sha256": "66e98f7c7b26c76e1cacf01488cdd30a3f23e3fad5a880075eee58f67c840a9f",
+        "bytes": 4902
+      }
+    ],
+    "adapters": [
+      {
+        "path": "scripts/check-staging-fargate-quota.py",
+        "sha256": "91e92b04a1f71482619cc65683c290003d20d1174b1a49822f7a6c24002197a3",
+        "bytes": 5350
+      },
+      {
+        "path": "scripts/prepare-staging-notifications.mjs",
+        "sha256": "b828abdf33c28820a86e7f4a0f41c61e7883a0a8e10d50454f74a24ad12b7361",
+        "bytes": 11462
+      },
+      {
+        "path": "infra/cloudflare/scripts/prepare-staging-readiness.mjs",
+        "sha256": "d5e03facd12e69cea3097ed4901c5da1a255f0f3d4318c048dc6bbefc815cf36",
+        "bytes": 6903
+      },
+      {
+        "path": "release/scripts/audit-staging-release-trust.mjs",
+        "sha256": "3b2e945fa62e6fc308c1ef6bbbcab64841321e282c4dd721afa654ab3c5072c6",
+        "bytes": 13149
+      },
+      {
+        "path": "release/scripts/build-staging-images.mjs",
+        "sha256": "bd863101a51cac86c8430ba76bcc7566b7d99daf347362365dbedefe288f8d8a",
+        "bytes": 15243
+      },
+      {
+        "path": "release/scripts/append-staging-release-evidence.mjs",
+        "sha256": "a70b1693b49b09f14f479c5afa59ebd788c63ae3d57241cc86e4c5afee8367ba",
+        "bytes": 17457
+      },
+      {
+        "path": "release/scripts/submit-staging-signing-request.mjs",
+        "sha256": "2ce72c366f538ec1101e52eb241e32dddd2fc2dc8468a6c60e077604311b5360",
+        "bytes": 24824
+      }
+    ],
+    "targeted_test_files": [
+      {
+        "path": "scripts/tests/test_staging_fargate_quota.py",
+        "sha256": "dba59a1aa12cd1c3fd2f95ffed29f5d7e5aca1e7552c3c5036eb18e89ff6dd46",
+        "bytes": 4377
+      },
+      {
+        "path": "scripts/tests/staging-notifications.test.mjs",
+        "sha256": "6c153214d705dc4b389e2543d49102509382efee9a207a33e7b8a1d9ec091d66",
+        "bytes": 5651
+      },
+      {
+        "path": "infra/cloudflare/test/staging-readiness.test.mjs",
+        "sha256": "3049a005bb910654798e5133439b8a8eaced54f116efd6299968d2ed6f9794dc",
+        "bytes": 2425
+      },
+      {
+        "path": "release/test/staging-release-audit.test.mjs",
+        "sha256": "9a807685c329c5878e39d181425f48f1e3f8a33072518df69ec6d5fa87f55610",
+        "bytes": 10202
+      },
+      {
+        "path": "release/test/staging-image-build.test.mjs",
+        "sha256": "a09d36fbe62ac4c55a373fc14a20a4dcc61cb99a463e02bffa399ecec81010ab",
+        "bytes": 13032
+      },
+      {
+        "path": "release/test/staging-evidence-writer.test.mjs",
+        "sha256": "413546dff195f4bf66bba9a004b5091047d810a3aabfc7434e2b38469857d547",
+        "bytes": 17411
+      },
+      {
+        "path": "release/test/staging-signing-submission.test.mjs",
+        "sha256": "a2c622f627d1e82082bdce731196711047e4393d5257192520e653b044d80bd9",
+        "bytes": 19537
+      }
+    ],
+    "application_build_platform": "linux/arm64",
+    "broker_build_platform": "linux/amd64",
+    "regional_parameters": 55,
+    "unresolved_regional_parameters": 14,
+    "nin_mode": "deferred"
+  },
+  "validation": {
+    "release_tests": {
+      "passed": 78,
+      "failed": 0,
+      "log": {
+        "path": "release/local/20260915-staging-preparation/release-tests-final.log",
+        "sha256": "57209c27c2deb755f8d60689e69d4e40677a4aed4f2ea5d73858f0b33457b2a9",
+        "bytes": 10377
+      }
+    },
+    "aws_infrastructure_tests": {
+      "passed": 87,
+      "failed": 0
+    },
+    "cloudflare_tests": {
+      "passed": 55,
+      "failed": 0
+    },
+    "staging_preparation_javascript_tests": {
+      "passed": 16,
+      "failed": 0
+    },
+    "staging_preparation_python_tests": {
+      "passed": 22,
+      "failed": 0
+    },
+    "aws_typecheck": "passed",
+    "release_contract_verification": "passed",
+    "all_workflow_yaml_parse": {
+      "files": 11,
+      "result": "passed"
+    },
+    "secret_readiness": {
+      "canonical_files": 1142,
+      "frontend_source_files": 264,
+      "frontend_artifact_files": 147,
+      "findings": 0
+    },
+    "scope": "local tests and injected transports; no live build, signing, archival, provider delivery or staging acceptance"
+  },
+  "preservation": {
+    "nin_and_related_files": [
+      {
+        "path": "apps/web/scripts/care-portal.browser.mjs",
+        "sha256": "7776879a98f4fe51223500feee42fb82837f4b8972ecc670f89bd39e275845b9"
+      },
+      {
+        "path": "apps/web/src/lib/patientRegistrationApi.ts",
+        "sha256": "1f539d0a789bf17c8ba778c7fd2b6fb0d2398df036b16902625da03044b04481"
+      },
+      {
+        "path": "apps/web/src/pages/doctor/PatientRegistration.tsx",
+        "sha256": "0576eab8928a5f2738a01668cd70f57d4b17a7d86d200855f0ae85e7a5dad8f3"
+      },
+      {
+        "path": "docs/METAMAP_NIN_CONTRACT.md",
+        "sha256": "e93b0694f9bfa584fe3765aae71a667f6991808b60ae8753d38691b923b4e92f"
+      },
+      {
+        "path": "docs/STAGING_PATIENT_JOURNEYS.md",
+        "sha256": "10a8e85726d91c2d8719ab74ae20a492f8d9c9f902757cd2e14ad713449247c0"
+      },
+      {
+        "path": "release/config/staging-journey-input.template.json",
+        "sha256": "2e359e1394beb9e0b7481f734075df76605e480526bcc9460ffd9219eaf912cf"
+      },
+      {
+        "path": "release/config/staging-nin-contract.template.json",
+        "sha256": "6ddd3c4560a10db69347604a2a07242dc635322c7950fae124375bfa62051781"
+      },
+      {
+        "path": "scripts/prepare-staging-journey-fixture.mjs",
+        "sha256": "91a246970ca262e88dc736b6c297cdbeef537d3694b9b55a26a10904ca2065e0"
+      },
+      {
+        "path": "scripts/staging-external-preflight.py",
+        "sha256": "ffd23997d2bdff8ca2d2afc00a598cfeb3b9e9910429bf414f94f45b8f3cad1b"
+      },
+      {
+        "path": "scripts/staging-metamap-secret.py",
+        "sha256": "1baaa090f04bd5c9543c879695053db491952aa45a7cc660f1658419a405e555"
+      },
+      {
+        "path": "scripts/tests/staging-journey-fixture.test.mjs",
+        "sha256": "f1307c2a1621f42a38ebb84b2e8ae4718a375b196d76e86ec0c871e2532b906a"
+      },
+      {
+        "path": "scripts/tests/test_staging_external_preflight.py",
+        "sha256": "c8cb6af68bb20684d48443f66332ca1da920bd91abeb5d477a1bf4a41510801f"
+      },
+      {
+        "path": "scripts/tests/test_staging_metamap_secret.py",
+        "sha256": "183ffce274d49b3e474db4ff0d9bc4b9fdedbf53ad4d96bf5e42c88d16041b78"
+      },
+      {
+        "path": "scripts/tuf-staging-migration-rehearsal.mjs",
+        "sha256": "c3d6d683eee4beebcebb46becb8e4529e4c94e904cd6b581a38b8450b56648c1"
+      },
+      {
+        "path": "services/identity-api/.env.example",
+        "sha256": "cab45b20ccdb5835c03eaf5cdc9bc8913e17390ee3892254944e8bfd299b7445"
+      },
+      {
+        "path": "services/identity-api/scripts/verify-patient-runtime.mjs",
+        "sha256": "6ef3c40e2d53d2cdc504731cd9c5bd1fda5715567a35c2460df82adef57ea162"
+      },
+      {
+        "path": "services/identity-api/src/config/environment.ts",
+        "sha256": "dd4ca4740a6bed205baa2f7eaf57f01dd930d5381f2d5507d20957bde1e2d5d4"
+      },
+      {
+        "path": "services/identity-api/src/identity/identity.module.ts",
+        "sha256": "948d2ba78a314be999f66ca267492d0cf9d0c693c8d93f18dfaf04197337aa80"
+      },
+      {
+        "path": "services/identity-api/src/identity/metamap-govchecks.client.spec.ts",
+        "sha256": "12711697c47d97b6ae0eb264d80c6a6115d1d83c1c00fc12506cb95e28df2fc0"
+      },
+      {
+        "path": "services/identity-api/src/identity/metamap-govchecks.client.ts",
+        "sha256": "a8886d5e5eeb3bddf6c4c8b830b47b5186dcf8e89522df77079c62acecc3a54b"
+      },
+      {
+        "path": "services/identity-api/src/identity/metamap-webhook-signature.spec.ts",
+        "sha256": "869bb364175ab5c4af1dec2ffc4a9dfd8838a9797b4ed18f7911501eef73847b"
+      },
+      {
+        "path": "services/identity-api/src/identity/metamap-webhook-signature.ts",
+        "sha256": "b2bb719cd6b96e7190a020ca2e7b65612b3553be2ac055340207f9ed626b52de"
+      },
+      {
+        "path": "services/identity-api/src/identity/nin-deferred-staging.spec.ts",
+        "sha256": "33c2218a0b51fe46c9124635fcb7ccc41b38b1a5cf17cb1eab02a73002039c28"
+      },
+      {
+        "path": "services/identity-api/src/identity/nin-registration.controller.ts",
+        "sha256": "3466401533702b2280d23ba35e7173754a791542069c2c6e30620dfcbf4c6bc4"
+      },
+      {
+        "path": "services/identity-api/src/identity/nin-registration.service.ts",
+        "sha256": "0c006ea5fb16bbf1fb5d6d5d6c5115a7e27c0ba09324f3604e81f0510f383125"
+      },
+      {
+        "path": "services/identity-api/src/identity/nin-verification.provider.ts",
+        "sha256": "f81a23f6cca6a2704cd75992c07998576d5284aaccca8583fbebcff9d716f744"
+      }
+    ],
+    "shared_novu_only_files": [
+      "infra/aws/src/hid-regional-stack.ts",
+      "infra/aws/test/infrastructure.test.ts"
+    ],
+    "nin_identity_task_unchanged": true,
+    "security_document": {
+      "path": "docs/SECURITY.md",
+      "sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+      "bytes": 12950
+    },
+    "regional_template_comparison": {
+      "staging_template_sha256": "8d4f5b2f4427c6842c49b3d401925b5cc8c59b055b099a653a7d5d0e7b8e2255",
+      "template_bytes": 545697,
+      "resources": 434,
+      "parameters": 55,
+      "only_template_changes": [
+        "Required StagingNovuApiUrl parameter with fixed US/EU allowed values and no default",
+        "Notification Worker NOVU_API_URL reference"
+      ],
+      "identity_nin_task_definition_unchanged": true,
+      "production_template_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+      "production_template_identical": true,
+      "security_document_unchanged": true,
+      "cloud_calls": false
+    },
+    "production_release_trust_comparisons": [
+      {
+        "configuration": "foundation",
+        "baseline_sha256": "bd539bd95d9cfaf77dd5177fc23a1c9a6522dc03625b5d1aa8ae8b8222b428d8",
+        "current_sha256": "bd539bd95d9cfaf77dd5177fc23a1c9a6522dc03625b5d1aa8ae8b8222b428d8",
+        "bytes": 34948,
+        "byte_identical": true
+      },
+      {
+        "configuration": "broker-enabled",
+        "baseline_sha256": "e19595ecabbc8eb36c1eba2c57fd14380cbf25f399383300f214b3faf4450351",
+        "current_sha256": "e19595ecabbc8eb36c1eba2c57fd14380cbf25f399383300f214b3faf4450351",
+        "bytes": 125742,
+        "byte_identical": true
+      }
+    ]
+  },
+  "user_input_required": [
+    {
+      "input": "Renew AWS browser authentication",
+      "secure_location": "aws login --profile hid-admin, local AWS browser flow",
+      "blocks": "current quota/capacity and AWS prerequisite verification"
+    },
+    {
+      "input": "Authorize existing Cloudflare staging DNS/Turnstile operations and separately scoped publisher",
+      "secure_location": "Cloudflare dashboard/local process; Turnstile JSON field in /hid/staging/identity-sensitive, publisher raw SecretString in hid-staging-cloudflare-publisher-token-*",
+      "blocks": "browser/API deployment and signed publication"
+    },
+    {
+      "input": "Controlled SES sender; isolated Novu environment/region/channel and environment key",
+      "secure_location": "SES eu-west-1 and Novu dashboards; /hid/staging/notification-provider; release/local/staging-notification-input.json for non-secret choices",
+      "blocks": "functional notification deployment, followed by delivery acceptance"
+    },
+    {
+      "input": "Two distinct controlled patient/clinician inboxes and separate send authorizations",
+      "secure_location": "release/local/staging-journey-input.json and release/local/staging-notification-input.json",
+      "blocks": "live recovery and notification/browser acceptance"
+    },
+    {
+      "input": "Real public release custody assignments and authenticated root/provenance",
+      "secure_location": "approved offline/hardware custody process; release/local/staging-public-custody.json; never private keys or PINs",
+      "blocks": "signed release admission/publication"
+    }
+  ],
+  "agent_work_after_inputs": [
+    "source review installation and ordinary CI",
+    "immutable staging callers derived from actual approved reusable workflow SHA",
+    "concrete trust/retention resource approval preparation",
+    "OIDC roles and staging infrastructure after quota and approvals",
+    "real images, SBOM, scans, provenance and signed candidate",
+    "controlled deployment, migration, delivery and browser acceptance"
+  ],
+  "post_staging": [
+    "MetaMap NIN integration is prepared but deferred. Activation requires version-specific provider contract confirmation and authorized trial/test access.",
+    "Existing version-specific callback/signature/correlation/date/test-identity/pricing/secure-secret/provider-test activation checklist remains in docs/METAMAP_NIN_CONTRACT.md."
+  ],
+  "next_command": "aws login --profile hid-admin",
+  "then_read_only_command": "python3 scripts/check-staging-fargate-quota.py"
+}

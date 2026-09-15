@@ -8,7 +8,7 @@ import { IDENTITY_PROVIDER } from './identity.types';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { NinRegistrationService } from './nin-registration.service';
-import { DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider } from './nin-verification.provider';
+import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER } from './nin.types';
 
 @Module({
@@ -20,6 +20,7 @@ import { NIN_VERIFICATION_PROVIDER } from './nin.types';
     HidCodeGenerator,
     DeterministicTestNinVerificationProvider,
     UnavailableNinVerificationProvider,
+    DeferredNinVerificationProvider,
     PostgresIdentityProvider,
     {
       provide: IDENTITY_PROVIDER,
@@ -27,11 +28,15 @@ import { NIN_VERIFICATION_PROVIDER } from './nin.types';
     },
     {
       provide: NIN_VERIFICATION_PROVIDER,
-      inject: [DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider],
+      inject: [DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider, DeferredNinVerificationProvider],
       useFactory: (
         deterministicTest: DeterministicTestNinVerificationProvider,
         unavailable: UnavailableNinVerificationProvider,
-      ) => getEnvironment().NIN_PROVIDER_MODE === 'test' ? deterministicTest : unavailable,
+        deferred: DeferredNinVerificationProvider,
+      ) => {
+        const mode = getEnvironment().NIN_PROVIDER_MODE;
+        return mode === 'deferred' ? deferred : mode === 'test' ? deterministicTest : unavailable;
+      },
     },
   ],
   exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator],

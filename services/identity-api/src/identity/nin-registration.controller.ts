@@ -5,11 +5,24 @@ import { requireRequestContext, type HidRequest } from '../common/request-contex
 import { ApproveRegistrationCaseDto } from './dto/approve-registration-case.dto';
 import { LinkRegistrationCaseDto } from './dto/link-registration-case.dto';
 import { ResolveNinDto } from './dto/resolve-nin.dto';
+import { EnrollPatientDto } from './dto/enroll-patient.dto';
 import { NinRegistrationService } from './nin-registration.service';
+import { getEnvironment } from '../config/environment';
 
 @Controller('identity')
 export class NinRegistrationController {
   constructor(private readonly registrations: NinRegistrationService) {}
+
+  @Get('registration-capabilities')
+  @RequirePermissions('identity.registration.write')
+  @AuditAction('identity.registration-capabilities.read')
+  capabilities() {
+    const mode = getEnvironment().NIN_PROVIDER_MODE;
+    return {
+      nin: { enabled: mode === 'test', state: mode === 'test' ? 'test-only' : mode },
+      newPatientRegistrationRequiresNin: true,
+    };
+  }
 
   @Post('nin/resolve')
   @RequirePermissions('identity.registration.write')
@@ -44,6 +57,19 @@ export class NinRegistrationController {
     requireIdempotencyKey(idempotencyKey);
     const context = requireRequestContext(request, input.purpose);
     return this.registrations.approveNew(caseId, input, idempotencyKey, context);
+  }
+
+  @Post('registration-cases/:caseId/enroll')
+  @RequirePermissions('identity.registration.approve')
+  @AuditAction('identity.patient.enroll.request')
+  enroll(
+    @Param('caseId', new ParseUUIDPipe({ version: '4' })) caseId: string,
+    @Body() input: EnrollPatientDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: HidRequest,
+  ) {
+    requireIdempotencyKey(idempotencyKey);
+    return this.registrations.enroll(caseId, input, idempotencyKey, requireRequestContext(request, input.purpose));
   }
 
   @Post('registration-cases/:caseId/link-existing')

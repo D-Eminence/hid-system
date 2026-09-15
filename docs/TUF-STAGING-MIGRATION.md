@@ -12,7 +12,7 @@ node scripts/tuf-staging-migration-rehearsal.mjs --evidence-dir /tmp/NEW_HID_REH
 ```
 
 Prerequisites: non-root Linux user, PostgreSQL 16 server/client tools on the
-same host (`pg_config --bindir`), installed `services/ehr-api` dependencies,
+same host (`pg_config --bindir`), installed `services/ehr-api` and `services/identity-api` dependencies,
 and the checked-in migration ledger. The command accepts no database URL or
 cloud mode. It creates a private temporary Unix-socket-only PostgreSQL cluster
 with host connections rejected, uses public synthetic fixture vectors, and
@@ -21,10 +21,20 @@ never reused. Caller cloud/database credentials are not passed to child tools.
 
 The executable covers:
 
-1. Verify every immutable migration hash `0001`–`0028`; apply a transactional
+1. Verify every immutable migration hash `0001`–`0032`; apply a transactional
    schema dry run and assert its objects rolled back; apply the real schema,
    bootstrap runtime roles, assert zero pending on rerun, and run the real
-   rollback-only schema/RLS integration suite.
+   rollback-only schema/RLS, OTP, patient self-service, enrollment and emergency
+   integration suites. Execute the real OTP service against the exact Identity
+   role, including concurrent completion/rate-limit and account-disable tests;
+   notification delivery uses an in-process test double.
+   Separately build a synthetic `0028` database with historical staff sessions,
+   verified OTP challenges and registration outbox records; back it up, dry-run
+   and apply `0029`–`0032`, verify preservation and fail-closed old OTP behavior,
+   and restore its pre-schema backup to an independent database for exact comparison.
+   A separate restored copy transfers schema/function ownership to a synthetic
+   NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites
+   with exact runtime callers so superuser function ownership cannot hide RLS failures.
 2. Seed a separate synthetic canonical patient/account/facility/membership,
    encounter, clinical note/revision and audit event before backup. Record
    per-table counts and deterministic sorted-row SHA-256 plus sequence state.
@@ -46,7 +56,8 @@ The executable covers:
    restored copy: promotion must block, earlier committed batches remain
    identifiable, and a blocked run cannot be retried as success.
 
-Evidence includes `evidence.json`, `commands.json`, `pre-migration.dump`, and
+Evidence includes `evidence.json`, `commands.json`, `pre-migration.dump`,
+`pre-schema-upgrade.dump`, and
 before/after count/checksum inventories. The local archive contains only
 synthetic data; operational backups must never enter Git or public artifacts.
 The evidence records source HEAD and whether the worktree was dirty. A dirty
@@ -54,7 +65,10 @@ local run is not evidence for an immutable release commit.
 
 ## Schema and import coverage
 
-The destination schema is exactly `0028`. Empty-schema bootstrap is covered;
+The candidate destination schema is exactly `0032`. The additive migrations
+`0029`–`0032` extend the approved `0028` baseline and require a new admitted
+release commit and artifacts; local success does not admit this candidate.
+Empty-schema bootstrap and a synthetic `0028` upgrade are covered;
 the data-rehearsal backup is taken after schema bootstrap and before legacy
 promotion. An existing staging schema upgrade requires its own pre-schema
 snapshot and restore verification; do not conflate these two backup points.
@@ -130,7 +144,7 @@ shell history, arguments, this document, CI output, or artifacts.
 | Gate | Required retained proof |
 | --- | --- |
 | Pre-migration backup | Snapshot/backup ARN or version, timestamp/LSN, KMS identity, byte/hash manifest where applicable, successful completion and retention |
-| Schema order | Source/destination versions, exact 28-file ledger and pending plan; dry-run outcome, execution order/times, zero pending afterward |
+| Schema order | Source/destination versions, exact 32-file ledger and pending plan; dry-run outcome, execution order/times, zero pending afterward |
 | Data totals | Per-entity source/staged/promoted/reconciled counts; every skipped/held/conflicting row explicitly accounted for |
 | Identity | Exact UUID/HID preservation, user/account associations, contact/identifier normalization, no unintended new canonical patients |
 | Constraints | Foreign keys, orphans, unique constraints/duplicate identifiers, not-null, check/enums, roles/RLS, facility relationships |

@@ -12,6 +12,7 @@ import { assertSafeNinVerificationResult } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER, type NinClaimedDemographics, type NinVerificationProvider } from './nin.types';
 import type { ApproveRegistrationCaseDto } from './dto/approve-registration-case.dto';
 import type { LinkRegistrationCaseDto } from './dto/link-registration-case.dto';
+import type { EnrollPatientDto } from './dto/enroll-patient.dto';
 import type { ResolveNinDto } from './dto/resolve-nin.dto';
 
 type RegistrationStatus =
@@ -63,6 +64,7 @@ export interface RegistrationCaseResult {
   status: RegistrationStatus;
   version: number;
   candidateCount: number;
+  candidates?: Array<{ patientId: string; fullName: string; dateOfBirth: string | null }>;
   patient?: { patientId: string; hid: string };
 }
 
@@ -90,6 +92,11 @@ export class NinRegistrationService {
 
   async resolve(input: ResolveNinDto, idempotencyHeader: string | undefined, context: DataAccessContext): Promise<RegistrationCaseResult> {
     const idempotencyKey = requireIdempotencyKey(idempotencyHeader);
+    if (this.provider.name === 'deferred') {
+      const error = new DomainProblem(503, 'NIN_PROVIDER_DEFERRED', 'NIN verification is deferred for this staging environment');
+      await this.auditFailure(context, 'identity.nin.verify', error);
+      throw error;
+    }
     let ninLookupHmac: string;
     try {
       ninLookupHmac = this.protector.lookup(input.nin);
@@ -294,7 +301,13 @@ export class NinRegistrationService {
         purposeOfUse: context.purposeOfUse,
         details: { status: row.status },
       });
-      return this.project(row);
+      const candidates = row.status === 'review_required' ? (await client.query<{
+        patientId: string; fullName: string; dateOfBirth: string | null;
+      }>(`select patient.id::text as "patientId", patient.full_name as "fullName", patient.dob::text as "dateOfBirth"
+           from identity.registration_case_candidates candidate
+           join identity.patients patient on patient.id = candidate.patient_id
+          where candidate.case_id = $1 order by candidate.match_score desc, patient.id limit 50`, [caseId])).rows : [];
+      return { ...this.project(row), candidates };
     });
   }
 
@@ -376,6 +389,29 @@ export class NinRegistrationService {
         throw error;
       }
     });
+  }
+
+  async enroll(caseId: string, input: EnrollPatientDto, header: string | undefined, context: DataAccessContext) {
+    const key = requireIdempotencyKey(header);
+    const digest = requestDigest('identity.patient.enroll', { caseId, input });
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const row = (await client.query<{ patient_id: string; hid: string; account_id: string; replayed: boolean }>(
+          'select * from identity.enroll_registered_patient($1::uuid, $2::bigint, $3, $4, $5, $6::char(64))',
+          [caseId, input.expectedVersion, input.email, input.reason, key, digest],
+        )).rows[0];
+        if (!row) throw new DomainProblem(503, 'PATIENT_ENROLLMENT_UNAVAILABLE', 'Patient enrollment is unavailable');
+        return { patientId: row.patient_id, hid: row.hid, contactVerificationRequired: true, replayed: row.replayed };
+      });
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : null;
+      if (code === '23505' || code === '23514' || code === '40001') {
+        throw new DomainProblem(409, 'PATIENT_ENROLLMENT_CONFLICT', 'Registration or account state changed; review this case before retrying');
+      }
+      if (code === '42501') throw new DomainProblem(403, 'PATIENT_ENROLLMENT_DENIED', 'Patient enrollment is not authorized');
+      if (code === 'P0002') throw new DomainProblem(404, 'REGISTRATION_CASE_NOT_FOUND', 'Registration case was not found');
+      throw error;
+    }
   }
 
   async linkExisting(caseId: string, input: LinkRegistrationCaseDto, idempotencyHeader: string | undefined, context: DataAccessContext): Promise<RegistrationCaseResult> {

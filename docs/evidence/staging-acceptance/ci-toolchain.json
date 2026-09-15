@@ -1,0 +1,140 @@
+{
+  "schema_version": "hid.tuf.local-ci-gates/v1",
+  "recorded_at": "2026-09-08T14:32:49.264Z",
+  "repository": "D-Eminence/hid-system",
+  "repository_id": "1317340803",
+  "owner_id": "182018869",
+  "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "ref": "refs/heads/tuf-production-release",
+  "ref_protected": true,
+  "event": "push",
+  "run_id": "34238812233",
+  "run_attempt": "1",
+  "job": "tuf-client",
+  "workflow_ref": "D-Eminence/hid-system/.github/workflows/tuf-local-gates.yml@refs/heads/tuf-production-release",
+  "workflow_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "gates": [
+    {
+      "id": "gate_1",
+      "outcome": "success"
+    },
+    {
+      "id": "gate_2",
+      "outcome": "success"
+    },
+    {
+      "id": "gate_3",
+      "outcome": "success"
+    },
+    {
+      "id": "gate_4",
+      "outcome": "success"
+    },
+    {
+      "id": "gate_9",
+      "outcome": "success"
+    },
+    {
+      "id": "gate_5",
+      "outcome": "success"
+    },
+    {
+      "id": "gate_6",
+      "outcome": "success"
+    },
+    {
+      "id": "gate_7",
+      "outcome": "success"
+    },
+    {
+      "id": "gate_8",
+      "outcome": "success"
+    }
+  ],
+  "artifacts": [
+    {
+      "name": ".github/workflows/tuf-local-gates.yml",
+      "size_bytes": 20299,
+      "sha256": "d6538c8a3ce34963cd1215858955a02b1e0a1b8f1744805ba47222bf35d9c325"
+    },
+    {
+      "name": "tools/tuf-release/toolchain/verified-upstream-build.json",
+      "size_bytes": 2622,
+      "sha256": "c0a1e025bcd49d9307fba9dffbcde74796f5a8318d0e1e60eef1b977a21f79ee"
+    },
+    {
+      "name": "tools/tuf-release/toolchain/production-build.json",
+      "size_bytes": 977,
+      "sha256": "a11b0874be880749da6fcd3dbeaa90c29837e0281dd66715bf4d01d8928734ec"
+    },
+    {
+      "name": "tools/tuf-release/go.mod",
+      "size_bytes": 2095,
+      "sha256": "af23b78b039ea0ee9d2e6144a264022ba1e7331c027a06f891e147a5e8da6494"
+    },
+    {
+      "name": "tools/tuf-release/go.sum",
+      "size_bytes": 8029,
+      "sha256": "76fd3d25015706b851d3d8172952e6216620c4b752264e25113cff0814b64910"
+    },
+    {
+      "name": "release/config/components.json",
+      "size_bytes": 6385,
+      "sha256": "d5133595bcd75bb46069d75266a8542ec5ed96a7fe9bbd4f0992e669be226d0e"
+    },
+    {
+      "name": "hid-tuf-client-reproducibility/hid-tuf-a",
+      "size_bytes": 15050352,
+      "sha256": "7b4424f4d86201977fb537059ce8b16ec128f5c405defef438d499d9df167165"
+    },
+    {
+      "name": "hid-tuf-client-reproducibility/hid-tuf-b",
+      "size_bytes": 15050352,
+      "sha256": "7b4424f4d86201977fb537059ce8b16ec128f5c405defef438d499d9df167165"
+    },
+    {
+      "name": "hid-tuf-signing-broker-reproducibility/bootstrap-a",
+      "size_bytes": 34288881,
+      "sha256": "706b30c877cc769370a120b6830c95889844d89658ce184eb5b60b7c876c77d6"
+    },
+    {
+      "name": "hid-tuf-signing-broker-reproducibility/bootstrap-b",
+      "size_bytes": 34288881,
+      "sha256": "706b30c877cc769370a120b6830c95889844d89658ce184eb5b60b7c876c77d6"
+    },
+    {
+      "name": "hid-tuf-operator-reproducibility/hid-tuf-journal-a",
+      "size_bytes": 30467324,
+      "sha256": "d6f22b046339659eb6b6d176cf01486158fa15574b9aaa69ddccc3a4600c7eba"
+    },
+    {
+      "name": "hid-tuf-operator-reproducibility/hid-tuf-journal-b",
+      "size_bytes": 30467324,
+      "sha256": "d6f22b046339659eb6b6d176cf01486158fa15574b9aaa69ddccc3a4600c7eba"
+    },
+    {
+      "name": "hid-tuf-operator-reproducibility/hid-tuf-publication-a",
+      "size_bytes": 30827305,
+      "sha256": "4a3538b7feda8b37f09e7e089c0a43c1e7c13ebd1a3549d2d22b1b014031d881"
+    },
+    {
+      "name": "hid-tuf-operator-reproducibility/hid-tuf-publication-b",
+      "size_bytes": 30827305,
+      "sha256": "4a3538b7feda8b37f09e7e089c0a43c1e7c13ebd1a3549d2d22b1b014031d881"
+    },
+    {
+      "name": "hid-tuf-operator-reproducibility/hid-tuf-repo-a",
+      "size_bytes": 22352759,
+      "sha256": "45f775be8eca9200c660616f8b446fc4afdc332fa1af29b34bb3c56e1568e527"
+    },
+    {
+      "name": "hid-tuf-operator-reproducibility/hid-tuf-repo-b",
+      "size_bytes": 22352759,
+      "sha256": "45f775be8eca9200c660616f8b446fc4afdc332fa1af29b34bb3c56e1568e527"
+    }
+  ],
+  "node": "v22.23.2",
+  "environment": "credential-free-validation",
+  "publication_result": "not-attempted",
+  "evidence_scope": "Local CI checks only; independently verify all job results and export run logs through the GitHub API. Not signed release provenance."
+}

@@ -11,11 +11,14 @@ import { TurnstileService } from './turnstile.service';
 import { OtpController } from './otp.controller';
 import { OtpService } from './otp.service';
 import { NotificationOtpClient } from './notification-otp.client';
+import { CurrentPatientContextService } from './current-patient-context.service';
+import { PatientSelfController } from './patient-self.controller';
+import { PatientSelfService } from './patient-self.service';
 
 @Global()
 @Module({
-  controllers: [AuthController, OtpController],
-  providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, TurnstileService, OtpService, NotificationOtpClient],
+  controllers: [AuthController, OtpController, PatientSelfController],
+  providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, TurnstileService, OtpService, NotificationOtpClient],
   exports: [TokenService, SecurityGuard, WorkloadAuthService],
 })
 export class AuthModule {}

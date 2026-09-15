@@ -8,7 +8,7 @@ import { DatabaseService } from '../database/database.service';
 import type { RecoveryOtpPurpose } from './dto/otp.dto';
 import { NotificationOtpClient, type OtpDeliveryOutcome } from './notification-otp.client';
 
-interface AccountRow { id: string; email: string; }
+interface AccountRow { id: string; email: string; token_version: string; }
 interface ActiveChallengeRow { id: string; created_at: Date; }
 interface ChallengeRow {
   id: string;
@@ -67,10 +67,11 @@ export class OtpService {
       | { kind: 'cooldown'; id: string }
     > => {
       const account = (await client.query<AccountRow>(
-        `select account.id::text, lower(account.email)::text as email
+        `select account.id::text, lower(account.email)::text as email, account.token_version::text
            from auth.accounts account
            left join identity.patients patient on patient.account_id = account.id
           where account.status in ('active', 'pending_reset')
+            and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
             and (lower(account.email) = lower($1) or upper(patient.hid_code) = upper($1))
           order by case when lower(account.email) = lower($1) then 0 else 1 end
           limit 1`,
@@ -105,12 +106,12 @@ export class OtpService {
       await client.query(
         `insert into auth.otp_challenges (
            id, account_id, recipient_hmac, purpose, channel, verifier_hmac,
-           verifier_key_version, expires_at, max_attempts, request_ip_hmac
+           verifier_key_version, expires_at, max_attempts, request_ip_hmac, account_token_version
          ) values ($1, $2, $3, $4, 'email', $5, $6,
-           clock_timestamp() + ($7 * interval '1 second'), $8, $9)`,
+           clock_timestamp() + ($7 * interval '1 second'), $8, $9, $10)`,
         [candidateChallengeId, account.id, recipientHmac, input.purpose, verifierHmac,
           this.environment.OTP_HMAC_KEY_VERSION, this.environment.OTP_EXPIRY_SECONDS,
-          this.environment.OTP_MAX_ATTEMPTS, ipHmac],
+          this.environment.OTP_MAX_ATTEMPTS, ipHmac, account.token_version],
       );
       return { kind: 'challenge', id: candidateChallengeId, email: account.email };
     });
@@ -149,10 +150,14 @@ export class OtpService {
                 challenge.verifier_hmac::text, challenge.expires_at,
                 challenge.failed_attempts, challenge.max_attempts
            from auth.otp_challenges challenge
-          where challenge.id = $1 and challenge.purpose = $2
+           join auth.accounts account on account.id = challenge.account_id
+          where account.status in ('active', 'pending_reset')
+            and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+            and challenge.account_token_version = account.token_version
+            and challenge.id = $1 and challenge.purpose = $2
             and challenge.verified_at is null
             and challenge.consumed_at is null and challenge.invalidated_at is null
-          limit 1 for update`,
+          limit 1 for update of challenge`,
         [input.challengeId, input.purpose],
       )).rows[0];
       if (!challenge) return 'invalid' as const;
@@ -207,11 +212,16 @@ export class OtpService {
     const suppliedTokenHmac = this.hmac('otp-completion', input.challengeId, input.verificationToken);
     const outcome = await this.database.withSystemTransaction(input.correlationId, async (client) => {
       const challenge = (await client.query<VerifiedChallengeRow>(
-        `select id::text, account_id::text, completion_token_hmac::text, completion_expires_at
-           from auth.otp_challenges
-          where id = $1 and purpose = $2 and verified_at is not null
-            and consumed_at is null and invalidated_at is null
-          limit 1 for update`,
+        `select challenge.id::text, challenge.account_id::text,
+                challenge.completion_token_hmac::text, challenge.completion_expires_at
+           from auth.otp_challenges challenge
+           join auth.accounts account on account.id = challenge.account_id
+          where challenge.id = $1 and challenge.purpose = $2 and challenge.verified_at is not null
+            and challenge.consumed_at is null and challenge.invalidated_at is null
+            and challenge.account_token_version = account.token_version
+            and account.status in ('active', 'pending_reset')
+            and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+          limit 1`,
         [input.challengeId, input.purpose],
       )).rows[0];
       if (!challenge || challenge.completion_expires_at.getTime() <= Date.now()
@@ -220,48 +230,20 @@ export class OtpService {
       const passwordHash = await argon2.hash(input.newPassword, {
         type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1,
       });
-      await client.query(
-        `update auth.accounts
-            set password_hash = $2, password_algorithm = 'argon2id',
-                password_changed_at = clock_timestamp(), status = 'active',
-                token_version = token_version + 1, row_version = row_version + 1,
-                updated_at = clock_timestamp()
-          where id = $1`,
-        [challenge.account_id, passwordHash],
+      const completed = await client.query<{ completed: boolean }>(
+        'select auth.complete_recovery_otp($1, $2, $3, $4) as completed',
+        [input.challengeId, input.purpose, suppliedTokenHmac, passwordHash],
       );
-      await client.query(
-        `update auth.sessions set revoked_at = clock_timestamp(),
-            revocation_reason = 'password_recovered_with_otp', row_version = row_version + 1
-          where account_id = $1 and revoked_at is null`,
-        [challenge.account_id],
-      );
-      await client.query(
-        `update auth.otp_challenges
-            set consumed_at = clock_timestamp(), invalidation_reason = null,
-                row_version = row_version + 1
-          where id = $1`,
-        [challenge.id],
-      );
-      await client.query(
-        `insert into identity.patient_assurance_states (
-           patient_id, account_id, state, source_system, contact_verified_at
-         ) select patient.id, account.id, 'CONTACT_VERIFIED', account.source_system, clock_timestamp()
-             from auth.accounts account join identity.patients patient on patient.account_id = account.id
-            where account.id = $1
-         on conflict (patient_id) do update set
-           state = case when identity.patient_assurance_states.state = 'NIN_VERIFIED'
-             then 'NIN_VERIFIED' else 'CONTACT_VERIFIED' end,
-           contact_verified_at = clock_timestamp(), updated_at = clock_timestamp(),
-           row_version = identity.patient_assurance_states.row_version + 1`,
-        [challenge.account_id],
-      );
-      return 'completed' as const;
+      return completed.rows[0]?.completed === true ? 'completed' as const : 'invalid' as const;
     });
     if (outcome !== 'completed') throw this.invalid();
     return { completed: true };
   }
 
   private async consumeRateLimit(client: PoolClient, scope: 'ip' | 'account' | 'recipient', bucket: string): Promise<boolean> {
+    // Serialize even an absent bucket: row locks alone lose concurrent first attempts.
+    await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',
+      [`otp-rate:${scope}:${bucket}`]);
     const result = await client.query<{ request_count: number; window_started_at: Date; blocked_until: Date | null }>(
       `select request_count, window_started_at, blocked_until
          from auth.otp_rate_limits where scope = $1 and bucket_hmac = $2 for update`,

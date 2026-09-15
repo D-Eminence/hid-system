@@ -67,7 +67,7 @@ const environmentSchema = z.object({
   OIDC_ISSUER_URL: optionalUrl,
   OIDC_AUDIENCE: optionalString,
   OIDC_JWKS_URL: optionalUrl,
-  NIN_PROVIDER_MODE: z.enum(['unavailable', 'test']).default('unavailable'),
+  NIN_PROVIDER_MODE: z.enum(['unavailable', 'deferred', 'test']).default('unavailable'),
   NIN_LOOKUP_HMAC_KEY_B64: optionalString,
   NIN_ENCRYPTION_KEY_B64: optionalString,
   NIN_KEY_VERSION: z.string().trim().min(1).max(64).default('local-v1'),
@@ -109,6 +109,10 @@ const environmentSchema = z.object({
   }
   if (environment.NIN_PROVIDER_MODE === 'test') {
     if (environment.NODE_ENV !== 'test') context.addIssue({ code: 'custom', path: ['NIN_PROVIDER_MODE'], message: 'The deterministic NIN provider is test-only' });
+    if (environment.HID_DEPLOYMENT_ENV === 'staging') context.addIssue({ code: 'custom', path: ['NIN_PROVIDER_MODE'], message: 'Staging NIN verification is deferred; test verification cannot be enabled' });
+  }
+  if (environment.NIN_PROVIDER_MODE === 'deferred' && environment.HID_DEPLOYMENT_ENV !== 'staging') {
+    context.addIssue({ code: 'custom', path: ['NIN_PROVIDER_MODE'], message: 'Deferred NIN mode requires the explicit staging deployment profile' });
   }
   if (environment.NIN_LOOKUP_HMAC_KEY_B64 && !isBase64Key(environment.NIN_LOOKUP_HMAC_KEY_B64, 32)) {
     context.addIssue({ code: 'custom', path: ['NIN_LOOKUP_HMAC_KEY_B64'], message: 'The NIN lookup key must be exactly 32 base64-encoded bytes' });

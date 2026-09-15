@@ -1,7 +1,7 @@
 import { createHash, createPublicKey, verify as verifySignature } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, open, readdir, realpath } from 'node:fs/promises'
-import { isAbsolute, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import duplicateKeyJson from 'json-dup-key-validator'
 import { classifyTufPath } from '../src/tuf-path-policy.mjs'
 
@@ -300,6 +300,38 @@ function physicalTargetPath(logicalPath, sha256, deployment) {
   }
   const basename = segments.pop()
   return `targets/${segments.join('/')}/${sha256}.${basename}`
+}
+
+// Public intake only: reuse the publication policy without creating trust state,
+// checking a rotation chain, signing, or authorizing a repository deployment.
+export async function validatePublicRootFile(path, options = {}) {
+  if (typeof path !== 'string' || !isAbsolute(path) || await realpath(path) !== path) fail('public root requires a canonical absolute file path')
+  const stat = await lstat(path)
+  if (!stat.isFile() || stat.size < 1 || stat.size > ROLE_POLICY.root.maximumBytes) fail('public root requires a bounded regular file')
+  const name = basename(path)
+  const match = /^([1-9][0-9]*)\.root\.json$/.exec(name)
+  if (!match || !Number.isSafeInteger(Number(match[1]))) fail('public root requires a versioned root filename')
+  const root = await readMetadata(dirname(path), name, { role: 'root', version: Number(match[1]) })
+  // createPublicKey can also derive public material from a private PEM. Intake
+  // explicitly forbids that input, even though no private bytes are returned.
+  for (const key of Object.values(root.signed.keys ?? {})) {
+    if (typeof key?.keyval?.public !== 'string'
+      || !/^-----BEGIN PUBLIC KEY-----\r?\n[A-Za-z0-9+/=\r\n]+-----END PUBLIC KEY-----\r?\n?$/.test(key.keyval.public)) {
+      fail('public root accepts only SPKI PUBLIC KEY PEM material')
+    }
+  }
+  const authority = parseRoot(root)
+  requireThreshold(authority, 'root', root, 'public root self-signature', false)
+  const now = options.now instanceof Date ? options.now : new Date()
+  if (!Number.isFinite(now.getTime())) fail('validation time is invalid')
+  freshness(root, 'root', now)
+  return Object.freeze({
+    version: root.version, sha256: root.digest, expires: root.signed.expires,
+    keys: Object.freeze(Object.entries(authority.roles).flatMap(([role, value]) => value.keyids.map(keyID => Object.freeze({
+      role, key_id: keyID, spki_sha256: digest(authority.keys.get(keyID).export({ type: 'spki', format: 'der' })),
+    })))),
+    self_signature_verified: true, rotation_chain_verified: false, custody_verified: false,
+  })
 }
 
 export async function validateTufRepositoryDirectory(directory, deployment, options = {}) {

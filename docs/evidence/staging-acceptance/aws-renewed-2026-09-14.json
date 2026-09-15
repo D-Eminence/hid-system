@@ -1,0 +1,364 @@
+{
+  "schema_version": "hid.staging-aws-renewed-checkpoint/v1",
+  "recorded_at": "2026-09-14T14:19:00.446443+00:00",
+  "environment": "staging",
+  "account_id": "659225405023",
+  "region": "eu-west-1",
+  "aws_authentication": "verified",
+  "aws_authentication_observed_at": "2026-09-14T14:16:50.818967+00:00",
+  "source_head": "fe1f2f45f787a12a1ab37ff82d316863a204ddcd",
+  "remote_release_branch_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "worktree_dirty": true,
+  "deployment_authorized": false,
+  "staging_accepted": false,
+  "production_locked": true,
+  "verified": {
+    "staging_regional_stack": "absent",
+    "staging_release_trust_stack": "absent",
+    "staging_rds_instance": "absent",
+    "staging_ecs_cluster": "absent",
+    "application_ecr_repositories_present": 0,
+    "application_ecr_repository_count": 11,
+    "signing_broker_ecr_repository": "absent",
+    "bootstrap_stack": "CREATE_COMPLETE",
+    "bootstrap_roles_present": 5,
+    "staging_certificates_issued": 2,
+    "database_secret_containers_present": 10,
+    "database_secret_versions": 0,
+    "notification_secret_versions": 0,
+    "ses_identity_count": 0,
+    "ses_verified_count": 0,
+    "ses_sandbox": true,
+    "turnstile_field_present": false,
+    "github_oidc_provider": "absent",
+    "github_staging_candidate_environment": "404",
+    "github_staging_existing_protections": "sole owner reviewer, protected branches, no administrator bypass",
+    "rds_selected_major": "16",
+    "rds_observed_default_minor": "16.13",
+    "rds_instance_class": "db.t4g.small",
+    "rds_orderable_gp3_in_az_count": 3,
+    "rds_ca_public_der_sha256": "6f7e01b62af24058417130b21e5fb9ad9f29b29c775c5107b657419010975886",
+    "rds_ca_matches_aws_default": true
+  },
+  "capacity": {
+    "quota_code": "L-3032A538",
+    "applied_vcpu": 6,
+    "default_desired_vcpu": 4.5,
+    "acceptance_desired_vcpu": 6.5,
+    "scaling_ceiling_vcpu": 13,
+    "simultaneous_ceiling_rollout_vcpu": 26,
+    "migration_task_vcpu": 0.5,
+    "conservative_bound_vcpu": 26.5,
+    "prepared_requested_vcpu": 32,
+    "request_submitted": false,
+    "prior_quota_requests": 0,
+    "account_usage": "no datapoints; unverified, not zero"
+  },
+  "preparation": {
+    "synth": {
+      "status": "PASS",
+      "template": {
+        "path": "release/local/20260914-aws-renewed/economy-assembly/Hid-staging-Regional.template.json",
+        "sha256": "56141dc6e28585b8d1b0dcd7570fbed2797cd332a71b13912c446eab3d999122"
+      },
+      "resources": 434,
+      "parameters": 54,
+      "bytes": 545312
+    },
+    "diff": {
+      "status": "PASS",
+      "stacks_with_differences": 1,
+      "change_set_created": false,
+      "deployment": false,
+      "asset_upload": false
+    },
+    "iam_simulation": "tested identity-policy actions allowed; resource policy/SCP/all context/live execution not established",
+    "capacity_tests": {
+      "status": "PASS",
+      "cases": 3
+    },
+    "secret_readiness": "PASS",
+    "release_contract_verification": "PASS",
+    "acceptance_plan": {
+      "path": "release/local/staging-acceptance-parameter-plan.json",
+      "sha256": "9576150eff088973c32df9bc69d2ac8b97236dfba48920a9b5a617041c83f364"
+    },
+    "existing_parameter_plan_values_changed": false,
+    "local_parameter_plan_modes": "0600 under0700 directory",
+    "new_environment_configurations": "eight proposed staging-only policies, no secrets/variables/dispatch and not applied"
+  },
+  "external_inputs": [
+    {
+      "input": "Cloudflare staging DNS/Turnstile and scoped publisher authorization",
+      "where": "Cloudflare dashboard; existing staging identity-sensitive JSON and version-pinned raw publisher SecretString in Secrets Manager",
+      "blocks": "live browser/API deployment and publication"
+    },
+    {
+      "input": "SES sender and dedicated Novu staging environment/delivery channel",
+      "where": "SES/Novu dashboards and existing notification-provider JSON in staging Secrets Manager",
+      "blocks": "notification API/worker runtime deployment; then delivery acceptance"
+    },
+    {
+      "input": "two controlled test inboxes and send authorization",
+      "where": "ignored release/local/staging-journey-input.json",
+      "blocks": "live recovery/delivery/browser acceptance"
+    },
+    {
+      "input": "owner decision and AWS approval for32-vCPU regional Fargate quota request",
+      "where": "AWS Service Quotas eu-west-1 L-3032A538; exact request prepared locally",
+      "blocks": "full active-worker launch and configured scaling/rollout envelope; not empty foundation"
+    },
+    {
+      "input": "actual release custodians and independently trusted public material",
+      "where": "offline/hardware custody and public intake; no private keys in chat",
+      "blocks": "signed admission/publication and admitted staging deployment"
+    }
+  ],
+  "remaining_agent_work_after_prerequisites": [
+    "final source approval and workflow installation/bindings",
+    "account-bound OIDC/role/trust plan and separately approved immutable resources",
+    "build/scan/admit actual artifacts",
+    "generate origin/database secrets during authorized provisioning",
+    "regional deployment, migration, live backup/restore, provider/browser and rollback acceptance"
+  ],
+  "nin_work_changed": false,
+  "nin_required_for_staging": false,
+  "preserved_nin_runtime_and_related_sources": [
+    {
+      "path": "apps/web/scripts/care-portal.browser.mjs",
+      "sha256": "7776879a98f4fe51223500feee42fb82837f4b8972ecc670f89bd39e275845b9"
+    },
+    {
+      "path": "apps/web/src/lib/patientRegistrationApi.ts",
+      "sha256": "1f539d0a789bf17c8ba778c7fd2b6fb0d2398df036b16902625da03044b04481"
+    },
+    {
+      "path": "apps/web/src/pages/doctor/PatientRegistration.tsx",
+      "sha256": "0576eab8928a5f2738a01668cd70f57d4b17a7d86d200855f0ae85e7a5dad8f3"
+    },
+    {
+      "path": "docs/METAMAP_NIN_CONTRACT.md",
+      "sha256": "e93b0694f9bfa584fe3765aae71a667f6991808b60ae8753d38691b923b4e92f"
+    },
+    {
+      "path": "docs/STAGING_PATIENT_JOURNEYS.md",
+      "sha256": "10a8e85726d91c2d8719ab74ae20a492f8d9c9f902757cd2e14ad713449247c0"
+    },
+    {
+      "path": "infra/aws/src/hid-regional-stack.ts",
+      "sha256": "5c50ee5d0c9471d1c13007750f9d19792461316f368488545332a8b5e4129fd5"
+    },
+    {
+      "path": "infra/aws/test/infrastructure.test.ts",
+      "sha256": "b6dc12d52c2015864ebcc220a527ae776f49db0ebcbc8bedfc106b00444f31de"
+    },
+    {
+      "path": "release/config/staging-journey-input.template.json",
+      "sha256": "2e359e1394beb9e0b7481f734075df76605e480526bcc9460ffd9219eaf912cf"
+    },
+    {
+      "path": "release/config/staging-nin-contract.template.json",
+      "sha256": "6ddd3c4560a10db69347604a2a07242dc635322c7950fae124375bfa62051781"
+    },
+    {
+      "path": "scripts/prepare-staging-journey-fixture.mjs",
+      "sha256": "91a246970ca262e88dc736b6c297cdbeef537d3694b9b55a26a10904ca2065e0"
+    },
+    {
+      "path": "scripts/staging-external-preflight.py",
+      "sha256": "ffd23997d2bdff8ca2d2afc00a598cfeb3b9e9910429bf414f94f45b8f3cad1b"
+    },
+    {
+      "path": "scripts/staging-metamap-secret.py",
+      "sha256": "1baaa090f04bd5c9543c879695053db491952aa45a7cc660f1658419a405e555"
+    },
+    {
+      "path": "scripts/tests/staging-journey-fixture.test.mjs",
+      "sha256": "f1307c2a1621f42a38ebb84b2e8ae4718a375b196d76e86ec0c871e2532b906a"
+    },
+    {
+      "path": "scripts/tests/test_staging_external_preflight.py",
+      "sha256": "c8cb6af68bb20684d48443f66332ca1da920bd91abeb5d477a1bf4a41510801f"
+    },
+    {
+      "path": "scripts/tests/test_staging_metamap_secret.py",
+      "sha256": "183ffce274d49b3e474db4ff0d9bc4b9fdedbf53ad4d96bf5e42c88d16041b78"
+    },
+    {
+      "path": "scripts/tuf-staging-migration-rehearsal.mjs",
+      "sha256": "c3d6d683eee4beebcebb46becb8e4529e4c94e904cd6b581a38b8450b56648c1"
+    },
+    {
+      "path": "services/identity-api/.env.example",
+      "sha256": "cab45b20ccdb5835c03eaf5cdc9bc8913e17390ee3892254944e8bfd299b7445"
+    },
+    {
+      "path": "services/identity-api/scripts/verify-patient-runtime.mjs",
+      "sha256": "6ef3c40e2d53d2cdc504731cd9c5bd1fda5715567a35c2460df82adef57ea162"
+    },
+    {
+      "path": "services/identity-api/src/config/environment.ts",
+      "sha256": "dd4ca4740a6bed205baa2f7eaf57f01dd930d5381f2d5507d20957bde1e2d5d4"
+    },
+    {
+      "path": "services/identity-api/src/identity/identity.module.ts",
+      "sha256": "948d2ba78a314be999f66ca267492d0cf9d0c693c8d93f18dfaf04197337aa80"
+    },
+    {
+      "path": "services/identity-api/src/identity/metamap-govchecks.client.spec.ts",
+      "sha256": "12711697c47d97b6ae0eb264d80c6a6115d1d83c1c00fc12506cb95e28df2fc0"
+    },
+    {
+      "path": "services/identity-api/src/identity/metamap-govchecks.client.ts",
+      "sha256": "a8886d5e5eeb3bddf6c4c8b830b47b5186dcf8e89522df77079c62acecc3a54b"
+    },
+    {
+      "path": "services/identity-api/src/identity/metamap-webhook-signature.spec.ts",
+      "sha256": "869bb364175ab5c4af1dec2ffc4a9dfd8838a9797b4ed18f7911501eef73847b"
+    },
+    {
+      "path": "services/identity-api/src/identity/metamap-webhook-signature.ts",
+      "sha256": "b2bb719cd6b96e7190a020ca2e7b65612b3553be2ac055340207f9ed626b52de"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-deferred-staging.spec.ts",
+      "sha256": "33c2218a0b51fe46c9124635fcb7ccc41b38b1a5cf17cb1eab02a73002039c28"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-registration.controller.ts",
+      "sha256": "3466401533702b2280d23ba35e7173754a791542069c2c6e30620dfcbf4c6bc4"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-registration.service.ts",
+      "sha256": "0c006ea5fb16bbf1fb5d6d5d6c5115a7e27c0ba09324f3604e81f0510f383125"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-verification.provider.ts",
+      "sha256": "f81a23f6cca6a2704cd75992c07998576d5284aaccca8583fbebcff9d716f744"
+    }
+  ],
+  "security_document_sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+  "production_template_retained_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+  "production_infrastructure_source_changed": false,
+  "cloud_resource_mutations": 0,
+  "github_mutations": 0,
+  "messages_sent": 0,
+  "secret_mutations": 0,
+  "database_mutations": 0,
+  "deployments": 0,
+  "commits_or_pushes": 0,
+  "source_files": [
+    {
+      "path": "infra/aws/scripts/assess-staging-capacity.mjs",
+      "sha256": "b3b85f0e9072fcfc6a20b76936359e55993c74bf19da35d2e5c87a5f17a610cd"
+    },
+    {
+      "path": "scripts/tests/staging-capacity.test.mjs",
+      "sha256": "550970ec1bed4b4537f36db3b71eeab75a52b3fc903f98eb418b2049352d5f42"
+    },
+    {
+      "path": "docs/STAGING_AWS_CHECKPOINT.md",
+      "sha256": "ec1e7509198a87c5f6c9ee7e8b3dcc8476f21de8da921fce2070b86119f07bd9"
+    },
+    {
+      "path": "docs/TUF-STAGING-EXECUTION.md",
+      "sha256": "0ca831e86fcd6227bbffda33c8748f2b83b1f5cbe6edc2a067bdf9ac88b13b10"
+    },
+    {
+      "path": "docs/TASK.md",
+      "sha256": "a0248b964c918e86a505d95fbd6db9e1046fb561805a1e8f4cd0bb8594e588bf"
+    },
+    {
+      "path": "docs/AWS_DEPLOYMENT_RUNBOOK.md",
+      "sha256": "ed9daeac546cf47aaba7a18ceb0d8466c831b834f0fef5997b355eb5e526ae26"
+    },
+    {
+      "path": "docs/README.md",
+      "sha256": "e8336dda4dabfb0ce5699339d853188cc41df1b7b232c640ad7fccee501394c7"
+    },
+    {
+      "path": "docs/evidence/staging-acceptance/README.md",
+      "sha256": "aa8c08e6499c0f6a2fdf4d94e822db24419104e8a05e5e1cc25c21dbdd108611"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "release/local/20260914-aws-renewed/external-preflight.json",
+      "sha256": "e054c6d174f4167d1ffd22cbc42f4a7f7b071b18711a87f260a9d5348e8fa0a8"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/external-preflight-final.json",
+      "sha256": "ad0228e7aed4f41793165720b14c14678140f75d70401c5d632a5cca25c696c7"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/provider-readback.json",
+      "sha256": "58b754e7707af2c462495ac2dec165931c7ea4d2f567fb018768f781ac5293e9"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/provider-readback-final.json",
+      "sha256": "ab886136366ce2b1590eb2533ed5e2ac21b1207f276897cd8226e53d4c8e4801"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/aws-inventory.json",
+      "sha256": "cfa09c1868008c2504bf03ddcf17517a3e215e19cc1d71fc94e726705d0f3c04"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/github-staging-prerequisites.json",
+      "sha256": "25f9a776c17ce60573f2ae3674c3b947c9b8963acef26bc2981962a2f910b797"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/permissions-and-quota-history.json",
+      "sha256": "fad721d16c2bcdebd4cfb079fb3aae7c833f9a9f683bedac059b49aad75fec34"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/fargate-usage.json",
+      "sha256": "cc4dfe3a37d2b7ea77a87eecbed186fcbca7a732932026f41d764184e65a9277"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/economy-capacity.json",
+      "sha256": "0c8c797a608bff5a446cfd8ee3b9d51182dfc9ef709a2ea7b445ac7fd966b72c"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/acceptance-capacity.json",
+      "sha256": "2048eaac8d52edac8a50b0b497ffa5eb31c867a7f5272d5682a080a903343a62"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/economy-synth.log",
+      "sha256": "e95c74c109207304fc754b9de8fdb2b4ae433363fee1603eb723c9ed56bd98a4"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/regional-diff.log",
+      "sha256": "4a79a6bb42ef6a6b654e51db69204d0b4db3621b625e3e8266a741161e1046b5"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/rds-deployment-compatibility.json",
+      "sha256": "c5fad16f4339c9cd29d8edc8dc085ca1f82dbaf3c8811c60b1d95a4e28bfdbf5"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/capacity-tests-detailed.log",
+      "sha256": "935578d294684c80545de756d0009fa5e1b33a1e7082d9d42250a75e96d04a84"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/secret-readiness.log",
+      "sha256": "b2aee45f0168d81c7d478a588ac72a5f51e1e5c575128920c6ce52fbf73abd99"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/release-verification.log",
+      "sha256": "cb5132b17a8eb1cb5a7c832b40f1cab7316cce8904791f8d6831e0ba8ca0eca7"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/github-environment-plan.json",
+      "sha256": "20bbde5ba2e35c2aa61eb23c062cf53e759ebed661ebae5913a4b4e531dd5c50"
+    },
+    {
+      "path": "release/local/20260914-aws-renewed/fargate-quota-request.json",
+      "sha256": "f7afaca7845a35f30b33bbd3b8e99a34742cf5851084bec334489e564896f83a"
+    }
+  ],
+  "evidence_root": "/home/l2e/hid-system/release/local/20260914-aws-renewed",
+  "limitations": [
+    "No live runtime exists, so actual task IAM, TLS, workload token, application and delivery checks remain unavailable",
+    "No requested quota increase or configured environment has been applied",
+    "An initial local RDS query assertion assumed a minor version; it stopped before cloud calls, and the corrected readback used the documented major-version default query"
+  ]
+}
