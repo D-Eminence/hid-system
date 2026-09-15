@@ -79,3 +79,19 @@ These inputs block live browser setup and protected publication. Actual browser
 Siteverify, hostname/action/replay rejection, DNS/TLS, proxy and direct-origin
 denial remain acceptance checks after authorized deployment. NIN is deferred
 and supplies no prerequisite for any of these steps.
+
+## September 15 CI toolchain correction
+
+The first review-branch CI run found the pinned Wrangler dependency tree affected
+by [GHSA-rgj7-g3m4-5g8c](https://github.com/advisories/GHSA-rgj7-g3m4-5g8c).
+Wrangler is now pinned to `4.131.2`, with its required compatible Workers types
+`5.20260911.1`; its dependency tree uses patched `sharp` `0.35.4`. Registry
+integrities and the installed schema/CLI hashes remain explicitly checked.
+No forced peer resolution, audit exclusion or production configuration change was used.
+
+The updated package passes the audit with zero vulnerabilities, all 55 Cloudflare
+tests, all 78 release tests, schema/config verification and seven actual staging
+Worker dry runs. Those dry runs do not publish Workers, modify DNS or prove live
+Turnstile acceptance. The first CI failure is retained in private evidence.
+The release-test CI job now installs the shared Cloudflare validator's locked
+dependencies before importing it; no test or gate is skipped.

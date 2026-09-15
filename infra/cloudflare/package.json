@@ -23,8 +23,8 @@
     "tuf:activate:production": "node scripts/tuf-wrangler.mjs activate-route production"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260831.1",
+    "@cloudflare/workers-types": "5.20260911.1",
     "json-dup-key-validator": "1.0.3",
-    "wrangler": "4.127.1"
+    "wrangler": "4.131.2"
   }
 }

@@ -1,6 +1,6 @@
 # Staging release workflow installation
 
-The current staging application changes and the eight new candidate/capability workflows are local preparation. They have no approved successor commit or remote execution receipt. The protected source branch remains `refs/heads/tuf-production-release`; its name grants no production authority. No workflow is dispatched while the Fargate quota request is pending.
+The current staging application changes and the eight new candidate/capability workflows are prepared in [draft PR #2](https://github.com/D-Eminence/hid-system/pull/2). Ordinary CI runs on that review branch. They have no approved successor commit or protected execution receipt. The protected source branch remains `refs/heads/tuf-production-release`; its name grants no production authority. No workflow is dispatched while the Fargate quota request is pending.
 
 The read-only GitHub observation at `2026-09-14T14:45:38Z` recorded remote source `a709e643a731b444f7cb775b2b16fe28164146a7` with seven successful required checks. Only `tuf-local-gates.yml`, `tuf-protected-readiness.yml` and reusable `tuf-publish.yml` existed on that source. It preceded the separately recorded installation of eight staging environments; use the later environment installation receipt for current policy state.
 
