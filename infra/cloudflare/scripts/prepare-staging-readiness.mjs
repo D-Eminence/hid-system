@@ -46,6 +46,10 @@ export function planCloudflareReadiness(configs) {
       source: 'Actual authorized staging ALB DNS readback; no placeholder target',
       requirement: 'Confirm API proxy/TLS choice against existing WAF/origin controls before completing record' },
       inventory_required: [host('web'), ...apps.filter(app => app !== 'web').map(host), host('updates'), apiHost],
+      custom_domain_reads_required: [...apps, 'updates'].map(app => ({
+        method: 'GET', hostname: host(app), expected_worker: app === 'updates' ? updates.name : `hid-${app}-staging`,
+        path: `/accounts/20c809ffe35ccb2c240d19a664dff97a/workers/domains?hostname=${host(app)}&zone_id=69d385b9f6a3233a7113c525524f14fe`,
+      })),
       do_not_precreate_cnames_for_worker_custom_domains: true,
       nameserver_or_apex_changes: false,
       conflict_policy: 'Read current staging records/custom domains first; do not replace unknown records' },
@@ -63,7 +67,7 @@ export function planCloudflareReadiness(configs) {
       destinations: ['Seven named staging Worker ORIGIN_AUTH_TOKEN bindings', 'StagingCloudflareOriginSecret WAF parameter'],
       expose_in_frontend_or_plan: false },
     minimum_authority: {
-      inventory: ['Zone Read for this zone', 'DNS Read for this zone', 'Workers Routes Read for this zone', 'Turnstile Sites Read for this account'],
+      inventory: ['Zone Read for this zone', 'DNS Read for this zone', 'Workers Routes Read for this zone', 'Workers Scripts Read for this account', 'Turnstile Sites Read for this account'],
       setup: ['DNS Edit for this zone', 'Turnstile Sites Write for this account'],
       publisher: ['Workers Scripts Edit for this account', 'Workers Routes Edit for this zone'],
       scope_limitation: 'Account/zone permissions are not per-worker staging isolation; protected tooling must enforce exact staging names' },

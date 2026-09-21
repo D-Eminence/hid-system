@@ -40,13 +40,38 @@ Validation: `node --test --test-isolation=none release/test/staging-release-audi
 
 ## Concrete offline approval preparation
 
-The last green review source was `fe472b818caf6488d57ffb88875eec2300a4b7e9` in
+The September 21 green review source was `27cddc3d9447bb0e0edc9612107a60014dd772b9` in
 [draft PR #2](https://github.com/D-Eminence/hid-system/pull/2). It is not an approved
 protected source; any follow-up source still requires ordinary CI. The review branch
 preserves the original workspace HEAD/index and the existing user edit to
 `docs/SECURITY.md`.
 
-Two ignored, mode-0600 review artifacts are ready:
+The refreshed metadata-only review packet is
+`release/local/20260921-provider-preparation/release-custody-approval-packet.json`.
+It records that exact source tree, all eleven workflow blob/SHA-256 pins, passing
+ordinary CI and the current protected environment policies. Its adjacent
+`staging-public-custody.json` is a private blank intake copy: structure validation
+passes but authentic public inputs are missing and authorization remains false.
+Final-source approval, source-bound template synthesis and any later immutable
+caller installation remain separate. Do not treat the older files below as
+verified provenance for a changed source.
+
+The foundation was subsequently synthesized offline from a clean detached checkout
+of that exact `27cddc3` commit with its lockfile-installed dependencies and recorded
+CDK context. The new private pair is
+`release/local/20260921-provider-preparation/staging-trust-foundation.exact-source-27.review-template.json`
+and `.review.json`. Template SHA-256 is
+`c0065d8c2989b6bc011b719779188a312c2984dbdb1d3f534fc1d3047089f942`:
+32 resources comprising eight retained KMS keys, one retained broker ECR repository,
+three retained encrypted/versioned archives, three bucket policies, one CloudTrail
+trail, eight capability roles and eight role policies. Archives propose a 90-day
+COMPLIANCE default. The Lambda signing broker and publisher secret binding remain
+absent. This verifies source provenance for the recorded commit only; it makes no
+cloud call, creates no keys or resources, and leaves owner retention approval and
+deployment authorization false. Compare or regenerate it for the final approved
+source before requesting execution.
+
+Two historical ignored, mode-0600 review artifacts are retained:
 
 - `release/local/20260915-staging-preparation/staging-trust-foundation.review.json`
   and its adjacent `.review-template.json`: account `659225405023`, `eu-west-1`,

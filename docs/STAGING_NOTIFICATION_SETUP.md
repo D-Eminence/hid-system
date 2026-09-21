@@ -48,6 +48,14 @@ put API keys into these JSON inputs, source, shell arguments or chat. SES sendin
 identity and sandbox recipients must be verified before sends. An empty Secrets
 Manager container is not configured delivery.
 
+The renewed September 21 inventory confirms this notification container exists
+with zero versions, and SES has zero identities. Sender, Novu environment/region/
+channel and both test inboxes remain unselected; all send authorizations are
+false. Use the [hidden staging entry helper](STAGING_PROVIDER_SECRET_ENTRY.md)
+to add the actual `sesFromAddress` and `novuApiKey` securely after selecting them.
+Its default mode only inspects; writing a field neither verifies an SES identity
+nor authorizes a message.
+
 The plan lists the four exact runtime workflow IDs and their generic message.
 The subscriber UUID remains null until the accepted synthetic journey manifest
 exists; then use `manifest.ids.patient`, never `ids.account`. Inspect existing

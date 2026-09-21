@@ -22,6 +22,20 @@ test('plan binds all existing staging workers and preserves unresolved external 
   assert.equal(plan.dns.nameserver_or_apex_changes, false);
   assert.equal(plan.publisher_secret.format, 'raw SecretString, not JSON');
   assert.equal(Object.keys(plan.source_sha256).length, 8);
+  const expectedWorkers = new Map([...plan.frontends.map(frontend => [frontend.hostname, frontend.worker]),
+    [plan.release_repository.hostname, plan.release_repository.worker]]);
+  assert.equal(plan.dns.custom_domain_reads_required.length, expectedWorkers.size);
+  for (const read of plan.dns.custom_domain_reads_required) {
+    assert.equal(read.method, 'GET');
+    const url = new URL(read.path, 'https://api.cloudflare.com');
+    assert.equal(url.pathname, `/accounts/${plan.account_id}/workers/domains`);
+    assert.deepEqual([...url.searchParams.keys()].sort(), ['hostname', 'zone_id']);
+    assert.equal(url.searchParams.get('zone_id'), plan.zone_id);
+    assert.equal(url.searchParams.get('hostname'), read.hostname);
+    assert.equal(read.expected_worker, expectedWorkers.get(read.hostname));
+    expectedWorkers.delete(read.hostname);
+  }
+  assert.equal(expectedWorkers.size, 0);
 });
 
 test('rejects production routes, altered API origin and fallback default environments', async () => {

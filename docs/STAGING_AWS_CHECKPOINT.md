@@ -1,21 +1,23 @@
 # AWS staging checkpoint — updated 2026-09-21
 
-**AWS SESSION EXPIRED. STAGING NOT DEPLOYED OR ACCEPTED. PRODUCTION LOCKED.**
+**AWS AUTHENTICATED. QUOTA HOLD ACTIVE. STAGING NOT DEPLOYED OR ACCEPTED. PRODUCTION LOCKED.**
 
-The September 14 renewed `hid-admin` session authenticated account `659225405023`, region
-`eu-west-1`. The initial resource checks below ran between 14:02 and 14:12 UTC.
-The owner subsequently submitted the **32-vCPU** Fargate request. AWS readback
-at **2026-09-14 21:04 UTC** reported **`CASE_OPENED`, applied quota 6**. A September 15
-read attempt failed because the browser session expired; September 21 read-only
-quota and ECR checks returned the same error. The current request state
-and applied capacity are unverified. No duplicate request or deployment is
+The renewed `hid-admin` session authenticated account `659225405023`, region
+`eu-west-1`. Fresh quota readback at **2026-09-21 16:04 UTC** confirms the existing
+**32-vCPU** request remains **`CASE_OPENED`, applied quota 6**,
+`request_pending: true`, `quota_gate_cleared: false`. The regional stack and all
+eleven application repositories are absent; the CDK bootstrap version is **32**.
+The final quota recheck at **21:01 UTC** returned the same pending status and limit.
+These successful reads supersede the earlier expired-session observations.
+No duplicate request or deployment is
 permitted while pending, including empty foundations and Cloudflare publication.
 This pending AWS decision requires no second user submission.
 
-During the continuation, eight staging GitHub environments were created and their
-owner-review/protected-branch/no-admin-bypass policies verified. No workflow was
-run. No AWS resource, secret, DNS record, database or deployed application was
-changed. No production API target was requested. NIN source/configuration remains
+The earlier continuation created eight staging GitHub environments; their
+owner-review/protected-branch/no-admin-bypass policies were verified again on
+September 21. Ordinary source CI has run; no protected release workflow was
+dispatched. The current continuation changed no AWS resource, secret, DNS record,
+database or deployed application. No production API target was requested. NIN source/configuration remains
 deferred; the Identity task is unchanged. The regional stack gained an explicit Novu
 endpoint parameter; its production template remains byte-identical. Release capability
 preparation and its separately tested staging build policy are recorded in the
@@ -30,7 +32,11 @@ and full-template hash comparison remain required before future execution.
 It makes no AWS call and does not establish current regional-stack or repository
 absence. It is not deployable while the quota request is pending.
 
-## What the renewed session established
+## Bounded AWS observations
+
+The broader infrastructure inventory below was established on September 14.
+September 21 readback refreshed identity, quota, bootstrap/stack/repository
+absence and provider readiness; it does not refresh every historical row.
 
 | Check | Actual result |
 | --- | --- |
@@ -42,9 +48,9 @@ absence. It is not deployable while the quota request is pending.
 | Certificates and S3 endpoint | Both referenced staging ACM certificates are issued and unused. The referenced AWS-managed S3 prefix list belongs to `eu-west-1` |
 | Database compatibility | PostgreSQL major 16 currently selects default 16.13; `db.t4g.small`, encrypted gp3 storage is orderable in three availability zones. The selected CA matches the current `rds-ca-rsa2048-g1` thumbprint; its base64 value is 1,932 bytes |
 | Secrets | Auth signing/login keys and OTP HMAC present. Turnstile absent. The notification-provider container and all ten database secret containers exist with zero versions |
-| SES | Sending enabled, sandbox access, zero identities and zero verified identities |
+| SES | September 21: sending enabled, HEALTHY, sandbox access, zero identities and zero verified identities |
 | GitHub/AWS federation | The account's GitHub OIDC provider is absent. This is an agent provisioning task after the exact release trust plan is approved, not an ARN the user must invent |
-| GitHub release branch | Approved base remains `a709e643a731b444f7cb775b2b16fe28164146a7`. The last green review source was `fe472b818caf6488d57ffb88875eec2300a4b7e9` in draft [PR #2](https://github.com/D-Eminence/hid-system/pull/2); it is unapproved and none of its workflows is on the protected branch |
+| GitHub release branch | Approved base remains `a709e643a731b444f7cb775b2b16fe28164146a7`. Review source `27cddc3d9447bb0e0edc9612107a60014dd772b9` passed all seven ordinary CI checks in draft [PR #2](https://github.com/D-Eminence/hid-system/pull/2); it is unapproved and none of its new workflows is on the protected branch. Any later follow-up needs its own CI |
 | GitHub staging protections | Existing `staging` and `staging-publisher` environments retain the sole owner reviewer, protected branches and disabled administrator bypass; each has zero variables/secrets. The eight previously absent candidate/capability environments were subsequently installed with the same protections; no variables, secrets or workflow runs |
 
 Policy simulation is bounded evidence and can differ from actual authorization;
@@ -56,8 +62,8 @@ specifies major 16, so check the selected minor and CA again at provisioning.
 
 ## Capacity and prepared acceptance settings
 
-The last verified **Fargate On-Demand vCPU quota was 6**, quota `L-3032A538`. The existing
-request `53cf4fecbdee43808970dadf399dce15KHtG3UD0` asks for 32 vCPUs and last reported
+The September 21 verified **Fargate On-Demand vCPU quota is 6**, quota `L-3032A538`. The existing
+request `53cf4fecbdee43808970dadf399dce15KHtG3UD0` asks for 32 vCPUs and reports
 `CASE_OPENED` (AWS support processing). The earlier empty-history observation is
 superseded; do not submit another request. Its CloudWatch usage query returned no datapoints;
 that does not prove unused account capacity.
@@ -137,7 +143,6 @@ node infra/aws/scripts/assess-staging-capacity.mjs \
 
 | Exact action/input | Where and how | Blocking stage |
 | --- | --- | --- |
-| Renew the expired AWS browser session | Run `aws login --profile hid-admin` locally, complete AWS browser authentication, then run `python3 scripts/check-staging-fargate-quota.py` and `python3 scripts/check-staging-ecr-bootstrap.py`. No keys in chat | Current quota/capacity and exact bootstrap-absence verification; deployment remains held |
 | Authorize staging DNS/Turnstile operations and the scoped publisher token | Existing Cloudflare account/zone. Renew its browser session locally if needed. Turnstile secret is a JSON field `turnstileSecretKey` in `/hid/staging/identity-sensitive`, preserving existing fields. Store publisher API token as the **raw SecretString**, not JSON, in an AWS secret named `hid-staging-cloudflare-publisher-token-*`; the publisher pins its ARN/version | Live browser/API deployment and protected publication. Real Siteverify and DNS/TLS behavior must then pass acceptance |
 | Select the controlled SES sender and Novu staging environment/channel; securely configure the two fields | SES `eu-west-1` and Novu dashboards; JSON `sesFromAddress` and `novuApiKey` in `/hid/staging/notification-provider`. Retain the chosen Novu region/API URL. No new AWS account or SES API key | Notification API/Worker startup and functional staging deployment. SES identity verification, workflow/channel activation and receipt are subsequent acceptance checks |
 | Confirm two distinct controlled patient/clinician inboxes and separate test-send authorizations | Edit `release/local/staging-journey-input.json` locally; set `patient_email`, `staff_email` and `controlled_test_recipients_confirmed`. Separately authorize each intended SES verification, recovery OTP and Novu test in `release/local/staging-notification-input.json`, following [notification setup](STAGING_NOTIFICATION_SETUP.md). Contact control alone does not authorize a send. No passwords, OTPs or provider keys belong in either file | Live recovery/delivery/browser acceptance; these contacts do not block an empty AWS foundation |
@@ -148,8 +153,9 @@ Notification account requirements and minimum scopes remain in the
 [provider matrix](STAGING_PROVIDER_ACCOUNTS.md): SES and Novu REQUIRED;
 Termii and Meta WhatsApp OPTIONAL; Infobip FALLBACK. Do not send secrets in chat.
 
-Draft PR #2's earlier head passed ordinary CI; the bootstrap follow-up needs its
-own CI and owner review. The protected release branch has not changed. Final protected workflow bindings, OIDC/provider-role
+Draft PR #2's bootstrap follow-up passed ordinary CI and still needs owner review.
+Any subsequent source change requires its own CI. The protected release branch has
+not changed. Final protected workflow bindings, OIDC/provider-role
 readback, generated origin/database secrets, image digests, resource IDs, and a
 concrete immutable retention/key decision remain before protected execution. They are
 not values the user must fabricate. Object Lock creation remains prohibited until its
@@ -162,7 +168,7 @@ Read the **existing** request and applied quota without submitting anything:
 python3 scripts/check-staging-fargate-quota.py
 ```
 
-After that read succeeds, the following also remains read-only and confirms that
+The following also remains read-only and confirms that
 the regional stack and all eleven application repositories are still absent before
 any future reviewed bootstrap path:
 
@@ -177,9 +183,9 @@ actual case outcome. Even after 32 is applied, available account capacity and al
 release/provider gates remain unverified. Exit zero means reads succeeded, never
 permission to deploy. [AWS request status](https://docs.aws.amazon.com/cli/latest/reference/service-quotas/get-requested-service-quota-change.html),
 [applied quota](https://docs.aws.amazon.com/cli/latest/reference/service-quotas/get-service-quota.html).
-The September 15 lookup-role attempt was approved for execution but failed with an
-expired AWS session. It did not verify role assumption or quota state. Renew with
-`aws login --profile hid-admin` before repeating AWS reads. The earlier no-change-set
+The September 15 lookup-role attempt failed with an expired AWS session. Renewed
+September 21 identity/quota/absence reads do not themselves prove that role
+assumption. The earlier no-change-set
 diff passed with a lookup-role assumption warning and same-account fallback; this
 warning is still unresolved.
 
@@ -188,6 +194,13 @@ records the earlier expired session, quota hold, prepared workflows and validati
 The [September 21 bootstrap review](evidence/staging-acceptance/bootstrap-hardening-2026-09-21.json)
 supersedes its ECR preparation and records the current read failures, source
 provenance limits, guarded output tests and unchanged NIN file hashes.
+Fresh successful quota/absence receipts are retained at
+`release/local/20260921-staging-preparation/quota-renewed.json` and
+`bootstrap-absence-renewed.json`. Provider/authorization preparation is retained
+under `release/local/20260921-provider-preparation/`; none authorizes deployment.
+The [provider preparation receipt](evidence/staging-acceptance/provider-preparation-2026-09-21.json)
+records the latest quota read, exact missing fields/authorizations, tested hidden
+secret-entry tooling and verified-source offline trust-foundation template.
 The earlier bounded [checkpoint receipt](evidence/staging-acceptance/aws-renewed-2026-09-14.json)
 indexes private readback/synth/diff/capacity logs under
 `release/local/20260914-aws-renewed/`. Earlier local tests and NIN deferral evidence

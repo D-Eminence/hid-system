@@ -39,6 +39,14 @@ output-failure safeguards and read-only AWS authentication failures. Regenerate
 from the exact approved checkout before any later execution. It is not a live
 repository-creation receipt or a source approval.
 
+The subsequent [September 21 provider preparation](provider-preparation-2026-09-21.json)
+records renewed AWS authentication, the still-pending 32-vCPU request with 6 applied,
+confirmed bootstrap/stack/repository state and exact remaining provider inputs.
+It also records secure secret-entry tooling, bounded Custom Domain inventory
+preparation and exact-source offline release-trust synthesis. It supersedes
+expired AWS-session claims, but supplies no deployment, message-delivery or
+custody approval.
+
 - `baseline.json`, `pr.json`, `checks.json`, and `remote-release-final.json` bind source/merge and preserved user work.
 - `workspace-validation.json` records successful exact-SHA build/tests/verify/cache checks; `ci-*` and `github-*` preserve independently verified public ordinary-CI evidence and staging environment policy.
 - `aws-audit.*` records baseline findings; `aws-remediation.*` records the unapproved nine-file staging candidate and its 62-test validation, patch/file/template hashes and limits.

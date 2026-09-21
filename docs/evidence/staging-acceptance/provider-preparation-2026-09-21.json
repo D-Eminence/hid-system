@@ -1,0 +1,163 @@
+{
+  "schema_version": "hid.staging-provider-preparation/v1",
+  "recorded_at": "2026-09-21T21:01:35Z",
+  "environment": "staging",
+  "production": "LOCKED",
+  "nin_provider_mode": "deferred",
+  "staging_accepted": false,
+  "deployment_authorized": false,
+  "supersedes": "Earlier expired AWS-session observations; does not supersede missing Cloudflare authorization or establish live acceptance.",
+  "aws": {
+    "account_id": "659225405023",
+    "region": "eu-west-1",
+    "authenticated": true,
+    "quota": {
+      "checked_at": "2026-09-21T21:01:35.360994+00:00",
+      "quota_code": "L-3032A538",
+      "request_id": "53cf4fecbdee43808970dadf399dce15KHtG3UD0",
+      "request_status": "CASE_OPENED",
+      "requested_vcpu": 32,
+      "applied_vcpu": 6,
+      "request_pending": true,
+      "quota_gate_cleared": false,
+      "available_capacity_verified": false
+    },
+    "bootstrap": {
+      "checked_at": "2026-09-21T16:04:50.703634+00:00",
+      "cdk_version": 32,
+      "regional_stack_absent": true,
+      "application_repositories_absent": true,
+      "application_repository_count": 11
+    }
+  },
+  "providers": {
+    "checked_on": "2026-09-21",
+    "cloudflare": {
+      "authorization": "forbidden_or_expired",
+      "dns_and_widgets": "UNVERIFIED",
+      "turnstile_secret_present": false,
+      "prepared_custom_domain_reads": 8,
+      "custom_domain_scope": "Account Workers Scripts Read, fixed account plus hostname/zone query filters",
+      "publisher_token": "requires separately scoped token and exact AWS secret version binding"
+    },
+    "ses": {
+      "classification": "REQUIRED",
+      "account_status": "HEALTHY",
+      "sending_enabled": true,
+      "sandbox": true,
+      "identities": 0,
+      "verified_identities": 0
+    },
+    "novu": {
+      "classification": "REQUIRED",
+      "selected_staging_region": false,
+      "selected_staging_organization": false,
+      "selected_staging_environment": false,
+      "selected_email_channel": false,
+      "credential_configured": false
+    },
+    "other_notification_classifications": {
+      "termii": "OPTIONAL",
+      "meta_whatsapp": "OPTIONAL",
+      "infobip": "FALLBACK"
+    },
+    "notification_secret": {
+      "container_exists": true,
+      "versions": 0,
+      "current_version_present": false
+    },
+    "controlled_inboxes": {
+      "patient_selected": false,
+      "clinician_selected": false,
+      "recipient_control_confirmed": false
+    },
+    "message_authorizations": {
+      "ses_verification": false,
+      "recovery_otp": false,
+      "novu_patient_notification": false
+    }
+  },
+  "completed": [
+    "Refreshed read-only AWS quota/bootstrap/provider observations with renewed session.",
+    "Prepared hidden local first-entry helper for three allowlisted staging fields; no secret writes performed.",
+    "Prepared eight hostname/zone-filtered Custom Domain inventory requests and corrected read permission requirements.",
+    "Prepared public-only custody intake and source/workflow/protection approval packet.",
+    "Synthesized release-trust foundation from clean exact-source checkout with offline installed locked dependencies and no lookups."
+  ],
+  "release_preparation": {
+    "review_source_sha": "27cddc3d9447bb0e0edc9612107a60014dd772b9",
+    "review_source_approved": false,
+    "ordinary_ci_checks_passed": 7,
+    "protected_source_unchanged": "a709e643a731b444f7cb775b2b16fe28164146a7",
+    "staging_environments_checked": 10,
+    "public_custody_intake": "STRUCTURE_VALID_NOT_READY_NOT_AUTHORIZED",
+    "foundation": {
+      "source_checkout_verified": true,
+      "source_sha": "27cddc3d9447bb0e0edc9612107a60014dd772b9",
+      "template_sha256": "c0065d8c2989b6bc011b719779188a312c2984dbdb1d3f534fc1d3047089f942",
+      "resource_count": 32,
+      "owner_retention_approved": false,
+      "cloud_calls": 0,
+      "limitation": "Compare or resynthesize for final approved source before execution; no resource existence, trust or approval is inferred."
+    }
+  },
+  "validation": {
+    "staging_preparation_javascript_tests": 16,
+    "staging_preparation_python_tests": 50,
+    "new_provider_secret_tests": 21,
+    "cloudflare_readiness_tests": 3,
+    "failed": 0,
+    "secret_readiness_findings": 0,
+    "nin_recorded_hashes_preserved": 26,
+    "live_secret_helper_inspection": "read-only checks confirm missing Turnstile and sender fields in the fixed existing staging containers"
+  },
+  "source_files": [
+    {
+      "path": "scripts/staging-provider-secret.py",
+      "sha256": "d7779586afc041cb750319f76e9a7c917b6930f848372dd7b70565d1918476a4",
+      "bytes": 13145
+    },
+    {
+      "path": "scripts/tests/test_staging_provider_secret.py",
+      "sha256": "40a9e15ad1e351e37ee77f830fb1047e8384434c001f7509f4644a04310c22c2",
+      "bytes": 14456
+    },
+    {
+      "path": "infra/cloudflare/scripts/prepare-staging-readiness.mjs",
+      "sha256": "de68a638e52228681c418d1f5e6ec68fd03e903019d1c1a34886fffa9093391c",
+      "bytes": 7283
+    },
+    {
+      "path": "infra/cloudflare/test/staging-readiness.test.mjs",
+      "sha256": "284f688871aca9fb378c1a78be578aac2c22c37996285a04a3407acd4b12ec7a",
+      "bytes": 3317
+    }
+  ],
+  "private_evidence_directory": "release/local/20260921-provider-preparation/",
+  "remaining_user_inputs": [
+    "Cloudflare staging operator authorization and separately scoped publisher token.",
+    "Controlled SES sender and isolated Novu staging environment/region/channel/key.",
+    "Two controlled patient/clinician inboxes and separate per-message send authorizations.",
+    "Authenticated public custody assignments and versioned root/provenance.",
+    "Owner review of final source, separately reviewed retention effects, and later concrete protected runs."
+  ],
+  "user_must_not_supply": [
+    "MetaMap credentials or contracts for staging",
+    "invented resource ARNs, workflow hashes, image digests or public key fingerprints",
+    "secrets in chat"
+  ],
+  "agent_next_work_after_inputs": [
+    "Validate actual DNS/widget bindings and securely bind provider inputs.",
+    "Inspect SES verification and Novu workflow/channel/subscriber configuration before approved sends.",
+    "Compare final approved-source resource templates and install exact immutable callers through source controls.",
+    "Recheck the existing quota when status changes; require quota_gate_cleared plus all independent gates before any deployment."
+  ],
+  "external_mutations": {
+    "cloud": 0,
+    "provider_messages": 0,
+    "protected_dispatches": 0,
+    "deployments": 0,
+    "production": 0
+  },
+  "next_action": "Restore scoped Cloudflare staging authorization locally and run the read-only external preflight; enter secrets only through local hidden prompts or the designated dashboard."
+}

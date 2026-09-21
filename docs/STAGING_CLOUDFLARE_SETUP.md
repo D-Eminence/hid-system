@@ -7,6 +7,10 @@ widgets remain **unverified**, not confirmed absent. No Cloudflare write has
 been made during this checkpoint. All deployments remain held for the pending
 Fargate request, including Cloudflare publication.
 
+September 21 readback still reports `forbidden_or_expired` for the existing
+Wrangler credential. AWS authentication is renewed, but Cloudflare authority is
+independent. The staging Turnstile secret field is confirmed absent in AWS.
+
 Generate the source-bound, non-secret plan without credentials:
 
 ```sh
@@ -25,6 +29,15 @@ hosts use Worker **Custom Domains**: Cloudflare creates their DNS records and
 certificates at deployment. Do not precreate CNAMEs for them; an existing CNAME
 conflicts with Custom Domain installation. Inspect existing records first.
 [Cloudflare Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/).
+
+Worker route counts do not establish Custom Domain bindings. The offline plan
+now includes eight separate `GET /accounts/{account_id}/workers/domains` reads,
+each filtered to one exact staging hostname and the fixed zone. After authorized
+inventory, compare each returned hostname, zone and service with its expected
+named staging Worker before considering a change. This API needs **Workers
+Scripts Read** for the account; Zone Workers Routes Read alone is insufficient.
+No Custom Domain inventory succeeded during the September 21 attempt.
+[Worker Domains API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/methods/list/).
 
 Only `api.staging.healthidentitydirectory.com` needs the AWS origin target.
 Its CNAME target remains null until the actual staging ALB exists and is read
@@ -45,11 +58,17 @@ for staging and bind the same value to the seven staging Worker
 Neither secret belongs in frontend code or the plan.
 [Cloudflare widget API](https://developers.cloudflare.com/turnstile/get-started/widget-management/api/).
 
+After the actual staging widget is available, use the
+[hidden staging entry helper](STAGING_PROVIDER_SECRET_ENTRY.md) with
+`--field turnstileSecretKey --apply` to add its secret while preserving existing
+identity fields. This does not publish a Worker or configure DNS.
+
 ## USER INPUT REQUIRED
 
 Use the existing Cloudflare dashboard account; no additional provider account is
 needed. Restore local authorization to this account/zone, with **Zone Read,
-DNS Read and Workers Routes Read** for inventory and **Turnstile Sites Read**
+DNS Read and Workers Routes Read** for inventory, plus **Workers Scripts Read**
+and **Turnstile Sites Read**
 for this account. Add **DNS Edit** and **Turnstile Sites Write** only for the
 staging setup operations. The token screen may label Turnstile as Read/Edit;
 use the specific Turnstile permission rather than general Account Settings

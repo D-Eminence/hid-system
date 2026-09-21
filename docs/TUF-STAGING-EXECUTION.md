@@ -5,12 +5,13 @@
 **STAGING: NOT ACCEPTED. READINESS: NOT READY FOR LIVE ACCEPTANCE. PRODUCTION: LOCKED.**
 
 The current operational checkpoint is [STAGING_AWS_CHECKPOINT.md](STAGING_AWS_CHECKPOINT.md).
-The last successful AWS quota read reported `CASE_OPENED` with 6 vCPUs applied;
-the AWS browser session has since expired, including the September 21 read attempts.
-Current quota, capacity, stack absence
-and ECR absence are unverified, and no deployment may proceed. Draft
-[PR #2](https://github.com/D-Eminence/hid-system/pull/2) has a last-green ordinary
-CI head but is unapproved. The newly prepared ECR bootstrap review is offline
+Renewed AWS authentication and September 21 16:04 UTC reads confirm `CASE_OPENED`
+with 6 vCPUs applied against the request for 32; the quota gate remains false.
+CDK bootstrap version 32, regional-stack absence and all eleven application
+repository absences are confirmed. Available capacity and release/provider gates
+do not authorize deployment. Draft [PR #2](https://github.com/D-Eminence/hid-system/pull/2)
+has a green ordinary CI head at `27cddc3d9447bb0e0edc9612107a60014dd772b9` but
+is unapproved. The prepared ECR bootstrap review is offline
 only and does not change any AWS state.
 
 The current external-gate continuation keeps the architecture fixed. Staging now
@@ -140,9 +141,9 @@ and their successful corrected runs are retained under
 ### Quota-pending continuation
 
 - The existing request `53cf4fecbdee43808970dadf399dce15KHtG3UD0` asks for 32 vCPUs
-  in `eu-west-1`; the last successful check at September 14 21:04 UTC reported
-  `CASE_OPENED`, applied quota 6. The September 15 session is expired; current
-  quota/capacity is unverified. The new read-only
+  in `eu-west-1`; renewed September 21 16:04 UTC readback reports
+  `CASE_OPENED`, applied quota 6. The quota gate remains false; available account
+  capacity is not established. The read-only
   checker makes no request or deployment and never labels missing usage as zero.
 - The offline ECR bootstrap review retains the 11 application repositories
   and URI outputs from its supplied template. Source checkout provenance remains
@@ -211,24 +212,18 @@ These are external boundaries reached after repository, configuration, environme
 CLI, account, secret-container and provider investigation. Do not send existing AWS
 access keys, patient NINs, passwords, OTPs, provider keys or signing private keys in chat.
 
-The owner has already submitted the 32-vCPU quota request. The last successful
-check at September 14 21:04 UTC reported `CASE_OPENED` with 6 vCPUs applied.
-The September 15 browser session expired, so current quota/capacity is unverified. This is an AWS-owned pending gate, not another
+The owner has already submitted the 32-vCPU quota request. Renewed September 21
+16:04 UTC readback reports `CASE_OPENED` with 6 vCPUs applied. The quota gate
+remains false. This is an AWS-owned pending gate, not another
 user request or approval. Do not submit a duplicate or deploy anything while it
 is pending. Read the existing request with
 `python3 scripts/check-staging-fargate-quota.py`.
 
-1. **INPUT REQUIRED:** renew the expired AWS browser session locally with
-   `aws login --profile hid-admin`. **WHY:** September 15 AWS reads failed with an
-   expired session. **WHERE:** the AWS browser flow; no keys or tokens in chat.
-   **BLOCKS:** current quota/capacity, bootstrap-absence, lookup-role and AWS
-   pre-deployment verification. After renewal, run
-   `python3 scripts/check-staging-fargate-quota.py` and
-   `python3 scripts/check-staging-ecr-bootstrap.py`; do not submit another request.
-2. **INPUT REQUIRED:** securely authorize staging DNS/Turnstile operations and supply
+1. **INPUT REQUIRED:** securely authorize staging DNS/Turnstile operations and supply
    the bounded release publisher token, and renew browser access if using Wrangler.
    **WHY:** the last authenticated OAuth inventory permitted Workers/routes but
-   DNS/Turnstile GETs were forbidden; the September 14 OAuth refresh also failed.
+   DNS/Turnstile GETs were forbidden; September 21 inventory still returns
+   forbidden/expired. Renewed AWS access does not renew Cloudflare authority.
    The protected publisher requires a
    separate version-pinned token secret. **WHERE:** Cloudflare dashboard for the known
    account/zone; renew the existing CLI browser login with
@@ -246,7 +241,7 @@ is pending. Read the existing request with
    Siteverify failures, bind the publisher secret version and run guarded publication
    only after signed release prerequisites pass. Publisher configuration persists;
    browser login remains temporary.
-3. **INPUT REQUIRED:** the controlled SES sender and two distinct, explicitly authorized
+2. **INPUT REQUIRED:** the controlled SES sender and two distinct, explicitly authorized
    test inboxes for patient and clinician recovery; access to an existing or new dedicated Novu staging organization/environment
    and the selected delivery integration. **WHY:** the current journey is email-only;
    OTP uses SES and the emergency worker uses Novu. A Novu key alone does not establish
@@ -273,7 +268,7 @@ is pending. Read the existing request with
    are in `release/local/staging-notification-input.json`; see the
    [offline setup instructions](STAGING_NOTIFICATION_SETUP.md). No password, OTP or
    provider secret belongs in either input file.
-4. **INPUT REQUIRED:** actual staging release custodians and their public root/targets
+3. **INPUT REQUIRED:** actual staging release custodians and their public root/targets
    trust material or access to the established signing ceremony. **WHY:** no real
    trusted root, signed candidate or hardware-backed custody evidence exists; locally
    generated test keys cannot substitute. **WHERE:** approved hardware/offline signing
@@ -351,11 +346,13 @@ owner review, protected branches and no administrator bypass. No workflow was ru
 
 ### F. NEXT ACTION
 
-Renew AWS browser access locally with `aws login --profile hid-admin`, then run
-`python3 scripts/check-staging-fargate-quota.py` and
-`python3 scripts/check-staging-ecr-bootstrap.py`. Both are read-only and must
-still show the requested capacity/applied quota and safe bootstrap absence before
-any later staging decision. The already-submitted 32-vCPU request, controlled
+Restore the scoped Cloudflare staging authorization described in
+[Cloudflare setup](STAGING_CLOUDFLARE_SETUP.md#user-input-required), then run the
+read-only external preflight. Supply provider configuration only through the
+designated local inputs and Secrets Manager locations. AWS authentication and
+bootstrap-absence checks now pass, but the existing quota gate remains closed.
+When its request status changes, rerun `python3 scripts/check-staging-fargate-quota.py`
+and require the gate to clear before any deployment. The already-submitted request, controlled
 notification inputs and public custody material are detailed in the
 [AWS checkpoint](STAGING_AWS_CHECKPOINT.md#user-input-required), including which
 gates block deployment versus later acceptance. No MetaMap input is required. No
