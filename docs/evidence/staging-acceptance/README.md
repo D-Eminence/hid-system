@@ -1,7 +1,7 @@
 # Staging acceptance evidence
 
 Approved source: `a709e643a731b444f7cb775b2b16fe28164146a7`.
-Audit began 2026-09-08; implementation continued through 2026-09-15. Result: **STAGING NOT ACCEPTED**.
+Audit began 2026-09-08; implementation continued through 2026-09-21. Result: **STAGING NOT ACCEPTED**.
 Production remains locked. The [canonical report](../../TUF-STAGING-EXECUTION.md)
 records phase decisions, findings, remedies and exact manual gates.
 
@@ -31,6 +31,13 @@ approval environments, prepared capability workflows, scoped staging build IAM,
 ARM64 application/AMD64 broker build bindings and bounded validation. Production
 regional and release-trust synthesis comparisons remain unchanged. No deployment
 or live delivery/signing acceptance is claimed.
+
+The [September 21 bootstrap review](bootstrap-hardening-2026-09-21.json) supersedes
+the earlier ECR preparation hashes and resource-count claims. It records the
+offline generator's explicit lack of approved-source provenance, strict parsing,
+output-failure safeguards and read-only AWS authentication failures. Regenerate
+from the exact approved checkout before any later execution. It is not a live
+repository-creation receipt or a source approval.
 
 - `baseline.json`, `pr.json`, `checks.json`, and `remote-release-final.json` bind source/merge and preserved user work.
 - `workspace-validation.json` records successful exact-SHA build/tests/verify/cache checks; `ci-*` and `github-*` preserve independently verified public ordinary-CI evidence and staging environment policy.

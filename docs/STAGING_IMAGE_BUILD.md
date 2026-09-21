@@ -2,9 +2,11 @@
 
 The reusable [build workflow](../.github/workflows/tuf-build.yml) and
 [adapter](../release/scripts/build-staging-images.mjs) prepare the existing
-release build capability for staging. They have not been installed remotely or
-run against AWS. No Docker build, image push, infrastructure creation or
-deployment was performed during this preparation. Production remains locked.
+release build capability for staging. Their source is available for review in
+[draft PR #2](https://github.com/D-Eminence/hid-system/pull/2), whose ordinary
+CI passed, but it is not installed on the protected branch, dispatched, or run
+against AWS. No Docker build, image push, infrastructure creation or deployment
+was performed during this preparation. Production remains locked.
 
 The protected `staging-build` environment must approve the exact configuration
 bytes and their SHA-256 hash. Repository and owner IDs, protected caller branch,
@@ -34,6 +36,13 @@ adapter checks every repository before starting Docker. The build role has
 scoped push/read permissions and cannot create repositories, change repository
 policies, deploy stacks or update ECS services. The extra application repository
 permissions are synthesized only for staging; production policy is unchanged.
+
+The offline ECR bootstrap review described in the
+[AWS deployment runbook](AWS_DEPLOYMENT_RUNBOOK.md#ecr-bootstrap-review) is only
+conditional future preparation for the eleven application repositories. It does
+not prove that any repository exists, authorize a build, or unblock the
+signing-broker mode. The broker repository and BuildRole still require the
+separately approved release-trust/OIDC path and release-custody gates.
 
 Docker builds only the separate, clean source checkout. Credentials are neither
 build arguments nor build context files. Application and migration builds request

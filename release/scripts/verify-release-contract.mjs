@@ -591,6 +591,11 @@ export function deriveDeploymentPlan(bundle, configuration) {
   }
 }
 
+export function parseStrictJsonBytes(bytes) {
+  assert.ok(Buffer.isBuffer(bytes), 'strict JSON input must be a Buffer')
+  return duplicateKeyJson.parse(bytes.toString('utf8'), false)
+}
+
 export async function loadStrictJson(path, maximumBytes = 26214400) {
   integer(maximumBytes, 1, 26214400, 'maximumBytes')
   const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
@@ -611,7 +616,7 @@ export async function loadStrictJson(path, maximumBytes = 26214400) {
     if ((await handle.read(trailing, 0, 1, offset)).bytesRead !== 0) {
       fail(path, 'grew while being read')
     }
-    return duplicateKeyJson.parse(bytes.toString('utf8'), false)
+    return parseStrictJsonBytes(bytes)
   } finally {
     await handle.close()
   }

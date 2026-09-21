@@ -37,3 +37,42 @@ Installation sequence remains: review the completed local bounded adapters; crea
 The owner still supplies the actual public custody assignments and authenticated public root/provenance from the established ceremony. Creation of irreversible retention resources requires a concrete account-specific plan and the owner's separate decision. Private keys, PINs, recovery material and provider secrets remain outside chat and Git. MetaMap remains deferred and disabled; its work is unchanged.
 
 Validation: `node --test --test-isolation=none release/test/staging-release-audit.test.mjs` exercises the real adapter with an injected read-only transport, context/config/owner/immutable-claim rejection, role substitution, wrong region, missing versioning, changed retention, disabled keys, public-key mismatch and read failures. Synthetic keys in these tests are not staging trust material.
+
+## Concrete offline approval preparation
+
+The last green review source was `fe472b818caf6488d57ffb88875eec2300a4b7e9` in
+[draft PR #2](https://github.com/D-Eminence/hid-system/pull/2). It is not an approved
+protected source; any follow-up source still requires ordinary CI. The review branch
+preserves the original workspace HEAD/index and the existing user edit to
+`docs/SECURITY.md`.
+
+Two ignored, mode-0600 review artifacts are ready:
+
+- `release/local/20260915-staging-preparation/staging-trust-foundation.review.json`
+  and its adjacent `.review-template.json`: account `659225405023`, `eu-west-1`,
+  stack `Hid-staging-ReleaseTrust`, 32 resources, three retained encrypted/versioned
+  archives with 90-day COMPLIANCE default retention, and eight retained KMS keys
+  (four storage and four online candidates). The broker and publisher token binding
+  are absent. Template SHA-256:
+  `c57e66cb92bef7b2a1b8928152458bc562f724e21b4da6b48a7dd49d0b4bc6f6`.
+  Object Lock cannot be disabled after creation; protected versions cannot be
+  removed or their retention shortened during the retention period. Retained
+  resources continue to exist after stack deletion. Creating them incurs AWS
+  storage/key charges. The local synthesis acknowledgement records understanding
+  for planning; `owner_retention_approved` and `deployment_authorized` remain false.
+- `release/local/20260915-staging-preparation/tuf-staging-capabilities.proposed.yml`
+  and `staging-capability-caller.review.json`: seven mutually selected capability
+  jobs using actual immutable workflow source above. It has no installed caller
+  commit, no dispatch, and no guessed source/resource/artifact identifiers.
+  Build mode is bound to its native runner and approved configuration. The caller
+  must be reviewed separately and registered on the current default branch before
+  manual dispatch discovery can work; every capability still rejects execution
+  outside the fixed protected staging source ref.
+
+The exact owner decisions, once ordinary CI and source review are complete, are
+approval of PR #2's final source and acceptance of this staging resource/retention
+plan. Those decisions do not override the quota hold or later public-custody,
+broker, provider, artifact, environment-approval or live acceptance checks.
+The OIDC provider ARN in the preview is a deterministic proposed identifier;
+its last inventory was absent. All AWS resource existence and key fingerprints
+must be discovered after authorized creation, never inferred from the template.

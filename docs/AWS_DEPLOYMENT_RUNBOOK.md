@@ -160,10 +160,70 @@ performs this calculation without credential access or deployment. The
 quota and prepared worker-active acceptance plan; that plan requires 6.5 vCPUs
 before rollover headroom. Missing usage datapoints are not evidence of zero usage.
 
-Bootstrap and deploy only after change approval. Live profiles default to the
-typed recommended counts. For a first foundation-only change, explicitly pass
-every `*DesiredCount=0` through reviewed `HID_CDK_EXTRA_ARGS_JSON`; never rely
-on an implicit zero or a shared count. Validate:
+The full regional template requires all twelve digest-qualified `*ImageUri`
+parameters even when every `*DesiredCount` is zero. Zero desired counts cannot
+bootstrap ECR. Tags, placeholders, fabricated digests, and an incomplete full
+template are forbidden.
+
+### ECR bootstrap review
+
+The offline
+[`prepare-staging-ecr-bootstrap.mjs`](../infra/aws/scripts/prepare-staging-ecr-bootstrap.mjs)
+generator prepares a narrowly scoped review template from a synthesized staging
+regional template. It makes no cloud calls and grants no deployment authority.
+It reuses the release package's strict JSON loader; install both locked dependency
+sets with `npm --prefix infra/aws ci` and `npm --prefix release ci --ignore-scripts`
+before running it or the infrastructure tests in a clean checkout.
+The review artifact has 11 retained application ECR repositories and their 11
+unchanged URI outputs. It preserves each complete ECR resource/output object,
+including the default AES-256 behavior, lifecycle policy, immutable tags,
+scan-on-push, logical IDs, retention policies, `BootstrapVersion`, and
+`CheckBootstrapVersion`.
+
+The generator records the supplied template's hash and derived resource counts;
+it does not verify which source checkout produced that template or approve a
+source commit. Its receipt always records `reviewed_source_sha: null`,
+`source_checkout_verified: false`, and a required source review before execution.
+Local review artifacts are unbound preparation. Before any future execution,
+synthesize from the exact approved source checkout, compare the resulting full
+template SHA-256, and regenerate/review the bootstrap artifact. Do not reuse an
+older receipt's resource counts as an expectation for changed source.
+
+This artifact must remain unexecuted while quota request `L-3032A538` is
+pending. It creates no runtime, database, IAM, secret, DNS, Cloudflare, image,
+release-trust, OIDC, NIN, or signing-broker resource. It is not evidence that a
+repository exists or that an image build is authorized.
+
+Only after the quota and every independent gate clear may a separately reviewed,
+dedicated executor be introduced. `staging:start` is not that executor: it
+requires the database to exist and therefore cannot expand an ECR-only stack.
+Do not use an unguarded `create-stack` command as an alternative. The future
+executor must first prove that `Hid-staging-Regional` and all eleven named
+application repositories are absent in account `659225405023`, region
+`eu-west-1`; an unreadable resource or expired session is not proof of absence.
+It must create the reviewed subset only under the same stack name and reviewed
+CloudFormation service role, build real digest-qualified application images,
+then update that same stack with the full reviewed template and its reviewed
+source SHA.
+
+After a renewed AWS session, the read-only
+[`check-staging-ecr-bootstrap.py`](../scripts/check-staging-ecr-bootstrap.py)
+check verifies the fixed account, CDK bootstrap version, stack absence, and all
+eleven repository absences. It rejects an unreadable resource, an existing stack
+or repository, and an old CDK bootstrap version. Its successful result still does
+not clear the quota, provider, custody, source-review, or deployment gates.
+
+The full-stack change set must add exactly the resources derived from that
+approved full template after excluding the eleven retained repositories, and
+show no ECR modify, replacement, delete, import, or adoption action. A
+source/template change requires a new offline artifact and review. Never import,
+adopt, delete, replace, empty,
+re-create, or automatically reuse retained repositories. The separate
+signing-broker repository, OIDC roles, and BuildRole belong to the independently
+approved release-trust path and are outside this application-repository subset.
+
+After a reviewed full-stack deployment exists, live profiles default to the
+typed recommended counts. Validate:
 
 - private RDS placement, TLS, encryption, backups, deletion behavior, and logs;
 - no world database/task ingress and no public task IPs;
@@ -180,7 +240,9 @@ domain.
 
 ## 5. Guarded staging operations
 
-The following commands are the only repository staging-mode entry points:
+The following commands are the only current repository runtime staging-mode
+entry points. They do not create the ECR bootstrap subset or perform its first
+full-stack expansion:
 
 ```bash
 npm run staging:start

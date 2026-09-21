@@ -1,12 +1,22 @@
 {
   "schema_version": "hid.staging-predeployment-preparation/v1",
-  "recorded_at": "2026-09-15T14:08:32.003858+00:00",
+  "recorded_at": "2026-09-15T21:04:20.000000+00:00",
   "environment": "staging",
   "production": "LOCKED",
   "staging_accepted": false,
   "deployment_authorized": false,
   "approved_source_base": "a709e643a731b444f7cb775b2b16fe28164146a7",
-  "review_successor_status": "local source preparation; no approved successor or protected execution",
+  "review_successor_status": "draft PR #2 review head fe472b818caf6488d57ffb88875eec2300a4b7e9 passed all seven ordinary CI checks; local ECR bootstrap follow-up awaits review CI; no approved successor or protected execution",
+  "source_review": {
+    "pull_request": 2,
+    "url": "https://github.com/D-Eminence/hid-system/pull/2",
+    "base_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+    "last_green_head_sha": "fe472b818caf6488d57ffb88875eec2300a4b7e9",
+    "draft": true,
+    "ordinary_ci_jobs_passed": 7,
+    "owner_approved": false,
+    "protected_execution": false
+  },
   "quota": {
     "last_successful_read": {
       "schema_version": "hid.staging-fargate-quota/v1",
@@ -31,7 +41,7 @@
       "cloud_mutations": false
     },
     "latest_attempt": {
-      "recorded_at": "2026-09-15T14:08:32.003858+00:00",
+      "recorded_at": "2026-09-15T21:04:20.000000+00:00",
       "result": "READ_OR_BINDING_FAILED",
       "aws_status": "expired_browser_session",
       "quota_status_observed": false
@@ -198,6 +208,16 @@
         "path": "release/scripts/submit-staging-signing-request.mjs",
         "sha256": "2ce72c366f538ec1101e52eb241e32dddd2fc2dc8468a6c60e077604311b5360",
         "bytes": 24824
+      },
+      {
+        "path": "infra/aws/scripts/prepare-staging-ecr-bootstrap.mjs",
+        "sha256": "247a81d6cbf81672718ba92811da712ca90a6096e4cc9eb8afd3ee05fe6f93f4",
+        "bytes": 16171
+      },
+      {
+        "path": "scripts/check-staging-ecr-bootstrap.py",
+        "sha256": "4e089ff98cba686faf0bbd885ced7b5f5cfdf6112c167e35aa78c3cdac2d6648",
+        "bytes": 6253
       }
     ],
     "targeted_test_files": [
@@ -235,6 +255,16 @@
         "path": "release/test/staging-signing-submission.test.mjs",
         "sha256": "a2c622f627d1e82082bdce731196711047e4393d5257192520e653b044d80bd9",
         "bytes": 19537
+      },
+      {
+        "path": "infra/aws/test/staging-ecr-bootstrap.test.mjs",
+        "sha256": "b15715e455dffc489c48b11294f757441882b50befae49b89576d01ccbac6d61",
+        "bytes": 4811
+      },
+      {
+        "path": "scripts/tests/test_staging_ecr_bootstrap.py",
+        "sha256": "6c3d7eea45c342ec422088f777fa0e5a6a9587a7ca45fb4e377817f42e974ece",
+        "bytes": 6027
       }
     ],
     "application_build_platform": "linux/arm64",
@@ -415,6 +445,32 @@
       "security_document_unchanged": true,
       "cloud_calls": false
     },
+    "ecr_bootstrap_review": {
+      "superseded_by": "bootstrap-hardening-2026-09-21.json",
+      "status": "LOCAL_UNBOUND_REVIEW_ONLY",
+      "source_checkout_verified": false,
+      "bootstrap_resources": 11,
+      "repository_uri_outputs": 11,
+      "full_update_new_resources": "derive from fresh exact approved-source synthesis before execution",
+      "reviewed_source_sha": null,
+      "reviewed_source_sha_required_before_execution": true,
+      "same_stack_name": "Hid-staging-Regional",
+      "ecr_change_set_actions_permitted": [],
+      "latest_read_attempt": {
+        "recorded_at": "2026-09-15T21:04:20.000000+00:00",
+        "result": "READ_OR_BOOTSTRAP_BINDING_FAILED",
+        "aws_status": "expired_browser_session",
+        "bootstrap_absence_observed": false
+      },
+      "cloud_calls": false,
+      "deployment_authorized": false,
+      "production": "LOCKED",
+      "validation": {
+        "infra_aws_tests": 90,
+        "staging_preparation_js_tests": 16,
+        "staging_preparation_python_tests": 28
+      }
+    },
     "production_release_trust_comparisons": [
       {
         "configuration": "foundation",
@@ -457,13 +513,19 @@
       "input": "Real public release custody assignments and authenticated root/provenance",
       "secure_location": "approved offline/hardware custody process; release/local/staging-public-custody.json; never private keys or PINs",
       "blocks": "signed release admission/publication"
+    },
+    {
+      "input": "Review final successor source after its follow-up CI passes",
+      "secure_location": "https://github.com/D-Eminence/hid-system/pull/2 through normal GitHub source controls",
+      "blocks": "protected workflow installation and subsequent admitted deployment; later concrete run approval remains separate"
     }
   ],
   "agent_work_after_inputs": [
-    "source review installation and ordinary CI",
-    "immutable staging callers derived from actual approved reusable workflow SHA",
+    "prepare the final source and passing CI for owner review before protected workflow installation",
+    "immutable staging callers derived from the actual approved reusable workflow SHA",
     "concrete trust/retention resource approval preparation",
     "OIDC roles and staging infrastructure after quota and approvals",
+    "dedicated guarded same-stack ECR bootstrap/expansion executor after its quota, source, provider, custody and change-set gates are concrete",
     "real images, SBOM, scans, provenance and signed candidate",
     "controlled deployment, migration, delivery and browser acceptance"
   ],
@@ -472,5 +534,6 @@
     "Existing version-specific callback/signature/correlation/date/test-identity/pricing/secure-secret/provider-test activation checklist remains in docs/METAMAP_NIN_CONTRACT.md."
   ],
   "next_command": "aws login --profile hid-admin",
-  "then_read_only_command": "python3 scripts/check-staging-fargate-quota.py"
+  "then_read_only_command": "python3 scripts/check-staging-fargate-quota.py",
+  "then_bootstrap_read_only_command": "python3 scripts/check-staging-ecr-bootstrap.py"
 }

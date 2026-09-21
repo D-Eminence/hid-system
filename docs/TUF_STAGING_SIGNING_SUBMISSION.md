@@ -1,6 +1,6 @@
 # Staging broker request submission
 
-The four reusable staging workflows and `release/scripts/submit-staging-signing-request.mjs` prepare the existing broker integration without creating keys, installing resources, invoking AWS or publishing a release during local validation. Production and deferred MetaMap work are unchanged. Missing configuration fails closed. These files are locally prepared; they are not installed or executed remote workflows.
+The four reusable staging workflows and `release/scripts/submit-staging-signing-request.mjs` prepare the existing broker integration without creating keys, installing resources, invoking AWS or publishing a release during local validation. Production and deferred MetaMap work are unchanged. Missing configuration fails closed. Their source is in [draft PR #2](https://github.com/D-Eminence/hid-system/pull/2), but the workflows are not installed on the protected branch or executed remotely.
 
 | Workflow | Protected environment | Existing paired broker function |
 | --- | --- | --- |

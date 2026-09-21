@@ -1,8 +1,17 @@
 # Staging readiness and acceptance report
 
-## Current implementation and live prerequisites — 2026-09-14
+## Current implementation and live prerequisites — 2026-09-21
 
 **STAGING: NOT ACCEPTED. READINESS: NOT READY FOR LIVE ACCEPTANCE. PRODUCTION: LOCKED.**
+
+The current operational checkpoint is [STAGING_AWS_CHECKPOINT.md](STAGING_AWS_CHECKPOINT.md).
+The last successful AWS quota read reported `CASE_OPENED` with 6 vCPUs applied;
+the AWS browser session has since expired, including the September 21 read attempts.
+Current quota, capacity, stack absence
+and ECR absence are unverified, and no deployment may proceed. Draft
+[PR #2](https://github.com/D-Eminence/hid-system/pull/2) has a last-green ordinary
+CI head but is unapproved. The newly prepared ECR bootstrap review is offline
+only and does not change any AWS state.
 
 The current external-gate continuation keeps the architecture fixed. Staging now
 uses an explicit email-only notification profile: SES is required, Novu is required
@@ -135,6 +144,12 @@ and their successful corrected runs are retained under
   `CASE_OPENED`, applied quota 6. The September 15 session is expired; current
   quota/capacity is unverified. The new read-only
   checker makes no request or deployment and never labels missing usage as zero.
+- The offline ECR bootstrap review retains the 11 application repositories
+  and URI outputs from its supplied template. Source checkout provenance remains
+  explicitly unverified; a fresh exact approved-source synthesis is required. It does not create a
+  repository or unblock builds. Its later same-stack transition requires renewed
+  read-only absence checks, an approved source/template, real digests and a full
+  change set with no ECR action; see the [AWS runbook](AWS_DEPLOYMENT_RUNBOOK.md#ecr-bootstrap-review).
 - Eight missing staging GitHub approval environments were created and read back;
   sole-owner approval, protected branches and no administrator bypass are verified.
   Existing environments and production settings were not modified. Source/workflow
@@ -206,9 +221,10 @@ is pending. Read the existing request with
 1. **INPUT REQUIRED:** renew the expired AWS browser session locally with
    `aws login --profile hid-admin`. **WHY:** September 15 AWS reads failed with an
    expired session. **WHERE:** the AWS browser flow; no keys or tokens in chat.
-   **BLOCKS:** current quota/capacity, lookup-role and AWS pre-deployment verification.
-   After renewal, run `python3 scripts/check-staging-fargate-quota.py`; do not submit
-   another request.
+   **BLOCKS:** current quota/capacity, bootstrap-absence, lookup-role and AWS
+   pre-deployment verification. After renewal, run
+   `python3 scripts/check-staging-fargate-quota.py` and
+   `python3 scripts/check-staging-ecr-bootstrap.py`; do not submit another request.
 2. **INPUT REQUIRED:** securely authorize staging DNS/Turnstile operations and supply
    the bounded release publisher token, and renew browser access if using Wrangler.
    **WHY:** the last authenticated OAuth inventory permitted Workers/routes but
@@ -335,13 +351,15 @@ owner review, protected branches and no administrator bypass. No workflow was ru
 
 ### F. NEXT ACTION
 
-AWS renewal is complete. Authorize the existing Cloudflare account for staging
-DNS/Turnstile operations and securely supply its publisher token as described above.
-The already-submitted 32-vCPU request, controlled notification inputs and public custody
-material are detailed in the [AWS checkpoint](STAGING_AWS_CHECKPOINT.md#user-input-required),
-including which gates block deployment versus later acceptance. No MetaMap input is
-required. The owner submitted the quota request; Codex installed eight staging
-GitHub approval environments. No duplicate quota request or deployment was submitted.
+Renew AWS browser access locally with `aws login --profile hid-admin`, then run
+`python3 scripts/check-staging-fargate-quota.py` and
+`python3 scripts/check-staging-ecr-bootstrap.py`. Both are read-only and must
+still show the requested capacity/applied quota and safe bootstrap absence before
+any later staging decision. The already-submitted 32-vCPU request, controlled
+notification inputs and public custody material are detailed in the
+[AWS checkpoint](STAGING_AWS_CHECKPOINT.md#user-input-required), including which
+gates block deployment versus later acceptance. No MetaMap input is required. No
+duplicate quota request or deployment was submitted.
 
 ### G. DEFERRED TO POST-STAGING
 
