@@ -1,4 +1,4 @@
-# AWS staging checkpoint — updated 2026-09-21
+# AWS staging checkpoint — updated 2026-09-22
 
 **AWS AUTHENTICATED. QUOTA HOLD ACTIVE. STAGING NOT DEPLOYED OR ACCEPTED. PRODUCTION LOCKED.**
 
@@ -8,6 +8,8 @@ The renewed `hid-admin` session authenticated account `659225405023`, region
 `request_pending: true`, `quota_gate_cleared: false`. The regional stack and all
 eleven application repositories are absent; the CDK bootstrap version is **32**.
 The final quota recheck at **21:01 UTC** returned the same pending status and limit.
+The **September 22 02:41 UTC** read also returned `CASE_OPENED` and 6 vCPUs;
+the 32-vCPU limit is still not applied. No duplicate request was submitted.
 These successful reads supersede the earlier expired-session observations.
 No duplicate request or deployment is
 permitted while pending, including empty foundations and Cloudflare publication.
@@ -152,6 +154,13 @@ node infra/aws/scripts/assess-staging-capacity.mjs \
 Notification account requirements and minimum scopes remain in the
 [provider matrix](STAGING_PROVIDER_ACCOUNTS.md): SES and Novu REQUIRED;
 Termii and Meta WhatsApp OPTIONAL; Infobip FALLBACK. Do not send secrets in chat.
+
+The owner's September 22 02:41 UTC Cloudflare diagnostic verified the exact
+active zone/account and found zero records in all nine exact staging DNS reads.
+Turnstile, Worker Routes and all eight Custom Domain reads were denied with
+HTTP 403/code 10000. The [Cloudflare setup guide](STAGING_CLOUDFLARE_SETUP.md)
+records the three required read scopes and a hidden-prompt rerun command.
+Those remaining inventories and publisher authority are still unverified.
 
 Draft PR #2's bootstrap follow-up passed ordinary CI and still needs owner review.
 Any subsequent source change requires its own CI. The protected release branch has

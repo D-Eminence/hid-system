@@ -67,7 +67,7 @@ export function planCloudflareReadiness(configs) {
       destinations: ['Seven named staging Worker ORIGIN_AUTH_TOKEN bindings', 'StagingCloudflareOriginSecret WAF parameter'],
       expose_in_frontend_or_plan: false },
     minimum_authority: {
-      inventory: ['Zone Read for this zone', 'DNS Read for this zone', 'Workers Routes Read for this zone', 'Workers Scripts Read for this account', 'Turnstile Sites Read for this account'],
+      inventory: ['DNS Read for this zone (also accepted by the initial zone read)', 'Workers Routes Read for this zone', 'Workers Scripts Read for this account', 'Turnstile Sites Read for this account'],
       setup: ['DNS Edit for this zone', 'Turnstile Sites Write for this account'],
       publisher: ['Workers Scripts Edit for this account', 'Workers Routes Edit for this zone'],
       scope_limitation: 'Account/zone permissions are not per-worker staging isolation; protected tooling must enforce exact staging names' },

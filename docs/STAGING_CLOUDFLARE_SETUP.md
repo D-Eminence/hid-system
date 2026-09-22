@@ -1,14 +1,21 @@
 # Staging Cloudflare preparation
 
 The account is `20c809ffe35ccb2c240d19a664dff97a`; the shared zone is
-`69d385b9f6a3233a7113c525524f14fe` (`healthidentitydirectory.com`). The last
-authenticated attempt returned forbidden/expired, so existing DNS records and
-widgets remain **unverified**, not confirmed absent. No Cloudflare write has
+`69d385b9f6a3233a7113c525524f14fe` (`healthidentitydirectory.com`). The owner-run
+diagnostic at **2026-09-22 02:41 UTC** authenticated that exact active zone/account
+and completed all nine exact staging DNS reads: each returned zero records.
+Turnstile, Worker Routes and all eight filtered Worker Custom Domain reads
+returned **HTTP 403, Cloudflare error 10000**. Those inventories remain unverified;
+they are not confirmed absent. No Cloudflare write has
 been made during this checkpoint. All deployments remain held for the pending
 Fargate request, including Cloudflare publication.
 
-September 21 readback still reports `forbidden_or_expired` for the existing
-Wrangler credential. AWS authentication is renewed, but Cloudflare authority is
+The earlier owner report at September 21 21:57 UTC returned `request_failed`
+without HTTP details; the new diagnostic supersedes its unverified zone/DNS
+status. The older agent readback used a failed Wrangler credential, which is a
+different credential source. A token entered in a separate terminal is not
+inherited by an existing agent session; clearing it after a command also prevents
+later reuse. AWS authentication is renewed, but Cloudflare authority is
 independent. The staging Turnstile secret field is confirmed absent in AWS.
 
 Generate the source-bound, non-secret plan without credentials:
@@ -36,7 +43,7 @@ each filtered to one exact staging hostname and the fixed zone. After authorized
 inventory, compare each returned hostname, zone and service with its expected
 named staging Worker before considering a change. This API needs **Workers
 Scripts Read** for the account; Zone Workers Routes Read alone is insufficient.
-No Custom Domain inventory succeeded during the September 21 attempt.
+The September 22 Custom Domain reads were denied; no binding is yet verified.
 [Worker Domains API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/methods/list/).
 
 Only `api.staging.healthidentitydirectory.com` needs the AWS origin target.
@@ -66,24 +73,44 @@ identity fields. This does not publish a Worker or configure DNS.
 ## USER INPUT REQUIRED
 
 Use the existing Cloudflare dashboard account; no additional provider account is
-needed. Restore local authorization to this account/zone, with **Zone Read,
-DNS Read and Workers Routes Read** for inventory, plus **Workers Scripts Read**
+needed. Restore local authorization to this account/zone, with **DNS Read and
+Workers Routes Read** for inventory, plus **Workers Scripts Read**
 and **Turnstile Sites Read**
-for this account. Add **DNS Edit** and **Turnstile Sites Write** only for the
+for this account. The zone-read API also accepts DNS Read; an additional Zone Read
+permission is not required for that request. Add **DNS Edit** and **Turnstile Sites Write** only for the
 staging setup operations. The token screen may label Turnstile as Read/Edit;
 use the specific Turnstile permission rather than general Account Settings
 Write. Renewing Worker OAuth alone does not add DNS/Turnstile authority.
 [Cloudflare token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).
 
-For temporary operator access, enter the scoped token silently in your local
-terminal, then run the read-only preflight:
+**Current correction:** retain the working DNS access and grant the operator
+token **Account → Workers Scripts → Read**, **Account → Turnstile → Read**
+(`Turnstile Sites Read`) for the exact account above, and **Zone → Workers Routes
+→ Read** for this exact zone. The September 22 run was denied at all three API
+groups. If the token already lists these permissions, confirm their account/zone
+resource scope and the issuing user's membership with the Cloudflare account
+owner. A successful zone read alone does not prove these permissions.
+
+For temporary operator access, run the diagnostic in your local terminal. It
+prompts with echo disabled and saves a new metadata-only report that the agent
+can inspect; it does not persist the token. Enter just the token value, without
+an `Authorization:` header, a `Bearer` prefix or surrounding quotes. Do not
+recreate a token solely because the older preflight returned `request_failed`.
 
 ```sh
-read -rs -p 'Cloudflare staging operator token: ' CLOUDFLARE_API_TOKEN
-export CLOUDFLARE_API_TOKEN
-python3 scripts/staging-external-preflight.py --cloud-read-only
-unset CLOUDFLARE_API_TOKEN
+python3 scripts/check-staging-cloudflare-access.py --prompt-token \
+  --output release/local/cloudflare-access-diagnostic-scoped.json
 ```
+
+Use a new output filename if that report already exists. The diagnostic makes
+only fixed staging inventory GET requests and follows no redirects. It records
+HTTP status and numeric Cloudflare error codes, omitting raw provider messages,
+response bodies, token values and widget credentials. It stops before inventory
+if the zone/account binding cannot be verified. Successful inventory reads still
+do not prove write permissions, publisher authorization, browser acceptance or
+deployment readiness. The original cross-provider preflight remains available
+and unchanged. See [Cloudflare API troubleshooting](https://developers.cloudflare.com/fundamentals/api/troubleshooting/)
+and the [zone read contract](https://developers.cloudflare.com/api/resources/zones/methods/get/).
 
 The protected publisher needs a **separate API token** with Account Workers
 Scripts Edit and this Zone Workers Routes Edit. Store it through AWS Secrets

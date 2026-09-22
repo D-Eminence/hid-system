@@ -47,6 +47,13 @@ preparation and exact-source offline release-trust synthesis. It supersedes
 expired AWS-session claims, but supplies no deployment, message-delivery or
 custody approval.
 
+The later [Cloudflare operator observation](cloudflare-operator-check-2026-09-21.json)
+retains the failed initial preflight and the subsequent September 22 diagnostic.
+The latter verified the active account/zone and all nine empty staging DNS reads;
+Turnstile, Worker Routes and Custom Domains returned HTTP 403/code 10000 and
+remain unverified. The token is usable for DNS reads. A separate hidden-prompt,
+read-only diagnostic retains sanitized HTTP status/error codes for the scoped rerun.
+
 - `baseline.json`, `pr.json`, `checks.json`, and `remote-release-final.json` bind source/merge and preserved user work.
 - `workspace-validation.json` records successful exact-SHA build/tests/verify/cache checks; `ci-*` and `github-*` preserve independently verified public ordinary-CI evidence and staging environment policy.
 - `aws-audit.*` records baseline findings; `aws-remediation.*` records the unapproved nine-file staging candidate and its 62-test validation, patch/file/template hashes and limits.
