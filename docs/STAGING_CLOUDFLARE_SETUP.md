@@ -91,6 +91,17 @@ groups. If the token already lists these permissions, confirm their account/zone
 resource scope and the issuing user's membership with the Cloudflare account
 owner. A successful zone read alone does not prove these permissions.
 
+The **02:45 UTC** scoped rerun produced the same denials. The owner confirmed
+that only the command had been rerun; the dashboard permission change is still
+outstanding. Open **My Profile → API Tokens → Edit** for the operator token and
+save the permission/resource-scope changes before running it again. Use a
+user-owned token for this combined inventory: Cloudflare's current compatibility
+matrix lists Turnstile as unsupported by account-owned tokens. A token from
+**Manage Account → Account API Tokens** therefore cannot be assumed to support
+the Turnstile read even after its permission policy changes. The protected
+publisher remains a separate credential and does not require Turnstile access.
+[Account-owned token compatibility](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/).
+
 For temporary operator access, run the diagnostic in your local terminal. It
 prompts with echo disabled and saves a new metadata-only report that the agent
 can inspect; it does not persist the token. Enter just the token value, without
@@ -99,7 +110,7 @@ recreate a token solely because the older preflight returned `request_failed`.
 
 ```sh
 python3 scripts/check-staging-cloudflare-access.py --prompt-token \
-  --output release/local/cloudflare-access-diagnostic-scoped.json
+  --output release/local/cloudflare-access-diagnostic-scoped-v2.json
 ```
 
 Use a new output filename if that report already exists. The diagnostic makes

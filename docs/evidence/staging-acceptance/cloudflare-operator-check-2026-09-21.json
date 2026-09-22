@@ -70,6 +70,17 @@
     "publisher_write_authority_verified": false,
     "supersedes": "Earlier unverified account/zone/DNS observations; denied widget/route/domain inventories remain unverified."
   },
+  "scoped_rerun": {
+    "checked_at": "2026-09-22T02:45:31.199678+00:00",
+    "source_report": "release/local/cloudflare-access-diagnostic-scoped.json",
+    "source_report_sha256": "5928cc6ff2d8f697f0d7707c467c4b0ca144b29a696ab8a0fa1bf6c1f0f545fc",
+    "report_matches_script": true,
+    "result": "Zone/DNS reads passed again; the same three API groups returned HTTP 403/code 10000.",
+    "owner_clarification": "Only the command was rerun; token permissions were not changed in the dashboard.",
+    "permission_change_outstanding": true,
+    "turnstile_token_compatibility": "Use a user-owned token for this combined inventory; current Cloudflare documentation lists Turnstile as unsupported by account-owned tokens.",
+    "token_type_observed": false
+  },
   "next_action": "Retain working DNS access; grant scoped Workers Scripts Read, Turnstile Sites Read and Workers Routes Read, or confirm their existing resource scope/user membership, then rerun the hidden-prompt diagnostic into a new sanitized report.",
   "nin_provider_mode": "deferred",
   "nin_files_preserved": 26,
