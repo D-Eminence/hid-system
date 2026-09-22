@@ -5,22 +5,28 @@
 **STAGING: NOT ACCEPTED. READINESS: NOT READY FOR LIVE ACCEPTANCE. PRODUCTION: LOCKED.**
 
 The current operational checkpoint is [STAGING_AWS_CHECKPOINT.md](STAGING_AWS_CHECKPOINT.md).
-Renewed AWS authentication and September 22 02:41 UTC readback confirm `CASE_OPENED`
+Renewed AWS authentication and September 22 08:41 UTC readback confirm `CASE_OPENED`
 with 6 vCPUs applied against the request for 32; the quota gate remains false.
 CDK bootstrap version 32, regional-stack absence and all eleven application
 repository absences are confirmed. Available capacity and release/provider gates
 do not authorize deployment. Draft [PR #2](https://github.com/D-Eminence/hid-system/pull/2)
-remains unapproved. Commit `d66bc66fa0006f84d2069047cf57791561c8ad83` passed all
-seven ordinary CI checks; subsequent follow-ups require their own checks.
+remains unapproved. Commit `9910eb073930810f62e562a7ae00457558aad923` passed all
+seven ordinary CI checks in both push and pull-request runs; subsequent follow-ups
+require their own checks. A direct bootstrap lookup-role assumption also passed
+at 08:42 UTC; this does not retest the earlier CDK preview's fallback warning.
 The prepared ECR bootstrap review is offline
 only and does not change any AWS state.
 
 Cloudflare operator read access is now verified. The September 22 03:02 UTC
 diagnostic completed all twenty requests against the expected account/zone:
 all nine exact staging DNS queries, the zone's Worker Routes list and eight
-filtered Custom Domain queries were empty. One widget exists but does not match
-the prepared seven-host staging configuration. Widget/secret binding and the
-separate publisher credential remain; no further read-scope renewal is required.
+filtered Custom Domain queries were empty. At that time the one widget did not
+match the prepared seven-host staging configuration. The owner subsequently
+created the dedicated staging widget and saved its public site key and secret.
+The 08:47 UTC AWS readback confirms the secret field is present and every earlier
+identity-secret field is preserved. The post-widget hostname readback is pending;
+public/secret pairing and live Siteverify are not yet verified. The separate
+publisher credential remains; no further read-scope renewal is required.
 
 The current external-gate continuation keeps the architecture fixed. Staging now
 uses an explicit email-only notification profile: SES is required, Novu is required
@@ -221,24 +227,26 @@ CLI, account, secret-container and provider investigation. Do not send existing 
 access keys, patient NINs, passwords, OTPs, provider keys or signing private keys in chat.
 
 The owner has already submitted the 32-vCPU quota request. Renewed September 22
-02:41 UTC readback reports `CASE_OPENED` with 6 vCPUs applied. The quota gate
+08:41 UTC readback reports `CASE_OPENED` with 6 vCPUs applied. The quota gate
 remains false. This is an AWS-owned pending gate, not another
 user request or approval. Do not submit a duplicate or deploy anything while it
 is pending. Read the existing request with
 `python3 scripts/check-staging-fargate-quota.py`.
 
-1. **INPUT REQUIRED:** configure the dedicated staging Turnstile widget and supply
-   the bounded release publisher token. **WHY:** operator read access is verified,
-   but the one observed widget does not match the prepared staging hostname set;
-   its secret is not bound. The protected publisher requires a separate
+1. **INPUT REQUIRED:** supply the bounded release publisher token and complete
+   the read-only post-widget inventory. **WHY:** operator read access, public
+   site-key entry and staging secret entry are complete. The newly created widget's
+   hostnames still need readback. The protected publisher requires a separate
    version-pinned token secret. **WHERE:** Cloudflare dashboard for the known
    account/zone, following [the exact staging setup](STAGING_CLOUDFLARE_SETUP.md).
    Publisher token in AWS Secrets Manager named
-   `hid-staging-cloudflare-publisher-token-*`; Turnstile secret field
-   `/hid/staging/identity-sensitive.turnstileSecretKey` and public site key in the
-   reviewed staging frontend build configuration. Preserve existing secret fields.
+   `hid-staging-cloudflare-publisher-token-*`. The existing Turnstile secret field
+   `/hid/staging/identity-sensitive.turnstileSecretKey` must be preserved; its public
+   site key is saved in `release/local/staging-turnstile-sitekey.txt` for the reviewed
+   staging frontend build configuration. Do not repeat secret entry.
    **MINIMUM PERMISSION:** publisher Account Workers Scripts Edit and this Zone Workers
-   Routes Edit; DNS Read and Turnstile Sites Read for inventory, with separate
+   Routes Edit; existing Zone DNS Read/Workers Routes Read and Account Workers
+   Scripts Read/Turnstile Sites Read for inventory, with separate
    Zone DNS Edit and Turnstile Sites Write only for required staging provisioning. Cloudflare zone scope covers the shared
    zone, so code/review must restrict mutations to staging names. **WHAT I SHOULD NOT
    SEND:** tokens or widget secrets. **AFTER I PROVIDE IT:** verify scopes, inspect
@@ -345,16 +353,19 @@ deployment-profile configuration remains unchanged. The user's `docs/SECURITY.md
 remains exactly SHA-256
 `a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93`.
 No production data, deployment, migration, deletion, signing, publication, PR approval
-or merge occurred. External writes comprise the five previously generated staging
-application keys and, in this continuation, eight staging GitHub environments with
-owner review, protected branches and no administrator bypass. No workflow was run.
+or merge occurred. Earlier receipts record five generated staging application keys
+and eight staging GitHub environments with owner review, protected branches and no
+administrator bypass. The owner has now configured a staging Turnstile widget and
+entered its secret; the agent's follow-up only read back that secret. Ordinary
+credential-free CI ran on the review branch; no protected release workflow was run.
 
 ### F. NEXT ACTION
 
-Configure the dedicated staging Turnstile widget described in
-[Cloudflare setup](STAGING_CLOUDFLARE_SETUP.md#user-input-required), then enter its
-secret with `python3 scripts/staging-provider-secret.py --field turnstileSecretKey --apply`.
-Cloudflare read authorization is already verified. Supply provider configuration only through the
+Complete the post-widget read-only inventory described in
+[Cloudflare setup](STAGING_CLOUDFLARE_SETUP.md#user-input-required):
+`python3 scripts/check-staging-cloudflare-access.py --prompt-token --output release/local/cloudflare-access-after-widget.json`.
+The staging public key and secret are saved; do not re-enter them. Cloudflare read
+authorization is already verified. Supply remaining provider configuration only through the
 designated local inputs and Secrets Manager locations. AWS authentication and
 bootstrap-absence checks now pass, but the existing quota gate remains closed.
 When its request status changes, rerun `python3 scripts/check-staging-fargate-quota.py`

@@ -56,6 +56,14 @@ does not match the prepared staging hostname set. Read authorization is cleared;
 widget/secret binding and separate publisher authority remain. The diagnostic's
 SinglePage correction and final offline recheck of recorded pagination are explicit.
 
+The [September 22 prerequisite follow-up](staging-prerequisite-progress-2026-09-22.json)
+records subsequent owner Turnstile setup and AWS readback: the public key and
+secret are saved, with all prior identity-secret fields preserved. The post-widget
+hostname inventory and live key pairing remain unverified. It also records the
+still-pending 6-vCPU quota, successful direct bootstrap lookup-role assumption,
+absence of a publisher-token container, and both successful seven-check CI runs
+for `9910eb0`. Source approval and protected execution remain separate gates.
+
 - `baseline.json`, `pr.json`, `checks.json`, and `remote-release-final.json` bind source/merge and preserved user work.
 - `workspace-validation.json` records successful exact-SHA build/tests/verify/cache checks; `ci-*` and `github-*` preserve independently verified public ordinary-CI evidence and staging environment policy.
 - `aws-audit.*` records baseline findings; `aws-remediation.*` records the unapproved nine-file staging candidate and its 62-test validation, patch/file/template hashes and limits.

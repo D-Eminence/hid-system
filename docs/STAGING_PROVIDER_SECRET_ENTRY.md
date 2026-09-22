@@ -29,8 +29,11 @@ python3 scripts/staging-provider-secret.py --field novuApiKey --apply
 
 The tool first displays only the destination and presence metadata. It then
 prompts with echo disabled for the value and the exact destination confirmation.
-Do not add the value to the command line, environment, local JSON inputs, source,
-or chat. AWS CLI history must be disabled; the tool checks this before accessing
+Do not add credential values (`turnstileSecretKey` or `novuApiKey`) to the command
+line, environment, local JSON inputs, source, or chat. The non-secret SES sender
+address also belongs in the private `staging-notification-input.json` described
+in [notification setup](STAGING_NOTIFICATION_SETUP.md); it is not an API key.
+AWS CLI history must be disabled; the tool checks this before accessing
 any value. The write payload goes through an anonymous stdin pipe, not a file or
 process argument. Raw AWS errors and secret values are never printed.
 [AWS file parameters](https://docs.aws.amazon.com/cli/latest/userguide/cli-usage-parameters-file.html),

@@ -18,7 +18,11 @@ The older agent readback used a failed Wrangler credential, which is a
 different credential source. A token entered in a separate terminal is not
 inherited by an existing agent session; clearing it after a command also prevents
 later reuse. AWS authentication is renewed, but Cloudflare authority is
-independent. The staging Turnstile secret field is confirmed absent in AWS.
+independent. After that inventory the owner created a dedicated staging widget
+and saved its public site key and secret. The September 22 08:47 UTC AWS readback
+confirms `turnstileSecretKey` is present and every previous identity-secret field
+is preserved. The post-widget hostname readback and live Siteverify/key pairing
+remain unverified; saved inputs alone do not prove those checks.
 
 Generate the source-bound, non-secret plan without credentials:
 
@@ -79,9 +83,9 @@ identity fields. This does not publish a Worker or configure DNS.
 
 ## USER INPUT REQUIRED
 
-**Operator read access is complete; no renewal or further read-scope change is
-required.** Use the existing account to configure a dedicated staging Turnstile
-widget and the separate publisher credential. No new provider account is needed.
+**Operator read access and staging Turnstile input entry are complete; no renewal,
+further read-scope change or repeated secret entry is required.** The separate
+publisher credential and post-widget inventory remain. No new provider account is needed.
 The observed widget has not been established as staging-only; do not modify an
 unverified or production widget to satisfy this setup.
 
@@ -98,10 +102,12 @@ outreach.staging.healthidentitydirectory.com
 admin.staging.healthidentitydirectory.com
 ```
 
-Save only its actual public site key in the prepared, ignored mode-0600 file
+The owner saved the actual public site key in the prepared, ignored mode-0600 file
 `release/local/staging-turnstile-sitekey.txt` for the later `VITE_TURNSTILE_SITE_KEY`
-build binding. This empty input is not a configured widget or deployment setting.
-The paired secret must be entered only through the local hidden helper:
+build binding. The copied label was removed without changing the key, and the
+original labeled input was preserved privately. The secret is also saved in its
+designated staging field. The command below documents first entry for operators;
+**do not rerun it now**, because the helper correctly refuses existing fields:
 
 ```sh
 python3 scripts/staging-provider-secret.py --field turnstileSecretKey --apply

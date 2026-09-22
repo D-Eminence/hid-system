@@ -8,7 +8,7 @@ The renewed `hid-admin` session authenticated account `659225405023`, region
 `request_pending: true`, `quota_gate_cleared: false`. The regional stack and all
 eleven application repositories are absent; the CDK bootstrap version is **32**.
 The final quota recheck at **21:01 UTC** returned the same pending status and limit.
-The **September 22 02:41 UTC** read also returned `CASE_OPENED` and 6 vCPUs;
+The **September 22 08:41 UTC** read also returned `CASE_OPENED` and 6 vCPUs;
 the 32-vCPU limit is still not applied. No duplicate request was submitted.
 These successful reads supersede the earlier expired-session observations.
 No duplicate request or deployment is
@@ -18,8 +18,9 @@ This pending AWS decision requires no second user submission.
 The earlier continuation created eight staging GitHub environments; their
 owner-review/protected-branch/no-admin-bypass policies were verified again on
 September 21. Ordinary source CI has run; no protected release workflow was
-dispatched. The current continuation changed no AWS resource, secret, DNS record,
-database or deployed application. No production API target was requested. NIN source/configuration remains
+dispatched. The agent made no AWS resource, secret, DNS record, database or
+deployed-application mutation in this continuation; the owner's subsequent staging
+Turnstile secret entry is recorded below. No production API target was requested. NIN source/configuration remains
 deferred; the Identity task is unchanged. The regional stack gained an explicit Novu
 endpoint parameter; its production template remains byte-identical. Release capability
 preparation and its separately tested staging build policy are recorded in the
@@ -49,10 +50,10 @@ absence and provider readiness; it does not refresh every historical row.
 | Permissions | Tested operator reads/role assumption, deployment-role CloudFormation actions and PassRole simulate as allowed. The pre-existing execution role has AdministratorAccess; no permission was added or widened |
 | Certificates and S3 endpoint | Both referenced staging ACM certificates are issued and unused. The referenced AWS-managed S3 prefix list belongs to `eu-west-1` |
 | Database compatibility | PostgreSQL major 16 currently selects default 16.13; `db.t4g.small`, encrypted gp3 storage is orderable in three availability zones. The selected CA matches the current `rds-ca-rsa2048-g1` thumbprint; its base64 value is 1,932 bytes |
-| Secrets | Auth signing/login keys and OTP HMAC present. Turnstile absent. The notification-provider container and all ten database secret containers exist with zero versions |
+| Secrets | Auth signing/login keys and OTP HMAC present. September 22 owner entry and readback confirm the staging Turnstile field is now present; live widget pairing/Siteverify remain unverified. The notification-provider container and all ten database secret containers had zero versions at their last inventory |
 | SES | September 21: sending enabled, HEALTHY, sandbox access, zero identities and zero verified identities |
 | GitHub/AWS federation | The account's GitHub OIDC provider is absent. This is an agent provisioning task after the exact release trust plan is approved, not an ARN the user must invent |
-| GitHub release branch | Approved base remains `a709e643a731b444f7cb775b2b16fe28164146a7`. Review source `27cddc3d9447bb0e0edc9612107a60014dd772b9` passed all seven ordinary CI checks in draft [PR #2](https://github.com/D-Eminence/hid-system/pull/2); it is unapproved and none of its new workflows is on the protected branch. Any later follow-up needs its own CI |
+| GitHub release branch | Approved base remains `a709e643a731b444f7cb775b2b16fe28164146a7`. Review source `9910eb073930810f62e562a7ae00457558aad923` passed all seven ordinary CI checks in both push and pull-request runs for draft [PR #2](https://github.com/D-Eminence/hid-system/pull/2); it is unapproved and none of its new workflows is on the protected branch. Any later follow-up needs its own CI |
 | GitHub staging protections | Existing `staging` and `staging-publisher` environments retain the sole owner reviewer, protected branches and disabled administrator bypass; each has zero variables/secrets. The eight previously absent candidate/capability environments were subsequently installed with the same protections; no variables, secrets or workflow runs |
 
 Policy simulation is bounded evidence and can differ from actual authorization;
@@ -64,7 +65,7 @@ specifies major 16, so check the selected minor and CA again at provisioning.
 
 ## Capacity and prepared acceptance settings
 
-The September 21 verified **Fargate On-Demand vCPU quota is 6**, quota `L-3032A538`. The existing
+The September 22 verified **Fargate On-Demand vCPU quota is 6**, quota `L-3032A538`. The existing
 request `53cf4fecbdee43808970dadf399dce15KHtG3UD0` asks for 32 vCPUs and reports
 `CASE_OPENED` (AWS support processing). The earlier empty-history observation is
 superseded; do not submit another request. Its CloudWatch usage query returned no datapoints;
@@ -145,11 +146,11 @@ node infra/aws/scripts/assess-staging-capacity.mjs \
 
 | Exact action/input | Where and how | Blocking stage |
 | --- | --- | --- |
-| Configure the dedicated staging Turnstile widget and separate publisher credential; operator read access is already verified | Existing Cloudflare account/zone. Use the seven-host configuration in [Cloudflare setup](STAGING_CLOUDFLARE_SETUP.md). Enter `turnstileSecretKey` into `/hid/staging/identity-sensitive` through the hidden local helper, preserving existing fields; retain the actual public site key for the frontend build. Store the separate publisher API token as the **raw SecretString**, not JSON, in an AWS secret named `hid-staging-cloudflare-publisher-token-*`; the operator derives its ARN/version | Live browser/API deployment and protected publication. Real Siteverify and DNS/TLS behavior must then pass acceptance |
+| Supply the separate scoped publisher credential; operator reads and Turnstile input entry are complete | Existing Cloudflare account/zone. Store the separate publisher API token as the **raw SecretString**, not JSON, in an AWS secret named `hid-staging-cloudflare-publisher-token-*`; the operator derives its ARN/version. The staging public site key and `turnstileSecretKey` are saved; do not repeat secret entry. Obtain the pending post-widget read-only report to verify the newly configured hostnames, following [Cloudflare setup](STAGING_CLOUDFLARE_SETUP.md) | Protected publication and admitted deployment. Widget configuration and actual Siteverify, DNS/TLS behavior remain acceptance checks |
 | Select the controlled SES sender and Novu staging environment/channel; securely configure the two fields | SES `eu-west-1` and Novu dashboards; JSON `sesFromAddress` and `novuApiKey` in `/hid/staging/notification-provider`. Retain the chosen Novu region/API URL. No new AWS account or SES API key | Notification API/Worker startup and functional staging deployment. SES identity verification, workflow/channel activation and receipt are subsequent acceptance checks |
 | Confirm two distinct controlled patient/clinician inboxes and separate test-send authorizations | Edit `release/local/staging-journey-input.json` locally; set `patient_email`, `staff_email` and `controlled_test_recipients_confirmed`. Separately authorize each intended SES verification, recovery OTP and Novu test in `release/local/staging-notification-input.json`, following [notification setup](STAGING_NOTIFICATION_SETUP.md). Contact control alone does not authorize a send. No passwords, OTPs or provider keys belong in either file | Live recovery/delivery/browser acceptance; these contacts do not block an empty AWS foundation |
 | Actual release custodian assignments and independently trusted public material | Existing offline/hardware custody process; public intake described in [public custody](TUF_STAGING_PUBLIC_CUSTODY.md). Keep private keys/PINs with custodians | Signed release admission, publication and the subsequent admitted staging deployment |
-| Review the final successor source once its follow-up CI passes | Review [draft PR #2](https://github.com/D-Eminence/hid-system/pull/2) through GitHub's source controls. Protected execution requires a separate later concrete run approval | Protected workflow installation and subsequent admitted deployment; ordinary CI is not source approval |
+| Review the staging successor source | Review [draft PR #2](https://github.com/D-Eminence/hid-system/pull/2) through GitHub's source controls; `9910eb0` has passed both seven-check CI runs. Review the actual latest head and its checks before approval. Protected execution requires a separate later concrete run approval | Protected workflow installation and subsequent admitted deployment; ordinary CI is not source approval |
 
 Notification account requirements and minimum scopes remain in the
 [provider matrix](STAGING_PROVIDER_ACCOUNTS.md): SES and Novu REQUIRED;
@@ -158,10 +159,13 @@ Termii and Meta WhatsApp OPTIONAL; Infobip FALLBACK. Do not send secrets in chat
 The owner's September 22 03:02 UTC Cloudflare diagnostic completed all twenty
 reads. The active account/zone is verified; the nine exact DNS queries, the
 zone's Worker Routes list and eight filtered Custom Domain queries are empty.
-One widget exists, but none matches the prepared seven staging hosts. Operator
-read access is cleared. The [Cloudflare setup guide](STAGING_CLOUDFLARE_SETUP.md)
-records the remaining widget/secret and separate publisher inputs; no publication
-or secret binding is inferred from inventory success.
+At that time one widget existed, but none matched the prepared seven staging
+hosts. The owner subsequently reported creating the dedicated widget and saved
+its public site key and staging secret. AWS readback confirms the secret field
+is now present. Operator read access is cleared; the new widget's hostnames
+require the post-widget inventory, and live key pairing/Siteverify are unverified.
+The [Cloudflare setup guide](STAGING_CLOUDFLARE_SETUP.md) records the remaining
+separate publisher input; no publication is inferred from inventory success.
 
 Draft PR #2's bootstrap follow-up passed ordinary CI and still needs owner review.
 Any subsequent source change requires its own CI. The protected release branch has
@@ -193,11 +197,13 @@ actual case outcome. Even after 32 is applied, available account capacity and al
 release/provider gates remain unverified. Exit zero means reads succeeded, never
 permission to deploy. [AWS request status](https://docs.aws.amazon.com/cli/latest/reference/service-quotas/get-requested-service-quota-change.html),
 [applied quota](https://docs.aws.amazon.com/cli/latest/reference/service-quotas/get-service-quota.html).
-The September 15 lookup-role attempt failed with an expired AWS session. Renewed
-September 21 identity/quota/absence reads do not themselves prove that role
-assumption. The earlier no-change-set
-diff passed with a lookup-role assumption warning and same-account fallback; this
-warning is still unresolved.
+The September 15 lookup-role attempt failed with an expired AWS session. A direct
+September 22 08:42 UTC STS check now successfully assumes the observed bootstrap
+lookup role. Only its ARN/expiration were retained; no temporary credentials were
+printed or saved and no assumed-role resource operation was performed. This clears
+the direct role-assumption check. The earlier CDK no-change-set diff's fallback
+warning still needs retesting on the exact approved-source preview; this STS
+check does not claim that CDK preview has been rerun.
 
 The [September 15 preparation receipt](evidence/staging-acceptance/predeployment-2026-09-15.json)
 records the earlier expired session, quota hold, prepared workflows and validation.
