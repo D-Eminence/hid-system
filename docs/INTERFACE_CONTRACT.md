@@ -15,6 +15,38 @@ credentials never use the ordinary-notification event path. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
 Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
+### Patient sessions and self service
+
+`POST /api/v1/auth/patient/login` accepts email/password and the `patient-login`
+Turnstile action. It binds a separate patient session to the existing canonical
+Identity patient; its actor has no staff roles, facility memberships or platform
+permissions. Existing session, refresh and logout routes retain that binding,
+host-only Secure/HttpOnly cookies, Origin/CSRF checks and refresh-family reuse
+revocation. The server rechecks account eligibility, token version, session and
+patient mapping on use.
+
+`GET /api/v1/identity/me` returns the authenticated patient's profile and HID.
+`GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
+grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
+returns at most 50 completed encounters and 50 current signed/amended note
+revisions, after fresh Identity authorization through the EHR workload caller.
+These routes accept no browser-selected patient identity. Patient record access
+is read-only and owning-service disclosure/audit is atomic. The internal
+`GET /api/v1/identity/service/patient-self-authorization` requires both the
+current patient session and the exact authenticated EHR workload caller.
+
+`GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
+permissions, emergency purpose and a freshly checked break-glass grant authorizing
+the `read_records` action for the exact facility and patient. Activation requires a reason, expires
+within the configured 5–240 minute bounds, permits at most ten new activations
+per account per hour, and atomically emits `EmergencyAccessActivated.v1` for
+notification and review. Idempotent replay does not extend expiry. Expiry,
+revocation and failed authorization/audit prevent further disclosure.
+
+Recovery completion atomically consumes the account/token-bound OTP credential,
+sets an Argon2 password and revokes sessions. Disabled, stale, expired and replayed
+credentials fail closed. Completion returns to login rather than opening a session.
+
 ## 1. Purpose
 
 This document defines communication rules between HID clients and services.
@@ -167,6 +199,22 @@ Input:
 
 Return only authorized patient identity information required by the caller.
 
+### Registration Capabilities
+
+`GET /api/v1/identity/registration-capabilities` requires authenticated workforce
+access, `X-Facility-Id`, and `identity.registration.write`. Staging returns:
+
+```json
+{"nin":{"enabled":false,"state":"deferred"},"newPatientRegistrationRequiresNin":true}
+```
+
+With `NIN_PROVIDER_MODE=deferred`, NIN resolve returns HTTP 503 with code
+`NIN_PROVIDER_DEFERRED` before identifier lookup or a provider call. No NIN keys
+or MetaMap credentials are required for startup. Existing case review and enrollment
+retain their identity-evidence, authorization and audit requirements. Reviewed
+synthetic staging accounts exercise recovery, sign-in and care access independently
+of new NIN registration; see [staging patient journeys](STAGING_PATIENT_JOURNEYS.md).
+
 ### NIN Resolution
 
 Flow:
@@ -188,6 +236,7 @@ Do not persist an unkeyed digest of raw NIN in idempotency records.
 GET  /api/v1/identity/registration-cases/:caseId
 POST /api/v1/identity/registration-cases/:caseId/approve-new
 POST /api/v1/identity/registration-cases/:caseId/link-existing
+POST /api/v1/identity/registration-cases/:caseId/enroll
 ```
 
 `resolve`, `approve-new`, and `link-existing` require `Idempotency-Key`.
@@ -212,6 +261,18 @@ cancelled
 identity mutation occurred. `linked_existing` requires explicit review of a
 stored candidate. `approved_new_identity` is the only transition that may issue
 a new canonical UUID and HID.
+
+Enrollment requires `identity.registration.approve`, the current facility,
+`Idempotency-Key`, `expectedVersion`, reason, `healthcare-operations` purpose and
+a normalized email address. Only a resolved, currently verified canonical NIN
+binding can enroll an unmapped patient. The command creates a separate
+`pending_reset` auth account and immutable enrollment evidence; it does not link
+an existing account merely because an email matches. Governed NIN assurance is
+preserved when the existing OTP flow verifies contact ownership and sets the
+password. The case response supplies only bounded authorized review candidates.
+Real NIN verification still requires a configured provider; deterministic mode
+is test-only, is rejected in staging, and unavailable/deferred modes cannot issue
+verified evidence.
 
 ### Outreach registration boundary
 

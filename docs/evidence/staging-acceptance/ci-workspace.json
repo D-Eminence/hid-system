@@ -1,0 +1,126 @@
+{
+  "schema_version": "hid.tuf.workspace-ci-evidence/v1",
+  "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "repository": "D-Eminence/hid-system",
+  "run_id": "34238812233",
+  "run_attempt": "1",
+  "results": [
+    {
+      "label": "build",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "started_at": "2026-09-08T14:33:38.808Z",
+      "completed_at": "2026-09-08T14:35:32.110Z",
+      "exit_code": 0,
+      "execution_error": null,
+      "log": "build.log",
+      "log_sha256": "b0340ca17f984a3444837bc285ebd7f3ed12520a0c61a81d6bb1accfe22db9ad"
+    },
+    {
+      "label": "test",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "started_at": "2026-09-08T14:35:32.112Z",
+      "completed_at": "2026-09-08T14:36:38.565Z",
+      "exit_code": 0,
+      "execution_error": null,
+      "log": "test.log",
+      "log_sha256": "aaf1e5aff6903018d49c8d07d64d3266e7049acd8a60d62b03a0a91d3893c9b3"
+    },
+    {
+      "label": "verify",
+      "command": [
+        "npm",
+        "run",
+        "verify"
+      ],
+      "started_at": "2026-09-08T14:36:38.565Z",
+      "completed_at": "2026-09-08T14:38:39.181Z",
+      "exit_code": 0,
+      "execution_error": null,
+      "log": "verify.log",
+      "log_sha256": "48cb4a0e39abc154e977f9b10cba4364b4d9a77e9f9e3fcac4361070c1a04f69"
+    },
+    {
+      "label": "release-tests",
+      "command": [
+        "npm",
+        "--prefix",
+        "release",
+        "test"
+      ],
+      "started_at": "2026-09-08T14:38:39.182Z",
+      "completed_at": "2026-09-08T14:38:41.456Z",
+      "exit_code": 0,
+      "execution_error": null,
+      "log": "release-tests.log",
+      "log_sha256": "ae7fb7406770ef807be170910b89520658d5f387462d9ff25bb5eb1bd4a0a88d"
+    },
+    {
+      "label": "release-contracts",
+      "command": [
+        "npm",
+        "--prefix",
+        "release",
+        "run",
+        "verify"
+      ],
+      "started_at": "2026-09-08T14:38:41.457Z",
+      "completed_at": "2026-09-08T14:38:41.800Z",
+      "exit_code": 0,
+      "execution_error": null,
+      "log": "release-contracts.log",
+      "log_sha256": "a149f27db994d3e3dc2849df988e33c0e59e3c318ff7e73c029258bbb76fe295"
+    },
+    {
+      "label": "ehr-tests",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/ehr",
+        "test"
+      ],
+      "started_at": "2026-09-08T14:38:41.801Z",
+      "completed_at": "2026-09-08T14:38:42.444Z",
+      "exit_code": 0,
+      "execution_error": null,
+      "log": "ehr-tests.log",
+      "log_sha256": "536e135d0bc0eb9743aa2629df4f2c8a7d9d82c58909c2889e91c48e8bbf8d7b"
+    },
+    {
+      "label": "migration-rehearsal",
+      "command": [
+        "node",
+        "scripts/tuf-staging-migration-rehearsal.mjs",
+        "--evidence-dir",
+        "/home/runner/work/_temp/synthetic-migration"
+      ],
+      "started_at": "2026-09-08T14:38:42.444Z",
+      "completed_at": "2026-09-08T14:38:52.379Z",
+      "exit_code": 0,
+      "execution_error": null,
+      "log": "migration-rehearsal.log",
+      "log_sha256": "22357f216a3a6715782c512ec9993241416fcf503df7e2eca379fc5fff3b2231"
+    },
+    {
+      "label": "diff-check",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "started_at": "2026-09-08T14:38:52.379Z",
+      "completed_at": "2026-09-08T14:38:52.384Z",
+      "exit_code": 0,
+      "execution_error": null,
+      "log": "diff-check.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "publication_result": "not-attempted"
+}

@@ -96,6 +96,34 @@ const exactBrokerFunctionArns = [
   'arn:aws:lambda:eu-west-1:111122223333:function:hid-production-tuf-broker-checkpoint',
 ] as const;
 
+test('only the staging build role can push the exact 11 application repositories without creating infrastructure', () => {
+  const { template } = synthesize({ environmentName: 'staging',
+    githubProtectedEnvironmentSubjects: protectedEnvironmentSubjects('staging'),
+    evidenceRetentionDays: 90,
+    alarmNotificationTopicArn: 'arn:aws:sns:eu-west-1:111122223333:hid-staging-release-trust-alerts',
+  });
+  const build = policyStatements(policyForRoleDescription(template, 'Build-only role'));
+  const writes = statementBySid(build, 'BuildOnlyExactStagingApplicationImages');
+  const expected = ['identity-api', 'ehr-api', 'lab-api', 'pharmacy-api', 'ocr-api', 'ocr-worker',
+    'outreach-api', 'notification-api', 'notification-worker', 'event-dispatcher', 'gateway']
+    .map((name) => ({ 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' },
+      `:ecr:eu-west-1:111122223333:repository/staging/hid/${name}`]] }));
+  assert.deepEqual(writes.Resource, expected);
+  assert.deepEqual(actionList(writes), ['ecr:BatchCheckLayerAvailability', 'ecr:BatchGetImage',
+    'ecr:GetDownloadUrlForLayer', 'ecr:InitiateLayerUpload', 'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload', 'ecr:PutImage']);
+  const reads = statementBySid(build, 'InspectOnlyExactStagingBuildRepositories');
+  assert.deepEqual(actionList(reads), ['ecr:DescribeRepositories', 'ecr:DescribeImages']);
+  assert.equal((reads.Resource as unknown[]).length, 12);
+  for (const statement of iamStatements(template)) {
+    assert.equal(actionList(statement).some(action => ['ecr:CreateRepository', 'ecr:DeleteRepository',
+      'ecr:SetRepositoryPolicy', 'ecs:UpdateService', 'cloudformation:CreateStack'].includes(action)), false);
+  }
+  const production = synthesize().template;
+  assert.equal(JSON.stringify(production).includes('BuildOnlyExactStagingApplicationImages'), false);
+  assert.equal(JSON.stringify(production).includes('InspectOnlyExactStagingBuildRepositories'), false);
+  assert.equal(JSON.stringify(production).includes('repository/staging/hid/'), false);
+});
+
 function synthesize(
   overrides: Partial<HidReleaseTrustStackProps> = {},
 ): { readonly stack: HidReleaseTrustStack; readonly template: SynthesizedTemplate } {

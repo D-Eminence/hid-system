@@ -308,8 +308,8 @@
       "properties": {
         "image_component": { "const": "database-migration" },
         "first": { "const": "0001" },
-        "last": { "const": "0028" },
-        "count": { "const": 28 },
+        "last": { "const": "0032" },
+        "count": { "const": 32 },
         "ledger": { "$ref": "#/$defs/targetRef" },
         "verification": { "$ref": "#/$defs/targetRef" }
       }

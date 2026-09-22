@@ -195,7 +195,7 @@
   "migration": {
     "source_schema_evidence": "<REVIEWED_REFERENCE>",
     "authorized_dataset_reference": "<REVIEWED_REFERENCE>",
-    "destination_schema": "0028",
+    "destination_schema": "0032",
     "backup_evidence": "<REVIEWED_REFERENCE>",
     "restore_evidence": "<REVIEWED_REFERENCE>",
     "rollback_evidence": "<REVIEWED_REFERENCE>"

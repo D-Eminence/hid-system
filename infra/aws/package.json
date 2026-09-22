@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node --import tsx --test test/*.test.ts test/*.test.mjs",
     "synth": "node scripts/synth.mjs",
     "verify:synth": "node scripts/verify-synth.mjs",
     "verify:policy": "node scripts/verify-policy.mjs",

@@ -431,7 +431,7 @@ test('bootstrap is create-only and route activation requires an exact sealed dep
         artifact_set_sha256: 'd'.repeat(64),
         deployment_id: '3333abcd-1234-1234-1234-123456789abc',
         deployed_at: '2026-09-01T00:02:00.000Z',
-        wrangler_version: '4.127.1',
+        wrangler_version: '4.131.2',
         publication_authorization: publicationAuthorization(repository, new Date('2026-09-01T00:02:00Z')),
       }
       const deployPath = resolve(receipts, 'deploy.json')

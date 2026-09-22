@@ -26,8 +26,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0028",
-    "count": 28,
+    "last": "0032",
+    "count": 32,
     "files": [
       { "name": "0001_platform_and_migration_control.sql", "sha256": "0658978c5f01dea74f3f4183f809e3a39198ac11484658ddb7844d1dd692f842" },
       { "name": "0002_auth_and_canonical_identity.sql", "sha256": "9c0dd720cf8f474191a2deee3889655519b9afca665c457c974b41144809ec7b" },
@@ -56,7 +56,11 @@
       { "name": "0025_identity_transactional_outbox.sql", "sha256": "1a4242fb12db180bbd2cd32fb134df77c2910a7ccb10d02d17892e5bb38adc08" },
       { "name": "0026_transactional_event_delivery.sql", "sha256": "1a2c2f5269397fb54e6df5bf3ae08bf373b62f68cec3f2104994faa2d8a32f3f" },
       { "name": "0027_super_admin_foundation.sql", "sha256": "59a74a198d9b773d6a80e87b55556e569f18a47a633d6ba4107d5bb68101839f" },
-      { "name": "0028_identity_notification_migration_state.sql", "sha256": "c074a44a1e98946721de9763a230762b28aa8639b302dd57afa4edc5c92de200" }
+      { "name": "0028_identity_notification_migration_state.sql", "sha256": "c074a44a1e98946721de9763a230762b28aa8639b302dd57afa4edc5c92de200" },
+      { "name": "0029_governed_otp_recovery.sql", "sha256": "ac8abd701b4da141867ea3e8bf0d3d6993b6414f6dc3b43bacc25afe3728b479" },
+      { "name": "0030_patient_self_service.sql", "sha256": "c25b47c46e34b0adbe384b3964636dbe26c083d2ef3bd7d787c5e1f75fe1b9d6" },
+      { "name": "0031_emergency_notification_and_rate_limit.sql", "sha256": "f04f1cc8380dc0c6bd38d69403f23b13cad6a4e02778a0817df220da3dc3f701" },
+      { "name": "0032_governed_patient_enrollment.sql", "sha256": "c4ee4ac51ce90a622901c3f8ebd4f3ac4d72acb5a8f7addd0a2b1ea993572225" }
     ]
   },
   "frontend_archive": {

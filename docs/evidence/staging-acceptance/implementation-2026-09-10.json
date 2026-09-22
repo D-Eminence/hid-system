@@ -1,0 +1,596 @@
+{
+  "recorded_at": "2026-09-10T13:40:41.386909+00:00",
+  "baseline_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "candidate_committed": false,
+  "staging_accepted": false,
+  "production_locked": true,
+  "live_deployment": false,
+  "live_migration": false,
+  "workspace": "/home/l2e/hid-system",
+  "evidence_root": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260909-implementation",
+  "validation": {
+    "repository_test": {
+      "exit_code": 0,
+      "cwd": "/home/l2e/hid-staging-worktrees/a709e643a731b444f7cb775b2b16fe28164146a7",
+      "log": "repository-tests-complete.log",
+      "log_sha256": "cd3409ca8140631acc3369acc545cb73382c17bdcad8308e930490d9300a4772"
+    },
+    "repository_verify": {
+      "exit_code": 0,
+      "cwd": "/home/l2e/hid-system",
+      "log": "workspace-verify-complete.log",
+      "log_sha256": "d84ea48420e748330a6872106364e7471ccadef20b3ddf9701a4189f74112ddc"
+    },
+    "final_container_verify": {
+      "exit_code": 0,
+      "cwd": "/home/l2e/hid-system",
+      "log": "workspace-container-verify-final.log",
+      "log_sha256": "8fca775f4307f875c1a95e20cde7edc6c617ce7af79c42152be65cae7de7807e"
+    },
+    "infrastructure_tests": 83,
+    "workload_runtime_tests": 20,
+    "release_tests": 33,
+    "browser_transport_tests": 12,
+    "synthetic_browser_journeys": 7,
+    "staging_frontend_dryruns": 7,
+    "migrations": 32,
+    "foreign_keys_checked": 336,
+    "orphan_rows": 0,
+    "migration_receipt_sha256": "47f7936765fa7011e44642f787f94d16184b98362a0a99f2c178ea151c8e35bc",
+    "final_secret_readiness": {
+      "exit_code": 0,
+      "canonical_findings": 0,
+      "frontend_artifact_findings": 0,
+      "log": "workspace-secret-readiness-final.log",
+      "log_sha256": "9810bb76b7ebec81bcabf1e60001c5cd6aa30178c1b11a44ee517bb346c3a5a1"
+    }
+  },
+  "production_template": {
+    "byte_identical": true,
+    "bytes": 464453,
+    "sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6"
+  },
+  "security_document_sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+  "local_image_proof": {
+    "status": "passed",
+    "scope": "local-Docker-no-network-no-cloud",
+    "image_id": "sha256:aa714c898c985362ac3d6bcccfdec04485000d8792b849d51b435b2dfd85761b",
+    "architecture": "amd64",
+    "uid": 65532,
+    "directory_mode": "0700",
+    "file_mode": "0600",
+    "read_only_consumer_write_denied": true,
+    "other_uid_read_denied": true,
+    "readonly_health_fresh_exit": 0,
+    "readonly_health_expired_exit": 1
+  },
+  "cloud_observations": {
+    "aws_account": "659225405023",
+    "aws_region": "eu-west-1",
+    "aws_authenticated_at": "2026-09-09",
+    "aws_renewal_required": true,
+    "cloudflare_authenticated_at": "2026-09-10T08:31:10Z",
+    "cloudflare_dns_and_turnstile_forbidden": true,
+    "staging_keys_generated": 5,
+    "existing_staging_secret_containers_written": 2,
+    "production_writes": 0
+  },
+  "limitations": [
+    "No external NIN provider contract configured",
+    "No live OTP or emergency notification delivery",
+    "No real signed successor or immutable trust/custody evidence",
+    "No deployed staging network/database/ECS/DNS acceptance",
+    "Local Docker proof is amd64; admitted ARM64 runtime requires live verification"
+  ],
+  "source_files": [
+    {
+      "path": ".github/workflows/tuf-staging-candidate.yml",
+      "sha256": "df953cd1d9b46178634a8a978cce625c49d4a54eb793c9dd286c6dc70e2f4877"
+    },
+    {
+      "path": "apps/web/package.json",
+      "sha256": "501deb2cea2e83f948faf7d0ee46fd03d4f643779e4ae799a714acf11f666fe4"
+    },
+    {
+      "path": "apps/web/scripts/care-portal.browser.mjs",
+      "sha256": "7ab1455815804857c34a758b1da6b31f910e90c9c6e8acf6a8215c1465abf9c5"
+    },
+    {
+      "path": "apps/web/scripts/care-portal.test.mjs",
+      "sha256": "a982492ecbc7a8fd170e64220451b7cdf7a3690cf17fbeac6d64b0710f644be7"
+    },
+    {
+      "path": "apps/web/scripts/identity-browser.test.mjs",
+      "sha256": "6978382dad6d924e03da9e5adc69dba1e2196d52b9bfa6b0ea3a7befd8f45e96"
+    },
+    {
+      "path": "apps/web/src/App.tsx",
+      "sha256": "0f9424b1920e455c3ec7445c3cbdfaad139e0472e033e1aa057290600b8af122"
+    },
+    {
+      "path": "apps/web/src/components/AccountAccess.tsx",
+      "sha256": "2c50df293ac88f3e1b763da30d90f1eb67d2ee0f8a8e32af1aed3c8d00b73b9a"
+    },
+    {
+      "path": "apps/web/src/components/CarePortal.tsx",
+      "sha256": "579bd15c921ad34895ab0de7eabb79703550e5d2664bf5d4b2b197448f4d249e"
+    },
+    {
+      "path": "apps/web/src/components/SessionBootstrap.tsx",
+      "sha256": "fff3a51e7c77c5fe10a5110872d354a2c487115074355ecbb889cd84adc7d4f2"
+    },
+    {
+      "path": "apps/web/src/lib/carePortalApi.ts",
+      "sha256": "3b55b0c3e9f4acadb39069e2afd1def74a373e84ddbe551f1fab53b7fb653277"
+    },
+    {
+      "path": "apps/web/src/lib/carePortalContract.ts",
+      "sha256": "25233dcce5fd880132aa025480c41a0b68d49e4420746e7bd0f51edee806f238"
+    },
+    {
+      "path": "apps/web/src/lib/patientRegistrationApi.ts",
+      "sha256": "8b7d8dc0a18d76e4002e12625b967e317c1547056c492828bbee70fc4c2978ed"
+    },
+    {
+      "path": "apps/web/src/lib/routePreload.tsx",
+      "sha256": "0abd41ac68741ea648b8dd2d8cfc14efb3267a5eb810dfb4727b8cdfd0f1db0a"
+    },
+    {
+      "path": "apps/web/src/pages/doctor/DoctorAuth.tsx",
+      "sha256": "ad4ffbc80bcf42b04e6fe606c06cd851cebef96127ae1d44a45f2e5049b5cde6"
+    },
+    {
+      "path": "apps/web/src/pages/doctor/DoctorEmergency.tsx",
+      "sha256": "f982132d55842e1e98c43521144ee6d9e12b81ef6d87bcb3000233d74b6504a1"
+    },
+    {
+      "path": "apps/web/src/pages/doctor/PatientRegistration.tsx",
+      "sha256": "50d5b69729f04f65ab128568f426e7ea1fab2f307d6c1652ced3e6279e561583"
+    },
+    {
+      "path": "apps/web/src/pages/patient/PatientAuth.tsx",
+      "sha256": "a48fcd03b50385261ffcdee2cdbc84f240c1adc124fb563b8417aaab28bb6d95"
+    },
+    {
+      "path": "apps/web/src/pages/patient/PatientBioData.tsx",
+      "sha256": "0ba8e847087996798b83b5ad3b21c3380c1f98fbe89ae44d86f1169aff191a7e"
+    },
+    {
+      "path": "apps/web/src/pages/patient/PatientHistory.tsx",
+      "sha256": "f7fd19002952a6feee37c1815f6ba0d200cd91eaeaa42a2f6128a4b62afe0266"
+    },
+    {
+      "path": "apps/web/src/pages/patient/PatientNotifications.tsx",
+      "sha256": "2e19a284a1438e116cfee249a99f31d9bfe1187c5d1347765c289896e6ff04ca"
+    },
+    {
+      "path": "apps/web/src/pages/patient/PatientProfile.tsx",
+      "sha256": "f7d832171a5f8222b7c02152f9bd7fa76529fd51059a83d9dfc7e5b89dec35a4"
+    },
+    {
+      "path": "apps/web/src/pages/patient/PatientRecords.tsx",
+      "sha256": "6606bff7cae4cecbc4129d6ae78033d3fca5119e2f6ad5fe5aaf468e2a7aa081"
+    },
+    {
+      "path": "apps/web/src/pages/patient/PatientSelfPortal.tsx",
+      "sha256": "b788ee0d147143bfd8c8eac275a2b56cbe218f5752fb8d6eb59a42279bf12cfb"
+    },
+    {
+      "path": "docs/AWS_COST_MODEL.md",
+      "sha256": "68bc24e2048e1cd8e76ac69629b2c08df0d7a85afe866aa547f18d85eb80ee1a"
+    },
+    {
+      "path": "docs/AWS_DEPLOYMENT_ARCHITECTURE.md",
+      "sha256": "0b4de4c0548ad9d94d911c916ede29ee46b698fe0946741d605928501094ed32"
+    },
+    {
+      "path": "docs/AWS_DEPLOYMENT_RUNBOOK.md",
+      "sha256": "cb0798f615d9d97eaaa4a05e90dbeef3a20ecf7be71320af902a52d132332a5b"
+    },
+    {
+      "path": "docs/AWS_IAM_MATRIX.md",
+      "sha256": "6f146b6e8a798dd91b630d4e140e6f11f59c898ab699286339e99466ac8ff53b"
+    },
+    {
+      "path": "docs/DATABASE.md",
+      "sha256": "dbb31ab12d1e3fd9b83f18276b07e74a685f10b48d8f98c4328db4fb31a3ad80"
+    },
+    {
+      "path": "docs/INTERFACE_CONTRACT.md",
+      "sha256": "7e975884d832f44dec9a0aaf8b8eb62f8aea2ad3e2b143edea69146bc1f9a11e"
+    },
+    {
+      "path": "docs/MIGRATION_RUNBOOK.md",
+      "sha256": "d2d19805aaa77f662a87627c1a4c41c0360fc26ed5f4003efa0e587bc5e15034"
+    },
+    {
+      "path": "docs/README.md",
+      "sha256": "a7ed965e4d9fdd9da9c04b0b14cf8a8c2ff9866c4174469c8fc87e6ed1493d31"
+    },
+    {
+      "path": "docs/TASK.md",
+      "sha256": "b6e00214abe7f636521a47a8b3a03f016d5805eeaf064e690d0cb056f2e794cf"
+    },
+    {
+      "path": "docs/TUF-PRODUCTION-IMPLEMENTATION.md",
+      "sha256": "4c58a3041efbea42718249fff8c8f5e579902c5a1e58a1552d5a944784c7ec18"
+    },
+    {
+      "path": "docs/TUF-STAGING-EXECUTION.md",
+      "sha256": "4bb1ab70ac9190f39dcfb3d920f0c6a9abb8745c59fdaef4cea6f5257f518fb5"
+    },
+    {
+      "path": "docs/TUF-STAGING-MIGRATION.md",
+      "sha256": "406afbc0bf4037f61a80d0058a068869ecc35e3feaf9ef13d0ccab5efba6d38e"
+    },
+    {
+      "path": "docs/TUF_STAGING_CANDIDATE_ADMISSION.md",
+      "sha256": "fdfd421050aedd2077e9e357fac61578e8c3de071e112ae38c61940976d86267"
+    },
+    {
+      "path": "docs/evidence/staging-acceptance/README.md",
+      "sha256": "e9045ea5d5aa811eb6893b3e20787d7a3766aa1bafdf396479d68b1c827db669"
+    },
+    {
+      "path": "docs/evidence/staging-acceptance/implementation-cloudflare-summary.json",
+      "sha256": "4c3f807dbe69de98dc062d979aee93f4d0f2b5ce9050fad34e216b6bc9a69760"
+    },
+    {
+      "path": "docs/evidence/staging-acceptance/implementation-public-ca.json",
+      "sha256": "9889d1d59011e66c300a348c30d5d4a2ed9ef0e015dff084e5107ace1519924a"
+    },
+    {
+      "path": "docs/evidence/staging-acceptance/implementation-staging-profiles.json",
+      "sha256": "3a3a2b9c1b85c2c8a5ce60fb3ea880a4491a7c80de89a96b88048fbf9eda0e4a"
+    },
+    {
+      "path": "infra/aws/cdk.context.json",
+      "sha256": "a3ac11696adaff8c6b2f533021860112eed80efc4b33a009b772f415009b5c4c"
+    },
+    {
+      "path": "infra/aws/cost-inventory.json",
+      "sha256": "95599bf3e3da4a5874e136bdc216e120fb22fa63637653001bb067d87f870390"
+    },
+    {
+      "path": "infra/aws/runtime/workload-issuer/index.mjs",
+      "sha256": "5a425a779cd34f96e23e6f4494c4a0e607408ba6ad9c00f38c14acdb8d41f610"
+    },
+    {
+      "path": "infra/aws/runtime/workload-issuer/issuer.mjs",
+      "sha256": "6b392e102c5893957f2d8304c00101ac33991f23e0a515c47aaa6e81e6e9d2e4"
+    },
+    {
+      "path": "infra/aws/scripts/verify-synth.mjs",
+      "sha256": "b2800323d5baeb1eefb4e4bdc4e9f046e3aebe345552405f53ae3a30e65a1f7a"
+    },
+    {
+      "path": "infra/aws/src/config.ts",
+      "sha256": "961f07911428048fc89dc34b81c834d27bd9bf5abc9d84ec6eebb9ee90e5752c"
+    },
+    {
+      "path": "infra/aws/src/cost-inventory.ts",
+      "sha256": "683e38b7d89e4e06f23c689a5ac36ee26808eab7fcae48017c4f3a2555e53f64"
+    },
+    {
+      "path": "infra/aws/src/hid-regional-stack.ts",
+      "sha256": "5a99584c59c11293b691457fca83f1006213ce64e4c5e3ade8ab7c72da3d0ba1"
+    },
+    {
+      "path": "infra/aws/src/staging-workload-identity.ts",
+      "sha256": "2e8887945db11b441cb857c4bd7a92c1bbf020acabe4e0172e0b3b79c47db77e"
+    },
+    {
+      "path": "infra/aws/test/infrastructure.test.ts",
+      "sha256": "8cde2ba344718665f57755a451165550e98715177bf368ae5b02350dcdfb2679"
+    },
+    {
+      "path": "infra/aws/test/staging-workload-identity.test.ts",
+      "sha256": "62c8c3f82f790432950789e856c465e43cad8eea4431e1cb86280756079ca8d2"
+    },
+    {
+      "path": "package.json",
+      "sha256": "04158ac4fbbafd1cb47207cb455d7dcc6b8e2d77818ea9744b61ff21bb5e5afd"
+    },
+    {
+      "path": "packages/api-client/src/identity.ts",
+      "sha256": "87cfe44dc543590d7822f8a77c25dcf946cf95afacefd4e3f06865143d6e0f91"
+    },
+    {
+      "path": "packages/api-client/src/index.ts",
+      "sha256": "4175431984a71468b939384296f7776f605d7217a4814b270036fb9071aec03b"
+    },
+    {
+      "path": "packages/identity-browser-client/src/identityClient.ts",
+      "sha256": "f8a0bc9cef8aa9879b96242f903faf47c2fe543c0b00f4f457fda4bf5529dba8"
+    },
+    {
+      "path": "release/config/components.json",
+      "sha256": "b51082a62a97207a65f1a80a1a6fc2b81f0177ee837ef00f1f23f8462b062841"
+    },
+    {
+      "path": "release/config/staging-identifiers.template.json",
+      "sha256": "6c876dba2e7dce951405611418ecf2695723ca7bb7d754e501c3bfdd846ff54f"
+    },
+    {
+      "path": "release/schemas/release-bundle.schema.json",
+      "sha256": "cf4b4370fa7b0fbf3de32c1de7fc0c6953321725081b81741267f860baadf879"
+    },
+    {
+      "path": "release/scripts/admit-staging-candidate.mjs",
+      "sha256": "8399bb357568a54276bf7787b0a1ad8138a4699dbe62edb437a6828dfb8e318e"
+    },
+    {
+      "path": "release/scripts/verify-release-contract.mjs",
+      "sha256": "f38f322e0548d07598b465ea7a551fd9a50e0c0975b578434a07c92808c507a9"
+    },
+    {
+      "path": "release/test/helpers/candidate-fixture.mjs",
+      "sha256": "b2db34d3e127ed826a2986ce5dd927afc8322cd6d18d6de28c0b358e0f700545"
+    },
+    {
+      "path": "release/test/release-contract.test.mjs",
+      "sha256": "a7a7ee50078ae8f5fb19106a7218ec6fc7ba72d0f78440f74519d694d7953791"
+    },
+    {
+      "path": "release/test/staging-candidate.test.mjs",
+      "sha256": "54678db69ec03ec6bcb4ef18c3ce6d9649a8abce9e3e3337cab252cf0307bfdc"
+    },
+    {
+      "path": "scripts/run-container-database-acceptance.sh",
+      "sha256": "c9aa5b13dc38080f90bed11e166519266644e2453da2dd68f74af3873397c5a5"
+    },
+    {
+      "path": "scripts/tuf-staging-migration-rehearsal.mjs",
+      "sha256": "2b1a9c0e79afebba74b8b645025cfe27a66a953c94f5f46be158c04a04661402"
+    },
+    {
+      "path": "scripts/verify-container-platform.mjs",
+      "sha256": "b9cec9d4dde3575d2271c4e1da02da0565b61f579dde7b75864f634453ede6a2"
+    },
+    {
+      "path": "scripts/verify-migration-ledger.mjs",
+      "sha256": "8da15eebc536efca8877e838da9ad8f99f5d81cdc7d2f3245b56fc427cbd4788"
+    },
+    {
+      "path": "services/ehr-api/database/migrations/0029_governed_otp_recovery.sql",
+      "sha256": "ac8abd701b4da141867ea3e8bf0d3d6993b6414f6dc3b43bacc25afe3728b479"
+    },
+    {
+      "path": "services/ehr-api/database/migrations/0030_patient_self_service.sql",
+      "sha256": "c25b47c46e34b0adbe384b3964636dbe26c083d2ef3bd7d787c5e1f75fe1b9d6"
+    },
+    {
+      "path": "services/ehr-api/database/migrations/0031_emergency_notification_and_rate_limit.sql",
+      "sha256": "f04f1cc8380dc0c6bd38d69403f23b13cad6a4e02778a0817df220da3dc3f701"
+    },
+    {
+      "path": "services/ehr-api/database/migrations/0032_governed_patient_enrollment.sql",
+      "sha256": "c4ee4ac51ce90a622901c3f8ebd4f3ac4d72acb5a8f7addd0a2b1ea993572225"
+    },
+    {
+      "path": "services/ehr-api/database/runtime-grants.sql",
+      "sha256": "3df125cfe41aee898dcec8ceb3d8ffbfdd1b08befc4c92c840d75b2fea5999b2"
+    },
+    {
+      "path": "services/ehr-api/database/tests/emergency.integration.sql",
+      "sha256": "04208723153cdbfc3cdc3705f2dbb94dab1ce13f5fcb6ac0e6c1d552f79ffd6d"
+    },
+    {
+      "path": "services/ehr-api/database/tests/otp-recovery.integration.sql",
+      "sha256": "14d2265ec96effbbcef46fbb38bac6d74792bcfa741fd2128bfaeaa5a4390c05"
+    },
+    {
+      "path": "services/ehr-api/database/tests/patient-enrollment.integration.sql",
+      "sha256": "7a227e018f0efb99cb61498cde7a58643b51d36126aed08aa0776a1b015b5087"
+    },
+    {
+      "path": "services/ehr-api/database/tests/patient-self.integration.sql",
+      "sha256": "80c1c8d1c3cc7465e0c601dadb5ab4871b14086e9c464cdee380c0b708199d03"
+    },
+    {
+      "path": "services/ehr-api/database/tests/runtime-roles.integration.sql",
+      "sha256": "01e36c5da125eb5ae14030eabc24b5d2854e562047cf75457560738977dd0bcc"
+    },
+    {
+      "path": "services/ehr-api/src/audit/audit.interceptor.ts",
+      "sha256": "253ef5ea814f98ada53f46cfbd503b785612442a4cbac4ef7b684f5c7b130807"
+    },
+    {
+      "path": "services/ehr-api/src/auth/remote-security.guard.ts",
+      "sha256": "3af616792b116244d66521a91e56010847f40847f6b60b8274e696a13230535d"
+    },
+    {
+      "path": "services/ehr-api/src/common/decorators.ts",
+      "sha256": "aeea16cf082744662d7bc0d49a7df378a06444a557969bcddd7d4eae5303bed0"
+    },
+    {
+      "path": "services/ehr-api/src/common/request-context.ts",
+      "sha256": "a885ef371acb65530894399e5bd0f463ccf496290e7de5a53018c7e2700aea2f"
+    },
+    {
+      "path": "services/ehr-api/src/database/database.service.ts",
+      "sha256": "146ad27cd62d56c642fddd1d2c184343621653b0099e7be394b8948004c4268e"
+    },
+    {
+      "path": "services/ehr-api/src/database/patient-transaction.spec.ts",
+      "sha256": "2123c1c794470d1bd4694ac7b5c003bda85a777604b037fa7cea42a7f3dcf2c6"
+    },
+    {
+      "path": "services/ehr-api/src/ehr/ehr.module.ts",
+      "sha256": "0001c0730c9ac179549da8b8a9b8266a4509bbe64e26669e15b765a6e0871623"
+    },
+    {
+      "path": "services/ehr-api/src/ehr/patient-records/patient-records.controller.ts",
+      "sha256": "97b4b6f4cebc4ed31e3546b9c8c7e3f6fbc35261acc1b0063b3731f1043d5a50"
+    },
+    {
+      "path": "services/ehr-api/src/ehr/patient-records/patient-records.service.spec.ts",
+      "sha256": "f8a52ff0a9b082524b02f908cf95a065d940d996a4ed82540d741e1508bfc7f9"
+    },
+    {
+      "path": "services/ehr-api/src/ehr/patient-records/patient-records.service.ts",
+      "sha256": "d9f0f2e6ec4e41c80c218432d00c6b7eb7348d06ecee2651db8610369882d4b1"
+    },
+    {
+      "path": "services/ehr-api/src/ehr/shared/clinical.repository.ts",
+      "sha256": "6fc088637c05150c9d5cc9f08aacd59773b19ed6b3321c20845d23d754711f3d"
+    },
+    {
+      "path": "services/ehr-api/src/integrations/identity-api.service.ts",
+      "sha256": "c3a014b708befce288e61da793122efd964dbbee8291a2f89f9c733cbf027fe2"
+    },
+    {
+      "path": "services/event-dispatcher/src/event-contracts.spec.ts",
+      "sha256": "b50ea11f3be30b14b825899ba07e6635cb40dda7cec79cf4e3b15fa81d3bed40"
+    },
+    {
+      "path": "services/event-dispatcher/src/event-contracts.ts",
+      "sha256": "1d47762220914688e866d165cde6815dea3bce2631669ef7d652b9269fad940a"
+    },
+    {
+      "path": "services/identity-api/Dockerfile",
+      "sha256": "5960b6823807125abd8cbf97762a1a2c9264865a0e5775009fddfa633977cafb"
+    },
+    {
+      "path": "services/identity-api/scripts/verify-otp-recovery-runtime.mjs",
+      "sha256": "522aa15fe4fb0dd478fcee7e77dc655d79229c1fbf60e66b25256f23446ca2ae"
+    },
+    {
+      "path": "services/identity-api/scripts/verify-patient-runtime.mjs",
+      "sha256": "7bbc0505e0e59fcc7cd84d1d606fc2f15c6543fca8202d02ea2916c198234e16"
+    },
+    {
+      "path": "services/identity-api/src/audit/audit.interceptor.ts",
+      "sha256": "253ef5ea814f98ada53f46cfbd503b785612442a4cbac4ef7b684f5c7b130807"
+    },
+    {
+      "path": "services/identity-api/src/auth/auth.controller.ts",
+      "sha256": "01adc5a5838dbce75f7b4ea4884364a033c5f924e0d53d79c256fda5d5729d17"
+    },
+    {
+      "path": "services/identity-api/src/auth/auth.module.ts",
+      "sha256": "3860696d6726a8474b96ccea6262a2c2dcf02fa263ce7eb1f168ff9be0f97eba"
+    },
+    {
+      "path": "services/identity-api/src/auth/auth.service.ts",
+      "sha256": "4989656a2a9c52534fde22a7d565821b8c7fcd075424c51a41be289a06e6f2b3"
+    },
+    {
+      "path": "services/identity-api/src/auth/auth.types.ts",
+      "sha256": "8fce960dfa9a0a21774acfe36506b304d0a54c1501fcc95096d048c8943ad8fb"
+    },
+    {
+      "path": "services/identity-api/src/auth/current-patient-context.service.spec.ts",
+      "sha256": "fb9a995bf3aeb9407852797c4ba07c7010f01e9070e2a690bab0296c38551623"
+    },
+    {
+      "path": "services/identity-api/src/auth/current-patient-context.service.ts",
+      "sha256": "3c8149d31ee0a0aac55a3788e3ad44763e495b4622abac2f62e7d1dd8ffdb26a"
+    },
+    {
+      "path": "services/identity-api/src/auth/otp.service.spec.ts",
+      "sha256": "472e44819a4d5bceded87ab153bb755b8805ca1d78670107f31e3fc3c5c71200"
+    },
+    {
+      "path": "services/identity-api/src/auth/otp.service.ts",
+      "sha256": "f9989d8be255e6ec4b25e269ae63cb6f2329741fcc4ec8f7b393a599e6220fce"
+    },
+    {
+      "path": "services/identity-api/src/auth/patient-self.controller.ts",
+      "sha256": "51e8445409735a3e617bc74d48d3ca2a78a59f76bc1e155d9ae5a5e142c4d5ee"
+    },
+    {
+      "path": "services/identity-api/src/auth/patient-self.service.spec.ts",
+      "sha256": "dd85f0b1d178f53ee27c92ec604882d827b72f38e04f028ba55cb09da524c4ca"
+    },
+    {
+      "path": "services/identity-api/src/auth/patient-self.service.ts",
+      "sha256": "c2e222e0e30b417039a651956e20508dff257e3869b7ed69675ac9fec7c86d48"
+    },
+    {
+      "path": "services/identity-api/src/auth/patient-session.spec.ts",
+      "sha256": "9b7564ab22c7a9c243cacc98e04154faf956eb37f37ae92ef9b6a507f551906b"
+    },
+    {
+      "path": "services/identity-api/src/auth/security.guard.ts",
+      "sha256": "d5e6eea87e8386342b615a6e07219e42164ddfecb4e750dd7362d626be7cbcd7"
+    },
+    {
+      "path": "services/identity-api/src/auth/token.service.ts",
+      "sha256": "2c737aecc794d7110976efbf9d2458c824a136d80057ae679ea28d004fcc75ac"
+    },
+    {
+      "path": "services/identity-api/src/common/decorators.ts",
+      "sha256": "aeea16cf082744662d7bc0d49a7df378a06444a557969bcddd7d4eae5303bed0"
+    },
+    {
+      "path": "services/identity-api/src/common/request-context.ts",
+      "sha256": "ee12941108a939cf4f669882bdef6b1e7b79d2c5dcc9f4750bf24f34204001d0"
+    },
+    {
+      "path": "services/identity-api/src/consent/consent.service.spec.ts",
+      "sha256": "a32b1d8108ccf537264f8bbd9eed57659644210ab5ff4d328f65b5a20cc222c8"
+    },
+    {
+      "path": "services/identity-api/src/consent/consent.service.ts",
+      "sha256": "6b680513e83d48d676d660fd52bdeef74bd1f719f3b81a755b0af0c16ef51dc0"
+    },
+    {
+      "path": "services/identity-api/src/identity/dto/enroll-patient.dto.ts",
+      "sha256": "48c261c95ebf572afee0f072afe0f885ef43b116edf38ca52792bcd97cc4d26f"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-registration.controller.ts",
+      "sha256": "9f1c6c8bb18be2ec1cb1df4f5bd645aafc4412c9716ae89b1df658c3ecaf73cf"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-registration.service.ts",
+      "sha256": "57be4fe882793ec6e09c3ec09511fe42b00484fca2ffdac2a81f862ee224f4f8"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-verification.provider.spec.ts",
+      "sha256": "3ffae8c09b29f239289ea721f547a3762b825ec8487c93fa04d8cd30d0cddda0"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-verification.provider.ts",
+      "sha256": "e9cb7581d8d0a0b5d39dc83daeb8529f90fbcf912847e156c52488b45942902a"
+    },
+    {
+      "path": "services/notification-worker/src/event.spec.ts",
+      "sha256": "a3632c8cb4b0bfe8cd219d9af7c424c3c2625b3585003794422555318af63843"
+    },
+    {
+      "path": "services/notification-worker/src/event.ts",
+      "sha256": "90781f95943df5aa0248f49c66a78ee83a0dd67416a92b3423638f02e9694f86"
+    },
+    {
+      "path": "services/notification-worker/src/worker.spec.ts",
+      "sha256": "150cf22ef492bbddd4675152b48e39f9fc04aebec0626d2a33df406ec93a5051"
+    },
+    {
+      "path": "services/workload-token-agent/package.json",
+      "sha256": "e26635b039bb45f7cbb989964623c86eee3d21eaf73254f83056819ecc3bbf79"
+    },
+    {
+      "path": "services/workload-token-agent/src/agent.mjs",
+      "sha256": "aecdeb93a96046da506eacac74e58278c6f539178e35e3fd4b884622ff10d58c"
+    },
+    {
+      "path": "services/workload-token-agent/src/health.mjs",
+      "sha256": "1c712fa27457201aa0fc9c31c327fb6a4589178d4e52892f43b9c9c23ae69ad0"
+    },
+    {
+      "path": "services/workload-token-agent/src/main.mjs",
+      "sha256": "f8c7ed0e831c013c73ae4af44680f6d122eca92652c20744b9cd78ae4065f5ff"
+    },
+    {
+      "path": "services/workload-token-agent/test/agent.test.mjs",
+      "sha256": "3b54d228faf44f66d9260c47e0ba2277db23f77c4f1286d75a9fc62088c779a0"
+    },
+    {
+      "path": "services/workload-token-agent/test/issuer.test.mjs",
+      "sha256": "e62fae6cef674d8a121aec420a34eedab695a042b9b617a3fab3eebe3688fdc1"
+    }
+  ],
+  "source_file_count": 127
+}

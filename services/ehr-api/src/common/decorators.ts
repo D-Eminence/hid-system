@@ -1,6 +1,8 @@
 import { SetMetadata } from '@nestjs/common';
 
 export const PUBLIC_ROUTE = Symbol('PUBLIC_ROUTE');
+export const PATIENT_ALLOWED = Symbol('PATIENT_ALLOWED');
+export const PatientAllowed = (): MethodDecorator & ClassDecorator => SetMetadata(PATIENT_ALLOWED, true);
 export const REQUIRED_PERMISSIONS = Symbol('REQUIRED_PERMISSIONS');
 export const AUDIT_ACTION = Symbol('AUDIT_ACTION');
 export const FACILITY_OPTIONAL = Symbol('FACILITY_OPTIONAL');

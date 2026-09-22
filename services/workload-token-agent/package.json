@@ -1,0 +1,8 @@
+{
+  "name": "@hid/workload-token-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.0.0" },
+  "scripts": { "test": "node --test test/*.test.mjs", "typecheck": "node --check src/main.mjs && node --check src/agent.mjs && node --check src/health.mjs" }
+}

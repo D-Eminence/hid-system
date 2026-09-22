@@ -18,6 +18,7 @@
 # Logs, coverage, and local caches
 *.log
 **/coverage/
+**/__pycache__/
 *.tsbuildinfo
 .DS_Store
 

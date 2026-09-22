@@ -36,7 +36,7 @@ test('preview admission uses an exact version URL, pinned root, and disposable f
       version_id: versionId,
       preview_url: 'https://1234abcd-hid-tuf-staging.account-name.workers.dev/',
       uploaded_at: '2026-09-01T00:00:00.000Z',
-      wrangler_version: '4.127.1',
+      wrangler_version: '4.131.2',
       publication_authorization: publicationAuthorization({
         deployment: 'staging', repositorySha256: 'a'.repeat(64), fileCount: 5,
         rootVersion: 1, targetsVersion: 1, snapshotVersion: 1, timestampVersion: 1,

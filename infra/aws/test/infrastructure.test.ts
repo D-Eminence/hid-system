@@ -78,6 +78,24 @@ test('account and region are both external or both absent', () => {
   });
 });
 
+test('staging requires the selected Novu region while production configuration is unchanged', () => {
+  for (const template of [stagingRegional, fidelityRegional, sleepRegional]) {
+    assert.deepEqual(template.Parameters.StagingNovuApiUrl?.AllowedValues,
+      ['https://api.novu.co', 'https://eu.api.novu.co']);
+    assert.equal(template.Parameters.StagingNovuApiUrl?.Default, undefined);
+    const task = resources(template, 'AWS::ECS::TaskDefinition')
+      .find(([id]) => id.startsWith('NotificationWorkerTaskDefinition'))?.[1];
+    assert.ok(task);
+    const containers = task.Properties!.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }> }>;
+    const worker = containers.find(container => container.Name === 'notification-worker');
+    assert.ok(worker);
+    assert.deepEqual(worker.Environment.find(entry => entry.Name === 'NOVU_API_URL')?.Value, { Ref: 'StagingNovuApiUrl' });
+  }
+  assert.equal(regional.Parameters.StagingNovuApiUrl, undefined);
+  const serialized = JSON.stringify(regional);
+  assert.ok(!serialized.includes('StagingNovuApiUrl'));
+});
+
 test('RDS is private', () => {
   const [database] = properties(regional, 'AWS::RDS::DBInstance');
   assert.equal(database!.PubliclyAccessible, false);
@@ -391,6 +409,62 @@ test('human authentication secrets are injected only into the Identity authority
   assert.doesNotMatch(JSON.stringify(ehr!.ContainerDefinitions), /AUTH_SIGNING_SECRET|AUTH_LOGIN_PEPPER/);
 });
 
+test('staging NIN is deferred in every profile without provider or NIN-key startup dependencies', () => {
+  for (const template of [stagingRegional, fidelityRegional, sleepRegional, regional]) {
+    const task = properties(template, 'AWS::ECS::TaskDefinition')
+      .find(item => JSON.stringify(item.Family).includes('identity-api'))!;
+    const api = (task.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }>; Secrets: Array<{ Name: string }> }>)
+      .find(item => item.Name === 'identity-api')!;
+    const environment = Object.fromEntries(api.Environment.map(item => [item.Name, item.Value]));
+    const names = api.Secrets.map(item => item.Name);
+    assert.equal(environment.NIN_PROVIDER_MODE, template === regional ? 'unavailable' : 'deferred');
+    for (const key of ['NIN_LOOKUP_HMAC_KEY_B64', 'NIN_ENCRYPTION_KEY_B64']) assert.equal(names.includes(key), template === regional);
+    assert.ok(names.includes('OTP_HMAC_KEY_B64'));
+    assert.ok(names.includes('TURNSTILE_SECRET_KEY'));
+    assert.equal(environment.IDENTITY_SERVICE_IDENTITY_MODE, 'jwt');
+    assert.equal(environment.TURNSTILE_MODE, 'required');
+    assert.doesNotMatch(JSON.stringify(api), /METAMAP|metamap/);
+  }
+});
+
+test('staging email OTP injects only its SES sender while ordinary delivery retains Novu', () => {
+  function container(template: typeof regional, name: string) {
+    const task = properties(template, 'AWS::ECS::TaskDefinition')
+      .find(item => JSON.stringify(item.Family).includes(name));
+    assert.ok(task, `missing ${name}`);
+    return (task.ContainerDefinitions as Array<{
+      Name: string;
+      Environment: Array<{ Name: string; Value: unknown }>;
+      Secrets: Array<{ Name: string; ValueFrom: unknown }>;
+    }>).find(item => item.Name === name)!;
+  }
+  for (const template of [stagingRegional, fidelityRegional, sleepRegional]) {
+    const api = container(template, 'notification-api');
+    assert.match(String(template.Parameters.NotificationProviderSecretArn!.Description), /sesFromAddress and novuApiKey/);
+    assert.doesNotMatch(String(template.Parameters.NotificationProviderSecretArn!.Description), /Termii|Meta|Infobip/);
+    const environment = Object.fromEntries(api.Environment.map(item => [item.Name, item.Value]));
+    assert.equal(environment.NODE_ENV, 'production');
+    assert.equal(environment.HID_DEPLOYMENT_ENV, 'staging');
+    assert.equal(environment.NOTIFICATION_PROVIDER_MODE, 'live');
+    assert.equal(environment.NOTIFICATION_WORKLOAD_IDENTITY_MODE, 'jwt');
+    assert.equal(environment.NOTIFICATION_DELIVERY_PROFILE, 'email-only');
+    assert.deepEqual(api.Secrets.map(item => item.Name), ['SES_FROM_ADDRESS']);
+    assert.match(JSON.stringify(api.Secrets[0]!.ValueFrom), /sesFromAddress/);
+    assert.doesNotMatch(JSON.stringify(api), /TERMII|META_|INFOBIP|termiiApiKey|metaAccessToken|infobipApiKey/);
+    const worker = container(template, 'notification-worker');
+    const workerEnvironment = Object.fromEntries(worker.Environment.map(item => [item.Name, item.Value]));
+    assert.equal(workerEnvironment.NOVU_MODE, 'live');
+    assert.ok(worker.Secrets.some(item => item.Name === 'NOVU_API_KEY'));
+  }
+  const productionApi = container(regional, 'notification-api');
+  const productionEnvironment = Object.fromEntries(productionApi.Environment.map(item => [item.Name, item.Value]));
+  assert.equal(productionEnvironment.NOTIFICATION_DELIVERY_PROFILE, undefined);
+  assert.equal(productionEnvironment.HID_DEPLOYMENT_ENV, undefined);
+  for (const name of ['SES_FROM_ADDRESS', 'TERMII_API_KEY', 'META_ACCESS_TOKEN', 'INFOBIP_API_KEY']) {
+    assert.ok(productionApi.Secrets.some(item => item.Name === name));
+  }
+});
+
 test('workload identity issuer, JWKS, and subjects are required external inputs', () => {
   for (const name of [
     'WorkloadIssuerUrl', 'WorkloadJwksUrl', 'EhrWorkloadSubject', 'LabWorkloadSubject',
@@ -408,7 +482,7 @@ test('monitoring is focused on RDS, task health, OCR, and event delivery', () =>
   assert.doesNotMatch(JSON.stringify(properties(regional, 'AWS::CloudWatch::Alarm')), /patient|\bnin\b|document_text/i);
 });
 
-test('sleep removes fixed-cost runtime ingress while retaining protected data controls', () => {
+test('sleep removes application ingress while retaining protected data and stable workload identity', () => {
   assert.equal(resources(sleepRegional, 'AWS::EC2::NatGateway').length, 0);
   assert.equal(resources(sleepRegional, 'AWS::EC2::VPCEndpoint')
     .filter(([, item]) => String(item.Properties?.VpcEndpointType) === 'Interface').length, 0);
@@ -423,14 +497,29 @@ test('sleep removes fixed-cost runtime ingress while retaining protected data co
   assert.equal(database!.MultiAZ, false);
   assert.equal(database!.BackupRetentionPeriod, 14);
   assert.equal(resources(sleepRegional, 'AWS::S3::Bucket').length, 1);
-  assert.equal(resources(sleepRegional, 'AWS::KMS::Key').length, 3);
+  const signingKeys = resources(sleepRegional, 'AWS::KMS::Key')
+    .filter(([, key]) => key.Properties?.KeyUsage === 'SIGN_VERIFY');
+  assert.equal(signingKeys.length, 1);
+  assert.equal(signingKeys[0]![1].Properties?.KeySpec, 'ECC_NIST_P256');
+  assert.equal(signingKeys[0]![1].DeletionPolicy, 'Retain');
+  assert.equal(signingKeys[0]![1].UpdateReplacePolicy, 'Retain');
+  for (const template of [stagingRegional, fidelityRegional, sleepRegional]) {
+    assert.equal(resources(template, 'AWS::KMS::Key').length, 4);
+    assert.deepEqual(resources(template, 'AWS::KMS::Key')
+      .filter(([, key]) => key.Properties?.KeyUsage === 'SIGN_VERIFY')
+      .map(([id]) => id), signingKeys.map(([id]) => id),
+    'sleep and wake must preserve the signing key logical identity');
+    assert.equal(resources(template, 'AWS::ApiGateway::RestApi').length, 1);
+    assert.equal(resources(template, 'AWS::Lambda::Function').length, 1);
+  }
+  assert.equal(resources(regional, 'AWS::KMS::Key').length, 3);
 });
 
 test('economy and fidelity are explicit, bounded staging modes', () => {
   assert.equal(resources(stagingRegional, 'AWS::EC2::NatGateway').length, 1);
   assert.equal(resources(stagingRegional, 'AWS::ElasticLoadBalancingV2::LoadBalancer').length, 2);
   assert.equal(resources(stagingRegional, 'AWS::EC2::VPCEndpoint')
-    .filter(([, item]) => String(item.Properties?.VpcEndpointType) === 'Interface').length, 4);
+    .filter(([, item]) => String(item.Properties?.VpcEndpointType) === 'Interface').length, 7);
   assert.equal(stagingRegional.Parameters.GatewayDesiredCount!.Default, 1);
   assert.equal(stagingRegional.Parameters.OcrWorkerDesiredCount!.Default, 0);
   assert.equal(properties(stagingRegional, 'AWS::RDS::DBInstance')[0]!.MultiAZ, false);
@@ -441,6 +530,77 @@ test('economy and fidelity are explicit, bounded staging modes', () => {
   assert.equal(fidelityRegional.Parameters.GatewayDesiredCount!.Default, 2);
   assert.equal(fidelityRegional.Parameters.OcrWorkerDesiredCount!.Default, 1);
   assert.equal(properties(fidelityRegional, 'AWS::RDS::DBInstance')[0]!.MultiAZ, true);
+});
+
+test('live staging can bootstrap restricted tasks through ECR, Logs, and secret endpoints', () => {
+  for (const template of [stagingRegional, fidelityRegional]) {
+    const endpoints = properties(template, 'AWS::EC2::VPCEndpoint')
+      .filter((endpoint) => endpoint.VpcEndpointType === 'Interface');
+    for (const service of ['ecr.api', 'ecr.dkr', 'logs', 'secretsmanager']) {
+      assert.ok(endpoints.some((endpoint) => JSON.stringify(endpoint.ServiceName).includes(service)),
+        `missing staging bootstrap endpoint ${service}`);
+    }
+    for (const name of ['Gateway', 'OcrWorker', 'EventDispatcher', 'Migration']) {
+      const [groupId] = resources(template, 'AWS::EC2::SecurityGroup')
+        .find(([id]) => id.startsWith(`${name}SecurityGroup`))!;
+      const outbound = properties(template, 'AWS::EC2::SecurityGroupEgress')
+        .filter((rule) => JSON.stringify(rule.GroupId).includes(groupId));
+      assert.ok(outbound.some((rule) => rule.FromPort === 443 && rule.ToPort === 443
+        && JSON.stringify(rule.DestinationSecurityGroupId ?? '').includes('AwsEndpointSecurityGroup')));
+      assert.ok(outbound.some((rule) => rule.FromPort === 443 && rule.ToPort === 443
+        && JSON.stringify(rule.DestinationPrefixListId ?? '').includes('S3PrefixListId')));
+      for (const rule of outbound) {
+        assert.equal(rule.CidrIp, undefined, `${name} must not gain public egress`);
+        assert.equal(rule.CidrIpv6, undefined, `${name} must not gain public IPv6 egress`);
+      }
+      if (name === 'Migration') {
+        assert.equal(outbound.length, 3, 'migration may reach only RDS, AWS endpoints, and S3');
+        assert.ok(outbound.some((rule) => rule.FromPort === 5432 && rule.ToPort === 5432
+          && JSON.stringify(rule.DestinationSecurityGroupId ?? '').includes('DatabaseSecurityGroup')));
+      }
+    }
+  }
+});
+
+test('sleep keeps migration HTTPS paths closed', () => {
+  const [groupId] = resources(sleepRegional, 'AWS::EC2::SecurityGroup')
+    .find(([id]) => id.startsWith('MigrationSecurityGroup'))!;
+  const outbound = properties(sleepRegional, 'AWS::EC2::SecurityGroupEgress')
+    .filter((rule) => JSON.stringify(rule.GroupId).includes(groupId));
+  assert.equal(outbound.length, 1);
+  assert.equal(outbound[0]!.FromPort, 5432);
+  assert.match(JSON.stringify(outbound[0]!.DestinationSecurityGroupId), /DatabaseSecurityGroup/);
+});
+
+test('staging HeadBucket access uses ListBucket only for the two exact document-bucket roles', () => {
+  for (const template of [stagingRegional, fidelityRegional, sleepRegional]) {
+    const policies = properties(template, 'AWS::IAM::Policy');
+    const documentPolicies = policies.filter((policy) => JSON.stringify(policy).includes('s3:ListBucket'));
+    assert.equal(documentPolicies.length, 2);
+    for (const policy of documentPolicies) {
+      assert.match(JSON.stringify(policy.Roles), /EhrApiTaskRole|OcrWorkerTaskRole/);
+      const document = policy.PolicyDocument as { readonly Statement: Array<Record<string, unknown>> };
+      for (const statement of document.Statement.filter((entry) => JSON.stringify(entry.Action).includes('s3:ListBucket'))) {
+        assert.deepEqual(statement.Resource, {
+          'Fn::GetAtt': [resources(template, 'AWS::S3::Bucket')[0]![0], 'Arn'],
+        });
+      }
+    }
+    assert.doesNotMatch(JSON.stringify(policies), /s3:HeadBucket/);
+  }
+});
+
+test('staging public CA input and native templates respect CloudFormation quotas', () => {
+  for (const template of [stagingRegional, fidelityRegional, sleepRegional]) {
+    assert.equal(template.Parameters.RdsCaBundleBase64!.MaxLength, 4096);
+    assert.equal(template.Parameters.RdsCaBundleBase64!.Default, undefined);
+    assert.match(String(template.Parameters.RdsCaBundleBase64!.Description), /matching.*staging region and RDS CA/);
+    assert.ok(Object.keys(template.Parameters).length <= 200);
+    assert.ok(Object.keys(template.Resources).length <= 500);
+    assert.ok(Buffer.byteLength(JSON.stringify(template)) <= 1024 * 1024);
+  }
+  assert.equal(regional.Parameters.RdsCaBundleBase64!.MaxLength, undefined,
+    'this staging repair must preserve the approved production parameter');
 });
 
 test('every live workload has typed resource and autoscaling boundaries', () => {
@@ -469,7 +629,14 @@ test('cost inventory is deterministic and never labels sleep zero-cost', () => {
   { nat: 0, endpoints: 0, publicAlbs: 0, internalAlbs: 0, publicIpv4: 0 });
   assert.equal(sleep.rds.expectedComputeState, 'stopped-by-operation');
   assert.equal(sleep.s3Buckets, 1);
-  assert.equal(sleep.kmsKeys, 3);
+  assert.equal(sleep.kmsKeys, 4);
+  for (const mode of ['sleep', 'economy', 'fidelity'] as const) {
+    assert.equal(costInventory(environmentConfig('staging', mode)).kmsKeys, 4,
+      `${mode} must account for the retained workload signing key`);
+  }
+  for (const environment of ['development', 'production'] as const) {
+    assert.equal(costInventory(environmentConfig(environment)).kmsKeys, 3);
+  }
 });
 
 test('optional billing governance notifies without creating cost actions', () => {
@@ -483,4 +650,17 @@ test('optional billing governance notifies without creating cost actions', () =>
   assert.match(text, /IncludeCredit/);
   assert.match(text, /CostNotificationEmail/);
   assert.doesNotMatch(text, /StopInstances|UpdateService|ExecutePolicy|iam:Attach/);
+});
+
+
+test('staging emergency notifications use the existing encrypted ordinary event route', () => {
+  for (const template of [stagingRegional, fidelityRegional, sleepRegional]) {
+    const rules = properties(template, 'AWS::Events::Rule');
+    assert.equal(rules.length, 1);
+    const pattern = rules[0]!.EventPattern as { readonly 'detail-type': readonly string[] };
+    assert.equal(pattern['detail-type'].filter(type => type === 'EmergencyAccessActivated.v1').length, 1);
+    assert.equal(pattern['detail-type'].some(type => /otp|passwordreset/i.test(type)), false);
+  }
+  const productionPattern = properties(regional, 'AWS::Events::Rule')[0]!.EventPattern as { readonly 'detail-type': readonly string[] };
+  assert.equal(productionPattern['detail-type'].includes('EmergencyAccessActivated.v1'), false);
 });

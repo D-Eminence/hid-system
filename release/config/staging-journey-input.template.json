@@ -1,0 +1,13 @@
+{
+  "schema_version": "hid.staging-journey-input/v1",
+  "environment": "staging",
+  "controlled_test_recipients_confirmed": false,
+  "patient_email": null,
+  "staff_email": null,
+  "expected_target": {
+    "aws_account_id": "659225405023",
+    "aws_region": "eu-west-1",
+    "rds_instance_identifier": null,
+    "database_name": null
+  }
+}

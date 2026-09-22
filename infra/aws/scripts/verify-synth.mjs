@@ -14,7 +14,7 @@ const profile = environment === 'staging' ? stagingMode : environment
 const contracts = {
   development: { api: 'api.development', secret: 'DevelopmentCloudflareOriginSecret', nat: 1, endpoints: 8, multiAz: false },
   sleep: { api: 'api.staging', secret: 'StagingCloudflareOriginSecret', nat: 0, endpoints: 0, multiAz: false },
-  economy: { api: 'api.staging', secret: 'StagingCloudflareOriginSecret', nat: 1, endpoints: 4, multiAz: false },
+  economy: { api: 'api.staging', secret: 'StagingCloudflareOriginSecret', nat: 1, endpoints: 7, multiAz: false },
   fidelity: { api: 'api.staging', secret: 'StagingCloudflareOriginSecret', nat: 2, endpoints: 8, multiAz: true },
   production: { api: 'api', secret: 'ProductionCloudflareOriginSecret', nat: 2, endpoints: 8, multiAz: true },
 }
@@ -23,6 +23,15 @@ assert.ok(contract, `unknown deployment profile ${profile}`)
 const names = (await readdir(output)).filter(name => name.endsWith('.template.json'))
 assert.equal(names.length, 1, 'default synth must produce exactly one regional stack')
 const regional = JSON.parse(await readFile(resolve(output, names[0]), 'utf8'))
+if (environment === 'staging') {
+  const templateBytes = (await readFile(resolve(output, names[0]))).byteLength
+  assert.ok(templateBytes <= 1024 * 1024, 'staging template exceeds the CloudFormation S3 object quota')
+  assert.ok(Object.keys(regional.Parameters ?? {}).length <= 200, 'staging template exceeds the parameter quota')
+  assert.ok(Object.keys(regional.Resources ?? {}).length <= 500, 'staging template exceeds the resource quota')
+  assert.ok(Object.keys(regional.Outputs ?? {}).length <= 200, 'staging template exceeds the output quota')
+  assert.equal(regional.Parameters.RdsCaBundleBase64.MaxLength, 4096,
+    'staging public CA parameter must enforce the CloudFormation value limit')
+}
 assert.ok(names[0].includes('Regional'), 'regional template is missing')
 const resources = (type) => Object.values(regional.Resources ?? {}).filter(resource => resource.Type === type)
 const text = JSON.stringify(regional)
@@ -98,7 +107,22 @@ assert.doesNotMatch(text, /(?:AKIA|ASIA)[0-9A-Z]{16}/)
 assert.doesNotMatch(text, /CloudFront/i)
 assert.equal(resources('AWS::SQS::Queue').length, 2)
 assert.equal(resources('AWS::Events::Rule').length, 1)
-assert.equal(resources('AWS::Lambda::Function').length, 0)
+assert.equal(resources('AWS::Lambda::Function').length, environment === 'staging' ? 1 : 0)
+if (environment === 'staging') {
+  const methods = resources('AWS::ApiGateway::Method')
+  assert.equal(methods.length, 2)
+  assert.equal(methods.find(method => method.Properties.HttpMethod === 'POST').Properties.AuthorizationType, 'AWS_IAM')
+  assert.equal(methods.find(method => method.Properties.HttpMethod === 'GET').Properties.AuthorizationType, 'NONE')
+  assert.equal(regional.Parameters.WorkloadIssuerUrl, undefined)
+  const tokenAgents = resources('AWS::ECS::TaskDefinition').flatMap(task => task.Properties.ContainerDefinitions)
+    .filter(container => container.Name === 'workload-token-agent')
+  assert.equal(tokenAgents.length, 6)
+  for (const agent of tokenAgents) {
+    assert.deepEqual(agent.Image, { Ref: 'IdentityApiImageUri' })
+    assert.equal(agent.User, '65532:65532')
+    assert.equal(agent.ReadonlyRootFilesystem, true)
+  }
+}
 assert.equal(regional.Parameters.OriginDomainName, undefined)
 if (asleep) {
   assert.equal(regional.Parameters[contract.secret], undefined)

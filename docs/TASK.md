@@ -1,6 +1,56 @@
 # Current HID Platform Task
 
-## Current protected PR — 2026-09-08
+## Current staging implementation — 2026-09-15
+
+**STAGING: NOT ACCEPTED. LIVE MIGRATION: NOT PERFORMED. PRODUCTION: LOCKED.**
+
+The successor preparation based on approved source
+`a709e643a731b444f7cb775b2b16fe28164146a7` implements patient self service,
+governed enrollment, OTP recovery, controlled emergency records/notification intent,
+staging workload token issuance/rotation and protected candidate admission. Additive
+migrations advance the candidate ledger to 32; historical migrations are unchanged.
+Local tests, database restore/HTTP journeys and all staging synth profiles are recorded
+in the [current staging execution report](TUF-STAGING-EXECUTION.md).
+
+The [September 14 deferral receipt](evidence/staging-acceptance/nin-deferred-2026-09-14.json)
+records 140 passing Identity tests, full repository verification, seven synthetic
+browser journeys and the actual disposable import with NIN absent. Production
+offline template bytes and the user's security document remain unchanged.
+
+The [AWS checkpoint](STAGING_AWS_CHECKPOINT.md) records September 14 authentication,
+absent staging workloads, available certificates/bootstrap roles and a passing
+no-change-set diff with an unresolved lookup-role warning. **AWS authentication
+expired again on September 15.** Renew locally with `aws login --profile hid-admin`.
+The owner submitted the 32-vCPU request; the last successful check, September 14
+at 21:04 UTC, reported `CASE_OPENED`, applied quota 6. Current capacity is unverified. **Do not submit another request or deploy while
+pending**, including empty foundations and Cloudflare publication. Active-worker
+acceptance requires 6.5 vCPUs and the conservative rollout/migration envelope 26.5.
+The new read-only quota checker separately reports request status and applied quota.
+Eight missing staging GitHub environments are now installed with owner review,
+protected branches and administrator bypass disabled; no workflow was dispatched.
+Offline Cloudflare/notification plans and controlled-input files are prepared.
+Staging now requires an explicit `StagingNovuApiUrl` choice; production is unchanged.
+Cloudflare access, SES/Novu selection, controlled inbox/send authorization and public
+release custody remain genuine external inputs. The build, auditor, evidence writer and four signing submitters are prepared and
+tested. Source installation, immutable callers, actual artifact generation and
+admission remain agent work, not values the owner must invent.
+No AWS resource/secret, DNS, deployment, live migration or publication changed in
+this continuation. The [September 15 receipt](evidence/staging-acceptance/predeployment-2026-09-15.json)
+records 78 release, 87 infrastructure, 55 Cloudflare and 38 preparation checks passing.
+Details are in the [staging report](TUF-STAGING-EXECUTION.md).
+MetaMap NIN is a **DEFERRED EXTERNAL INTEGRATION / POST-STAGING ITEM**. All prepared
+code, tooling and tests remain. Staging uses `NIN_PROVIDER_MODE=deferred`, needs no
+MetaMap credentials and must not be blocked by this integration. The normal staged
+patient/provider journeys use reviewed synthetic account/patient links without
+verified NIN claims; new NIN registration/enrollment is post-staging. See
+[MetaMap contract review](METAMAP_NIN_CONTRACT.md) and
+[staging patient journeys](STAGING_PATIENT_JOURNEYS.md).
+The staging-only email profile now requires SES and Novu; Termii/Meta/Infobip
+accounts are optional for this scope. Public NIN/custody intakes and a read-only
+external preflight are prepared. The existing `docs/SECURITY.md` edit remains untouched. The report names exact external
+inputs and validation steps; generic staging permission is not being requested again.
+
+## Historical pre-merge protected PR — 2026-09-08
 
 **SOLO-OWNER CORRECTION LOCALLY VERIFIED AND COMMITTED — READY FOR EXACT-SHA PR UPDATE.**
 **PUSH: NOT AUTHORIZED. MERGE: NOT AUTHORIZED. PROTECTED CI: NOT RUN.

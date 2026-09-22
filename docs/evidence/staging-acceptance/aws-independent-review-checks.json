@@ -1,0 +1,164 @@
+{
+  "equivalence_recomputed": [
+    {
+      "profile": "production",
+      "before_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+      "after_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+      "byte_identical": true,
+      "bytes": 464453
+    },
+    {
+      "profile": "development",
+      "before_sha256": "42cadadc0cda9ef7f13c86f27937b066662f417e5e5925fc2a46a1bb708db73c",
+      "after_sha256": "42cadadc0cda9ef7f13c86f27937b066662f417e5e5925fc2a46a1bb708db73c",
+      "byte_identical": true,
+      "bytes": 517254
+    }
+  ],
+  "migration_egress_inspected": [
+    {
+      "profile": "sleep",
+      "migration_group": "MigrationSecurityGroupBCB362A0",
+      "inline_egress": null,
+      "separate_egress": [
+        {
+          "Description": "Migration PostgreSQL only",
+          "DestinationSecurityGroupId": {
+            "Fn::GetAtt": [
+              "DatabaseSecurityGroup7319C0F6",
+              "GroupId"
+            ]
+          },
+          "FromPort": 5432,
+          "GroupId": {
+            "Fn::GetAtt": [
+              "MigrationSecurityGroupBCB362A0",
+              "GroupId"
+            ]
+          },
+          "IpProtocol": "tcp",
+          "ToPort": 5432
+        }
+      ],
+      "template_sha256": "e2e469a88b42063e3902128057f4e7f92ba20e25ef643dd7e84f4d0d6f3bbf35"
+    },
+    {
+      "profile": "economy",
+      "migration_group": "MigrationSecurityGroupBCB362A0",
+      "inline_egress": null,
+      "separate_egress": [
+        {
+          "Description": "Migration PostgreSQL only",
+          "DestinationSecurityGroupId": {
+            "Fn::GetAtt": [
+              "DatabaseSecurityGroup7319C0F6",
+              "GroupId"
+            ]
+          },
+          "FromPort": 5432,
+          "GroupId": {
+            "Fn::GetAtt": [
+              "MigrationSecurityGroupBCB362A0",
+              "GroupId"
+            ]
+          },
+          "IpProtocol": "tcp",
+          "ToPort": 5432
+        },
+        {
+          "Description": "Staging migration image, logs, and secret endpoints",
+          "DestinationSecurityGroupId": {
+            "Fn::GetAtt": [
+              "AwsEndpointSecurityGroup2D5E897F",
+              "GroupId"
+            ]
+          },
+          "FromPort": 443,
+          "GroupId": {
+            "Fn::GetAtt": [
+              "MigrationSecurityGroupBCB362A0",
+              "GroupId"
+            ]
+          },
+          "IpProtocol": "tcp",
+          "ToPort": 443
+        },
+        {
+          "Description": "Staging migration ECR image layers through Amazon S3",
+          "DestinationPrefixListId": {
+            "Ref": "S3PrefixListId"
+          },
+          "FromPort": 443,
+          "GroupId": {
+            "Fn::GetAtt": [
+              "MigrationSecurityGroupBCB362A0",
+              "GroupId"
+            ]
+          },
+          "IpProtocol": "tcp",
+          "ToPort": 443
+        }
+      ],
+      "template_sha256": "79adf7159d135a12656c18957395f33752cc8755bdc8063443aba68c08b33033"
+    },
+    {
+      "profile": "fidelity",
+      "migration_group": "MigrationSecurityGroupBCB362A0",
+      "inline_egress": null,
+      "separate_egress": [
+        {
+          "Description": "Migration PostgreSQL only",
+          "DestinationSecurityGroupId": {
+            "Fn::GetAtt": [
+              "DatabaseSecurityGroup7319C0F6",
+              "GroupId"
+            ]
+          },
+          "FromPort": 5432,
+          "GroupId": {
+            "Fn::GetAtt": [
+              "MigrationSecurityGroupBCB362A0",
+              "GroupId"
+            ]
+          },
+          "IpProtocol": "tcp",
+          "ToPort": 5432
+        },
+        {
+          "Description": "Staging migration image, logs, and secret endpoints",
+          "DestinationSecurityGroupId": {
+            "Fn::GetAtt": [
+              "AwsEndpointSecurityGroup2D5E897F",
+              "GroupId"
+            ]
+          },
+          "FromPort": 443,
+          "GroupId": {
+            "Fn::GetAtt": [
+              "MigrationSecurityGroupBCB362A0",
+              "GroupId"
+            ]
+          },
+          "IpProtocol": "tcp",
+          "ToPort": 443
+        },
+        {
+          "Description": "Staging migration ECR image layers through Amazon S3",
+          "DestinationPrefixListId": {
+            "Ref": "S3PrefixListId"
+          },
+          "FromPort": 443,
+          "GroupId": {
+            "Fn::GetAtt": [
+              "MigrationSecurityGroupBCB362A0",
+              "GroupId"
+            ]
+          },
+          "IpProtocol": "tcp",
+          "ToPort": 443
+        }
+      ],
+      "template_sha256": "7340ff3b6984d6e7779ac7b5184838746a103a2175c8e42aa87c4f4b2a4be916"
+    }
+  ]
+}

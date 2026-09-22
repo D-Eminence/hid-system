@@ -6,9 +6,11 @@ const optionalUrl = z.preprocess(empty, z.string().url().optional());
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  HID_DEPLOYMENT_ENV: z.enum(['development', 'staging', 'production']).default('production'),
   NODE_TLS_REJECT_UNAUTHORIZED: optional,
   PORT: z.coerce.number().int().min(1).max(65_535).default(3007),
   NOTIFICATION_PROVIDER_MODE: z.enum(['disabled', 'test', 'live']).default('disabled'),
+  NOTIFICATION_DELIVERY_PROFILE: z.enum(['full', 'email-only']).default('full'),
   NOTIFICATION_PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(250).max(15_000).default(5_000),
   NOTIFICATION_WORKLOAD_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: optional,
@@ -37,6 +39,9 @@ const schema = z.object({
   INFOBIP_WHATSAPP_SENDER: optional,
   INFOBIP_WHATSAPP_OTP_TEMPLATE_ID: optional,
 }).superRefine((value, context) => {
+  if (value.NOTIFICATION_DELIVERY_PROFILE === 'email-only' && value.HID_DEPLOYMENT_ENV !== 'staging') {
+    context.addIssue({ code: 'custom', path: ['NOTIFICATION_DELIVERY_PROFILE'], message: 'The email-only delivery profile is staging-only' });
+  }
   if (value.NOTIFICATION_PROVIDER_MODE === 'test' && value.NODE_ENV !== 'test') {
     context.addIssue({ code: 'custom', path: ['NOTIFICATION_PROVIDER_MODE'], message: 'Deterministic notification providers are test-only' });
   }
@@ -44,8 +49,13 @@ const schema = z.object({
     if (value.NODE_TLS_REJECT_UNAUTHORIZED === '0') context.addIssue({ code: 'custom', path: ['NODE_TLS_REJECT_UNAUTHORIZED'], message: 'Production TLS verification cannot be disabled' });
     if (value.NOTIFICATION_PROVIDER_MODE !== 'live') context.addIssue({ code: 'custom', path: ['NOTIFICATION_PROVIDER_MODE'], message: 'Live providers are required in production' });
     if (value.NOTIFICATION_WORKLOAD_IDENTITY_MODE !== 'jwt') context.addIssue({ code: 'custom', path: ['NOTIFICATION_WORKLOAD_IDENTITY_MODE'], message: 'JWT workload identity is required in production' });
-    for (const key of ['WORKLOAD_ISSUER_URL','WORKLOAD_JWKS_URL','IDENTITY_CALLER_SUBJECT','AWS_REGION','SES_FROM_ADDRESS','TERMII_BASE_URL','TERMII_API_KEY','TERMII_SENDER_ID','META_PHONE_NUMBER_ID','META_ACCESS_TOKEN','META_OTP_TEMPLATE_NAME','INFOBIP_BASE_URL','INFOBIP_API_KEY'] as const) {
+    for (const key of ['WORKLOAD_ISSUER_URL','WORKLOAD_JWKS_URL','IDENTITY_CALLER_SUBJECT','AWS_REGION','SES_FROM_ADDRESS'] as const) {
       if (!value[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
+    }
+    if (value.NOTIFICATION_DELIVERY_PROFILE === 'full') {
+      for (const key of ['TERMII_BASE_URL','TERMII_API_KEY','TERMII_SENDER_ID','META_PHONE_NUMBER_ID','META_ACCESS_TOKEN','META_OTP_TEMPLATE_NAME','INFOBIP_BASE_URL','INFOBIP_API_KEY'] as const) {
+        if (!value[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
+      }
     }
     if (value.AWS_ACCESS_KEY_ID || value.AWS_SECRET_ACCESS_KEY) context.addIssue({ code: 'custom', path: ['AWS_ACCESS_KEY_ID'], message: 'Static AWS credentials are forbidden in production' });
     for (const key of ['WORKLOAD_ISSUER_URL','WORKLOAD_JWKS_URL','TERMII_BASE_URL','INFOBIP_BASE_URL'] as const) {

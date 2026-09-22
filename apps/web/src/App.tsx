@@ -15,6 +15,7 @@ import {
   DoctorAuthPage,
   DoctorDashboardPage,
   DoctorEmergencyPage,
+  PatientRegistrationPage,
   DoctorHistoryPage,
   DoctorPatientRecordsPage,
   LandingPage,
@@ -238,7 +239,8 @@ export default function App() {
             <Route path={HOSPITAL_DASHBOARD_PATH} element={<DoctorDashboardPage />} />
             <Route path={HOSPITAL_ACCESS_PATH} element={<DoctorAccessPage />} />
             <Route path={HOSPITAL_HISTORY_PATH} element={<DoctorHistoryPage />} />
-            <Route path={HOSPITAL_EMERGENCY_PATH} element={<DoctorEmergencyPage />} />
+            <Route path="/hospital/registration" element={<PatientRegistrationPage />} />
+                <Route path={HOSPITAL_EMERGENCY_PATH} element={<DoctorEmergencyPage />} />
             <Route path="/hospital/patient-records/:hidCode" element={<DoctorPatientRecordsPage />} />
             <Route path={MIGRATE_ROOT_PATH} element={<Navigate to={MIGRATE_DASHBOARD_PATH} replace />} />
             <Route path="/migrate/*" element={<MigratePage />} />

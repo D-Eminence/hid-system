@@ -554,6 +554,31 @@ export class HidReleaseTrustStack extends Stack {
       'build',
     );
     this.brokerImageRepository.grantPullPush(buildRole);
+    // Application images already belong to the regional stack. Staging builds
+    // may push only to those exact repositories; they cannot create repositories
+    // or change their policies. Keep production's existing policy unchanged.
+    if (environmentName === 'staging') {
+      const repositories = [
+        'identity-api', 'ehr-api', 'lab-api', 'pharmacy-api', 'ocr-api',
+        'ocr-worker', 'outreach-api', 'notification-api', 'notification-worker',
+        'event-dispatcher', 'gateway',
+      ].map((name) => this.formatArn({
+        service: 'ecr', resource: 'repository', resourceName: `staging/hid/${name}`,
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      }));
+      buildRole.addToPolicy(new iam.PolicyStatement({
+        sid: 'BuildOnlyExactStagingApplicationImages',
+        actions: ['ecr:BatchCheckLayerAvailability', 'ecr:BatchGetImage',
+          'ecr:GetDownloadUrlForLayer', 'ecr:InitiateLayerUpload',
+          'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload', 'ecr:PutImage'],
+        resources: repositories,
+      }));
+      buildRole.addToPolicy(new iam.PolicyStatement({
+        sid: 'InspectOnlyExactStagingBuildRepositories',
+        actions: ['ecr:DescribeRepositories', 'ecr:DescribeImages'],
+        resources: [...repositories, this.brokerImageRepository.repositoryArn],
+      }));
+    }
     const publisherRole = githubRole(
       'PublisherRole',
       `TUF repository publisher for ${environmentName}; it cannot sign or write general evidence`,

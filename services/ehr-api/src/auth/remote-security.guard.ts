@@ -1,7 +1,7 @@
 import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuditService } from '../audit/audit.service';
-import { FACILITY_OPTIONAL, PUBLIC_ROUTE, REQUIRED_PERMISSIONS } from '../common/decorators';
+import { FACILITY_OPTIONAL, PUBLIC_ROUTE, REQUIRED_PERMISSIONS, PATIENT_ALLOWED } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { IdentityApiService } from '../integrations/identity-api.service';
@@ -20,6 +20,9 @@ export class RemoteSecurityGuard implements CanActivate {
     try {
       const actor = await this.identity.authenticateRequest(request);
       request.actor = actor;
+      if (actor.kind === 'patient' && !this.metadata<boolean>(PATIENT_ALLOWED, context)) {
+        throw new DomainProblem(403, 'PATIENT_SCOPE_DENIED', 'This operation requires workforce authorization');
+      }
       request.authTransport = request.header('authorization') ? 'bearer' : 'cookie';
       const facilityOptional = this.metadata<boolean>(FACILITY_OPTIONAL, context);
       const facilityId = request.header('x-facility-id');
@@ -51,7 +54,7 @@ export class RemoteSecurityGuard implements CanActivate {
   private async recordDenied(request: HidRequest): Promise<void> {
     await this.audit.record({
       correlationId: request.correlationId,
-      actorType: request.actor ? 'staff' : 'system',
+      actorType: request.actor?.kind === 'patient' ? 'patient' : request.actor ? 'staff' : 'system',
       actorSubject: request.actor?.subject,
       actorAccountId: request.actor?.accountId,
       actorMembershipId: request.actor?.facility?.membershipId,

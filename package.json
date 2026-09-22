@@ -14,7 +14,7 @@
     "build:container-verification-prerequisites": "npm run build:identity-api && npm run build:ehr-api && npm run build:lab-api && npm run build:pharmacy-api && npm run build:ocr-api && npm run build:ocr-worker && npm run build:outreach-api && npm run build:notification-api && npm run build:notification-worker && npm run build:event-dispatcher",
     "dev": "node scripts/dev.mjs",
     "build": "npm run build:api-client && npm run build:offline && npm run build:telemetry && npm run build:web && npm run build:ehr && npm run build:lab && npm run build:pharmacy && npm run build:ocr && npm run build:outreach && npm run build:admin && npm run build:identity-api && npm run build:ehr-api && npm run build:lab-api && npm run build:pharmacy-api && npm run build:ocr-api && npm run build:ocr-worker && npm run build:outreach-api && npm run build:notification-api && npm run build:notification-worker && npm run build:event-dispatcher && npm run build:infra",
-    "test": "npm run test:cloudflare && npm run test:admin && npm run test:pharmacy && npm run test:ocr && npm run test:identity-api && npm run test:ehr-api && npm run test:lab-api && npm run test:pharmacy-api && npm run test:ocr-api && npm run test:ocr-worker && npm run test:outreach-api && npm run test:notification-api && npm run test:notification-worker && npm run test:event-dispatcher && npm run test:infra",
+    "test": "npm run test:cloudflare && npm run test:web && npm run test:workload-token-agent && npm run test:admin && npm run test:pharmacy && npm run test:ocr && npm run test:identity-api && npm run test:ehr-api && npm run test:lab-api && npm run test:pharmacy-api && npm run test:ocr-api && npm run test:ocr-worker && npm run test:outreach-api && npm run test:notification-api && npm run test:notification-worker && npm run test:event-dispatcher && npm run test:infra && npm run test:staging-preparation",
     "verify": "npm run verify:convergence && npm run verify:secret-readiness && npm run verify:migration-ledger && npm run verify:migration && npm run verify:cloudflare && npm run verify:identity && npm run verify:outreach && npm run verify:offline && npm run verify:telemetry && npm run verify:platform-graph && npm run verify:frontends && npm run verify:containers && npm run verify:infra",
     "build:api-client": "npm --prefix packages/api-client run build",
     "build:offline": "npm --prefix packages/offline run build",
@@ -80,6 +80,7 @@
     "test:event-dispatcher": "npm --prefix services/event-dispatcher test",
     "test:notification-api": "npm --prefix services/notification-api test",
     "test:notification-worker": "npm --prefix services/notification-worker test",
+    "test:staging-preparation": "node --test scripts/tests/*.test.mjs && python3 -m unittest discover -s scripts/tests -p 'test_staging_*.py'",
     "test:cloudflare": "npm --prefix infra/cloudflare test",
     "test:infra": "npm --prefix infra/aws test",
     "verify:platform-graph": "node scripts/verify-platform-graph.mjs",
@@ -101,6 +102,8 @@
     "staging:fidelity:enable": "npm --prefix infra/aws run staging:fidelity:enable",
     "staging:fidelity:disable": "npm --prefix infra/aws run staging:fidelity:disable",
     "staging:teardown": "npm --prefix infra/aws run staging:teardown",
-    "aws:cost-inventory": "npm --prefix infra/aws run cost:inventory:check"
+    "aws:cost-inventory": "npm --prefix infra/aws run cost:inventory:check",
+    "test:web": "npm --prefix apps/web run test:care-portal",
+    "test:workload-token-agent": "npm --prefix services/workload-token-agent test"
   }
 }

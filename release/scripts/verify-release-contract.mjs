@@ -591,6 +591,11 @@ export function deriveDeploymentPlan(bundle, configuration) {
   }
 }
 
+export function parseStrictJsonBytes(bytes) {
+  assert.ok(Buffer.isBuffer(bytes), 'strict JSON input must be a Buffer')
+  return duplicateKeyJson.parse(bytes.toString('utf8'), false)
+}
+
 export async function loadStrictJson(path, maximumBytes = 26214400) {
   integer(maximumBytes, 1, 26214400, 'maximumBytes')
   const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
@@ -611,7 +616,7 @@ export async function loadStrictJson(path, maximumBytes = 26214400) {
     if ((await handle.read(trailing, 0, 1, offset)).bytesRead !== 0) {
       fail(path, 'grew while being read')
     }
-    return duplicateKeyJson.parse(bytes.toString('utf8'), false)
+    return parseStrictJsonBytes(bytes)
   } finally {
     await handle.close()
   }
@@ -646,9 +651,9 @@ export async function verifyMachineConfiguration(configuration) {
   })
   const migration = plainObject(components.migration, 'components config.migration', ['first', 'last', 'count', 'files'])
   exact(migration.first, '0001', 'components config.migration.first')
-  exact(migration.last, '0028', 'components config.migration.last')
-  exact(migration.count, 28, 'components config.migration.count')
-  if (!Array.isArray(migration.files) || migration.files.length !== 28) fail('components config.migration.files', 'must contain exactly 28 records')
+  exact(migration.last, '0032', 'components config.migration.last')
+  exact(migration.count, 32, 'components config.migration.count')
+  if (!Array.isArray(migration.files) || migration.files.length !== 32) fail('components config.migration.files', 'must contain exactly 32 records')
   const migrationDirectory = resolve(repositoryRoot, 'services', 'ehr-api', 'database', 'migrations')
   const diskFiles = (await readdir(migrationDirectory)).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()
   exact(JSON.stringify(diskFiles), JSON.stringify(migration.files.map(({ name }) => name)), 'components config.migration.files')

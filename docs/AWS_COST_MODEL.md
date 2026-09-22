@@ -40,13 +40,16 @@ staging economy, staging fidelity, and production.
 | Profile | AZ | NAT | Interface endpoint/AZ attachments | ALBs | RDS | Default runtime |
 |---|---:|---:|---:|---:|---|---|
 | staging sleep | 2 | 0 | 0 | 0 | `db.t4g.small`, single-AZ, operator-stopped | all 11 services at 0 |
-| staging economy | 2 | 1 | 4 | 2 | `db.t4g.small`, single-AZ, 100 GiB | request services/Gateway 1; workers 0 |
+| staging economy | 2 | 1 | 7 | 2 | `db.t4g.small`, single-AZ, 100 GiB | request services/Gateway 1; workers 0 |
 | staging fidelity | 2 | 2 | 16 | 2 | `db.t4g.medium`, Multi-AZ, 100 GiB | request services/Gateway 2; workers 1 |
 | production | 3 | 2 | 24 | 2 | `db.r6g.large`, Multi-AZ, 200 GiB | every service 2 |
 
 Sleep is **not zero cost**. It retains the protected RDS instance/storage,
 automated backups/PITR, snapshots, versioned S3 objects, KMS keys, secret
-interfaces, ECR images, logs, EventBridge/SQS, and DNS metadata. RDS stopping
+interfaces, ECR images, logs, EventBridge/SQS, and DNS metadata. All staging
+modes also retain the workload issuer's P-256 signing key, Lambda, and regional
+API Gateway. Keeping their identities stable across sleep avoids orphaning a
+retained key and replacing the issuer on each wake. RDS stopping
 removes instance compute temporarily; AWS automatically restarts stopped RDS
 instances after its bounded stop period. The sleep template installs one exact-
 database, staging-only daily re-stop schedule with zero scheduler retries.
@@ -60,9 +63,24 @@ monthly gross = Fargate task-hours and scale-out
               + Textract pages and bounded attempts
               + NAT/endpoints/ALB/WAF/public IPv4
               + EventBridge/SQS and providers
+              + staging workload signing key, KMS signing, API Gateway and Lambda requests
               + logs, metrics, Insights scans and retained evidence
               + ECR storage/scanning and Cloudflare delivery
 ```
+
+Every staging mode has **four customer-managed KMS keys**; development and
+production retain three. Sleep still incurs the signing key's fixed charge and
+any metered issuer traffic, although zero ECS tasks means no token-agent calls.
+The issuer is not a provisioned ECS service and has no provisioned Lambda
+concurrency. Its log group retains logs for 14 days.
+
+Six staging caller task definitions include token agents, each with a 64 MiB
+memory reservation inside its existing Fargate task allocation. At one running
+replica per caller, a successful renewal cycle makes eleven audience-specific
+token requests and six JWKS requests about every 90 seconds. Starts, retries,
+replica counts, and receiver JWKS retrieval affect actual request volume. Count
+API Gateway requests, Lambda execution, KMS signing, logs, and applicable NAT
+traffic in the dated estimate; the inventory supplies quantities, not prices.
 
 Textract cost is driven by pages and operation. Identical exact-version PDF
 requests use a deterministic `ClientRequestToken`; completed extractions are
