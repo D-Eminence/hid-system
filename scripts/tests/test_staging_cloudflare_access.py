@@ -192,6 +192,45 @@ class InventoryTests(unittest.TestCase):
             self.assertIsNone(result)
             self.assertFalse(info["inventory_complete"])
 
+    def test_custom_domains_single_page_contract_accepts_zero_paging_counters(self):
+        for records in ([], [{"hostname": "synthetic.invalid"}]):
+            body = {"result": records, "result_info": {"count": len(records), "page": 0,
+                    "per_page": 0, "total_count": len(records), "total_pages": 0}}
+            result, info = access.valid_list(body, access.diagnostic("read", 200), single_page=True)
+            self.assertEqual(result, records)
+            self.assertTrue(info["inventory_complete"])
+            self.assertEqual(info["pagination"]["per_page"], 0)
+            self.assertEqual(info["pagination_mode"], "single_page")
+            result, info = access.valid_list(body, access.diagnostic("read", 200), pagination_required=True)
+            self.assertIsNone(result)  # DNS and widget pagination stays strict.
+            self.assertFalse(info["inventory_complete"])
+        observed_empty = {"result": [], "result_info": {"count": 0, "page": 1,
+                          "per_page": 0, "total_count": 0}}
+        result, info = access.valid_list(observed_empty, access.diagnostic("read", 200), single_page=True)
+        self.assertEqual(result, [])
+        self.assertTrue(info["inventory_complete"])
+        def fake(path, token):
+            body, info = inventory(path, token)
+            if path in access.CUSTOM_PATHS.values():
+                body = {"result": [], "result_info": {"count": 0, "page": 0,
+                        "per_page": 0, "total_count": 0, "total_pages": 0}}
+            return body, info
+        result = access.check(SENTINEL, fake)
+        self.assertTrue(result["inventory_reads_complete"])
+        self.assertTrue(all(not result["checks"]["custom_domain:" + host]["single_expected_binding_present"]
+                            for host in access.WORKERS))
+
+    def test_single_page_retains_safe_metadata_and_rejects_partial_or_conflicting_counts(self):
+        for metadata in ({"count": 1, "total_count": 0}, {"total_count": 2},
+                         {"page": 2, "count": 0, "total_count": 0, "total_pages": 1},
+                         {"total_pages": 2}, {"per_page": SENTINEL, "raw": SENTINEL}):
+            result, info = access.valid_list({"result": [], "result_info": metadata},
+                                            access.diagnostic("read", 200), single_page=True)
+            self.assertIsNone(result)
+            self.assertFalse(info["inventory_complete"])
+            self.assertNotIn(SENTINEL, json.dumps(info))
+            self.assertNotIn("raw", info["pagination"])
+
     def test_result_shape_and_filtered_hostname_mismatches_block_inventory(self):
         host = next(iter(access.DNS_PATHS))
         for payload in ({}, [None], [{"name": "production.invalid", "content": SENTINEL}]):

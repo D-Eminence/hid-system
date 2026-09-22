@@ -145,7 +145,7 @@ node infra/aws/scripts/assess-staging-capacity.mjs \
 
 | Exact action/input | Where and how | Blocking stage |
 | --- | --- | --- |
-| Authorize staging DNS/Turnstile operations and the scoped publisher token | Existing Cloudflare account/zone. Renew its browser session locally if needed. Turnstile secret is a JSON field `turnstileSecretKey` in `/hid/staging/identity-sensitive`, preserving existing fields. Store publisher API token as the **raw SecretString**, not JSON, in an AWS secret named `hid-staging-cloudflare-publisher-token-*`; the publisher pins its ARN/version | Live browser/API deployment and protected publication. Real Siteverify and DNS/TLS behavior must then pass acceptance |
+| Configure the dedicated staging Turnstile widget and separate publisher credential; operator read access is already verified | Existing Cloudflare account/zone. Use the seven-host configuration in [Cloudflare setup](STAGING_CLOUDFLARE_SETUP.md). Enter `turnstileSecretKey` into `/hid/staging/identity-sensitive` through the hidden local helper, preserving existing fields; retain the actual public site key for the frontend build. Store the separate publisher API token as the **raw SecretString**, not JSON, in an AWS secret named `hid-staging-cloudflare-publisher-token-*`; the operator derives its ARN/version | Live browser/API deployment and protected publication. Real Siteverify and DNS/TLS behavior must then pass acceptance |
 | Select the controlled SES sender and Novu staging environment/channel; securely configure the two fields | SES `eu-west-1` and Novu dashboards; JSON `sesFromAddress` and `novuApiKey` in `/hid/staging/notification-provider`. Retain the chosen Novu region/API URL. No new AWS account or SES API key | Notification API/Worker startup and functional staging deployment. SES identity verification, workflow/channel activation and receipt are subsequent acceptance checks |
 | Confirm two distinct controlled patient/clinician inboxes and separate test-send authorizations | Edit `release/local/staging-journey-input.json` locally; set `patient_email`, `staff_email` and `controlled_test_recipients_confirmed`. Separately authorize each intended SES verification, recovery OTP and Novu test in `release/local/staging-notification-input.json`, following [notification setup](STAGING_NOTIFICATION_SETUP.md). Contact control alone does not authorize a send. No passwords, OTPs or provider keys belong in either file | Live recovery/delivery/browser acceptance; these contacts do not block an empty AWS foundation |
 | Actual release custodian assignments and independently trusted public material | Existing offline/hardware custody process; public intake described in [public custody](TUF_STAGING_PUBLIC_CUSTODY.md). Keep private keys/PINs with custodians | Signed release admission, publication and the subsequent admitted staging deployment |
@@ -155,12 +155,13 @@ Notification account requirements and minimum scopes remain in the
 [provider matrix](STAGING_PROVIDER_ACCOUNTS.md): SES and Novu REQUIRED;
 Termii and Meta WhatsApp OPTIONAL; Infobip FALLBACK. Do not send secrets in chat.
 
-The owner's September 22 02:41 UTC Cloudflare diagnostic verified the exact
-active zone/account and found zero records in all nine exact staging DNS reads.
-Turnstile, Worker Routes and all eight Custom Domain reads were denied with
-HTTP 403/code 10000. The [Cloudflare setup guide](STAGING_CLOUDFLARE_SETUP.md)
-records the three required read scopes and a hidden-prompt rerun command.
-Those remaining inventories and publisher authority are still unverified.
+The owner's September 22 03:02 UTC Cloudflare diagnostic completed all twenty
+reads. The active account/zone is verified; the nine exact DNS queries, the
+zone's Worker Routes list and eight filtered Custom Domain queries are empty.
+One widget exists, but none matches the prepared seven staging hosts. Operator
+read access is cleared. The [Cloudflare setup guide](STAGING_CLOUDFLARE_SETUP.md)
+records the remaining widget/secret and separate publisher inputs; no publication
+or secret binding is inferred from inventory success.
 
 Draft PR #2's bootstrap follow-up passed ordinary CI and still needs owner review.
 Any subsequent source change requires its own CI. The protected release branch has

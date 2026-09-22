@@ -1,5 +1,6 @@
 {
   "schema_version": "hid.staging-cloudflare-operator-observation/v1",
+  "historical_observation_superseded_by": "cloudflare-read-inventory-2026-09-22.json",
   "environment": "staging",
   "source": "Operator-produced, value-free local preflight report",
   "checked_at": "2026-09-21T21:57:01.577947+00:00",

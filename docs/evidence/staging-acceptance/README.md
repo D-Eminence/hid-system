@@ -1,7 +1,7 @@
 # Staging acceptance evidence
 
 Approved source: `a709e643a731b444f7cb775b2b16fe28164146a7`.
-Audit began 2026-09-08; implementation continued through 2026-09-21. Result: **STAGING NOT ACCEPTED**.
+Audit began 2026-09-08; implementation continued through 2026-09-22. Result: **STAGING NOT ACCEPTED**.
 Production remains locked. The [canonical report](../../TUF-STAGING-EXECUTION.md)
 records phase decisions, findings, remedies and exact manual gates.
 
@@ -49,10 +49,12 @@ custody approval.
 
 The later [Cloudflare operator observation](cloudflare-operator-check-2026-09-21.json)
 retains the failed initial preflight and the subsequent September 22 diagnostic.
-The latter verified the active account/zone and all nine empty staging DNS reads;
-Turnstile, Worker Routes and Custom Domains returned HTTP 403/code 10000 and
-remain unverified. The token is usable for DNS reads. A separate hidden-prompt,
-read-only diagnostic retains sanitized HTTP status/error codes for the scoped rerun.
+After the owner changed permissions, the [successful read inventory](cloudflare-read-inventory-2026-09-22.json)
+verified all twenty requests. All nine exact DNS queries, the zone's Worker Routes
+list and eight staging Custom Domain queries are empty. One widget exists but
+does not match the prepared staging hostname set. Read authorization is cleared;
+widget/secret binding and separate publisher authority remain. The diagnostic's
+SinglePage correction and final offline recheck of recorded pagination are explicit.
 
 - `baseline.json`, `pr.json`, `checks.json`, and `remote-release-final.json` bind source/merge and preserved user work.
 - `workspace-validation.json` records successful exact-SHA build/tests/verify/cache checks; `ci-*` and `github-*` preserve independently verified public ordinary-CI evidence and staging environment policy.

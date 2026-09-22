@@ -160,13 +160,32 @@ def cf_get(path, token, opener=None):
     return body, diagnostic("read", status)
 
 
-def valid_list(body, info, pagination_required=False):
+def valid_list(body, info, pagination_required=False, single_page=False):
     if info["status"] != "read":
         return None, info
     result = body.get("result") if isinstance(body, dict) else None
     if not isinstance(result, list) or not all(isinstance(item, dict) for item in result):
         return None, {**info, "status": "invalid_result_shape"}
     page = body.get("result_info")
+    info = {**info, "returned_count": len(result)}
+    if isinstance(page, dict):
+        # Retain only bounded numeric pagination metadata, even when rejected.
+        # Provider strings and unrelated fields must never enter the receipt.
+        info["pagination"] = {key: page[key] if type(page[key]) is int and 0 <= page[key] <= 2_147_483_647 else None
+                              for key in ("count", "page", "per_page", "total_count", "total_pages") if key in page}
+    if single_page:
+        # Workers Domains is SinglePage in Cloudflare's generated SDK and has
+        # no page/per_page query parameters. Do not impose DNS paging rules on
+        # its optional metadata, which may use zero-valued paging counters.
+        # https://github.com/cloudflare/cloudflare-typescript/blob/main/src/resources/workers/domains.ts
+        if page is not None and not isinstance(page, dict):
+            return None, {**info, "status": "pagination_unverified", "inventory_complete": False}
+        numbers = info.get("pagination", {})
+        if any(value is None for value in numbers.values()) or numbers.get("page", 1) > 1 or numbers.get("count", len(result)) != len(result) or numbers.get("total_count", len(result)) < len(result):
+            return None, {**info, "status": "invalid_pagination", "inventory_complete": False}
+        if numbers.get("total_count", len(result)) > len(result) or numbers.get("total_pages", 1) > 1:
+            return None, {**info, "status": "inventory_incomplete_no_pagination_attempted", "inventory_complete": False}
+        return result, {**info, "pagination_mode": "single_page", "inventory_complete": True}
     if page is None and not pagination_required:
         return result, {**info, "returned_count": len(result), "inventory_complete": True}
     if not isinstance(page, dict) or not all(type(page.get(key)) is int for key in ("count", "page", "per_page", "total_count")):
@@ -217,7 +236,7 @@ def check(token, call=cf_get):
         info = {**info, "status": "invalid_worker_route", "inventory_complete": False}
     report["checks"]["worker_routes"] = info
     for host, path in CUSTOM_PATHS.items():
-        result, info = valid_list(*call(path, token))
+        result, info = valid_list(*call(path, token), single_page=True)
         if result is not None:
             info = {**info, "expected_hostname_matches": bool(result) and all(item.get("hostname") == host for item in result),
                     "expected_zone_matches": bool(result) and all(item.get("zone_id") == CF_ZONE and item.get("zone_name") == DOMAIN for item in result),
