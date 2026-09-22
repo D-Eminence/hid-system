@@ -1,0 +1,10 @@
+output "ecs_cluster_name" { value = aws_ecs_cluster.main.name }
+output "ecr_repository_url" { value = aws_ecr_repository.application.repository_url }
+output "application_role_arn" { value = aws_iam_role.application.arn }
+output "application_role_name" { value = aws_iam_role.application.name }
+output "service_name" { value = var.enable_application ? aws_ecs_service.application[0].name : null }
+output "load_balancer_dns_name" { value = var.enable_application ? aws_lb.application[0].dns_name : null }
+output "load_balancer_security_group_id" { value = var.enable_application ? aws_security_group.load_balancer[0].id : null }
+output "load_balancer_listener_arn" { value = var.enable_application ? aws_lb_listener.https[0].arn : null }
+output "load_balancer_arn_suffix" { value = var.enable_application ? aws_lb.application[0].arn_suffix : null }
+output "target_group_arn_suffix" { value = var.enable_application ? aws_lb_target_group.application[0].arn_suffix : null }

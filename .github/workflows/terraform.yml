@@ -1,0 +1,69 @@
+name: Terraform foundation
+
+on:
+  pull_request:
+    paths:
+      - "infra/terraform/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to plan or apply
+        type: choice
+        required: true
+        options: [dev, staging, prod]
+      action:
+        description: Plan or apply after review
+        type: choice
+        required: true
+        options: [plan, apply]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+        working-directory: infra/terraform
+      - run: terraform init -backend=false
+        working-directory: infra/terraform
+      - run: terraform validate
+        working-directory: infra/terraform
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Initialize remote state
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=health-identity/${{ inputs.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+      - name: Write environment variables
+        env:
+          TFVARS: ${{ secrets.TFVARS }}
+        run: printf '%s' "$TFVARS" > "environments/${{ inputs.environment }}.tfvars"
+      - name: Plan
+        run: terraform plan -input=false -var-file="environments/${{ inputs.environment }}.tfvars" -out=deployment.tfplan
+      - name: Apply reviewed plan
+        if: inputs.action == 'apply'
+        run: terraform apply -input=false deployment.tfplan

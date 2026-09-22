@@ -1,0 +1,35 @@
+aws_region          = "REPLACE_WITH_APPROVED_REGION"
+expected_account_id = "REPLACE_WITH_AWS_ACCOUNT_ID"
+environment         = "dev"
+
+vpc_cidr            = "10.40.0.0/16"
+public_subnet_cidrs = ["10.40.0.0/24", "10.40.1.0/24"]
+app_subnet_cidrs    = ["10.40.10.0/24", "10.40.11.0/24"]
+data_subnet_cidrs   = ["10.40.20.0/24", "10.40.21.0/24"]
+
+# Enable components in stages after their required inputs are known.
+enable_nat           = false
+enable_database      = false
+enable_application   = false
+enable_provider_api  = false
+enable_opensearch    = false
+enable_account_trail = false
+
+# Application inputs required before enable_application = true.
+# application_image   = "<ECR image URI with immutable digest>"
+# acm_certificate_arn = "<regional ACM certificate ARN>"
+# origin_cidrs        = ["<current Cloudflare IPv4 CIDR>"]
+# application_port    = 8080
+# health_check_path   = "/health"
+# application_secret_arns = {
+#   AUTH_SECRET = "<Secrets Manager ARN>"
+# }
+
+# Integration inputs required before enable_provider_api = true.
+# provider_jwt_issuer   = "https://<issuer>"
+# provider_jwt_audience = ["<audience>"]
+# origin_server_name    = "<origin hostname present on ACM certificate>"
+
+# AI inputs set only after region, model access, and retrieval design are approved.
+# bedrock_model_arns       = ["<approved Bedrock model ARN>"]
+# opensearch_instance_type = "t3.small.search"

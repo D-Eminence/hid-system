@@ -1,0 +1,18 @@
+aws_region          = "REPLACE_WITH_APPROVED_REGION"
+expected_account_id = "REPLACE_WITH_AWS_ACCOUNT_ID"
+environment         = "staging"
+
+vpc_cidr            = "10.50.0.0/16"
+public_subnet_cidrs = ["10.50.0.0/24", "10.50.1.0/24"]
+app_subnet_cidrs    = ["10.50.10.0/24", "10.50.11.0/24"]
+data_subnet_cidrs   = ["10.50.20.0/24", "10.50.21.0/24"]
+
+enable_nat           = false
+enable_database      = false
+enable_application   = false
+enable_provider_api  = false
+enable_opensearch    = false
+enable_account_trail = false
+
+# Copy the approved application, integration, and AI values from the dev
+# template, using staging-specific image, certificate, hostname, and secrets.
