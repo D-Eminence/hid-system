@@ -1,3 +1,0 @@
-zone_id             = "REPLACE_WITH_CLOUDFLARE_ZONE_ID"
-hostname            = "REPLACE_WITH_PUBLIC_APPLICATION_HOSTNAME"
-origin_alb_dns_name = "REPLACE_WITH_AWS_LOAD_BALANCER_DNS_OUTPUT"

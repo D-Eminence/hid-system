@@ -1,36 +1,31 @@
-# Health Identity infrastructure
+# Infrastructure workflow
 
-Terraform for the Health Identity AWS foundation described in the SOW. The implementation starts with development and keeps region selection configurable until the client approves data residency and service availability.
+## Current state
 
-## Structure
+The AWS application platform is represented in Terraform and has not been deployed. The agreed home region is Ireland (`eu-west-1`). Existing AWS Budgets must be inventoried before the optional cost-governance module is enabled.
 
-| Directory | Purpose |
-| --- | --- |
-| `bootstrap/` | Creates the versioned, encrypted S3 remote-state bucket and its access policy. |
-| `terraform/` | Composes the environment modules for dev, staging, and production. |
-| `terraform/modules/network/` | VPC, two-AZ subnet layout, routing, internet gateway, and NAT. |
-| `terraform/modules/data/` | KMS, S3 documents, secret placeholders, security groups, and optional RDS PostgreSQL. |
-| `terraform/modules/application/` | ECR, ECS Fargate, ALB, WAF, Cloud Map, logging, and autoscaling. |
-| `terraform/modules/integration/` | Optional JWT-protected provider API and VPC link. |
-| `terraform/modules/ai/` | Optional private OpenSearch and allowlisted Bedrock permissions. |
-| `terraform/modules/operations/` | Backups, alarms, SNS alerts, and optional account CloudTrail. |
-| `cloudflare/` | Separate proxied DNS cutover after the AWS origin is validated. |
+## Deployment sequence
 
-## Deployment order
+1. Apply `bootstrap/` locally to create the S3 state bucket.
+2. Move the bootstrap state into that bucket and configure the GitHub environment variables used by the plan workflow.
+3. Review a development foundation plan with the database and runtime gates disabled.
+4. Confirm ACM certificate validation records with the Cloudflare owner.
+5. Build and push all eleven application images, then record immutable image digests.
+6. Populate the application and per-workload database secrets through an approved bootstrap process.
+7. Enable RDS, run the migration task, then enable ECS and ingress in development.
+8. Complete health, security, backup, restore, and cost checks before staging or production.
 
-1. Approve the AWS account, region, and non-overlapping network ranges.
-2. Apply `bootstrap/` locally, then migrate its state into the created S3 bucket.
-3. Copy `terraform/environments/dev.tfvars.example` to the ignored `dev.tfvars` file and fill in approved values.
-4. Initialize the development root with the remote backend and S3 lockfile enabled.
-5. Review the foundation plan before enabling RDS or cost-bearing application and AI services.
-6. Add the application image, certificate, Cloudflare CIDRs, secret ARNs, and health contract before enabling ECS.
-7. Validate staging before production and apply the Cloudflare DNS change only during the approved cutover.
+The GitHub workflow validates and plans only. An apply job should be added after the AWS role, GitHub environments, review rules, and first plan have been approved.
 
-## Current status
+## Inputs still needed
 
-- No AWS or Cloudflare resources have been deployed.
-- No credentials, patient data, secret values, state files, or real `.tfvars` files belong in this repository.
-- The bootstrap, AWS environment, and Cloudflare roots pass provider-backed `terraform validate`.
-- The application repository and Supabase dependency inventory are still required before migration and runtime integration can be completed.
+- Confirmation that AWS account `659225405023` is the intended account.
+- ACM certificate ARNs after DNS validation for the public API and internal service domain.
+- Eleven digest-qualified container image URIs and the migration image URI.
+- The AWS RDS CA bundle used by the application containers.
+- Application secret values and the database bootstrap or migration procedure.
+- Development and production workload identity issuer, JWKS URL, and service subjects. Staging creates its own issuer.
+- An operations email address and confirmation of the existing AWS Budgets configuration.
+- Confirmation that the selected availability zones have sufficient Fargate, NAT, RDS, and elastic IP quota.
 
-See the README inside each Terraform root for its setup steps and required inputs.
+No patient data or plaintext secret value belongs in Git, Terraform variables, plans, or state.

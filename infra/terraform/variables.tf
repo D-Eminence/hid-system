@@ -1,10 +1,16 @@
 variable "aws_region" {
-  description = "Approved AWS region for this environment. Confirm data residency before applying."
+  description = "Approved AWS region. HID currently targets Ireland."
   type        = string
+  default     = "eu-west-1"
+
+  validation {
+    condition     = var.aws_region == "eu-west-1"
+    error_message = "The approved HID region is eu-west-1. Change this only after a documented residency decision."
+  }
 }
 
 variable "expected_account_id" {
-  description = "Expected 12-digit AWS account ID; prevents applying to the wrong account."
+  description = "Expected AWS account ID; prevents plans against the wrong account."
   type        = string
 
   validation {
@@ -14,174 +20,181 @@ variable "expected_account_id" {
 }
 
 variable "environment" {
-  description = "Environment name. Use a separate state and variables for each environment."
-  type        = string
+  type = string
 
   validation {
-    condition     = contains(["dev", "staging", "prod"], var.environment)
-    error_message = "environment must be dev, staging, or prod."
+    condition     = contains(["development", "staging", "production"], var.environment)
+    error_message = "environment must be development, staging, or production."
   }
 }
 
-variable "vpc_cidr" {
-  description = "VPC CIDR. Choose non-overlapping ranges across environments."
+variable "staging_mode" {
+  description = "Staging cost/capacity profile."
   type        = string
-}
-
-variable "az_suffixes" {
-  description = "Two availability-zone suffixes in the selected region."
-  type        = list(string)
-  default     = ["a", "b"]
+  default     = "sleep"
 
   validation {
-    condition     = length(var.az_suffixes) == 2 && length(distinct(var.az_suffixes)) == 2
-    error_message = "Provide two distinct availability-zone suffixes."
+    condition     = contains(["sleep", "economy", "fidelity"], var.staging_mode)
+    error_message = "staging_mode must be sleep, economy, or fidelity."
+  }
+}
+
+variable "availability_zones" {
+  description = "Explicit AZ names: two for development/staging, three for production."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.availability_zones) >= 2 && length(var.availability_zones) <= 3 && length(distinct(var.availability_zones)) == length(var.availability_zones)
+    error_message = "Provide two or three distinct availability zones."
   }
 }
 
 variable "public_subnet_cidrs" {
-  type        = list(string)
-  description = "Two public subnet CIDRs, one per AZ."
+  type = list(string)
 }
 
-variable "app_subnet_cidrs" {
-  type        = list(string)
-  description = "Two private application subnet CIDRs, one per AZ."
+variable "application_subnet_cidrs" {
+  type = list(string)
 }
 
-variable "data_subnet_cidrs" {
-  type        = list(string)
-  description = "Two isolated database subnet CIDRs, one per AZ."
+variable "database_subnet_cidrs" {
+  type = list(string)
 }
 
-variable "enable_nat" {
-  description = "Enable private application egress. Dev/staging use one NAT; production uses one NAT per AZ."
-  type        = bool
-  default     = false
+variable "root_domain_name" {
+  type    = string
+  default = "healthidentitydirectory.com"
 }
 
 variable "enable_database" {
-  description = "Provision the PostgreSQL database after sizing and migration design are approved."
+  description = "Create PostgreSQL after the plan and migration design are approved."
   type        = bool
   default     = false
 }
 
-variable "db_instance_class" {
-  type    = string
-  default = "db.t4g.micro"
-}
-
-variable "db_allocated_storage_gb" {
-  type    = number
-  default = 20
-}
-
-variable "db_backup_retention_days" {
-  type    = number
-  default = 7
-}
-
-variable "enable_application" {
-  description = "Deploy the HTTPS load balancer, WAF, ECS task, and ECS service once an application image is available."
+variable "enable_runtime" {
+  description = "Create task definitions and ECS services after images and secret values exist."
   type        = bool
   default     = false
 }
 
-variable "application_image" {
-  description = "Immutable application image URI, preferably an ECR image digest."
-  type        = string
-  default     = ""
+variable "enable_ingress" {
+  description = "Create public/internal ALBs and WAF."
+  type        = bool
+  default     = false
 }
 
-variable "application_port" {
-  type    = number
-  default = 8080
+variable "enable_backup_plan" {
+  type    = bool
+  default = false
 }
 
-variable "health_check_path" {
-  type    = string
-  default = "/health"
-}
-
-variable "acm_certificate_arn" {
-  description = "ACM certificate for the origin HTTPS listener."
-  type        = string
-  default     = ""
-}
-
-variable "origin_cidrs" {
-  description = "Approved Cloudflare origin source CIDRs. Required before enabling the public ALB."
-  type        = list(string)
-  default     = []
-}
-
-variable "desired_task_count" {
-  type    = number
-  default = 1
-}
-
-variable "task_cpu" {
-  type    = number
-  default = 512
-}
-
-variable "task_memory" {
-  type    = number
-  default = 1024
-}
-
-variable "application_secret_arns" {
-  description = "Environment variable name to existing Secrets Manager secret ARN. Never put secret values in tfvars."
+variable "image_uris" {
+  description = "Workload name to immutable ECR repository@sha256 URI."
   type        = map(string)
   default     = {}
+
+  validation {
+    condition     = alltrue([for uri in values(var.image_uris) : can(regex(".+@sha256:[a-f0-9]{64}$", uri))])
+    error_message = "Every image URI must be digest-qualified."
+  }
 }
 
-variable "enable_provider_api" {
-  description = "Expose the provider integration API after a JWT issuer, audience, and backend route are agreed."
-  type        = bool
-  default     = false
+variable "migration_image_uri" {
+  type    = string
+  default = ""
+
+  validation {
+    condition     = var.migration_image_uri == "" || can(regex(".+@sha256:[a-f0-9]{64}$", var.migration_image_uri))
+    error_message = "migration_image_uri must be empty or digest-qualified."
+  }
 }
 
-variable "provider_jwt_issuer" {
+variable "regional_certificate_arn" {
   type    = string
   default = ""
 }
 
-variable "provider_jwt_audience" {
-  type    = list(string)
-  default = []
+variable "internal_certificate_arn" {
+  type    = string
+  default = ""
 }
 
-variable "origin_server_name" {
-  description = "Hostname on the ALB certificate used by API Gateway for private HTTPS verification."
+variable "cloudflare_origin_secret" {
+  description = "Independent origin secret checked by AWS WAF. Stored in encrypted Terraform state."
   type        = string
   default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.cloudflare_origin_secret == "" || length(var.cloudflare_origin_secret) >= 32
+    error_message = "cloudflare_origin_secret must contain at least 32 characters."
+  }
 }
 
-variable "enable_opensearch" {
-  description = "Provision the private OpenSearch domain after sizing and retrieval design are approved."
+variable "rds_ca_bundle_base64" {
+  type    = string
+  default = ""
+}
+
+variable "workload_issuer_url" {
+  type    = string
+  default = ""
+}
+
+variable "workload_jwks_url" {
+  type    = string
+  default = ""
+}
+
+variable "workload_subjects" {
+  description = "Service identity subjects used outside staging, keyed by identity, ehr, lab, pharmacy, ocr, and outreach."
+  type        = map(string)
+  default     = {}
+}
+
+variable "staging_novu_api_url" {
+  type    = string
+  default = "https://eu.api.novu.co"
+
+  validation {
+    condition     = contains(["https://api.novu.co", "https://eu.api.novu.co"], var.staging_novu_api_url)
+    error_message = "Use an explicitly approved Novu endpoint."
+  }
+}
+
+variable "alert_email" {
+  type    = string
+  default = ""
+}
+
+variable "enable_cost_governance" {
+  description = "Create budgets only after checking existing account budgets."
   type        = bool
   default     = false
 }
 
-variable "opensearch_engine_version" {
+variable "cost_notification_email" {
   type    = string
-  default = "OpenSearch_2.19"
+  default = ""
 }
 
-variable "opensearch_instance_type" {
+variable "cost_notification_sns_arn" {
   type    = string
-  default = "t3.small.search"
+  default = ""
 }
 
-variable "bedrock_model_arns" {
-  description = "Approved Bedrock model ARNs the app task may invoke; empty disables model permissions."
-  type        = list(string)
-  default     = []
+variable "monthly_cash_budget_usd" {
+  type    = number
+  default = 416.67
 }
 
-variable "enable_account_trail" {
-  description = "Create one account-wide CloudTrail trail from the chosen home-region stack only."
-  type        = bool
-  default     = false
+variable "monthly_gross_budget_usd" {
+  type    = number
+  default = 416.67
+}
+
+variable "cost_anomaly_threshold_usd" {
+  type    = number
+  default = 10
 }

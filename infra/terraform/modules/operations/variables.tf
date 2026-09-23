@@ -1,13 +1,32 @@
-variable "environment" { type = string }
-variable "aws_region" { type = string }
-variable "expected_account_id" { type = string }
-variable "enable_database" { type = bool }
-variable "database_arn" { type = string }
-variable "database_identifier" { type = string }
-variable "kms_key_arn" { type = string }
-variable "enable_account_trail" { type = bool }
-variable "enable_application" { type = bool }
-variable "ecs_cluster_name" { type = string }
-variable "service_name" { type = string }
-variable "load_balancer_arn_suffix" { type = string }
-variable "target_group_arn_suffix" { type = string }
+variable "name_prefix" {
+  type = string
+}
+variable "environment" {
+  type = string
+}
+variable "enable_database" {
+  type = bool
+}
+variable "database_arn" {
+  type    = string
+  default = null
+}
+variable "database_identifier" {
+  type    = string
+  default = null
+}
+variable "database_kms_key_arn" {
+  type = string
+}
+variable "database_connection_budget" {
+  type = number
+}
+variable "backup_retention_days" {
+  type = number
+}
+variable "enable_backup_plan" {
+  type = bool
+}
+variable "alert_email" {
+  type = string
+}

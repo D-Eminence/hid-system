@@ -40,9 +40,13 @@ resource "aws_s3_bucket" "state" {
   }
 
   tags = {
-    Project   = "health-identity"
-    Purpose   = "terraform-state"
-    ManagedBy = "terraform"
+    Project            = "HID"
+    Environment        = "account"
+    Purpose            = "terraform-state"
+    ManagedBy          = "Terraform"
+    Owner              = "HID"
+    CostCenter         = "HID"
+    DataClassification = "healthcare-restricted"
   }
 }
 

@@ -8,6 +8,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
+    }
   }
 }
 
@@ -17,9 +21,12 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project     = "health-identity"
-      Environment = var.environment
-      ManagedBy   = "terraform"
+      Project            = "HID"
+      Environment        = var.environment
+      ManagedBy          = "Terraform"
+      Owner              = "HID"
+      CostCenter         = "HID"
+      DataClassification = "healthcare-restricted"
     }
   }
 }

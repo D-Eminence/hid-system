@@ -1,4 +1,4 @@
-name: Terraform foundation
+name: Terraform checks and plan
 
 on:
   pull_request:
@@ -8,15 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: Environment to plan or apply
+        description: Environment to plan
         type: choice
         required: true
-        options: [dev, staging, prod]
-      action:
-        description: Plan or apply after review
-        type: choice
-        required: true
-        options: [plan, apply]
+        options: [development, staging, production]
 
 permissions:
   contents: read
@@ -34,8 +29,10 @@ jobs:
         working-directory: infra/terraform
       - run: terraform validate
         working-directory: infra/terraform
+      - run: terraform test
+        working-directory: infra/terraform
 
-  deploy:
+  plan:
     if: github.event_name == 'workflow_dispatch'
     needs: validate
     runs-on: ubuntu-latest
@@ -64,6 +61,3 @@ jobs:
         run: printf '%s' "$TFVARS" > "environments/${{ inputs.environment }}.tfvars"
       - name: Plan
         run: terraform plan -input=false -var-file="environments/${{ inputs.environment }}.tfvars" -out=deployment.tfplan
-      - name: Apply reviewed plan
-        if: inputs.action == 'apply'
-        run: terraform apply -input=false deployment.tfplan

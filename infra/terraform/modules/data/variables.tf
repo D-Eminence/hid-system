@@ -1,7 +1,13 @@
+variable "name_prefix" { type = string }
 variable "environment" { type = string }
 variable "vpc_id" { type = string }
-variable "data_subnet_ids" { type = list(string) }
+variable "database_subnet_ids" { type = list(string) }
+variable "database_instance_class" { type = string }
+variable "database_allocated_storage" { type = number }
+variable "database_max_storage" { type = number }
+variable "database_multi_az" { type = bool }
+variable "database_deletion_protection" { type = bool }
+variable "database_backup_retention" { type = number }
+variable "log_retention_days" { type = number }
 variable "enable_database" { type = bool }
-variable "db_instance_class" { type = string }
-variable "db_allocated_storage_gb" { type = number }
-variable "db_backup_retention_days" { type = number }
+variable "database_workload_names" { type = list(string) }

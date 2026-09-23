@@ -1,102 +1,113 @@
 module "network" {
   source = "./modules/network"
 
-  aws_region          = var.aws_region
-  environment         = var.environment
-  vpc_cidr            = var.vpc_cidr
-  az_suffixes         = var.az_suffixes
-  public_subnet_cidrs = var.public_subnet_cidrs
-  app_subnet_cidrs    = var.app_subnet_cidrs
-  data_subnet_cidrs   = var.data_subnet_cidrs
-  enable_nat          = var.enable_nat
+  name_prefix                 = local.name_prefix
+  vpc_cidr                    = local.profile.vpc_cidr
+  availability_zones          = var.availability_zones
+  public_subnet_cidrs         = var.public_subnet_cidrs
+  application_subnet_cidrs    = var.application_subnet_cidrs
+  database_subnet_cidrs       = var.database_subnet_cidrs
+  nat_gateway_count           = local.profile.nat_gateway_count
+  interface_endpoint_services = local.profile.interface_endpoint_services
+  interface_endpoint_az_count = local.profile.interface_endpoint_az_count
 }
 
 module "data" {
   source = "./modules/data"
 
-  environment              = var.environment
-  vpc_id                   = module.network.vpc_id
-  data_subnet_ids          = module.network.data_subnet_ids
-  enable_database          = var.enable_database
-  db_instance_class        = var.db_instance_class
-  db_allocated_storage_gb  = var.db_allocated_storage_gb
-  db_backup_retention_days = var.db_backup_retention_days
+  name_prefix                  = local.name_prefix
+  environment                  = var.environment
+  vpc_id                       = module.network.vpc_id
+  database_subnet_ids          = module.network.database_subnet_ids
+  database_instance_class      = local.profile.database_instance_class
+  database_allocated_storage   = local.profile.database_allocated_storage
+  database_max_storage         = local.profile.database_max_storage
+  database_multi_az            = local.profile.database_multi_az
+  database_deletion_protection = local.profile.database_deletion_protection
+  database_backup_retention    = local.profile.database_backup_retention
+  log_retention_days           = local.profile.log_retention_days
+  enable_database              = var.enable_database
+  database_workload_names      = local.database_workload_names
+}
+
+module "messaging" {
+  source = "./modules/messaging"
+
+  name_prefix             = local.name_prefix
+  environment             = var.environment
+  queue_kms_key_arn       = module.data.queue_kms_key_arn
+  include_emergency_event = var.environment == "staging"
 }
 
 module "application" {
   source = "./modules/application"
 
+  name_prefix                   = local.name_prefix
   environment                   = var.environment
+  deployment_profile            = local.deployment_profile
   aws_region                    = var.aws_region
+  root_domain_name              = var.root_domain_name
+  browser_subdomains            = local.browser_subdomains
+  workloads                     = local.workloads
+  desired_counts                = local.desired_counts
+  scaling_ceilings              = local.scaling_ceilings
+  enable_runtime                = var.enable_runtime
+  enable_ingress                = var.enable_ingress
+  enable_autoscaling            = local.profile.enable_autoscaling
   vpc_id                        = module.network.vpc_id
+  vpc_cidr                      = local.profile.vpc_cidr
   public_subnet_ids             = module.network.public_subnet_ids
-  app_subnet_ids                = module.network.app_subnet_ids
-  application_security_group_id = module.data.application_security_group_id
+  application_subnet_ids        = module.network.application_subnet_ids
+  endpoint_security_group_id    = module.network.endpoint_security_group_id
+  s3_prefix_list_id             = module.network.s3_prefix_list_id
   database_security_group_id    = module.data.database_security_group_id
+  database_enabled              = var.enable_database
   document_bucket_arn           = module.data.document_bucket_arn
-  kms_key_arn                   = module.data.kms_key_arn
-  enable_nat                    = var.enable_nat
-  enable_database               = var.enable_database
-  enable_application            = var.enable_application
-  application_image             = var.application_image
-  application_port              = var.application_port
-  health_check_path             = var.health_check_path
-  acm_certificate_arn           = var.acm_certificate_arn
-  origin_cidrs                  = var.origin_cidrs
-  desired_task_count            = var.desired_task_count
-  task_cpu                      = var.task_cpu
-  task_memory                   = var.task_memory
-  application_secret_arns       = var.application_secret_arns
-}
-
-module "ai" {
-  source = "./modules/ai"
-
-  environment                   = var.environment
-  aws_region                    = var.aws_region
-  expected_account_id           = var.expected_account_id
-  vpc_id                        = module.network.vpc_id
-  app_subnet_ids                = module.network.app_subnet_ids
-  application_security_group_id = module.data.application_security_group_id
-  kms_key_arn                   = module.data.kms_key_arn
-  application_role_arn          = module.application.application_role_arn
-  application_role_name         = module.application.application_role_name
-  enable_application            = var.enable_application
-  enable_opensearch             = var.enable_opensearch
-  opensearch_engine_version     = var.opensearch_engine_version
-  opensearch_instance_type      = var.opensearch_instance_type
-  bedrock_model_arns            = var.bedrock_model_arns
-}
-
-module "integration" {
-  source = "./modules/integration"
-
-  environment                     = var.environment
-  vpc_id                          = module.network.vpc_id
-  app_subnet_ids                  = module.network.app_subnet_ids
-  enable_provider_api             = var.enable_provider_api
-  enable_application              = var.enable_application
-  provider_jwt_issuer             = var.provider_jwt_issuer
-  provider_jwt_audience           = var.provider_jwt_audience
-  origin_server_name              = var.origin_server_name
-  load_balancer_security_group_id = module.application.load_balancer_security_group_id
-  load_balancer_listener_arn      = module.application.load_balancer_listener_arn
+  document_kms_key_arn          = module.data.document_kms_key_arn
+  database_kms_key_arn          = module.data.database_kms_key_arn
+  runtime_secret_arns           = module.data.runtime_secret_arns
+  database_secret_arns          = module.data.database_secret_arns
+  migration_database_secret_arn = module.data.migration_database_secret_arn
+  event_bus_arn                 = module.messaging.event_bus_arn
+  notification_queue_arn        = module.messaging.notification_queue_arn
+  notification_queue_url        = module.messaging.notification_queue_url
+  image_uris                    = var.image_uris
+  migration_image_uri           = var.migration_image_uri
+  regional_certificate_arn      = var.regional_certificate_arn
+  internal_certificate_arn      = var.internal_certificate_arn
+  cloudflare_origin_secret      = var.cloudflare_origin_secret
+  rds_ca_bundle_base64          = var.rds_ca_bundle_base64
+  workload_issuer_url           = var.workload_issuer_url
+  workload_jwks_url             = var.workload_jwks_url
+  workload_subjects             = var.workload_subjects
+  staging_novu_api_url          = var.staging_novu_api_url
+  log_retention_days            = local.profile.log_retention_days
+  repository_image_count        = local.profile.repository_image_count
+  alarm_topic_arn               = module.operations.alert_topic_arn
 }
 
 module "operations" {
   source = "./modules/operations"
 
-  environment              = var.environment
-  aws_region               = var.aws_region
-  expected_account_id      = var.expected_account_id
-  enable_database          = var.enable_database
-  database_arn             = module.data.database_arn
-  database_identifier      = module.data.database_identifier
-  kms_key_arn              = module.data.kms_key_arn
-  enable_account_trail     = var.enable_account_trail
-  enable_application       = var.enable_application
-  ecs_cluster_name         = module.application.ecs_cluster_name
-  service_name             = module.application.service_name
-  load_balancer_arn_suffix = module.application.load_balancer_arn_suffix
-  target_group_arn_suffix  = module.application.target_group_arn_suffix
+  name_prefix                = local.name_prefix
+  environment                = var.environment
+  enable_database            = var.enable_database
+  database_arn               = module.data.database_arn
+  database_identifier        = module.data.database_identifier
+  database_kms_key_arn       = module.data.database_kms_key_arn
+  database_connection_budget = local.profile.database_connection_budget
+  backup_retention_days      = local.profile.database_backup_retention
+  enable_backup_plan         = var.enable_backup_plan
+  alert_email                = var.alert_email
+}
+
+module "cost_governance" {
+  count  = var.enable_cost_governance ? 1 : 0
+  source = "./modules/cost-governance"
+
+  notification_email       = var.cost_notification_email
+  notification_sns_arn     = var.cost_notification_sns_arn
+  monthly_cash_budget_usd  = var.monthly_cash_budget_usd
+  monthly_gross_budget_usd = var.monthly_gross_budget_usd
+  anomaly_threshold_usd    = var.cost_anomaly_threshold_usd
 }
