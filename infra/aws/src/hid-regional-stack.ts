@@ -31,6 +31,7 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
+import { StagingWorkloadIdentity } from './staging-workload-identity.js';
 import type { HidEnvironmentConfig } from './config.js';
 import {
   serviceHostLabels,
@@ -82,6 +83,7 @@ export class HidRegionalStack extends Stack {
 
   private readonly configuration: HidEnvironmentConfig;
   private readonly parameters: ParameterMap = {};
+  private readonly stagingWorkloadIdentity?: StagingWorkloadIdentity;
 
   public constructor(scope: Construct, id: string, props: HidRegionalStackProps) {
     super(scope, id, props);
@@ -265,6 +267,7 @@ export class HidRegionalStack extends Stack {
         detailType: [
           'PatientRegistered.v1', 'PatientIdentityResolved.v1', 'OcrPublicationSucceeded.v1',
           'LabResultReleased.v1', 'MedicationDispensed.v1', 'OutreachPatientResolved.v1',
+          ...(this.configuration.name === 'staging' ? ['EmergencyAccessActivated.v1'] : []),
         ],
       },
       targets: [new eventTargets.SqsQueue(this.notificationQueue, {
@@ -338,6 +341,9 @@ export class HidRegionalStack extends Stack {
       `https://${label}.${privateZone.zoneName}`,
     ])) as Partial<Record<WorkloadName, string>>;
 
+    if (this.configuration.name === 'staging') {
+      this.stagingWorkloadIdentity = new StagingWorkloadIdentity(this, 'StagingWorkloadIdentity');
+    }
     const resources = new Map<WorkloadName, RuntimeResource>();
     for (const name of workloadNames) {
       const definition = workloads[name];
@@ -358,6 +364,11 @@ export class HidRegionalStack extends Stack {
       }
     }
 
+    if (this.stagingWorkloadIdentity) {
+      this.stagingWorkloadIdentity.bindCallers(workloadNames.filter(name => Object.keys(workloads[name].tokenFiles).length > 0)
+        .map(name => ({ role: resources.get(name)!.taskDefinition.taskRole, subject: `hid:staging:${name}`,
+          audiences: this.workloadTokenFiles(name).map(item => item.audience) })));
+    }
     this.attachBusinessIam(resources, documentKey);
     this.connectRuntimeNetwork(resources, endpointSecurityGroup, internalLoadBalancerSecurityGroup);
     const internalTargetGroups = internalLoadBalancer && internalListener
@@ -369,6 +380,12 @@ export class HidRegionalStack extends Stack {
     databaseSecurityGroup.addIngressRule(migration.securityGroup, ec2.Port.tcp(5432), 'Migration administrator only');
     if (this.configuration.interfaceEndpoints.length > 0) {
       endpointSecurityGroup.addIngressRule(migration.securityGroup, ec2.Port.tcp(443), 'Migration image, logs, and secret endpoints');
+      if (this.configuration.name === 'staging' && this.configuration.runtimeIngressEnabled) {
+        migration.securityGroup.addEgressRule(endpointSecurityGroup, ec2.Port.tcp(443),
+          'Staging migration image, logs, and secret endpoints');
+        migration.securityGroup.addEgressRule(ec2.Peer.prefixList(this.parameter('S3PrefixListId').valueAsString),
+          ec2.Port.tcp(443), 'Staging migration ECR image layers through Amazon S3');
+      }
     }
 
     const publicEntry = this.configuration.runtimeIngressEnabled
@@ -408,7 +425,11 @@ export class HidRegionalStack extends Stack {
       );
     }
     this.requiredParameter('S3PrefixListId', 'Region-specific Amazon S3 managed prefix list ID', '^pl-[a-f0-9]+$');
-    this.requiredParameter('RdsCaBundleBase64', 'Base64-encoded current AWS RDS trust bundle; public certificate material, not a secret');
+    const rdsCa = this.requiredParameter('RdsCaBundleBase64', this.configuration.name === 'staging'
+      ? 'Base64-encoded public root certificate matching the verified staging region and RDS CA; maximum 4096 characters, not the global bundle'
+      : 'Base64-encoded current AWS RDS trust bundle; public certificate material, not a secret');
+    if (this.configuration.name === 'staging') rdsCa.maxLength = 4096;
+    if (this.configuration.name !== 'staging') {
     this.requiredParameter('WorkloadIssuerUrl', 'Approved HTTPS workload issuer; external prerequisite', '^https://');
     this.requiredParameter('WorkloadJwksUrl', 'Approved HTTPS workload JWKS endpoint; external prerequisite', '^https://');
     this.requiredParameter('EhrWorkloadSubject', 'Exact deployment subject for EHR API');
@@ -417,9 +438,19 @@ export class HidRegionalStack extends Stack {
     this.requiredParameter('OcrWorkloadSubject', 'Exact deployment subject for OCR API');
     this.requiredParameter('OutreachWorkloadSubject', 'Exact deployment subject for Outreach API');
     this.requiredParameter('IdentityWorkloadSubject', 'Exact deployment subject for Identity API');
+    }
     this.requiredParameter('AuthSecretArn', 'Secrets Manager JSON secret containing authSigningSecret and authLoginPepper');
-    this.requiredParameter('IdentitySensitiveSecretArn', 'Secrets Manager JSON secret containing NIN keys, OTP HMAC key, and Turnstile secret');
-    this.requiredParameter('NotificationProviderSecretArn', 'Secrets Manager JSON secret containing Novu, SES sender, Termii, Meta, and Infobip configuration');
+    this.requiredParameter('IdentitySensitiveSecretArn', this.configuration.name === 'staging'
+      ? 'Secrets Manager JSON secret containing OTP HMAC key and Turnstile secret; NIN is deferred'
+      : 'Secrets Manager JSON secret containing NIN keys, OTP HMAC key, and Turnstile secret');
+    this.requiredParameter('NotificationProviderSecretArn', this.configuration.name === 'staging'
+      ? 'Secrets Manager JSON secret containing sesFromAddress and novuApiKey for staging email OTP and ordinary notifications'
+      : 'Secrets Manager JSON secret containing Novu, SES sender, Termii, Meta, and Infobip configuration');
+    if (this.configuration.name === 'staging') {
+      const novuApiUrl = this.requiredParameter('StagingNovuApiUrl',
+        'API endpoint of the confirmed isolated Novu staging environment; no implicit region selection');
+      novuApiUrl.allowedValues = ['https://api.novu.co', 'https://eu.api.novu.co'];
+    }
     if (this.configuration.profile !== 'sleep') {
       for (const name of workloadNames) {
         const id = pascal(name);
@@ -626,6 +657,30 @@ export class HidRegionalStack extends Stack {
     if (Object.keys(definition.tokenFiles).length > 0) {
       taskDefinition.addVolume({ name: 'workload-tokens' });
       container.addMountPoints({ containerPath: tokenRoot, sourceVolume: 'workload-tokens', readOnly: true });
+      if (this.stagingWorkloadIdentity) {
+        const agent = taskDefinition.addContainer('WorkloadTokenAgent', {
+          containerName: 'workload-token-agent',
+          image: ecs.ContainerImage.fromRegistry(this.parameter('IdentityApiImageUri').valueAsString),
+          command: ['/app/services/workload-token-agent/src/main.mjs'],
+          user: '65532:65532', readonlyRootFilesystem: true, essential: true, memoryReservationMiB: 64,
+          environment: {
+            HID_DEPLOYMENT_ENV: 'staging', AWS_REGION: Aws.REGION,
+            WORKLOAD_ISSUER_URL: this.stagingWorkloadIdentity.issuerUrl,
+            WORKLOAD_JWKS_URL: this.stagingWorkloadIdentity.jwksUrl,
+            WORKLOAD_SUBJECT: `hid:staging:${definition.name}`,
+            WORKLOAD_TOKEN_DIRECTORY: tokenRoot,
+            WORKLOAD_TOKEN_FILES_JSON: JSON.stringify(this.workloadTokenFiles(definition.name)),
+          },
+          logging: ecs.LogDrivers.awsLogs({ logGroup, streamPrefix: 'workload-token-agent' }),
+          healthCheck: {
+            command: ['CMD', '/nodejs/bin/node', '/app/services/workload-token-agent/src/health.mjs'],
+            interval: Duration.seconds(10), timeout: Duration.seconds(5), retries: 3, startPeriod: Duration.seconds(30),
+          },
+        });
+        agent.addMountPoints({ containerPath: tokenRoot, sourceVolume: 'workload-tokens', readOnly: false });
+        container.addContainerDependencies({ container: agent, condition: ecs.ContainerDependencyCondition.HEALTHY });
+      }
+
     }
 
     const desiredCount = this.configuration.profile === 'sleep'
@@ -663,6 +718,13 @@ export class HidRegionalStack extends Stack {
     return { definition, taskDefinition, service, container, logGroup, securityGroup: input.securityGroup };
   }
 
+  private workloadTokenFiles(name: WorkloadName): Array<{ audience: string; file: string }> {
+    return Object.values(workloads[name].tokenFiles).map(path => {
+      const file = path.slice(path.lastIndexOf('/') + 1);
+      return { audience: `hid-${file.slice(0, -4)}-api`, file };
+    });
+  }
+
   private environmentFor(
     name: WorkloadName,
     urls: Partial<Record<WorkloadName, string>>,
@@ -678,15 +740,14 @@ export class HidRegionalStack extends Stack {
         .map((subdomain) => `https://${subdomain}.${this.parameter('RootDomainName').valueAsString}`).join(','),
       TRUST_PROXY_CIDRS: this.configuration.vpcCidr,
     };
-    const issuer = this.parameter('WorkloadIssuerUrl').valueAsString;
-    const jwks = this.parameter('WorkloadJwksUrl').valueAsString;
+    const issuer = this.stagingWorkloadIdentity?.issuerUrl ?? this.parameter('WorkloadIssuerUrl').valueAsString;
+    const jwks = this.stagingWorkloadIdentity?.jwksUrl ?? this.parameter('WorkloadJwksUrl').valueAsString;
+    const subject = (name: string, parameter: string) => this.stagingWorkloadIdentity
+      ? `hid:staging:${name}-api` : this.parameter(parameter).valueAsString;
     const subjects = {
-      identity: this.parameter('IdentityWorkloadSubject').valueAsString,
-      ehr: this.parameter('EhrWorkloadSubject').valueAsString,
-      lab: this.parameter('LabWorkloadSubject').valueAsString,
-      pharmacy: this.parameter('PharmacyWorkloadSubject').valueAsString,
-      ocr: this.parameter('OcrWorkloadSubject').valueAsString,
-      outreach: this.parameter('OutreachWorkloadSubject').valueAsString,
+      identity: subject('identity', 'IdentityWorkloadSubject'), ehr: subject('ehr', 'EhrWorkloadSubject'),
+      lab: subject('lab', 'LabWorkloadSubject'), pharmacy: subject('pharmacy', 'PharmacyWorkloadSubject'),
+      ocr: subject('ocr', 'OcrWorkloadSubject'), outreach: subject('outreach', 'OutreachWorkloadSubject'),
     };
     const base = { ...workloads[name].tokenFiles };
     switch (name) {
@@ -695,7 +756,7 @@ export class HidRegionalStack extends Stack {
           AUTH_ISSUER: 'hid-identity', AUTH_AUDIENCE: 'hid-api',
           TURNSTILE_MODE: 'required', OTP_HMAC_KEY_VERSION: 'aws-v1',
           NOTIFICATION_API_URL: urls['notification-api']!, NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
-          NIN_PROVIDER_MODE: 'unavailable', NIN_KEY_VERSION: 'aws-v1', IDENTITY_SERVICE_IDENTITY_MODE: 'jwt',
+          NIN_PROVIDER_MODE: this.configuration.name === 'staging' ? 'deferred' : 'unavailable', NIN_KEY_VERSION: 'aws-v1', IDENTITY_SERVICE_IDENTITY_MODE: 'jwt',
           WORKLOAD_ISSUER_URL: issuer, WORKLOAD_JWKS_URL: jwks, WORKLOAD_AUDIENCE: 'hid-identity-api',
           IDENTITY_EHR_CALLER_SUBJECT: subjects.ehr, IDENTITY_LAB_CALLER_SUBJECT: subjects.lab,
           IDENTITY_PHARMACY_CALLER_SUBJECT: subjects.pharmacy, IDENTITY_OCR_CALLER_SUBJECT: subjects.ocr,
@@ -734,6 +795,9 @@ export class HidRegionalStack extends Stack {
           OUTREACH_IDENTITY_SERVICE_IDENTITY_MODE: 'jwt' };
       case 'notification-api':
         return { NODE_ENV: 'production', PORT: '3007', NOTIFICATION_PROVIDER_MODE: 'live',
+          ...(this.configuration.name === 'staging' ? {
+            HID_DEPLOYMENT_ENV: 'staging', NOTIFICATION_DELIVERY_PROFILE: 'email-only',
+          } : {}),
           NOTIFICATION_WORKLOAD_IDENTITY_MODE: 'jwt', WORKLOAD_ISSUER_URL: issuer,
           WORKLOAD_JWKS_URL: jwks, WORKLOAD_AUDIENCE: 'hid-notification-api',
           IDENTITY_CALLER_SUBJECT: subjects.identity, AWS_REGION: Aws.REGION };
@@ -745,6 +809,7 @@ export class HidRegionalStack extends Stack {
           NOTIFICATION_WORKER_DATABASE_SSL_ROOT_CERT_BASE64: this.parameter('RdsCaBundleBase64').valueAsString,
           NOTIFICATION_WORKER_DATABASE_POOL_MAX: String(workloads[name].databaseConnectionsPerTask),
           NOTIFICATION_WORKER_QUEUE_URL: this.notificationQueue.queueUrl,
+          ...(this.configuration.name === 'staging' ? { NOVU_API_URL: this.parameter('StagingNovuApiUrl').valueAsString } : {}),
           NOVU_MODE: 'live', AWS_REGION: Aws.REGION };
       case 'ocr-worker':
         return { NODE_ENV: 'production', OCR_PROVIDER: 'textract', OCR_WORKER_SUBJECT: subjects.ocr,
@@ -775,8 +840,10 @@ export class HidRegionalStack extends Stack {
       output.AUTH_LOGIN_PEPPER = ecs.Secret.fromSecretsManager(secrets.auth!, 'authLoginPepper');
     }
     if (name === 'identity-api') {
-      output.NIN_LOOKUP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'ninLookupHmacKeyB64');
-      output.NIN_ENCRYPTION_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'ninEncryptionKeyB64');
+      if (this.configuration.name !== 'staging') {
+        output.NIN_LOOKUP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'ninLookupHmacKeyB64');
+        output.NIN_ENCRYPTION_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'ninEncryptionKeyB64');
+      }
       output.OTP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'otpHmacKeyB64');
       output.TURNSTILE_SECRET_KEY = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'turnstileSecretKey');
     }
@@ -784,7 +851,7 @@ export class HidRegionalStack extends Stack {
       output.WORKLOAD_DATABASE_URL = ecs.Secret.fromSecretsManager(secrets[`${name}Database`]!, 'scannerUrl');
     }
     if (name === 'notification-api') {
-      for (const [environmentName, field] of Object.entries({
+      const providerFields = this.configuration.name === 'staging' ? { SES_FROM_ADDRESS: 'sesFromAddress' } : {
         SES_FROM_ADDRESS: 'sesFromAddress', TERMII_BASE_URL: 'termiiBaseUrl',
         TERMII_API_KEY: 'termiiApiKey', TERMII_SENDER_ID: 'termiiSenderId',
         META_PHONE_NUMBER_ID: 'metaPhoneNumberId', META_ACCESS_TOKEN: 'metaAccessToken',
@@ -792,7 +859,10 @@ export class HidRegionalStack extends Stack {
         INFOBIP_API_KEY: 'infobipApiKey', INFOBIP_EMAIL_FROM: 'infobipEmailFrom',
         INFOBIP_SMS_SENDER: 'infobipSmsSender', INFOBIP_WHATSAPP_SENDER: 'infobipWhatsAppSender',
         INFOBIP_WHATSAPP_OTP_TEMPLATE_ID: 'infobipWhatsAppOtpTemplateId',
-      })) output[environmentName] = ecs.Secret.fromSecretsManager(secrets.notificationProvider!, field);
+      };
+      for (const [environmentName, field] of Object.entries(providerFields)) {
+        output[environmentName] = ecs.Secret.fromSecretsManager(secrets.notificationProvider!, field);
+      }
     }
     if (name === 'notification-worker') {
       output.NOVU_API_KEY = ecs.Secret.fromSecretsManager(secrets.notificationProvider!, 'novuApiKey');
@@ -804,7 +874,7 @@ export class HidRegionalStack extends Stack {
     const ehr = resources.get('ehr-api')!;
     ehr.taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
       sid: 'DocumentBucketMetadataAndObjects',
-      actions: ['s3:HeadBucket', 's3:GetBucketVersioning'],
+      actions: [this.configuration.name === 'staging' ? 's3:ListBucket' : 's3:HeadBucket', 's3:GetBucketVersioning'],
       resources: [this.documentBucket.bucketArn],
     }));
     ehr.taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
@@ -819,7 +889,9 @@ export class HidRegionalStack extends Stack {
 
     const worker = resources.get('ocr-worker')!;
     worker.taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
-      sid: 'ReadExactDocumentVersions', actions: ['s3:HeadBucket'], resources: [this.documentBucket.bucketArn],
+      sid: 'ReadExactDocumentVersions',
+      actions: [this.configuration.name === 'staging' ? 's3:ListBucket' : 's3:HeadBucket'],
+      resources: [this.documentBucket.bucketArn],
     }));
     worker.taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
       sid: 'ReadExactDocumentObjects', actions: ['s3:GetObject', 's3:GetObjectVersion'], resources: [this.documentBucket.arnForObjects('*')],

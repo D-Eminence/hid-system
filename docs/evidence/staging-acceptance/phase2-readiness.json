@@ -1,0 +1,106 @@
+{
+  "recorded_at": "2026-09-08T19:14:06.570114+00:00",
+  "phase": 2,
+  "approved_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "readiness": "NOT READY",
+  "staging_deployment_authorization": "BLOCKED",
+  "production": "LOCKED",
+  "findings": [
+    {
+      "id": "B01",
+      "status": "BLOCKER",
+      "finding": "AWS session expired; target account/region/resource identity unverified",
+      "remediation": "Owner reauthenticate and bind staging-only inventory; no cloud operations until then"
+    },
+    {
+      "id": "B02",
+      "status": "BLOCKER",
+      "finding": "Cloudflare unauthenticated; actual zone/routes/TLS/origin state unverified",
+      "remediation": "Authenticate scoped staging operator and provide verified account/zone identifiers"
+    },
+    {
+      "id": "B03",
+      "status": "BLOCKER",
+      "finding": "No bound staging identifiers, protected readiness variables, signed candidate, caller/custody or admitted artifact set",
+      "remediation": "Complete reviewed manifests and existing protected release workflow arrangement; preserve owner approval"
+    },
+    {
+      "id": "B04",
+      "status": "BLOCKER",
+      "finding": "Staging economy lacks ECR api/dkr and Logs endpoints for restricted-egress tasks",
+      "remediation": "Add staging-economy private endpoints and validate security groups without changing production output"
+    },
+    {
+      "id": "B05",
+      "status": "BLOCKER",
+      "finding": "Migration task security group allows only database egress and cannot reach image/secret/log dependencies",
+      "remediation": "Add exact staging endpoint-SG HTTPS and regional S3-prefix-list HTTPS paths; keep sleep closed"
+    },
+    {
+      "id": "B06",
+      "status": "BLOCKER",
+      "finding": "EHR/OCR IAM uses nonexistent s3:HeadBucket for real HeadBucket readiness calls",
+      "remediation": "Use s3:ListBucket on the exact staging bucket without broadening object permissions"
+    },
+    {
+      "id": "B07",
+      "status": "BLOCKER",
+      "finding": "Full RDS bundle exceeds CFN 4096-byte parameter limit; actual DB root unbound",
+      "remediation": "Select and verify actual database CA root <=4096 base64 bytes; staging length guard and precise guidance"
+    },
+    {
+      "id": "B08",
+      "status": "BLOCKER",
+      "finding": "Irreversible Object Lock prerequisite is not permitted by current task boundary",
+      "remediation": "Retain concrete reviewable trust plan; owner resolves separate irreversible-resource gate outside this run"
+    },
+    {
+      "id": "N01",
+      "status": "NOT VERIFIED",
+      "finding": "Actual staging migration/auth/RBAC/HID/EHR/break-glass/backup/restore/rollback/alarms",
+      "remediation": "Require deployed synthetic workflow and restore/failure evidence"
+    },
+    {
+      "id": "P01",
+      "status": "PASS",
+      "finding": "Approved remote merge SHA and seven CI checks with identical tracked parent tree",
+      "remediation": "Retain baseline and GitHub evidence"
+    },
+    {
+      "id": "P02",
+      "status": "PASS",
+      "finding": "Exact-SHA local build/tests and isolated SQL migration/restore rehearsal",
+      "remediation": "Source evidence only; workspace verify still running"
+    },
+    {
+      "id": "P03",
+      "status": "PASS",
+      "finding": "Offline AWS default and three staging profiles synthesize below S3 template/resource/count limits",
+      "remediation": "No deployed or account-bound infrastructure claim"
+    },
+    {
+      "id": "P04",
+      "status": "PASS",
+      "finding": "Cloudflare 52 and release 29 local tests; synthetic staging TUF bundle build",
+      "remediation": "Real signed repository remains missing"
+    },
+    {
+      "id": "W01",
+      "status": "WARNING",
+      "finding": "Node local v24.13.1 versus pinned CI v22.23.2",
+      "remediation": "Exact-SHA remote CI proves pinned runtime; local checks recorded separately"
+    },
+    {
+      "id": "N02",
+      "status": "NOT VERIFIED",
+      "finding": "Fresh package advisory service unavailable",
+      "remediation": "No vulnerability clearance inferred from failed advisory response"
+    },
+    {
+      "id": "N03",
+      "status": "NOT VERIFIED",
+      "finding": "Active patient UI/API compatibility and NIN provider availability under investigation",
+      "remediation": "Require concrete path evidence before final classification"
+    }
+  ]
+}

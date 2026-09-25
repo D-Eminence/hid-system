@@ -69,6 +69,11 @@ async function hydratePortalSession() {
     }
 
     const pathname = typeof window !== 'undefined' ? window.location.pathname : '/'
+    // Canonical patient and emergency pages own their server-authorized fetches.
+    // Do not start legacy cache warmups or cross-portal account requests here.
+    if (pathname.startsWith('/patient') || pathname.startsWith('/hospital/emergency')
+        || pathname.startsWith('/hospital/auth') || pathname.startsWith('/hospital/registration')) return
+
     const requestedRole = `${session.user.user_metadata.requested_role ?? ''}`.trim().toLowerCase()
     const shouldLoadPatient =
       pathname.startsWith('/patient') ||

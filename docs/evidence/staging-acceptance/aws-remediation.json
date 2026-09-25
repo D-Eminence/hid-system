@@ -1,0 +1,144 @@
+{
+  "status": "UNAPPROVED REMEDIATION CANDIDATE",
+  "approved_source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "candidate_commit": null,
+  "at_utc": "2026-09-09T08:28:36.100872+00:00",
+  "cloud_mutations": 0,
+  "changed_files": [
+    {
+      "path": "docs/AWS_COST_MODEL.md",
+      "sha256": "3196a0b6dc0f2cec41ca9702a236fd72df8aba4745455a665ff14e1b51064d9f"
+    },
+    {
+      "path": "docs/AWS_DEPLOYMENT_ARCHITECTURE.md",
+      "sha256": "6365ab99defeaf99ceeb7cd8482aa3cf3f830ecc67687fb3815ae8dea3628404"
+    },
+    {
+      "path": "docs/AWS_DEPLOYMENT_RUNBOOK.md",
+      "sha256": "5e6b32d26d72a557a2658165423e3abfb2a6b754d6d5fb9d2c7650ed42ab1b3a"
+    },
+    {
+      "path": "docs/AWS_IAM_MATRIX.md",
+      "sha256": "08d80d4a21ff2fa22c90952006b4feade00bd5ec6df5f2e6c545f709d3a4a02e"
+    },
+    {
+      "path": "infra/aws/cost-inventory.json",
+      "sha256": "b0d3949d80098f426651a0a6282eaf245260845de20f5f334e4bd8bdab9fe231"
+    },
+    {
+      "path": "infra/aws/scripts/verify-synth.mjs",
+      "sha256": "92e5f78a6697b12c43215dcebe79fc8f0c7bc361ff0d0f73dd6dd8d09493c3b8"
+    },
+    {
+      "path": "infra/aws/src/config.ts",
+      "sha256": "961f07911428048fc89dc34b81c834d27bd9bf5abc9d84ec6eebb9ee90e5752c"
+    },
+    {
+      "path": "infra/aws/src/hid-regional-stack.ts",
+      "sha256": "4d01507501548a287fd13d162f07e1f23c28784747f260cbeb8fc94e8d6edbf6"
+    },
+    {
+      "path": "infra/aws/test/infrastructure.test.ts",
+      "sha256": "cbb56672c2e3fea73f36a3f79c83d5c76eda425568af105c773375c3322ef8a2"
+    }
+  ],
+  "patch_file": "aws-staging-remediation-candidate.patch",
+  "patch_sha256": "9560d59f42b924edab6a635a245b98b4ec2d1a4f30edfa948afaa9beaa009094",
+  "fixed_local_blockers": [
+    "AWS-05 economy ECR/Logs connectivity",
+    "AWS-06 live-staging migration AWS endpoint/S3 connectivity",
+    "AWS-07 staging exact-bucket HeadBucket IAM permission"
+  ],
+  "additional_guard": "AWS-04 staging public RDS root MaxLength4096; actual region/CA and TLS remain NOT VERIFIED",
+  "validation": {
+    "tests_passed": 62,
+    "typecheck_exit": 0,
+    "cost_inventory_check_exit": 0,
+    "default_and_staging_synth_verifiers": "PASS",
+    "diff_check_exit": 0,
+    "first_candidate_test_attempt": "61/62; new test helper attempted includes on undefined optional destination. Fixed only helper with nullish fallback; original failure log retained. Final62/62."
+  },
+  "production_and_development_equivalence": [
+    {
+      "profile": "production",
+      "before": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-production-baseline-assembly/Hid-production-Regional.template.json",
+      "after": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-production-candidate-assembly/Hid-production-Regional.template.json",
+      "before_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+      "after_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+      "bytes": 464453,
+      "byte_identical": true
+    },
+    {
+      "profile": "development",
+      "before": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-default-assembly/Hid-development-Regional.template.json",
+      "after": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-candidate-default-assembly/Hid-development-Regional.template.json",
+      "before_sha256": "42cadadc0cda9ef7f13c86f27937b066662f417e5e5925fc2a46a1bb708db73c",
+      "after_sha256": "42cadadc0cda9ef7f13c86f27937b066662f417e5e5925fc2a46a1bb708db73c",
+      "bytes": 517254,
+      "byte_identical": true
+    }
+  ],
+  "templates": [
+    {
+      "profile": "default",
+      "template": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-candidate-default-assembly/Hid-development-Regional.template.json",
+      "bytes": 517254,
+      "compact_bytes": 352233,
+      "resources": 412,
+      "parameters": 62,
+      "outputs": 21,
+      "sha256": "42cadadc0cda9ef7f13c86f27937b066662f417e5e5925fc2a46a1bb708db73c"
+    },
+    {
+      "profile": "sleep",
+      "template": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-candidate-sleep-assembly/Hid-staging-Regional.template.json",
+      "bytes": 276270,
+      "compact_bytes": 182356,
+      "resources": 207,
+      "parameters": 37,
+      "outputs": 20,
+      "sha256": "e2e469a88b42063e3902128057f4e7f92ba20e25ef643dd7e84f4d0d6f3bbf35"
+    },
+    {
+      "profile": "economy",
+      "template": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-candidate-economy-assembly/Hid-staging-Regional.template.json",
+      "bytes": 512641,
+      "compact_bytes": 347996,
+      "resources": 413,
+      "parameters": 62,
+      "outputs": 21,
+      "sha256": "79adf7159d135a12656c18957395f33752cc8755bdc8063443aba68c08b33033"
+    },
+    {
+      "profile": "fidelity",
+      "template": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-candidate-fidelity-assembly/Hid-staging-Regional.template.json",
+      "bytes": 516287,
+      "compact_bytes": 350386,
+      "resources": 416,
+      "parameters": 62,
+      "outputs": 21,
+      "sha256": "7340ff3b6984d6e7779ac7b5184838746a103a2175c8e42aa87c4f4b2a4be916"
+    }
+  ],
+  "staging_deployment_authorization": "BLOCKED",
+  "remaining_gates": [
+    "Approve immutable candidate source through repository governance; original approved SHA unchanged",
+    "Refresh approved staging AWS session and verify actual account/region/AZ/resource identifiers",
+    "Verify real RDS CA/root,TLS,certificates,secret CMK grants and role isolation",
+    "Prove rotating workload JWT delivery and provider prerequisites",
+    "Bind admitted ARM64 images/provenance and actual release-trust state",
+    "Review account-specific quotas,cost,diff,retention/custody and rollback inputs",
+    "Deploy and validate actual staging health/security/migrations/backup/restore/forward rollback"
+  ],
+  "limitations": [
+    "Production and development template bytes preserved, including preexisting migration-egress/HeadBucket defects outside staging scope",
+    "Economy gains three interface endpoints in one AZ and corresponding ongoing cost",
+    "Offline policy/template checks do not prove live cloud authorization or service operation"
+  ],
+  "independent_review": {
+    "decision": "No must-fix concern",
+    "report": "aws-independent-review.md",
+    "checks": "aws-independent-review-checks.json",
+    "scope": "recomputed production/development byte equality; inspected inline and separate staging SG egress; observed62/62 final tests"
+  }
+}

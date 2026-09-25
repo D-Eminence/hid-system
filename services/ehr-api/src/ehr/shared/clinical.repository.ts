@@ -9,6 +9,7 @@ import { IdentityApiService } from '../../integrations/identity-api.service';
 export type ClinicalAccess = 'read_records' | 'write_records';
 
 export interface SemanticEvent {
+  breakGlassOnly?: boolean;
   action: string;
   resourceType: string;
   resourceId?: string;
@@ -56,7 +57,7 @@ export class ClinicalRepository {
         context.purposeOfUse,
         context,
       );
-      if (!authorization.allowed) {
+      if (!authorization.allowed || (event.breakGlassOnly && !authorization.breakGlass)) {
         await this.audit.record({
           correlationId: context.correlationId,
           actorType: 'staff',

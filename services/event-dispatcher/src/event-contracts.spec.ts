@@ -34,4 +34,12 @@ describe('HID event envelope v1', () => {
     expect(() => eventEnvelope({ ...event, payload: { source: { nested: { rawNin: '12345678901' } } } }))
       .toThrow(/minimum-necessary/);
   });
+  it('allows minimal emergency notification and rejects clinical reasons', () => {
+    const emergency = { ...event, eventType: 'EmergencyAccessActivated', aggregateType: 'identity-consent-grant', aggregateVersion: 1,
+      payload: { consentGrantId: event.aggregateId, reviewRequired: true } };
+    expect(eventEnvelope(emergency)).toMatchObject({ type: 'EmergencyAccessActivated', payload: emergency.payload });
+    expect(() => eventEnvelope({ ...emergency, payload: { ...emergency.payload, reason: 'Clinical reason' } }))
+      .toThrow(/outside its producer contract/);
+  });
+
 });

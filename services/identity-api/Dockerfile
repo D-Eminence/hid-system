@@ -11,6 +11,7 @@ ENV NODE_ENV=production
 WORKDIR /app/services/identity-api
 COPY services/identity-api/package.json services/identity-api/package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
+RUN mkdir -p /var/run/hid/workload-tokens && chown 65532:65532 /var/run/hid/workload-tokens && chmod 0700 /var/run/hid/workload-tokens
 
 # This runtime deliberately has no shell or package manager. The pinned Node 22
 # Distroless image retains Debian 13 CA/TLS support while excluding the Node
@@ -20,7 +21,10 @@ ENV NODE_ENV=production
 WORKDIR /app/services/identity-api
 COPY --chown=65532:65532 --from=production-dependencies /app/services/identity-api/node_modules ./node_modules
 COPY --chown=65532:65532 --from=build /app/services/identity-api/dist ./dist
+COPY --chown=65532:65532 services/workload-token-agent/src /app/services/workload-token-agent/src
+COPY --chown=65532:65532 --chmod=0700 --from=production-dependencies /var/run/hid/workload-tokens /var/run/hid/workload-tokens
 USER 65532:65532
+VOLUME ["/var/run/hid/workload-tokens"]
 EXPOSE 3001
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \

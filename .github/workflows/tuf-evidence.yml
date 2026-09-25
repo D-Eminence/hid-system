@@ -1,0 +1,97 @@
+name: Append approved staging release evidence
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: tuf-staging-evidence-writer
+  cancel-in-progress: false
+jobs:
+  append:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: staging-evidence-writer
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      APPROVED_SOURCE_SHA: ${{ vars.TUF_EVIDENCE_SOURCE_SHA }}
+      APPROVED_WORKFLOW_SHA: ${{ vars.TUF_EVIDENCE_WORKFLOW_SHA }}
+      REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+      EVIDENCE_CONFIG_JSON: ${{ vars.TUF_EVIDENCE_CONFIG_JSON }}
+      EVIDENCE_CONFIG_SHA256: ${{ vars.TUF_EVIDENCE_CONFIG_SHA256 }}
+      EVIDENCE_WRITER_ROLE_ARN: ${{ vars.TUF_EVIDENCE_WRITER_ROLE_ARN }}
+    steps:
+      - name: Bind exact approved caller and evidence configuration before checkout
+        id: pins
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { writeFile, appendFile } from 'node:fs/promises';
+          const e = process.env;
+          if (e.GITHUB_REPOSITORY !== 'D-Eminence/hid-system' || e.GITHUB_REPOSITORY_ID !== '1317340803'
+            || e.GITHUB_REPOSITORY_OWNER_ID !== '182018869' || !['push', 'workflow_dispatch'].includes(e.GITHUB_EVENT_NAME)
+            || e.GITHUB_REF !== 'refs/heads/tuf-production-release' || e.GITHUB_REF_PROTECTED !== 'true'
+            || e.GITHUB_REF_TYPE !== 'branch' || e.GITHUB_HEAD_REF || e.GITHUB_BASE_REF || e.GITHUB_RUN_ATTEMPT !== '1'
+            || !/^[a-f0-9]{40}$/.test(e.APPROVED_SOURCE_SHA) || e.GITHUB_SHA !== e.APPROVED_SOURCE_SHA
+            || !/^[a-f0-9]{40}$/.test(e.APPROVED_WORKFLOW_SHA)
+            || e.GITHUB_WORKFLOW_SHA !== e.APPROVED_SOURCE_SHA || e.REQUESTED_SOURCE_SHA !== e.APPROVED_SOURCE_SHA
+            || !/^[a-f0-9]{64}$/.test(e.EVIDENCE_CONFIG_SHA256) || !e.EVIDENCE_CONFIG_JSON
+            || Buffer.byteLength(e.EVIDENCE_CONFIG_JSON) > 16384
+            || createHash('sha256').update(e.EVIDENCE_CONFIG_JSON).digest('hex') !== e.EVIDENCE_CONFIG_SHA256) throw Error('staging evidence approval rejected');
+          const c = JSON.parse(e.EVIDENCE_CONFIG_JSON);
+          if (c.environment !== 'staging' || c.source_sha !== e.APPROVED_SOURCE_SHA || c.workflow_sha !== e.APPROVED_WORKFLOW_SHA
+            || !/^[1-9][0-9]{0,19}$/.test(c.producer?.artifact_id) || !/^[1-9][0-9]{0,19}$/.test(c.producer?.run_id)) throw Error('staging evidence artifact pins rejected');
+          await writeFile(`${e.RUNNER_TEMP}/staging-evidence-config.json`, e.EVIDENCE_CONFIG_JSON, { flag: 'wx', mode: 0o600 });
+          await appendFile(e.GITHUB_OUTPUT, `artifact_id=${c.producer.artifact_id}\nrun_id=${c.producer.run_id}\n`);
+          NODE
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ vars.TUF_EVIDENCE_WORKFLOW_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.23.2
+          package-manager-cache: false
+      - name: Install locked validators without lifecycle scripts
+        run: npm --prefix release ci --ignore-scripts
+      - name: Verify immutable workload identity owner policy and completed producer provenance
+        env:
+          GH_EVIDENCE_READ_TOKEN: ${{ github.token }}
+        run: node release/scripts/append-staging-release-evidence.mjs preflight
+      - name: Download only the pinned immutable evidence artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ steps.pins.outputs.artifact_id }}
+          run-id: ${{ steps.pins.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/staging-evidence-input
+      - name: Verify exact evidence bytes and release contract before AWS credentials
+        run: node release/scripts/append-staging-release-evidence.mjs validate
+      - name: Assume the immutable workflow bound staging evidence writer role
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ vars.TUF_EVIDENCE_WRITER_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: '659225405023'
+          role-duration-seconds: 900
+          role-session-name: hid-staging-evidence-${{ github.run_id }}
+          unset-current-credentials: true
+      - name: Append conditional encrypted evidence using the existing archive permissions
+        env:
+          GH_EVIDENCE_READ_TOKEN: ${{ github.token }}
+        run: node release/scripts/append-staging-release-evidence.mjs append
+      - name: Retain the exact object version and archival limitations
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-staging-evidence-append-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/staging-evidence-append-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

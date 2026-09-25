@@ -1,0 +1,23 @@
+{
+  "schema_version": "hid.staging-public-custody/v1",
+  "environment": "staging",
+  "repository_id": "hid-staging-v1",
+  "authorization": "NOT_AUTHORIZED",
+  "trusted_root": {
+    "version": null,
+    "sha256": null,
+    "public_provenance_evidence_sha256": null
+  },
+  "offline_custodians": {
+    "root": [
+      { "key_id": null, "custodian_id": null, "hardware_provider": null, "public_custody_evidence_sha256": null },
+      { "key_id": null, "custodian_id": null, "hardware_provider": null, "public_custody_evidence_sha256": null },
+      { "key_id": null, "custodian_id": null, "hardware_provider": null, "public_custody_evidence_sha256": null }
+    ],
+    "targets": [
+      { "key_id": null, "custodian_id": null, "hardware_provider": null, "public_custody_evidence_sha256": null },
+      { "key_id": null, "custodian_id": null, "hardware_provider": null, "public_custody_evidence_sha256": null },
+      { "key_id": null, "custodian_id": null, "hardware_provider": null, "public_custody_evidence_sha256": null }
+    ]
+  }
+}

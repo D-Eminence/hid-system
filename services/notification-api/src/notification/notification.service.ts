@@ -1,4 +1,4 @@
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Optional } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
 import { InfobipFallbackProvider } from '../providers/infobip.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
@@ -27,11 +27,17 @@ export class NotificationService {
   }
 
   async deliverOtp(message: OtpMessage): Promise<{ primary: ProviderResult; fallback?: ProviderResult; outcome: ProviderResult['outcome'] }> {
+    if (this.environment.NOTIFICATION_DELIVERY_PROFILE === 'email-only' && message.channel !== 'email') {
+      throw new BadRequestException('This delivery profile supports email OTP only');
+    }
     if (this.environment.NOTIFICATION_PROVIDER_MODE === 'disabled') {
       return { primary: { outcome: 'definitive_failure', provider: 'disabled-test', safeCode: 'providers_disabled' }, outcome: 'definitive_failure' };
     }
     const primary = await this.primary[message.channel].send(message);
     if (primary.outcome !== 'definitive_failure') return { primary, outcome: primary.outcome };
+    // Staging email acceptance uses SES only. An unavailable primary remains a
+    // real failure; inactive providers are neither attempted nor reported as sent.
+    if (this.environment.NOTIFICATION_DELIVERY_PROFILE === 'email-only') return { primary, outcome: primary.outcome };
     const fallback = await this.fallback.send(message);
     return { primary, fallback, outcome: fallback.outcome };
   }

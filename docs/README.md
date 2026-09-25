@@ -9,6 +9,21 @@ The same document records the seven-app telemetry policy and current local
 browser evidence; [`OFFLINE.md`](OFFLINE.md) and [`SECURITY.md`](SECURITY.md)
 remain authoritative for capability and PHI controls.
 
+Current staging implementation, live prerequisites and acceptance evidence are in
+[`TUF-STAGING-EXECUTION.md`](TUF-STAGING-EXECUTION.md). Staging is not accepted;
+production remains locked. Provider account requirements are in
+[`STAGING_PROVIDER_ACCOUNTS.md`](STAGING_PROVIDER_ACCOUNTS.md); repeatable
+read-only gate checks are in [`STAGING_EXTERNAL_PREFLIGHT.md`](STAGING_EXTERNAL_PREFLIGHT.md).
+The [AWS checkpoint](STAGING_AWS_CHECKPOINT.md) records dated resource,
+permission and quota checks, prepared acceptance settings, and the remaining
+deployment-versus-acceptance inputs. The September 15 AWS session has expired;
+quota capacity is unverified. The [release installation guide](TUF_STAGING_RELEASE_INSTALLATION.md)
+indexes the prepared build, audit, signing and evidence adapters.
+[Cloudflare setup](STAGING_CLOUDFLARE_SETUP.md) and
+[notification setup](STAGING_NOTIFICATION_SETUP.md) give the secure local input paths.
+The prepared MetaMap NIN integration is deferred after staging; retained research is in
+[`METAMAP_NIN_CONTRACT.md`](METAMAP_NIN_CONTRACT.md).
+
 ## Documentation Map
 
 ### `PRODUCT.md`
@@ -190,7 +205,7 @@ Documentation updates are part of implementation, not optional cleanup.
 
 ### Phase C staging preparation
 
-- [Execution sequence and binary acceptance](TUF-STAGING-EXECUTION.md)
+- [Staging readiness, execution and acceptance report](TUF-STAGING-EXECUTION.md)
 - [GitHub protection and CI evidence](TUF-CI-PROTECTION.md)
 - [Identifier binding and irreversible infrastructure plan](TUF-STAGING-INFRASTRUCTURE.md)
 - [Synthetic migration, restore and forward rollback](TUF-STAGING-MIGRATION.md)

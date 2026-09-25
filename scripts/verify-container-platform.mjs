@@ -91,8 +91,24 @@ for (const [service, port, hasHttpHealth] of backends) {
   assert.match(dockerfile, /STOPSIGNAL SIGTERM/, `${service} must receive its graceful stop signal`)
   assert.doesNotMatch(dockerfile, /COPY\s+\.\s+\./, `${service} must not copy the entire context`)
   assert.doesNotMatch(dockerfile, /chmod\s+777/, `${service} must not use world-writable permissions`)
-  assert.doesNotMatch(dockerfile, /COPY[^\n]*(?:workload|token|\.env|credential|secret)/i,
+  // These two exact Identity-image inputs are authored agent code and an empty
+  // directory created in the dependency stage. No credential source is copied.
+  const allowedAgentCopies = service === 'identity-api' ? new Set([
+    'COPY --chown=65532:65532 services/workload-token-agent/src /app/services/workload-token-agent/src',
+    'COPY --chown=65532:65532 --chmod=0700 --from=production-dependencies /var/run/hid/workload-tokens /var/run/hid/workload-tokens',
+  ]) : new Set()
+  const credentialCopies = dockerfile.split('\n').filter(line => !allowedAgentCopies.has(line)).join('\n')
+  assert.doesNotMatch(credentialCopies, /COPY[^\n]*(?:workload|token|\.env|credential|secret)/i,
     `${service} must not copy credentials into the image`)
+  if (service === 'identity-api') {
+    assert.deepEqual((await readdir(join(repository, 'services/workload-token-agent/src'))).sort(),
+      ['agent.mjs', 'health.mjs', 'main.mjs'], 'Only the reviewed credential-free agent source may enter the Identity image')
+    for (const line of allowedAgentCopies) assert.ok(dockerfile.includes(line), 'Agent image source contract changed')
+    assert.match(dockerfile, /VOLUME \["\/var\/run\/hid\/workload-tokens"\]/,
+      'ECS must initialize the task volume from the owned image directory')
+    assert.match(dockerfile, /chown 65532:65532 \/var\/run\/hid\/workload-tokens && chmod 0700/,
+      'Only the runtime UID may access the initialized token directory')
+  }
   if (port !== null) assert.match(dockerfile, new RegExp(`EXPOSE ${port}`), `${service} port mismatch`)
   else assert.doesNotMatch(dockerfile, /^EXPOSE /m, `${service} has no public HTTP port`)
   if (hasHttpHealth && service !== 'event-dispatcher') {

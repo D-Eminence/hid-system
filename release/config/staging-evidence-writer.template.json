@@ -1,0 +1,23 @@
+{
+  "schema_version": "hid.staging-release-evidence-config/v1",
+  "environment": "staging",
+  "source_sha": null,
+  "workflow_sha": null,
+  "caller_workflow_path": null,
+  "aws_account_id": "659225405023",
+  "aws_region": "eu-west-1",
+  "writer_role_arn": null,
+  "archive": { "bucket": null, "kms_key_arn": null },
+  "release_id": null,
+  "artifact_set_sha256": null,
+  "expires_at": null,
+  "producer": {
+    "run_id": null,
+    "artifact_id": null,
+    "artifact_name": null,
+    "artifact_digest": null,
+    "workflow_path": null,
+    "evidence_sha256": null,
+    "evidence_size_bytes": null
+  }
+}

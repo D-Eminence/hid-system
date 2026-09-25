@@ -1,0 +1,96 @@
+name: Submit staging timestamp two signing request
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: tuf-staging-timestamp-signer-two
+  cancel-in-progress: false
+jobs:
+  submit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: staging-timestamp-signer-two
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      HID_SIGNING_ROLE: timestamp
+      HID_SIGNING_CANDIDATE: two
+      APPROVED_SOURCE_SHA: ${{ vars.TUF_SIGNER_SOURCE_SHA }}
+      APPROVED_WORKFLOW_SHA: ${{ vars.TUF_SIGNER_WORKFLOW_SHA }}
+      REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+      SIGNER_CONFIG_JSON: ${{ vars.TUF_SIGNER_CONFIG_JSON }}
+      SIGNER_CONFIG_SHA256: ${{ vars.TUF_SIGNER_CONFIG_SHA256 }}
+      SUBMITTER_ROLE_ARN: ${{ vars.TUF_SIGNER_ROLE_ARN }}
+    steps:
+      - name: Bind owner-approved staging source and submission configuration
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { writeFile } from 'node:fs/promises';
+          const e = process.env;
+          if (e.GITHUB_REPOSITORY !== 'D-Eminence/hid-system' || e.GITHUB_REPOSITORY_ID !== '1317340803'
+            || e.GITHUB_REPOSITORY_OWNER_ID !== '182018869' || !['push', 'workflow_dispatch'].includes(e.GITHUB_EVENT_NAME)
+            || e.GITHUB_REF !== 'refs/heads/tuf-production-release' || e.GITHUB_REF_PROTECTED !== 'true'
+            || e.GITHUB_REF_TYPE !== 'branch' || e.GITHUB_HEAD_REF || e.GITHUB_BASE_REF || e.GITHUB_RUN_ATTEMPT !== '1'
+            || !/^[a-f0-9]{40}$/.test(e.APPROVED_SOURCE_SHA) || !/^[a-f0-9]{40}$/.test(e.APPROVED_WORKFLOW_SHA)
+            || e.GITHUB_SHA !== e.APPROVED_SOURCE_SHA || e.GITHUB_WORKFLOW_SHA !== e.APPROVED_SOURCE_SHA
+            || e.REQUESTED_SOURCE_SHA !== e.APPROVED_SOURCE_SHA || !/^[a-f0-9]{64}$/.test(e.SIGNER_CONFIG_SHA256)
+            || !e.SIGNER_CONFIG_JSON || Buffer.byteLength(e.SIGNER_CONFIG_JSON) > 16384
+            || createHash('sha256').update(e.SIGNER_CONFIG_JSON).digest('hex') !== e.SIGNER_CONFIG_SHA256) throw Error('staging signing approval rejected');
+          await writeFile(`${e.RUNNER_TEMP}/staging-signer-config.json`, e.SIGNER_CONFIG_JSON, { flag: 'wx', mode: 0o600 });
+          NODE
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ vars.TUF_SIGNER_WORKFLOW_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.23.2
+          package-manager-cache: false
+      - name: Install locked input validators without lifecycle scripts
+        run: |
+          npm --prefix release ci --ignore-scripts
+          npm --prefix infra/cloudflare ci --ignore-scripts
+      - name: Verify owner policy immutable workflow and approved input artifact provenance
+        env:
+          GH_SIGNER_READ_TOKEN: ${{ github.token }}
+        run: node release/scripts/submit-staging-signing-request.mjs provenance
+      - name: Download exact approved public root and signed input metadata
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ fromJSON(vars.TUF_SIGNER_CONFIG_JSON).producer.artifact_id }}
+          run-id: ${{ fromJSON(vars.TUF_SIGNER_CONFIG_JSON).producer.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/staging-signing-input
+      - name: Validate exact input closure and signatures then prepare fresh canonical request
+        run: node release/scripts/submit-staging-signing-request.mjs prepare
+      - name: Assume only the paired immutable workflow bound staging submitter role
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ vars.TUF_SIGNER_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: '659225405023'
+          role-duration-seconds: 900
+          role-session-name: hid-staging-timestamp-two-${{ github.run_id }}
+          unset-current-credentials: true
+      - name: Submit one immutable request and invoke only the qualified paired broker once
+        run: node release/scripts/submit-staging-signing-request.mjs submit
+      - name: Retain successful response or reconciliation marker
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-staging-timestamp-two-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/staging-signing-attempt.json
+            ${{ runner.temp }}/staging-signing-result.json
+          if-no-files-found: ignore
+          retention-days: 30
+          compression-level: 0

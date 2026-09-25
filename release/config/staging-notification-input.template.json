@@ -1,0 +1,21 @@
+{
+  "schema_version": "hid.staging-notification-input/v1",
+  "environment": "staging",
+  "aws_account_id": "659225405023",
+  "aws_region": "eu-west-1",
+  "ses_from_address": null,
+  "novu": {
+    "region": null,
+    "organization_id": null,
+    "environment_id": null,
+    "isolated_staging_environment_confirmed": false,
+    "email_channel": null,
+    "demo_account_email": null,
+    "ses_connector_credential_design_approved": false
+  },
+  "message_authorizations": {
+    "ses_identity_verification_emails": false,
+    "recovery_otp_to_controlled_inboxes": false,
+    "novu_notification_to_controlled_patient": false
+  }
+}

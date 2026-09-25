@@ -40,13 +40,17 @@ const acceptedMigrations = new Map([
   ['0026_transactional_event_delivery.sql', '1a2c2f5269397fb54e6df5bf3ae08bf373b62f68cec3f2104994faa2d8a32f3f'],
   ['0027_super_admin_foundation.sql', '59a74a198d9b773d6a80e87b55556e569f18a47a633d6ba4107d5bb68101839f'],
   ['0028_identity_notification_migration_state.sql', 'c074a44a1e98946721de9763a230762b28aa8639b302dd57afa4edc5c92de200'],
+  ['0029_governed_otp_recovery.sql', 'ac8abd701b4da141867ea3e8bf0d3d6993b6414f6dc3b43bacc25afe3728b479'],
+  ['0030_patient_self_service.sql', 'c25b47c46e34b0adbe384b3964636dbe26c083d2ef3bd7d787c5e1f75fe1b9d6'],
+  ['0031_emergency_notification_and_rate_limit.sql', 'f04f1cc8380dc0c6bd38d69403f23b13cad6a4e02778a0817df220da3dc3f701'],
+  ['0032_governed_patient_enrollment.sql', 'c4ee4ac51ce90a622901c3f8ebd4f3ac4d72acb5a8f7addd0a2b1ea993572225'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
   .filter((name) => /^\d{4}_.+\.sql$/.test(name))
   .sort()
 assert.deepEqual(migrationFiles, [...acceptedMigrations.keys()],
-  'The accepted baseline must contain exactly migrations 0001 through 0028; add a new migration and ledger entry deliberately.')
+  'The checked-in migration set must exactly match the reviewed ledger; add a new migration and ledger entry deliberately.')
 
 for (const [name, expectedChecksum] of acceptedMigrations) {
   const source = await readFile(join(migrationDirectory, name))
@@ -59,7 +63,7 @@ assert.match(runtimeGrants, /nobypassrls/i, 'Runtime roles must remain unable to
 
 process.stdout.write(JSON.stringify({
   status: 'passed',
-  immutableMigrationCount: acceptedMigrations.size - 1,
-  acceptedMigration: '0028_identity_notification_migration_state.sql',
+  immutableMigrationCount: acceptedMigrations.size,
+  acceptedMigration: [...acceptedMigrations.keys()].at(-1),
   runtimeRolesBypassRls: false,
 }) + '\n')

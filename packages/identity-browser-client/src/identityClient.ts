@@ -54,6 +54,9 @@ export interface IdentityActorContext {
   subject: string
   accountId: string
   displayName?: string
+  email?: string
+  kind?: 'patient' | 'staff'
+  patientId?: string
   facilities: IdentityFacilityAssignment[]
 }
 
@@ -140,12 +143,13 @@ function actorSession(payload: unknown): IdentitySession | null {
   const roles = Array.isArray(actor.roles)
     ? actor.roles.filter((role): role is string => typeof role === 'string')
     : []
-  const role = readString(actor.role) ?? roles[0] ?? null
+  const role = actor.kind === 'patient' ? 'patient' : readString(actor.role) ?? roles[0] ?? null
   const user: IdentityUser = {
     id,
     ...(email ? { email } : {}),
     user_metadata: {
       display_name: readString(actor.displayName),
+      patient_id: readString(actor.patientId),
       requested_role: role,
       roles,
     },
@@ -266,6 +270,15 @@ async function publicCommand<T>(path: string, input: Record<string, unknown>): P
   }
 }
 
+/** Canonical API transport: browser cookies, CSRF and no-store apply to both Identity and EHR. */
+export async function canonicalRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (!path.startsWith('/api/v1/') || path.includes('/functions/')) {
+    throw new Error('A canonical API path is required')
+  }
+  const { payload } = await request(path, init)
+  return unwrapData(payload) as T
+}
+
 export async function fetchWithTimeout(
   input: RequestInfo | URL,
   init: RequestInit = {},
@@ -311,6 +324,15 @@ export const identityClient = {
           turnstileAction: input.options?.captchaAction,
         }),
       }, 'SIGNED_IN')
+    },
+    signInPatientWithPassword(input: { email: string; password: string; turnstileToken?: string }) {
+      return authRequest('/api/v1/auth/patient/login', {
+        method: 'POST',
+        body: JSON.stringify({ ...input, turnstileAction: 'patient-login' }),
+      }, 'SIGNED_IN')
+    },
+    refreshSession() {
+      return authRequest('/api/v1/auth/refresh', { method: 'POST' }, 'TOKEN_REFRESHED')
     },
     signInWithIdToken(input: { provider: string; token: string; nonce?: string }) {
       return authRequest('/api/v1/auth/oidc/exchange', {
@@ -506,6 +528,8 @@ export async function getIdentityActorContext(): Promise<IdentityActorContext | 
     subject: readString(actor.subject)!,
     accountId: readString(actor.accountId)!,
     ...(readString(actor.displayName) ? { displayName: readString(actor.displayName) ?? undefined } : {}),
+    ...(readString(actor.email) ? { email: readString(actor.email)! } : {}),
+    ...(actor.kind === 'patient' ? { kind: 'patient' as const, patientId: readString(actor.patientId) ?? undefined } : {}),
     facilities,
   }
 }

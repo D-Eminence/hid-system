@@ -15,9 +15,9 @@ const VERSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12
 const SHA256 = /^[a-f0-9]{64}$/
 const CANONICAL_TIME = /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{3})?Z$/
 const RELEASE_ID = /^r[0-9]{10}-g[a-f0-9]{40}$/
-const WRANGLER_VERSION = '4.127.1'
+const WRANGLER_VERSION = '4.131.2'
 const WRANGLER_BIN_SHA256 = '780661a508810f3b65786895b1ca9aacbc4f55d329ae6b8c1e49ec8433569f77'
-const WRANGLER_CLI_SHA256 = 'ba531de00d3c21615f3d523df4e83a94d487de68d77225aa703463b6a2979406'
+const WRANGLER_CLI_SHA256 = 'd57dc4633d667dc20d210afc7f54afc5f4b29e8494174ecaacb7c56f379a902a'
 
 function usage() {
   return [
@@ -286,7 +286,7 @@ async function verifyPinnedWrangler(wrangler) {
   }
   const [binBytes, cliBytes] = await Promise.all([readFile(binPath), readFile(cliPath)])
   if (sha256(binBytes) !== WRANGLER_BIN_SHA256 || sha256(cliBytes) !== WRANGLER_CLI_SHA256) {
-    throw new Error('installed Wrangler executable does not match the audited 4.127.1 bytes')
+    throw new Error('installed Wrangler executable does not match the audited 4.131.2 bytes')
   }
 }
 

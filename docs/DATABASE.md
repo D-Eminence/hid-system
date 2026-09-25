@@ -934,3 +934,29 @@ facility update/delete, or audit update/delete. The command-owner functions
 revalidate `platform.current_account_id()`. All application/test/dispatcher
 roles remain non-owner and non-BYPASSRLS. Migrations `0001`–`0026` were not
 changed.
+
+## Staging OTP recovery correction
+
+Additive migration `0029_governed_otp_recovery.sql` binds newly issued recovery
+challenges to the account token version and adds `auth.complete_recovery_otp`.
+The Identity runtime retains SELECT-only access to `auth.accounts`; the
+narrow command locks the current account before the challenge, validates the
+purpose/completion HMAC, expiry, attempt limit, current token version and
+eligible active/pending-reset state, and refuses disabled/temporarily disabled
+accounts. Pre-migration unbound challenges fail closed and must be restarted.
+
+Password replacement, token-version advancement, existing-session revocation,
+one-time challenge consumption, invalidation of other recovery challenges,
+contact assurance and semantic audit commit together. Existing NIN assurance
+is retained. Audit failure rolls back the entire operation. Recovery does not
+create a patient or silently issue a session; the caller signs in using the
+new password through the appropriate account flow. A later account disable
+invalidates pending credentials through token-version binding, including after
+reenablement. Concurrent first-use rate buckets are serialized in PostgreSQL.
+
+`database/tests/otp-recovery.integration.sql` exercises the actual Identity
+runtime role, denied/replayed/expired/unbound credentials and audit-failure
+rollback. The private synthetic staging rehearsal additionally runs the real
+OTP service with PostgreSQL and Argon2, a direct-delivery test double, concurrent
+completion and rate-limit checks. These tests do not establish live delivery
+or staging acceptance.

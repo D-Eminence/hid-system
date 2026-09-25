@@ -1,11 +1,34 @@
 # TUF Production Implementation Record
 
+## Current staging implementation — 2026-09-11
+
+**STAGING: NOT ACCEPTED. LIVE MIGRATION: NOT PERFORMED. PRODUCTION: LOCKED.**
+
+The uncommitted successor to approved source
+`a709e643a731b444f7cb775b2b16fe28164146a7` implements patient self service,
+governed enrollment, OTP recovery, controlled emergency records/notification intent,
+staging workload token issuance/rotation and protected candidate admission. Additive
+migrations advance the candidate ledger to 32; historical migrations are unchanged.
+Local tests, database restore/HTTP journeys and all staging synth profiles are recorded
+in the [current staging execution report](TUF-STAGING-EXECUTION.md).
+
+AWS identity and account were verified before its temporary login expired. Cloudflare
+Workers/routes authentication worked in the earlier readback; the latest OAuth
+session expired. DNS/Turnstile scope and renewed access remain external gates. Five generated
+application keys populated two existing staging secrets; no other cloud mutation,
+stack deployment, live migration, DNS change or publication occurred. Real NIN/provider
+configuration, release custody/admission and live evidence remain acceptance gates.
+The staging-only email profile now requires SES and Novu; Termii/Meta/Infobip
+accounts are optional for this scope. Public NIN/custody intakes and a read-only
+external preflight are prepared. The existing `docs/SECURITY.md` edit remains untouched. The report names exact external
+inputs and validation steps; generic staging permission is not being requested again.
+
 This is the canonical, continuously maintained implementation record for the
 HID trusted release/update pipeline. It records only evidence that has actually
 been produced. A local test, source implementation, or dry run is never a
 staging or production deployment claim.
 
-## STATUS
+## Historical preparation status
 
 Date: 2026-09-08
 
@@ -46,7 +69,7 @@ The mandatory sequence is:
 Production deployment is forbidden until every preceding gate has recorded
 evidence in this document.
 
-## Current protected PR — 2026-09-08
+## Historical pre-merge protected PR — 2026-09-08
 
 **SOLO-OWNER CORRECTION LOCALLY VERIFIED AND COMMITTED — READY FOR EXACT-SHA PR UPDATE.**
 **PUSH: NOT AUTHORIZED. MERGE: NOT AUTHORIZED. PROTECTED CI: NOT RUN.

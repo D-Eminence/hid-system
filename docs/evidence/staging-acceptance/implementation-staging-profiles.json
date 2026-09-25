@@ -1,0 +1,110 @@
+[
+  {
+    "mode": "sleep",
+    "account": "659225405023",
+    "region": "eu-west-1",
+    "commands": [
+      {
+        "command": [
+          "npm",
+          "run",
+          "synth"
+        ],
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "npm",
+          "run",
+          "verify:synth"
+        ],
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "npm",
+          "run",
+          "verify:policy"
+        ],
+        "exit_code": 0
+      }
+    ],
+    "template_sha256": "7e425252166b356e4f8cd0b345e919c9bf81a9c2e85ce0e3011f8ffa0574e2f4",
+    "template_bytes": 312661,
+    "resources": 228,
+    "parameters": 29,
+    "outputs": 23
+  },
+  {
+    "mode": "economy",
+    "account": "659225405023",
+    "region": "eu-west-1",
+    "commands": [
+      {
+        "command": [
+          "npm",
+          "run",
+          "synth"
+        ],
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "npm",
+          "run",
+          "verify:synth"
+        ],
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "npm",
+          "run",
+          "verify:policy"
+        ],
+        "exit_code": 0
+      }
+    ],
+    "template_sha256": "ffc8523d226efe9cd1f4ff56d646c9a8f211aaa53d0a11783fd5b751d10dfa60",
+    "template_bytes": 548953,
+    "resources": 434,
+    "parameters": 54,
+    "outputs": 24
+  },
+  {
+    "mode": "fidelity",
+    "account": "659225405023",
+    "region": "eu-west-1",
+    "commands": [
+      {
+        "command": [
+          "npm",
+          "run",
+          "synth"
+        ],
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "npm",
+          "run",
+          "verify:synth"
+        ],
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "npm",
+          "run",
+          "verify:policy"
+        ],
+        "exit_code": 0
+      }
+    ],
+    "template_sha256": "7361633477530b4e560e03f173b666ad660f1b110c68a464acbb763dbc777800",
+    "template_bytes": 552482,
+    "resources": 437,
+    "parameters": 54,
+    "outputs": 24
+  }
+]

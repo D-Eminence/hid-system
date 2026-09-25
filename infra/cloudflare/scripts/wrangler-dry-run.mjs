@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const pinnedWranglerVersion = '4.127.1'
+const pinnedWranglerVersion = '4.131.2'
 const localWrangler = resolve(root, 'node_modules', '.bin', process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler')
 
 function assertPinnedLocalWrangler() {

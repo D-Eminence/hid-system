@@ -379,6 +379,7 @@ grant execute on function platform.current_actor_subject(),
   identity.admin_platform_overview(),
   auth.membership_has_permission(text, uuid, uuid, text),
   auth.upgrade_legacy_password(uuid, text, bigint, text),
+  auth.complete_recovery_otp(uuid, text, text, text),
   identity.has_active_membership(text, uuid, uuid),
   identity.has_active_consent_grant(uuid, text, uuid, uuid, text, text, timestamptz),
   identity.create_access_request(text, text, text, integer),
@@ -643,6 +644,7 @@ grant execute on function platform.current_actor_subject(),
   identity.admin_platform_overview(),
   auth.membership_has_permission(text, uuid, uuid, text),
   auth.upgrade_legacy_password(uuid, text, bigint, text),
+  auth.complete_recovery_otp(uuid, text, text, text),
   identity.has_active_membership(text, uuid, uuid),
   identity.has_active_consent_grant(uuid, text, uuid, uuid, text, text, timestamptz),
   identity.create_access_request(text, text, text, integer),
@@ -682,6 +684,7 @@ revoke all on function auth.account_id_for_subject(text),
   auth.account_has_active_role(uuid, text),
   auth.membership_has_permission(text, uuid, uuid, text),
   auth.upgrade_legacy_password(uuid, text, bigint, text),
+  auth.complete_recovery_otp(uuid, text, text, text),
   identity.has_active_membership(text, uuid, uuid),
   identity.has_active_consent_grant(uuid, text, uuid, uuid, text, text, timestamptz),
   identity.create_access_request(text, text, text, integer),
@@ -721,3 +724,19 @@ alter default privileges in schema outreach revoke all on functions from public;
 alter default privileges in schema integration revoke all on tables from public;
 alter default privileges in schema integration revoke all on sequences from public;
 alter default privileges in schema integration revoke all on functions from public;
+
+-- Patient self-service is an Identity-owned authorization boundary; EHR only
+-- evaluates the private context established after that service authorization.
+grant execute on function identity.current_patient_account(text),
+  identity.patient_self_profile(text,uuid), identity.authorize_patient_self(text,uuid),
+  identity.patient_self_access_history(text,uuid)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function ehr.patient_self_context(uuid) to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function identity.current_patient_account(text),
+  identity.patient_self_session(text,uuid), identity.patient_self_profile(text,uuid),
+  identity.authorize_patient_self(text,uuid), identity.patient_self_access_history(text,uuid),
+  ehr.patient_self_context(uuid) from public;
+
+-- Governed enrollment creates only a pending-reset account for a resolved case.
+grant execute on function identity.enroll_registered_patient(uuid, bigint, text, text, text, char)
+  to hid_identity_runtime;

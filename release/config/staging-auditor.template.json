@@ -1,0 +1,21 @@
+{
+  "schema_version": "hid.staging-release-trust-audit/v1",
+  "environment": "staging",
+  "source_sha": null,
+  "workflow_sha": null,
+  "caller_workflow_path": null,
+  "aws_account_id": "659225405023",
+  "aws_region": "eu-west-1",
+  "auditor_role_arn": null,
+  "archives": {
+    "repository": { "bucket": null, "kms_key_arn": null },
+    "evidence": { "bucket": null, "kms_key_arn": null },
+    "audit": { "bucket": null, "kms_key_arn": null }
+  },
+  "signing_keys": {
+    "snapshot_one": { "arn": null, "spki_sha256": null },
+    "snapshot_two": { "arn": null, "spki_sha256": null },
+    "timestamp_one": { "arn": null, "spki_sha256": null },
+    "timestamp_two": { "arn": null, "spki_sha256": null }
+  }
+}

@@ -57,7 +57,7 @@ export function costInventory(configuration: HidEnvironmentConfig): CostInventor
     },
     logRetentionDays: Number(configuration.logRetention),
     ecrImagesPerRepository: configuration.repositoryImageCount,
-    kmsKeys: 3,
+    kmsKeys: configuration.name === 'staging' ? 4 : 3,
     secretInterfaces: workloadNames.filter((name) => workloads[name].hasDatabase).length + 5,
     wafs: ingress ? 1 : 0,
     sqsQueuesAndDlqs: 2,

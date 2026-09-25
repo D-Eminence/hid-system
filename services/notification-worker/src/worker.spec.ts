@@ -47,4 +47,14 @@ describe('ordinary notification worker', () => {
     expect(repository.fail).toHaveBeenCalledWith(expect.anything(), 'claim-1', expect.anything(), false, 1);
     expect(sqs.send).toHaveBeenCalledTimes(1);
   });
+  it('durably records emergency notification through established orchestration', async () => {
+    const { worker, repository, orchestrator } = harness('accepted');
+    const emergency = { ...event, type: 'EmergencyAccessActivated', producer: 'identity',
+      payload: { consentGrantId: '40000000-0000-4000-8000-000000000001', reviewRequired: true } };
+    await worker.process({ ...message, Body: JSON.stringify({ detail: emergency }) });
+    expect(orchestrator.trigger).toHaveBeenCalledWith(expect.objectContaining({ type: 'EmergencyAccessActivated' }));
+    expect(repository.complete).toHaveBeenCalledWith(expect.objectContaining({ type: 'EmergencyAccessActivated' }),
+      'claim-1', expect.objectContaining({ outcome: 'accepted' }));
+  });
+
 });

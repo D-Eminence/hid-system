@@ -29,8 +29,10 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
-      - name: Install release verifier dependencies from the lockfile
-        run: npm --prefix release ci
+      - name: Install release and shared validator dependencies from their lockfiles
+        run: |
+          npm --prefix release ci --ignore-scripts
+          npm --prefix infra/cloudflare ci --ignore-scripts
         id: gate_1
       - name: Audit release verifier dependencies
         run: npm --prefix release audit --audit-level=moderate
@@ -206,8 +208,10 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
-      - name: Install AWS infrastructure dependencies from the lockfile
-        run: npm --prefix infra/aws ci
+      - name: Install AWS infrastructure and shared validator dependencies from lockfiles
+        run: |
+          npm --prefix infra/aws ci
+          npm --prefix release ci --ignore-scripts
         id: gate_1
       - name: Audit AWS infrastructure dependencies
         run: npm --prefix infra/aws audit --audit-level=moderate

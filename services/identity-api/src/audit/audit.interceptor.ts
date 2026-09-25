@@ -41,6 +41,7 @@ export class AuditInterceptor implements NestInterceptor {
     const successAudited = failuresOnly ? responseStream : responseStream.pipe(
       mergeMap((result) => from(this.audit.record({
         correlationId: request.correlationId,
+        actorType: request.actor?.kind === 'patient' ? 'patient' : undefined,
         actorSubject: request.actor?.subject,
         actorAccountId: request.actor?.accountId,
         actorMembershipId: request.actor?.facility?.membershipId,
@@ -59,6 +60,7 @@ export class AuditInterceptor implements NestInterceptor {
     return successAudited.pipe(
       catchError((error: unknown) => from(this.audit.record({
         correlationId: request.correlationId,
+        actorType: request.actor?.kind === 'patient' ? 'patient' : undefined,
         actorSubject: request.actor?.subject,
         actorAccountId: request.actor?.accountId,
         actorMembershipId: request.actor?.facility?.membershipId,

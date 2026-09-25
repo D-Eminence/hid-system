@@ -68,6 +68,7 @@ export const DoctorAuthPage = lazyWithPreload(() => import('../pages/doctor/Doct
 export const DoctorDashboardPage = lazyWithPreload(() => import('../pages/doctor/HospitalDashboard'))
 export const DoctorAccessPage = lazyWithPreload(() => import('../pages/doctor/DoctorPortal'))
 export const DoctorHistoryPage = lazyWithPreload(() => import('../pages/doctor/DoctorHistory'))
+export const PatientRegistrationPage = lazyWithPreload(() => import('../pages/doctor/PatientRegistration'))
 export const DoctorEmergencyPage = lazyWithPreload(() => import('../pages/doctor/DoctorEmergency'))
 export const DoctorPatientRecordsPage = lazyWithPreload(() => import('../pages/doctor/DoctorPatientRecords'))
 export const MigratePage = lazyWithPreload(() => import('../features/migrate/ui/MigratePage'))

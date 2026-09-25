@@ -111,6 +111,8 @@ export class ConsentService {
     if (error instanceof DomainProblem) return error;
     if (!isDatabaseError(error)) return error;
     switch (error.code) {
+      case 'P0001':
+        return new DomainProblem(429, 'EMERGENCY_RATE_LIMITED', 'Too many emergency activations. Contact your facility emergency access administrator.');
       case 'P0002':
         return new DomainProblem(404, 'CONSENT_RESOURCE_NOT_FOUND', 'The requested patient or consent grant is unavailable');
       case '42501':

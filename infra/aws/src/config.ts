@@ -98,7 +98,7 @@ const profiles: Record<DeploymentProfile, ProfileValues> = {
   },
   economy: {
     profile: 'economy', availabilityZones: 2, natGateways: 1,
-    interfaceEndpoints: ['secrets-manager', 'eventbridge', 'sqs', 'textract'],
+    interfaceEndpoints: ['ecr-api', 'ecr-docker', 'logs', 'secrets-manager', 'eventbridge', 'sqs', 'textract'],
     interfaceEndpointAzCount: 1, runtimeIngressEnabled: true, autoscalingEnabled: true,
     databaseInstanceType: InstanceType.of(InstanceClass.T4G, InstanceSize.SMALL),
     databaseInstanceClass: 'db.t4g.small', databaseAllocatedStorageGiB: 100,

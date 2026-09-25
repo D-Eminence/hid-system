@@ -169,8 +169,8 @@ function buildBundle(environment, sequence, stagingBundle) {
     migration: {
       image_component: 'database-migration',
       first: '0001',
-      last: '0028',
-      count: 28,
+      last: '0032',
+      count: 32,
       ledger: target(environment, id, 'migrations/ledger.json', MEDIA.ledger),
       verification: target(environment, id, 'migrations/verification.json', MEDIA.migrationVerification),
     },
