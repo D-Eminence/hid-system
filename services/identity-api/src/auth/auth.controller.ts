@@ -1,3 +1,4 @@
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Body, Controller, Get, HttpCode, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuditService } from '../audit/audit.service';
@@ -7,8 +8,10 @@ import type { ActorContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { AuthService } from './auth.service';
 import { AuthSessionAuditService } from './auth-session-audit.service';
+import { GoogleLoginDto } from './dto/google-login.dto';
 import { LoginDto } from './dto/login.dto';
 import { SelectFacilityDto } from './dto/select-facility.dto';
+import { GoogleAuthenticationService } from './google-authentication.service';
 import type { LoginResult } from './auth.types';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
@@ -17,6 +20,7 @@ import { TurnstileService } from './turnstile.service';
 @Controller('auth')
 @AuditFailuresOnly()
 export class AuthController {
+  private static readonly GOOGLE_NONCE_TTL_MS = 5 * 60 * 1_000;
   private readonly environment = getEnvironment();
   private readonly allowedOrigins = new Set(this.environment.CORS_ORIGINS.split(',').map((origin) => origin.trim()));
 
@@ -27,6 +31,7 @@ export class AuthController {
     private readonly audit: AuditService,
     private readonly workloadAuth: WorkloadAuthService,
     private readonly turnstile: TurnstileService,
+    private readonly google: GoogleAuthenticationService,
   ) {}
 
   @Post('login')
@@ -52,6 +57,62 @@ export class AuthController {
       throw new DomainProblem(400, 'INVALID_LOGIN_ACTION', 'Patient login action is required');
     }
     return this.performLogin(input, request, response, 'patient');
+  }
+
+  @Get('google/nonce')
+  @Public()
+  @HttpCode(200)
+  googleNonce(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
+    this.assertGoogleNonceOrigin(request);
+    const nonce = randomBytes(32).toString('base64url');
+    const expiresAt = new Date(Date.now() + AuthController.GOOGLE_NONCE_TTL_MS);
+    this.setGoogleNonceCookie(response, nonce, expiresAt);
+    return { nonce };
+  }
+
+  @Post('oidc/exchange')
+  @Public()
+  @HttpCode(200)
+  async exchangeGoogleIdToken(
+    @Body() input: GoogleLoginDto,
+    @Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    this.assertAllowedOrigin(request);
+    try {
+      await this.turnstile.verifyLogin({
+        token: input.turnstileToken,
+        action: input.turnstileAction,
+        origin: request.header('origin'),
+        remoteIp: request.ip,
+      });
+      const nonce = this.googleNonceFromCookie(this.cookies(request)[this.googleNonceCookieName()]);
+      if (!nonce) {
+        throw new DomainProblem(401, 'GOOGLE_SIGN_IN_DENIED', 'Google sign-in could not be completed for this HID account');
+      }
+      const result = await this.google.login(
+        input.idToken,
+        nonce,
+        input.turnstileAction === 'patient-login' ? 'patient' : 'staff',
+        this.event(request),
+      );
+      await this.recordSuccess('auth.google.login', result.actor, request);
+      this.setCookies(response, result);
+      response.setHeader('x-csrf-token', result.csrfToken);
+      return this.sessionResponse(result.actor, result.expiresAt);
+    } catch (error) {
+      await this.sessionAudit.record({
+        correlationId: request.correlationId,
+        eventType: 'login_failed',
+        outcome: error instanceof DomainProblem && error.getStatus() < 500 ? 'denied' : 'failure',
+        sourceIp: request.ip,
+        userAgent: request.header('user-agent'),
+        details: { authentication_method: 'oidc', identity_provider: 'google' },
+      });
+      throw error;
+    } finally {
+      this.clearGoogleNonceCookie(response);
+    }
   }
 
   private async performLogin(input: LoginDto, request: HidRequest, response: Response, kind: 'staff' | 'patient') {
@@ -263,11 +324,96 @@ export class AuthController {
     response.clearCookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, { ...common, httpOnly: false, path: '/' });
   }
 
+  private googleNonceCookieName(): string {
+    return `${this.environment.AUTH_COOKIE_NAME}_google_nonce`;
+  }
+
+  private setGoogleNonceCookie(response: Response, nonce: string, expiresAt: Date): void {
+    response.cookie(this.googleNonceCookieName(), this.googleNonceCookieValue(nonce, expiresAt), {
+      secure: this.environment.AUTH_COOKIE_SECURE,
+      sameSite: 'strict',
+      httpOnly: true,
+      path: '/api/v1/auth/oidc',
+      expires: expiresAt,
+    });
+  }
+
+  /**
+   * The raw nonce is intentionally returned to Google Identity Services, but
+   * never trusted when echoed in a client-supplied Cookie header. The cookie
+   * envelope proves the nonce was minted by this Identity API and enforces its
+   * expiry on the server rather than relying only on browser cookie expiry.
+   */
+  private googleNonceCookieValue(nonce: string, expiresAt: Date): string {
+    const expiresAtSeconds = Math.floor(expiresAt.getTime() / 1_000);
+    const payload = `${nonce}.${expiresAtSeconds}`;
+    return `${payload}.${this.googleNonceSignature(payload)}`;
+  }
+
+  private googleNonceFromCookie(cookie: string | undefined): string | undefined {
+    if (!cookie) return undefined;
+    const [nonce, expiresAtText, signature, extra] = cookie.split('.');
+    if (extra !== undefined
+      || !nonce
+      || !expiresAtText
+      || !signature
+      || !/^[A-Za-z0-9_-]{43}$/.test(nonce)
+      || !/^[1-9][0-9]{9,12}$/.test(expiresAtText)) {
+      return undefined;
+    }
+    const expiresAtSeconds = Number(expiresAtText);
+    if (!Number.isSafeInteger(expiresAtSeconds) || expiresAtSeconds <= Math.floor(Date.now() / 1_000)) return undefined;
+    const expected = this.googleNonceSignature(`${nonce}.${expiresAtText}`);
+    const supplied = Buffer.from(signature, 'utf8');
+    const verified = Buffer.from(expected, 'utf8');
+    if (supplied.length !== verified.length || !timingSafeEqual(supplied, verified)) return undefined;
+    return nonce;
+  }
+
+  private googleNonceSignature(payload: string): string {
+    // Local cookie sessions cannot start without this environment-validated
+    // secret. Keep a distinct context label so this signature is never an
+    // interchangeable access-token or CSRF MAC.
+    return createHmac('sha256', this.environment.AUTH_SIGNING_SECRET ?? '')
+      .update(`google-oidc-nonce:${payload}`, 'utf8')
+      .digest('base64url');
+  }
+
+  private clearGoogleNonceCookie(response: Response): void {
+    response.clearCookie(this.googleNonceCookieName(), {
+      secure: this.environment.AUTH_COOKIE_SECURE,
+      sameSite: 'strict',
+      httpOnly: true,
+      path: '/api/v1/auth/oidc',
+    });
+  }
+
   private assertAllowedOrigin(request: HidRequest): void {
     const origin = request.header('origin');
     if (!origin || !this.allowedOrigins.has(origin)) {
       throw new DomainProblem(403, 'ORIGIN_DENIED', 'Request origin is not allowed');
     }
+  }
+
+  /**
+   * Chromium omits Origin on same-origin GET fetches. The nonce endpoint has
+   * no authenticated side effect, but it must still reject a cross-site
+   * caller. Accept a validated Referer only for this GET; the token exchange
+   * remains strictly Origin-checked.
+   */
+  private assertGoogleNonceOrigin(request: HidRequest): void {
+    const origin = request.header('origin');
+    if (origin) {
+      this.assertAllowedOrigin(request);
+      return;
+    }
+    const referer = request.header('referer');
+    try {
+      if (referer && this.allowedOrigins.has(new URL(referer).origin)) return;
+    } catch {
+      // Treat a malformed Referer as an unapproved origin.
+    }
+    throw new DomainProblem(403, 'ORIGIN_DENIED', 'Request origin is not allowed');
   }
 
   private event(request: HidRequest) {

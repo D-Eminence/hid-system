@@ -497,11 +497,14 @@ grant select, insert on notification.delivery_attempts to hid_notification_runti
 grant usage, select on all sequences in schema notification to hid_notification_runtime;
 
 -- Migration mappings are available only to the controlled migration role.
-grant usage on schema migration to hid_migration_admin;
-grant select, insert, update on migration.runs, migration.source_rows,
+grant usage on schema auth, identity, migration to hid_migration_admin;
+grant select, insert, update on migration.runs,
   migration.conflicts, migration.conflict_resolutions,
   migration.entity_reconciliations, migration.legacy_identity_mappings
   to hid_migration_admin;
+revoke update on migration.source_rows from hid_migration_admin;
+grant select, insert on migration.source_rows to hid_migration_admin;
+grant update (promoted_at) on migration.source_rows to hid_migration_admin;
 grant usage, select on all sequences in schema migration to hid_migration_admin;
 
 -- The dispatcher can execute only lease-bound commands. A separate technical
@@ -740,3 +743,28 @@ revoke all on function identity.current_patient_account(text),
 -- Governed enrollment creates only a pending-reset account for a resolved case.
 grant execute on function identity.enroll_registered_patient(uuid, bigint, text, text, text, char)
   to hid_identity_runtime;
+
+-- Supabase cutover commands are security-definer boundaries. The Identity
+-- runtime cannot read PIN hashes, attempt windows, or external-identity rows
+-- directly; it can only resolve a verified Google subject and invoke the
+-- named patient/staff commands.
+grant execute on function auth.resolve_google_identity(text),
+  identity.set_my_patient_access_pin(text,uuid,text),
+  identity.revoke_my_patient_access_pin(text,uuid),
+  identity.access_patient_with_pin(text,text,integer)
+  to hid_identity_runtime, hid_schema_test_runtime;
+
+grant select, insert on auth.external_identities, identity.patient_access_pins,
+  migration.cutover_preservation_holds to hid_migration_admin;
+grant usage on schema migration to hid_schema_test_runtime;
+grant usage, select on all sequences in schema identity to hid_schema_test_runtime;
+grant select, insert, update on identity.patient_access_pins,
+  identity.patient_access_pin_actor_limits, identity.patient_access_pin_target_limits
+  to hid_schema_test_runtime;
+grant select, insert on identity.patient_access_pin_attempts,
+  migration.cutover_preservation_holds to hid_schema_test_runtime;
+
+revoke all on function auth.resolve_google_identity(text),
+  identity.set_my_patient_access_pin(text,uuid,text),
+  identity.revoke_my_patient_access_pin(text,uuid),
+  identity.access_patient_with_pin(text,text,integer) from public;

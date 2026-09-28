@@ -25,6 +25,7 @@
     "migration:promote": "node scripts/promote-legacy-identity.mjs",
     "migration:reconcile": "node scripts/reconcile-legacy-identity.mjs",
     "migration:verify": "node scripts/verify-legacy-migration.mjs",
+    "migration:verify-cutover-input": "node scripts/verify-supabase-cutover-input.mjs",
     "admin:bootstrap": "node scripts/bootstrap-platform-admin.mjs",
     "test": "jest --runInBand",
     "test:watch": "jest --watch",

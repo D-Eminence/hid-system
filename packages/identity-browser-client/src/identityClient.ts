@@ -68,6 +68,22 @@ export interface IdentityClientError extends Error {
 
 type RecoveryOtpPurpose = 'PASSWORD_RESET' | 'LEGACY_ACCOUNT_RECOVERY' | 'LEGACY_SESSION_FALLBACK'
 type RecoveryTurnstileAction = 'patient-reset-start' | 'staff-reset' | 'admin-reset' | 'legacy-recovery'
+type GoogleActorKind = 'patient' | 'staff'
+type GoogleTurnstileAction = 'patient-login' | 'staff-login'
+
+/**
+ * `provider`, `token`, and `nonce` retain the legacy Supabase-compatible
+ * caller shape. The nonce is bound to an HttpOnly server cookie and therefore
+ * is intentionally not forwarded in the token-exchange body.
+ */
+interface GoogleIdTokenSignInInput {
+  provider: string
+  token: string
+  nonce?: string
+  actorKind?: GoogleActorKind
+  path?: string
+  turnstileToken?: string
+}
 
 interface RecoveryOtpStart {
   accepted: true
@@ -270,6 +286,33 @@ async function publicCommand<T>(path: string, input: Record<string, unknown>): P
   }
 }
 
+function googleTurnstileAction(input: GoogleIdTokenSignInInput): GoogleTurnstileAction {
+  const actorKind = input.actorKind ?? actorKindForPath(input.path)
+  return actorKind === 'patient' ? 'patient-login' : 'staff-login'
+}
+
+function actorKindForPath(path: string | undefined): GoogleActorKind {
+  const currentPath = path ?? (typeof window === 'undefined' ? '' : window.location.pathname)
+  return currentPath.toLowerCase().includes('patient') ? 'patient' : 'staff'
+}
+
+function unsupportedGoogleProvider(provider: string): IdentityClientError {
+  const error = new Error('This identity provider is not supported.') as IdentityClientError
+  error.code = 'IDENTITY_PROVIDER_UNSUPPORTED'
+  return error
+}
+
+/** Fetches a short-lived browser nonce that the Identity API binds in an HttpOnly cookie. */
+export async function getGoogleSignInNonce(): Promise<string> {
+  const { payload } = await request('/api/v1/auth/google/nonce')
+  const result = unwrapData(payload)
+  const nonce = isRecord(result) ? readString(result.nonce) : null
+  if (!nonce || nonce.length < 32 || nonce.length > 256) {
+    throw new Error('Google sign-in could not be initialized.')
+  }
+  return nonce
+}
+
 /** Canonical API transport: browser cookies, CSRF and no-store apply to both Identity and EHR. */
 export async function canonicalRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!path.startsWith('/api/v1/') || path.includes('/functions/')) {
@@ -334,10 +377,20 @@ export const identityClient = {
     refreshSession() {
       return authRequest('/api/v1/auth/refresh', { method: 'POST' }, 'TOKEN_REFRESHED')
     },
-    signInWithIdToken(input: { provider: string; token: string; nonce?: string }) {
+    signInWithIdToken(input: GoogleIdTokenSignInInput) {
+      if (input.provider !== 'google') {
+        return Promise.resolve({
+          data: { session: null, user: null },
+          error: unsupportedGoogleProvider(input.provider),
+        })
+      }
       return authRequest('/api/v1/auth/oidc/exchange', {
         method: 'POST',
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          idToken: input.token,
+          turnstileAction: googleTurnstileAction(input),
+          turnstileToken: input.turnstileToken,
+        }),
       }, 'SIGNED_IN')
     },
     signUp(input: {

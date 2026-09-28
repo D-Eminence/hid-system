@@ -14,11 +14,12 @@ import { NotificationOtpClient } from './notification-otp.client';
 import { CurrentPatientContextService } from './current-patient-context.service';
 import { PatientSelfController } from './patient-self.controller';
 import { PatientSelfService } from './patient-self.service';
+import { GoogleAuthenticationService } from './google-authentication.service';
 
 @Global()
 @Module({
   controllers: [AuthController, OtpController, PatientSelfController],
-  providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, TurnstileService, OtpService, NotificationOtpClient],
+  providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, TurnstileService, OtpService, NotificationOtpClient, GoogleAuthenticationService],
   exports: [TokenService, SecurityGuard, WorkloadAuthService],
 })
 export class AuthModule {}

@@ -2,9 +2,6 @@ type GoogleCredentialResponse = { credential?: string }
 
 export type GoogleIdentitySelection = {
   credential: string
-  email: string
-  firstName: string
-  lastName: string
 }
 
 export type GoogleIdentityButtonText = 'signin_with' | 'signup_with' | 'continue_with'
@@ -26,6 +23,7 @@ type GoogleIdentityApi = {
         auto_select: false
         button_auto_select: false
         client_id: string
+        nonce: string
         callback: (response: GoogleCredentialResponse) => void
         ux_mode: 'popup'
       }) => void
@@ -40,6 +38,7 @@ declare global {
 
 let googleScriptPromise: Promise<void> | null = null
 let initializedClientId = ''
+let initializedNonce = ''
 let currentCredentialHandler: ((selection: GoogleIdentitySelection) => void) | null = null
 let currentCredentialErrorHandler: ((error: Error) => void) | null = null
 
@@ -70,60 +69,43 @@ function loadGoogleIdentityScript() {
   return googleScriptPromise
 }
 
-function decodeGoogleCredential(credential: string) {
-  const payload = credential.split('.')[1]
-  if (!payload) throw new Error('Google did not return a valid identity.')
-  const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
-  const decoded = decodeURIComponent(window.atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='))
-    .split('').map(character => `%${`00${character.charCodeAt(0).toString(16)}`.slice(-2)}`).join(''))
-  const data = JSON.parse(decoded) as { email?: string; given_name?: string; family_name?: string; name?: string }
-  if (!data.email) throw new Error('Google did not provide an email address.')
-  const names = (data.name ?? '').trim().split(/\s+/).filter(Boolean)
-  return {
-    email: data.email.trim().toLowerCase(),
-    firstName: (data.given_name ?? names[0] ?? '').trim(),
-    lastName: (data.family_name ?? names.slice(1).join(' ')).trim(),
-  }
-}
-
 export async function renderGoogleIdentityButton(
   parent: HTMLElement,
   options: {
     onError: (error: Error) => void
     onIdentity: (selection: GoogleIdentitySelection) => void
+    nonce: string
     text: GoogleIdentityButtonText
     width: number
   },
 ) {
   const clientId = `${import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''}`.trim()
   if (!clientId) throw new Error('Google sign-in is not configured yet. Add the Google Web Client ID to the production app settings.')
+  const nonce = options.nonce.trim()
+  if (nonce.length < 32 || nonce.length > 256) throw new Error('Google sign-in could not be initialized.')
   await loadGoogleIdentityScript()
   if (!window.google?.accounts?.id) throw new Error('The Google account chooser is unavailable right now.')
   const googleIdentity = window.google
   currentCredentialHandler = options.onIdentity
   currentCredentialErrorHandler = options.onError
 
-  if (initializedClientId !== clientId) {
+  if (initializedClientId !== clientId || initializedNonce !== nonce) {
     googleIdentity.accounts.id.initialize({
       auto_select: false,
       button_auto_select: false,
       client_id: clientId,
+      nonce,
       callback: response => {
         if (!response.credential) {
           currentCredentialErrorHandler?.(new Error('Google did not return an identity. Please try again.'))
           return
         }
-        try {
-          const credential = response.credential
-          const identity = decodeGoogleCredential(credential)
-          currentCredentialHandler?.({ ...identity, credential })
-        } catch (error) {
-          currentCredentialErrorHandler?.(error instanceof Error ? error : new Error('Unable to read the Google identity.'))
-        }
+        currentCredentialHandler?.({ credential: response.credential })
       },
       ux_mode: 'popup',
     })
     initializedClientId = clientId
+    initializedNonce = nonce
   }
 
   parent.replaceChildren()

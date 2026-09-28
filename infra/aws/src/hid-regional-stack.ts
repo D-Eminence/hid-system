@@ -267,6 +267,7 @@ export class HidRegionalStack extends Stack {
         detailType: [
           'PatientRegistered.v1', 'PatientIdentityResolved.v1', 'OcrPublicationSucceeded.v1',
           'LabResultReleased.v1', 'MedicationDispensed.v1', 'OutreachPatientResolved.v1',
+          'PatientAccessPinVerified.v1',
           ...(this.configuration.name === 'staging' ? ['EmergencyAccessActivated.v1'] : []),
         ],
       },
@@ -441,8 +442,8 @@ export class HidRegionalStack extends Stack {
     }
     this.requiredParameter('AuthSecretArn', 'Secrets Manager JSON secret containing authSigningSecret and authLoginPepper');
     this.requiredParameter('IdentitySensitiveSecretArn', this.configuration.name === 'staging'
-      ? 'Secrets Manager JSON secret containing OTP HMAC key and Turnstile secret; NIN is deferred'
-      : 'Secrets Manager JSON secret containing NIN keys, OTP HMAC key, and Turnstile secret');
+      ? 'Secrets Manager JSON secret containing OTP HMAC key, Turnstile secret, and Google OIDC client-ID allowlist; NIN is deferred'
+      : 'Secrets Manager JSON secret containing NIN keys, OTP HMAC key, Turnstile secret, and Google OIDC client-ID allowlist');
     this.requiredParameter('NotificationProviderSecretArn', this.configuration.name === 'staging'
       ? 'Secrets Manager JSON secret containing sesFromAddress and novuApiKey for staging email OTP and ordinary notifications'
       : 'Secrets Manager JSON secret containing Novu, SES sender, Termii, Meta, and Infobip configuration');
@@ -846,6 +847,11 @@ export class HidRegionalStack extends Stack {
       }
       output.OTP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'otpHmacKeyB64');
       output.TURNSTILE_SECRET_KEY = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'turnstileSecretKey');
+      // The allowlist is configuration rather than a Google client secret,
+      // but it is an Identity-only trust decision. Keep it in the existing
+      // secure envelope so task definitions cannot silently drift from the
+      // approved backend audience policy.
+      output.GOOGLE_OIDC_CLIENT_IDS = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'googleOidcClientIds');
     }
     if (name === 'ehr-api') {
       output.WORKLOAD_DATABASE_URL = ecs.Secret.fromSecretsManager(secrets[`${name}Database`]!, 'scannerUrl');

@@ -73,7 +73,7 @@ For the data phase, obtain these inputs through that operator session:
 | Input | Source |
 | --- | --- |
 | `MIGRATION_FIXTURE_PATH` | Absolute path to the exact reviewed `fixture.json`; leave `LEGACY_DATABASE_URL` unset |
-| `MIGRATION_RUN_ID`, `MIGRATION_SNAPSHOT_ID` | The generated manifest's `migration.run_id` and `migration.snapshot_id`; retain them across retries |
+| `MIGRATION_RUN_ID`, `MIGRATION_SNAPSHOT_ID` | The generated manifest's values; retain a successful stage ID for promotion/reconciliation retries, but never reuse it to resume a failed staging run |
 | `MIGRATION_OPERATOR` | The actual accountable operator identity, not a fictional approver |
 | `MIGRATION_FACILITY_TIMEZONES_JSON` | The manifest's `migration.facility_timezones` object, mapping the exact synthetic facility UUID to `Africa/Lagos` |
 | Database URL, TLS configuration and migration field encryption/HMAC keys | Existing secure, account-bound migration configuration; never reuse public test vectors or write secrets into this fixture |

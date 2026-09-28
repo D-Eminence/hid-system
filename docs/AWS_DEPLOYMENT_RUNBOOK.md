@@ -286,8 +286,8 @@ Never run any of these commands for production.
 
 ## 6. Migrate identity and data
 
-Never edit migrations `0001`–`0028`. Apply all 32 ledger migrations through
-`0032` using the one-shot migration task. First record snapshot/PITR readiness
+Never edit migrations `0001`–`0028`. Apply all 33 ledger migrations through
+`0033` using the one-shot migration task. First record snapshot/PITR readiness
 and run `--plan`.
 Exercise the offline fixture path before using an approved read-only HID 1.0
 source:

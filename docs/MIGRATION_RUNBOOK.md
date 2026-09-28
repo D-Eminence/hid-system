@@ -41,9 +41,10 @@ The target runtime supports local credentials and approved OIDC only.
 |---|---|
 | `database/migrations/0001_*.sql` through `0027_*.sql` | Immutable platform ledger |
 | `database/migrations/0028_identity_notification_migration_state.sql` | OTP/KYC assurance, legacy mapping, encrypted device registration, delivery reconciliation |
+| `database/migrations/0033_supabase_cutover_identity_controls.sql` | Sealed Supabase cutover input, server-only patient PIN controls, exact Google subject links, and outreach preservation holds |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
-| `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; hash-only staging comparisons |
+| `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
 | `scripts/promote-legacy-identity.mjs` | Explicit dependency ordering, UUID/HID preservation, encryption/HMAC, holds and conflict evidence |
 | `scripts/reconcile-legacy-identity.mjs` | Independent destination read-back, counts, decryption and checksums |
 | `scripts/verify-legacy-migration.mjs` | Offline determinism, preservation, idempotency and blocking-contract verification |
@@ -71,7 +72,7 @@ MIGRATION_FIXTURE_PATH                    # offline rehearsal instead of source 
 DATABASE_URL                              # target migrator; not required for fixture --dry-run
 MIGRATION_OPERATOR
 MIGRATION_SNAPSHOT_ID
-MIGRATION_RUN_ID                          # stage output; required for promote/reconcile
+MIGRATION_RUN_ID                          # fresh per stage attempt; successful stage output is required for promote/reconcile
 MIGRATION_FIELD_ENCRYPTION_KEY_B64
 MIGRATION_LOOKUP_HMAC_KEY_B64
 MIGRATION_FIELD_KEY_REFERENCE
@@ -137,7 +138,7 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0032`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0033`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
@@ -158,8 +159,9 @@ npm --prefix services/ehr-api run migration:stage
 
 The source transaction is `REPEATABLE READ READ ONLY`. It excludes recovery,
 confirmation and session tokens; stores canonical per-row SHA-256; preserves
-timestamps/UUIDs; and fails if resumed content differs. A failed/running run
-may resume only with the same controlled snapshot ID and content.
+timestamps/UUIDs; and seals the resulting category counts/checksum. A
+failed/running stage run is never resumed: retain it as restricted evidence and
+create a fresh `MIGRATION_RUN_ID` from a new controlled source snapshot.
 
 Staging contains PHI and password hashes. Restrict the `migration` schema to the
 migrator, retain encryption, and disable payload query logging.
@@ -224,7 +226,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0032`, runtime grants, RLS and purpose/deny behavior.
+6. Verify `0033`, runtime grants, RLS and purpose/deny behavior.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.

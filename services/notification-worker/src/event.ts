@@ -5,6 +5,7 @@ const PRODUCERS = new Set(['identity', 'ocr', 'lab', 'pharmacy', 'outreach']);
 
 export const WORKFLOW_BY_EVENT: Readonly<Record<string, string>> = Object.freeze({
   EmergencyAccessActivated: 'patient-update-v1',
+  PatientAccessPinVerified: 'patient-update-v1',
   PatientRegistered: 'identity-registration-update-v1',
   PatientIdentityResolved: 'identity-resolution-update-v1',
   OcrPublicationSucceeded: 'document-update-v1',
@@ -26,11 +27,13 @@ export function parseSqsEvent(body: string | undefined): HidEventEnvelope {
       || typeof event.payload !== 'object' || event.payload === null || Array.isArray(event.payload)) {
     throw new Error('INVALID_EVENT_CONTRACT');
   }
-  if (event.type === 'EmergencyAccessActivated'
+  if ((event.type === 'EmergencyAccessActivated' || event.type === 'PatientAccessPinVerified')
       && (event.producer !== 'identity' || !UUID.test(String(event.context.facilityId))
         || Object.keys(event.payload).length !== 2
         || !UUID.test(String(event.payload.consentGrantId)) || event.payload.reviewRequired !== true)) {
-    throw new Error('INVALID_EMERGENCY_NOTIFICATION_CONTRACT');
+    throw new Error(event.type === 'PatientAccessPinVerified'
+      ? 'INVALID_PATIENT_PIN_NOTIFICATION_CONTRACT'
+      : 'INVALID_EMERGENCY_NOTIFICATION_CONTRACT');
   }
   return event as HidEventEnvelope;
 }

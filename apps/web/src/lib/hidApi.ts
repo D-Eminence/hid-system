@@ -26,6 +26,7 @@ import { pruneExpiredMapEntries, setBoundedMapEntry } from './cacheBudget'
 import { registerCacheResetter } from './cacheReset'
 import { BANNED_ACCOUNT_MESSAGE, isBannedAuthMessage } from './securityMessages'
 import {
+  canonicalRequest,
   fetchWithTimeout,
   getIdentityCsrfToken,
   getSafeSession,
@@ -599,53 +600,47 @@ async function clearPendingMetadata(key: 'pending_patient_signup' | 'pending_sta
 }
 
 export async function assertGoogleSignInEligibility(path: 'patient' | 'hospital', email: string) {
-  const normalizedEmail = email.trim().toLowerCase()
-  if (!looksLikeEmailIdentifier(normalizedEmail)) {
-    throw new HidApiError(400, 'Enter the email address already registered on HID before using Google sign-in.')
-  }
-
-  const result = await edgeRequest<{ registered: boolean }>('google-signin-eligibility', {
-    method: 'POST',
-    requireAuth: false,
-    body: { accountType: path === 'hospital' ? 'hospital' : 'patient', email: normalizedEmail },
-  })
-  if (!result.registered) {
-    throw new HidApiError(404, 'This Google email is not registered on HID. Use Sign Up first.')
-  }
+  // Do not reintroduce the retired Supabase email-preflight endpoint. Email
+  // cannot prove a Google-to-HID account link and its old result enumerated
+  // registered accounts. Google eligibility is decided by the server after
+  // it verifies the credential's provider subject.
+  void path
+  void email
+  throw new HidApiError(410, 'Google sign-in eligibility is verified after secure Google identity proof.')
 }
 
-export async function signInWithGoogleIdToken(path: 'patient' | 'hospital', credential: string, email: string) {
-  const normalizedEmail = email.trim().toLowerCase()
-  await assertGoogleSignInEligibility(path, normalizedEmail)
-  await clearConflictingAuthSession(normalizedEmail)
-
+export async function signInWithGoogleIdToken(
+  path: 'patient' | 'hospital',
+  credential: string,
+  email?: string,
+  turnstileToken?: string,
+) {
+  // The email argument remains only for compatibility. The browser must not
+  // decode or compare a Google JWT email; the Identity API uses a verified
+  // canonical Google issuer/sub mapping and never auto-creates a patient.
+  void email
   const { data, error } = await identityClient.auth.signInWithIdToken({
     provider: 'google',
     token: credential,
+    actorKind: path === 'patient' ? 'patient' : 'staff',
+    turnstileToken,
   })
   if (error) {
-    const message = error.message.toLowerCase()
-    if (message.includes('audience') || message.includes('client') || message.includes('id token') || message.includes('jwt')) {
-      throw new HidApiError(503, 'Google sign-in is not configured correctly right now. Please contact HID support.', error)
-    }
-    throw new HidApiError(401, 'Google could not sign you in. Choose the Google account already registered on HID and try again.', error)
+    throw new HidApiError(401, 'Google could not sign you in. Choose the HID account that was previously linked to Google and try again.', error)
   }
-
-  const authenticatedEmail = data.user?.email?.trim().toLowerCase()
-  if (!authenticatedEmail || authenticatedEmail !== normalizedEmail) {
-    await safeSignOut().catch(() => undefined)
-    clearAllPortalSessions()
-    throw new HidApiError(401, 'Google returned a different account than the one selected. Please try again.')
-  }
-
   return data
 }
 
 export async function finalizeGoogleSignIn(path: 'patient' | 'hospital') {
-  return edgeRequest<{ registered: boolean }>('google-signin-finalize', {
-    method: 'POST',
-    body: { accountType: path === 'hospital' ? 'hospital' : 'patient' },
-  })
+  // The target exchange has already resolved the provider subject to an
+  // existing account. There is no post-login email finalization or account
+  // creation step.
+  void path
+  const { data, error } = await identityClient.auth.getSession()
+  if (error || !data.session) {
+    throw new HidApiError(401, 'Google sign-in could not be completed for this HID account.', error)
+  }
+  return { registered: true }
 }
 
 async function getCurrentUserSecurityProfile() {
@@ -1274,14 +1269,14 @@ export async function updateMyPatientProfile(patch: Partial<Patient>) {
 }
 
 export async function setMyPatientAccessPin(accessPin?: string | null) {
-  const response = await edgeRequest<{ configured: boolean }>('patient-access-pin', {
-    method: 'POST',
-    body: {
-      accessPin: normalizeOptionalText(accessPin),
-    },
-  })
+  const normalizedPin = normalizeOptionalText(accessPin)
+  const response = normalizedPin
+    ? await canonicalRequest<{ configured: boolean }>('/api/v1/identity/me/access-pin', {
+      method: 'POST', body: JSON.stringify({ pin: normalizedPin }),
+    })
+    : await canonicalRequest<{ revoked: boolean }>('/api/v1/identity/me/access-pin', { method: 'DELETE' })
   invalidateViewCache('patient:')
-  return response
+  return 'configured' in response ? response : { configured: false }
 }
 
 export async function countUnreadNotifications(options: { forceRefresh?: boolean } = {}) {
@@ -2206,19 +2201,33 @@ export async function fetchStaffDashboard(options: { forceRefresh?: boolean } = 
 }
 
 export async function accessPatientWithPin(patientIdentifier: string, accessPin: string, durationMinutes = 60, staffDisplayName?: string | null) {
-  const response = await edgeRequest<{ request_id: string | null; grant_id: string; patient_id: string }>('access-request-create', {
+  // Staff identity/display data is derived from the authenticated membership;
+  // the legacy caller parameter is retained only to avoid a UI-wide signature
+  // change and is intentionally never sent to the server.
+  void staffDisplayName
+  const response = await canonicalRequest<{
+    accessRequestId: string
+    consentGrantId: string
+    patientId: string
+  }>('/api/v1/identity/standard-access/pin', {
     method: 'POST',
-    body: {
-      patientIdentifier,
-      accessPin,
+    headers: { 'X-Purpose-of-Use': 'direct-care' },
+    body: JSON.stringify({
+      hid: patientIdentifier,
+      pin: accessPin,
       durationMinutes,
-      staffDisplayName: normalizeOptionalText(staffDisplayName),
-    },
+    }),
   })
   invalidateViewCache('history:')
   invalidateViewCache('records:')
   invalidateViewCache('staff-dashboard:')
-  return response
+  // Preserve the legacy caller-facing response shape while transport changes
+  // from the retired function gateway to the governed Identity command.
+  return {
+    request_id: response.accessRequestId,
+    grant_id: response.consentGrantId,
+    patient_id: response.patientId,
+  }
 }
 
 export async function breakGlassAccess(patientIdentifier: string, reason: string, durationMinutes = 30, staffDisplayName?: string | null) {

@@ -4,6 +4,7 @@ import {
   type GoogleIdentityButtonText,
   type GoogleIdentitySelection,
 } from '../lib/googleIdentity'
+import { getGoogleSignInNonce } from '../lib/identityClient'
 
 type GoogleIdentityButtonProps = {
   disabled?: boolean
@@ -28,18 +29,38 @@ export function GoogleIdentityButton({ disabled = false, onIdentity, text }: Goo
     let active = true
     let lastWidth = 0
     let resizeTimer = 0
+    let nonce: string | null = null
+    let submitting = false
 
     const render = async () => {
       const width = Math.max(100, Math.min(400, Math.floor(host.getBoundingClientRect().width)))
       lastWidth = width
       try {
+        nonce ??= await getGoogleSignInNonce()
+        if (!active) return
         await renderGoogleIdentityButton(host, {
           onError: error => {
             if (active) setErrorMessage(error.message)
           },
           onIdentity: identity => {
-            if (active) void onIdentityRef.current(identity)
+            if (!active || submitting) return
+            submitting = true
+            void (async () => {
+              try {
+                await onIdentityRef.current(identity)
+              } catch {
+                if (active) setErrorMessage('Google sign-in could not be completed. Please try again.')
+              } finally {
+                // The Identity API consumes and clears the nonce cookie for
+                // every exchange attempt, including denied attempts. Render a
+                // new Google button with a fresh nonce before another try.
+                submitting = false
+                nonce = null
+                if (active) void render()
+              }
+            })()
           },
+          nonce,
           text,
           width,
         })

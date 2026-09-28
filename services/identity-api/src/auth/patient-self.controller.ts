@@ -1,9 +1,10 @@
-import { Controller, Get, Req } from '@nestjs/common';
-import { AuditFailuresOnly, FacilityOptional, PatientAllowed } from '../common/decorators';
+import { Body, Controller, Delete, Get, HttpCode, Post, Req } from '@nestjs/common';
+import { AuditAction, AuditFailuresOnly, FacilityOptional, PatientAllowed } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { PatientSelfService } from './patient-self.service';
 import { WorkloadAuthService } from './workload-auth.service';
+import { SetPatientAccessPinDto } from './dto/set-patient-access-pin.dto';
 
 @Controller('identity')
 @PatientAllowed()
@@ -17,6 +18,20 @@ export class PatientSelfController {
 
   @Get('me/access-history')
   history(@Req() request: HidRequest) { return this.self.history(request); }
+
+  @Post('me/access-pin')
+  @HttpCode(200)
+  @AuditAction('identity.patient-access-pin.configure.command')
+  setAccessPin(@Req() request: HidRequest, @Body() input: SetPatientAccessPinDto) {
+    return this.self.setAccessPin(request, input.pin);
+  }
+
+  @Delete('me/access-pin')
+  @HttpCode(200)
+  @AuditAction('identity.patient-access-pin.revoke.command')
+  revokeAccessPin(@Req() request: HidRequest) {
+    return this.self.revokeAccessPin(request);
+  }
 
   @Get('service/patient-self-authorization')
   async authorize(@Req() request: HidRequest) {

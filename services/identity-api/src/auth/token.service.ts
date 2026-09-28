@@ -21,7 +21,7 @@ interface SessionRow {
   expires_at: Date;
   absolute_expires_at: Date;
   revoked_at: Date | null;
-  authentication_method: 'password';
+  authentication_method: 'password' | 'oidc';
 }
 
 class RefreshRotationConflict extends Error {}
@@ -51,11 +51,19 @@ export class TokenService {
   ) {}
 
   async issue(identity: CredentialIdentity, event: SessionEventMetadata): Promise<LoginResult> {
-    if (identity.authenticationMethod === 'oidc') {
-      throw new Error('OIDC identities are not issued internal password sessions');
-    }
     const authenticationMethod = identity.authenticationMethod;
-    const actor = await this.resolveActor(identity.subject, identity.authenticationMethod, identity.actorKind ?? 'staff');
+    const resolvedActor = await this.resolveActor(
+      identity.subject,
+      identity.authenticationMethod,
+      identity.actorKind ?? 'staff',
+    );
+    if (identity.accountId && identity.accountId !== resolvedActor.accountId) {
+      throw new UnauthorizedException('Resolved account does not match the authenticated identity');
+    }
+    // A federated provider is verified and mapped before it reaches this
+    // shared session lifecycle. Keep the authentication provenance in the HID
+    // cookie session rather than minting a parallel token system.
+    const actor = { ...resolvedActor, authenticationMethod };
     const sessionId = randomUUID();
     const accessJti = randomUUID();
     const refreshToken = this.newRefreshToken(sessionId, authenticationMethod);
@@ -338,7 +346,7 @@ export class TokenService {
       throw new UnauthorizedException('Access token claims are incomplete');
     }
     const method = payload.auth_method;
-    if (method !== 'local') throw new UnauthorizedException('Invalid authentication method');
+    if (method !== 'local' && method !== 'oidc') throw new UnauthorizedException('Invalid authentication method');
     if (payload.actor_kind !== undefined && payload.actor_kind !== 'staff' && payload.actor_kind !== 'patient') {
       throw new UnauthorizedException('Invalid actor context');
     }
@@ -401,7 +409,7 @@ export class TokenService {
     client: PoolClient,
     input: {
       id: string; accountId: string; familyId: string; refreshToken: string; accessJti: string;
-      accountTokenVersion: number; authenticationMethod: 'local';
+      accountTokenVersion: number; authenticationMethod: 'local' | 'oidc';
       actorKind: 'staff' | 'patient';
       patientId?: string;
       issuedAt: Date; expiresAt: Date; absoluteExpiresAt: Date; event: SessionEventMetadata;
@@ -480,26 +488,32 @@ export class TokenService {
     });
   }
 
-  private newRefreshToken(sessionId: string, method: 'local'): string {
+  private newRefreshToken(sessionId: string, method: 'local' | 'oidc'): string {
     return `${sessionId}.${randomBytes(48).toString('base64url')}.${method}`;
   }
 
-  private resolveActor(subject: string, method: ActorContext['authenticationMethod'], kind: 'staff' | 'patient', sessionId?: string) {
+  private async resolveActor(
+    subject: string,
+    method: ActorContext['authenticationMethod'],
+    kind: 'staff' | 'patient',
+    sessionId?: string,
+  ): Promise<ActorContext> {
     if (kind === 'patient') {
-      if (!this.currentPatient || method !== 'local') throw new UnauthorizedException('Patient session is unavailable');
-      return this.currentPatient.resolve(subject, sessionId);
+      if (!this.currentPatient) throw new UnauthorizedException('Patient session is unavailable');
+      const patient = await this.currentPatient.resolve(subject, sessionId);
+      return { ...patient, authenticationMethod: method };
     }
     return this.currentStaff.resolve(subject, method, sessionId);
   }
 
-  private refreshMethod(token: string): 'local' {
+  private refreshMethod(token: string): 'local' | 'oidc' {
     const method = token.split('.').at(-1);
-    if (method !== 'local') throw new UnauthorizedException('Invalid refresh session');
+    if (method !== 'local' && method !== 'oidc') throw new UnauthorizedException('Invalid refresh session');
     return method;
   }
 
-  private databaseMethod(_method: 'local'): 'password' {
-    return 'password';
+  private databaseMethod(method: 'local' | 'oidc'): 'password' | 'oidc' {
+    return method === 'oidc' ? 'oidc' : 'password';
   }
 
   private deriveRefreshCsrf(refreshToken: string): string {

@@ -8,6 +8,11 @@ it('routes minimal emergency notice through the existing generic patient workflo
   expect(parseSqsEvent(JSON.stringify({ detail: event }))).toEqual(event);
   expect(WORKFLOW_BY_EVENT.EmergencyAccessActivated).toBe('patient-update-v1');
 });
+it('routes the minimal patient-PIN verification notice through the same patient workflow', () => {
+  const pinAccess = { ...event, type: 'PatientAccessPinVerified' };
+  expect(parseSqsEvent(JSON.stringify({ detail: pinAccess }))).toEqual(pinAccess);
+  expect(WORKFLOW_BY_EVENT.PatientAccessPinVerified).toBe('patient-update-v1');
+});
 it.each([
   { producer: 'lab' },
   { payload: { ...event.payload, reason: 'Sensitive emergency reason' } },

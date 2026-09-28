@@ -7,6 +7,8 @@ import {
   createHmac,
   randomBytes,
 } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
 
@@ -19,6 +21,25 @@ const facilityTimezones = parseFacilityTimezones(process.env.MIGRATION_FACILITY_
 const encryptionKey = decodeKey('MIGRATION_FIELD_ENCRYPTION_KEY_B64', 32);
 const lookupKey = decodeKey('MIGRATION_LOOKUP_HMAC_KEY_B64', 32);
 const batchSize = Number.parseInt(process.env.MIGRATION_BATCH_SIZE ?? '250', 10);
+
+const GOOGLE_ISSUER = 'https://accounts.google.com';
+const GOOGLE_SOURCE_SYSTEM = 'legacy_google_identity';
+const PRESERVATION_REASON = 'AWS has no approved campaign or queued-encounter replacement';
+const OUTREACH_PRESERVATION_ENTITY_TYPES = Object.freeze([
+  'outreach_campaigns',
+  'outreach_workers',
+  'outreach_encounters',
+  'outreach_sync_queue',
+  'outreach_referrals',
+  'outreach_vaccinations',
+  'outreach_mobile_lab_samples',
+  'outreach_invites',
+]);
+// The PIN command equalizes bcrypt work to cost 12. Accepting a higher-cost
+// source hash would break that bound and could turn a malformed export into a
+// denial-of-service vector, so such a snapshot must be remediated explicitly.
+const BCRYPT_ENVELOPE = /^\$2[aby]\$(?:0[4-9]|1[0-2])\$[./A-Za-z0-9]{53}$/;
+const cutoverInputVerifierPath = fileURLToPath(new URL('./verify-supabase-cutover-input.mjs', import.meta.url));
 
 if (!targetUrl) throw new Error('DATABASE_URL is required');
 if (!runId) throw new Error('MIGRATION_RUN_ID is required');
@@ -61,6 +82,33 @@ function parseFacilityTimezones(value) {
     new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0));
   }
   return parsed;
+}
+
+/**
+ * Promotion is not allowed to depend on an operator remembering a separate
+ * command. Run the read-only validator in a fresh process so it validates the
+ * exact staged run and its payload/hash evidence before any target mutation.
+ */
+function enforceCutoverInputGate() {
+  const environment = { ...process.env };
+  // A local fixture is appropriate for the standalone verifier test, never
+  // for a database promotion. Rejecting it here prevents bypassing a staged
+  // run with unrelated synthetic data inherited from a shell environment.
+  delete environment.MIGRATION_FIXTURE_PATH;
+  try {
+    const output = execFileSync(process.execPath, [cutoverInputVerifierPath], {
+      encoding: 'utf8',
+      env: environment,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
+    });
+    const parsed = JSON.parse(output);
+    if (!parsed || typeof parsed !== 'object' || !('categories' in parsed)) {
+      throw new Error('validator produced an unexpected result');
+    }
+  } catch {
+    throw new Error('Cutover input validation failed; promotion is blocked before target mutation');
+  }
 }
 
 function canonicalJson(value) {
@@ -107,6 +155,27 @@ function dateOrNull(value) {
   return value ? new Date(value) : null;
 }
 
+function timestampOrNull(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.valueOf()) ? null : parsed;
+}
+
+function requiredTimestamp(value, entityType, sourceRow, field) {
+  const parsed = timestampOrNull(value);
+  if (!parsed) {
+    throw new PromotionConflict(
+      entityType,
+      sourceRow.source_pk,
+      'invalid_source_value',
+      sourceRow.payload_sha256.trim(),
+      null,
+      { field, reason: 'required_timestamp_missing_or_invalid' },
+    );
+  }
+  return parsed;
+}
+
 function textOrNull(value) {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
@@ -120,6 +189,64 @@ function uuidOrNull(value) {
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
     ? value.toLowerCase()
     : null;
+}
+
+function uuidOrThrow(value, entityType, sourceRow, field) {
+  const normalized = uuidOrNull(value);
+  if (!normalized) {
+    throw new PromotionConflict(
+      entityType,
+      sourceRow.source_pk,
+      'invalid_source_value',
+      sourceRow.payload_sha256.trim(),
+      null,
+      { field, reason: 'uuid_required' },
+    );
+  }
+  return normalized;
+}
+
+function legacyAccountStatus(source) {
+  return source.deleted_at ? 'deleted' : source.email_confirmed_at ? 'active' : 'pending_reset';
+}
+
+function rawTextOrNull(value) {
+  return typeof value === 'string' ? value : null;
+}
+
+function googleIdentitySource(source, sourceRow) {
+  if (String(source.provider ?? '').toLowerCase() !== 'google') {
+    throw new PromotionConflict(
+      'google_identities', sourceRow.source_pk, 'invalid_source_value', sourceRow.payload_sha256.trim(), null,
+      { field: 'provider', reason: 'google_provider_required' },
+    );
+  }
+  if (typeof source.provider_id !== 'string' || source.provider_id.length === 0) {
+    throw new PromotionConflict(
+      'google_identities', sourceRow.source_pk, 'invalid_source_value', sourceRow.payload_sha256.trim(), null,
+      { field: 'provider_id', reason: 'provider_subject_required' },
+    );
+  }
+  const identityData = recordOrEmpty(source.identity_data);
+  if (identityData.sub !== undefined && identityData.sub !== null && identityData.sub !== source.provider_id) {
+    throw new PromotionConflict(
+      'google_identities', sourceRow.source_pk, 'invalid_source_value', sourceRow.payload_sha256.trim(), null,
+      { field: 'identity_data.sub', reason: 'provider_subject_mismatch' },
+    );
+  }
+  const sourceId = uuidOrThrow(source.id, 'google_identities', sourceRow, 'id');
+  if (uuidOrNull(sourceRow.source_pk) !== sourceId) {
+    throw new PromotionConflict(
+      'google_identities', sourceRow.source_pk, 'invalid_source_value', sourceRow.payload_sha256.trim(), null,
+      { field: 'id', reason: 'source_primary_key_mismatch' },
+    );
+  }
+  return {
+    sourceId,
+    userId: uuidOrThrow(source.user_id, 'google_identities', sourceRow, 'user_id'),
+    providerId: source.provider_id,
+    createdAt: requiredTimestamp(source.created_at, 'google_identities', sourceRow, 'created_at'),
+  };
 }
 
 function correlationOrFallback(value, eventId) {
@@ -201,13 +328,213 @@ async function validateRbacVocabulary(client) {
 
 async function stagedRows(client, entityType, cursor) {
   return client.query(
-    `select source_pk, payload, payload_sha256
+    `select source_pk, payload, payload_sha256, source_updated_at
        from migration.source_rows
       where run_id = $1 and entity_type = $2 and source_pk > $3
       order by source_pk
       limit $4`,
     [runId, entityType, cursor, batchSize],
   );
+}
+
+async function requireExactStagedAccount(client, sourceAccountId, entityType, sourceRow) {
+  const staged = await client.query(
+    `select payload
+       from migration.source_rows
+      where run_id = $1 and entity_type = 'accounts' and source_pk = $2`,
+    [runId, sourceAccountId],
+  );
+  const sourceAccount = staged.rows[0]?.payload;
+  if (!sourceAccount || uuidOrNull(sourceAccount.id) !== sourceAccountId) {
+    throw new PromotionConflict(
+      entityType, sourceRow.source_pk, 'missing_dependency', sourceRow.payload_sha256.trim(), null,
+      { dependency: 'staged_exact_source_account' },
+    );
+  }
+  const target = await client.query(
+    `select id, source_system, legacy_identity_user_id
+       from auth.accounts where id = $1`,
+    [sourceAccountId],
+  );
+  const account = target.rows[0];
+  if (!account
+      || account.source_system !== 'legacy_identity'
+      || uuidOrNull(account.legacy_identity_user_id) !== sourceAccountId) {
+    throw new PromotionConflict(
+      entityType, sourceRow.source_pk, 'missing_dependency', sourceRow.payload_sha256.trim(), null,
+      { dependency: 'promoted_exact_source_account' },
+    );
+  }
+  return sourceAccount;
+}
+
+async function requireExactStagedPatient(client, sourcePatientId, entityType, sourceRow) {
+  const staged = await client.query(
+    `select payload
+       from migration.source_rows
+      where run_id = $1 and entity_type = 'patients' and source_pk = $2`,
+    [runId, sourcePatientId],
+  );
+  const sourcePatient = staged.rows[0]?.payload;
+  if (!sourcePatient || uuidOrNull(sourcePatient.id) !== sourcePatientId) {
+    throw new PromotionConflict(
+      entityType, sourceRow.source_pk, 'missing_dependency', sourceRow.payload_sha256.trim(), null,
+      { dependency: 'staged_exact_source_patient' },
+    );
+  }
+  const target = await client.query(
+    `select id, source_system, source_record_id
+       from identity.patients where id = $1`,
+    [sourcePatientId],
+  );
+  const patient = target.rows[0];
+  if (!patient
+      || patient.source_system !== 'legacy_identity'
+      || patient.source_record_id !== sourcePatientId) {
+    throw new PromotionConflict(
+      entityType, sourceRow.source_pk, 'missing_dependency', sourceRow.payload_sha256.trim(), null,
+      { dependency: 'promoted_exact_source_patient' },
+    );
+  }
+  return sourcePatient;
+}
+
+function preservationHoldExpected(sourceRow) {
+  const source = sourceRow.payload;
+  return {
+    source_status: rawTextOrNull(source.status),
+    source_created_at: timestampOrNull(source.created_at),
+    source_updated_at: sourceRow.source_updated_at ?? null,
+    payload_sha256: sourceRow.payload_sha256.trim(),
+    disposition: 'preserved_unmapped',
+    reason: PRESERVATION_REASON,
+  };
+}
+
+function comparablePreservationHold(value) {
+  return {
+    source_status: value.source_status ?? null,
+    source_created_at: value.source_created_at ?? null,
+    source_updated_at: value.source_updated_at ?? null,
+    payload_sha256: value.payload_sha256?.trim?.() ?? null,
+    disposition: value.disposition ?? null,
+    reason: value.reason ?? null,
+  };
+}
+
+async function insertPreservationHold(client, entityType, sourceRow) {
+  const expected = preservationHoldExpected(sourceRow);
+  let inserted;
+  try {
+    inserted = await client.query(
+      `insert into migration.cutover_preservation_holds (
+         run_id, entity_type, source_pk, source_status, source_created_at,
+         source_updated_at, payload_sha256, disposition, reason
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       on conflict (run_id, entity_type, source_pk) do nothing
+       returning source_pk`,
+      [
+        runId, entityType, sourceRow.source_pk, expected.source_status,
+        expected.source_created_at, expected.source_updated_at, expected.payload_sha256,
+        expected.disposition, expected.reason,
+      ],
+    );
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+    throw new PromotionConflict(
+      entityType, sourceRow.source_pk,
+      code === '23503' ? 'missing_dependency' : code === '23514' ? 'invalid_source_value' : 'target_content_mismatch',
+      sourceRow.payload_sha256.trim(), null,
+      { table: 'migration.cutover_preservation_holds', databaseCode: code ?? 'unknown' },
+    );
+  }
+  if (inserted.rowCount > 0) return;
+
+  const existing = await client.query(
+    `select source_status, source_created_at, source_updated_at, payload_sha256, disposition, reason
+       from migration.cutover_preservation_holds
+      where run_id = $1 and entity_type = $2 and source_pk = $3`,
+    [runId, entityType, sourceRow.source_pk],
+  );
+  const actual = existing.rows[0] ? comparablePreservationHold(existing.rows[0]) : null;
+  if (!actual || sha256(canonicalJson(actual)) !== sha256(canonicalJson(expected))) {
+    throw new PromotionConflict(
+      entityType, sourceRow.source_pk, 'target_content_mismatch', sourceRow.payload_sha256.trim(),
+      actual ? sha256(canonicalJson(actual)) : null,
+      { table: 'migration.cutover_preservation_holds', constraint: 'run_id_entity_type_source_pk' },
+    );
+  }
+}
+
+function sourceReferenceId(value, entityType, sourceRow, field) {
+  return uuidOrThrow(value, entityType, sourceRow, field);
+}
+
+async function requiredStagedPayload(client, requiredEntityType, sourceId, entityType, sourceRow, field) {
+  const result = await client.query(
+    'select payload from migration.source_rows where run_id = $1 and entity_type = $2 and source_pk = $3',
+    [runId, requiredEntityType, sourceId],
+  );
+  const payload = result.rows[0]?.payload;
+  if (!payload || sourceReferenceId(payload.id, entityType, sourceRow, field) !== sourceId) {
+    throw new PromotionConflict(
+      entityType, sourceRow.source_pk, 'missing_dependency', sourceRow.payload_sha256.trim(), null,
+      { field, dependency: requiredEntityType },
+    );
+  }
+  return payload;
+}
+
+async function validateOutreachPreservationDependencies(client, entityType, sourceRow) {
+  const source = sourceRow.payload;
+  const ownId = sourceReferenceId(source.id, entityType, sourceRow, 'id');
+  if (ownId !== sourceRow.source_pk) {
+    throw new PromotionConflict(
+      entityType, sourceRow.source_pk, 'invalid_source_value', sourceRow.payload_sha256.trim(), null,
+      { field: 'id', reason: 'source_primary_key_mismatch' },
+    );
+  }
+  if (entityType === 'outreach_campaigns') return;
+
+  const campaignId = sourceReferenceId(source.campaign_id, entityType, sourceRow, 'campaign_id');
+  await requiredStagedPayload(client, 'outreach_campaigns', campaignId, entityType, sourceRow, 'campaign_id');
+
+  if (entityType === 'outreach_workers') {
+    const accountId = sourceReferenceId(source.auth_user_id, entityType, sourceRow, 'auth_user_id');
+    await requireExactStagedAccount(client, accountId, entityType, sourceRow);
+    return;
+  }
+
+  if (entityType === 'outreach_encounters' || entityType === 'outreach_sync_queue'
+      || entityType === 'outreach_invites') {
+    const workerField = entityType === 'outreach_invites' ? 'created_by' : 'worker_id';
+    const workerId = sourceReferenceId(source[workerField], entityType, sourceRow, workerField);
+    const worker = await requiredStagedPayload(
+      client, 'outreach_workers', workerId, entityType, sourceRow, workerField,
+    );
+    if (sourceReferenceId(worker.campaign_id, entityType, sourceRow, workerField + '.campaign_id') !== campaignId) {
+      throw new PromotionConflict(
+        entityType, sourceRow.source_pk, 'invalid_source_value', sourceRow.payload_sha256.trim(), null,
+        { field: workerField, reason: 'worker_campaign_mismatch' },
+      );
+    }
+    return;
+  }
+
+  if (entityType === 'outreach_referrals' || entityType === 'outreach_vaccinations'
+      || entityType === 'outreach_mobile_lab_samples') {
+    if (source.encounter_id === null || source.encounter_id === undefined) return;
+    const encounterId = sourceReferenceId(source.encounter_id, entityType, sourceRow, 'encounter_id');
+    const encounter = await requiredStagedPayload(
+      client, 'outreach_encounters', encounterId, entityType, sourceRow, 'encounter_id',
+    );
+    if (sourceReferenceId(encounter.campaign_id, entityType, sourceRow, 'encounter_id.campaign_id') !== campaignId) {
+      throw new PromotionConflict(
+        entityType, sourceRow.source_pk, 'invalid_source_value', sourceRow.payload_sha256.trim(), null,
+        { field: 'encounter_id', reason: 'encounter_campaign_mismatch' },
+      );
+    }
+  }
 }
 
 async function insertExact(client, entityType, sourceRow, tableName, data, comparisonColumns = Object.keys(data), conflictColumn = 'id') {
@@ -317,15 +644,42 @@ async function accountForProfile(client, profileId) {
   return result.rows[0]?.id ?? null;
 }
 
+async function assertPromotableRun(client, lockRun = false) {
+  const run = await client.query(
+    `select id, mode
+       from migration.runs
+      where id = $1
+        and source_system = 'legacy_identity'
+        and status = 'staged'
+        and mode in ('stage', 'promote')${lockRun ? '\n      for update' : ''}`,
+    [runId],
+  );
+  if (run.rowCount !== 1) {
+    throw new Error('MIGRATION_RUN_ID must reference the sealed legacy_identity staging or promotion run');
+  }
+  const conflicts = await client.query(
+    'select count(*)::integer as count from migration.conflicts where run_id = $1',
+    [runId],
+  );
+  if ((conflicts.rows[0]?.count ?? 0) > 0) {
+    throw new Error('Run has conflicts; create a new corrected staging run');
+  }
+  return run.rows[0].mode;
+}
+
 async function promoteEntity(client, entityType, transform) {
   let cursor = '';
   let promoted = 0;
   for (;;) {
-    const result = await stagedRows(client, entityType, cursor);
-    if (result.rows.length === 0) break;
     await client.query('begin isolation level serializable');
     try {
       await client.query("select pg_advisory_xact_lock(hashtextextended('hid-legacy-promotion', 0))");
+      await assertPromotableRun(client, true);
+      const result = await stagedRows(client, entityType, cursor);
+      if (result.rows.length === 0) {
+        await client.query('commit');
+        break;
+      }
       for (const row of result.rows) {
         await transform(row);
         cursor = row.source_pk;
@@ -347,19 +701,31 @@ async function promoteEntity(client, entityType, transform) {
 
 async function main() {
   const client = new Client(databaseOptions(targetUrl, 'hid-legacy-promoter'));
+  let promotionLockHeld = false;
+  let promotionStarted = false;
   await client.connect();
   try {
-    const runResult = await client.query(
-      `select id, status, source_system from migration.runs where id = $1`,
-      [runId],
-    );
-    const run = runResult.rows[0];
-    if (!run || run.source_system !== 'legacy_identity' || run.status !== 'staged') {
-      throw new Error('MIGRATION_RUN_ID must reference a staged legacy_identity run');
+    // Hold one session lock from the sealed-input check through the final
+    // stage->promote transition. Batch transactions also take the same key so
+    // concurrent promotion processes cannot slip between validation and write.
+    await client.query("select pg_advisory_lock(hashtextextended('hid-legacy-promotion', 0))");
+    promotionLockHeld = true;
+    await assertPromotableRun(client);
+    try {
+      enforceCutoverInputGate();
+    } catch (error) {
+      await client.query(
+        "update migration.runs set status = 'blocked', notes = 'Cutover input validation failed; promotion prohibited' where id = $1 and status = 'staged' and mode in ('stage', 'promote')",
+        [runId],
+      );
+      throw error;
     }
-    const conflicts = await client.query('select count(*)::integer as count from migration.conflicts where run_id = $1', [runId]);
-    if ((conflicts.rows[0]?.count ?? 0) > 0) throw new Error('Run has conflicts; create a new corrected staging run');
     await validateRbacVocabulary(client);
+    // The verifier runs on a separate read-only connection. Re-read the run
+    // after it returns; the sealed-row/run guards and the session lock make
+    // this the state used by the first write transaction.
+    await assertPromotableRun(client);
+    promotionStarted = true;
 
     await promoteEntity(client, 'accounts', async (row) => {
       const source = row.payload;
@@ -370,11 +736,7 @@ async function main() {
       const profile = await profileForAuthUser(client, source.id);
       const createdAt = new Date(source.created_at);
       const updatedAt = new Date(source.updated_at ?? source.created_at);
-      const accountStatus = source.deleted_at
-        ? 'deleted'
-        : source.email_confirmed_at
-          ? 'active'
-          : 'pending_reset';
+      const accountStatus = legacyAccountStatus(source);
       const data = {
         id: source.id,
         subject: source.id,
@@ -407,6 +769,26 @@ async function main() {
         source_system: 'legacy_identity',
       };
       await insertExact(client, 'accounts', row, 'auth.external_identities', external);
+    });
+
+    await promoteEntity(client, 'google_identities', async (row) => {
+      const source = row.payload;
+      const google = googleIdentitySource(source, row);
+      const sourceAccount = await requireExactStagedAccount(client, google.userId, 'google_identities', row);
+      const external = {
+        id: deterministicUuid(`legacy-google-identity:${google.sourceId}`),
+        account_id: google.userId,
+        issuer: GOOGLE_ISSUER,
+        // provider_id is the raw provider subject. Never use email or an
+        // identity-data fallback to construct this relationship.
+        subject: google.providerId,
+        status: legacyAccountStatus(sourceAccount) === 'active' ? 'active' : 'disabled',
+        assurance_level: null,
+        linked_at: google.createdAt,
+        revoked_at: null,
+        source_system: GOOGLE_SOURCE_SYSTEM,
+      };
+      await insertExact(client, 'google_identities', row, 'auth.external_identities', external);
     });
 
     await promoteEntity(client, 'organizations', async (row) => {
@@ -548,6 +930,47 @@ async function main() {
           Object.keys(quarantine).filter((column) => !['encrypted_payload', 'created_at'].includes(column)),
         );
       }
+    });
+
+    await promoteEntity(client, 'patient_access_pins', async (row) => {
+      const source = row.payload;
+      const patientId = uuidOrThrow(source.patient_id, 'patient_access_pins', row, 'patient_id');
+      if (uuidOrNull(row.source_pk) !== patientId) {
+        throw new PromotionConflict(
+          'patient_access_pins', row.source_pk, 'invalid_source_value', row.payload_sha256.trim(), null,
+          { field: 'patient_id', reason: 'source_primary_key_mismatch' },
+        );
+      }
+      if (typeof source.pin_hash !== 'string' || !BCRYPT_ENVELOPE.test(source.pin_hash)) {
+        throw new PromotionConflict(
+          'patient_access_pins', row.source_pk, 'invalid_source_value', row.payload_sha256.trim(), null,
+          { field: 'pin_hash', reason: 'unsupported_bcrypt_envelope' },
+        );
+      }
+      // The PIN row is not an identity-resolution mechanism. Its patient ID
+      // must refer to the exact raw patient staged and promoted in this run.
+      await requireExactStagedPatient(client, patientId, 'patient_access_pins', row);
+      const createdAt = requiredTimestamp(source.created_at, 'patient_access_pins', row, 'created_at');
+      const updatedAt = requiredTimestamp(source.updated_at, 'patient_access_pins', row, 'updated_at');
+      await insertExact(client, 'patient_access_pins', row, 'identity.patient_access_pins', {
+        patient_id: patientId,
+        pin_hash: source.pin_hash,
+        status: 'active',
+        hash_algorithm: 'bcrypt',
+        disabled_at: null,
+        disabled_reason: null,
+        source_system: 'legacy_identity',
+        source_record_id: patientId,
+        source_created_at: createdAt,
+        source_updated_at: updatedAt,
+        created_at: createdAt,
+        updated_at: updatedAt,
+        row_version: 1,
+      }, [
+        'patient_id', 'pin_hash', 'status', 'hash_algorithm', 'disabled_at', 'disabled_reason',
+        'source_system', 'source_record_id', 'source_created_at', 'source_updated_at',
+        'created_at', 'updated_at', 'row_version',
+      ], 'patient_id');
     });
 
     await promoteEntity(client, 'patient_identifiers', async (row) => {
@@ -778,15 +1201,38 @@ async function main() {
       }, ['event_id', 'occurred_at', 'correlation_id', 'actor_type', 'actor_subject', 'actor_account_id', 'organization_id', 'facility_id', 'patient_id', 'action', 'outcome', 'resource_type', 'resource_id', 'reason', 'source_ip', 'user_agent', 'provenance', 'source_system', 'source_event_id', 'details'], 'event_id');
     });
 
-    await client.query(
-      `update migration.runs
-          set mode = 'promote', notes = coalesce(notes, '') || E'\nPromotion completed; reconciliation required.'
-        where id = $1 and status = 'staged'`,
-      [runId],
-    );
+    for (const entityType of OUTREACH_PRESERVATION_ENTITY_TYPES) {
+      // This is intentionally a preservation hold rather than a campaign,
+      // registration case, encounter, patient, or clinical-record import.
+      await promoteEntity(client, entityType, async (row) => {
+        await validateOutreachPreservationDependencies(client, entityType, row);
+        await insertPreservationHold(client, entityType, row);
+      });
+    }
+
+    await client.query('begin isolation level serializable');
+    try {
+      await client.query("select pg_advisory_xact_lock(hashtextextended('hid-legacy-promotion', 0))");
+      const mode = await assertPromotableRun(client, true);
+      if (mode === 'stage') {
+        const completed = await client.query(
+          `update migration.runs
+              set mode = 'promote', notes = coalesce(notes, '') || E'\nPromotion completed; reconciliation required.'
+            where id = $1 and status = 'staged' and mode = 'stage'`,
+          [runId],
+        );
+        if (completed.rowCount !== 1) {
+          throw new Error('Staged run changed before promotion could be finalized');
+        }
+      }
+      await client.query('commit');
+    } catch (error) {
+      await client.query('rollback').catch(() => undefined);
+      throw error;
+    }
     process.stdout.write(`Promotion completed for run ${runId}; run reconciliation before cutover\n`);
   } catch (error) {
-    if (error instanceof PromotionConflict) {
+    if (promotionStarted && error instanceof PromotionConflict) {
       await client.query(
         `insert into migration.conflicts (
            run_id, entity_type, source_pk, conflict_type, source_sha256, target_sha256, details
@@ -794,18 +1240,24 @@ async function main() {
          on conflict (run_id, entity_type, source_pk, conflict_type) do nothing`,
         [runId, error.entityType, error.sourcePk, error.conflictType, error.sourceHash, error.targetHash, JSON.stringify(error.details)],
       );
-      await client.query("update migration.runs set status = 'blocked', notes = 'Promotion conflict; no overwrite performed' where id = $1", [runId]);
-    } else {
+      await client.query(
+        "update migration.runs set status = 'blocked', notes = 'Promotion conflict; no overwrite performed' where id = $1 and status = 'staged' and mode in ('stage', 'promote')",
+        [runId],
+      );
+    } else if (promotionStarted) {
       await client.query(
         `update migration.runs
             set status = 'failed', completed_at = clock_timestamp(),
                 notes = 'Promotion failed; inspect restricted operational logs'
-          where id = $1 and status <> 'blocked'`,
+          where id = $1 and status = 'staged' and mode in ('stage', 'promote')`,
         [runId],
       ).catch(() => undefined);
     }
     throw error;
   } finally {
+    if (promotionLockHeld) {
+      await client.query("select pg_advisory_unlock(hashtextextended('hid-legacy-promotion', 0))").catch(() => undefined);
+    }
     await client.end();
   }
 }

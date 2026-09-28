@@ -15,6 +15,20 @@ const lookupKey = decodeKey('MIGRATION_LOOKUP_HMAC_KEY_B64', 32);
 const facilityTimezones = parseFacilityTimezones(process.env.MIGRATION_FACILITY_TIMEZONES_JSON);
 const batchSize = Number.parseInt(process.env.MIGRATION_BATCH_SIZE ?? '500', 10);
 
+const GOOGLE_ISSUER = 'https://accounts.google.com';
+const GOOGLE_SOURCE_SYSTEM = 'legacy_google_identity';
+const PRESERVATION_REASON = 'AWS has no approved campaign or queued-encounter replacement';
+const OUTREACH_PRESERVATION_ENTITY_TYPES = Object.freeze([
+  'outreach_campaigns',
+  'outreach_workers',
+  'outreach_encounters',
+  'outreach_sync_queue',
+  'outreach_referrals',
+  'outreach_vaccinations',
+  'outreach_mobile_lab_samples',
+  'outreach_invites',
+]);
+
 if (!databaseUrl) throw new Error('DATABASE_URL is required');
 if (!runId) throw new Error('MIGRATION_RUN_ID is required');
 if (!Number.isSafeInteger(batchSize) || batchSize < 10 || batchSize > 5_000) {
@@ -96,6 +110,20 @@ function uuidOrNull(value) {
     : null;
 }
 
+function timestampText(value) {
+  if (value === null || value === undefined) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.valueOf()) ? null : parsed.toISOString();
+}
+
+function legacyAccountStatus(source) {
+  return source.deleted_at ? 'deleted' : source.email_confirmed_at ? 'active' : 'pending_reset';
+}
+
+function rawTextOrNull(value) {
+  return typeof value === 'string' ? value : null;
+}
+
 function correlationOrFallback(value, eventId) {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value)
     ? value
@@ -146,6 +174,45 @@ const definitions = [
       source_system: target.source_system,
     })),
     sourceEntityType: 'accounts',
+  },
+  {
+    type: 'patient_access_pins',
+    table: 'identity.patient_access_pins',
+    targetKey: (source) => source.patient_id,
+    keyColumn: 'patient_id',
+    expected: (source) => ({
+      patient_id: source.patient_id,
+      // This is a bcrypt envelope from the raw source row, not a PIN.
+      pin_hash: source.pin_hash,
+      status: 'active',
+      hash_algorithm: 'bcrypt',
+      disabled_at: null,
+      disabled_reason: null,
+      source_system: 'legacy_identity',
+      source_record_id: source.patient_id,
+      source_created_at: timestampText(source.created_at),
+      source_updated_at: timestampText(source.updated_at),
+      created_at: timestampText(source.created_at),
+      updated_at: timestampText(source.updated_at),
+      row_version: '1',
+    }),
+    actual: (target) => ({
+      patient_id: target.patient_id,
+      pin_hash: target.pin_hash,
+      status: target.status,
+      hash_algorithm: target.hash_algorithm,
+      disabled_at: timestampText(target.disabled_at),
+      disabled_reason: target.disabled_reason,
+      source_system: target.source_system,
+      source_record_id: target.source_record_id,
+      source_created_at: timestampText(target.source_created_at),
+      source_updated_at: timestampText(target.source_updated_at),
+      created_at: timestampText(target.created_at),
+      updated_at: timestampText(target.updated_at),
+      row_version: String(target.row_version),
+    }),
+    orphanSql: `select count(*)::bigint as count
+      from identity.patient_access_pins where source_system = 'legacy_identity'`,
   },
   {
     ...definition('user_profiles', 'auth.accounts', (source) => source.auth_user_id, (source) => ({
@@ -551,6 +618,240 @@ async function reconcileClinicalQuarantine(client) {
   return { sourceCount, matchedCount, sourceChecksum, targetChecksum, conflictCount };
 }
 
+function googleIdentityExpected(source, sourceAccount) {
+  if (String(source.provider ?? '').toLowerCase() !== 'google'
+      || typeof source.provider_id !== 'string' || source.provider_id.length === 0) {
+    throw new Error('invalid_google_identity_source');
+  }
+  const userId = uuidOrNull(source.user_id);
+  const sourceId = uuidOrNull(source.id);
+  if (!sourceId || !userId || !sourceAccount || uuidOrNull(sourceAccount.id) !== userId) {
+    throw new Error('missing_exact_google_account_source');
+  }
+  const identityData = recordOrEmpty(source.identity_data);
+  if (identityData.sub !== undefined && identityData.sub !== null && identityData.sub !== source.provider_id) {
+    throw new Error('google_provider_subject_mismatch');
+  }
+  const linkedAt = timestampText(source.created_at);
+  if (!linkedAt) throw new Error('missing_google_identity_created_at');
+  return {
+    id: deterministicUuid(`legacy-google-identity:${sourceId}`),
+    account_id: userId,
+    issuer: GOOGLE_ISSUER,
+    subject: source.provider_id,
+    status: legacyAccountStatus(sourceAccount) === 'active' ? 'active' : 'disabled',
+    assurance_level: null,
+    linked_at: linkedAt,
+    revoked_at: null,
+    source_system: GOOGLE_SOURCE_SYSTEM,
+  };
+}
+
+function googleIdentityActual(target) {
+  return {
+    id: target.id,
+    account_id: target.account_id,
+    issuer: target.issuer,
+    subject: target.subject,
+    status: target.status,
+    assurance_level: target.assurance_level,
+    linked_at: timestampText(target.linked_at),
+    revoked_at: timestampText(target.revoked_at),
+    source_system: target.source_system,
+  };
+}
+
+async function reconcileGoogleIdentities(client) {
+  let cursor = '';
+  let sourceCount = 0;
+  let matchedCount = 0;
+  let conflictCount = 0;
+  const sourceAggregate = createHash('sha256');
+  const targetAggregate = createHash('sha256');
+
+  for (;;) {
+    const staged = await client.query(
+      `select source_pk, payload, payload_sha256
+         from migration.source_rows
+        where run_id = $1 and entity_type = 'google_identities' and source_pk > $2
+        order by source_pk
+        limit $3`,
+      [runId, cursor, batchSize],
+    );
+    if (staged.rows.length === 0) break;
+    const sourceAccountIds = [...new Set(staged.rows
+      .map((row) => rawTextOrNull(row.payload.user_id))
+      .filter((value) => value !== null))];
+    const accountRows = sourceAccountIds.length === 0 ? { rows: [] } : await client.query(
+      `select source_pk, payload
+         from migration.source_rows
+        where run_id = $1 and entity_type = 'accounts' and source_pk = any($2::text[])`,
+      [runId, sourceAccountIds],
+    );
+    const sourceAccounts = new Map(accountRows.rows.map((row) => [row.source_pk, row.payload]));
+    const expectedByPk = new Map();
+    const identityIds = [];
+    for (const row of staged.rows) {
+      try {
+        const expected = googleIdentityExpected(row.payload, sourceAccounts.get(row.payload.user_id));
+        if (uuidOrNull(row.source_pk) !== uuidOrNull(row.payload.id)) throw new Error('google_source_primary_key_mismatch');
+        expectedByPk.set(row.source_pk, expected);
+        identityIds.push(expected.id);
+      } catch {
+        // The source payload itself stays in the ledger; conflict evidence is
+        // intentionally limited to its SHA-256 and a table/row coordinate.
+      }
+    }
+    const targetRows = identityIds.length === 0 ? { rows: [] } : await client.query(
+      `select id, account_id, issuer, subject, status, assurance_level, linked_at, revoked_at, source_system
+         from auth.external_identities where id = any($1::uuid[])`,
+      [identityIds],
+    );
+    const targets = new Map(targetRows.rows.map((row) => [String(row.id), row]));
+    const targetAccountIds = [...new Set(targetRows.rows.map((row) => String(row.account_id)))];
+    const linkedContexts = targetAccountIds.length === 0 ? { rows: [] } : await client.query(
+      'select account_id from identity.patients where account_id = any($1::uuid[]) union select account_id from identity.staff where account_id = any($1::uuid[])',
+      [targetAccountIds],
+    );
+    const linkedAccountIds = new Set(linkedContexts.rows.map((row) => String(row.account_id)));
+
+    for (const row of staged.rows) {
+      cursor = row.source_pk;
+      sourceCount += 1;
+      const expected = expectedByPk.get(row.source_pk);
+      const expectedHash = expected ? sha256(canonicalJson(expected)) : row.payload_sha256.trim();
+      sourceAggregate.update(`${row.source_pk}:${expectedHash}\n`, 'utf8');
+      const target = expected ? targets.get(expected.id) : undefined;
+      const actual = target ? googleIdentityActual(target) : null;
+      const actualHash = actual ? sha256(canonicalJson(actual)) : null;
+      if (!actualHash || actualHash !== expectedHash || !linkedAccountIds.has(String(target?.account_id))) {
+        conflictCount += 1;
+        await recordConflict(client, 'google_identities', row.source_pk, expectedHash, actualHash,
+          { table: 'auth.external_identities',
+            reason: !target || !linkedAccountIds.has(String(target.account_id))
+              ? 'target_account_has_no_patient_or_staff_context' : 'identity_mapping_mismatch' });
+      } else {
+        matchedCount += 1;
+        targetAggregate.update(`${row.source_pk}:${actualHash}\n`, 'utf8');
+      }
+    }
+  }
+
+  const sourceChecksum = sourceAggregate.digest('hex');
+  const targetChecksum = targetAggregate.digest('hex');
+  const markedTargetCount = BigInt((await client.query(
+    `select count(*)::bigint as count from auth.external_identities where source_system = $1`,
+    [GOOGLE_SOURCE_SYSTEM],
+  )).rows[0]?.count ?? 0);
+  if (markedTargetCount > BigInt(sourceCount)) {
+    conflictCount += 1;
+    await recordConflict(client, 'google_identities', '__orphan_count__', sha256(String(sourceCount)),
+      sha256(String(markedTargetCount)), { reason: 'target_contains_google_rows_absent_from_snapshot' });
+  }
+  if (conflictCount === 0) {
+    await client.query(
+      `insert into migration.entity_reconciliations (
+         run_id, entity_type, source_count, target_count, source_checksum_sha256, target_checksum_sha256
+       ) values ($1, 'google_identities', $2, $3, $4, $5)
+       on conflict (run_id, entity_type) do nothing`,
+      [runId, sourceCount, matchedCount, sourceChecksum, targetChecksum],
+    );
+  }
+  process.stdout.write(`google_identities: ${matchedCount}/${sourceCount} matched; ${conflictCount} conflict(s)\n`);
+  return { sourceCount, matchedCount, sourceChecksum, targetChecksum, conflictCount };
+}
+
+function preservationHoldExpected(sourceRow) {
+  return {
+    source_status: rawTextOrNull(sourceRow.payload.status),
+    source_created_at: timestampText(sourceRow.payload.created_at),
+    source_updated_at: timestampText(sourceRow.source_updated_at),
+    payload_sha256: sourceRow.payload_sha256.trim(),
+    disposition: 'preserved_unmapped',
+    reason: PRESERVATION_REASON,
+  };
+}
+
+function preservationHoldActual(target) {
+  return {
+    source_status: target.source_status ?? null,
+    source_created_at: timestampText(target.source_created_at),
+    source_updated_at: timestampText(target.source_updated_at),
+    payload_sha256: target.payload_sha256?.trim?.() ?? null,
+    disposition: target.disposition ?? null,
+    reason: target.reason ?? null,
+  };
+}
+
+async function reconcileOutreachPreservation(client, entityType) {
+  let cursor = '';
+  let sourceCount = 0;
+  let matchedCount = 0;
+  let conflictCount = 0;
+  const sourceAggregate = createHash('sha256');
+  const targetAggregate = createHash('sha256');
+  for (;;) {
+    const staged = await client.query(
+      `select source_pk, payload, payload_sha256, source_updated_at
+         from migration.source_rows
+        where run_id = $1 and entity_type = $2 and source_pk > $3
+        order by source_pk
+        limit $4`,
+      [runId, entityType, cursor, batchSize],
+    );
+    if (staged.rows.length === 0) break;
+    const targetRows = await client.query(
+      `select source_pk, source_status, source_created_at, source_updated_at,
+              payload_sha256, disposition, reason
+         from migration.cutover_preservation_holds
+        where run_id = $1 and entity_type = $2 and source_pk = any($3::text[])`,
+      [runId, entityType, staged.rows.map((row) => row.source_pk)],
+    );
+    const targets = new Map(targetRows.rows.map((row) => [row.source_pk, row]));
+    for (const row of staged.rows) {
+      cursor = row.source_pk;
+      sourceCount += 1;
+      const expected = preservationHoldExpected(row);
+      const target = targets.get(row.source_pk);
+      const actual = target ? preservationHoldActual(target) : null;
+      const expectedShapeHash = sha256(canonicalJson(expected));
+      const actualShapeHash = actual ? sha256(canonicalJson(actual)) : null;
+      sourceAggregate.update(`${row.source_pk}:${expected.payload_sha256}\n`, 'utf8');
+      if (!actualShapeHash || actualShapeHash !== expectedShapeHash) {
+        conflictCount += 1;
+        await recordConflict(client, entityType, row.source_pk, row.payload_sha256.trim(), actualShapeHash,
+          { table: 'migration.cutover_preservation_holds' });
+      } else {
+        matchedCount += 1;
+        targetAggregate.update(`${row.source_pk}:${actual.payload_sha256}\n`, 'utf8');
+      }
+    }
+  }
+  const sourceChecksum = sourceAggregate.digest('hex');
+  const targetChecksum = targetAggregate.digest('hex');
+  const targetCount = Number((await client.query(
+    `select count(*)::integer as count from migration.cutover_preservation_holds
+      where run_id = $1 and entity_type = $2`,
+    [runId, entityType],
+  )).rows[0]?.count ?? 0);
+  if (targetCount !== sourceCount) {
+    conflictCount += 1;
+    await recordConflict(client, entityType, '__count__', sha256(String(sourceCount)), sha256(String(targetCount)),
+      { reason: 'preservation_hold_count_mismatch' });
+  }
+  if (conflictCount === 0) {
+    await client.query(
+      `insert into migration.entity_reconciliations (
+         run_id, entity_type, source_count, target_count, source_checksum_sha256, target_checksum_sha256
+       ) values ($1, $2, $3, $4, $5, $6)
+       on conflict (run_id, entity_type) do nothing`,
+      [runId, entityType, sourceCount, matchedCount, sourceChecksum, targetChecksum],
+    );
+  }
+  process.stdout.write(`${entityType}: ${matchedCount}/${sourceCount} preserved; ${conflictCount} conflict(s)\n`);
+  return { sourceCount, matchedCount, sourceChecksum, targetChecksum, conflictCount };
+}
+
 async function main() {
   const client = new Client(databaseOptions(databaseUrl, 'hid-legacy-reconciler'));
   await client.connect();
@@ -575,9 +876,17 @@ async function main() {
       results[item.type] = result;
       totalConflicts += result.conflictCount;
     }
+    const googleResult = await reconcileGoogleIdentities(client);
+    results.google_identities = googleResult;
+    totalConflicts += googleResult.conflictCount;
     const quarantineResult = await reconcileClinicalQuarantine(client);
     results.legacy_clinical_quarantine = quarantineResult;
     totalConflicts += quarantineResult.conflictCount;
+    for (const entityType of OUTREACH_PRESERVATION_ENTITY_TYPES) {
+      const result = await reconcileOutreachPreservation(client, entityType);
+      results[entityType] = result;
+      totalConflicts += result.conflictCount;
+    }
 
     const targetCounts = Object.fromEntries(Object.entries(results).map(([type, result]) => [type, result.matchedCount]));
     const targetChecksum = sha256(canonicalJson(Object.fromEntries(

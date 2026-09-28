@@ -21,17 +21,17 @@ never reused. Caller cloud/database credentials are not passed to child tools.
 
 The executable covers:
 
-1. Verify every immutable migration hash `0001`–`0032`; apply a transactional
+1. Verify every immutable migration hash `0001`–`0033`; apply a transactional
    schema dry run and assert its objects rolled back; apply the real schema,
    bootstrap runtime roles, assert zero pending on rerun, and run the real
-   rollback-only schema/RLS, OTP, patient self-service, enrollment and emergency
-   integration suites. Execute the real OTP service against the exact Identity
+   rollback-only schema/RLS, OTP, patient self-service, enrollment, emergency,
+   patient-PIN, and cutover-staging-integrity integration suites. Execute the real OTP service against the exact Identity
    role, including concurrent completion/rate-limit and account-disable tests;
    notification delivery uses an in-process test double.
    Separately build a synthetic `0028` database with historical staff sessions,
    verified OTP challenges and registration outbox records; back it up, dry-run
-   and apply `0029`–`0032`, verify preservation and fail-closed old OTP behavior,
-   and restore its pre-schema backup to an independent database for exact comparison.
+   and apply `0029`–`0033`, verify preservation, fail-closed old OTP behavior,
+   and the new cutover controls, then restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites
    with exact runtime callers so superuser function ownership cannot hide RLS failures.
@@ -65,8 +65,8 @@ local run is not evidence for an immutable release commit.
 
 ## Schema and import coverage
 
-The candidate destination schema is exactly `0032`. The additive migrations
-`0029`–`0032` extend the approved `0028` baseline and require a new admitted
+The candidate destination schema is exactly `0033`. The additive migrations
+`0029`–`0033` extend the approved `0028` baseline and require a new admitted
 release commit and artifacts; local success does not admit this candidate.
 Empty-schema bootstrap and a synthetic `0028` upgrade are covered;
 the data-rehearsal backup is taken after schema bootstrap and before legacy

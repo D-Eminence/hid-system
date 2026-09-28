@@ -30,6 +30,36 @@ test('patient login uses canonical patient realm and host cookie session', async
   assert.deepEqual(JSON.parse(request.init.body), { email: actor.email, password: 'synthetic-password-only', turnstileToken: 'synthetic-turnstile', turnstileAction: 'patient-login' })
   assert.equal(request.init.credentials, 'include'); assert.equal(request.init.cache, 'no-store')
 })
+test('Google credentials use the server nonce cookie contract and never forward client-decoded identity data', async () => {
+  const nonce = 'n'.repeat(43)
+  responses.push(response({ nonce }))
+  assert.equal(await client.getGoogleSignInNonce(), nonce)
+  const nonceRequest = calls.at(-1)
+  assert.equal(nonceRequest.url, '/api/v1/auth/google/nonce')
+  assert.equal(nonceRequest.init.method, undefined)
+
+  responses.push(response({ actor, expiresAt: new Date(Date.now() + 60_000).toISOString() }))
+  const result = await client.identityClient.auth.signInWithIdToken({
+    provider: 'google', token: 'synthetic-google-id-token', nonce,
+    actorKind: 'patient', turnstileToken: 'synthetic-turnstile',
+  })
+  assert.equal(result.error, null)
+  const exchange = calls.at(-1)
+  assert.equal(exchange.url, '/api/v1/auth/oidc/exchange')
+  assert.deepEqual(JSON.parse(exchange.init.body), {
+    idToken: 'synthetic-google-id-token',
+    turnstileAction: 'patient-login',
+    turnstileToken: 'synthetic-turnstile',
+  })
+})
+test('Google exchange infers the patient Turnstile boundary from a patient portal path', async () => {
+  responses.push(response({ actor, expiresAt: new Date(Date.now() + 60_000).toISOString() }))
+  const result = await client.identityClient.auth.signInWithIdToken({
+    provider: 'google', token: 'synthetic-google-id-token', path: '/patient', turnstileToken: 'synthetic-turnstile',
+  })
+  assert.equal(result.error, null)
+  assert.equal(JSON.parse(calls.at(-1).init.body).turnstileAction, 'patient-login')
+})
 test('canonical mutations use session CSRF token without bearer token exposure', async () => {
   responses.push(response({ status: 'active' }))
   await client.canonicalRequest('/api/v1/identity/break-glass', { method: 'POST', body: JSON.stringify({ hid: 'HID-ABCDEFGH' }) })

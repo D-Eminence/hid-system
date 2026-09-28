@@ -31,6 +31,7 @@ const { CurrentStaffContextService } = load('auth/current-staff-context.service.
 const { CurrentPatientContextService } = load('auth/current-patient-context.service.ts');
 const { AuthService } = load('auth/auth.service.ts');
 const { AuthController } = load('auth/auth.controller.ts');
+const { GoogleAuthenticationService } = load('auth/google-authentication.service.ts');
 const { AuthSessionAuditService } = load('auth/auth-session-audit.service.ts');
 const { AuditService } = load('audit/audit.service.ts');
 const { SecurityGuard } = load('auth/security.guard.ts');
@@ -61,7 +62,10 @@ try {
   const module = await Test.createTestingModule({ controllers: [AuthController, PatientSelfController],
     providers: [{ provide: DatabaseService, useValue: database }, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
-      AuditService, WorkloadAuthService, TurnstileService, PatientSelfService] }).compile();
+      AuditService, WorkloadAuthService, TurnstileService, PatientSelfService,
+      { provide: GoogleAuthenticationService, useValue: {
+        login: async () => { throw new Error('Google exchange is outside the patient-session verifier'); },
+      } }] }).compile();
   app = module.createNestApplication({ logger: false });
   app.use(require('cookie-parser')());
   app.use((req, _res, next) => { req.correlationId = randomUUID(); next(); });

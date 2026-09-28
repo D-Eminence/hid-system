@@ -13,6 +13,34 @@
       }
     }
   ],
+  "google_identities": [
+    {
+      "source_pk": "22000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-01T00:00:00.000Z",
+      "payload": {
+        "id": "22000000-0000-4000-8000-000000000001",
+        "provider": "google",
+        "provider_id": "synthetic-google-subject-001",
+        "user_id": "20000000-0000-4000-8000-000000000001",
+        "identity_data": { "sub": "synthetic-google-subject-001" },
+        "created_at": "2025-01-01T00:00:00.000Z",
+        "updated_at": "2026-01-01T00:00:00.000Z"
+      }
+    }
+  ],
+  "patient_access_pins": [
+    {
+      "source_pk": "30000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-01T00:00:00.000Z",
+      "payload": {
+        "patient_id": "30000000-0000-4000-8000-000000000001",
+        "pin_hash": "$2b$06$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "created_at": "2025-01-01T00:00:00.000Z",
+        "updated_at": "2026-01-01T00:00:00.000Z",
+        "source_table": "public.hid_patient_access_secrets"
+      }
+    }
+  ],
   "user_profiles": [
     {
       "source_pk": "21000000-0000-4000-8000-000000000001",
@@ -48,5 +76,209 @@
   "memberships": [],
   "access_requests": [],
   "consent_grants": [],
-  "audit_events": []
+  "audit_events": [],
+  "outreach_campaigns": [
+    {
+      "source_pk": "40000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-01T00:00:00.000Z",
+      "payload": {
+        "id": "40000000-0000-4000-8000-000000000001",
+        "name": "Synthetic preservation campaign 01",
+        "org": "Synthetic organization",
+        "location": "Synthetic location",
+        "status": "planned",
+        "services": ["registration"],
+        "starts_at": "2026-02-01T08:00:00.000Z",
+        "ends_at": null,
+        "created_at": "2026-01-01T00:00:00.000Z"
+      }
+    },
+    {
+      "source_pk": "40000000-0000-4000-8000-000000000002",
+      "source_updated_at": "2026-01-02T00:00:00.000Z",
+      "payload": {
+        "id": "40000000-0000-4000-8000-000000000002",
+        "name": "Synthetic preservation campaign 02",
+        "org": "Synthetic organization",
+        "location": "Synthetic location",
+        "status": "planned",
+        "services": ["registration"],
+        "starts_at": "2026-02-02T08:00:00.000Z",
+        "ends_at": null,
+        "created_at": "2026-01-02T00:00:00.000Z"
+      }
+    },
+    {
+      "source_pk": "40000000-0000-4000-8000-000000000003",
+      "source_updated_at": "2026-01-03T00:00:00.000Z",
+      "payload": {
+        "id": "40000000-0000-4000-8000-000000000003",
+        "name": "Synthetic preservation campaign 03",
+        "org": "Synthetic organization",
+        "location": "Synthetic location",
+        "status": "planned",
+        "services": ["registration"],
+        "starts_at": "2026-02-03T08:00:00.000Z",
+        "ends_at": null,
+        "created_at": "2026-01-03T00:00:00.000Z"
+      }
+    },
+    {
+      "source_pk": "40000000-0000-4000-8000-000000000004",
+      "source_updated_at": "2026-01-04T00:00:00.000Z",
+      "payload": {
+        "id": "40000000-0000-4000-8000-000000000004",
+        "name": "Synthetic preservation campaign 04",
+        "org": "Synthetic organization",
+        "location": "Synthetic location",
+        "status": "planned",
+        "services": ["registration"],
+        "starts_at": "2026-02-04T08:00:00.000Z",
+        "ends_at": null,
+        "created_at": "2026-01-04T00:00:00.000Z"
+      }
+    }
+  ],
+  "outreach_workers": [
+    {
+      "source_pk": "41000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-01T00:00:00.000Z",
+      "payload": {
+        "id": "41000000-0000-4000-8000-000000000001",
+        "auth_user_id": "20000000-0000-4000-8000-000000000001",
+        "campaign_id": "40000000-0000-4000-8000-000000000001",
+        "display_name": "Synthetic worker",
+        "role": "enumerator",
+        "created_at": "2026-01-01T00:00:00.000Z"
+      }
+    }
+  ],
+  "outreach_encounters": [
+    {
+      "source_pk": "42000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-05T00:00:00.000Z",
+      "payload": {
+        "id": "42000000-0000-4000-8000-000000000001",
+        "campaign_id": "40000000-0000-4000-8000-000000000001",
+        "worker_id": "41000000-0000-4000-8000-000000000001",
+        "patient_hid": null,
+        "provisional_patient_id": "synthetic-queue-001",
+        "full_name": "Synthetic queued record 01",
+        "sex": "other",
+        "age_years": 0,
+        "phone": null,
+        "service_type": "registration",
+        "status": "queued",
+        "notes": null,
+        "consent_captured_at": null,
+        "consent_method": null,
+        "created_at": "2026-01-05T00:00:00.000Z",
+        "synced_at": null
+      }
+    },
+    {
+      "source_pk": "42000000-0000-4000-8000-000000000002",
+      "source_updated_at": "2026-01-06T00:00:00.000Z",
+      "payload": {
+        "id": "42000000-0000-4000-8000-000000000002",
+        "campaign_id": "40000000-0000-4000-8000-000000000001",
+        "worker_id": "41000000-0000-4000-8000-000000000001",
+        "patient_hid": null,
+        "provisional_patient_id": "synthetic-queue-002",
+        "full_name": "Synthetic queued record 02",
+        "sex": "other",
+        "age_years": 0,
+        "phone": null,
+        "service_type": "registration",
+        "status": "queued",
+        "notes": null,
+        "consent_captured_at": null,
+        "consent_method": null,
+        "created_at": "2026-01-06T00:00:00.000Z",
+        "synced_at": null
+      }
+    }
+  ],
+  "outreach_sync_queue": [
+    {
+      "source_pk": "43000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-05T00:00:00.000Z",
+      "payload": {
+        "id": "43000000-0000-4000-8000-000000000001",
+        "campaign_id": "40000000-0000-4000-8000-000000000001",
+        "worker_id": "41000000-0000-4000-8000-000000000001",
+        "entity": "encounter",
+        "action": "insert",
+        "payload": { "encounter_id": "42000000-0000-4000-8000-000000000001" },
+        "status": "queued",
+        "error": null,
+        "created_at": "2026-01-05T00:00:00.000Z",
+        "synced_at": null
+      }
+    }
+  ],
+  "outreach_referrals": [
+    {
+      "source_pk": "44000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-05T00:00:00.000Z",
+      "payload": {
+        "id": "44000000-0000-4000-8000-000000000001",
+        "encounter_id": "42000000-0000-4000-8000-000000000001",
+        "campaign_id": "40000000-0000-4000-8000-000000000001",
+        "facility_name": "Synthetic facility",
+        "reason": "Synthetic preservation test",
+        "urgency": "routine",
+        "created_at": "2026-01-05T00:00:00.000Z"
+      }
+    }
+  ],
+  "outreach_vaccinations": [
+    {
+      "source_pk": "45000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-05T00:00:00.000Z",
+      "payload": {
+        "id": "45000000-0000-4000-8000-000000000001",
+        "encounter_id": "42000000-0000-4000-8000-000000000001",
+        "campaign_id": "40000000-0000-4000-8000-000000000001",
+        "vaccine_name": "Synthetic vaccine",
+        "dose_label": "synthetic",
+        "vial_lot": "synthetic-lot",
+        "administered_at": "2026-01-05T00:00:00.000Z",
+        "aefi_observed": false,
+        "notes": null
+      }
+    }
+  ],
+  "outreach_mobile_lab_samples": [
+    {
+      "source_pk": "46000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-05T00:00:00.000Z",
+      "payload": {
+        "id": "46000000-0000-4000-8000-000000000001",
+        "encounter_id": "42000000-0000-4000-8000-000000000001",
+        "campaign_id": "40000000-0000-4000-8000-000000000001",
+        "sample_type": "synthetic",
+        "barcode": "synthetic-barcode",
+        "collected_at": "2026-01-05T00:00:00.000Z",
+        "cold_chain_required": false
+      }
+    }
+  ],
+  "outreach_invites": [
+    {
+      "source_pk": "47000000-0000-4000-8000-000000000001",
+      "source_updated_at": "2026-01-01T00:00:00.000Z",
+      "payload": {
+        "id": "47000000-0000-4000-8000-000000000001",
+        "campaign_id": "40000000-0000-4000-8000-000000000001",
+        "created_by": "41000000-0000-4000-8000-000000000001",
+        "code": "synthetic-invite-code",
+        "role": "enumerator",
+        "max_uses": 1,
+        "use_count": 0,
+        "expires_at": null,
+        "created_at": "2026-01-01T00:00:00.000Z"
+      }
+    }
+  ]
 }

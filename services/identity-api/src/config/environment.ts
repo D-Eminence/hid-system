@@ -67,6 +67,7 @@ const environmentSchema = z.object({
   OIDC_ISSUER_URL: optionalUrl,
   OIDC_AUDIENCE: optionalString,
   OIDC_JWKS_URL: optionalUrl,
+  GOOGLE_OIDC_CLIENT_IDS: z.preprocess(emptyToUndefined, z.string().trim().min(3).max(4000).optional()),
   NIN_PROVIDER_MODE: z.enum(['unavailable', 'deferred', 'test']).default('unavailable'),
   NIN_LOOKUP_HMAC_KEY_B64: optionalString,
   NIN_ENCRYPTION_KEY_B64: optionalString,
@@ -105,6 +106,16 @@ const environmentSchema = z.object({
   if (environment.AUTH_MODE === 'oidc') {
     for (const key of ['OIDC_ISSUER_URL', 'OIDC_AUDIENCE', 'OIDC_JWKS_URL'] as const) {
       if (!environment[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required for OIDC auth` });
+    }
+  }
+  if (environment.GOOGLE_OIDC_CLIENT_IDS) {
+    const clientIds = environment.GOOGLE_OIDC_CLIENT_IDS.split(',').map((value) => value.trim());
+    if (environment.AUTH_MODE !== 'local') {
+      context.addIssue({ code: 'custom', path: ['GOOGLE_OIDC_CLIENT_IDS'], message: 'Google cookie sessions require AUTH_MODE=local' });
+    }
+    if (clientIds.some((value) => value.length < 3 || value.length > 255)
+        || new Set(clientIds).size !== clientIds.length) {
+      context.addIssue({ code: 'custom', path: ['GOOGLE_OIDC_CLIENT_IDS'], message: 'Google client IDs must be unique, non-empty values' });
     }
   }
   if (environment.NIN_PROVIDER_MODE === 'test') {

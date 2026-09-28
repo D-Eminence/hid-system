@@ -12,9 +12,9 @@ class StagingPreflightTests(unittest.TestCase):
     def test_deferred_nin_credentials_are_not_staging_requirements(self):
         name = "/hid/staging/identity-sensitive"
         response = {"ARN": f"arn:aws:secretsmanager:eu-west-1:659225405023:secret:{name}-example",
-                    "SecretString": json.dumps({"otpHmacKeyB64": "fixture", "turnstileSecretKey": "fixture"})}
+                    "SecretString": json.dumps({"otpHmacKeyB64": "fixture", "turnstileSecretKey": "fixture", "googleOidcClientIds": "fixture"})}
         self.assertEqual(preflight.secret_summary(name, response)["required_fields_present"], {
-            "otpHmacKeyB64": True, "turnstileSecretKey": True})
+            "otpHmacKeyB64": True, "turnstileSecretKey": True, "googleOidcClientIds": True})
         self.assertNotIn("/hid/staging/nin-metamap", preflight.SECRET_FIELDS)
 
     def test_wrong_aws_account_stops_before_secret_reads(self):

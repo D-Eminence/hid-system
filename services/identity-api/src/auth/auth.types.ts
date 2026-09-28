@@ -13,7 +13,7 @@ export interface HidJwtClaims extends JWTPayload {
   platform_roles: string[];
   platform_permissions: string[];
   facility_ids: string[];
-  auth_method: 'local';
+  auth_method: 'local' | 'oidc';
   csrf_hash?: string;
   token_version: number;
 }

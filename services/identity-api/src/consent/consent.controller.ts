@@ -6,6 +6,7 @@ import { ConsentService } from './consent.service';
 import { CloseGrantDto } from './dto/close-grant.dto';
 import { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import { CreateBreakGlassDto } from './dto/create-break-glass.dto';
+import { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
 
 @Controller('identity')
 export class ConsentController {
@@ -28,6 +29,14 @@ export class ConsentController {
   @AuditAction('identity.break-glass.command')
   activateBreakGlass(@Req() request: HidRequest, @Body() input: CreateBreakGlassDto) {
     return this.consent.activateBreakGlass(consentContext(request, ['emergency']), input);
+  }
+
+  @Post('standard-access/pin')
+  @HttpCode(200)
+  @RequirePermissions('identity.patient-access-pin.verify')
+  @AuditAction('identity.patient-access-pin.verify.command')
+  verifyPatientAccessPin(@Req() request: HidRequest, @Body() input: VerifyPatientAccessPinDto) {
+    return this.consent.verifyPatientAccessPin(consentContext(request, ['direct-care']), input);
   }
 
   @Post('consent-grants/:grantId/close')

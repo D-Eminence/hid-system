@@ -299,6 +299,7 @@ test('ordinary notifications have one selected EventBridge route and encrypted S
     'LabResultReleased.v1',
     'MedicationDispensed.v1',
     'OutreachPatientResolved.v1',
+    'PatientAccessPinVerified.v1',
   ]);
   assert.equal(eventPattern['detail-type'].some((eventType) => /otp|passwordreset/i.test(eventType)), false);
   assert.equal(resources(regional, 'AWS::Lambda::Function').length, 0);
@@ -406,7 +407,7 @@ test('human authentication secrets are injected only into the Identity authority
   assert.match(JSON.stringify(carryingAuthSecret[0]!.Family), /identity-api/i);
   const ehr = taskDefinitions.find((task) => JSON.stringify(task.Family).includes('ehr-api'));
   assert.ok(ehr);
-  assert.doesNotMatch(JSON.stringify(ehr!.ContainerDefinitions), /AUTH_SIGNING_SECRET|AUTH_LOGIN_PEPPER/);
+  assert.doesNotMatch(JSON.stringify(ehr!.ContainerDefinitions), /AUTH_SIGNING_SECRET|AUTH_LOGIN_PEPPER|GOOGLE_OIDC_CLIENT_IDS/);
 });
 
 test('staging NIN is deferred in every profile without provider or NIN-key startup dependencies', () => {
@@ -421,6 +422,7 @@ test('staging NIN is deferred in every profile without provider or NIN-key start
     for (const key of ['NIN_LOOKUP_HMAC_KEY_B64', 'NIN_ENCRYPTION_KEY_B64']) assert.equal(names.includes(key), template === regional);
     assert.ok(names.includes('OTP_HMAC_KEY_B64'));
     assert.ok(names.includes('TURNSTILE_SECRET_KEY'));
+    assert.ok(names.includes('GOOGLE_OIDC_CLIENT_IDS'));
     assert.equal(environment.IDENTITY_SERVICE_IDENTITY_MODE, 'jwt');
     assert.equal(environment.TURNSTILE_MODE, 'required');
     assert.doesNotMatch(JSON.stringify(api), /METAMAP|metamap/);

@@ -26,6 +26,27 @@ if (!Number.isSafeInteger(batchSize) || batchSize < 10 || batchSize > 5_000) {
   throw new Error('MIGRATION_BATCH_SIZE must be between 10 and 5000');
 }
 
+// These rows have an approved AWS target and are promoted as canonical
+// identity records. The cutover-only inputs below are deliberately separate:
+// Google identities become exact external-identity links, PINs retain only a
+// bcrypt envelope, and outreach rows remain preservation evidence.
+export const OUTREACH_PRESERVATION_ENTITY_TYPES = Object.freeze([
+  'outreach_campaigns',
+  'outreach_workers',
+  'outreach_encounters',
+  'outreach_sync_queue',
+  'outreach_referrals',
+  'outreach_vaccinations',
+  'outreach_mobile_lab_samples',
+  'outreach_invites',
+]);
+
+const optionalFixtureEntityTypes = new Set([
+  'google_identities',
+  'patient_access_pins',
+  ...OUTREACH_PRESERVATION_ENTITY_TYPES,
+]);
+
 const entities = [
   {
     type: 'accounts',
@@ -52,6 +73,50 @@ const entities = [
       order by source_pk
       limit $2`,
   },
+  {
+    // `auth.identities.id` is the provider-identity record coordinate. Keep
+    // only the fields required to prove its exact provider-to-account link;
+    // do not copy provider email, tokens, or other metadata into the ledger.
+    type: 'google_identities',
+    sql: `
+      select identity_row.id::text as source_pk,
+             jsonb_build_object(
+               'id', identity_row.id,
+               'user_id', identity_row.user_id,
+               'provider', identity_row.provider,
+               'provider_id', identity_row.provider_id,
+               'identity_data', jsonb_build_object('sub', identity_row.identity_data->>'sub'),
+               'created_at', identity_row.created_at,
+               'updated_at', identity_row.updated_at,
+               'last_sign_in_at', identity_row.last_sign_in_at
+             ) as payload,
+             coalesce(identity_row.updated_at, identity_row.created_at, identity_row.last_sign_in_at)
+               as source_updated_at
+      from auth.identities identity_row
+      where lower(identity_row.provider) = 'google'
+        and identity_row.id::text > $1
+      order by identity_row.id::text
+      limit $2`,
+  },
+  {
+    // The source table contains a bcrypt verifier, never a raw PIN. Select a
+    // minimal envelope so no unrelated patient data enters the ledger.
+    type: 'patient_access_pins',
+    sql: `
+      select secret_row.patient_id::text as source_pk,
+             jsonb_build_object(
+               'patient_id', secret_row.patient_id,
+               'pin_hash', secret_row.access_pin_hash,
+               'created_at', secret_row.created_at,
+               'updated_at', secret_row.updated_at,
+               'source_table', 'public.hid_patient_access_secrets'
+             ) as payload,
+             secret_row.updated_at as source_updated_at
+      from public.hid_patient_access_secrets secret_row
+      where secret_row.patient_id::text > $1
+      order by secret_row.patient_id::text
+      limit $2`,
+  },
   tableEntity('user_profiles', 'public.hid_user_profiles'),
   tableEntity('organizations', 'public.hid_organizations'),
   tableEntity('facilities', 'public.hid_facilities'),
@@ -72,7 +137,17 @@ const entities = [
       order by event_id::text
       limit $2`,
   },
+  tableEntity('outreach_campaigns', 'public.hid_outreach_campaigns', 'created_at'),
+  tableEntity('outreach_workers', 'public.hid_outreach_workers', 'created_at'),
+  tableEntity('outreach_encounters', 'public.hid_outreach_encounters', 'created_at'),
+  tableEntity('outreach_sync_queue', 'public.hid_sync_queue', 'created_at'),
+  tableEntity('outreach_referrals', 'public.hid_outreach_referrals', 'created_at'),
+  tableEntity('outreach_vaccinations', 'public.hid_vaccinations', 'administered_at'),
+  tableEntity('outreach_mobile_lab_samples', 'public.hid_mobile_lab_samples', 'collected_at'),
+  tableEntity('outreach_invites', 'public.hid_outreach_invites', 'created_at'),
 ];
+
+export const MIGRATION_ENTITY_TYPES = Object.freeze(entities.map((entity) => entity.type));
 
 function tableEntity(type, qualifiedTable, timestampColumn = 'updated_at') {
   return {
@@ -139,7 +214,9 @@ async function stageBatch(target, entityType, rows) {
             [runId, entityType, row.source_pk, payloadHash, existingHash ?? null, JSON.stringify({ stage: 'source_staging' })],
           );
           await target.query(
-            `update migration.runs set status = 'blocked', notes = 'Staging checksum conflict' where id = $1`,
+            `update migration.runs
+                set status = 'blocked', notes = 'Staging checksum conflict'
+              where id = $1 and status = 'running' and mode = 'stage'`,
             [runId],
           );
           await target.query('commit');
@@ -164,6 +241,7 @@ async function main() {
   const counts = {};
   const checksums = {};
   let snapshot;
+  let stageRunCreated = false;
 
   try {
     if (source) {
@@ -178,20 +256,18 @@ async function main() {
         `insert into migration.runs (
            id, source_system, source_snapshot, mode, status, started_by, source_transaction_snapshot
          ) values ($1, 'legacy_identity', $2, 'stage', 'running', $3, $4)
-         on conflict (id) do update set
-           status = 'running', started_by = excluded.started_by,
-           source_transaction_snapshot = excluded.source_transaction_snapshot,
-           completed_at = null, notes = 'Resumed from the same controlled source snapshot'
-         where migration.runs.source_system = 'legacy_identity'
-           and migration.runs.source_snapshot = excluded.source_snapshot
-           and migration.runs.mode = 'stage'
-           and migration.runs.status in ('running', 'failed')
+         on conflict (id) do nothing
          returning id`,
         [runId, snapshotLabel, operator, snapshot],
       );
       if (started.rowCount !== 1) {
-        throw new Error('MIGRATION_RUN_ID cannot resume: source snapshot or run state does not match');
+        throw new Error('MIGRATION_RUN_ID is already in use; start a fresh staging run from a new controlled snapshot');
       }
+      // A PostgreSQL repeatable-read snapshot belongs to this source
+      // transaction. Never resume a partial run with a later transaction:
+      // added/deleted source rows would otherwise make one ledger appear to
+      // represent two different snapshots.
+      stageRunCreated = true;
     }
 
     for (const entity of entities) {
@@ -218,25 +294,28 @@ async function main() {
 
     const overallChecksum = sha256(canonicalJson({ counts, checksums }));
     if (target) {
-      await target.query(
+      const completed = await target.query(
         `update migration.runs
             set status = 'staged', source_counts = $2::jsonb,
                 source_checksum_sha256 = $3, notes = $4
           where id = $1 and status = 'running'`,
         [runId, JSON.stringify(counts), overallChecksum, `Entity checksums: ${JSON.stringify(checksums)}`],
       );
+      if (completed.rowCount !== 1) {
+        throw new Error('Staging run state changed before snapshot evidence could be sealed');
+      }
     }
     if (source) await source.query('commit');
     process.stdout.write(`${dryRun ? 'Dry-run source scan' : `Staging run ${runId}`} complete: ${overallChecksum}\n`);
   } catch (error) {
     if (source) await source.query('rollback').catch(() => undefined);
-    if (target) {
+    if (target && stageRunCreated) {
       await target.query(
         `update migration.runs
             set status = case when status = 'blocked' then status else 'failed' end,
                 completed_at = case when status = 'blocked' then completed_at else clock_timestamp() end,
                 notes = case when status = 'blocked' then notes else 'Staging failed; inspect restricted operational logs' end
-          where id = $1`,
+          where id = $1 and status = 'running' and mode = 'stage'`,
         [runId],
       ).catch(() => undefined);
     }
@@ -254,9 +333,18 @@ export async function loadMigrationFixture(path) {
   }
   for (const entity of entities) {
     const rows = parsed[entity.type];
-    if (!Array.isArray(rows)) throw new Error(`Fixture is missing ${entity.type} rows`);
+    // Existing synthetic identity fixtures predate controlled cutover inputs.
+    // They remain usable only with an explicit empty optional category; the
+    // cutover preflight independently refuses a real snapshot that omits its
+    // required nonzero Google/PIN/outreach inventory.
+    if (rows === undefined && optionalFixtureEntityTypes.has(entity.type)) {
+      parsed[entity.type] = [];
+    } else if (!Array.isArray(rows)) {
+      throw new Error(`Fixture is missing ${entity.type} rows`);
+    }
+    const validatedRows = parsed[entity.type];
     let previous = '';
-    for (const row of rows) {
+    for (const row of validatedRows) {
       if (!row || typeof row !== 'object' || typeof row.source_pk !== 'string'
           || !row.source_pk || row.source_pk <= previous
           || !row.payload || Array.isArray(row.payload) || typeof row.payload !== 'object') {
@@ -269,7 +357,7 @@ export async function loadMigrationFixture(path) {
 }
 
 function fixtureRows(fixture, entityType, cursor, limit) {
-  return fixture[entityType].filter((row) => row.source_pk > cursor).slice(0, limit);
+  return (fixture[entityType] ?? []).filter((row) => row.source_pk > cursor).slice(0, limit);
 }
 
 export function summarizeMigrationFixture(fixture) {
@@ -277,10 +365,10 @@ export function summarizeMigrationFixture(fixture) {
   const checksums = {};
   for (const entity of entities) {
     const aggregate = createHash('sha256');
-    for (const row of fixture[entity.type]) {
+    for (const row of fixture[entity.type] ?? []) {
       aggregate.update(`${row.source_pk}:${sha256(canonicalJson(row.payload))}\n`, 'utf8');
     }
-    counts[entity.type] = fixture[entity.type].length;
+    counts[entity.type] = (fixture[entity.type] ?? []).length;
     checksums[entity.type] = aggregate.digest('hex');
   }
   return { counts, checksums, overallChecksum: sha256(canonicalJson({ counts, checksums })) };

@@ -94,6 +94,13 @@ begin
      or pg_has_role('hid_schema_test_runtime', 'hid_api_runtime', 'member') then
     raise exception 'migration and schema-test roles must not inherit the application aggregate';
   end if;
+  if not has_table_privilege('hid_migration_admin', 'migration.source_rows', 'SELECT')
+     or not has_table_privilege('hid_migration_admin', 'migration.source_rows', 'INSERT')
+     or not has_column_privilege('hid_migration_admin', 'migration.source_rows', 'promoted_at', 'UPDATE')
+     or has_column_privilege('hid_migration_admin', 'migration.source_rows', 'payload', 'UPDATE')
+     or has_column_privilege('hid_migration_admin', 'migration.source_rows', 'payload_sha256', 'UPDATE') then
+    raise exception 'migration source ledger is not restricted to append-only staging and promotion marking';
+  end if;
   if pg_has_role('hid_event_dispatcher', 'hid_event_delivery_commands', 'member')
      or pg_has_role('hid_event_delivery_commands', 'hid_event_dispatcher', 'member') then
     raise exception 'event dispatcher must not inherit its security-definer command owner';

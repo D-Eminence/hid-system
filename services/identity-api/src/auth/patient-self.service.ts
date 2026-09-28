@@ -19,6 +19,41 @@ export class PatientSelfService {
   history(request: HidRequest) { return this.read(request, 'access-history'); }
   authorize(request: HidRequest) { return this.read(request, 'authorize'); }
 
+  async setAccessPin(request: HidRequest, pin: string) {
+    const actor = requirePatient(request.actor);
+    await this.database.withSystemTransaction(request.correlationId, async (client) => {
+      // `withSystemTransaction` starts as system:auth. Bind the verified
+      // patient subject explicitly so `patient_self_session` can enforce the
+      // session/subject pair inside the security-definer command.
+      await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);
+      const result = await client.query<{ patient_id: string }>(
+        'select identity.set_my_patient_access_pin($1, $2, $3) as patient_id',
+        [actor.subject, actor.sessionId, pin],
+      );
+      if (!result.rows[0]?.patient_id) {
+        throw new DomainProblem(503, 'PATIENT_PIN_COMMAND_UNAVAILABLE', 'Patient PIN configuration is unavailable');
+      }
+    });
+    // The security-definer command records the durable audit event in the
+    // same transaction as the hash/grant change. Never log or return the PIN.
+    return { configured: true };
+  }
+
+  async revokeAccessPin(request: HidRequest) {
+    const actor = requirePatient(request.actor);
+    await this.database.withSystemTransaction(request.correlationId, async (client) => {
+      await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);
+      const result = await client.query<{ patient_id: string }>(
+        'select identity.revoke_my_patient_access_pin($1, $2) as patient_id',
+        [actor.subject, actor.sessionId],
+      );
+      if (!result.rows[0]?.patient_id) {
+        throw new DomainProblem(503, 'PATIENT_PIN_COMMAND_UNAVAILABLE', 'Patient PIN revocation is unavailable');
+      }
+    });
+    return { revoked: true };
+  }
+
   private async read(request: HidRequest, operation: 'profile' | 'access-history' | 'authorize') {
     const actor = requirePatient(request.actor);
     const functions = {

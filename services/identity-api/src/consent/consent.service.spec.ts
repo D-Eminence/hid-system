@@ -110,4 +110,53 @@ describe('ConsentService', () => {
     })).rejects.toBe(outage);
   });
 
+  it('returns a narrow governed grant only when the database command verifies the PIN', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{
+        verified: true,
+        accessRequestId: '40000000-0000-4000-8000-000000000002',
+        consentGrantId: '40000000-0000-4000-8000-000000000003',
+        patientId: '50000000-0000-4000-8000-000000000002',
+        status: 'active',
+        expiresAt: new Date('2026-09-28T00:15:00.000Z'),
+        existingGrant: false,
+      }],
+    });
+
+    await expect(service.verifyPatientAccessPin(context, {
+      hid: 'HID-ABCDEFGH', pin: '1234', durationMinutes: 15,
+    })).resolves.toMatchObject({
+      status: 'active',
+      patientId: '50000000-0000-4000-8000-000000000002',
+    });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('identity.access_patient_with_pin'),
+      ['HID-ABCDEFGH', '1234', 15],
+    );
+  });
+
+  it('turns failed, locked, unknown, or revoked PIN results into one generic denial', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{
+        verified: false, accessRequestId: null, consentGrantId: null, patientId: null,
+        status: null, expiresAt: null, existingGrant: false,
+      }],
+    });
+    await expect(service.verifyPatientAccessPin(context, {
+      hid: 'HID-ABCDEFGH', pin: '9999', durationMinutes: 15,
+    })).rejects.toMatchObject<Partial<DomainProblem>>({
+      code: 'PATIENT_PIN_ACCESS_DENIED',
+    });
+  });
+
+  it.each(['42501', 'P0001', 'P0002', '22023'])(
+    'does not leak patient scope or authorization failures from PIN verification (%s)',
+    async (code) => {
+      query.mockRejectedValueOnce({ code, detail: 'sensitive target state' });
+      await expect(service.verifyPatientAccessPin(context, {
+        hid: 'HID-ABCDEFGH', pin: '1234', durationMinutes: 15,
+      })).rejects.toMatchObject({ code: 'PATIENT_PIN_ACCESS_DENIED' });
+    },
+  );
+
 });

@@ -90,6 +90,21 @@ describe('TokenService legacy password continuity', () => {
     expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes('insert into auth.sessions'))).toBe(false);
   });
 
+  it('fails closed when an authenticated identity does not map to the resolved account', async () => {
+    const { service, clientQuery } = serviceWithUpgradeResult(true);
+
+    await expect(service.issue({
+      subject: actor.subject,
+      accountId: '50000000-0000-4000-8000-000000000001',
+      email: actor.email ?? '',
+      displayName: actor.displayName ?? '',
+      facilities: [...actor.facilities],
+      authenticationMethod: 'oidc',
+    }, { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ' })).rejects.toBeInstanceOf(UnauthorizedException);
+
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes('insert into auth.sessions'))).toBe(false);
+  });
+
   it('only accepts refresh sessions for a currently active, unsuspended account at the current token version', async () => {
     const query = jest.fn(async (_sql: string, _values?: readonly unknown[]) => ({ rows: [], rowCount: 0 }));
     const database = { query } as unknown as DatabaseService;

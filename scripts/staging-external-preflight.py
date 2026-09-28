@@ -23,7 +23,7 @@ HOSTS = ["staging." + DOMAIN] + [f"{app}.staging.{DOMAIN}" for app in
     ["ehr", "lab", "pharmacy", "ocr", "outreach", "admin", "updates", "api"]]
 SECRET_FIELDS = {
     "/hid/staging/auth": ["authSigningSecret", "authLoginPepper"],
-    "/hid/staging/identity-sensitive": ["otpHmacKeyB64", "turnstileSecretKey"],
+    "/hid/staging/identity-sensitive": ["otpHmacKeyB64", "turnstileSecretKey", "googleOidcClientIds"],
     "/hid/staging/notification-provider": ["sesFromAddress", "novuApiKey"],
 }
 

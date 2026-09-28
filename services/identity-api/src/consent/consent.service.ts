@@ -5,6 +5,7 @@ import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import type { CreateBreakGlassDto } from './dto/create-break-glass.dto';
+import type { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
 
 export interface AccessRequestRow extends QueryResultRow {
   accessRequestId: string;
@@ -32,6 +33,25 @@ export interface ClosedGrantRow extends QueryResultRow {
   status: 'revoked';
   closedAt: Date;
   alreadyClosed: boolean;
+}
+
+interface PatientPinAccessRow extends QueryResultRow {
+  verified: boolean;
+  accessRequestId: string | null;
+  consentGrantId: string | null;
+  patientId: string | null;
+  status: 'active' | null;
+  expiresAt: Date | null;
+  existingGrant: boolean;
+}
+
+export interface VerifiedPatientPinAccess {
+  accessRequestId: string;
+  consentGrantId: string;
+  patientId: string;
+  status: 'active';
+  expiresAt: Date;
+  existingGrant: boolean;
 }
 
 @Injectable()
@@ -82,6 +102,50 @@ export class ConsentService {
     }
   }
 
+  /**
+   * The function commits a non-disclosing denial/audit/rate-limit result for
+   * every failed verification. Convert that result to one generic API error
+   * only after the transaction commits, so an attacker cannot distinguish an
+   * unknown HID, absent/revoked PIN, malformed secret, or a locked window.
+   */
+  async verifyPatientAccessPin(
+    context: DataAccessContext,
+    input: VerifyPatientAccessPinDto,
+  ): Promise<VerifiedPatientPinAccess> {
+    let row: PatientPinAccessRow;
+    try {
+      row = await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<PatientPinAccessRow>(
+          'select verified, access_request_id as "accessRequestId", '
+          + 'consent_grant_id as "consentGrantId", subject_patient_id as "patientId", '
+          + 'grant_status as status, expires_at as "expiresAt", '
+          + 'existing_grant as "existingGrant" '
+          + 'from identity.access_patient_with_pin($1, $2, $3)',
+          [input.hid, input.pin, input.durationMinutes ?? 15],
+        );
+        return this.requireRow(result.rows[0]);
+      });
+    } catch (error) {
+      throw this.translatePatientPin(error);
+    }
+    if (!row.verified
+      || !row.accessRequestId
+      || !row.consentGrantId
+      || !row.patientId
+      || row.status !== 'active'
+      || !row.expiresAt) {
+      throw this.patientPinDenied();
+    }
+    return {
+      accessRequestId: row.accessRequestId,
+      consentGrantId: row.consentGrantId,
+      patientId: row.patientId,
+      status: row.status,
+      expiresAt: row.expiresAt,
+      existingGrant: row.existingGrant,
+    };
+  }
+
   async closeOwnGrant(context: DataAccessContext, grantId: string, reason: string) {
     try {
       return await this.database.withTransaction(context, async (client) => {
@@ -128,6 +192,18 @@ export class ConsentService {
       default:
         return error;
     }
+  }
+
+  private translatePatientPin(error: unknown): unknown {
+    if (error instanceof DomainProblem) return error;
+    if (isDatabaseError(error) && ['42501', 'P0001', 'P0002', '22023', '22P02', '23514'].includes(error.code)) {
+      return this.patientPinDenied();
+    }
+    return error;
+  }
+
+  private patientPinDenied(): DomainProblem {
+    return new DomainProblem(403, 'PATIENT_PIN_ACCESS_DENIED', 'Patient access could not be verified');
   }
 }
 

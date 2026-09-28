@@ -2,7 +2,8 @@ import { EventContractFailure, type ClaimedEvent, type EventProducer,
   type HidEventEnvelopeV1 } from './types';
 
 const EVENT_TYPES: Readonly<Record<EventProducer, ReadonlySet<string>>> = {
-  identity: new Set(['PatientRegistered', 'PatientIdentifierAdded', 'PatientIdentityResolved', 'EmergencyAccessActivated']),
+  identity: new Set(['PatientRegistered', 'PatientIdentifierAdded', 'PatientIdentityResolved',
+    'EmergencyAccessActivated', 'PatientAccessPinVerified']),
   ocr: new Set(['OcrJobQueued', 'OcrProcessingStarted', 'OcrExtractionCreated',
     'OcrAwaitingValidation', 'OcrValidated', 'OcrValidationRejected', 'OcrFailed',
     'OcrJobCancelled', 'OcrPatientConfirmed', 'OcrPublicationRequested',
@@ -63,12 +64,12 @@ export function eventEnvelope(event: ClaimedEvent): HidEventEnvelopeV1 {
       throw new EventContractFailure('EVENT_PAYLOAD_POLICY_REJECTED', 'Event payload contains a field outside its producer contract');
     }
   }
-  if (event.eventType === 'EmergencyAccessActivated'
+  if ((event.eventType === 'EmergencyAccessActivated' || event.eventType === 'PatientAccessPinVerified')
       && (event.aggregateType !== 'identity-consent-grant' || event.aggregateVersion !== 1
         || event.patientId === null || event.facilityId === null
         || Object.keys(event.payload).length !== 2
         || event.payload.consentGrantId !== event.aggregateId || event.payload.reviewRequired !== true)) {
-    throw new EventContractFailure('INVALID_EVENT_ENVELOPE', 'Emergency notification contract is invalid');
+    throw new EventContractFailure('INVALID_EVENT_ENVELOPE', 'Consent-grant notification contract is invalid');
   }
   validateRecursively(event.payload, 0);
   return Object.freeze({ schema: 'ng.hid.event-envelope', schemaVersion: 1,

@@ -75,6 +75,14 @@ function migration(label, script, db = database, extra = {}, expected = 0, flags
     // Public test vectors, never operational secrets; not retained as key files.
     MIGRATION_FIELD_ENCRYPTION_KEY_B64: Buffer.alloc(32, 0x11).toString('base64'),
     MIGRATION_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 0x22).toString('base64'),
+    // Every source in this rehearsal is a locally generated fixture, whose
+    // stage run records a `fixture:` transaction marker. Keep production's
+    // 39/6/4/2 cutover expectations intact while making this deliberately
+    // minimal fixture's empty optional categories explicit to the gate.
+    CUTOVER_EXPECTED_PIN_COUNT: '0',
+    CUTOVER_EXPECTED_GOOGLE_COUNT: '0',
+    CUTOVER_EXPECTED_PLANNED_CAMPAIGN_COUNT: '0',
+    CUTOVER_EXPECTED_QUEUED_ENCOUNTER_COUNT: '0',
     ...extra,
   }, expected);
 }
@@ -239,6 +247,16 @@ try {
     assert.deepEqual((await client.query(`select registration_case_id,emergency_grant_id from identity.outbox_events
       where aggregate_id='c3000000-0000-4000-8000-000000000001'`)).rows[0],
       {registration_case_id:'c3000000-0000-4000-8000-000000000001',emergency_grant_id:null});
+    assert.deepEqual((await client.query(`select code, active from auth.permissions
+      where code='identity.patient-access-pin.verify'`)).rows,
+    [{ code:'identity.patient-access-pin.verify', active:true }]);
+    assert.deepEqual((await client.query(`select role_code, permission_code from auth.role_permissions
+      where permission_code='identity.patient-access-pin.verify' order by role_code`)).rows,
+    [
+      { role_code:'clinician', permission_code:'identity.patient-access-pin.verify' },
+      { role_code:'doctor', permission_code:'identity.patient-access-pin.verify' },
+      { role_code:'nurse', permission_code:'identity.patient-access-pin.verify' },
+    ]);
     await client.query('begin');
     try {
       await client.query('set local role hid_identity_api_runtime');
@@ -251,7 +269,10 @@ try {
     } finally { await client.query('rollback'); }
   });
   const upgradeAfter = await snapshot('hid_upgrade');
-  const expectedChanged = new Set(['migration.schema_migrations','auth.sessions','auth.otp_challenges','identity.outbox_events']);
+  const expectedChanged = new Set([
+    'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
+    'auth.permissions', 'auth.role_permissions',
+  ]);
   for (const [name, value] of Object.entries(upgradeBefore)) {
     if (!expectedChanged.has(name)) assert.deepEqual(upgradeAfter[name], value, `Upgrade changed historical ${name}`);
   }

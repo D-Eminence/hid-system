@@ -75,11 +75,12 @@ this section supersedes its authentication, implementation and secret-change sta
   break-glass scope authorizing record reads, fresh grant checks, expiry/revocation, ten new activations per
   account per hour, and atomic `EmergencyAccessActivated.v1` outbox/notification intent.
   Provider acceptance or delivery is not inferred from an outbox row or grant history.
-- **Database:** additive migrations 0029–0032 and corresponding runtime-role/RLS tests;
+- **Database:** additive migrations 0029–0033 and corresponding runtime-role/RLS tests;
   all historical 0001–0028 hashes remain unchanged. Release schema/ledger now require
-  32 migrations. Clean apply, existing-0028 upgrade, transactional dry run, repeat apply,
+  33 migrations. Clean apply, existing-0028 upgrade, transactional dry run, repeat apply,
   backup/restore, exact-role HTTP journeys, non-superuser/non-bypass command ownership,
-  audit failures and negative authorization paths passed against disposable PostgreSQL.
+  audit failures, patient-PIN/cutover staging-integrity, and negative authorization paths
+  passed against disposable PostgreSQL.
 - **Staging infrastructure:** ECR/Logs endpoint and migration egress repairs, correct
   exact-bucket readiness IAM, certificate/CloudFormation quota guards, and a KMS ES256
   workload issuer with IAM-authenticated issuance. Six non-root sidecars rotate
