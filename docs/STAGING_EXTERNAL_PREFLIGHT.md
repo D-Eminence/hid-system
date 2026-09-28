@@ -32,7 +32,7 @@ and region `eu-west-1`. A different STS account stops all subsequent AWS reads.
 Only the three existing `/hid/staging/auth`, `/hid/staging/identity-sensitive`
 and `/hid/staging/notification-provider` secret names are read, plus SES account
 status. No production secret or resource is requested. Optional Termii, Meta and
-Infobip fields are not required by this email-only staging check.
+Brevo fields are not required by this email-only staging check.
 
 The Cloudflare account/zone are pinned to `20c809ffe35ccb2c240d19a664dff97a` /
 `69d385b9f6a3233a7113c525524f14fe`. Zone/account mismatch stops further reads.
@@ -58,23 +58,21 @@ python3 -m unittest discover -s scripts/tests -p test_staging_external_preflight
 
 ## NIN contract intake — deferred after staging
 
-[The intake template](../release/config/staging-nin-contract.template.json) now
-records confirmed MetaMap GovChecks v1 / OpenAPI document 1.4, the documented NIN
-and OAuth endpoints, and the remaining standalone callback gaps. The supplied
-Client ID is already in private local configuration; do not request it again.
-[The MetaMap contract review](METAMAP_NIN_CONTRACT.md) identifies the exact
-provider clarification needed, prepared transport/signature code and local secret
-entry tool for post-staging activation. Staging uses explicit deferred mode; NIN
-is excluded from deployment/acceptance gates and requires no Client Secret. The
-preflight does not read the MetaMap secret or require NIN HMAC/encryption fields.
-Existing NIN material remains preserved. An HTTP acknowledgment is not identity verification.
+The [intake template](../release/config/staging-nin-contract.template.json) records
+the selected QoreID references for future NIN and CAC work without treating them
+as an approved HID wire contract. [The QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md)
+lists the unresolved authentication, result-assurance, callback, privacy, and
+CAC-domain design work. Staging uses explicit deferred mode; NIN is excluded from
+deployment/acceptance gates and requires no provider credential. The preflight
+does not read a QoreID secret or require NIN HMAC/encryption fields. Existing NIN
+material remains preserved. An HTTP acknowledgment is not identity verification.
 
 Do not put API keys, tokens, raw NINs or identity documents into the intake. A
 staging secret reference identifies secure storage; its value is not an intake
-field. The designated location is `/hid/staging/nin-metamap`; no secret has been
-created or populated. MetaMap trial entitlement, NIN charges and any account
-verification requirements are post-staging work. No MetaMap account, contract,
-credential or other NIN input is requested for current staging.
+field. No QoreID secret location is designated until the approved authentication
+contract and secret-management design exist. QoreID entitlement, NIN/CAC charges
+and any account-verification requirements are post-staging work. No QoreID
+account, credential, or NIN/CAC input is requested for current staging.
 
 ## Delivery and final deployment preparation
 
@@ -82,7 +80,7 @@ Use [the provider account matrix](STAGING_PROVIDER_ACCOUNTS.md) before creating
 any notification account. Staging email OTP requires SES; the implemented
 emergency notification worker requires Novu plus an approved workflow/channel
 and canonical subscriber/contact mapping. Termii and Meta are optional channels;
-Infobip is an optional fallback. UI grant history is not delivery evidence.
+Brevo is an optional fallback. UI grant history is not delivery evidence.
 
 After provider authorization, Codex checks field presence, SES verification and
 sandbox restrictions, Novu workflows/subscriber mapping and channel configuration

@@ -66,7 +66,10 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.throws(() => environmentConfig('production', 'sleep'), /valid only/);
   assert.equal(environmentConfig('staging', 'economy').publicApiSubdomain, 'api.staging');
   assert.deepEqual(environmentConfig('staging', 'economy').browserSubdomains, [
-    'staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'ocr.staging', 'outreach.staging', 'admin.staging',
+    'staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'migrate.staging', 'outreach.staging', 'admin.staging',
+  ]);
+  assert.deepEqual(environmentConfig('production').browserSubdomains, [
+    'www', 'ehr', 'lab', 'pharmacy', 'migrate', 'outreach', 'admin',
   ]);
 });
 
@@ -307,7 +310,7 @@ test('ordinary notifications have one selected EventBridge route and encrypted S
 });
 
 test('the canonical seven browser roots remain explicit', () => {
-  assert.deepEqual(browserPaths, ['/', '/ehr/', '/lab/', '/pharmacy/', '/ocr/', '/outreach/', '/admin/']);
+  assert.deepEqual(browserPaths, ['/', '/ehr/', '/lab/', '/pharmacy/', '/migrate/', '/outreach/', '/admin/']);
   assert.equal(browserPaths.length, 7);
 });
 
@@ -425,7 +428,7 @@ test('staging NIN is deferred in every profile without provider or NIN-key start
     assert.ok(names.includes('GOOGLE_OIDC_CLIENT_IDS'));
     assert.equal(environment.IDENTITY_SERVICE_IDENTITY_MODE, 'jwt');
     assert.equal(environment.TURNSTILE_MODE, 'required');
-    assert.doesNotMatch(JSON.stringify(api), /METAMAP|metamap/);
+    assert.doesNotMatch(JSON.stringify(api), /METAMAP|metamap|QOREID|qoreid/);
   }
 });
 
@@ -443,7 +446,7 @@ test('staging email OTP injects only its SES sender while ordinary delivery reta
   for (const template of [stagingRegional, fidelityRegional, sleepRegional]) {
     const api = container(template, 'notification-api');
     assert.match(String(template.Parameters.NotificationProviderSecretArn!.Description), /sesFromAddress and novuApiKey/);
-    assert.doesNotMatch(String(template.Parameters.NotificationProviderSecretArn!.Description), /Termii|Meta|Infobip/);
+    assert.doesNotMatch(String(template.Parameters.NotificationProviderSecretArn!.Description), /Termii|Meta|Brevo/);
     const environment = Object.fromEntries(api.Environment.map(item => [item.Name, item.Value]));
     assert.equal(environment.NODE_ENV, 'production');
     assert.equal(environment.HID_DEPLOYMENT_ENV, 'staging');
@@ -452,7 +455,7 @@ test('staging email OTP injects only its SES sender while ordinary delivery reta
     assert.equal(environment.NOTIFICATION_DELIVERY_PROFILE, 'email-only');
     assert.deepEqual(api.Secrets.map(item => item.Name), ['SES_FROM_ADDRESS']);
     assert.match(JSON.stringify(api.Secrets[0]!.ValueFrom), /sesFromAddress/);
-    assert.doesNotMatch(JSON.stringify(api), /TERMII|META_|INFOBIP|termiiApiKey|metaAccessToken|infobipApiKey/);
+    assert.doesNotMatch(JSON.stringify(api), /TERMII|META_|BREVO|termiiApiKey|metaAccessToken|brevoApiKey/);
     const worker = container(template, 'notification-worker');
     const workerEnvironment = Object.fromEntries(worker.Environment.map(item => [item.Name, item.Value]));
     assert.equal(workerEnvironment.NOVU_MODE, 'live');
@@ -462,7 +465,7 @@ test('staging email OTP injects only its SES sender while ordinary delivery reta
   const productionEnvironment = Object.fromEntries(productionApi.Environment.map(item => [item.Name, item.Value]));
   assert.equal(productionEnvironment.NOTIFICATION_DELIVERY_PROFILE, undefined);
   assert.equal(productionEnvironment.HID_DEPLOYMENT_ENV, undefined);
-  for (const name of ['SES_FROM_ADDRESS', 'TERMII_API_KEY', 'META_ACCESS_TOKEN', 'INFOBIP_API_KEY']) {
+  for (const name of ['SES_FROM_ADDRESS', 'TERMII_API_KEY', 'META_ACCESS_TOKEN', 'BREVO_API_KEY']) {
     assert.ok(productionApi.Secrets.some(item => item.Name === name));
   }
 });

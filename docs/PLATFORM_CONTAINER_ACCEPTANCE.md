@@ -70,7 +70,7 @@ Evidence labels in this report are exclusive: `LOCALLY EXECUTED`, `STATICALLY VE
 | EHR | `apps/ehr` | `gateway/Dockerfile` | repository root | locked EHR static build | shared Nginx | 3000 `/ehr/` | gateway health | `101` | canonical static artifact in gateway | STATICALLY VERIFIED |
 | Lab | `apps/lab` | `gateway/Dockerfile` | repository root | locked Lab static build | shared Nginx | 3000 `/lab/` | gateway health | `101` | Vite static build in gateway | STATICALLY VERIFIED |
 | Pharmacy | `apps/pharmacy` | `gateway/Dockerfile` | repository root | locked Pharmacy static build | shared Nginx | 3000 `/pharmacy/` | gateway health | `101` | Vite static build in gateway | STATICALLY VERIFIED |
-| OCR | `apps/ocr` | `gateway/Dockerfile` | repository root | locked OCR static build | shared Nginx | 3000 `/ocr/` | gateway health | `101` | Vite static build in gateway | STATICALLY VERIFIED |
+| Migrate | `apps/ocr` | `gateway/Dockerfile` | repository root | locked Migrate static build | shared Nginx | 3000 `/migrate/` | gateway health | `101` | Vite static build in gateway | STATICALLY VERIFIED |
 | Outreach | `apps/outreach` | `gateway/Dockerfile` | repository root | locked Outreach static build | shared Nginx | 3000 `/outreach/` | gateway health | `101` | Vite static build in gateway | STATICALLY VERIFIED |
 | Admin | `apps/admin` | `gateway/Dockerfile` | repository root | locked Admin static build | shared Nginx | 3000 `/admin/` | gateway health | `101` | Vite static build in gateway | STATICALLY VERIFIED |
 | Gateway | `gateway` | `gateway/Dockerfile` | repository root | seven locked frontend builds | unprivileged Nginx | 3000 | `/gateway-health/live`, `/ready` | `101` | multi-stage static host/reverse proxy | STATICALLY VERIFIED |
@@ -100,7 +100,7 @@ All eight host builds were also run by root `npm run build`: `LOCALLY EXECUTED`.
 | EHR | canonical standalone/static output built by Vite tooling | `/ehr/` | LOCALLY EXECUTED | STATICALLY VERIFIED |
 | Lab | React/Vite static output | `/lab/` | LOCALLY EXECUTED | STATICALLY VERIFIED |
 | Pharmacy | React/Vite static output | `/pharmacy/` | LOCALLY EXECUTED | STATICALLY VERIFIED |
-| OCR | React/Vite static output | `/ocr/` | LOCALLY EXECUTED | STATICALLY VERIFIED |
+| Migrate | React/Vite static output | `/migrate/` | LOCALLY EXECUTED | STATICALLY VERIFIED |
 | Outreach | React/Vite static output | `/outreach/` | LOCALLY EXECUTED | STATICALLY VERIFIED |
 | Admin | React/Vite static output | `/admin/` | LOCALLY EXECUTED | STATICALLY VERIFIED |
 
@@ -110,7 +110,7 @@ All eight host builds were also run by root `npm run build`: `LOCALLY EXECUTED`.
 
 | Item | Evidence | Status |
 |---|---|---|
-| Seven UI roots and slash redirects | Nginx template owns `/`, `/ehr/`, `/lab/`, `/pharmacy/`, `/ocr/`, `/outreach/`, `/admin/` | STATICALLY VERIFIED |
+| Seven UI roots and slash redirects | Local gateway owns `/`, `/ehr/`, `/lab/`, `/pharmacy/`, `/migrate/`, `/outreach/`, `/admin/` | STATICALLY VERIFIED |
 | API ownership | Identity owns auth/identity/audit/admin; EHR owns ehr and legacy `/api` fallback; Lab, Pharmacy, OCR, Outreach own exact prefixes | STATICALLY VERIFIED |
 | Dispatcher exposure | No browser route to 3010 | STATICALLY VERIFIED |
 | Forwarding boundary | Host/proto/forwarded-for are overwritten; Origin, CSRF, and correlation are explicitly relayed | STATICALLY VERIFIED |
@@ -325,7 +325,7 @@ Chrome transport was genuinely blocked through DevTools. Because headless Chrome
 | EHR | `http://127.0.0.1:3101/ehr/` | 3 | 0 | LOCALLY EXECUTED |
 | Lab | `http://127.0.0.1:3102/lab/` | 3 | 0 | LOCALLY EXECUTED |
 | Pharmacy | `http://127.0.0.1:3103/pharmacy/` | 3 | 0 | LOCALLY EXECUTED |
-| OCR | `http://127.0.0.1:3105/ocr/` | 3 | 0 | LOCALLY EXECUTED |
+| Migrate | `http://127.0.0.1:3105/migrate/` | 3 | 0 | LOCALLY EXECUTED |
 | Outreach | `http://127.0.0.1:3104/outreach/` | 6 | 0 | LOCALLY EXECUTED |
 | Admin | `http://127.0.0.1:3106/admin/` | 3 | 0 | LOCALLY EXECUTED |
 
@@ -353,7 +353,7 @@ The telemetry verifier and 311-test aggregate execute event/property allowlists,
 | Check | Result | Status |
 |---|---|---|
 | Browser/version | Google Chrome 150, clean temporary profile | LOCALLY EXECUTED |
-| Routes | `/patient`, `/ehr/acceptance-refresh`, `/lab/acceptance-refresh`, `/pharmacy/prescriptions`, `/ocr/jobs`, `/outreach/login`, `/admin/facilities` | LOCALLY EXECUTED |
+| Routes | `/patient`, `/ehr/acceptance-refresh`, `/lab/acceptance-refresh`, `/pharmacy/prescriptions`, `/migrate/jobs`, `/outreach/login`, `/admin/facilities` | LOCALLY EXECUTED |
 | Render | seven meaningful shells, no blank root or EHR bundler error | LOCALLY EXECUTED |
 | Direct refresh | all seven routes reloaded under service-worker control | LOCALLY EXECUTED |
 | Offline reload | all seven cached shells rendered with visible offline state | LOCALLY EXECUTED |

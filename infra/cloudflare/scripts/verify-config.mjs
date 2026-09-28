@@ -92,7 +92,7 @@ const applications = [
   ['hid-ehr', 'ehr', 'ehr.healthidentitydirectory.com', 'ehr.staging.healthidentitydirectory.com'],
   ['hid-lab', 'lab', 'lab.healthidentitydirectory.com', 'lab.staging.healthidentitydirectory.com'],
   ['hid-pharmacy', 'pharmacy', 'pharmacy.healthidentitydirectory.com', 'pharmacy.staging.healthidentitydirectory.com'],
-  ['hid-ocr', 'ocr', 'ocr.healthidentitydirectory.com', 'ocr.staging.healthidentitydirectory.com'],
+  ['hid-ocr', 'ocr', 'migrate.healthidentitydirectory.com', 'migrate.staging.healthidentitydirectory.com'],
   ['hid-outreach', 'outreach', 'outreach.healthidentitydirectory.com', 'outreach.staging.healthidentitydirectory.com'],
   ['hid-admin', 'admin', 'admin.healthidentitydirectory.com', 'admin.staging.healthidentitydirectory.com'],
 ]
@@ -131,8 +131,18 @@ for (const [worker, app, productionHost, stagingHost] of applications) {
 
   const dist = resolve(root, 'apps', app, 'dist')
   const html = await readFile(resolve(dist, 'index.html'), 'utf8')
-  assert.match(html, /(?:src|href)="\/assets\//, `${app} Cloudflare artifact must load assets from its host root`)
-  if (app !== 'web') {
+  const publicBase = '/'
+  const assetPrefix = publicBase === '/' ? '/assets/' : `${publicBase}assets/`
+  assert.ok(html.includes(`src="${assetPrefix}`) || html.includes(`href="${assetPrefix}`),
+    `${app} Cloudflare artifact must load assets from ${publicBase}`)
+  if (app === 'ocr') {
+    assert.match(
+      html,
+      /rel="canonical" href="https:\/\/migrate\.healthidentitydirectory\.com\/"/,
+      'Migrate Cloudflare artifact must retain its canonical hostname-root URL',
+    )
+  }
+  if (app !== 'web' && app !== 'ocr') {
     assert.doesNotMatch(
       html,
       new RegExp(`(?:src|href)=["']\\/${app}\\/`),
@@ -143,8 +153,9 @@ for (const [worker, app, productionHost, stagingHost] of applications) {
   const manifest = JSON.parse(await readFile(resolve(dist, 'manifest.webmanifest'), 'utf8'))
   for (const host of [productionHost, stagingHost]) {
     const hostRoot = new URL(`https://${host}/`)
-    assert.equal(new URL(manifest.scope, hostRoot).pathname, '/', `${app} manifest scope must resolve to its host root`)
-    assert.equal(new URL(manifest.start_url, hostRoot).pathname, '/', `${app} manifest start URL must resolve to its host root`)
+    const appBase = new URL(publicBase, hostRoot)
+    assert.equal(new URL(manifest.scope, appBase).pathname, publicBase, `${app} manifest scope must resolve to ${publicBase}`)
+    assert.equal(new URL(manifest.start_url, appBase).pathname, publicBase, `${app} manifest start URL must resolve to ${publicBase}`)
   }
   await access(resolve(dist, 'service-worker.js'))
 }
@@ -157,6 +168,27 @@ assert.equal(apex.routes, undefined)
 assert.deepEqual(Object.keys(apex.env), ['production'])
 assert.equal(apex.env.production.name, 'hid-apex-redirect-production')
 assert.deepEqual(apex.env.production.routes, [{ pattern: 'healthidentitydirectory.com', custom_domain: true }])
+
+const { raw: legacyOcrRedirectRaw, value: legacyOcrRedirect } = await readStrictJson(
+  resolve(cloudflareRoot, 'workers', 'hid-ocr-redirect', 'wrangler.json'),
+  'hid-ocr-redirect Wrangler configuration',
+)
+assert.equal(legacyOcrRedirect.name, 'hid-ocr-redirect')
+assert.equal(legacyOcrRedirect.main, '../../src/legacy-ocr-domain-redirect-worker.mjs')
+assert.equal(legacyOcrRedirect.routes, undefined)
+assert.equal(legacyOcrRedirect.vars, undefined)
+assert.equal(legacyOcrRedirect.assets, undefined)
+assert.deepEqual(Object.keys(legacyOcrRedirect.env).sort(), ['production', 'staging'])
+for (const [deployment, expectedHost, targetOrigin] of [
+  ['production', 'ocr.healthidentitydirectory.com', 'https://migrate.healthidentitydirectory.com'],
+  ['staging', 'ocr.staging.healthidentitydirectory.com', 'https://migrate.staging.healthidentitydirectory.com'],
+]) {
+  const environment = legacyOcrRedirect.env[deployment]
+  assert.equal(environment.name, `hid-ocr-redirect-${deployment}`)
+  assert.deepEqual(environment.routes, [{ pattern: expectedHost, custom_domain: true }])
+  assert.deepEqual(environment.vars, { DEPLOYMENT_ENV: deployment, EXPECTED_HOST: expectedHost, TARGET_ORIGIN: targetOrigin })
+}
+assert.doesNotMatch(legacyOcrRedirectRaw, /ORIGIN_AUTH_TOKEN/, 'legacy redirect must not require an API-origin secret')
 
 const tufDeployments = Object.freeze({
   staging: 'updates.staging.healthidentitydirectory.com',
@@ -205,5 +237,5 @@ assert.match(ignore, /hid-tuf-staging\/repository\//)
 assert.match(ignore, /hid-tuf-production\/repository\//)
 
 process.stdout.write(
-  'Cloudflare configuration verified: seven isolated production/staging frontend Workers, one production apex redirect, two isolated TUF repository Workers, and the pinned local Wrangler schema/toolchain.\n',
+  'Cloudflare configuration verified: seven isolated production/staging frontend Workers, one legacy OCR-domain redirect per environment, one production apex redirect, two isolated TUF repository Workers, and the pinned local Wrangler schema/toolchain.\n',
 )

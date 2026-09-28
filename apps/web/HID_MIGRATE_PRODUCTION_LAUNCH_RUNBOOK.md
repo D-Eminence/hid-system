@@ -1,5 +1,9 @@
 # HID Migrate controlled production launch runbook
 
+> Historical prototype record — retired 2026-09-28. This is not an approved
+> launch runbook for the active Migrate product. See
+> [`../../docs/MIGRATE_CONSOLIDATION.md`](../../docs/MIGRATE_CONSOLIDATION.md).
+
 Status: launch preparation only. Production deployment is not authorized.
 
 ## Mandatory approvals

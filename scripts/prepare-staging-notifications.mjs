@@ -14,7 +14,7 @@ const localRoot = resolve(import.meta.dirname, '../release/local');
 const account = '659225405023', region = 'eu-west-1';
 const hosts = { us: 'https://api.novu.co', eu: 'https://eu.api.novu.co' };
 export const workflowEvents = Object.freeze({
-  'patient-update-v1': ['EmergencyAccessActivated', 'LabResultReleased', 'MedicationDispensed'],
+  'patient-update-v1': ['EmergencyAccessActivated', 'PatientAccessPinVerified', 'LabResultReleased', 'MedicationDispensed'],
   'identity-registration-update-v1': ['PatientRegistered'],
   'identity-resolution-update-v1': ['PatientIdentityResolved', 'OutreachPatientResolved'],
   'document-update-v1': ['OcrPublicationSucceeded'],
@@ -110,7 +110,7 @@ export function planStagingNotifications(input, journey) {
       'Set the existing staging template parameter StagingNovuApiUrl to the confirmed Novu API URL',
       'Require applied AWS capacity, release admission and all staging deployment gates before deployment',
       'Perform each approved message test only after its service, identity and delivery prerequisites pass'],
-    provider_classification: { AWS_SES: 'REQUIRED', Novu: 'REQUIRED', Termii: 'OPTIONAL', Meta_WhatsApp: 'OPTIONAL', Infobip: 'FALLBACK' },
+    provider_classification: { AWS_SES: 'REQUIRED', Novu: 'REQUIRED', Termii: 'OPTIONAL', Meta_WhatsApp: 'OPTIONAL', Brevo: 'FALLBACK' },
   };
 }
 

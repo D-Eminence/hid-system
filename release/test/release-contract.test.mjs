@@ -165,6 +165,12 @@ function buildBundle(environment, sequence, stagingBundle) {
         hostname: environmentConfig.apex_redirect.hostname,
         destination_origin: environmentConfig.apex_redirect.destination_origin,
       },
+      legacy_ocr_redirect: {
+        name: environmentConfig.legacy_ocr_redirect.worker,
+        script: target(environment, id, 'edge/legacy-ocr-domain-redirect-worker.mjs', MEDIA.worker, 2048),
+        hostname: environmentConfig.legacy_ocr_redirect.hostname,
+        destination_origin: environmentConfig.legacy_ocr_redirect.destination_origin,
+      },
     },
     migration: {
       image_component: 'database-migration',
@@ -259,6 +265,18 @@ test('machine configuration and exact-bound staging admission produce a determin
   assert.match(plan.plan_sha256, /^[a-f0-9]{64}$/)
   assert.deepEqual(plan, deriveDeploymentPlan(stagingBundle, configuration))
   assert.equal(new Set(plan.verified_targets.map(({ path }) => path)).size, plan.verified_targets.length)
+})
+
+test('release plans bind the legacy OCR hostname to the paired Migrate origin', () => {
+  assert.equal(admitReleaseBundle(stagingBundle, configuration, expectations(stagingBundle)), true)
+  const plan = deriveDeploymentPlan(stagingBundle, configuration)
+  assert.deepEqual(plan.cloudflare.legacy_ocr_redirect, {
+    name: 'hid-ocr-redirect-staging',
+    script: target('staging', stagingBundle.release.id, 'edge/legacy-ocr-domain-redirect-worker.mjs', MEDIA.worker, 2048),
+    hostname: 'ocr.staging.healthidentitydirectory.com',
+    destination_origin: 'https://migrate.staging.healthidentitydirectory.com',
+  })
+  assert.ok(plan.verified_targets.some(({ path }) => path.endsWith('/edge/legacy-ocr-domain-redirect-worker.mjs')))
 })
 
 test('bundle admission rejects caller/bundle identity confusion and post-attestation mutation', () => {

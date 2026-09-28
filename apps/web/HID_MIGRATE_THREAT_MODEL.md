@@ -1,5 +1,10 @@
 # HID Migrate threat model
 
+> Historical prototype record — retired 2026-09-28. The former Web prototype
+> and its planned storage/worker contracts are not active. The current
+> OCR-backed Migrate boundary is documented in
+> [`../../docs/MIGRATE_CONSOLIDATION.md`](../../docs/MIGRATE_CONSOLIDATION.md).
+
 Status: implementation baseline; must be reviewed before real-data staging.
 
 ## Protected assets

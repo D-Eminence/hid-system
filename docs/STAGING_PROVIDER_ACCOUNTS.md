@@ -6,12 +6,12 @@ not a record of account creation, payment, message delivery or staging acceptanc
 No provider account was created, no person was contacted and no message was sent
 during this research.
 
-**2026-09-11 NIN update:** MetaMap is confirmed for NIN verification and is separate
-from Meta WhatsApp below. **MetaMap is deferred after staging**, requires no current
-credential/account action, and does not block staging. Trial entitlement and its
-standalone callback contract are future activation requirements. Exact configuration, payment
-uncertainty, minimum authority and secure secret entry are in
-[MetaMap NIN contract review](METAMAP_NIN_CONTRACT.md). The notification
+**NIN/CAC update:** QoreID is selected for future NIN and CAC verification and is
+separate from Meta WhatsApp below. **QoreID is deferred after staging**, requires
+no current credential/account action, and does not block staging. An approved
+authentication/result contract, entitlement, and a CAC organization-lifecycle
+design are future activation requirements. See the
+[QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md). The notification
 classifications below remain unchanged.
 
 ## What is required for the current staging scope
@@ -21,7 +21,7 @@ only**. The intended staging configuration therefore requires **SES for OTP,
 Novu for asynchronous emergency notifications, and Turnstile for browser security
 checks**. Reuse the existing AWS and Cloudflare accounts. Create a dedicated Novu
 staging organization/environment only if one is not already available. **Do not
-create Termii, Meta WhatsApp or Infobip accounts for this acceptance scope.**
+create Termii, Meta WhatsApp or Brevo accounts for this acceptance scope.**
 
 The staging-only `NOTIFICATION_DELIVERY_PROFILE=email-only` correction now removes
 unused provider startup requirements and ECS secret-field injection. Notification
@@ -36,7 +36,7 @@ is unchanged. Live staging deployment and delivery remain unverified.
 | Existing Cloudflare account, staging Turnstile widget | REQUIRED: live protected browser flows | Real Siteverify acceptance and hostname/action/replay rejection |
 | Termii Messaging API | OPTIONAL: SMS is outside the active acceptance journey | SMS delivery only after explicit channel activation and adapter verification |
 | Meta WhatsApp Cloud API | OPTIONAL: WhatsApp is outside the active acceptance journey | Approved authentication-template delivery only after activation |
-| Infobip channel APIs | FALLBACK: optional activation; disabled in current staging profile | The selected channel's fallback delivery and failure handling |
+| Brevo Messaging API | FALLBACK: optional activation; disabled in current staging profile | The selected channel's fallback delivery and failure handling |
 
 None of these five integrations is classified REDUNDANT in the full existing
 implementation: each has a distinct primary-channel, orchestration or fallback role.
@@ -120,7 +120,7 @@ these exact workflow identifiers:
 
 | Workflow identifier | Version-1 domain events |
 | --- | --- |
-| `patient-update-v1` | `EmergencyAccessActivated`, `LabResultReleased`, `MedicationDispensed` |
+| `patient-update-v1` | `EmergencyAccessActivated`, `PatientAccessPinVerified`, `LabResultReleased`, `MedicationDispensed` |
 | `identity-registration-update-v1` | `PatientRegistered` |
 | `identity-resolution-update-v1` | `PatientIdentityResolved`, `OutreachPatientResolved` |
 | `document-update-v1` | `OcrPublicationSucceeded` |
@@ -233,50 +233,33 @@ budgeted using that category's current rate card; do not infer that free service
 replies make OTP messages free or repeat obsolete per-conversation prices.
 [WhatsApp Business Platform pricing](https://whatsappbusiness.com/products/platform-pricing/)
 
-## Infobip: optional fallback, activate only the selected channels
+## Brevo: optional fallback, activate only the selected channels
 
-The [fallback adapter](../services/notification-api/src/providers/infobip.provider.ts)
-uses Email v4 (`/email/4/messages`), SMS v3 (`/sms/3/messages`) and WhatsApp template
-messages (`/whatsapp/1/message/template`). It does not use Infobip's hosted 2FA
-PIN lifecycle. Fallback is attempted only after a definitive primary failure;
-an ambiguous timeout does not justify a duplicate send through another provider.
+The [fallback adapter](../services/notification-api/src/providers/brevo.provider.ts)
+uses Brevo's documented transactional Email, SMS, and WhatsApp endpoints. Fallback
+is attempted only after a definitive primary failure; an ambiguous timeout does
+not justify a duplicate send through another provider. SES, Termii, and Meta
+WhatsApp remain the primary providers for their existing channels.
 
-Signup currently requires no credit card, then email/phone verification and
-company/setup details. The trial is time-limited and restricts traffic to verified
-recipients and provider test senders. Adding funds transitions to a paid account;
-rates depend on channel, destination and network. Confirm the actual account's
-available channels, quota and sender restrictions before a test; free units do
-not prove that an arbitrary authentication template or recipient is permitted.
-[Account setup](https://www.infobip.com/docs/essentials/getting-started/create-an-account),
-[Trial restrictions](https://www.infobip.com/docs/essentials/getting-started/free-trial),
-[Paid-account activation](https://www.infobip.com/docs/essentials/getting-started/paying-account)
+Future secret fields in `/hid/staging/notification-provider` are `brevoApiKey`
+and only the sender fields needed by enabled channels: `brevoEmailFrom`,
+`brevoSmsSender`, and `brevoWhatsAppSender`. CDK maps them to `BREVO_API_KEY`,
+`BREVO_EMAIL_FROM`, `BREVO_SMS_SENDER`, and `BREVO_WHATSAPP_SENDER`. The current
+email-only staging profile intentionally injects none of them. Do not create a
+placeholder sender or key: a channel without a configured sender fails closed as
+`channel_not_configured`.
 
-Use the account's base URL and a dedicated API key. Grant only the enabled send
-scopes: `email:message:send`, `sms:message:send`, and/or
-`whatsapp:message:send`. Broader all-channel send or administration scopes are
-not necessary just to enable one fallback channel. Expiry/IP restrictions and
-account/application isolation should follow the account's available controls;
-do not assume CPaaS X entitlements.
-[Email authorization](https://www.infobip.com/docs/email/email-over-api/send-email-over-http-api),
-[SMS authorization](https://www.infobip.com/docs/tutorials/send-your-first-sms-message-using-infobip-api),
-[WhatsApp authentication-template authorization](https://www.infobip.com/docs/tutorials/authenticate-users-with-whatsapp-template-messages)
+Email needs an approved sender; SMS needs an approved sender identity and an
+authorized recipient/channel; validate account-specific requirements before
+activation. Brevo's WhatsApp guide says an initial API message to a contact must
+use an approved template. The current fallback does not invent OTP-template
+variables, so WhatsApp fallback stays disabled unless a separately reviewed
+template contract is implemented. A successful provider acceptance response is
+not delivery evidence.
 
-Future fields in `/hid/staging/notification-provider` are `infobipBaseUrl`,
-`infobipApiKey`, and the enabled channel's `infobipEmailFrom`, `infobipSmsSender`,
-or `infobipWhatsAppSender` plus `infobipWhatsAppOtpTemplateId`. Despite the last
-field's name, this adapter sends it as the provider's **template name**. Its
-language follows `META_OTP_TEMPLATE_LANGUAGE`; review that shared setting when
-enabling WhatsApp fallback.
-
-Custom email requires a verified sender domain and its exact generated DNS
-records. Custom SMS needs the destination's approved sender/number arrangement;
-WhatsApp needs an approved sender and matching authentication template. Verify
-delivery reports separately from queued responses. The unused adapters still
-need current wire-contract tests before optional activation; this account guide
-does not certify their live payloads.
-[Infobip domain setup](https://www.infobip.com/docs/email/get-started-with-email/set-up-your-domain),
-[SMS senders and delivery reports](https://www.infobip.com/docs/tutorials/send-your-first-sms-message-using-infobip-api),
-[WhatsApp template and delivery validation](https://www.infobip.com/docs/tutorials/authenticate-users-with-whatsapp-template-messages)
+[Transactional email reference](https://developers.brevo.com/reference/send-transac-email),
+[transactional SMS reference](https://developers.brevo.com/reference/send-async-transactional-sms),
+[WhatsApp messaging guide](https://developers.brevo.com/docs/whatsapp-messages)
 
 ## Cloudflare Turnstile: use the existing account and a staging widget
 
@@ -309,7 +292,7 @@ identity and authorized test inbox; access to the dedicated Novu staging
 organization/environment and its chosen delivery integration; and staging
 Turnstile widget access or its public sitekey plus securely stored secret. If
 using Novu demo email, the approved inbox must match the Novu account email.
-No Termii, Meta or Infobip account is requested now.
+No Termii, Meta or Brevo account is requested now.
 
 Credentials belong in the stated secret systems/provider dashboards, not chat,
 Git, screenshots, test fixtures or browser bundles. Codex can populate discovered

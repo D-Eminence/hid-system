@@ -946,12 +946,14 @@ Date: 2026-08-11
 Decision:
 
 The canonical browser platform consists of `apps/web`, `apps/ehr`, `apps/lab`,
-`apps/pharmacy`, `apps/ocr`, `apps/outreach`, and `apps/admin`, routed through
-one origin at `/`, `/ehr/`, `/lab/`, `/pharmacy/`, `/ocr/`, `/outreach/`, and
-`/admin/`. ADR-030's temporary decision not to create Pharmacy is superseded:
+`apps/pharmacy`, `apps/ocr`, `apps/outreach`, and `apps/admin`. Its local
+one-origin developer gateway uses `/`, `/ehr/`, `/lab/`, `/pharmacy/`,
+`/migrate/`, `/outreach/`, and `/admin/`; production serves the `apps/ocr`
+Migrate application at the root of `migrate.healthidentitydirectory.com`.
+ADR-030's temporary decision not to create Pharmacy is superseded:
 the existing Pharmacy API now supports a real authenticated acceptance,
 dispensing/reversal, medication-evidence, patient lookup, and activity workspace.
-OCR receives a separate operations workspace without displacing contextual
+Migrate receives a separate operations workspace without displacing contextual
 clinical OCR review in EHR.
 
 Every app consumes `packages/offline` and `packages/telemetry`. Offline awareness
@@ -1088,7 +1090,7 @@ purpose-bound six-digit contact OTP fallback mapped to the existing patient.
 Split notifications deliberately:
 
 - authentication OTP: Identity -> workload-authenticated Notification API ->
-  SES/Termii/Meta primary with Infobip fallback; never Novu or durable plaintext;
+  SES/Termii/Meta primary with Brevo fallback; never Novu or durable plaintext;
 - ordinary events: owner outbox -> Event Dispatcher -> EventBridge -> encrypted
   SQS/DLQ -> Notification Worker -> Novu, with FCM as the server-side push
   boundary.
@@ -1096,8 +1098,8 @@ Split notifications deliberately:
 Create additive migration `0028` because OTP state, progressive assurance,
 complete legacy identity-link evidence, encrypted device registration, and
 delivery reconciliation do not exist in `0001`–`0027`. Preserve all earlier
-migrations unchanged. Supabase is a read-only migration source; Vercel and
-Brevo are retired.
+migrations unchanged. Supabase is a read-only migration source and Vercel is
+retired; Brevo is the optional Notification API fallback.
 
 Consequences:
 

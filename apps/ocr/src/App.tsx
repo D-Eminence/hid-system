@@ -24,13 +24,13 @@ export default function App() {
       if (!active) return
       if (!actor) return setAuth({ loading: false, actor: null, facility: null, error: '' })
       const facility = ocrFacility(actor)
-      setAuth({ loading: false, actor, facility, error: facility ? '' : 'Your Identity account has no OCR operations permission at an active facility.' })
+      setAuth({ loading: false, actor, facility, error: facility ? '' : 'Your Identity account has no Migrate workspace permission at an active facility.' })
     }).catch(error => active && setAuth({ loading: false, actor: null, facility: null, error: error instanceof Error ? error.message : 'Identity session could not be restored.' }))
     return () => { active = false }
   }, [])
-  if (auth.loading) return <Layout title="OCR Operations" subtitle="Restoring secure Identity session…"><div style={{ padding: 64, textAlign: 'center' }}><Spinner /></div></Layout>
+  if (auth.loading) return <Layout title="Migrate" subtitle="Restoring secure Identity session…"><div style={{ padding: 64, textAlign: 'center' }}><Spinner /></div></Layout>
   if (!auth.actor) return <HostLogin />
-  if (!auth.facility) return <Layout title="OCR Operations" subtitle="Access denied"><Card><h2>OCR operations is unavailable</h2><p role="alert" style={{ color: 'var(--color-error)' }}>{auth.error}</p><Button variant="secondary" onClick={() => void safeSignOut().finally(() => window.location.assign('/'))}>Sign out</Button></Card></Layout>
+  if (!auth.facility) return <Layout title="Migrate" subtitle="Access denied"><Card><h2>Migrate is unavailable</h2><p role="alert" style={{ color: 'var(--color-error)' }}>{auth.error}</p><Button variant="secondary" onClick={() => void safeSignOut().finally(() => window.location.assign('/'))}>Sign out</Button></Card></Layout>
   return <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/$/, '') || '/'}><OcrWorkspace actor={auth.actor} facility={auth.facility} /></BrowserRouter>
 }
 
@@ -43,15 +43,15 @@ function HostLogin() {
     if (result.error) throw result.error
     window.location.reload()
   } catch (caught) { setError(caught instanceof Error ? caught.message : 'Sign-in failed.') } finally { setLoading(false) } }
-  return <Layout title="OCR Operations" subtitle="Identity sign-in required"><Card><h2>Sign in to OCR Operations</h2><p>This host receives its own secure Identity session cookie. No credentials are shared through browser storage.</p><form onSubmit={submit} style={{ display: 'grid', gap: 14 }}><Input label="Email" type="email" value={email} onChange={event => setEmail(event.target.value)} /><Input label="Password" type="password" value={password} onChange={event => setPassword(event.target.value)} /><Turnstile action="ocr-login" onTokenChange={setToken} />{error && <p role="alert" style={{ color: 'var(--color-error)' }}>{error}</p>}<Button type="submit" loading={loading}>Sign in</Button></form></Card></Layout>
+  return <Layout title="Migrate" subtitle="Identity sign-in required"><Card><h2>Sign in to Migrate</h2><p>This host receives its own secure Identity session cookie. No credentials are shared through browser storage.</p><form onSubmit={submit} style={{ display: 'grid', gap: 14 }}><Input label="Email" type="email" value={email} onChange={event => setEmail(event.target.value)} /><Input label="Password" type="password" value={password} onChange={event => setPassword(event.target.value)} /><Turnstile action="ocr-login" onTokenChange={setToken} />{error && <p role="alert" style={{ color: 'var(--color-error)' }}>{error}</p>}<Button type="submit" loading={loading}>Sign in</Button></form></Card></Layout>
 }
 
 function OcrWorkspace({ actor, facility }: { actor: IdentityActorContext; facility: IdentityFacilityAssignment }) {
   const api = useMemo(() => createOcrApi(facility.id), [facility.id])
   const { online } = useConnectivity()
   useEffect(() => captureProductEvent('workspace_opened', { workspace: 'ocr', offline: !online }), [])
-  return <Layout title="OCR Operations" subtitle={`${facility.name} · ${actor.displayName ?? 'Authorized OCR user'}`}>
-    <nav className="ocr-nav" aria-label="OCR workspace"><NavLink to="/" end><Button size="sm" variant="secondary">Dashboard</Button></NavLink><NavLink to="/jobs"><Button size="sm" variant="secondary">Jobs</Button></NavLink><NavLink to="/document-processing"><Button size="sm" variant="secondary">Document processing</Button></NavLink><Button size="sm" variant="ghost" onClick={() => void safeSignOut().finally(() => window.location.assign('/'))}>Sign out</Button></nav>
+  return <Layout title="Migrate" subtitle={`${facility.name} · ${actor.displayName ?? 'Authorized Migrate user'}`}>
+    <nav className="ocr-nav" aria-label="Migrate workspace"><NavLink to="/" end><Button size="sm" variant="secondary">Dashboard</Button></NavLink><NavLink to="/jobs"><Button size="sm" variant="secondary">Jobs</Button></NavLink><NavLink to="/document-processing"><Button size="sm" variant="secondary">Document processing</Button></NavLink><Button size="sm" variant="ghost" onClick={() => void safeSignOut().finally(() => window.location.assign('/'))}>Sign out</Button></nav>
     {!online && <div className="ocr-safe"><SyncStatus status="offline" /> OCR execution, retry, validation, and publication are not simulated offline.</div>}
     <Routes>
       <Route path="/" element={<Dashboard />} />

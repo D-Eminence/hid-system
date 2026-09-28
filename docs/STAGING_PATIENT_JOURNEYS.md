@@ -1,11 +1,12 @@
 # Synthetic patient journeys with NIN disabled
 
-MetaMap/NIN verification is deferred until after staging. Preserve its existing
-implementation and keep `NIN_PROVIDER_MODE=deferred` for staging. NIN verification and new
+QoreID/NIN verification is deferred until after staging. Keep
+`NIN_PROVIDER_MODE=deferred` for staging. NIN verification and new
 NIN-based enrollment are outside current staging acceptance. Existing canonical
 patients can use login, profile, records, history and recovery without a NIN.
 
-MetaMap NIN integration is prepared but deferred. Activation requires version-specific provider contract confirmation and authorized trial/test access.
+QoreID is selected for future NIN verification. Activation requires an approved
+provider contract and authorized test access.
 
 The local [fixture generator](../scripts/prepare-staging-journey-fixture.mjs)
 prepares input for the existing migration importer. It does not connect to a

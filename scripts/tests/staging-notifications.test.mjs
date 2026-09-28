@@ -53,6 +53,7 @@ test('rejects secrets, production/account drift, unknown endpoints, duplicate co
 test('prepared workflow IDs and events exactly match runtime event contract', async () => {
   const source = await readFile(new URL('../../services/notification-worker/src/event.ts', import.meta.url), 'utf8');
   const actual = Object.fromEntries([...source.matchAll(/^  (\w+): '([a-z-]+-v1)',/gm)].map(x => [x[1], x[2]]));
+  assert.equal(workflowEvents['patient-update-v1'].includes('PatientAccessPinVerified'), true);
   assert.deepEqual(Object.fromEntries(Object.entries(workflowEvents).flatMap(([id, events]) => events.map(event => [event, id]))), actual);
 });
 

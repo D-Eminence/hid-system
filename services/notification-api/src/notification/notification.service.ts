@@ -1,6 +1,6 @@
 import { BadRequestException, Inject, Injectable, Optional } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
-import { InfobipFallbackProvider } from '../providers/infobip.provider';
+import { BrevoFallbackProvider } from '../providers/brevo.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
 import type { OtpMessage, OtpProvider, ProviderResult } from '../providers/provider.types';
 import { SesEmailProvider } from '../providers/ses.provider';
@@ -23,7 +23,7 @@ export class NotificationService {
       email: new SesEmailProvider(this.environment), sms: new TermiiSmsProvider(this.environment),
       whatsapp: new MetaWhatsAppProvider(this.environment),
     };
-    this.fallback = providers?.fallback ?? new InfobipFallbackProvider(this.environment);
+    this.fallback = providers?.fallback ?? new BrevoFallbackProvider(this.environment);
   }
 
   async deliverOtp(message: OtpMessage): Promise<{ primary: ProviderResult; fallback?: ProviderResult; outcome: ProviderResult['outcome'] }> {

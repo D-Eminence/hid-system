@@ -1,11 +1,13 @@
-# HID OCR operations workspace
+# HID Migrate workspace
 
-`apps/ocr` is the authenticated digitization-operations frontend. It uses the
+`apps/ocr` is the authenticated HID Migrate frontend. It uses the
 shared Identity cookie/CSRF session, requires an active facility assignment
 with OCR permissions, calls only same-origin `/api/v1/ocr/*`, and has no direct
 database, object-storage, provider, or worker credential.
 
-Gateway route: `/ocr/`. Direct development port: `3105`.
+The public application is served at
+`https://migrate.healthidentitydirectory.com/`. The local one-origin developer
+gateway mounts it at `/migrate/`; the direct development port is `3105`.
 
 The existing API supports exact document/job lookup, secured job creation,
 eligible failed-job retry, extraction metadata, validation state, and

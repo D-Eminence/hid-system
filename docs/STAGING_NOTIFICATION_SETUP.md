@@ -3,7 +3,7 @@
 The offline planner reads non-secret configuration and the existing controlled
 journey input. It makes no provider calls, sends no mail and never authorizes
 deployment. SES and Novu are required; Termii/Meta WhatsApp are optional and
-Infobip is a fallback. Account costs, minimum authority and verification rules
+Brevo is a fallback. Account costs, minimum authority and verification rules
 are in [the provider account guide](STAGING_PROVIDER_ACCOUNTS.md).
 
 `release/local/staging-notification-input.json` is a private copy of the

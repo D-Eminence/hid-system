@@ -3,15 +3,17 @@
 Status: implemented and verified locally on 2026-08-11; authenticated external,
 representative-device, Docker, and deployment evidence remain pending.
 
-## 2026-08-12 production-host addendum
+## Production-host addendum
 
 Each canonical app is now an independent Cloudflare Workers Static Assets
-deployment at `www`, `ehr`, `lab`, `pharmacy`, `ocr`, `outreach`, or `admin`
+deployment at `www`, `ehr`, `lab`, `pharmacy`, `migrate`, `outreach`, or `admin`
 under `healthidentitydirectory.com`. Every app is built with production base
 `/`, owns its root-scoped service worker, and proxies only same-origin
 `/api/v1/*` to the fixed AWS API origin. The path bases and ports below remain
 the local one-origin development/preview contract; they are not production
-frontend hosting paths. AWS Gateway contains no frontend artifacts.
+frontend hosting paths. Migrate is served at the root of
+`https://migrate.healthidentitydirectory.com/`; its local gateway path remains
+`/migrate/`. AWS Gateway contains no frontend artifacts.
 
 This is the authoritative browser-application inventory. It supersedes older
 active-location references to `identity/hid-unified-package/`, top-level `ehr/`,
@@ -19,14 +21,14 @@ and ADR-030's temporary decision to leave Pharmacy without an application.
 
 ## Canonical applications
 
-| Application | Canonical source | Gateway path | Direct port | Authentication and service boundary | Offline/PWA result |
+| Application | Canonical source | Local gateway path | Direct port | Authentication and service boundary | Offline/PWA result |
 | --- | --- | --- | --- | --- | --- |
 | Web | `apps/web` | `/` | 3100 | Identity-owned browser session; same-origin Identity/EHR gateway APIs | Installable root-scoped PWA, static shell only, visible connectivity; no broad patient-record cache |
 | EHR | `apps/ehr` | `/ehr/` | 3101 | Canonical EHR reference plus build-checked typed Identity/EHR integration; contextual clinical OCR review remains here | Installable `/ehr/` PWA; canonical platform runtime provides shared telemetry and connectivity; no API caching or new offline mutation outbox |
 | Lab | `apps/lab` | `/lab/` | 3102 | Shared Identity cookie/CSRF session; `lab.work-item.read`; `/api/v1/lab/*` only | Installable `/lab/` PWA and honest offline shell; result mutations remain live-only and never appear verified/released offline |
 | Pharmacy | `apps/pharmacy` | `/pharmacy/` | 3103 | Shared Identity cookie/CSRF session; `pharmacy.work-item.read`; `/api/v1/pharmacy/*` only | Installable `/pharmacy/` PWA; work context is memory-only; dispensing/reversal are disabled offline and become complete only after API confirmation |
 | Outreach | `apps/outreach` | `/outreach/` | 3104 | Shared Identity session; `/api/v1/outreach/*`; Identity remains the only canonical patient/HID authority | Strongest offline workflow: installable PWA plus encrypted IndexedDB command outbox, temporary IDs, stable idempotency, retries/conflicts, reauthorization, and acknowledged-PHI cleanup |
-| OCR | `apps/ocr` | `/ocr/` | 3105 | Shared Identity cookie/CSRF session; `ocr.job.read`/`ocr.job.write`; `/api/v1/ocr/*` only | Installable `/ocr/` PWA and honest offline shell; no fake extraction, provider, validation, or publication success and no raw OCR payload display |
+| Migrate | `apps/ocr` | `/migrate/` (public: `https://migrate.healthidentitydirectory.com/`) | 3105 | Shared Identity cookie/CSRF session; `ocr.job.read`/`ocr.job.write`; `/api/v1/ocr/*` only | Installable root-scoped public PWA and honest offline shell; no fake extraction, provider, validation, or publication success and no raw OCR payload display |
 | Admin | `apps/admin` | `/admin/` | 3106 | Identity-owned platform capabilities; `/api/v1/admin/*` only | Installable `/admin/` PWA and visible connectivity; sensitive mutations require live authoritative connectivity and are never queued offline |
 
 Every production browser API URL is same-origin. Direct ports are loopback
@@ -75,7 +77,7 @@ UI prefixes independently from `/api/v1/pharmacy/*` and `/api/v1/ocr/*`.
 
 * The EHR "Pharmacy unavailable" placeholder as the only Pharmacy product
   surface, the former missing standalone Pharmacy decision, and any claim that
-  OCR operations are represented solely by an EHR navigation card.
+  Migrate is represented solely by an EHR navigation card.
 * Direct browser database clients, internal service-port calls, broad API
   service-worker caching, and independent Pharmacy/OCR authentication stores.
 
@@ -87,14 +89,16 @@ historical medication evidence, patient-scoped lookup, and operational activity
 using existing Pharmacy API responses. Inventory, refills, administration, and
 unsupported aggregate metrics are not fabricated.
 
-OCR Operations implements job/document lookup, job creation/retry, extraction
+Migrate implements job/document lookup, job creation/retry, extraction
 metadata, validation state, and publication state supported by the OCR API. It
 does not expose raw extracted text to analytics and does not claim global queue,
 provider readiness, automatic patient creation, or offline OCR success. EHR
 continues contextual clinical review.
 
 Direct route refresh is supported for the app bases and implemented nested
-routes, including `/pharmacy/prescriptions` and `/ocr/jobs`.
+routes, including `/pharmacy/prescriptions`, public Migrate `/jobs`, and local
+gateway Migrate `/migrate/jobs`. Public `/migrate/*` and `/ocr/*` paths redirect
+once to their root-based Migrate equivalents.
 
 ## Shared offline and telemetry boundaries
 

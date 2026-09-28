@@ -1,3 +1,8 @@
+import {
+  isLegacyMigratePath,
+  migrateRedirectUrl,
+} from './migrate-route-redirects.mjs'
+
 const API_PATH = /^\/api\/v1(?:\/|$)/
 const CORRELATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/
 const ORIGIN_AUTH_TOKEN = /^[A-Za-z0-9._~+/-]{32,256}$/
@@ -10,7 +15,7 @@ const DEPLOYMENT_PROFILES = Object.freeze({
       ehr: 'ehr.healthidentitydirectory.com',
       lab: 'lab.healthidentitydirectory.com',
       pharmacy: 'pharmacy.healthidentitydirectory.com',
-      ocr: 'ocr.healthidentitydirectory.com',
+      ocr: 'migrate.healthidentitydirectory.com',
       outreach: 'outreach.healthidentitydirectory.com',
       admin: 'admin.healthidentitydirectory.com',
     }),
@@ -22,7 +27,7 @@ const DEPLOYMENT_PROFILES = Object.freeze({
       ehr: 'ehr.staging.healthidentitydirectory.com',
       lab: 'lab.staging.healthidentitydirectory.com',
       pharmacy: 'pharmacy.staging.healthidentitydirectory.com',
-      ocr: 'ocr.staging.healthidentitydirectory.com',
+      ocr: 'migrate.staging.healthidentitydirectory.com',
       outreach: 'outreach.staging.healthidentitydirectory.com',
       admin: 'admin.staging.healthidentitydirectory.com',
     }),
@@ -81,7 +86,13 @@ function configuredDeployment(environment) {
     || !ORIGIN_AUTH_TOKEN.test(environment.ORIGIN_AUTH_TOKEN ?? '')) {
     throw new Error('Worker deployment configuration is incomplete or inconsistent')
   }
-  return { application, expectedHost, origin: new URL(profile.apiOrigin), originAuthToken: environment.ORIGIN_AUTH_TOKEN }
+  return {
+    application,
+    expectedHost,
+    migrateOrigin: `https://${profile.hosts.ocr}`,
+    origin: new URL(profile.apiOrigin),
+    originAuthToken: environment.ORIGIN_AUTH_TOKEN,
+  }
 }
 
 function withSecurityHeaders(response, apiResponse = false, application) {
@@ -99,6 +110,19 @@ function withSecurityHeaders(response, apiResponse = false, application) {
     headers.set('cache-control', 'no-cache, no-store, must-revalidate')
   }
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+}
+
+function applicationRouteRedirect(request, requestUrl, deployment) {
+  if (!['GET', 'HEAD'].includes(request.method) || !isLegacyMigratePath(requestUrl.pathname)) return null
+  if (deployment.application !== 'ocr' && deployment.application !== 'web') return null
+
+  const destinationOrigin = deployment.application === 'ocr'
+    ? requestUrl.origin
+    : deployment.migrateOrigin
+  return Response.redirect(
+    migrateRedirectUrl(destinationOrigin, requestUrl.pathname, requestUrl.search),
+    308,
+  )
 }
 
 async function proxyApi(request, deployment, requestUrl) {
@@ -154,6 +178,8 @@ export function createFrontendWorker() {
       if (url.pathname.startsWith('/api/')) {
         return problem(404, 'API_ROUTE_NOT_FOUND', 'The requested API route is not available.', correlationId(request))
       }
+      const redirect = applicationRouteRedirect(request, url, deployment)
+      if (redirect) return withSecurityHeaders(redirect, false, deployment.application)
       const assetResponse = await environment.ASSETS.fetch(request)
       return withSecurityHeaders(assetResponse, false, deployment.application)
     },

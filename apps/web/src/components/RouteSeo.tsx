@@ -50,15 +50,6 @@ function resolveRouteMeta(pathname: string): RouteMeta {
     }
   }
 
-  if (pathname.startsWith('/migrate')) {
-    return {
-      canonical: `${SITE_ORIGIN}${pathname}`,
-      description: 'HID Migrate medical-record digitisation and migration workspace.',
-      robots: 'noindex,nofollow',
-      title: 'HID Migrate | Health Identity Directory',
-    }
-  }
-
   if (pathname.startsWith('/patient/') || pathname.startsWith('/hospital/') || pathname.startsWith('/doctor/')) {
     return {
       canonical: `${SITE_ORIGIN}${pathname}`,

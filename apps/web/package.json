@@ -11,8 +11,7 @@
     "security:audit": "npm audit --audit-level=high",
     "security:deps": "npm outdated",
     "verify:api": "node ./scripts/verify-api-response-contracts.mjs",
-    "verify:identity": "node ./scripts/verify-identity-contracts.mjs",
-    "verify:migrate": "node ./scripts/verify-migrate-contracts.mjs"
+    "verify:identity": "node ./scripts/verify-identity-contracts.mjs"
   },
   "overrides": {
     "dompurify": "^3.4.11",

@@ -89,8 +89,8 @@ assert.match(gateway, /'\/outreach'[\s\S]{0,100}ports\.outreachUi/,
   'the one-origin gateway must route the dedicated Outreach UI')
 assert.match(gateway, /'\/pharmacy'[\s\S]{0,100}ports\.pharmacyUi/,
   'the one-origin gateway must route the dedicated Pharmacy UI')
-assert.match(gateway, /'\/ocr'[\s\S]{0,100}ports\.ocrUi/,
-  'the one-origin gateway must route the dedicated OCR UI')
+assert.match(gateway, /'\/migrate'[\s\S]{0,100}ports\.ocrUi/,
+  'the one-origin gateway must route the dedicated Migrate UI')
 
 await assert.rejects(access(join(repository, 'apps/ehr/server')), { code: 'ENOENT' },
   'retired ehr/server path must not remain')

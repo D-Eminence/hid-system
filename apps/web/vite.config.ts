@@ -23,6 +23,20 @@ export default defineConfig({
       name: 'hid-app-entry-redirects',
       configureServer(server) {
         server.middlewares.use((request, response, next) => {
+          const requestUrl = new URL(request.url ?? '/', 'http://localhost')
+          if (requestUrl.pathname === '/ocr' || requestUrl.pathname.startsWith('/ocr/')) {
+            const legacyPath = requestUrl.pathname.slice('/ocr'.length)
+            response.statusCode = 302
+            response.setHeader('Location', `/migrate${legacyPath || '/'}${requestUrl.search}`)
+            response.end()
+            return
+          }
+          if (requestUrl.pathname === '/migrate') {
+            response.statusCode = 302
+            response.setHeader('Location', `/migrate/${requestUrl.search}`)
+            response.end()
+            return
+          }
           if (request.url === '/ehr') {
             response.statusCode = 302
             response.setHeader('Location', '/ehr/')
@@ -38,12 +52,6 @@ export default defineConfig({
           if (request.url === '/pharmacy') {
             response.statusCode = 302
             response.setHeader('Location', '/pharmacy/')
-            response.end()
-            return
-          }
-          if (request.url === '/ocr') {
-            response.statusCode = 302
-            response.setHeader('Location', '/ocr/')
             response.end()
             return
           }
@@ -94,7 +102,10 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
-      '/ocr': {
+      // The one-origin developer gateway composes the single standalone
+      // Migrate UI. This remains true in direct Web mode so the Web bundle
+      // cannot expose a competing Migrate application.
+      '/migrate': {
         target: `http://127.0.0.1:${ports.ocrUi}`,
         changeOrigin: true,
         ws: true,

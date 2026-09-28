@@ -3,6 +3,7 @@ import { join, relative } from 'node:path'
 import process from 'node:process'
 
 const root = process.cwd()
+const repository = join(root, '..', '..')
 const sourceRoot = join(root, 'src')
 const failures = []
 
@@ -16,14 +17,13 @@ async function filesBelow(directory, extensions) {
   return nested.flat()
 }
 
-const client = await readFile(join(sourceRoot, 'lib', 'identityClient.ts'), 'utf8')
+const client = await readFile(
+  join(repository, 'packages', 'identity-browser-client', 'src', 'identityClient.ts'),
+  'utf8',
+)
 const functionApi = await readFile(join(sourceRoot, 'lib', 'functionApi.ts'), 'utf8')
 const hidApi = await readFile(join(sourceRoot, 'lib', 'hidApi.ts'), 'utf8')
 const adminDashboard = await readFile(join(sourceRoot, 'services', 'adminDashboard.ts'), 'utf8')
-const migrationCapture = await readFile(
-  join(sourceRoot, 'features', 'migrate', 'api', 'migrationCapture.ts'),
-  'utf8',
-)
 for (const required of [
   "credentials: 'include'",
   "'/api/v1/auth/session'",
@@ -42,14 +42,10 @@ if (/new AbortController\s*\(/.test(client)) {
 for (const [name, source] of [
   ['HID domain API', hidApi],
   ['admin dashboard API', adminDashboard],
-  ['migration capture API', migrationCapture],
 ]) {
   if (/new AbortController\s*\(/.test(source)) {
     failures.push(`${name} duplicates shared timeout and abort handling`)
   }
-}
-if (!migrationCapture.includes("from '../../../../../../packages/api-client/src/index'")) {
-  failures.push('migration capture uploads must use the shared transport primitive')
 }
 for (const required of ['code', 'message', 'requestId', 'retryable', 'status']) {
   if (!functionApi.includes(required)) failures.push(`function API error contract is missing ${required}`)

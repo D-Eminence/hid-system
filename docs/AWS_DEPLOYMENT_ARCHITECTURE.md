@@ -24,7 +24,7 @@ owner outbox -> Event Dispatcher -> EventBridge
   -> Notification Worker -> Novu / FCM boundary
 
 Identity -> workload-authenticated Notification API
-  -> SES / Termii / Meta, with bounded Infobip fallback
+  -> SES / Termii / Meta, with bounded Brevo fallback
 ```
 
 Authentication OTP never enters EventBridge, SQS, Novu, or ordinary delivery
@@ -57,18 +57,21 @@ Cloudflare publishes seven independent static applications:
 | `ehr.healthidentitydirectory.com` | EHR | `/` |
 | `lab.healthidentitydirectory.com` | Lab | `/` |
 | `pharmacy.healthidentitydirectory.com` | Pharmacy | `/` |
-| `ocr.healthidentitydirectory.com` | OCR Operations | `/` |
+| `migrate.healthidentitydirectory.com` | HID Migrate | `/` (legacy OCR domain, `/migrate/*`, and `/ocr/*` redirect to root-equivalent paths) |
 | `outreach.healthidentitydirectory.com` | Outreach | `/` |
 | `admin.healthidentitydirectory.com` | Admin | `/` |
 
-The apex host performs an originless redirect to `www`. Each Worker serves only
-its own build, applies its own service-worker scope and permissions policy, and
-proxies only `/api/v1/*` to the fixed AWS API hostname. HTML, service workers,
-and API responses are not cached as durable PHI. Gateway contains no static
-frontend output and returns `API_ONLY_ORIGIN` for non-API paths.
+The apex host performs an originless redirect to `www`. The old OCR hostname
+uses a separate originless 308 redirect to the paired Migrate hostname, retaining
+the root-equivalent request path and query. Migrate's legacy `/migrate/*` and
+`/ocr/*` paths also redirect directly to their root equivalents. Each application Worker serves only its own build,
+applies its own service-worker scope and permissions policy, and proxies only
+`/api/v1/*` to the fixed AWS API hostname. HTML, service workers, and API
+responses are not cached as durable PHI. Gateway contains no static frontend
+output and returns `API_ONLY_ORIGIN` for non-API paths.
 
 Staging has the exact parallel namespace: `staging`, `ehr.staging`,
-`lab.staging`, `pharmacy.staging`, `ocr.staging`, `outreach.staging`, and
+`lab.staging`, `pharmacy.staging`, `migrate.staging`, `outreach.staging`, and
 `admin.staging` under `healthidentitydirectory.com`. A staging Worker can only
 proxy to the staging API hostname; it cannot select an origin from request
 headers, a path, or a query value.

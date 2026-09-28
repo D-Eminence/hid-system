@@ -121,7 +121,7 @@ export function validateDatabaseConnectionBudget(
   }
 }
 
-export const browserPaths = ['/', '/ehr/', '/lab/', '/pharmacy/', '/ocr/', '/outreach/', '/admin/'] as const;
+export const browserPaths = ['/', '/ehr/', '/lab/', '/pharmacy/', '/migrate/', '/outreach/', '/admin/'] as const;
 
 export const serviceHostLabels: Partial<Record<WorkloadName, string>> = {
   'identity-api': 'identity', 'ehr-api': 'ehr', 'lab-api': 'lab', 'pharmacy-api': 'pharmacy',

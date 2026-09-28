@@ -38,14 +38,15 @@ No AWS resource/secret, DNS, deployment, live migration or publication changed i
 this continuation. The [September 15 receipt](evidence/staging-acceptance/predeployment-2026-09-15.json)
 records 78 release, 87 infrastructure, 55 Cloudflare and 38 preparation checks passing.
 Details are in the [staging report](TUF-STAGING-EXECUTION.md).
-MetaMap NIN is a **DEFERRED EXTERNAL INTEGRATION / POST-STAGING ITEM**. All prepared
-code, tooling and tests remain. Staging uses `NIN_PROVIDER_MODE=deferred`, needs no
-MetaMap credentials and must not be blocked by this integration. The normal staged
-patient/provider journeys use reviewed synthetic account/patient links without
-verified NIN claims; new NIN registration/enrollment is post-staging. See
-[MetaMap contract review](METAMAP_NIN_CONTRACT.md) and
+QoreID verification is a **DEFERRED EXTERNAL INTEGRATION / POST-STAGING ITEM**.
+Staging uses `NIN_PROVIDER_MODE=deferred`, needs no QoreID credentials, and must
+not be blocked by this integration. The normal staged patient/provider journeys use
+reviewed synthetic account/patient links without verified NIN claims; new NIN
+registration/enrollment is post-staging. CAC verification for EHR/hospitals,
+laboratories, and pharmacies requires a separately approved organization domain.
+See [the QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md) and
 [staging patient journeys](STAGING_PATIENT_JOURNEYS.md).
-The staging-only email profile now requires SES and Novu; Termii/Meta/Infobip
+The staging-only email profile now requires SES and Novu; Termii/Meta/Brevo
 accounts are optional for this scope. Public NIN/custody intakes and a read-only
 external preflight are prepared. The existing `docs/SECURITY.md` edit remains untouched. The report names exact external
 inputs and validation steps; generic staging permission is not being requested again.
@@ -879,14 +880,15 @@ The accepted target is now:
   through a six-digit verified-contact OTP without creating a second patient.
 - Identity owns purpose-bound six-digit OTP challenges. Only HMAC verifiers and
   challenge evidence are durable. OTP delivery goes directly to Notification
-  API: SES/Termii/Meta primary and Infobip fallback. Unknown primary outcomes do
+  API: SES/Termii/Meta primary and Brevo fallback. Unknown primary outcomes do
   not trigger duplicate fallback. Authentication OTP never enters Novu.
 - Ordinary minimum-necessary notifications use transactional outbox -> Event
   Dispatcher -> EventBridge -> encrypted SQS -> Notification Worker -> Novu.
   FCM is the server-side web/mobile push boundary. Notification content remains
   generic and PHI-minimal.
-- Brevo is retired. Vercel is HID 1.0 hosting history only. Supabase is a
-  protected, read-only HID 1.0 migration source only; none is a target runtime.
+- Brevo is the optional Notification API fallback. Vercel is HID 1.0 hosting
+  history only. Supabase is a protected, read-only HID 1.0 migration source
+  only; none is a target runtime.
 - Additive migration `0028_identity_notification_migration_state.sql` is
   justified by OTP challenge/rate-limit state, progressive assurance, legacy
   identity mapping evidence, encrypted device registrations, and delivery
@@ -1012,11 +1014,12 @@ history, and the consolidated `localhost:3000` browser flow.
   `docs/OFFLINE.md`, and the frontend addendum in
   `docs/PLATFORM_INTEGRATION_ACCEPTANCE.md`.
 - Canonical browser apps are Web 3100, EHR 3101, Lab 3102, Pharmacy 3103,
-  Outreach 3104, OCR 3105, and Admin 3106, gateway-routed at `/`, `/ehr/`,
-  `/lab/`, `/pharmacy/`, `/outreach/`, `/ocr/`, and `/admin/`.
-- Pharmacy and OCR are real Identity-session/API-backed workspaces. Pharmacy
+  Outreach 3104, Migrate 3105, and Admin 3106. The listed prefixed routes are
+  local gateway routes; production Migrate is root-served at
+  `https://migrate.healthidentitydirectory.com/`.
+- Pharmacy and Migrate are real Identity-session/API-backed workspaces. Pharmacy
   preserves prescribed/accepted/dispensed/administered distinctions and requires
-  server acknowledgement for dispensing/reversal. OCR Operations exposes only
+  server acknowledgement for dispensing/reversal. Migrate exposes only
   implemented job/document lifecycle behavior; clinical OCR review remains EHR-
   contextual and no provider/publication success is fabricated.
 - `packages/offline` and `packages/telemetry` are shared by every app. All seven

@@ -1,5 +1,10 @@
 # HID Migrate operations runbook
 
+> Historical prototype record — retired 2026-09-28. The project/queue/import
+> workflow described below is not an active Migrate runtime. Do not use it as
+> an operations procedure. Current Migrate ownership is documented in
+> [`../../docs/MIGRATE_CONSOLIDATION.md`](../../docs/MIGRATE_CONSOLIDATION.md).
+
 ## Queue incident
 
 1. Pause new project jobs using the Migrate feature/project control.

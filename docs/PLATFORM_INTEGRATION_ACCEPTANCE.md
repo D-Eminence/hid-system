@@ -6,13 +6,15 @@ Classification: implemented locally with external environment verification pendi
 ## 2026-08-12 production-convergence addendum
 
 The current production edge supersedes this report's older one-origin frontend
-wording: Web, EHR, Lab, Pharmacy, OCR, Outreach, and Admin are seven independent
+wording: Web, EHR, Lab, Pharmacy, Migrate, Outreach, and Admin are seven independent
 Cloudflare Workers Static Assets applications. AWS Gateway is API-only.
+Migrate is root-served at `https://migrate.healthidentitydirectory.com/`; the
+`/migrate/` route described below is retained only for local gateway evidence.
 Notification API owns workload-authenticated authentication OTP delivery on
 port 3007. Notification Worker owns ordinary EventBridge/SQS delivery through
 Novu/FCM on port 3008. Identity is local/OIDC only; active Supabase, legacy HTTP
-identity, Brevo, Vercel target, magic-link, CloudFront, and Gateway-static paths
-are absent. Migration `0028` and its deterministic fixture/reconciliation
+identity, legacy notification-fallback, Vercel target, magic-link, CloudFront, and Gateway-static paths
+are absent. Brevo is the optional Notification API fallback. Migration `0028` and its deterministic fixture/reconciliation
 tooling are additive to immutable `0001`–`0027`.
 
 All details below remain useful local extraction evidence, but any gateway,
@@ -32,7 +34,7 @@ acceptance, or representative-device Outreach acceptance.
 | EHR UI | `apps/ehr` | Facility-scoped clinical workspace at `/ehr/` | None |
 | Lab UI | `apps/lab` | Facility-scoped accession, custody, execution, and result workspace at `/lab/` | None |
 | Pharmacy UI | `apps/pharmacy` | Facility-scoped prescription acceptance, dispensing/reversal, historical medication evidence, lookup, and activity at `/pharmacy/` | None |
-| OCR Operations UI | `apps/ocr` | OCR job/document operations and lifecycle state at `/ocr/`; contextual clinical review remains in EHR | None |
+| Migrate UI | `apps/ocr` | OCR job/document operations and lifecycle state at `/migrate/`; contextual clinical review remains in EHR | None |
 | Outreach UI | `apps/outreach` | Encrypted offline field registration at `/outreach/` | Encrypted browser IndexedDB only |
 | Admin UI | `apps/admin` | Governed platform administration at `/admin/` | None |
 | Identity API | `services/identity-api` | Auth, workforce context, canonical patients/HIDs, NIN registration, consent, break-glass, Identity audit reads | `auth`, `identity`; append-only `audit` |
@@ -59,7 +61,8 @@ flowchart LR
   Browser --> Gateway[Gateway :3000]
   Gateway -->|/auth /identity /audit| Identity[Identity API :3001]
   Gateway -->|/ehr and API fallback| EHR[EHR API :3002]
-  Gateway -->|/ocr| OCR[OCR API :3005]
+  Gateway -->|/migrate| Migrate[Migrate UI :3105]
+  Gateway -->|/api/v1/ocr| OCR[OCR API :3005]
   Gateway -->|/lab| Lab[Lab API :3003]
   Gateway -->|/pharmacy| Pharmacy[Pharmacy API :3004]
   Gateway -->|/outreach| Outreach[Outreach API :3006]
@@ -112,7 +115,7 @@ no distributed database transaction is used.
 | 3102 | Direct Lab UI | Started with the combined stack |
 | 3103 | Direct Pharmacy UI | Production build and browser/offline smoke pass |
 | 3104 | Direct Outreach UI | Started with the combined stack |
-| 3105 | Direct OCR Operations UI | Production build and browser/offline smoke pass |
+| 3105 | Direct Migrate UI | Production build and browser/offline smoke pass |
 | 3106 | Direct Admin UI | Production build and browser/offline smoke pass |
 
 `scripts/ports.mjs` rejects invalid or duplicate assignments. The platform graph
@@ -131,7 +134,7 @@ test confirms all default ports are unique.
 | `/api/v1/outreach/*` | Outreach 3006 | Outreach-owned `FACILITY_REQUIRED` response |
 | `/api/v1/ehr/*`, other `/api/*` | EHR 3002 | EHR fallback; OCR module is absent |
 | `/pharmacy/*` | Pharmacy UI 3103 | UI prefix precedes API fallback; base and nested refresh render |
-| `/ocr/*` | OCR UI 3105 | UI prefix precedes API fallback; base and nested refresh render |
+| `/migrate/*` | Migrate UI 3105 | UI prefix precedes API fallback; base and nested refresh render |
 
 Specific routes precede the EHR fallback. Exact old Identity POST and old
 Lab/Pharmacy/Outreach EHR routes returned 404. Lab-to-Pharmacy,
@@ -388,9 +391,9 @@ executes in the production builds.
 - Five domain outboxes feed the implemented neutral dispatcher/inbox
   foundation. EHR has no producer and no product consumer is active; the root
   launcher keeps dispatch disabled until configuration is explicit.
-- Lab, Pharmacy, OCR Operations, Outreach, and Admin now have independent
-  canonical `apps/*` frontends. Contextual OCR clinical review remains in EHR
-  by design rather than as duplicate OCR operations authority.
+- Lab, Pharmacy, Migrate, Outreach, and Admin now have independent canonical
+  `apps/*` frontends. Contextual OCR clinical review remains in EHR by design
+  rather than as duplicate Migrate authority.
 - Dockerfiles exist for Identity, EHR, Lab, Pharmacy, OCR API, OCR worker,
   Outreach, and the event dispatcher. Static root build context, production command, non-root runtime,
   and secret exclusions pass inspection; image execution remains external.
@@ -447,9 +450,9 @@ checks remain external.
 ## 23. Seven-application frontend platform addendum
 
 The canonical browser topology is Web 3100, EHR 3101, Lab 3102, Pharmacy 3103,
-Outreach 3104, OCR 3105, and Admin 3106. The gateway serves all seven UI paths
-and keeps Pharmacy/OCR UI routing distinct from their owning API prefixes.
-Pharmacy and OCR are API-backed workspaces rather than shells: Pharmacy
+Outreach 3104, Migrate 3105, and Admin 3106. The gateway serves all seven UI
+paths and keeps Pharmacy/Migrate UI routing distinct from their owning API
+prefixes. Pharmacy and Migrate are API-backed workspaces rather than shells: Pharmacy
 preserves acceptance/dispensing/reversal/evidence truth, while OCR exposes only
 implemented job/document operations and leaves clinical review in EHR.
 

@@ -16,7 +16,7 @@ const sensitiveKey = new RegExp(`(${sensitivePattern})`, 'i')
 const requiredRedactions = [
   'otp_code', 'nin', 'turnstile_token', 'authorization', 'cookie', 'novu_api_key',
   'firebase_private_key', 'fcm_token', 'whatsapp_access_token', 'termii_api_key',
-  'infobip_api_key', 'ses_credentials', 'presigned_url', 'clinical_notes',
+  'brevo_api_key', 'infobip_api_key', 'qoreid_api_key', 'ses_credentials', 'presigned_url', 'clinical_notes',
   'diagnosis', 'laboratory_result_value', 'medication_details', 'ocr_text',
 ]
 for (const key of requiredRedactions) {

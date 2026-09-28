@@ -1,5 +1,9 @@
 # HID Migrate release evidence register
 
+> Historical prototype record — retired 2026-09-28. These gates refer to the
+> removed Web prototype, not the active OCR-backed Migrate application. See
+> [`../../docs/MIGRATE_CONSOLIDATION.md`](../../docs/MIGRATE_CONSOLIDATION.md).
+
 All entries are `pending` until backed by a dated artifact and named approver.
 
 | Gate | Status | Required evidence | Owner |

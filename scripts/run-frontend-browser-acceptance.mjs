@@ -16,7 +16,7 @@ const applications = [
   { name: 'ehr', port: ports.ehrUi, route: '/ehr/acceptance-refresh', scope: '/ehr/' },
   { name: 'lab', port: ports.labUi, route: '/lab/acceptance-refresh', scope: '/lab/' },
   { name: 'pharmacy', port: ports.pharmacyUi, route: '/pharmacy/prescriptions', scope: '/pharmacy/' },
-  { name: 'ocr', port: ports.ocrUi, route: '/ocr/jobs', scope: '/ocr/' },
+  { name: 'ocr', port: ports.ocrUi, route: '/jobs', scope: '/' },
   { name: 'outreach', port: ports.outreachUi, route: '/outreach/login', scope: '/outreach/' },
   { name: 'admin', port: ports.adminUi, route: '/admin/facilities', scope: '/admin/' },
 ]
@@ -222,6 +222,7 @@ try {
       env: {
         ...process.env,
         ...(application.name === 'web' ? { HID_WEB_DIRECT: 'true' } : {}),
+        ...(application.name === 'ocr' ? { HID_PUBLIC_BASE: '/' } : {}),
       },
       stdio: 'ignore',
     })

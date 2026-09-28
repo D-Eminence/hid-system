@@ -30,8 +30,5 @@ jobs:
       - name: Run security audit
         run: npm run security:audit
 
-      - name: Verify HID Migrate contracts
-        run: npm run verify:migrate
-
       - name: Build application
         run: npm run build

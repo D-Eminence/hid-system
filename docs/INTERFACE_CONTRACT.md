@@ -210,7 +210,7 @@ access, `X-Facility-Id`, and `identity.registration.write`. Staging returns:
 
 With `NIN_PROVIDER_MODE=deferred`, NIN resolve returns HTTP 503 with code
 `NIN_PROVIDER_DEFERRED` before identifier lookup or a provider call. No NIN keys
-or MetaMap credentials are required for startup. Existing case review and enrollment
+or QoreID credentials are required for startup. Existing case review and enrollment
 retain their identity-evidence, authorization and audit requirements. Reviewed
 synthetic staging accounts exercise recovery, sign-in and care access independently
 of new NIN registration; see [staging patient journeys](STAGING_PATIENT_JOURNEYS.md).
@@ -699,9 +699,12 @@ and whitelists terminal failure fields. No arbitrary retry command exists.
 
 ## 20. Browser gateway and application contract
 
-The one-origin gateway serves Web at `/` and proxies EHR, Lab, Pharmacy, OCR,
-Outreach, and Admin at `/ehr/`, `/lab/`, `/pharmacy/`, `/ocr/`, `/outreach/`,
-and `/admin/`. These UI prefixes are distinct from API ownership:
+The local one-origin gateway serves Web at `/` and proxies EHR, Lab, Pharmacy,
+Migrate, Outreach, and Admin at `/ehr/`, `/lab/`, `/pharmacy/`, `/migrate/`,
+`/outreach/`, and `/admin/`. In production Migrate is the standalone root
+application at `https://migrate.healthidentitydirectory.com/`; legacy
+`/migrate/*` and `/ocr/*` paths redirect to root-equivalent Migrate paths.
+These UI prefixes are distinct from API ownership:
 `/api/v1/pharmacy/*` remains Pharmacy API-owned and `/api/v1/ocr/*` remains OCR
 API-owned. Browser applications call only gateway API paths with Identity
 cookies/CSRF, exact facility and purpose context, correlation, and idempotency
@@ -710,7 +713,7 @@ where the owning command requires it. No browser calls an internal host/port.
 Pharmacy reads only existing work items/evidence and sends acceptance,
 dispensing, and reversal commands through the typed Pharmacy client. A UI state
 becomes `dispensed` or `reversed` only from a successful authoritative response;
-the exact expected server version is preserved. OCR Operations uses the typed
+the exact expected server version is preserved. Migrate uses the typed
 OCR client for job/document reads, job create/retry, and lifecycle state. It
 does not receive a generic clinical write, provider-success, or patient-create
 interface. Clinical review/publication authority remains governed in context.

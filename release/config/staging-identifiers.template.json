@@ -147,7 +147,7 @@
       "ehr": "ehr.staging.healthidentitydirectory.com",
       "lab": "lab.staging.healthidentitydirectory.com",
       "pharmacy": "pharmacy.staging.healthidentitydirectory.com",
-      "ocr": "ocr.staging.healthidentitydirectory.com",
+      "ocr": "migrate.staging.healthidentitydirectory.com",
       "outreach": "outreach.staging.healthidentitydirectory.com",
       "admin": "admin.staging.healthidentitydirectory.com"
     },

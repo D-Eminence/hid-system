@@ -52,12 +52,16 @@ The local launcher retains a one-origin developer convenience surface. Use
 `http://localhost:3000/` for the Web and patient portal entry,
 `http://localhost:3000/ehr/` for EHR, `http://localhost:3000/lab/` for
 Laboratory, `http://localhost:3000/pharmacy/` for Pharmacy,
-`http://localhost:3000/ocr/` for OCR Operations,
+`http://localhost:3000/migrate/` for HID Migrate,
 `http://localhost:3000/outreach/` for field registration, and
 `http://localhost:3000/admin/` for governed platform administration. See
 [`docs/FRONTEND_LAYOUT_CONVERGENCE.md`](docs/FRONTEND_LAYOUT_CONVERGENCE.md)
 and the module READMEs for focused
 build, test, migration, and environment guidance.
+
+The `/migrate/` path above is a local developer-gateway convenience. The
+public Migrate application is served directly from
+`https://migrate.healthidentitydirectory.com/`.
 
 Useful frontend-only commands:
 
@@ -117,7 +121,7 @@ The dedicated Admin frontend commands are `npm run dev:admin`,
 direct database access, clinical authority, or break-glass authority. See
 `docs/SUPER_ADMIN_FOUNDATION.md`.
 
-Pharmacy (`npm run dev:pharmacy`, `npm run test:pharmacy`) and OCR Operations
+Pharmacy (`npm run dev:pharmacy`, `npm run test:pharmacy`) and HID Migrate
 (`npm run dev:ocr`, `npm run test:ocr`) are real authenticated API clients, not
 placeholder dashboards. Their app READMEs record exact product and offline
 limits. Contextual clinical OCR review remains in EHR.

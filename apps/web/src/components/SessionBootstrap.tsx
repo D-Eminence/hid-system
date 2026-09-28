@@ -78,11 +78,10 @@ async function hydratePortalSession() {
     const shouldLoadPatient =
       pathname.startsWith('/patient') ||
       requestedRole === 'patient' ||
-      (!pathname.startsWith('/hospital') && !pathname.startsWith('/doctor') && !pathname.startsWith('/eminence') && !pathname.startsWith('/migrate'))
+      (!pathname.startsWith('/hospital') && !pathname.startsWith('/doctor') && !pathname.startsWith('/eminence'))
     const shouldLoadStaff =
       pathname.startsWith('/hospital') ||
       pathname.startsWith('/doctor') ||
-      pathname.startsWith('/migrate') ||
       requestedRole === 'clinician' ||
       requestedRole === 'org_admin'
 

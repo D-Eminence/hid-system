@@ -3,7 +3,7 @@
 ## Production delivery model
 
 HID retains seven independent browser products at `www`, `ehr`, `lab`,
-`pharmacy`, `ocr`, `outreach`, and `admin` under
+`pharmacy`, `migrate`, `outreach`, and `admin` under
 `healthidentitydirectory.com`. Cloudflare serves each product independently;
 AWS remains the healthcare backend. Migrated HID 1.0 users retain their patient
 UUID, HID code, profile, authorized records, and ordinary continuity-of-care
@@ -242,9 +242,11 @@ The architecture must permit additional AI/OCR providers without changing busine
 HID uses a hybrid frontend architecture.
 
 The current canonical browser applications are Web, EHR, Laboratory, Pharmacy,
-OCR Operations, Outreach, and Admin under `apps/`, served at `/`, `/ehr/`,
-`/lab/`, `/pharmacy/`, `/ocr/`, `/outreach/`, and `/admin/` through one origin.
-Pharmacy is an API-backed operational workspace and OCR Operations complements,
+Migrate, Outreach, and Admin under `apps/`. The local developer gateway serves
+them at `/`, `/ehr/`, `/lab/`, `/pharmacy/`, `/migrate/`, `/outreach/`, and
+`/admin/`; production serves Migrate at the root of
+`https://migrate.healthidentitydirectory.com/`.
+Pharmacy is an API-backed operational workspace and Migrate complements,
 but does not replace, contextual clinical OCR review in EHR.
 
 ### Next.js
@@ -271,7 +273,7 @@ Use for authenticated operational applications including:
 * EHR
 * Lab
 * Pharmacy
-* OCR Operations
+* Migrate
 * Outreach
 * Admin
 * internal dashboards

@@ -5,6 +5,9 @@ This directory contains the architectural source of truth for the HID platform.
 Current browser application placement, gateway paths, and offline/PWA
 boundaries are recorded in
 [`FRONTEND_LAYOUT_CONVERGENCE.md`](FRONTEND_LAYOUT_CONVERGENCE.md).
+The Migrate domain/application consolidation, including its root canonical URL
+and compatibility redirects, is recorded in
+[`MIGRATE_CONSOLIDATION.md`](MIGRATE_CONSOLIDATION.md).
 The same document records the seven-app telemetry policy and current local
 browser evidence; [`OFFLINE.md`](OFFLINE.md) and [`SECURITY.md`](SECURITY.md)
 remain authoritative for capability and PHI controls.
@@ -21,8 +24,9 @@ quota capacity is unverified. The [release installation guide](TUF_STAGING_RELEA
 indexes the prepared build, audit, signing and evidence adapters.
 [Cloudflare setup](STAGING_CLOUDFLARE_SETUP.md) and
 [notification setup](STAGING_NOTIFICATION_SETUP.md) give the secure local input paths.
-The prepared MetaMap NIN integration is deferred after staging; retained research is in
-[`METAMAP_NIN_CONTRACT.md`](METAMAP_NIN_CONTRACT.md).
+QoreID is selected for future NIN and CAC verification, while the HID provider
+integration remains deferred. The current decision and activation prerequisites are
+in [`QOREID_VERIFICATION_CONTRACT.md`](QOREID_VERIFICATION_CONTRACT.md).
 
 ## Documentation Map
 
@@ -53,6 +57,11 @@ Defines the target system architecture including:
 * observability
 * development ports
 * future extensibility
+
+### `MIGRATE_CONSOLIDATION.md`
+
+Defines the active Migrate implementation, the retired duplicate Web feature,
+the canonical hostname-root URL, and compatibility redirect behavior.
 
 ### `DECISIONS.md`
 

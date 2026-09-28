@@ -136,18 +136,18 @@ const environmentIdentity: Record<EnvironmentName, Pick<HidEnvironmentConfig,
   development: {
     name: 'development', publicApiSubdomain: 'api.development',
     browserSubdomains: ['development', 'ehr.development', 'lab.development', 'pharmacy.development',
-      'ocr.development', 'outreach.development', 'admin.development'],
+      'migrate.development', 'outreach.development', 'admin.development'],
     originAuthorizationSecretParameter: 'DevelopmentCloudflareOriginSecret', vpcCidr: '10.20.0.0/16',
   },
   staging: {
     name: 'staging', publicApiSubdomain: 'api.staging',
     browserSubdomains: ['staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging',
-      'ocr.staging', 'outreach.staging', 'admin.staging'],
+      'migrate.staging', 'outreach.staging', 'admin.staging'],
     originAuthorizationSecretParameter: 'StagingCloudflareOriginSecret', vpcCidr: '10.30.0.0/16',
   },
   production: {
     name: 'production', publicApiSubdomain: 'api',
-    browserSubdomains: ['www', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin'],
+    browserSubdomains: ['www', 'ehr', 'lab', 'pharmacy', 'migrate', 'outreach', 'admin'],
     originAuthorizationSecretParameter: 'ProductionCloudflareOriginSecret', vpcCidr: '10.40.0.0/16',
   },
 };

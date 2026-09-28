@@ -7,8 +7,9 @@ definitions, the fixed same-origin AWS API proxy, client/server Turnstile,
 host-only session enforcement, Notification API/Worker boundaries, direct
 six-digit OTP delivery, ordinary Novu/FCM orchestration, additive migration
 state, offline migration fixtures, and regional AWS notification IaC.
-CloudFront, active Vercel targeting, Brevo, magic authentication links, and
-canonical Supabase runtime paths have been removed. Local verification is the
+CloudFront, active Vercel targeting, magic authentication links, and canonical
+Supabase runtime paths have been removed. Brevo is the optional Notification API
+fallback, not a retired frontend/identity dependency. Local verification is the
 current gate; live Cloudflare/AWS/provider/NIN configuration, rehearsed HID 1.0
 migration, representative-device acceptance, and production cutover remain the
 next externally governed milestone.
@@ -16,7 +17,7 @@ next externally governed milestone.
 ## Current frontend convergence milestone
 
 The intended seven-application browser platform is implemented under `apps/*`:
-Web, EHR, Lab, Pharmacy, OCR Operations, Outreach, and Admin. Pharmacy and OCR
+Web, EHR, Lab, Pharmacy, Migrate, Outreach, and Admin. Pharmacy and Migrate
 are real API-backed workspaces, all apps consume shared offline/telemetry policy,
 and the one-origin gateway, direct refresh, production builds, desktop browser
 rendering, and scoped offline shells pass locally. Outreach remains the only

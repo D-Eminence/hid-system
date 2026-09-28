@@ -1,8 +1,8 @@
 # HID Identity Portal
 
-This package contains the React and Vite patient, facility, admin, Outreach,
-and HID Migrate experiences. It is part of the consolidated HID repository and
-uses the first-party HID REST API for authentication and application commands.
+This package contains the React and Vite patient, facility, admin, and Outreach
+experiences. HID Migrate is the separate `apps/ocr` application, served in
+production from `https://migrate.healthidentitydirectory.com/`.
 
 ## Runtime architecture
 
@@ -23,7 +23,6 @@ Historical comparison material remains only under the repository-level
 - `src/` contains the active frontend.
 - `src/lib/identityClient.ts` owns the REST session boundary.
 - `src/lib/functionApi.ts` owns shared function-gateway response handling.
-- `src/features/migrate/` contains the digitization and migration workspaces.
 - `public/` contains static assets, PWA files, and crawl metadata.
 - `scripts/` contains repository contract verification.
 
@@ -67,7 +66,6 @@ configuration.
 - `/patient` and `/patient/*` - patient authentication and portal flows
 - `/hospital` and `/hospital/*` - facility and staff flows
 - `/outreach/*` - Outreach onboarding and workspace
-- `/migrate/*` - controlled migration workspace
 - `/eminence/*` - private platform administration
 - `/pricing`, `/products`, and `/configure-ehr` - public product flows
 
@@ -76,7 +74,6 @@ configuration.
 ```bash
 npm run verify:identity
 npm run verify:api
-npm run verify:migrate
 npm run build
 ```
 

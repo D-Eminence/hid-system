@@ -446,7 +446,7 @@ export class HidRegionalStack extends Stack {
       : 'Secrets Manager JSON secret containing NIN keys, OTP HMAC key, Turnstile secret, and Google OIDC client-ID allowlist');
     this.requiredParameter('NotificationProviderSecretArn', this.configuration.name === 'staging'
       ? 'Secrets Manager JSON secret containing sesFromAddress and novuApiKey for staging email OTP and ordinary notifications'
-      : 'Secrets Manager JSON secret containing Novu, SES sender, Termii, Meta, and Infobip configuration');
+      : 'Secrets Manager JSON secret containing Novu, SES sender, Termii, Meta, and Brevo configuration');
     if (this.configuration.name === 'staging') {
       const novuApiUrl = this.requiredParameter('StagingNovuApiUrl',
         'API endpoint of the confirmed isolated Novu staging environment; no implicit region selection');
@@ -861,10 +861,9 @@ export class HidRegionalStack extends Stack {
         SES_FROM_ADDRESS: 'sesFromAddress', TERMII_BASE_URL: 'termiiBaseUrl',
         TERMII_API_KEY: 'termiiApiKey', TERMII_SENDER_ID: 'termiiSenderId',
         META_PHONE_NUMBER_ID: 'metaPhoneNumberId', META_ACCESS_TOKEN: 'metaAccessToken',
-        META_OTP_TEMPLATE_NAME: 'metaOtpTemplateName', INFOBIP_BASE_URL: 'infobipBaseUrl',
-        INFOBIP_API_KEY: 'infobipApiKey', INFOBIP_EMAIL_FROM: 'infobipEmailFrom',
-        INFOBIP_SMS_SENDER: 'infobipSmsSender', INFOBIP_WHATSAPP_SENDER: 'infobipWhatsAppSender',
-        INFOBIP_WHATSAPP_OTP_TEMPLATE_ID: 'infobipWhatsAppOtpTemplateId',
+        META_OTP_TEMPLATE_NAME: 'metaOtpTemplateName', BREVO_API_KEY: 'brevoApiKey',
+        BREVO_EMAIL_FROM: 'brevoEmailFrom', BREVO_SMS_SENDER: 'brevoSmsSender',
+        BREVO_WHATSAPP_SENDER: 'brevoWhatsAppSender',
       };
       for (const [environmentName, field] of Object.entries(providerFields)) {
         output[environmentName] = ecs.Secret.fromSecretsManager(secrets.notificationProvider!, field);

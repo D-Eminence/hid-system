@@ -14,8 +14,8 @@ const localWrangler = resolve(
 
 test('frontend dry-runs use only the pinned local Wrangler executable', () => {
   for (const [deployment, expectedWorkers] of [
-    ['staging', ['hid-web', 'hid-ehr', 'hid-lab', 'hid-pharmacy', 'hid-ocr', 'hid-outreach', 'hid-admin']],
-    ['production', ['hid-web', 'hid-ehr', 'hid-lab', 'hid-pharmacy', 'hid-ocr', 'hid-outreach', 'hid-admin', 'hid-apex-redirect']],
+    ['staging', ['hid-web', 'hid-ehr', 'hid-lab', 'hid-pharmacy', 'hid-ocr', 'hid-outreach', 'hid-admin', 'hid-ocr-redirect']],
+    ['production', ['hid-web', 'hid-ehr', 'hid-lab', 'hid-pharmacy', 'hid-ocr', 'hid-outreach', 'hid-admin', 'hid-ocr-redirect', 'hid-apex-redirect']],
   ]) {
     const invocations = []
     const workers = runWranglerDryRun(deployment, {

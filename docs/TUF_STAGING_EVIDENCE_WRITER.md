@@ -1,6 +1,6 @@
 # Prepared staging evidence archive writer
 
-The reusable `.github/workflows/tuf-evidence.yml` and `release/scripts/append-staging-release-evidence.mjs` preserve independently approved staging evidence using the existing release trust `EvidenceWriterRole`. They are local preparation. No workflow run, AWS upload, deployment or production change has been performed by this work. Deployment remains paused while the quota request is pending. MetaMap remains deferred and disabled.
+The reusable `.github/workflows/tuf-evidence.yml` and `release/scripts/append-staging-release-evidence.mjs` preserve independently approved staging evidence using the existing release trust `EvidenceWriterRole`. They are local preparation. No workflow run, AWS upload, deployment or production change has been performed by this work. Deployment remains paused while the quota request is pending. QoreID remains deferred and disabled.
 
 The adapter consumes an actual completed, successful, first-attempt producer run on the same approved source. Its artifact must contain exactly one regular file named `evidence.json`. The input must satisfy the existing promotion evidence contract and its mandatory checks, bind the exact staging release and artifact set, and have completed before archival. Supported evidence types are `staging-acceptance`, `migration-dry-run`, `staging-copy-migration`, `backup-restore` and `rollback-drill`. The adapter never creates passed checks or converts local preparation receipts into acceptance evidence. Production approval evidence is rejected.
 

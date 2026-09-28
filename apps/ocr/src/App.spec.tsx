@@ -22,7 +22,7 @@ vi.mock('./lib/ocrApi', () => ({
 }))
 
 const actor = (permissions: string[]): IdentityActorContext => ({
-  subject: 'subject-1', accountId: 'account-1', displayName: 'OCR operator',
+  subject: 'subject-1', accountId: 'account-1', displayName: 'Migrate operator',
   facilities: [{ id: 'facility-1', membershipId: 'membership-1', organizationId: 'organization-1',
     name: 'Digitization Centre', roles: ['ocr_operator'], permissions, isPrimary: true }],
 })
@@ -30,23 +30,23 @@ const actor = (permissions: string[]): IdentityActorContext => ({
 beforeEach(() => {
   testState.actor = null
   testState.online = true
-  window.history.replaceState({}, '', '/ocr/')
+  window.history.replaceState({}, '', '/')
 })
 afterEach(cleanup)
 
-describe('OCR route acceptance', () => {
-  it('shows Identity sign-in before any OCR operations for an unauthenticated user', async () => {
+describe('Migrate route acceptance', () => {
+  it('shows Identity sign-in before any Migrate operations for an unauthenticated user', async () => {
     render(<App />)
-    expect(await screen.findByRole('heading', { name: 'Sign in to OCR Operations' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Sign in to Migrate' })).toBeInTheDocument()
   })
 
   it('shows access denied when the membership lacks OCR read authority', async () => {
     testState.actor = actor([])
     render(<App />)
-    expect(await screen.findByText('OCR operations is unavailable')).toBeInTheDocument()
+    expect(await screen.findByText('Migrate is unavailable')).toBeInTheDocument()
   })
 
-  it('renders the truthful operations dashboard for an authorized OCR operator', async () => {
+  it('renders the truthful operations dashboard for an authorized Migrate operator', async () => {
     testState.actor = actor(['ocr.job.read'])
     render(<App />)
     expect(await screen.findByText('Digitization operations')).toBeInTheDocument()
@@ -56,7 +56,7 @@ describe('OCR route acceptance', () => {
 
   it('preserves a direct document-processing refresh without granting write authority', async () => {
     testState.actor = actor(['ocr.job.read'])
-    window.history.replaceState({}, '', '/ocr/document-processing')
+    window.history.replaceState({}, '', '/document-processing')
     render(<App />)
     expect(await screen.findByRole('heading', { name: 'Document processing' })).toBeInTheDocument()
     expect(screen.getByText(/cannot create them/i)).toBeInTheDocument()

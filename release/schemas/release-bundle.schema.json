@@ -64,7 +64,7 @@
         "type": "object",
         "properties": {
           "promotion": { "$ref": "#/$defs/candidatePromotion" },
-          "edge": { "type": "object", "properties": { "apex_redirect": { "type": "null" } }, "required": ["apex_redirect"] }
+          "edge": { "type": "object", "properties": { "apex_redirect": { "type": "null" }, "legacy_ocr_redirect": { "$ref": "#/$defs/legacyOcrRedirect" } }, "required": ["apex_redirect", "legacy_ocr_redirect"] }
         }
       }
     },
@@ -78,7 +78,7 @@
         "type": "object",
         "properties": {
           "promotion": { "$ref": "#/$defs/stagingValidatedPromotion" },
-          "edge": { "type": "object", "properties": { "apex_redirect": { "$ref": "#/$defs/apexRedirect" } }, "required": ["apex_redirect"] }
+          "edge": { "type": "object", "properties": { "apex_redirect": { "$ref": "#/$defs/apexRedirect" }, "legacy_ocr_redirect": { "$ref": "#/$defs/legacyOcrRedirect" } }, "required": ["apex_redirect", "legacy_ocr_redirect"] }
         }
       }
     }
@@ -292,13 +292,25 @@
         "destination_origin": { "const": "https://www.healthidentitydirectory.com" }
       }
     },
+    "legacyOcrRedirect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "script", "hostname", "destination_origin"],
+      "properties": {
+        "name": { "enum": ["hid-ocr-redirect-staging", "hid-ocr-redirect-production"] },
+        "script": { "$ref": "#/$defs/targetRef" },
+        "hostname": { "enum": ["ocr.staging.healthidentitydirectory.com", "ocr.healthidentitydirectory.com"] },
+        "destination_origin": { "enum": ["https://migrate.staging.healthidentitydirectory.com", "https://migrate.healthidentitydirectory.com"] }
+      }
+    },
     "edge": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["frontend_worker", "apex_redirect"],
+      "required": ["frontend_worker", "apex_redirect", "legacy_ocr_redirect"],
       "properties": {
         "frontend_worker": { "$ref": "#/$defs/targetRef" },
-        "apex_redirect": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/apexRedirect" }] }
+        "apex_redirect": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/apexRedirect" }] },
+        "legacy_ocr_redirect": { "$ref": "#/$defs/legacyOcrRedirect" }
       }
     },
     "migration": {

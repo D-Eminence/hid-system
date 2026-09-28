@@ -19,7 +19,7 @@ const backends = [
 ]
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
 const bases = { web: '/', ehr: '/ehr/', lab: '/lab/', pharmacy: '/pharmacy/',
-  ocr: '/ocr/', outreach: '/outreach/', admin: '/admin/' }
+  ocr: '/migrate/', outreach: '/outreach/', admin: '/admin/' }
 const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167'
 const unprivilegedNginxRuntime = 'nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3'
 

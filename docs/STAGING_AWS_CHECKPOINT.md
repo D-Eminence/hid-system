@@ -154,7 +154,7 @@ node infra/aws/scripts/assess-staging-capacity.mjs \
 
 Notification account requirements and minimum scopes remain in the
 [provider matrix](STAGING_PROVIDER_ACCOUNTS.md): SES and Novu REQUIRED;
-Termii and Meta WhatsApp OPTIONAL; Infobip FALLBACK. Do not send secrets in chat.
+Termii and Meta WhatsApp OPTIONAL; Brevo FALLBACK. Do not send secrets in chat.
 
 The owner's September 22 03:02 UTC Cloudflare diagnostic completed all twenty
 reads. The active account/zone is verified; the nine exact DNS queries, the

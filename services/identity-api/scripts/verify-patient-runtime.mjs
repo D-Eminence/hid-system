@@ -15,7 +15,8 @@ Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', AUTH_COOKIE_DOMAIN: '.e
   IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: 'public-synthetic-ehr-workload-token' });
 // Exercise patient sessions without NIN material in this disposable local test only.
 for (const key of ['NIN_LOOKUP_HMAC_KEY_B64', 'NIN_ENCRYPTION_KEY_B64',
-  'METAMAP_CLIENT_ID', 'METAMAP_CLIENT_SECRET']) delete process.env[key];
+  'METAMAP_CLIENT_ID', 'METAMAP_CLIENT_SECRET', 'QOREID_CLIENT_ID',
+  'QOREID_CLIENT_SECRET', 'QOREID_API_KEY']) delete process.env[key];
 require('ts-node').register({ project: join(service, 'tsconfig.json'), transpileOnly: true });
 require('reflect-metadata');
 const load = path => require(join(service, 'src', path));

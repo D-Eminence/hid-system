@@ -83,6 +83,17 @@ describe('TurnstileService', () => {
     })).rejects.toMatchObject({ code: 'TURNSTILE_CONTEXT_MISMATCH' });
   });
 
+  it('accepts the preserved OCR login action only on the Migrate hostname', async () => {
+    result({ success: true, hostname: 'migrate.healthidentitydirectory.com', action: 'ocr-login' });
+    await expect(new TurnstileService().verifyLogin({
+      token: 'migrate-token', action: 'ocr-login', origin: 'https://migrate.healthidentitydirectory.com',
+    })).resolves.toBeUndefined();
+    result({ success: true, hostname: 'ocr.healthidentitydirectory.com', action: 'ocr-login' });
+    await expect(new TurnstileService().verifyLogin({
+      token: 'legacy-ocr-token', action: 'ocr-login', origin: 'https://ocr.healthidentitydirectory.com',
+    })).rejects.toMatchObject({ code: 'TURNSTILE_CONTEXT_MISMATCH' });
+  });
+
   it('accepts only staging evidence under the staging deployment profile', async () => {
     process.env.HID_DEPLOYMENT_ENV = 'staging';
     resetEnvironmentForTests();

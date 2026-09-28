@@ -389,7 +389,7 @@ export default function Landing() {
     { icon: 'lab', title: 'HID Lab', desc: 'Laboratory operations, diagnostics management, and fast, reliable result reporting.' },
     { icon: 'pharmacy', title: 'HID Pharmacy', desc: 'Prescription management, dispensing workflows, and real-time inventory across branches.' },
     { icon: 'outreach', title: 'HID Outreach', desc: 'Tools to run medical outreaches, community health programs, and population health initiatives.' },
-    { icon: 'ehr', title: 'HID Migrate', desc: 'Digitize physical folders with scanning, OCR, AI-assisted extraction, human validation, and patient matching.' },
+    { icon: 'ehr', title: 'HID Migrate', desc: 'Run governed OCR jobs for secured document references, with extraction, validation, retry, and publication-state visibility.' },
     { icon: 'identity', title: 'HID API', desc: 'Connect existing EHRs, laboratory systems, pharmacies, HMOs, and external health applications.' },
   ]
 
@@ -744,8 +744,8 @@ export default function Landing() {
 
       <section style={{ padding: responsiveSectionPadding, background: '#0f2742', color: '#fff' }}>
         <div style={{ maxWidth: 960, margin: '0 auto', display: 'grid', gridTemplateColumns: isNarrow ? '1fr' : 'minmax(0,1fr) minmax(300px,.8fr)', gap: 36, alignItems: 'center' }}>
-          <div><div style={{ color: '#82b9f5', fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.08em' }}>HID Migrate</div><h2 style={{ fontSize: isNarrow ? 25 : 36, lineHeight: 1.15, letterSpacing: '-.04em' }}>Your old records don&apos;t have to stay on paper.</h2><p style={{ color: '#c8d6e6', lineHeight: 1.7 }}>Move years of patient records into a structured digital healthcare system without starting from zero.</p><a href="/products/migrate" style={{ display: 'inline-flex', background: '#fff', color: '#1a6fd4', padding: '11px 17px', borderRadius: 10, fontWeight: 700, textDecoration: 'none' }}>Digitize Your Records</a></div>
-          <div style={{ background: 'rgba(255,255,255,.08)', border: '1px solid rgba(255,255,255,.12)', borderRadius: 18, padding: 24, lineHeight: 2, fontFamily: 'JetBrains Mono, monospace', fontSize: 13 }}>Paper Folder<br/>↓ Scan<br/>↓ OCR & AI Extraction<br/>↓ Human Validation<br/>↓ Patient Matching<br/>↓ Digital Patient Folder</div>
+          <div><div style={{ color: '#82b9f5', fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.08em' }}>HID Migrate</div><h2 style={{ fontSize: isNarrow ? 25 : 36, lineHeight: 1.15, letterSpacing: '-.04em' }}>Your governed OCR workflow starts with the right document reference.</h2><p style={{ color: '#c8d6e6', lineHeight: 1.7 }}>Create authorized OCR jobs, inspect their extraction and validation state, retry eligible failures, and hand off publication for contextual review.</p><a href="/products/migrate" style={{ display: 'inline-flex', background: '#fff', color: '#1a6fd4', padding: '11px 17px', borderRadius: 10, fontWeight: 700, textDecoration: 'none' }}>Explore Migrate</a></div>
+          <div style={{ background: 'rgba(255,255,255,.08)', border: '1px solid rgba(255,255,255,.12)', borderRadius: 18, padding: 24, lineHeight: 2, fontFamily: 'JetBrains Mono, monospace', fontSize: 13 }}>Secured Document Reference<br/>↓ Authorized OCR Job<br/>↓ Extraction Metadata<br/>↓ Validation State<br/>↓ Eligible Retry or Publication Handoff<br/>↓ Contextual Review</div>
         </div>
       </section>
 

@@ -301,7 +301,7 @@ export function verifyReleaseBundle(bundle, configuration, expectations = {}) {
     checkProvenance(frontend.provenance, `${base}/provenance.intoto.jsonl`, prefix, `${path}.provenance`)
   })
 
-  plainObject(bundle.edge, 'bundle.edge', ['frontend_worker', 'apex_redirect'])
+  plainObject(bundle.edge, 'bundle.edge', ['frontend_worker', 'apex_redirect', 'legacy_ocr_redirect'])
   checkTargetRef(bundle.edge.frontend_worker, sharedWorkerPath, MEDIA.worker, 'bundle.edge.frontend_worker', 1048576)
   exact(bundle.edge.frontend_worker.sha256, sharedWorkerHash, 'bundle.edge.frontend_worker.sha256')
   if (environment.name === 'staging') {
@@ -313,6 +313,11 @@ export function verifyReleaseBundle(bundle, configuration, expectations = {}) {
     exact(apex.hostname, expectedEnvironment.apex_redirect.hostname, 'bundle.edge.apex_redirect.hostname')
     exact(apex.destination_origin, expectedEnvironment.apex_redirect.destination_origin, 'bundle.edge.apex_redirect.destination_origin')
   }
+  const legacyOcrRedirect = plainObject(bundle.edge.legacy_ocr_redirect, 'bundle.edge.legacy_ocr_redirect', ['name', 'script', 'hostname', 'destination_origin'])
+  exact(legacyOcrRedirect.name, expectedEnvironment.legacy_ocr_redirect.worker, 'bundle.edge.legacy_ocr_redirect.name')
+  checkTargetRef(legacyOcrRedirect.script, `${prefix}/edge/legacy-ocr-domain-redirect-worker.mjs`, MEDIA.worker, 'bundle.edge.legacy_ocr_redirect.script', 1048576)
+  exact(legacyOcrRedirect.hostname, expectedEnvironment.legacy_ocr_redirect.hostname, 'bundle.edge.legacy_ocr_redirect.hostname')
+  exact(legacyOcrRedirect.destination_origin, expectedEnvironment.legacy_ocr_redirect.destination_origin, 'bundle.edge.legacy_ocr_redirect.destination_origin')
 
   const migration = plainObject(bundle.migration, 'bundle.migration', ['image_component', 'first', 'last', 'count', 'ledger', 'verification'])
   exact(migration.image_component, 'database-migration', 'bundle.migration.image_component')
@@ -528,6 +533,7 @@ export function collectTargetReferences(bundle) {
   }
   add(bundle.edge.frontend_worker)
   if (bundle.edge.apex_redirect !== null) add(bundle.edge.apex_redirect.script)
+  add(bundle.edge.legacy_ocr_redirect.script)
   add(bundle.migration.ledger)
   add(bundle.migration.verification)
   if (bundle.promotion.kind === 'staging-validated') {
@@ -574,6 +580,7 @@ export function deriveDeploymentPlan(bundle, configuration) {
         script: frontend.worker.script,
       })),
       apex_redirect: bundle.edge.apex_redirect,
+      legacy_ocr_redirect: bundle.edge.legacy_ocr_redirect,
     },
     migration: {
       image_uri: imageParameters.find((item) => item.component === 'database-migration').image_uri,
@@ -689,24 +696,28 @@ export async function verifyMachineConfiguration(configuration) {
     {
       name: 'staging', tuf_repository_id: 'hid-staging-v1', update_origin: 'https://updates.staging.healthidentitydirectory.com',
       target_prefix: 'environments/staging', api_origin: 'https://api.staging.healthidentitydirectory.com',
-      hosts: ['staging.healthidentitydirectory.com', 'ehr.staging.healthidentitydirectory.com', 'lab.staging.healthidentitydirectory.com', 'pharmacy.staging.healthidentitydirectory.com', 'ocr.staging.healthidentitydirectory.com', 'outreach.staging.healthidentitydirectory.com', 'admin.staging.healthidentitydirectory.com'],
-      apex_redirect: null, retention: { minimum_accepted_releases: 5, minimum_days: 90 },
+      hosts: ['staging.healthidentitydirectory.com', 'ehr.staging.healthidentitydirectory.com', 'lab.staging.healthidentitydirectory.com', 'pharmacy.staging.healthidentitydirectory.com', 'migrate.staging.healthidentitydirectory.com', 'outreach.staging.healthidentitydirectory.com', 'admin.staging.healthidentitydirectory.com'],
+      apex_redirect: null,
+      legacy_ocr_redirect: { worker: 'hid-ocr-redirect-staging', hostname: 'ocr.staging.healthidentitydirectory.com', destination_origin: 'https://migrate.staging.healthidentitydirectory.com' },
+      retention: { minimum_accepted_releases: 5, minimum_days: 90 },
     },
     {
       name: 'production', tuf_repository_id: 'hid-production-v1', update_origin: 'https://updates.healthidentitydirectory.com',
       target_prefix: 'environments/production', api_origin: 'https://api.healthidentitydirectory.com',
-      hosts: ['www.healthidentitydirectory.com', 'ehr.healthidentitydirectory.com', 'lab.healthidentitydirectory.com', 'pharmacy.healthidentitydirectory.com', 'ocr.healthidentitydirectory.com', 'outreach.healthidentitydirectory.com', 'admin.healthidentitydirectory.com'],
+      hosts: ['www.healthidentitydirectory.com', 'ehr.healthidentitydirectory.com', 'lab.healthidentitydirectory.com', 'pharmacy.healthidentitydirectory.com', 'migrate.healthidentitydirectory.com', 'outreach.healthidentitydirectory.com', 'admin.healthidentitydirectory.com'],
       apex_redirect: { worker: 'hid-apex-redirect-production', hostname: 'healthidentitydirectory.com', destination_origin: 'https://www.healthidentitydirectory.com' },
+      legacy_ocr_redirect: { worker: 'hid-ocr-redirect-production', hostname: 'ocr.healthidentitydirectory.com', destination_origin: 'https://migrate.healthidentitydirectory.com' },
       retention: { minimum_accepted_releases: 10, minimum_days: 180 },
     },
   ]
   environments.environments.forEach((environment, index) => {
-    plainObject(environment, `environments config.environments[${index}]`, ['name', 'tuf_repository_id', 'update_origin', 'target_prefix', 'api_origin', 'frontend_hosts', 'apex_redirect', 'retention'])
+    plainObject(environment, `environments config.environments[${index}]`, ['name', 'tuf_repository_id', 'update_origin', 'target_prefix', 'api_origin', 'frontend_hosts', 'apex_redirect', 'legacy_ocr_redirect', 'retention'])
     const expected = expectedEnvironments[index]
     for (const key of ['name', 'tuf_repository_id', 'update_origin', 'target_prefix', 'api_origin']) exact(environment[key], expected[key], `environments config.environments[${index}].${key}`)
     plainObject(environment.frontend_hosts, `environments config.environments[${index}].frontend_hosts`, FRONTENDS)
     exact(JSON.stringify(FRONTENDS.map((app) => environment.frontend_hosts[app])), JSON.stringify(expected.hosts), `environments config.environments[${index}].frontend_hosts`)
     exact(JSON.stringify(environment.apex_redirect), JSON.stringify(expected.apex_redirect), `environments config.environments[${index}].apex_redirect`)
+    exact(JSON.stringify(environment.legacy_ocr_redirect), JSON.stringify(expected.legacy_ocr_redirect), `environments config.environments[${index}].legacy_ocr_redirect`)
     exact(JSON.stringify(environment.retention), JSON.stringify(expected.retention), `environments config.environments[${index}].retention`)
   })
   plainObject(environments.rollback, 'environments config.rollback', ['strategy', 'requires_higher_release_sequence', 'requires_retained_verified_targets', 'allow_metadata_reversion'])

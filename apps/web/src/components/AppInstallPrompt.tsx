@@ -1,5 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
 import { HIDLogo } from './HIDLogo'
 import { Button } from './ui'
 
@@ -53,7 +52,6 @@ function isStaleInstallPromptError(error: unknown) {
 }
 
 export function AppInstallPrompt() {
-  const location = useLocation()
   const [deferredPrompt, setDeferredPrompt] = useState<DeferredInstallPromptEvent | null>(null)
   const [visible, setVisible] = useState(false)
   const [iosPrompt, setIosPrompt] = useState(false)
@@ -123,7 +121,7 @@ export function AppInstallPrompt() {
     setIosPrompt(false)
   }
 
-  if (location.pathname.startsWith('/migrate') || !visible || (!deferredPrompt && !iosPrompt)) return null
+  if (!visible || (!deferredPrompt && !iosPrompt)) return null
 
   return (
     <div

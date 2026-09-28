@@ -26,7 +26,7 @@ Offline support applies especially to:
 * Pharmacy
 * Outreach
 
-It also applies to OCR Operations and Admin as honest shell/connectivity
+It also applies to Migrate and Admin as honest shell/connectivity
 behavior. `offline-aware != offline-authoritative` and offline support does not
 grant mutation authority.
 

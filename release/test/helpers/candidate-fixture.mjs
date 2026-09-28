@@ -141,6 +141,12 @@ export function buildBundle(environment, sequence, stagingBundle) {
         hostname: environmentConfig.apex_redirect.hostname,
         destination_origin: environmentConfig.apex_redirect.destination_origin,
       },
+      legacy_ocr_redirect: {
+        name: environmentConfig.legacy_ocr_redirect.worker,
+        script: target(environment, id, 'edge/legacy-ocr-domain-redirect-worker.mjs', MEDIA.worker, 2048),
+        hostname: environmentConfig.legacy_ocr_redirect.hostname,
+        destination_origin: environmentConfig.legacy_ocr_redirect.destination_origin,
+      },
     },
     migration: {
       image_component: 'database-migration',
@@ -170,4 +176,3 @@ export function buildBundle(environment, sequence, stagingBundle) {
   }
   return bundle
 }
-

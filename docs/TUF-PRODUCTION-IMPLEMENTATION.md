@@ -18,7 +18,7 @@ session expired. DNS/Turnstile scope and renewed access remain external gates. F
 application keys populated two existing staging secrets; no other cloud mutation,
 stack deployment, live migration, DNS change or publication occurred. Real NIN/provider
 configuration, release custody/admission and live evidence remain acceptance gates.
-The staging-only email profile now requires SES and Novu; Termii/Meta/Infobip
+The staging-only email profile now requires SES and Novu; Termii/Meta/Brevo
 accounts are optional for this scope. Public NIN/custody intakes and a read-only
 external preflight are prepared. The existing `docs/SECURITY.md` edit remains untouched. The report names exact external
 inputs and validation steps; generic staging permission is not being requested again.

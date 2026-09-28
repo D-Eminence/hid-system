@@ -1,8 +1,9 @@
 # HID Cloudflare frontend edge
 
-The seven directories under `workers/` are independent Cloudflare Workers
-Static Assets deployments. Each builds one canonical application at `/`, has
-one exact custom domain, and invokes the shared Worker before assets so the
+The seven application directories under `workers/` are independent Cloudflare
+Workers Static Assets deployments. Each builds one canonical application (Migrate
+is root-served at `migrate.healthidentitydirectory.com`), has one exact custom domain, and invokes the shared
+Worker before assets so the
 fixed `/api/v1/*` AWS proxy and response security policy cannot be bypassed.
 
 Each application requires an explicit Wrangler named environment. `production`
@@ -11,7 +12,10 @@ uses the approved production hostname and the fixed
 staging hostname and the fixed `https://api.staging.healthidentitydirectory.com`
 origin. The Worker rejects any mismatched application, host, environment, or
 origin combination, so browser input, Host headers, and query strings cannot
-select an upstream. The production apex redirect is explicit and has no staging
+select an upstream. The `hid-ocr-redirect` Worker is a separate, originless
+compatibility redirect from the old OCR hostname to the paired Migrate hostname
+in each environment. Legacy Migrate `/migrate/*` and OCR `/ocr/*` paths map once
+to root-equivalent Migrate paths; `/api/v1/*` paths retain their API path. The production apex redirect is explicit and has no staging
 counterpart because `staging.healthidentitydirectory.com` is the staging Web
 application.
 
@@ -33,6 +37,6 @@ DNS. Deploy only from the future authorized pipeline. Hostinger remains
 registrar; Cloudflare becomes authoritative DNS/TLS only after the separately
 approved nameserver cutover.
 
-The apex redirect is a separate originless Worker because it serves no
-application artifact. Its fixed 308 retains the path and query and never reads
-a redirect target from request input.
+The redirects are separate originless Workers because they serve no application
+artifact. Their fixed 308 responses retain the path and query and never read a
+redirect target from request input.

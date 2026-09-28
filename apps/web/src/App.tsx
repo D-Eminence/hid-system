@@ -19,7 +19,6 @@ import {
   DoctorHistoryPage,
   DoctorPatientRecordsPage,
   LandingPage,
-  MigratePage,
   CommercialProductsPage,
   EhrConfiguratorPage,
   PricingPage,
@@ -48,7 +47,6 @@ import {
   HOSPITAL_HISTORY_PATH,
   HOSPITAL_ROOT_PATH,
 } from './lib/hospitalRoutes'
-import { MIGRATE_DASHBOARD_PATH, MIGRATE_ROOT_PATH } from './lib/migrateRoutes'
 
 class ErrorBoundary extends Component<{ children: React.ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null }
@@ -138,7 +136,6 @@ function requiresImmediateSessionBootstrap(pathname: string) {
     pathname.startsWith('/hospital/history') ||
     pathname.startsWith('/hospital/emergency') ||
     pathname.startsWith('/hospital/patient-records/') ||
-    pathname.startsWith('/migrate') ||
     pathname.startsWith('/eminence/')
   )
 }
@@ -242,8 +239,6 @@ export default function App() {
             <Route path="/hospital/registration" element={<PatientRegistrationPage />} />
                 <Route path={HOSPITAL_EMERGENCY_PATH} element={<DoctorEmergencyPage />} />
             <Route path="/hospital/patient-records/:hidCode" element={<DoctorPatientRecordsPage />} />
-            <Route path={MIGRATE_ROOT_PATH} element={<Navigate to={MIGRATE_DASHBOARD_PATH} replace />} />
-            <Route path="/migrate/*" element={<MigratePage />} />
             <Route path="/patient/auth" element={<Navigate to="/patient" replace />} />
             <Route path="/doctor/auth" element={<Navigate to={HOSPITAL_AUTH_PATH} replace />} />
             <Route path="/doctor/access" element={<Navigate to={HOSPITAL_ACCESS_PATH} replace />} />

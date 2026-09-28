@@ -65,6 +65,16 @@ interface ModuleGroup {
   entries: ModuleEntry[];
 }
 
+const MIGRATE_ORIGIN_BY_EHR_HOST: Readonly<Record<string, string>> = {
+  'ehr.healthidentitydirectory.com': 'https://migrate.healthidentitydirectory.com/',
+  'ehr.staging.healthidentitydirectory.com': 'https://migrate.staging.healthidentitydirectory.com/',
+};
+
+function migrateWorkspaceHref() {
+  if (typeof window === 'undefined') return '/migrate/';
+  return MIGRATE_ORIGIN_BY_EHR_HOST[window.location.hostname] ?? '/migrate/';
+}
+
 const MODULE_GROUPS: ModuleGroup[] = [
   {
     title: 'Core EHR',
@@ -94,7 +104,7 @@ const MODULE_GROUPS: ModuleGroup[] = [
       { id: 'laboratory', label: 'Laboratory', description: 'Open the facility-scoped accession, custody, execution, and result workflow.', icon: 'flask', available: true, externalHref: '/lab/' },
       { id: 'radiology', label: 'Radiology', description: 'Imaging requests, DICOM workflow, and reports.', icon: 'eye', available: false },
       { id: 'pharmacy', label: 'Pharmacy', description: 'Open the governed prescription acceptance, dispensing, and reversal workspace.', icon: 'pill', available: true, externalHref: '/pharmacy/' },
-      { id: 'ocr_operations', label: 'OCR Operations', description: 'Open the governed extraction job, retry, validation-state, and publication workspace.', icon: 'fileText', available: true, externalHref: '/ocr/' },
+      { id: 'ocr_operations', label: 'Migrate', description: 'Open Migrate’s governed extraction job, retry, validation-state, and publication workspace.', icon: 'fileText', available: true, externalHref: migrateWorkspaceHref() },
       { id: 'blood_bank', label: 'Blood Bank', description: 'Blood products and transfusion workflow.', icon: 'droplet', available: false },
     ],
   },

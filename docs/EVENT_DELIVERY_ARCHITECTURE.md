@@ -16,7 +16,7 @@ subset of ordinary domain events is routed by EventBridge to a KMS-encrypted
 SQS queue/DLQ and consumed by Notification Worker through Novu, with FCM as the
 server-side push boundary. Authentication OTP is explicitly excluded and uses
 Identity -> workload-authenticated Notification API -> SES/Termii/Meta with
-bounded Infobip fallback. The generic inbox remains available for future
+bounded Brevo fallback. The generic inbox remains available for future
 governed consumers; no other product effect or EHR producer is invented.
 
 ## Producer inventory

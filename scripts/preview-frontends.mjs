@@ -7,7 +7,11 @@ const ports = resolveDevelopmentPorts(process.env)
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'outreach', 'ocr', 'admin']
 const children = apps.map(app => spawn('npm', ['--prefix', `apps/${app}`, 'run', 'preview'], {
   cwd: new URL('..', import.meta.url),
-  env: { ...process.env, ...(app === 'web' ? { HID_WEB_DIRECT: 'true' } : {}) },
+  env: {
+    ...process.env,
+    ...(app === 'web' ? { HID_WEB_DIRECT: 'true' } : {}),
+    ...(app === 'ocr' ? { HID_PUBLIC_BASE: '/' } : {}),
+  },
   stdio: 'inherit',
 }))
 
@@ -15,7 +19,7 @@ console.log('[hid-system] production frontend previews')
 for (const [app, port] of [
   ['web', ports.webUi], ['ehr', ports.ehrUi], ['lab', ports.labUi], ['pharmacy', ports.pharmacyUi],
   ['outreach', ports.outreachUi], ['ocr', ports.ocrUi], ['admin', ports.adminUi],
-]) console.log(`[hid-system] ${app.padEnd(9)} http://127.0.0.1:${port}/${app === 'web' ? '' : `${app}/`}`)
+]) console.log(`[hid-system] ${(app === 'ocr' ? 'migrate' : app).padEnd(9)} http://127.0.0.1:${port}/${app === 'web' || app === 'ocr' ? '' : `${app}/`}`)
 
 let stopping = false
 function stop(signal = 'SIGTERM') {

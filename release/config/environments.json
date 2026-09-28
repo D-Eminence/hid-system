@@ -18,11 +18,16 @@
         "ehr": "ehr.staging.healthidentitydirectory.com",
         "lab": "lab.staging.healthidentitydirectory.com",
         "pharmacy": "pharmacy.staging.healthidentitydirectory.com",
-        "ocr": "ocr.staging.healthidentitydirectory.com",
+        "ocr": "migrate.staging.healthidentitydirectory.com",
         "outreach": "outreach.staging.healthidentitydirectory.com",
         "admin": "admin.staging.healthidentitydirectory.com"
       },
       "apex_redirect": null,
+      "legacy_ocr_redirect": {
+        "worker": "hid-ocr-redirect-staging",
+        "hostname": "ocr.staging.healthidentitydirectory.com",
+        "destination_origin": "https://migrate.staging.healthidentitydirectory.com"
+      },
       "retention": { "minimum_accepted_releases": 5, "minimum_days": 90 }
     },
     {
@@ -36,7 +41,7 @@
         "ehr": "ehr.healthidentitydirectory.com",
         "lab": "lab.healthidentitydirectory.com",
         "pharmacy": "pharmacy.healthidentitydirectory.com",
-        "ocr": "ocr.healthidentitydirectory.com",
+        "ocr": "migrate.healthidentitydirectory.com",
         "outreach": "outreach.healthidentitydirectory.com",
         "admin": "admin.healthidentitydirectory.com"
       },
@@ -44,6 +49,11 @@
         "worker": "hid-apex-redirect-production",
         "hostname": "healthidentitydirectory.com",
         "destination_origin": "https://www.healthidentitydirectory.com"
+      },
+      "legacy_ocr_redirect": {
+        "worker": "hid-ocr-redirect-production",
+        "hostname": "ocr.healthidentitydirectory.com",
+        "destination_origin": "https://migrate.healthidentitydirectory.com"
       },
       "retention": { "minimum_accepted_releases": 10, "minimum_days": 180 }
     }

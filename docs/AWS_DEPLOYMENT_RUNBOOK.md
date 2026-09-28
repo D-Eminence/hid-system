@@ -9,11 +9,11 @@ OTP values, tokens, provider credentials, or database URLs in logs.
 
 ## Staging NIN deferral
 
-MetaMap NIN integration is prepared but deferred. Activation requires version-specific provider contract confirmation and authorized trial/test access.
+QoreID is selected for future NIN verification, but the HID integration remains deferred. Activation requires an approved provider contract and authorized test access.
 
 All staging profiles set `NIN_PROVIDER_MODE=deferred` and omit NIN provider and
 cryptographic-key injection. Existing stored NIN keys remain preserved. Missing
-MetaMap credentials do not block task startup, deployment or acceptance. Follow
+QoreID credentials do not block task startup, deployment or acceptance. Follow
 [staging patient journeys](STAGING_PATIENT_JOURNEYS.md) for approved synthetic
 account/patient preparation; keep real authentication, OTP delivery, TLS, RLS,
 consent, workload identity and audit controls active.
@@ -24,7 +24,7 @@ Staging selects `NOTIFICATION_DELIVERY_PROFILE=email-only`. Its Notification API
 requires only `sesFromAddress` from `/hid/staging/notification-provider`; the
 Notification Worker separately requires `novuApiKey`. SES remains live, workload
 authentication and TLS remain required, and SES failures are preserved. Termii,
-Meta and Infobip fields must not be filled with placeholders. Their accounts and
+Meta and Brevo fields must not be filled with placeholders. Their accounts and
 full-channel profile are deferred unless explicitly included in a later reviewed
 acceptance scope. Production retains the existing full profile.
 
@@ -55,7 +55,7 @@ Record and approve:
 - Identity auth/OTP/Turnstile secret material; NIN material is excluded from
   current staging requirements and retained for later integration;
 - for staging email acceptance, SES sender and Novu secret material only; the
-  existing full profile additionally uses Termii, Meta and Infobip. FCM is not
+  existing full profile additionally uses Termii, Meta and Brevo. FCM is not
   instantiated by the current worker and is outside this acceptance scope; and
 - one independently generated origin secret per environment, stored only in
   that environment's Cloudflare Worker secret binding and its matching AWS WAF
@@ -337,7 +337,7 @@ Before raising task counts, prove in staging:
   workload JWT behavior;
 - Turnstile success, failure, timeout, replay/hostname/action rejection, and
   fail-closed production configuration;
-- SES/Termii/Meta primary OTP delivery and Infobip fallback only after a known
+- SES/Termii/Meta primary OTP delivery and Brevo fallback only after a known
   primary failure; unknown outcomes must not create blind duplicates;
 - OTP is exactly six digits, purpose-bound, expiring, attempt-limited,
   resend-invalidated, never plaintext-persisted/logged, and completion is

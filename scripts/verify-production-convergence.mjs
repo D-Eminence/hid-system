@@ -30,7 +30,7 @@ function assertNoRuntime(label, pattern) {
   assert.deepEqual(matches, [], `${label} remains in canonical deployable files: ${matches.join(', ')}`)
 }
 
-assertNoRuntime('Brevo runtime', /\b(?:brevo|sendinblue)\b|api\.brevo\.com|sendinblue\.com/i)
+assertNoRuntime('Infobip runtime', /InfobipFallbackProvider|infobip\.provider|INFOBIP_(?:BASE_URL|EMAIL_FROM|SMS_SENDER|WHATSAPP)|api\.infobip\.com/i)
 assertNoRuntime('Supabase runtime', /@supabase\/supabase-js|\bsupabase\.(?:auth|from|storage|channel|functions)\b|\.supabase\.co|\bcreateClient\s*\([^)]*supabase/i)
 assertNoRuntime('legacy HTTP identity runtime', /legacy-http|LEGACY_IDENTITY_(?:URL|ANON_KEY|SERVICE_ROLE_KEY)|IDENTITY_LEGACY_(?:BASE_URL|SERVICE_TOKEN)|IDENTITY_PROVIDER_MODE/i)
 assertNoRuntime('authentication magic-link runtime', /emailRedirectTo|PASSWORD_RECOVERY|\.(?:signInWithOtp|verifyOtp)\s*\(|\bmagic[-_ ]?link\b/i)
@@ -57,12 +57,16 @@ const cloudflareDeployments = {
     apiOrigin: 'https://api.healthidentitydirectory.com',
     hostFor: (app) => app === 'web'
       ? 'www.healthidentitydirectory.com'
+      : app === 'ocr'
+        ? 'migrate.healthidentitydirectory.com'
       : `${app}.healthidentitydirectory.com`,
   },
   staging: {
     apiOrigin: 'https://api.staging.healthidentitydirectory.com',
     hostFor: (app) => app === 'web'
       ? 'staging.healthidentitydirectory.com'
+      : app === 'ocr'
+        ? 'migrate.staging.healthidentitydirectory.com'
       : `${app}.staging.healthidentitydirectory.com`,
   },
 }
@@ -95,6 +99,16 @@ const apex = JSON.parse(await readFile(resolve(root, 'infra/cloudflare/workers/h
 assert.equal(apex.routes, undefined)
 assert.ok(apex.env?.production?.routes?.some((route) => route.pattern === 'healthidentitydirectory.com' && route.custom_domain === true))
 assert.equal(apex.env?.staging, undefined)
+const legacyOcrRedirect = JSON.parse(await readFile(resolve(root, 'infra/cloudflare/workers/hid-ocr-redirect/wrangler.json'), 'utf8'))
+for (const [deployment, sourceHost, targetOrigin] of [
+  ['production', 'ocr.healthidentitydirectory.com', 'https://migrate.healthidentitydirectory.com'],
+  ['staging', 'ocr.staging.healthidentitydirectory.com', 'https://migrate.staging.healthidentitydirectory.com'],
+]) {
+  const environment = legacyOcrRedirect.env?.[deployment]
+  assert.equal(environment?.name, `hid-ocr-redirect-${deployment}`)
+  assert.ok(environment?.routes?.some((route) => route.pattern === sourceHost && route.custom_domain === true))
+  assert.deepEqual(environment?.vars, { DEPLOYMENT_ENV: deployment, EXPECTED_HOST: sourceHost, TARGET_ORIGIN: targetOrigin })
+}
 const cloudflareWorker = await readFile(resolve(root, 'infra/cloudflare/src/frontend-worker.mjs'), 'utf8')
 for (const { apiOrigin } of Object.values(cloudflareDeployments)) {
   assert.match(cloudflareWorker, new RegExp(apiOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
@@ -120,7 +134,7 @@ for (const script of ['stage-legacy-identity.mjs', 'promote-legacy-identity.mjs'
   assert.ok((await stat(resolve(root, 'services/ehr-api/scripts', script))).isFile(), `${script} is missing`)
 }
 
-console.log('NO ACTIVE BREVO RUNTIME DEPENDENCY')
+console.log('NO ACTIVE INFOBIP RUNTIME DEPENDENCY')
 console.log('NO ACTIVE SUPABASE RUNTIME DEPENDENCY')
 console.log('NO ACTIVE VERCEL TARGET OR AUTHENTICATION MAGIC-LINK RUNTIME')
 console.log('Verified seven Cloudflare static-asset workers, fixed API proxy, notification IaC, OTP policy, and migration tooling.')

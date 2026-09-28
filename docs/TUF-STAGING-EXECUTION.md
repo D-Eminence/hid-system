@@ -31,18 +31,16 @@ publisher credential remains; no further read-scope renewal is required.
 The current external-gate continuation keeps the architecture fixed. Staging now
 uses an explicit email-only notification profile: SES is required, Novu is required
 for asynchronous emergency delivery, Termii and Meta are optional unused channels,
-and Infobip is an optional fallback. See the researched
+and Brevo is an optional fallback. See the researched
 [provider account matrix](STAGING_PROVIDER_ACCOUNTS.md) before creating accounts.
 No optional provider account is requested for this acceptance scope.
 
-MetaMap and the Client ID are now confirmed. Official GovChecks v1 / OpenAPI
-document 1.4 research, isolated transport and signature preparation, and a hidden
-local Secrets Manager entry tool are recorded in the
-[MetaMap contract review](METAMAP_NIN_CONTRACT.md). The actual standalone callback
-contract still needs clarification and is now a **post-staging task**. NIN is
-explicitly disabled with `NIN_PROVIDER_MODE=deferred`; it does not block staging
-deployment or acceptance and no MetaMap credential is required. No provider
-secret was supplied or stored, and no MetaMap API request or deployment occurred.
+QoreID is selected for future NIN and CAC verification. HID has no active QoreID
+adapter, credential binding, or provider request: the generic NIN boundary stays
+explicitly disabled with `NIN_PROVIDER_MODE=deferred`. It does not block staging
+deployment or acceptance and requires no QoreID credential. The unresolved
+authentication/result contract and CAC organization-domain work are recorded in
+[the QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md).
 
 The staging successor now implements the patient, recovery and emergency journeys,
 governed enrollment, and staging workload token delivery. Local evidence below
@@ -63,10 +61,10 @@ this section supersedes its authentication, implementation and secret-change sta
   idempotent enrollment of an unmapped canonical patient into a separate pending-reset
   auth account; existing-email linkage is rejected. Verified canonical NIN provenance
   is required and preserved through contact verification. Provider responses receive
-  strict runtime validation. MetaMap is now the confirmed provider; documented
-  transport preparation remains isolated until its standalone result/callback
-  contract is complete. Staging deferred mode fails closed; deterministic mode
-  is test-only and rejected in staging. Existing-patient staging journeys use
+  strict runtime validation. QoreID is the selected future provider; no transport
+  is implemented until an approved result/authentication contract exists. Staging
+  deferred mode fails closed; deterministic mode is test-only and rejected in
+  staging. Existing-patient staging journeys use
   [reviewed synthetic account/patient links](STAGING_PATIENT_JOURNEYS.md), without NIN assurance.
 - **OTP:** account/token-bound challenge and completion credential, atomic one-time
   recovery with Argon2 password, session revocation, audit rollback, disabled/stale
@@ -118,7 +116,7 @@ this section supersedes its authentication, implementation and secret-change sta
 
 
 The continuation also adds a [read-only external preflight](STAGING_EXTERNAL_PREFLIGHT.md),
-an updated MetaMap NIN contract intake, and a
+an updated QoreID NIN/CAC contract intake, and a
 [public custody intake](TUF_STAGING_PUBLIC_CUSTODY.md). They prepare inputs and
 checks; they do not authorize deployment, prove hardware custody, or implement an
 assumed NIN adapter. New checks are retained under the sibling evidence directory
@@ -127,17 +125,16 @@ assumed NIN adapter. New checks are retained under the sibling evidence director
 records that earlier source and completed validation.
 
 The subsequent [MetaMap preparation receipt](evidence/staging-acceptance/metamap-2026-09-11.json)
-records the official document versions/hashes and this narrower continuation:
-125 Identity tests (34 focused MetaMap cases), eight secret-tool tests, Identity
-typecheck/build, container verification and secret scanning pass. No infrastructure
-source was changed by this continuation; no new synth or cloud acceptance is claimed.
+is retained as historical evidence of the superseded provider research. It does
+not authorize, configure, or describe the selected QoreID integration.
 
 The [September 14 NIN-deferral receipt](evidence/staging-acceptance/nin-deferred-2026-09-14.json)
 supersedes those earlier receipts for current staging NIN behavior and authentication
-status. All six MetaMap transport/signature/secret-tool source and test files still
-match their preparation hashes. Staging omits NIN key injection, selects the closed
-deferred provider, and reports its state through an authenticated, facility-scoped
-capabilities endpoint. The UI hides NIN input while preserving case review controls.
+status. Its references to MetaMap preparation files are historical; those unused
+files were retired when QoreID was selected. Staging omits NIN key injection,
+selects the closed deferred provider, and reports its state through an
+authenticated, facility-scoped capabilities endpoint. The UI hides NIN input
+while preserving case review controls.
 
 The latest checks pass: 140 Identity tests, 14 Python preflight/secret-tool tests,
 seven fixture-generator tests, web contract tests, seven synthetic browser journeys,
@@ -273,7 +270,7 @@ is pending. Read the existing request with
    the authorized inbox. Novu's demo email can provide a bounded test to the Novu
    account inbox without a separate delivery-provider credential; record that channel
    explicitly. SES-backed Novu delivery requires its own reviewed connector credentials
-   and is not implied by HID task IAM. **No Termii, Meta or Infobip account is required
+   and is not implied by HID task IAM. **No Termii, Meta or Brevo account is required
    now.** Account costs, verification and exact fields are in the
    [provider account matrix](STAGING_PROVIDER_ACCOUNTS.md).
    The ignored, mode-0600 `release/local/staging-journey-input.json` is prepared for
@@ -373,18 +370,20 @@ When its request status changes, rerun `python3 scripts/check-staging-fargate-qu
 and require the gate to clear before any deployment. The already-submitted request, controlled
 notification inputs and public custody material are detailed in the
 [AWS checkpoint](STAGING_AWS_CHECKPOINT.md#user-input-required), including which
-gates block deployment versus later acceptance. No MetaMap input is required. No
+gates block deployment versus later acceptance. No QoreID input is required. No
 duplicate quota request or deployment was submitted.
 
 ### G. DEFERRED TO POST-STAGING
 
-MetaMap NIN integration is prepared but deferred. Activation requires version-specific provider contract confirmation and authorized trial/test access.
+QoreID NIN/CAC integration is deferred. Activation requires an approved provider
+authentication/result contract, authorized test access, and a separately approved
+CAC organization domain for EHR/hospitals, laboratories, and pharmacies.
 
-Retain all implemented code, tests, configuration and secret-entry tooling. The
-[post-staging activation task](METAMAP_NIN_CONTRACT.md#post-staging-activation-task)
-tracks callback/signature/correlation/date contracts, authorized trial identities,
-pricing, secure Client Secret entry, provider tests and eventual activation. This
-list is excluded from the current staging blocker and user-input lists.
+Do not retain or recreate the superseded MetaMap transport, secret-entry tooling,
+or credentials. The [QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md)
+tracks the bounded adapter, provider tests, secure configuration, and eventual
+activation work. This list is excluded from the current staging blocker and
+user-input lists.
 
 ## Historical audit — September 8–9, 2026
 
@@ -494,7 +493,7 @@ supplement it below.
 | New HID issuance/NIN | BLOCKER | Only unavailable or test-only verification adapters; approved-new-patient issuance depends on verified NIN case. Live provider contract/adapter absent |
 | OTP recovery completion | BLOCKER | Direct account UPDATE conflicts with runtime least privilege; correction needs constrained recovery operation, account-disable checks, atomic audit/session/challenge behavior and governed schema/release integration |
 | EHR/HID/RBAC/break-glass | NOT VERIFIED | Local owning-service and SQL tests exist; actual deployed doctor/patient, PIN/access-history, record mutations/reads, emergency authorization/audit/notification and negative paths untested |
-| Notifications/integrations | NOT VERIFIED | Provider/JWT/config checks exist; SES/Termii/Meta/Infobip/Novu/FCM/Turnstile/NIN delivery and failure evidence unavailable |
+| Notifications/integrations | NOT VERIFIED | Provider/JWT/config checks exist; SES/Termii/Meta/Brevo/Novu/FCM/Turnstile/NIN delivery and failure evidence unavailable |
 | Observability | WARNING | Source alarms/logs/health exist; active alert delivery, ALB/WAF/VPC access-log configuration and frontend error visibility need review and live proof |
 | Reproducibility | PASS | Exact-SHA CI evidence records equal paired hashes for five pinned Go 1.26.8 binaries. Twelve OCI images and seven complete admitted artifacts NOT VERIFIED |
 | Local toolchain | WARNING | Node v24.13.1 locally; ordinary CI used pinned v22.23.2. Local builds are not the protected release-build environment |

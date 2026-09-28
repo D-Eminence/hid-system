@@ -1,5 +1,10 @@
 # HID Migrate staging and UAT plan
 
+> Historical prototype record — retired 2026-09-28. This is not an active UAT
+> plan for Migrate; its described project/import backend was never active in
+> the current platform. See
+> [`../../docs/MIGRATE_CONSOLIDATION.md`](../../docs/MIGRATE_CONSOLIDATION.md).
+
 Status: ready for execution after environment and governance approval. This document does not authorize deployment or real patient data.
 
 ## Entry criteria

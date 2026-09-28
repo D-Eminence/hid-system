@@ -108,7 +108,7 @@ Audit sensitive:
 * clinical reads
 * clinical writes
 * document access
-* OCR operations
+* Migrate operations
 * offline synchronization
 * administrative operations
 

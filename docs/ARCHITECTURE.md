@@ -31,7 +31,9 @@ an independently managed Cloudflare-to-AWS origin authorization secret.
 Identity remains the sole patient and human-session authority. Canonical
 runtime authentication is local imported credentials or OIDC. The retired
 hosted/Supabase implementation is read-only migration evidence, never a target
-runtime. Vercel and Brevo are retired target dependencies.
+runtime. Vercel is a retired target dependency. Brevo is retained only as the
+configured optional Notification API fallback; no historical Brevo runtime or
+credential is reused.
 
 ## 1. Purpose
 
@@ -229,7 +231,12 @@ Responsibilities:
 
 It must work independently and integrate with EHR through the Pharmacy API.
 
-### 4.5 `apps/ocr`
+### 4.5 `apps/ocr` (HID Migrate)
+
+The public Migrate application is served at the root of
+`https://migrate.healthidentitydirectory.com/`. `apps/ocr` retains OCR as its
+internal service and API terminology; legacy public `/migrate/*` and `/ocr/*`
+paths are edge redirects to root-equivalent routes.
 
 Technology:
 
@@ -237,7 +244,7 @@ React + Vite
 
 Responsibilities:
 
-* OCR job and document operations
+* Migrate job and document operations
 * job creation and governed retry
 * extraction metadata and lifecycle state
 * validation/publication operational state

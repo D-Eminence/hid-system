@@ -5,8 +5,11 @@ import { planCloudflareReadiness, prepareCloudflareReadiness } from '../scripts/
 
 async function sources() {
   const configs = {};
-  for (const app of ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin', 'updates']) {
-    configs[app] = JSON.parse(await readFile(new URL(app === 'updates' ? '../workers/hid-tuf-staging/wrangler.json' : `../workers/hid-${app}/wrangler.json`, import.meta.url)));
+  for (const app of ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin', 'legacyOcrRedirect', 'updates']) {
+    const relative = app === 'updates' ? '../workers/hid-tuf-staging/wrangler.json'
+      : app === 'legacyOcrRedirect' ? '../workers/hid-ocr-redirect/wrangler.json'
+        : `../workers/hid-${app}/wrangler.json`;
+    configs[app] = JSON.parse(await readFile(new URL(relative, import.meta.url)));
   }
   return configs;
 }
@@ -14,15 +17,16 @@ async function sources() {
 test('plan binds all existing staging workers and preserves unresolved external targets', async () => {
   const plan = await prepareCloudflareReadiness();
   assert.equal(plan.frontends.length, 7);
-  assert.equal(plan.dns.inventory_required.length, 9);
+  assert.equal(plan.dns.inventory_required.length, 10);
   assert.equal(plan.dns.api.content, null);
   assert.equal(plan.publisher_secret.arn, null);
   assert.equal(plan.turnstile.sitekey, null);
   assert.equal(plan.deployment_authorized, false);
   assert.equal(plan.dns.nameserver_or_apex_changes, false);
   assert.equal(plan.publisher_secret.format, 'raw SecretString, not JSON');
-  assert.equal(Object.keys(plan.source_sha256).length, 8);
+  assert.equal(Object.keys(plan.source_sha256).length, 9);
   const expectedWorkers = new Map([...plan.frontends.map(frontend => [frontend.hostname, frontend.worker]),
+    [plan.legacy_ocr_redirect.hostname, plan.legacy_ocr_redirect.worker],
     [plan.release_repository.hostname, plan.release_repository.worker]]);
   assert.equal(plan.dns.custom_domain_reads_required.length, expectedWorkers.size);
   for (const read of plan.dns.custom_domain_reads_required) {
@@ -42,7 +46,8 @@ test('rejects production routes, altered API origin and fallback default environ
   for (const change of [c => { c.web.env.staging.routes[0].pattern = 'www.healthidentitydirectory.com'; },
     c => { c.ehr.env.staging.vars.API_ORIGIN = 'https://api.healthidentitydirectory.com'; },
     c => { c.web.routes = c.web.env.production.routes; },
-    c => { c.updates.name = 'hid-tuf-production'; }]) {
+    c => { c.updates.name = 'hid-tuf-production'; },
+    c => { c.legacyOcrRedirect.env.staging.vars.TARGET_ORIGIN = 'https://attacker.example'; }]) {
     const config = await sources(); change(config); assert.throws(() => planCloudflareReadiness(config));
   }
 });

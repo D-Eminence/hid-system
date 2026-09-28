@@ -16,7 +16,8 @@ describe('Notification API delivery profile validation', () => {
     ...emailConfiguration, NOTIFICATION_DELIVERY_PROFILE: 'full',
     TERMII_BASE_URL: 'https://termii.example.test', TERMII_API_KEY: randomBytes(24).toString('base64url'), TERMII_SENDER_ID: 'HID',
     META_PHONE_NUMBER_ID: '123', META_ACCESS_TOKEN: randomBytes(24).toString('base64url'), META_OTP_TEMPLATE_NAME: 'hid_otp',
-    INFOBIP_BASE_URL: 'https://infobip.example.test', INFOBIP_API_KEY: randomBytes(24).toString('base64url'),
+    BREVO_API_KEY: randomBytes(24).toString('base64url'), BREVO_EMAIL_FROM: 'security@example.test',
+    BREVO_SMS_SENDER: 'HID', BREVO_WHATSAPP_SENDER: '2348000000000',
   });
 
   beforeEach(() => { process.env = { ...emailConfiguration }; resetEnvironmentForTests(); });
@@ -24,7 +25,7 @@ describe('Notification API delivery profile validation', () => {
 
   it('accepts live staging email without unrelated provider credentials', () => {
     expect(getEnvironment()).toMatchObject({ NOTIFICATION_DELIVERY_PROFILE: 'email-only', NOTIFICATION_PROVIDER_MODE: 'live' });
-    for (const key of ['TERMII_API_KEY', 'META_ACCESS_TOKEN', 'INFOBIP_API_KEY'] as const) {
+    for (const key of ['TERMII_API_KEY', 'META_ACCESS_TOKEN', 'BREVO_API_KEY'] as const) {
       expect(getEnvironment()[key]).toBeUndefined();
     }
   });
@@ -68,5 +69,19 @@ describe('Notification API delivery profile validation', () => {
     expect(() => getEnvironment()).toThrow('META_ACCESS_TOKEN is required in production');
     process.env = fullConfiguration();
     expect(getEnvironment().NOTIFICATION_DELIVERY_PROFILE).toBe('full');
+  });
+
+  it('requires Brevo fallback configuration for the full production profile', () => {
+    process.env = { ...fullConfiguration(), HID_DEPLOYMENT_ENV: 'production' };
+    delete process.env.BREVO_API_KEY;
+    expect(() => getEnvironment()).toThrow('BREVO_API_KEY is required in production');
+  });
+
+  it('does not require inactive Brevo channel senders for the full profile', () => {
+    process.env = { ...fullConfiguration(), HID_DEPLOYMENT_ENV: 'production' };
+    delete process.env.BREVO_EMAIL_FROM;
+    delete process.env.BREVO_SMS_SENDER;
+    delete process.env.BREVO_WHATSAPP_SENDER;
+    expect(getEnvironment()).toMatchObject({ BREVO_API_KEY: expect.any(String) });
   });
 });

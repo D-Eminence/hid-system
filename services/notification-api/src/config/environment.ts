@@ -32,12 +32,10 @@ const schema = z.object({
   META_ACCESS_TOKEN: optional,
   META_OTP_TEMPLATE_NAME: optional,
   META_OTP_TEMPLATE_LANGUAGE: z.string().trim().min(2).max(16).default('en_US'),
-  INFOBIP_BASE_URL: optionalUrl,
-  INFOBIP_API_KEY: optional,
-  INFOBIP_EMAIL_FROM: z.preprocess(empty, z.string().email().optional()),
-  INFOBIP_SMS_SENDER: optional,
-  INFOBIP_WHATSAPP_SENDER: optional,
-  INFOBIP_WHATSAPP_OTP_TEMPLATE_ID: optional,
+  BREVO_API_KEY: optional,
+  BREVO_EMAIL_FROM: z.preprocess(empty, z.string().email().optional()),
+  BREVO_SMS_SENDER: optional,
+  BREVO_WHATSAPP_SENDER: optional,
 }).superRefine((value, context) => {
   if (value.NOTIFICATION_DELIVERY_PROFILE === 'email-only' && value.HID_DEPLOYMENT_ENV !== 'staging') {
     context.addIssue({ code: 'custom', path: ['NOTIFICATION_DELIVERY_PROFILE'], message: 'The email-only delivery profile is staging-only' });
@@ -53,12 +51,12 @@ const schema = z.object({
       if (!value[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
     }
     if (value.NOTIFICATION_DELIVERY_PROFILE === 'full') {
-      for (const key of ['TERMII_BASE_URL','TERMII_API_KEY','TERMII_SENDER_ID','META_PHONE_NUMBER_ID','META_ACCESS_TOKEN','META_OTP_TEMPLATE_NAME','INFOBIP_BASE_URL','INFOBIP_API_KEY'] as const) {
+      for (const key of ['TERMII_BASE_URL','TERMII_API_KEY','TERMII_SENDER_ID','META_PHONE_NUMBER_ID','META_ACCESS_TOKEN','META_OTP_TEMPLATE_NAME','BREVO_API_KEY'] as const) {
         if (!value[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
       }
     }
     if (value.AWS_ACCESS_KEY_ID || value.AWS_SECRET_ACCESS_KEY) context.addIssue({ code: 'custom', path: ['AWS_ACCESS_KEY_ID'], message: 'Static AWS credentials are forbidden in production' });
-    for (const key of ['WORKLOAD_ISSUER_URL','WORKLOAD_JWKS_URL','TERMII_BASE_URL','INFOBIP_BASE_URL'] as const) {
+    for (const key of ['WORKLOAD_ISSUER_URL','WORKLOAD_JWKS_URL','TERMII_BASE_URL'] as const) {
       if (value[key] && new URL(value[key]).protocol !== 'https:') context.addIssue({ code: 'custom', path: [key], message: `${key} must use HTTPS` });
     }
   }

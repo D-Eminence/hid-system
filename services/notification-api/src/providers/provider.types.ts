@@ -3,7 +3,7 @@ export type OtpChannel = 'email' | 'sms' | 'whatsapp';
 
 export interface ProviderResult {
   outcome: DeliveryOutcome;
-  provider: 'ses' | 'termii' | 'meta-whatsapp' | 'infobip' | 'disabled-test';
+  provider: 'ses' | 'termii' | 'meta-whatsapp' | 'brevo' | 'disabled-test';
   providerMessageId?: string;
   safeCode?: string;
 }

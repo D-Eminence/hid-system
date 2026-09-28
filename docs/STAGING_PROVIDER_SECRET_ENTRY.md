@@ -4,7 +4,7 @@ Use `scripts/staging-provider-secret.py` on the existing Linux operator machine
 to inspect or securely enter one absent provider field. It pins AWS profile
 `hid-admin`, account `659225405023`, and region `eu-west-1`. It never creates a
 secret container, sends a message, verifies a provider or deploys an application.
-No MetaMap/NIN secret is accessed.
+No QoreID/NIN secret is accessed.
 
 | Field | Existing Secrets Manager container | Value source |
 | --- | --- | --- |

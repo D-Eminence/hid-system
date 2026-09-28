@@ -16,6 +16,7 @@ class StagingPreflightTests(unittest.TestCase):
         self.assertEqual(preflight.secret_summary(name, response)["required_fields_present"], {
             "otpHmacKeyB64": True, "turnstileSecretKey": True, "googleOidcClientIds": True})
         self.assertNotIn("/hid/staging/nin-metamap", preflight.SECRET_FIELDS)
+        self.assertNotIn("/hid/staging/nin-qoreid", preflight.SECRET_FIELDS)
 
     def test_wrong_aws_account_stops_before_secret_reads(self):
         calls = []

@@ -1,6 +1,6 @@
 {
-  "name": "HID OCR Operations",
-  "short_name": "HID OCR",
+  "name": "HID Migrate",
+  "short_name": "Migrate",
   "start_url": ".",
   "scope": ".",
   "display": "standalone",

@@ -24,32 +24,42 @@ confirms `turnstileSecretKey` is present and every previous identity-secret fiel
 is preserved. The post-widget hostname readback and live Siteverify/key pairing
 remain unverified; saved inputs alone do not prove those checks.
 
+The September 22 DNS/custom-domain counts predate the canonical Migrate-host
+change. They are historical inventory evidence only and do not establish that
+`migrate.staging.healthidentitydirectory.com` or the legacy OCR redirect is
+available.
+
 Generate the source-bound, non-secret plan without credentials:
 
 ```sh
 node infra/cloudflare/scripts/prepare-staging-readiness.mjs
 ```
 
-The plan validates the seven existing named staging Worker configurations and
-the staging TUF repository configuration, recording their source hashes. Its
-tests also compare the widget action list with the existing Identity validator.
-It rejects production hostnames, unexpected API origins and default routes.
+The plan validates the seven application Worker configurations, the legacy OCR
+domain redirect Worker, and the staging TUF repository configuration, recording
+their source hashes. Its tests also compare the widget action list with the
+existing Identity validator. It rejects production hostnames, unexpected API
+origins and default routes.
 
 The seven application hosts are `staging`, `ehr.staging`, `lab.staging`,
-`pharmacy.staging`, `ocr.staging`, `outreach.staging` and `admin.staging` under
-the zone. `updates.staging` belongs to the protected TUF publisher. These eight
-hosts use Worker **Custom Domains**: Cloudflare creates their DNS records and
-certificates at deployment. Do not precreate CNAMEs for them; an existing CNAME
-conflicts with Custom Domain installation. Inspect existing records first.
+`pharmacy.staging`, `migrate.staging`, `outreach.staging` and `admin.staging` under
+the zone. `updates.staging` belongs to the protected TUF publisher. The old
+`ocr.staging` hostname is a separate compatibility redirect to
+`migrate.staging`; it is not an application origin or a Turnstile hostname.
+These eight canonical application/update hosts plus the legacy redirect host use
+Worker **Custom Domains**: Cloudflare creates their DNS records and certificates
+at deployment. Do not precreate CNAMEs for them; an existing CNAME conflicts
+with Custom Domain installation. Inspect existing records first.
 [Cloudflare Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/).
 
 Worker route counts do not establish Custom Domain bindings. The offline plan
-now includes eight separate `GET /accounts/{account_id}/workers/domains` reads,
+now includes nine separate `GET /accounts/{account_id}/workers/domains` reads,
 each filtered to one exact staging hostname and the fixed zone. After authorized
 inventory, compare each returned hostname, zone and service with its expected
 named staging Worker before considering a change. This API needs **Workers
 Scripts Read** for the account; Zone Workers Routes Read alone is insufficient.
-The September 22 03:02 UTC reads confirm no bindings for these eight exact hosts.
+The September 22 03:02 UTC reads confirm no bindings for the previous eight-host
+set; they must not be reused as a readback for the new Migrate/redirect pair.
 Cloudflare's generated SDK defines this endpoint as `SinglePage`; its observed
 empty result uses `per_page: 0`. The diagnostic now handles that contract without
 weakening DNS/widget pagination checks. It retains only numeric pagination
@@ -97,7 +107,7 @@ staging.healthidentitydirectory.com
 ehr.staging.healthidentitydirectory.com
 lab.staging.healthidentitydirectory.com
 pharmacy.staging.healthidentitydirectory.com
-ocr.staging.healthidentitydirectory.com
+migrate.staging.healthidentitydirectory.com
 outreach.staging.healthidentitydirectory.com
 admin.staging.healthidentitydirectory.com
 ```

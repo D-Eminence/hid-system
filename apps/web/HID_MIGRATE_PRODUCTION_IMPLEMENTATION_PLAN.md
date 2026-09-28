@@ -1,5 +1,11 @@
 # HID Migrate production implementation plan
 
+> Historical prototype planning record — retired 2026-09-28. This document
+> describes the former Web `/migrate/*` prototype and does not describe an
+> active backend, runtime, or approved implementation plan. The single active
+> product is `apps/ocr` at `https://migrate.healthidentitydirectory.com/`; see
+> [`../../docs/MIGRATE_CONSOLIDATION.md`](../../docs/MIGRATE_CONSOLIDATION.md).
+
 Status: planning baseline for approval  
 Date: 20 July 2026  
 Scope: audit and plan only; no production implementation is authorized by this document.

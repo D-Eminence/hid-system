@@ -28,7 +28,7 @@ const SAFE_PROPERTY_KEYS = new Set([
   'app', 'workspace', 'operation', 'result', 'source', 'duration_bucket', 'retry_count_bucket',
   'offline', 'sync_state', 'status', 'error_code', 'correlation_id', 'route', 'version',
 ])
-const SENSITIVE_KEY = /(authorization|cookie|token|csrf|otp|turnstile|nin|patient|phone|email|name|hid|clinical|diagnosis|result_value|laboratory|medication|prescription|ocr_text|raw_text|document|payload|body|url|presign|signature|secret|credential|private_key|api_key|access_key|novu|firebase|fcm|whatsapp|termii|infobip|ses_|pin)/i
+const SENSITIVE_KEY = /(authorization|cookie|token|csrf|otp|turnstile|nin|patient|phone|email|name|hid|clinical|diagnosis|result_value|laboratory|medication|prescription|ocr_text|raw_text|document|payload|body|url|presign|signature|secret|credential|private_key|api_key|access_key|novu|firebase|fcm|whatsapp|termii|brevo|infobip|qoreid|ses_|pin)/i
 
 function primitive(value: unknown): string | number | boolean | null | undefined {
   return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === null

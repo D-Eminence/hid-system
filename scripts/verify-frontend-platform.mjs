@@ -6,7 +6,7 @@ import { extname, join, resolve } from 'node:path'
 
 const repository = resolve(import.meta.dirname, '..')
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
-const bases = { web: '/', ehr: '/ehr/', lab: '/lab/', pharmacy: '/pharmacy/', ocr: '/ocr/', outreach: '/outreach/', admin: '/admin/' }
+const bases = { web: '/', ehr: '/ehr/', lab: '/lab/', pharmacy: '/pharmacy/', ocr: '/', outreach: '/outreach/', admin: '/admin/' }
 const entryHtml = { web: 'index.html', ehr: 'ehr.html', lab: 'index.html', pharmacy: 'index.html', ocr: 'index.html', outreach: 'index.html', admin: 'index.html' }
 
 async function files(root, extensions) {
@@ -35,7 +35,6 @@ for (const file of sourceFiles) {
 
 const allowedBrowserStorageFiles = new Set([
   'apps/web/src/components/AppInstallPrompt.tsx',
-  'apps/web/src/features/migrate/ui/CaptureWorkspace.tsx',
   'apps/web/src/lib/routePreload.tsx',
 ])
 for (const file of sourceFiles) {
@@ -45,11 +44,6 @@ for (const file of sourceFiles) {
     assert.ok(allowedBrowserStorageFiles.has(relative), `${relative} uses unreviewed browser string storage`)
   }
 }
-const migrateCapture = await readFile(join(repository, 'apps/web/src/features/migrate/ui/CaptureWorkspace.tsx'), 'utf8')
-assert.match(migrateCapture, /crypto\.randomUUID\(\)/)
-assert.doesNotMatch(migrateCapture, /localStorage\.(?:setItem|getItem)\([^\n]*(?:patient|nin|folderReference|file|document)/i,
-  'migration capture string storage must remain a non-PHI client-session identifier only')
-
 for (const app of apps) {
   const root = join(repository, 'apps', app)
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
@@ -121,9 +115,13 @@ for (const file of bundleFiles) {
 }
 
 const gateway = await readFile(join(repository, 'apps/web/vite.config.ts'), 'utf8')
-for (const route of ['/ehr', '/lab', '/pharmacy', '/ocr', '/outreach', '/admin']) {
+for (const route of ['/ehr', '/lab', '/pharmacy', '/migrate', '/outreach', '/admin']) {
   assert.ok(gateway.includes(`'${route}'`), `gateway is missing ${route}`)
 }
+assert.match(gateway, /requestUrl\.pathname === '\/ocr'[\s\S]*?`\/migrate\$\{legacyPath \|\| '\/'\}\$\{requestUrl\.search\}`/,
+  'gateway must preserve legacy OCR UI routes by redirecting them to Migrate')
+assert.doesNotMatch(gateway, /Direct Web mode retains Web's separately implemented \/migrate route/,
+  'Web must not retain a competing Migrate route in direct mode')
 assert.match(gateway, /'\/api\/v1\/pharmacy'[\s\S]{0,100}ports\.pharmacyApi/, 'Pharmacy API must retain its owning service target')
 assert.match(gateway, /'\/api\/v1\/ocr'[\s\S]{0,100}ports\.ocrApi/, 'OCR API must retain its owning service target')
 

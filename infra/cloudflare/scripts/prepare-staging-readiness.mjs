@@ -9,11 +9,12 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(import.meta.dirname, '../../..');
 const domain = 'healthidentitydirectory.com';
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin'];
-const host = app => app === 'web' ? `staging.${domain}` : `${app}.staging.${domain}`;
+const host = app => app === 'web' ? `staging.${domain}` : app === 'ocr' ? `migrate.staging.${domain}` : `${app}.staging.${domain}`;
+const legacyOcrHost = `ocr.staging.${domain}`;
 const apiHost = `api.staging.${domain}`;
 
 export function planCloudflareReadiness(configs) {
-  assert.deepEqual(Object.keys(configs).sort(), [...apps, 'updates'].sort(), 'Exact staging worker set required');
+  assert.deepEqual(Object.keys(configs).sort(), [...apps, 'legacyOcrRedirect', 'updates'].sort(), 'Exact staging worker set required');
   const frontends = apps.map(app => {
     const config = configs[app]; const stage = config.env?.staging;
     assert.equal(stage?.name, `hid-${app}-staging`, 'Staging worker identity required');
@@ -28,6 +29,18 @@ export function planCloudflareReadiness(configs) {
       config: `infra/cloudflare/workers/hid-${app}/wrangler.json`, origin_secret_binding: 'ORIGIN_AUTH_TOKEN',
       dns_mode: 'Worker Custom Domain; Cloudflare creates DNS and certificate at authorized deployment' };
   });
+  const legacyOcrRedirect = configs.legacyOcrRedirect;
+  const legacyStage = legacyOcrRedirect.env?.staging;
+  assert.equal(legacyOcrRedirect.name, 'hid-ocr-redirect');
+  assert.equal(legacyStage?.name, 'hid-ocr-redirect-staging');
+  assert.deepEqual(legacyStage?.routes, [{ pattern: legacyOcrHost, custom_domain: true }]);
+  assert.deepEqual(legacyStage?.vars, {
+    DEPLOYMENT_ENV: 'staging', EXPECTED_HOST: legacyOcrHost, TARGET_ORIGIN: `https://${host('ocr')}`,
+  });
+  assert.equal(legacyOcrRedirect.workers_dev, false);
+  assert.equal(legacyOcrRedirect.preview_urls, false);
+  assert.equal(legacyOcrRedirect.routes, undefined, 'Explicit named environment required');
+  assert.equal(legacyOcrRedirect.vars, undefined, 'Explicit named environment required');
   const updates = configs.updates;
   assert.equal(updates.name, 'hid-tuf-staging');
   assert.deepEqual(updates.routes, [{ pattern: host('updates'), custom_domain: true }]);
@@ -39,16 +52,20 @@ export function planCloudflareReadiness(configs) {
     cloud_calls: false, deployment_authorized: false, staging_accepted: false, production_changes: false,
     quota_hold_applies_to_all_deployments: true,
     frontends,
+    legacy_ocr_redirect: { worker: legacyStage.name, hostname: legacyOcrHost, destination_origin: legacyStage.vars.TARGET_ORIGIN,
+      config: 'infra/cloudflare/workers/hid-ocr-redirect/wrangler.json', origin_secret_binding: null,
+      dns_mode: 'Worker Custom Domain; Cloudflare creates DNS and certificate at authorized deployment' },
     release_repository: { worker: updates.name, hostname: host('updates'),
       config: 'infra/cloudflare/workers/hid-tuf-staging/wrangler.json',
       execution: 'Existing protected publication only; requires admitted signed repository and owner gate' },
     dns: { api: { name: apiHost, type: 'CNAME', content: null, proxied: null,
       source: 'Actual authorized staging ALB DNS readback; no placeholder target',
       requirement: 'Confirm API proxy/TLS choice against existing WAF/origin controls before completing record' },
-      inventory_required: [host('web'), ...apps.filter(app => app !== 'web').map(host), host('updates'), apiHost],
-      custom_domain_reads_required: [...apps, 'updates'].map(app => ({
-        method: 'GET', hostname: host(app), expected_worker: app === 'updates' ? updates.name : `hid-${app}-staging`,
-        path: `/accounts/20c809ffe35ccb2c240d19a664dff97a/workers/domains?hostname=${host(app)}&zone_id=69d385b9f6a3233a7113c525524f14fe`,
+      inventory_required: [host('web'), ...apps.filter(app => app !== 'web').map(host), legacyOcrHost, host('updates'), apiHost],
+      custom_domain_reads_required: [...apps, 'legacyOcrRedirect', 'updates'].map(app => ({
+        method: 'GET', hostname: app === 'legacyOcrRedirect' ? legacyOcrHost : host(app),
+        expected_worker: app === 'updates' ? updates.name : app === 'legacyOcrRedirect' ? legacyStage.name : `hid-${app}-staging`,
+        path: `/accounts/20c809ffe35ccb2c240d19a664dff97a/workers/domains?hostname=${app === 'legacyOcrRedirect' ? legacyOcrHost : host(app)}&zone_id=69d385b9f6a3233a7113c525524f14fe`,
       })),
       do_not_precreate_cnames_for_worker_custom_domains: true,
       nameserver_or_apex_changes: false,
@@ -83,8 +100,10 @@ export function planCloudflareReadiness(configs) {
 
 export async function prepareCloudflareReadiness() {
   const configs = {}, hashes = {};
-  for (const app of [...apps, 'updates']) {
-    const path = app === 'updates' ? 'infra/cloudflare/workers/hid-tuf-staging/wrangler.json' : `infra/cloudflare/workers/hid-${app}/wrangler.json`;
+  for (const app of [...apps, 'legacyOcrRedirect', 'updates']) {
+    const path = app === 'updates' ? 'infra/cloudflare/workers/hid-tuf-staging/wrangler.json'
+      : app === 'legacyOcrRedirect' ? 'infra/cloudflare/workers/hid-ocr-redirect/wrangler.json'
+        : `infra/cloudflare/workers/hid-${app}/wrangler.json`;
     const bytes = await readFile(resolve(root, path));
     configs[app] = JSON.parse(bytes);
     hashes[path] = createHash('sha256').update(bytes).digest('hex');

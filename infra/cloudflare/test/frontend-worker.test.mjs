@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createFrontendWorker } from '../src/frontend-worker.mjs'
 import apexWorker from '../src/apex-redirect-worker.mjs'
+import legacyOcrDomainRedirectWorker from '../src/legacy-ocr-domain-redirect-worker.mjs'
 
 const worker = createFrontendWorker()
 const originalFetch = globalThis.fetch
@@ -13,7 +14,7 @@ const deploymentProfiles = Object.freeze({
     hosts: Object.freeze({
       web: 'www.healthidentitydirectory.com', ehr: 'ehr.healthidentitydirectory.com',
       lab: 'lab.healthidentitydirectory.com', pharmacy: 'pharmacy.healthidentitydirectory.com',
-      ocr: 'ocr.healthidentitydirectory.com', outreach: 'outreach.healthidentitydirectory.com',
+      ocr: 'migrate.healthidentitydirectory.com', outreach: 'outreach.healthidentitydirectory.com',
       admin: 'admin.healthidentitydirectory.com',
     }),
   }),
@@ -22,7 +23,7 @@ const deploymentProfiles = Object.freeze({
     hosts: Object.freeze({
       web: 'staging.healthidentitydirectory.com', ehr: 'ehr.staging.healthidentitydirectory.com',
       lab: 'lab.staging.healthidentitydirectory.com', pharmacy: 'pharmacy.staging.healthidentitydirectory.com',
-      ocr: 'ocr.staging.healthidentitydirectory.com', outreach: 'outreach.staging.healthidentitydirectory.com',
+      ocr: 'migrate.staging.healthidentitydirectory.com', outreach: 'outreach.staging.healthidentitydirectory.com',
       admin: 'admin.staging.healthidentitydirectory.com',
     }),
   }),
@@ -56,10 +57,85 @@ test('serves the application asset binding with security headers', async () => {
 })
 
 test('grants device capabilities only to the application host that needs them', async () => {
-  const ocr = await worker.fetch(new Request('https://ocr.healthidentitydirectory.com/'), environment({ APP_NAME: 'ocr' }))
+  const ocr = await worker.fetch(new Request('https://migrate.healthidentitydirectory.com/'), environment({ APP_NAME: 'ocr' }))
   assert.equal(ocr.headers.get('permissions-policy'), 'camera=(self), microphone=(), geolocation=()')
   const outreach = await worker.fetch(new Request('https://outreach.healthidentitydirectory.com/'), environment({ APP_NAME: 'outreach' }))
   assert.equal(outreach.headers.get('permissions-policy'), 'camera=(self), microphone=(), geolocation=(self)')
+})
+
+test('serves Migrate from its canonical hostname root and redirects legacy paths without chains', async () => {
+  const root = await worker.fetch(new Request('https://migrate.healthidentitydirectory.com/'), environment({ APP_NAME: 'ocr' }))
+  assert.equal(root.status, 200)
+  assert.equal(await root.text(), '<p>/</p>')
+
+  const directDeepLink = await worker.fetch(
+    new Request('https://migrate.healthidentitydirectory.com/jobs/123?view=safe'),
+    environment({ APP_NAME: 'ocr' }),
+  )
+  assert.equal(directDeepLink.status, 200)
+  assert.equal(await directDeepLink.text(), '<p>/jobs/123</p>')
+
+  const legacyMigrate = await worker.fetch(
+    new Request('https://migrate.healthidentitydirectory.com/migrate/jobs?view=safe'),
+    environment({ APP_NAME: 'ocr' }),
+  )
+  assert.equal(legacyMigrate.status, 308)
+  assert.equal(legacyMigrate.headers.get('location'), 'https://migrate.healthidentitydirectory.com/jobs?view=safe')
+
+  const legacy = await worker.fetch(new Request('https://migrate.healthidentitydirectory.com/ocr/jobs?view=safe'), environment({ APP_NAME: 'ocr' }))
+  assert.equal(legacy.status, 308)
+  assert.equal(legacy.headers.get('location'), 'https://migrate.healthidentitydirectory.com/jobs?view=safe')
+
+  const retiredWebRoute = await worker.fetch(
+    new Request('https://migrate.healthidentitydirectory.com/migrate/dashboard?view=safe'),
+    environment({ APP_NAME: 'ocr' }),
+  )
+  assert.equal(retiredWebRoute.status, 308)
+  assert.equal(retiredWebRoute.headers.get('location'), 'https://migrate.healthidentitydirectory.com/?view=safe')
+
+  const webLegacyRoute = await worker.fetch(
+    new Request('https://www.healthidentitydirectory.com/migrate/jobs?view=safe'),
+    environment({ APP_NAME: 'web' }),
+  )
+  assert.equal(webLegacyRoute.status, 308)
+  assert.equal(webLegacyRoute.headers.get('location'), 'https://migrate.healthidentitydirectory.com/jobs?view=safe')
+})
+
+test('redirects legacy OCR domains directly to the Migrate root application while preserving paths and queries', () => {
+  const production = legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://ocr.healthidentitydirectory.com/ocr/jobs?view=safe'),
+    { DEPLOYMENT_ENV: 'production', EXPECTED_HOST: 'ocr.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.healthidentitydirectory.com' },
+  )
+  assert.equal(production.status, 308)
+  assert.equal(production.headers.get('location'), 'https://migrate.healthidentitydirectory.com/jobs?view=safe')
+  const productionDeepLink = legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://ocr.healthidentitydirectory.com/jobs/123?view=safe'),
+    { DEPLOYMENT_ENV: 'production', EXPECTED_HOST: 'ocr.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.healthidentitydirectory.com' },
+  )
+  assert.equal(productionDeepLink.status, 308)
+  assert.equal(productionDeepLink.headers.get('location'), 'https://migrate.healthidentitydirectory.com/jobs/123?view=safe')
+  const api = legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://ocr.healthidentitydirectory.com/api/v1/ocr/jobs?view=safe', { method: 'POST' }),
+    { DEPLOYMENT_ENV: 'production', EXPECTED_HOST: 'ocr.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.healthidentitydirectory.com' },
+  )
+  assert.equal(api.status, 308)
+  assert.equal(api.headers.get('location'), 'https://migrate.healthidentitydirectory.com/api/v1/ocr/jobs?view=safe')
+  const staging = legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://ocr.staging.healthidentitydirectory.com/migrate/jobs?view=safe'),
+    { DEPLOYMENT_ENV: 'staging', EXPECTED_HOST: 'ocr.staging.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.staging.healthidentitydirectory.com' },
+  )
+  assert.equal(staging.status, 308)
+  assert.equal(staging.headers.get('location'), 'https://migrate.staging.healthidentitydirectory.com/jobs?view=safe')
+  const originInjectionAttempt = legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://ocr.healthidentitydirectory.com/migrate//attacker.example?view=safe'),
+    { DEPLOYMENT_ENV: 'production', EXPECTED_HOST: 'ocr.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.healthidentitydirectory.com' },
+  )
+  assert.equal(originInjectionAttempt.status, 308)
+  assert.equal(originInjectionAttempt.headers.get('location'), 'https://migrate.healthidentitydirectory.com//attacker.example?view=safe')
+  assert.equal(legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://attacker.example/migrate/'),
+    { DEPLOYMENT_ENV: 'production', EXPECTED_HOST: 'ocr.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.healthidentitydirectory.com' },
+  ).status, 421)
 })
 
 for (const [deployment, profile] of Object.entries(deploymentProfiles)) {

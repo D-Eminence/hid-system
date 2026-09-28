@@ -7,7 +7,7 @@ import { resolveDevelopmentPorts } from '../../scripts/ports.mjs'
 const ports = resolveDevelopmentPorts()
 
 export default defineConfig({
-  base: process.env.HID_PUBLIC_BASE ?? '/ocr/',
+  base: process.env.HID_PUBLIC_BASE ?? '/migrate/',
   plugins: [react()],
   resolve: {
     preserveSymlinks: true,

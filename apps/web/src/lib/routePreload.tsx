@@ -71,7 +71,6 @@ export const DoctorHistoryPage = lazyWithPreload(() => import('../pages/doctor/D
 export const PatientRegistrationPage = lazyWithPreload(() => import('../pages/doctor/PatientRegistration'))
 export const DoctorEmergencyPage = lazyWithPreload(() => import('../pages/doctor/DoctorEmergency'))
 export const DoctorPatientRecordsPage = lazyWithPreload(() => import('../pages/doctor/DoctorPatientRecords'))
-export const MigratePage = lazyWithPreload(() => import('../features/migrate/ui/MigratePage'))
 export const CommercialProductsPage = lazyWithPreload(() => import('../pages/CommercialProducts'))
 export const EhrConfiguratorPage = lazyWithPreload(() => import('../pages/EhrConfigurator'))
 export const PricingPage = lazyWithPreload(() => import('../pages/Pricing'))
@@ -94,7 +93,6 @@ const routeLoaders = {
   doctorHistory: DoctorHistoryPage.preload,
   doctorEmergency: DoctorEmergencyPage.preload,
   doctorPatientRecords: DoctorPatientRecordsPage.preload,
-  migrate: MigratePage.preload,
   commercialProducts: CommercialProductsPage.preload,
   ehrConfigurator: EhrConfiguratorPage.preload,
   pricing: PricingPage.preload,
@@ -163,7 +161,6 @@ export function getRoutePreloadKeys(path: string): RoutePreloadKey[] {
   if (path.startsWith('/pricing')) return ['pricing']
   if (path.startsWith('/products') || path.startsWith('/solutions') || path.startsWith('/developers')) return ['commercialProducts']
   if (path.startsWith('/eminence/')) return ['adminLogin']
-  if (path === '/migrate' || path.startsWith('/migrate/')) return ['migrate']
   if (path === '/hospital' || path.startsWith('/hospital/auth') || path.startsWith('/doctor/auth')) {
     return ['doctorDashboard', 'doctorAccess', 'doctorHistory', 'doctorEmergency']
   }

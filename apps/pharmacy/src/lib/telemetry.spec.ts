@@ -44,7 +44,7 @@ describe('shared healthcare telemetry redaction', () => {
         { category: 'ui.input', message: 'NIN' },
         { category: 'fetch', data: { url: '/api/v1/patient' } },
         { category: 'console', message: 'clinical note' },
-        { category: 'navigation', message: '/ocr/jobs' },
+        { category: 'navigation', message: '/migrate/jobs' },
       ],
     })
     expect(event.exception?.values?.[0]?.value).toBe('ApiFailure (details redacted)')

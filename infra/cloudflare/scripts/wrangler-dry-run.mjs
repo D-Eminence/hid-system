@@ -25,6 +25,7 @@ export function runWranglerDryRun(deployment, options = {}) {
   const spawn = options.spawn ?? spawnSync
   const workers = [
     'hid-web', 'hid-ehr', 'hid-lab', 'hid-pharmacy', 'hid-ocr', 'hid-outreach', 'hid-admin',
+    'hid-ocr-redirect',
     ...(deployment === 'production' ? ['hid-apex-redirect'] : []),
   ]
 
