@@ -8,7 +8,7 @@ import { AdminOperationsService } from './admin-operations.service';
 import { AdminService } from './admin.service';
 import { AccountStatusCommandDto, FacilityStatusCommandDto, PlatformRoleCommandDto,
   RevokeSessionsCommandDto } from './dto/admin-command.dto';
-import { ListFacilitiesDto, ListIdentityReviewsDto, ListPlatformAuditDto,
+import { ExportPrincipalsDto, ListFacilitiesDto, ListIdentityReviewsDto, ListPlatformAuditDto,
   ListPrincipalsDto } from './dto/admin-list.dto';
 
 @Controller('admin')
@@ -55,6 +55,14 @@ export class AdminController {
   @AuditAction('admin.principals.list.request')
   principals(@Query() query: ListPrincipalsDto, @Req() request: HidRequest) {
     return this.admin.listPrincipals(requireAdminContext(request), query);
+  }
+
+  @Get('principals/export')
+  @RequirePermissions('platform.principal.read')
+  @AuditAction('admin.principals.export.request')
+  async exportPrincipals(@Query() query: ExportPrincipalsDto, @Req() request: HidRequest, @Res() response: Response) {
+    const csv = await this.admin.exportPrincipals(requireAdminContext(request), query);
+    response.status(200).type('text/csv').setHeader('Content-Disposition', 'attachment; filename="hid-principals.csv"').send(csv);
   }
 
   @Post('principals/:accountId/status')
