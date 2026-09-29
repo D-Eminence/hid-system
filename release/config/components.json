@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0032",
-    "count": 32,
+    "last": "0040",
+    "count": 41,
     "files": [
       "0001_platform_and_migration_control.sql",
       "0002_auth_and_canonical_identity.sql",
