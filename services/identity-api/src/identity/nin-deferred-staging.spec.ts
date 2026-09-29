@@ -69,6 +69,7 @@ describe('explicitly deferred staging NIN', () => {
     };
     resetEnvironmentForTests();
     jest.resetAllMocks();
+    database.query.mockResolvedValue({ rows: [{ enabled: true }] });
     jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('External transport is forbidden in this fixture'));
   });
 
@@ -84,7 +85,7 @@ describe('explicitly deferred staging NIN', () => {
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     app.useGlobalFilters(new ProblemDetailsFilter());
     if (tokens) app.useGlobalGuards(new SecurityGuard(new Reflector(),
-      tokens as unknown as TokenService, audit as unknown as AuditService));
+      tokens as unknown as TokenService, audit as unknown as AuditService, database as unknown as DatabaseService));
     app.use((incoming: HidRequest, _response: Response, next: NextFunction) => {
       incoming.correlationId = randomUUID();
       if (!tokens) { incoming.actor = actor; incoming.facilityId = facilityId; }
