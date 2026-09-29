@@ -327,6 +327,11 @@ export class AdminService {
 
   private escapeLike(value: string): string { return value.replace(/[\\%_]/g, (match) => `\\${match}`); }
 
+  private csv(value: unknown): string {
+    const text = value == null ? '' : String(value);
+    return /[",\\n\\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
   private commandError(error: unknown): Error {
     if (error instanceof DomainProblem) return error;
     const message = typeof error === 'object' && error && 'message' in error ? String(error.message) : '';
