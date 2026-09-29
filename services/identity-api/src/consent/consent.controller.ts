@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
-import { AuditAction, PatientAllowed, RequirePermissions } from '../common/decorators';
+import { AuditAction, FacilityOptional, PatientAllowed, RequirePermissions } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import { consentContext } from './consent-context';
 import { ConsentService } from './consent.service';
@@ -15,6 +15,7 @@ export class ConsentController {
 
   @Get('me/access-requests')
   @PatientAllowed()
+  @FacilityOptional()
   @AuditAction('identity.access-request.list.request')
   listMyAccessRequests(@Req() request: HidRequest) {
     return this.consent.listMyAccessRequests(consentContext(request, ['direct-care']));
@@ -34,6 +35,7 @@ export class ConsentController {
   @Post('access-requests/:requestId/approve')
   @HttpCode(200)
   @PatientAllowed()
+  @FacilityOptional()
   @AuditAction('identity.access-request.approve.command')
   approveAccessRequest(
     @Req() request: HidRequest,
@@ -45,6 +47,7 @@ export class ConsentController {
   @Post('access-requests/:requestId/deny')
   @HttpCode(200)
   @PatientAllowed()
+  @FacilityOptional()
   @AuditAction('identity.access-request.deny.command')
   denyAccessRequest(
     @Req() request: HidRequest,
