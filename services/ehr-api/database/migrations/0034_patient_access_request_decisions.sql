@@ -202,3 +202,54 @@ $$;
 
 revoke all on function identity.approve_access_request(uuid) from public;
 revoke all on function identity.deny_access_request(uuid, text) from public;
+
+create or replace function identity.list_my_access_requests()
+returns table (
+  access_request_id uuid,
+  facility_id uuid,
+  facility_name text,
+  scope text,
+  reason text,
+  status text,
+  requested_duration_minutes integer,
+  requested_at timestamptz,
+  approved_at timestamptz,
+  denied_at timestamptz,
+  denied_reason text
+)
+language plpgsql
+security definer
+set search_path = identity, auth, platform, pg_catalog, pg_temp
+as $$
+declare
+  actor_account_id uuid := auth.account_id_for_subject(platform.current_actor_subject());
+  patient_id_value uuid;
+begin
+  if actor_account_id is null then
+    raise exception using errcode = '42501', message = 'Authenticated patient context is required';
+  end if;
+  select id into patient_id_value
+    from identity.patients
+   where account_id = actor_account_id
+     and status = 'active'
+   limit 1;
+  if patient_id_value is null then
+    raise exception using errcode = '42501', message = 'Authenticated patient context is required';
+  end if;
+
+  return query
+  select request_row.id, request_row.facility_id, facility.name,
+    request_row.scope, request_row.reason, request_row.status,
+    request_row.requested_duration_minutes, request_row.created_at,
+    request_row.approved_at, request_row.denied_at, request_row.denied_reason
+    from identity.access_requests request_row
+    join identity.facilities facility on facility.id = request_row.facility_id
+   where request_row.patient_id = patient_id_value
+     and request_row.break_glass = false
+     and request_row.migration_hold_reason is null
+   order by request_row.created_at desc, request_row.id desc
+   limit 100;
+end;
+$$;
+
+revoke all on function identity.list_my_access_requests() from public;
