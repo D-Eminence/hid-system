@@ -82,6 +82,21 @@ export class ConsentService {
   }
 
 
+
+  async listMyAccessRequests(context: DataAccessContext) {
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query<Record<string, unknown> & QueryResultRow>(
+        `select access_request_id as "accessRequestId", facility_id as "facilityId",
+           facility_name as "facilityName", scope, reason, status,
+           requested_duration_minutes as "requestedDurationMinutes",
+           requested_at as "requestedAt", approved_at as "approvedAt",
+           denied_at as "deniedAt", denied_reason as "deniedReason"
+         from identity.list_my_access_requests()`,
+      );
+      return result.rows;
+    }, { readOnly: true });
+  }
+
   async approveAccessRequest(context: DataAccessContext, requestId: string) {
     try {
       return await this.database.withTransaction(context, async (client) => {
