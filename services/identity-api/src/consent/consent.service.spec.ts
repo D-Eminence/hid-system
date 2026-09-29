@@ -111,6 +111,25 @@ describe('ConsentService', () => {
   });
 
 
+
+  it('lists the authenticated patient access request inbox without unrelated identity data', async () => {
+    query.mockResolvedValueOnce({ rows: [{
+      accessRequestId: '40000000-0000-4000-8000-000000000006',
+      facilityId: '10000000-0000-4000-8000-000000000006',
+      facilityName: 'Example Facility',
+      scope: 'read_records',
+      reason: 'Continuity of care',
+      status: 'pending',
+      requestedDurationMinutes: 60,
+      requestedAt: new Date('2026-09-29T12:00:00.000Z'),
+      approvedAt: null,
+      deniedAt: null,
+      deniedReason: null,
+    }]});
+    await expect(service.listMyAccessRequests(context)).resolves.toHaveLength(1);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('identity.list_my_access_requests()'));
+  });
+
   it('returns the patient approval result from the governed consent command', async () => {
     query.mockResolvedValueOnce({ rows: [{
       accessRequestId: '40000000-0000-4000-8000-000000000004',
