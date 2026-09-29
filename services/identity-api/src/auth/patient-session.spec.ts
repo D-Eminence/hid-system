@@ -28,6 +28,7 @@ beforeEach(() => {
     AUTH_SIGNING_SECRET: 'test-signing-secret-with-at-least-32-characters',
     AUTH_LOGIN_PEPPER: 'test-login-pepper-with-at-least-32-characters' });
   resetEnvironmentForTests();
+  runtimeDatabase.query.mockResolvedValue({ rows: [{ enabled: true }] });
 });
 afterEach(() => { runtimeDatabase.query.mockReset(); resetEnvironmentForTests(); });
 
