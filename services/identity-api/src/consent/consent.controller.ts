@@ -1,5 +1,5 @@
 import { Body, Controller, HttpCode, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
-import { AuditAction, RequirePermissions } from '../common/decorators';
+import { AuditAction, PatientAllowed, RequirePermissions } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import { consentContext } from './consent-context';
 import { ConsentService } from './consent.service';
@@ -26,7 +26,7 @@ export class ConsentController {
 
   @Post('access-requests/:requestId/approve')
   @HttpCode(200)
-  @RequirePermissions('identity.consent.write')
+  @PatientAllowed()
   @AuditAction('identity.access-request.approve.command')
   approveAccessRequest(
     @Req() request: HidRequest,
@@ -37,7 +37,7 @@ export class ConsentController {
 
   @Post('access-requests/:requestId/deny')
   @HttpCode(200)
-  @RequirePermissions('identity.consent.write')
+  @PatientAllowed()
   @AuditAction('identity.access-request.deny.command')
   denyAccessRequest(
     @Req() request: HidRequest,
