@@ -22,7 +22,10 @@ create table platform.control_settings (
 );
 
 insert into platform.control_settings(control_key,enabled,reason,updated_by)
-select key, true, 'Initial platform control state', null
+select key,
+       case when key = 'maintenance_mode' then false else true end,
+       'Initial platform control state',
+       null
 from (values
   ('patient_portal_enabled'),('provider_portal_enabled'),('outreach_portal_enabled'),
   ('maintenance_mode'),('uploads_enabled'),('break_glass_enabled')
