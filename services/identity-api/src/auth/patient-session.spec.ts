@@ -65,7 +65,7 @@ describe('Patient session separation', () => {
   });
 
   it('denies patient actors at workforce routes before any facility or permission expansion', async () => {
-    const request = { method: 'GET', correlationId: 'patient-guard-test', header: (key: string) => key.toLowerCase() === 'authorization' ? 'Bearer signed' : undefined } as unknown as HidRequest;
+    const request = { method: 'GET', correlationId: 'patient-guard-test', header: jest.fn().mockReturnValue('Bearer signed') } as unknown as HidRequest;
     const context = { switchToHttp: () => ({ getRequest: () => request }), getHandler: () => ({}), getClass: () => ({}) } as unknown as ExecutionContext;
     const audit = { record: jest.fn().mockResolvedValue(undefined) };
     const reflector = { getAllAndOverride: (key: symbol) => key === FACILITY_OPTIONAL ? true : undefined } as unknown as Reflector;
