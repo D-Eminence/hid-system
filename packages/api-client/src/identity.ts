@@ -24,6 +24,8 @@ export interface IdentityActorContext {
   displayName?: string;
   roles: readonly string[];
   permissions: readonly string[];
+  platformRoles?: readonly string[];
+  platformPermissions?: readonly string[];
   facilityIds: readonly string[];
   facilities: readonly IdentityFacilityAssignment[];
   facility?: IdentityFacilityAssignment;
