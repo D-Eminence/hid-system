@@ -46,6 +46,13 @@ const acceptedMigrations = new Map([
   ['0032_governed_patient_enrollment.sql', 'c4ee4ac51ce90a622901c3f8ebd4f3ac4d72acb5a8f7addd0a2b1ea993572225'],
   ['0033_supabase_cutover_identity_controls.sql', '4df718e800165d27085ae4b7b79761ef2748841cb6cebe1895c3674ebc6a2bce'],
   ['0034_qoreid_verification_evidence.sql', '7dbb417aa3ff8982316606546047c37fa00559d8790e510cfd6ac622be538c18'],
+  ['0035_patient_access_request_decisions.sql', '9deac031d48c5e38587cb75090ff0b1234c81dc44b5fccd0b92fd3d38d58080b'],
+  ['0036_staff_access_request_visibility.sql', 'b52347897e20781add7d5db1b36851bb5892e4c5a0b268269b7a7bc3f3cb8c32'],
+  ['0037_patient_notification_inbox.sql', '86a2af2c94967bb536cd004ddbb39111ab6ce2239076844e295008731b3249be'],
+  ['0038_outreach_campaign_workspaces.sql', '30b0f5dfe9ca2114a956047c6165101219af57cecba6f0870c73bfad488dd28a'],
+  ['0039_platform_control_settings.sql', '1eb71f69e181390014ed1bd00f2a076683c0a3f420ef945f8da111afccb3ed0b'],
+  ['0040_platform_control_enforcement.sql', 'bf51abc205bc88fcb89b6318640da2448b82766050739784ab660c771259f5be'],
+  ['0041_disable_initial_maintenance_mode.sql', '196d5a227cfb3aca3f87f41c629b1d4e10520a55d9961130bc92ec0112831093'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
