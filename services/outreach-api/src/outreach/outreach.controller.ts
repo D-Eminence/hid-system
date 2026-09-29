@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import { RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
+import { DomainProblem } from '../common/problem';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { CreateRegistrationCaseDto } from './dto/create-registration-case.dto';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
@@ -35,7 +36,7 @@ export class OutreachController {
     const raw = request.header('if-match')?.replace(/^W\//, '').replace(/^"|"$/g, '');
     const expectedVersion = Number(raw);
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
-      throw new Error('If-Match must contain the expected positive version');
+      throw new DomainProblem(428, 'IF_MATCH_REQUIRED', 'If-Match must contain the expected positive version');
     }
     return this.outreach.updateCampaignStatus(campaignId, input, expectedVersion, requireRequestContext(request));
   }
