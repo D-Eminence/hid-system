@@ -117,6 +117,7 @@ export class ConsentService {
       case '42501':
         return new DomainProblem(403, 'CONSENT_COMMAND_DENIED', 'The consent command is not authorized');
       case '23505':
+        return new DomainProblem(409, 'CONSENT_COMMAND_CONFLICT', 'The consent state no longer permits this command');
       case '55000':
         if (errorMessage(error).startsWith('PLATFORM_CONTROL_DISABLED:')) {
           return new DomainProblem(423, 'PLATFORM_CONTROL_DISABLED', 'Emergency access is temporarily disabled');
