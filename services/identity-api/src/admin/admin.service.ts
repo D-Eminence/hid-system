@@ -67,7 +67,9 @@ export class AdminService {
         [input.controlKey, input.enabled, expectedVersion, input.reason.trim()]);
       const row = result.rows[0];
       if (!row) throw new DomainProblem(503, 'ADMIN_CONTROL_UNAVAILABLE', 'Platform control could not be updated');
-      await this.audit.recordWithClient(client, context, 'admin.platform-control.change', row.control_key);
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.platform-control.change',
+        'platform-control', row.control_key, input.reason,
+        { enabled: row.enabled, version: Number(row.row_version), replayed: row.replayed }));
       return { controlKey: row.control_key, enabled: row.enabled, version: Number(row.row_version), replayed: row.replayed };
     });
   }
