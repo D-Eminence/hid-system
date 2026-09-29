@@ -71,11 +71,13 @@ describe('Patient session separation', () => {
     const reflector = { getAllAndOverride: (key: symbol) => key === FACILITY_OPTIONAL ? true : undefined } as unknown as Reflector;
     const guard = new SecurityGuard(reflector, { verify: jest.fn().mockResolvedValue({ actor, claims: {} }) } as unknown as TokenService,
       audit as unknown as AuditService, runtimeDatabase as unknown as DatabaseService);
-    jest.spyOn(SecurityGuard.prototype as unknown as { extractToken: jest.Mock }, 'extractToken').mockReturnValue({ token: 'signed', transport: 'bearer' });
+    jest.spyOn(guard as unknown as { extractToken: jest.Mock }, 'extractToken').mockReturnValue({ token: 'signed', transport: 'bearer' });
     await expect(guard.canActivate(context)).rejects.toThrow('This operation requires workforce authorization');
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ actorType: 'patient', outcome: 'denied' }));
     const allowed = { getAllAndOverride: (key: symbol) => key === FACILITY_OPTIONAL || key === PATIENT_ALLOWED ? true : undefined } as unknown as Reflector;
-    await expect(new SecurityGuard(allowed, { verify: jest.fn().mockResolvedValue({ actor, claims: {} }) } as unknown as TokenService,
-      audit as unknown as AuditService, runtimeDatabase as unknown as DatabaseService).canActivate(context)).resolves.toBe(true);
+    const allowedGuard = new SecurityGuard(allowed, { verify: jest.fn().mockResolvedValue({ actor, claims: {} }) } as unknown as TokenService,
+      audit as unknown as AuditService, runtimeDatabase as unknown as DatabaseService);
+    jest.spyOn(allowedGuard as unknown as { extractToken: jest.Mock }, 'extractToken').mockReturnValue({ token: 'signed', transport: 'bearer' });
+    await expect(allowedGuard.canActivate(context)).resolves.toBe(true);
   });
 });
