@@ -263,23 +263,7 @@ export class DocumentService {
 
   private async requirePlatformControl(controlKey: string): Promise<void> {
     try {
-      await this.database.withTransaction(
-        {
-          actor: {
-            ...({} as DataAccessContext['actor']),
-            subject: 'system:platform-control',
-            accountId: '00000000-0000-0000-0000-000000000000',
-          },
-          facilityId: '',
-          membershipId: '',
-          correlationId: 'platform-control',
-          purposeOfUse: 'healthcare-operations',
-        } as DataAccessContext,
-        async (client) => {
-          await client.query('select platform.require_control_enabled($1)', [controlKey]);
-        },
-        { readOnly: true },
-      );
+      await this.database.query('select platform.require_control_enabled($1)', [controlKey]);
     } catch (error) {
       if (isDatabaseError(error) && error.code === '55000'
         && String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) {
