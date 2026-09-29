@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0041",
-    "count": 41,
+    "last": "0042",
+    "count": 42,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -261,6 +261,10 @@
       {
         "name": "0041_disable_initial_maintenance_mode.sql",
         "sha256": "196d5a227cfb3aca3f87f41c629b1d4e10520a55d9961130bc92ec0112831093"
+      },
+      {
+        "name": "0042_outreach_campaign_membership_key.sql",
+        "sha256": "b8cd326ea393dc80ae897822b32d0f3e8b90d6770a6e86a9207b543174a4c0d7"
       }
     ]
   },
