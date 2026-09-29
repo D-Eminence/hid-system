@@ -79,7 +79,9 @@ describe('explicitly deferred staging NIN', () => {
   });
 
   async function startModule(tokens?: { verify: jest.Mock }) {
-    const module = await Test.createTestingModule({ imports: [IsolatedDependenciesModule, IdentityModule] }).compile();
+    const module = await Test.createTestingModule({ imports: [IsolatedDependenciesModule, IdentityModule] })
+      .overrideProvider(DatabaseService).useValue(database)
+      .compile();
     app = module.createNestApplication({ logger: false });
     app.setGlobalPrefix('api/v1');
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
