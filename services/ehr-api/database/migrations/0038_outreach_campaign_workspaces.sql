@@ -1,6 +1,10 @@
 -- Outreach campaign/workspace lifecycle, adapted to HID's canonical staff identity model.
 -- Campaign workers are existing facility staff memberships, not a second account system.
 
+-- PostgreSQL requires an exact unique key for the membership_id + facility_id foreign key below.
+create unique index staff_memberships_id_facility_uq
+  on identity.staff_facility_memberships (id, facility_id);
+
 insert into auth.permissions (code, description) values
   ('outreach.campaign.read', 'Read facility-scoped Outreach campaigns and workspace membership'),
   ('outreach.campaign.write', 'Create and govern facility-scoped Outreach campaigns and workspace membership')
