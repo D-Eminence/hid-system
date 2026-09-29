@@ -4,6 +4,7 @@ import type { HidRequest } from '../common/request-context';
 import { consentContext } from './consent-context';
 import { ConsentService } from './consent.service';
 import { CloseGrantDto } from './dto/close-grant.dto';
+import { DenyAccessRequestDto } from './dto/deny-access-request.dto';
 import { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import { CreateBreakGlassDto } from './dto/create-break-glass.dto';
 import { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
@@ -21,6 +22,29 @@ export class ConsentController {
       consentContext(request, ['direct-care', 'healthcare-operations']),
       input,
     );
+  }
+
+  @Post('access-requests/:requestId/approve')
+  @HttpCode(200)
+  @RequirePermissions('identity.consent.write')
+  @AuditAction('identity.access-request.approve.command')
+  approveAccessRequest(
+    @Req() request: HidRequest,
+    @Param('requestId', new ParseUUIDPipe()) requestId: string,
+  ) {
+    return this.consent.approveAccessRequest(consentContext(request, ['direct-care']), requestId);
+  }
+
+  @Post('access-requests/:requestId/deny')
+  @HttpCode(200)
+  @RequirePermissions('identity.consent.write')
+  @AuditAction('identity.access-request.deny.command')
+  denyAccessRequest(
+    @Req() request: HidRequest,
+    @Param('requestId', new ParseUUIDPipe()) requestId: string,
+    @Body() input: DenyAccessRequestDto,
+  ) {
+    return this.consent.denyAccessRequest(consentContext(request, ['direct-care']), requestId, input.reason);
   }
 
   @Post('break-glass')
