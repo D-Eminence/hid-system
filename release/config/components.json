@@ -236,31 +236,31 @@
       },
       {
         "name": "0035_patient_access_request_decisions.sql",
-        "sha256": "4831c81290f433d2a053c3ea9c228ff03579697452324c6355017bd0e703f6b8"
+        "sha256": "9deac031d48c5e38587cb75090ff0b1234c81dc44b5fccd0b92fd3d38d58080b"
       },
       {
         "name": "0036_staff_access_request_visibility.sql",
-        "sha256": "04a534c71f627f87a769e84c0c5fd950482e858695b0a485130817784dadcf41"
+        "sha256": "b52347897e20781add7d5db1b36851bb5892e4c5a0b268269b7a7bc3f3cb8c32"
       },
       {
         "name": "0037_patient_notification_inbox.sql",
-        "sha256": "435eae72ae653c56ab1a8318d3d24ae5ff3ae0acb95e1538990d235fa2e6fa84"
+        "sha256": "86a2af2c94967bb536cd004ddbb39111ab6ce2239076844e295008731b3249be"
       },
       {
         "name": "0038_outreach_campaign_workspaces.sql",
-        "sha256": "9dcc0a42c945ac76343cf0c5ae1b90e55854969d3c50c193a9a44a1a4a31f81f"
+        "sha256": "30b0f5dfe9ca2114a956047c6165101219af57cecba6f0870c73bfad488dd28a"
       },
       {
         "name": "0039_platform_control_settings.sql",
-        "sha256": "2c03268837f74d66d72b3dd2161055588bfa9044b3d3b6307e4b73c88d70f3c9"
+        "sha256": "1eb71f69e181390014ed1bd00f2a076683c0a3f420ef945f8da111afccb3ed0b"
       },
       {
         "name": "0040_platform_control_enforcement.sql",
-        "sha256": "f177ca3caa393ebfef1e2c88366d52ffb27b44039697c54f951d97e805577339"
+        "sha256": "bf51abc205bc88fcb89b6318640da2448b82766050739784ab660c771259f5be"
       },
       {
         "name": "0041_disable_initial_maintenance_mode.sql",
-        "sha256": "e91a2dd34fa1ebf4772c0b6ab8dabd561554f4db6b20c6020e41aff2304ae5eb"
+        "sha256": "196d5a227cfb3aca3f87f41c629b1d4e10520a55d9961130bc92ec0112831093"
       }
     ]
   },
