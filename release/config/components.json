@@ -94,9 +94,6 @@
     }
   ],
   "migration": {
-    "first": "0001",
-    "last": "0040",
-    "count": 41,
     "files": [
       "0001_platform_and_migration_control.sql",
       "0002_auth_and_canonical_identity.sql",
@@ -139,7 +136,10 @@
       "0038_platform_control_settings.sql",
       "0039_platform_control_enforcement.sql",
       "0040_disable_initial_maintenance_mode.sql"
-    ]
+    ],
+    "first": "0001",
+    "last": "0040",
+    "count": 41
   },
   "frontend_archive": {
     "format": "ustar",
