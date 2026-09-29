@@ -5,6 +5,7 @@ import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import type { CreateBreakGlassDto } from './dto/create-break-glass.dto';
+import type { ListStaffAccessRequestsDto } from './dto/list-staff-access-requests.dto';
 import type { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
 
 export interface AccessRequestRow extends QueryResultRow {
@@ -82,6 +83,25 @@ export class ConsentService {
   }
 
 
+
+  async listMyStaffAccessRequests(context: DataAccessContext, query: ListStaffAccessRequestsDto) {
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<Record<string, unknown> & QueryResultRow>(
+          `select access_request_id as "accessRequestId", patient_id as "patientId",
+             scope, purpose_of_use as "purposeOfUse", reason, status,
+             requested_duration_minutes as "requestedDurationMinutes",
+             requested_at as "requestedAt", approved_at as "approvedAt",
+             denied_at as "deniedAt", denied_reason as "deniedReason"
+           from identity.list_my_staff_access_requests($1)`,
+          [query.status ?? null],
+        );
+        return result.rows;
+      }, { readOnly: true });
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
 
   async listMyAccessRequests(context: DataAccessContext) {
     return this.database.withTransaction(context, async (client) => {
