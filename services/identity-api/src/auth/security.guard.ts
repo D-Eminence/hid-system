@@ -6,6 +6,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { AuditService } from '../audit/audit.service';
+import { DatabaseService } from '../database/database.service';
 import { getEnvironment } from '../config/environment';
 import {
   FACILITY_OPTIONAL,
@@ -28,6 +29,7 @@ export class SecurityGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly tokens: TokenService,
     private readonly audit: AuditService,
+    private readonly database: DatabaseService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -39,6 +41,7 @@ export class SecurityGuard implements CanActivate {
       const verified = await this.tokens.verify(token);
       request.actor = verified.actor;
       request.authTransport = transport;
+      await this.enforceRuntimeControls(request);
       if (verified.actor.kind === 'patient' && !this.metadata<boolean>(PATIENT_ALLOWED, context)) {
         throw new DomainProblem(403, 'PATIENT_SCOPE_DENIED', 'This operation requires workforce authorization');
       }
@@ -134,6 +137,42 @@ export class SecurityGuard implements CanActivate {
     }
   }
 
+  private async enforceRuntimeControls(request: HidRequest): Promise<void> {
+    const actor = request.actor;
+    if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+
+    const isPlatformAdmin = actor.platformPermissions?.includes('platform.admin.access') ?? false;
+    if (isPlatformAdmin) return;
+
+    const maintenance = await this.controlEnabled('maintenance_mode');
+    if (maintenance) {
+      throw new DomainProblem(503, 'PLATFORM_MAINTENANCE', 'HID is temporarily in maintenance mode');
+    }
+
+    const portalControl = actor.kind === 'patient'
+      ? 'patient_portal_enabled'
+      : 'provider_portal_enabled';
+    if (!(await this.controlEnabled(portalControl))) {
+      throw new DomainProblem(423, 'PLATFORM_PORTAL_DISABLED', 'This portal is temporarily disabled');
+    }
+  }
+
+  private async controlEnabled(controlKey: string): Promise<boolean> {
+    try {
+      const result = await this.database.query<{ enabled: boolean }>(
+        'select platform.control_enabled($1) as enabled',
+        [controlKey],
+      );
+      return result.rows[0]?.enabled === true;
+    } catch (error) {
+      if (isDatabaseError(error) && error.code === '55000') {
+        if (String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) return false;
+        throw new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
+      }
+      throw error;
+    }
+  }
+
   private extractToken(request: HidRequest): { token: string; transport: 'bearer' | 'cookie' } {
     const authorization = request.header('authorization');
     if (authorization?.startsWith('Bearer ')) {
@@ -177,4 +216,11 @@ export class SecurityGuard implements CanActivate {
   private routeTemplate(request: HidRequest): string {
     return typeof request.route?.path === 'string' ? request.route.path : 'unresolved';
   }
+}
+
+function isDatabaseError(value: unknown): value is { code: string; message?: string } {
+  return typeof value === 'object'
+    && value !== null
+    && 'code' in value
+    && typeof (value as { code?: unknown }).code === 'string';
 }
