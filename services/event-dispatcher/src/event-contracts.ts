@@ -69,7 +69,9 @@ export function eventEnvelope(event: ClaimedEvent): HidEventEnvelopeV1 {
         || event.patientId === null || event.facilityId === null
         || Object.keys(event.payload).length !== 2
         || event.payload.consentGrantId !== event.aggregateId || event.payload.reviewRequired !== true)) {
-    throw new EventContractFailure('INVALID_EVENT_ENVELOPE', 'Consent-grant notification contract is invalid');
+    throw new EventContractFailure('INVALID_EVENT_ENVELOPE', event.eventType === 'PatientAccessPinVerified'
+      ? 'Patient PIN notification contract is invalid'
+      : 'Emergency notification contract is invalid');
   }
   validateRecursively(event.payload, 0);
   return Object.freeze({ schema: 'ng.hid.event-envelope', schemaVersion: 1,

@@ -94,11 +94,12 @@ describe('explicitly deferred staging NIN', () => {
     return module;
   }
 
-  it('starts the actual Identity module with no NIN cryptographic keys or QoreID credentials', async () => {
+  it('starts the actual Identity module with no NIN cryptographic keys or provider credentials', async () => {
     expect(getEnvironment().NIN_PROVIDER_MODE).toBe('deferred');
     expect(getEnvironment().NIN_LOOKUP_HMAC_KEY_B64).toBeUndefined();
     expect(getEnvironment().NIN_ENCRYPTION_KEY_B64).toBeUndefined();
     expect(Object.keys(process.env).some(key => key.startsWith('QOREID_'))).toBe(false);
+    expect(Object.keys(process.env).some(key => key.startsWith('METAMAP_'))).toBe(false);
     await startModule();
     expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(database.withTransaction).not.toHaveBeenCalled();

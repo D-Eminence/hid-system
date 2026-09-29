@@ -347,10 +347,9 @@ is pending. Read the existing request with
 
 Production resources, secrets, DNS and deployment configuration were not modified.
 The staging issuer is conditional on the staging profile. The original production
-deployment-profile configuration remains unchanged. The earlier readiness
-baseline preserved `docs/SECURITY.md` at SHA-256
-`a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93`; the
-current QoreID security documentation is an additive, uncommitted follow-up.
+deployment-profile configuration remains unchanged. The current
+`docs/SECURITY.md` contains an additive QoreID privacy section; no
+deployment-profile configuration was changed.
 No production data, deployment, migration, deletion, signing, publication, PR approval
 or merge occurred. Earlier receipts record five generated staging application keys
 and eight staging GitHub environments with owner review, protected branches and no
@@ -371,22 +370,23 @@ When its request status changes, rerun `python3 scripts/check-staging-fargate-qu
 and require the gate to clear before any deployment. The already-submitted request, controlled
 notification inputs and public custody material are detailed in the
 [AWS checkpoint](STAGING_AWS_CHECKPOINT.md#user-input-required), including which
-gates block deployment versus later acceptance. No QoreID input is required for
-ordinary staging; separate QoreID activation has its own credential and privacy
-approval gates. No duplicate quota request or deployment was submitted.
+gates block deployment versus later acceptance. Neither legacy MetaMap/NIN work
+nor QoreID input is required for ordinary staging. Separate QoreID activation has
+its own entitlement, credential, and privacy approval gates. No duplicate quota
+request or deployment was submitted.
 
-### G. QOREID ACTIVATION DEFERRED
+### G. VERIFICATION PROVIDERS DEFERRED
 
 QoreID NIN/CAC implementation is complete but disabled. Activation requires an
 approved provider entitlement/test contract, the distinct staging secret, and
 privacy/security approval before any provider call. The same separate approval
 is required for production.
 
-Do not retain or recreate the superseded MetaMap transport, secret-entry tooling,
-or credentials. The [QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md)
-tracks the bounded adapter, provider tests, secure configuration, and eventual
-activation work. This list is excluded from the current staging blocker and
-user-input lists.
+MetaMap preparation remains historical, deferred legacy-NIN research. It creates
+no current staging input, credential binding, or provider-call authority. The
+[QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md) tracks the bounded
+adapter, provider tests, secure configuration, and eventual activation work. This
+section is excluded from the current staging blocker and user-input lists.
 
 ## Historical audit — September 8–9, 2026
 

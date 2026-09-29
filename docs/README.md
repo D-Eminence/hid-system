@@ -28,6 +28,8 @@ The HID QoreID NIN/CAC adapter and minimal evidence boundary are implemented but
 disabled by default; legacy governed NIN registration remains deferred in
 staging. The current route, security, and activation contract is in
 [`QOREID_VERIFICATION_CONTRACT.md`](QOREID_VERIFICATION_CONTRACT.md).
+Historic MetaMap research remains retained only for evidence continuity in
+[`METAMAP_NIN_CONTRACT.md`](METAMAP_NIN_CONTRACT.md).
 
 ## Documentation Map
 
