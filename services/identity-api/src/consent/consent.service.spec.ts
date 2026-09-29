@@ -112,7 +112,29 @@ describe('ConsentService', () => {
 
 
 
-  it('lists the authenticated patient access request inbox without unrelated identity data', async () => {
+  it('lists only the exact staff membership access-request lifecycle', async () => {
+    query.mockResolvedValueOnce({ rows: [{
+      accessRequestId: '40000000-0000-4000-8000-000000000007',
+      patientId: '50000000-0000-4000-8000-000000000007',
+      scope: 'read_records',
+      purposeOfUse: 'direct-care',
+      reason: 'Continuity of care',
+      status: 'approved',
+      requestedDurationMinutes: 60,
+      requestedAt: new Date('2026-09-29T12:00:00.000Z'),
+      approvedAt: new Date('2026-09-29T12:01:00.000Z'),
+      deniedAt: null,
+      deniedReason: null,
+    }]});
+    await expect(service.listMyStaffAccessRequests(context, { status: 'approved' }))
+      .resolves.toHaveLength(1);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('identity.list_my_staff_access_requests($1)'),
+      ['approved'],
+    );
+  });
+
+  it('lists the authenticated patient access request inbox without unrelated identity data', async () =>
     query.mockResolvedValueOnce({ rows: [{
       accessRequestId: '40000000-0000-4000-8000-000000000006',
       facilityId: '10000000-0000-4000-8000-000000000006',
