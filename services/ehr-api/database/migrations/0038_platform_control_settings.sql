@@ -6,17 +6,16 @@ create table platform.control_settings (
   enabled boolean not null,
   reason text not null check (length(btrim(reason)) between 8 and 500),
   row_version bigint not null default 1 check (row_version > 0),
-  updated_by uuid not null references auth.accounts(id) on delete restrict,
+  updated_by uuid references auth.accounts(id) on delete restrict,
   updated_at timestamptz not null default clock_timestamp()
 );
 
 insert into platform.control_settings(control_key,enabled,reason,updated_by)
-select key, true, 'Initial platform control state', id
+select key, true, 'Initial platform control state', null
 from (values
   ('patient_portal_enabled'),('provider_portal_enabled'),('outreach_portal_enabled'),
   ('maintenance_mode'),('uploads_enabled'),('break_glass_enabled')
-) v(key)
-cross join lateral (select id from auth.accounts where status='active' order by created_at,id limit 1) a
+ ) v(key)
 on conflict do nothing;
 
 alter table platform.control_settings enable row level security;
