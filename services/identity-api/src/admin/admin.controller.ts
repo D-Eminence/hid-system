@@ -7,7 +7,7 @@ import type { HidRequest } from '../common/request-context';
 import { requireAdminContext } from './admin-context';
 import { AdminOperationsService } from './admin-operations.service';
 import { AdminService } from './admin.service';
-import { AccountStatusCommandDto, FacilityStatusCommandDto, PlatformRoleCommandDto,
+import { AccountStatusCommandDto, FacilityStatusCommandDto, PlatformControlCommandDto, PlatformRoleCommandDto,
   RevokeSessionsCommandDto } from './dto/admin-command.dto';
 import { ExportPrincipalsDto, ListFacilitiesDto, ListIdentityReviewsDto, ListPlatformAuditDto,
   ListPrincipalsDto } from './dto/admin-list.dto';
@@ -26,6 +26,22 @@ export class AdminController {
   @RequirePermissions('platform.admin.access')
   @AuditAction('admin.overview.read.request')
   overview(@Req() request: HidRequest) { return this.admin.overview(requireAdminContext(request)); }
+
+
+  @Get('controls')
+  @RequirePermissions('platform.control.read')
+  @AuditAction('admin.platform-controls.list.request')
+  controls(@Req() request: HidRequest) {
+    return this.admin.platformControls(requireAdminContext(request));
+  }
+
+  @Post('controls')
+  @RequirePermissions('platform.control.manage')
+  @AuditAction('admin.platform-control.change.request')
+  setControl(@Headers('if-match') ifMatch: string | undefined, @Body() input: PlatformControlCommandDto,
+    @Req() request: HidRequest) {
+    return this.admin.setPlatformControl(requireAdminContext(request), input, this.expectedVersion(ifMatch));
+  }
 
   @Get('facilities')
   @RequirePermissions('platform.facility.read')
