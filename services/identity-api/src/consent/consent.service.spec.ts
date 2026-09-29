@@ -113,54 +113,59 @@ describe('ConsentService', () => {
 
 
   it('lists only the exact staff membership access-request lifecycle', async () => {
-    query.mockResolvedValueOnce({ rows: [{
-      accessRequestId: '40000000-0000-4000-8000-000000000007',
-      patientId: '50000000-0000-4000-8000-000000000007',
-      scope: 'read_records',
-      purposeOfUse: 'direct-care',
-      reason: 'Continuity of care',
-      status: 'approved',
-      requestedDurationMinutes: 60,
-      requestedAt: new Date('2026-09-29T12:00:00.000Z'),
-      approvedAt: new Date('2026-09-29T12:01:00.000Z'),
-      deniedAt: null,
-      deniedReason: null,
-    }]});
-    await expect(service.listMyStaffAccessRequests(context, { status: 'approved' }))
-      .resolves.toHaveLength(1);
+    query.mockResolvedValueOnce({
+      rows: [{
+        accessRequestId: '40000000-0000-4000-8000-000000000007',
+        patientId: '50000000-0000-4000-8000-000000000007',
+        scope: 'read_records',
+        purposeOfUse: 'direct-care',
+        reason: 'Continuity of care',
+        status: 'approved',
+        requestedDurationMinutes: 60,
+        requestedAt: new Date('2026-09-29T12:00:00.000Z'),
+        approvedAt: new Date('2026-09-29T12:01:00.000Z'),
+        deniedAt: null,
+        deniedReason: null,
+      }],
+    });
+    await expect(service.listMyStaffAccessRequests(context, { status: 'approved' })).resolves.toHaveLength(1);
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('identity.list_my_staff_access_requests($1)'),
       ['approved'],
     );
   });
 
-  it('lists the authenticated patient access request inbox without unrelated identity data', async () =>
-    query.mockResolvedValueOnce({ rows: [{
-      accessRequestId: '40000000-0000-4000-8000-000000000006',
-      facilityId: '10000000-0000-4000-8000-000000000006',
-      facilityName: 'Example Facility',
-      scope: 'read_records',
-      reason: 'Continuity of care',
-      status: 'pending',
-      requestedDurationMinutes: 60,
-      requestedAt: new Date('2026-09-29T12:00:00.000Z'),
-      approvedAt: null,
-      deniedAt: null,
-      deniedReason: null,
-    }]});
+  it('lists the authenticated patient access request inbox without unrelated identity data', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{
+        accessRequestId: '40000000-0000-4000-8000-000000000006',
+        facilityId: '10000000-0000-4000-8000-000000000006',
+        facilityName: 'Example Facility',
+        scope: 'read_records',
+        reason: 'Continuity of care',
+        status: 'pending',
+        requestedDurationMinutes: 60,
+        requestedAt: new Date('2026-09-29T12:00:00.000Z'),
+        approvedAt: null,
+        deniedAt: null,
+        deniedReason: null,
+      }],
+    });
     await expect(service.listMyAccessRequests(context)).resolves.toHaveLength(1);
     expect(query).toHaveBeenCalledWith(expect.stringContaining('identity.list_my_access_requests()'));
   });
 
   it('returns the patient approval result from the governed consent command', async () => {
-    query.mockResolvedValueOnce({ rows: [{
-      accessRequestId: '40000000-0000-4000-8000-000000000004',
-      consentGrantId: '60000000-0000-4000-8000-000000000004',
-      patientId: '50000000-0000-4000-8000-000000000004',
-      status: 'approved',
-      expiresAt: new Date('2026-09-29T13:00:00.000Z'),
-      replayed: false,
-    }]});
+    query.mockResolvedValueOnce({
+      rows: [{
+        accessRequestId: '40000000-0000-4000-8000-000000000004',
+        consentGrantId: '60000000-0000-4000-8000-000000000004',
+        patientId: '50000000-0000-4000-8000-000000000004',
+        status: 'approved',
+        expiresAt: new Date('2026-09-29T13:00:00.000Z'),
+        replayed: false,
+      }],
+    });
     await expect(service.approveAccessRequest(context, '40000000-0000-4000-8000-000000000004'))
       .resolves.toMatchObject({ status: 'approved', replayed: false });
     expect(query).toHaveBeenCalledWith(
@@ -170,15 +175,19 @@ describe('ConsentService', () => {
   });
 
   it('returns the patient denial result and trims the reason', async () => {
-    query.mockResolvedValueOnce({ rows: [{
-      accessRequestId: '40000000-0000-4000-8000-000000000005',
-      patientId: '50000000-0000-4000-8000-000000000005',
-      status: 'denied',
-      deniedAt: new Date('2026-09-29T12:30:00.000Z'),
-      replayed: false,
-    }]});
+    query.mockResolvedValueOnce({
+      rows: [{
+        accessRequestId: '40000000-0000-4000-8000-000000000005',
+        patientId: '50000000-0000-4000-8000-000000000005',
+        status: 'denied',
+        deniedAt: new Date('2026-09-29T12:30:00.000Z'),
+        replayed: false,
+      }],
+    });
     await expect(service.denyAccessRequest(
-      context, '40000000-0000-4000-8000-000000000005', '  Not authorized  ',
+      context,
+      '40000000-0000-4000-8000-000000000005',
+      '  Not authorized  ',
     )).resolves.toMatchObject({ status: 'denied', replayed: false });
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('identity.deny_access_request'),
@@ -198,9 +207,10 @@ describe('ConsentService', () => {
         existingGrant: false,
       }],
     });
-
     await expect(service.verifyPatientAccessPin(context, {
-      hid: 'HID-ABCDEFGH', pin: '1234', durationMinutes: 15,
+      hid: 'HID-ABCDEFGH',
+      pin: '1234',
+      durationMinutes: 15,
     })).resolves.toMatchObject({
       status: 'active',
       patientId: '50000000-0000-4000-8000-000000000002',
@@ -211,28 +221,35 @@ describe('ConsentService', () => {
     );
   });
 
-  it('turns failed, locked, unknown, or revoked PIN results into one generic denial', async () => {
+  it('denies an invalid patient access PIN without leaking scope', async () => {
     query.mockResolvedValueOnce({
       rows: [{
-        verified: false, accessRequestId: null, consentGrantId: null, patientId: null,
-        status: null, expiresAt: null, existingGrant: false,
+        verified: false,
+        accessRequestId: null,
+        consentGrantId: null,
+        patientId: null,
+        status: null,
+        expiresAt: null,
+        existingGrant: false,
       }],
     });
     await expect(service.verifyPatientAccessPin(context, {
-      hid: 'HID-ABCDEFGH', pin: '9999', durationMinutes: 15,
+      hid: 'HID-ABCDEFGH',
+      pin: '9999',
+      durationMinutes: 15,
     })).rejects.toMatchObject<Partial<DomainProblem>>({
       code: 'PATIENT_PIN_ACCESS_DENIED',
     });
   });
 
-  it.each(['42501', 'P0001', 'P0002', '22023'])(
-    'does not leak patient scope or authorization failures from PIN verification (%s)',
-    async (code) => {
+  it('maps PIN authorization and target-state failures to one generic denial', async () => {
+    for (const code of ['42501', 'P0001', 'P0002', '22023']) {
       query.mockRejectedValueOnce({ code, detail: 'sensitive target state' });
       await expect(service.verifyPatientAccessPin(context, {
-        hid: 'HID-ABCDEFGH', pin: '1234', durationMinutes: 15,
+        hid: 'HID-ABCDEFGH',
+        pin: '1234',
+        durationMinutes: 15,
       })).rejects.toMatchObject({ code: 'PATIENT_PIN_ACCESS_DENIED' });
-    },
-  );
-
+    }
+  });
 });
