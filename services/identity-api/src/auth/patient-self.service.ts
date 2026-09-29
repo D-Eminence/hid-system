@@ -19,6 +19,34 @@ export class PatientSelfService {
   history(request: HidRequest) { return this.read(request, 'access-history'); }
   authorize(request: HidRequest) { return this.read(request, 'authorize'); }
 
+  async notificationInbox(request: HidRequest, limit?: number) {
+    const actor = requirePatient(request.actor);
+    return this.database.withSystemTransaction(request.correlationId, async (client) => {
+      await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);
+      const result = await client.query(
+        'select id, notification_code as "notificationCode", resource_type as "resourceType", '
+        + 'resource_id as "resourceId", metadata, read_at as "readAt", created_at as "createdAt" '
+        + 'from identity.list_my_notification_inbox($1)',
+        [limit ?? 50],
+      );
+      return result.rows;
+    });
+  }
+
+  async markNotificationRead(request: HidRequest, notificationId: string) {
+    const actor = requirePatient(request.actor);
+    return this.database.withSystemTransaction(request.correlationId, async (client) => {
+      await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);
+      const result = await client.query(
+        'select id, read_at as "readAt" from identity.mark_my_notification_read($1)',
+        [notificationId],
+      );
+      const row = result.rows[0];
+      if (!row) throw new DomainProblem(404, 'NOTIFICATION_NOT_FOUND', 'Notification was not found');
+      return row;
+    });
+  }
+
   async setAccessPin(request: HidRequest, pin: string) {
     const actor = requirePatient(request.actor);
     await this.database.withSystemTransaction(request.correlationId, async (client) => {

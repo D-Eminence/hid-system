@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { AuditAction, AuditFailuresOnly, FacilityOptional, PatientAllowed } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
@@ -18,6 +18,23 @@ export class PatientSelfController {
 
   @Get('me/access-history')
   history(@Req() request: HidRequest) { return this.self.history(request); }
+
+  @Get('me/notifications')
+  notificationInbox(@Req() request: HidRequest, @Query('limit') limit?: string) {
+    const parsed = limit === undefined ? undefined : Number(limit);
+    if (parsed !== undefined && (!Number.isInteger(parsed) || parsed < 1 || parsed > 100)) {
+      throw new DomainProblem(400, 'INVALID_NOTIFICATION_LIMIT', 'Notification limit must be an integer from 1 to 100');
+    }
+    return this.self.notificationInbox(request, parsed);
+  }
+
+  @Post('me/notifications/:notificationId/read')
+  @HttpCode(200)
+  @AuditAction('identity.patient.notification.read.command')
+  markNotificationRead(@Req() request: HidRequest,
+    @Param('notificationId', new ParseUUIDPipe()) notificationId: string) {
+    return this.self.markNotificationRead(request, notificationId);
+  }
 
   @Post('me/access-pin')
   @HttpCode(200)

@@ -48,6 +48,7 @@ export class DocumentService {
 
   async createUploadIntent(input: CreateDocumentUploadDto, idempotencyKey: string, context: DataAccessContext) {
     this.validateIdempotencyKey(idempotencyKey);
+    await this.requirePlatformControl('uploads_enabled');
     const authorization = await this.identity.authorize(input.patientId, 'write_records', context.purposeOfUse, context);
     if (!authorization.allowed) throw new ForbiddenException('Patient write access is not authorized');
 
@@ -260,6 +261,18 @@ export class DocumentService {
     });
   }
 
+  private async requirePlatformControl(controlKey: string): Promise<void> {
+    try {
+      await this.database.query('select platform.require_control_enabled($1)', [controlKey]);
+    } catch (error) {
+      if (isDatabaseError(error) && error.code === '55000'
+        && String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) {
+        throw new ConflictException('Document uploads are temporarily disabled');
+      }
+      throw error;
+    }
+  }
+
   private async claimIdempotency(
     client: PoolClient,
     patientId: string,
@@ -352,4 +365,11 @@ export class DocumentService {
   private hash(value: string): string {
     return createHash('sha256').update(value, 'utf8').digest('hex');
   }
+}
+
+function isDatabaseError(value: unknown): value is { code: string; message?: string } {
+  return typeof value === 'object'
+    && value !== null
+    && 'code' in value
+    && typeof (value as { code?: unknown }).code === 'string';
 }

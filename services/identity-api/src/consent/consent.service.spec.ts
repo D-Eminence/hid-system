@@ -110,6 +110,82 @@ describe('ConsentService', () => {
     })).rejects.toBe(outage);
   });
 
+
+
+  it('lists only the exact staff membership access-request lifecycle', async () => {
+    query.mockResolvedValueOnce({ rows: [{
+      accessRequestId: '40000000-0000-4000-8000-000000000007',
+      patientId: '50000000-0000-4000-8000-000000000007',
+      scope: 'read_records',
+      purposeOfUse: 'direct-care',
+      reason: 'Continuity of care',
+      status: 'approved',
+      requestedDurationMinutes: 60,
+      requestedAt: new Date('2026-09-29T12:00:00.000Z'),
+      approvedAt: new Date('2026-09-29T12:01:00.000Z'),
+      deniedAt: null,
+      deniedReason: null,
+    }]});
+    await expect(service.listMyStaffAccessRequests(context, { status: 'approved' }))
+      .resolves.toHaveLength(1);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('identity.list_my_staff_access_requests($1)'),
+      ['approved'],
+    );
+  });
+
+  it('lists the authenticated patient access request inbox without unrelated identity data', async () =>
+    query.mockResolvedValueOnce({ rows: [{
+      accessRequestId: '40000000-0000-4000-8000-000000000006',
+      facilityId: '10000000-0000-4000-8000-000000000006',
+      facilityName: 'Example Facility',
+      scope: 'read_records',
+      reason: 'Continuity of care',
+      status: 'pending',
+      requestedDurationMinutes: 60,
+      requestedAt: new Date('2026-09-29T12:00:00.000Z'),
+      approvedAt: null,
+      deniedAt: null,
+      deniedReason: null,
+    }]});
+    await expect(service.listMyAccessRequests(context)).resolves.toHaveLength(1);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('identity.list_my_access_requests()'));
+  });
+
+  it('returns the patient approval result from the governed consent command', async () => {
+    query.mockResolvedValueOnce({ rows: [{
+      accessRequestId: '40000000-0000-4000-8000-000000000004',
+      consentGrantId: '60000000-0000-4000-8000-000000000004',
+      patientId: '50000000-0000-4000-8000-000000000004',
+      status: 'approved',
+      expiresAt: new Date('2026-09-29T13:00:00.000Z'),
+      replayed: false,
+    }]});
+    await expect(service.approveAccessRequest(context, '40000000-0000-4000-8000-000000000004'))
+      .resolves.toMatchObject({ status: 'approved', replayed: false });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('identity.approve_access_request'),
+      ['40000000-0000-4000-8000-000000000004'],
+    );
+  });
+
+  it('returns the patient denial result and trims the reason', async () => {
+    query.mockResolvedValueOnce({ rows: [{
+      accessRequestId: '40000000-0000-4000-8000-000000000005',
+      patientId: '50000000-0000-4000-8000-000000000005',
+      status: 'denied',
+      deniedAt: new Date('2026-09-29T12:30:00.000Z'),
+      replayed: false,
+    }]});
+    await expect(service.denyAccessRequest(
+      context, '40000000-0000-4000-8000-000000000005', '  Not authorized  ',
+    )).resolves.toMatchObject({ status: 'denied', replayed: false });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('identity.deny_access_request'),
+      ['40000000-0000-4000-8000-000000000005', 'Not authorized'],
+    );
+  });
+
   it('returns a narrow governed grant only when the database command verifies the PIN', async () => {
     query.mockResolvedValueOnce({
       rows: [{
