@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import { AuditAction, PatientAllowed, RequirePermissions } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import { consentContext } from './consent-context';
@@ -12,6 +12,13 @@ import { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
 @Controller('identity')
 export class ConsentController {
   constructor(private readonly consent: ConsentService) {}
+
+  @Get('me/access-requests')
+  @PatientAllowed()
+  @AuditAction('identity.access-request.list.request')
+  listMyAccessRequests(@Req() request: HidRequest) {
+    return this.consent.listMyAccessRequests(consentContext(request, ['direct-care']));
+  }
 
   @Post('access-requests')
   @HttpCode(201)
