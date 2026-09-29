@@ -599,7 +599,8 @@ grant select, insert, update on identity.organizations, identity.facilities,
   identity.consent_directives, identity.consent_directive_versions,
   identity.registration_cases, identity.registration_case_candidates,
   identity.registration_case_events, identity.outbox_events,
-  identity.facility_status_events, identity.patient_assurance_states to hid_schema_test_runtime;
+  identity.facility_status_events, identity.patient_assurance_states,
+  identity.verification_evidence to hid_schema_test_runtime;
 grant select, insert, update on ehr.encounters, ehr.documents to hid_schema_test_runtime;
 grant select, insert on ehr.lab_requests to hid_schema_test_runtime;
 grant select, insert on ehr.ocr_import_provenance to hid_schema_test_runtime;
@@ -751,7 +752,9 @@ grant execute on function identity.enroll_registered_patient(uuid, bigint, text,
 grant execute on function auth.resolve_google_identity(text),
   identity.set_my_patient_access_pin(text,uuid,text),
   identity.revoke_my_patient_access_pin(text,uuid),
-  identity.access_patient_with_pin(text,text,integer)
+  identity.access_patient_with_pin(text,text,integer),
+  identity.record_my_nin_verification_evidence(text,uuid,text,text,text),
+  identity.record_organization_cac_verification_evidence(text,text,text,text)
   to hid_identity_runtime, hid_schema_test_runtime;
 
 grant select, insert on auth.external_identities, identity.patient_access_pins,
@@ -767,4 +770,6 @@ grant select, insert on identity.patient_access_pin_attempts,
 revoke all on function auth.resolve_google_identity(text),
   identity.set_my_patient_access_pin(text,uuid,text),
   identity.revoke_my_patient_access_pin(text,uuid),
-  identity.access_patient_with_pin(text,text,integer) from public;
+  identity.access_patient_with_pin(text,text,integer),
+  identity.record_my_nin_verification_evidence(text,uuid,text,text,text),
+  identity.record_organization_cac_verification_evidence(text,text,text,text) from public;

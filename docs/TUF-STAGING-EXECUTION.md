@@ -35,12 +35,12 @@ and Brevo is an optional fallback. See the researched
 [provider account matrix](STAGING_PROVIDER_ACCOUNTS.md) before creating accounts.
 No optional provider account is requested for this acceptance scope.
 
-QoreID is selected for future NIN and CAC verification. HID has no active QoreID
-adapter, credential binding, or provider request: the generic NIN boundary stays
-explicitly disabled with `NIN_PROVIDER_MODE=deferred`. It does not block staging
-deployment or acceptance and requires no QoreID credential. The unresolved
-authentication/result contract and CAC organization-domain work are recorded in
-[the QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md).
+QoreID is the selected NIN/CAC evidence provider. HID now has a server-only
+adapter and minimal evidence boundary, both disabled by default: the legacy
+governed-registration boundary still uses `NIN_PROVIDER_MODE=deferred` and is
+separate from this work. Ordinary staging requires no QoreID credential. A
+provider call requires the separately approved staging activation described in
+[the QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
 
 The staging successor now implements the patient, recovery and emergency journeys,
 governed enrollment, and staging workload token delivery. Local evidence below
@@ -61,10 +61,10 @@ this section supersedes its authentication, implementation and secret-change sta
   idempotent enrollment of an unmapped canonical patient into a separate pending-reset
   auth account; existing-email linkage is rejected. Verified canonical NIN provenance
   is required and preserved through contact verification. Provider responses receive
-  strict runtime validation. QoreID is the selected future provider; no transport
-  is implemented until an approved result/authentication contract exists. Staging
-  deferred mode fails closed; deterministic mode is test-only and rejected in
-  staging. Existing-patient staging journeys use
+  strict runtime validation. The separate QoreID self/organization evidence
+  adapter is implemented but disabled by default; the legacy registration flow
+  remains deferred, and deterministic mode is test-only and rejected in staging.
+  Existing-patient staging journeys use
   [reviewed synthetic account/patient links](STAGING_PATIENT_JOURNEYS.md), without NIN assurance.
 - **OTP:** account/token-bound challenge and completion credential, atomic one-time
   recovery with Argon2 password, session revocation, audit rollback, disabled/stale
@@ -73,9 +73,9 @@ this section supersedes its authentication, implementation and secret-change sta
   break-glass scope authorizing record reads, fresh grant checks, expiry/revocation, ten new activations per
   account per hour, and atomic `EmergencyAccessActivated.v1` outbox/notification intent.
   Provider acceptance or delivery is not inferred from an outbox row or grant history.
-- **Database:** additive migrations 0029–0033 and corresponding runtime-role/RLS tests;
+- **Database:** additive migrations 0029–0034 and corresponding runtime-role/RLS tests;
   all historical 0001–0028 hashes remain unchanged. Release schema/ledger now require
-  33 migrations. Clean apply, existing-0028 upgrade, transactional dry run, repeat apply,
+  34 migrations. Clean apply, existing-0028 upgrade, transactional dry run, repeat apply,
   backup/restore, exact-role HTTP journeys, non-superuser/non-bypass command ownership,
   audit failures, patient-PIN/cutover staging-integrity, and negative authorization paths
   passed against disposable PostgreSQL.
@@ -329,7 +329,7 @@ is pending. Read the existing request with
       TUF metadata; validate custody, immutable journal and protected run approval.
 - [ ] Deploy staging; verify private network paths, TLS/CA, secrets, non-owner database
       roles, task health, IAM denial boundaries and real workload issuance/rotation/expiry.
-- [ ] Apply all 32 migrations once; repeat with zero pending; reconcile constraints and
+- [ ] Apply all 34 migrations once; repeat with zero pending; reconcile constraints and
       identifiers; restore the actual staging backup and run restored application checks.
 - [ ] Prepare reviewed staging-only synthetic patient/staff accounts through the existing
       operator import path, with distinct canonical UUIDs, no NIN claims and pending-reset
@@ -347,9 +347,10 @@ is pending. Read the existing request with
 
 Production resources, secrets, DNS and deployment configuration were not modified.
 The staging issuer is conditional on the staging profile. The original production
-deployment-profile configuration remains unchanged. The user's `docs/SECURITY.md`
-remains exactly SHA-256
-`a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93`.
+deployment-profile configuration remains unchanged. The earlier readiness
+baseline preserved `docs/SECURITY.md` at SHA-256
+`a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93`; the
+current QoreID security documentation is an additive, uncommitted follow-up.
 No production data, deployment, migration, deletion, signing, publication, PR approval
 or merge occurred. Earlier receipts record five generated staging application keys
 and eight staging GitHub environments with owner review, protected branches and no
@@ -370,14 +371,16 @@ When its request status changes, rerun `python3 scripts/check-staging-fargate-qu
 and require the gate to clear before any deployment. The already-submitted request, controlled
 notification inputs and public custody material are detailed in the
 [AWS checkpoint](STAGING_AWS_CHECKPOINT.md#user-input-required), including which
-gates block deployment versus later acceptance. No QoreID input is required. No
-duplicate quota request or deployment was submitted.
+gates block deployment versus later acceptance. No QoreID input is required for
+ordinary staging; separate QoreID activation has its own credential and privacy
+approval gates. No duplicate quota request or deployment was submitted.
 
-### G. DEFERRED TO POST-STAGING
+### G. QOREID ACTIVATION DEFERRED
 
-QoreID NIN/CAC integration is deferred. Activation requires an approved provider
-authentication/result contract, authorized test access, and a separately approved
-CAC organization domain for EHR/hospitals, laboratories, and pharmacies.
+QoreID NIN/CAC implementation is complete but disabled. Activation requires an
+approved provider entitlement/test contract, the distinct staging secret, and
+privacy/security approval before any provider call. The same separate approval
+is required for production.
 
 Do not retain or recreate the superseded MetaMap transport, secret-entry tooling,
 or credentials. The [QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md)

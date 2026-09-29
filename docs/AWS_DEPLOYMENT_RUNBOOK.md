@@ -7,16 +7,23 @@ Do not interpret successful tests or synthesis as deployment success. This
 runbook requires authorized operators and records evidence without putting PHI,
 OTP values, tokens, provider credentials, or database URLs in logs.
 
-## Staging NIN deferral
+## Staging NIN deferral and QoreID opt-in
 
-QoreID is selected for future NIN verification, but the HID integration remains deferred. Activation requires an approved provider contract and authorized test access.
+The legacy governed-registration provider remains deferred in staging:
+`NIN_PROVIDER_MODE=deferred` still omits NIN encryption/HMAC-key injection and
+does not make a provider request. The separately implemented QoreID
+self/organization verification adapter is also disabled by default
+(`QOREID_ENABLED=false`), so ordinary task synthesis carries no QoreID
+credential reference.
 
-All staging profiles set `NIN_PROVIDER_MODE=deferred` and omit NIN provider and
-cryptographic-key injection. Existing stored NIN keys remain preserved. Missing
-QoreID credentials do not block task startup, deployment or acceptance. Follow
-[staging patient journeys](STAGING_PATIENT_JOURNEYS.md) for approved synthetic
-account/patient preparation; keep real authentication, OTP delivery, TLS, RLS,
-consent, workload identity and audit controls active.
+An authorized staging activation must explicitly synthesize with
+`HID_QOREID_ENABLED=true` and supply `QoreIdCredentialsSecretArn`, a distinct
+AWS Secrets Manager JSON secret with `clientId` and `secret`. ECS injects those
+values into the Identity API only; they must not be copied to a frontend,
+worker, migration task, log, or deployment parameter. Validate synthetic NIN
+and CAC outcomes plus timeout/401/5xx privacy behavior before considering any
+production change. This repository change did not activate or deploy QoreID.
+See [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
 
 ## Staging email acceptance profile
 
@@ -52,8 +59,9 @@ Record and approve:
   development and production, the external issuer/JWKS/subjects and token
   delivery mechanism;
 - nine non-owner database secrets plus a separate migration administrator;
-- Identity auth/OTP/Turnstile secret material; NIN material is excluded from
-  current staging requirements and retained for later integration;
+- Identity auth/OTP/Turnstile secret material; legacy NIN material remains
+  excluded from current staging requirements. If QoreID staging activation is
+  separately approved, add its distinct `clientId`/`secret` envelope only;
 - for staging email acceptance, SES sender and Novu secret material only; the
   existing full profile additionally uses Termii, Meta and Brevo. FCM is not
   instantiated by the current worker and is outside this acceptance scope; and
@@ -286,8 +294,8 @@ Never run any of these commands for production.
 
 ## 6. Migrate identity and data
 
-Never edit migrations `0001`–`0028`. Apply all 33 ledger migrations through
-`0033` using the one-shot migration task. First record snapshot/PITR readiness
+Never edit migrations `0001`–`0028`. Apply all 34 ledger migrations through
+`0034` using the one-shot migration task. First record snapshot/PITR readiness
 and run `--plan`.
 Exercise the offline fixture path before using an approved read-only HID 1.0
 source:

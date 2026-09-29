@@ -45,6 +45,7 @@ const acceptedMigrations = new Map([
   ['0031_emergency_notification_and_rate_limit.sql', 'f04f1cc8380dc0c6bd38d69403f23b13cad6a4e02778a0817df220da3dc3f701'],
   ['0032_governed_patient_enrollment.sql', 'c4ee4ac51ce90a622901c3f8ebd4f3ac4d72acb5a8f7addd0a2b1ea993572225'],
   ['0033_supabase_cutover_identity_controls.sql', '4df718e800165d27085ae4b7b79761ef2748841cb6cebe1895c3674ebc6a2bce'],
+  ['0034_qoreid_verification_evidence.sql', '7dbb417aa3ff8982316606546047c37fa00559d8790e510cfd6ac622be538c18'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

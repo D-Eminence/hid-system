@@ -715,6 +715,31 @@ Do not embed a specific NIN provider throughout domain logic.
 
 The adapter may change without changing core identity behavior.
 
+### 11.3.1 QoreID evidence verification
+
+The Identity API has a separate, server-only QoreID adapter for a patient's
+self-verification and for verification of an already-existing organization. It
+is disabled by default and is not the legacy governed-registration provider.
+
+```text
+POST /api/v1/identity/me/verification/nin
+POST /api/v1/identity/organizations/verification/cac/{hospital|laboratory|pharmacy}
+```
+
+The patient command is bound to the authenticated patient session and takes an
+11-digit NIN only. It cannot create, merge, enroll, link, relink, or change a
+canonical patient. The organization command requires `organization.manage` at
+the selected facility and derives the organization from that existing
+membership; it accepts a CAC `RC`, `BN`, or `IT` registration number only and
+cannot create, merge, or transfer organizations.
+
+The reusable adapter obtains its token server-side and sends NIN as the
+provider path parameter only; CAC Basic V2 receives only `regNumber`. It maps
+provider state to HID's `verified`, `not_verified`, or `incomplete` result and
+stores only append-only, minimal evidence/audit metadata. Raw identifiers,
+provider payloads, credentials, and tokens stay out of audit, responses, and
+persistence. See [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
+
 ### 11.4 Patient Creation
 
 If a verified NIN does not resolve to an existing patient, Identity first

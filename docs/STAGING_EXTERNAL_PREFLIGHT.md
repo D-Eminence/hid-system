@@ -56,23 +56,26 @@ Tests cover cross-account/zone refusal and secret-value exclusion:
 python3 -m unittest discover -s scripts/tests -p test_staging_external_preflight.py -v
 ```
 
-## NIN contract intake — deferred after staging
+## QoreID intake — implemented but disabled pending separate activation
 
-The [intake template](../release/config/staging-nin-contract.template.json) records
-the selected QoreID references for future NIN and CAC work without treating them
-as an approved HID wire contract. [The QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md)
-lists the unresolved authentication, result-assurance, callback, privacy, and
-CAC-domain design work. Staging uses explicit deferred mode; NIN is excluded from
-deployment/acceptance gates and requires no provider credential. The preflight
-does not read a QoreID secret or require NIN HMAC/encryption fields. Existing NIN
-material remains preserved. An HTTP acknowledgment is not identity verification.
+The [intake template](../release/config/staging-nin-contract.template.json)
+records the implemented QoreID request contract without authorizing a provider
+call. The server-only adapter is disabled by default; ordinary staging remains
+on `NIN_PROVIDER_MODE=deferred` for the separate legacy governed-registration
+flow and requires no QoreID credential. The current route, data-minimization,
+and activation requirements are in the [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
+The preflight does not read a QoreID secret or require legacy NIN
+HMAC/encryption fields. Existing NIN material remains preserved. An HTTP
+acknowledgment is not identity verification.
 
 Do not put API keys, tokens, raw NINs or identity documents into the intake. A
 staging secret reference identifies secure storage; its value is not an intake
-field. No QoreID secret location is designated until the approved authentication
-contract and secret-management design exist. QoreID entitlement, NIN/CAC charges
-and any account-verification requirements are post-staging work. No QoreID
-account, credential, or NIN/CAC input is requested for current staging.
+field. A separately approved staging activation uses the CDK
+`QoreIdCredentialsSecretArn` parameter and a distinct Secrets Manager JSON
+secret containing only `clientId` and `secret`. QoreID entitlement, NIN/CAC
+charges and any account-verification requirements remain activation prerequisites.
+No QoreID account, credential, or NIN/CAC input is requested for ordinary
+staging.
 
 ## Delivery and final deployment preparation
 

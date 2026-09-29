@@ -38,14 +38,16 @@ No AWS resource/secret, DNS, deployment, live migration or publication changed i
 this continuation. The [September 15 receipt](evidence/staging-acceptance/predeployment-2026-09-15.json)
 records 78 release, 87 infrastructure, 55 Cloudflare and 38 preparation checks passing.
 Details are in the [staging report](TUF-STAGING-EXECUTION.md).
-QoreID verification is a **DEFERRED EXTERNAL INTEGRATION / POST-STAGING ITEM**.
-Staging uses `NIN_PROVIDER_MODE=deferred`, needs no QoreID credentials, and must
-not be blocked by this integration. The normal staged patient/provider journeys use
-reviewed synthetic account/patient links without verified NIN claims; new NIN
-registration/enrollment is post-staging. CAC verification for EHR/hospitals,
-laboratories, and pharmacies requires a separately approved organization domain.
-See [the QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md) and
-[staging patient journeys](STAGING_PATIENT_JOURNEYS.md).
+QoreID verification now has an implemented server-only adapter, patient
+self-verification route, organization CAC route, and minimal append-only
+evidence boundary, all **disabled by default**. Staging retains
+`NIN_PROVIDER_MODE=deferred` for the separate legacy governed-registration
+flow and needs no QoreID credentials unless a separate approved staging
+activation explicitly opts in. The normal staged journeys may still use
+reviewed synthetic account/patient links without NIN assurance; new legacy NIN
+registration/enrollment remains post-staging. See [the QoreID verification
+contract](QOREID_VERIFICATION_CONTRACT.md) and [staging patient
+journeys](STAGING_PATIENT_JOURNEYS.md).
 The staging-only email profile now requires SES and Novu; Termii/Meta/Brevo
 accounts are optional for this scope. Public NIN/custody intakes and a read-only
 external preflight are prepared. The existing `docs/SECURITY.md` edit remains untouched. The report names exact external

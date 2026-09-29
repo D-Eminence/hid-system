@@ -14,6 +14,20 @@ test('patient reads accept no caller patient or facility identity', async () => 
   await api.self(); await api.ownRecords()
   assert.deepEqual(requests, [{ path: '/api/v1/identity/me', init: undefined }, { path: '/api/v1/ehr/me/records', init: undefined }])
 })
+test('patient NIN verification submits only a normalized NIN to the session-bound endpoint', async () => {
+  const requests = []
+  const api = createCarePortalApi(async (path, init) => {
+    requests.push({ path, init })
+    return { entityType: 'patient', verificationType: 'nin', provider: 'qoreid', state: 'verified', recordedAt: new Date().toISOString() }
+  })
+  await api.verifyNin('123 456-78901')
+  assert.deepEqual(requests, [{
+    path: '/api/v1/identity/me/verification/nin',
+    init: { method: 'POST', body: JSON.stringify({ nin: '12345678901' }) },
+  }])
+  await assert.rejects(api.verifyNin('not-a-nin'), /11-digit/)
+  assert.equal(requests.length, 1)
+})
 test('emergency activation, records and revoke bind canonical identifiers, facility and emergency purpose', async () => {
   const requests = []
   const api = createCarePortalApi(async (path, init) => { requests.push({ path, init }); return path.endsWith('break-glass') ? grant() : records })

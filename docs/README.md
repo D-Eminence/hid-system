@@ -24,9 +24,10 @@ quota capacity is unverified. The [release installation guide](TUF_STAGING_RELEA
 indexes the prepared build, audit, signing and evidence adapters.
 [Cloudflare setup](STAGING_CLOUDFLARE_SETUP.md) and
 [notification setup](STAGING_NOTIFICATION_SETUP.md) give the secure local input paths.
-QoreID is selected for future NIN and CAC verification, while the HID provider
-integration remains deferred. The current decision and activation prerequisites are
-in [`QOREID_VERIFICATION_CONTRACT.md`](QOREID_VERIFICATION_CONTRACT.md).
+The HID QoreID NIN/CAC adapter and minimal evidence boundary are implemented but
+disabled by default; legacy governed NIN registration remains deferred in
+staging. The current route, security, and activation contract is in
+[`QOREID_VERIFICATION_CONTRACT.md`](QOREID_VERIFICATION_CONTRACT.md).
 
 ## Documentation Map
 

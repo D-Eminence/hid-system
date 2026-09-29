@@ -74,6 +74,17 @@ Review and link commands require permission, facility scope, `Idempotency-Key`,
 and optimistic `expectedVersion` checks. Concurrent duplicate requests resolve
 to one case or fail with a non-disclosing conflict.
 
+The QoreID self-verification route is intentionally different: its adapter is
+server-only, takes only the 11-digit NIN required for the provider path, and is
+bound to an existing patient session. It persists no NIN, raw response, OAuth
+token, demographic result, image, or address. Its append-only evidence and
+atomic audit record only the existing subject reference, provider, normalized
+outcome, timestamp, bounded failure category, correlation, and optional safe
+provider transaction reference. CAC verification has the same minimization
+rule and is bound to an existing organization selected from an authorized
+facility membership. Neither flow may create, merge, link, transfer, or relink
+identity records. See [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
+
 ## 7. Consent
 
 Patient access must respect the consent model defined by Identity.

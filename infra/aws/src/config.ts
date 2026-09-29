@@ -49,6 +49,9 @@ export interface HidEnvironmentConfig {
   readonly logRetention: RetentionDays;
   readonly removalPolicy: RemovalPolicy;
   readonly repositoryImageCount: number;
+  // Deliberately opt-in at synth time. The default task definition contains
+  // no QoreID credential reference and application calls remain disabled.
+  readonly qoreIdEnabled: boolean;
 }
 
 interface ProfileValues {
@@ -155,6 +158,7 @@ const environmentIdentity: Record<EnvironmentName, Pick<HidEnvironmentConfig,
 export function environmentConfig(
   value: string | undefined,
   stagingModeValue?: string,
+  qoreIdEnabledValue?: string,
 ): HidEnvironmentConfig {
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
@@ -172,7 +176,15 @@ export function environmentConfig(
   } else if (stagingModeValue) {
     throw new Error('HID_STAGING_MODE is valid only when HID_INFRA_ENV=staging');
   }
-  return { ...environmentIdentity[name], ...profiles[profile], ...(stagingMode ? { stagingMode } : {}) };
+  const qoreIdEnabledInput = qoreIdEnabledValue ?? 'false';
+  if (!['true', 'false'].includes(qoreIdEnabledInput)) {
+    throw new Error('HID_QOREID_ENABLED must be true or false when supplied');
+  }
+  return {
+    ...environmentIdentity[name], ...profiles[profile],
+    ...(stagingMode ? { stagingMode } : {}),
+    qoreIdEnabled: qoreIdEnabledInput === 'true',
+  };
 }
 
 export function externalAwsEnvironment(account: string | undefined, region: string | undefined) {

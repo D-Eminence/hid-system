@@ -6,12 +6,12 @@ not a record of account creation, payment, message delivery or staging acceptanc
 No provider account was created, no person was contacted and no message was sent
 during this research.
 
-**NIN/CAC update:** QoreID is selected for future NIN and CAC verification and is
-separate from Meta WhatsApp below. **QoreID is deferred after staging**, requires
-no current credential/account action, and does not block staging. An approved
-authentication/result contract, entitlement, and a CAC organization-lifecycle
-design are future activation requirements. See the
-[QoreID verification decision](QOREID_VERIFICATION_CONTRACT.md). The notification
+**NIN/CAC update:** QoreID is separate from Meta WhatsApp below. HID now has a
+server-only NIN/CAC adapter and minimal evidence commands, but it is disabled by
+default and requires no current credential/account action. An approved provider
+contract, entitlement, and explicit staging opt-in remain required before any
+provider request; legacy NIN registration remains deferred. See the
+[QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md). The notification
 classifications below remain unchanged.
 
 ## What is required for the current staging scope

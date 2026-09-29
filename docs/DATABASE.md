@@ -44,6 +44,13 @@ issued. A verified unmatched NIN never creates a patient during resolution.
 Migration `0012_narrow_break_glass_authorization.sql` makes emergency access a
 read-only exception for an exact active, reasoned, time-bounded, unheld
 break-glass grant; normal consent remains subject to deny directives.
+Migration `0034_qoreid_verification_evidence.sql` adds only append-only minimal
+evidence for a separately disabled-by-default QoreID integration. It has no
+raw NIN/CAC, provider payload, OAuth token, photo, address, or demographic
+columns. Patient and organization evidence is inserted only by narrowly scoped
+commands that recheck the existing session or exact active organization
+membership and atomically append semantic audit evidence; the migration does
+not create, merge, relink, or transfer canonical records.
 Migration `0013_durable_ocr_persistence.sql` adds the isolated `ocr` schema,
 facility-scoped idempotent jobs, immutable extraction/validation/lifecycle
 evidence, bounded retry state, atomic `SKIP LOCKED` worker claims, constrained

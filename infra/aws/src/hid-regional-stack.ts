@@ -444,6 +444,10 @@ export class HidRegionalStack extends Stack {
     this.requiredParameter('IdentitySensitiveSecretArn', this.configuration.name === 'staging'
       ? 'Secrets Manager JSON secret containing OTP HMAC key, Turnstile secret, and Google OIDC client-ID allowlist; NIN is deferred'
       : 'Secrets Manager JSON secret containing NIN keys, OTP HMAC key, Turnstile secret, and Google OIDC client-ID allowlist');
+    if (this.configuration.qoreIdEnabled) {
+      this.requiredParameter('QoreIdCredentialsSecretArn',
+        'Secrets Manager JSON secret containing clientId and secret for the server-only QoreID OAuth client');
+    }
     this.requiredParameter('NotificationProviderSecretArn', this.configuration.name === 'staging'
       ? 'Secrets Manager JSON secret containing sesFromAddress and novuApiKey for staging email OTP and ordinary notifications'
       : 'Secrets Manager JSON secret containing Novu, SES sender, Termii, Meta, and Brevo configuration');
@@ -579,6 +583,9 @@ export class HidRegionalStack extends Stack {
       notificationProvider: this.importSecret('NotificationProviderSecret', 'NotificationProviderSecretArn'),
       migrationDatabase: this.importSecret('MigrationDatabaseSecret', 'MigrationDatabaseSecretArn'),
     };
+    if (this.configuration.qoreIdEnabled) {
+      imported.qoreid = this.importSecret('QoreIdCredentialsSecret', 'QoreIdCredentialsSecretArn');
+    }
     for (const name of workloadNames.filter((item) => workloads[item].hasDatabase)) {
       imported[`${name}Database`] = this.importSecret(`${pascal(name)}DatabaseSecret`, `${pascal(name)}DatabaseSecretArn`);
     }
@@ -758,6 +765,8 @@ export class HidRegionalStack extends Stack {
           TURNSTILE_MODE: 'required', OTP_HMAC_KEY_VERSION: 'aws-v1',
           NOTIFICATION_API_URL: urls['notification-api']!, NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
           NIN_PROVIDER_MODE: this.configuration.name === 'staging' ? 'deferred' : 'unavailable', NIN_KEY_VERSION: 'aws-v1', IDENTITY_SERVICE_IDENTITY_MODE: 'jwt',
+          QOREID_ENABLED: this.configuration.qoreIdEnabled ? 'true' : 'false',
+          QOREID_BASE_URL: 'https://api.qoreid.com', QOREID_TIMEOUT_MS: '5000', QOREID_MAX_RETRIES: '0',
           WORKLOAD_ISSUER_URL: issuer, WORKLOAD_JWKS_URL: jwks, WORKLOAD_AUDIENCE: 'hid-identity-api',
           IDENTITY_EHR_CALLER_SUBJECT: subjects.ehr, IDENTITY_LAB_CALLER_SUBJECT: subjects.lab,
           IDENTITY_PHARMACY_CALLER_SUBJECT: subjects.pharmacy, IDENTITY_OCR_CALLER_SUBJECT: subjects.ocr,
@@ -852,6 +861,10 @@ export class HidRegionalStack extends Stack {
       // secure envelope so task definitions cannot silently drift from the
       // approved backend audience policy.
       output.GOOGLE_OIDC_CLIENT_IDS = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'googleOidcClientIds');
+      if (this.configuration.qoreIdEnabled) {
+        output.QOREID_CLIENT_ID = ecs.Secret.fromSecretsManager(secrets.qoreid!, 'clientId');
+        output.QOREID_CLIENT_SECRET = ecs.Secret.fromSecretsManager(secrets.qoreid!, 'secret');
+      }
     }
     if (name === 'ehr-api') {
       output.WORKLOAD_DATABASE_URL = ecs.Secret.fromSecretsManager(secrets[`${name}Database`]!, 'scannerUrl');

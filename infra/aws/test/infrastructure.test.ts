@@ -41,6 +41,10 @@ const fidelityApplication = new App();
 const fidelityRegional = Template.fromStack(new HidRegionalStack(fidelityApplication, 'FidelityRegionalTest', {
   configuration: fidelityConfiguration,
 })).toJSON() as typeof regional;
+const qoreIdStagingApplication = new App();
+const qoreIdStagingRegional = Template.fromStack(new HidRegionalStack(qoreIdStagingApplication, 'QoreIdStagingRegionalTest', {
+  configuration: environmentConfig('staging', 'economy', 'true'),
+})).toJSON() as typeof regional;
 
 function resources(template: typeof regional, type: string): Array<[string, Resource]> {
   return Object.entries(template.Resources).filter(([, resource]) => resource.Type === type);
@@ -64,6 +68,9 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.equal(configuration.publicApiSubdomain, 'api');
   assert.throws(() => environmentConfig('staging'), /HID_STAGING_MODE/);
   assert.throws(() => environmentConfig('production', 'sleep'), /valid only/);
+  assert.throws(() => environmentConfig('staging', 'economy', 'enabled'), /HID_QOREID_ENABLED/);
+  assert.equal(environmentConfig('staging', 'economy').qoreIdEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', 'true').qoreIdEnabled, true);
   assert.equal(environmentConfig('staging', 'economy').publicApiSubdomain, 'api.staging');
   assert.deepEqual(environmentConfig('staging', 'economy').browserSubdomains, [
     'staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'migrate.staging', 'outreach.staging', 'admin.staging',
@@ -413,7 +420,7 @@ test('human authentication secrets are injected only into the Identity authority
   assert.doesNotMatch(JSON.stringify(ehr!.ContainerDefinitions), /AUTH_SIGNING_SECRET|AUTH_LOGIN_PEPPER|GOOGLE_OIDC_CLIENT_IDS/);
 });
 
-test('staging NIN is deferred in every profile without provider or NIN-key startup dependencies', () => {
+test('staging NIN is deferred and QoreID remains explicitly disabled without credential dependencies', () => {
   for (const template of [stagingRegional, fidelityRegional, sleepRegional, regional]) {
     const task = properties(template, 'AWS::ECS::TaskDefinition')
       .find(item => JSON.stringify(item.Family).includes('identity-api'))!;
@@ -428,7 +435,29 @@ test('staging NIN is deferred in every profile without provider or NIN-key start
     assert.ok(names.includes('GOOGLE_OIDC_CLIENT_IDS'));
     assert.equal(environment.IDENTITY_SERVICE_IDENTITY_MODE, 'jwt');
     assert.equal(environment.TURNSTILE_MODE, 'required');
-    assert.doesNotMatch(JSON.stringify(api), /METAMAP|metamap|QOREID|qoreid/);
+    assert.equal(environment.QOREID_ENABLED, 'false');
+    assert.equal(names.includes('QOREID_CLIENT_ID'), false);
+    assert.equal(names.includes('QOREID_CLIENT_SECRET'), false);
+    assert.doesNotMatch(JSON.stringify(api), /METAMAP|metamap/);
+  }
+});
+
+test('an explicit QoreID staging synth injects its distinct server-only secret into Identity only', () => {
+  const parameter = qoreIdStagingRegional.Parameters.QoreIdCredentialsSecretArn;
+  assert.ok(parameter);
+  assert.equal(parameter.Default, undefined);
+  assert.equal(parameter.NoEcho, true);
+  const tasks = properties(qoreIdStagingRegional, 'AWS::ECS::TaskDefinition');
+  const identity = tasks.find(task => JSON.stringify(task.Family).includes('identity-api'))!;
+  const identityContainer = (identity.ContainerDefinitions as Array<{
+    Name: string; Environment: Array<{ Name: string; Value: unknown }>; Secrets: Array<{ Name: string; ValueFrom: unknown }>;
+  }>).find(container => container.Name === 'identity-api')!;
+  const environment = Object.fromEntries(identityContainer.Environment.map(item => [item.Name, item.Value]));
+  assert.equal(environment.QOREID_ENABLED, 'true');
+  assert.deepEqual(identityContainer.Secrets.filter(item => item.Name.startsWith('QOREID_')).map(item => item.Name).sort(),
+    ['QOREID_CLIENT_ID', 'QOREID_CLIENT_SECRET']);
+  for (const task of tasks.filter(task => task !== identity)) {
+    assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /QOREID_CLIENT_ID|QOREID_CLIENT_SECRET/);
   }
 });
 

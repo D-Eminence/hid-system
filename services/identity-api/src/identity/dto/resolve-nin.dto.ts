@@ -2,6 +2,10 @@ import { Transform, type TransformFnParams } from 'class-transformer';
 import { IsDateString, IsIn, IsOptional, IsString, Length, Matches } from 'class-validator';
 import type { PurposeOfUse } from '../../common/request-context';
 
+// Legacy governed-registration input. It is intentionally not used by the
+// QoreID self-verification adapter, whose NIN request contains only an ID path
+// value and has no demographic payload.
+
 const trim = ({ value }: TransformFnParams): unknown => typeof value === 'string' ? value.trim() : value;
 const normalizeNin = ({ value }: TransformFnParams): unknown =>
   typeof value === 'string' ? value.replace(/[\s-]+/g, '') : value;

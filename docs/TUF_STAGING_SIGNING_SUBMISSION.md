@@ -1,6 +1,6 @@
 # Staging broker request submission
 
-The four reusable staging workflows and `release/scripts/submit-staging-signing-request.mjs` prepare the existing broker integration without creating keys, installing resources, invoking AWS or publishing a release during local validation. Production and deferred QoreID work are unchanged. Missing configuration fails closed. Their source is in [draft PR #2](https://github.com/D-Eminence/hid-system/pull/2), but the workflows are not installed on the protected branch or executed remotely.
+The four reusable staging workflows and `release/scripts/submit-staging-signing-request.mjs` prepare the existing broker integration without creating keys, installing resources, invoking AWS or publishing a release during local validation. Production and QoreID activation remain unchanged. The implemented QoreID adapter is disabled by default. Missing configuration fails closed. Their source is in [draft PR #2](https://github.com/D-Eminence/hid-system/pull/2), but the workflows are not installed on the protected branch or executed remotely.
 
 | Workflow | Protected environment | Existing paired broker function |
 | --- | --- | --- |

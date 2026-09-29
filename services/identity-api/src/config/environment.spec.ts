@@ -46,4 +46,25 @@ describe('Identity production database transport', () => {
     production(); delete process.env.HID_DEPLOYMENT_ENV; resetEnvironmentForTests();
     expect(() => getEnvironment()).toThrow(/deployment profile/);
   });
+
+  it('keeps QoreID disabled by default and requires approved server-only configuration when enabled', () => {
+    production(); resetEnvironmentForTests();
+    expect(getEnvironment().QOREID_ENABLED).toBe(false);
+
+    production(); process.env.QOREID_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/QOREID_CLIENT_ID/);
+
+    production(); Object.assign(process.env, {
+      QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'synthetic-client', QOREID_CLIENT_SECRET: 'synthetic-secret',
+      QOREID_BASE_URL: 'https://unapproved.example',
+    }); resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/approved QoreID API origin/);
+
+    production(); Object.assign(process.env, {
+      QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'synthetic-client', QOREID_CLIENT_SECRET: 'synthetic-secret',
+      QOREID_BASE_URL: 'https://api.qoreid.com',
+    }); resetEnvironmentForTests();
+    expect(getEnvironment().QOREID_ENABLED).toBe(true);
+    expect(getEnvironment().QOREID_MAX_RETRIES).toBe(0);
+  });
 });

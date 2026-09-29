@@ -158,6 +158,49 @@ describe('explicitly deferred staging NIN', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  it('keeps the separately disabled QoreID self-verification route patient-bound and body-minimal', async () => {
+    const patientActor: ActorContext = {
+      kind: 'patient', id: randomUUID(), subject: 'patient:synthetic-qoreid', accountId: randomUUID(),
+      patientId: randomUUID(), sessionId: randomUUID(), roles: [], permissions: [], facilityIds: [], facilities: [],
+      authenticationMethod: 'oidc',
+    };
+    const query = jest.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ evidenceId: randomUUID(), recordedAt: new Date() }] });
+    database.withSystemTransaction.mockImplementation(async (_correlation, operation) => operation({ query }));
+    const tokens = { verify: jest.fn().mockResolvedValue({ actor: patientActor, claims: {} }) };
+    await startModule(tokens);
+
+    const invalid = await request(app!.getHttpServer()).post('/api/v1/identity/me/verification/nin')
+      .set('authorization', 'Bearer synthetic-token')
+      .send({ nin: '12345678901', firstName: 'Rejected' });
+    expect(invalid.status).toBe(400);
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
+
+    const disabled = await request(app!.getHttpServer()).post('/api/v1/identity/me/verification/nin')
+      .set('authorization', 'Bearer synthetic-token').send({ nin: '12345678901' });
+    expect(disabled.status).toBe(503);
+    expect(disabled.body.code).toBe('QOREID_DISABLED');
+    expect(JSON.stringify(disabled.body)).not.toContain('12345678901');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(query.mock.calls[1]?.[1]).not.toContain('12345678901');
+  });
+
+  it('does not let a facility actor verify an organization without organization.manage', async () => {
+    const tokens = { verify: jest.fn().mockResolvedValue({
+      actor: { ...actor, facilities: [{ ...actor.facility!, permissions: [] }], permissions: [] }, claims: {},
+    }) };
+    await startModule(tokens);
+    const response = await request(app!.getHttpServer())
+      .post('/api/v1/identity/organizations/verification/cac/hospital')
+      .set('authorization', 'Bearer synthetic-token').set('x-facility-id', facilityId)
+      .send({ regNumber: 'RC1234' });
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('PERMISSION_DENIED');
+    expect(database.withTransaction).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['missing authentication', 401, 'AUTHENTICATION_REQUIRED'],
     ['patient principal', 403, 'PATIENT_SCOPE_DENIED'],

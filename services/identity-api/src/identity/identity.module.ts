@@ -10,9 +10,17 @@ import { NinIdentifierProtector } from './nin-identifier-protector';
 import { NinRegistrationService } from './nin-registration.service';
 import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER } from './nin.types';
+import {
+  QOREID_ADAPTER_CONFIGURATION,
+  QOREID_FETCH,
+  QoreIdVerificationAdapter,
+  qoreIdAdapterConfigurationFromEnvironment,
+} from './qoreid-verification.adapter';
+import { QoreIdVerificationController } from './qoreid-verification.controller';
+import { QoreIdVerificationService } from './qoreid-verification.service';
 
 @Module({
-  controllers: [IdentityController, NinRegistrationController],
+  controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController],
   providers: [
     IdentityService,
     NinRegistrationService,
@@ -21,6 +29,16 @@ import { NIN_VERIFICATION_PROVIDER } from './nin.types';
     DeterministicTestNinVerificationProvider,
     UnavailableNinVerificationProvider,
     DeferredNinVerificationProvider,
+    {
+      provide: QOREID_ADAPTER_CONFIGURATION,
+      useFactory: qoreIdAdapterConfigurationFromEnvironment,
+    },
+    {
+      provide: QOREID_FETCH,
+      useFactory: () => globalThis.fetch,
+    },
+    QoreIdVerificationAdapter,
+    QoreIdVerificationService,
     PostgresIdentityProvider,
     {
       provide: IDENTITY_PROVIDER,

@@ -35,6 +35,13 @@ is read-only and owning-service disclosure/audit is atomic. The internal
 `GET /api/v1/identity/service/patient-self-authorization` requires both the
 current patient session and the exact authenticated EHR workload caller.
 
+`POST /api/v1/identity/me/verification/nin` is a separate patient-session
+command for QoreID evidence verification. Its body is exactly `{ "nin":
+"<11-digit-NIN>" }`; it returns only a normalized provider/result state, optional
+opaque provider reference, and timestamp. It does not accept patient identity
+attributes, create a patient, or modify a canonical identity. The integration
+is disabled by default and does not expose provider credentials or tokens.
+
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
 the `read_records` action for the exact facility and patient. Activation requires a reason, expires
@@ -190,6 +197,28 @@ Supported resolution inputs:
 * NIN
 
 For sensitive NIN lookup, prefer a body-based protected request when query-string exposure would create logging or browser-history risk.
+
+### QoreID self and organization verification
+
+This is distinct from governed NIN resolution above. The NIN adapter sends the
+11-digit value only in QoreID's required provider path and HID never returns it.
+HID validates and rejects any extra browser body fields before provider access.
+
+```text
+POST /api/v1/identity/me/verification/nin
+POST /api/v1/identity/organizations/verification/cac/hospital
+POST /api/v1/identity/organizations/verification/cac/laboratory
+POST /api/v1/identity/organizations/verification/cac/pharmacy
+```
+
+The first route requires an active patient session. The CAC routes require the
+active facility plus `organization.manage` and accept exactly `{ "regNumber":
+"RC1234" }` (or `BN`/`IT`). The server derives the existing organization from
+the membership rather than accepting an organization ID. All routes return a
+safe HID result state (`verified`, `not_verified`, `incomplete`) or static
+Problem Details; raw QoreID payloads, NIN/CAC inputs, OAuth tokens, and
+diagnostic text are excluded. Full configuration and activation controls are in
+[QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
 
 ### HID Resolution
 

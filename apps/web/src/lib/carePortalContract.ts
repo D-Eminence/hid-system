@@ -12,6 +12,11 @@ export interface EmergencyGrant {
   accessRequestId: string; consentGrantId: string; patientId: string
   status: 'active'; expiresAt: string; existingGrant: boolean
 }
+export interface PatientNinVerification {
+  entityType: 'patient'; verificationType: 'nin'; provider: 'qoreid'
+  state: 'verified' | 'not_verified' | 'incomplete' | 'provider_error' | 'disabled'
+  providerReference?: string; recordedAt: string
+}
 export type CanonicalTransport = <T>(path: string, init?: RequestInit) => Promise<T>
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 export const canonicalHid = /^HID-[A-HJ-NP-Z2-9]{6,32}$/
@@ -31,6 +36,17 @@ export function createCarePortalApi(send: CanonicalTransport) {
   return {
     self: () => send<PatientSelf>('/api/v1/identity/me'),
     ownRecords: () => send<ReleasedRecords>('/api/v1/ehr/me/records'),
+    async verifyNin(nin: string) {
+      const normalized = nin.replace(/[\s-]+/g, '')
+      if (!/^\d{11}$/.test(normalized)) {
+        throw new Error('Enter an 11-digit NIN.')
+      }
+      // The authoritative patient is derived from the cookie-bound session.
+      // Do not add names, DOB, contact details, patient IDs, or a provider token.
+      return send<PatientNinVerification>('/api/v1/identity/me/verification/nin', {
+        method: 'POST', body: JSON.stringify({ nin: normalized }),
+      })
+    },
     async activate(facilityId: string, hid: string, reason: string, durationMinutes: number) {
       const normalized = hid.trim().toUpperCase()
       if (!canonicalHid.test(normalized) || reason.trim().length < 8 || reason.trim().length > 500

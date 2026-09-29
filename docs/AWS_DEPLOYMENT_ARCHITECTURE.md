@@ -243,10 +243,12 @@ acknowledgements before any deployment.
 Migrations `0001`–`0028` are immutable. Migration `0028` introduced the
 identity/notification migration state needed for OTP, progressive KYC, legacy
 mapping, encrypted device registration, and delivery reconciliation. The
-current release applies all 33 migrations through `0033`: additive migrations
+current release applies all 34 migrations through `0034`: additive migrations
 `0029`–`0033` implement governed OTP recovery, patient self-service, emergency
 notification/rate controls, governed patient account enrollment, and Supabase-to-AWS
-cutover identity controls.
+cutover identity controls. Migration `0034` adds append-only minimal QoreID
+verification evidence and security-definer commands without adding raw NIN/CAC
+or provider-response storage.
 Migration is a controlled ECS RunTask operation: snapshot/PITR gate, plan,
 fixture/source dry run, apply once, reconciliation, runtime-role verification,
 then progressive service rollout.

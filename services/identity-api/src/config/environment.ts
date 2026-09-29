@@ -72,6 +72,16 @@ const environmentSchema = z.object({
   NIN_LOOKUP_HMAC_KEY_B64: optionalString,
   NIN_ENCRYPTION_KEY_B64: optionalString,
   NIN_KEY_VERSION: z.string().trim().min(1).max(64).default('local-v1'),
+  // QoreID is a separate, server-only verification integration. It must not
+  // change the governed NIN-registration provider mode above.
+  QOREID_ENABLED: booleanString,
+  QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
+  QOREID_CLIENT_ID: optionalString,
+  QOREID_CLIENT_SECRET: optionalString,
+  QOREID_TIMEOUT_MS: z.coerce.number().int().min(250).max(10_000).default(5_000),
+  // QoreID's POST endpoints do not publish an idempotency contract. Keep
+  // retries explicitly disabled rather than risking duplicate verification.
+  QOREID_MAX_RETRIES: z.coerce.number().int().min(0).max(0).default(0),
   IDENTITY_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: optionalSecret,
   IDENTITY_LAB_INTERNAL_SERVICE_TOKEN: optionalSecret,
@@ -124,6 +134,17 @@ const environmentSchema = z.object({
   }
   if (environment.NIN_PROVIDER_MODE === 'deferred' && environment.HID_DEPLOYMENT_ENV !== 'staging') {
     context.addIssue({ code: 'custom', path: ['NIN_PROVIDER_MODE'], message: 'Deferred NIN mode requires the explicit staging deployment profile' });
+  }
+  if (environment.QOREID_ENABLED) {
+    for (const key of ['QOREID_CLIENT_ID', 'QOREID_CLIENT_SECRET'] as const) {
+      if (!environment[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required when QoreID verification is enabled` });
+    }
+    const qoreIdUrl = new URL(environment.QOREID_BASE_URL);
+    if (qoreIdUrl.origin !== 'https://api.qoreid.com'
+      || qoreIdUrl.username || qoreIdUrl.password
+      || qoreIdUrl.pathname !== '/' || qoreIdUrl.search || qoreIdUrl.hash) {
+      context.addIssue({ code: 'custom', path: ['QOREID_BASE_URL'], message: 'Enabled QoreID verification must use the approved QoreID API origin' });
+    }
   }
   if (environment.NIN_LOOKUP_HMAC_KEY_B64 && !isBase64Key(environment.NIN_LOOKUP_HMAC_KEY_B64, 32)) {
     context.addIssue({ code: 'custom', path: ['NIN_LOOKUP_HMAC_KEY_B64'], message: 'The NIN lookup key must be exactly 32 base64-encoded bytes' });

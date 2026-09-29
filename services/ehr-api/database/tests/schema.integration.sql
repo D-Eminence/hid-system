@@ -276,6 +276,79 @@ insert into auth.sessions (
   clock_timestamp() + interval '2 hours'
 );
 
+insert into auth.sessions (
+  id, account_id, family_id, refresh_token_sha256, access_jti,
+  account_token_version, authentication_method, issued_at, expires_at,
+  absolute_expires_at, session_kind, patient_id
+) values (
+  '61000000-0000-4000-8000-000000000002',
+  '20000000-0000-4000-8000-000000000002',
+  '62000000-0000-4000-8000-000000000002', repeat('a', 64)::character(64),
+  '63000000-0000-4000-8000-000000000002', 1, 'password',
+  clock_timestamp(), clock_timestamp() + interval '1 hour',
+  clock_timestamp() + interval '2 hours', 'patient',
+  '50000000-0000-4000-8000-000000000001'
+);
+
+-- QoreID evidence commands use an existing session/member and retain only
+-- normalized provider metadata. No submitted identifier is present in this
+-- schema fixture or in the resulting evidence/audit rows.
+select set_config('app.actor_subject', 'patient:test-person', true);
+select set_config('app.correlation_id', 'schema-qoreid-patient-0001', true);
+do $$
+declare patient_evidence record;
+begin
+  select * into patient_evidence from identity.record_my_nin_verification_evidence(
+    'patient:test-person', '61000000-0000-4000-8000-000000000002',
+    'verified', 'qoreid-patient-test-1', null
+  );
+  if patient_evidence.evidence_id is null
+     or not exists (
+       select 1 from identity.verification_evidence evidence
+        where evidence.id = patient_evidence.evidence_id
+          and evidence.subject_type = 'patient'
+          and evidence.patient_id = '50000000-0000-4000-8000-000000000001'
+          and evidence.result = 'verified' and evidence.provider = 'qoreid'
+     ) or not exists (
+       select 1 from audit.events event
+        where event.resource_id = patient_evidence.evidence_id::text
+          and event.action = 'identity.patient.nin-verification'
+          and event.details ? 'provider' and not event.details ? 'nin'
+     ) then
+    raise exception 'patient QoreID evidence was not minimal and atomic';
+  end if;
+end
+$$;
+
+select set_config('app.actor_subject', 'staff:test-clinician', true);
+select set_config('app.membership_id', '40000000-0000-4000-8000-000000000001', true);
+select set_config('app.facility_id', '10000000-0000-4000-8000-000000000002', true);
+select set_config('app.correlation_id', 'schema-qoreid-organization-0001', true);
+select set_config('app.purpose_of_use', 'healthcare-operations', true);
+do $$
+declare organization_evidence record;
+begin
+  select * into organization_evidence from identity.record_organization_cac_verification_evidence(
+    'hospital', 'not_verified', 'qoreid-organization-test-1', 'not_verified'
+  );
+  if organization_evidence.evidence_id is null
+     or not exists (
+       select 1 from identity.verification_evidence evidence
+        where evidence.id = organization_evidence.evidence_id
+          and evidence.subject_type = 'organization'
+          and evidence.organization_id = '10000000-0000-4000-8000-000000000001'
+          and evidence.organization_context = 'hospital'
+          and evidence.result = 'not_verified'
+     ) or exists (
+       select 1 from information_schema.columns
+        where table_schema = 'identity' and table_name = 'verification_evidence'
+          and column_name = any (array['nin', 'reg_number', 'raw_payload', 'provider_payload', 'address', 'photo'])
+     ) then
+    raise exception 'organization QoreID evidence scope or minimization is invalid';
+  end if;
+end
+$$;
+
 do $$
 declare
   registration_id uuid := 'a1000000-0000-4000-8000-000000000001';

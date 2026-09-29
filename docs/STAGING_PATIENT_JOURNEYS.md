@@ -1,12 +1,12 @@
 # Synthetic patient journeys with NIN disabled
 
-QoreID/NIN verification is deferred until after staging. Keep
-`NIN_PROVIDER_MODE=deferred` for staging. NIN verification and new
-NIN-based enrollment are outside current staging acceptance. Existing canonical
-patients can use login, profile, records, history and recovery without a NIN.
-
-QoreID is selected for future NIN verification. Activation requires an approved
-provider contract and authorized test access.
+The separately implemented QoreID adapter remains disabled for ordinary staging
+(`QOREID_ENABLED=false`), while the legacy governed-registration flow keeps
+`NIN_PROVIDER_MODE=deferred`. New legacy NIN-based enrollment is outside
+current staging acceptance. Existing canonical patients can use login, profile,
+records, history and recovery without NIN assurance. Any QoreID staging call
+requires the separate approved activation described in the [QoreID verification
+contract](QOREID_VERIFICATION_CONTRACT.md).
 
 The local [fixture generator](../scripts/prepare-staging-journey-fixture.mjs)
 prepares input for the existing migration importer. It does not connect to a

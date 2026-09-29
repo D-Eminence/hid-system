@@ -5,7 +5,11 @@ import { HidRegionalStack } from '../src/hid-regional-stack.js';
 import { HidCostGovernanceStack } from '../src/cost-governance-stack.js';
 
 const application = new App();
-const configuration = environmentConfig(process.env.HID_INFRA_ENV, process.env.HID_STAGING_MODE);
+const configuration = environmentConfig(
+  process.env.HID_INFRA_ENV,
+  process.env.HID_STAGING_MODE,
+  process.env.HID_QOREID_ENABLED,
+);
 const regionalEnvironment = externalAwsEnvironment(process.env.HID_AWS_ACCOUNT, process.env.HID_AWS_REGION);
 
 new HidRegionalStack(application, `Hid-${configuration.name}-Regional`, {

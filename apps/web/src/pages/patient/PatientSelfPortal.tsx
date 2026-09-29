@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { CarePortal, RecordSummary } from '../../components/CarePortal'
-import { carePortalApi, type PatientSelf, type ReleasedRecords } from '../../lib/carePortalApi'
+import { carePortalApi, type PatientNinVerification, type PatientSelf, type ReleasedRecords } from '../../lib/carePortalApi'
 import { canonicalRequest, identityClient } from '../../lib/identityClient'
 
 type AccessItem = { consentGrantId: string; scope: string; purpose: string; status: string; startsAt: string; expiresAt: string; reason: string; facilityName: string }
@@ -11,6 +11,10 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
   const [activity, setActivity] = useState<AccessItem[] | null>(null)
   const [error, setError] = useState('')
   const [reload, setReload] = useState(0)
+  const [nin, setNin] = useState('')
+  const [verification, setVerification] = useState<PatientNinVerification | null>(null)
+  const [verificationError, setVerificationError] = useState('')
+  const [verifying, setVerifying] = useState(false)
   useEffect(() => {
     let active = true
     setProfile(null); setRecords(null); setActivity(null); setError('')
@@ -36,6 +40,16 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
     document.addEventListener('visibilitychange', refresh)
     return () => { active = false; subscription.data.subscription.unsubscribe(); document.removeEventListener('visibilitychange', refresh) }
   }, [page, reload])
+  async function verifyNin(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setVerification(null); setVerificationError(''); setVerifying(true)
+    try {
+      const result = await carePortalApi.verifyNin(nin)
+      setVerification(result); setNin('')
+    } catch (reason) {
+      setVerificationError(reason instanceof Error ? reason.message : 'Verification could not be completed.')
+    } finally { setVerifying(false) }
+  }
   const title = { profile: 'Your profile and HID', biodata: 'Your bio data', records: 'Your medical records', history: 'Your access history', notifications: 'Your access notifications' }[page]
   return <CarePortal title={title} patient>
     {error ? <div role="alert"><p>{error}</p><Link to="/patient">Sign in</Link> <button onClick={() => setReload(value => value + 1)}>Retry</button></div> : !profile ? <p role="status">Loading your account…</p> : <>
@@ -44,7 +58,19 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
         <dt>First name</dt><dd>{profile.firstName}</dd><dt>Last name</dt><dd>{profile.lastName}</dd>
         <dt>Date of birth</dt><dd>{profile.dateOfBirth?.slice(0, 10) || 'Not recorded'}</dd>
         <dt>Gender</dt><dd>{profile.gender || 'Not recorded'}</dd><dt>Country</dt><dd>{profile.country || 'Not recorded'}</dd><dt>State</dt><dd>{profile.state || 'Not recorded'}</dd>
-      </dl><p>Contact your registering facility to request a verified identity correction.</p></>}
+      </dl><p>Contact your registering facility to request a verified identity correction.</p>
+      {page === 'profile' && <section aria-labelledby="nin-verification-title">
+        <h2 id="nin-verification-title">Verify your NIN</h2>
+        <p>We use only your 11-digit NIN for this check. It does not change your HID or profile.</p>
+        <form onSubmit={verifyNin}>
+          <label htmlFor="patient-nin">NIN</label>
+          <input id="patient-nin" value={nin} onChange={event => setNin(event.target.value)}
+            inputMode="numeric" autoComplete="off" maxLength={16} required />
+          <button type="submit" disabled={verifying}>{verifying ? 'Verifying…' : 'Verify NIN'}</button>
+        </form>
+        {verificationError && <p role="alert">{verificationError}</p>}
+        {verification && <p role="status">Verification result: {verification.state.replace('_', ' ')}. Recorded {new Date(verification.recordedAt).toLocaleString()}.</p>}
+      </section>}</>}
       {page === 'records' && (records ? <RecordSummary records={records} /> : <p role="status">Loading released records…</p>)}
       {(page === 'history' || page === 'notifications') && <>
         {page === 'notifications' && <p>Emergency access notices recorded in your account. Email delivery status is not shown here.</p>}

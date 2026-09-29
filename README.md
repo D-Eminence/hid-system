@@ -12,6 +12,7 @@ definitions, AWS infrastructure, and governing platform documentation.
 - [`docs/README.md`](docs/README.md) is the documentation index.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) defines the target platform architecture.
 - [`docs/TASK.md`](docs/TASK.md) defines the current implementation scope.
+- [`docs/QOREID_VERIFICATION_CONTRACT.md`](docs/QOREID_VERIFICATION_CONTRACT.md) defines the disabled-by-default server-only QoreID verification boundary.
 
 Module documentation under `apps/ehr/` and `apps/web/` describes local setup and
 implementation details. It does not override the platform documentation above.
