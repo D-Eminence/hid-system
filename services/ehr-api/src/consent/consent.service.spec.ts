@@ -83,7 +83,7 @@ describe('ConsentService', () => {
   });
 
   it('maps invalid state transitions to a conflict without leaking database details', async () => {
-    query.mockRejectedValueOnce({ code: '55000', detail: 'sensitive database detail' });
+    query.mockRejectedValueOnce({ code: '23505', detail: 'sensitive database detail' });
 
     await expect(service.closeOwnGrant(
       context,
