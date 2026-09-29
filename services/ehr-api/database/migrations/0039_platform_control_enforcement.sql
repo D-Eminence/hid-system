@@ -40,5 +40,5 @@ begin
 end
 $$;
 
-revoke all on function platform.control_enabled(text) from public;
-revoke all on function platform.require_control_enabled(text) from public;
+grant execute on function platform.control_enabled(text) to public;
+grant execute on function platform.require_control_enabled(text) to public;
