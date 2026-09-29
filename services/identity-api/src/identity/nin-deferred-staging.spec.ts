@@ -45,6 +45,7 @@ describe('explicitly deferred staging NIN', () => {
   const actor: ActorContext = {
     kind: 'staff', id: randomUUID(), subject: 'synthetic:staging-staff', accountId: randomUUID(),
     roles: ['doctor'], permissions: ['identity.registration.write', 'identity.registration.approve'],
+    platformPermissions: ['platform.admin.access'], platformRoles: ['platform_super_admin'],
     facilityIds: [facilityId], facilities: [], authenticationMethod: 'oidc',
     facility: { id: facilityId, membershipId: randomUUID(), organizationId: randomUUID(),
       name: 'Synthetic facility', roles: ['doctor'], permissions: ['identity.registration.write', 'identity.registration.approve'], isPrimary: true },
@@ -217,7 +218,7 @@ describe('explicitly deferred staging NIN', () => {
     };
     if (scenario === 'patient principal') {
       Object.assign(verifiedActor, { kind: 'patient', patientId: randomUUID(),
-        roles: [], permissions: [], facilities: [], facilityIds: [], facility: undefined });
+        roles: [], permissions: [], platformPermissions: ['platform.admin.access'], platformRoles: ['platform_super_admin'], facilities: [], facilityIds: [], facility: undefined });
     }
     const tokens = { verify: jest.fn().mockResolvedValue({ actor: verifiedActor, claims: {} }) };
     await startModule(tokens);
