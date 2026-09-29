@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsDateString, IsIn, IsInt, IsString, IsUUID, Matches, Max, Min, MinLength } from 'class-validator';
+import { IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, Min, MinLength } from 'class-validator';
 import { IsOptionalButNotNull } from '../../common/validation';
 
 export class AdminPageDto {
@@ -38,6 +38,17 @@ export class ListPrincipalsDto extends AdminPageDto {
   status?: string;
 }
 
+export class ExportPrincipalsDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  query?: string;
+
+  @IsOptional()
+  @IsIn(['active', 'pending_reset', 'locked', 'disabled', 'deleted'])
+  status?: string;
+}
+
 export class ListIdentityReviewsDto extends AdminPageDto {
   @IsOptionalButNotNull()
   @IsIn(['pending_new_identity_approval', 'review_required', 'resolved_existing_identity',
@@ -61,7 +72,7 @@ export class ListPlatformAuditDto {
   @IsOptionalButNotNull() @IsString() actor?: string;
   @IsOptionalButNotNull() @IsUUID('4') facilityId?: string;
   @IsOptionalButNotNull() @IsString() action?: string;
-  @IsOptionalButNotNull() @IsString() correlationId?: string;
+  @IsOptionalButNotNull() @IsUUID('4') correlationId?: string;
   @IsOptionalButNotNull() @IsIn(['success', 'denied', 'failure']) outcome?: string;
   @IsOptionalButNotNull() @IsDateString() from?: string;
   @IsOptionalButNotNull() @IsDateString() to?: string;
