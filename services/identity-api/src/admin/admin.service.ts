@@ -9,6 +9,7 @@ import type { AccountStatusCommandDto, FacilityStatusCommandDto,
   PlatformRoleCommandDto, RevokeSessionsCommandDto } from './dto/admin-command.dto';
 import type { ListFacilitiesDto, ListIdentityReviewsDto,
   ListPlatformAuditDto, ListPrincipalsDto } from './dto/admin-list.dto';
+import type { PlatformControlCommandDto } from './dto/admin-command.dto';
 
 interface FacilityRow extends QueryResultRow {
   id: string; organizationId: string; organizationName: string; name: string; code: string;
@@ -49,6 +50,26 @@ export class AdminService {
         platformPermissions: context.actor.platformPermissions ?? [],
       },
     };
+  }
+
+
+  async platformControls(context: DataAccessContext) {
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query(`select * from platform.admin_list_controls()`);
+      return result.rows.map((row) => ({ controlKey: row.control_key, enabled: row.enabled, reason: row.reason,
+        version: Number(row.row_version), updatedAt: new Date(row.updated_at).toISOString() }));
+    }, { readOnly: true });
+  }
+
+  async setPlatformControl(context: DataAccessContext, input: PlatformControlCommandDto, expectedVersion: number) {
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query(`select * from platform.admin_set_control($1,$2,$3,$4)`,
+        [input.controlKey, input.enabled, expectedVersion, input.reason.trim()]);
+      const row = result.rows[0];
+      if (!row) throw new DomainProblem(503, 'ADMIN_CONTROL_UNAVAILABLE', 'Platform control could not be updated');
+      await this.audit.recordWithClient(client, context, 'admin.platform-control.change', row.control_key);
+      return { controlKey: row.control_key, enabled: row.enabled, version: Number(row.row_version), replayed: row.replayed };
+    });
   }
 
   async overview(context: DataAccessContext) {
