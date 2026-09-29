@@ -72,7 +72,7 @@ export class ListPlatformAuditDto {
   @IsOptionalButNotNull() @IsString() actor?: string;
   @IsOptionalButNotNull() @IsUUID('4') facilityId?: string;
   @IsOptionalButNotNull() @IsString() action?: string;
-  @IsOptionalButNotNull() @IsUUID('4') correlationId?: string;
+  @IsOptionalButNotNull() @IsString() correlationId?: string;
   @IsOptionalButNotNull() @IsIn(['success', 'denied', 'failure']) outcome?: string;
   @IsOptionalButNotNull() @IsDateString() from?: string;
   @IsOptionalButNotNull() @IsDateString() to?: string;
