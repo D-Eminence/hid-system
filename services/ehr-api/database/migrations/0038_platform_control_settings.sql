@@ -1,3 +1,14 @@
+insert into auth.permissions(code,description) values
+ ('platform.control.read','Read platform runtime controls'),
+ ('platform.control.manage','Change platform runtime controls')
+on conflict(code) do update set description=excluded.description;
+
+insert into auth.role_permissions(role_code,permission_code)
+select r.role_code,r.permission_code from (values
+ ('platform_super_admin','platform.control.read'),('platform_super_admin','platform.control.manage'),
+ ('platform_operations_admin','platform.control.read'),('platform_operations_admin','platform.control.manage')
+) r(role_code,permission_code) on conflict do nothing;
+
 create table platform.control_settings (
   control_key text primary key check (control_key in (
     'patient_portal_enabled','provider_portal_enabled','outreach_portal_enabled',
