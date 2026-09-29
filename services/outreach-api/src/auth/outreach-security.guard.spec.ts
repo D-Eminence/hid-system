@@ -1,6 +1,7 @@
 import type { ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 import { OutreachSecurityGuard } from './outreach-security.guard';
+import type { DatabaseService } from '../database/database.service';
 
 describe('OutreachSecurityGuard', () => {
   function execution(headers: Record<string, string | undefined>): ExecutionContext {
@@ -14,7 +15,8 @@ describe('OutreachSecurityGuard', () => {
     const reflector = { getAllAndOverride: jest.fn().mockReturnValueOnce(false)
       .mockReturnValueOnce(['outreach.registration.read']) } as unknown as Reflector;
     const workload = { headers: jest.fn() };
-    await expect(new OutreachSecurityGuard(reflector, workload as never).canActivate(execution({
+    const database = { query: jest.fn().mockResolvedValue({ rows: [{ enabled: true }] }) } as unknown as DatabaseService;
+    await expect(new OutreachSecurityGuard(reflector, workload as never, database).canActivate(execution({
       'x-facility-id': '123e4567-e89b-42d3-a456-426614174001',
     }))).rejects.toMatchObject({ status: 401, code: 'AUTHENTICATION_REQUIRED' });
     expect(workload.headers).not.toHaveBeenCalled();
@@ -23,7 +25,8 @@ describe('OutreachSecurityGuard', () => {
   it('requires origin and CSRF evidence for cookie-authenticated writes and reads', async () => {
     const reflector = { getAllAndOverride: jest.fn().mockReturnValueOnce(false)
       .mockReturnValueOnce(['outreach.registration.write']) } as unknown as Reflector;
-    await expect(new OutreachSecurityGuard(reflector, { headers: jest.fn() } as never)
+    const database = { query: jest.fn().mockResolvedValue({ rows: [{ enabled: true }] }) } as unknown as DatabaseService;
+    await expect(new OutreachSecurityGuard(reflector, { headers: jest.fn() } as never, database)
       .canActivate(execution({
         'x-facility-id': '123e4567-e89b-42d3-a456-426614174001', cookie: 'hid_session=opaque',
       }))).rejects.toMatchObject({ status: 403, code: 'CSRF_VALIDATION_FAILED' });
