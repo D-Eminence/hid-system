@@ -135,6 +135,44 @@ export class AdminService {
     });
   }
 
+  async exportPrincipals(context: DataAccessContext, query: import('./dto/admin-list.dto').ExportPrincipalsDto): Promise<string> {
+    const term = query.query ? `%${this.escapeLike(query.query.trim())}%` : null;
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query<PrincipalRow>(`select account.id::text, account.subject, account.email,
+          account.display_name as "displayName", account.status, account.row_version::text as version,
+          account.created_at as "createdAt",
+          (select count(*) from auth.sessions session where session.account_id = account.id
+            and session.revoked_at is null and session.expires_at > clock_timestamp())::text as "activeSessionCount",
+          coalesce((select jsonb_agg(jsonb_build_object('id', membership.id, 'facilityId', membership.facility_id,
+            'facilityName', facility.name, 'role', membership.membership_role, 'appRole', membership.app_role,
+            'active', membership.active, 'version', membership.row_version) order by facility.name)
+            from identity.staff_facility_memberships membership
+            join identity.facilities facility on facility.id = membership.facility_id
+            where membership.account_id = account.id), '[]'::jsonb) as memberships,
+          coalesce((select array_agg(assignment.role_code order by assignment.role_code)
+            from auth.account_roles assignment where assignment.account_id = account.id
+              and assignment.scope_type = 'platform' and assignment.revoked_at is null), array[]::text[]) as "platformRoles"
+        from auth.accounts account
+        where ($1::text is null or account.email ilike $1 escape '\\' or account.display_name ilike $1 escape '\\'
+          or account.subject ilike $1 escape '\\')
+          and ($2::text is null or account.status = $2)
+        order by account.updated_at desc, account.id
+        limit 10000`, [term, query.status ?? null]);
+
+      const header = ['account_id', 'subject', 'email', 'display_name', 'status', 'version',
+        'created_at', 'active_sessions', 'platform_roles', 'facility_memberships'];
+      const rows = result.rows.map((row) => [
+        row.id, row.subject, row.email ?? '', row.displayName ?? '', row.status, Number(row.version),
+        new Date(row.createdAt).toISOString(), Number(row.activeSessionCount),
+        (row.platformRoles ?? []).join('|'), JSON.stringify(row.memberships ?? []),
+      ]);
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.principals.export',
+        'authentication-account-collection', null, 'Administrative principal export',
+        { returnedCount: rows.length, status: query.status ?? null, filtered: Boolean(query.query) }));
+      return [header, ...rows].map((row) => row.map((value) => this.csv(value)).join(',')).join('\\n') + '\\n';
+    }, { readOnly: true });
+  }
+
   async listPrincipals(context: DataAccessContext, query: ListPrincipalsDto) {
     const offset = (query.page - 1) * query.pageSize;
     const term = `%${this.escapeLike(query.query.trim())}%`;
