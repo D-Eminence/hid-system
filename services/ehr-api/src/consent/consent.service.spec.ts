@@ -90,7 +90,7 @@ describe('ConsentService', () => {
       '60000000-0000-4000-8000-000000000001',
       'Treatment relationship ended',
     )).rejects.toMatchObject<Partial<DomainProblem>>({
-      code: 'PLATFORM_CONTROL_UNAVAILABLE',
+      code: 'CONSENT_COMMAND_CONFLICT',
     });
   });
 });
