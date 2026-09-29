@@ -166,7 +166,7 @@ describe('explicitly deferred staging NIN', () => {
   it('keeps the separately disabled QoreID self-verification route patient-bound and body-minimal', async () => {
     const patientActor: ActorContext = {
       kind: 'patient', id: randomUUID(), subject: 'patient:synthetic-qoreid', accountId: randomUUID(),
-      patientId: randomUUID(), sessionId: randomUUID(), roles: [], permissions: [], facilityIds: [], facilities: [],
+      patientId: randomUUID(), sessionId: randomUUID(), roles: [], permissions: [], platformPermissions: ['platform.admin.access'], platformRoles: ['platform_super_admin'], facilityIds: [], facilities: [],
       authenticationMethod: 'oidc',
     };
     const query = jest.fn()
