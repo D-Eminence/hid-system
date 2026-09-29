@@ -22,6 +22,8 @@ export interface ActorContext {
   displayName?: string;
   roles: readonly string[];
   permissions: readonly string[];
+  platformRoles?: readonly string[];
+  platformPermissions?: readonly string[];
   facilityIds: readonly string[];
   facilities: readonly FacilityAssignment[];
   facility?: FacilityAssignment;
