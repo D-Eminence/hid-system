@@ -6,6 +6,7 @@ import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { WorkloadCredentialsService } from './workload-credentials.service';
+import { DatabaseService } from '../database/database.service';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -14,6 +15,7 @@ export class OutreachSecurityGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly workload: WorkloadCredentialsService,
+    private readonly database: DatabaseService,
   ) {}
 
   async canActivate(execution: ExecutionContext): Promise<boolean> {
@@ -51,7 +53,38 @@ export class OutreachSecurityGuard implements CanActivate {
     request.facilityId = facilityId;
     request.actor = { ...actor, facility: assignment, roles: assignment.roles,
       role: assignment.roles[0], permissions: assignment.permissions };
+    await this.enforceRuntimeControls(request);
     return true;
+  }
+
+  private async enforceRuntimeControls(request: HidRequest): Promise<void> {
+    const actor = request.actor;
+    if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+    const isPlatformAdmin = actor.platformPermissions?.includes('platform.admin.access') ?? false;
+    if (isPlatformAdmin) return;
+
+    if (await this.controlEnabled('maintenance_mode')) {
+      throw new DomainProblem(503, 'PLATFORM_MAINTENANCE', 'HID is temporarily in maintenance mode');
+    }
+    if (!(await this.controlEnabled('outreach_portal_enabled'))) {
+      throw new DomainProblem(423, 'PLATFORM_PORTAL_DISABLED', 'The Outreach portal is temporarily disabled');
+    }
+  }
+
+  private async controlEnabled(controlKey: string): Promise<boolean> {
+    try {
+      const result = await this.database.query<{ enabled: boolean }>(
+        'select platform.control_enabled($1) as enabled',
+        [controlKey],
+      );
+      return result.rows[0]?.enabled === true;
+    } catch (error) {
+      if (isDatabaseError(error) && error.code === '55000') {
+        if (String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) return false;
+        throw new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
+      }
+      throw error;
+    }
   }
 
   private allowedOrigins(): ReadonlySet<string> {
@@ -63,4 +96,11 @@ export class OutreachSecurityGuard implements CanActivate {
       caller: 'outreach-api', timeoutMs: 5_000,
       workloadHeaders: () => this.workload.headers() });
   }
+}
+
+function isDatabaseError(value: unknown): value is { code: string; message?: string } {
+  return typeof value === 'object'
+    && value !== null
+    && 'code' in value
+    && typeof (value as { code?: unknown }).code === 'string';
 }
