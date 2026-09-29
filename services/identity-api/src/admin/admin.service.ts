@@ -170,7 +170,7 @@ export class AdminService {
         'authentication-account-collection', null, 'Administrative principal export',
         { returnedCount: rows.length, status: query.status ?? null, filtered: Boolean(query.query) }));
       return [header, ...rows].map((row) => row.map((value) => this.csv(value)).join(',')).join('\\n') + '\\n';
-    }, { readOnly: true });
+    });
   }
 
   async listPrincipals(context: DataAccessContext, query: ListPrincipalsDto) {
