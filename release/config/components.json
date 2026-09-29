@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0034",
-    "count": 34,
+    "last": "0041",
+    "count": 41,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -233,6 +233,34 @@
       {
         "name": "0034_qoreid_verification_evidence.sql",
         "sha256": "7dbb417aa3ff8982316606546047c37fa00559d8790e510cfd6ac622be538c18"
+      },
+      {
+        "name": "0035_patient_access_request_decisions.sql",
+        "sha256": "76f022978becd25e46750289d605442b02840b2a"
+      },
+      {
+        "name": "0036_staff_access_request_visibility.sql",
+        "sha256": "e44f82f81d1ce6f562100dfec1852d9d340b1ae8"
+      },
+      {
+        "name": "0037_patient_notification_inbox.sql",
+        "sha256": "77eeab5f4ef163c0102daa31551f9e2094b486c2"
+      },
+      {
+        "name": "0038_outreach_campaign_workspaces.sql",
+        "sha256": "86ee73310e2c3fe04b6d9f7bc514719405cabcae"
+      },
+      {
+        "name": "0039_platform_control_settings.sql",
+        "sha256": "d6d1be35f98fbf37ed7c2d9c4ed7315db05b17ac"
+      },
+      {
+        "name": "0040_platform_control_enforcement.sql",
+        "sha256": "2efd8f18bda6b3b9da1ed772daee9a5f06de0fdf"
+      },
+      {
+        "name": "0041_disable_initial_maintenance_mode.sql",
+        "sha256": "57eb7e0f398b998eb543c4509a395599272f3b1e"
       }
     ]
   },
