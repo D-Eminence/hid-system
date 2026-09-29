@@ -28,7 +28,9 @@ beforeEach(() => {
     AUTH_SIGNING_SECRET: 'test-signing-secret-with-at-least-32-characters',
     AUTH_LOGIN_PEPPER: 'test-login-pepper-with-at-least-32-characters' });
   resetEnvironmentForTests();
-  runtimeDatabase.query.mockResolvedValue({ rows: [{ enabled: true }] });
+  runtimeDatabase.query.mockImplementation(async (_sql: string, params: unknown[]) => ({
+    rows: [{ enabled: params[0] !== 'maintenance_mode' }],
+  }));
 });
 afterEach(() => { runtimeDatabase.query.mockReset(); resetEnvironmentForTests(); });
 
