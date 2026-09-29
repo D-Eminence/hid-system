@@ -81,6 +81,39 @@ export class ConsentService {
     }
   }
 
+
+  async approveAccessRequest(context: DataAccessContext, requestId: string) {
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<Record<string, unknown> & QueryResultRow>(
+          `select access_request_id as "accessRequestId", consent_grant_id as "consentGrantId",
+             patient_id as "patientId", status, expires_at as "expiresAt", replayed
+           from identity.approve_access_request($1)`,
+          [requestId],
+        );
+        return this.requireRow(result.rows[0]);
+      });
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+  async denyAccessRequest(context: DataAccessContext, requestId: string, reason: string) {
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<Record<string, unknown> & QueryResultRow>(
+          `select access_request_id as "accessRequestId", patient_id as "patientId",
+             status, denied_at as "deniedAt", replayed
+           from identity.deny_access_request($1, $2)`,
+          [requestId, reason.trim()],
+        );
+        return this.requireRow(result.rows[0]);
+      });
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
   async activateBreakGlass(context: DataAccessContext, input: CreateBreakGlassDto) {
     try {
       return await this.database.withTransaction(context, async (client) => {
