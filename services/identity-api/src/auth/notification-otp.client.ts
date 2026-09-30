@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { Injectable } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
+import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import type { RecoveryOtpPurpose } from './dto/otp.dto';
 
 export type OtpDeliveryOutcome = 'accepted' | 'definitive_failure' | 'unknown';
@@ -9,6 +10,8 @@ export type OtpDeliveryOutcome = 'accepted' | 'definitive_failure' | 'unknown';
 export class NotificationOtpClient {
   private readonly environment = getEnvironment();
 
+  constructor(private readonly integrations: IntegrationRuntimeService) {}
+
   async deliver(input: {
     challengeId: string;
     recipient: string;
@@ -16,6 +19,10 @@ export class NotificationOtpClient {
     purpose: RecoveryOtpPurpose;
     correlationId: string;
   }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string }> {
+    // A missing runtime policy must not disclose account existence: OTP start
+    // keeps its generic response, records a failed delivery, and sends nothing.
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure' };
     let response: Response;
     try {
       response = await fetch(`${this.environment.NOTIFICATION_API_URL.replace(/\/+$/, '')}/api/v1/notifications/otp`, {
@@ -29,6 +36,7 @@ export class NotificationOtpClient {
         },
         body: JSON.stringify({
           channel: 'email', recipient: input.recipient, code: input.code, purpose: input.purpose,
+          plan,
         }),
         signal: AbortSignal.timeout(5_000),
       });

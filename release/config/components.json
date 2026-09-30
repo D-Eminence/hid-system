@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0046",
-    "count": 46,
+    "last": "0050",
+    "count": 50,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -281,6 +281,22 @@
       {
         "name": "0046_organization_onboarding.sql",
         "sha256": "0c19d39b019e0d967160a2f0fce4f86e432be90ec7cb7da87313d1511326b2c2"
+      },
+      {
+        "name": "0047_provider_integration_controls.sql",
+        "sha256": "9822ce9603c21a318377abd9f9b596b17cfaa8b406bdaf5c642539cbcd79fbe4"
+      },
+      {
+        "name": "0048_cac_legal_entity_binding.sql",
+        "sha256": "62dbe2720db379e824be9a38b1e1648fb4c3cdb64a63904707c486c31c5f88d3"
+      },
+      {
+        "name": "0049_qoreid_request_quotas.sql",
+        "sha256": "e696c52591d25531c417b6d6cccd96419758ebf5ce640de8d84562ee086d548d"
+      },
+      {
+        "name": "0050_patient_nin_evidence_binding.sql",
+        "sha256": "b7354dfe7e5918e309a40f0814bce76165200a088f922e3a1d561f7d5419d59f"
       }
     ]
   },

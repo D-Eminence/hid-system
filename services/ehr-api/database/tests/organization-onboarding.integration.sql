@@ -67,7 +67,7 @@ begin
     where product_code = 'migrate' and cac_hint = 'RC*****67';
   if application_id_value is null then raise exception 'Admin list omitted the pending Migrate application'; end if;
   select * into changed from identity.admin_record_organization_cac_result(
-    application_id_value, 1, 'not_verified', null, 'not_verified');
+    application_id_value, 1, 'not_verified', null, 'not_verified', null, null);
   if changed.application_status <> 'pending_verification' or changed.row_version <> 2 then
     raise exception 'Nonverified CAC moved the application to review';
   end if;
@@ -77,8 +77,22 @@ begin
     raise exception 'Unverified CAC was approved';
   exception when check_violation then null;
   end;
+  begin
+    perform identity.admin_record_organization_cac_result(
+      application_id_value, 2, 'verified', 'qoreid-test-0001', null, null, null);
+    raise exception 'Status-only CAC result was accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  begin
+    perform identity.admin_record_organization_cac_result(
+      application_id_value, 2, 'verified', 'qoreid-test-0001', null,
+      'RC9999999', 'Unrelated Company Limited');
+    raise exception 'Mismatched CAC registration number was accepted';
+  exception when invalid_parameter_value then null;
+  end;
   select * into changed from identity.admin_record_organization_cac_result(
-    application_id_value, 2, 'verified', 'qoreid-test-0001', null);
+    application_id_value, 2, 'verified', 'qoreid-test-0001', null,
+    'RC1234567', 'Verified Migrate Legal Limited');
   if changed.application_status <> 'ready_for_review' or changed.row_version <> 3 then
     raise exception 'Verified CAC did not move the application to review';
   end if;
@@ -98,6 +112,20 @@ begin
 end $$;
 reset role;
 
+do $$ begin
+  if not exists (select 1 from identity.organization_applications application
+    join identity.organizations organization on organization.id = application.organization_id
+    join identity.facilities facility on facility.id = application.facility_id
+    where application.cac_registration_number = 'RC1234567'
+      and application.product_code = 'migrate'
+      and application.organization_name = 'Synthetic Migrate Clinic'
+      and application.verified_organization_name = 'Verified Migrate Legal Limited'
+      and organization.name = application.verified_organization_name
+      and facility.name = application.verified_organization_name) then
+    raise exception 'Applicant-supplied name overrode verified legal name';
+  end if;
+end $$;
+
 -- The first admin must complete the existing OTP password setup before an
 -- additional product can reuse the organization. Simulate that completion.
 do $$ begin
@@ -108,6 +136,12 @@ do $$ begin
 end $$;
 update auth.accounts set status = 'active'
 where email = 'migrate.admin@example.invalid';
+insert into auth.account_roles
+  (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+values ('c4650000-0000-4000-8000-000000000002',
+  'c4600000-0000-4000-8000-000000000001', 'org_admin', 'facility',
+  'c4640000-0000-4000-8000-000000000001',
+  'c4620000-0000-4000-8000-000000000001', 'Synthetic existing organization authority');
 select set_config('test.onboarding_organization_id', organization_id::text, true),
   set_config('test.onboarding_facility_id', facility_id::text, true),
   set_config('test.onboarding_first_admin_id', first_admin_account_id::text, true)
@@ -119,6 +153,7 @@ do $$
 declare
   second_application uuid;
   rogue_application uuid;
+  conflicting_application uuid;
   second_approval record;
 begin
   perform set_config('app.actor_subject', 'system:auth', true);
@@ -127,7 +162,8 @@ begin
     into second_application;
   perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
   perform identity.admin_record_organization_cac_result(
-    second_application, 1, 'verified', 'qoreid-test-0002', null);
+    second_application, 1, 'verified', 'qoreid-test-0002', null,
+    'RC1234567', 'Verified Migrate Legal Limited');
   select * into second_approval from identity.admin_approve_organization_application(
     second_application, 2, current_setting('test.onboarding_organization_id')::uuid, current_setting('test.onboarding_facility_id')::uuid,
     'Synthetic existing organization review');
@@ -144,12 +180,29 @@ begin
     into rogue_application;
   perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
   perform identity.admin_record_organization_cac_result(
-    rogue_application, 1, 'verified', 'qoreid-test-0003', null);
+    rogue_application, 1, 'verified', 'qoreid-test-0003', null,
+    'RC1234567', 'Verified Migrate Legal Limited');
   begin
     perform identity.admin_approve_organization_application(
       rogue_application, 2, current_setting('test.onboarding_organization_id')::uuid, current_setting('test.onboarding_facility_id')::uuid,
       'Synthetic unproven administrator');
     raise exception 'Unrelated applicant captured an existing organization';
+  exception when check_violation then null;
+  end;
+
+  perform set_config('app.actor_subject', 'system:auth', true);
+  select identity.submit_organization_application('ehr', 'Other Applicant', 'clinic',
+    'RC7654321', 'Onboarding Admin', 'onboarding-admin@example.invalid')
+    into conflicting_application;
+  perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
+  perform identity.admin_record_organization_cac_result(
+    conflicting_application, 1, 'verified', 'qoreid-test-0004', null,
+    'RC7654321', 'Other Legal Company Limited');
+  begin
+    perform identity.admin_approve_organization_application(
+      conflicting_application, 2, 'c4610000-0000-4000-8000-000000000001',
+      'c4620000-0000-4000-8000-000000000001', 'Synthetic mismatched legal identity');
+    raise exception 'A CAC for one legal entity was bound to another organization';
   exception when check_violation then null;
   end;
 
@@ -171,5 +224,30 @@ begin
     raise exception 'Raw CAC leaked into semantic audit details';
   end if;
 end $$;
+
+select set_config('app.actor_subject', account.subject, true),
+  set_config('app.facility_id', membership.facility_id::text, true),
+  set_config('app.membership_id', membership.id::text, true)
+from auth.accounts account
+join identity.staff_facility_memberships membership on membership.account_id = account.id
+where account.id = current_setting('test.onboarding_first_admin_id')::uuid;
+select set_config('app.purpose_of_use', 'healthcare-operations', true);
+set local role hid_identity_api_runtime;
+do $$
+begin
+  if not identity.current_organization_cac_binding_matches(
+    'pharmacy', 'RC1234567', 'Verified Migrate Legal Limited') then
+    raise exception 'Approved product CAC binding was not recognized';
+  end if;
+  if identity.current_organization_cac_binding_matches(
+    'pharmacy', 'RC9999999', 'Verified Migrate Legal Limited')
+     or identity.current_organization_cac_binding_matches(
+       'pharmacy', 'RC1234567', 'Unrelated Company Limited')
+     or identity.current_organization_cac_binding_matches(
+       'laboratory', 'RC1234567', 'Verified Migrate Legal Limited') then
+    raise exception 'Unbound CAC number, name, or product was accepted';
+  end if;
+end $$;
+reset role;
 
 rollback;

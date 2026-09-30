@@ -1,4 +1,4 @@
-import { IsEnum, IsIn, IsString, Matches, MaxLength } from 'class-validator';
+import { IsEnum, IsIn, IsObject, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 
 export enum OtpPurpose {
   SIGNUP_VERIFY='SIGNUP_VERIFY', EMAIL_VERIFY='EMAIL_VERIFY', PHONE_VERIFY='PHONE_VERIFY',
@@ -12,6 +12,7 @@ export class DeliverOtpDto {
   @IsString() @MaxLength(320) recipient!: string;
   @IsString() @Matches(/^\d{6}$/) code!: string;
   @IsEnum(OtpPurpose) purpose!: OtpPurpose;
+  @IsOptional() @IsObject() plan?: Record<string, unknown>;
 }
 
 export function validateRecipient(channel: DeliverOtpDto['channel'], recipient: string): boolean {

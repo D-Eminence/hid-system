@@ -15,10 +15,11 @@ import { CurrentPatientContextService } from './current-patient-context.service'
 import { PatientSelfController } from './patient-self.controller';
 import { PatientSelfService } from './patient-self.service';
 import { GoogleAuthenticationService } from './google-authentication.service';
+import { IntegrationModule } from '../integrations/integration.module';
 
 @Global()
 @Module({
-  imports: [TurnstileModule],
+  imports: [TurnstileModule, IntegrationModule],
   controllers: [AuthController, OtpController, PatientSelfController],
   providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService],
   exports: [TokenService, SecurityGuard, WorkloadAuthService, TurnstileModule],

@@ -58,6 +58,10 @@ const acceptedMigrations = new Map([
   ['0044_commercial_demo_requests.sql', 'a62508cd72325f2bc98a8a33530a281643a1e891740d12adab776e164fb6bf8b'],
   ['0045_outreach_campaign_registration_binding.sql', 'f5b432143ddbb9e7066313a3af221f2d4b33d85a4d7e46390e956dc5c2fff6ae'],
   ['0046_organization_onboarding.sql', '0c19d39b019e0d967160a2f0fce4f86e432be90ec7cb7da87313d1511326b2c2'],
+  ['0047_provider_integration_controls.sql', '9822ce9603c21a318377abd9f9b596b17cfaa8b406bdaf5c642539cbcd79fbe4'],
+  ['0048_cac_legal_entity_binding.sql', '62dbe2720db379e824be9a38b1e1648fb4c3cdb64a63904707c486c31c5f88d3'],
+  ['0049_qoreid_request_quotas.sql', 'e696c52591d25531c417b6d6cccd96419758ebf5ce640de8d84562ee086d548d'],
+  ['0050_patient_nin_evidence_binding.sql', 'b7354dfe7e5918e309a40f0814bce76165200a088f922e3a1d561f7d5419d59f'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

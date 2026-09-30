@@ -5,9 +5,11 @@ export const navigation = [
   { path: '/facilities', label: 'Facilities', permission: 'platform.facility.read', section: 'Management' },
   { path: '/users', label: 'Users & memberships', permission: 'platform.principal.read', section: 'Management' },
   { path: '/identity', label: 'Identity review', permission: 'platform.identity-review.read', section: 'Management' },
+  { path: '/provider-applications', label: 'Provider applications', permission: 'platform.identity-review.read', section: 'Management' },
   { path: '/audit', label: 'Audit center', permission: 'platform.audit.read', section: 'Security' },
   { path: '/operations', label: 'Services', permission: 'platform.operations.read', section: 'Operations' },
   { path: '/events', label: 'Event delivery', permission: 'platform.operations.read', section: 'Operations' },
+  { path: '/integrations', label: 'Integrations', permission: 'platform.integration.read', section: 'Settings' },
 ] as const;
 
 export function visibleNavigation(actor: AdminActor) {

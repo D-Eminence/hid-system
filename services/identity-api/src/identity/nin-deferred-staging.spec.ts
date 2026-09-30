@@ -95,6 +95,11 @@ describe('explicitly deferred staging NIN', () => {
       next();
     });
     await app.init();
+    // Startup retention maintenance is independent of the request boundary
+    // exercised below. Count database calls only after initialization.
+    database.withTransaction.mockClear();
+    database.withSystemTransaction.mockClear();
+    database.query.mockClear();
     return module;
   }
 
@@ -172,9 +177,9 @@ describe('explicitly deferred staging NIN', () => {
     const query = jest.fn()
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ evidenceId: randomUUID(), recordedAt: new Date() }] });
-    database.withSystemTransaction.mockImplementation(async (_correlation, operation) => operation({ query }));
     const tokens = { verify: jest.fn().mockResolvedValue({ actor: patientActor, claims: {} }) };
     await startModule(tokens);
+    database.withSystemTransaction.mockImplementation(async (_correlation, operation) => operation({ query }));
 
     const invalid = await request(app!.getHttpServer()).post('/api/v1/identity/me/verification/nin')
       .set('authorization', 'Bearer synthetic-token')

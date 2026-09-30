@@ -22,6 +22,7 @@ import {
   CommercialProductsPage,
   EhrConfiguratorPage,
   PricingPage,
+  ProviderApplicationPage,
   PatientAuthPage,
   getRoutePreloadKeys,
   PatientBioDataPage,
@@ -212,6 +213,7 @@ export default function App() {
             <Route path="/solutions" element={<CommercialProductsPage />} />
             <Route path="/developers" element={<CommercialProductsPage />} />
             <Route path="/pricing" element={<PricingPage />} />
+            <Route path="/provider/apply" element={<ProviderApplicationPage />} />
             <Route path="/configure-ehr" element={<EhrConfiguratorPage />} />
             <Route path="/signup" element={<Navigate to="/patient" replace />} />
             <Route path="/login" element={<Navigate to="/patient" replace />} />

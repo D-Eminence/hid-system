@@ -761,7 +761,8 @@ grant execute on function auth.resolve_google_identity(text),
   identity.set_my_patient_access_pin(text,uuid,text),
   identity.revoke_my_patient_access_pin(text,uuid),
   identity.access_patient_with_pin(text,text,integer),
-  identity.record_my_nin_verification_evidence(text,uuid,text,text,text),
+  identity.patient_self_nin_binding_matches(text,uuid,text),
+  identity.record_my_nin_verification_evidence(text,uuid,text,text,text,text),
   identity.record_organization_cac_verification_evidence(text,text,text,text)
   to hid_identity_runtime, hid_schema_test_runtime;
 
@@ -779,7 +780,8 @@ revoke all on function auth.resolve_google_identity(text),
   identity.set_my_patient_access_pin(text,uuid,text),
   identity.revoke_my_patient_access_pin(text,uuid),
   identity.access_patient_with_pin(text,text,integer),
-  identity.record_my_nin_verification_evidence(text,uuid,text,text,text),
+  identity.patient_self_nin_binding_matches(text,uuid,text),
+  identity.record_my_nin_verification_evidence(text,uuid,text,text,text,text),
   identity.record_organization_cac_verification_evidence(text,text,text,text) from public;
 
 -- Demo intake is insert-only for anonymous callers. RLS limits the same
@@ -801,12 +803,31 @@ grant execute on function platform.public_list_commercial_prices(),
 grant select on platform.commercial_products, platform.commercial_prices,
   platform.commercial_catalog_events to hid_schema_test_runtime;
 
+-- Runtime provider decisions and admin commands have narrow function grants.
+-- Notification API receives no direct database access or provider table grant.
+grant execute on function platform.integration_runtime_provider(text,text),
+  platform.integration_runtime_route(text),
+  platform.admin_list_integration_providers(),
+  platform.admin_list_integration_routes(),
+  platform.admin_list_integration_events(text,integer),
+  platform.admin_set_integration_provider(text,bigint,boolean,jsonb,text,text,text,char),
+  platform.admin_set_integration_route(text,bigint,text,text,text,text,text,char),
+  platform.admin_integration_test_replay(text,char),
+  platform.admin_record_integration_test(text,bigint,text,text,text,char),
+  platform.consume_qoreid_quota(text,uuid,uuid,char,char),
+  platform.consume_public_application_quota(char),
+  platform.prune_verification_quotas()
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant select on platform.integration_providers, platform.integration_provider_capabilities,
+  platform.integration_capability_routes, platform.integration_events to hid_schema_test_runtime;
+
 -- Public organization intake and platform review use narrow commands. The
 -- Identity runtime cannot directly mutate canonical organizations or roles.
 grant execute on function identity.submit_organization_application(text,text,text,text,text,text),
   identity.admin_list_organization_applications(text),
   identity.admin_get_organization_application(uuid),
-  identity.admin_record_organization_cac_result(uuid,bigint,text,text,text),
+  identity.admin_record_organization_cac_result(uuid,bigint,text,text,text,text,text),
+  identity.current_organization_cac_binding_matches(text,text,text),
   identity.admin_approve_organization_application(uuid,bigint,uuid,uuid,text),
   identity.admin_reject_organization_application(uuid,bigint,text)
   to hid_identity_runtime, hid_schema_test_runtime;

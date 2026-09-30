@@ -200,9 +200,10 @@ For sensitive NIN lookup, prefer a body-based protected request when query-strin
 
 ### QoreID self and organization verification
 
-This is distinct from governed NIN resolution above. The NIN adapter sends the
-11-digit value only in QoreID's required provider path and HID never returns it.
-HID validates and rejects any extra browser body fields before provider access.
+This is distinct from governed NIN resolution above. The browser sends only the
+11-digit NIN; the server adds required first/last name and DOB claims from the
+authenticated patient's canonical profile to QoreID's request. HID never
+returns the NIN or provider demographics. Extra browser body fields are rejected.
 
 ```text
 POST /api/v1/identity/me/verification/nin

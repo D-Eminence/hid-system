@@ -68,6 +68,14 @@ describe('governed Admin application', () => {
     expect(screen.getByText('Super Admin ≠ clinical authority')).toBeInTheDocument();
   });
 
+  it('gates provider applications by identity review permission at the route', async () => {
+    apiMock.mockImplementation(async (path: string) => path === '/admin/session'
+      ? session(['platform.admin.access']) : { items: [] });
+    mount('/provider-applications');
+    expect(await screen.findByRole('heading', { name: 'Access denied' })).toBeInTheDocument();
+    expect(apiMock).not.toHaveBeenCalledWith('/admin/organization-applications');
+  });
+
   it('lists facilities, opens bounded detail, and preserves versioned command evidence', async () => {
     apiMock.mockImplementation(async (path: string, options?: { method?: string }) => {
       if (path === '/admin/session') return session();

@@ -61,7 +61,7 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
       </dl><p>Contact your registering facility to request a verified identity correction.</p>
       {page === 'profile' && <section aria-labelledby="nin-verification-title">
         <h2 id="nin-verification-title">Verify your NIN</h2>
-        <p>We use only your 11-digit NIN for this check. It does not change your HID or profile.</p>
+        <p>We compare your NIN with your existing verified HID identity and registry details. This check does not change your HID or profile.</p>
         <form onSubmit={verifyNin}>
           <label htmlFor="patient-nin">NIN</label>
           <input id="patient-nin" value={nin} onChange={event => setNin(event.target.value)}

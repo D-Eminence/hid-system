@@ -72,6 +72,15 @@ env NODE_ENV=test DATABASE_ADMIN_URL="$acceptance_admin_url" DATABASE_SSL=true \
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/schema.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/provider-integrations.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/verification-quotas.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/organization-onboarding.integration.sql" >/dev/null
 env NODE_ENV=test DATABASE_URL="$acceptance_admin_url" DATABASE_SSL=true \
   DATABASE_SSL_ROOT_CERT_BASE64="$acceptance_ca_base64" \
   npm --prefix "$acceptance_repository/services/ehr-api" run db:plan
@@ -309,4 +318,4 @@ acceptance_remaining="$(PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/se
 acceptance_started=false
 rm -rf -- "$acceptance_root"
 trap - EXIT INT TERM
-echo '{"status":"passed","postgresql":"16.14","migrations":"0001-0034","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"ocrWorkers":2,"dispatchers":2,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}'
+echo '{"status":"passed","postgresql":"16.14","migrations":"0001-0050","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"ocrWorkers":2,"dispatchers":2,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}'

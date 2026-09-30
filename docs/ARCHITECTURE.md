@@ -733,9 +733,12 @@ the selected facility and derives the organization from that existing
 membership; it accepts a CAC `RC`, `BN`, or `IT` registration number only and
 cannot create, merge, or transfer organizations.
 
-The reusable adapter obtains its token server-side and sends NIN as the
-provider path parameter only; CAC Basic V2 receives only `regNumber`. It maps
-provider state to HID's `verified`, `not_verified`, or `incomplete` result and
+The reusable adapter obtains its token server-side and sends NIN in the provider
+path plus canonical patient name and DOB claims in the request body; CAC Basic
+V2 receives only `regNumber`. It checks QoreID's exact NIN match and returned
+registry fields, then checks the submitted NIN's keyed HMAC against the
+session-bound patient's prior verified NIN identifier before mapping to HID's
+`verified`, `not_verified`, or `incomplete` result and
 stores only append-only, minimal evidence/audit metadata. Raw identifiers,
 provider payloads, credentials, and tokens stay out of audit, responses, and
 persistence. See [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).

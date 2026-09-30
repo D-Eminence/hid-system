@@ -851,8 +851,10 @@ export class HidRegionalStack extends Stack {
       output.AUTH_LOGIN_PEPPER = ecs.Secret.fromSecretsManager(secrets.auth!, 'authLoginPepper');
     }
     if (name === 'identity-api') {
-      if (this.configuration.name !== 'staging') {
+      if (this.configuration.name !== 'staging' || this.configuration.qoreIdEnabled) {
         output.NIN_LOOKUP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'ninLookupHmacKeyB64');
+      }
+      if (this.configuration.name !== 'staging') {
         output.NIN_ENCRYPTION_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'ninEncryptionKeyB64');
       }
       output.OTP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'otpHmacKeyB64');

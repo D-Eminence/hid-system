@@ -277,11 +277,15 @@ begin
     raise exception 'Identity runtime is missing required governed registration privileges';
   end if;
   if not has_function_privilege(
-       'hid_identity_runtime', 'identity.record_my_nin_verification_evidence(text,uuid,text,text,text)', 'EXECUTE'
+       'hid_identity_runtime', 'identity.record_my_nin_verification_evidence(text,uuid,text,text,text,text)', 'EXECUTE'
      ) or not has_function_privilege(
        'hid_identity_runtime', 'identity.record_organization_cac_verification_evidence(text,text,text,text)', 'EXECUTE'
+     ) or not has_function_privilege(
+       'hid_identity_runtime', 'identity.patient_self_nin_binding_matches(text,uuid,text)', 'EXECUTE'
      ) or has_function_privilege(
-       'public', 'identity.record_my_nin_verification_evidence(text,uuid,text,text,text)', 'EXECUTE'
+       'public', 'identity.record_my_nin_verification_evidence(text,uuid,text,text,text,text)', 'EXECUTE'
+     ) or has_function_privilege(
+       'public', 'identity.patient_self_nin_binding_matches(text,uuid,text)', 'EXECUTE'
      ) or has_function_privilege(
        'public', 'identity.record_organization_cac_verification_evidence(text,text,text,text)', 'EXECUTE'
      ) or has_table_privilege('hid_identity_runtime', 'identity.verification_evidence', 'SELECT,INSERT,UPDATE,DELETE')

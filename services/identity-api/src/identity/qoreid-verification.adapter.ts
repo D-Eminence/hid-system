@@ -3,6 +3,7 @@ import { getEnvironment } from '../config/environment';
 import { DomainProblem } from '../common/problem';
 import {
   QOREID_PROVIDER,
+  type QoreIdNinClaims,
   type QoreIdVerificationResult,
   type VerificationState,
 } from './qoreid-verification.types';
@@ -44,10 +45,15 @@ export class QoreIdVerificationAdapter {
     @Inject(QOREID_FETCH) private readonly request: FetchImplementation,
   ) {}
 
-  async verifyNin(nin: string): Promise<QoreIdVerificationResult> {
+  /** OAuth-only check. It never submits a NIN or CAC number. */
+  async testConnection(): Promise<void> {
+    await this.accessToken();
+  }
+
+  async verifyNin(nin: string, claims: QoreIdNinClaims): Promise<QoreIdVerificationResult> {
     const accessToken = await this.accessToken();
-    // QoreID's NIN contract is path-only. In particular, do not add claimed
-    // demographic attributes or a JSON body to this request.
+    // QoreID requires first and last name claims. The caller derives these
+    // from the session-bound canonical patient, never from browser input.
     const response = await this.requestJson(
       `/v1/ng/identities/nin/${encodeURIComponent(nin)}`,
       {
@@ -55,11 +61,14 @@ export class QoreIdVerificationAdapter {
         headers: {
           accept: 'application/json',
           authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json',
         },
+        body: JSON.stringify({ firstname: claims.firstName, lastname: claims.lastName,
+          dob: claims.dateOfBirth }),
       },
       'verification',
     );
-    return this.normalizedVerification(response);
+    return this.normalizedNinVerification(response, nin, claims);
   }
 
   async verifyCac(regNumber: string): Promise<QoreIdVerificationResult> {
@@ -77,7 +86,7 @@ export class QoreIdVerificationAdapter {
       },
       'verification',
     );
-    return this.normalizedVerification(response);
+    return this.normalizedCacVerification(response);
   }
 
   private async accessToken(): Promise<string> {
@@ -112,12 +121,43 @@ export class QoreIdVerificationAdapter {
   private async requestJson(path: string, init: RequestInit, operation: 'token' | 'verification'): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.configuration.timeoutMs);
-    let response: Response;
     try {
       // Provider credentials and the path-bound NIN must never be forwarded to
       // an unexpected redirect destination.
-      response = await this.request(this.url(path), { ...init, redirect: 'error', signal: controller.signal });
+      const response = await this.request(this.url(path), { ...init, redirect: 'error', signal: controller.signal });
+      if (!response.ok) {
+        if (response.status === 401) {
+          throw new DomainProblem(503, 'QOREID_AUTHENTICATION_FAILED', 'External verification is unavailable');
+        }
+        if (response.status >= 500) {
+          throw new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'External verification is unavailable');
+        }
+        throw new DomainProblem(502, operation === 'token' ? 'QOREID_TOKEN_REJECTED' : 'QOREID_PROVIDER_REJECTED',
+          'External verification could not be completed');
+      }
+      // Keep the deadline active while consuming the body. NIN responses may
+      // contain a photo, but no provider can send unbounded data to this API.
+      const reader = response.body?.getReader();
+      if (!reader) throw this.invalidProviderResponse();
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > 262_144) {
+          controller.abort();
+          throw this.invalidProviderResponse();
+        }
+        chunks.push(chunk.value);
+      }
+      try {
+        const body = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+        return JSON.parse(body) as unknown;
+      }
+      catch { throw this.invalidProviderResponse(); }
     } catch (error) {
+      if (error instanceof DomainProblem) throw error;
       if (controller.signal.aborted) {
         throw new DomainProblem(504, 'QOREID_TIMEOUT', 'External verification timed out');
       }
@@ -126,29 +166,6 @@ export class QoreIdVerificationAdapter {
       throw new DomainProblem(503, 'QOREID_NETWORK_UNAVAILABLE', 'External verification is unavailable');
     } finally {
       clearTimeout(timeout);
-    }
-
-    if (!response.ok) {
-      if (response.status === 401) {
-        throw new DomainProblem(503, 'QOREID_AUTHENTICATION_FAILED', 'External verification is unavailable');
-      }
-      if (response.status >= 500) {
-        throw new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'External verification is unavailable');
-      }
-      throw new DomainProblem(502, operation === 'token' ? 'QOREID_TOKEN_REJECTED' : 'QOREID_PROVIDER_REJECTED',
-        'External verification could not be completed');
-    }
-
-    let body: string;
-    try {
-      body = await response.text();
-    } catch {
-      throw this.invalidProviderResponse();
-    }
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw this.invalidProviderResponse();
     }
   }
 
@@ -174,6 +191,75 @@ export class QoreIdVerificationAdapter {
       ...(providerReference ? { providerReference } : {}),
       respondedAt: new Date().toISOString(),
     };
+  }
+
+  private normalizedNinVerification(payload: unknown, submittedNin: string,
+    claims: QoreIdNinClaims): QoreIdVerificationResult {
+    const result = this.normalizedVerification(payload);
+    if (result.state !== 'verified') return result;
+    const record = this.record(payload);
+    const match = this.record(this.record(record?.summary)?.nin_check);
+    const fields = this.record(match?.fieldMatches);
+    if (typeof match?.status !== 'string' || typeof fields?.firstname !== 'boolean'
+      || typeof fields?.lastname !== 'boolean') throw this.invalidProviderResponse();
+    if (match.status !== 'EXACT_MATCH' || !fields.firstname || !fields.lastname
+      || (fields.dob !== undefined && fields.dob !== true)) {
+      return { ...result, state: 'not_verified' };
+    }
+    const bio = this.record(record?.nin);
+    const returnedNin = bio?.nin;
+    const firstName = this.safeName(bio?.firstname);
+    const lastName = this.safeName(bio?.lastname);
+    const dateOfBirth = this.dateOfBirth(bio?.birthdate);
+    if (typeof returnedNin !== 'string' || !/^\d{11}$/.test(returnedNin)
+      || !firstName || !lastName || !dateOfBirth) throw this.invalidProviderResponse();
+    if (returnedNin !== submittedNin
+      || this.normalizedName(firstName) !== this.normalizedName(claims.firstName)
+      || this.normalizedName(lastName) !== this.normalizedName(claims.lastName)
+      || dateOfBirth !== claims.dateOfBirth) return { ...result, state: 'not_verified' };
+    return { ...result, ninBinding: { firstName, lastName, dateOfBirth } };
+  }
+
+  private normalizedCacVerification(payload: unknown): QoreIdVerificationResult {
+    const result = this.normalizedVerification(payload);
+    if (result.state !== 'verified') return result;
+    const record = this.record(payload);
+    const summary = this.record(record?.summary);
+    if (typeof summary?.cac_check !== 'string') throw this.invalidProviderResponse();
+    if (summary.cac_check !== 'verified') return { ...result, state: 'not_verified' };
+    const cac = this.record(record?.cac);
+    const registrationNumber = this.safeRegistrationNumber(cac?.rcNumber);
+    const companyName = this.safeName(cac?.companyName, 200);
+    const registryStatus = this.safeName(cac?.status, 40);
+    if (!registrationNumber || !companyName || !registryStatus) throw this.invalidProviderResponse();
+    return { ...result, cacBinding: { registrationNumber, companyName, registryStatus } };
+  }
+
+  private safeRegistrationNumber(value: unknown): string | undefined {
+    const number = typeof value === 'string' ? value.trim().toUpperCase()
+      : typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? String(value) : '';
+    return /^(?:(?:RC|BN|IT))?\d{4,20}$/.test(number) ? number : undefined;
+  }
+
+  private safeName(value: unknown, limit = 100): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const name = value.trim();
+    return name.length >= 1 && name.length <= limit && !/[\x00-\x1f\x7f]/.test(name)
+      ? name : undefined;
+  }
+
+  private normalizedName(value: string): string {
+    return value.trim().replace(/\s+/g, ' ').toLocaleUpperCase('en-NG');
+  }
+
+  private dateOfBirth(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const match = /^(\d{2})-(\d{2})-(\d{4})$/.exec(value);
+    if (!match) return undefined;
+    const iso = `${match[3]}-${match[2]}-${match[1]}`;
+    const date = new Date(`${iso}T00:00:00Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === iso
+      && date.getTime() <= Date.now() ? iso : undefined;
   }
 
   private url(path: string): string {

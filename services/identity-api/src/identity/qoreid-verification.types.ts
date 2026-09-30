@@ -17,6 +17,24 @@ export type VerificationFailureCategory =
 
 export type OrganizationVerificationContext = 'hospital' | 'laboratory' | 'pharmacy';
 
+export interface QoreIdNinClaims {
+  firstName: string;
+  lastName: string;
+  dateOfBirth: string;
+}
+
+export interface QoreIdNinBinding {
+  firstName: string;
+  lastName: string;
+  dateOfBirth: string;
+}
+
+export interface QoreIdCacBinding {
+  registrationNumber: string;
+  companyName: string;
+  registryStatus: string;
+}
+
 export interface QoreIdVerificationResult {
   provider: typeof QOREID_PROVIDER;
   state: VerificationState;
@@ -24,6 +42,10 @@ export interface QoreIdVerificationResult {
   // is a safe opaque scalar. It is not an identifier submitted by a user.
   providerReference?: string;
   respondedAt: string;
+  // Registry fields are normalized and server-only. They must not be copied
+  // into the public verification response or audit details.
+  ninBinding?: QoreIdNinBinding;
+  cacBinding?: QoreIdCacBinding;
 }
 
 export interface VerificationResponse {

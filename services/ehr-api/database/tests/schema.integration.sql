@@ -298,9 +298,20 @@ select set_config('app.correlation_id', 'schema-qoreid-patient-0001', true);
 do $$
 declare patient_evidence record;
 begin
+  if identity.patient_self_nin_binding_matches(
+    'patient:test-person', '61000000-0000-4000-8000-000000000002', repeat('a', 64)) then
+    raise exception 'Unbound patient NIN was treated as a verified identifier';
+  end if;
+  begin
+    perform identity.record_my_nin_verification_evidence(
+      'patient:test-person', '61000000-0000-4000-8000-000000000002',
+      'verified', 'qoreid-patient-test-1', null, repeat('a', 64));
+    raise exception 'Unbound NIN was recorded as verified evidence';
+  exception when check_violation then null;
+  end;
   select * into patient_evidence from identity.record_my_nin_verification_evidence(
     'patient:test-person', '61000000-0000-4000-8000-000000000002',
-    'verified', 'qoreid-patient-test-1', null
+    'not_verified', 'qoreid-patient-test-1', 'not_verified', null
   );
   if patient_evidence.evidence_id is null
      or not exists (
@@ -308,7 +319,7 @@ begin
         where evidence.id = patient_evidence.evidence_id
           and evidence.subject_type = 'patient'
           and evidence.patient_id = '50000000-0000-4000-8000-000000000001'
-          and evidence.result = 'verified' and evidence.provider = 'qoreid'
+          and evidence.result = 'not_verified' and evidence.provider = 'qoreid'
      ) or not exists (
        select 1 from audit.events event
         where event.resource_id = patient_evidence.evidence_id::text
@@ -475,6 +486,49 @@ begin
 end
 $$;
 
+reset role;
+
+-- A governed verified identifier supports QoreID evidence only for the exact
+-- patient session and keyed NIN lookup value. The lookup value stays out of
+-- the evidence and semantic audit rows.
+insert into auth.accounts (id, subject, email, display_name, status)
+values ('20000000-0000-4000-8000-000000000005', 'patient:governed-nin',
+  'governed-nin@example.invalid', 'Governed NIN Patient', 'active');
+update identity.patients set account_id = '20000000-0000-4000-8000-000000000005'
+where id = '50000000-0000-4000-8000-000000000002';
+insert into auth.sessions (
+  id, account_id, family_id, refresh_token_sha256, access_jti,
+  account_token_version, authentication_method, issued_at, expires_at,
+  absolute_expires_at, session_kind, patient_id
+) select '61000000-0000-4000-8000-000000000003', account.id,
+  '62000000-0000-4000-8000-000000000003', repeat('b', 64)::character(64),
+  '63000000-0000-4000-8000-000000000003', account.token_version,
+  'password', clock_timestamp(), clock_timestamp() + interval '1 hour',
+  clock_timestamp() + interval '2 hours', 'patient',
+  '50000000-0000-4000-8000-000000000002'
+from auth.accounts account where account.id = '20000000-0000-4000-8000-000000000005';
+set role hid_schema_test_runtime;
+select set_config('app.actor_subject', 'patient:governed-nin', true);
+select set_config('app.correlation_id', 'schema-qoreid-bound-patient-0001', true);
+do $$
+declare evidence record;
+begin
+  if not identity.patient_self_nin_binding_matches(
+    'patient:governed-nin', '61000000-0000-4000-8000-000000000003', repeat('c', 64))
+     or identity.patient_self_nin_binding_matches(
+       'patient:governed-nin', '61000000-0000-4000-8000-000000000003', repeat('d', 64)) then
+    raise exception 'Exact governed patient NIN binding was not enforced';
+  end if;
+  select * into evidence from identity.record_my_nin_verification_evidence(
+    'patient:governed-nin', '61000000-0000-4000-8000-000000000003',
+    'verified', 'qoreid-bound-test-1', null, repeat('c', 64));
+  if evidence.evidence_id is null or not exists (
+    select 1 from identity.verification_evidence row
+    where row.id = evidence.evidence_id and row.result = 'verified'
+      and row.patient_id = '50000000-0000-4000-8000-000000000002'
+      and row::text not like '%' || repeat('c', 64) || '%'
+  ) then raise exception 'Bound NIN evidence was not minimal and exact'; end if;
+end $$;
 reset role;
 
 set role hid_schema_test_runtime;

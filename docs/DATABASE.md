@@ -51,6 +51,23 @@ columns. Patient and organization evidence is inserted only by narrowly scoped
 commands that recheck the existing session or exact active organization
 membership and atomically append semantic audit evidence; the migration does
 not create, merge, relink, or transfer canonical records.
+Migration `0047_provider_integration_controls.sql` adds the Identity-owned,
+secret-free provider/capability catalog, current routing, runtime read functions,
+versioned admin commands, and append-only change events. Migration
+`0048_cac_legal_entity_binding.sql` requires provider-confirmed CAC number and
+legal name before organization approval and prevents a status-only result from
+activating a provider organization. Neither migration stores a provider key,
+raw NIN, or raw QoreID response.
+Migration `0049_qoreid_request_quotas.sql` adds cross-instance, atomic request
+limits for new NIN/CAC verifications, safe connection tests, and public provider
+applications. Counters contain canonical UUIDs or a keyed network digest, with
+no raw NIN, CAC, IP address, or provider payload. The Identity runtime prunes
+expired counters and test-key reservations after 48 hours.
+Migration `0050_patient_nin_evidence_binding.sql` removes the unbound
+five-argument patient evidence command. A verified result now requires the
+submitted NIN's keyed lookup HMAC to match an existing verified, unrevoked NIN
+identifier on the exact session-bound patient. The HMAC is not persisted in
+QoreID evidence or audit.
 Migration `0013_durable_ocr_persistence.sql` adds the isolated `ocr` schema,
 facility-scoped idempotent jobs, immutable extraction/validation/lifecycle
 evidence, bounded retry state, atomic `SKIP LOCKED` worker claims, constrained

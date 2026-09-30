@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
 import { TurnstileModule } from '../auth/turnstile.module';
+import { IntegrationModule } from '../integrations/integration.module';
 import { IdentityController } from './identity.controller';
 import { NinRegistrationController } from './nin-registration.controller';
 import { PostgresIdentityProvider } from './postgres-identity.provider';
@@ -23,7 +24,7 @@ import { AdminOrganizationApplicationsController, PublicOrganizationApplications
 import { OrganizationApplicationsService } from './organization-applications.service';
 
 @Module({
-  imports: [TurnstileModule],
+  imports: [TurnstileModule, IntegrationModule],
   controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
     PublicOrganizationApplicationsController, AdminOrganizationApplicationsController],
   providers: [
@@ -63,6 +64,6 @@ import { OrganizationApplicationsService } from './organization-applications.ser
       },
     },
   ],
-  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator],
+  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter],
 })
 export class IdentityModule {}

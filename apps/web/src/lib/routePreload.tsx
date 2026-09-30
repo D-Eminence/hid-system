@@ -74,6 +74,7 @@ export const DoctorPatientRecordsPage = lazyWithPreload(() => import('../pages/d
 export const CommercialProductsPage = lazyWithPreload(() => import('../pages/CommercialProducts'))
 export const EhrConfiguratorPage = lazyWithPreload(() => import('../pages/EhrConfigurator'))
 export const PricingPage = lazyWithPreload(() => import('../pages/Pricing'))
+export const ProviderApplicationPage = lazyWithPreload(() => import('../pages/ProviderApplication'))
 export const AdminBillingPage = lazyWithPreload(() => import('../pages/admin/AdminBilling'))
 
 const routeLoaders = {
@@ -96,6 +97,7 @@ const routeLoaders = {
   commercialProducts: CommercialProductsPage.preload,
   ehrConfigurator: EhrConfiguratorPage.preload,
   pricing: PricingPage.preload,
+  providerApplication: ProviderApplicationPage.preload,
   adminBilling: AdminBillingPage.preload,
 }
 
@@ -159,6 +161,7 @@ export function getRoutePreloadKeys(path: string): RoutePreloadKey[] {
   if (path.startsWith('/eminence/billing')) return ['adminBilling']
   if (path.startsWith('/configure-ehr')) return ['ehrConfigurator']
   if (path.startsWith('/pricing')) return ['pricing']
+  if (path.startsWith('/provider/apply')) return ['providerApplication']
   if (path.startsWith('/products') || path.startsWith('/solutions') || path.startsWith('/developers')) return ['commercialProducts']
   if (path.startsWith('/eminence/')) return ['adminLogin']
   if (path === '/hospital' || path.startsWith('/hospital/auth') || path.startsWith('/doctor/auth')) {

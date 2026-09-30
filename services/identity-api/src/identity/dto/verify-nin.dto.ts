@@ -4,7 +4,7 @@ import { IsString, Matches } from 'class-validator';
 const normalizeNin = ({ value }: TransformFnParams): unknown =>
   typeof value === 'string' ? value.replace(/[\s-]+/g, '') : value;
 
-/** The QoreID NIN request intentionally contains only the NIN. */
+/** The browser supplies only NIN; QoreID name and DOB claims come from the authenticated patient profile. */
 export class VerifyNinDto {
   @Transform(normalizeNin)
   @IsString()

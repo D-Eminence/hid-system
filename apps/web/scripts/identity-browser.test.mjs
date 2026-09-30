@@ -2,12 +2,13 @@ import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { createServer } from 'vite'
 import { fileURLToPath } from 'node:url'
-let server, client
+let server, client, organizationApplication
 const calls = [], responses = []
 const originalFetch = globalThis.fetch
 before(async () => {
   server = await createServer({ configFile: false, resolve: { alias: { '@hid/api-client': fileURLToPath(new URL('../../../packages/api-client/src/index.ts', import.meta.url)) } }, server: { middlewareMode: true }, appType: 'custom' })
   client = await server.ssrLoadModule('/src/lib/identityClient.ts')
+  organizationApplication = await server.ssrLoadModule('/src/lib/organizationApplicationApi.ts')
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), init })
     const response = responses.shift()
@@ -68,6 +69,46 @@ test('canonical mutations use session CSRF token without bearer token exposure',
   assert.equal(request.init.headers.has('Authorization'), false)
   assert.equal(request.init.credentials, 'include'); assert.equal(request.init.cache, 'no-store')
   await assert.rejects(client.canonicalRequest('/api/v1/functions/break-glass'), /canonical API path/)
+})
+test('provider application sends only the required data to the public route and uses the exact Turnstile action', async () => {
+  responses.push(response({ accepted: true }, 202))
+  const result = await organizationApplication.submitOrganizationApplication({
+    organizationName: '  Example General Hospital  ',
+    organizationType: 'hospital',
+    productCode: 'laboratory',
+    cacRegistrationNumber: ' rc 123456 ',
+    administratorName: '  Test Administrator  ',
+    administratorEmail: '  admin@example.invalid  ',
+    turnstileToken: 'synthetic-turnstile',
+  })
+  assert.equal(result, undefined)
+  const request = calls.at(-1)
+  assert.equal(request.url, '/api/v1/identity/organization-applications')
+  assert.equal(request.init.method, 'POST')
+  assert.deepEqual(JSON.parse(request.init.body), {
+    productCode: 'laboratory',
+    organizationName: 'Example General Hospital',
+    organizationType: 'hospital',
+    cacRegistrationNumber: 'RC123456',
+    administratorName: 'Test Administrator',
+    administratorEmail: 'admin@example.invalid',
+    turnstileAction: 'organization-application',
+    turnstileToken: 'synthetic-turnstile',
+  })
+  assert.equal(request.init.credentials, 'include')
+  assert.equal(request.init.cache, 'no-store')
+})
+test('provider application rejects invalid CAC and incompatible organization product before making a request', async () => {
+  const input = {
+    organizationName: 'Example Laboratory', organizationType: 'laboratory',
+    productCode: 'laboratory', cacRegistrationNumber: 'RC123456',
+    administratorName: 'Test Administrator', administratorEmail: 'admin@example.invalid',
+    turnstileToken: 'synthetic-turnstile',
+  }
+  const before = calls.length
+  await assert.rejects(organizationApplication.submitOrganizationApplication({ ...input, cacRegistrationNumber: '123456' }), /CAC registration number/)
+  await assert.rejects(organizationApplication.submitOrganizationApplication({ ...input, productCode: 'pharmacy' }), /Choose a product/)
+  assert.equal(calls.length, before)
 })
 test('recovery start, verify and completion preserve purpose and never create a session', async () => {
   let signedIn = 0

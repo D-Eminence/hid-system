@@ -75,8 +75,12 @@ and optimistic `expectedVersion` checks. Concurrent duplicate requests resolve
 to one case or fail with a non-disclosing conflict.
 
 The QoreID self-verification route is intentionally different: its adapter is
-server-only, takes only the 11-digit NIN required for the provider path, and is
-bound to an existing patient session. It persists no NIN, raw response, OAuth
+server-only, takes the 11-digit NIN from the browser and derives required name
+and DOB provider claims from the existing patient session. It validates the
+returned registry NIN and demographics against that canonical patient and
+requires the submitted NIN's keyed lookup HMAC to match the same patient's
+prior verified, unrevoked NIN identifier before recording a verified result.
+It persists no NIN, raw response, OAuth
 token, demographic result, image, or address. Its append-only evidence and
 atomic audit record only the existing subject reference, provider, normalized
 outcome, timestamp, bounded failure category, correlation, and optional safe
