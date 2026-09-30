@@ -73,7 +73,7 @@ try {
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }));
   app.useGlobalFilters(new ProblemDetailsFilter());
-  app.useGlobalGuards(new SecurityGuard(module.get(Reflector), module.get(TokenService), module.get(AuditService)));
+  app.useGlobalGuards(new SecurityGuard(module.get(Reflector), module.get(TokenService), module.get(AuditService), module.get(DatabaseService)));
   await app.init();
   const http = request(app.getHttpServer());
   const accountId = randomUUID(), patientId = randomUUID();
