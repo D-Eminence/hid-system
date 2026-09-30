@@ -1,0 +1,5 @@
+# Health ID Outreach campaign association
+
+The existing authorized Outreach registration endpoint accepts an optional `campaignId`. If supplied, the campaign must belong to the same facility, be active within its start/end window, include the `registration` service, and contain the actor's exact staff membership. The database enforces these checks alongside the API and prevents moving a case to another campaign. The registration response and outbox event carry `campaignId` so reporting can connect the field case to its campaign.
+
+Existing registration cases without a campaign remain valid and use their existing facility boundary. A campaign creator is added to the campaign workspace as an administrator when the campaign is created. Historical campaign creators are backfilled by the additive `0045` migration. Campaign state changes retain immutable authorship, workspace events, and audit records. No separate Outreach patient identity store is introduced; field identity resolution continues to use the canonical patient flow.

@@ -54,6 +54,10 @@ const acceptedMigrations = new Map([
   ['0040_platform_control_enforcement.sql', 'bf51abc205bc88fcb89b6318640da2448b82766050739784ab660c771259f5be'],
   ['0041_disable_initial_maintenance_mode.sql', '196d5a227cfb3aca3f87f41c629b1d4e10520a55d9961130bc92ec0112831093'],
   ['0042_outreach_campaign_membership_key.sql', 'b8cd326ea393dc80ae897822b32d0f3e8b90d6770a6e86a9207b543174a4c0d7'],
+  ['0043_authoritative_product_pricing.sql', 'd892901a51540925cf54dca3c649d487c11196780460b4aa74d1442f4e8ec146'],
+  ['0044_commercial_demo_requests.sql', 'a62508cd72325f2bc98a8a33530a281643a1e891740d12adab776e164fb6bf8b'],
+  ['0045_outreach_campaign_registration_binding.sql', 'f5b432143ddbb9e7066313a3af221f2d4b33d85a4d7e46390e956dc5c2fff6ae'],
+  ['0046_organization_onboarding.sql', '0c19d39b019e0d967160a2f0fce4f86e432be90ec7cb7da87313d1511326b2c2'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0042",
-    "count": 42,
+    "last": "0046",
+    "count": 46,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -265,6 +265,22 @@
       {
         "name": "0042_outreach_campaign_membership_key.sql",
         "sha256": "b8cd326ea393dc80ae897822b32d0f3e8b90d6770a6e86a9207b543174a4c0d7"
+      },
+      {
+        "name": "0043_authoritative_product_pricing.sql",
+        "sha256": "d892901a51540925cf54dca3c649d487c11196780460b4aa74d1442f4e8ec146"
+      },
+      {
+        "name": "0044_commercial_demo_requests.sql",
+        "sha256": "a62508cd72325f2bc98a8a33530a281643a1e891740d12adab776e164fb6bf8b"
+      },
+      {
+        "name": "0045_outreach_campaign_registration_binding.sql",
+        "sha256": "f5b432143ddbb9e7066313a3af221f2d4b33d85a4d7e46390e956dc5c2fff6ae"
+      },
+      {
+        "name": "0046_organization_onboarding.sql",
+        "sha256": "0c19d39b019e0d967160a2f0fce4f86e432be90ec7cb7da87313d1511326b2c2"
       }
     ]
   },

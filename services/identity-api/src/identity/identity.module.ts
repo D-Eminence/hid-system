@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
+import { TurnstileModule } from '../auth/turnstile.module';
 import { IdentityController } from './identity.controller';
 import { NinRegistrationController } from './nin-registration.controller';
 import { PostgresIdentityProvider } from './postgres-identity.provider';
@@ -18,9 +19,13 @@ import {
 } from './qoreid-verification.adapter';
 import { QoreIdVerificationController } from './qoreid-verification.controller';
 import { QoreIdVerificationService } from './qoreid-verification.service';
+import { AdminOrganizationApplicationsController, PublicOrganizationApplicationsController } from './organization-applications.controller';
+import { OrganizationApplicationsService } from './organization-applications.service';
 
 @Module({
-  controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController],
+  imports: [TurnstileModule],
+  controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
+    PublicOrganizationApplicationsController, AdminOrganizationApplicationsController],
   providers: [
     IdentityService,
     NinRegistrationService,
@@ -39,6 +44,7 @@ import { QoreIdVerificationService } from './qoreid-verification.service';
     },
     QoreIdVerificationAdapter,
     QoreIdVerificationService,
+    OrganizationApplicationsService,
     PostgresIdentityProvider,
     {
       provide: IDENTITY_PROVIDER,

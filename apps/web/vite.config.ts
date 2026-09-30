@@ -147,6 +147,10 @@ export default defineConfig({
         target: `http://127.0.0.1:${ports.identityApi}`,
         changeOrigin: true,
       },
+      '/api/v1/commercial': {
+        target: `http://127.0.0.1:${ports.identityApi}`,
+        changeOrigin: true,
+      },
       '/api': {
         target: `http://127.0.0.1:${ports.ehrApi}`,
         changeOrigin: true,

@@ -33,13 +33,14 @@ export class OutreachService {
       const replay = await this.replay(client, context, 'registration_case_create', idempotencyKey, digest);
       if (replay) return replay;
       try {
+        if (normalized.campaignId) await this.assertCampaignAcceptsRegistration(client, normalized.campaignId, context);
         const inserted = await client.query<RegistrationRow>(`insert into outreach.registration_cases (
           facility_id,created_by_account_id,created_by_membership_id,local_command_id,
-          temporary_patient_id,full_name,sex,age_years,phone,operational_notes
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning *`,
+          temporary_patient_id,full_name,sex,age_years,phone,operational_notes,campaign_id
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *`,
         [context.facilityId, context.actor.accountId, context.membershipId, normalized.localCommandId,
           normalized.temporaryPatientId, normalized.fullName, normalized.sex, normalized.ageYears,
-          normalized.phone, normalized.operationalNotes]);
+          normalized.phone, normalized.operationalNotes, normalized.campaignId ?? null]);
         const row = inserted.rows[0];
         if (!row) throw new Error('Outreach registration insert returned no row');
         await client.query(`insert into outreach.registration_case_events (
@@ -53,7 +54,7 @@ export class OutreachService {
         [context.actor.accountId, context.membershipId, context.facilityId, idempotencyKey, digest, row.id]);
         await this.outbox(client, 'OutreachRegistrationCaseCreated', row.id, 1, context, null,
           { registrationCaseId: row.id, temporaryPatientId: row.temporary_patient_id,
-            status: 'identity_resolution_pending' });
+            campaignId: row.campaign_id, status: 'identity_resolution_pending' });
         await this.audit.recordWithClient(client, context, 'outreach.registration-case.received', row.id);
         return registrationCase(row);
       } catch (error) {
@@ -67,7 +68,8 @@ export class OutreachService {
   async list(context: DataAccessContext): Promise<readonly OutreachRegistrationCase[]> {
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query<RegistrationRow>(`select * from outreach.registration_cases
-        where facility_id=$1 order by created_at desc,id desc limit 100`, [context.facilityId]);
+        where facility_id=$1 and outreach.registration_campaign_member(campaign_id, facility_id)
+        order by created_at desc,id desc limit 100`, [context.facilityId]);
       await this.audit.recordWithClient(client, context, 'outreach.registration-case.list', context.facilityId);
       return result.rows.map(registrationCase);
     });
@@ -130,7 +132,8 @@ export class OutreachService {
         [context.actor.accountId, context.membershipId, context.facilityId, idempotencyKey, digest, id]);
         await this.outbox(client, 'OutreachPatientResolved', id, Number(row.row_version), context,
           normalized.canonicalPatientId, { registrationCaseId: id,
-            temporaryPatientId: row.temporary_patient_id, canonicalPatientId: normalized.canonicalPatientId,
+            temporaryPatientId: row.temporary_patient_id, campaignId: row.campaign_id,
+            canonicalPatientId: normalized.canonicalPatientId,
             resolutionKind: 'linked_existing' });
         await this.audit.recordWithClient(client, context, 'outreach.patient.linked-existing', id,
           normalized.canonicalPatientId);
@@ -166,11 +169,20 @@ export class OutreachService {
           input.startsAt, input.endsAt ?? null]);
       const row = result.rows[0];
       if (!row) throw new DomainProblem(503, 'OUTREACH_CAMPAIGN_UNAVAILABLE', 'Campaign could not be created');
+      await client.query(`insert into outreach.campaign_members
+        (campaign_id,facility_id,membership_id,role,added_by_account_id,added_by_membership_id)
+        values ($1,$2,$3,'admin',$4,$3)`,
+      [row.id, context.facilityId, context.membershipId, context.actor.accountId]);
       await client.query(`insert into outreach.campaign_events
         (campaign_id,facility_id,event_type,actor_account_id,actor_membership_id,details,correlation_id)
         values ($1,$2,'campaign_created',$3,$4,$5::jsonb,$6)`,
         [row.id, context.facilityId, context.actor.accountId, context.membershipId,
           JSON.stringify({ name: row.name, services }), context.correlationId]);
+      await client.query(`insert into outreach.campaign_events
+        (campaign_id,facility_id,event_type,actor_account_id,actor_membership_id,details,correlation_id)
+        values ($1,$2,'campaign_member_added',$3,$4,$5::jsonb,$6)`,
+        [row.id, context.facilityId, context.actor.accountId, context.membershipId,
+          JSON.stringify({ membershipId: context.membershipId, role: 'admin' }), context.correlationId]);
       await this.audit.recordWithClient(client, context, 'outreach.campaign.created', row.id);
       return { ...row, rowVersion: Number(row.rowVersion), startsAt: new Date(row.startsAt).toISOString(),
         endsAt: row.endsAt ? new Date(row.endsAt).toISOString() : null,
@@ -246,6 +258,27 @@ export class OutreachService {
     if (replay.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
       'The Idempotency-Key belongs to a different Outreach request');
     return this.find(client, replay.registration_case_id);
+  }
+
+  private async assertCampaignAcceptsRegistration(client: PoolClient, campaignId: string,
+    context: DataAccessContext): Promise<void> {
+    const result = await client.query<{ status: string; services: string[];
+      starts_at: Date | string; ends_at: Date | string | null }>(`select campaign.status,campaign.services,
+        campaign.starts_at,campaign.ends_at from outreach.campaigns campaign
+        join outreach.campaign_members member on member.campaign_id=campaign.id
+          and member.facility_id=campaign.facility_id and member.membership_id=$3
+        where campaign.id=$1 and campaign.facility_id=$2 for share of campaign,member`,
+    [campaignId, context.facilityId, context.membershipId]);
+    const campaign = result.rows[0];
+    if (!campaign) throw new DomainProblem(403, 'OUTREACH_CAMPAIGN_ACCESS_DENIED',
+      'Exact membership in this Outreach campaign is required');
+    const now = Date.now();
+    if (campaign.status !== 'active' || !campaign.services.includes('registration')
+      || new Date(campaign.starts_at).getTime() > now
+      || (campaign.ends_at && new Date(campaign.ends_at).getTime() <= now)) {
+      throw new DomainProblem(409, 'OUTREACH_CAMPAIGN_NOT_ACCEPTING_REGISTRATIONS',
+        'This Outreach campaign is not accepting registrations');
+    }
   }
 
   private async find(client: PoolClient, id: string): Promise<OutreachRegistrationCase> {

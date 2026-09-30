@@ -1996,6 +1996,108 @@ begin
 end
 $$;
 
+-- Campaign-linked registration is allowed only while the campaign accepts
+-- registration and the exact facility membership is in its workspace.
+do $$
+declare
+  campaign_uuid uuid := 'f4100000-0000-4000-8000-000000000001';
+  linked_case_id uuid := 'f4100000-0000-4000-8000-000000000002';
+begin
+  insert into outreach.campaigns (
+    id, facility_id, created_by_account_id, created_by_membership_id,
+    name, services, status, starts_at, ends_at
+  ) values (
+    campaign_uuid, '10000000-0000-4000-8000-000000000002',
+    '20000000-0000-4000-8000-000000000001',
+    '40000000-0000-4000-8000-000000000001',
+    'Schema registration campaign', array['registration']::text[], 'active',
+    clock_timestamp() - interval '1 hour', clock_timestamp() + interval '1 hour'
+  );
+  insert into outreach.campaign_members (
+    campaign_id, facility_id, membership_id, role,
+    added_by_account_id, added_by_membership_id
+  ) values (
+    campaign_uuid, '10000000-0000-4000-8000-000000000002',
+    '40000000-0000-4000-8000-000000000001', 'admin',
+    '20000000-0000-4000-8000-000000000001',
+    '40000000-0000-4000-8000-000000000001'
+  );
+  insert into outreach.registration_cases (
+    id, facility_id, created_by_account_id, created_by_membership_id,
+    local_command_id, temporary_patient_id, full_name, sex, age_years,
+    campaign_id
+  ) values (
+    linked_case_id, '10000000-0000-4000-8000-000000000002',
+    '20000000-0000-4000-8000-000000000001',
+    '40000000-0000-4000-8000-000000000001',
+    'f4100000-0000-4000-8000-000000000003',
+    'tmp_f4100000-0000-4000-8000-000000000004',
+    'Campaign Field Person', 'unknown', 35, campaign_uuid
+  );
+  if not exists (select 1 from outreach.registration_cases
+    where id = linked_case_id and campaign_id = campaign_uuid) then
+    raise exception 'Campaign-linked intake was not available to its exact member';
+  end if;
+
+  delete from outreach.campaign_members
+    where campaign_id = campaign_uuid and membership_id = '40000000-0000-4000-8000-000000000001';
+  if exists (select 1 from outreach.registration_cases where id = linked_case_id) then
+    raise exception 'Revoked campaign member could read linked intake';
+  end if;
+  if not exists (select 1 from outreach.registration_cases
+    where id = 'f4000000-0000-4000-8000-000000000001') then
+    raise exception 'Facility-only Outreach intake lost existing access';
+  end if;
+  begin
+    insert into outreach.registration_cases (
+      id, facility_id, created_by_account_id, created_by_membership_id,
+      local_command_id, temporary_patient_id, full_name, sex, age_years, campaign_id
+    ) values (
+      'f4100000-0000-4000-8000-000000000005',
+      '10000000-0000-4000-8000-000000000002',
+      '20000000-0000-4000-8000-000000000001',
+      '40000000-0000-4000-8000-000000000001',
+      'f4100000-0000-4000-8000-000000000006',
+      'tmp_f4100000-0000-4000-8000-000000000007',
+      'Unauthorized Campaign Person', 'unknown', 35, campaign_uuid
+    );
+    raise exception 'Nonmember captured a campaign registration';
+  exception when insufficient_privilege then null;
+  end;
+
+  insert into outreach.campaign_members (
+    campaign_id, facility_id, membership_id, role,
+    added_by_account_id, added_by_membership_id
+  ) values (
+    campaign_uuid, '10000000-0000-4000-8000-000000000002',
+    '40000000-0000-4000-8000-000000000001', 'admin',
+    '20000000-0000-4000-8000-000000000001',
+    '40000000-0000-4000-8000-000000000001'
+  );
+  update outreach.campaigns set status = 'closed', row_version = row_version + 1
+    where id = campaign_uuid;
+  begin
+    insert into outreach.registration_cases (
+      id, facility_id, created_by_account_id, created_by_membership_id,
+      local_command_id, temporary_patient_id, full_name, sex, age_years, campaign_id
+    ) values (
+      'f4100000-0000-4000-8000-000000000005',
+      '10000000-0000-4000-8000-000000000002',
+      '20000000-0000-4000-8000-000000000001',
+      '40000000-0000-4000-8000-000000000001',
+      'f4100000-0000-4000-8000-000000000006',
+      'tmp_f4100000-0000-4000-8000-000000000007',
+      'Closed Campaign Person', 'unknown', 35, campaign_uuid
+    );
+    raise exception 'Closed campaign accepted a new registration';
+  exception when check_violation then null;
+  end;
+  if not exists (select 1 from outreach.registration_cases where id = linked_case_id) then
+    raise exception 'A member could not review an earlier registration after campaign close';
+  end if;
+end
+$$;
+
 set constraints all immediate;
 set constraints all deferred;
 

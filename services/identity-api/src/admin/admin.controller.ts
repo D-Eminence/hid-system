@@ -1,12 +1,14 @@
 import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Query, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
-import { AuditAction, FacilityOptional, RequirePermissions } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, FacilityOptional, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { requireAdminContext } from './admin-context';
 import { AdminOperationsService } from './admin-operations.service';
 import { AdminService } from './admin.service';
+import { PricingService } from './pricing.service';
+import { PricePricingCommandDto, ProductPricingCommandDto } from './dto/pricing-command.dto';
 import { AccountStatusCommandDto, FacilityStatusCommandDto, PlatformControlCommandDto, PlatformRoleCommandDto,
   RevokeSessionsCommandDto } from './dto/admin-command.dto';
 import { ExportPrincipalsDto, ListFacilitiesDto, ListIdentityReviewsDto, ListPlatformAuditDto,
@@ -15,7 +17,8 @@ import { ExportPrincipalsDto, ListFacilitiesDto, ListIdentityReviewsDto, ListPla
 @Controller('admin')
 @FacilityOptional()
 export class AdminController {
-  constructor(private readonly admin: AdminService, private readonly operations: AdminOperationsService) {}
+  constructor(private readonly admin: AdminService, private readonly operations: AdminOperationsService,
+    private readonly pricing: PricingService) {}
 
   @Get('session')
   @RequirePermissions('platform.admin.access')
@@ -134,6 +137,36 @@ export class AdminController {
   @RequirePermissions('platform.operations.read')
   @AuditAction('admin.operations.events.request')
   events(@Req() request: HidRequest) { return this.operations.events(requireAdminContext(request)); }
+
+  @Get('pricing')
+  @RequirePermissions('platform.pricing.read')
+  @AuditAction('admin.pricing.list.request')
+  pricingCatalog(@Req() request: HidRequest) {
+    return this.pricing.adminCatalog(requireAdminContext(request));
+  }
+
+  @Post('pricing/products/:productSlug')
+  @RequirePermissions('platform.pricing.manage')
+  @AuditAction('admin.pricing.product.update.request')
+  @AuditFailuresOnly()
+  updateProduct(@Param('productSlug') slug: string, @Headers('if-match') ifMatch: string | undefined,
+    @Headers('idempotency-key') key: string | undefined, @Body() input: ProductPricingCommandDto,
+    @Req() request: HidRequest) {
+    return this.pricing.updateProduct(requireAdminContext(request), slug, this.expectedVersion(ifMatch),
+      input, requireIdempotencyKey(key));
+  }
+
+  @Post('pricing/products/:productSlug/prices/:context')
+  @RequirePermissions('platform.pricing.manage')
+  @AuditAction('admin.pricing.price.update.request')
+  @AuditFailuresOnly()
+  updatePrice(@Param('productSlug') slug: string, @Param('context') priceContext: string,
+    @Headers('if-match') ifMatch: string | undefined,
+    @Headers('idempotency-key') key: string | undefined, @Body() input: PricePricingCommandDto,
+    @Req() request: HidRequest) {
+    return this.pricing.updatePrice(requireAdminContext(request), slug, priceContext,
+      this.expectedVersion(ifMatch), input, requireIdempotencyKey(key));
+  }
 
   private expectedVersion(value: string | undefined): number {
     const normalized = value?.trim().replace(/^W\//, '').replace(/^"|"$/g, '');

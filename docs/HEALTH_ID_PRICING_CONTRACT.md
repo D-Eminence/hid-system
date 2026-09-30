@@ -1,0 +1,7 @@
+# Health ID pricing backend contract
+
+`GET /api/v1/commercial/pricing` returns `{ "data": [...] }` for active products and visible active price contexts. Each row contains `product_slug`, `context`, `visibility`, `amount_minor`, `currency`, `billing_period`, and `unit`. `amount_minor` is null for `contact_sales` and `custom_quote`. The public frontend must not infer an amount from a null value.
+
+The protected admin catalog is `GET /api/v1/admin/pricing` (`platform.pricing.read`). `POST /api/v1/admin/pricing/products/{slug}` and `POST /api/v1/admin/pricing/products/{slug}/prices/{context}` require `platform.pricing.manage`, `If-Match` with the current version, and an `Idempotency-Key`. A product command sets `name`, `status`, and `reason`. A price command sets `visibility`, `amountMinor`, `currency`, `billingPeriod`, `unit`, `active`, and `reason`. Fixed and starting-from visibility require a safe integer minor-unit amount; quote and hidden visibility require null.
+
+Each successful change increments the row version and writes an immutable before/after event with actor, reason, and correlation ID. The initial catalog has no invented numeric price. Admin edits take effect immediately; scheduling future effective dates would require a separate approved policy and migration. The later Health-id integration should replace its static price display with this endpoint and respect `contact_sales` visibility.

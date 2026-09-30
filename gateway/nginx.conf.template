@@ -35,6 +35,8 @@ server {
   location ^~ /api/v1/audit/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
   location = /api/v1/admin { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
   location ^~ /api/v1/admin/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+  location = /api/v1/commercial { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+  location ^~ /api/v1/commercial/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
 
   location = /api/v1/lab { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${LAB_API_UPSTREAM}; }
   location ^~ /api/v1/lab/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${LAB_API_UPSTREAM}; }

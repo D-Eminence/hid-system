@@ -16,7 +16,9 @@ aggregation. These routes require separate `platform.*` capabilities and do
 not grant clinical, break-glass, arbitrary SQL, audit mutation, or foreign-
 domain persistence authority. See `../../docs/SUPER_ADMIN_FOUNDATION.md`.
 
-Public URLs remain under `/api/v1/auth/*` and `/api/v1/identity/*`. Approved
+Public authentication and identity URLs remain under `/api/v1/auth/*` and
+`/api/v1/identity/*`. Commercial demo intake and pricing reads use
+`/api/v1/commercial/*` in the same Identity service. Approved
 service consumers use workload-authenticated internal actor/authorization
 routes while separately propagating the user credential. Production accepts
 only asymmetric issuer/JWKS workload evidence; local tokens are development

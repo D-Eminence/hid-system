@@ -14,17 +14,21 @@ describe('Outreach registration DTO', () => {
     expect(await validate(temporary)).toEqual([]);
   });
 
-  it('does not accept canonical identity, clinical, campaign, or document fields', async () => {
+  it('accepts an optional campaign UUID while excluding canonical identity and clinical fields', async () => {
     const input = plainToInstance(CreateRegistrationCaseDto, {
       localCommandId: '123e4567-e89b-42d3-a456-426614174000',
       temporaryPatientId: 'tmp_123e4567-e89b-42d3-a456-426614174001',
       fullName: 'Ada Person', sex: 'female', ageYears: 32,
-      patientId: '123e4567-e89b-42d3-a456-426614174002', campaignId: 'campaign',
+      patientId: '123e4567-e89b-42d3-a456-426614174002',
+      campaignId: '123e4567-e89b-42d3-a456-426614174003',
       diagnosis: 'not Outreach data', document: 'not Outreach data',
     });
     const errors = await validate(input, { whitelist: true, forbidNonWhitelisted: true });
     expect(errors.map((error) => error.property)).toEqual(expect.arrayContaining([
-      'patientId', 'campaignId', 'diagnosis', 'document',
+      'patientId', 'diagnosis', 'document',
     ]));
+    expect(errors.some((error) => error.property === 'campaignId')).toBe(false);
+    input.campaignId = 'not-a-uuid';
+    expect((await validate(input)).some((error) => error.property === 'campaignId')).toBe(true);
   });
 });

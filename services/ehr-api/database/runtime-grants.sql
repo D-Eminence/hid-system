@@ -480,6 +480,9 @@ grant execute on function platform.current_actor_subject(), platform.current_acc
 
 grant usage on schema platform, auth, identity, outreach to hid_outreach_runtime;
 grant select, insert, update on outreach.registration_cases to hid_outreach_runtime;
+grant select, insert, update on outreach.campaigns to hid_outreach_runtime;
+grant select, insert, delete on outreach.campaign_members to hid_outreach_runtime;
+grant select, insert on outreach.campaign_events to hid_outreach_runtime;
 grant select, insert on outreach.patient_mappings, outreach.registration_case_events,
   outreach.command_idempotency, outreach.outbox_events to hid_outreach_runtime;
 grant usage, select on all sequences in schema outreach to hid_outreach_runtime;
@@ -487,7 +490,8 @@ grant execute on function platform.current_actor_subject(), platform.current_acc
   platform.current_facility_id(), platform.current_membership_id(), platform.current_correlation_id(),
   platform.current_purpose_of_use(),
   auth.membership_has_permission(text, uuid, uuid, text),
-  outreach.context_allows(uuid,text) to hid_outreach_runtime;
+  outreach.context_allows(uuid,text),
+  outreach.registration_campaign_member(uuid,uuid) to hid_outreach_runtime;
 
 -- Notification persistence contains no message bodies or OTP credentials.
 -- Authentication challenges stay exclusively with the Identity runtime.
@@ -623,6 +627,9 @@ grant select, insert on pharmacy.work_items, pharmacy.work_item_events,
   pharmacy.dispensings, pharmacy.dispensing_reversals,
   pharmacy.imported_medication_evidence, pharmacy.outbox_events to hid_schema_test_runtime;
 grant select, insert, update on outreach.registration_cases to hid_schema_test_runtime;
+grant select, insert, update on outreach.campaigns to hid_schema_test_runtime;
+grant select, insert, delete on outreach.campaign_members to hid_schema_test_runtime;
+grant select, insert on outreach.campaign_events to hid_schema_test_runtime;
 grant select, insert on outreach.patient_mappings, outreach.registration_case_events,
   outreach.command_idempotency, outreach.outbox_events to hid_schema_test_runtime;
 grant select, insert, update on notification.device_registrations to hid_schema_test_runtime;
@@ -672,6 +679,7 @@ grant execute on function platform.current_actor_subject(),
   lab.context_allows(uuid,uuid,text),
   pharmacy.context_allows(uuid,uuid,text),
   outreach.context_allows(uuid,text),
+  outreach.registration_campaign_member(uuid,uuid),
   integration.claim_outbox_events(text,integer,integer,integer),
   integration.record_outbox_delivered(text,uuid,uuid,text,text),
   integration.record_outbox_failure(text,uuid,uuid,text,text,text,boolean,timestamptz,integer),
@@ -773,3 +781,32 @@ revoke all on function auth.resolve_google_identity(text),
   identity.access_patient_with_pin(text,text,integer),
   identity.record_my_nin_verification_evidence(text,uuid,text,text,text),
   identity.record_organization_cac_verification_evidence(text,text,text,text) from public;
+
+-- Demo intake is insert-only for anonymous callers. RLS limits the same
+-- Identity runtime role to permissioned platform-admin reads and transitions.
+grant select, insert, update on identity.demo_requests to hid_identity_runtime;
+grant select, insert on identity.demo_request_events to hid_identity_runtime;
+grant usage, select on sequence identity.demo_request_events_sequence_id_seq to hid_identity_runtime;
+grant select, insert, update on identity.demo_requests to hid_schema_test_runtime;
+grant select, insert on identity.demo_request_events to hid_schema_test_runtime;
+grant usage, select on sequence identity.demo_request_events_sequence_id_seq to hid_schema_test_runtime;
+
+-- Pricing is read and changed only through the exact Identity-owned functions.
+-- No application runtime receives direct table or event-log privileges.
+grant execute on function platform.public_list_commercial_prices(),
+  platform.admin_list_commercial_products(), platform.admin_list_commercial_prices(),
+  platform.admin_set_commercial_product(text, bigint, text, text, text, text, char),
+  platform.admin_set_commercial_price(text, text, bigint, text, bigint, text, text, text, boolean, text, text, char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant select on platform.commercial_products, platform.commercial_prices,
+  platform.commercial_catalog_events to hid_schema_test_runtime;
+
+-- Public organization intake and platform review use narrow commands. The
+-- Identity runtime cannot directly mutate canonical organizations or roles.
+grant execute on function identity.submit_organization_application(text,text,text,text,text,text),
+  identity.admin_list_organization_applications(text),
+  identity.admin_get_organization_application(uuid),
+  identity.admin_record_organization_cac_result(uuid,bigint,text,text,text),
+  identity.admin_approve_organization_application(uuid,bigint,uuid,uuid,text),
+  identity.admin_reject_organization_application(uuid,bigint,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
