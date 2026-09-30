@@ -145,6 +145,15 @@ describe('AuthController Google exchange', () => {
     expect(response.cookie).not.toHaveBeenCalled();
   });
 
+  it('rejects a patient Turnstile action on the workforce password route', async () => {
+    await expect(controller.login(
+      { email: 'staff@example.test', password: 'valid-password', turnstileAction: 'patient-login' },
+      requestFor(),
+      responseFor(),
+    )).rejects.toMatchObject({ code: 'INVALID_LOGIN_ACTION' });
+    expect(turnstile.verifyLogin).not.toHaveBeenCalled();
+  });
+
   it('verifies Turnstile, consumes the nonce, and establishes a patient cookie session', async () => {
     const challenge = issueNonce(controller);
     const request = requestFor({ cookies: { [nonceCookie]: challenge.cookie } });

@@ -328,6 +328,7 @@ export class HidRegionalStack extends Stack {
       internalListener = internalLoadBalancer.addListener('InternalHttpsListener', {
         port: 443,
         protocol: elasticloadbalancingv2.ApplicationProtocol.HTTPS,
+        open: false,
         certificates: [internalCertificate],
         sslPolicy: elasticloadbalancingv2.SslPolicy.RECOMMENDED_TLS,
         defaultAction: elasticloadbalancingv2.ListenerAction.fixedResponse(404, {

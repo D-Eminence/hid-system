@@ -42,6 +42,9 @@ export class AuthController {
     @Req() request: HidRequest,
     @Res({ passthrough: true }) response: Response,
   ) {
+    if (input.turnstileAction === 'patient-login') {
+      throw new DomainProblem(400, 'INVALID_LOGIN_ACTION', 'A workforce login action is required');
+    }
     return this.performLogin(input, request, response, 'staff');
   }
 

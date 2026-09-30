@@ -106,6 +106,25 @@ export async function produceStagingImages(config, runId, readAws, docker, now =
       && found.imageTagMutability === 'IMMUTABLE' && found.imageScanningConfiguration?.scanOnPush === true
       && found.encryptionConfiguration?.encryptionType === (repository.startsWith('staging/') ? 'AES256' : 'KMS'), 'staging build repository rejected')
   }
+  // Check every immutable tag before the first build. BatchGetImage reports a
+  // missing tag as a typed failure, so transport, authorization and KMS errors
+  // cannot be mistaken for an available tag.
+  for (const repository of [...new Set(plan.map(item => item.repository))]) {
+    const items = plan.filter(item => item.repository === repository)
+    const response = await aws('ecr', 'batch-get-image', ['--registry-id', ACCOUNT, '--repository-name', repository,
+      '--image-ids', ...items.map(item => `imageTag=${item.tag}`)])
+    const expected = new Set(items.map(item => item.tag))
+    check(Array.isArray(response.images) && response.images.length === 0
+      && Array.isArray(response.failures) && response.failures.length === expected.size,
+    'staging build immutable tag collision check rejected')
+    for (const failure of response.failures) {
+      const tag = failure?.imageId?.imageTag
+      check(failure?.failureCode === 'ImageNotFound' && typeof tag === 'string' && expected.delete(tag)
+        && failure.imageId.imageDigest === undefined,
+      'staging build immutable tag collision check rejected')
+    }
+    check(expected.size === 0, 'staging build immutable tag collision check rejected')
+  }
   await docker('login', [])
   const images = []
   for (const item of plan) {
@@ -118,11 +137,19 @@ export async function produceStagingImages(config, runId, readAws, docker, now =
     check(Array.isArray(local) && local.length === 1 && local[0].Architecture === item.platform.split('/')[1] && local[0].Os === 'linux'
       && local[0].RepoTags?.includes(tagged) && local[0].Config?.Labels?.['org.opencontainers.image.revision'] === config.source_sha,
     'staging build local image platform or source rejected')
-    await docker('push', ['push', tagged])
+    // Docker reports the pushed manifest digest; ECR must independently return
+    // that same digest for this immutable tag before a receipt is emitted.
+    const pushOutput = await docker('push', ['push', tagged])
+    check(typeof pushOutput === 'string', 'staging build Docker push digest missing')
+    const pushReceipts = pushOutput.split(/\r?\n/).map(line => line.trim())
+      .filter(line => line.startsWith(`${item.tag}: digest:`))
+    check(pushReceipts.length === 1, 'staging build Docker push digest missing or ambiguous')
+    const pushDigest = /^([a-z0-9-]+): digest: (sha256:[a-f0-9]{64}) size: [1-9][0-9]*$/.exec(pushReceipts[0])
+    check(pushDigest?.[1] === item.tag, 'staging build Docker push digest rejected')
     const response = await aws('ecr', 'describe-images', ['--registry-id', ACCOUNT, '--repository-name', item.repository, '--image-ids', `imageTag=${item.tag}`])
     check(response.imageDetails?.length === 1)
     const found = response.imageDetails[0]
-    check(found.registryId === ACCOUNT && found.repositoryName === item.repository && /^sha256:[a-f0-9]{64}$/.test(found.imageDigest)
+    check(found.registryId === ACCOUNT && found.repositoryName === item.repository && found.imageDigest === pushDigest[2]
       && found.imageTags?.includes(item.tag) && Number.isSafeInteger(found.imageSizeInBytes) && found.imageSizeInBytes > 0, 'staging build image receipt rejected')
     images.push({ component: item.component, repository_uri: item.repository_uri, digest: found.imageDigest,
       image_uri: `${item.repository_uri}@${found.imageDigest}`, size_bytes: found.imageSizeInBytes,

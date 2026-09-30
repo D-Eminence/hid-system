@@ -919,7 +919,7 @@ export default function Landing() {
             <p style={{ fontSize: 14, color: '#6b7280', marginTop: 10, lineHeight: 1.7 }}>Four steps that show exactly how HID connects you and your healthcare providers without stress or paperwork.</p>
           </div>
           {[
-            { n: '01', title: 'Create Your HID Profile', desc: 'Patient sign up creates the account and issues a unique Health ID for future lookups and updates.' },
+            { n: '01', title: 'Verify Your HID Identity', desc: 'New HID identities are issued through the approved, reviewed identity-registration process.' },
             { n: '02', title: 'Connect Your Health Records', desc: 'Hospitals, labs, and pharmacies link records to the HID. Visit notes, prescriptions, and lab results all attach to one identity.' },
             { n: '03', title: 'Access Anywhere', desc: 'Patients use their HID at any provider in the network. Records are instantly accessible to authorized medical staff across the country.' },
             { n: '04', title: 'Providers Pull Your Data', desc: 'Medical staff retrieve the complete patient file instantly. No paperwork, no delays, and no duplicate onboarding flow.' },

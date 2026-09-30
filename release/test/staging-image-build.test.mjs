@@ -79,15 +79,31 @@ function harness(options = {}) {
         imageTagMutability: options.mutable ? 'MUTABLE' : 'IMMUTABLE', imageScanningConfiguration: { scanOnPush: true },
         encryptionConfiguration: { encryptionType: name.startsWith('staging/') ? 'AES256' : 'KMS' } }] }
     }
+    if (operation === 'batch-get-image') {
+      const tags = args.slice(args.indexOf('--image-ids') + 1, args.indexOf('--region'))
+        .map(value => value.slice('imageTag='.length))
+      assert.ok(tags.every(tag => tag.startsWith(c.source_sha)))
+      const occupiedTag = options.collision && tags.find(tag => tag.endsWith('-database-migration-123'))
+      return { images: occupiedTag ? [{ imageId: { imageTag: occupiedTag } }] : [],
+        failures: tags.filter(tag => tag !== occupiedTag).map(tag => ({ imageId: { imageTag: tag },
+          failureCode: options.preflightError ? 'UpstreamUnavailable' : 'ImageNotFound' })) }
+    }
     assert.equal(operation, 'describe-images')
     const tag = args[args.indexOf('--image-ids') + 1].slice('imageTag='.length)
     return { imageDetails: [{ registryId: '659225405023', repositoryName: args[args.indexOf('--repository-name') + 1],
-      imageDigest: options.badDigest ? 'latest' : `sha256:${hash(tag)}`, imageTags: [tag], imageSizeInBytes: 1000 }] }
+      imageDigest: options.badDigest ? 'latest' : `sha256:${hash(options.digestMismatch ? `${tag}-wrong` : tag)}`,
+      imageTags: [tag], imageSizeInBytes: 1000 }] }
   }
   const docker = async (operation, args) => {
     calls.push(['docker', operation, ...args])
     if (operation === 'inspect') return JSON.stringify([{ Architecture: options.wrongPlatform ? (c.build_kind === 'applications' ? 'amd64' : 'arm64') : (c.build_kind === 'applications' ? 'arm64' : 'amd64'), Os: 'linux',
       RepoTags: [args.at(-1)], Config: { Labels: { 'org.opencontainers.image.revision': c.source_sha } } }])
+    if (operation === 'push') {
+      const tag = args.at(-1).split(':').at(-1)
+      const receipt = `${tag}: digest: sha256:${hash(tag)} size: 1234`
+      return options.missingPushDigest ? 'Layer already exists\n'
+        : options.duplicatePushDigest ? `${receipt}\n${receipt}\n` : `Layer already exists\n${receipt}\n`
+    }
   }
   return { calls, plan, run: () => produceStagingImages(c, '123', read, docker, () => new Date(now)) }
 }
@@ -104,10 +120,14 @@ test('application producer resolves 12 real outputs across 11 repositories and k
   assert.equal(result.deployment_authorized, false)
   assert.equal(result.release_admission, 'NOT_PERFORMED')
   const firstDocker = h.calls.findIndex(call => call[0] === 'docker')
-  assert.equal(firstDocker, 12) // STS plus ALL 11 repository checks before any Docker operation.
+  assert.equal(firstDocker, 23) // STS, all 11 repositories, then all 11 tag batches before Docker.
+  const tagChecks = h.calls.filter(call => call[2] === 'batch-get-image')
+  assert.equal(tagChecks.length, 11)
+  assert.equal(tagChecks.find(call => call.includes('staging/hid/ehr-api'))
+    .filter(value => value.startsWith('imageTag=')).length, 2)
   assert.equal(h.calls.filter(call => call[0] === 'docker' && call[1] === 'push').length, 12)
   assert.ok(result.images.every(image => image.image_uri.endsWith(image.digest)))
-  assert.ok(h.calls.filter(call => call[0] === 'aws').every(call => ['get-caller-identity', 'describe-repositories', 'describe-images'].includes(call[2])))
+  assert.ok(h.calls.filter(call => call[0] === 'aws').every(call => ['get-caller-identity', 'describe-repositories', 'batch-get-image', 'describe-images'].includes(call[2])))
 })
 
 test('broker build remains separate and pins its two mandatory base images', async () => {
@@ -130,12 +150,28 @@ test('missing repositories, mutable repositories or wrong AWS identity cannot st
   }
 })
 
+test('existing immutable tag or ambiguous ECR preflight fails before Docker starts', async () => {
+  for (const options of [{ collision: true }, { preflightError: true }]) {
+    const h = harness(options)
+    await assert.rejects(h.run, /immutable tag collision check rejected/)
+    assert.equal(h.calls.filter(call => call[0] === 'docker').length, 0)
+  }
+})
+
 test('wrong local platform cannot be pushed and registry digest failure cannot emit a success receipt', async () => {
   for (const build_kind of ['applications', 'signing-broker']) {
     const h = harness({ config: { build_kind }, wrongPlatform: true }); await assert.rejects(h.run)
     assert.equal(h.calls.filter(call => call[1] === 'push').length, 0)
   }
   await assert.rejects(harness({ badDigest: true }).run)
+})
+
+test('Docker push receipt must be unique and match the independent ECR digest', async () => {
+  for (const options of [{ missingPushDigest: true }, { duplicatePushDigest: true }, { digestMismatch: true }]) {
+    const h = harness(options)
+    await assert.rejects(h.run)
+    assert.equal(h.calls.filter(call => call[1] === 'push').length, 1)
+  }
 })
 
 test('credential preflight refuses non-GitHub OIDC URL before releasing an ID token', async () => {
