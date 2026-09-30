@@ -58,6 +58,35 @@ async function loadMigrations() {
   }));
 }
 
+function orderMigrations(migrations) {
+  const byVersion = new Map(migrations.map((migration) => [migration.version, migration]));
+  const prerequisites = new Map([
+    // 0038 is an accepted immutable migration. Its campaign_members
+    // foreign key requires the unique key introduced by 0042, so the
+    // prerequisite must run first on a clean database.
+    ['0038_outreach_campaign_workspaces.sql', ['0042_outreach_campaign_membership_key.sql']],
+  ]);
+  const ordered = [];
+  const visiting = new Set();
+  const visited = new Set();
+
+  function visit(version) {
+    if (visited.has(version)) return;
+    if (visiting.has(version)) throw new Error(`Migration prerequisite cycle detected at ${version}`);
+    const migration = byVersion.get(version);
+    if (!migration) throw new Error(`Migration prerequisite references missing migration ${version}`);
+
+    visiting.add(version);
+    for (const prerequisite of prerequisites.get(version) ?? []) visit(prerequisite);
+    visiting.delete(version);
+    visited.add(version);
+    ordered.push(migration);
+  }
+
+  for (const migration of migrations) visit(migration.version);
+  return ordered;
+}
+
 async function appliedMigrations(client) {
   const result = await client.query(
     'select version, checksum_sha256 from migration.schema_migrations order by version',
@@ -84,7 +113,7 @@ async function main() {
       }
     }
 
-    const pending = migrations.filter((migration) => !applied.has(migration.version));
+    const pending = orderMigrations(migrations).filter((migration) => !applied.has(migration.version));
     process.stdout.write(`${pending.length} pending migration(s)\n`);
     for (const migration of pending) {
       process.stdout.write(`${migration.version} ${migration.checksum}\n`);
