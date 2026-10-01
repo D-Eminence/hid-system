@@ -17,9 +17,8 @@ const complete = {
   nin: { nin: '12345678901', firstname: 'Bunch', lastname: 'Dillon', birthdate: '06-01-1974',
     photo: 'sensitive-photo', address: 'sensitive-address' },
 };
-// The NIN-only fields and nesting follow the entitled sandbox observation.
-// All values are invented. The numeric id models the existing persistence
-// requirement; its presence in that sandbox response still needs confirmation.
+// The NIN-only fields and nesting follow the entitled sandbox observation,
+// including its numeric top-level provider id. All fixture values are invented.
 const fixtureNin = '00000000000';
 const sandboxNinOnlySuccess = {
   id: 48291,
