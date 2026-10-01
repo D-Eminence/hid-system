@@ -47,9 +47,14 @@ The Identity API uses these configuration names for QoreID patient enrollment; n
 | `QOREID_BASE_URL` | Approved QoreID API origin. |
 | `QOREID_CLIENT_ID`, `QOREID_CLIENT_SECRET` | Server-only OAuth credentials supplied through the Identity task's secret configuration. |
 | `QOREID_TIMEOUT_MS` | Bounded provider request timeout. |
+| `QOREID_MAX_RETRIES` | Must remain `0` for general provider retries; the adapter's single re-authentication retry after an explicit verification `401` is separate. |
 | `NIN_LOOKUP_HMAC_KEY_B64`, `NIN_ENCRYPTION_KEY_B64` | Server-only keys for duplicate lookup and encrypted NIN/profile storage. |
 | `NIN_KEY_VERSION` | Version identifier for encrypted NIN material. |
+| `OTP_HMAC_KEY_B64`, `OTP_HMAC_KEY_VERSION` | Server-only OTP verifier key and version; the key is required in production. |
+| `OTP_EXPIRY_SECONDS`, `OTP_MAX_ATTEMPTS`, `OTP_RESEND_COOLDOWN_SECONDS`, `OTP_RATE_WINDOW_SECONDS`, `OTP_RATE_MAX_REQUESTS` | Existing bounded contact-code and rate-limit policy. |
+| `TURNSTILE_MODE`, `TURNSTILE_SECRET_KEY`, `TURNSTILE_SITEVERIFY_URL` | Server-side start-request verification; production requires `required` mode and a server-only secret. |
+| `NOTIFICATION_API_URL`, `NOTIFICATION_SERVICE_IDENTITY_MODE`, `NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE` | Existing OTP delivery route and production workload authentication. Local mode uses `NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN` instead. |
 
-For QoreID-enabled staging, the Identity task receives both the NIN lookup HMAC key and NIN encryption key from the existing Identity sensitive secret. The NIN-only gate remains off until the body-free request and response mapping pass an entitled live staging check. No raw provider payload, NIN, CAC number, address, photo, OAuth token, or OTP is placed in audit details or browser responses. Existing provider connection tests only check OAuth; they do not prove NIN-only or CAC entitlement.
+The browser needs the public `VITE_TURNSTILE_SITE_KEY`; it never receives QoreID credentials or the Turnstile secret. For QoreID-enabled staging, the Identity task receives both the NIN lookup HMAC key and NIN encryption key from the existing Identity sensitive secret. The NIN-only gate remains off until the body-free request and response mapping pass an entitled live staging check. No raw provider payload, NIN, CAC number, address, photo, OAuth token, or OTP is placed in audit details or browser responses. Existing provider connection tests only check OAuth; they do not prove NIN-only or CAC entitlement.
 
 Automated tests use fixture responses and a disposable PostgreSQL database. Live provider tests remain pending valid credentials, approved entitlement, validation of the body-free NIN-only request and response, CAC identifier mapping, and a separately reviewed staging rollout. The production rollout requires its own approval.
