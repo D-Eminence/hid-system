@@ -31,7 +31,7 @@ export interface IdentityReview {
 export interface OrganizationApplication {
   applicationId: string;
   productCode: 'ehr' | 'migrate' | 'laboratory' | 'pharmacy';
-  organizationName: string;
+  organizationName: string | null;
   organizationType: string;
   cacHint: string;
   administratorName: string;
@@ -39,6 +39,10 @@ export interface OrganizationApplication {
   status: 'pending_verification' | 'ready_for_review' | 'approved' | 'rejected';
   verificationResult: 'verified' | 'not_verified' | 'incomplete' | 'provider_error' | 'disabled' | null;
   verifiedOrganizationName: string | null;
+  verifiedEntityType: string | null;
+  verifiedRegistrationDate: string | null;
+  verifiedAddress: string | null;
+  verifiedRegistryStatus: string | null;
   version: number;
   createdAt: string;
   verifiedAt: string | null;

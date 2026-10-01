@@ -642,8 +642,8 @@ export default function Landing() {
             ))}
           </div>
           <div style={{ display: 'grid', gap: 10, marginTop: 24 }}>
-            <Cta variant="primary" size="md" fullWidth onClick={() => { setMenuOpen(false); navigate('/patient') }}>
-              Get Your HID
+            <Cta variant="primary" size="md" fullWidth onClick={() => { setMenuOpen(false); navigate('/patient/enroll') }}>
+              Get your Health ID
             </Cta>
             <Cta variant="secondary" size="md" fullWidth href={DEMO_HREF} onClick={() => setMenuOpen(false)}>
               Book a Demo
@@ -691,11 +691,11 @@ export default function Landing() {
               variant="primary"
               size="md"
               fullWidth
-              onClick={() => navigate('/patient')}
-              onMouseEnter={() => preloadRoute('patientAuth')}
-              onFocus={() => preloadRoute('patientAuth')}
+              onClick={() => navigate('/patient/enroll')}
+              onMouseEnter={() => preloadRoute('patientEnrollment')}
+              onFocus={() => preloadRoute('patientEnrollment')}
             >
-              Get Your HID
+              Get your Health ID
             </Cta>
             <Cta variant="secondary" size="md" fullWidth href={DEMO_HREF}>
               Book a Demo
@@ -1045,11 +1045,11 @@ export default function Landing() {
             variant="white"
             size="md"
             fullWidth={isNarrow}
-            onClick={() => navigate('/patient')}
-            onMouseEnter={() => preloadRoute('patientAuth')}
-            onFocus={() => preloadRoute('patientAuth')}
+            onClick={() => navigate('/patient/enroll')}
+            onMouseEnter={() => preloadRoute('patientEnrollment')}
+            onFocus={() => preloadRoute('patientEnrollment')}
           >
-            Get Your HID
+            Get your Health ID
           </Cta>
           <Cta variant="outlineWhite" size="md" fullWidth={isNarrow} href={DEMO_HREF}>
             Book a Demo

@@ -32,6 +32,15 @@ function resolveRouteMeta(pathname: string): RouteMeta {
     }
   }
 
+  if (pathname === '/patient/enroll') {
+    return {
+      canonical: `${SITE_ORIGIN}/patient/enroll`,
+      description: 'Verify your identity and contact to get your HID Health ID.',
+      robots: 'noindex,nofollow',
+      title: 'Get your Health ID | HID - Health Identity Directory',
+    }
+  }
+
   if (pathname === '/hospital' || pathname === '/hospital/auth') {
     return {
       canonical: `${SITE_ORIGIN}/hospital`,

@@ -50,7 +50,7 @@ export function AccountAccess({ patient }: { patient: boolean }) {
         if (!result.data?.accepted) throw new Error('Recovery could not be started.')
         setChallenge({ challengeId: result.data.challengeId, expiresAt: Date.now() + result.data.expiresInSeconds * 1000, resendAt: Date.now() + result.data.resendAfterSeconds * 1000 })
         setCode(''); setVerification(''); setPassword(''); setStep('verify')
-        setNotice('If this account is eligible, a recovery code will arrive at its registered email address.')
+        setNotice('If this account is eligible, a recovery code will arrive at its verified account contact.')
       } finally { captcha.resetCaptcha() }
     }))
   }
@@ -89,10 +89,11 @@ export function AccountAccess({ patient }: { patient: boolean }) {
   return <main style={{ maxWidth: 520, margin: '0 auto', padding: 24, lineHeight: 1.6 }}>
     <Link to="/">Health Identity Directory</Link>
     <h1>{patient ? 'Patient account' : 'Clinical account'}</h1>
-    <h2>{step === 'login' ? 'Sign in' : step === 'start' ? 'Recover or activate your account' : step === 'verify' ? 'Verify your email code' : 'Set your password'}</h2>
+    <h2>{step === 'login' ? 'Sign in' : step === 'start' ? 'Recover or activate your account' : step === 'verify' ? 'Verify your recovery code' : 'Set your password'}</h2>
+    {step === 'start' && patient && <p>Use your email or Health ID. If you enrolled with a phone number, enter your Health ID to receive a code at your verified phone number.</p>}
     {notice && <p role="status">{notice}</p>}{error && <p role="alert">{error}</p>}
     <form onSubmit={submit} style={{ display: 'grid', gap: 16 }}>
-      {(step === 'login' || step === 'start') && <label>{step === 'login' ? 'Email' : 'Email or HID'}<input required type={step === 'login' ? 'email' : 'text'} autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} style={{ display: 'block', width: '100%' }} /></label>}
+      {(step === 'login' || step === 'start') && <label>{patient ? 'Email or Health ID' : step === 'login' ? 'Email' : 'Email or HID'}<input required type={step === 'login' && !patient ? 'email' : 'text'} autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} style={{ display: 'block', width: '100%' }} /></label>}
       {(step === 'login' || step === 'complete') && <label>Password<input required type="password" minLength={step === 'complete' ? 12 : undefined} maxLength={256} autoComplete={step === 'login' ? 'current-password' : 'new-password'} value={password} onChange={event => setPassword(event.target.value)} style={{ display: 'block', width: '100%' }} /></label>}
       {step === 'complete' && <label>Confirm password<input required type="password" minLength={12} maxLength={256} autoComplete="new-password" value={confirmation} onChange={event => setConfirmation(event.target.value)} style={{ display: 'block', width: '100%' }} /></label>}
       {step === 'verify' && <><label>Six-digit code<input required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={event => setCode(event.target.value.replace(/\D/g, ''))} style={{ display: 'block', width: '100%' }} /></label>
@@ -102,6 +103,6 @@ export function AccountAccess({ patient }: { patient: boolean }) {
     </form>
     {step === 'verify' && <button disabled={busy || !challenge || now < challenge.resendAt} onClick={startRecovery}>Send another code{challenge && now < challenge.resendAt ? ` (${Math.ceil((challenge.resendAt - now) / 1000)}s)` : ''}</button>}
     <p><button disabled={busy} onClick={() => changeStep(step === 'login' ? 'start' : 'login')}>{step === 'login' ? 'Forgot password or activate an issued account' : 'Back to sign in'}</button></p>
-    {patient && <section><h2>Register for HID</h2><p>Visit an authorized facility to verify your identity and register your patient account. Once the facility issues your account, use your registered email above to activate it and set a password.</p></section>}
+    {patient && <section><h2>New to HID?</h2><p>Verify your NIN and contact to get your Health ID. You can also use an account issued by an authorized facility.</p><Link to="/patient/enroll">Get your Health ID</Link></section>}
   </main>
 }

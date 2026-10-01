@@ -61,13 +61,13 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
     && actor.platformPermissions.includes('platform.role.manage');
 
   async function verify(application: OrganizationApplication) {
-    if (!window.confirm(`Request CAC verification for ${application.organizationName} (${application.cacHint})? This may contact the external provider.`)) return;
+    if (!window.confirm(`Request CAC verification for ${application.cacHint}? This may contact the external provider.`)) return;
     setBusyId(application.applicationId); setActionError(null); setNotice(null);
     try {
       await api(`/admin/organization-applications/${application.applicationId}/verify-cac`, {
         method: 'POST', version: application.version,
       });
-      setNotice(`CAC verification recorded for ${application.organizationName}. Review the result before approval.`);
+      setNotice(`CAC verification recorded for ${application.cacHint}. Review the registry identity before approval.`);
     } catch (error) { setActionError(errorMessage(error)); }
     finally { setBusyId(null); setRevision((current) => current + 1); }
   }
@@ -85,8 +85,8 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
       setActionError('Provide both existing organization and facility UUIDs, or leave both blank.'); return;
     }
     const detail = action === 'approve'
-      ? `Approve ${application.organizationName} using the verified legal name ${application.verifiedOrganizationName}? This provisions or links an organization and administrator.`
-      : `Reject ${application.organizationName} (${application.cacHint})?`;
+      ? `Approve the registry-verified organization ${application.verifiedOrganizationName}? This provisions or links an organization and administrator.`
+      : `Reject the application for ${application.cacHint}?`;
     if (!window.confirm(detail)) return;
     setBusyId(application.applicationId); setActionError(null); setNotice(null);
     try {
@@ -98,7 +98,7 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
         method: 'POST', version: application.version, body,
       });
       setReasons((current) => ({ ...current, [application.applicationId]: '' }));
-      setNotice(`${application.organizationName} ${action === 'approve' ? 'approved' : 'rejected'}.`);
+      setNotice(`Application for ${application.cacHint} ${action === 'approve' ? 'approved' : 'rejected'}.`);
     } catch (error) { setActionError(errorMessage(error)); }
     finally { setBusyId(null); setRevision((current) => current + 1); }
   }
@@ -116,7 +116,7 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
 
   return <div className="organization-applications-page">
     <header className="page-head"><p className="eyebrow">HID Super Admin</p><h1>Provider applications</h1>
-      <p>Review the masked CAC reference and provider-confirmed legal name before granting organization access. Verification depends on the configured provider.</p></header>
+      <p>Review the masked CAC reference and registry-confirmed organization identity before granting access. Verification depends on the configured provider.</p></header>
     <div className="filters"><label className="application-filter">Application status
       <select value={status} onChange={(event) => { setStatus(event.target.value as ApplicationStatus | ''); setActionError(null); setNotice(null); }}>
         {statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -132,16 +132,22 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
           : <div className="cards">{items.map((application) => {
             const open = application.status === 'pending_verification' || application.status === 'ready_for_review';
             const ready = application.status === 'ready_for_review'
-              && application.verificationResult === 'verified' && Boolean(application.verifiedOrganizationName);
+              && application.verificationResult === 'verified' && Boolean(application.verifiedOrganizationName)
+              && Boolean(application.verifiedEntityType) && Boolean(application.verifiedRegistrationDate)
+              && Boolean(application.verifiedAddress) && application.verifiedRegistryStatus === 'active';
             const busy = busyId === application.applicationId;
             const ids = reuseIds[application.applicationId] ?? { organizationId: '', facilityId: '' };
             return <article className="card application-card" key={application.applicationId}>
-              <header><div><p className="eyebrow">{label(application.productCode)} · {label(application.organizationType)}</p>
-                <h2>{application.organizationName}</h2><small>Application {application.applicationId}</small></div>
+              <header><div><p className="eyebrow">{label(application.productCode)} · Requested {label(application.organizationType)} service</p>
+                <h2>{application.verifiedOrganizationName ?? 'Registry verification pending'}</h2><small>Application {application.applicationId}</small></div>
                 <span className={`status status-${application.status.replaceAll('_', '-')}`}>{label(application.status)}</span></header>
               <dl>
                 <dt>Masked CAC</dt><dd>{application.cacHint}</dd>
                 <dt>Registry legal name</dt><dd>{application.verifiedOrganizationName ?? 'Awaiting verified CAC result'}</dd>
+                <dt>Registry entity type</dt><dd>{application.verifiedEntityType ?? '—'}</dd>
+                <dt>Registration date</dt><dd>{application.verifiedRegistrationDate ?? '—'}</dd>
+                <dt>Registry address</dt><dd>{application.verifiedAddress ?? '—'}</dd>
+                <dt>Registry status</dt><dd>{application.verifiedRegistryStatus ? label(application.verifiedRegistryStatus) : '—'}</dd>
                 <dt>Verification</dt><dd>{application.verificationResult ? label(application.verificationResult) : 'Not run'}</dd>
                 <dt>Applicant admin</dt><dd>{application.administratorName} · {application.administratorEmail}</dd>
                 <dt>Submitted</dt><dd>{formattedDate(application.createdAt)}</dd>
@@ -167,7 +173,7 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
                       onClick={() => void review(application, 'reject')}>Reject application</button>
                   </div>
                   {!canApprove && <small>Principal and role management permissions are required to approve.</small>}
-                  {!ready && <small>Approval requires a verified CAC result and legal name.</small>}
+                  {!ready && <small>Approval requires a complete, active registry identity from CAC verification.</small>}
                 </form>
               </div>}
             </article>;

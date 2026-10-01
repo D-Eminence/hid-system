@@ -36,6 +36,7 @@ for (const file of sourceFiles) {
 const allowedBrowserStorageFiles = new Set([
   'apps/web/src/components/AppInstallPrompt.tsx',
   'apps/web/src/lib/routePreload.tsx',
+  'apps/web/src/pages/patient/PatientEnrollment.tsx',
 ])
 for (const file of sourceFiles) {
   const relative = file.slice(repository.length + 1)
@@ -44,6 +45,22 @@ for (const file of sourceFiles) {
     assert.ok(allowedBrowserStorageFiles.has(relative), `${relative} uses unreviewed browser string storage`)
   }
 }
+const enrollmentPage = await readFile(join(repository, 'apps/web/src/pages/patient/PatientEnrollment.tsx'), 'utf8')
+const enrollmentStorageCalls = [...enrollmentPage.matchAll(/\b(?:localStorage|sessionStorage)\.\w+\([^)]*\)/g)]
+  .map(match => match[0])
+assert.deepEqual(enrollmentStorageCalls.sort(), [
+  'sessionStorage.getItem(START_KEY_STORAGE)',
+  'sessionStorage.removeItem(START_KEY_STORAGE)',
+  'sessionStorage.setItem(START_KEY_STORAGE, value)',
+].sort(), 'patient enrollment may store only its opaque retry key in session storage')
+assert.equal([...enrollmentPage.matchAll(/\b(?:localStorage|sessionStorage)\b/g)].length, 3,
+  'patient enrollment must not introduce another browser storage reference')
+assert.match(enrollmentPage, /const START_KEY_STORAGE = 'hid:patient-enrollment-start-key'/)
+assert.match(enrollmentPage, /if \(value && !isEnrollmentIdempotencyKey\(value\)\) return/,
+  'only a validated idempotency UUID may be persisted')
+const enrollmentContract = await readFile(join(repository, 'apps/web/src/lib/patientEnrollmentContract.ts'), 'utf8')
+assert.match(enrollmentContract, /return globalThis\.crypto\.randomUUID\(\)/,
+  'enrollment retry keys must use a secure random UUID')
 for (const app of apps) {
   const root = join(repository, 'apps', app)
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))

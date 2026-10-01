@@ -36,7 +36,6 @@ function initialSelection(product: string | null): { organizationType: Organizat
 export default function ProviderApplication() {
   const [searchParams] = useSearchParams()
   const [selection, setSelection] = useState(() => initialSelection(searchParams.get('product')))
-  const [organizationName, setOrganizationName] = useState('')
   const [cacRegistrationNumber, setCacRegistrationNumber] = useState('')
   const [administratorName, setAdministratorName] = useState('')
   const [administratorEmail, setAdministratorEmail] = useState('')
@@ -57,7 +56,6 @@ export default function ProviderApplication() {
     }
     const input: OrganizationApplicationInput = {
       ...selection,
-      organizationName,
       cacRegistrationNumber,
       administratorName,
       administratorEmail,
@@ -67,7 +65,6 @@ export default function ProviderApplication() {
     try {
       await submitOrganizationApplication(input)
       setAccepted(true)
-      setOrganizationName('')
       setCacRegistrationNumber('')
       setAdministratorName('')
       setAdministratorEmail('')
@@ -97,9 +94,9 @@ export default function ProviderApplication() {
         <Link className="commercial-button" to="/">Return to home</Link>
       </div> : <form className="commercial-card provider-application-form" onSubmit={event => { void submit(event) }}>
         <h2>Organization details</h2>
-        <p>Use the legal organization name and CAC registration number. The registered entity must be verified before an administrator can approve access.</p>
+        <p>Enter the CAC registration identifier. HID obtains the legal name, entity type, registration date, address, and status from the registry verification result before review.</p>
         {error && <div className="provider-application-error" role="alert">{error}</div>}
-        <label>Organization type
+        <label>Facility or service type
           <select className="commercial-input" value={selection.organizationType} onChange={event => {
             const organizationType = event.target.value as OrganizationType
             setSelection({ organizationType, productCode: productOptions[organizationType][0] })
@@ -112,10 +109,7 @@ export default function ProviderApplication() {
             {productOptions[selection.organizationType].map(product => <option key={product} value={product}>{productLabels[product]}</option>)}
           </select>
         </label>
-        <label>Legal organization name
-          <input className="commercial-input" value={organizationName} onChange={event => setOrganizationName(event.target.value)} type="text" autoComplete="organization" minLength={2} maxLength={200} required />
-        </label>
-        <label>CAC registration number
+        <label>CAC registration identifier
           <input className="commercial-input" value={cacRegistrationNumber} onChange={event => setCacRegistrationNumber(normalizeCacRegistrationNumber(event.target.value))} type="text" autoCapitalize="characters" autoComplete="off" spellCheck={false} maxLength={22} pattern="(RC|BN|IT)[0-9]{4,20}" title="Include the RC, BN, or IT prefix followed by 4 to 20 digits" placeholder="RC123456" required />
           <span className="provider-application-help">Include the RC, BN, or IT prefix. Spaces are removed as you type.</span>
         </label>

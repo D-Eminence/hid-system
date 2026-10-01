@@ -88,7 +88,7 @@ interface GoogleIdTokenSignInInput {
 interface RecoveryOtpStart {
   accepted: true
   challengeId: string
-  deliveryChannels: ['email']
+  deliveryChannels: ['email', 'sms']
   expiresInSeconds: number
   resendAfterSeconds: number
 }

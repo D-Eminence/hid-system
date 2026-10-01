@@ -19,9 +19,11 @@ const reviewer = actor(['platform.identity-review.read', 'platform.facility.mana
   'platform.principal.manage', 'platform.role.manage']);
 const application: OrganizationApplication = {
   applicationId: '10000000-0000-4000-8000-000000000011', productCode: 'laboratory',
-  organizationName: 'Applicant Lab Ltd', organizationType: 'laboratory', cacHint: 'RC******34',
+  organizationName: null, organizationType: 'laboratory', cacHint: 'RC******34',
   administratorName: 'Ada Admin', administratorEmail: 'ada@example.test',
   status: 'pending_verification', verificationResult: null, verifiedOrganizationName: null,
+  verifiedEntityType: null, verifiedRegistrationDate: null, verifiedAddress: null,
+  verifiedRegistryStatus: null,
   version: 3, createdAt: '2026-09-01T00:00:00Z', verifiedAt: null, reviewedAt: null,
 };
 
@@ -58,13 +60,16 @@ describe('provider organization application review', () => {
 
   it('requires review reason and confirmation before approving the verified legal entity', async () => {
     const ready = { ...application, status: 'ready_for_review' as const,
-      verificationResult: 'verified' as const, verifiedOrganizationName: 'Registry Lab Limited', version: 7 };
+      organizationName: 'Registry Lab Limited', verificationResult: 'verified' as const,
+      verifiedOrganizationName: 'Registry Lab Limited', verifiedEntityType: 'Private Limited',
+      verifiedRegistrationDate: '2001-01-01', verifiedAddress: '123 Registry Street, Lagos',
+      verifiedRegistryStatus: 'active', version: 7 };
     apiMock.mockImplementation(async (path: string) => path === '/admin/organization-applications'
       ? { items: [ready] } : { organizationId: 'new-org' });
     const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
     render(<OrganizationApplications actor={reviewer} />);
-    const card = (await screen.findByRole('heading', { name: application.organizationName })).closest('article')!;
-    expect(within(card).getByText('Registry Lab Limited')).toBeInTheDocument();
+    const card = (await screen.findByRole('heading', { name: 'Registry Lab Limited' })).closest('article')!;
+    expect(within(card).getAllByText('Registry Lab Limited')).not.toHaveLength(0);
     fireEvent.change(within(card).getByLabelText('Review reason'), { target: { value: 'Registry legal entity and admin reviewed' } });
     fireEvent.change(within(card).getByLabelText('Existing organization ID'), {
       target: { value: '10000000-0000-4000-8000-000000000001' },
@@ -88,7 +93,7 @@ describe('provider organization application review', () => {
       ? { items: [application] } : { status: 'rejected', version: 4 });
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(<OrganizationApplications actor={actor(['platform.identity-review.read', 'platform.facility.manage'])} />);
-    const card = (await screen.findByRole('heading', { name: application.organizationName })).closest('article')!;
+    const card = (await screen.findByRole('heading', { name: 'Registry verification pending' })).closest('article')!;
     expect(within(card).getByRole('button', { name: 'Approve and provision' })).toBeDisabled();
     fireEvent.click(within(card).getByRole('button', { name: 'Reject application' }));
     expect(screen.getByRole('alert')).toHaveTextContent('8 to 500 characters');

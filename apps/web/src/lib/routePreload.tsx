@@ -56,6 +56,7 @@ function lazyWithPreload<T extends React.ComponentType<any>>(
 
 export const LandingPage = lazyWithPreload(() => import('../pages/Landing'))
 export const PatientAuthPage = lazyWithPreload(() => import('../pages/patient/PatientAuth'))
+export const PatientEnrollmentPage = lazyWithPreload(() => import('../pages/patient/PatientEnrollment'))
 export const PatientProfilePage = lazyWithPreload(() => import('../pages/patient/PatientProfile'))
 export const PatientBioDataPage = lazyWithPreload(() => import('../pages/patient/PatientBioData'))
 export const PatientRecordsPage = lazyWithPreload(() => import('../pages/patient/PatientRecords'))
@@ -80,6 +81,7 @@ export const AdminBillingPage = lazyWithPreload(() => import('../pages/admin/Adm
 const routeLoaders = {
   landing: LandingPage.preload,
   patientAuth: PatientAuthPage.preload,
+  patientEnrollment: PatientEnrollmentPage.preload,
   patientProfile: PatientProfilePage.preload,
   patientBioData: PatientBioDataPage.preload,
   patientRecords: PatientRecordsPage.preload,
@@ -148,7 +150,8 @@ export function preloadPath(path: string) {
 export function getRoutePreloadKeys(path: string): RoutePreloadKey[] {
   if (!path) return []
   if (path === '/' || path.startsWith('/#')) return ['patientAuth', 'doctorAuth', 'adminLogin']
-  if (path === '/signup' || path === '/login' || path === '/register' || path === '/patient' || path.startsWith('/patient/auth')) {
+  if (path === '/signup' || path === '/register' || path === '/patient/enroll') return []
+  if (path === '/login' || path === '/patient' || path.startsWith('/patient/auth')) {
     return ['patientProfile', 'patientRecords', 'patientHistory', 'patientBioData', 'patientNotifications']
   }
   if (path.startsWith('/patient/profile')) return ['patientRecords', 'patientHistory', 'patientBioData', 'patientNotifications']

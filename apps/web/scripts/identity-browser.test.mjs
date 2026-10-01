@@ -2,13 +2,15 @@ import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { createServer } from 'vite'
 import { fileURLToPath } from 'node:url'
-let server, client, organizationApplication
+let server, client, organizationApplication, patientEnrollment, routePreload
 const calls = [], responses = []
 const originalFetch = globalThis.fetch
 before(async () => {
   server = await createServer({ configFile: false, resolve: { alias: { '@hid/api-client': fileURLToPath(new URL('../../../packages/api-client/src/index.ts', import.meta.url)) } }, server: { middlewareMode: true }, appType: 'custom' })
   client = await server.ssrLoadModule('/src/lib/identityClient.ts')
   organizationApplication = await server.ssrLoadModule('/src/lib/organizationApplicationApi.ts')
+  patientEnrollment = await server.ssrLoadModule('/src/lib/patientEnrollmentApi.ts')
+  routePreload = await server.ssrLoadModule('/src/lib/routePreload.tsx')
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), init })
     const response = responses.shift()
@@ -30,6 +32,45 @@ test('patient login uses canonical patient realm and host cookie session', async
   assert.equal(request.url, '/api/v1/auth/patient/login')
   assert.deepEqual(JSON.parse(request.init.body), { email: actor.email, password: 'synthetic-password-only', turnstileToken: 'synthetic-turnstile', turnstileAction: 'patient-login' })
   assert.equal(request.init.credentials, 'include'); assert.equal(request.init.cache, 'no-store')
+})
+test('patient enrollment sends only NIN and Turnstile for the identity step through the cookie-bound public route', async () => {
+  const key = '50000000-0000-4000-8000-000000000001'
+  responses.push(response({ stage: 'verify_contact', expiresAt: new Date(Date.now() + 60_000).toISOString() }, 202))
+  const progress = await patientEnrollment.patientEnrollmentApi.start(' 12345678901 ', 'synthetic-turnstile', key)
+  assert.equal(progress.stage, 'verify_contact')
+  const request = calls.at(-1)
+  assert.equal(request.url, '/api/v1/identity/patient-enrollments')
+  assert.equal(request.init.method, 'POST')
+  assert.equal(request.init.headers.get('Idempotency-Key'), key)
+  assert.deepEqual(JSON.parse(request.init.body), {
+    nin: '12345678901', turnstileAction: 'patient-enrollment', turnstileToken: 'synthetic-turnstile',
+  })
+  assert.equal(request.init.credentials, 'include')
+  assert.equal(request.init.cache, 'no-store')
+  assert.deepEqual(routePreload.getRoutePreloadKeys('/patient/enroll'), [])
+})
+test('patient enrollment requires one contact, verifies its code, and activates without a client-issued identity', async () => {
+  const requests = []
+  const api = patientEnrollment.createPatientEnrollmentApi(async (path, init = {}) => {
+    requests.push({ path, init })
+    if (path.endsWith('/contact')) return { challengeId: '40000000-0000-4000-8000-000000000001', expiresInSeconds: 300, resendAfterSeconds: 60 }
+    if (path.endsWith('/activate')) return { stage: 'active', hidCode: 'HID-ABCDEFGHJKLMNPQ' }
+    return { stage: 'set_password' }
+  })
+  const challenge = await api.contact('phone', '08012345678')
+  assert.equal(challenge.challengeId, '40000000-0000-4000-8000-000000000001')
+  assert.deepEqual(JSON.parse(requests.at(-1).init.body), { channel: 'phone', contact: '+2348012345678' })
+  await api.verifyContact(challenge.challengeId, '123456')
+  assert.deepEqual(JSON.parse(requests.at(-1).init.body), { challengeId: challenge.challengeId, code: '123456' })
+  const activated = await api.activate('synthetic-passphrase')
+  assert.deepEqual(activated, { stage: 'active', hidCode: 'HID-ABCDEFGHJKLMNPQ' })
+  assert.deepEqual(JSON.parse(requests.at(-1).init.body), { password: 'synthetic-passphrase' })
+  const count = requests.length
+  assert.throws(() => api.start('123', 'token', '50000000-0000-4000-8000-000000000001'), /11-digit NIN/)
+  assert.throws(() => api.contact('email', 'invalid'), /valid email/)
+  assert.throws(() => api.verifyContact(challenge.challengeId, '12345'), /six-digit/)
+  assert.throws(() => api.activate('short'), /12–256/)
+  assert.equal(requests.length, count)
 })
 test('Google credentials use the server nonce cookie contract and never forward client-decoded identity data', async () => {
   const nonce = 'n'.repeat(43)
@@ -87,7 +128,6 @@ test('provider application sends only the required data to the public route and 
   assert.equal(request.init.method, 'POST')
   assert.deepEqual(JSON.parse(request.init.body), {
     productCode: 'laboratory',
-    organizationName: 'Example General Hospital',
     organizationType: 'hospital',
     cacRegistrationNumber: 'RC123456',
     administratorName: 'Test Administrator',
