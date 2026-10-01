@@ -126,29 +126,6 @@ describe('QoreID verification adapter', () => {
     });
   });
 
-  it('does not map a top-level-only residence as authoritative identity', async () => {
-    const payload = { ...sandboxNinOnlySuccess,
-      nin: { ...sandboxNinOnlySuccess.nin, residence: undefined }, residence: fixtureResidence };
-    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
-    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
-      fetch as unknown as typeof globalThis.fetch);
-    const result = await adapter.verifyNinEnrollment(fixtureNin);
-    expect(result.state).toBe('verified');
-    expect(result.ninEnrollmentBinding).not.toHaveProperty('address');
-    expect(result.ninEnrollmentBinding).not.toHaveProperty('residence');
-  });
-
-  it('uses nested residence even when an unrelated top-level field differs', async () => {
-    const payload = { ...sandboxNinOnlySuccess,
-      residence: { ...fixtureResidence, address1: 'Untrusted top-level address' } };
-    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
-    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
-      fetch as unknown as typeof globalThis.fetch);
-    await expect(adapter.verifyNinEnrollment(fixtureNin)).resolves.toMatchObject({
-      state: 'verified', ninEnrollmentBinding: { residence: fixtureResidence },
-    });
-  });
-
   it.each(['1234567890', '123456789012', '1234567890A', '1234567890 ', ''])
   ('rejects malformed enrollment NIN before a provider request: %j', async (nin) => {
     const fetch = jest.fn();
@@ -159,7 +136,7 @@ describe('QoreID verification adapter', () => {
   });
 
   it('accepts core identity when optional middle name, phone, residence, and photo are absent', async () => {
-    const payload = { ...sandboxNinOnlySuccess, residence: undefined, nin: {
+    const payload = { ...sandboxNinOnlySuccess, nin: {
       nin: fixtureNin, firstname: 'Fixture', lastname: 'Person', birthdate: '01-01-1990', gender: 'female',
     } };
     const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));

@@ -37,6 +37,7 @@ export interface QoreIdNinEnrollmentBinding extends QoreIdNinBinding {
   phoneNumber?: string;
   photo?: string;
   address?: string;
+  /** HID-normalized address components parsed from provider `nin.residence` only. */
   residence?: {
     address1: string;
     town?: string;
