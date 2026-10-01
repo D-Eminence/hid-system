@@ -137,8 +137,9 @@ export class QoreIdVerificationService {
         if (!binding) return { ...result, state: 'not_verified' };
         const matched = await this.database.withTransaction(context, async (client) => {
           const query = await client.query<{ matched: boolean }>(
-            'select identity.current_organization_cac_binding_matches($1,$2,$3) as matched',
-            [organizationContext, binding.registrationNumber, binding.companyName]);
+            'select identity.current_organization_cac_binding_matches($1,$2,$3,$4,$5,$6,$7) as matched',
+            [organizationContext, binding.registrationNumber, binding.companyName,
+              binding.entityType, binding.registrationDate, binding.address, binding.registryStatus]);
           return query.rows[0]?.matched === true;
         }, { readOnly: true });
         return matched ? result : { ...result, state: 'not_verified' };

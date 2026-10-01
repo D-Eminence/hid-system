@@ -171,7 +171,9 @@ describe('QoreID verification service', () => {
     ) => operation({ query: organizationQuery } as unknown as PoolClient));
     (provider.verifyCac as jest.Mock).mockResolvedValue({
       provider: 'qoreid', state: 'verified', providerReference: '71', respondedAt: new Date().toISOString(),
-      cacBinding: { registrationNumber: 'RC1234', companyName: 'Existing organization', registryStatus: 'Active' },
+      cacBinding: { registrationNumber: 'RC1234', companyName: 'Existing organization',
+        entityType: 'Private Limited', registrationDate: '2001-01-01',
+        address: '123 Registry Street, Lagos', registryStatus: 'Active' },
     });
     const facilityId = 'a0000000-0000-4000-8000-000000000006';
     const organizationRequest = {
@@ -197,6 +199,10 @@ describe('QoreID verification service', () => {
       actor: expect.objectContaining({ accountId: 'a0000000-0000-4000-8000-000000000007' }),
     }), 'existing_cac', 'a0000000-0000-4000-8000-000000000009');
     expect(organizationQuery.mock.calls[0]?.[0]).toContain('current_organization_cac_binding_matches');
+    expect(organizationQuery.mock.calls[0]?.[1]).toEqual([
+      'hospital', 'RC1234', 'Existing organization', 'Private Limited',
+      '2001-01-01', '123 Registry Street, Lagos', 'active',
+    ]);
     expect(organizationQuery.mock.calls[1]?.[0]).toContain('record_organization_cac_verification_evidence');
     expect(organizationQuery.mock.calls[1]?.[1]).toEqual(['hospital', 'verified', '71', null]);
     expect(JSON.stringify(organizationQuery.mock.calls)).not.toContain('a0000000-0000-4000-8000-000000000009');

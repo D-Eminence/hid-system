@@ -823,11 +823,22 @@ grant select on platform.integration_providers, platform.integration_provider_ca
 
 -- Public organization intake and platform review use narrow commands. The
 -- Identity runtime cannot directly mutate canonical organizations or roles.
-grant execute on function identity.submit_organization_application(text,text,text,text,text,text),
+grant execute on function identity.submit_organization_application(text,text,text,text,text),
   identity.admin_list_organization_applications(text),
   identity.admin_get_organization_application(uuid),
-  identity.admin_record_organization_cac_result(uuid,bigint,text,text,text,text,text),
-  identity.current_organization_cac_binding_matches(text,text,text),
+  identity.admin_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text,text),
+  identity.current_organization_cac_binding_matches(text,text,text,text,text,text,text),
   identity.admin_approve_organization_application(uuid,bigint,uuid,uuid,text),
   identity.admin_reject_organization_application(uuid,bigint,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+
+-- Public patient enrollment persists only encrypted pending evidence. Its
+-- activation command performs the canonical account/patient writes atomically.
+grant select, insert, update, delete on identity.public_patient_enrollments,
+  identity.public_patient_enrollment_otps,
+  identity.public_patient_enrollment_rates to hid_identity_runtime, hid_schema_test_runtime;
+grant select on identity.patient_authoritative_profiles to hid_schema_test_runtime;
+grant execute on function identity.public_patient_nin_already_bound(char),
+  identity.prune_expired_public_patient_enrollments(),
+  identity.activate_public_patient_enrollment(uuid,char,text,text,text,text)
   to hid_identity_runtime, hid_schema_test_runtime;

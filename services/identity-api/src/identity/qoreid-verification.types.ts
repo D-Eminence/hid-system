@@ -29,9 +29,31 @@ export interface QoreIdNinBinding {
   dateOfBirth: string;
 }
 
+/** Server-only registry identity for a new, still-pending patient enrollment. */
+export interface QoreIdNinEnrollmentBinding extends QoreIdNinBinding {
+  nin: string;
+  gender: 'female' | 'male' | 'intersex' | 'other' | 'unknown';
+  phoneNumber: string;
+  photo: string;
+  address: string;
+}
+
+/** HID-normalized holder proof. A reviewed provider-contract mapper must derive
+ * every field from the authenticated provider response, never browser input. */
+export interface QoreIdNinHolderAssertion {
+  status: 'verified';
+  method: 'provider_possession' | 'provider_consent';
+  nin: string;
+  transactionReference: string;
+  verifiedAt: string;
+}
+
 export interface QoreIdCacBinding {
   registrationNumber: string;
   companyName: string;
+  entityType: string;
+  registrationDate: string;
+  address: string;
   registryStatus: string;
 }
 
@@ -45,6 +67,7 @@ export interface QoreIdVerificationResult {
   // Registry fields are normalized and server-only. They must not be copied
   // into the public verification response or audit details.
   ninBinding?: QoreIdNinBinding;
+  ninEnrollmentBinding?: QoreIdNinEnrollmentBinding;
   cacBinding?: QoreIdCacBinding;
 }
 

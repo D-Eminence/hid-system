@@ -83,6 +83,26 @@ describe('TurnstileService', () => {
     })).rejects.toMatchObject({ code: 'TURNSTILE_CONTEXT_MISMATCH' });
   });
 
+  it('accepts patient enrollment only on the public website for the active deployment', async () => {
+    result({ success: true, hostname: 'www.healthidentitydirectory.com', action: 'patient-enrollment' });
+    await expect(new TurnstileService().verify({
+      token: 'enrollment-token', action: 'patient-enrollment',
+      origin: 'https://www.healthidentitydirectory.com', remoteIp: '203.0.113.4',
+    })).resolves.toBeUndefined();
+    await expect(new TurnstileService().verify({
+      token: 'enrollment-token', action: 'patient-enrollment',
+      origin: 'https://admin.healthidentitydirectory.com', remoteIp: '203.0.113.4',
+    })).rejects.toMatchObject({ code: 'TURNSTILE_CONTEXT_MISMATCH' });
+
+    process.env.HID_DEPLOYMENT_ENV = 'staging';
+    resetEnvironmentForTests();
+    result({ success: true, hostname: 'staging.healthidentitydirectory.com', action: 'patient-enrollment' });
+    await expect(new TurnstileService().verify({
+      token: 'staging-enrollment-token', action: 'patient-enrollment',
+      origin: 'https://staging.healthidentitydirectory.com', remoteIp: '203.0.113.4',
+    })).resolves.toBeUndefined();
+  });
+
   it('accepts the preserved OCR login action only on the Migrate hostname', async () => {
     result({ success: true, hostname: 'migrate.healthidentitydirectory.com', action: 'ocr-login' });
     await expect(new TurnstileService().verifyLogin({

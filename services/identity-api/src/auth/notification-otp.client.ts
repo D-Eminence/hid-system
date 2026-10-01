@@ -16,12 +16,14 @@ export class NotificationOtpClient {
     challengeId: string;
     recipient: string;
     code: string;
-    purpose: RecoveryOtpPurpose;
+    purpose: RecoveryOtpPurpose | 'SIGNUP_VERIFY';
+    channel?: 'email' | 'sms';
     correlationId: string;
   }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string }> {
     // A missing runtime policy must not disclose account existence: OTP start
     // keeps its generic response, records a failed delivery, and sends nothing.
-    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    const channel = input.channel ?? 'email';
+    const plan = await this.integrations.deliveryPlan(channel).catch(() => null);
     if (!plan) return { outcome: 'definitive_failure' };
     let response: Response;
     try {
@@ -35,7 +37,7 @@ export class NotificationOtpClient {
           ...await this.credentials(),
         },
         body: JSON.stringify({
-          channel: 'email', recipient: input.recipient, code: input.code, purpose: input.purpose,
+          channel, recipient: input.recipient, code: input.code, purpose: input.purpose,
           plan,
         }),
         signal: AbortSignal.timeout(5_000),

@@ -9,9 +9,6 @@ export class SubmitOrganizationApplicationDto {
   @IsIn(products)
   productCode!: typeof products[number];
 
-  @Transform(trim) @IsString() @MinLength(2) @MaxLength(200)
-  organizationName!: string;
-
   @IsIn(['clinic', 'hospital', 'laboratory', 'pharmacy', 'other'])
   organizationType!: 'clinic' | 'hospital' | 'laboratory' | 'pharmacy' | 'other';
 

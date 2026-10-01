@@ -75,6 +75,9 @@ const environmentSchema = z.object({
   // QoreID is a separate, server-only verification integration. It must not
   // change the governed NIN-registration provider mode above.
   QOREID_ENABLED: booleanString,
+  // The public NIN documentation still requires name claims. This separate
+  // gate must remain false until QoreID confirms the NIN-only contract.
+  QOREID_NIN_ONLY_ENROLLMENT_ENABLED: booleanString,
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,
@@ -145,6 +148,10 @@ const environmentSchema = z.object({
       || qoreIdUrl.pathname !== '/' || qoreIdUrl.search || qoreIdUrl.hash) {
       context.addIssue({ code: 'custom', path: ['QOREID_BASE_URL'], message: 'Enabled QoreID verification must use the approved QoreID API origin' });
     }
+  }
+  if (environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED && !environment.QOREID_ENABLED) {
+    context.addIssue({ code: 'custom', path: ['QOREID_NIN_ONLY_ENROLLMENT_ENABLED'],
+      message: 'NIN-only enrollment requires enabled QoreID verification' });
   }
   if (environment.NIN_LOOKUP_HMAC_KEY_B64 && !isBase64Key(environment.NIN_LOOKUP_HMAC_KEY_B64, 32)) {
     context.addIssue({ code: 'custom', path: ['NIN_LOOKUP_HMAC_KEY_B64'], message: 'The NIN lookup key must be exactly 32 base64-encoded bytes' });

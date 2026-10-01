@@ -1,184 +1,37 @@
 # QoreID verification contract
 
-**Status: implemented in the Identity API; disabled by default.** No QoreID
-credential, provider request, AWS deployment, staging activation, or production
-activation is performed by this change.
+**PR #5 state:** implemented with deterministic fixtures; provider calls remain disabled by default. QoreID credentials and staging/production entitlements are absent. No live QoreID verification, deployment, or database migration has been performed.
 
-QoreID is an external evidence provider, not a HID identity authority. The
-integration is deliberately separate from the legacy governed NIN-registration
-flow (`NIN_PROVIDER_MODE`), which remains deferred in staging and must not use
-this adapter.
+QoreID supplies external identity evidence. HID owns the account, contact verification, password, patient identity, Health ID, organization approval, and administrator setup.
 
-## HID routes and authority
+## Public patient enrollment
 
-| HID route | Actor and authority | Input | Existing record selected by HID | Effect |
-| --- | --- | --- | --- | --- |
-| `POST /api/v1/identity/me/verification/nin` | Current patient session only | `{ "nin": "<11-digit-NIN>" }` | The patient bound to the verified session | Records verification evidence only. It never creates, merges, links, enrolls, or relinks a patient. |
-| `POST /api/v1/identity/organizations/verification/cac/hospital` | Workforce actor with `organization.manage` at the active facility | `{ "regNumber": "RC1234" }` | The active facility's existing organization | Records CAC evidence only. `hospital` covers hospital/EHR use. |
-| `POST /api/v1/identity/organizations/verification/cac/laboratory` | Same | `{ "regNumber": "BN1234" }` | Same | Records CAC evidence only. |
-| `POST /api/v1/identity/organizations/verification/cac/pharmacy` | Same | `{ "regNumber": "IT1234" }` | Same | Records CAC evidence only. |
+`Get your Health ID` opens `/patient/enroll`. The browser submits only an 11 digit NIN and a Turnstile token to `POST /api/v1/identity/patient-enrollments`; it cannot submit names, birth date, gender, address, or a QoreID phone value. Identity validates the NIN and calls a separate NIN-only adapter operation. A verified, attributable response must contain the same NIN, first and last names, a valid birth date, gender, phone, photo, address, and a safe provider transaction reference. It must also include a fresh provider-backed holder possession or consent assertion bound to that NIN and transaction. A registry demographic lookup alone cannot authorize creation of a Health ID, because someone else may know the NIN. All eight registry fields are retained as authoritative encrypted evidence. A failed, mismatched, incomplete, or malformed response stops enrollment.
 
-The patient route accepts exactly 11 digits after whitespace/hyphen removal.
-The CAC route accepts normalized `RC`, `BN`, or `IT` registration numbers. The
-global request validator rejects unexpected fields; no caller can select a
-patient ID, organization ID, or facility by request body.
+**Provider request and holder-proof contracts still need confirmation.** [QoreID's published NIN-with-NIN documentation](https://docs.qoreid.com/docs/nin-with-nin) requires first and last name in the request. It does not establish a NIN-only request entitlement or a holder assertion. The confirmed response fields in this project do not settle either contract. `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=false` is therefore a separate default-off gate, including when general `QOREID_ENABLED=true`. Even setting it to `true` does not activate enrollment: the production adapter has no holder-assertion mapper and fails before an outbound request. Fixture tests inject a synthetic mapper and send the NIN in the URL with no demographic body; that fixture shape is not claimed to be QoreID's live response. Before activation, confirm the actual provider endpoint, method, entitlement, response shape, transaction attribution, holder-proof/consent mechanism, and terms, then implement and test the production mapper against that contract. Never fill the published endpoint's required name fields with applicant input.
 
-Patient verification requires no workforce facility header. Organization
-verification requires the ordinary active-facility security boundary and a
-`healthcare-operations` purpose; the database command independently rechecks
-the exact active membership, permission, facility, and organization.
+On success, migration `0051_public_patient_enrollment.sql` stores a single pending enrollment keyed by the same NIN lookup HMAC used by governed NIN bindings. It stores NIN and the complete normalized registry profile encrypted at rest. It does **not** create an account, patient, or HIDCode. Existing active NIN bindings, duplicate pending NINs, concurrent starts, and replayed idempotency keys are rejected or resumed without a second HID.
 
-## Server-only QoreID adapter
+The user then chooses exactly one HID account contact: phone **or** email. This contact is independent of QoreID's phone evidence. A purpose- and enrollment-bound six digit OTP is sent through the existing Notification API, with expiry, attempt limit, cooldown, rate limits, single use, and an audit trail. Only after that OTP succeeds can the user set a password. A single database transaction then creates the active account, canonical patient, NIN binding, authoritative profile, assurance state, HIDCode, and semantic audit event. The patient can sign in with email or the issued HIDCode; normal sign-in never repeats NIN verification. Recovery sends a code to the verified HID account contact, including SMS for a phone-only account.
 
-`QoreIdVerificationAdapter` is the single server-side component that knows the
-provider URLs and payloads. Browsers receive only HID-normalized results and
-never receive OAuth credentials or access tokens.
+The enrollment cookie is HttpOnly, Secure in deployed environments, SameSite Strict, and scoped to the enrollment route. Mutations require an allowed Origin; starting also requires server-side Turnstile validation. The browser stores only a retry UUID across refreshes, never a NIN, provider payload, OTP, or secret. Pending state can be resumed through `GET /current`. Identity's request audit records success/failure without registry fields or codes.
 
-| Step | Exact request contract |
-| --- | --- |
-| OAuth token | `POST https://api.qoreid.com/token`, JSON body `{ "clientId": "…", "secret": "…" }`; the documented response fields are `accessToken`, `expiresIn` (for example `"7200 secs"`), and `tokenType` (`"Bearer"`). |
-| NIN | `POST https://api.qoreid.com/v1/ng/identities/nin/{idNumber}` with the 11-digit NIN in the path, an OAuth Bearer token, and JSON `firstname`, `lastname`, and `dob` taken from the session-bound HID patient profile. QoreID documents first and last name as required and DOB as optional; HID requires DOB to bind the result to its existing patient. |
-| CAC Basic V2 | `POST https://api.qoreid.com/v2/ng/identities/cac-basic`, JSON body exactly `{ "regNumber": "RC1234" }`, with the OAuth Bearer token. |
+## Existing-patient NIN evidence
 
-The NIN response sample contains `summary.nin_check.status`, per-field match
-flags, and a `nin` object with NIN, names, date of birth, phone, gender, photo,
-and address. QoreID's documented match states include `EXACT_MATCH`,
-`PARTIAL_MATCH`, `TRANSPOSED_MATCH`, and `NO_MATCH`; a transaction with
-`status.status = "verified"` can still report a partial name match. HID therefore
-accepts NIN verification only when the transaction is complete and verified,
-the summary reports `EXACT_MATCH` with both name flags true and no explicit DOB mismatch, returned NIN,
-names, and birth date match the submitted NIN and canonical patient profile,
-and the submitted NIN's keyed lookup HMAC matches that session-bound patient's
-prior verified, unrevoked NIN identifier. A demographic match alone cannot
-attach verified evidence to another patient. The exact NIN binding is checked
-before the provider call and again by the evidence database command.
-The provider birth date sample uses `DD-MM-YYYY`; HID converts and validates it
-as a real ISO date. A missing or malformed authoritative field fails closed.
+`POST /api/v1/identity/me/verification/nin` remains a separate governed route for a signed-in patient with an existing verified NIN binding. It uses canonical patient names and birth date for QoreID's documented name-matching request, and records evidence only. It cannot create or relink a patient. Migration `0050` removed the earlier unbound evidence command.
 
-CAC Basic V2 documents `summary.cac_check` and a `cac` object containing
-`rcNumber`, `companyName`, and registry `status`. The adapter retains only those
-bounded binding fields in server memory alongside the normalized state and an
-optional safe numeric transaction ID. A verified transaction ID identifies the
-verification request, not a person or legal entity. The adapter never logs,
-returns to the browser, or persists a raw QoreID payload. A completed
-non-verified result becomes `not_verified`; any other syntactically valid state
-becomes `incomplete`.
+## Organization application and CAC
 
-QoreID's published CAC sample sends an `RC`-prefixed number but shows bare
-digits in `cac.rcNumber`. HID cannot assume the prefix semantics for RC, BN,
-and IT from this sample. Organization onboarding requires an exact binding to
-the submitted registration number and an active registry status; an ambiguous
-bare-number result stays unverified until the provider confirms a safe
-normalization rule for all supported registration types.
-CAC registry identity also does not establish that the person who supplied an
-administrator email can act for the company. A platform reviewer must confirm
-that authority through an approved separate process before approving a new
-organization. Existing-organization reuse requires an active administrator
-account at the exact facility and matching verified legal name.
+`POST /api/v1/identity/organization-applications` accepts product, organization type, an `RC`/`BN`/`IT` registration identifier, and administrator contact. It does not accept an applicant-entered legal company name. An admin with the exact review permission and expected row version invokes `POST /api/v1/admin/organization-applications/{id}/verify-cac`. The QoreID CAC Basic V2 adapter sends `{ "regNumber": "RC1234" }` to [the documented endpoint](https://docs.qoreid.com/docs/copy-of-cac-basic).
 
-Malformed payloads, OAuth failure, network failure, timeout, and unavailable
-provider responses become static HID Problem Details codes. Provider response
-bodies, token values, identifiers, and diagnostic strings are never exposed.
-Automatic retries are deliberately disabled because the provider POST contract
-does not publish an idempotency mechanism.
+A verified response must have an attributable transaction, exact submitted registration identifier, company name, entity type, valid registration date, address, and active registry status. These fields become the only legal-entity identity source. Migration `0052_authoritative_cac_identity.sql` persists them and prevents approval of status-only or incomplete historical evidence. Migration `0054_complete_existing_cac_evidence_binding.sql` also requires the existing-organization evidence route to match all six registry fields against the stored binding; incomplete legacy bindings fail closed. A unique registry identifier binding and locked governance command prevent a second organization; replayed approval returns the existing result. QoreID verification alone leaves the application awaiting platform review. Reviewer approval, product enrollment, and first administrator account setup remain separate actions. The administrator's name and email are contact/authentication fields, not registry identity.
 
-Migration `0049_qoreid_request_quotas.sql` limits new NIN and CAC attempts
-across Identity API instances before they reach QoreID. Patient requests are
-limited by account; existing organization and application checks are limited
-by both administrator account and target. An exhausted quota returns 429
-without a provider call or a misleading verification result. Connection tests
-also have an account quota and a reserved idempotency key. Expired counters
-are pruned after 48 hours and contain no submitted identifier or payload.
+The published CAC example shows a prefixed input and an unprefixed `rcNumber` output. HID does not infer that mapping for `RC`, `BN`, or `IT`. Ambiguous returned numbers fail the exact binding until QoreID confirms the normalization rule.
 
-When QoreID is enabled in staging, the Identity task also receives the
-existing `ninLookupHmacKeyB64` field from `IdentitySensitiveSecretArn`. It
-does not receive the NIN encryption key in that profile. A missing lookup key
-makes existing-patient NIN evidence unavailable; it does not relax the binding
-rule or affect CAC verification. Migration `0050` removes the old
-five-argument evidence command that could record an unbound result.
+## Availability and secrets
 
-These existing-patient and organization-evidence routes do not provide public
-patient self signup. The published NIN response can supply registry demographics
-but does not, by itself, prove that the browser user controls the NIN identity.
-The current HID account setup uses an email chosen by the applicant, so public
-Health ID issuance remains deferred until an approved possession or consent
-signal, an authoritative stable NIN binding for duplicate protection, and the
-corresponding server-side enrollment flow are implemented and tested. QoreID
-documents a user-generated vNIN token, but its sample does not establish a
-stable raw NIN or other HID-approved duplicate key in the response; entitlement
-and binding semantics need provider confirmation. Status-only verification must
-never create a patient or Health ID.
+`QOREID_ENABLED=false` and `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=false` are the defaults. QoreID OAuth credentials remain server-only ECS Secrets Manager fields in the Identity task. When QoreID is paused in Admin Settings → Integrations, new NIN enrollment and CAC verification fail closed; existing verified identities and Health IDs remain valid. No unapproved provider substitution occurs.
 
-## Minimal evidence and audit
+For QoreID-enabled staging, the Identity task receives both the NIN lookup HMAC key and NIN encryption key from the existing Identity sensitive secret. The NIN-only gate remains off until the separate request contract is confirmed. No raw provider payload, NIN, CAC number, address, photo, OAuth token, or OTP is placed in audit details or browser responses. Existing provider connection tests only check OAuth; they do not prove NIN-only or CAC entitlement.
 
-Migration `0034_qoreid_verification_evidence.sql` adds the append-only
-`identity.verification_evidence` table and two narrowly scoped
-security-definer commands. They record only:
-
-- subject type and the already-existing patient or organization reference;
-- verification type (`nin` or `cac`), provider (`qoreid`), normalized result,
-  timestamp, correlation ID, source system, and optional provider transaction
-  reference;
-- active actor/membership/facility attribution for organization checks; and
-- a bounded failure category when applicable.
-
-Each command appends the semantic audit event in the same transaction. Neither
-the table nor audit detail contains a raw NIN, CAC number, raw provider payload,
-address, date of birth, photograph, OAuth credential, or access token.
-
-## Configuration and AWS secret boundary
-
-Identity API configuration is server-only:
-
-```text
-QOREID_ENABLED=false
-QOREID_BASE_URL=https://api.qoreid.com
-QOREID_TIMEOUT_MS=5000
-QOREID_MAX_RETRIES=0
-QOREID_CLIENT_ID=<injected only when enabled>
-QOREID_CLIENT_SECRET=<injected only when enabled>
-```
-
-When `QOREID_ENABLED=false`, no request is made and the request fails closed
-with `QOREID_DISABLED` after recording only disabled evidence. When enabled,
-startup requires both credential fields and the approved `https://api.qoreid.com`
-origin.
-
-The CDK default leaves the feature disabled and emits no QoreID credential
-reference. An explicitly reviewed synth with `HID_QOREID_ENABLED=true` adds the
-`QoreIdCredentialsSecretArn` parameter and injects only the `clientId` and
-`secret` fields from that AWS Secrets Manager JSON secret into the Identity API
-task. No browser task, EHR, Lab, Pharmacy, OCR, worker, or migration task gets
-those fields. Do not place credentials in source, `.env.example`, `VITE_*`,
-`NEXT_PUBLIC_*`, client bundles, logs, issue trackers, or shell history.
-
-## Staging and production activation checklist
-
-1. Obtain an approved QoreID account, NIN and CAC Basic V2 entitlements, test contract, and the
-   provider's current consent/privacy review; do not treat this document as
-   authorization to make a provider request.
-2. Create a distinct environment-scoped AWS Secrets Manager JSON secret with
-   `clientId` and `secret`; grant only the Identity task execution role read
-   access through the ECS secret reference. For enabled staging patient NIN
-   evidence, provision `ninLookupHmacKeyB64` in the separate Identity sensitive
-   secret using the same key material as governed NIN identifiers. A new key
-   cannot match existing bindings.
-3. Keep `NIN_PROVIDER_MODE=deferred` in staging. This QoreID self-verification
-   route is independent of legacy registration and does not require the NIN
-   encryption key, but existing-patient evidence requires the lookup HMAC key.
-4. Explicitly set `HID_QOREID_ENABLED=true` for the approved staging synth,
-   supply `QoreIdCredentialsSecretArn`, and deploy only through the normal
-   reviewed release procedure.
-5. Run synthetic NIN and CAC success/non-match/incomplete/timeout/401/5xx
-   checks; verify no sensitive request/response data reaches logs, audit
-   details, metrics, or browser traffic.
-6. Obtain a separate production approval, privacy/security review, incident
-   handling plan, and rollout/rollback decision before enabling any production
-   task. This implementation did not make that decision or perform that
-   deployment.
-
-Official provider references: [Get client token](https://docs.qoreid.com/reference/get-client-token),
-[NIN (With NIN)](https://docs.qoreid.com/docs/nin-with-nin),
-[Virtual NIN](https://docs.qoreid.com/docs/vnin),
-[verification result semantics](https://docs.qoreid.com/docs/webhook-payload-structure),
-and [CAC (Basic) V2](https://docs.qoreid.com/docs/copy-of-cac-basic).
+Automated tests use fixture responses and a disposable PostgreSQL database. Live provider tests remain pending valid credentials, approved entitlement, confirmed NIN-only request, provider holder-proof contract, CAC identifier mapping, and a separately reviewed staging rollout. The production rollout requires its own approval.

@@ -16,7 +16,7 @@ const localApplicationHmacKey = randomBytes(32);
 interface ApplicationRow extends QueryResultRow {
   application_id: string;
   product_code: string;
-  organization_name: string;
+  organization_name: string | null;
   organization_type: string;
   cac_hint: string;
   administrator_name: string;
@@ -24,6 +24,10 @@ interface ApplicationRow extends QueryResultRow {
   application_status: string;
   verification_result: string | null;
   verified_organization_name: string | null;
+  verified_entity_type: string | null;
+  verified_registration_date: string | null;
+  verified_address: string | null;
+  verified_registry_status: string | null;
   row_version: string;
   created_at: Date;
   verified_at: Date | null;
@@ -47,8 +51,8 @@ export class OrganizationApplicationsService {
     try {
       await this.database.withSystemTransaction(request.correlationId, async (client) => {
         await client.query('select platform.consume_public_application_quota($1)', [networkDigest]);
-        await client.query('select identity.submit_organization_application($1,$2,$3,$4,$5,$6)', [
-          input.productCode, input.organizationName, input.organizationType, input.cacRegistrationNumber,
+        await client.query('select identity.submit_organization_application($1,$2,$3,$4,$5)', [
+          input.productCode, input.organizationType, input.cacRegistrationNumber,
           input.administratorName, input.administratorEmail,
         ]);
       });
@@ -71,6 +75,10 @@ export class OrganizationApplicationsService {
         administratorName: row.administrator_name, administratorEmail: row.administrator_email,
         status: row.application_status, verificationResult: row.verification_result,
         verifiedOrganizationName: row.verified_organization_name,
+        verifiedEntityType: row.verified_entity_type,
+        verifiedRegistrationDate: row.verified_registration_date,
+        verifiedAddress: row.verified_address,
+        verifiedRegistryStatus: row.verified_registry_status,
         version: Number(row.row_version), createdAt: row.created_at.toISOString(),
         verifiedAt: row.verified_at?.toISOString() ?? null,
         reviewedAt: row.reviewed_at?.toISOString() ?? null,
@@ -104,6 +112,10 @@ export class OrganizationApplicationsService {
     let reference: string | null = null;
     let verifiedRegistrationNumber: string | null = null;
     let verifiedOrganizationName: string | null = null;
+    let verifiedEntityType: string | null = null;
+    let verifiedRegistrationDate: string | null = null;
+    let verifiedAddress: string | null = null;
+    let verifiedRegistryStatus: string | null = null;
     let providerError: unknown;
     try {
       if (!getEnvironment().QOREID_ENABLED) {
@@ -119,6 +131,10 @@ export class OrganizationApplicationsService {
           outcome = 'verified';
           verifiedRegistrationNumber = binding.registrationNumber;
           verifiedOrganizationName = binding.companyName;
+          verifiedEntityType = binding.entityType;
+          verifiedRegistrationDate = binding.registrationDate;
+          verifiedAddress = binding.address;
+          verifiedRegistryStatus = binding.registryStatus;
         } else {
           // A successful transaction status is not legal-entity identity proof.
           outcome = 'not_verified';
@@ -145,9 +161,10 @@ export class OrganizationApplicationsService {
     try {
       const recorded = await this.database.withTransaction(context, (client) =>
         client.query<{ application_status: string; row_version: string }>(
-          'select * from identity.admin_record_organization_cac_result($1,$2,$3,$4,$5,$6,$7)',
+          'select * from identity.admin_record_organization_cac_result($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
           [applicationId, expectedVersion, outcome, reference, failure,
-            verifiedRegistrationNumber, verifiedOrganizationName]),
+            verifiedRegistrationNumber, verifiedOrganizationName, verifiedEntityType,
+            verifiedRegistrationDate, verifiedAddress, verifiedRegistryStatus]),
       );
       const row = recorded.rows[0];
       if (!row) throw new DomainProblem(503, 'VERIFICATION_EVIDENCE_UNAVAILABLE', 'Verification evidence is unavailable');
@@ -240,21 +257,33 @@ export class OrganizationApplicationsService {
   }
 }
 
-/** Accept only a provider-confirmed registration number and active legal name. */
+/** Accept only the complete provider-confirmed active legal-entity identity. */
 export function verifiedCacBinding(
   submittedRegistrationNumber: string,
   result: QoreIdVerificationResult,
-): { registrationNumber: string; companyName: string } | null {
-  if (result.state !== 'verified' || !result.cacBinding) return null;
-  const { registrationNumber, companyName, registryStatus } = result.cacBinding;
+): { registrationNumber: string; companyName: string; entityType: string;
+  registrationDate: string; address: string; registryStatus: 'active' } | null {
+  if (result.state !== 'verified' || !result.cacBinding || !result.providerReference) return null;
+  const { registrationNumber, companyName, entityType, registrationDate, address, registryStatus } = result.cacBinding;
   if (typeof registrationNumber !== 'string' || typeof companyName !== 'string'
-    || typeof registryStatus !== 'string') return null;
-  if (/[\x00-\x1f\x7f]/.test(companyName)) return null;
+    || typeof entityType !== 'string' || typeof registrationDate !== 'string'
+    || typeof address !== 'string' || typeof registryStatus !== 'string') return null;
+  if (/[\x00-\x1f\x7f]/.test(companyName + entityType + address)) return null;
   const normalizedNumber = registrationNumber.replace(/[\s-]+/g, '').toUpperCase();
   const legalName = companyName.replace(/\s+/g, ' ').trim();
+  const legalEntityType = entityType.replace(/\s+/g, ' ').trim();
+  const registeredAddress = address.replace(/\s+/g, ' ').trim();
+  const parsedRegistrationDate = /^\d{4}-\d{2}-\d{2}$/.test(registrationDate)
+    ? new Date(`${registrationDate}T00:00:00.000Z`) : null;
   if (!/^(?:RC|BN|IT)[0-9]{4,20}$/.test(normalizedNumber)
     || normalizedNumber !== submittedRegistrationNumber
     || legalName.length < 2 || legalName.length > 200
+    || legalEntityType.length < 2 || legalEntityType.length > 120
+    || registeredAddress.length < 5 || registeredAddress.length > 1000
+    || !parsedRegistrationDate || Number.isNaN(parsedRegistrationDate.getTime())
+    || parsedRegistrationDate.toISOString().slice(0, 10) !== registrationDate
+    || registrationDate > new Date().toISOString().slice(0, 10)
     || registryStatus.trim().toLowerCase() !== 'active') return null;
-  return { registrationNumber: normalizedNumber, companyName: legalName };
+  return { registrationNumber: normalizedNumber, companyName: legalName,
+    entityType: legalEntityType, registrationDate, address: registeredAddress, registryStatus: 'active' };
 }

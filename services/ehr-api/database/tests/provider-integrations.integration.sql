@@ -34,9 +34,13 @@ select set_config('app.actor_subject', 'staff:integration-admin', true);
 do $$
 declare changed record; replay record;
 begin
-  if (select count(*) from platform.admin_list_integration_providers()) <> 15
+  if (select count(*) from platform.admin_list_integration_providers()) <> 14
     or (select count(*) from platform.admin_list_integration_routes()) <> 3 then
     raise exception 'Integration inventory or routing catalog incomplete';
+  end if;
+  if exists (select 1 from platform.admin_list_integration_providers()
+      where provider = 'piersflow') then
+    raise exception 'Unwired PiersFlow is still represented in the provider catalog';
   end if;
   if (select enabled from platform.integration_runtime_provider('qoreid','patient_nin'))
     or (select enabled from platform.integration_runtime_provider('qoreid','provider_cac')) then

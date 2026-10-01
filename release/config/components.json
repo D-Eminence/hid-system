@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0050",
-    "count": 50,
+    "last": "0054",
+    "count": 54,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -297,6 +297,22 @@
       {
         "name": "0050_patient_nin_evidence_binding.sql",
         "sha256": "b7354dfe7e5918e309a40f0814bce76165200a088f922e3a1d561f7d5419d59f"
+      },
+      {
+        "name": "0051_public_patient_enrollment.sql",
+        "sha256": "24fef483e8bd5c9cddd91b4e3ad9b6e9436c8844d44cab9d25bcb21d9a6039ec"
+      },
+      {
+        "name": "0052_authoritative_cac_identity.sql",
+        "sha256": "7970e20da6bbf9984d08dd36b1f7beb60b618c19d2fc1c9c970ebea49953db88"
+      },
+      {
+        "name": "0053_remove_unwired_piersflow_catalog.sql",
+        "sha256": "57ae02a97839c581c35a6c78c27fabdc4873000e60dfb33e8c556a39a6b58331"
+      },
+      {
+        "name": "0054_complete_existing_cac_evidence_binding.sql",
+        "sha256": "3c06c35ad311835a825397c5b52269a059edd426f4edb6292007cf47041d444d"
       }
     ]
   },

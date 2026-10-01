@@ -31,7 +31,7 @@ export interface CredentialIdentity {
   actorKind?: 'staff' | 'patient';
   subject: string;
   accountId?: string;
-  email: string;
+  email?: string;
   displayName: string;
   facilities: FacilityAssignment[];
   authenticationMethod: ActorContext['authenticationMethod'];

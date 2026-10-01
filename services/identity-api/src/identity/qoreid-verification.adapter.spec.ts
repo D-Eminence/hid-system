@@ -19,7 +19,18 @@ const complete = {
 };
 const completeCac = {
   id: 71, status: { state: 'complete', status: 'verified' }, summary: { cac_check: 'verified' },
-  cac: { rcNumber: '1234', companyName: 'Example Clinic', status: 'Active', headOfficeAddress: 'sensitive-address' },
+  cac: { rcNumber: '1234', companyName: 'Example Clinic', companyType: 'Private Limited',
+    registrationDate: '07-Jul-95', status: 'Active', headOfficeAddress: '123 Example Street, Lagos' },
+};
+const holderProof = () => ({
+  status: 'verified', method: 'provider_possession', nin: '12345678901',
+  transactionReference: '48291', verifiedAt: new Date().toISOString(),
+});
+const enrollmentConfiguration = {
+  ...configuration,
+  ninOnlyEnrollmentEnabled: true,
+  // Synthetic fixture seam only. Production must map the approved provider contract.
+  holderAssertionExtractor: (payload: unknown) => (payload as { holderProof?: unknown }).holderProof,
 };
 
 function response(body: unknown, status = 200): Response {
@@ -64,11 +75,91 @@ describe('QoreID verification adapter', () => {
     const adapter = new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch);
 
     await expect(adapter.verifyCac('RC1234')).resolves.toMatchObject({ state: 'verified', providerReference: '71',
-      cacBinding: { registrationNumber: '1234', companyName: 'Example Clinic', registryStatus: 'Active' } });
+      cacBinding: { registrationNumber: '1234', companyName: 'Example Clinic', entityType: 'Private Limited',
+        registrationDate: '1995-07-07', address: '123 Example Street, Lagos', registryStatus: 'Active' } });
     expect(fetch.mock.calls[1]?.[0]).toBe('https://api.qoreid.com/v2/ng/identities/cac-basic');
     expect(fetch.mock.calls[1]?.[1]?.method).toBe('POST');
     expect(fetch.mock.calls[1]?.[1]?.body).toBe(JSON.stringify({ regNumber: 'RC1234' }));
     expect(JSON.parse(fetch.mock.calls[1]?.[1]?.body as string)).toEqual({ regNumber: 'RC1234' });
+  });
+
+  it('keeps the unconfirmed NIN-only contract disabled before any provider request', async () => {
+    const fetch = jest.fn();
+    const adapter = new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch);
+    await expect(adapter.verifyNinEnrollment('12345678901')).rejects.toMatchObject({
+      status: 503, code: 'QOREID_NIN_ONLY_CONTRACT_UNCONFIRMED',
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('requires a reviewed holder-proof mapper before any NIN-only provider request', async () => {
+    const fetch = jest.fn();
+    const adapter = new QoreIdVerificationAdapter({ ...configuration, ninOnlyEnrollmentEnabled: true },
+      fetch as unknown as typeof globalThis.fetch);
+    await expect(adapter.verifyNinEnrollment('12345678901')).rejects.toMatchObject({
+      status: 503, code: 'QOREID_HOLDER_ASSERTION_CONTRACT_UNCONFIRMED',
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('sends only NIN with an explicitly enabled contract and retains bounded registry identity', async () => {
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
+      ...complete, holderProof: holderProof(), nin: { ...complete.nin, gender: 'F', phone: '08000000000',
+        photo: 'ZmFrZQ==', address: '123 Example Street, Lagos' },
+    }));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+      fetch as unknown as typeof globalThis.fetch);
+    await expect(adapter.verifyNinEnrollment('12345678901')).resolves.toMatchObject({
+      state: 'verified', providerReference: '48291', ninEnrollmentBinding: {
+        nin: '12345678901', firstName: 'Bunch', lastName: 'Dillon', dateOfBirth: '1974-01-06',
+        gender: 'female', phoneNumber: '08000000000', photo: 'ZmFrZQ==',
+        address: '123 Example Street, Lagos',
+      },
+    });
+    expect(fetch.mock.calls[1]?.[0]).toBe('https://api.qoreid.com/v1/ng/identities/nin/12345678901');
+    expect(fetch.mock.calls[1]?.[1]?.body).toBeUndefined();
+  });
+
+  it('rejects a NIN-only response missing the transaction reference or authoritative fields', async () => {
+    const full = { ...complete, nin: { ...complete.nin, gender: 'F', phone: '08000000000',
+      photo: 'ZmFrZQ==', address: '123 Example Street, Lagos' } };
+    for (const payload of [
+      { ...full, id: undefined },
+      { ...full, nin: { ...full.nin, nin: '99999999999' } },
+      { ...full, nin: { ...full.nin, gender: undefined } },
+      { ...full, nin: { ...full.nin, phone: undefined } },
+      { ...full, nin: { ...full.nin, photo: undefined } },
+      { ...full, nin: { ...full.nin, address: undefined } },
+    ]) {
+      const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
+        ...payload, holderProof: holderProof(),
+      }));
+      const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+        fetch as unknown as typeof globalThis.fetch);
+      await expect(adapter.verifyNinEnrollment('12345678901')).rejects.toMatchObject({
+        code: 'QOREID_PROVIDER_RESPONSE_INVALID',
+      });
+    }
+  });
+
+  it.each([
+    undefined,
+    { ...holderProof(), status: 'pending' },
+    { ...holderProof(), method: 'registry_lookup' },
+    { ...holderProof(), nin: '99999999999' },
+    { ...holderProof(), transactionReference: '99999' },
+    { ...holderProof(), verifiedAt: new Date(Date.now() - 11 * 60_000).toISOString() },
+    { ...holderProof(), verifiedAt: new Date(Date.now() + 2 * 60_000).toISOString() },
+  ])('rejects NIN-only demographic lookup without fresh provider holder proof', async (proof) => {
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
+      ...complete, holderProof: proof,
+      nin: { ...complete.nin, gender: 'F' },
+    }));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+      fetch as unknown as typeof globalThis.fetch);
+    await expect(adapter.verifyNinEnrollment('12345678901')).rejects.toMatchObject({
+      code: 'QOREID_PROVIDER_RESPONSE_INVALID',
+    });
   });
 
   it.each([

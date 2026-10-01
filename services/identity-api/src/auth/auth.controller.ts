@@ -10,6 +10,7 @@ import { AuthService } from './auth.service';
 import { AuthSessionAuditService } from './auth-session-audit.service';
 import { GoogleLoginDto } from './dto/google-login.dto';
 import { LoginDto } from './dto/login.dto';
+import { PatientLoginDto } from './dto/patient-login.dto';
 import { SelectFacilityDto } from './dto/select-facility.dto';
 import { GoogleAuthenticationService } from './google-authentication.service';
 import type { LoginResult } from './auth.types';
@@ -52,7 +53,7 @@ export class AuthController {
   @Public()
   @HttpCode(200)
   async patientLogin(
-    @Body() input: LoginDto,
+    @Body() input: PatientLoginDto,
     @Req() request: HidRequest,
     @Res({ passthrough: true }) response: Response,
   ) {
@@ -118,7 +119,7 @@ export class AuthController {
     }
   }
 
-  private async performLogin(input: LoginDto, request: HidRequest, response: Response, kind: 'staff' | 'patient') {
+  private async performLogin(input: LoginDto | PatientLoginDto, request: HidRequest, response: Response, kind: 'staff' | 'patient') {
     this.assertAllowedOrigin(request);
     await this.turnstile.verifyLogin({
       token: input.turnstileToken,

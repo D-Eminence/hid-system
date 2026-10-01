@@ -68,6 +68,23 @@ five-argument patient evidence command. A verified result now requires the
 submitted NIN's keyed lookup HMAC to match an existing verified, unrevoked NIN
 identifier on the exact session-bound patient. The HMAC is not persisted in
 QoreID evidence or audit.
+Migration `0051_public_patient_enrollment.sql` creates a separate public NIN
+enrollment path. It keeps provider identity evidence encrypted in a pending,
+unique-NIN record; a single selected contact OTP must be consumed before a
+password-backed account, canonical patient, NIN binding, and HIDCode can be
+created atomically. Its rate counters and OTPs are scoped to the enrollment.
+Migration `0052_authoritative_cac_identity.sql` makes the registration
+identifier the public organization lookup key and requires complete QoreID
+registry name, entity type, date, address, and active status before review can
+approve a new legal-entity binding. Neither migration adds provider secrets.
+Migration `0053_remove_unwired_piersflow_catalog.sql` removes the disabled,
+non-operational PiersFlow placeholder from the provider catalog. It aborts if
+provider events or capability rows exist, preserving unexpected history for
+review rather than discarding it.
+Migration `0054_complete_existing_cac_evidence_binding.sql` requires the
+existing-organization CAC evidence route to match every authoritative registry
+field against its governed application and unique CAC binding. Historical
+name-only bindings cannot produce new verified evidence until reconciled.
 Migration `0013_durable_ocr_persistence.sql` adds the isolated `ocr` schema,
 facility-scoped idempotent jobs, immutable extraction/validation/lifecycle
 evidence, bounded retry state, atomic `SKIP LOCKED` worker claims, constrained

@@ -496,7 +496,7 @@ test('an explicit QoreID staging synth injects its distinct server-only secret i
   assert.deepEqual(identityContainer.Secrets.filter(item => item.Name.startsWith('QOREID_')).map(item => item.Name).sort(),
     ['QOREID_CLIENT_ID', 'QOREID_CLIENT_SECRET']);
   assert.ok(identityContainer.Secrets.some(item => item.Name === 'NIN_LOOKUP_HMAC_KEY_B64'));
-  assert.equal(identityContainer.Secrets.some(item => item.Name === 'NIN_ENCRYPTION_KEY_B64'), false);
+  assert.ok(identityContainer.Secrets.some(item => item.Name === 'NIN_ENCRYPTION_KEY_B64'));
   for (const task of tasks.filter(task => task !== identity)) {
     assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /QOREID_CLIENT_ID|QOREID_CLIENT_SECRET|NIN_LOOKUP_HMAC_KEY_B64/);
   }

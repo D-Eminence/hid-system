@@ -1,6 +1,7 @@
 import { Injectable, MethodNotAllowedException } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
 import type { LoginDto } from './dto/login.dto';
+import type { PatientLoginDto } from './dto/patient-login.dto';
 import { LocalAuthProvider } from './local-auth.provider';
 import { TokenService, type SessionEventMetadata } from './token.service';
 import type { LoginResult } from './auth.types';
@@ -14,11 +15,12 @@ export class AuthService {
     private readonly tokens: TokenService,
   ) {}
 
-  async login(input: LoginDto, event: SessionEventMetadata, actorKind: 'staff' | 'patient' = 'staff'): Promise<LoginResult> {
+  async login(input: LoginDto | PatientLoginDto, event: SessionEventMetadata, actorKind: 'staff' | 'patient' = 'staff'): Promise<LoginResult> {
     if (this.environment.AUTH_MODE === 'oidc') {
       throw new MethodNotAllowedException('Password login is disabled; use the configured OIDC authorization flow');
     }
-    const identity = await this.localProvider.authenticate(input.email, input.password);
+    const identity = await this.localProvider.authenticate(input.email, input.password, actorKind,
+      event.correlationId);
     return this.tokens.issue({ ...identity, actorKind }, {
       ...event,
       principalHmac: this.localProvider.principalHash(input.email),

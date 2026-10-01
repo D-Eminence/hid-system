@@ -4,6 +4,8 @@ import { DomainProblem } from '../common/problem';
 import {
   QOREID_PROVIDER,
   type QoreIdNinClaims,
+  type QoreIdNinEnrollmentBinding,
+  type QoreIdNinHolderAssertion,
   type QoreIdVerificationResult,
   type VerificationState,
 } from './qoreid-verification.types';
@@ -13,6 +15,11 @@ export interface QoreIdAdapterConfiguration {
   clientId?: string;
   clientSecret?: string;
   timeoutMs: number;
+  /** Requires a separately confirmed NIN-only provider entitlement/contract. */
+  ninOnlyEnrollmentEnabled?: boolean;
+  /** No production mapper exists until QoreID confirms a holder proof contract.
+   * This mapper must read only provider-authored fields from the same response. */
+  holderAssertionExtractor?: (payload: unknown) => unknown;
 }
 
 type FetchImplementation = typeof globalThis.fetch;
@@ -31,6 +38,7 @@ export function qoreIdAdapterConfigurationFromEnvironment(): QoreIdAdapterConfig
     clientId: environment.QOREID_CLIENT_ID,
     clientSecret: environment.QOREID_CLIENT_SECRET,
     timeoutMs: environment.QOREID_TIMEOUT_MS,
+    ninOnlyEnrollmentEnabled: environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED,
   };
 }
 
@@ -69,6 +77,58 @@ export class QoreIdVerificationAdapter {
       'verification',
     );
     return this.normalizedNinVerification(response, nin, claims);
+  }
+
+  /**
+   * Public enrollment deliberately sends no applicant demographics. The
+   * published QoreID NIN-with-NIN contract requires first and last name, so
+   * this transport stays disabled until its NIN-only variant is confirmed.
+   */
+  async verifyNinEnrollment(nin: string): Promise<QoreIdVerificationResult> {
+    if (!this.configuration.ninOnlyEnrollmentEnabled) {
+      throw new DomainProblem(503, 'QOREID_NIN_ONLY_CONTRACT_UNCONFIRMED',
+        'Patient identity enrollment is temporarily unavailable');
+    }
+    if (!/^\d{11}$/.test(nin)) {
+      throw new DomainProblem(400, 'NIN_INVALID', 'An 11-digit NIN is required');
+    }
+    const extractHolderAssertion = this.configuration.holderAssertionExtractor;
+    if (!extractHolderAssertion) {
+      throw new DomainProblem(503, 'QOREID_HOLDER_ASSERTION_CONTRACT_UNCONFIRMED',
+        'Patient identity enrollment is temporarily unavailable');
+    }
+    const accessToken = await this.accessToken();
+    const response = await this.requestJson(
+      `/v1/ng/identities/nin/${encodeURIComponent(nin)}`,
+      { method: 'POST', headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` } },
+      'verification',
+    );
+    const result = this.normalizedVerification(response);
+    if (result.state !== 'verified') return result;
+    if (!result.providerReference) throw this.invalidProviderResponse();
+    let holderAssertion: unknown;
+    try { holderAssertion = extractHolderAssertion(response); }
+    catch { throw this.invalidProviderResponse(); }
+    this.assertHolderAssertion(holderAssertion, nin, result.providerReference);
+    return { ...result, ninEnrollmentBinding: this.ninEnrollmentBinding(response, nin) };
+  }
+
+  private assertHolderAssertion(value: unknown, submittedNin: string,
+    transactionReference: string): asserts value is QoreIdNinHolderAssertion {
+    const assertion = this.record(value);
+    const verifiedAt = assertion?.verifiedAt;
+    const verifiedTime = typeof verifiedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(verifiedAt)
+      ? Date.parse(verifiedAt) : Number.NaN;
+    const now = Date.now();
+    if (assertion?.status !== 'verified'
+      || !['provider_possession', 'provider_consent'].includes(String(assertion.method))
+      || assertion.nin !== submittedNin
+      || assertion.transactionReference !== transactionReference
+      || !Number.isFinite(verifiedTime)
+      || verifiedTime < now - 10 * 60 * 1_000
+      || verifiedTime > now + 60 * 1_000) {
+      throw this.invalidProviderResponse();
+    }
   }
 
   async verifyCac(regNumber: string): Promise<QoreIdVerificationResult> {
@@ -230,9 +290,67 @@ export class QoreIdVerificationAdapter {
     const cac = this.record(record?.cac);
     const registrationNumber = this.safeRegistrationNumber(cac?.rcNumber);
     const companyName = this.safeName(cac?.companyName, 200);
+    const entityType = this.safeName(cac?.companyType, 120);
+    const registrationDate = this.registrationDate(cac?.registrationDate);
+    const address = this.safeName(cac?.headOfficeAddress, 1000)
+      ?? this.safeName(cac?.branchAddress, 1000);
     const registryStatus = this.safeName(cac?.status, 40);
-    if (!registrationNumber || !companyName || !registryStatus) throw this.invalidProviderResponse();
-    return { ...result, cacBinding: { registrationNumber, companyName, registryStatus } };
+    if (!registrationNumber || !companyName || !entityType || !registrationDate || !address
+      || !registryStatus) throw this.invalidProviderResponse();
+    return { ...result, cacBinding: { registrationNumber, companyName, entityType,
+      registrationDate, address, registryStatus } };
+  }
+
+  private ninEnrollmentBinding(payload: unknown, submittedNin: string): QoreIdNinEnrollmentBinding {
+    const record = this.record(payload);
+    const bio = this.record(record?.nin);
+    const nin = bio?.nin;
+    const firstName = this.safeName(bio?.firstname);
+    const lastName = this.safeName(bio?.lastname);
+    const dateOfBirth = this.dateOfBirth(bio?.birthdate);
+    const gender = this.gender(bio?.gender);
+    if (nin !== submittedNin || !firstName || !lastName || !dateOfBirth || !gender) {
+      throw this.invalidProviderResponse();
+    }
+    const phoneNumber = this.safeName(bio?.phone, 30);
+    const address = this.safeName(bio?.address, 1000);
+    const photo = typeof bio?.photo === 'string' && bio.photo.length <= 131_072
+      && /^[A-Za-z0-9+/]+={0,2}$/.test(bio.photo) ? bio.photo : undefined;
+    if (!phoneNumber || !address || !photo) throw this.invalidProviderResponse();
+    return { nin, firstName, lastName, dateOfBirth, gender, phoneNumber, address, photo };
+  }
+
+  private gender(value: unknown): QoreIdNinEnrollmentBinding['gender'] | undefined {
+    if (typeof value !== 'string') return undefined;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'm' || normalized === 'male') return 'male';
+    if (normalized === 'f' || normalized === 'female') return 'female';
+    if (normalized === 'intersex' || normalized === 'other' || normalized === 'unknown') return normalized;
+    return undefined;
+  }
+
+  private registrationDate(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return this.validDate(trimmed);
+    const match = /^(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})$/.exec(trimmed);
+    if (!match) return undefined;
+    const [, dayPart = '', monthPart = '', yearPart = ''] = match;
+    const month = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+      .indexOf(monthPart.toLowerCase()) + 1;
+    if (!month) return undefined;
+    const yearNumber = Number(yearPart);
+    const currentYear = new Date().getUTCFullYear();
+    const year = yearPart.length === 2
+      ? (yearNumber <= currentYear % 100 ? 2000 : 1900) + yearNumber
+      : yearNumber;
+    return this.validDate(`${year}-${String(month).padStart(2, '0')}-${dayPart.padStart(2, '0')}`);
+  }
+
+  private validDate(iso: string): string | undefined {
+    const date = new Date(`${iso}T00:00:00Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === iso
+      && date.getUTCFullYear() >= 1800 && date.getTime() <= Date.now() ? iso : undefined;
   }
 
   private safeRegistrationNumber(value: unknown): string | undefined {
@@ -254,12 +372,11 @@ export class QoreIdVerificationAdapter {
 
   private dateOfBirth(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return this.validDate(value);
     const match = /^(\d{2})-(\d{2})-(\d{4})$/.exec(value);
     if (!match) return undefined;
     const iso = `${match[3]}-${match[2]}-${match[1]}`;
-    const date = new Date(`${iso}T00:00:00Z`);
-    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === iso
-      && date.getTime() <= Date.now() ? iso : undefined;
+    return this.validDate(iso);
   }
 
   private url(path: string): string {

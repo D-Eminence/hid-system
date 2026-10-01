@@ -12,7 +12,7 @@ import { OrganizationApplicationsService, verifiedCacBinding } from './organizat
 
 const applicationId = 'c4600000-0000-4000-8000-000000000002';
 const input: SubmitOrganizationApplicationDto = {
-  productCode: 'migrate', organizationName: 'Example Clinic', organizationType: 'clinic', cacRegistrationNumber: 'RC1234567',
+  productCode: 'migrate', organizationType: 'clinic', cacRegistrationNumber: 'RC1234567',
   administratorName: 'Ada Admin', administratorEmail: 'ada@example.invalid',
   turnstileAction: 'organization-application', turnstileToken: 'opaque-proof',
 };
@@ -58,6 +58,8 @@ describe('organization onboarding boundary', () => {
     expect(JSON.stringify(query.mock.calls[0])).not.toContain(request.ip);
     expect(JSON.stringify(query.mock.calls[0])).not.toContain(input.cacRegistrationNumber);
     expect(query.mock.calls[1]?.[0]).toContain('submit_organization_application');
+    expect(query.mock.calls[1]?.[1]).toEqual(['migrate', 'clinic', 'RC1234567',
+      'Ada Admin', 'ada@example.invalid']);
   });
 
   it('returns 429 before public application persistence when a network bucket is exhausted', async () => {
@@ -80,7 +82,9 @@ describe('organization onboarding boundary', () => {
       .mockResolvedValueOnce({ rows: [{ application_status: 'ready_for_review', row_version: '2' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: 'qoreid-123',
-      cacBinding: { registrationNumber: 'RC1234567', companyName: 'Verified Legal Clinic Limited', registryStatus: 'Active' } }) };
+      cacBinding: { registrationNumber: 'RC1234567', companyName: 'Verified Legal Clinic Limited',
+        entityType: 'Private Company Limited by Shares', registrationDate: '2014-05-26',
+        address: '10 Test Avenue, Lagos', registryStatus: 'Active' } }) };
     const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined),
       consumeQuota: jest.fn().mockResolvedValue(undefined) };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
@@ -95,7 +99,8 @@ describe('organization onboarding boundary', () => {
       providerReference: 'qoreid-123' });
     expect(JSON.stringify(result)).not.toContain('RC1234567');
     expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'verified', 'qoreid-123', null,
-      'RC1234567', 'Verified Legal Clinic Limited']);
+      'RC1234567', 'Verified Legal Clinic Limited', 'Private Company Limited by Shares',
+      '2014-05-26', '10 Test Avenue, Lagos', 'active']);
   });
 
   it('records disabled verification and refuses approval without paired existing organization IDs', async () => {
@@ -114,7 +119,8 @@ describe('organization onboarding boundary', () => {
     expect(qoreid.verifyCac).not.toHaveBeenCalled();
     expect(integrations.assertAvailable).not.toHaveBeenCalled();
     expect(integrations.consumeQuota).not.toHaveBeenCalled();
-    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'disabled', null, 'disabled', null, null]);
+    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'disabled', null, 'disabled',
+      null, null, null, null, null, null]);
     await expect(service.approve(context, applicationId, 2, {
       reason: 'Synthetic approval', existingOrganizationId: 'c4610000-0000-4000-8000-000000000001',
     })).rejects.toMatchObject({ code: 'ORGANIZATION_LINK_INVALID' });
@@ -139,13 +145,16 @@ describe('organization onboarding boundary', () => {
       .mockResolvedValueOnce({ rows: [{ application_status: 'pending_verification', row_version: '2' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: '123',
-      cacBinding: { registrationNumber: 'RC9999999', companyName: 'Other Company', registryStatus: 'Active' } }) };
+      cacBinding: { registrationNumber: 'RC9999999', companyName: 'Other Company',
+        entityType: 'Private Company Limited by Shares', registrationDate: '2014-05-26',
+        address: '10 Test Avenue, Lagos', registryStatus: 'Active' } }) };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
       qoreid as unknown as QoreIdVerificationAdapter,
       { assertAvailable: jest.fn(), consumeQuota: jest.fn() } as unknown as IntegrationRuntimeService);
     await expect(service.verify(context, applicationId, 1)).rejects.toMatchObject({ code: 'CAC_IDENTITY_MISMATCH' });
-    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'not_verified', '123', 'not_verified', null, null]);
+    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'not_verified', '123', 'not_verified',
+      null, null, null, null, null, null]);
   });
 
   it('blocks CAC provider calls when the integration is paused', async () => {
@@ -162,7 +171,8 @@ describe('organization onboarding boundary', () => {
         consumeQuota: jest.fn() } as unknown as IntegrationRuntimeService);
     await expect(service.verify(context, applicationId, 1)).rejects.toMatchObject({ code: 'INTEGRATION_PAUSED' });
     expect(qoreid.verifyCac).not.toHaveBeenCalled();
-    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'disabled', null, 'disabled', null, null]);
+    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'disabled', null, 'disabled',
+      null, null, null, null, null, null]);
   });
 
   it('does not record a provider result or change application version when CAC quota is exhausted', async () => {
@@ -204,12 +214,21 @@ describe('organization onboarding boundary', () => {
   });
 
   it('requires an exact prefixed CAC number, active registry state, and legal name', () => {
-    const base = { provider: 'qoreid' as const, state: 'verified' as const, respondedAt: new Date().toISOString(),
-      cacBinding: { registrationNumber: 'RC1234567', companyName: 'Legal Company Ltd', registryStatus: 'Active' } };
-    expect(verifiedCacBinding('RC1234567', base)).toEqual({ registrationNumber: 'RC1234567', companyName: 'Legal Company Ltd' });
+    const base = { provider: 'qoreid' as const, state: 'verified' as const,
+      providerReference: 'qoreid-123', respondedAt: new Date().toISOString(),
+      cacBinding: { registrationNumber: 'RC1234567', companyName: 'Legal Company Ltd',
+        entityType: 'Private Company Limited by Shares', registrationDate: '2014-05-26',
+        address: '10 Test Avenue, Lagos', registryStatus: 'Active' } };
+    expect(verifiedCacBinding('RC1234567', base)).toEqual({ registrationNumber: 'RC1234567',
+      companyName: 'Legal Company Ltd', entityType: 'Private Company Limited by Shares',
+      registrationDate: '2014-05-26', address: '10 Test Avenue, Lagos', registryStatus: 'active' });
+    expect(verifiedCacBinding('RC1234567', { ...base, providerReference: undefined })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: undefined })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, registrationNumber: '1234567' } })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, registryStatus: 'Inactive' } })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, companyName: ' ' } })).toBeNull();
+    expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, entityType: '' } })).toBeNull();
+    expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, registrationDate: '2024-02-30' } })).toBeNull();
+    expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, address: '' } })).toBeNull();
   });
 });

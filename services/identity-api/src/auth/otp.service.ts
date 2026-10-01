@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createDecipheriv, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import * as argon2 from 'argon2';
 import type { PoolClient } from 'pg';
@@ -8,7 +8,15 @@ import { DatabaseService } from '../database/database.service';
 import type { RecoveryOtpPurpose } from './dto/otp.dto';
 import { NotificationOtpClient, type OtpDeliveryOutcome } from './notification-otp.client';
 
-interface AccountRow { id: string; email: string; token_version: string; }
+interface AccountRow {
+  id: string;
+  email: string | null;
+  token_version: string;
+  phone_enrollment_id: string | null;
+  phone_ciphertext: Buffer | null;
+  phone_key_version: string | null;
+}
+interface RecoveryRecipient { channel: 'email' | 'sms'; value: string }
 interface ActiveChallengeRow { id: string; created_at: Date; }
 interface ChallengeRow {
   id: string;
@@ -50,7 +58,7 @@ export class OtpService {
   }): Promise<{
     accepted: true;
     challengeId: string;
-    deliveryChannels: ['email'];
+    deliveryChannels: ['email', 'sms'];
     expiresInSeconds: number;
     resendAfterSeconds: number;
   }> {
@@ -61,15 +69,27 @@ export class OtpService {
     const candidateChallengeId = randomUUID();
 
     const challenge = await this.database.withSystemTransaction(input.correlationId, async (client): Promise<
-      { kind: 'challenge'; id: string; email: string }
+      { kind: 'challenge'; id: string; recipient: RecoveryRecipient }
       | { kind: 'none' }
       | { kind: 'rate_limited' }
       | { kind: 'cooldown'; id: string }
     > => {
       const account = (await client.query<AccountRow>(
-        `select account.id::text, lower(account.email)::text as email, account.token_version::text
+        `select account.id::text, lower(account.email)::text as email, account.token_version::text,
+                enrollment.id::text as phone_enrollment_id,
+                enrollment.contact_ciphertext as phone_ciphertext,
+                enrollment.key_version as phone_key_version
            from auth.accounts account
            left join identity.patients patient on patient.account_id = account.id
+           left join identity.public_patient_enrollments enrollment
+             on enrollment.account_id = account.id and enrollment.patient_id = patient.id
+            and enrollment.state = 'active' and enrollment.contact_channel = 'phone'
+            and enrollment.contact_verified_at is not null
+            and patient.status = 'active'
+            and patient.phone_lookup_hmac = enrollment.contact_hmac
+            and patient.contact_key_version = enrollment.key_version
+            and account.source_system = 'hid-public-qoreid-enrollment'
+            and patient.source_system = 'hid-public-qoreid-enrollment'
           where account.status in ('active', 'pending_reset')
             and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
             and (lower(account.email) = lower($1) or upper(patient.hid_code) = upper($1))
@@ -77,7 +97,10 @@ export class OtpService {
           limit 1`,
         [identifier],
       )).rows[0];
-      const recipientHmac = this.hmac('recipient', account?.email ?? identifier.toLowerCase());
+      const recipient = account?.email
+        ? { channel: 'email' as const, value: account.email }
+        : account ? this.verifiedEnrollmentPhone(account) : null;
+      const recipientHmac = this.hmac('recipient', recipient?.value ?? identifier.toLowerCase());
       const recipientLimited = await this.consumeRateLimit(client, 'recipient', recipientHmac);
       const ipLimited = await this.consumeRateLimit(client, 'ip', ipHmac);
       const accountLimited = account
@@ -94,7 +117,7 @@ export class OtpService {
       if (active && active.created_at.getTime() + this.environment.OTP_RESEND_COOLDOWN_SECONDS * 1000 > Date.now()) {
         return { kind: 'cooldown', id: active.id };
       }
-      if (!account) return { kind: 'none' };
+      if (!account || !recipient) return { kind: 'none' };
       await client.query(
         `update auth.otp_challenges set invalidated_at = clock_timestamp(),
             invalidation_reason = 'resend', row_version = row_version + 1
@@ -107,19 +130,20 @@ export class OtpService {
         `insert into auth.otp_challenges (
            id, account_id, recipient_hmac, purpose, channel, verifier_hmac,
            verifier_key_version, expires_at, max_attempts, request_ip_hmac, account_token_version
-         ) values ($1, $2, $3, $4, 'email', $5, $6,
-           clock_timestamp() + ($7 * interval '1 second'), $8, $9, $10)`,
-        [candidateChallengeId, account.id, recipientHmac, input.purpose, verifierHmac,
+         ) values ($1, $2, $3, $4, $5, $6, $7,
+           clock_timestamp() + ($8 * interval '1 second'), $9, $10, $11)`,
+        [candidateChallengeId, account.id, recipientHmac, input.purpose, recipient.channel, verifierHmac,
           this.environment.OTP_HMAC_KEY_VERSION, this.environment.OTP_EXPIRY_SECONDS,
           this.environment.OTP_MAX_ATTEMPTS, ipHmac, account.token_version],
       );
-      return { kind: 'challenge', id: candidateChallengeId, email: account.email };
+      return { kind: 'challenge', id: candidateChallengeId, recipient };
     });
 
     if (challenge.kind === 'rate_limited') throw this.rateLimited();
     if (challenge.kind === 'challenge') {
       const delivery = await this.notification.deliver({
-        challengeId: challenge.id, recipient: challenge.email, code, purpose: input.purpose,
+        challengeId: challenge.id, recipient: challenge.recipient.value, code, purpose: input.purpose,
+        channel: challenge.recipient.channel,
         correlationId: input.correlationId,
       });
       await this.recordDelivery(challenge.id, delivery);
@@ -129,7 +153,9 @@ export class OtpService {
       accepted: true,
       challengeId: challenge.kind === 'challenge' || challenge.kind === 'cooldown'
         ? challenge.id : candidateChallengeId,
-      deliveryChannels: ['email'],
+      // This is the generic set of possible channels, not the chosen account
+      // channel. Keep the public response identical for unknown identifiers.
+      deliveryChannels: ['email', 'sms'],
       expiresInSeconds: this.environment.OTP_EXPIRY_SECONDS,
       resendAfterSeconds: this.environment.OTP_RESEND_COOLDOWN_SECONDS,
     };
@@ -280,6 +306,26 @@ export class OtpService {
           row_version = row_version + 1 where id = $1 and consumed_at is null`,
       [challengeId, delivery.outcome, delivery.provider ?? null],
     );
+  }
+
+  private verifiedEnrollmentPhone(account: AccountRow): RecoveryRecipient | null {
+    const { phone_enrollment_id: enrollmentId, phone_ciphertext: ciphertext,
+      phone_key_version: keyVersion } = account;
+    const encodedKey = this.environment.NIN_ENCRYPTION_KEY_B64;
+    if (!enrollmentId || !ciphertext || !encodedKey || keyVersion !== this.environment.NIN_KEY_VERSION
+      || ciphertext.length < 30 || ciphertext[0] !== 1) return null;
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', Buffer.from(encodedKey, 'base64'),
+        ciphertext.subarray(1, 13));
+      decipher.setAAD(Buffer.from(`identity:public-patient-enrollment:${enrollmentId}:contact`));
+      decipher.setAuthTag(ciphertext.subarray(ciphertext.length - 16));
+      const phone = Buffer.concat([decipher.update(ciphertext.subarray(13, -16)),
+        decipher.final()]).toString('utf8');
+      return /^\+[1-9]\d{7,14}$/.test(phone) ? { channel: 'sms', value: phone } : null;
+    } catch {
+      // Missing or rotated encryption material cannot authorize recovery.
+      return null;
+    }
   }
 
   private invalidate(client: PoolClient, challengeId: string, reason: 'expired' | 'attempts_exhausted'): Promise<unknown> {

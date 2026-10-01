@@ -62,6 +62,10 @@ const acceptedMigrations = new Map([
   ['0048_cac_legal_entity_binding.sql', '62dbe2720db379e824be9a38b1e1648fb4c3cdb64a63904707c486c31c5f88d3'],
   ['0049_qoreid_request_quotas.sql', 'e696c52591d25531c417b6d6cccd96419758ebf5ce640de8d84562ee086d548d'],
   ['0050_patient_nin_evidence_binding.sql', 'b7354dfe7e5918e309a40f0814bce76165200a088f922e3a1d561f7d5419d59f'],
+  ['0051_public_patient_enrollment.sql', '24fef483e8bd5c9cddd91b4e3ad9b6e9436c8844d44cab9d25bcb21d9a6039ec'],
+  ['0052_authoritative_cac_identity.sql', '7970e20da6bbf9984d08dd36b1f7beb60b618c19d2fc1c9c970ebea49953db88'],
+  ['0053_remove_unwired_piersflow_catalog.sql', '57ae02a97839c581c35a6c78c27fabdc4873000e60dfb33e8c556a39a6b58331'],
+  ['0054_complete_existing_cac_evidence_binding.sql', '3c06c35ad311835a825397c5b52269a059edd426f4edb6292007cf47041d444d'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

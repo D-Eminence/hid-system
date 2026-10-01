@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
 import { TurnstileModule } from '../auth/turnstile.module';
+import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { IntegrationModule } from '../integrations/integration.module';
 import { IdentityController } from './identity.controller';
 import { NinRegistrationController } from './nin-registration.controller';
@@ -22,11 +23,15 @@ import { QoreIdVerificationController } from './qoreid-verification.controller';
 import { QoreIdVerificationService } from './qoreid-verification.service';
 import { AdminOrganizationApplicationsController, PublicOrganizationApplicationsController } from './organization-applications.controller';
 import { OrganizationApplicationsService } from './organization-applications.service';
+import { PatientEnrollmentController } from './patient-enrollment.controller';
+import { PatientEnrollmentService } from './patient-enrollment.service';
+import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 
 @Module({
   imports: [TurnstileModule, IntegrationModule],
   controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
-    PublicOrganizationApplicationsController, AdminOrganizationApplicationsController],
+    PublicOrganizationApplicationsController, AdminOrganizationApplicationsController,
+    PatientEnrollmentController],
   providers: [
     IdentityService,
     NinRegistrationService,
@@ -46,6 +51,10 @@ import { OrganizationApplicationsService } from './organization-applications.ser
     QoreIdVerificationAdapter,
     QoreIdVerificationService,
     OrganizationApplicationsService,
+    NotificationOtpClient,
+    PatientEnrollmentService,
+    QoreIdPublicPatientIdentityProvider,
+    { provide: PUBLIC_PATIENT_IDENTITY_PROVIDER, useExisting: QoreIdPublicPatientIdentityProvider },
     PostgresIdentityProvider,
     {
       provide: IDENTITY_PROVIDER,

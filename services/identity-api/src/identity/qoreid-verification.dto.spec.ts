@@ -19,7 +19,7 @@ describe('QoreID verification DTOs', () => {
     expect(await validate(valid)).toHaveLength(0);
   });
 
-  it.each(['1234', 'RC-1234', 'CO1234', 'RCABC'])('rejects unsupported CAC registration number %s', async (regNumber) => {
+  it.each(['1234', 'RC-1234', 'CO1234', 'RCABC', 'RC123', `RC${'1'.repeat(21)}`])('rejects unsupported CAC registration number %s', async (regNumber) => {
     expect(await validate(plainToInstance(VerifyCacDto, { regNumber }))).not.toHaveLength(0);
   });
 });

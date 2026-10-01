@@ -34,11 +34,15 @@ select set_config('app.correlation_id', 'organization-onboarding-test-0001', tru
 do $$
 declare first_id uuid; repeated_id uuid;
 begin
-  select identity.submit_organization_application('migrate', 'Synthetic Migrate Clinic', 'clinic',
+  select identity.submit_organization_application('migrate', 'clinic',
     'RC1234567', 'Migrate Administrator', 'Migrate.Admin@Example.Invalid') into first_id;
-  select identity.submit_organization_application('migrate', 'Synthetic Migrate Clinic', 'clinic',
+  select identity.submit_organization_application('migrate', 'clinic',
     'RC1234567', 'Migrate Administrator', 'Migrate.Admin@Example.Invalid') into repeated_id;
   if first_id <> repeated_id then raise exception 'Public retry created a second organization application'; end if;
+  if to_regprocedure('identity.submit_organization_application(text,text,text,text,text,text)') is not null
+     or to_regprocedure('identity.admin_record_organization_cac_result(uuid,bigint,text,text,text,text,text)') is not null then
+    raise exception 'Superseded applicant-name or name-only CAC command remains executable';
+  end if;
   begin
     perform 1 from identity.organization_applications;
     raise exception 'Runtime directly read restricted organization intake';
@@ -66,8 +70,15 @@ begin
     from identity.admin_list_organization_applications('pending_verification')
     where product_code = 'migrate' and cac_hint = 'RC*****67';
   if application_id_value is null then raise exception 'Admin list omitted the pending Migrate application'; end if;
+  if exists (select 1 from identity.admin_list_organization_applications('pending_verification') item
+    where item.application_id = application_id_value and (
+      item.organization_name is not null or item.verified_organization_name is not null
+      or item.verified_entity_type is not null or item.verified_registration_date is not null
+      or item.verified_address is not null or item.verified_registry_status is not null)) then
+    raise exception 'Public applicant populated registry identity before verification';
+  end if;
   select * into changed from identity.admin_record_organization_cac_result(
-    application_id_value, 1, 'not_verified', null, 'not_verified', null, null);
+    application_id_value, 1, 'not_verified', null, 'not_verified', null, null, null, null, null, null);
   if changed.application_status <> 'pending_verification' or changed.row_version <> 2 then
     raise exception 'Nonverified CAC moved the application to review';
   end if;
@@ -79,22 +90,51 @@ begin
   end;
   begin
     perform identity.admin_record_organization_cac_result(
-      application_id_value, 2, 'verified', 'qoreid-test-0001', null, null, null);
+      application_id_value, 2, 'verified', 'qoreid-test-0001', null,
+      null, null, null, null, null, null);
     raise exception 'Status-only CAC result was accepted';
   exception when invalid_parameter_value then null;
   end;
   begin
     perform identity.admin_record_organization_cac_result(
       application_id_value, 2, 'verified', 'qoreid-test-0001', null,
-      'RC9999999', 'Unrelated Company Limited');
+      'RC9999999', 'Unrelated Company Limited', 'Private Limited Company',
+      '2014-05-26', '10 Test Avenue, Lagos', 'active');
     raise exception 'Mismatched CAC registration number was accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  begin
+    perform identity.admin_record_organization_cac_result(
+      application_id_value, 2, 'verified', 'qoreid-test-0001', null,
+      'RC1234567', 'Verified Migrate Legal Limited', null,
+      '2014-05-26', '10 Test Avenue, Lagos', 'active');
+    raise exception 'CAC result with a missing entity type was accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  begin
+    perform identity.admin_record_organization_cac_result(
+      application_id_value, 2, 'verified', 'qoreid-test-0001', null,
+      'RC1234567', 'Verified Migrate Legal Limited', 'Private Limited Company',
+      '2014-05-26', '10 Test Avenue, Lagos', 'inactive');
+    raise exception 'Inactive CAC result was accepted';
   exception when invalid_parameter_value then null;
   end;
   select * into changed from identity.admin_record_organization_cac_result(
     application_id_value, 2, 'verified', 'qoreid-test-0001', null,
-    'RC1234567', 'Verified Migrate Legal Limited');
+    'RC1234567', 'Verified Migrate Legal Limited', 'Private Limited Company',
+    '2014-05-26', '10 Test Avenue, Lagos', 'active');
   if changed.application_status <> 'ready_for_review' or changed.row_version <> 3 then
     raise exception 'Verified CAC did not move the application to review';
+  end if;
+  if not exists (select 1 from identity.admin_list_organization_applications('ready_for_review') item
+    where item.application_id = application_id_value
+      and item.organization_name = 'Verified Migrate Legal Limited'
+      and item.verified_organization_name = 'Verified Migrate Legal Limited'
+      and item.verified_entity_type = 'Private Limited Company'
+      and item.verified_registration_date = '2014-05-26'
+      and item.verified_address = '10 Test Avenue, Lagos'
+      and item.verified_registry_status = 'active') then
+    raise exception 'Admin review omitted authoritative registry identity';
   end if;
   begin
     perform identity.admin_approve_organization_application(
@@ -118,11 +158,24 @@ do $$ begin
     join identity.facilities facility on facility.id = application.facility_id
     where application.cac_registration_number = 'RC1234567'
       and application.product_code = 'migrate'
-      and application.organization_name = 'Synthetic Migrate Clinic'
+      and application.organization_name = 'Verified Migrate Legal Limited'
       and application.verified_organization_name = 'Verified Migrate Legal Limited'
+      and application.verified_entity_type = 'Private Limited Company'
+      and application.verified_registration_date = date '2014-05-26'
+      and application.verified_address = '10 Test Avenue, Lagos'
+      and application.verified_registry_status = 'active'
       and organization.name = application.verified_organization_name
       and facility.name = application.verified_organization_name) then
     raise exception 'Applicant-supplied name overrode verified legal name';
+  end if;
+  if not exists (select 1 from identity.organization_cac_registrations binding
+    where binding.cac_registration_number = 'RC1234567'
+      and binding.verified_organization_name = 'Verified Migrate Legal Limited'
+      and binding.verified_entity_type = 'Private Limited Company'
+      and binding.verified_registration_date = date '2014-05-26'
+      and binding.verified_address = '10 Test Avenue, Lagos'
+      and binding.verified_registry_status = 'active') then
+    raise exception 'Approved CAC binding omitted authoritative registry fields';
   end if;
 end $$;
 
@@ -153,17 +206,19 @@ do $$
 declare
   second_application uuid;
   rogue_application uuid;
+  changed_registry_application uuid;
   conflicting_application uuid;
   second_approval record;
 begin
   perform set_config('app.actor_subject', 'system:auth', true);
-  select identity.submit_organization_application('pharmacy', 'Synthetic Migrate Clinic', 'clinic',
+  select identity.submit_organization_application('pharmacy', 'clinic',
     'RC1234567', 'Migrate Administrator', 'Migrate.Admin@Example.Invalid')
     into second_application;
   perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
   perform identity.admin_record_organization_cac_result(
     second_application, 1, 'verified', 'qoreid-test-0002', null,
-    'RC1234567', 'Verified Migrate Legal Limited');
+    'RC1234567', 'Verified Migrate Legal Limited', 'Private Limited Company',
+    '2014-05-26', '10 Test Avenue, Lagos', 'active');
   select * into second_approval from identity.admin_approve_organization_application(
     second_application, 2, current_setting('test.onboarding_organization_id')::uuid, current_setting('test.onboarding_facility_id')::uuid,
     'Synthetic existing organization review');
@@ -175,13 +230,14 @@ begin
   end if;
 
   perform set_config('app.actor_subject', 'system:auth', true);
-  select identity.submit_organization_application('laboratory', 'Synthetic Migrate Clinic', 'clinic',
+  select identity.submit_organization_application('laboratory', 'clinic',
     'RC1234567', 'Unrelated Applicant', 'unrelated@example.invalid')
     into rogue_application;
   perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
   perform identity.admin_record_organization_cac_result(
     rogue_application, 1, 'verified', 'qoreid-test-0003', null,
-    'RC1234567', 'Verified Migrate Legal Limited');
+    'RC1234567', 'Verified Migrate Legal Limited', 'Private Limited Company',
+    '2014-05-26', '10 Test Avenue, Lagos', 'active');
   begin
     perform identity.admin_approve_organization_application(
       rogue_application, 2, current_setting('test.onboarding_organization_id')::uuid, current_setting('test.onboarding_facility_id')::uuid,
@@ -191,13 +247,33 @@ begin
   end;
 
   perform set_config('app.actor_subject', 'system:auth', true);
-  select identity.submit_organization_application('ehr', 'Other Applicant', 'clinic',
+  select identity.submit_organization_application('ehr', 'clinic',
+    'RC1234567', 'Migrate Administrator', 'Migrate.Admin@Example.Invalid')
+    into changed_registry_application;
+  perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
+  perform identity.admin_record_organization_cac_result(
+    changed_registry_application, 1, 'verified', 'qoreid-test-0005', null,
+    'RC1234567', 'Verified Migrate Legal Limited', 'Private Limited Company',
+    '2014-05-26', 'Changed Address, Lagos', 'active');
+  begin
+    perform identity.admin_approve_organization_application(
+      changed_registry_application, 2,
+      current_setting('test.onboarding_organization_id')::uuid,
+      current_setting('test.onboarding_facility_id')::uuid,
+      'Synthetic changed registry identity');
+    raise exception 'Changed registry identity silently reused an organization';
+  exception when check_violation then null;
+  end;
+
+  perform set_config('app.actor_subject', 'system:auth', true);
+  select identity.submit_organization_application('ehr', 'clinic',
     'RC7654321', 'Onboarding Admin', 'onboarding-admin@example.invalid')
     into conflicting_application;
   perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
   perform identity.admin_record_organization_cac_result(
     conflicting_application, 1, 'verified', 'qoreid-test-0004', null,
-    'RC7654321', 'Other Legal Company Limited');
+    'RC7654321', 'Other Legal Company Limited', 'Private Limited Company',
+    '2016-06-09', '19 Example Road, Abuja', 'active');
   begin
     perform identity.admin_approve_organization_application(
       conflicting_application, 2, 'c4610000-0000-4000-8000-000000000001',
@@ -236,16 +312,55 @@ set local role hid_identity_api_runtime;
 do $$
 begin
   if not identity.current_organization_cac_binding_matches(
-    'pharmacy', 'RC1234567', 'Verified Migrate Legal Limited') then
+    'pharmacy', 'RC1234567', 'Verified Migrate Legal Limited',
+    'Private Limited Company', '2014-05-26', '10 Test Avenue, Lagos', 'active') then
     raise exception 'Approved product CAC binding was not recognized';
   end if;
+  if to_regprocedure('identity.current_organization_cac_binding_matches(text,text,text)') is not null then
+    raise exception 'Name-only CAC evidence command remains executable';
+  end if;
   if identity.current_organization_cac_binding_matches(
-    'pharmacy', 'RC9999999', 'Verified Migrate Legal Limited')
+    'pharmacy', 'RC9999999', 'Verified Migrate Legal Limited',
+    'Private Limited Company', '2014-05-26', '10 Test Avenue, Lagos', 'active')
      or identity.current_organization_cac_binding_matches(
-       'pharmacy', 'RC1234567', 'Unrelated Company Limited')
+       'pharmacy', 'RC1234567', 'Unrelated Company Limited',
+       'Private Limited Company', '2014-05-26', '10 Test Avenue, Lagos', 'active')
      or identity.current_organization_cac_binding_matches(
-       'laboratory', 'RC1234567', 'Verified Migrate Legal Limited') then
+       'laboratory', 'RC1234567', 'Verified Migrate Legal Limited',
+       'Private Limited Company', '2014-05-26', '10 Test Avenue, Lagos', 'active') then
     raise exception 'Unbound CAC number, name, or product was accepted';
+  end if;
+  if identity.current_organization_cac_binding_matches(
+       'pharmacy', 'RC1234567', 'Verified Migrate Legal Limited',
+       'Different Entity Type', '2014-05-26', '10 Test Avenue, Lagos', 'active')
+     or identity.current_organization_cac_binding_matches(
+       'pharmacy', 'RC1234567', 'Verified Migrate Legal Limited',
+       'Private Limited Company', '2014-05-27', '10 Test Avenue, Lagos', 'active')
+     or identity.current_organization_cac_binding_matches(
+       'pharmacy', 'RC1234567', 'Verified Migrate Legal Limited',
+       'Private Limited Company', '2014-05-26', 'Changed Address, Lagos', 'active')
+     or identity.current_organization_cac_binding_matches(
+       'pharmacy', 'RC1234567', 'Verified Migrate Legal Limited',
+       'Private Limited Company', '2014-05-26', '10 Test Avenue, Lagos', 'inactive') then
+    raise exception 'Changed registry identity was accepted as existing CAC evidence';
+  end if;
+end $$;
+reset role;
+
+-- A pre-0052 name-only registration must fail closed even if its legal name
+-- still matches a fresh provider response.
+update identity.organization_cac_registrations
+   set verified_organization_name = null, verified_entity_type = null,
+       verified_registration_date = null, verified_address = null,
+       verified_registry_status = null
+ where cac_registration_number = 'RC1234567';
+set local role hid_identity_api_runtime;
+do $$
+begin
+  if identity.current_organization_cac_binding_matches(
+    'pharmacy', 'RC1234567', 'Verified Migrate Legal Limited',
+    'Private Limited Company', '2014-05-26', '10 Test Avenue, Lagos', 'active') then
+    raise exception 'Legacy incomplete binding became verified CAC evidence';
   end if;
 end $$;
 reset role;

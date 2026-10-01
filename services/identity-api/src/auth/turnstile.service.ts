@@ -6,7 +6,8 @@ import type { LoginDto } from './dto/login.dto';
 
 type LoginAction = NonNullable<LoginDto['turnstileAction']>;
 export type TurnstileAction = LoginAction | 'patient-reset-start' | 'staff-reset'
-  | 'admin-reset' | 'legacy-recovery' | 'book-demo' | 'organization-application';
+  | 'admin-reset' | 'legacy-recovery' | 'book-demo' | 'organization-application'
+  | 'patient-enrollment';
 
 interface SiteverifyResponse {
   success?: unknown;
@@ -24,6 +25,7 @@ const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<
     'www.healthidentitydirectory.com': [
       'patient-login', 'staff-login', 'admin-login', 'patient-reset-start',
       'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application',
+      'patient-enrollment',
     ],
     'ehr.healthidentitydirectory.com': ['ehr-login', 'staff-login'],
     'lab.healthidentitydirectory.com': ['lab-login'],
@@ -36,6 +38,7 @@ const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<
     'staging.healthidentitydirectory.com': [
       'patient-login', 'staff-login', 'admin-login', 'patient-reset-start',
       'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application',
+      'patient-enrollment',
     ],
     'ehr.staging.healthidentitydirectory.com': ['ehr-login', 'staff-login'],
     'lab.staging.healthidentitydirectory.com': ['lab-login'],

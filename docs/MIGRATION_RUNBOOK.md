@@ -47,6 +47,10 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0048_cac_legal_entity_binding.sql` | Exact CAC number/legal-name binding guard for organization approval; closes the previous status-only path |
 | `database/migrations/0049_qoreid_request_quotas.sql` | Shared NIN/CAC/test and public application request limits, keyed network digests, and 48-hour counter retention |
 | `database/migrations/0050_patient_nin_evidence_binding.sql` | Require the current patient's prior governed NIN HMAC binding before recording verified QoreID evidence; remove the unbound evidence command |
+| `database/migrations/0051_public_patient_enrollment.sql` | Encrypted unique-NIN pending enrollment, single-contact OTP and rate limits, immutable authoritative profile, and atomic account/patient/HID activation after OTP and password |
+| `database/migrations/0052_authoritative_cac_identity.sql` | Registration-identifier-only public intake, complete authoritative CAC fields, exact organization binding, and governed approval guard |
+| `database/migrations/0053_remove_unwired_piersflow_catalog.sql` | Remove the non-executable PiersFlow placeholder from the admin provider catalog while preserving any unexpected audit history |
+| `database/migrations/0054_complete_existing_cac_evidence_binding.sql` | Compare all authoritative registry fields for existing-organization CAC evidence; incomplete historical bindings fail closed |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
