@@ -30,7 +30,7 @@ const catalog: IntegrationCatalog = {
     operationGates: [
       { operation: 'existing_patient_nin', state: 'open', detail: 'General gate and provider enabled.' },
       { operation: 'patient_nin_enrollment', state: 'closed', detail: 'Separate deployment gate required.' },
-      { operation: 'provider_cac', state: 'open', detail: 'CAC Basic V2 is configured; entitlement must be checked separately.' },
+      { operation: 'provider_cac', state: 'open', detail: 'CAC Basic V2 is configured; OAuth testing does not prove legal-profile completeness.' },
     ], availableActions: ['pause', 'test', 'audit'] }),
   provider({ provider: 'turnstile', name: 'Turnstile', capabilities: ['bot-protection'],
     managementMode: 'deployment',
@@ -57,7 +57,7 @@ describe('admin integration management', () => {
     const qoreid = screen.getByRole('heading', { name: 'QoreID' }).closest('article')!;
     expect(within(qoreid).getByText('NIN-only enrollment')).toBeInTheDocument();
     expect(within(qoreid).getByText('CAC verification')).toBeInTheDocument();
-    expect(within(qoreid).getByText('CAC Basic V2 is configured; entitlement must be checked separately.')).toBeInTheDocument();
+    expect(within(qoreid).getByText('CAC Basic V2 is configured; OAuth testing does not prove legal-profile completeness.')).toBeInTheDocument();
     expect(within(qoreid).getAllByText('Gate off')).toHaveLength(1);
     expect(within(qoreid).getAllByText('Gate on')).toHaveLength(2);
     const termii = screen.getByRole('heading', { name: 'Termii' }).closest('article')!;

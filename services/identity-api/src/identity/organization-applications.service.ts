@@ -11,7 +11,7 @@ import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import type { QoreIdVerificationResult, VerificationFailureCategory } from './qoreid-verification.types';
 import type { ApproveOrganizationApplicationDto, SubmitOrganizationApplicationDto } from './dto/organization-application.dto';
 
-type VerificationOutcome = 'verified' | 'not_verified' | 'incomplete' | 'provider_error' | 'disabled';
+type VerificationOutcome = 'verified' | 'verified_incomplete' | 'not_verified' | 'incomplete' | 'provider_error' | 'disabled';
 const localApplicationHmacKey = randomBytes(32);
 interface ApplicationRow extends QueryResultRow {
   application_id: string;
@@ -116,6 +116,7 @@ export class OrganizationApplicationsService {
     let verifiedRegistrationDate: string | null = null;
     let verifiedAddress: string | null = null;
     let verifiedRegistryStatus: string | null = null;
+    let providerVerification: 'verified' | undefined;
     let providerError: unknown;
     try {
       if (!getEnvironment().QOREID_ENABLED) {
@@ -126,15 +127,29 @@ export class OrganizationApplicationsService {
       const result = await this.qoreid.verifyCac(secret.cac_registration_number);
       reference = result.providerReference ?? null;
       if (result.state === 'verified') {
-        const binding = verifiedCacBinding(secret.cac_registration_number, result);
+        if (!numericProviderReference(result.providerReference)
+          || (!result.cacBinding && !result.cacIncompleteProfile)) {
+          throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
+            'External verification returned an invalid response');
+        }
+        const binding = result.cacBinding
+          ? verifiedCacBinding(secret.cac_registration_number, result) : null;
         if (binding) {
           outcome = 'verified';
+          providerVerification = 'verified';
           verifiedRegistrationNumber = binding.registrationNumber;
           verifiedOrganizationName = binding.companyName;
           verifiedEntityType = binding.entityType;
           verifiedRegistrationDate = binding.registrationDate;
           verifiedAddress = binding.address;
           verifiedRegistryStatus = binding.registryStatus;
+        } else if (result.cacIncompleteProfile
+          && matchingCacIncompleteProfile(secret.cac_registration_number, result)) {
+          // The provider verified the lookup, but did not return enough legal
+          // identity to establish a registration binding or permit approval.
+          outcome = 'verified_incomplete';
+          failure = 'incomplete';
+          providerVerification = 'verified';
         } else {
           // A successful transaction status is not legal-entity identity proof.
           outcome = 'not_verified';
@@ -172,6 +187,7 @@ export class OrganizationApplicationsService {
       if (!row) throw new DomainProblem(503, 'VERIFICATION_EVIDENCE_UNAVAILABLE', 'Verification evidence is unavailable');
       if (providerError) throw providerError;
       return { status: row.application_status, version: Number(row.row_version), state: outcome,
+        ...(providerVerification ? { providerVerification } : {}),
         ...(reference ? { providerReference: reference } : {}) };
     } catch (error) {
       if (providerError && error === providerError) throw error;
@@ -265,7 +281,8 @@ export function verifiedCacBinding(
   result: QoreIdVerificationResult,
 ): { registrationNumber: string; companyName: string; entityType: string;
   registrationDate: string; address: string; registryStatus: 'active' } | null {
-  if (result.state !== 'verified' || !result.cacBinding || !result.providerReference) return null;
+  if (result.state !== 'verified' || !result.cacBinding
+    || !numericProviderReference(result.providerReference)) return null;
   const { registrationNumber, providerRegistrationNumber, companyName, entityType,
     registrationDate, address, registryStatus } = result.cacBinding;
   if (typeof registrationNumber !== 'string' || typeof providerRegistrationNumber !== 'string'
@@ -297,4 +314,30 @@ export function verifiedCacBinding(
     || registryStatus.trim().toLowerCase() !== 'active') return null;
   return { registrationNumber: normalizedNumber, companyName: legalName,
     entityType: legalEntityType, registrationDate, address: registeredAddress, registryStatus: 'active' };
+}
+
+/** Check a partial provider profile without promoting the queried identifier into a binding. */
+export function matchingCacIncompleteProfile(
+  submittedRegistrationNumber: string,
+  result: QoreIdVerificationResult,
+): boolean {
+  const profile = result.cacIncompleteProfile;
+  if (result.state !== 'verified' || !numericProviderReference(result.providerReference)
+    || !profile || profile.submittedRegistrationNumber !== submittedRegistrationNumber
+    || !/^(?:RC|BN|IT)[0-9]{4,20}$/.test(submittedRegistrationNumber)) return false;
+  const returned = profile.providerRegistrationNumber;
+  if (returned !== undefined) {
+    if (!/^(?:RC|BN|IT)?[0-9]{4,20}$/.test(returned)) return false;
+    const prefix = /^(RC|BN|IT)/.exec(returned)?.[1];
+    if (prefix && prefix !== submittedRegistrationNumber.slice(0, 2)) return false;
+    if ((prefix ? returned.slice(2) : returned) !== submittedRegistrationNumber.slice(2)) return false;
+  }
+  // A complete active profile must be carried as a validated cacBinding.
+  return !(returned && profile.companyName && profile.entityType && profile.registrationDate
+    && profile.address && profile.registryStatus?.toLowerCase() === 'active');
+}
+
+function numericProviderReference(reference: unknown): reference is string {
+  return typeof reference === 'string' && /^(?:0|[1-9][0-9]*)$/.test(reference)
+    && Number.isSafeInteger(Number(reference));
 }

@@ -237,7 +237,7 @@ export class IntegrationAdminService {
           state: qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED ? 'open' : 'closed',
           detail: 'NIN-only enrollment also requires its separate deployment gate.' },
         { operation: 'provider_cac', state: qoreidOpen ? 'open' : 'closed',
-          detail: 'CAC Basic V2 requires the general QoreID gate and an enabled provider. OAuth connection tests do not prove CAC entitlement.' },
+          detail: 'CAC Basic V2 requires the general QoreID gate and an enabled provider. OAuth connection tests do not prove legal-profile completeness or staging readiness.' },
       ] : [];
       const availableActions = ['audit',
         ...(row.runtime_control && (row.provider !== 'qoreid' || row.enabled || this.qoreidConfigured())

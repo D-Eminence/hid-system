@@ -66,6 +66,7 @@ const acceptedMigrations = new Map([
   ['0052_authoritative_cac_identity.sql', '7970e20da6bbf9984d08dd36b1f7beb60b618c19d2fc1c9c970ebea49953db88'],
   ['0053_remove_unwired_piersflow_catalog.sql', '57ae02a97839c581c35a6c78c27fabdc4873000e60dfb33e8c556a39a6b58331'],
   ['0054_complete_existing_cac_evidence_binding.sql', '3c06c35ad311835a825397c5b52269a059edd426f4edb6292007cf47041d444d'],
+  ['0055_verified_incomplete_cac_result.sql', 'ac451f14dee5f7e6996de89ec92172773598229515829ee90637f98ebed7a54b'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

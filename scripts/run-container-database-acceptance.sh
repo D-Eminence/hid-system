@@ -321,4 +321,4 @@ acceptance_remaining="$(PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/se
 acceptance_started=false
 rm -rf -- "$acceptance_root"
 trap - EXIT INT TERM
-echo '{"status":"passed","postgresql":"16.14","migrations":"0001-0054","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"ocrWorkers":2,"dispatchers":2,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}'
+echo '{"status":"passed","postgresql":"16.14","migrations":"0001-0055","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"ocrWorkers":2,"dispatchers":2,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}'

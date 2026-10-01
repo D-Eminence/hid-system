@@ -152,6 +152,155 @@ begin
 end $$;
 reset role;
 
+-- A verified provider response can still lack the legal-entity snapshot needed
+-- for organization binding. Keep the provider evidence without creating one.
+set local role hid_identity_api_runtime;
+do $$
+declare
+  rc_application uuid;
+  bn_application uuid;
+  changed record;
+begin
+  perform set_config('app.actor_subject', 'system:auth', true);
+  select identity.submit_organization_application('ehr', 'clinic',
+    'RC1111111', 'Incomplete RC Applicant', 'incomplete-rc@example.invalid') into rc_application;
+  select identity.submit_organization_application('laboratory', 'laboratory',
+    'BN2222222', 'Incomplete BN Applicant', 'incomplete-bn@example.invalid') into bn_application;
+  perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
+  begin
+    perform identity.admin_record_organization_cac_result(
+      rc_application, 1, 'verified_incomplete', null, 'incomplete',
+      null, null, null, null, null, null);
+    raise exception 'Provider-verified incomplete result without reference was accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  begin
+    perform identity.admin_record_organization_cac_result(
+      rc_application, 1, 'verified_incomplete', 'not-a-numeric-id', 'incomplete',
+      null, null, null, null, null, null);
+    raise exception 'Provider-verified incomplete result with nonnumeric reference was accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  begin
+    perform identity.admin_record_organization_cac_result(
+      rc_application, 1, 'verified_incomplete', '86421', 'incomplete',
+      'RC1111111', 'Applicant Claimed Company', null, null, null, null);
+    raise exception 'Partial or applicant-supplied legal profile became provider identity';
+  exception when invalid_parameter_value then null;
+  end;
+  select * into changed from identity.admin_record_organization_cac_result(
+    rc_application, 1, 'verified_incomplete', '86421', 'incomplete',
+    null, null, null, null, null, null);
+  if changed.application_status <> 'pending_verification' or changed.row_version <> 2 then
+    raise exception 'Incomplete RC profile moved into organization review';
+  end if;
+  select * into changed from identity.admin_record_organization_cac_result(
+    bn_application, 1, 'verified_incomplete', '86422', 'incomplete',
+    null, null, null, null, null, null);
+  if changed.application_status <> 'pending_verification' or changed.row_version <> 2 then
+    raise exception 'Incomplete BN profile moved into organization review';
+  end if;
+  if (select count(*) from identity.admin_list_organization_applications('pending_verification') item
+      where item.application_id in (rc_application, bn_application)
+        and item.verification_result = 'verified_incomplete'
+        and item.verified_at is not null
+        and item.organization_name is null
+        and item.verified_organization_name is null
+        and item.verified_entity_type is null
+        and item.verified_registration_date is null
+        and item.verified_address is null
+        and item.verified_registry_status is null) <> 2 then
+    raise exception 'Admin list did not distinguish verified but incomplete profiles';
+  end if;
+  begin
+    perform identity.admin_approve_organization_application(
+      rc_application, 2, null, null, 'Synthetic incomplete profile approval');
+    raise exception 'Incomplete provider profile was approved';
+  exception when check_violation then null;
+  end;
+end $$;
+reset role;
+
+do $$
+begin
+  if (select count(*) from identity.organization_applications application
+      where application.cac_registration_number in ('RC1111111', 'BN2222222')
+        and application.status = 'pending_verification'
+        and application.verification_result = 'verified_incomplete'
+        and application.verification_failure_category = 'incomplete'
+        and application.provider_reference ~ '^[0-9]+$'
+        and application.verified_at is not null
+        and application.organization_name is null
+        and application.verified_organization_name is null) <> 2 then
+    raise exception 'Verified provider lookup or incomplete profile was not persisted accurately';
+  end if;
+  if exists (select 1 from identity.organization_cac_registrations binding
+      where binding.cac_registration_number in ('RC1111111', 'BN2222222'))
+     or exists (select 1 from identity.organization_products product
+      join identity.organization_applications application on application.id = product.source_application_id
+      where application.cac_registration_number in ('RC1111111', 'BN2222222')) then
+    raise exception 'Incomplete provider profile created a legal registration or product binding';
+  end if;
+  begin
+    update identity.organization_applications
+       set status = 'ready_for_review'
+     where cac_registration_number = 'RC1111111';
+    raise exception 'Incomplete provider profile bypassed the review constraint';
+  exception when check_violation then null;
+  end;
+end $$;
+
+-- A later complete provider result may advance the same BN application, but
+-- only with a new exact registry snapshot supplied through the governed call.
+set local role hid_identity_api_runtime;
+do $$
+declare
+  bn_application uuid;
+  changed record;
+begin
+  select item.application_id into bn_application
+    from identity.admin_list_organization_applications('pending_verification') item
+    where item.cac_hint = 'BN*****22' and item.product_code = 'laboratory'
+      and item.verification_result = 'verified_incomplete';
+  if bn_application is null then raise exception 'Incomplete BN application was not available for retry'; end if;
+  select * into changed from identity.admin_record_organization_cac_result(
+    bn_application, 2, 'verified', '86423', null,
+    'BN2222222', 'Verified BN Registry Limited', 'Business Name',
+    '2018-06-12', '12 Synthetic Avenue, Abuja', 'active');
+  if changed.application_status <> 'ready_for_review' or changed.row_version <> 3 then
+    raise exception 'Complete provider retry did not advance BN application to review';
+  end if;
+  if not exists (select 1 from identity.admin_list_organization_applications('ready_for_review') item
+    where item.application_id = bn_application
+      and item.organization_name = 'Verified BN Registry Limited'
+      and item.verified_organization_name = 'Verified BN Registry Limited'
+      and item.verified_entity_type = 'Business Name'
+      and item.verified_registration_date = '2018-06-12'
+      and item.verified_address = '12 Synthetic Avenue, Abuja'
+      and item.verified_registry_status = 'active') then
+    raise exception 'Complete provider retry did not replace incomplete evidence with legal identity';
+  end if;
+end $$;
+reset role;
+
+do $$
+begin
+  if not exists (select 1 from identity.organization_applications application
+      where application.cac_registration_number = 'BN2222222'
+        and application.status = 'ready_for_review'
+        and application.verification_result = 'verified'
+        and application.verification_failure_category is null
+        and application.provider_reference = '86423'
+        and application.organization_name = 'Verified BN Registry Limited'
+        and application.verified_organization_name = application.organization_name
+        and application.verified_entity_type = 'Business Name'
+        and application.verified_registration_date = date '2018-06-12'
+        and application.verified_address = '12 Synthetic Avenue, Abuja'
+        and application.verified_registry_status = 'active') then
+    raise exception 'Complete BN retry retained incomplete or applicant-derived legal identity';
+  end if;
+end $$;
+
 do $$ begin
   if not exists (select 1 from identity.organization_applications application
     join identity.organizations organization on organization.id = application.organization_id

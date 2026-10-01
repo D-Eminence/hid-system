@@ -8,7 +8,7 @@ import { DatabaseService } from '../database/database.service';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
-import { verifiedCacBinding } from './organization-applications.service';
+import { matchingCacIncompleteProfile, verifiedCacBinding } from './organization-applications.service';
 import {
   QOREID_PROVIDER,
   type QoreIdNinClaims,
@@ -133,6 +133,15 @@ export class QoreIdVerificationService {
         await this.integrations.consumeQuota(context, 'existing_cac', organizationId);
         const result = await this.provider.verifyCac(regNumber);
         if (result.state !== 'verified') return result;
+        if (!result.cacBinding) {
+          if (!result.cacIncompleteProfile) {
+            throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
+              'External verification returned an invalid response');
+          }
+          return matchingCacIncompleteProfile(regNumber, result)
+            ? { ...result, state: 'incomplete', providerVerification: 'verified' }
+            : { ...result, state: 'not_verified' };
+        }
         const binding = verifiedCacBinding(regNumber, result);
         if (!binding) return { ...result, state: 'not_verified' };
         const matched = await this.database.withTransaction(context, async (client) => {
@@ -142,7 +151,8 @@ export class QoreIdVerificationService {
               binding.entityType, binding.registrationDate, binding.address, binding.registryStatus]);
           return query.rows[0]?.matched === true;
         }, { readOnly: true });
-        return matched ? result : { ...result, state: 'not_verified' };
+        return matched ? { ...result, providerVerification: 'verified' as const }
+          : { ...result, state: 'not_verified' };
       },
       persist,
       'organization',
@@ -188,6 +198,7 @@ export class QoreIdVerificationService {
       provider: QOREID_PROVIDER,
       state: providerResult.state,
       ...(providerResult.providerReference ? { providerReference: providerResult.providerReference } : {}),
+      ...(providerResult.providerVerification ? { providerVerification: providerResult.providerVerification } : {}),
       recordedAt: evidence.recordedAt,
     };
   }

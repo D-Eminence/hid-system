@@ -51,6 +51,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0052_authoritative_cac_identity.sql` | Registration-identifier-only public intake, complete authoritative CAC fields, exact organization binding, and governed approval guard |
 | `database/migrations/0053_remove_unwired_piersflow_catalog.sql` | Remove the non-executable PiersFlow placeholder from the admin provider catalog while preserving any unexpected audit history |
 | `database/migrations/0054_complete_existing_cac_evidence_binding.sql` | Compare all authoritative registry fields for existing-organization CAC evidence; incomplete historical bindings fail closed |
+| `database/migrations/0055_verified_incomplete_cac_result.sql` | Persist a verified CAC lookup with incomplete legal data as pending evidence; complete registry identity remains required before review and binding |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |

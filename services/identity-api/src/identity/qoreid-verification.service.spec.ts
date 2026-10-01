@@ -192,7 +192,7 @@ describe('QoreID verification service', () => {
 
     await expect(service.verifyOrganizationCac(organizationRequest, 'hospital', 'RC1234')).resolves.toEqual({
       entityType: 'organization', verificationType: 'cac', provider: 'qoreid', state: 'verified',
-      providerReference: '71', recordedAt: '2026-01-01T00:00:00.000Z',
+      providerReference: '71', providerVerification: 'verified', recordedAt: '2026-01-01T00:00:00.000Z',
     });
     expect(provider.verifyCac).toHaveBeenCalledWith('RC1234');
     expect(integrations.consumeQuota).toHaveBeenCalledWith(expect.objectContaining({
@@ -207,5 +207,38 @@ describe('QoreID verification service', () => {
     expect(organizationQuery.mock.calls[1]?.[1]).toEqual(['hospital', 'verified', '71', null]);
     expect(JSON.stringify(organizationQuery.mock.calls)).not.toContain('a0000000-0000-4000-8000-000000000009');
 
+  });
+
+  it('records an incomplete existing-organization CAC check without changing its legal binding', async () => {
+    const { service, provider, database } = setup(true);
+    const organizationQuery = jest.fn().mockResolvedValue({ rows: [{
+      evidenceId: 'a0000000-0000-4000-8000-000000000005',
+      recordedAt: new Date('2026-01-01T00:00:00.000Z'),
+    }] });
+    (database.withTransaction as jest.Mock).mockImplementation(async (
+      _context: unknown, operation: (value: PoolClient) => Promise<unknown>,
+    ) => operation({ query: organizationQuery } as unknown as PoolClient));
+    (provider.verifyCac as jest.Mock).mockResolvedValue({ provider: 'qoreid', state: 'verified',
+      providerReference: '8643', respondedAt: new Date().toISOString(),
+      cacIncompleteProfile: { submittedRegistrationNumber: 'RC1234',
+        metadataCompanyType: 'limited_company', address: 'Synthetic Registry Office' } });
+    const request = {
+      correlationId: 'qoreid-cac-incomplete-test',
+      facilityId: 'a0000000-0000-4000-8000-000000000006',
+      actor: { kind: 'staff', accountId: 'a0000000-0000-4000-8000-000000000007',
+        subject: 'staff:subject', roles: ['admin'], permissions: ['organization.manage'],
+        facility: { id: 'a0000000-0000-4000-8000-000000000006',
+          organizationId: 'a0000000-0000-4000-8000-000000000009' } },
+      header: () => undefined,
+    } as unknown as HidRequest;
+    await expect(service.verifyOrganizationCac(request, 'hospital', 'RC1234')).resolves.toEqual({
+      entityType: 'organization', verificationType: 'cac', provider: 'qoreid',
+      state: 'incomplete', providerVerification: 'verified', providerReference: '8643',
+      recordedAt: '2026-01-01T00:00:00.000Z',
+    });
+    expect(organizationQuery).toHaveBeenCalledTimes(1);
+    expect(organizationQuery.mock.calls[0]?.[0]).toContain('record_organization_cac_verification_evidence');
+    expect(organizationQuery.mock.calls[0]?.[1]).toEqual(['hospital', 'incomplete', '8643', 'incomplete']);
+    expect(JSON.stringify(organizationQuery.mock.calls)).not.toContain('Synthetic Registry Office');
   });
 });

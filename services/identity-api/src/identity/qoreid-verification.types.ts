@@ -56,6 +56,31 @@ export interface QoreIdCacBinding {
   registrationDate: string;
   address: string;
   registryStatus: string;
+  /** Direct `cac.address`, kept separate from the selected HID legal address. */
+  providerAddress?: string;
+  /** Provider classification; never substitutes for `cac.companyType`. */
+  metadataCompanyType?: string;
+  branchAddress?: string;
+  companyEmail?: string;
+  city?: string;
+  headOfficeAddress?: string;
+  lga?: string;
+  affiliates?: number;
+  state?: string;
+}
+
+/** A verified CAC check can return too little legal data to bind an organization. */
+export interface QoreIdCacIncompleteProfile {
+  /** The queried identifier is an input, not a provider-confirmed binding. */
+  submittedRegistrationNumber: string;
+  providerRegistrationNumber?: string;
+  metadataCompanyType?: string;
+  companyName?: string;
+  entityType?: string;
+  registrationDate?: string;
+  address?: string;
+  providerAddress?: string;
+  registryStatus?: string;
   branchAddress?: string;
   companyEmail?: string;
   city?: string;
@@ -77,6 +102,9 @@ export interface QoreIdVerificationResult {
   ninBinding?: QoreIdNinBinding;
   ninEnrollmentBinding?: QoreIdNinEnrollmentBinding;
   cacBinding?: QoreIdCacBinding;
+  cacIncompleteProfile?: QoreIdCacIncompleteProfile;
+  /** QoreID verified the CAC check; HID binding may still be incomplete. */
+  providerVerification?: 'verified';
 }
 
 export interface VerificationResponse {
@@ -85,5 +113,6 @@ export interface VerificationResponse {
   provider: typeof QOREID_PROVIDER;
   state: EvidenceResult;
   providerReference?: string;
+  providerVerification?: 'verified';
   recordedAt: string;
 }

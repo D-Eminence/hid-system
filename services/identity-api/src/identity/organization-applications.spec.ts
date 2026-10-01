@@ -8,7 +8,8 @@ import type { TurnstileService } from '../auth/turnstile.service';
 import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import { AdminOrganizationApplicationsController, PublicOrganizationApplicationsController } from './organization-applications.controller';
 import type { SubmitOrganizationApplicationDto } from './dto/organization-application.dto';
-import { OrganizationApplicationsService, verifiedCacBinding } from './organization-applications.service';
+import { matchingCacIncompleteProfile, OrganizationApplicationsService,
+  verifiedCacBinding } from './organization-applications.service';
 
 const applicationId = 'c4600000-0000-4000-8000-000000000002';
 const input: SubmitOrganizationApplicationDto = {
@@ -81,7 +82,7 @@ describe('organization onboarding boundary', () => {
         cac_registration_number: 'RC1234567', application_status: 'pending_verification', row_version: '1' }] })
       .mockResolvedValueOnce({ rows: [{ application_status: 'ready_for_review', row_version: '2' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
-    const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: 'qoreid-123',
+    const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: '123',
       cacBinding: { registrationNumber: 'RC1234567', providerRegistrationNumber: '1234567',
         companyName: 'Verified Legal Clinic Limited',
         entityType: 'Private Company Limited by Shares', registrationDate: '2014-05-26',
@@ -97,11 +98,35 @@ describe('organization onboarding boundary', () => {
     expect(integrations.assertAvailable).toHaveBeenCalledWith('qoreid', 'provider_cac');
     expect(integrations.consumeQuota).toHaveBeenCalledWith(context, 'application_cac', applicationId);
     expect(result).toEqual({ status: 'ready_for_review', version: 2, state: 'verified',
-      providerReference: 'qoreid-123' });
+      providerVerification: 'verified', providerReference: '123' });
     expect(JSON.stringify(result)).not.toContain('RC1234567');
-    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'verified', 'qoreid-123', null,
+    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'verified', '123', null,
       'RC1234567', 'Verified Legal Clinic Limited', 'Private Company Limited by Shares',
       '2014-05-26', '10 Test Avenue, Lagos', 'active']);
+  });
+
+  it('records a verified but incomplete provider check without legal identity or approval readiness', async () => {
+    const query = jest.fn()
+      .mockResolvedValueOnce({ rows: [{ application_id: applicationId, product_code: 'migrate',
+        cac_registration_number: 'RC1234567', application_status: 'pending_verification', row_version: '1' }] })
+      .mockResolvedValueOnce({ rows: [{ application_status: 'pending_verification', row_version: '2' }] });
+    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified',
+      providerReference: '8643', cacIncompleteProfile: {
+        submittedRegistrationNumber: 'RC1234567', metadataCompanyType: 'limited_company',
+        providerAddress: 'Synthetic Registry Office', address: 'Synthetic Registry Office',
+      } }) };
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
+    const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
+      qoreid as unknown as QoreIdVerificationAdapter,
+      { assertAvailable: jest.fn(), consumeQuota: jest.fn() } as unknown as IntegrationRuntimeService);
+    await expect(service.verify(context, applicationId, 1)).resolves.toEqual({
+      status: 'pending_verification', version: 2, state: 'verified_incomplete',
+      providerVerification: 'verified', providerReference: '8643',
+    });
+    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'verified_incomplete', '8643',
+      'incomplete', null, null, null, null, null, null]);
+    expect(JSON.stringify(query.mock.calls[1])).not.toContain('Synthetic Registry Office');
   });
 
   it('keeps an application unchanged when verification is disabled and refuses an incomplete approval link', async () => {
@@ -248,7 +273,7 @@ describe('organization onboarding boundary', () => {
 
   it('requires an exact prefixed CAC number, active registry state, and legal name', () => {
     const base = { provider: 'qoreid' as const, state: 'verified' as const,
-      providerReference: 'qoreid-123', respondedAt: new Date().toISOString(),
+      providerReference: '123', respondedAt: new Date().toISOString(),
       cacBinding: { registrationNumber: 'RC1234567', providerRegistrationNumber: '1234567',
         companyName: 'Legal Company Ltd',
         entityType: 'Private Company Limited by Shares', registrationDate: '2014-05-26',
@@ -275,5 +300,23 @@ describe('organization onboarding boundary', () => {
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, entityType: '' } })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, registrationDate: '2024-02-30' } })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, address: '' } })).toBeNull();
+  });
+
+  it('requires a canonical query match for an incomplete CAC lookup without promoting it to a binding', () => {
+    const base = { provider: 'qoreid' as const, state: 'verified' as const,
+      providerReference: '8643', respondedAt: new Date().toISOString(),
+      cacIncompleteProfile: { submittedRegistrationNumber: 'BN1234567',
+        metadataCompanyType: 'business', address: 'Synthetic Registry Office' } };
+    expect(matchingCacIncompleteProfile('BN1234567', base)).toBe(true);
+    expect(matchingCacIncompleteProfile('RC1234567', base)).toBe(false);
+    expect(matchingCacIncompleteProfile('BN1234567', { ...base,
+      cacIncompleteProfile: { ...base.cacIncompleteProfile,
+        providerRegistrationNumber: 'RC1234567' } })).toBe(false);
+    expect(matchingCacIncompleteProfile('BN1234567', { ...base,
+      cacIncompleteProfile: { ...base.cacIncompleteProfile,
+        providerRegistrationNumber: '1234567' } })).toBe(true);
+    expect(matchingCacIncompleteProfile('BN1234567', { ...base,
+      cacIncompleteProfile: { ...base.cacIncompleteProfile,
+        providerRegistrationNumber: '7654321' } })).toBe(false);
   });
 });

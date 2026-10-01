@@ -85,6 +85,10 @@ Migration `0054_complete_existing_cac_evidence_binding.sql` requires the
 existing-organization CAC evidence route to match every authoritative registry
 field against its governed application and unique CAC binding. Historical
 name-only bindings cannot produce new verified evidence until reconciled.
+Migration `0055_verified_incomplete_cac_result.sql` records a QoreID-verified
+CAC lookup with a numeric provider reference even when legal-entity fields are
+missing. It leaves the application pending and those fields null, so approval
+and organization binding still require a later complete authoritative result.
 Migration `0013_durable_ocr_persistence.sql` adds the isolated `ocr` schema,
 facility-scoped idempotent jobs, immutable extraction/validation/lifecycle
 evidence, bounded retry state, atomic `SKIP LOCKED` worker claims, constrained

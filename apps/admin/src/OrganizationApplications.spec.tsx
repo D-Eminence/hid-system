@@ -58,6 +58,30 @@ describe('provider organization application review', () => {
     expect(confirm).toHaveBeenCalledTimes(2);
   });
 
+  it('shows a verified CAC check with incomplete legal identity as pending and blocks approval', async () => {
+    const incomplete: OrganizationApplication = { ...application, verificationResult: 'verified_incomplete',
+      verifiedAt: '2026-09-02T00:00:00Z', version: 4 };
+    apiMock.mockImplementation(async (path: string) => path === '/admin/organization-applications'
+      ? { items: [incomplete] }
+      : { status: 'pending_verification', version: 5, state: 'verified_incomplete', providerVerification: 'verified' });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<OrganizationApplications actor={reviewer} />);
+    const card = (await screen.findByRole('heading', { name: 'Organization profile incomplete' })).closest('article')!;
+    expect(within(card).getByText('Awaiting registry profile')).toBeInTheDocument();
+    expect(within(card).getByText('Not provided by QoreID')).toBeInTheDocument();
+    expect(within(card).getByText('Provider CAC check').nextElementSibling).toHaveTextContent('Verified');
+    expect(within(card).getByText('Authoritative profile').nextElementSibling).toHaveTextContent('Incomplete');
+    expect(within(card).getByText('Organization binding').nextElementSibling).toHaveTextContent('Not ready');
+    expect(within(card).getByText('Organization activation').nextElementSibling).toHaveTextContent('Not active');
+    expect(within(card).getByText('Provider checked').nextElementSibling).not.toHaveTextContent('—');
+    expect(within(card).getByRole('button', { name: 'Approve and provision' })).toBeDisabled();
+    expect(within(card).getByText(/authoritative legal fields or registration binding are incomplete/)).toBeInTheDocument();
+    fireEvent.click(within(card).getByRole('button', { name: 'Reverify CAC' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('QoreID verified the CAC check');
+    expect(screen.getByRole('status')).toHaveTextContent('Approval remains unavailable');
+    expect(apiMock.mock.calls.some(([path]) => String(path).endsWith('/approve'))).toBe(false);
+  });
+
   it('requires review reason and confirmation before approving the verified legal entity', async () => {
     const ready = { ...application, status: 'ready_for_review' as const,
       organizationName: 'Registry Lab Limited', verificationResult: 'verified' as const,
@@ -70,6 +94,10 @@ describe('provider organization application review', () => {
     render(<OrganizationApplications actor={reviewer} />);
     const card = (await screen.findByRole('heading', { name: 'Registry Lab Limited' })).closest('article')!;
     expect(within(card).getAllByText('Registry Lab Limited')).not.toHaveLength(0);
+    expect(within(card).getByText('Provider CAC check').nextElementSibling).toHaveTextContent('Verified');
+    expect(within(card).getByText('Authoritative profile').nextElementSibling).toHaveTextContent('Complete');
+    expect(within(card).getByText('Organization binding').nextElementSibling).toHaveTextContent('Ready for review');
+    expect(within(card).getByText('Organization activation').nextElementSibling).toHaveTextContent('Not active');
     fireEvent.change(within(card).getByLabelText('Review reason'), { target: { value: 'Registry legal entity and admin reviewed' } });
     fireEvent.change(within(card).getByLabelText('Existing organization ID'), {
       target: { value: '10000000-0000-4000-8000-000000000001' },
@@ -86,6 +114,19 @@ describe('provider organization application review', () => {
         existingOrganizationId: '10000000-0000-4000-8000-000000000001',
         existingFacilityId: '10000000-0000-4000-8000-000000000002' } }));
     expect(confirm.mock.calls[0]?.[0]).toContain('Registry Lab Limited');
+  });
+
+  it('labels an approved and bound organization as active without offering another approval', async () => {
+    const approved: OrganizationApplication = { ...application, status: 'approved',
+      verificationResult: 'verified', verifiedOrganizationName: 'Registry Lab Limited',
+      verifiedEntityType: 'Private Limited', verifiedRegistrationDate: '2001-01-01',
+      verifiedAddress: '123 Registry Street, Lagos', verifiedRegistryStatus: 'active' };
+    apiMock.mockResolvedValue({ items: [approved] });
+    render(<OrganizationApplications actor={reviewer} />);
+    const card = (await screen.findByRole('heading', { name: 'Registry Lab Limited' })).closest('article')!;
+    expect(within(card).getByText('Organization binding').nextElementSibling).toHaveTextContent('Bound');
+    expect(within(card).getByText('Organization activation').nextElementSibling).toHaveTextContent('Active');
+    expect(within(card).queryByRole('button', { name: 'Approve and provision' })).not.toBeInTheDocument();
   });
 
   it('keeps approval disabled without all provisioning permissions and sends a versioned rejection', async () => {

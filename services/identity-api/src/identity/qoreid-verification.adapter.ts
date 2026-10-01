@@ -306,19 +306,28 @@ export class QoreIdVerificationAdapter {
     if (summary.cac_check !== 'verified') return { ...result, state: 'not_verified' };
     const cac = this.record(record?.cac);
     if (!cac) throw this.invalidProviderResponse();
-    const providerRegistrationNumber = this.safeCacRegistrationNumber(cac.rcNumber);
-    if (!providerRegistrationNumber) throw this.invalidProviderResponse();
+    const metadataValue = record?.metadata;
+    const metadata = metadataValue === undefined || metadataValue === null
+      ? undefined : this.record(metadataValue);
+    if (metadataValue !== undefined && metadataValue !== null && !metadata) {
+      throw this.invalidProviderResponse();
+    }
+    const providerRegistrationNumber = this.optionalCacRegistrationNumber(cac.rcNumber);
+    if (!providerRegistrationNumber.valid) throw this.invalidProviderResponse();
     const submittedPrefix = submitted.slice(0, 2);
     const submittedDigits = submitted.slice(2);
-    const providerPrefix = /^(RC|BN|IT)/.exec(providerRegistrationNumber)?.[1];
-    const providerDigits = providerPrefix
-      ? providerRegistrationNumber.slice(2) : providerRegistrationNumber;
-    if ((providerPrefix && providerPrefix !== submittedPrefix)
-      || providerDigits !== submittedDigits) return { ...result, state: 'not_verified' };
+    if (providerRegistrationNumber.value) {
+      const providerPrefix = /^(RC|BN|IT)/.exec(providerRegistrationNumber.value)?.[1];
+      const providerDigits = providerPrefix
+        ? providerRegistrationNumber.value.slice(2) : providerRegistrationNumber.value;
+      if ((providerPrefix && providerPrefix !== submittedPrefix)
+        || providerDigits !== submittedDigits) return { ...result, state: 'not_verified' };
+    }
 
-    const companyName = this.safeName(cac.companyName, 200);
-    const entityType = this.safeName(cac.companyType, 120);
-    const registrationDate = this.registrationDate(cac.registrationDate);
+    const companyName = this.optionalCacText(cac.companyName, 200);
+    const entityType = this.optionalCacText(cac.companyType, 120);
+    const registrationDate = this.optionalCacRegistrationDate(cac.registrationDate);
+    const providerAddress = this.optionalCacText(cac.address, 1000);
     const branchAddress = this.optionalCacText(cac.branchAddress, 1000);
     const companyEmail = this.optionalCacEmail(cac.companyEmail);
     const city = this.optionalCacText(cac.city, 120);
@@ -326,17 +335,25 @@ export class QoreIdVerificationAdapter {
     const lga = this.optionalCacText(cac.lga, 120);
     const state = this.optionalCacText(cac.state, 120);
     const affiliates = this.optionalCacAffiliates(cac.affiliates);
-    const registryStatus = this.safeName(cac.status, 40);
-    const address = headOfficeAddress.value ?? branchAddress.value;
-    if (!companyName || !entityType || !registrationDate || !address || !registryStatus
-      || !branchAddress.valid || !companyEmail.valid || !city.valid || !headOfficeAddress.valid
-      || !lga.valid || !state.valid || !affiliates.valid) throw this.invalidProviderResponse();
-    if (registryStatus.toLowerCase() !== 'active') return { ...result, state: 'not_verified' };
-    return { ...result, cacBinding: {
-      registrationNumber: submitted,
-      providerRegistrationNumber,
-      companyName, entityType, registrationDate, address,
-      registryStatus,
+    const registryStatus = this.optionalCacText(cac.status, 40);
+    const metadataCompanyType = this.optionalCacText(metadata?.companyType, 120);
+    const address = providerAddress.value ?? headOfficeAddress.value ?? branchAddress.value;
+    if (!companyName.valid || !entityType.valid || !registrationDate.valid
+      || !providerAddress.valid || !branchAddress.valid || !companyEmail.valid || !city.valid
+      || !headOfficeAddress.valid || !lga.valid || !state.valid || !affiliates.valid
+      || !registryStatus.valid || !metadataCompanyType.valid) throw this.invalidProviderResponse();
+    if (registryStatus.value && registryStatus.value.toLowerCase() !== 'active') {
+      return { ...result, state: 'not_verified' };
+    }
+    const profileFields = {
+      ...(providerRegistrationNumber.value ? { providerRegistrationNumber: providerRegistrationNumber.value } : {}),
+      ...(companyName.value ? { companyName: companyName.value } : {}),
+      ...(entityType.value ? { entityType: entityType.value } : {}),
+      ...(registrationDate.value ? { registrationDate: registrationDate.value } : {}),
+      ...(address ? { address } : {}),
+      ...(registryStatus.value ? { registryStatus: registryStatus.value } : {}),
+      ...(providerAddress.value ? { providerAddress: providerAddress.value } : {}),
+      ...(metadataCompanyType.value ? { metadataCompanyType: metadataCompanyType.value } : {}),
       ...(branchAddress.value ? { branchAddress: branchAddress.value } : {}),
       ...(companyEmail.value ? { companyEmail: companyEmail.value } : {}),
       ...(city.value ? { city: city.value } : {}),
@@ -344,6 +361,20 @@ export class QoreIdVerificationAdapter {
       ...(lga.value ? { lga: lga.value } : {}),
       ...(affiliates.value !== undefined ? { affiliates: affiliates.value } : {}),
       ...(state.value ? { state: state.value } : {}),
+    };
+    if (!providerRegistrationNumber.value || !companyName.value || !entityType.value
+      || !registrationDate.value || !address || !registryStatus.value) {
+      return { ...result, cacIncompleteProfile: {
+        submittedRegistrationNumber: submitted, ...profileFields,
+      } };
+    }
+    return { ...result, cacBinding: {
+      registrationNumber: submitted,
+      providerRegistrationNumber: providerRegistrationNumber.value,
+      companyName: companyName.value, entityType: entityType.value,
+      registrationDate: registrationDate.value, address,
+      registryStatus: registryStatus.value,
+      ...profileFields,
     } };
   }
 
@@ -427,6 +458,20 @@ export class QoreIdVerificationAdapter {
     if (typeof value !== 'string') return undefined;
     const normalized = value.replace(/\s+/g, '').toUpperCase();
     return /^(?:(?:RC|BN|IT))?[0-9]{4,20}$/.test(normalized) ? normalized : undefined;
+  }
+
+  private optionalCacRegistrationNumber(value: unknown): { valid: boolean; value?: string } {
+    if (value === undefined || value === null || value === '') return { valid: true };
+    if (typeof value === 'string' && value.trim() === '') return { valid: true };
+    const normalized = this.safeCacRegistrationNumber(value);
+    return normalized ? { valid: true, value: normalized } : { valid: false };
+  }
+
+  private optionalCacRegistrationDate(value: unknown): { valid: boolean; value?: string } {
+    if (value === undefined || value === null || value === '') return { valid: true };
+    if (typeof value === 'string' && value.trim() === '') return { valid: true };
+    const normalized = this.registrationDate(value);
+    return normalized ? { valid: true, value: normalized } : { valid: false };
   }
 
   private optionalCacText(value: unknown, limit: number): { valid: boolean; value?: string } {
