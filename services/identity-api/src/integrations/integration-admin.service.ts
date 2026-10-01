@@ -227,7 +227,7 @@ export class IntegrationAdminService {
           : { state: 'external', masked: '••••', rotationSupported: false };
       const activeCapabilities = row.capabilities.filter((capability) =>
         row.enabled && (capability === 'patient_nin' || capability === 'provider_cac'
-          ? capability === 'patient_nin' && qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED
+          ? qoreidOpen && (capability === 'provider_cac' || env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED)
           : routing.some((route) => route.capability === capability &&
             (route.active_provider === row.provider || route.fallback_provider === row.provider))));
       const operationGates = row.provider === 'qoreid' ? [
@@ -236,8 +236,8 @@ export class IntegrationAdminService {
         { operation: 'patient_nin_enrollment',
           state: qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED ? 'open' : 'closed',
           detail: 'NIN-only enrollment also requires its separate deployment gate.' },
-        { operation: 'provider_cac', state: 'scaffold',
-          detail: 'CAC entitlement and returned registration-number mapping remain unconfirmed.' },
+        { operation: 'provider_cac', state: qoreidOpen ? 'open' : 'closed',
+          detail: 'CAC Basic V2 requires the general QoreID gate and an enabled provider. OAuth connection tests do not prove CAC entitlement.' },
       ] : [];
       const availableActions = ['audit',
         ...(row.runtime_control && (row.provider !== 'qoreid' || row.enabled || this.qoreidConfigured())

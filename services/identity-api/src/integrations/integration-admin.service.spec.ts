@@ -80,11 +80,11 @@ describe('IntegrationAdminService', () => {
     const { service, database } = harness(listRows);
     const result = await service.list(context);
     expect(result.items).toEqual([expect.objectContaining({
-      provider: 'qoreid', enabled: true, managementMode: 'runtime', activeCapabilities: [],
+      provider: 'qoreid', enabled: true, managementMode: 'runtime', activeCapabilities: ['provider_cac'],
       operationGates: [
         expect.objectContaining({ operation: 'existing_patient_nin', state: 'open' }),
         expect.objectContaining({ operation: 'patient_nin_enrollment', state: 'closed' }),
-        expect.objectContaining({ operation: 'provider_cac', state: 'scaffold' }),
+        expect.objectContaining({ operation: 'provider_cac', state: 'open' }),
       ],
       credential: { state: 'configured', masked: '••••', rotationSupported: false },
       availableActions: expect.arrayContaining(['audit', 'pause', 'test']),
@@ -104,17 +104,17 @@ describe('IntegrationAdminService', () => {
     expect(JSON.stringify(result)).not.toMatch(/synthetic-secret-never-returned|example\.test/);
   });
 
-  it('shows the NIN-only gate separately and never labels unconfirmed CAC as active', async () => {
+  it('shows the NIN-only gate separately from configured CAC Basic V2', async () => {
     process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
     resetEnvironmentForTests();
     const { service } = harness(listRows);
     const result = await service.list(context);
     expect(result.items[0]).toMatchObject({
-      activeCapabilities: ['patient_nin'],
+      activeCapabilities: ['patient_nin', 'provider_cac'],
       operationGates: [
         { operation: 'existing_patient_nin', state: 'open' },
         { operation: 'patient_nin_enrollment', state: 'open' },
-        { operation: 'provider_cac', state: 'scaffold' },
+        { operation: 'provider_cac', state: 'open' },
       ],
     });
   });
@@ -130,7 +130,7 @@ describe('IntegrationAdminService', () => {
       operationGates: [
         { operation: 'existing_patient_nin', state: 'closed' },
         { operation: 'patient_nin_enrollment', state: 'closed' },
-        { operation: 'provider_cac', state: 'scaffold' },
+        { operation: 'provider_cac', state: 'closed' },
       ] });
     expect(result.items[0]?.availableActions).not.toContain('test');
     expect(result.items[0]?.availableActions).not.toContain('enable');
@@ -145,7 +145,7 @@ describe('IntegrationAdminService', () => {
       operationGates: [
         { operation: 'existing_patient_nin', state: 'closed' },
         { operation: 'patient_nin_enrollment', state: 'closed' },
-        { operation: 'provider_cac', state: 'scaffold' },
+        { operation: 'provider_cac', state: 'closed' },
       ] });
     expect(result.items[0]?.availableActions).not.toContain('test');
     await expect(service.test(context, 'qoreid', 3, 'Routine connection check', 'qoreid-test-0001'))

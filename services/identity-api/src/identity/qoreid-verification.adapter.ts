@@ -101,20 +101,13 @@ export class QoreIdVerificationAdapter {
   }
 
   async verifyCac(regNumber: string): Promise<QoreIdVerificationResult> {
-    if (!/^(?:RC|BN|IT)[0-9]{4,20}$/.test(regNumber)) {
+    const submitted = typeof regNumber === 'string' ? regNumber.replace(/\s+/g, '').toUpperCase() : '';
+    if (!/^(?:RC|BN|IT)[0-9]{4,20}$/.test(submitted)) {
       throw new DomainProblem(400, 'CAC_REGISTRATION_NUMBER_INVALID', 'A valid CAC registration number is required');
     }
-    this.assertCacContractAvailable();
-    throw this.cacContractUnconfirmed();
-  }
-
-  /**
-   * CAC entitlement and the returned registration-number mapping have not
-   * been confirmed for this account. Keep this gate in the adapter so no
-   * caller can turn a guessed response shape into verified legal identity.
-   */
-  assertCacContractAvailable(): void {
-    throw this.cacContractUnconfirmed();
+    const response = await this.requestVerification('/v2/ng/identities/cac-basic',
+      JSON.stringify({ regNumber: submitted }));
+    return this.normalizedCacVerification(response, submitted);
   }
 
   private async requestVerification(path: string, body?: string): Promise<unknown> {
@@ -303,6 +296,57 @@ export class QoreIdVerificationAdapter {
     return { ...result, ninBinding: { firstName, lastName, dateOfBirth } };
   }
 
+  private normalizedCacVerification(payload: unknown, submitted: string): QoreIdVerificationResult {
+    const result = this.normalizedVerification(payload);
+    if (result.state !== 'verified') return result;
+    if (!result.providerReference) throw this.invalidProviderResponse();
+    const record = this.record(payload);
+    const summary = this.record(record?.summary);
+    if (typeof summary?.cac_check !== 'string') throw this.invalidProviderResponse();
+    if (summary.cac_check !== 'verified') return { ...result, state: 'not_verified' };
+    const cac = this.record(record?.cac);
+    if (!cac) throw this.invalidProviderResponse();
+    const providerRegistrationNumber = this.safeCacRegistrationNumber(cac.rcNumber);
+    if (!providerRegistrationNumber) throw this.invalidProviderResponse();
+    const submittedPrefix = submitted.slice(0, 2);
+    const submittedDigits = submitted.slice(2);
+    const providerPrefix = /^(RC|BN|IT)/.exec(providerRegistrationNumber)?.[1];
+    const providerDigits = providerPrefix
+      ? providerRegistrationNumber.slice(2) : providerRegistrationNumber;
+    if ((providerPrefix && providerPrefix !== submittedPrefix)
+      || providerDigits !== submittedDigits) return { ...result, state: 'not_verified' };
+
+    const companyName = this.safeName(cac.companyName, 200);
+    const entityType = this.safeName(cac.companyType, 120);
+    const registrationDate = this.registrationDate(cac.registrationDate);
+    const branchAddress = this.optionalCacText(cac.branchAddress, 1000);
+    const companyEmail = this.optionalCacEmail(cac.companyEmail);
+    const city = this.optionalCacText(cac.city, 120);
+    const headOfficeAddress = this.optionalCacText(cac.headOfficeAddress, 1000);
+    const lga = this.optionalCacText(cac.lga, 120);
+    const state = this.optionalCacText(cac.state, 120);
+    const affiliates = this.optionalCacAffiliates(cac.affiliates);
+    const registryStatus = this.safeName(cac.status, 40);
+    const address = headOfficeAddress.value ?? branchAddress.value;
+    if (!companyName || !entityType || !registrationDate || !address || !registryStatus
+      || !branchAddress.valid || !companyEmail.valid || !city.valid || !headOfficeAddress.valid
+      || !lga.valid || !state.valid || !affiliates.valid) throw this.invalidProviderResponse();
+    if (registryStatus.toLowerCase() !== 'active') return { ...result, state: 'not_verified' };
+    return { ...result, cacBinding: {
+      registrationNumber: submitted,
+      providerRegistrationNumber,
+      companyName, entityType, registrationDate, address,
+      registryStatus,
+      ...(branchAddress.value ? { branchAddress: branchAddress.value } : {}),
+      ...(companyEmail.value ? { companyEmail: companyEmail.value } : {}),
+      ...(city.value ? { city: city.value } : {}),
+      ...(headOfficeAddress.value ? { headOfficeAddress: headOfficeAddress.value } : {}),
+      ...(lga.value ? { lga: lga.value } : {}),
+      ...(affiliates.value !== undefined ? { affiliates: affiliates.value } : {}),
+      ...(state.value ? { state: state.value } : {}),
+    } };
+  }
+
   private ninEnrollmentBinding(payload: unknown, submittedNin: string): QoreIdNinEnrollmentBinding {
     const record = this.record(payload);
     const bio = this.record(record?.nin);
@@ -361,6 +405,51 @@ export class QoreIdVerificationAdapter {
       && date.getUTCFullYear() >= 1800 && date.getTime() <= Date.now() ? iso : undefined;
   }
 
+  private registrationDate(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const input = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(input)) return this.validDate(input);
+    const match = /^(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})$/.exec(input);
+    if (!match) return undefined;
+    const [, day = '', monthText = '', yearText = ''] = match;
+    const month = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+      .indexOf(monthText.toLowerCase()) + 1;
+    if (!month) return undefined;
+    const yearNumber = Number(yearText);
+    const currentYear = new Date().getUTCFullYear();
+    const year = yearText.length === 2
+      ? (yearNumber <= currentYear % 100 ? 2000 : 1900) + yearNumber
+      : yearNumber;
+    return this.validDate(`${year}-${String(month).padStart(2, '0')}-${day.padStart(2, '0')}`);
+  }
+
+  private safeCacRegistrationNumber(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const normalized = value.replace(/\s+/g, '').toUpperCase();
+    return /^(?:(?:RC|BN|IT))?[0-9]{4,20}$/.test(normalized) ? normalized : undefined;
+  }
+
+  private optionalCacText(value: unknown, limit: number): { valid: boolean; value?: string } {
+    if (value === undefined || value === null || value === '') return { valid: true };
+    const normalized = this.safeName(value, limit);
+    return normalized ? { valid: true, value: normalized } : { valid: false };
+  }
+
+  private optionalCacEmail(value: unknown): { valid: boolean; value?: string } {
+    if (value === undefined || value === null || value === '') return { valid: true };
+    const normalized = this.safeName(value, 254);
+    return normalized && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)
+      ? { valid: true, value: normalized } : { valid: false };
+  }
+
+  private optionalCacAffiliates(value: unknown): { valid: boolean; value?: number } {
+    if (value === undefined || value === null || value === '') return { valid: true };
+    const number = typeof value === 'number' ? value
+      : typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value) ? Number(value) : NaN;
+    return Number.isSafeInteger(number) && number >= 0
+      ? { valid: true, value: number } : { valid: false };
+  }
+
   private safeName(value: unknown, limit = 100): string | undefined {
     if (typeof value !== 'string') return undefined;
     const name = value.trim();
@@ -395,8 +484,4 @@ export class QoreIdVerificationAdapter {
     return new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID', 'External verification returned an invalid response');
   }
 
-  private cacContractUnconfirmed(): DomainProblem {
-    return new DomainProblem(503, 'QOREID_CAC_CONTRACT_UNCONFIRMED',
-      'Organization verification is awaiting provider contract confirmation');
-  }
 }

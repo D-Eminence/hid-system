@@ -47,12 +47,22 @@ export interface QoreIdNinEnrollmentBinding extends QoreIdNinBinding {
 }
 
 export interface QoreIdCacBinding {
+  /** Prefixed HID binding key, derived only from a matching submitted identifier. */
   registrationNumber: string;
+  /** QoreID's normalized `cac.rcNumber`, retained separately from the HID key. */
+  providerRegistrationNumber: string;
   companyName: string;
   entityType: string;
   registrationDate: string;
   address: string;
   registryStatus: string;
+  branchAddress?: string;
+  companyEmail?: string;
+  city?: string;
+  headOfficeAddress?: string;
+  lga?: string;
+  affiliates?: number;
+  state?: string;
 }
 
 export interface QoreIdVerificationResult {

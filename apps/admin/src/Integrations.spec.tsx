@@ -26,11 +26,11 @@ const catalog: IntegrationCatalog = {
   items: [provider({}), provider({ provider: 'brevo', name: 'Brevo', capabilities: ['sms', 'email'],
     activeCapabilities: [], configuration: {}, availableActions: ['enable', 'pause', 'audit', 'select', 'fallback'] }),
   provider({ provider: 'qoreid', name: 'QoreID', capabilities: ['patient_nin', 'provider_cac'],
-    activeCapabilities: [], configuration: { timeoutMs: 5000 },
+    activeCapabilities: ['provider_cac'], configuration: { timeoutMs: 5000 },
     operationGates: [
       { operation: 'existing_patient_nin', state: 'open', detail: 'General gate and provider enabled.' },
       { operation: 'patient_nin_enrollment', state: 'closed', detail: 'Separate deployment gate required.' },
-      { operation: 'provider_cac', state: 'scaffold', detail: 'Entitlement and mapping unconfirmed.' },
+      { operation: 'provider_cac', state: 'open', detail: 'CAC Basic V2 is configured; entitlement must be checked separately.' },
     ], availableActions: ['pause', 'test', 'audit'] }),
   provider({ provider: 'turnstile', name: 'Turnstile', capabilities: ['bot-protection'],
     managementMode: 'deployment',
@@ -57,9 +57,9 @@ describe('admin integration management', () => {
     const qoreid = screen.getByRole('heading', { name: 'QoreID' }).closest('article')!;
     expect(within(qoreid).getByText('NIN-only enrollment')).toBeInTheDocument();
     expect(within(qoreid).getByText('CAC verification')).toBeInTheDocument();
-    expect(within(qoreid).getByText('Entitlement and mapping unconfirmed.')).toBeInTheDocument();
+    expect(within(qoreid).getByText('CAC Basic V2 is configured; entitlement must be checked separately.')).toBeInTheDocument();
     expect(within(qoreid).getAllByText('Gate off')).toHaveLength(1);
-    expect(within(qoreid).getByText('Unavailable')).toBeInTheDocument();
+    expect(within(qoreid).getAllByText('Gate on')).toHaveLength(2);
     const termii = screen.getByRole('heading', { name: 'Termii' }).closest('article')!;
     expect(within(termii).getByRole('button', { name: 'Rotate Credential' })).toBeDisabled();
   });
@@ -96,20 +96,20 @@ describe('admin integration management', () => {
     expect(within(fcm).getByRole('button', { name: 'Enable' })).toBeDisabled();
   });
 
-  it('shows a paused QoreID provider with its connection test disabled and CAC still unavailable', async () => {
+  it('shows a paused QoreID provider with its connection test and CAC gate disabled', async () => {
     const paused = provider({ provider: 'qoreid', name: 'QoreID', enabled: false,
       capabilities: ['patient_nin', 'provider_cac'], activeCapabilities: [],
       operationGates: [
         { operation: 'existing_patient_nin', state: 'closed', detail: 'Provider paused.' },
         { operation: 'patient_nin_enrollment', state: 'closed', detail: 'Separate gate is off.' },
-        { operation: 'provider_cac', state: 'scaffold', detail: 'Contract unconfirmed.' },
+        { operation: 'provider_cac', state: 'closed', detail: 'Provider paused.' },
       ], availableActions: ['enable', 'audit'] });
     apiMock.mockResolvedValue({ items: [paused], capabilities: [] });
     render(<Integrations actor={actor()} />);
     const qoreid = (await screen.findByRole('heading', { name: 'QoreID' })).closest('article')!;
     expect(within(qoreid).getByText('Paused')).toBeInTheDocument();
     expect(within(qoreid).getByRole('button', { name: 'Test Connection' })).toBeDisabled();
-    expect(within(qoreid).getByText('Contract unconfirmed.')).toBeInTheDocument();
+    expect(within(qoreid).getAllByText('Provider paused.')).toHaveLength(2);
   });
 
   it('configures only approved non-secret fields when the provider has no prior override', async () => {

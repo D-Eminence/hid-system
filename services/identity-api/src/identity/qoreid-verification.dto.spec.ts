@@ -14,7 +14,7 @@ describe('QoreID verification DTOs', () => {
   });
 
   it.each(['RC1234', 'BN1234', 'IT1234'])('accepts normalized CAC registration number %s', async (regNumber) => {
-    const valid = plainToInstance(VerifyCacDto, { regNumber: regNumber.toLowerCase() });
+    const valid = plainToInstance(VerifyCacDto, { regNumber: ` ${regNumber.slice(0, 2).toLowerCase()} 12\t34 ` });
     expect(valid.regNumber).toBe(regNumber);
     expect(await validate(valid)).toHaveLength(0);
   });

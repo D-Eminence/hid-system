@@ -42,7 +42,6 @@ function setup(enabled: boolean) {
     verifyNin: jest.fn().mockResolvedValue({ provider: 'qoreid', state: 'verified', providerReference: '99',
       ninBinding: { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04' },
       respondedAt: new Date().toISOString() }),
-    assertCacContractAvailable: jest.fn(),
     verifyCac: jest.fn(),
   } as unknown as QoreIdVerificationAdapter;
   const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined),
@@ -172,7 +171,7 @@ describe('QoreID verification service', () => {
     ) => operation({ query: organizationQuery } as unknown as PoolClient));
     (provider.verifyCac as jest.Mock).mockResolvedValue({
       provider: 'qoreid', state: 'verified', providerReference: '71', respondedAt: new Date().toISOString(),
-      cacBinding: { registrationNumber: 'RC1234', companyName: 'Existing organization',
+      cacBinding: { registrationNumber: 'RC1234', providerRegistrationNumber: '1234', companyName: 'Existing organization',
         entityType: 'Private Limited', registrationDate: '2001-01-01',
         address: '123 Registry Street, Lagos', registryStatus: 'Active' },
     });
@@ -208,17 +207,5 @@ describe('QoreID verification service', () => {
     expect(organizationQuery.mock.calls[1]?.[1]).toEqual(['hospital', 'verified', '71', null]);
     expect(JSON.stringify(organizationQuery.mock.calls)).not.toContain('a0000000-0000-4000-8000-000000000009');
 
-    // The normalized success above exercises the future provider interface.
-    // The production adapter currently blocks at this gate before quota or
-    // provider access, leaving existing organization evidence untouched.
-    (provider.assertCacContractAvailable as jest.Mock).mockImplementationOnce(() => {
-      throw new DomainProblem(503, 'QOREID_CAC_CONTRACT_UNCONFIRMED', 'Contract is unconfirmed');
-    });
-    await expect(service.verifyOrganizationCac(organizationRequest, 'hospital', 'RC1234'))
-      .rejects.toMatchObject({ status: 503, code: 'QOREID_CAC_CONTRACT_UNCONFIRMED' });
-    expect(provider.verifyCac).toHaveBeenCalledTimes(1);
-    expect(integrations.consumeQuota).toHaveBeenCalledTimes(1);
-    expect(organizationQuery.mock.calls.filter(([sql]) => sql.includes('record_organization_cac_verification_evidence')))
-      .toHaveLength(1);
   });
 });

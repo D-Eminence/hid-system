@@ -9,7 +9,6 @@ The future `Health-id` public frontend can submit EHR, Migrate, Laboratory, and 
 ```json
 {
   "productCode": "migrate",
-  "organizationName": "Example Clinic",
   "organizationType": "clinic",
   "cacRegistrationNumber": "RC1234567",
   "administratorName": "Ada Example",
@@ -19,7 +18,7 @@ The future `Health-id` public frontend can submit EHR, Migrate, Laboratory, and 
 }
 ```
 
-Product codes are `ehr`, `migrate`, `laboratory`, and `pharmacy`. Organization types are `clinic`, `hospital`, `laboratory`, `pharmacy`, and `other`. A duplicate open application for the same CAC and product returns the same generic response. No application ID, duplicate status, raw CAC, or provider response is returned. Admin is not a signup product; Health ID API continues to use Book Demo. Outreach uses its existing authorized workspace onboarding.
+Product codes are `ehr`, `migrate`, `laboratory`, and `pharmacy`. Organization types are `clinic`, `hospital`, `laboratory`, `pharmacy`, and `other`. The `RC`/`BN`/`IT` registration identifier is normalized for whitespace and case. Public intake does not accept an applicant-supplied legal company name or other registry details; those come from the verified QoreID CAC Basic V2 response. A duplicate open application for the same CAC and product returns the same generic response. No application ID, duplicate status, raw CAC, or provider response is returned. Admin is not a signup product; Health ID API continues to use Book Demo. Outreach uses its existing authorized workspace onboarding.
 
 ## Platform review
 
@@ -32,7 +31,7 @@ All routes below require authenticated platform permissions, a current active st
 | `POST /api/v1/admin/organization-applications/{id}/approve` | `platform.facility.manage`, `platform.principal.manage`, `platform.role.manage` | Requires `{ "reason": "Reviewed legal entity" }`; for reuse also pass `existingOrganizationId` and `existingFacilityId`. Returns canonical IDs and new version. |
 | `POST /api/v1/admin/organization-applications/{id}/reject` | `platform.facility.manage` | Requires `{ "reason": "Review reason" }`; returns status and new version. |
 
-Verification is disabled when `QOREID_ENABLED=false`, and a provider failure cannot become an approval. Approval requires a recorded `verified` CAC result and a reason. A new organization gets an active verified facility, a product enrollment, and a first administrator account in `pending_reset`. The administrator completes the existing email OTP password setup before local signin. An existing organization can only be reused when its explicit IDs match the CAC binding and the submitted email already belongs to an active administrator at that facility. Conflicts require manual administrator resolution.
+Verification is disabled when `QOREID_ENABLED=false` or the runtime integration is paused, and a provider failure cannot become an approval. The CAC Basic V2 request sends only the normalized `regNumber`; the [QoreID contract](QOREID_VERIFICATION_CONTRACT.md) defines the verified response and canonical registration binding. Approval requires a recorded `verified` CAC result and a reason. A new organization gets an active verified facility, a product enrollment, and a first administrator account in `pending_reset`. The administrator completes the existing email OTP password setup before local signin. An existing organization can only be reused when its explicit IDs match the CAC binding and the submitted email already belongs to an active administrator at that facility. Conflicts require manual administrator resolution. CAC Basic V2 does not verify the applicant's authority to represent the organization; platform review remains separate.
 
 The CAC number is stored in the restricted application and binding tables so the server can verify and deduplicate it. It is never returned by public intake, admin lists, or API verification responses, and is excluded from semantic audit details. The application records provider state, reference, failure category, reviewer, reason, and version. The database runtime has `EXECUTE` on guarded commands rather than direct table mutation rights.
 

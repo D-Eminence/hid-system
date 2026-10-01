@@ -122,7 +122,6 @@ export class OrganizationApplicationsService {
         throw new DomainProblem(503, 'QOREID_DISABLED', 'External verification is not enabled');
       }
       await this.integrations.assertAvailable('qoreid', 'provider_cac');
-      this.qoreid.assertCacContractAvailable();
       await this.integrations.consumeQuota(context, 'application_cac', applicationId);
       const result = await this.qoreid.verifyCac(secret.cac_registration_number);
       reference = result.providerReference ?? null;
@@ -148,10 +147,10 @@ export class OrganizationApplicationsService {
         failure = result.state;
       }
     } catch (error) {
-      // Local availability, contract, permission, and quota gates made no
+      // Local availability, permission, and quota gates made no
       // provider request. Never erase a prior verified review-ready result.
       if (error instanceof DomainProblem && [
-        'QOREID_DISABLED', 'INTEGRATION_PAUSED', 'QOREID_CAC_CONTRACT_UNCONFIRMED',
+        'QOREID_DISABLED', 'INTEGRATION_PAUSED',
         'VERIFICATION_QUOTA_EXCEEDED', 'VERIFICATION_QUOTA_UNAVAILABLE',
         'PERMISSION_DENIED', 'INTEGRATION_UNAVAILABLE',
       ].includes(error.code)) throw error;
@@ -267,8 +266,10 @@ export function verifiedCacBinding(
 ): { registrationNumber: string; companyName: string; entityType: string;
   registrationDate: string; address: string; registryStatus: 'active' } | null {
   if (result.state !== 'verified' || !result.cacBinding || !result.providerReference) return null;
-  const { registrationNumber, companyName, entityType, registrationDate, address, registryStatus } = result.cacBinding;
-  if (typeof registrationNumber !== 'string' || typeof companyName !== 'string'
+  const { registrationNumber, providerRegistrationNumber, companyName, entityType,
+    registrationDate, address, registryStatus } = result.cacBinding;
+  if (typeof registrationNumber !== 'string' || typeof providerRegistrationNumber !== 'string'
+    || typeof companyName !== 'string'
     || typeof entityType !== 'string' || typeof registrationDate !== 'string'
     || typeof address !== 'string' || typeof registryStatus !== 'string') return null;
   if (/[\x00-\x1f\x7f]/.test(companyName + entityType + address)) return null;
@@ -280,8 +281,13 @@ export function verifiedCacBinding(
   const registeredAddress = address.replace(/\s+/g, ' ').trim();
   const parsedRegistrationDate = /^\d{4}-\d{2}-\d{2}$/.test(registrationDate)
     ? new Date(`${registrationDate}T00:00:00.000Z`) : null;
+  const providerPrefix = /^(RC|BN|IT)/.exec(providerRegistrationNumber)?.[1];
+  const providerDigits = providerPrefix ? providerRegistrationNumber.slice(2) : providerRegistrationNumber;
   if (!/^(?:RC|BN|IT)[0-9]{4,20}$/.test(normalizedNumber)
     || normalizedNumber !== submittedRegistrationNumber
+    || !/^(?:(?:RC|BN|IT))?[0-9]{4,20}$/.test(providerRegistrationNumber)
+    || (providerPrefix && providerPrefix !== normalizedNumber.slice(0, 2))
+    || providerDigits !== normalizedNumber.slice(2)
     || legalName.length < 2 || legalName.length > 200
     || legalEntityType.length < 2 || legalEntityType.length > 120
     || registeredAddress.length < 5 || registeredAddress.length > 1000
