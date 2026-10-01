@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0054",
-    "count": 54,
+    "last": "0056",
+    "count": 56,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -313,6 +313,14 @@
       {
         "name": "0054_complete_existing_cac_evidence_binding.sql",
         "sha256": "3c06c35ad311835a825397c5b52269a059edd426f4edb6292007cf47041d444d"
+      },
+      {
+        "name": "0055_verified_incomplete_cac_result.sql",
+        "sha256": "ac451f14dee5f7e6996de89ec92172773598229515829ee90637f98ebed7a54b"
+      },
+      {
+        "name": "0056_cac_applicant_profile_completion.sql",
+        "sha256": "3b501b72e6c34f2d8139de077a446614666e4e37ee872721864c2f8463d52b91"
       }
     ]
   },
