@@ -304,7 +304,7 @@ export class QoreIdVerificationAdapter {
     const summary = this.record(record?.summary);
     if (typeof summary?.cac_check !== 'string') throw this.invalidProviderResponse();
     if (summary.cac_check !== 'verified') return { ...result, state: 'not_verified' };
-    const cac = this.record(record?.cac);
+    const cac = record?.cac === undefined ? {} : this.record(record?.cac);
     if (!cac) throw this.invalidProviderResponse();
     const metadataValue = record?.metadata;
     const metadata = metadataValue === undefined || metadataValue === null
@@ -342,9 +342,6 @@ export class QoreIdVerificationAdapter {
       || !providerAddress.valid || !branchAddress.valid || !companyEmail.valid || !city.valid
       || !headOfficeAddress.valid || !lga.valid || !state.valid || !affiliates.valid
       || !registryStatus.valid || !metadataCompanyType.valid) throw this.invalidProviderResponse();
-    if (registryStatus.value && registryStatus.value.toLowerCase() !== 'active') {
-      return { ...result, state: 'not_verified' };
-    }
     const profileFields = {
       ...(providerRegistrationNumber.value ? { providerRegistrationNumber: providerRegistrationNumber.value } : {}),
       ...(companyName.value ? { companyName: companyName.value } : {}),
@@ -362,15 +359,17 @@ export class QoreIdVerificationAdapter {
       ...(affiliates.value !== undefined ? { affiliates: affiliates.value } : {}),
       ...(state.value ? { state: state.value } : {}),
     };
-    if (!providerRegistrationNumber.value || !companyName.value || !entityType.value
-      || !registrationDate.value || !address || !registryStatus.value) {
-      return { ...result, cacIncompleteProfile: {
+    if (!companyName.value || !entityType.value
+      || !registrationDate.value || !address
+      || registryStatus.value?.toLowerCase() !== 'active') {
+      return { ...result, verifiedRegistrationNumber: submitted, cacIncompleteProfile: {
         submittedRegistrationNumber: submitted, ...profileFields,
       } };
     }
-    return { ...result, cacBinding: {
+    return { ...result, verifiedRegistrationNumber: submitted, cacBinding: {
       registrationNumber: submitted,
-      providerRegistrationNumber: providerRegistrationNumber.value,
+      ...(providerRegistrationNumber.value
+        ? { providerRegistrationNumber: providerRegistrationNumber.value } : {}),
       companyName: companyName.value, entityType: entityType.value,
       registrationDate: registrationDate.value, address,
       registryStatus: registryStatus.value,

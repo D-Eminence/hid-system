@@ -170,7 +170,8 @@ describe('QoreID verification service', () => {
       operation: (value: PoolClient) => Promise<unknown>,
     ) => operation({ query: organizationQuery } as unknown as PoolClient));
     (provider.verifyCac as jest.Mock).mockResolvedValue({
-      provider: 'qoreid', state: 'verified', providerReference: '71', respondedAt: new Date().toISOString(),
+      provider: 'qoreid', state: 'verified', providerReference: '71',
+      verifiedRegistrationNumber: 'RC1234', respondedAt: new Date().toISOString(),
       cacBinding: { registrationNumber: 'RC1234', providerRegistrationNumber: '1234', companyName: 'Existing organization',
         entityType: 'Private Limited', registrationDate: '2001-01-01',
         address: '123 Registry Street, Lagos', registryStatus: 'Active' },
@@ -219,7 +220,8 @@ describe('QoreID verification service', () => {
       _context: unknown, operation: (value: PoolClient) => Promise<unknown>,
     ) => operation({ query: organizationQuery } as unknown as PoolClient));
     (provider.verifyCac as jest.Mock).mockResolvedValue({ provider: 'qoreid', state: 'verified',
-      providerReference: '8643', respondedAt: new Date().toISOString(),
+      providerReference: '8643', verifiedRegistrationNumber: 'RC1234',
+      respondedAt: new Date().toISOString(),
       cacIncompleteProfile: { submittedRegistrationNumber: 'RC1234',
         metadataCompanyType: 'limited_company', address: 'Synthetic Registry Office' } });
     const request = {

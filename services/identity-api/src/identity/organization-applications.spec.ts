@@ -83,6 +83,7 @@ describe('organization onboarding boundary', () => {
       .mockResolvedValueOnce({ rows: [{ application_status: 'ready_for_review', row_version: '2' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: '123',
+      verifiedRegistrationNumber: 'RC1234567',
       cacBinding: { registrationNumber: 'RC1234567', providerRegistrationNumber: '1234567',
         companyName: 'Verified Legal Clinic Limited',
         entityType: 'Private Company Limited by Shares', registrationDate: '2014-05-26',
@@ -98,7 +99,7 @@ describe('organization onboarding boundary', () => {
     expect(integrations.assertAvailable).toHaveBeenCalledWith('qoreid', 'provider_cac');
     expect(integrations.consumeQuota).toHaveBeenCalledWith(context, 'application_cac', applicationId);
     expect(result).toEqual({ status: 'ready_for_review', version: 2, state: 'verified',
-      providerVerification: 'verified', providerReference: '123' });
+      providerVerification: 'verified', profileState: 'complete', providerReference: '123' });
     expect(JSON.stringify(result)).not.toContain('RC1234567');
     expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'verified', '123', null,
       'RC1234567', 'Verified Legal Clinic Limited', 'Private Company Limited by Shares',
@@ -112,6 +113,7 @@ describe('organization onboarding boundary', () => {
       .mockResolvedValueOnce({ rows: [{ application_status: 'pending_verification', row_version: '2' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified',
+      verifiedRegistrationNumber: 'RC1234567',
       providerReference: '8643', cacIncompleteProfile: {
         submittedRegistrationNumber: 'RC1234567', metadataCompanyType: 'limited_company',
         providerAddress: 'Synthetic Registry Office', address: 'Synthetic Registry Office',
@@ -121,12 +123,11 @@ describe('organization onboarding boundary', () => {
       qoreid as unknown as QoreIdVerificationAdapter,
       { assertAvailable: jest.fn(), consumeQuota: jest.fn() } as unknown as IntegrationRuntimeService);
     await expect(service.verify(context, applicationId, 1)).resolves.toEqual({
-      status: 'pending_verification', version: 2, state: 'verified_incomplete',
-      providerVerification: 'verified', providerReference: '8643',
+      status: 'pending_verification', version: 2, state: 'verified',
+      providerVerification: 'verified', profileState: 'incomplete', providerReference: '8643',
     });
-    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'verified_incomplete', '8643',
-      'incomplete', null, null, null, null, null, null]);
-    expect(JSON.stringify(query.mock.calls[1])).not.toContain('Synthetic Registry Office');
+    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'verified', '8643',
+      null, 'RC1234567', null, null, null, 'Synthetic Registry Office', null]);
   });
 
   it('keeps an application unchanged when verification is disabled and refuses an incomplete approval link', async () => {
@@ -170,6 +171,7 @@ describe('organization onboarding boundary', () => {
       .mockResolvedValueOnce({ rows: [{ application_status: 'pending_verification', row_version: '2' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: '123',
+      verifiedRegistrationNumber: 'RC1234567',
       cacBinding: { registrationNumber: 'RC9999999', providerRegistrationNumber: '9999999',
         companyName: 'Other Company',
         entityType: 'Private Company Limited by Shares', registrationDate: '2014-05-26',
@@ -273,6 +275,7 @@ describe('organization onboarding boundary', () => {
 
   it('requires an exact prefixed CAC number, active registry state, and legal name', () => {
     const base = { provider: 'qoreid' as const, state: 'verified' as const,
+      verifiedRegistrationNumber: 'RC1234567',
       providerReference: '123', respondedAt: new Date().toISOString(),
       cacBinding: { registrationNumber: 'RC1234567', providerRegistrationNumber: '1234567',
         companyName: 'Legal Company Ltd',
@@ -285,6 +288,7 @@ describe('organization onboarding boundary', () => {
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: undefined })).toBeNull();
     for (const prefix of ['BN', 'IT']) {
       expect(verifiedCacBinding(`${prefix}1234567`, { ...base,
+        verifiedRegistrationNumber: `${prefix}1234567`,
         cacBinding: { ...base.cacBinding, registrationNumber: `${prefix}1234567` } }))
         .toMatchObject({ registrationNumber: `${prefix}1234567` });
     }
@@ -304,6 +308,7 @@ describe('organization onboarding boundary', () => {
 
   it('requires a canonical query match for an incomplete CAC lookup without promoting it to a binding', () => {
     const base = { provider: 'qoreid' as const, state: 'verified' as const,
+      verifiedRegistrationNumber: 'BN1234567',
       providerReference: '8643', respondedAt: new Date().toISOString(),
       cacIncompleteProfile: { submittedRegistrationNumber: 'BN1234567',
         metadataCompanyType: 'business', address: 'Synthetic Registry Office' } };

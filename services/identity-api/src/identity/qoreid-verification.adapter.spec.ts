@@ -112,7 +112,8 @@ describe('QoreID verification adapter', () => {
     }));
     expect(JSON.parse(fetch.mock.calls[1]?.[1]?.body as string)).toEqual({ regNumber: `${prefix}1234` });
     expect(result).toEqual({
-      provider: 'qoreid', state: 'verified', providerReference: '8642', respondedAt: expect.any(String),
+      provider: 'qoreid', state: 'verified', providerReference: '8642',
+      verifiedRegistrationNumber: `${prefix}1234`, respondedAt: expect.any(String),
       cacBinding: {
         registrationNumber: `${prefix}1234`, providerRegistrationNumber: '1234',
         companyName: 'Synthetic Registry Ltd', entityType: 'Private', registrationDate: '2021-01-01',
@@ -127,7 +128,8 @@ describe('QoreID verification adapter', () => {
   it.each([
     { prefix: 'RC', classification: 'limited_company' },
     { prefix: 'BN', classification: 'business' },
-  ])('keeps the observed sparse $prefix sandbox shape verified but unbound', async ({ prefix, classification }) => {
+    { prefix: 'IT', classification: 'incorporated_trustee' },
+  ])('keeps the sparse $prefix CAC shape verified with incomplete legal fields', async ({ prefix, classification }) => {
     const payload = { ...sparseCacResponse, metadata: { companyType: classification } };
     const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
     const result = await new QoreIdVerificationAdapter(configuration,
@@ -135,6 +137,7 @@ describe('QoreID verification adapter', () => {
     expect(fetch.mock.calls[1]?.[0]).toBe('https://api.qoreid.com/v2/ng/identities/cac-basic');
     expect(fetch.mock.calls[1]?.[1]?.body).toBe(JSON.stringify({ regNumber: `${prefix}1234` }));
     expect(result).toEqual({ provider: 'qoreid', state: 'verified', providerReference: '8643',
+      verifiedRegistrationNumber: `${prefix}1234`,
       respondedAt: expect.any(String), cacIncompleteProfile: {
         submittedRegistrationNumber: `${prefix}1234`, metadataCompanyType: classification,
         providerAddress: 'Synthetic Registry Office', address: 'Synthetic Registry Office',
@@ -190,7 +193,6 @@ describe('QoreID verification adapter', () => {
     { status: { state: 'pending', status: 'verified' } },
     { status: { state: 'complete', status: 'declined' } },
     { cac: { ...verifiedCacResponse.cac, rcNumber: '9999' } },
-    { cac: { ...verifiedCacResponse.cac, status: 'Inactive' } },
   ])('does not bind an unverified or mismatched CAC response', async (override) => {
     const fetch = jest.fn().mockResolvedValueOnce(response(token))
       .mockResolvedValueOnce(response({ ...verifiedCacResponse, ...override }));
@@ -201,7 +203,8 @@ describe('QoreID verification adapter', () => {
   });
 
   it.each([
-    { cac: undefined },
+    { cac: null },
+    { cac: [] },
     { summary: { cac_check: undefined } },
     { status: { state: undefined, status: 'verified' } },
     { cac: { ...verifiedCacResponse.cac, rcNumber: 'RC-1234' } },
@@ -224,8 +227,30 @@ describe('QoreID verification adapter', () => {
       .rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
   });
 
+  it('keeps a verified lookup with no cac object as a sparse profile', async () => {
+    const { cac: _omitted, ...payload } = verifiedCacResponse;
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
+    const result = await new QoreIdVerificationAdapter(configuration,
+      fetch as unknown as typeof globalThis.fetch).verifyCac('RC1234');
+    expect(result).toMatchObject({ state: 'verified', providerReference: '8642',
+      verifiedRegistrationNumber: 'RC1234',
+      cacIncompleteProfile: { submittedRegistrationNumber: 'RC1234' } });
+    expect(result.cacBinding).toBeUndefined();
+  });
+
+  it('preserves a non-active registry status without treating the CAC check as failed', async () => {
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
+      ...verifiedCacResponse, cac: { ...verifiedCacResponse.cac, status: 'Inactive' },
+    }));
+    const result = await new QoreIdVerificationAdapter(configuration,
+      fetch as unknown as typeof globalThis.fetch).verifyCac('RC1234');
+    expect(result).toMatchObject({ state: 'verified', verifiedRegistrationNumber: 'RC1234',
+      cacIncompleteProfile: { registryStatus: 'Inactive', submittedRegistrationNumber: 'RC1234' } });
+    expect(result.cacBinding).toBeUndefined();
+  });
+
   it.each([
-    { rcNumber: '' }, { rcNumber: undefined }, { companyName: '' },
+    { companyName: '' },
     { companyType: '' }, { registrationDate: '' }, { status: '' },
     { headOfficeAddress: undefined, branchAddress: undefined },
   ])('keeps a verified CAC lookup incomplete when a required binding field is absent', async (override) => {
@@ -237,6 +262,17 @@ describe('QoreID verification adapter', () => {
     expect(result).toMatchObject({ state: 'verified', providerReference: '8642',
       cacIncompleteProfile: { submittedRegistrationNumber: 'RC1234' } });
     expect(result.cacBinding).toBeUndefined();
+  });
+
+  it.each(['', undefined])('keeps a complete verified CAC profile when rcNumber is %s', async (rcNumber) => {
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
+      ...verifiedCacResponse, cac: { ...verifiedCacResponse.cac, rcNumber },
+    }));
+    const result = await new QoreIdVerificationAdapter(configuration,
+      fetch as unknown as typeof globalThis.fetch).verifyCac('RC1234');
+    expect(result).toMatchObject({ state: 'verified', verifiedRegistrationNumber: 'RC1234',
+      cacBinding: { registrationNumber: 'RC1234', companyName: 'Synthetic Registry Ltd' } });
+    expect(result.cacBinding).not.toHaveProperty('providerRegistrationNumber');
   });
 
   it('uses a verified branch address when the head-office address is absent', async () => {

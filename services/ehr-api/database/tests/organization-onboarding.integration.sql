@@ -90,14 +90,14 @@ begin
   end;
   begin
     perform identity.admin_record_organization_cac_result(
-      application_id_value, 2, 'verified', 'qoreid-test-0001', null,
+      application_id_value, 2, 'verified', '86411', null,
       null, null, null, null, null, null);
     raise exception 'Status-only CAC result was accepted';
   exception when invalid_parameter_value then null;
   end;
   begin
     perform identity.admin_record_organization_cac_result(
-      application_id_value, 2, 'verified', 'qoreid-test-0001', null,
+      application_id_value, 2, 'verified', '86411', null,
       'RC9999999', 'Unrelated Company Limited', 'Private Limited Company',
       '2014-05-26', '10 Test Avenue, Lagos', 'active');
     raise exception 'Mismatched CAC registration number was accepted';
@@ -105,22 +105,22 @@ begin
   end;
   begin
     perform identity.admin_record_organization_cac_result(
-      application_id_value, 2, 'verified', 'qoreid-test-0001', null,
-      'RC1234567', 'Verified Migrate Legal Limited', null,
+      application_id_value, 2, 'verified', '86411', null,
+      'RC1234567', 'Verified Migrate Legal Limited', 'x',
       '2014-05-26', '10 Test Avenue, Lagos', 'active');
-    raise exception 'CAC result with a missing entity type was accepted';
+    raise exception 'CAC result with a malformed entity type was accepted';
   exception when invalid_parameter_value then null;
   end;
   begin
     perform identity.admin_record_organization_cac_result(
-      application_id_value, 2, 'verified', 'qoreid-test-0001', null,
+      application_id_value, 2, 'verified', '86411', null,
       'RC1234567', 'Verified Migrate Legal Limited', 'Private Limited Company',
-      '2014-05-26', '10 Test Avenue, Lagos', 'inactive');
-    raise exception 'Inactive CAC result was accepted';
+      '2014-05-26', '10 Test Avenue, Lagos', '');
+    raise exception 'Empty CAC registry status was accepted';
   exception when invalid_parameter_value then null;
   end;
   select * into changed from identity.admin_record_organization_cac_result(
-    application_id_value, 2, 'verified', 'qoreid-test-0001', null,
+    application_id_value, 2, 'verified', '86411', null,
     'RC1234567', 'Verified Migrate Legal Limited', 'Private Limited Company',
     '2014-05-26', '10 Test Avenue, Lagos', 'active');
   if changed.application_status <> 'ready_for_review' or changed.row_version <> 3 then
@@ -152,13 +152,14 @@ begin
 end $$;
 reset role;
 
--- A verified provider response can still lack the legal-entity snapshot needed
--- for organization binding. Keep the provider evidence without creating one.
+-- Sparse RC/BN provider checks succeed, retain the queried identifier, and
+-- preserve the provider address. Applicant completion requires email proof.
 set local role hid_identity_api_runtime;
 do $$
 declare
   rc_application uuid;
   bn_application uuid;
+  it_application uuid;
   changed record;
 begin
   perform set_config('app.actor_subject', 'system:auth', true);
@@ -166,56 +167,80 @@ begin
     'RC1111111', 'Incomplete RC Applicant', 'incomplete-rc@example.invalid') into rc_application;
   select identity.submit_organization_application('laboratory', 'laboratory',
     'BN2222222', 'Incomplete BN Applicant', 'incomplete-bn@example.invalid') into bn_application;
+  select identity.submit_organization_application('pharmacy', 'pharmacy',
+    'IT3333333', 'Inactive IT Applicant', 'inactive-it@example.invalid') into it_application;
   perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
   begin
     perform identity.admin_record_organization_cac_result(
-      rc_application, 1, 'verified_incomplete', null, 'incomplete',
-      null, null, null, null, null, null);
+      rc_application, 1, 'verified', null, null,
+      'RC1111111', null, null, null, '11 Synthetic Provider Road', null);
     raise exception 'Provider-verified incomplete result without reference was accepted';
   exception when invalid_parameter_value then null;
   end;
   begin
     perform identity.admin_record_organization_cac_result(
-      rc_application, 1, 'verified_incomplete', 'not-a-numeric-id', 'incomplete',
-      null, null, null, null, null, null);
+      rc_application, 1, 'verified', 'not-a-numeric-id', null,
+      'RC1111111', null, null, null, '11 Synthetic Provider Road', null);
     raise exception 'Provider-verified incomplete result with nonnumeric reference was accepted';
   exception when invalid_parameter_value then null;
   end;
   begin
     perform identity.admin_record_organization_cac_result(
-      rc_application, 1, 'verified_incomplete', '86421', 'incomplete',
-      'RC1111111', 'Applicant Claimed Company', null, null, null, null);
-    raise exception 'Partial or applicant-supplied legal profile became provider identity';
+      rc_application, 1, 'verified', '86421', null,
+      'BN1111111', null, null, null, '11 Synthetic Provider Road', null);
+    raise exception 'Mismatched submitted registration was accepted';
   exception when invalid_parameter_value then null;
   end;
   select * into changed from identity.admin_record_organization_cac_result(
-    rc_application, 1, 'verified_incomplete', '86421', 'incomplete',
-    null, null, null, null, null, null);
+    rc_application, 1, 'verified', '86421', null,
+    'RC1111111', null, null, null, '11 Synthetic Provider Road', null);
   if changed.application_status <> 'pending_verification' or changed.row_version <> 2 then
-    raise exception 'Incomplete RC profile moved into organization review';
+    raise exception 'Sparse verified RC profile moved into organization review';
   end if;
   select * into changed from identity.admin_record_organization_cac_result(
-    bn_application, 1, 'verified_incomplete', '86422', 'incomplete',
-    null, null, null, null, null, null);
+    bn_application, 1, 'verified', '86422', null,
+    'BN2222222', null, null, null, '22 Synthetic Provider Road', null);
   if changed.application_status <> 'pending_verification' or changed.row_version <> 2 then
-    raise exception 'Incomplete BN profile moved into organization review';
+    raise exception 'Sparse verified BN profile moved into organization review';
+  end if;
+  select * into changed from identity.admin_record_organization_cac_result(
+    it_application, 1, 'verified', '86423', null,
+    'IT3333333', 'Synthetic Trustee', 'Incorporated Trustee', '2019-02-01',
+    '33 Synthetic Provider Road', 'inactive');
+  if changed.application_status <> 'pending_verification' or changed.row_version <> 2 then
+    raise exception 'Verified inactive CAC lookup moved into organization review';
+  end if;
+  if not exists (select 1 from identity.admin_list_organization_applications('pending_verification') item
+      where item.application_id = it_application and item.verification_result = 'verified'
+        and item.profile_state = 'incomplete' and item.qoreid_registry_status = 'inactive'
+        and item.verified_registry_status = 'inactive'
+        and item.registry_status_source = 'qoreid') then
+    raise exception 'Verified inactive registry status was not preserved as provider data';
   end if;
   if (select count(*) from identity.admin_list_organization_applications('pending_verification') item
       where item.application_id in (rc_application, bn_application)
-        and item.verification_result = 'verified_incomplete'
+        and item.verification_result = 'verified'
+        and item.profile_state = 'incomplete'
         and item.verified_at is not null
         and item.organization_name is null
         and item.verified_organization_name is null
         and item.verified_entity_type is null
         and item.verified_registration_date is null
-        and item.verified_address is null
+        and item.verified_address is not null
+        and item.address_source = 'qoreid'
         and item.verified_registry_status is null) <> 2 then
-    raise exception 'Admin list did not distinguish verified but incomplete profiles';
+    raise exception 'Admin list lost verified sparse provider field provenance';
   end if;
   begin
     perform identity.admin_approve_organization_application(
       rc_application, 2, null, null, 'Synthetic incomplete profile approval');
     raise exception 'Incomplete provider profile was approved';
+  exception when check_violation then null;
+  end;
+  begin
+    perform identity.admin_approve_organization_application(
+      it_application, 2, null, null, 'Synthetic inactive registry approval');
+    raise exception 'Inactive provider registry status was approved';
   exception when check_violation then null;
   end;
 end $$;
@@ -226,12 +251,15 @@ begin
   if (select count(*) from identity.organization_applications application
       where application.cac_registration_number in ('RC1111111', 'BN2222222')
         and application.status = 'pending_verification'
-        and application.verification_result = 'verified_incomplete'
-        and application.verification_failure_category = 'incomplete'
+        and application.verification_result = 'verified'
+        and application.profile_state = 'incomplete'
+        and application.provider_verified_registration_number = application.cac_registration_number
         and application.provider_reference ~ '^[0-9]+$'
         and application.verified_at is not null
         and application.organization_name is null
-        and application.verified_organization_name is null) <> 2 then
+        and application.verified_organization_name is null
+        and application.verified_address = application.qoreid_address
+        and application.address_source = 'qoreid') <> 2 then
     raise exception 'Verified provider lookup or incomplete profile was not persisted accurately';
   end if;
   if exists (select 1 from identity.organization_cac_registrations binding
@@ -248,37 +276,77 @@ begin
     raise exception 'Incomplete provider profile bypassed the review constraint';
   exception when check_violation then null;
   end;
+  begin
+    update identity.organization_applications
+       set qoreid_address = null
+     where cac_registration_number = 'RC1111111';
+    raise exception 'Provider source label survived deletion of provider evidence';
+  exception when check_violation then null;
+  end;
 end $$;
 
--- A later complete provider result may advance the same BN application, but
--- only with a new exact registry snapshot supplied through the governed call.
+-- A code delivered to the recorded administrator email yields a short-lived
+-- completion session. Only missing fields can be supplied by that applicant.
 set local role hid_identity_api_runtime;
 do $$
 declare
-  bn_application uuid;
+  recipient text;
   changed record;
+  approved record;
 begin
-  select item.application_id into bn_application
-    from identity.admin_list_organization_applications('pending_verification') item
-    where item.cac_hint = 'BN*****22' and item.product_code = 'laboratory'
-      and item.verification_result = 'verified_incomplete';
-  if bn_application is null then raise exception 'Incomplete BN application was not available for retry'; end if;
-  select * into changed from identity.admin_record_organization_cac_result(
-    bn_application, 2, 'verified', '86423', null,
-    'BN2222222', 'Verified BN Registry Limited', 'Business Name',
-    '2018-06-12', '12 Synthetic Avenue, Abuja', 'active');
-  if changed.application_status <> 'ready_for_review' or changed.row_version <> 3 then
-    raise exception 'Complete provider retry did not advance BN application to review';
+  perform set_config('app.actor_subject', 'system:auth', true);
+  select identity.begin_organization_profile_completion(
+    'RC1111111', 'incomplete-rc@example.invalid', 'ehr',
+    '10000000-0000-4000-8000-000000000011', repeat('a', 64)) into recipient;
+  if recipient <> 'incomplete-rc@example.invalid' then
+    raise exception 'Verified sparse application was not eligible for contact proof';
   end if;
-  if not exists (select 1 from identity.admin_list_organization_applications('ready_for_review') item
-    where item.application_id = bn_application
-      and item.organization_name = 'Verified BN Registry Limited'
-      and item.verified_organization_name = 'Verified BN Registry Limited'
-      and item.verified_entity_type = 'Business Name'
-      and item.verified_registration_date = '2018-06-12'
-      and item.verified_address = '12 Synthetic Avenue, Abuja'
-      and item.verified_registry_status = 'active') then
-    raise exception 'Complete provider retry did not replace incomplete evidence with legal identity';
+  if identity.verify_organization_profile_completion_challenge(
+    '10000000-0000-4000-8000-000000000011', repeat('b', 64), repeat('c', 64)) then
+    raise exception 'Incorrect email code opened a completion session';
+  end if;
+  if not identity.verify_organization_profile_completion_challenge(
+    '10000000-0000-4000-8000-000000000011', repeat('a', 64), repeat('c', 64)) then
+    raise exception 'Correct email code did not open a completion session';
+  end if;
+  begin
+    perform identity.complete_organization_profile(repeat('c', 64), 2,
+      'Applicant Clinic Limited', 'Private Limited', '2018-06-12',
+      'Applicant address must not replace QoreID address', 'active');
+    raise exception 'Applicant replaced a QoreID address';
+  exception when invalid_parameter_value then null;
+  end;
+  select * into changed from identity.complete_organization_profile(repeat('c', 64), 2,
+    'Applicant Clinic Limited', 'Private Limited', '2018-06-12', null, 'active');
+  if changed.application_status <> 'ready_for_review' or changed.profile_state <> 'complete'
+     or changed.row_version <> 3 or changed.profile_address <> '11 Synthetic Provider Road'
+     or changed.profile_address_source <> 'qoreid'
+     or changed.profile_organization_name_source <> 'user_provided' then
+    raise exception 'Applicant completion lost exact field sources or review readiness';
+  end if;
+  select identity.begin_organization_profile_completion(
+    'IT3333333', 'inactive-it@example.invalid', 'pharmacy',
+    '10000000-0000-4000-8000-000000000012', repeat('d', 64)) into recipient;
+  if recipient <> 'inactive-it@example.invalid'
+     or not identity.verify_organization_profile_completion_challenge(
+       '10000000-0000-4000-8000-000000000012', repeat('d', 64), repeat('e', 64)) then
+    raise exception 'Verified inactive lookup did not allow applicant access';
+  end if;
+  begin
+    perform identity.complete_organization_profile(repeat('e', 64), 2,
+      null, null, null, null, 'active');
+    raise exception 'Applicant replaced a QoreID inactive registry status';
+  exception when invalid_parameter_value then null;
+  end;
+  perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
+  select item.application_id into approved
+    from identity.admin_list_organization_applications('ready_for_review') item
+    where item.cac_hint = 'RC*****11' and item.product_code = 'ehr';
+  if approved.application_id is null then raise exception 'Completed RC application is not review-ready'; end if;
+  select * into approved from identity.admin_approve_organization_application(
+    approved.application_id, 3, null, null, 'Reviewed applicant-sourced fields and CAC lookup');
+  if approved.organization_id is null or approved.facility_id is null then
+    raise exception 'Reviewed completed organization did not activate';
   end if;
 end $$;
 reset role;
@@ -286,18 +354,26 @@ reset role;
 do $$
 begin
   if not exists (select 1 from identity.organization_applications application
-      where application.cac_registration_number = 'BN2222222'
-        and application.status = 'ready_for_review'
+      join identity.organization_cac_registrations binding
+        on binding.cac_registration_number = application.cac_registration_number
+      where application.cac_registration_number = 'RC1111111'
+        and application.status = 'approved'
         and application.verification_result = 'verified'
         and application.verification_failure_category is null
-        and application.provider_reference = '86423'
-        and application.organization_name = 'Verified BN Registry Limited'
-        and application.verified_organization_name = application.organization_name
-        and application.verified_entity_type = 'Business Name'
+        and application.provider_reference = '86421'
+        and application.organization_name = 'Applicant Clinic Limited'
+        and application.qoreid_organization_name is null
+        and application.organization_name_source = 'user_provided'
+        and binding.organization_name_source = 'user_provided'
+        and application.verified_entity_type = 'Private Limited'
+        and application.entity_type_source = 'user_provided'
         and application.verified_registration_date = date '2018-06-12'
-        and application.verified_address = '12 Synthetic Avenue, Abuja'
-        and application.verified_registry_status = 'active') then
-    raise exception 'Complete BN retry retained incomplete or applicant-derived legal identity';
+        and application.verified_address = '11 Synthetic Provider Road'
+        and application.address_source = 'qoreid'
+        and binding.address_source = 'qoreid'
+        and application.verified_registry_status = 'active'
+        and application.registry_status_source = 'user_provided') then
+    raise exception 'Approved sparse CAC profile lost provider/applicant provenance';
   end if;
 end $$;
 
@@ -365,7 +441,7 @@ begin
     into second_application;
   perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
   perform identity.admin_record_organization_cac_result(
-    second_application, 1, 'verified', 'qoreid-test-0002', null,
+    second_application, 1, 'verified', '86412', null,
     'RC1234567', 'Verified Migrate Legal Limited', 'Private Limited Company',
     '2014-05-26', '10 Test Avenue, Lagos', 'active');
   select * into second_approval from identity.admin_approve_organization_application(
@@ -384,7 +460,7 @@ begin
     into rogue_application;
   perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
   perform identity.admin_record_organization_cac_result(
-    rogue_application, 1, 'verified', 'qoreid-test-0003', null,
+    rogue_application, 1, 'verified', '86413', null,
     'RC1234567', 'Verified Migrate Legal Limited', 'Private Limited Company',
     '2014-05-26', '10 Test Avenue, Lagos', 'active');
   begin
@@ -401,7 +477,7 @@ begin
     into changed_registry_application;
   perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
   perform identity.admin_record_organization_cac_result(
-    changed_registry_application, 1, 'verified', 'qoreid-test-0005', null,
+    changed_registry_application, 1, 'verified', '86415', null,
     'RC1234567', 'Verified Migrate Legal Limited', 'Private Limited Company',
     '2014-05-26', 'Changed Address, Lagos', 'active');
   begin
@@ -420,7 +496,7 @@ begin
     into conflicting_application;
   perform set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
   perform identity.admin_record_organization_cac_result(
-    conflicting_application, 1, 'verified', 'qoreid-test-0004', null,
+    conflicting_application, 1, 'verified', '86414', null,
     'RC7654321', 'Other Legal Company Limited', 'Private Limited Company',
     '2016-06-09', '19 Example Road, Abuja', 'active');
   begin
@@ -513,5 +589,32 @@ begin
   end if;
 end $$;
 reset role;
+
+-- Closed pre-0052 approvals carried a legal name without a complete CAC
+-- snapshot. Migration 0056 must not mislabel that historical name as QoreID
+-- profile evidence or fail while retaining the old closed record.
+update identity.organization_applications
+   set provider_reference = 'legacy-lookup', profile_state = null,
+       provider_verified_registration_number = null,
+       qoreid_organization_name = null, qoreid_entity_type = null,
+       qoreid_registration_date = null, qoreid_address = null,
+       qoreid_registry_status = null,
+       verified_entity_type = null, verified_registration_date = null,
+       verified_address = null, verified_registry_status = null,
+       organization_name_source = null, entity_type_source = null,
+       registration_date_source = null, address_source = null,
+       registry_status_source = null
+ where cac_registration_number = 'RC1234567' and product_code = 'migrate'
+   and status = 'approved';
+do $$ begin
+  if not exists (select 1 from identity.organization_applications application
+      where application.cac_registration_number = 'RC1234567'
+        and application.product_code = 'migrate' and application.status = 'approved'
+        and application.profile_state is null and application.provider_reference = 'legacy-lookup'
+        and application.verified_organization_name = 'Verified Migrate Legal Limited'
+        and application.organization_name_source is null) then
+    raise exception 'Historical closed CAC record was promoted or rejected by provenance guard';
+  end if;
+end $$;
 
 rollback;

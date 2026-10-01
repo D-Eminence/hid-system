@@ -58,28 +58,50 @@ describe('provider organization application review', () => {
     expect(confirm).toHaveBeenCalledTimes(2);
   });
 
-  it('shows a verified CAC check with incomplete legal identity as pending and blocks approval', async () => {
-    const incomplete: OrganizationApplication = { ...application, verificationResult: 'verified_incomplete',
+  it('shows a verified CAC check with missing applicant fields as pending and blocks approval', async () => {
+    const incomplete: OrganizationApplication = { ...application, verificationResult: 'verified',
+      profileState: 'incomplete', profileAddress: 'Synthetic Registry Office',
+      fieldSources: { companyName: null, entityType: null, registrationDate: null,
+        address: 'qoreid', registryStatus: null },
       verifiedAt: '2026-09-02T00:00:00Z', version: 4 };
     apiMock.mockImplementation(async (path: string) => path === '/admin/organization-applications'
       ? { items: [incomplete] }
-      : { status: 'pending_verification', version: 5, state: 'verified_incomplete', providerVerification: 'verified' });
+      : { status: 'pending_verification', version: 5, state: 'verified',
+        profileState: 'incomplete', providerVerification: 'verified' });
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(<OrganizationApplications actor={reviewer} />);
     const card = (await screen.findByRole('heading', { name: 'Organization profile incomplete' })).closest('article')!;
-    expect(within(card).getByText('Awaiting registry profile')).toBeInTheDocument();
-    expect(within(card).getByText('Not provided by QoreID')).toBeInTheDocument();
+    expect(within(card).getByText('Awaiting applicant details')).toBeInTheDocument();
+    expect(within(card).getByText(/Synthetic Registry Office/)).toBeInTheDocument();
+    expect(within(card).getByText(/QoreID supplied/)).toBeInTheDocument();
     expect(within(card).getByText('Provider CAC check').nextElementSibling).toHaveTextContent('Verified');
-    expect(within(card).getByText('Authoritative profile').nextElementSibling).toHaveTextContent('Incomplete');
+    expect(within(card).getByText('Organization profile').nextElementSibling).toHaveTextContent('Incomplete');
     expect(within(card).getByText('Organization binding').nextElementSibling).toHaveTextContent('Not ready');
     expect(within(card).getByText('Organization activation').nextElementSibling).toHaveTextContent('Not active');
     expect(within(card).getByText('Provider checked').nextElementSibling).not.toHaveTextContent('—');
     expect(within(card).getByRole('button', { name: 'Approve and provision' })).toBeDisabled();
-    expect(within(card).getByText(/authoritative legal fields or registration binding are incomplete/)).toBeInTheDocument();
+    expect(within(card).getByText(/applicant must complete missing fields/)).toBeInTheDocument();
     fireEvent.click(within(card).getByRole('button', { name: 'Reverify CAC' }));
     expect(await screen.findByRole('status')).toHaveTextContent('QoreID verified the CAC check');
-    expect(screen.getByRole('status')).toHaveTextContent('Approval remains unavailable');
+    expect(screen.getByRole('status')).toHaveTextContent('approval remains unavailable');
     expect(apiMock.mock.calls.some(([path]) => String(path).endsWith('/approve'))).toBe(false);
+  });
+
+  it('shows applicant provenance on a completed profile before admin approval', async () => {
+    const sourced: OrganizationApplication = { ...application, status: 'ready_for_review',
+      verificationResult: 'verified', profileState: 'complete',
+      profileCompanyName: 'Applicant Clinic Limited', profileEntityType: 'Private Limited',
+      profileRegistrationDate: '2018-06-12', profileAddress: 'Synthetic Registry Office',
+      profileRegistryStatus: 'active', fieldSources: {
+        companyName: 'user_provided', entityType: 'user_provided',
+        registrationDate: 'user_provided', address: 'qoreid', registryStatus: 'user_provided',
+      } };
+    apiMock.mockResolvedValue({ items: [sourced] });
+    render(<OrganizationApplications actor={reviewer} />);
+    const card = (await screen.findByRole('heading', { name: 'Applicant Clinic Limited' })).closest('article')!;
+    expect(within(card).getAllByText(/Applicant supplied/)).toHaveLength(4);
+    expect(within(card).getByText(/QoreID supplied/)).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Approve and provision' })).toBeEnabled();
   });
 
   it('requires review reason and confirmation before approving the verified legal entity', async () => {
@@ -95,7 +117,7 @@ describe('provider organization application review', () => {
     const card = (await screen.findByRole('heading', { name: 'Registry Lab Limited' })).closest('article')!;
     expect(within(card).getAllByText('Registry Lab Limited')).not.toHaveLength(0);
     expect(within(card).getByText('Provider CAC check').nextElementSibling).toHaveTextContent('Verified');
-    expect(within(card).getByText('Authoritative profile').nextElementSibling).toHaveTextContent('Complete');
+    expect(within(card).getByText('Organization profile').nextElementSibling).toHaveTextContent('Complete');
     expect(within(card).getByText('Organization binding').nextElementSibling).toHaveTextContent('Ready for review');
     expect(within(card).getByText('Organization activation').nextElementSibling).toHaveTextContent('Not active');
     fireEvent.change(within(card).getByLabelText('Review reason'), { target: { value: 'Registry legal entity and admin reviewed' } });

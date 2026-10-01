@@ -43,6 +43,14 @@ export interface OrganizationApplication {
   verifiedRegistrationDate: string | null;
   verifiedAddress: string | null;
   verifiedRegistryStatus: string | null;
+  profileCompanyName?: string | null;
+  profileEntityType?: string | null;
+  profileRegistrationDate?: string | null;
+  profileAddress?: string | null;
+  profileRegistryStatus?: string | null;
+  profileState?: 'incomplete' | 'complete' | null;
+  fieldSources?: Record<'companyName' | 'entityType' | 'registrationDate' | 'address' | 'registryStatus',
+    'qoreid' | 'user_provided' | null>;
   version: number;
   createdAt: string;
   verifiedAt: string | null;

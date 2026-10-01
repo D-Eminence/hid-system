@@ -827,6 +827,11 @@ grant execute on function identity.submit_organization_application(text,text,tex
   identity.admin_list_organization_applications(text),
   identity.admin_get_organization_application(uuid),
   identity.admin_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text,text),
+  identity.begin_organization_profile_completion(text,text,text,uuid,char),
+  identity.invalidate_organization_profile_completion_challenge(uuid),
+  identity.verify_organization_profile_completion_challenge(uuid,char,char),
+  identity.current_organization_profile_completion(char),
+  identity.complete_organization_profile(char,bigint,text,text,text,text,text),
   identity.current_organization_cac_binding_matches(text,text,text,text,text,text,text),
   identity.admin_approve_organization_application(uuid,bigint,uuid,uuid,text),
   identity.admin_reject_organization_application(uuid,bigint,text)

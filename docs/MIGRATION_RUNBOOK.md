@@ -44,14 +44,15 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0033_supabase_cutover_identity_controls.sql` | Sealed Supabase cutover input, server-only patient PIN controls, exact Google subject links, and outreach preservation holds |
 | `database/migrations/0034_qoreid_verification_evidence.sql` | Append-only, minimal QoreID NIN/CAC evidence commands for existing HID patients and organizations; no raw identifier or provider payload storage |
 | `database/migrations/0047_provider_integration_controls.sql` | Secret-free provider/capability controls, optimistic routing, runtime decisions and append-only admin history |
-| `database/migrations/0048_cac_legal_entity_binding.sql` | Exact CAC number/legal-name binding guard for organization approval; closes the previous status-only path |
+| `database/migrations/0048_cac_legal_entity_binding.sql` | Original exact CAC number/legal-name approval guard; `0056` extends it for verified submitted identifiers and sourced profile fields |
 | `database/migrations/0049_qoreid_request_quotas.sql` | Shared NIN/CAC/test and public application request limits, keyed network digests, and 48-hour counter retention |
 | `database/migrations/0050_patient_nin_evidence_binding.sql` | Require the current patient's prior governed NIN HMAC binding before recording verified QoreID evidence; remove the unbound evidence command |
 | `database/migrations/0051_public_patient_enrollment.sql` | Encrypted unique-NIN pending enrollment, single-contact OTP and rate limits, immutable authoritative profile, and atomic account/patient/HID activation after OTP and password |
-| `database/migrations/0052_authoritative_cac_identity.sql` | Registration-identifier-only public intake, complete authoritative CAC fields, exact organization binding, and governed approval guard |
+| `database/migrations/0052_authoritative_cac_identity.sql` | Registration-identifier-only public intake and original complete-QoreID-profile binding guard, revised by `0056` |
 | `database/migrations/0053_remove_unwired_piersflow_catalog.sql` | Remove the non-executable PiersFlow placeholder from the admin provider catalog while preserving any unexpected audit history |
-| `database/migrations/0054_complete_existing_cac_evidence_binding.sql` | Compare all authoritative registry fields for existing-organization CAC evidence; incomplete historical bindings fail closed |
-| `database/migrations/0055_verified_incomplete_cac_result.sql` | Persist a verified CAC lookup with incomplete legal data as pending evidence; complete registry identity remains required before review and binding |
+| `database/migrations/0054_complete_existing_cac_evidence_binding.sql` | Compare all required persisted legal-entity fields for existing-organization CAC evidence; incomplete historical bindings fail closed |
+| `database/migrations/0055_verified_incomplete_cac_result.sql` | Historical `verified_incomplete` representation for a successful sparse lookup; `0056` converts it to verified provider state plus incomplete profile state |
+| `database/migrations/0056_cac_applicant_profile_completion.sql` | Separate CAC provider verification from profile completion; preserve the verified submitted RC/BN/IT identifier when QoreID omits `cac.rcNumber`, enforce returned-number matches, store provider fields and per-field `qoreid`/`user_provided` sources, add bounded email-OTP completion, preserve non-active provider status while blocking review, and require a complete sourced active profile plus existing governed review before binding/approval |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |

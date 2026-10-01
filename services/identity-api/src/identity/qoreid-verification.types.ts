@@ -47,10 +47,10 @@ export interface QoreIdNinEnrollmentBinding extends QoreIdNinBinding {
 }
 
 export interface QoreIdCacBinding {
-  /** Prefixed HID binding key, derived only from a matching submitted identifier. */
+  /** Prefixed HID key used in the provider-verified registration lookup. */
   registrationNumber: string;
-  /** QoreID's normalized `cac.rcNumber`, retained separately from the HID key. */
-  providerRegistrationNumber: string;
+  /** Optional QoreID `cac.rcNumber`; when present it must match the queried key. */
+  providerRegistrationNumber?: string;
   companyName: string;
   entityType: string;
   registrationDate: string;
@@ -103,6 +103,8 @@ export interface QoreIdVerificationResult {
   ninEnrollmentBinding?: QoreIdNinEnrollmentBinding;
   cacBinding?: QoreIdCacBinding;
   cacIncompleteProfile?: QoreIdCacIncompleteProfile;
+  /** Submitted canonical RC/BN/IT identifier after a successful CAC lookup. */
+  verifiedRegistrationNumber?: string;
   /** QoreID verified the CAC check; HID binding may still be incomplete. */
   providerVerification?: 'verified';
 }

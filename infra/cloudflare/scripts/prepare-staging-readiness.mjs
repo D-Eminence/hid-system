@@ -77,7 +77,7 @@ export function planCloudflareReadiness(configs) {
         secret_id: '/hid/staging/identity-sensitive', json_field: 'turnstileSecretKey', preserve_existing_fields: true },
       public_build_setting: 'VITE_TURNSTILE_SITE_KEY',
       runtime_validation: 'Existing Identity TurnstileService validates exact staging origin/hostname and action; retain replay rejection',
-      browser_actions: { [host('web')]: ['patient-login', 'staff-login', 'admin-login', 'patient-reset-start', 'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application', 'patient-enrollment'],
+      browser_actions: { [host('web')]: ['patient-login', 'staff-login', 'admin-login', 'patient-reset-start', 'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application', 'organization-completion', 'patient-enrollment'],
         [host('ehr')]: ['ehr-login', 'staff-login'], [host('lab')]: ['lab-login'], [host('pharmacy')]: ['pharmacy-login'],
         [host('ocr')]: ['ocr-login'], [host('outreach')]: ['outreach-login'], [host('admin')]: ['admin-login', 'admin-reset'] } },
     origin_auth: { value: null, generate_independent_staging_value: true,

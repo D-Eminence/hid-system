@@ -90,11 +90,12 @@ export default function ProviderApplication() {
     <section className="commercial-section"><div className="commercial-shell provider-application-shell">
       {accepted ? <div className="commercial-card" role="status">
         <h2>Application received</h2>
-        <p>We received your request. If eligible, HID will verify the registered organization and review access. Submission does not create an account or grant clinical access.</p>
+        <p>We received your request. HID will verify the CAC identifier. If QoreID omits organization details, use the profile completion page after verification. Submission does not create an account or grant clinical access.</p>
+        <Link className="commercial-button primary" to="/provider/complete">Complete missing organization details</Link>
         <Link className="commercial-button" to="/">Return to home</Link>
       </div> : <form className="commercial-card provider-application-form" onSubmit={event => { void submit(event) }}>
         <h2>Organization details</h2>
-        <p>Enter the CAC registration identifier. HID obtains the legal name, entity type, registration date, address, and status from the registry verification result before review.</p>
+        <p>Enter the CAC registration identifier. HID checks it with QoreID. If QoreID omits profile fields, you can complete those fields after the check; HID records which values came from QoreID and which came from you.</p>
         {error && <div className="provider-application-error" role="alert">{error}</div>}
         <label>Facility or service type
           <select className="commercial-input" value={selection.organizationType} onChange={event => {

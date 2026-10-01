@@ -6,7 +6,8 @@ type ApplicationStatus = OrganizationApplication['status'];
 type ListResult = { items: OrganizationApplication[] };
 type ReuseIds = { organizationId: string; facilityId: string };
 type VerifyResult = { state: OrganizationApplication['verificationResult'];
-  providerVerification?: 'verified'; status: ApplicationStatus; version: number };
+  providerVerification?: 'verified'; profileState?: 'incomplete' | 'complete';
+  status: ApplicationStatus; version: number };
 
 const statusOptions: Array<{ value: ApplicationStatus | ''; label: string }> = [
   { value: '', label: 'All statuses' },
@@ -46,7 +47,8 @@ function providerCheck(application: OrganizationApplication): string {
   }
 }
 
-function hasCompleteAuthoritativeProfile(application: OrganizationApplication): boolean {
+function hasCompleteProfile(application: OrganizationApplication): boolean {
+  if (application.profileState) return application.profileState === 'complete';
   return Boolean(application.verifiedOrganizationName)
     && Boolean(application.verifiedEntityType)
     && Boolean(application.verifiedRegistrationDate)
@@ -55,9 +57,17 @@ function hasCompleteAuthoritativeProfile(application: OrganizationApplication): 
 }
 
 function profileCompleteness(application: OrganizationApplication): string {
-  if (application.verificationResult === 'verified' && hasCompleteAuthoritativeProfile(application)) return 'Complete';
+  if (application.verificationResult === 'verified' && hasCompleteProfile(application)) return 'Complete';
   if (application.verificationResult === 'verified' || application.verificationResult === 'verified_incomplete') return 'Incomplete';
-  return 'Awaiting authoritative data';
+  return 'Awaiting provider check';
+}
+
+function profileValue(application: OrganizationApplication,
+  name: keyof NonNullable<OrganizationApplication['fieldSources']>,
+  value: string | null | undefined): JSX.Element {
+  const source = application.fieldSources?.[name];
+  return <>{value ?? '—'}{source && <small> · {source === 'qoreid'
+    ? 'QoreID supplied' : 'Applicant supplied'}</small>}</>;
 }
 
 function bindingState(application: OrganizationApplication, ready: boolean): string {
@@ -101,10 +111,10 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
       const result = await api<VerifyResult>(`/admin/organization-applications/${application.applicationId}/verify-cac`, {
         method: 'POST', version: application.version,
       });
-      setNotice(result.state === 'verified_incomplete' && result.providerVerification === 'verified'
-        ? `QoreID verified the CAC check for ${application.cacHint}, but the authoritative organization profile or registration binding is incomplete. Approval remains unavailable.`
+      setNotice(result.state === 'verified' && result.profileState === 'incomplete'
+        ? `QoreID verified the CAC check for ${application.cacHint}. The applicant can complete missing profile fields after confirming the administrator email; approval remains unavailable until review-ready.`
         : result.state === 'verified'
-          ? `CAC verification recorded for ${application.cacHint}. The complete registry identity is ready for platform review.`
+          ? `CAC verification recorded for ${application.cacHint}. The completed sourced profile is ready for platform review.`
           : `CAC verification result recorded for ${application.cacHint}. Review the application state.`);
     } catch (error) { setActionError(errorMessage(error)); }
     finally { setBusyId(null); setRevision((current) => current + 1); }
@@ -123,7 +133,7 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
       setActionError('Provide both existing organization and facility UUIDs, or leave both blank.'); return;
     }
     const detail = action === 'approve'
-      ? `Approve the registry-verified organization ${application.verifiedOrganizationName}? This provisions or links an organization and administrator.`
+      ? `Approve the reviewed organization profile for ${application.profileCompanyName ?? application.verifiedOrganizationName}? Check the source of each field before provisioning or linking an organization and administrator.`
       : `Reject the application for ${application.cacHint}?`;
     if (!window.confirm(detail)) return;
     setBusyId(application.applicationId); setActionError(null); setNotice(null);
@@ -154,7 +164,7 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
 
   return <div className="organization-applications-page">
     <header className="page-head"><p className="eyebrow">HID Super Admin</p><h1>Provider applications</h1>
-      <p>Review the masked CAC reference and registry-confirmed organization identity before granting access. Verification depends on the configured provider.</p></header>
+      <p>Review the masked CAC reference, QoreID check, and source of each organization field before granting access.</p></header>
     <div className="filters"><label className="application-filter">Application status
       <select value={status} onChange={(event) => { setStatus(event.target.value as ApplicationStatus | ''); setActionError(null); setNotice(null); }}>
         {statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -170,29 +180,33 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
           : <div className="cards">{items.map((application) => {
             const open = application.status === 'pending_verification' || application.status === 'ready_for_review';
             const ready = application.status === 'ready_for_review'
-              && application.verificationResult === 'verified' && hasCompleteAuthoritativeProfile(application);
+              && application.verificationResult === 'verified' && hasCompleteProfile(application);
             const busy = busyId === application.applicationId;
             const ids = reuseIds[application.applicationId] ?? { organizationId: '', facilityId: '' };
             return <article className="card application-card" key={application.applicationId}>
               <header><div><p className="eyebrow">{label(application.productCode)} · Requested {label(application.organizationType)} service</p>
-                <h2>{application.verifiedOrganizationName
-                  ?? (application.verificationResult === 'verified_incomplete'
+                <h2>{application.profileCompanyName ?? application.verifiedOrganizationName
+                  ?? (application.verificationResult === 'verified' || application.verificationResult === 'verified_incomplete'
                     ? 'Organization profile incomplete' : 'Registry verification pending')}</h2>
                 <small>Application {application.applicationId}</small></div>
                 <span className={`status status-${application.status.replaceAll('_', '-')}`}>
-                  {application.verificationResult === 'verified_incomplete' ? 'Awaiting registry profile' : label(application.status)}
+                  {application.verificationResult === 'verified' && application.profileState === 'incomplete'
+                    ? 'Awaiting applicant details' : label(application.status)}
                 </span></header>
               <dl>
                 <dt>Masked CAC</dt><dd>{application.cacHint}</dd>
-                <dt>Registry legal name</dt><dd>{application.verifiedOrganizationName
-                  ?? (application.verificationResult === 'verified_incomplete'
-                    ? 'Not provided by QoreID' : 'Awaiting verified CAC result')}</dd>
-                <dt>Registry entity type</dt><dd>{application.verifiedEntityType ?? '—'}</dd>
-                <dt>Registration date</dt><dd>{application.verifiedRegistrationDate ?? '—'}</dd>
-                <dt>Registry address</dt><dd>{application.verifiedAddress ?? '—'}</dd>
-                <dt>Registry status</dt><dd>{application.verifiedRegistryStatus ? label(application.verifiedRegistryStatus) : '—'}</dd>
+                <dt>Organization name</dt><dd>{profileValue(application, 'companyName',
+                  application.profileCompanyName ?? application.verifiedOrganizationName)}</dd>
+                <dt>Entity type</dt><dd>{profileValue(application, 'entityType',
+                  application.profileEntityType ?? application.verifiedEntityType)}</dd>
+                <dt>Registration date</dt><dd>{profileValue(application, 'registrationDate',
+                  application.profileRegistrationDate ?? application.verifiedRegistrationDate)}</dd>
+                <dt>Registered address</dt><dd>{profileValue(application, 'address',
+                  application.profileAddress ?? application.verifiedAddress)}</dd>
+                <dt>Registry status</dt><dd>{profileValue(application, 'registryStatus',
+                  application.profileRegistryStatus ?? application.verifiedRegistryStatus)}</dd>
                 <dt>Provider CAC check</dt><dd>{providerCheck(application)}</dd>
-                <dt>Authoritative profile</dt><dd>{profileCompleteness(application)}</dd>
+                <dt>Organization profile</dt><dd>{profileCompleteness(application)}</dd>
                 <dt>Organization binding</dt><dd>{bindingState(application, ready)}</dd>
                 <dt>Organization activation</dt><dd>{application.status === 'approved' ? 'Active' : 'Not active'}</dd>
                 <dt>Applicant admin</dt><dd>{application.administratorName} · {application.administratorEmail}</dd>
@@ -220,9 +234,10 @@ export function OrganizationApplications({ actor }: { actor: AdminActor }) {
                       onClick={() => void review(application, 'reject')}>Reject application</button>
                   </div>
                   {!canApprove && <small>Principal and role management permissions are required to approve.</small>}
-                  {!ready && <small>{application.verificationResult === 'verified_incomplete'
-                    ? 'QoreID verified this CAC check, but authoritative legal fields or registration binding are incomplete. Reverify after QoreID supplies complete data.'
-                    : 'Approval requires a complete, active registry identity from CAC verification.'}</small>}
+                  {!ready && <small>{application.verificationResult === 'verified'
+                    && application.profileState === 'incomplete'
+                    ? 'QoreID verified this CAC check. The applicant must complete missing fields using the administrator email code before review.'
+                    : 'Approval requires a verified CAC lookup and complete sourced organization profile.'}</small>}
                 </form>
               </div>}
             </article>;

@@ -21,8 +21,10 @@ import {
 } from './qoreid-verification.adapter';
 import { QoreIdVerificationController } from './qoreid-verification.controller';
 import { QoreIdVerificationService } from './qoreid-verification.service';
-import { AdminOrganizationApplicationsController, PublicOrganizationApplicationsController } from './organization-applications.controller';
+import { AdminOrganizationApplicationsController, PublicOrganizationApplicationsController,
+  PublicOrganizationProfileCompletionController } from './organization-applications.controller';
 import { OrganizationApplicationsService } from './organization-applications.service';
+import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
 import { PatientEnrollmentController } from './patient-enrollment.controller';
 import { PatientEnrollmentService } from './patient-enrollment.service';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
@@ -30,7 +32,8 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider }
 @Module({
   imports: [TurnstileModule, IntegrationModule],
   controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
-    PublicOrganizationApplicationsController, AdminOrganizationApplicationsController,
+    PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
+    AdminOrganizationApplicationsController,
     PatientEnrollmentController],
   providers: [
     IdentityService,
@@ -51,6 +54,7 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider }
     QoreIdVerificationAdapter,
     QoreIdVerificationService,
     OrganizationApplicationsService,
+    OrganizationProfileCompletionService,
     NotificationOtpClient,
     PatientEnrollmentService,
     QoreIdPublicPatientIdentityProvider,
