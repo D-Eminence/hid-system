@@ -122,6 +122,7 @@ export class OrganizationApplicationsService {
         throw new DomainProblem(503, 'QOREID_DISABLED', 'External verification is not enabled');
       }
       await this.integrations.assertAvailable('qoreid', 'provider_cac');
+      this.qoreid.assertCacContractAvailable();
       await this.integrations.consumeQuota(context, 'application_cac', applicationId);
       const result = await this.qoreid.verifyCac(secret.cac_registration_number);
       reference = result.providerReference ?? null;
@@ -147,12 +148,14 @@ export class OrganizationApplicationsService {
         failure = result.state;
       }
     } catch (error) {
-      // Local availability, permission, and quota gates made no QoreID
-      // request. Preserve any prior verified result and review-ready state.
+      // Local availability, contract, permission, and quota gates made no
+      // provider request. Never erase a prior verified review-ready result.
       if (error instanceof DomainProblem && [
+        'QOREID_DISABLED', 'INTEGRATION_PAUSED', 'QOREID_CAC_CONTRACT_UNCONFIRMED',
         'VERIFICATION_QUOTA_EXCEEDED', 'VERIFICATION_QUOTA_UNAVAILABLE',
         'PERMISSION_DENIED', 'INTEGRATION_UNAVAILABLE',
       ].includes(error.code)) throw error;
+      if (secret.application_status === 'ready_for_review') throw error;
       providerError = error;
       failure = this.failureCategory(error);
       outcome = failure === 'disabled' ? 'disabled' : 'provider_error';
@@ -269,7 +272,9 @@ export function verifiedCacBinding(
     || typeof entityType !== 'string' || typeof registrationDate !== 'string'
     || typeof address !== 'string' || typeof registryStatus !== 'string') return null;
   if (/[\x00-\x1f\x7f]/.test(companyName + entityType + address)) return null;
-  const normalizedNumber = registrationNumber.replace(/[\s-]+/g, '').toUpperCase();
+  // The provider adapter must supply a canonical, explicitly mapped binding.
+  // Do not infer a registration-number transformation at this domain boundary.
+  const normalizedNumber = registrationNumber;
   const legalName = companyName.replace(/\s+/g, ' ').trim();
   const legalEntityType = entityType.replace(/\s+/g, ' ').trim();
   const registeredAddress = address.replace(/\s+/g, ' ').trim();

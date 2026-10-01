@@ -37,6 +37,14 @@ interface TestCommandRow extends QueryResultRow {
 const providerKey = /^[a-z][a-z0-9-]{1,63}$/;
 const configurable = new Set(['ses', 'termii', 'meta-whatsapp', 'brevo']);
 const routes = new Set(['email', 'sms', 'whatsapp']);
+const publicSettings: Record<string, Record<string, RegExp>> = {
+  ses: { fromAddress: /^[^\s@]+@[^\s@]+\.[^\s@]+$/ },
+  termii: { senderId: /^[A-Za-z0-9]{3,20}$/, channel: /^(generic|dnd)$/ },
+  'meta-whatsapp': { phoneNumberId: /^\d{5,30}$/, templateName: /^[A-Za-z0-9_]{2,120}$/,
+    templateLanguage: /^[a-z]{2}_[A-Z]{2}$/ },
+  brevo: { emailFrom: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+    smsSender: /^[A-Za-z0-9]{3,20}$/, whatsappSender: /^\+[1-9]\d{7,14}$/ },
+};
 
 @Injectable()
 export class IntegrationAdminService {
@@ -103,7 +111,8 @@ export class IntegrationAdminService {
         if (!row) throw new DomainProblem(503, 'INTEGRATION_UNAVAILABLE', 'Integration update was unavailable');
         if (!row.replayed) await this.recordAudit(client, context, `admin.integration.${action}`, provider, reason,
           { enabled: row.enabled, version: Number(row.row_version) });
-        return { provider: row.provider, enabled: row.enabled, configuration: row.configuration,
+        return { provider: row.provider, enabled: row.enabled,
+          configuration: this.publicConfiguration(row.provider, row.configuration),
           version: Number(row.row_version), replayed: row.replayed };
       });
     } catch (error) { throw this.mapError(error); }
@@ -200,30 +209,47 @@ export class IntegrationAdminService {
     if (Number(current.row_version) !== expectedVersion) {
       throw new DomainProblem(409, 'VERSION_CONFLICT', 'Integration changed; reload before retrying');
     }
+    if (!current.enabled) {
+      throw new DomainProblem(503, 'INTEGRATION_PAUSED',
+        'Connection test is unavailable while the provider is paused');
+    }
     return null;
   }
 
   private catalog(providers: ProviderRow[], routing: RouteRow[]) {
     const env = getEnvironment();
     const items = providers.map((row) => {
+      const qoreidOpen = row.provider === 'qoreid' && row.enabled && this.qoreidConfigured();
       const credential = row.provider === 'qoreid'
-        ? { state: this.qoreidConfigured() ? 'configured' : 'missing', masked: '••••', rotationSupported: false }
+        ? { state: this.qoreidCredentialsPresent() ? 'configured' : 'missing', masked: '••••', rotationSupported: false }
         : row.credential_source === 'none'
           ? { state: 'unsupported', masked: null, rotationSupported: false }
           : { state: 'external', masked: '••••', rotationSupported: false };
       const activeCapabilities = row.capabilities.filter((capability) =>
         row.enabled && (capability === 'patient_nin' || capability === 'provider_cac'
-          ? row.provider === 'qoreid' && env.QOREID_ENABLED
+          ? capability === 'patient_nin' && qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED
           : routing.some((route) => route.capability === capability &&
             (route.active_provider === row.provider || route.fallback_provider === row.provider))));
+      const operationGates = row.provider === 'qoreid' ? [
+        { operation: 'existing_patient_nin', state: qoreidOpen ? 'open' : 'closed',
+          detail: 'Existing-patient NIN evidence requires the general QoreID gate and an enabled provider.' },
+        { operation: 'patient_nin_enrollment',
+          state: qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED ? 'open' : 'closed',
+          detail: 'NIN-only enrollment also requires its separate deployment gate.' },
+        { operation: 'provider_cac', state: 'scaffold',
+          detail: 'CAC entitlement and returned registration-number mapping remain unconfirmed.' },
+      ] : [];
       const availableActions = ['audit',
-        ...(row.runtime_control ? [row.enabled ? 'pause' : 'enable'] : []),
+        ...(row.runtime_control && (row.provider !== 'qoreid' || row.enabled || this.qoreidConfigured())
+          ? [row.enabled ? 'pause' : 'enable'] : []),
         ...(configurable.has(row.provider) ? ['configure'] : []),
-        ...(row.provider === 'qoreid' && this.qoreidConfigured() ? ['test'] : []),
+        ...(qoreidOpen ? ['test'] : []),
         ...(row.capabilities.some((capability) => routes.has(capability)) ? ['select', 'fallback'] : [])];
       return { provider: row.provider, name: row.display_name, capabilities: row.capabilities,
         enabled: row.enabled, health: row.last_test_status ?? 'unknown', activeCapabilities,
-        version: Number(row.row_version), configuration: row.configuration,
+        managementMode: row.runtime_control ? 'runtime' : row.credential_source === 'none' ? 'scaffold' : 'deployment',
+        operationGates,
+        version: Number(row.row_version), configuration: this.publicConfiguration(row.provider, row.configuration),
         credential, lastTestedAt: row.last_tested_at?.toISOString() ?? null,
         lastSuccessfulTestAt: row.last_successful_test_at?.toISOString() ?? null,
         lastFailedTestAt: row.last_failed_test_at?.toISOString() ?? null, availableActions };
@@ -237,7 +263,18 @@ export class IntegrationAdminService {
 
   private qoreidConfigured(): boolean {
     const env = getEnvironment();
-    return env.QOREID_ENABLED && Boolean(env.QOREID_CLIENT_ID && env.QOREID_CLIENT_SECRET);
+    return env.QOREID_ENABLED && this.qoreidCredentialsPresent();
+  }
+
+  private qoreidCredentialsPresent(): boolean {
+    const env = getEnvironment();
+    return Boolean(env.QOREID_CLIENT_ID && env.QOREID_CLIENT_SECRET);
+  }
+
+  private publicConfiguration(provider: string, configuration: Record<string, unknown>): Record<string, string> {
+    const fields = publicSettings[provider] ?? {};
+    return Object.fromEntries(Object.entries(configuration ?? {}).filter(([key, value]) =>
+      typeof value === 'string' && value.length <= 120 && fields[key]?.test(value))) as Record<string, string>;
   }
 
   private assertProvider(provider: string): void {

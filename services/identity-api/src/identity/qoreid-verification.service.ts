@@ -130,6 +130,7 @@ export class QoreIdVerificationService {
       this.recordOrganizationEvidence(context, organizationContext, result, reference, failure);
     return this.verify(
       async () => {
+        this.provider.assertCacContractAvailable();
         await this.integrations.consumeQuota(context, 'existing_cac', organizationId);
         const result = await this.provider.verifyCac(regNumber);
         if (result.state !== 'verified') return result;
@@ -163,11 +164,14 @@ export class QoreIdVerificationService {
     } catch (error) {
       // Local policy, binding, and quota gates made no provider request. They
       // must not be recorded as QoreID outcomes or change assurance state.
-      if (error instanceof DomainProblem && [
-        'VERIFICATION_QUOTA_EXCEEDED', 'VERIFICATION_QUOTA_UNAVAILABLE', 'PERMISSION_DENIED',
-        'INTEGRATION_UNAVAILABLE', 'PATIENT_NIN_NOT_BOUND', 'PATIENT_NIN_BINDING_UNAVAILABLE',
-        'NIN_PROTECTION_UNAVAILABLE', 'PATIENT_IDENTITY_PROFILE_INCOMPLETE',
-      ].includes(error.code)) throw error;
+      if (error instanceof DomainProblem && (
+        (verificationType === 'cac' && ['QOREID_DISABLED', 'INTEGRATION_PAUSED'].includes(error.code))
+        || [
+          'VERIFICATION_QUOTA_EXCEEDED', 'VERIFICATION_QUOTA_UNAVAILABLE', 'PERMISSION_DENIED',
+          'INTEGRATION_UNAVAILABLE', 'PATIENT_NIN_NOT_BOUND', 'PATIENT_NIN_BINDING_UNAVAILABLE',
+          'NIN_PROTECTION_UNAVAILABLE', 'PATIENT_IDENTITY_PROFILE_INCOMPLETE',
+          'QOREID_CAC_CONTRACT_UNCONFIRMED',
+        ].includes(error.code))) throw error;
       const failure = this.failureCategory(error);
       await this.persistFailure(persist, failure);
       throw error;

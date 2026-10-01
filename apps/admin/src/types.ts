@@ -74,6 +74,12 @@ export interface ProviderIntegration {
   name: string;
   capabilities: string[];
   enabled: boolean;
+  managementMode: 'runtime' | 'deployment' | 'scaffold';
+  operationGates: Array<{
+    operation: string;
+    state: 'open' | 'closed' | 'scaffold';
+    detail: string;
+  }>;
   health: IntegrationHealth;
   activeCapabilities: string[];
   version: number;

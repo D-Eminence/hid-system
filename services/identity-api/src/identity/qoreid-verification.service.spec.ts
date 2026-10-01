@@ -20,11 +20,11 @@ const patientRequest = {
 } as unknown as HidRequest;
 
 function setup(enabled: boolean) {
-  let profileDateOfBirth: string | null = '1974-01-06';
+  let profileDateOfBirth: string | null = '1991-03-04';
   let ninBindingMatches = true;
   const query = jest.fn(async (sql: string, _values?: readonly unknown[]) => {
     if (sql.includes('patient_self_profile')) return { rows: [{ profile: {
-      patientId: 'a0000000-0000-4000-8000-000000000001', firstName: 'Bunch', lastName: 'Dillon',
+      patientId: 'a0000000-0000-4000-8000-000000000001', firstName: 'Samplefirst', lastName: 'Samplelast',
       dateOfBirth: profileDateOfBirth,
     } }] };
     if (sql.includes('patient_self_nin_binding_matches')) return { rows: [{ matched: ninBindingMatches }] };
@@ -40,8 +40,9 @@ function setup(enabled: boolean) {
   } as unknown as DatabaseService;
   const provider = {
     verifyNin: jest.fn().mockResolvedValue({ provider: 'qoreid', state: 'verified', providerReference: '99',
-      ninBinding: { firstName: 'Bunch', lastName: 'Dillon', dateOfBirth: '1974-01-06' },
+      ninBinding: { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04' },
       respondedAt: new Date().toISOString() }),
+    assertCacContractAvailable: jest.fn(),
     verifyCac: jest.fn(),
   } as unknown as QoreIdVerificationAdapter;
   const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined),
@@ -86,7 +87,7 @@ describe('QoreID verification service', () => {
       providerReference: '99', recordedAt: '2026-01-01T00:00:00.000Z',
     });
     expect(provider.verifyNin).toHaveBeenCalledWith('12345678901', {
-      firstName: 'Bunch', lastName: 'Dillon', dateOfBirth: '1974-01-06',
+      firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04',
     });
     expect(integrations.consumePatientQuota).toHaveBeenCalledWith(patientRequest.correlationId,
       'patient:subject', patientRequest.actor!.sessionId);
@@ -206,5 +207,18 @@ describe('QoreID verification service', () => {
     expect(organizationQuery.mock.calls[1]?.[0]).toContain('record_organization_cac_verification_evidence');
     expect(organizationQuery.mock.calls[1]?.[1]).toEqual(['hospital', 'verified', '71', null]);
     expect(JSON.stringify(organizationQuery.mock.calls)).not.toContain('a0000000-0000-4000-8000-000000000009');
+
+    // The normalized success above exercises the future provider interface.
+    // The production adapter currently blocks at this gate before quota or
+    // provider access, leaving existing organization evidence untouched.
+    (provider.assertCacContractAvailable as jest.Mock).mockImplementationOnce(() => {
+      throw new DomainProblem(503, 'QOREID_CAC_CONTRACT_UNCONFIRMED', 'Contract is unconfirmed');
+    });
+    await expect(service.verifyOrganizationCac(organizationRequest, 'hospital', 'RC1234'))
+      .rejects.toMatchObject({ status: 503, code: 'QOREID_CAC_CONTRACT_UNCONFIRMED' });
+    expect(provider.verifyCac).toHaveBeenCalledTimes(1);
+    expect(integrations.consumeQuota).toHaveBeenCalledTimes(1);
+    expect(organizationQuery.mock.calls.filter(([sql]) => sql.includes('record_organization_cac_verification_evidence')))
+      .toHaveLength(1);
   });
 });

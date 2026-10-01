@@ -22,8 +22,13 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
     private readonly integrations: IntegrationRuntimeService) {}
 
   async verifyNin(nin: string): Promise<VerifiedPublicPatientIdentity> {
-    if (!getEnvironment().QOREID_ENABLED) {
+    const environment = getEnvironment();
+    if (!environment.QOREID_ENABLED) {
       throw new DomainProblem(503, 'QOREID_DISABLED', 'Patient identity enrollment is temporarily unavailable');
+    }
+    if (!environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED) {
+      throw new DomainProblem(503, 'QOREID_NIN_ONLY_DISABLED',
+        'Patient identity enrollment is temporarily unavailable');
     }
     await this.integrations.assertAvailable('qoreid', 'patient_nin');
     const result = await this.adapter.verifyNinEnrollment(nin);

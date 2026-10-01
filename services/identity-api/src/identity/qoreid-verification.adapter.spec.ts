@@ -9,17 +9,20 @@ const configuration = {
 };
 
 const token = { accessToken: 'server-only-access-token', expiresIn: 7200, tokenType: 'Bearer' };
-const claims = { firstName: 'Bunch', lastName: 'Dillon', dateOfBirth: '1974-01-06' };
+const claims = { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04' };
 const complete = {
   id: 48291,
   status: { state: 'complete', status: 'verified' },
   summary: { nin_check: { status: 'EXACT_MATCH', fieldMatches: { firstname: true, lastname: true } } },
-  nin: { nin: '12345678901', firstname: 'Bunch', lastname: 'Dillon', birthdate: '06-01-1974',
+  nin: { nin: '12345678901', firstname: 'Samplefirst', lastname: 'Samplelast', birthdate: '04-03-1991',
     photo: 'sensitive-photo', address: 'sensitive-address' },
 };
 // The NIN-only fields and nesting follow the entitled sandbox observation,
 // including its numeric top-level provider id. All fixture values are invented.
 const fixtureNin = '00000000000';
+const fixtureResidence = {
+  address1: 'Fixture Address 1', town: 'Fixture Town', lga: 'Fixture LGA', state: 'Fixture State',
+};
 const sandboxNinOnlySuccess = {
   id: 48291,
   status: { state: 'complete', status: 'verified' },
@@ -27,15 +30,8 @@ const sandboxNinOnlySuccess = {
   nin: {
     nin: fixtureNin, firstname: 'Fixture', lastname: 'Person', middlename: 'Sample',
     phone: '00000000000', gender: 'F', photo: 'Zml4dHVyZQ==', birthdate: '01-01-1990',
+    residence: fixtureResidence,
   },
-  residence: {
-    address1: 'Fixture Address 1', town: 'Fixture Town', lga: 'Fixture LGA', state: 'Fixture State',
-  },
-};
-const completeCac = {
-  id: 71, status: { state: 'complete', status: 'verified' }, summary: { cac_check: 'verified' },
-  cac: { rcNumber: '1234', companyName: 'Example Clinic', companyType: 'Private Limited',
-    registrationDate: '07-Jul-95', status: 'Active', headOfficeAddress: '123 Example Street, Lagos' },
 };
 const enrollmentConfiguration = {
   ...configuration,
@@ -57,7 +53,7 @@ describe('QoreID verification adapter', () => {
 
     await expect(adapter.verifyNin('12345678901', claims)).resolves.toEqual({
       provider: 'qoreid', state: 'verified', providerReference: '48291', respondedAt: expect.any(String),
-      ninBinding: { firstName: 'Bunch', lastName: 'Dillon', dateOfBirth: '1974-01-06' },
+      ninBinding: { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04' },
     });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch.mock.calls[0]).toEqual([
@@ -72,26 +68,31 @@ describe('QoreID verification adapter', () => {
     expect(fetch.mock.calls[1]?.[1]?.method).toBe('POST');
     expect(fetch.mock.calls[1]?.[1]?.redirect).toBe('error');
     expect(fetch.mock.calls[1]?.[1]?.body).toBe(JSON.stringify({
-      firstname: 'Bunch', lastname: 'Dillon', dob: '1974-01-06',
+      firstname: 'Samplefirst', lastname: 'Samplelast', dob: '1991-03-04',
     }));
     const ninHeaders = fetch.mock.calls[1]?.[1]?.headers as Record<string, string>;
     expect(ninHeaders).toEqual({ accept: 'application/json', authorization: 'Bearer server-only-access-token',
       'content-type': 'application/json' });
   });
 
-  it('uses CAC Basic V2 with only regNumber in the JSON body', async () => {
-    const fetch = jest.fn()
-      .mockResolvedValueOnce(response(token))
-      .mockResolvedValueOnce(response(completeCac));
+  it.each(['RC1234', 'BN1234', 'IT1234'])
+  ('blocks CAC verification before OAuth or registry requests while entitlement and mapping are unconfirmed: %s', async (number) => {
+    const fetch = jest.fn();
     const adapter = new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch);
+    await expect(adapter.verifyCac(number)).rejects.toMatchObject({
+      status: 503, code: 'QOREID_CAC_CONTRACT_UNCONFIRMED',
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
 
-    await expect(adapter.verifyCac('RC1234')).resolves.toMatchObject({ state: 'verified', providerReference: '71',
-      cacBinding: { registrationNumber: '1234', companyName: 'Example Clinic', entityType: 'Private Limited',
-        registrationDate: '1995-07-07', address: '123 Example Street, Lagos', registryStatus: 'Active' } });
-    expect(fetch.mock.calls[1]?.[0]).toBe('https://api.qoreid.com/v2/ng/identities/cac-basic');
-    expect(fetch.mock.calls[1]?.[1]?.method).toBe('POST');
-    expect(fetch.mock.calls[1]?.[1]?.body).toBe(JSON.stringify({ regNumber: 'RC1234' }));
-    expect(JSON.parse(fetch.mock.calls[1]?.[1]?.body as string)).toEqual({ regNumber: 'RC1234' });
+  it.each(['1234', 'RC-1234', 'CO1234', 'RC123', `RC${'1'.repeat(21)}`])
+  ('rejects malformed CAC identifiers before any provider request: %s', async (number) => {
+    const fetch = jest.fn();
+    const adapter = new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch);
+    await expect(adapter.verifyCac(number)).rejects.toMatchObject({
+      status: 400, code: 'CAC_REGISTRATION_NUMBER_INVALID',
+    });
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('keeps NIN-only enrollment disabled by configuration before any provider request', async () => {
@@ -119,9 +120,32 @@ describe('QoreID verification adapter', () => {
     });
     expect(fetch.mock.calls[1]?.[0]).toBe('https://api.qoreid.com/v1/ng/identities/nin/00000000000');
     expect(fetch.mock.calls[1]?.[1]?.method).toBe('POST');
-    expect(fetch.mock.calls[1]?.[1]?.body).toBeUndefined();
+    expect(fetch.mock.calls[1]?.[1]).not.toHaveProperty('body');
     expect(fetch.mock.calls[1]?.[1]?.headers).toEqual({
       accept: 'application/json', authorization: 'Bearer server-only-access-token',
+    });
+  });
+
+  it('does not map a top-level-only residence as authoritative identity', async () => {
+    const payload = { ...sandboxNinOnlySuccess,
+      nin: { ...sandboxNinOnlySuccess.nin, residence: undefined }, residence: fixtureResidence };
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+      fetch as unknown as typeof globalThis.fetch);
+    const result = await adapter.verifyNinEnrollment(fixtureNin);
+    expect(result.state).toBe('verified');
+    expect(result.ninEnrollmentBinding).not.toHaveProperty('address');
+    expect(result.ninEnrollmentBinding).not.toHaveProperty('residence');
+  });
+
+  it('uses nested residence even when an unrelated top-level field differs', async () => {
+    const payload = { ...sandboxNinOnlySuccess,
+      residence: { ...fixtureResidence, address1: 'Untrusted top-level address' } };
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+      fetch as unknown as typeof globalThis.fetch);
+    await expect(adapter.verifyNinEnrollment(fixtureNin)).resolves.toMatchObject({
+      state: 'verified', ninEnrollmentBinding: { residence: fixtureResidence },
     });
   });
 
@@ -162,10 +186,20 @@ describe('QoreID verification adapter', () => {
     expect(result.ninEnrollmentBinding).not.toHaveProperty('middleName');
   });
 
+  it.each([undefined, null, '48291', -1, 1.25, Number.MAX_SAFE_INTEGER + 1])
+  ('rejects a missing or non-numeric safe provider id: %j', async (id) => {
+    const fetch = jest.fn().mockResolvedValueOnce(response(token))
+      .mockResolvedValueOnce(response({ ...sandboxNinOnlySuccess, id }));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+      fetch as unknown as typeof globalThis.fetch);
+    await expect(adapter.verifyNinEnrollment(fixtureNin)).rejects.toMatchObject({
+      code: 'QOREID_PROVIDER_RESPONSE_INVALID', status: 502,
+    });
+  });
+
   it('rejects a NIN-only response with a mismatched NIN or malformed authoritative identity', async () => {
     const full = sandboxNinOnlySuccess;
     for (const payload of [
-      { ...full, id: undefined },
       { ...full, nin: { ...full.nin, nin: '11111111111' } },
       { ...full, nin: { ...full.nin, nin: undefined } },
       { ...full, nin: { ...full.nin, firstname: undefined } },
@@ -176,11 +210,11 @@ describe('QoreID verification adapter', () => {
       { ...full, nin: { ...full.nin, middlename: 'Bad\nName' } },
       { ...full, nin: { ...full.nin, phone: '' } },
       { ...full, nin: { ...full.nin, photo: 'bad base64?' } },
-      { ...full, residence: { ...full.residence, address1: '' } },
-      { ...full, residence: { ...full.residence, town: 'Bad\nTown' } },
-      { ...full, residence: { ...full.residence, lga: 123 } },
-      { ...full, residence: { ...full.residence, state: '' } },
-      { ...full, residence: [] },
+      { ...full, nin: { ...full.nin, residence: { ...fixtureResidence, address1: '' } } },
+      { ...full, nin: { ...full.nin, residence: { ...fixtureResidence, town: 'Bad\nTown' } } },
+      { ...full, nin: { ...full.nin, residence: { ...fixtureResidence, lga: 123 } } },
+      { ...full, nin: { ...full.nin, residence: { ...fixtureResidence, state: '' } } },
+      { ...full, nin: { ...full.nin, residence: [] } },
     ]) {
       const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
       const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
@@ -261,15 +295,11 @@ describe('QoreID verification adapter', () => {
     }
   });
 
-  it('rejects a verified provider status with missing authoritative NIN or CAC fields', async () => {
+  it('rejects a verified provider status with missing authoritative NIN fields', async () => {
     const ninFetch = jest.fn().mockResolvedValueOnce(response(token))
       .mockResolvedValueOnce(response({ id: 1, status: { state: 'complete', status: 'verified' } }));
     await expect(new QoreIdVerificationAdapter(configuration, ninFetch as unknown as typeof globalThis.fetch)
       .verifyNin('12345678901', claims)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
-    const cacFetch = jest.fn().mockResolvedValueOnce(response(token))
-      .mockResolvedValueOnce(response({ ...completeCac, cac: { companyName: 'Example Clinic' } }));
-    await expect(new QoreIdVerificationAdapter(configuration, cacFetch as unknown as typeof globalThis.fetch)
-      .verifyCac('RC1234')).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
   });
 
   it('rejects malformed OAuth or provider payloads without returning their contents', async () => {
@@ -288,8 +318,9 @@ describe('QoreID verification adapter', () => {
     0, -1, 0.5, '7200', '7200 secs', Number.MAX_SAFE_INTEGER + 1,
   ])('rejects an invalid provider token lifetime: %j', async (expiresIn) => {
     const fetch = jest.fn().mockResolvedValueOnce(response({ ...token, expiresIn }));
-    const adapter = new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch);
-    await expect(adapter.verifyCac('RC1234')).rejects.toMatchObject({
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+      fetch as unknown as typeof globalThis.fetch);
+    await expect(adapter.verifyNinEnrollment(fixtureNin)).rejects.toMatchObject({
       status: 502, code: 'QOREID_PROVIDER_RESPONSE_INVALID',
     });
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -301,15 +332,15 @@ describe('QoreID verification adapter', () => {
     let tokenRequests = 0;
     const fetch = jest.fn(async (url: string, _init?: RequestInit) => url.endsWith('/token')
       ? response({ ...token, accessToken: `fixture-token-${++tokenRequests}` })
-      : response(completeCac));
-    const adapter = new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch);
+      : response(sandboxNinOnlySuccess));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration, fetch as unknown as typeof globalThis.fetch);
 
-    await adapter.verifyCac('RC1234');
+    await adapter.verifyNinEnrollment(fixtureNin);
     now += 5_399_000;
-    await adapter.verifyCac('RC1234');
+    await adapter.verifyNinEnrollment(fixtureNin);
     expect(tokenRequests).toBe(1);
     now += 1_000;
-    await adapter.verifyCac('RC1234');
+    await adapter.verifyNinEnrollment(fixtureNin);
     expect(tokenRequests).toBe(2);
     const verificationHeaders = fetch.mock.calls.filter(([url]) => !url.endsWith('/token'))
       .map(([, init]) => init?.headers as Record<string, string>);
@@ -324,15 +355,15 @@ describe('QoreID verification adapter', () => {
     let tokenRequests = 0;
     const fetch = jest.fn(async (url: string, _init?: RequestInit) => url.endsWith('/token')
       ? response({ ...token, expiresIn: 120, accessToken: `fixture-token-${++tokenRequests}` })
-      : response(completeCac));
-    const adapter = new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch);
+      : response(sandboxNinOnlySuccess));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration, fetch as unknown as typeof globalThis.fetch);
 
-    await adapter.verifyCac('RC1234');
+    await adapter.verifyNinEnrollment(fixtureNin);
     now += 119_000;
-    await adapter.verifyCac('RC1234');
+    await adapter.verifyNinEnrollment(fixtureNin);
     expect(tokenRequests).toBe(1);
     now += 1_000;
-    await adapter.verifyCac('RC1234');
+    await adapter.verifyNinEnrollment(fixtureNin);
     expect(tokenRequests).toBe(2);
   });
 
@@ -340,16 +371,33 @@ describe('QoreID verification adapter', () => {
     let resolveToken!: (value: Response) => void;
     const tokenPending = new Promise<Response>((resolve) => { resolveToken = resolve; });
     const fetch = jest.fn((url: string, _init?: RequestInit) => url.endsWith('/token')
-      ? tokenPending : Promise.resolve(response(completeCac)));
-    const adapter = new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch);
-    const first = adapter.verifyCac('RC1234');
-    const second = adapter.verifyCac('RC1234');
+      ? tokenPending : Promise.resolve(response(sandboxNinOnlySuccess)));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration, fetch as unknown as typeof globalThis.fetch);
+    const first = adapter.verifyNinEnrollment(fixtureNin);
+    const second = adapter.verifyNinEnrollment(fixtureNin);
     expect(fetch.mock.calls.filter(([url]) => url.endsWith('/token'))).toHaveLength(1);
 
     resolveToken(response(token));
     await expect(Promise.all([first, second])).resolves.toHaveLength(2);
     expect(fetch.mock.calls.filter(([url]) => url.endsWith('/token'))).toHaveLength(1);
     expect(fetch.mock.calls.filter(([url]) => !url.endsWith('/token'))).toHaveLength(2);
+  });
+
+  it('probes OAuth afresh for each connection test even when a usable token is cached', async () => {
+    const fetch = jest.fn()
+      .mockResolvedValueOnce(response({ ...token, accessToken: 'fixture-token-1' }))
+      .mockResolvedValueOnce(response(sandboxNinOnlySuccess))
+      .mockResolvedValueOnce(response({ ...token, accessToken: 'fixture-token-2' }))
+      .mockResolvedValueOnce(response(sandboxNinOnlySuccess));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+      fetch as unknown as typeof globalThis.fetch);
+    await adapter.verifyNinEnrollment(fixtureNin);
+    await adapter.testConnection();
+    await adapter.verifyNinEnrollment(fixtureNin);
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith('/token'))).toHaveLength(2);
+    expect(fetch.mock.calls.filter(([url]) => !url.endsWith('/token'))).toHaveLength(2);
+    expect((fetch.mock.calls[3]?.[1]?.headers as Record<string, string>).authorization)
+      .toBe('Bearer fixture-token-2');
   });
 
   it('invalidates a rejected token and retries the same NIN-only verification exactly once', async () => {
@@ -391,11 +439,11 @@ describe('QoreID verification adapter', () => {
     const fetch = jest.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith('/token')) return response({ ...token, accessToken: `fixture-token-${++tokenRequests}` });
       const authorization = (init?.headers as Record<string, string>)?.authorization;
-      return authorization === 'Bearer fixture-token-1' ? response({}, 401) : response(completeCac);
+      return authorization === 'Bearer fixture-token-1' ? response({}, 401) : response(sandboxNinOnlySuccess);
     });
-    const adapter = new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch);
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration, fetch as unknown as typeof globalThis.fetch);
     await adapter.testConnection();
-    await expect(Promise.all([adapter.verifyCac('RC1234'), adapter.verifyCac('RC1234')]))
+    await expect(Promise.all([adapter.verifyNinEnrollment(fixtureNin), adapter.verifyNinEnrollment(fixtureNin)]))
       .resolves.toHaveLength(2);
     expect(tokenRequests).toBe(2);
     expect(fetch.mock.calls.filter(([url]) => !url.endsWith('/token'))).toHaveLength(4);

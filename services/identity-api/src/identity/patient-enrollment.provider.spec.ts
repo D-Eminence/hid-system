@@ -1,3 +1,4 @@
+import { DomainProblem } from '../common/problem';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
@@ -41,8 +42,20 @@ describe('QoreID public patient identity provider', () => {
     expect(f.adapter.verifyNinEnrollment).not.toHaveBeenCalled();
   });
 
+  it('blocks NIN-only enrollment before runtime lookup when its separate gate is disabled', async () => {
+    process.env.QOREID_ENABLED = 'true';
+    process.env.QOREID_CLIENT_ID = 'test-client';
+    process.env.QOREID_CLIENT_SECRET = 'test-secret';
+    resetEnvironmentForTests();
+    const f = provider({ state: 'verified', providerReference: '1', ninEnrollmentBinding: binding });
+    await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ code: 'QOREID_NIN_ONLY_DISABLED' });
+    expect(f.integrations.assertAvailable).not.toHaveBeenCalled();
+    expect(f.adapter.verifyNinEnrollment).not.toHaveBeenCalled();
+  });
+
   it('requires enabled runtime authority and an exact verified NIN binding', async () => {
     process.env.QOREID_ENABLED = 'true';
+    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
     process.env.QOREID_CLIENT_ID = 'test-client';
     process.env.QOREID_CLIENT_SECRET = 'test-secret';
     resetEnvironmentForTests();
@@ -57,6 +70,7 @@ describe('QoreID public patient identity provider', () => {
 
   it('rejects an incomplete or denied provider result', async () => {
     process.env.QOREID_ENABLED = 'true';
+    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
     process.env.QOREID_CLIENT_ID = 'test-client';
     process.env.QOREID_CLIENT_SECRET = 'test-secret';
     resetEnvironmentForTests();
@@ -64,5 +78,18 @@ describe('QoreID public patient identity provider', () => {
     await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ code: 'NIN_NOT_VERIFIED' });
     f.adapter.verifyNinEnrollment.mockResolvedValue({ state: 'verified', ninEnrollmentBinding: binding });
     await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+  });
+
+  it('blocks new verification while QoreID is paused before invoking the adapter', async () => {
+    process.env.QOREID_ENABLED = 'true';
+    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
+    process.env.QOREID_CLIENT_ID = 'test-client';
+    process.env.QOREID_CLIENT_SECRET = 'test-secret';
+    resetEnvironmentForTests();
+    const f = provider({ state: 'verified', providerReference: '1', ninEnrollmentBinding: binding });
+    f.integrations.assertAvailable.mockRejectedValue(new DomainProblem(503, 'INTEGRATION_PAUSED',
+      'External verification is temporarily unavailable'));
+    await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ code: 'INTEGRATION_PAUSED' });
+    expect(f.adapter.verifyNinEnrollment).not.toHaveBeenCalled();
   });
 });

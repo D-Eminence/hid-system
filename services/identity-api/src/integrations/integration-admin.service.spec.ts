@@ -22,7 +22,7 @@ const context: DataAccessContext = {
 
 const qoreidRow = {
   provider: 'qoreid', display_name: 'QoreID', enabled: true, runtime_control: true,
-  configuration: {}, credential_source: 'deployment-secret', last_test_status: null,
+  configuration: {}, credential_source: 'aws-secret', last_test_status: null,
   last_tested_at: null, last_successful_test_at: null, last_failed_test_at: null,
   row_version: '3', capabilities: ['patient_nin', 'provider_cac'],
 };
@@ -52,7 +52,8 @@ describe('IntegrationAdminService', () => {
     AUTH_SIGNING_SECRET: process.env.AUTH_SIGNING_SECRET,
     AUTH_LOGIN_PEPPER: process.env.AUTH_LOGIN_PEPPER,
     QOREID_ENABLED: process.env.QOREID_ENABLED, QOREID_CLIENT_ID: process.env.QOREID_CLIENT_ID,
-    QOREID_CLIENT_SECRET: process.env.QOREID_CLIENT_SECRET };
+    QOREID_CLIENT_SECRET: process.env.QOREID_CLIENT_SECRET,
+    QOREID_NIN_ONLY_ENROLLMENT_ENABLED: process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED };
 
   beforeEach(() => {
     Object.assign(process.env, {
@@ -62,6 +63,7 @@ describe('IntegrationAdminService', () => {
       AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
       QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'test-client-id',
       QOREID_CLIENT_SECRET: 'test-client-secret',
+      QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false',
     });
     resetEnvironmentForTests();
   });
@@ -78,12 +80,78 @@ describe('IntegrationAdminService', () => {
     const { service, database } = harness(listRows);
     const result = await service.list(context);
     expect(result.items).toEqual([expect.objectContaining({
-      provider: 'qoreid', enabled: true, activeCapabilities: ['patient_nin', 'provider_cac'],
+      provider: 'qoreid', enabled: true, managementMode: 'runtime', activeCapabilities: [],
+      operationGates: [
+        expect.objectContaining({ operation: 'existing_patient_nin', state: 'open' }),
+        expect.objectContaining({ operation: 'patient_nin_enrollment', state: 'closed' }),
+        expect.objectContaining({ operation: 'provider_cac', state: 'scaffold' }),
+      ],
       credential: { state: 'configured', masked: '••••', rotationSupported: false },
       availableActions: expect.arrayContaining(['audit', 'pause', 'test']),
     })]);
     expect(JSON.stringify(result)).not.toMatch(/test-client-secret|deployment-secret/);
     expect(database.withTransaction).toHaveBeenCalledWith(context, expect.any(Function), { readOnly: true });
+  });
+
+  it('projects only validated non-secret settings from database rows into the API catalog', async () => {
+    const termii = { ...qoreidRow, provider: 'termii', display_name: 'Termii',
+      capabilities: ['sms'], configuration: { senderId: 'HID', channel: 'generic',
+        apiKey: 'synthetic-secret-never-returned', baseUrl: 'https://example.test' } };
+    const { service } = harness((sql) => sql.includes('admin_list_integration_providers')
+      ? { rows: [termii] } : { rows: [] });
+    const result = await service.list(context);
+    expect(result.items[0]?.configuration).toEqual({ senderId: 'HID', channel: 'generic' });
+    expect(JSON.stringify(result)).not.toMatch(/synthetic-secret-never-returned|example\.test/);
+  });
+
+  it('shows the NIN-only gate separately and never labels unconfirmed CAC as active', async () => {
+    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
+    resetEnvironmentForTests();
+    const { service } = harness(listRows);
+    const result = await service.list(context);
+    expect(result.items[0]).toMatchObject({
+      activeCapabilities: ['patient_nin'],
+      operationGates: [
+        { operation: 'existing_patient_nin', state: 'open' },
+        { operation: 'patient_nin_enrollment', state: 'open' },
+        { operation: 'provider_cac', state: 'scaffold' },
+      ],
+    });
+  });
+
+  it('distinguishes configured credentials from a closed deployment gate', async () => {
+    process.env.QOREID_ENABLED = 'false';
+    resetEnvironmentForTests();
+    const { service } = harness((sql) => sql.includes('admin_list_integration_providers')
+      ? { rows: [{ ...qoreidRow, enabled: false }] } : { rows: [] });
+    const result = await service.list(context);
+    expect(result.items[0]).toMatchObject({ activeCapabilities: [],
+      credential: { state: 'configured' },
+      operationGates: [
+        { operation: 'existing_patient_nin', state: 'closed' },
+        { operation: 'patient_nin_enrollment', state: 'closed' },
+        { operation: 'provider_cac', state: 'scaffold' },
+      ] });
+    expect(result.items[0]?.availableActions).not.toContain('test');
+    expect(result.items[0]?.availableActions).not.toContain('enable');
+  });
+
+  it('does not offer a connection test or active QoreID capability while paused', async () => {
+    const paused = { ...qoreidRow, enabled: false };
+    const { service, qoreid, runtime } = harness((sql) => sql.includes('admin_list_integration_providers')
+      ? { rows: [paused] } : { rows: [] });
+    const result = await service.list(context);
+    expect(result.items[0]).toMatchObject({ activeCapabilities: [],
+      operationGates: [
+        { operation: 'existing_patient_nin', state: 'closed' },
+        { operation: 'patient_nin_enrollment', state: 'closed' },
+        { operation: 'provider_cac', state: 'scaffold' },
+      ] });
+    expect(result.items[0]?.availableActions).not.toContain('test');
+    await expect(service.test(context, 'qoreid', 3, 'Routine connection check', 'qoreid-test-0001'))
+      .rejects.toMatchObject({ code: 'INTEGRATION_PAUSED', status: 503 });
+    expect(qoreid.testConnection).not.toHaveBeenCalled();
+    expect(runtime.consumeQuota).not.toHaveBeenCalled();
   });
 
   it('maps a database permission denial to a safe forbidden response', async () => {

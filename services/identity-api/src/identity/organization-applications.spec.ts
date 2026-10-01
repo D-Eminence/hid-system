@@ -75,13 +75,14 @@ describe('organization onboarding boundary', () => {
     expect(query).toHaveBeenCalledTimes(1);
   });
 
-  it('passes CAC only from restricted database intake to QoreID and stores a normalized result', async () => {
+  it('binds a normalized provider result to restricted CAC intake when a future validated adapter supplies it', async () => {
     const query = jest.fn()
       .mockResolvedValueOnce({ rows: [{ application_id: applicationId, product_code: 'migrate',
         cac_registration_number: 'RC1234567', application_status: 'pending_verification', row_version: '1' }] })
       .mockResolvedValueOnce({ rows: [{ application_status: 'ready_for_review', row_version: '2' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
-    const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: 'qoreid-123',
+    const qoreid = { assertCacContractAvailable: jest.fn(),
+      verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: 'qoreid-123',
       cacBinding: { registrationNumber: 'RC1234567', companyName: 'Verified Legal Clinic Limited',
         entityType: 'Private Company Limited by Shares', registrationDate: '2014-05-26',
         address: '10 Test Avenue, Lagos', registryStatus: 'Active' } }) };
@@ -103,7 +104,7 @@ describe('organization onboarding boundary', () => {
       '2014-05-26', '10 Test Avenue, Lagos', 'active']);
   });
 
-  it('records disabled verification and refuses approval without paired existing organization IDs', async () => {
+  it('keeps an application unchanged when verification is disabled and refuses an incomplete approval link', async () => {
     const query = jest.fn()
       .mockResolvedValueOnce({ rows: [{ application_id: applicationId, product_code: 'migrate',
         cac_registration_number: 'RC1234567', application_status: 'pending_verification', row_version: '1' }] })
@@ -119,12 +120,11 @@ describe('organization onboarding boundary', () => {
     expect(qoreid.verifyCac).not.toHaveBeenCalled();
     expect(integrations.assertAvailable).not.toHaveBeenCalled();
     expect(integrations.consumeQuota).not.toHaveBeenCalled();
-    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'disabled', null, 'disabled',
-      null, null, null, null, null, null]);
-    await expect(service.approve(context, applicationId, 2, {
+    expect(query.mock.calls.some(([sql]) => sql.includes('admin_record_organization_cac_result'))).toBe(false);
+    await expect(service.approve(context, applicationId, 1, {
       reason: 'Synthetic approval', existingOrganizationId: 'c4610000-0000-4000-8000-000000000001',
     })).rejects.toMatchObject({ code: 'ORGANIZATION_LINK_INVALID' });
-    expect(database.withTransaction).toHaveBeenCalledTimes(2);
+    expect(database.withTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('maps an optimistic concurrency conflict without returning SQL details', async () => {
@@ -144,7 +144,8 @@ describe('organization onboarding boundary', () => {
         cac_registration_number: 'RC1234567', application_status: 'pending_verification', row_version: '1' }] })
       .mockResolvedValueOnce({ rows: [{ application_status: 'pending_verification', row_version: '2' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
-    const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: '123',
+    const qoreid = { assertCacContractAvailable: jest.fn(),
+      verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: '123',
       cacBinding: { registrationNumber: 'RC9999999', companyName: 'Other Company',
         entityType: 'Private Company Limited by Shares', registrationDate: '2014-05-26',
         address: '10 Test Avenue, Lagos', registryStatus: 'Active' } }) };
@@ -157,10 +158,11 @@ describe('organization onboarding boundary', () => {
       null, null, null, null, null, null]);
   });
 
-  it('blocks CAC provider calls when the integration is paused', async () => {
+  it.each(['pending_verification', 'ready_for_review'])
+  ('blocks %s CAC provider calls when the integration is paused', async (status) => {
     const query = jest.fn()
       .mockResolvedValueOnce({ rows: [{ application_id: applicationId, product_code: 'ehr',
-        cac_registration_number: 'RC1234567', application_status: 'pending_verification', row_version: '1' }] })
+        cac_registration_number: 'RC1234567', application_status: status, row_version: '1' }] })
       .mockResolvedValueOnce({ rows: [{ application_status: 'pending_verification', row_version: '2' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn() };
@@ -171,8 +173,61 @@ describe('organization onboarding boundary', () => {
         consumeQuota: jest.fn() } as unknown as IntegrationRuntimeService);
     await expect(service.verify(context, applicationId, 1)).rejects.toMatchObject({ code: 'INTEGRATION_PAUSED' });
     expect(qoreid.verifyCac).not.toHaveBeenCalled();
-    expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'disabled', null, 'disabled',
-      null, null, null, null, null, null]);
+    expect(query.mock.calls.some(([sql]) => sql.includes('admin_record_organization_cac_result'))).toBe(false);
+  });
+
+  it.each(['pending_verification', 'ready_for_review'])
+  ('blocks %s CAC application verification before quota or provider access while the contract is unconfirmed', async (status) => {
+    const query = jest.fn().mockResolvedValue({ rows: [{ application_id: applicationId, product_code: 'ehr',
+      cac_registration_number: 'RC1234567', application_status: status, row_version: '2' }] });
+    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const qoreid = { assertCacContractAvailable: jest.fn(() => {
+      throw new DomainProblem(503, 'QOREID_CAC_CONTRACT_UNCONFIRMED', 'Contract is unconfirmed');
+    }), verifyCac: jest.fn() };
+    const integrations = { assertAvailable: jest.fn(), consumeQuota: jest.fn() };
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
+    const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
+      qoreid as unknown as QoreIdVerificationAdapter,
+      integrations as unknown as IntegrationRuntimeService);
+    await expect(service.verify(context, applicationId, 2)).rejects.toMatchObject({
+      status: 503, code: 'QOREID_CAC_CONTRACT_UNCONFIRMED',
+    });
+    expect(integrations.assertAvailable).toHaveBeenCalledWith('qoreid', 'provider_cac');
+    expect(integrations.consumeQuota).not.toHaveBeenCalled();
+    expect(qoreid.verifyCac).not.toHaveBeenCalled();
+    expect(query.mock.calls.some(([sql]) => sql.includes('admin_record_organization_cac_result'))).toBe(false);
+  });
+
+  it('preserves a review-ready application and verified legal fields when QoreID is disabled', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [{ application_id: applicationId, product_code: 'ehr',
+      cac_registration_number: 'RC1234567', application_status: 'ready_for_review', row_version: '2' }] });
+    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const qoreid = { verifyCac: jest.fn() };
+    const integrations = { assertAvailable: jest.fn(), consumeQuota: jest.fn() };
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: false } as environment.Environment);
+    const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
+      qoreid as unknown as QoreIdVerificationAdapter,
+      integrations as unknown as IntegrationRuntimeService);
+    await expect(service.verify(context, applicationId, 2)).rejects.toMatchObject({ code: 'QOREID_DISABLED' });
+    expect(qoreid.verifyCac).not.toHaveBeenCalled();
+    expect(integrations.assertAvailable).not.toHaveBeenCalled();
+    expect(query.mock.calls.some(([sql]) => sql.includes('admin_record_organization_cac_result'))).toBe(false);
+  });
+
+  it('preserves a review-ready application when the normalized provider fails', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [{ application_id: applicationId, product_code: 'ehr',
+      cac_registration_number: 'RC1234567', application_status: 'ready_for_review', row_version: '2' }] });
+    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const qoreid = { assertCacContractAvailable: jest.fn(),
+      verifyCac: jest.fn().mockRejectedValue(new DomainProblem(504, 'QOREID_TIMEOUT', 'External verification timed out')) };
+    const integrations = { assertAvailable: jest.fn(), consumeQuota: jest.fn() };
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
+    const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
+      qoreid as unknown as QoreIdVerificationAdapter,
+      integrations as unknown as IntegrationRuntimeService);
+    await expect(service.verify(context, applicationId, 2)).rejects.toMatchObject({ code: 'QOREID_TIMEOUT' });
+    expect(qoreid.verifyCac).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls.some(([sql]) => sql.includes('admin_record_organization_cac_result'))).toBe(false);
   });
 
   it('does not record a provider result or change application version when CAC quota is exhausted', async () => {
@@ -180,7 +235,7 @@ describe('organization onboarding boundary', () => {
       product_code: 'ehr', cac_registration_number: 'RC1234567',
       application_status: 'pending_verification', row_version: '1' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
-    const qoreid = { verifyCac: jest.fn() };
+    const qoreid = { assertCacContractAvailable: jest.fn(), verifyCac: jest.fn() };
     const integrations = { assertAvailable: jest.fn(), consumeQuota: jest.fn().mockRejectedValue(
       new DomainProblem(429, 'VERIFICATION_QUOTA_EXCEEDED', 'Verification limit reached')) };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
@@ -199,7 +254,7 @@ describe('organization onboarding boundary', () => {
       product_code: 'ehr', cac_registration_number: 'RC1234567',
       application_status: 'ready_for_review', row_version: '2' }] });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
-    const qoreid = { verifyCac: jest.fn() };
+    const qoreid = { assertCacContractAvailable: jest.fn(), verifyCac: jest.fn() };
     const integrations = { assertAvailable: jest.fn(), consumeQuota: jest.fn().mockRejectedValue(
       new DomainProblem(503, 'VERIFICATION_QUOTA_UNAVAILABLE', 'Quota gate unavailable')) };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
@@ -225,6 +280,8 @@ describe('organization onboarding boundary', () => {
     expect(verifiedCacBinding('RC1234567', { ...base, providerReference: undefined })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: undefined })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, registrationNumber: '1234567' } })).toBeNull();
+    expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, registrationNumber: 'RC-1234567' } })).toBeNull();
+    expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, registrationNumber: 'rc1234567' } })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, registryStatus: 'Inactive' } })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, companyName: ' ' } })).toBeNull();
     expect(verifiedCacBinding('RC1234567', { ...base, cacBinding: { ...base.cacBinding, entityType: '' } })).toBeNull();

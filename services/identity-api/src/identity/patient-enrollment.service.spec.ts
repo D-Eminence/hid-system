@@ -15,7 +15,7 @@ const correlationId = 'patient-enrollment-test';
 const identity = {
   nin, firstName: 'Amina', lastName: 'Okafor', dateOfBirth: '1990-01-02',
   gender: 'female' as const, providerReference: 'qoreid-transaction-7',
-  middleName: 'Fixture', phoneNumber: '08000000000', photo: 'ZmFrZQ==',
+  middleName: 'Fixture', phoneNumber: '08076543210', photo: 'ZmFrZQ==',
   address: '1 Fixture Street', residence: { address1: '1 Fixture Street',
     town: 'Fixture Town', lga: 'Fixture LGA', state: 'Fixture State' },
 };
@@ -289,7 +289,7 @@ describe('PatientEnrollmentService', () => {
     expect(activation.values[1]).toMatch(/^[0-9a-f]{64}$/);
     expect(activation.values[3]).toBe('+2348012345678');
     expect(JSON.parse(activation.values[2] as string)).toMatchObject({
-      phoneNumber: '08000000000', middleName: 'Fixture',
+      phoneNumber: '08076543210', middleName: 'Fixture',
       residence: { address1: '1 Fixture Street', town: 'Fixture Town',
         lga: 'Fixture LGA', state: 'Fixture State' },
     });

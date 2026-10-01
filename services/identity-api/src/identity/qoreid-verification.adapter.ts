@@ -60,9 +60,9 @@ export class QoreIdVerificationAdapter {
     @Inject(QOREID_FETCH) private readonly request: FetchImplementation,
   ) {}
 
-  /** OAuth-only check. It never submits a NIN or CAC number. */
+  /** Fresh OAuth-only check. It never submits a NIN or CAC number. */
   async testConnection(): Promise<void> {
-    await this.accessToken();
+    await this.accessToken(true);
   }
 
   async verifyNin(nin: string, claims: QoreIdNinClaims): Promise<QoreIdVerificationResult> {
@@ -101,11 +101,20 @@ export class QoreIdVerificationAdapter {
   }
 
   async verifyCac(regNumber: string): Promise<QoreIdVerificationResult> {
-    const response = await this.requestVerification(
-      '/v2/ng/identities/cac-basic',
-      JSON.stringify({ regNumber }),
-    );
-    return this.normalizedCacVerification(response);
+    if (!/^(?:RC|BN|IT)[0-9]{4,20}$/.test(regNumber)) {
+      throw new DomainProblem(400, 'CAC_REGISTRATION_NUMBER_INVALID', 'A valid CAC registration number is required');
+    }
+    this.assertCacContractAvailable();
+    throw this.cacContractUnconfirmed();
+  }
+
+  /**
+   * CAC entitlement and the returned registration-number mapping have not
+   * been confirmed for this account. Keep this gate in the adapter so no
+   * caller can turn a guessed response shape into verified legal identity.
+   */
+  assertCacContractAvailable(): void {
+    throw this.cacContractUnconfirmed();
   }
 
   private async requestVerification(path: string, body?: string): Promise<unknown> {
@@ -137,8 +146,8 @@ export class QoreIdVerificationAdapter {
     }
   }
 
-  private async accessToken(): Promise<AccessTokenLease> {
-    if (this.cachedToken && Date.now() < this.cachedToken.expiresAt
+  private async accessToken(forceRefresh = false): Promise<AccessTokenLease> {
+    if (!forceRefresh && this.cachedToken && Date.now() < this.cachedToken.expiresAt
       && Date.now() < this.cachedToken.usableUntil) return this.cachedToken;
     if (this.tokenRefresh) return this.tokenRefresh;
     const refresh = this.fetchAccessToken();
@@ -294,27 +303,6 @@ export class QoreIdVerificationAdapter {
     return { ...result, ninBinding: { firstName, lastName, dateOfBirth } };
   }
 
-  private normalizedCacVerification(payload: unknown): QoreIdVerificationResult {
-    const result = this.normalizedVerification(payload);
-    if (result.state !== 'verified') return result;
-    const record = this.record(payload);
-    const summary = this.record(record?.summary);
-    if (typeof summary?.cac_check !== 'string') throw this.invalidProviderResponse();
-    if (summary.cac_check !== 'verified') return { ...result, state: 'not_verified' };
-    const cac = this.record(record?.cac);
-    const registrationNumber = this.safeRegistrationNumber(cac?.rcNumber);
-    const companyName = this.safeName(cac?.companyName, 200);
-    const entityType = this.safeName(cac?.companyType, 120);
-    const registrationDate = this.registrationDate(cac?.registrationDate);
-    const address = this.safeName(cac?.headOfficeAddress, 1000)
-      ?? this.safeName(cac?.branchAddress, 1000);
-    const registryStatus = this.safeName(cac?.status, 40);
-    if (!registrationNumber || !companyName || !entityType || !registrationDate || !address
-      || !registryStatus) throw this.invalidProviderResponse();
-    return { ...result, cacBinding: { registrationNumber, companyName, entityType,
-      registrationDate, address, registryStatus } };
-  }
-
   private ninEnrollmentBinding(payload: unknown, submittedNin: string): QoreIdNinEnrollmentBinding {
     const record = this.record(payload);
     const bio = this.record(record?.nin);
@@ -330,27 +318,32 @@ export class QoreIdVerificationAdapter {
     const middleName = rawMiddleName === undefined || rawMiddleName === null || rawMiddleName === ''
       ? undefined : this.safeName(rawMiddleName);
     const phoneNumber = bio?.phone === undefined ? undefined : this.safeName(bio.phone, 30);
-    const rawResidence = record?.residence;
-    const residence = rawResidence === undefined ? undefined : this.record(rawResidence);
-    const address1 = residence === undefined ? undefined : this.safeName(residence.address1, 1000);
-    const town = residence?.town === undefined ? undefined : this.safeName(residence.town, 120);
-    const lga = residence?.lga === undefined ? undefined : this.safeName(residence.lga, 120);
-    const state = residence?.state === undefined ? undefined : this.safeName(residence.state, 120);
+    // Only nin.residence is part of the confirmed NIN-only response contract.
+    const residence = this.ninResidence(bio?.residence);
     const photo = typeof bio?.photo === 'string' && bio.photo.length <= 131_072
       && /^[A-Za-z0-9+/]+={0,2}$/.test(bio.photo) ? bio.photo : undefined;
     if ((rawMiddleName !== undefined && rawMiddleName !== null && rawMiddleName !== '' && !middleName)
       || (bio?.phone !== undefined && !phoneNumber)
-      || (rawResidence !== undefined && (!residence || !address1))
-      || (residence?.town !== undefined && !town)
-      || (residence?.lga !== undefined && !lga)
-      || (residence?.state !== undefined && !state)
       || (bio?.photo !== undefined && !photo)) throw this.invalidProviderResponse();
     return { nin, firstName, lastName, dateOfBirth, gender,
       ...(middleName ? { middleName } : {}),
       ...(phoneNumber ? { phoneNumber } : {}),
-      ...(address1 ? { address: address1,
-        residence: { address1, ...(town ? { town } : {}), ...(lga ? { lga } : {}), ...(state ? { state } : {}) } } : {}),
+      ...(residence ? { address: residence.address1, residence } : {}),
       ...(photo ? { photo } : {}) };
+  }
+
+  private ninResidence(value: unknown): QoreIdNinEnrollmentBinding['residence'] | undefined {
+    if (value === undefined) return undefined;
+    const record = this.record(value);
+    const address1 = this.safeName(record?.address1, 1000);
+    const town = record?.town === undefined ? undefined : this.safeName(record.town, 120);
+    const lga = record?.lga === undefined ? undefined : this.safeName(record.lga, 120);
+    const state = record?.state === undefined ? undefined : this.safeName(record.state, 120);
+    if (!address1 || (record?.town !== undefined && !town)
+      || (record?.lga !== undefined && !lga)
+      || (record?.state !== undefined && !state)) throw this.invalidProviderResponse();
+    return { address1, ...(town ? { town } : {}), ...(lga ? { lga } : {}),
+      ...(state ? { state } : {}) };
   }
 
   private gender(value: unknown): QoreIdNinEnrollmentBinding['gender'] | undefined {
@@ -362,34 +355,10 @@ export class QoreIdVerificationAdapter {
     return undefined;
   }
 
-  private registrationDate(value: unknown): string | undefined {
-    if (typeof value !== 'string') return undefined;
-    const trimmed = value.trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return this.validDate(trimmed);
-    const match = /^(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})$/.exec(trimmed);
-    if (!match) return undefined;
-    const [, dayPart = '', monthPart = '', yearPart = ''] = match;
-    const month = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
-      .indexOf(monthPart.toLowerCase()) + 1;
-    if (!month) return undefined;
-    const yearNumber = Number(yearPart);
-    const currentYear = new Date().getUTCFullYear();
-    const year = yearPart.length === 2
-      ? (yearNumber <= currentYear % 100 ? 2000 : 1900) + yearNumber
-      : yearNumber;
-    return this.validDate(`${year}-${String(month).padStart(2, '0')}-${dayPart.padStart(2, '0')}`);
-  }
-
   private validDate(iso: string): string | undefined {
     const date = new Date(`${iso}T00:00:00Z`);
     return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === iso
       && date.getUTCFullYear() >= 1800 && date.getTime() <= Date.now() ? iso : undefined;
-  }
-
-  private safeRegistrationNumber(value: unknown): string | undefined {
-    const number = typeof value === 'string' ? value.trim().toUpperCase()
-      : typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? String(value) : '';
-    return /^(?:(?:RC|BN|IT))?\d{4,20}$/.test(number) ? number : undefined;
   }
 
   private safeName(value: unknown, limit = 100): string | undefined {
@@ -424,5 +393,10 @@ export class QoreIdVerificationAdapter {
 
   private invalidProviderResponse(): DomainProblem {
     return new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID', 'External verification returned an invalid response');
+  }
+
+  private cacContractUnconfirmed(): DomainProblem {
+    return new DomainProblem(503, 'QOREID_CAC_CONTRACT_UNCONFIRMED',
+      'Organization verification is awaiting provider contract confirmation');
   }
 }

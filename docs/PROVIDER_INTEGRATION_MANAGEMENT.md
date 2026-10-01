@@ -20,7 +20,7 @@ provider's credential or grants a new outbound endpoint.
 | Meta / WhatsApp | Authentication WhatsApp OTP; `notification-api` | `META_GRAPH_BASE_URL`, `META_GRAPH_API_VERSION`, `META_PHONE_NUMBER_ID`, `META_ACCESS_TOKEN`, `META_OTP_TEMPLATE_NAME`, `META_OTP_TEMPLATE_LANGUAGE`, provider timeout; ID, token, template from `NotificationProviderSecretArn` | Brevo WhatsApp on a definitive failure if configured | Safe to pause before a new send; token rotation remains a provider/AWS/ECS operation. |
 | Brevo | Optional authentication email, SMS, WhatsApp fallback; `notification-api` | `BREVO_API_KEY`, `BREVO_EMAIL_FROM`, `BREVO_SMS_SENDER`, `BREVO_WHATSAPP_SENDER`, provider timeout; key and sender fields from `NotificationProviderSecretArn` | None after Brevo | Safe to pause; an unavailable or unconfigured fallback fails safely. Key rotation remains external. |
 | Novu | Ordinary event notifications; `notification-worker` after EventBridge and SQS | `NOTIFICATION_WORKER_ENABLED`, `NOVU_MODE`, `NOVU_API_URL`, `NOVU_API_KEY`; key from `NotificationProviderSecretArn`, staging API origin from `StagingNovuApiUrl` | No other wired orchestrator | Worker retry/queue handling requires operational coordination, so it is catalogued without a dashboard pause command. Key rotation requires AWS secret update and task refresh. |
-| QoreID | Existing-patient NIN evidence, public patient enrollment, and provider CAC verification; `identity-api` | `QOREID_ENABLED`, separate default-off `QOREID_NIN_ONLY_ENROLLMENT_ENABLED`, fixed base URL, timeout, OAuth fields; `QoreIdCredentialsSecretArn` is injected only when CDK `HID_QOREID_ENABLED=true`; enabled staging also injects the NIN lookup and encryption keys from `IdentitySensitiveSecretArn` | None; new verification fails closed | Runtime pause blocks new NIN/CAC calls while preserving prior identities. NIN-only request contract and entitlement remain unconfirmed; the separate enrollment gate stays off. Credentials require provider/AWS rotation and task refresh. |
+| QoreID | Existing-patient NIN evidence, public patient enrollment, and CAC onboarding scaffold; `identity-api` | `QOREID_ENABLED`, separate default-off `QOREID_NIN_ONLY_ENROLLMENT_ENABLED`, fixed base URL, timeout, OAuth fields; `QoreIdCredentialsSecretArn` is injected only when CDK `HID_QOREID_ENABLED=true`; enabled staging also injects the NIN lookup and encryption keys from `IdentitySensitiveSecretArn` | None; new verification fails closed | Runtime pause blocks new verification calls while preserving prior identities. The entitled sandbox NIN-only request and response contract are empirically confirmed; its enrollment gate stays off pending release/security gates. CAC calls remain unavailable pending entitlement and actual response/registration mapping. Credentials require provider/AWS rotation and task refresh. |
 | Cloudflare Turnstile | Bot challenge for public authentication, patient enrollment, and organization application; browser widget plus `identity-api` Siteverify | Public `VITE_TURNSTILE_SITE_KEY`; server `TURNSTILE_MODE`, `TURNSTILE_SITEVERIFY_URL`, `TURNSTILE_TIMEOUT_MS`, `TURNSTILE_SECRET_KEY` from `IdentitySensitiveSecretArn` | None; a required challenge fails closed | Production requires Turnstile. A general admin pause would weaken that boundary, so this is read only. Secret and site key rotation require Cloudflare/AWS and, for the public key, a frontend build. |
 | Google OIDC | Existing account sign in; `apps/web` and `identity-api` | Public `VITE_GOOGLE_CLIENT_ID`; server `GOOGLE_OIDC_CLIENT_IDS` allowlist from `IdentitySensitiveSecretArn`; fixed Google JWKS and issuer | No automatic account creation or identity-provider fallback | Catalogued read only. Client ID/allowlist changes require frontend build and secure deployment configuration. Existing HID sessions are independent of a temporary Google outage. |
 | Generic OIDC and workload issuer/JWKS | Configured login trust and service-to-service JWT verification; Identity and domain APIs | `AUTH_MODE`, `OIDC_ISSUER_URL`, `OIDC_AUDIENCE`, `OIDC_JWKS_URL`; workload `WORKLOAD_ISSUER_URL`, `WORKLOAD_JWKS_URL`, audiences and exact caller subjects | No authorization fallback | Infrastructure trust boundary. Never allow a dashboard pause or arbitrary issuer/JWKS URL update. Signing-key rotation is an infrastructure operation. |
@@ -53,8 +53,8 @@ use workload IAM.
 | Email OTP | AWS SES, Brevo | SES primary; Brevo can be the configured fallback in the full profile. |
 | SMS OTP | Termii, Brevo | Termii primary; Brevo can be the configured fallback in the full profile. |
 | WhatsApp OTP | Meta, Brevo | Meta primary; Brevo can be the configured fallback in the full profile. |
-| Patient NIN | QoreID | One verification provider; no fallback. Existing-patient evidence and new public enrollment are separate routes. New enrollment additionally needs an exact NIN binding, contact OTP, and password; its NIN-only provider gate is off pending contract confirmation. |
-| Provider CAC | QoreID | One verification provider; no fallback. Approval still requires authoritative organization binding. |
+| Patient NIN | QoreID | One verification provider; no fallback. Existing-patient evidence and new public enrollment are separate routes. New enrollment additionally needs an exact NIN binding, chosen-contact OTP, and password; its NIN-only gate stays off pending release/security gates. |
+| Provider CAC | QoreID scaffold | No live verification until CAC entitlement, response mapping, and registration-number mapping are confirmed. Approval still requires authoritative organization binding. |
 | Ordinary notifications | Novu | One wired orchestrator; no automatic fallback. |
 | Push notifications | FCM adapter only | Not wired to the worker; unavailable for selection. |
 | Bot challenge | Turnstile | Required production security control; no alternative. |
@@ -82,6 +82,21 @@ an infrastructure dependency off merely because the catalog displays it.
 | `POST /admin/integrations/:provider/test` | Record a safe, non-sending provider check and last test outcome. |
 | `GET /admin/integrations/:provider/audit` | Bounded provider change/test history without secrets. |
 | `POST /admin/integrations/capabilities/:capability/selection`, `/fallback` | Select compatible configured providers for email, SMS or WhatsApp. |
+
+The dashboard's persisted state covers enabled/paused flags, compatible OTP
+routes, allowlisted non-secret sender/template settings, test outcomes, and
+append-only change history. It does not persist credentials or override
+deployment gates. New calls to a paused provider are rejected; an already
+verified identity or organization remains valid. A provider outage returns a
+bounded application error. No identity verification silently switches to a
+different provider.
+
+| Integration | Dashboard control and test semantics | State and failure boundary |
+| --- | --- | --- |
+| SES, Termii, Meta/WhatsApp, Brevo | Authorized enable/pause, compatible channel selection, and the allowlisted sender/template settings below. No provider connection probe is implemented. | Runtime route and non-secret settings are persisted and audited; credentials stay in AWS. Definitive send failure permits only the configured compatible fallback; ambiguous outcomes fail without another send. |
+| QoreID | Authorized enable/pause and an OAuth-only, non-sending connection test when enabled and configured. The test does not prove NIN match or CAC entitlement. | Runtime state and bounded test outcome are persisted and audited. General and NIN-only deployment gates also apply; CAC remains an unavailable scaffold. Provider errors fail closed without another identity provider. |
+| Novu and FCM scaffold | Catalog visibility only; no dashboard pause, selection, or provider probe. | Novu worker operation is deployment/runbook controlled; FCM has no live route. Queue failure follows worker retry handling. |
+| Turnstile, Google/generic OIDC, AWS storage/OCR/events, Cloudflare edge, release services | Read-only inventory where represented; no dashboard pause, credential edit, or app-level connection probe. | Deployment/environment configuration and external health tooling own these dependencies. Security controls and trust boundaries fail closed under their owning service. |
 
 The Admin UI disables actions when either the actor lacks permission or the
 backend omits the action from `availableActions`. The provider/capability
@@ -151,8 +166,9 @@ keys follow their own deployment paths. Credential-reference updates can be
 enabled later only with a reviewed secret access/refresh design, no plaintext
 entry, and an audited rollback path.
 
-The catalog reflects local implementation and configured state. It does not
-claim a live provider account, entitlement, successful staging delivery,
-approved QoreID NIN demographic binding, or production readiness. See
+The catalog reflects local implementation and configured state. The entitled
+QoreID sandbox NIN-only request and response were verified by the project owner;
+the catalog does not claim production activation, CAC entitlement, successful
+staging OTP delivery, or production readiness. See
 [staging provider accounts](STAGING_PROVIDER_ACCOUNTS.md) and
 [AWS deployment runbook](AWS_DEPLOYMENT_RUNBOOK.md) for external prerequisites.

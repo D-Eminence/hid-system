@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { Fragment, useCallback, useEffect, useState, type FormEvent } from 'react';
 import { api, commandKey } from './api';
 import type { AdminActor, CapabilityRouting, IntegrationAuditEvent, IntegrationCatalog,
   IntegrationHealth, IntegrationSetting, ProviderIntegration } from './types';
@@ -13,6 +13,11 @@ const configurationFields: Record<string, Array<{ key: string; label: string; ki
 };
 const settingName = (key: string) => key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ');
 const date = (value: string | null | undefined) => value ? new Date(value).toLocaleString() : 'Never';
+const operationLabels: Record<string, string> = {
+  existing_patient_nin: 'Existing-patient NIN check',
+  patient_nin_enrollment: 'NIN-only enrollment',
+  provider_cac: 'CAC verification',
+};
 function safeConfiguration(provider: string, configuration: ProviderIntegration['configuration']) {
   const keys = new Set((configurationFields[provider] ?? []).map((field) => field.key));
   return Object.fromEntries(Object.entries(configuration ?? {}).filter(([key, value]) => keys.has(key)
@@ -165,11 +170,25 @@ export function Integrations({ actor }: { actor: AdminActor }) {
         const fields = configurationFields[integration.provider] ?? [];
         const current = editing === integration.provider;
         const pending = busy !== null;
+        const state = integration.managementMode === 'runtime'
+          ? integration.enabled ? 'Enabled' : 'Paused'
+          : integration.managementMode === 'scaffold' ? 'Scaffold' : 'Deployment controlled';
+        const stateStyle = integration.managementMode === 'runtime'
+          ? integration.enabled ? 'active' : 'disabled' : 'unknown';
         return <article className="card integration-card" key={integration.provider}>
           <header><div><h2>{integration.name}</h2><small>{integration.capabilities.join(', ') || 'No runtime capability'}</small></div>
-            <div className="integration-badges"><span className={`status status-${integration.enabled ? 'active' : 'disabled'}`}>{integration.enabled ? 'Enabled' : 'Paused'}</span>
-              <span className={`status status-${integration.health}`}>{integration.health}</span></div></header>
-          <dl><dt>Active for</dt><dd>{integration.activeCapabilities.length ? integration.activeCapabilities.join(', ') : 'Inactive'}</dd>
+            <div className="integration-badges"><span className={`status status-${stateStyle}`}>{state}</span>
+              <span className={`status status-${integration.health}`}>{integration.lastTestedAt
+                ? `Last check: ${integration.health}` : 'No app check'}</span></div></header>
+          <dl><dt>Active for</dt><dd>{integration.managementMode === 'runtime'
+            ? integration.activeCapabilities.length ? integration.activeCapabilities.join(', ') : 'Inactive'
+            : integration.managementMode === 'scaffold' ? 'Unavailable scaffold' : 'Not tracked by dashboard'}</dd>
+            {integration.operationGates?.map((gate) => <Fragment key={gate.operation}>
+              <dt>{operationLabels[gate.operation] ?? settingName(gate.operation)}</dt>
+              <dd><span className={`status status-${gate.state === 'open' ? 'active' : gate.state === 'closed' ? 'disabled' : 'unknown'}`}>
+                {gate.state === 'scaffold' ? 'Unavailable' : gate.state === 'open' ? 'Gate on' : 'Gate off'}</span>
+                {' '}{gate.detail}</dd>
+            </Fragment>)}
             <dt>Last tested</dt><dd>{date(integration.lastTestedAt)}</dd>
             <dt>Last successful test</dt><dd>{date(integration.lastSuccessfulTestAt)}</dd>
             <dt>Last failed test</dt><dd>{date(integration.lastFailedTestAt)}</dd>
