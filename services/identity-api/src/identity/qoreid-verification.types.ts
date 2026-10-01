@@ -33,19 +33,9 @@ export interface QoreIdNinBinding {
 export interface QoreIdNinEnrollmentBinding extends QoreIdNinBinding {
   nin: string;
   gender: 'female' | 'male' | 'intersex' | 'other' | 'unknown';
-  phoneNumber: string;
-  photo: string;
-  address: string;
-}
-
-/** HID-normalized holder proof. A reviewed provider-contract mapper must derive
- * every field from the authenticated provider response, never browser input. */
-export interface QoreIdNinHolderAssertion {
-  status: 'verified';
-  method: 'provider_possession' | 'provider_consent';
-  nin: string;
-  transactionReference: string;
-  verifiedAt: string;
+  phoneNumber?: string;
+  photo?: string;
+  address?: string;
 }
 
 export interface QoreIdCacBinding {

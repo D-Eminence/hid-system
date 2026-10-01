@@ -5,7 +5,6 @@ import {
   QOREID_PROVIDER,
   type QoreIdNinClaims,
   type QoreIdNinEnrollmentBinding,
-  type QoreIdNinHolderAssertion,
   type QoreIdVerificationResult,
   type VerificationState,
 } from './qoreid-verification.types';
@@ -15,11 +14,8 @@ export interface QoreIdAdapterConfiguration {
   clientId?: string;
   clientSecret?: string;
   timeoutMs: number;
-  /** Requires a separately confirmed NIN-only provider entitlement/contract. */
+  /** Explicitly enables the provider-confirmed NIN-only transport. */
   ninOnlyEnrollmentEnabled?: boolean;
-  /** No production mapper exists until QoreID confirms a holder proof contract.
-   * This mapper must read only provider-authored fields from the same response. */
-  holderAssertionExtractor?: (payload: unknown) => unknown;
 }
 
 type FetchImplementation = typeof globalThis.fetch;
@@ -30,6 +26,14 @@ export const QOREID_FETCH = Symbol('QOREID_FETCH');
 interface JsonRecord {
   readonly [key: string]: unknown;
 }
+
+interface AccessTokenLease {
+  readonly value: string;
+  readonly expiresAt: number;
+  readonly usableUntil: number;
+}
+
+const MAX_TOKEN_USE_SECONDS = 5_400;
 
 export function qoreIdAdapterConfigurationFromEnvironment(): QoreIdAdapterConfiguration {
   const environment = getEnvironment();
@@ -48,6 +52,9 @@ export function qoreIdAdapterConfigurationFromEnvironment(): QoreIdAdapterConfig
  */
 @Injectable()
 export class QoreIdVerificationAdapter {
+  private cachedToken?: AccessTokenLease;
+  private tokenRefresh?: Promise<AccessTokenLease>;
+
   constructor(
     @Inject(QOREID_ADAPTER_CONFIGURATION) private readonly configuration: QoreIdAdapterConfiguration,
     @Inject(QOREID_FETCH) private readonly request: FetchImplementation,
@@ -59,102 +66,114 @@ export class QoreIdVerificationAdapter {
   }
 
   async verifyNin(nin: string, claims: QoreIdNinClaims): Promise<QoreIdVerificationResult> {
-    const accessToken = await this.accessToken();
     // QoreID requires first and last name claims. The caller derives these
     // from the session-bound canonical patient, never from browser input.
-    const response = await this.requestJson(
+    const response = await this.requestVerification(
       `/v1/ng/identities/nin/${encodeURIComponent(nin)}`,
-      {
-        method: 'POST',
-        headers: {
-          accept: 'application/json',
-          authorization: `Bearer ${accessToken}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ firstname: claims.firstName, lastname: claims.lastName,
-          dob: claims.dateOfBirth }),
-      },
-      'verification',
+      JSON.stringify({ firstname: claims.firstName, lastname: claims.lastName,
+        dob: claims.dateOfBirth }),
     );
     return this.normalizedNinVerification(response, nin, claims);
   }
 
   /**
    * Public enrollment deliberately sends no applicant demographics. The
-   * published QoreID NIN-with-NIN contract requires first and last name, so
-   * this transport stays disabled until its NIN-only variant is confirmed.
+   * provider-confirmed NIN-only transport remains behind an explicit gate.
    */
   async verifyNinEnrollment(nin: string): Promise<QoreIdVerificationResult> {
     if (!this.configuration.ninOnlyEnrollmentEnabled) {
-      throw new DomainProblem(503, 'QOREID_NIN_ONLY_CONTRACT_UNCONFIRMED',
+      throw new DomainProblem(503, 'QOREID_NIN_ONLY_DISABLED',
         'Patient identity enrollment is temporarily unavailable');
     }
     if (!/^\d{11}$/.test(nin)) {
       throw new DomainProblem(400, 'NIN_INVALID', 'An 11-digit NIN is required');
     }
-    const extractHolderAssertion = this.configuration.holderAssertionExtractor;
-    if (!extractHolderAssertion) {
-      throw new DomainProblem(503, 'QOREID_HOLDER_ASSERTION_CONTRACT_UNCONFIRMED',
-        'Patient identity enrollment is temporarily unavailable');
-    }
-    const accessToken = await this.accessToken();
-    const response = await this.requestJson(
+    const response = await this.requestVerification(
       `/v1/ng/identities/nin/${encodeURIComponent(nin)}`,
-      { method: 'POST', headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` } },
-      'verification',
     );
     const result = this.normalizedVerification(response);
     if (result.state !== 'verified') return result;
     if (!result.providerReference) throw this.invalidProviderResponse();
-    let holderAssertion: unknown;
-    try { holderAssertion = extractHolderAssertion(response); }
-    catch { throw this.invalidProviderResponse(); }
-    this.assertHolderAssertion(holderAssertion, nin, result.providerReference);
+    if (!this.ninEnrollmentMatchIndicatorsAgree(response)) return { ...result, state: 'not_verified' };
     return { ...result, ninEnrollmentBinding: this.ninEnrollmentBinding(response, nin) };
   }
 
-  private assertHolderAssertion(value: unknown, submittedNin: string,
-    transactionReference: string): asserts value is QoreIdNinHolderAssertion {
-    const assertion = this.record(value);
-    const verifiedAt = assertion?.verifiedAt;
-    const verifiedTime = typeof verifiedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(verifiedAt)
-      ? Date.parse(verifiedAt) : Number.NaN;
-    const now = Date.now();
-    if (assertion?.status !== 'verified'
-      || !['provider_possession', 'provider_consent'].includes(String(assertion.method))
-      || assertion.nin !== submittedNin
-      || assertion.transactionReference !== transactionReference
-      || !Number.isFinite(verifiedTime)
-      || verifiedTime < now - 10 * 60 * 1_000
-      || verifiedTime > now + 60 * 1_000) {
+  private ninEnrollmentMatchIndicatorsAgree(payload: unknown): boolean {
+    const rawSummary = this.record(payload)?.summary;
+    if (rawSummary === undefined) return true;
+    const summary = this.record(rawSummary);
+    if (!summary) throw this.invalidProviderResponse();
+    if (summary?.nin_check === undefined) return true;
+    const check = this.record(summary.nin_check);
+    if (!check) throw this.invalidProviderResponse();
+    if (check.status !== undefined && check.status !== 'EXACT_MATCH') return false;
+    if (check.fieldMatches === undefined) return true;
+    const matches = this.record(check.fieldMatches);
+    if (!matches || Object.values(matches).some((value) => typeof value !== 'boolean')) {
       throw this.invalidProviderResponse();
     }
+    return !Object.values(matches).includes(false);
   }
 
   async verifyCac(regNumber: string): Promise<QoreIdVerificationResult> {
-    const accessToken = await this.accessToken();
-    const response = await this.requestJson(
+    const response = await this.requestVerification(
       '/v2/ng/identities/cac-basic',
-      {
-        method: 'POST',
-        headers: {
-          accept: 'application/json',
-          authorization: `Bearer ${accessToken}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ regNumber }),
-      },
-      'verification',
+      JSON.stringify({ regNumber }),
     );
     return this.normalizedCacVerification(response);
   }
 
-  private async accessToken(): Promise<string> {
+  private async requestVerification(path: string, body?: string): Promise<unknown> {
+    const send = (token: AccessTokenLease) => this.requestJson(path, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        authorization: `Bearer ${token.value}`,
+      },
+      ...(body === undefined ? {} : { body }),
+    }, 'verification');
+    const token = await this.accessToken();
+    try {
+      return await send(token);
+    } catch (error) {
+      if (!(error instanceof DomainProblem) || error.code !== 'QOREID_AUTHENTICATION_FAILED') throw error;
+      // A simultaneous request may already have replaced this lease. Do not
+      // invalidate its fresh token when a request using an older lease fails.
+      if (this.cachedToken === token) this.cachedToken = undefined;
+      const replacement = await this.accessToken();
+      try {
+        return await send(replacement);
+      } catch (retryError) {
+        if (retryError instanceof DomainProblem && retryError.code === 'QOREID_AUTHENTICATION_FAILED'
+          && this.cachedToken === replacement) this.cachedToken = undefined;
+        throw retryError;
+      }
+    }
+  }
+
+  private async accessToken(): Promise<AccessTokenLease> {
+    if (this.cachedToken && Date.now() < this.cachedToken.expiresAt
+      && Date.now() < this.cachedToken.usableUntil) return this.cachedToken;
+    if (this.tokenRefresh) return this.tokenRefresh;
+    const refresh = this.fetchAccessToken();
+    this.tokenRefresh = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (this.tokenRefresh === refresh) this.tokenRefresh = undefined;
+    }
+  }
+
+  private async fetchAccessToken(): Promise<AccessTokenLease> {
     const clientId = this.configuration.clientId;
     const secret = this.configuration.clientSecret;
     if (!clientId || !secret) {
       throw new DomainProblem(503, 'QOREID_CONFIGURATION_INVALID', 'External verification is unavailable');
     }
+    // Start the lifetime before the network call, so transport time cannot
+    // extend QoreID's actual expiry or HID's shorter safety window.
+    const requestedAt = Date.now();
     const response = await this.requestJson(
       '/token',
       {
@@ -171,11 +190,18 @@ export class QoreIdVerificationAdapter {
     const expiresIn = record?.expiresIn;
     const tokenType = record?.tokenType;
     if (typeof accessToken !== 'string' || accessToken.length < 1 || accessToken.length > 8_192
-      || typeof expiresIn !== 'string' || !/^\d+\s+secs$/.test(expiresIn)
+      || /[^\x21-\x7e]/.test(accessToken)
+      || typeof expiresIn !== 'number' || !Number.isSafeInteger(expiresIn) || expiresIn <= 0
       || tokenType !== 'Bearer') {
       throw this.invalidProviderResponse();
     }
-    return accessToken;
+    const expiresAt = requestedAt + expiresIn * 1_000;
+    if (!Number.isSafeInteger(expiresAt)) throw this.invalidProviderResponse();
+    const lease = { value: accessToken, expiresAt,
+      usableUntil: Math.min(expiresAt, requestedAt + MAX_TOKEN_USE_SECONDS * 1_000) };
+    if (Date.now() >= lease.usableUntil) throw this.invalidProviderResponse();
+    this.cachedToken = lease;
+    return lease;
   }
 
   private async requestJson(path: string, init: RequestInit, operation: 'token' | 'verification'): Promise<unknown> {
@@ -188,6 +214,9 @@ export class QoreIdVerificationAdapter {
       if (!response.ok) {
         if (response.status === 401) {
           throw new DomainProblem(503, 'QOREID_AUTHENTICATION_FAILED', 'External verification is unavailable');
+        }
+        if (response.status === 429) {
+          throw new DomainProblem(429, 'QOREID_RATE_LIMITED', 'External verification is temporarily rate limited');
         }
         if (response.status >= 500) {
           throw new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'External verification is unavailable');
@@ -312,12 +341,14 @@ export class QoreIdVerificationAdapter {
     if (nin !== submittedNin || !firstName || !lastName || !dateOfBirth || !gender) {
       throw this.invalidProviderResponse();
     }
-    const phoneNumber = this.safeName(bio?.phone, 30);
-    const address = this.safeName(bio?.address, 1000);
+    const phoneNumber = bio?.phone === undefined ? undefined : this.safeName(bio.phone, 30);
+    const address = bio?.address === undefined ? undefined : this.safeName(bio.address, 1000);
     const photo = typeof bio?.photo === 'string' && bio.photo.length <= 131_072
       && /^[A-Za-z0-9+/]+={0,2}$/.test(bio.photo) ? bio.photo : undefined;
-    if (!phoneNumber || !address || !photo) throw this.invalidProviderResponse();
-    return { nin, firstName, lastName, dateOfBirth, gender, phoneNumber, address, photo };
+    if ((bio?.phone !== undefined && !phoneNumber) || (bio?.address !== undefined && !address)
+      || (bio?.photo !== undefined && !photo)) throw this.invalidProviderResponse();
+    return { nin, firstName, lastName, dateOfBirth, gender,
+      ...(phoneNumber ? { phoneNumber } : {}), ...(address ? { address } : {}), ...(photo ? { photo } : {}) };
   }
 
   private gender(value: unknown): QoreIdNinEnrollmentBinding['gender'] | undefined {

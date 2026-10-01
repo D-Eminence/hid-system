@@ -80,8 +80,9 @@ export class PatientEnrollmentService {
       return { cookie: `${existing.id}.${token}`, progress: await this.progress(existing, correlationId) };
     }
 
-    // This provider call is never retried automatically: QoreID publishes no
-    // idempotency contract. Unique HMAC constraints settle concurrent starts.
+    // Verification is not retried after transport or result failures. The
+    // adapter may replay once after an explicit 401 with a fresh access token.
+    // Unique HMAC constraints settle concurrent starts.
     const verified = this.validateIdentity(await this.provider.verifyNin(nin), nin);
     const id = existing?.id ?? randomUUID();
     const profileJson = JSON.stringify(verified);
@@ -335,8 +336,9 @@ export class PatientEnrollmentService {
   private validateIdentity(identity: VerifiedPublicPatientIdentity, nin: string) {
     const validName = (value: unknown): value is string => typeof value === 'string'
       && value.trim().length >= 1 && value.trim().length <= 100 && !/[\x00-\x1f\x7f]/.test(value);
-    const validText = (value: unknown, limit: number) => typeof value === 'string'
-      && value.trim().length >= 1 && value.length <= limit && !/[\x00-\x1f\x7f]/.test(value);
+    const validText = (value: unknown, limit: number) => value === undefined
+      || (typeof value === 'string' && value.trim().length >= 1
+        && value.length <= limit && !/[\x00-\x1f\x7f]/.test(value));
     const date = typeof identity.dateOfBirth === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(identity.dateOfBirth)
       ? new Date(`${identity.dateOfBirth}T00:00:00Z`) : new Date(NaN);
     if (identity.nin !== nin || !validName(identity.firstName) || !validName(identity.lastName)
@@ -346,7 +348,8 @@ export class PatientEnrollmentService {
       || typeof identity.providerReference !== 'string'
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/.test(identity.providerReference)
       || !validText(identity.phoneNumber, 30) || !validText(identity.address, 1000)
-      || !validText(identity.photo, 131_072)) {
+      || !validText(identity.photo, 131_072)
+      || (identity.photo !== undefined && !/^[A-Za-z0-9+/]+={0,2}$/.test(identity.photo))) {
       throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
         'External verification returned an invalid response');
     }
