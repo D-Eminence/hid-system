@@ -17,6 +17,22 @@ const complete = {
   nin: { nin: '12345678901', firstname: 'Bunch', lastname: 'Dillon', birthdate: '06-01-1974',
     photo: 'sensitive-photo', address: 'sensitive-address' },
 };
+// The NIN-only fields and nesting follow the entitled sandbox observation.
+// All values are invented. The numeric id models the existing persistence
+// requirement; its presence in that sandbox response still needs confirmation.
+const fixtureNin = '00000000000';
+const sandboxNinOnlySuccess = {
+  id: 48291,
+  status: { state: 'complete', status: 'verified' },
+  summary: { nin_check: 'verified' },
+  nin: {
+    nin: fixtureNin, firstname: 'Fixture', lastname: 'Person', middlename: 'Sample',
+    phone: '00000000000', gender: 'F', photo: 'Zml4dHVyZQ==', birthdate: '01-01-1990',
+  },
+  residence: {
+    address1: 'Fixture Address 1', town: 'Fixture Town', lga: 'Fixture LGA', state: 'Fixture State',
+  },
+};
 const completeCac = {
   id: 71, status: { state: 'complete', status: 'verified' }, summary: { cac_check: 'verified' },
   cac: { rcNumber: '1234', companyName: 'Example Clinic', companyType: 'Private Limited',
@@ -88,21 +104,22 @@ describe('QoreID verification adapter', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('sends only NIN with an explicitly enabled contract and retains bounded registry identity', async () => {
-    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
-      ...complete, summary: undefined, nin: { ...complete.nin, gender: 'F', phone: '08000000000',
-        photo: 'ZmFrZQ==', address: '123 Example Street, Lagos' },
-    }));
+  it('accepts the observed sandbox NIN-only shape and sends a body-free request', async () => {
+    const fetch = jest.fn().mockResolvedValueOnce(response(token))
+      .mockResolvedValueOnce(response(sandboxNinOnlySuccess));
     const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
       fetch as unknown as typeof globalThis.fetch);
-    await expect(adapter.verifyNinEnrollment('12345678901')).resolves.toMatchObject({
+    await expect(adapter.verifyNinEnrollment(fixtureNin)).resolves.toMatchObject({
       state: 'verified', providerReference: '48291', ninEnrollmentBinding: {
-        nin: '12345678901', firstName: 'Bunch', lastName: 'Dillon', dateOfBirth: '1974-01-06',
-        gender: 'female', phoneNumber: '08000000000', photo: 'ZmFrZQ==',
-        address: '123 Example Street, Lagos',
+        nin: fixtureNin, firstName: 'Fixture', lastName: 'Person', middleName: 'Sample',
+        dateOfBirth: '1990-01-01', gender: 'female', phoneNumber: '00000000000',
+        photo: 'Zml4dHVyZQ==', address: 'Fixture Address 1',
+        residence: { address1: 'Fixture Address 1', town: 'Fixture Town',
+          lga: 'Fixture LGA', state: 'Fixture State' },
       },
     });
-    expect(fetch.mock.calls[1]?.[0]).toBe('https://api.qoreid.com/v1/ng/identities/nin/12345678901');
+    expect(fetch.mock.calls[1]?.[0]).toBe('https://api.qoreid.com/v1/ng/identities/nin/00000000000');
+    expect(fetch.mock.calls[1]?.[1]?.method).toBe('POST');
     expect(fetch.mock.calls[1]?.[1]?.body).toBeUndefined();
     expect(fetch.mock.calls[1]?.[1]?.headers).toEqual({
       accept: 'application/json', authorization: 'Bearer server-only-access-token',
@@ -118,42 +135,58 @@ describe('QoreID verification adapter', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('accepts core identity when optional phone, address, and photo are absent', async () => {
-    const payload = { ...complete, summary: undefined, nin: {
-      nin: '12345678901', firstname: 'Bunch', lastname: 'Dillon', birthdate: '06-01-1974', gender: 'female',
+  it('accepts core identity when optional middle name, phone, residence, and photo are absent', async () => {
+    const payload = { ...sandboxNinOnlySuccess, residence: undefined, nin: {
+      nin: fixtureNin, firstname: 'Fixture', lastname: 'Person', birthdate: '01-01-1990', gender: 'female',
     } };
     const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
     const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
       fetch as unknown as typeof globalThis.fetch);
-    const result = await adapter.verifyNinEnrollment('12345678901');
+    const result = await adapter.verifyNinEnrollment(fixtureNin);
     expect(result).toMatchObject({
-      state: 'verified', ninEnrollmentBinding: { nin: '12345678901', firstName: 'Bunch',
-        lastName: 'Dillon', dateOfBirth: '1974-01-06', gender: 'female' },
+      state: 'verified', ninEnrollmentBinding: { nin: fixtureNin, firstName: 'Fixture',
+        lastName: 'Person', dateOfBirth: '1990-01-01', gender: 'female' },
     });
+    expect(result.ninEnrollmentBinding).not.toHaveProperty('middleName');
     expect(result.ninEnrollmentBinding).not.toHaveProperty('phoneNumber');
     expect(result.ninEnrollmentBinding).not.toHaveProperty('address');
+    expect(result.ninEnrollmentBinding).not.toHaveProperty('residence');
     expect(result.ninEnrollmentBinding).not.toHaveProperty('photo');
   });
 
-  it('rejects a NIN-only response missing the transaction reference or authoritative fields', async () => {
-    const full = { ...complete, nin: { ...complete.nin, gender: 'F', phone: '08000000000',
-      photo: 'ZmFrZQ==', address: '123 Example Street, Lagos' } };
+  it.each([null, ''])('accepts a blank optional middle name: %j', async (middlename) => {
+    const payload = { ...sandboxNinOnlySuccess, nin: { ...sandboxNinOnlySuccess.nin, middlename } };
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+      fetch as unknown as typeof globalThis.fetch);
+    const result = await adapter.verifyNinEnrollment(fixtureNin);
+    expect(result.ninEnrollmentBinding).not.toHaveProperty('middleName');
+  });
+
+  it('rejects a NIN-only response with a mismatched NIN or malformed authoritative identity', async () => {
+    const full = sandboxNinOnlySuccess;
     for (const payload of [
       { ...full, id: undefined },
-      { ...full, nin: { ...full.nin, nin: '99999999999' } },
+      { ...full, nin: { ...full.nin, nin: '11111111111' } },
       { ...full, nin: { ...full.nin, nin: undefined } },
       { ...full, nin: { ...full.nin, firstname: undefined } },
       { ...full, nin: { ...full.nin, lastname: undefined } },
       { ...full, nin: { ...full.nin, birthdate: undefined } },
       { ...full, nin: { ...full.nin, gender: undefined } },
+      { ...full, nin: { ...full.nin, middlename: 123 } },
+      { ...full, nin: { ...full.nin, middlename: 'Bad\nName' } },
       { ...full, nin: { ...full.nin, phone: '' } },
       { ...full, nin: { ...full.nin, photo: 'bad base64?' } },
-      { ...full, nin: { ...full.nin, address: '' } },
+      { ...full, residence: { ...full.residence, address1: '' } },
+      { ...full, residence: { ...full.residence, town: 'Bad\nTown' } },
+      { ...full, residence: { ...full.residence, lga: 123 } },
+      { ...full, residence: { ...full.residence, state: '' } },
+      { ...full, residence: [] },
     ]) {
       const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
       const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
         fetch as unknown as typeof globalThis.fetch);
-      await expect(adapter.verifyNinEnrollment('12345678901')).rejects.toMatchObject({
+      await expect(adapter.verifyNinEnrollment(fixtureNin)).rejects.toMatchObject({
         code: 'QOREID_PROVIDER_RESPONSE_INVALID',
       });
     }
@@ -162,31 +195,32 @@ describe('QoreID verification adapter', () => {
   it.each([
     { status: { state: 'complete', status: 'declined' } },
     { status: { state: 'pending', status: 'queued' } },
-    { summary: { nin_check: { status: 'PARTIAL_MATCH' } } },
-    { summary: { nin_check: { fieldMatches: { firstname: false } } } },
+    { summary: { nin_check: 'declined' } },
   ])('does not enroll an unverified NIN-only provider result', async (override) => {
     const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
-      ...complete, ...override, nin: { ...complete.nin, gender: 'F' },
+      ...sandboxNinOnlySuccess, ...override,
     }));
     const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
       fetch as unknown as typeof globalThis.fetch);
-    const result = await adapter.verifyNinEnrollment('12345678901');
+    const result = await adapter.verifyNinEnrollment(fixtureNin);
     expect(result.state).not.toBe('verified');
     expect(result.ninEnrollmentBinding).toBeUndefined();
   });
 
   it.each([
     { status: { status: 'verified' } },
+    { summary: undefined },
     { summary: 'malformed' },
-    { summary: { nin_check: 'EXACT_MATCH' } },
-    { summary: { nin_check: { fieldMatches: { firstname: 'true' } } } },
+    { summary: {} },
+    { summary: { nin_check: { status: 'EXACT_MATCH' } } },
+    { summary: { nin_check: null } },
   ])('rejects malformed NIN-only provider evidence', async (override) => {
     const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
-      ...complete, ...override, nin: { ...complete.nin, gender: 'F' },
+      ...sandboxNinOnlySuccess, ...override,
     }));
     const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
       fetch as unknown as typeof globalThis.fetch);
-    await expect(adapter.verifyNinEnrollment('12345678901')).rejects.toMatchObject({
+    await expect(adapter.verifyNinEnrollment(fixtureNin)).rejects.toMatchObject({
       code: 'QOREID_PROVIDER_RESPONSE_INVALID', status: 502,
     });
   });
@@ -320,7 +354,7 @@ describe('QoreID verification adapter', () => {
   });
 
   it('invalidates a rejected token and retries the same NIN-only verification exactly once', async () => {
-    const payload = { ...complete, summary: undefined, nin: { ...complete.nin, gender: 'F', photo: 'ZmFrZQ==' } };
+    const payload = sandboxNinOnlySuccess;
     const fetch = jest.fn()
       .mockResolvedValueOnce(response({ ...token, accessToken: 'fixture-token-1' }))
       .mockResolvedValueOnce(response({ providerDiagnostic: 'secret' }, 401))
@@ -328,8 +362,8 @@ describe('QoreID verification adapter', () => {
       .mockResolvedValueOnce(response(payload));
     const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
       fetch as unknown as typeof globalThis.fetch);
-    await expect(adapter.verifyNinEnrollment('12345678901')).resolves.toMatchObject({
-      state: 'verified', ninEnrollmentBinding: { nin: '12345678901' },
+    await expect(adapter.verifyNinEnrollment(fixtureNin)).resolves.toMatchObject({
+      state: 'verified', ninEnrollmentBinding: { nin: fixtureNin },
     });
     expect(fetch).toHaveBeenCalledTimes(4);
     expect(fetch.mock.calls[1]?.[0]).toBe(fetch.mock.calls[3]?.[0]);

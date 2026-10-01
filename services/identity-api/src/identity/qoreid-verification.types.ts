@@ -33,9 +33,16 @@ export interface QoreIdNinBinding {
 export interface QoreIdNinEnrollmentBinding extends QoreIdNinBinding {
   nin: string;
   gender: 'female' | 'male' | 'intersex' | 'other' | 'unknown';
+  middleName?: string;
   phoneNumber?: string;
   photo?: string;
   address?: string;
+  residence?: {
+    address1: string;
+    town?: string;
+    lga?: string;
+    state?: string;
+  };
 }
 
 export interface QoreIdCacBinding {

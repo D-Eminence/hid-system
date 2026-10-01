@@ -15,7 +15,9 @@ const correlationId = 'patient-enrollment-test';
 const identity = {
   nin, firstName: 'Amina', lastName: 'Okafor', dateOfBirth: '1990-01-02',
   gender: 'female' as const, providerReference: 'qoreid-transaction-7',
-  phoneNumber: '08012345678', address: 'Lagos', photo: 'ZmFrZQ==',
+  middleName: 'Fixture', phoneNumber: '08000000000', photo: 'ZmFrZQ==',
+  address: '1 Fixture Street', residence: { address1: '1 Fixture Street',
+    town: 'Fixture Town', lga: 'Fixture LGA', state: 'Fixture State' },
 };
 
 type RecordedQuery = { sql: string; values: readonly unknown[] };
@@ -242,6 +244,13 @@ describe('PatientEnrollmentService', () => {
     f.provider.verifyNin.mockResolvedValue({ ...identity, photo: 'malformed photo' });
     await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
       .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+    f.provider.verifyNin.mockResolvedValue({ ...identity, residence: { ...identity.residence,
+      town: 'bad\nlocation' } });
+    await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+      .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+    f.provider.verifyNin.mockResolvedValue({ ...identity, address: 'different address' });
+    await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+      .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
   });
 
   it.each([
@@ -279,6 +288,11 @@ describe('PatientEnrollmentService', () => {
     expect(activation.values[0]).toBe(f.enrollment?.id);
     expect(activation.values[1]).toMatch(/^[0-9a-f]{64}$/);
     expect(activation.values[3]).toBe('+2348012345678');
+    expect(JSON.parse(activation.values[2] as string)).toMatchObject({
+      phoneNumber: '08000000000', middleName: 'Fixture',
+      residence: { address1: '1 Fixture Street', town: 'Fixture Town',
+        lga: 'Fixture LGA', state: 'Fixture State' },
+    });
     expect(activation.values[5]).toMatch(/^\$argon2id\$/);
     expect(activation.values).not.toContain('a-strong-test-password');
   });

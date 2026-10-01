@@ -339,6 +339,13 @@ export class PatientEnrollmentService {
     const validText = (value: unknown, limit: number) => value === undefined
       || (typeof value === 'string' && value.trim().length >= 1
         && value.length <= limit && !/[\x00-\x1f\x7f]/.test(value));
+    const residence = identity.residence;
+    const validResidence = residence === undefined || (residence !== null
+      && typeof residence === 'object' && !Array.isArray(residence)
+      && validText(residence.address1, 1000) && residence.address1 !== undefined
+      && identity.address === residence.address1
+      && validText(residence.town, 120) && validText(residence.lga, 120)
+      && validText(residence.state, 120));
     const date = typeof identity.dateOfBirth === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(identity.dateOfBirth)
       ? new Date(`${identity.dateOfBirth}T00:00:00Z`) : new Date(NaN);
     if (identity.nin !== nin || !validName(identity.firstName) || !validName(identity.lastName)
@@ -347,7 +354,8 @@ export class PatientEnrollmentService {
       || !['female', 'male', 'intersex', 'other', 'unknown'].includes(identity.gender)
       || typeof identity.providerReference !== 'string'
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/.test(identity.providerReference)
-      || !validText(identity.phoneNumber, 30) || !validText(identity.address, 1000)
+      || !validText(identity.middleName, 100) || !validText(identity.phoneNumber, 30)
+      || !validText(identity.address, 1000) || !validResidence
       || !validText(identity.photo, 131_072)
       || (identity.photo !== undefined && !/^[A-Za-z0-9+/]+={0,2}$/.test(identity.photo))) {
       throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',

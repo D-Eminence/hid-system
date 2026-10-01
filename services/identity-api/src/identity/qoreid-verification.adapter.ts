@@ -94,25 +94,10 @@ export class QoreIdVerificationAdapter {
     const result = this.normalizedVerification(response);
     if (result.state !== 'verified') return result;
     if (!result.providerReference) throw this.invalidProviderResponse();
-    if (!this.ninEnrollmentMatchIndicatorsAgree(response)) return { ...result, state: 'not_verified' };
+    const summary = this.record(this.record(response)?.summary);
+    if (typeof summary?.nin_check !== 'string') throw this.invalidProviderResponse();
+    if (summary.nin_check !== 'verified') return { ...result, state: 'not_verified' };
     return { ...result, ninEnrollmentBinding: this.ninEnrollmentBinding(response, nin) };
-  }
-
-  private ninEnrollmentMatchIndicatorsAgree(payload: unknown): boolean {
-    const rawSummary = this.record(payload)?.summary;
-    if (rawSummary === undefined) return true;
-    const summary = this.record(rawSummary);
-    if (!summary) throw this.invalidProviderResponse();
-    if (summary?.nin_check === undefined) return true;
-    const check = this.record(summary.nin_check);
-    if (!check) throw this.invalidProviderResponse();
-    if (check.status !== undefined && check.status !== 'EXACT_MATCH') return false;
-    if (check.fieldMatches === undefined) return true;
-    const matches = this.record(check.fieldMatches);
-    if (!matches || Object.values(matches).some((value) => typeof value !== 'boolean')) {
-      throw this.invalidProviderResponse();
-    }
-    return !Object.values(matches).includes(false);
   }
 
   async verifyCac(regNumber: string): Promise<QoreIdVerificationResult> {
@@ -341,14 +326,31 @@ export class QoreIdVerificationAdapter {
     if (nin !== submittedNin || !firstName || !lastName || !dateOfBirth || !gender) {
       throw this.invalidProviderResponse();
     }
+    const rawMiddleName = bio?.middlename;
+    const middleName = rawMiddleName === undefined || rawMiddleName === null || rawMiddleName === ''
+      ? undefined : this.safeName(rawMiddleName);
     const phoneNumber = bio?.phone === undefined ? undefined : this.safeName(bio.phone, 30);
-    const address = bio?.address === undefined ? undefined : this.safeName(bio.address, 1000);
+    const rawResidence = record?.residence;
+    const residence = rawResidence === undefined ? undefined : this.record(rawResidence);
+    const address1 = residence === undefined ? undefined : this.safeName(residence.address1, 1000);
+    const town = residence?.town === undefined ? undefined : this.safeName(residence.town, 120);
+    const lga = residence?.lga === undefined ? undefined : this.safeName(residence.lga, 120);
+    const state = residence?.state === undefined ? undefined : this.safeName(residence.state, 120);
     const photo = typeof bio?.photo === 'string' && bio.photo.length <= 131_072
       && /^[A-Za-z0-9+/]+={0,2}$/.test(bio.photo) ? bio.photo : undefined;
-    if ((bio?.phone !== undefined && !phoneNumber) || (bio?.address !== undefined && !address)
+    if ((rawMiddleName !== undefined && rawMiddleName !== null && rawMiddleName !== '' && !middleName)
+      || (bio?.phone !== undefined && !phoneNumber)
+      || (rawResidence !== undefined && (!residence || !address1))
+      || (residence?.town !== undefined && !town)
+      || (residence?.lga !== undefined && !lga)
+      || (residence?.state !== undefined && !state)
       || (bio?.photo !== undefined && !photo)) throw this.invalidProviderResponse();
     return { nin, firstName, lastName, dateOfBirth, gender,
-      ...(phoneNumber ? { phoneNumber } : {}), ...(address ? { address } : {}), ...(photo ? { photo } : {}) };
+      ...(middleName ? { middleName } : {}),
+      ...(phoneNumber ? { phoneNumber } : {}),
+      ...(address1 ? { address: address1,
+        residence: { address1, ...(town ? { town } : {}), ...(lga ? { lga } : {}), ...(state ? { state } : {}) } } : {}),
+      ...(photo ? { photo } : {}) };
   }
 
   private gender(value: unknown): QoreIdNinEnrollmentBinding['gender'] | undefined {
