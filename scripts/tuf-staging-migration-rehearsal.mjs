@@ -482,6 +482,90 @@ try {
     earlier_batches_preserved: true, blocked_retry_rejected: true,
     recovery: 'restore pre-migration backup to a new isolated destination; reconcile writes before switching' };
 
+  // `patient_assurance_states.state` belongs to the runtime assurance ladder and
+  // legitimately advances after promotion, so reconciliation compares only the
+  // migration-owned provenance (patient, account, source_system, source_reference).
+  // These three cases pin both halves of that contract: an advanced state is
+  // tolerated, a re-promotion of an advanced patient succeeds, and a missing
+  // assurance row still fails closed.
+
+  // A: advanced assurance state must reconcile cleanly, with no conflict.
+  restore('hid_assurance_advanced', backupPath);
+  migration('stage advanced-assurance fixture', 'stage-legacy-identity.mjs', 'hid_assurance_advanced');
+  migration('promote advanced-assurance fixture', 'promote-legacy-identity.mjs', 'hid_assurance_advanced');
+  await withClient('hid_assurance_advanced', async (client) => {
+    const before = (await client.query(`select state from identity.patient_assurance_states
+      where patient_id=$1`, [ids.patient])).rows[0];
+    assert.equal(before.state, 'LEGACY_MIGRATED', 'Promotion must still create the LEGACY_MIGRATED starting state');
+    await client.query(`update identity.patient_assurance_states
+         set state='NIN_VERIFIED', verified_provider='qoreid', nin_verified_at=clock_timestamp()
+       where patient_id=$1`, [ids.patient]);
+  });
+  migration('reconcile advanced assurance state', 'reconcile-legacy-identity.mjs', 'hid_assurance_advanced');
+  const advancedReconcile = await withClient('hid_assurance_advanced', async (client) => {
+    assert.equal((await client.query(`select status from migration.runs where id=$1`, [runId])).rows[0].status,
+      'verified', 'Advanced assurance state must not block reconciliation');
+    const conflicts = (await client.query('select count(*)::integer as n from migration.conflicts')).rows[0].n;
+    assert.equal(conflicts, 0, 'Advanced assurance state must not record a conflict');
+    const row = (await client.query(`select patient_id, account_id, source_system, source_reference, state
+      from identity.patient_assurance_states where patient_id=$1`, [ids.patient])).rows[0];
+    assert.equal(row.state, 'NIN_VERIFIED', 'Reconciliation must not rewrite an advanced lifecycle state');
+    assert.equal(row.account_id, ids.account);
+    assert.equal(row.source_system, 'legacy_identity');
+    assert.equal(row.source_reference, ids.patient);
+    return { status: 'verified', conflicts, state_after: row.state };
+  });
+
+  // B: re-promoting a patient whose assurance already advanced must not be read
+  // as a target content mismatch, and must leave provenance correct.
+  restore('hid_assurance_repromote', backupPath);
+  migration('stage re-promotion fixture', 'stage-legacy-identity.mjs', 'hid_assurance_repromote');
+  migration('promote re-promotion fixture', 'promote-legacy-identity.mjs', 'hid_assurance_repromote');
+  await withClient('hid_assurance_repromote', async (client) => {
+    await client.query(`update identity.patient_assurance_states
+         set state='NIN_VERIFIED', verified_provider='qoreid', nin_verified_at=clock_timestamp()
+       where patient_id=$1`, [ids.patient]);
+  });
+  migration('re-promote after assurance advanced', 'promote-legacy-identity.mjs', 'hid_assurance_repromote');
+  const advancedRepromote = await withClient('hid_assurance_repromote', async (client) => {
+    assert.equal((await client.query(`select status from migration.runs where id=$1`, [runId])).rows[0].status,
+      'staged', 'A successful retry must not block the run');
+    const row = (await client.query(`select account_id, source_system, source_reference, state
+      from identity.patient_assurance_states where patient_id=$1`, [ids.patient])).rows[0];
+    assert.equal(row.state, 'NIN_VERIFIED', 'Re-promotion must not reset an advanced lifecycle state');
+    assert.equal(row.account_id, ids.account, 'Provenance must remain correct after re-promotion');
+    assert.equal(row.source_system, 'legacy_identity');
+    assert.equal(row.source_reference, ids.patient);
+    return { retried: true, state_after: row.state, provenance_preserved: true };
+  });
+
+  // C: a missing assurance row is a real preservation failure and must still
+  // block. This is what stops the provenance-only comparison becoming "ignore
+  // the assurance row entirely".
+  restore('hid_assurance_missing', backupPath);
+  migration('stage missing-assurance fixture', 'stage-legacy-identity.mjs', 'hid_assurance_missing');
+  migration('promote missing-assurance fixture', 'promote-legacy-identity.mjs', 'hid_assurance_missing');
+  await withClient('hid_assurance_missing', async (client) => {
+    await client.query('delete from identity.patient_assurance_states where patient_id=$1', [ids.patient]);
+    assert.equal((await client.query(`select count(*)::integer as n from identity.patient_assurance_states
+      where patient_id=$1`, [ids.patient])).rows[0].n, 0);
+  });
+  migration('reject reconciliation of missing assurance row', 'reconcile-legacy-identity.mjs',
+    'hid_assurance_missing', {}, 'failure');
+  const missingAssurance = await withClient('hid_assurance_missing', async (client) => {
+    assert.equal((await client.query(`select status from migration.runs where id=$1`, [runId])).rows[0].status,
+      'blocked', 'A missing assurance row must block reconciliation');
+    const conflict = (await client.query(`select entity_type, source_pk, details from migration.conflicts
+      where entity_type='patient_assurance_states'`)).rows[0];
+    assert.ok(conflict, 'A missing assurance row must record a conflict');
+    assert.equal(conflict.details.table, 'identity.patient_assurance_states');
+    assert.equal(conflict.source_pk, ids.patient);
+    return { blocked: true, conflict_entity_type: conflict.entity_type };
+  });
+  evidence.checks.assurance_reconciliation = { ...advancedReconcile, ...advancedRepromote, ...missingAssurance,
+    invariant: 'migration-owned provenance only: patient_id, account_id, source_system, source_reference',
+    lifecycle_state: 'runtime-owned; may advance from LEGACY_MIGRATED without blocking reconciliation' };
+
   // Independent disposable database: do not alter the established baseline,
   // snapshot counts, restore comparisons, or NIN registration integration tests.
   // These public .invalid contacts cannot deliver mail and are never operator input.

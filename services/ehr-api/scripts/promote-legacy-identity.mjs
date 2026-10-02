@@ -884,6 +884,11 @@ async function main() {
       const encryptedColumns = new Set(['phone_e164_ciphertext', 'email_ciphertext', 'emergency_contact_ciphertext']);
       await insertExact(client, 'patients', row, 'identity.patients', data, Object.keys(data).filter((column) => !encryptedColumns.has(column)));
 
+      // Compare only migration-owned provenance on retry. The assurance row's
+      // `state` (and its verified_provider / timestamps) belong to the runtime
+      // ladder and may already have advanced past LEGACY_MIGRATED for a patient
+      // who completed progressive NIN binding, which must not read as a
+      // promotion mismatch. A wrong patient/account/provenance still conflicts.
       await insertExact(client, 'patients', row, 'identity.patient_assurance_states', {
         patient_id: source.id,
         account_id: source.auth_user_id,
@@ -894,7 +899,7 @@ async function main() {
         contact_verified_at: null,
         nin_verified_at: null,
         review_reason_code: null,
-      }, undefined, 'patient_id');
+      }, ['patient_id', 'account_id', 'source_system', 'source_reference'], 'patient_id');
 
       const existing = await client.query(
         `select phone_e164_ciphertext, email_ciphertext, emergency_contact_ciphertext from identity.patients where id = $1`,

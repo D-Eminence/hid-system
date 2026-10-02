@@ -267,25 +267,26 @@ const definitions = [
     status: target.status,
   })),
   {
+    // Only migration-owned provenance is reconciled. `state`, `verified_provider`
+    // and `nin_verified_at` belong to the runtime assurance ladder
+    // (LEGACY_MIGRATED -> CONTACT_VERIFIED -> NIN_PENDING -> NIN_VERIFIED, see
+    // migration 0028) and legitimately advance after promotion, so requiring
+    // them to equal their migration-time values would flag a healthy patient as
+    // drift. A missing row, or a row whose patient/account/provenance no longer
+    // matches the staged source, still fails closed.
     ...definition('patient_assurance_states', 'identity.patient_assurance_states',
       (source) => source.id,
       (source) => ({
         patient_id: source.id,
         account_id: source.auth_user_id,
-        state: 'LEGACY_MIGRATED',
         source_system: 'legacy_identity',
         source_reference: source.id,
-        verified_provider: null,
-        nin_verified_at: null,
       }),
       (target) => ({
         patient_id: target.patient_id,
         account_id: target.account_id,
-        state: target.state,
         source_system: target.source_system,
         source_reference: target.source_reference,
-        verified_provider: target.verified_provider,
-        nin_verified_at: target.nin_verified_at,
       })),
     sourceEntityType: 'patients',
     keyColumn: 'patient_id',
