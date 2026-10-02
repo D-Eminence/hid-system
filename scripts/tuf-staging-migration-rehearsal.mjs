@@ -75,6 +75,7 @@ function migration(label, script, db = database, extra = {}, expected = 0, flags
     // Public test vectors, never operational secrets; not retained as key files.
     MIGRATION_FIELD_ENCRYPTION_KEY_B64: Buffer.alloc(32, 0x11).toString('base64'),
     MIGRATION_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 0x22).toString('base64'),
+    CONTACT_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 0x44).toString('base64'),
     // Every source in this rehearsal is a locally generated fixture, whose
     // stage run records a `fixture:` transaction marker. Keep production's
     // 39/6/4/2 cutover expectations intact while making this deliberately
