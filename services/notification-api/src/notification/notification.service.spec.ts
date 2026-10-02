@@ -51,4 +51,25 @@ describe('NotificationService fallback safety', () => {
     expect(primary.send).not.toHaveBeenCalled();
     expect(fallback.send).not.toHaveBeenCalled();
   });
+
+  it('routes a paused Termii SMS only to the selected Brevo fallback', async () => {
+    Object.assign(process.env, { NOTIFICATION_PROVIDER_MODE: 'live' }); resetEnvironmentForTests();
+    const unused = provider('termii', 'accepted');
+    const selected = provider('brevo', 'accepted');
+    await expect(service(unused, selected).deliverOtp(message, {
+      capability: 'sms', primary: 'brevo', fallback: null, configuration: { brevo: {} },
+    })).resolves.toMatchObject({ outcome: 'accepted', primary: { provider: 'brevo' } });
+    expect(unused.send).not.toHaveBeenCalled();
+    expect(selected.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires a policy in live mode and rejects incompatible capability plans', async () => {
+    Object.assign(process.env, { NOTIFICATION_PROVIDER_MODE: 'live' }); resetEnvironmentForTests();
+    const first = provider('termii', 'accepted'); const fallback = provider('brevo', 'accepted');
+    await expect(service(first, fallback).deliverOtp(message)).rejects.toThrow('Delivery policy is unavailable');
+    await expect(service(first, fallback).deliverOtp(message, {
+      capability: 'sms', primary: 'ses', fallback: null, configuration: { ses: {} },
+    })).rejects.toThrow('Invalid delivery policy');
+    expect(first.send).not.toHaveBeenCalled();
+  });
 });

@@ -362,7 +362,9 @@ grant select on identity.organizations, identity.facilities, identity.staff,
   identity.access_requests, identity.consent_grants,
   identity.facility_status_events to hid_identity_runtime;
 grant select, insert on identity.patients, identity.patient_identifiers to hid_identity_runtime;
-grant select, insert, update on identity.patient_assurance_states to hid_identity_runtime;
+-- Assurance transitions are evidence-bound SECURITY DEFINER commands. Revoke
+-- legacy broad grants as well as omitting them for a fresh role bootstrap.
+revoke select, insert, update, delete on identity.patient_assurance_states from hid_identity_runtime;
 grant select, insert, update on identity.registration_cases to hid_identity_runtime;
 grant select, insert on identity.registration_case_candidates,
   identity.registration_case_events, identity.outbox_events to hid_identity_runtime;
@@ -480,6 +482,9 @@ grant execute on function platform.current_actor_subject(), platform.current_acc
 
 grant usage on schema platform, auth, identity, outreach to hid_outreach_runtime;
 grant select, insert, update on outreach.registration_cases to hid_outreach_runtime;
+grant select, insert, update on outreach.campaigns to hid_outreach_runtime;
+grant select, insert, delete on outreach.campaign_members to hid_outreach_runtime;
+grant select, insert on outreach.campaign_events to hid_outreach_runtime;
 grant select, insert on outreach.patient_mappings, outreach.registration_case_events,
   outreach.command_idempotency, outreach.outbox_events to hid_outreach_runtime;
 grant usage, select on all sequences in schema outreach to hid_outreach_runtime;
@@ -487,7 +492,8 @@ grant execute on function platform.current_actor_subject(), platform.current_acc
   platform.current_facility_id(), platform.current_membership_id(), platform.current_correlation_id(),
   platform.current_purpose_of_use(),
   auth.membership_has_permission(text, uuid, uuid, text),
-  outreach.context_allows(uuid,text) to hid_outreach_runtime;
+  outreach.context_allows(uuid,text),
+  outreach.registration_campaign_member(uuid,uuid) to hid_outreach_runtime;
 
 -- Notification persistence contains no message bodies or OTP credentials.
 -- Authentication challenges stay exclusively with the Identity runtime.
@@ -502,6 +508,10 @@ grant select, insert, update on migration.runs,
   migration.conflicts, migration.conflict_resolutions,
   migration.entity_reconciliations, migration.legacy_identity_mappings
   to hid_migration_admin;
+grant select, insert, update (status, revoked_at, revocation_reason)
+  on migration.legacy_nin_crosswalk,
+  migration.legacy_nin_crosswalk_attestations to hid_migration_admin;
+grant select, insert on migration.patient_contact_lookup_rekeys to hid_migration_admin;
 revoke update on migration.source_rows from hid_migration_admin;
 grant select, insert on migration.source_rows to hid_migration_admin;
 grant update (promoted_at) on migration.source_rows to hid_migration_admin;
@@ -623,6 +633,9 @@ grant select, insert on pharmacy.work_items, pharmacy.work_item_events,
   pharmacy.dispensings, pharmacy.dispensing_reversals,
   pharmacy.imported_medication_evidence, pharmacy.outbox_events to hid_schema_test_runtime;
 grant select, insert, update on outreach.registration_cases to hid_schema_test_runtime;
+grant select, insert, update on outreach.campaigns to hid_schema_test_runtime;
+grant select, insert, delete on outreach.campaign_members to hid_schema_test_runtime;
+grant select, insert on outreach.campaign_events to hid_schema_test_runtime;
 grant select, insert on outreach.patient_mappings, outreach.registration_case_events,
   outreach.command_idempotency, outreach.outbox_events to hid_schema_test_runtime;
 grant select, insert, update on notification.device_registrations to hid_schema_test_runtime;
@@ -672,6 +685,7 @@ grant execute on function platform.current_actor_subject(),
   lab.context_allows(uuid,uuid,text),
   pharmacy.context_allows(uuid,uuid,text),
   outreach.context_allows(uuid,text),
+  outreach.registration_campaign_member(uuid,uuid),
   integration.claim_outbox_events(text,integer,integer,integer),
   integration.record_outbox_delivered(text,uuid,uuid,text,text),
   integration.record_outbox_failure(text,uuid,uuid,text,text,text,boolean,timestamptz,integer),
@@ -753,7 +767,13 @@ grant execute on function auth.resolve_google_identity(text),
   identity.set_my_patient_access_pin(text,uuid,text),
   identity.revoke_my_patient_access_pin(text,uuid),
   identity.access_patient_with_pin(text,text,integer),
-  identity.record_my_nin_verification_evidence(text,uuid,text,text,text),
+  identity.legacy_nin_crosswalk_patient(char),
+  identity.legacy_nin_crosswalk_ready(),
+  identity.patient_contact_lookup_ready(),
+  identity.patient_self_nin_eligibility(text,uuid,char),
+  identity.bind_my_verified_nin(text,uuid,uuid,char,bytea,text,char,text,bytea,char),
+  identity.patient_self_nin_binding_matches(text,uuid,text),
+  identity.record_my_nin_verification_evidence(text,uuid,text,text,text,text),
   identity.record_organization_cac_verification_evidence(text,text,text,text)
   to hid_identity_runtime, hid_schema_test_runtime;
 
@@ -771,5 +791,94 @@ revoke all on function auth.resolve_google_identity(text),
   identity.set_my_patient_access_pin(text,uuid,text),
   identity.revoke_my_patient_access_pin(text,uuid),
   identity.access_patient_with_pin(text,text,integer),
-  identity.record_my_nin_verification_evidence(text,uuid,text,text,text),
+  identity.legacy_nin_crosswalk_patient(char),
+  identity.legacy_nin_crosswalk_ready(),
+  identity.patient_contact_lookup_ready(),
+  identity.patient_self_nin_eligibility(text,uuid,char),
+  identity.bind_my_verified_nin(text,uuid,uuid,char,bytea,text,char,text,bytea,char),
+  identity.patient_self_nin_binding_matches(text,uuid,text),
+  identity.record_my_nin_verification_evidence(text,uuid,text,text,text,text),
   identity.record_organization_cac_verification_evidence(text,text,text,text) from public;
+
+-- Demo intake is insert-only for anonymous callers. RLS limits the same
+-- Identity runtime role to permissioned platform-admin reads and transitions.
+grant select, insert, update on identity.demo_requests to hid_identity_runtime;
+grant select, insert on identity.demo_request_events to hid_identity_runtime;
+grant usage, select on sequence identity.demo_request_events_sequence_id_seq to hid_identity_runtime;
+grant select, insert, update on identity.demo_requests to hid_schema_test_runtime;
+grant select, insert on identity.demo_request_events to hid_schema_test_runtime;
+grant usage, select on sequence identity.demo_request_events_sequence_id_seq to hid_schema_test_runtime;
+
+-- Pricing is read and changed only through the exact Identity-owned functions.
+-- No application runtime receives direct table or event-log privileges.
+grant execute on function platform.public_list_commercial_prices(),
+  platform.admin_list_commercial_products(), platform.admin_list_commercial_prices(),
+  platform.admin_set_commercial_product(text, bigint, text, text, text, text, char),
+  platform.admin_set_commercial_price(text, text, bigint, text, bigint, text, text, text, boolean, text, text, char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant select on platform.commercial_products, platform.commercial_prices,
+  platform.commercial_catalog_events to hid_schema_test_runtime;
+
+-- Runtime provider decisions and admin commands have narrow function grants.
+-- Notification API receives no direct database access or provider table grant.
+grant execute on function platform.integration_runtime_provider(text,text),
+  platform.integration_runtime_route(text),
+  platform.admin_list_integration_providers(),
+  platform.admin_list_integration_routes(),
+  platform.admin_list_integration_events(text,integer),
+  platform.admin_set_integration_provider(text,bigint,boolean,jsonb,text,text,text,char),
+  platform.admin_set_integration_route(text,bigint,text,text,text,text,text,char),
+  platform.admin_integration_test_replay(text,char),
+  platform.admin_record_integration_test(text,bigint,text,text,text,char),
+  platform.consume_qoreid_quota(text,uuid,uuid,char,char),
+  platform.consume_public_application_quota(char),
+  platform.prune_verification_quotas()
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant select on platform.integration_providers, platform.integration_provider_capabilities,
+  platform.integration_capability_routes, platform.integration_events to hid_schema_test_runtime;
+
+-- Public organization intake and platform review use narrow commands. The
+-- Identity runtime cannot directly mutate canonical organizations or roles.
+grant execute on function identity.submit_organization_application(text,text,text,text,text),
+  identity.admin_list_organization_applications(text),
+  identity.admin_get_organization_application(uuid),
+  identity.admin_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text,text),
+  identity.begin_organization_profile_completion(text,text,text,uuid,char),
+  identity.invalidate_organization_profile_completion_challenge(uuid),
+  identity.verify_organization_profile_completion_challenge(uuid,char,char),
+  identity.current_organization_profile_completion(char),
+  identity.complete_organization_profile(char,bigint,text,text,text,text,text),
+  identity.current_organization_cac_binding_matches(text,text,text,text,text,text,text),
+  identity.admin_approve_organization_application(uuid,bigint,uuid,uuid,text),
+  identity.admin_reject_organization_application(uuid,bigint,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+
+-- Public patient enrollment persists only encrypted pending evidence. Its
+-- activation command performs the canonical account/patient writes atomically.
+grant select, insert, update, delete on identity.public_patient_enrollments,
+  identity.public_patient_enrollment_otps,
+  identity.public_patient_enrollment_rates to hid_identity_runtime, hid_schema_test_runtime;
+grant select on identity.patient_authoritative_profiles to hid_schema_test_runtime;
+grant execute on function identity.public_patient_nin_already_bound(char),
+  identity.public_patient_enrollment_ready(),
+  identity.public_patient_contact_already_bound(text,char),
+  identity.prune_expired_public_patient_enrollments(),
+  identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+
+-- Google onboarding capabilities are accountless and only the Identity API
+-- may use their narrow commands. Runtime roles never read provider subjects.
+grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
+  auth.google_onboarding_capability_status(uuid,char),
+  auth.bind_google_onboarding_capability(uuid,char,uuid,char),
+  auth.google_onboarding_enrollment_requirement(uuid,char),
+  auth.consume_google_onboarding_capability(uuid,char,uuid,uuid),
+  auth.link_google_identity_to_patient_account(uuid,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function auth.create_google_onboarding_capability(uuid,char,text),
+  auth.google_onboarding_capability_status(uuid,char),
+  auth.bind_google_onboarding_capability(uuid,char,uuid,char),
+  auth.google_onboarding_enrollment_requirement(uuid,char),
+  auth.consume_google_onboarding_capability(uuid,char,uuid,uuid),
+  auth.link_google_identity_to_patient_account(uuid,text)
+  from public;

@@ -5,6 +5,7 @@ import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import type { CreateBreakGlassDto } from './dto/create-break-glass.dto';
+import type { ListStaffAccessRequestsDto } from './dto/list-staff-access-requests.dto';
 import type { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
 
 export interface AccessRequestRow extends QueryResultRow {
@@ -73,6 +74,73 @@ export class ConsentService {
              existing_request as "existingRequest"
            from identity.create_access_request($1, $2, $3, $4)`,
           [input.hid, input.scope, input.reason, input.durationMinutes],
+        );
+        return this.requireRow(result.rows[0]);
+      });
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+
+
+  async listMyStaffAccessRequests(context: DataAccessContext, query: ListStaffAccessRequestsDto) {
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<Record<string, unknown> & QueryResultRow>(
+          `select access_request_id as "accessRequestId", patient_id as "patientId",
+             scope, purpose_of_use as "purposeOfUse", reason, status,
+             requested_duration_minutes as "requestedDurationMinutes",
+             requested_at as "requestedAt", approved_at as "approvedAt",
+             denied_at as "deniedAt", denied_reason as "deniedReason"
+           from identity.list_my_staff_access_requests($1)`,
+          [query.status ?? null],
+        );
+        return result.rows;
+      }, { readOnly: true });
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+  async listMyAccessRequests(context: DataAccessContext) {
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query<Record<string, unknown> & QueryResultRow>(
+        `select access_request_id as "accessRequestId", facility_id as "facilityId",
+           facility_name as "facilityName", scope, reason, status,
+           requested_duration_minutes as "requestedDurationMinutes",
+           requested_at as "requestedAt", approved_at as "approvedAt",
+           denied_at as "deniedAt", denied_reason as "deniedReason"
+         from identity.list_my_access_requests()`,
+      );
+      return result.rows;
+    }, { readOnly: true });
+  }
+
+  async approveAccessRequest(context: DataAccessContext, requestId: string) {
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<Record<string, unknown> & QueryResultRow>(
+          `select access_request_id as "accessRequestId", consent_grant_id as "consentGrantId",
+             patient_id as "patientId", status, expires_at as "expiresAt", replayed
+           from identity.approve_access_request($1)`,
+          [requestId],
+        );
+        return this.requireRow(result.rows[0]);
+      });
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+  async denyAccessRequest(context: DataAccessContext, requestId: string, reason: string) {
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<Record<string, unknown> & QueryResultRow>(
+          `select access_request_id as "accessRequestId", patient_id as "patientId",
+             status, denied_at as "deniedAt", replayed
+           from identity.deny_access_request($1, $2)`,
+          [requestId, reason.trim()],
         );
         return this.requireRow(result.rows[0]);
       });

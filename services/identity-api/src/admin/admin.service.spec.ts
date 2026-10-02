@@ -80,6 +80,42 @@ describe('AdminService governed commands', () => {
     }));
   });
 
+
+  it('exports principals with audited writable transaction semantics and CSV escaping', async () => {
+    const client = { query: jest.fn().mockResolvedValue({
+      rows: [{
+        id: '20000000-0000-4000-8000-000000000003',
+        subject: 'staff:export-test',
+        email: 'admin@example.com',
+        displayName: 'Admin, Test',
+        status: 'active',
+        version: '7',
+        createdAt: new Date('2026-09-29T12:00:00.000Z'),
+        activeSessionCount: '2',
+        memberships: [{ facilityId: '10000000-0000-4000-8000-000000000002', facilityName: 'Main, Facility',
+          role: 'admin', appRole: 'facility_admin', active: true, version: 3 }],
+        platformRoles: ['platform_admin', 'support'],
+      }],
+    }) };
+    const calls: unknown[] = [];
+    const database = { withTransaction: jest.fn(async (_context, operation, options) => {
+      calls.push(options);
+      return operation(client as unknown as PoolClient);
+    }) };
+    const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
+    const service = new AdminService(database as unknown as DatabaseService, audit as unknown as AuditService);
+
+    await expect(service.exportPrincipals(context, {} as never)).resolves.toContain(
+      '"Admin, Test"'
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toBeUndefined();
+    expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: 'admin.principals.export',
+      outcome: 'success',
+    }));
+  });
+
   it('audits authoritative account suspension and session revocation commands', async () => {
     const suspended = harness({ account_id: '20000000-0000-4000-8000-000000000002',
       account_status: 'disabled', row_version: '3', replayed: false });

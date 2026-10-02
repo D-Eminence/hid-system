@@ -23,6 +23,11 @@ import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvid
 // OIDC/JWKS/database calls may occur in either isolated fixture.
 jest.mock('../auth/workload-auth.service', () => ({ WorkloadAuthService: class WorkloadAuthService {} }));
 jest.mock('../auth/token.service', () => ({ TokenService: class TokenService {} }));
+jest.mock('../auth/google-authentication.service', () => ({
+  GoogleAuthenticationService: class GoogleAuthenticationService {
+    readonly onboardingCookieName = 'hid_google_onboarding';
+  },
+}));
 
 const database = { withTransaction: jest.fn(), withSystemTransaction: jest.fn(), query: jest.fn() };
 const audit = { record: jest.fn(), recordWithClient: jest.fn() };
@@ -45,6 +50,7 @@ describe('explicitly deferred staging NIN', () => {
   const actor: ActorContext = {
     kind: 'staff', id: randomUUID(), subject: 'synthetic:staging-staff', accountId: randomUUID(),
     roles: ['doctor'], permissions: ['identity.registration.write', 'identity.registration.approve'],
+    platformPermissions: ['platform.admin.access'], platformRoles: ['platform_super_admin'],
     facilityIds: [facilityId], facilities: [], authenticationMethod: 'oidc',
     facility: { id: facilityId, membershipId: randomUUID(), organizationId: randomUUID(),
       name: 'Synthetic facility', roles: ['doctor'], permissions: ['identity.registration.write', 'identity.registration.approve'], isPrimary: true },
@@ -64,11 +70,13 @@ describe('explicitly deferred staging NIN', () => {
       IDENTITY_PHARMACY_CALLER_SUBJECT: 'hid:staging:pharmacy-api', IDENTITY_OCR_CALLER_SUBJECT: 'hid:staging:ocr-api',
       OUTREACH_CALLER_SUBJECT: 'hid:staging:outreach-api', TURNSTILE_MODE: 'required',
       TURNSTILE_SECRET_KEY: randomBytes(32).toString('base64url'), OTP_HMAC_KEY_B64: randomBytes(32).toString('base64'),
+      CONTACT_LOOKUP_HMAC_KEY_B64: randomBytes(32).toString('base64'),
       NOTIFICATION_API_URL: 'https://notification.example.test', NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
       NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE: '/synthetic/unused-notification.jwt',
     };
     resetEnvironmentForTests();
     jest.resetAllMocks();
+    database.query.mockResolvedValue({ rows: [{ enabled: true }] });
     jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('External transport is forbidden in this fixture'));
   });
 
@@ -78,19 +86,26 @@ describe('explicitly deferred staging NIN', () => {
   });
 
   async function startModule(tokens?: { verify: jest.Mock }) {
-    const module = await Test.createTestingModule({ imports: [IsolatedDependenciesModule, IdentityModule] }).compile();
+    const module = await Test.createTestingModule({ imports: [IsolatedDependenciesModule, IdentityModule] })
+      .overrideProvider(DatabaseService).useValue(database)
+      .compile();
     app = module.createNestApplication({ logger: false });
     app.setGlobalPrefix('api/v1');
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     app.useGlobalFilters(new ProblemDetailsFilter());
     if (tokens) app.useGlobalGuards(new SecurityGuard(new Reflector(),
-      tokens as unknown as TokenService, audit as unknown as AuditService));
+      tokens as unknown as TokenService, audit as unknown as AuditService, database as unknown as DatabaseService));
     app.use((incoming: HidRequest, _response: Response, next: NextFunction) => {
       incoming.correlationId = randomUUID();
       if (!tokens) { incoming.actor = actor; incoming.facilityId = facilityId; }
       next();
     });
     await app.init();
+    // Startup retention maintenance is independent of the request boundary
+    // exercised below. Count database calls only after initialization.
+    database.withTransaction.mockClear();
+    database.withSystemTransaction.mockClear();
+    database.query.mockClear();
     return module;
   }
 
@@ -162,15 +177,15 @@ describe('explicitly deferred staging NIN', () => {
   it('keeps the separately disabled QoreID self-verification route patient-bound and body-minimal', async () => {
     const patientActor: ActorContext = {
       kind: 'patient', id: randomUUID(), subject: 'patient:synthetic-qoreid', accountId: randomUUID(),
-      patientId: randomUUID(), sessionId: randomUUID(), roles: [], permissions: [], facilityIds: [], facilities: [],
+      patientId: randomUUID(), sessionId: randomUUID(), roles: [], permissions: [], platformPermissions: ['platform.admin.access'], platformRoles: ['platform_super_admin'], facilityIds: [], facilities: [],
       authenticationMethod: 'oidc',
     };
     const query = jest.fn()
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ evidenceId: randomUUID(), recordedAt: new Date() }] });
-    database.withSystemTransaction.mockImplementation(async (_correlation, operation) => operation({ query }));
     const tokens = { verify: jest.fn().mockResolvedValue({ actor: patientActor, claims: {} }) };
     await startModule(tokens);
+    database.withSystemTransaction.mockImplementation(async (_correlation, operation) => operation({ query }));
 
     const invalid = await request(app!.getHttpServer()).post('/api/v1/identity/me/verification/nin')
       .set('authorization', 'Bearer synthetic-token')
@@ -214,7 +229,7 @@ describe('explicitly deferred staging NIN', () => {
     };
     if (scenario === 'patient principal') {
       Object.assign(verifiedActor, { kind: 'patient', patientId: randomUUID(),
-        roles: [], permissions: [], facilities: [], facilityIds: [], facility: undefined });
+        roles: [], permissions: [], platformPermissions: ['platform.admin.access'], platformRoles: ['platform_super_admin'], facilities: [], facilityIds: [], facility: undefined });
     }
     const tokens = { verify: jest.fn().mockResolvedValue({ actor: verifiedActor, claims: {} }) };
     await startModule(tokens);

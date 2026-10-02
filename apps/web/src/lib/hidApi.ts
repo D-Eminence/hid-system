@@ -78,7 +78,7 @@ type SignedDownloadResponse = {
 
 type PasswordResetStartResponse = {
   challengeId: string
-  deliveryChannels: Array<'email'>
+  deliveryChannels: Array<'email' | 'sms'>
   expiresAt: string
   maskedEmail: string | null
 }

@@ -7,7 +7,7 @@ import { SecurityGuard } from './security.guard';
 import { TokenService } from './token.service';
 import { CurrentStaffContextService } from './current-staff-context.service';
 import { WorkloadAuthService } from './workload-auth.service';
-import { TurnstileService } from './turnstile.service';
+import { TurnstileModule } from './turnstile.module';
 import { OtpController } from './otp.controller';
 import { OtpService } from './otp.service';
 import { NotificationOtpClient } from './notification-otp.client';
@@ -15,11 +15,13 @@ import { CurrentPatientContextService } from './current-patient-context.service'
 import { PatientSelfController } from './patient-self.controller';
 import { PatientSelfService } from './patient-self.service';
 import { GoogleAuthenticationService } from './google-authentication.service';
+import { IntegrationModule } from '../integrations/integration.module';
 
 @Global()
 @Module({
+  imports: [TurnstileModule, IntegrationModule],
   controllers: [AuthController, OtpController, PatientSelfController],
-  providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, TurnstileService, OtpService, NotificationOtpClient, GoogleAuthenticationService],
-  exports: [TokenService, SecurityGuard, WorkloadAuthService],
+  providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService],
+  exports: [TokenService, SecurityGuard, WorkloadAuthService, TurnstileModule, GoogleAuthenticationService],
 })
 export class AuthModule {}

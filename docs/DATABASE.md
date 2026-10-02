@@ -51,6 +51,65 @@ columns. Patient and organization evidence is inserted only by narrowly scoped
 commands that recheck the existing session or exact active organization
 membership and atomically append semantic audit evidence; the migration does
 not create, merge, relink, or transfer canonical records.
+Migration `0047_provider_integration_controls.sql` adds the Identity-owned,
+secret-free provider/capability catalog, current routing, runtime read functions,
+versioned admin commands, and append-only change events. Migration
+`0048_cac_legal_entity_binding.sql` introduced the CAC number/legal-name
+approval guard and prevents a status-only result from activating a provider
+organization. Migration `0056` extends this guard to a verified submitted
+identifier and a complete profile with per-field provenance. Neither migration
+stores a provider key, raw NIN, or raw QoreID response.
+Migration `0049_qoreid_request_quotas.sql` adds cross-instance, atomic request
+limits for new NIN/CAC verifications, safe connection tests, and public provider
+applications. Counters contain canonical UUIDs or a keyed network digest, with
+no raw NIN, CAC, IP address, or provider payload. The Identity runtime prunes
+expired counters and test-key reservations after 48 hours.
+Migration `0050_patient_nin_evidence_binding.sql` removes the unbound
+five-argument patient evidence command. A verified result now requires the
+submitted NIN's keyed lookup HMAC to match an existing verified, unrevoked NIN
+identifier on the exact session-bound patient. The HMAC is not persisted in
+QoreID evidence or audit.
+Migration `0051_public_patient_enrollment.sql` creates a separate public NIN
+enrollment path. It keeps provider identity evidence encrypted in a pending,
+unique-NIN record; a single selected contact OTP must be consumed before a
+password-backed account, canonical patient, NIN binding, and HIDCode can be
+created atomically. Its rate counters and OTPs are scoped to the enrollment.
+Migration `0052_authoritative_cac_identity.sql` makes the registration
+identifier the public organization lookup key and introduced a complete-QoreID-
+profile guard for review and legal-entity binding. Migration `0056` revises
+that guard so a verified sparse lookup can be followed by applicant completion
+of provider-omitted fields. Neither migration adds provider secrets.
+Migration `0053_remove_unwired_piersflow_catalog.sql` removes the disabled,
+non-operational PiersFlow placeholder from the provider catalog. It aborts if
+provider events or capability rows exist, preserving unexpected history for
+review rather than discarding it.
+Migration `0054_complete_existing_cac_evidence_binding.sql` requires the
+existing-organization CAC evidence route to match all required persisted
+legal-entity fields against its governed application and unique CAC binding. Historical
+name-only bindings cannot produce new verified evidence until reconciled.
+Migration `0055_verified_incomplete_cac_result.sql` records a QoreID-verified
+CAC lookup with a numeric provider reference even when legal-entity fields are
+missing. It leaves the application pending and those fields null under the
+former `verified_incomplete` representation.
+Migration `0056_cac_applicant_profile_completion.sql` separates successful CAC
+provider verification from organization profile completeness. Exact verified
+QoreID status fields and a numeric provider `id` confirm the submitted
+`RC`/`BN`/`IT` identifier; a returned `cac.rcNumber` must match, but an omitted
+number does not prevent verification or canonical registration binding. The
+application stores populated provider fields separately from the merged review
+profile and records `qoreid` or `user_provided` sources for required name, entity
+type, registration date, address, and active registry status. The applicant may
+complete provider-omitted fields only after bounded email OTP; provider values
+cannot be overwritten. A populated non-active QoreID registry status remains
+provider-sourced but blocks review. The migration adds restricted completion
+challenges and session hashes, expected-version profile updates, sourced CAC
+binding columns, and approval constraints. A verified lookup with missing
+fields or a non-active provider status remains `profile_state=incomplete` until
+its sourced profile is complete and active, then becomes `ready_for_review`;
+platform RBAC, audit, unique binding, and approval remain
+required. Historical `verified_incomplete` records become verified lookups with
+incomplete profiles; their omitted/partial provider fields were not retained by
+`0055` and cannot be reconstructed.
 Migration `0013_durable_ocr_persistence.sql` adds the isolated `ocr` schema,
 facility-scoped idempotent jobs, immutable extraction/validation/lifecycle
 evidence, bounded retry state, atomic `SKIP LOCKED` worker claims, constrained

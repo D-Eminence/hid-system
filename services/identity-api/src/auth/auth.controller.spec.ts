@@ -50,7 +50,8 @@ const actor: ActorContext = {
 
 describe('AuthController Google exchange', () => {
   let controller: AuthController;
-  let google: { login: jest.Mock };
+  let google: { login: jest.Mock; exchange: jest.Mock; onboardingStatus: jest.Mock;
+    linkExistingPatient: jest.Mock; onboardingCookieName: string };
   let turnstile: { verifyLogin: jest.Mock };
   let sessionAudit: { record: jest.Mock };
   let audit: { record: jest.Mock };
@@ -71,7 +72,8 @@ describe('AuthController Google exchange', () => {
     });
     resetEnvironmentForTests();
 
-    google = { login: jest.fn() };
+    google = { login: jest.fn(), exchange: jest.fn(), onboardingStatus: jest.fn(),
+      linkExistingPatient: jest.fn(), onboardingCookieName: 'hid_access_google_onboarding' };
     turnstile = { verifyLogin: jest.fn().mockResolvedValue(undefined) };
     sessionAudit = { record: jest.fn().mockResolvedValue(undefined) };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
@@ -102,7 +104,7 @@ describe('AuthController Google exchange', () => {
       httpOnly: true,
       secure: false,
       sameSite: 'strict',
-      path: '/api/v1/auth/oidc',
+      path: '/api/v1/auth',
       expires: expect.any(Date),
     }));
     const cookieValue = response.cookie.mock.calls[0]?.[1];
@@ -143,6 +145,15 @@ describe('AuthController Google exchange', () => {
       response,
     )).toThrow(expect.objectContaining({ code: 'ORIGIN_DENIED' }));
     expect(response.cookie).not.toHaveBeenCalled();
+  });
+
+  it('rejects a patient Turnstile action on the workforce password route', async () => {
+    await expect(controller.login(
+      { email: 'staff@example.test', password: 'valid-password', turnstileAction: 'patient-login' },
+      requestFor(),
+      responseFor(),
+    )).rejects.toMatchObject({ code: 'INVALID_LOGIN_ACTION' });
+    expect(turnstile.verifyLogin).not.toHaveBeenCalled();
   });
 
   it('verifies Turnstile, consumes the nonce, and establishes a patient cookie session', async () => {
@@ -187,7 +198,7 @@ describe('AuthController Google exchange', () => {
     expect(response.setHeader).toHaveBeenCalledWith('x-csrf-token', 'csrf-token');
     expect(response.clearCookie).toHaveBeenCalledWith(nonceCookie, expect.objectContaining({
       httpOnly: true,
-      path: '/api/v1/auth/oidc',
+      path: '/api/v1/auth',
     }));
   });
 
@@ -212,6 +223,97 @@ describe('AuthController Google exchange', () => {
       'staff',
       expect.any(Object),
     );
+  });
+
+  it('keeps an unknown Google enrollee accountless and writes only a pending capability cookie', async () => {
+    const challenge = issueNonce(controller);
+    const request = requestFor({ cookies: { [nonceCookie]: challenge.cookie } });
+    const response = responseFor();
+    const expiresAt = new Date(Date.now() + 30 * 60_000);
+    google.exchange.mockResolvedValue({ kind: 'pending', cookie: 'pending-id.pending-token',
+      expiresAt, progress: { stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY',
+        expiresAt: expiresAt.toISOString() } });
+
+    const result = await controller.exchangeGoogleIdToken(
+      { ...googleInput('patient-login'), intent: 'enroll' }, request, response);
+
+    expect(result).toEqual({ stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY',
+      expiresAt: expiresAt.toISOString() });
+    expect(google.exchange).toHaveBeenCalledWith('g'.repeat(64), challenge.nonce, 'patient',
+      'enroll', expect.any(Object));
+    expect(response.cookie).toHaveBeenCalledWith('hid_access_google_onboarding',
+      'pending-id.pending-token', expect.objectContaining({ httpOnly: true,
+        sameSite: 'strict', path: '/api/v1', expires: expiresAt }));
+    expect(response.cookie).not.toHaveBeenCalledWith('hid_access', expect.anything(), expect.anything());
+    expect(response.status).toHaveBeenCalledWith(202);
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('requires sign-out before Google enrollment in a browser with an HID session', async () => {
+    const challenge = issueNonce(controller);
+    await expect(controller.exchangeGoogleIdToken({ ...googleInput('patient-login'),
+      intent: 'enroll' }, requestFor({ cookies: {
+      [nonceCookie]: challenge.cookie, hid_access: 'existing-session-token',
+    } }), responseFor())).rejects.toMatchObject({
+      code: 'GOOGLE_ONBOARDING_REQUIRES_SIGN_OUT',
+    });
+    expect(google.exchange).not.toHaveBeenCalled();
+    expect(turnstile.verifyLogin).not.toHaveBeenCalled();
+  });
+
+  it('requires sign-out before Google enrollment when the HID session cookie is repeated', async () => {
+    // cookie-parser yields an array for a repeated name; the guard must treat
+    // that as "signed in" rather than dropping the key and reading as absent.
+    const challenge = issueNonce(controller);
+    await expect(controller.exchangeGoogleIdToken({ ...googleInput('patient-login'),
+      intent: 'enroll' }, requestFor({ cookies: {
+      [nonceCookie]: challenge.cookie, hid_access: ['existing-session-token', 'existing-session-token'],
+    } as unknown as Record<string, string> }), responseFor())).rejects.toMatchObject({
+      code: 'GOOGLE_ONBOARDING_REQUIRES_SIGN_OUT',
+    });
+    expect(google.exchange).not.toHaveBeenCalled();
+    expect(turnstile.verifyLogin).not.toHaveBeenCalled();
+  });
+
+  it('reads a pending Google capability only with an allowed same-origin request', async () => {
+    google.onboardingStatus.mockResolvedValue({ stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY',
+      expiresAt: '2030-01-01T00:00:00.000Z' });
+    const cookie = '30000000-0000-4000-8000-000000000001.' + 'A'.repeat(43);
+    await expect(controller.googleOnboarding(requestFor({ origin: null,
+      referer: `${origin}/patient/enroll`,
+      cookies: { 'hid_access_google_onboarding': cookie } }))).resolves.toMatchObject({
+      stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY',
+    });
+    expect(google.onboardingStatus).toHaveBeenCalledWith(cookie);
+    await expect(async () => controller.googleOnboarding(requestFor({ origin: null,
+      referer: 'https://attacker.example/patient/enroll',
+      cookies: { 'hid_access_google_onboarding': cookie } }))).rejects.toMatchObject({
+      code: 'ORIGIN_DENIED',
+    });
+  });
+
+  it('requires a patient session and fresh Google nonce for explicit account linking', async () => {
+    const challenge = issueNonce(controller);
+    const request = requestFor({ cookies: { [nonceCookie]: challenge.cookie }, actor });
+    const response = responseFor();
+    google.linkExistingPatient.mockResolvedValue(undefined);
+    await expect(controller.linkGoogleIdentity({ ...googleInput('patient-login'),
+      principal: 'patient@example.test', password: 'valid-password' }, request, response))
+      .resolves.toEqual({ linked: true });
+    expect(google.linkExistingPatient).toHaveBeenCalledWith('g'.repeat(64), challenge.nonce,
+      'patient@example.test', 'valid-password', actor, expect.any(Object));
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.google.link',
+      actorAccountId: actor.accountId, outcome: 'success' }));
+    expect(response.clearCookie).toHaveBeenCalledWith(nonceCookie, expect.objectContaining({ path: '/api/v1/auth' }));
+  });
+
+  it('rejects Google linking without an existing patient actor before checking account credentials', async () => {
+    const challenge = issueNonce(controller);
+    await expect(controller.linkGoogleIdentity({ ...googleInput('patient-login'),
+      principal: 'patient@example.test', password: 'valid-password' },
+    requestFor({ cookies: { [nonceCookie]: challenge.cookie } }), responseFor()))
+      .rejects.toMatchObject({ code: 'PATIENT_SCOPE_DENIED' });
+    expect(google.linkExistingPatient).not.toHaveBeenCalled();
   });
 
   it('audits a denied exchange without logging the Google token or nonce and clears the nonce cookie', async () => {
@@ -281,12 +383,14 @@ function issueNonce(controller: AuthController): { nonce: string; cookie: string
   return { nonce: result.nonce, cookie };
 }
 
-function requestFor(input: { origin?: string | null; referer?: string; cookies?: Record<string, string> } = {}): HidRequest {
+function requestFor(input: { origin?: string | null; referer?: string; cookies?: Record<string, string>;
+  actor?: ActorContext } = {}): HidRequest {
   const requestOrigin = input.origin === undefined ? origin : input.origin;
   return {
     correlationId,
     ip: '203.0.113.10',
     cookies: input.cookies ?? {},
+    actor: input.actor,
     header: jest.fn((name: string) => {
       if (name === 'origin') return requestOrigin;
       if (name === 'referer') return input.referer;
@@ -301,7 +405,9 @@ function responseFor() {
     cookie: jest.fn(),
     clearCookie: jest.fn(),
     setHeader: jest.fn(),
-  } as unknown as Response & { cookie: jest.Mock; clearCookie: jest.Mock; setHeader: jest.Mock };
+    status: jest.fn(),
+  } as unknown as Response & { cookie: jest.Mock; clearCookie: jest.Mock; setHeader: jest.Mock;
+    status: jest.Mock };
 }
 
 function restoreEnvironment(): void {

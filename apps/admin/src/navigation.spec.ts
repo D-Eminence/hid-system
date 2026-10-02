@@ -14,6 +14,16 @@ describe('admin authorization UX', () => {
     const items = visibleNavigation(actor(['platform.admin.access', 'platform.audit.read']));
     expect(items.map((item) => item.label)).toEqual(['Overview', 'Audit center']);
   });
+  it('shows Settings → Integrations only with its read permission', () => {
+    expect(visibleNavigation(actor(['platform.admin.access'])).some((item) => item.path === '/integrations')).toBe(false);
+    expect(visibleNavigation(actor(['platform.admin.access', 'platform.integration.read'])))
+      .toContainEqual(expect.objectContaining({ path: '/integrations', section: 'Settings' }));
+  });
+  it('shows provider application review only to identity review readers', () => {
+    expect(visibleNavigation(actor(['platform.admin.access'])).some((item) => item.path === '/provider-applications')).toBe(false);
+    expect(visibleNavigation(actor(['platform.admin.access', 'platform.identity-review.read'])))
+      .toContainEqual(expect.objectContaining({ path: '/provider-applications', section: 'Management' }));
+  });
   it('does not infer clinical navigation from Super Admin naming', () => {
     const items = visibleNavigation({ ...actor(['platform.admin.access']), platformRoles: ['platform_super_admin'] });
     expect(items.some((item) => /lab|pharmacy|clinical/i.test(item.label))).toBe(false);

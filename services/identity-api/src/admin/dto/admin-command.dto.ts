@@ -1,4 +1,4 @@
-import { IsIn, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsIn, IsString, Matches, MaxLength, MinLength } from 'class-validator';
 
 export class FacilityStatusCommandDto {
   @IsIn(['verified', 'rejected', 'suspended'])
@@ -28,6 +28,16 @@ export class PlatformRoleCommandDto {
 }
 
 export class RevokeSessionsCommandDto {
+  @IsString() @MinLength(8) @MaxLength(500)
+  reason!: string;
+}
+
+
+export class PlatformControlCommandDto {
+  @Matches(/^(patient_portal_enabled|provider_portal_enabled|outreach_portal_enabled|maintenance_mode|uploads_enabled|break_glass_enabled)$/)
+  controlKey!: string;
+  @IsBoolean()
+  enabled!: boolean;
   @IsString() @MinLength(8) @MaxLength(500)
   reason!: string;
 }

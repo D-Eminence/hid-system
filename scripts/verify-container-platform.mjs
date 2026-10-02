@@ -188,6 +188,7 @@ const gatewayConfig = await readFile(join(repository, 'gateway/nginx.conf.templa
 for (const [route, upstream] of [
   ['/api/v1/auth', 'IDENTITY_API_UPSTREAM'], ['/api/v1/identity', 'IDENTITY_API_UPSTREAM'],
   ['/api/v1/audit', 'IDENTITY_API_UPSTREAM'], ['/api/v1/admin', 'IDENTITY_API_UPSTREAM'],
+  ['/api/v1/commercial', 'IDENTITY_API_UPSTREAM'],
   ['/api/v1/ehr', 'EHR_API_UPSTREAM'], ['/api/v1/lab', 'LAB_API_UPSTREAM'],
   ['/api/v1/pharmacy', 'PHARMACY_API_UPSTREAM'], ['/api/v1/ocr', 'OCR_API_UPSTREAM'],
   ['/api/v1/outreach', 'OUTREACH_API_UPSTREAM'],

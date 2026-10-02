@@ -15,4 +15,20 @@ export class GoogleLoginDto {
 
   @IsIn(['patient-login', 'staff-login'])
   turnstileAction!: 'patient-login' | 'staff-login';
+
+  @IsOptional()
+  @IsIn(['sign_in', 'enroll'])
+  intent?: 'sign_in' | 'enroll';
+}
+
+export class GoogleLinkDto extends GoogleLoginDto {
+  @IsString()
+  @MinLength(3)
+  @MaxLength(254)
+  principal!: string;
+
+  @IsString()
+  @MinLength(6)
+  @MaxLength(256)
+  password!: string;
 }

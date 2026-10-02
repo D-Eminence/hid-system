@@ -3,7 +3,7 @@ import type { ActorContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 
 interface PatientAccount {
-  account_id: string; subject: string; email: string; display_name: string; patient_id: string;
+  account_id: string; subject: string; email: string | null; display_name: string; patient_id: string;
 }
 
 @Injectable()
@@ -18,7 +18,7 @@ export class CurrentPatientContextService {
     if (!row || result.rows.length !== 1) throw new UnauthorizedException('Patient account is unavailable');
     return {
       kind: 'patient', id: row.subject, subject: row.subject, accountId: row.account_id,
-      patientId: row.patient_id, sessionId, email: row.email, displayName: row.display_name,
+      patientId: row.patient_id, sessionId, ...(row.email ? { email: row.email } : {}), displayName: row.display_name,
       authenticationMethod: 'local', roles: [], permissions: [], platformRoles: [],
       platformPermissions: [], facilityIds: [], facilities: [],
     };

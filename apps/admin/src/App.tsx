@@ -4,6 +4,8 @@ import { AdminApiError, api, commandKey } from './api';
 import { accessState, visibleNavigation } from './navigation';
 import type { AdminSession, AuditEvent, EventFailure, Facility, IdentityReview, Page, Principal, ServiceState } from './types';
 import { Turnstile } from '@hid/ui/Turnstile';
+import { Integrations } from './Integrations';
+import { OrganizationApplications } from './OrganizationApplications';
 
 type LoadState<T> = { value: T | null; loading: boolean; error: string | null };
 
@@ -95,9 +97,11 @@ function Shell({ session, onSignedOut }: { session: AdminSession; onSignedOut: (
     <Route path="/facilities/:facilityId" element={<Permission actor={actor} permission="platform.facility.read"><FacilityDetail /></Permission>} />
     <Route path="/users" element={<Permission actor={actor} permission="platform.principal.read"><Principals actor={actor} /></Permission>} />
     <Route path="/identity" element={<Permission actor={actor} permission="platform.identity-review.read"><IdentityReviews /></Permission>} />
+    <Route path="/provider-applications" element={<Permission actor={actor} permission="platform.identity-review.read"><OrganizationApplications actor={actor} /></Permission>} />
     <Route path="/audit" element={<Permission actor={actor} permission="platform.audit.read"><AuditCenter /></Permission>} />
     <Route path="/operations" element={<Permission actor={actor} permission="platform.operations.read"><Operations /></Permission>} />
     <Route path="/events" element={<Permission actor={actor} permission="platform.operations.read"><Events /></Permission>} />
+    <Route path="/integrations" element={<Permission actor={actor} permission="platform.integration.read"><Integrations actor={actor} /></Permission>} />
     <Route path="*" element={<Navigate to="/" replace />} />
   </Routes></main></div>;
 }
@@ -141,7 +145,7 @@ function FacilityDetail() {
   const state = useLoad(() => api<Facility>(`/admin/facilities/${facilityId}`), [facilityId]);
   return <Page title="Facility detail" subtitle="Governance state and membership count; clinical records are outside this view.">
     <p><Link to="/facilities">← Back to facilities</Link></p>
-    <Load state={state}>{(facility) => <article className="card"><header><div><h3>{facility.name}</h3><small>{facility.code} · {facility.organizationName}</small></div><Status value={facility.status} /></header><dl><dt>Facility ID</dt><dd>{facility.id}</dd><dt>Memberships</dt><dd>{facility.membershipCount}</dd><dt>Version</dt><dd>{facility.version}</dd><dt>Status reason</dt><dd>{facility.statusReason ?? 'No reason recorded'}</dd><dt>Status changed</dt><dd>{facility.statusChangedAt ? date(facility.statusChangedAt) : 'Not reported'}</dd></dl></article>}</Load>
+    <Load state={state}>{(facility) => <article className="card"><header><div><h3>{facility.name}</h3><small>{facility.code} · {facility.organizationName}</small></div><Status value={facility.status} /></header><dl><dt>Organization ID</dt><dd>{facility.organizationId}</dd><dt>Facility ID</dt><dd>{facility.id}</dd><dt>Memberships</dt><dd>{facility.membershipCount}</dd><dt>Version</dt><dd>{facility.version}</dd><dt>Status reason</dt><dd>{facility.statusReason ?? 'No reason recorded'}</dd><dt>Status changed</dt><dd>{facility.statusChangedAt ? date(facility.statusChangedAt) : 'Not reported'}</dd></dl></article>}</Load>
   </Page>;
 }
 

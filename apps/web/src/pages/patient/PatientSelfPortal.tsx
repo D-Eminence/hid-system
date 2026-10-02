@@ -3,6 +3,10 @@ import { Link } from 'react-router-dom'
 import { CarePortal, RecordSummary } from '../../components/CarePortal'
 import { carePortalApi, type PatientNinVerification, type PatientSelf, type ReleasedRecords } from '../../lib/carePortalApi'
 import { canonicalRequest, identityClient } from '../../lib/identityClient'
+import { GoogleIdentityButton } from '../../components/GoogleIdentityButton'
+import { PasswordField } from '../../components/PasswordField'
+import { TurnstileWidget } from '../../components/TurnstileWidget'
+import { ensureCaptchaReady } from '../../lib/captcha'
 
 type AccessItem = { consentGrantId: string; scope: string; purpose: string; status: string; startsAt: string; expiresAt: string; reason: string; facilityName: string }
 export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata' | 'records' | 'history' | 'notifications' }) {
@@ -15,6 +19,17 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
   const [verification, setVerification] = useState<PatientNinVerification | null>(null)
   const [verificationError, setVerificationError] = useState('')
   const [verifying, setVerifying] = useState(false)
+  const [pin, setPin] = useState('')
+  const [pinConfirmation, setPinConfirmation] = useState('')
+  const [pinBusy, setPinBusy] = useState(false)
+  const [pinError, setPinError] = useState('')
+  const [pinNotice, setPinNotice] = useState('')
+  const [linkPassword, setLinkPassword] = useState('')
+  const [linkTurnstileToken, setLinkTurnstileToken] = useState<string | null>(null)
+  const [linkTurnstileResetKey, setLinkTurnstileResetKey] = useState(0)
+  const [linkBusy, setLinkBusy] = useState(false)
+  const [linkError, setLinkError] = useState('')
+  const [linkNotice, setLinkNotice] = useState('')
   useEffect(() => {
     let active = true
     setProfile(null); setRecords(null); setActivity(null); setError('')
@@ -46,9 +61,56 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
     try {
       const result = await carePortalApi.verifyNin(nin)
       setVerification(result); setNin('')
+      if (result.state === 'verified') setReload(value => value + 1)
     } catch (reason) {
       setVerificationError(reason instanceof Error ? reason.message : 'Verification could not be completed.')
     } finally { setVerifying(false) }
+  }
+  async function savePin(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (pinBusy) return
+    const digits = pin.replace(/\s+/g, '')
+    if (!/^\d{4,8}$/.test(digits) || digits !== pinConfirmation.replace(/\s+/g, '')) {
+      setPinError('Enter matching Access PINs of 4 to 8 digits.')
+      return
+    }
+    setPinBusy(true); setPinError(''); setPinNotice('')
+    try {
+      await carePortalApi.configureAccessPin(digits)
+      setProfile(current => current ? { ...current, accessPinConfigured: true } : current)
+      setPin(''); setPinConfirmation('')
+      setPinNotice('Your Access PIN is configured. Earlier PIN access grants were revoked.')
+    } catch (reason) {
+      setPinError(reason instanceof Error ? reason.message : 'The Access PIN could not be saved.')
+    } finally { setPinBusy(false) }
+  }
+  async function revokePin() {
+    if (pinBusy) return
+    setPinBusy(true); setPinError(''); setPinNotice('')
+    try {
+      await carePortalApi.revokeAccessPin()
+      setProfile(current => current ? { ...current, accessPinConfigured: false } : current)
+      setPin(''); setPinConfirmation('')
+      setPinNotice('Your Access PIN was removed. Earlier PIN access grants were revoked.')
+    } catch (reason) {
+      setPinError(reason instanceof Error ? reason.message : 'The Access PIN could not be removed.')
+    } finally { setPinBusy(false) }
+  }
+  async function linkGoogle(credential: string) {
+    if (!profile || linkBusy || !linkPassword || !ensureCaptchaReady(linkTurnstileToken)) return
+    setLinkBusy(true); setLinkError(''); setLinkNotice('')
+    try {
+      await identityClient.auth.linkGoogleIdentity({ token: credential, principal: profile.hid,
+        password: linkPassword, turnstileToken: linkTurnstileToken ?? '' })
+      setLinkPassword('')
+      setLinkNotice('Your Google identity is linked to this Health ID. You can use it on the sign-in page.')
+    } catch {
+      setLinkError('Google linking could not be completed. Check your password and Google account, then try again.')
+    } finally {
+      setLinkBusy(false)
+      setLinkTurnstileToken(null)
+      setLinkTurnstileResetKey(value => value + 1)
+    }
   }
   const title = { profile: 'Your profile and HID', biodata: 'Your bio data', records: 'Your medical records', history: 'Your access history', notifications: 'Your access notifications' }[page]
   return <CarePortal title={title} patient>
@@ -61,7 +123,8 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
       </dl><p>Contact your registering facility to request a verified identity correction.</p>
       {page === 'profile' && <section aria-labelledby="nin-verification-title">
         <h2 id="nin-verification-title">Verify your NIN</h2>
-        <p>We use only your 11-digit NIN for this check. It does not change your HID or profile.</p>
+        {profile.assuranceState === 'NIN_VERIFIED' ? <p role="status">Your NIN is verified for this Health ID.</p> : <>
+        <p>Verify your NIN with QoreID while keeping your existing Health ID and records. Your HID account contact can be different from your NIN record phone.</p>
         <form onSubmit={verifyNin}>
           <label htmlFor="patient-nin">NIN</label>
           <input id="patient-nin" value={nin} onChange={event => setNin(event.target.value)}
@@ -70,6 +133,32 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
         </form>
         {verificationError && <p role="alert">{verificationError}</p>}
         {verification && <p role="status">Verification result: {verification.state.replace('_', ' ')}. Recorded {new Date(verification.recordedAt).toLocaleString()}.</p>}
+        </>}
+      </section>}
+      {page === 'profile' && <section aria-labelledby="access-pin-title" style={{ marginTop: 28 }}>
+        <h2 id="access-pin-title">Access PIN</h2>
+        <p role="status">{profile.accessPinConfigured ? 'Access PIN configured' : 'No Access PIN configured'}</p>
+        <p>A clinician can use your Health ID and Access PIN to request short-lived, read-only record access. Your PIN is separate from your account password and NIN.</p>
+        <form onSubmit={savePin} style={{ display: 'grid', gap: 10, maxWidth: 360 }}>
+          <label htmlFor="patient-access-pin">{profile.accessPinConfigured ? 'New Access PIN' : 'Set an Access PIN'}</label>
+          <input id="patient-access-pin" type="password" inputMode="numeric" autoComplete="off" pattern="[0-9]{4,8}" minLength={4} maxLength={8} required value={pin} onChange={event => setPin(event.target.value.replace(/\D/g, '').slice(0, 8))} />
+          <label htmlFor="patient-access-pin-confirm">Confirm Access PIN</label>
+          <input id="patient-access-pin-confirm" type="password" inputMode="numeric" autoComplete="off" pattern="[0-9]{4,8}" minLength={4} maxLength={8} required value={pinConfirmation} onChange={event => setPinConfirmation(event.target.value.replace(/\D/g, '').slice(0, 8))} />
+          <button type="submit" disabled={pinBusy}>{pinBusy ? 'Saving…' : profile.accessPinConfigured ? 'Replace PIN' : 'Set PIN'}</button>
+        </form>
+        {profile.accessPinConfigured && <button type="button" disabled={pinBusy} onClick={() => { void revokePin() }} style={{ marginTop: 12 }}>Remove Access PIN</button>}
+        {pinError && <p role="alert">{pinError} If asked to sign in again, use Sign out above and then sign in to return here.</p>}
+        {pinNotice && <p role="status">{pinNotice}</p>}
+      </section>}
+      {page === 'profile' && import.meta.env.VITE_GOOGLE_CLIENT_ID && <section aria-labelledby="link-google-title" style={{ marginTop: 28, maxWidth: 400 }}>
+        <h2 id="link-google-title">Link Google to this Health ID</h2>
+        <p>Confirm your current HID password, complete the security check, and choose the Google account you want to link. Matching email addresses alone never link accounts.</p>
+        <PasswordField id="google-link-password" label="Current HID password" value={linkPassword} onChange={setLinkPassword} autoComplete="current-password" />
+        <TurnstileWidget action="patient-login" onTokenChange={setLinkTurnstileToken} resetKey={linkTurnstileResetKey} />
+        <GoogleIdentityButton text="continue_with" disabled={linkBusy || !linkPassword || !ensureCaptchaReady(linkTurnstileToken)}
+          onIdentity={identity => linkGoogle(identity.credential)} />
+        {linkError && <p role="alert">{linkError}</p>}
+        {linkNotice && <p role="status">{linkNotice}</p>}
       </section>}</>}
       {page === 'records' && (records ? <RecordSummary records={records} /> : <p role="status">Loading released records…</p>)}
       {(page === 'history' || page === 'notifications') && <>

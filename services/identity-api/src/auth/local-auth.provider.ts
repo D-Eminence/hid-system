@@ -9,7 +9,7 @@ import type { CredentialIdentity } from './auth.types';
 interface AccountRow {
   id: string;
   subject: string;
-  email: string;
+  email: string | null;
   display_name: string;
   password_hash: string | null;
   password_algorithm: string | null;
@@ -28,8 +28,10 @@ export class LocalAuthProvider {
 
   constructor(private readonly database: DatabaseService) {}
 
-  async authenticate(email: string, password: string): Promise<CredentialIdentity> {
-    const principalHash = this.principalHash(email);
+  async authenticate(principal: string, password: string,
+    actorKind: 'staff' | 'patient' = 'staff', correlationId?: string): Promise<CredentialIdentity> {
+    const hidLogin = actorKind === 'patient' && /^HID-[A-HJ-NP-Z2-9]{6,32}$/i.test(principal);
+    const principalHash = this.principalHash(principal);
     const attempt = await this.database.query<{ locked: boolean }>(
       `select locked_until is not null and locked_until > clock_timestamp() as locked
          from auth.login_attempts
@@ -40,16 +42,22 @@ export class LocalAuthProvider {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const accountResult = await this.database.query<AccountRow>(
-      `select id::text, subject, email, display_name, password_hash, password_algorithm,
-              row_version::text
-         from auth.accounts
-        where lower(email) = lower($1)
-          and status = 'active'
-          and (disabled_until is null or disabled_until <= clock_timestamp())
-        limit 1`,
-      [email],
-    );
+    const accountSql = `select account.id::text, account.subject, account.email,
+            account.display_name, account.password_hash, account.password_algorithm,
+            account.row_version::text
+       from auth.accounts account
+      where ${hidLogin
+        ? `exists (select 1 from identity.patients patient
+             where patient.account_id=account.id and upper(patient.hid_code)=upper($1)
+               and patient.status='active')`
+        : 'lower(account.email) = lower($1)'}
+        and account.status = 'active'
+        and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+      limit 1`;
+    const accountResult = hidLogin
+      ? await this.database.withSystemTransaction(correlationId ?? 'auth-hid-login-lookup', (client) =>
+          client.query<AccountRow>(accountSql, [principal]))
+      : await this.database.query<AccountRow>(accountSql, [principal]);
     const account = accountResult.rows[0];
     const hash = account?.password_hash ?? await this.dummyHash;
     let passwordValid: boolean;
@@ -82,7 +90,7 @@ export class LocalAuthProvider {
     return {
       subject: account.subject,
       accountId: account.id,
-      email: account.email,
+      ...(account.email ? { email: account.email } : {}),
       displayName: account.display_name,
       facilities: [],
       authenticationMethod: 'local',

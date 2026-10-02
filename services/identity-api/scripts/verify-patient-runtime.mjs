@@ -73,7 +73,7 @@ try {
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }));
   app.useGlobalFilters(new ProblemDetailsFilter());
-  app.useGlobalGuards(new SecurityGuard(module.get(Reflector), module.get(TokenService), module.get(AuditService)));
+  app.useGlobalGuards(new SecurityGuard(module.get(Reflector), module.get(TokenService), module.get(AuditService), module.get(DatabaseService)));
   await app.init();
   const http = request(app.getHttpServer());
   const accountId = randomUUID(), patientId = randomUUID();
@@ -104,7 +104,8 @@ try {
   assert(!first.body.accessToken && !first.body.refreshToken, 'Tokens must not be serialized into browser JSON');
   const firstCookie = cookieHeader(first);
   await http.get('/api/v1/auth/session').set('Cookie', firstCookie).expect(200);
-  const profile = await http.get('/api/v1/identity/me').set('Cookie', firstCookie).expect(200);
+  const profile = await http.get('/api/v1/identity/me').set('Cookie', firstCookie);
+  assert.equal(profile.status, 200, `patient profile failed: ${JSON.stringify(profile.body)}`);
   assert.equal(profile.body.patientId, patientId); assert.equal(profile.body.hid, 'HID-RUNTMESELF');
   assert(!('accountId' in profile.body) && !('nin' in profile.body));
   const history = await http.get('/api/v1/identity/me/access-history').set('Cookie', firstCookie).expect(200);

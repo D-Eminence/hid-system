@@ -18,6 +18,8 @@ export interface ActorContext {
   sessionId?: string;
   roles: readonly string[];
   permissions: readonly string[];
+  platformRoles?: readonly string[];
+  platformPermissions?: readonly string[];
   facilityIds: readonly string[];
   facilities: readonly FacilityAssignment[];
   facility?: FacilityAssignment;

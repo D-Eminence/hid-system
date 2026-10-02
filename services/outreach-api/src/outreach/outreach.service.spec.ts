@@ -9,6 +9,7 @@ const ids = {
   case: '123e4567-e89b-42d3-a456-426614174004',
   patient: '123e4567-e89b-42d3-a456-426614174005',
   command: '123e4567-e89b-42d3-a456-426614174006',
+  campaign: '123e4567-e89b-42d3-a456-426614174008',
 };
 const context: DataAccessContext = {
   correlationId: 'correlation-12345678', facilityId: ids.facility, membershipId: ids.membership,
@@ -24,7 +25,7 @@ const context: DataAccessContext = {
 const input = { localCommandId: ids.command,
   temporaryPatientId: 'tmp_123e4567-e89b-42d3-a456-426614174007',
   fullName: 'Ada Person', sex: 'female' as const, ageYears: 32 };
-const row = { id: ids.case, facility_id: ids.facility, local_command_id: ids.command,
+const row = { id: ids.case, facility_id: ids.facility, campaign_id: null, local_command_id: ids.command,
   temporary_patient_id: input.temporaryPatientId, status: 'identity_resolution_pending' as const,
   full_name: input.fullName, sex: input.sex, age_years: 32, phone: null,
   operational_notes: null, resolved_patient_id: null, resolution_kind: null,
@@ -61,6 +62,53 @@ describe('OutreachService', () => {
       .create(input, 'idempotency-key-1234', context)).resolves.toMatchObject({ id: ids.case });
     expect(query).toHaveBeenCalledTimes(2);
     expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it('binds a registration to an active campaign with exact staff membership', async () => {
+    const campaignInput = { ...input, campaignId: ids.campaign };
+    const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{
+      status: 'active', services: ['registration'], starts_at: new Date(Date.now() - 60_000),
+      ends_at: new Date(Date.now() + 60_000),
+    }] }).mockResolvedValueOnce({ rows: [{ ...row, campaign_id: ids.campaign }] })
+      .mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
+    await expect(new OutreachService(database as never, audit as never, identity as never)
+      .create(campaignInput, 'campaign-idempotency-key', context))
+      .resolves.toMatchObject({ id: ids.case, campaignId: ids.campaign });
+    expect(query.mock.calls[1][0]).toContain('member.membership_id=$3');
+    expect(query.mock.calls[1][1]).toEqual([ids.campaign, ids.facility, ids.membership]);
+    expect(query.mock.calls[2][1][10]).toBe(ids.campaign);
+    expect(query.mock.calls[5][1][6]).toContain(`"campaignId":"${ids.campaign}"`);
+  });
+
+  it('denies a campaign registration without exact membership', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
+    const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
+    await expect(new OutreachService(database as never, audit as never, identity as never)
+      .create({ ...input, campaignId: ids.campaign }, 'campaign-idempotency-key', context))
+      .rejects.toMatchObject({ status: 403, code: 'OUTREACH_CAMPAIGN_ACCESS_DENIED' });
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('denies registration after a campaign closes', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{
+      status: 'closed', services: ['registration'], starts_at: new Date(Date.now() - 60_000),
+      ends_at: null,
+    }] });
+    const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
+    await expect(new OutreachService(database as never, audit as never, identity as never)
+      .create({ ...input, campaignId: ids.campaign }, 'campaign-idempotency-key', context))
+      .rejects.toMatchObject({ status: 409, code: 'OUTREACH_CAMPAIGN_NOT_ACCEPTING_REGISTRATIONS' });
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('filters listed cases by exact campaign membership', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [row] });
+    const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
+    await expect(new OutreachService(database as never, audit as never, identity as never)
+      .list(context)).resolves.toMatchObject([{ id: ids.case, campaignId: null }]);
+    expect(query.mock.calls[0][0]).toContain('outreach.registration_campaign_member(campaign_id, facility_id)');
   });
 
   it('requires Identity authorization before opening a patient-link transaction', async () => {

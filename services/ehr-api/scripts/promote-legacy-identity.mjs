@@ -11,6 +11,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
+import { normalizeContactForLookup, contactLookupHmac } from './contact-lookup.mjs';
+import { validLegacyPinHash } from './legacy-pin-hash.mjs';
 
 const { Client } = pg;
 const targetUrl = process.env.DATABASE_URL;
@@ -20,6 +22,7 @@ const encryptionKeyReference = process.env.MIGRATION_FIELD_KEY_REFERENCE;
 const facilityTimezones = parseFacilityTimezones(process.env.MIGRATION_FACILITY_TIMEZONES_JSON);
 const encryptionKey = decodeKey('MIGRATION_FIELD_ENCRYPTION_KEY_B64', 32);
 const lookupKey = decodeKey('MIGRATION_LOOKUP_HMAC_KEY_B64', 32);
+const contactLookupKey = decodeKey('CONTACT_LOOKUP_HMAC_KEY_B64', 32);
 const batchSize = Number.parseInt(process.env.MIGRATION_BATCH_SIZE ?? '250', 10);
 
 const GOOGLE_ISSUER = 'https://accounts.google.com';
@@ -35,10 +38,6 @@ const OUTREACH_PRESERVATION_ENTITY_TYPES = Object.freeze([
   'outreach_mobile_lab_samples',
   'outreach_invites',
 ]);
-// The PIN command equalizes bcrypt work to cost 12. Accepting a higher-cost
-// source hash would break that bound and could turn a malformed export into a
-// denial-of-service vector, so such a snapshot must be remediated explicitly.
-const BCRYPT_ENVELOPE = /^\$2[aby]\$(?:0[4-9]|1[0-2])\$[./A-Za-z0-9]{53}$/;
 const cutoverInputVerifierPath = fileURLToPath(new URL('./verify-supabase-cutover-input.mjs', import.meta.url));
 
 if (!targetUrl) throw new Error('DATABASE_URL is required');
@@ -259,14 +258,6 @@ function legacyAuditOutcome(value) {
   if (value === 'deny' || value === 'not_found' || value === 'denied') return 'denied';
   if (value === 'failure' || value === 'failed') return 'failure';
   return 'success';
-}
-
-function normalizePhone(value) {
-  return value ? String(value).replace(/[^0-9+]/g, '') : null;
-}
-
-function normalizeEmail(value) {
-  return value ? String(value).trim().toLowerCase() : null;
 }
 
 function quoteIdentifier(value) {
@@ -839,8 +830,15 @@ async function main() {
     await promoteEntity(client, 'patients', async (row) => {
       const source = row.payload;
       await requireTarget(client, 'auth.accounts', source.auth_user_id, 'patients', row);
-      const phone = normalizePhone(source.phone_e164);
-      const email = normalizeEmail(source.email);
+      let phone;
+      let email;
+      try {
+        phone = normalizeContactForLookup('phone', source.phone_e164);
+        email = normalizeContactForLookup('email', source.email);
+      } catch {
+        throw new PromotionConflict('patients', row.source_pk, 'invalid_source_value', row.payload_sha256.trim(), null,
+          { field: 'contact', reason: 'invalid_contact_format' });
+      }
       const emergencyContact = {
         name: source.emergency_contact_name ?? null,
         relationship: source.emergency_contact_relationship ?? null,
@@ -857,9 +855,9 @@ async function main() {
         last_name: source.last_name,
         full_name: source.full_name,
         phone_e164_ciphertext: phone ? encrypt(phone, `${source.id}:phone`) : null,
-        phone_lookup_hmac: phone ? hmacLookup(phone) : null,
+        phone_lookup_hmac: phone ? contactLookupHmac('phone', phone, contactLookupKey) : null,
         email_ciphertext: email ? encrypt(email, `${source.id}:email`) : null,
-        email_lookup_hmac: email ? hmacLookup(email) : null,
+        email_lookup_hmac: email ? contactLookupHmac('email', email, contactLookupKey) : null,
         contact_key_version: phone || email ? encryptionKeyReference : null,
         gender: textOrNull(source.gender),
         dob: source.dob ?? null,
@@ -885,6 +883,23 @@ async function main() {
       };
       const encryptedColumns = new Set(['phone_e164_ciphertext', 'email_ciphertext', 'emergency_contact_ciphertext']);
       await insertExact(client, 'patients', row, 'identity.patients', data, Object.keys(data).filter((column) => !encryptedColumns.has(column)));
+
+      // Compare only migration-owned provenance on retry. The assurance row's
+      // `state` (and its verified_provider / timestamps) belong to the runtime
+      // ladder and may already have advanced past LEGACY_MIGRATED for a patient
+      // who completed progressive NIN binding, which must not read as a
+      // promotion mismatch. A wrong patient/account/provenance still conflicts.
+      await insertExact(client, 'patients', row, 'identity.patient_assurance_states', {
+        patient_id: source.id,
+        account_id: source.auth_user_id,
+        state: 'LEGACY_MIGRATED',
+        source_system: 'legacy_identity',
+        source_reference: source.id,
+        verified_provider: null,
+        contact_verified_at: null,
+        nin_verified_at: null,
+        review_reason_code: null,
+      }, ['patient_id', 'account_id', 'source_system', 'source_reference'], 'patient_id');
 
       const existing = await client.query(
         `select phone_e164_ciphertext, email_ciphertext, emergency_contact_ciphertext from identity.patients where id = $1`,
@@ -941,7 +956,7 @@ async function main() {
           { field: 'patient_id', reason: 'source_primary_key_mismatch' },
         );
       }
-      if (typeof source.pin_hash !== 'string' || !BCRYPT_ENVELOPE.test(source.pin_hash)) {
+      if (!validLegacyPinHash(source.pin_hash)) {
         throw new PromotionConflict(
           'patient_access_pins', row.source_pk, 'invalid_source_value', row.payload_sha256.trim(), null,
           { field: 'pin_hash', reason: 'unsupported_bcrypt_envelope' },

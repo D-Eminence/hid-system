@@ -1,4 +1,4 @@
-import { createCipheriv, createHmac, randomBytes } from 'node:crypto';
+import { createCipheriv, createHash, createHmac, randomBytes } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
@@ -16,6 +16,12 @@ export interface ProtectedNin {
   keyVersion: string;
 }
 
+export interface ProtectedPatientNinProfile {
+  ciphertext: Buffer;
+  sha256: string;
+  keyVersion: string;
+}
+
 export function createNinLookupHmac(nin: string, lookupKey: Buffer): string {
   if (lookupKey.length !== 32) {
     throw new DomainProblem(503, 'NIN_PROTECTION_UNAVAILABLE', 'NIN protection keys are unavailable');
@@ -28,12 +34,42 @@ export function protectNin(
   caseId: string,
   config: NinProtectionConfig,
 ): ProtectedNin {
+  return protectNinWithContext(nin, `identity:registration-case:${caseId}:nin`, config);
+}
+
+export function protectPatientSelfNin(
+  nin: string,
+  evidenceId: string,
+  config: NinProtectionConfig,
+): ProtectedNin {
+  return protectNinWithContext(nin, `identity:patient-self-nin:${evidenceId}:nin`, config);
+}
+
+export function protectPatientSelfNinProfile(
+  profile: { firstName: string; lastName: string; dateOfBirth: string },
+  evidenceId: string,
+  config: NinProtectionConfig,
+): ProtectedPatientNinProfile {
+  if (config.encryptionKey.length !== 32) {
+    throw new DomainProblem(503, 'NIN_PROTECTION_UNAVAILABLE', 'NIN protection keys are unavailable');
+  }
+  const json = JSON.stringify(profile);
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', config.encryptionKey, nonce);
+  cipher.setAAD(Buffer.from(`identity:patient-self-nin-profile:${evidenceId}`, 'utf8'));
+  const encrypted = Buffer.concat([cipher.update(json, 'utf8'), cipher.final()]);
+  const ciphertext = Buffer.concat([Buffer.from([1]), nonce, cipher.getAuthTag(), encrypted]);
+  return { ciphertext,
+    sha256: createHash('sha256').update(ciphertext).digest('hex'), keyVersion: config.keyVersion };
+}
+
+function protectNinWithContext(nin: string, associatedData: string, config: NinProtectionConfig): ProtectedNin {
   if (config.lookupKey.length !== 32 || config.encryptionKey.length !== 32) {
     throw new DomainProblem(503, 'NIN_PROTECTION_UNAVAILABLE', 'NIN protection keys are unavailable');
   }
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', config.encryptionKey, nonce);
-  cipher.setAAD(Buffer.from(`identity:registration-case:${caseId}:nin`, 'utf8'));
+  cipher.setAAD(Buffer.from(associatedData, 'utf8'));
   const ciphertext = Buffer.concat([cipher.update(nin, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
   return {
@@ -60,6 +96,32 @@ export class NinIdentifierProtector {
       throw new DomainProblem(503, 'NIN_PROTECTION_UNAVAILABLE', 'NIN protection keys are unavailable');
     }
     return protectNin(nin, caseId, {
+      lookupKey: Buffer.from(environment.NIN_LOOKUP_HMAC_KEY_B64, 'base64'),
+      encryptionKey: Buffer.from(environment.NIN_ENCRYPTION_KEY_B64, 'base64'),
+      keyVersion: environment.NIN_KEY_VERSION,
+    });
+  }
+
+  protectPatientSelf(nin: string, evidenceId: string): ProtectedNin {
+    const environment = getEnvironment();
+    if (!environment.NIN_LOOKUP_HMAC_KEY_B64 || !environment.NIN_ENCRYPTION_KEY_B64) {
+      throw new DomainProblem(503, 'NIN_PROTECTION_UNAVAILABLE', 'NIN protection keys are unavailable');
+    }
+    return protectPatientSelfNin(nin, evidenceId, {
+      lookupKey: Buffer.from(environment.NIN_LOOKUP_HMAC_KEY_B64, 'base64'),
+      encryptionKey: Buffer.from(environment.NIN_ENCRYPTION_KEY_B64, 'base64'),
+      keyVersion: environment.NIN_KEY_VERSION,
+    });
+  }
+
+  protectPatientSelfProfile(
+    profile: { firstName: string; lastName: string; dateOfBirth: string }, evidenceId: string,
+  ): ProtectedPatientNinProfile {
+    const environment = getEnvironment();
+    if (!environment.NIN_LOOKUP_HMAC_KEY_B64 || !environment.NIN_ENCRYPTION_KEY_B64) {
+      throw new DomainProblem(503, 'NIN_PROTECTION_UNAVAILABLE', 'NIN protection keys are unavailable');
+    }
+    return protectPatientSelfNinProfile(profile, evidenceId, {
       lookupKey: Buffer.from(environment.NIN_LOOKUP_HMAC_KEY_B64, 'base64'),
       encryptionKey: Buffer.from(environment.NIN_ENCRYPTION_KEY_B64, 'base64'),
       keyVersion: environment.NIN_KEY_VERSION,

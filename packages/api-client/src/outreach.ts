@@ -17,6 +17,7 @@ export interface OutreachClientOptions {
 export interface OutreachRegistrationCase {
   id: string;
   facilityId: string;
+  campaignId: string | null;
   localCommandId: string;
   temporaryPatientId: string;
   status: 'identity_resolution_pending' | 'identity_resolved';
@@ -34,6 +35,7 @@ export interface OutreachRegistrationCase {
 
 export interface CreateOutreachRegistrationCase {
   localCommandId: string;
+  campaignId?: string;
   temporaryPatientId: string;
   fullName: string;
   sex: OutreachRegistrationCase['sex'];

@@ -22,7 +22,10 @@ import {
   CommercialProductsPage,
   EhrConfiguratorPage,
   PricingPage,
+  ProviderApplicationPage,
+  ProviderCompletionPage,
   PatientAuthPage,
+  PatientEnrollmentPage,
   getRoutePreloadKeys,
   PatientBioDataPage,
   PatientHistoryPage,
@@ -212,15 +215,18 @@ export default function App() {
             <Route path="/solutions" element={<CommercialProductsPage />} />
             <Route path="/developers" element={<CommercialProductsPage />} />
             <Route path="/pricing" element={<PricingPage />} />
+            <Route path="/provider/apply" element={<ProviderApplicationPage />} />
+            <Route path="/provider/complete" element={<ProviderCompletionPage />} />
             <Route path="/configure-ehr" element={<EhrConfiguratorPage />} />
-            <Route path="/signup" element={<Navigate to="/patient" replace />} />
+            <Route path="/signup" element={<Navigate to="/patient/enroll" replace />} />
             <Route path="/login" element={<Navigate to="/patient" replace />} />
             <Route path="/dashboard" element={<Navigate to={HOSPITAL_DASHBOARD_PATH} replace />} />
-            <Route path="/register" element={<Navigate to="/patient" replace />} />
+            <Route path="/register" element={<Navigate to="/patient/enroll" replace />} />
             <Route path="/doctor" element={<Navigate to={HOSPITAL_DASHBOARD_PATH} replace />} />
             <Route path="/records" element={<Navigate to="/patient/records" replace />} />
             <Route path="/logs" element={<Navigate to="/patient/history" replace />} />
             <Route path="/patient" element={<PatientAuthPage />} />
+            <Route path="/patient/enroll" element={<PatientEnrollmentPage />} />
             <Route path="/patient/profile" element={<PatientProfilePage />} />
             <Route path="/patient/biodata" element={<PatientBioDataPage />} />
             <Route path="/patient/records" element={<PatientRecordsPage />} />

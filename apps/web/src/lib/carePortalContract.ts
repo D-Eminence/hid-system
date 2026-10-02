@@ -2,6 +2,8 @@
 export interface PatientSelf {
   patientId: string; hid: string; firstName: string; lastName: string; fullName: string
   dateOfBirth: string | null; gender: string | null; country: string | null; state: string | null; version: number
+  assuranceState: 'LEGACY_MIGRATED' | 'CONTACT_VERIFIED' | 'NIN_PENDING' | 'NIN_VERIFIED' | 'MANUAL_REVIEW' | null
+  accessPinConfigured: boolean
 }
 export interface ReleasedRecords {
   encounters: Array<{ id: string; facilityId: string; encounterType: string; status: string; startedAt: string; endedAt: string | null }>
@@ -36,6 +38,13 @@ export function createCarePortalApi(send: CanonicalTransport) {
   return {
     self: () => send<PatientSelf>('/api/v1/identity/me'),
     ownRecords: () => send<ReleasedRecords>('/api/v1/ehr/me/records'),
+    configureAccessPin(pin: string) {
+      if (!/^\d{4,8}$/.test(pin)) throw new Error('Enter an Access PIN of 4 to 8 digits.')
+      return send<{ configured: true }>('/api/v1/identity/me/access-pin', {
+        method: 'POST', body: JSON.stringify({ pin }),
+      })
+    },
+    revokeAccessPin: () => send<{ revoked: true }>('/api/v1/identity/me/access-pin', { method: 'DELETE' }),
     async verifyNin(nin: string) {
       const normalized = nin.replace(/[\s-]+/g, '')
       if (!/^\d{11}$/.test(normalized)) {

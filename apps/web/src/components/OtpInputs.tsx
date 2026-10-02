@@ -1,5 +1,21 @@
 import React, { useRef } from 'react'
 
+/** Keep the code contiguous so a partial paste cannot reuse stale trailing digits. */
+export function nextOtpValue(value: string, index: number, raw: string, paste = false) {
+  const digits = raw.replace(/\D/g, '').slice(0, 6)
+  if (!digits) return value.slice(0, index)
+  if (paste || digits.length > 1) {
+    const prefix = digits.length === 6 || value.length < index ? '' : value.slice(0, index)
+    return (prefix + digits).slice(0, 6)
+  }
+  const position = Math.min(index, value.length)
+  return (value.slice(0, position) + digits + value.slice(position + 1)).slice(0, 6)
+}
+
+export function shouldCompleteOtp(next: string, raw: string, paste = false) {
+  return next.length === 6 && (!paste || raw.replace(/\D/g, '').length >= 6)
+}
+
 export function OtpInputs({
   value,
   onChange,
@@ -11,33 +27,21 @@ export function OtpInputs({
 }) {
   const refs = useRef<Array<HTMLInputElement | null>>([])
 
-  function applyDigits(startIndex: number, raw: string) {
-    const digits = raw.replace(/\D/g, '').slice(0, 6 - startIndex)
-    if (!digits) return
+  function applyDigits(startIndex: number, raw: string, paste = false) {
+    const next = nextOtpValue(value, startIndex, raw, paste)
+    if (next === value && !raw.replace(/\D/g, '')) return
+    onChange(next)
 
-    const next = Array.from({ length: 6 }, (_, index) => value[index] ?? '')
-    digits.split('').forEach((digit, offset) => {
-      next[startIndex + offset] = digit
-    })
-
-    const joined = next.join('').slice(0, 6)
-    onChange(joined)
-
-    const focusIndex = Math.min(startIndex + digits.length, 5)
+    const focusIndex = Math.min(next.length, 5)
     refs.current[focusIndex]?.focus()
     refs.current[focusIndex]?.select()
-    if (joined.length === 6) onComplete?.(joined)
+    // A short paste is still a partial entry, even if a pre-existing prefix
+    // happens to make the combined value six digits long.
+    if (shouldCompleteOtp(next, raw, paste)) onComplete?.(next)
   }
 
   function updateAt(index: number, raw: string) {
     const digits = raw.replace(/\D/g, '')
-    if (!digits) {
-      const next = value.split('')
-      next[index] = ''
-      onChange(next.join(''))
-      return
-    }
-
     applyDigits(index, digits)
   }
 
@@ -46,7 +50,7 @@ export function OtpInputs({
     if (!digits) return
 
     event.preventDefault()
-    applyDigits(digits.length >= 6 ? 0 : index, digits)
+    applyDigits(index, digits, true)
   }
 
   return (

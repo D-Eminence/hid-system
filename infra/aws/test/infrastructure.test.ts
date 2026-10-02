@@ -111,6 +111,45 @@ test('RDS is private', () => {
   assert.equal(database!.PubliclyAccessible, false);
 });
 
+test('internal HTTPS ingress is limited to the eight owner-service security groups', () => {
+  const allowedSourcePrefixes = [
+    'IdentityApi', 'EhrApi', 'LabApi', 'PharmacyApi', 'OcrApi', 'OutreachApi',
+    'NotificationApi', 'NotificationWorker',
+  ];
+  for (const template of [regional, stagingRegional, fidelityRegional]) {
+    const internal = resources(template, 'AWS::EC2::SecurityGroup').find(([, group]) =>
+      group.Properties?.GroupDescription === 'Internal HTTPS service boundary for server-to-server calls');
+    assert.ok(internal);
+    const [internalId, internalGroup] = internal;
+    assert.deepEqual(internalGroup.Properties?.SecurityGroupIngress ?? [], [],
+      'the listener must not add an inline world-open ingress rule');
+
+    const ingress = properties(template, 'AWS::EC2::SecurityGroupIngress').filter((rule) =>
+      JSON.stringify(rule.GroupId) === JSON.stringify({ 'Fn::GetAtt': [internalId, 'GroupId'] }));
+    assert.equal(ingress.length, allowedSourcePrefixes.length);
+    const actualSources = new Set<string>();
+    for (const rule of ingress) {
+      assert.equal(rule.IpProtocol, 'tcp');
+      assert.equal(rule.FromPort, 443);
+      assert.equal(rule.ToPort, 443);
+      assert.equal(rule.CidrIp, undefined);
+      assert.equal(rule.CidrIpv6, undefined);
+      const source = rule.SourceSecurityGroupId as { readonly 'Fn::GetAtt': readonly string[] };
+      assert.deepEqual(source['Fn::GetAtt'].slice(1), ['GroupId']);
+      actualSources.add(source['Fn::GetAtt'][0]!);
+    }
+    const expectedSources = allowedSourcePrefixes.map((prefix) => {
+      const source = resources(template, 'AWS::EC2::SecurityGroup').find(([id]) =>
+        id.startsWith(`${prefix}SecurityGroup`));
+      assert.ok(source, `missing ${prefix} source security group`);
+      return source[0];
+    });
+    assert.deepEqual(actualSources, new Set(expectedSources));
+  }
+  assert.equal(resources(sleepRegional, 'AWS::EC2::SecurityGroup').some(([, group]) =>
+    group.Properties?.GroupDescription === 'Internal HTTPS service boundary for server-to-server calls'), false);
+});
+
 test('RDS is encrypted with a customer-managed KMS key', () => {
   const [database] = properties(regional, 'AWS::RDS::DBInstance');
   assert.equal(database!.StorageEncrypted, true);
@@ -456,8 +495,10 @@ test('an explicit QoreID staging synth injects its distinct server-only secret i
   assert.equal(environment.QOREID_ENABLED, 'true');
   assert.deepEqual(identityContainer.Secrets.filter(item => item.Name.startsWith('QOREID_')).map(item => item.Name).sort(),
     ['QOREID_CLIENT_ID', 'QOREID_CLIENT_SECRET']);
+  assert.ok(identityContainer.Secrets.some(item => item.Name === 'NIN_LOOKUP_HMAC_KEY_B64'));
+  assert.ok(identityContainer.Secrets.some(item => item.Name === 'NIN_ENCRYPTION_KEY_B64'));
   for (const task of tasks.filter(task => task !== identity)) {
-    assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /QOREID_CLIENT_ID|QOREID_CLIENT_SECRET/);
+    assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /QOREID_CLIENT_ID|QOREID_CLIENT_SECRET|NIN_LOOKUP_HMAC_KEY_B64/);
   }
 });
 

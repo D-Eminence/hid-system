@@ -12,6 +12,9 @@ insert into identity.patients(id,account_id,hid_code,first_name,last_name,full_n
 values
  ('a2000000-0000-4000-8000-000000000001','a1000000-0000-4000-8000-000000000001','HID-SELFABC','Self','One','Self One','active'),
  ('a2000000-0000-4000-8000-000000000002','a1000000-0000-4000-8000-000000000002','HID-SELFDEF','Self','Two','Self Two','active');
+insert into identity.patient_assurance_states(patient_id,account_id,state,source_system)
+values('a2000000-0000-4000-8000-000000000001','a1000000-0000-4000-8000-000000000001',
+  'LEGACY_MIGRATED','synthetic-legacy');
 insert into auth.sessions(id,account_id,family_id,refresh_token_sha256,access_jti,account_token_version,
   authentication_method,issued_at,expires_at,absolute_expires_at,session_kind,patient_id)
 select ('a3000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
@@ -32,6 +35,10 @@ begin
   if exists(select 1 from identity.current_patient_account('synthetic:self:3')) then raise exception 'unlinked workforce account became a patient'; end if;
   if identity.patient_self_profile('synthetic:self:1','a3000000-0000-4000-8000-000000000001')->>'hid'
       <> 'HID-SELFABC' then raise exception 'self profile missing'; end if;
+  if identity.patient_self_profile('synthetic:self:1','a3000000-0000-4000-8000-000000000001')->>'assuranceState'
+      <> 'LEGACY_MIGRATED' then raise exception 'legacy assurance was not shown accurately'; end if;
+  if identity.patient_self_profile('synthetic:self:1','a3000000-0000-4000-8000-000000000001')->>'accessPinConfigured'
+      <> 'false' then raise exception 'missing PIN was reported as configured'; end if;
   if identity.patient_self_profile('synthetic:self:1','a3000000-0000-4000-8000-000000000002') is not null
     then raise exception 'another patient session was accepted'; end if;
   if identity.patient_self_profile('synthetic:self:2','a3000000-0000-4000-8000-000000000002') is not null
@@ -40,6 +47,20 @@ begin
     then raise exception 'current self authorization failed'; end if;
 end;
 $$;
+select identity.set_my_patient_access_pin('synthetic:self:1','a3000000-0000-4000-8000-000000000001','1234');
+do $$ declare profile jsonb;
+begin
+  profile := identity.patient_self_profile('synthetic:self:1','a3000000-0000-4000-8000-000000000001');
+  if profile->>'accessPinConfigured' <> 'true' then raise exception 'configured PIN was not reported'; end if;
+  if profile ? 'pin' or profile ? 'pinHash' or profile ? 'pin_hash' then
+    raise exception 'PIN secret leaked through patient profile';
+  end if;
+end $$;
+select identity.revoke_my_patient_access_pin('synthetic:self:1','a3000000-0000-4000-8000-000000000001');
+do $$ begin
+  if identity.patient_self_profile('synthetic:self:1','a3000000-0000-4000-8000-000000000001')->>'accessPinConfigured'
+      <> 'false' then raise exception 'revoked PIN was reported as configured'; end if;
+end $$;
 reset role;
 update auth.accounts set disabled_until=clock_timestamp()+interval '1 hour'
   where id='a1000000-0000-4000-8000-000000000001';

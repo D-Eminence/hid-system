@@ -75,6 +75,7 @@ const expectedGatewayTargets = new Map([
   ["'/api/v1/identity'", 'ports.identityApi'],
   ["'/api/v1/audit'", 'ports.identityApi'],
   ["'/api/v1/admin'", 'ports.identityApi'],
+  ["'/api/v1/commercial'", 'ports.identityApi'],
   ["'/api'", 'ports.ehrApi'],
 ])
 for (const [route, target] of expectedGatewayTargets) {

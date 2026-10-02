@@ -17,6 +17,81 @@ export type VerificationFailureCategory =
 
 export type OrganizationVerificationContext = 'hospital' | 'laboratory' | 'pharmacy';
 
+export interface QoreIdNinClaims {
+  firstName: string;
+  lastName: string;
+  dateOfBirth: string;
+}
+
+export interface QoreIdNinBinding {
+  /** Returned by QoreID and required to equal the submitted 11-digit NIN. */
+  nin: string;
+  firstName: string;
+  lastName: string;
+  dateOfBirth: string;
+}
+
+/** Server-only registry identity for a new, still-pending patient enrollment. */
+export interface QoreIdNinEnrollmentBinding extends QoreIdNinBinding {
+  nin: string;
+  gender: 'female' | 'male' | 'intersex' | 'other' | 'unknown';
+  middleName?: string;
+  phoneNumber?: string;
+  photo?: string;
+  address?: string;
+  /** HID-normalized address components parsed from provider `nin.residence` only. */
+  residence?: {
+    address1: string;
+    town?: string;
+    lga?: string;
+    state?: string;
+  };
+}
+
+export interface QoreIdCacBinding {
+  /** Prefixed HID key used in the provider-verified registration lookup. */
+  registrationNumber: string;
+  /** Optional QoreID `cac.rcNumber`; when present it must match the queried key. */
+  providerRegistrationNumber?: string;
+  companyName: string;
+  entityType: string;
+  registrationDate: string;
+  address: string;
+  registryStatus: string;
+  /** Direct `cac.address`, kept separate from the selected HID legal address. */
+  providerAddress?: string;
+  /** Provider classification; never substitutes for `cac.companyType`. */
+  metadataCompanyType?: string;
+  branchAddress?: string;
+  companyEmail?: string;
+  city?: string;
+  headOfficeAddress?: string;
+  lga?: string;
+  affiliates?: number;
+  state?: string;
+}
+
+/** A verified CAC check can return too little legal data to bind an organization. */
+export interface QoreIdCacIncompleteProfile {
+  /** The queried identifier is an input, not a provider-confirmed binding. */
+  submittedRegistrationNumber: string;
+  providerRegistrationNumber?: string;
+  metadataCompanyType?: string;
+  companyName?: string;
+  entityType?: string;
+  registrationDate?: string;
+  address?: string;
+  providerAddress?: string;
+  registryStatus?: string;
+  branchAddress?: string;
+  companyEmail?: string;
+  city?: string;
+  headOfficeAddress?: string;
+  lga?: string;
+  affiliates?: number;
+  state?: string;
+}
+
 export interface QoreIdVerificationResult {
   provider: typeof QOREID_PROVIDER;
   state: VerificationState;
@@ -24,6 +99,16 @@ export interface QoreIdVerificationResult {
   // is a safe opaque scalar. It is not an identifier submitted by a user.
   providerReference?: string;
   respondedAt: string;
+  // Registry fields are normalized and server-only. They must not be copied
+  // into the public verification response or audit details.
+  ninBinding?: QoreIdNinBinding;
+  ninEnrollmentBinding?: QoreIdNinEnrollmentBinding;
+  cacBinding?: QoreIdCacBinding;
+  cacIncompleteProfile?: QoreIdCacIncompleteProfile;
+  /** Submitted canonical RC/BN/IT identifier after a successful CAC lookup. */
+  verifiedRegistrationNumber?: string;
+  /** QoreID verified the CAC check; HID binding may still be incomplete. */
+  providerVerification?: 'verified';
 }
 
 export interface VerificationResponse {
@@ -32,5 +117,6 @@ export interface VerificationResponse {
   provider: typeof QOREID_PROVIDER;
   state: EvidenceResult;
   providerReference?: string;
+  providerVerification?: 'verified';
   recordedAt: string;
 }

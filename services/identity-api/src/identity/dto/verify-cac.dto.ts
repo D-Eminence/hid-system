@@ -8,6 +8,6 @@ const normalizeRegistrationNumber = ({ value }: TransformFnParams): unknown =>
 export class VerifyCacDto {
   @Transform(normalizeRegistrationNumber)
   @IsString()
-  @Matches(/^(?:RC|BN|IT)\d+$/)
+  @Matches(/^(?:RC|BN|IT)\d{4,20}$/)
   regNumber!: string;
 }

@@ -9,6 +9,7 @@ import type { AccountStatusCommandDto, FacilityStatusCommandDto,
   PlatformRoleCommandDto, RevokeSessionsCommandDto } from './dto/admin-command.dto';
 import type { ListFacilitiesDto, ListIdentityReviewsDto,
   ListPlatformAuditDto, ListPrincipalsDto } from './dto/admin-list.dto';
+import type { PlatformControlCommandDto } from './dto/admin-command.dto';
 
 interface FacilityRow extends QueryResultRow {
   id: string; organizationId: string; organizationName: string; name: string; code: string;
@@ -49,6 +50,28 @@ export class AdminService {
         platformPermissions: context.actor.platformPermissions ?? [],
       },
     };
+  }
+
+
+  async platformControls(context: DataAccessContext) {
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query(`select * from platform.admin_list_controls()`);
+      return result.rows.map((row) => ({ controlKey: row.control_key, enabled: row.enabled, reason: row.reason,
+        version: Number(row.row_version), updatedAt: new Date(row.updated_at).toISOString() }));
+    }, { readOnly: true });
+  }
+
+  async setPlatformControl(context: DataAccessContext, input: PlatformControlCommandDto, expectedVersion: number) {
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query(`select * from platform.admin_set_control($1,$2,$3,$4)`,
+        [input.controlKey, input.enabled, expectedVersion, input.reason.trim()]);
+      const row = result.rows[0];
+      if (!row) throw new DomainProblem(503, 'ADMIN_CONTROL_UNAVAILABLE', 'Platform control could not be updated');
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.platform-control.change',
+        'platform-control', row.control_key, input.reason,
+        { enabled: row.enabled, version: Number(row.row_version), replayed: row.replayed }));
+      return { controlKey: row.control_key, enabled: row.enabled, version: Number(row.row_version), replayed: row.replayed };
+    });
   }
 
   async overview(context: DataAccessContext) {
@@ -132,6 +155,44 @@ export class AdminService {
         return { facilityId: row.facility_id, status: row.lifecycle_status,
           version: Number(row.row_version), replayed: row.replayed };
       } catch (error) { throw this.commandError(error); }
+    });
+  }
+
+  async exportPrincipals(context: DataAccessContext, query: import('./dto/admin-list.dto').ExportPrincipalsDto): Promise<string> {
+    const term = query.query ? `%${this.escapeLike(query.query.trim())}%` : null;
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query<PrincipalRow>(`select account.id::text, account.subject, account.email,
+          account.display_name as "displayName", account.status, account.row_version::text as version,
+          account.created_at as "createdAt",
+          (select count(*) from auth.sessions session where session.account_id = account.id
+            and session.revoked_at is null and session.expires_at > clock_timestamp())::text as "activeSessionCount",
+          coalesce((select jsonb_agg(jsonb_build_object('id', membership.id, 'facilityId', membership.facility_id,
+            'facilityName', facility.name, 'role', membership.membership_role, 'appRole', membership.app_role,
+            'active', membership.active, 'version', membership.row_version) order by facility.name)
+            from identity.staff_facility_memberships membership
+            join identity.facilities facility on facility.id = membership.facility_id
+            where membership.account_id = account.id), '[]'::jsonb) as memberships,
+          coalesce((select array_agg(assignment.role_code order by assignment.role_code)
+            from auth.account_roles assignment where assignment.account_id = account.id
+              and assignment.scope_type = 'platform' and assignment.revoked_at is null), array[]::text[]) as "platformRoles"
+        from auth.accounts account
+        where ($1::text is null or account.email ilike $1 escape '\\' or account.display_name ilike $1 escape '\\'
+          or account.subject ilike $1 escape '\\')
+          and ($2::text is null or account.status = $2)
+        order by account.updated_at desc, account.id
+        limit 10000`, [term, query.status ?? null]);
+
+      const header = ['account_id', 'subject', 'email', 'display_name', 'status', 'version',
+        'created_at', 'active_sessions', 'platform_roles', 'facility_memberships'];
+      const rows = result.rows.map((row) => [
+        row.id, row.subject, row.email ?? '', row.displayName ?? '', row.status, Number(row.version),
+        new Date(row.createdAt).toISOString(), Number(row.activeSessionCount),
+        (row.platformRoles ?? []).join('|'), JSON.stringify(row.memberships ?? []),
+      ]);
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.principals.export',
+        'authentication-account-collection', null, 'Administrative principal export',
+        { returnedCount: rows.length, status: query.status ?? null, filtered: Boolean(query.query) }));
+      return [header, ...rows].map((row) => row.map((value) => this.csv(value)).join(',')).join('\\n') + '\\n';
     });
   }
 
@@ -288,6 +349,11 @@ export class AdminService {
   }
 
   private escapeLike(value: string): string { return value.replace(/[\\%_]/g, (match) => `\\${match}`); }
+
+  private csv(value: unknown): string {
+    const text = value == null ? '' : String(value);
+    return /[",\\n\\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
 
   private commandError(error: unknown): Error {
     if (error instanceof DomainProblem) return error;

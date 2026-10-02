@@ -1,5 +1,9 @@
 import { Module } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
+import { AuthModule } from '../auth/auth.module';
+import { TurnstileModule } from '../auth/turnstile.module';
+import { NotificationOtpClient } from '../auth/notification-otp.client';
+import { IntegrationModule } from '../integrations/integration.module';
 import { IdentityController } from './identity.controller';
 import { NinRegistrationController } from './nin-registration.controller';
 import { PostgresIdentityProvider } from './postgres-identity.provider';
@@ -18,9 +22,20 @@ import {
 } from './qoreid-verification.adapter';
 import { QoreIdVerificationController } from './qoreid-verification.controller';
 import { QoreIdVerificationService } from './qoreid-verification.service';
+import { AdminOrganizationApplicationsController, PublicOrganizationApplicationsController,
+  PublicOrganizationProfileCompletionController } from './organization-applications.controller';
+import { OrganizationApplicationsService } from './organization-applications.service';
+import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
+import { PatientEnrollmentController } from './patient-enrollment.controller';
+import { PatientEnrollmentService } from './patient-enrollment.service';
+import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 
 @Module({
-  controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController],
+  imports: [AuthModule, TurnstileModule, IntegrationModule],
+  controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
+    PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
+    AdminOrganizationApplicationsController,
+    PatientEnrollmentController],
   providers: [
     IdentityService,
     NinRegistrationService,
@@ -39,6 +54,12 @@ import { QoreIdVerificationService } from './qoreid-verification.service';
     },
     QoreIdVerificationAdapter,
     QoreIdVerificationService,
+    OrganizationApplicationsService,
+    OrganizationProfileCompletionService,
+    NotificationOtpClient,
+    PatientEnrollmentService,
+    QoreIdPublicPatientIdentityProvider,
+    { provide: PUBLIC_PATIENT_IDENTITY_PROVIDER, useExisting: QoreIdPublicPatientIdentityProvider },
     PostgresIdentityProvider,
     {
       provide: IDENTITY_PROVIDER,
@@ -57,6 +78,6 @@ import { QoreIdVerificationService } from './qoreid-verification.service';
       },
     },
   ],
-  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator],
+  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter],
 })
 export class IdentityModule {}

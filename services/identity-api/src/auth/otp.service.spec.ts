@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createCipheriv, createHmac } from 'node:crypto';
 import * as argon2 from 'argon2';
 jest.mock('argon2', () => ({
   argon2id: 2,
@@ -13,6 +13,7 @@ import { generateSixDigitOtp, OtpService } from './otp.service';
 describe('Identity OTP credentials', () => {
   const original = { ...process.env };
   const key = Buffer.alloc(32, 7);
+  const encryptionKey = Buffer.alloc(32, 8);
 
   beforeEach(() => {
     Object.assign(process.env, {
@@ -21,6 +22,8 @@ describe('Identity OTP credentials', () => {
       AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
       AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
       OTP_HMAC_KEY_B64: key.toString('base64'),
+      NIN_ENCRYPTION_KEY_B64: encryptionKey.toString('base64'),
+      NIN_KEY_VERSION: 'local-v1',
     });
     resetEnvironmentForTests();
   });
@@ -68,6 +71,71 @@ describe('Identity OTP credentials', () => {
     expect(inserted?.values).not.toContain(delivered.code);
     expect(stdout.mock.calls.flat().join(' ')).not.toContain(delivered.code);
     expect(stderr.mock.calls.flat().join(' ')).not.toContain(delivered.code);
+  });
+
+  it('sends recovery to the verified phone for a phone-only public patient identified by HID', async () => {
+    const enrollmentId = '50000000-0000-4000-8000-000000000001';
+    const phone = '+2348012345678';
+    const ciphertext = encryptedContact(enrollmentId, phone);
+    const calls: Array<{ sql: string; values: readonly unknown[] }> = [];
+    const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
+      calls.push({ sql, values });
+      if (sql.includes('from auth.accounts account')) return { rows: [{
+        id: 'account-1', email: null, token_version: '1', phone_enrollment_id: enrollmentId,
+        phone_ciphertext: ciphertext, phone_key_version: 'local-v1',
+      }] };
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
+
+    const result = await new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient)
+      .start({ identifier: 'hid-abcdefgh', purpose: 'PASSWORD_RESET',
+        remoteIp: '192.0.2.30', correlationId: 'phone-recovery-0001' });
+
+    expect(result).toEqual(expect.objectContaining({ accepted: true, deliveryChannels: ['email', 'sms'] }));
+    expect(result.challengeId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(notification.deliver).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'sms', recipient: phone, purpose: 'PASSWORD_RESET', challengeId: result.challengeId,
+    }));
+    const lookup = calls.find(({ sql }) => sql.includes('from auth.accounts account'));
+    expect(lookup?.values).toEqual(['hid-abcdefgh']);
+    expect(lookup?.sql).toContain("enrollment.state = 'active'");
+    expect(lookup?.sql).toContain('enrollment.contact_verified_at is not null');
+    expect(lookup?.sql).toContain("patient.status = 'active'");
+    expect(lookup?.sql).toContain('patient.phone_lookup_hmac = enrollment.contact_lookup_hmac');
+    expect(lookup?.sql).not.toContain('patient.phone_lookup_hmac = enrollment.contact_hmac');
+    expect(lookup?.sql).toContain('enrollment.account_id = account.id and enrollment.patient_id = patient.id');
+    const inserted = calls.find(({ sql }) => sql.includes('insert into auth.otp_challenges'));
+    expect(inserted?.values[4]).toBe('sms');
+    expect(inserted?.values).not.toContain(phone);
+    expect(calls.map(({ values }) => values)).not.toContainEqual(expect.arrayContaining([phone]));
+  });
+
+  it('keeps an unknown HID and unusable phone evidence on the generic recovery path', async () => {
+    const enrollmentId = '50000000-0000-4000-8000-000000000001';
+    const tampered = Buffer.from(encryptedContact(enrollmentId, '+2348012345678'));
+    tampered[tampered.length - 1] = tampered[tampered.length - 1]! ^ 1;
+    const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
+      if (sql.includes('from auth.accounts account')) return { rows: values[0] === 'HID-ABCDEFGH' ? [{
+        id: 'account-1', email: null, token_version: '1', phone_enrollment_id: enrollmentId,
+        phone_ciphertext: tampered, phone_key_version: 'local-v1',
+      }] : [] };
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    const notification = { deliver: jest.fn() };
+    const service = new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient);
+
+    const unknown = await service.start({ identifier: 'HID-ZYXWVUTS', purpose: 'PASSWORD_RESET',
+      remoteIp: '192.0.2.31', correlationId: 'phone-recovery-unknown' });
+    const unusable = await service.start({ identifier: 'HID-ABCDEFGH', purpose: 'PASSWORD_RESET',
+      remoteIp: '192.0.2.32', correlationId: 'phone-recovery-tampered' });
+
+    expect({ ...unknown, challengeId: '<opaque>' }).toEqual({ ...unusable, challengeId: '<opaque>' });
+    expect(unknown.challengeId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(unusable.challengeId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(notification.deliver).not.toHaveBeenCalled();
+    expect((client.query as jest.Mock).mock.calls.some(([sql]) => String(sql).includes('insert into auth.otp_challenges')))
+      .toBe(false);
   });
 
   it('binds verification to purpose and commits bounded failed-attempt evidence', async () => {
@@ -251,6 +319,14 @@ describe('Identity OTP credentials', () => {
 
   function hmac(...parts: string[]): string {
     return createHmac('sha256', key).update(parts.join('\u001f'), 'utf8').digest('hex');
+  }
+
+  function encryptedContact(enrollmentId: string, phone: string): Buffer {
+    const nonce = Buffer.alloc(12, 3);
+    const cipher = createCipheriv('aes-256-gcm', encryptionKey, nonce);
+    cipher.setAAD(Buffer.from(`identity:public-patient-enrollment:${enrollmentId}:contact`));
+    return Buffer.concat([Buffer.from([1]), nonce, cipher.update(phone, 'utf8'),
+      cipher.final(), cipher.getAuthTag()]);
   }
 
   function transactionDatabase(client: PoolClient): DatabaseService {

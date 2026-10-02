@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsDateString, IsIn, IsInt, IsString, IsUUID, Matches, Max, Min, MinLength } from 'class-validator';
+import { IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, Min, MinLength } from 'class-validator';
 import { IsOptionalButNotNull } from '../../common/validation';
 
 export class AdminPageDto {
@@ -34,6 +34,17 @@ export class ListPrincipalsDto extends AdminPageDto {
   query!: string;
 
   @IsOptionalButNotNull()
+  @IsIn(['active', 'pending_reset', 'locked', 'disabled', 'deleted'])
+  status?: string;
+}
+
+export class ExportPrincipalsDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  query?: string;
+
+  @IsOptional()
   @IsIn(['active', 'pending_reset', 'locked', 'disabled', 'deleted'])
   status?: string;
 }

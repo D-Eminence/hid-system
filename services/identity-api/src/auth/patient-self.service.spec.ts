@@ -46,16 +46,17 @@ describe('Patient self service', () => {
   it('configures a PIN only through the patient-session-bound database command', async () => {
     const { service, query } = setup({ ignored: true });
     query.mockReset();
+    query.mockResolvedValueOnce({ rows: [{ recent: true }] });
     query.mockResolvedValueOnce({ rows: [] });
     query.mockResolvedValueOnce({ rows: [{ patient_id: 'patient-id' }] });
     await expect(service.setAccessPin(request, '1234')).resolves.toEqual({ configured: true });
     expect(query).toHaveBeenNthCalledWith(
-      1,
+      2,
       "select set_config('app.actor_subject',$1,true)",
       ['patient-subject'],
     );
     expect(query).toHaveBeenNthCalledWith(
-      2,
+      3,
       'select identity.set_my_patient_access_pin($1, $2, $3) as patient_id',
       ['patient-subject', 'session-id', '1234'],
     );
@@ -63,18 +64,26 @@ describe('Patient self service', () => {
   it('revokes a PIN only through the patient-session-bound database command', async () => {
     const { service, query } = setup({ ignored: true });
     query.mockReset();
+    query.mockResolvedValueOnce({ rows: [{ recent: true }] });
     query.mockResolvedValueOnce({ rows: [] });
     query.mockResolvedValueOnce({ rows: [{ patient_id: 'patient-id' }] });
     await expect(service.revokeAccessPin(request)).resolves.toEqual({ revoked: true });
     expect(query).toHaveBeenNthCalledWith(
-      1,
+      2,
       "select set_config('app.actor_subject',$1,true)",
       ['patient-subject'],
     );
     expect(query).toHaveBeenNthCalledWith(
-      2,
+      3,
       'select identity.revoke_my_patient_access_pin($1, $2) as patient_id',
       ['patient-subject', 'session-id'],
     );
+  });
+  it('denies a PIN change when the authentication family is no longer recent', async () => {
+    const { service, query } = setup({ ignored: true });
+    query.mockReset().mockResolvedValueOnce({ rows: [{ recent: false }] });
+    await expect(service.setAccessPin(request, '1234')).rejects.toThrow('Sign in again');
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0]?.[0]).toContain('min(family.issued_at)');
   });
 });

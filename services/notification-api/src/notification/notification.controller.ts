@@ -19,7 +19,7 @@ export class NotificationController {
     if (!validateRecipient(input.channel, input.recipient)) {
       throw new BadRequestException('Recipient does not match the selected channel');
     }
-    const result = await this.notifications.deliverOtp({ ...input, idempotencyKey });
+    const result = await this.notifications.deliverOtp({ ...input, idempotencyKey }, input.plan);
     return {
       requestId: randomUUID(), outcome: result.outcome,
       primary: { provider: result.primary.provider, outcome: result.primary.outcome, safeCode: result.primary.safeCode },

@@ -1,6 +1,7 @@
 export interface OutreachRegistrationCase {
   id: string;
   facilityId: string;
+  campaignId: string | null;
   localCommandId: string;
   temporaryPatientId: string;
   status: 'identity_resolution_pending' | 'identity_resolved';
@@ -19,6 +20,7 @@ export interface OutreachRegistrationCase {
 export interface RegistrationRow {
   id: string;
   facility_id: string;
+  campaign_id: string | null;
   local_command_id: string;
   temporary_patient_id: string;
   status: OutreachRegistrationCase['status'];
@@ -38,6 +40,7 @@ export function registrationCase(row: RegistrationRow): OutreachRegistrationCase
   return {
     id: row.id,
     facilityId: row.facility_id,
+    campaignId: row.campaign_id,
     localCommandId: row.local_command_id,
     temporaryPatientId: row.temporary_patient_id,
     status: row.status,

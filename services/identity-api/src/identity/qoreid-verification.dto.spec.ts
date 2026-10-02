@@ -14,12 +14,12 @@ describe('QoreID verification DTOs', () => {
   });
 
   it.each(['RC1234', 'BN1234', 'IT1234'])('accepts normalized CAC registration number %s', async (regNumber) => {
-    const valid = plainToInstance(VerifyCacDto, { regNumber: regNumber.toLowerCase() });
+    const valid = plainToInstance(VerifyCacDto, { regNumber: ` ${regNumber.slice(0, 2).toLowerCase()} 12\t34 ` });
     expect(valid.regNumber).toBe(regNumber);
     expect(await validate(valid)).toHaveLength(0);
   });
 
-  it.each(['1234', 'RC-1234', 'CO1234', 'RCABC'])('rejects unsupported CAC registration number %s', async (regNumber) => {
+  it.each(['1234', 'RC-1234', 'CO1234', 'RCABC', 'RC123', `RC${'1'.repeat(21)}`])('rejects unsupported CAC registration number %s', async (regNumber) => {
     expect(await validate(plainToInstance(VerifyCacDto, { regNumber }))).not.toHaveLength(0);
   });
 });

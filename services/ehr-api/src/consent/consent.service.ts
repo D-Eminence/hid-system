@@ -63,6 +63,7 @@ export class ConsentService {
 
   async activateBreakGlass(context: DataAccessContext, input: CreateBreakGlassDto) {
     try {
+      await this.database.query('select platform.require_control_enabled($1)', ['break_glass_enabled']);
       return await this.database.withTransaction(context, async (client) => {
         const result = await client.query<BreakGlassRow>(
           `select
@@ -116,8 +117,12 @@ export class ConsentService {
       case '42501':
         return new DomainProblem(403, 'CONSENT_COMMAND_DENIED', 'The consent command is not authorized');
       case '23505':
-      case '55000':
         return new DomainProblem(409, 'CONSENT_COMMAND_CONFLICT', 'The consent state no longer permits this command');
+      case '55000':
+        if (errorMessage(error).startsWith('PLATFORM_CONTROL_DISABLED:')) {
+          return new DomainProblem(423, 'PLATFORM_CONTROL_DISABLED', 'Emergency access is temporarily disabled');
+        }
+        return new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
       case '22001':
       case '22023':
       case '22P02':
@@ -134,4 +139,10 @@ function isDatabaseError(value: unknown): value is { code: string } {
     && value !== null
     && 'code' in value
     && typeof (value as { code?: unknown }).code === 'string';
+}
+
+function errorMessage(value: unknown): string {
+  return typeof value === 'object' && value !== null && 'message' in value
+    ? String((value as { message?: unknown }).message ?? '')
+    : '';
 }

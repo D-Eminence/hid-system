@@ -8,8 +8,9 @@ import type { ActorContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { AuthService } from './auth.service';
 import { AuthSessionAuditService } from './auth-session-audit.service';
-import { GoogleLoginDto } from './dto/google-login.dto';
+import { GoogleLinkDto, GoogleLoginDto } from './dto/google-login.dto';
 import { LoginDto } from './dto/login.dto';
+import { PatientLoginDto } from './dto/patient-login.dto';
 import { SelectFacilityDto } from './dto/select-facility.dto';
 import { GoogleAuthenticationService } from './google-authentication.service';
 import type { LoginResult } from './auth.types';
@@ -42,6 +43,9 @@ export class AuthController {
     @Req() request: HidRequest,
     @Res({ passthrough: true }) response: Response,
   ) {
+    if (input.turnstileAction === 'patient-login') {
+      throw new DomainProblem(400, 'INVALID_LOGIN_ACTION', 'A workforce login action is required');
+    }
     return this.performLogin(input, request, response, 'staff');
   }
 
@@ -49,7 +53,7 @@ export class AuthController {
   @Public()
   @HttpCode(200)
   async patientLogin(
-    @Body() input: LoginDto,
+    @Body() input: PatientLoginDto,
     @Req() request: HidRequest,
     @Res({ passthrough: true }) response: Response,
   ) {
@@ -70,6 +74,13 @@ export class AuthController {
     return { nonce };
   }
 
+  @Get('google/onboarding')
+  @Public()
+  googleOnboarding(@Req() request: HidRequest) {
+    this.assertGoogleNonceOrigin(request);
+    return this.google.onboardingStatus(this.cookies(request)[this.google.onboardingCookieName]);
+  }
+
   @Post('oidc/exchange')
   @Public()
   @HttpCode(200)
@@ -79,6 +90,12 @@ export class AuthController {
     @Res({ passthrough: true }) response: Response,
   ) {
     this.assertAllowedOrigin(request);
+    if (input.intent === 'enroll' && (this.hasCookie(request, this.environment.AUTH_COOKIE_NAME)
+      || this.hasCookie(request, `${this.environment.AUTH_COOKIE_NAME}_refresh`)
+      || request.header('authorization'))) {
+      throw new DomainProblem(409, 'GOOGLE_ONBOARDING_REQUIRES_SIGN_OUT',
+        'Sign out before starting a new Health ID enrollment');
+    }
     try {
       await this.turnstile.verifyLogin({
         token: input.turnstileToken,
@@ -90,12 +107,23 @@ export class AuthController {
       if (!nonce) {
         throw new DomainProblem(401, 'GOOGLE_SIGN_IN_DENIED', 'Google sign-in could not be completed for this HID account');
       }
-      const result = await this.google.login(
-        input.idToken,
-        nonce,
-        input.turnstileAction === 'patient-login' ? 'patient' : 'staff',
-        this.event(request),
-      );
+      const actorKind = input.turnstileAction === 'patient-login' ? 'patient' : 'staff';
+      const exchanged = input.intent === 'enroll'
+        ? await this.google.exchange(input.idToken, nonce, actorKind, 'enroll', this.event(request))
+        : { kind: 'session' as const,
+          session: await this.google.login(input.idToken, nonce, actorKind, this.event(request)) };
+      if (exchanged.kind === 'pending') {
+        response.cookie(this.google.onboardingCookieName, exchanged.cookie, {
+          secure: this.environment.AUTH_COOKIE_SECURE,
+          sameSite: 'strict',
+          httpOnly: true,
+          path: '/api/v1',
+          expires: exchanged.expiresAt,
+        });
+        response.status(202);
+        return exchanged.progress;
+      }
+      const result = exchanged.session;
       await this.recordSuccess('auth.google.login', result.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
@@ -115,7 +143,44 @@ export class AuthController {
     }
   }
 
-  private async performLogin(input: LoginDto, request: HidRequest, response: Response, kind: 'staff' | 'patient') {
+  @Post('google/link')
+  @FacilityOptional()
+  @PatientAllowed()
+  @HttpCode(200)
+  async linkGoogleIdentity(
+    @Body() input: GoogleLinkDto,
+    @Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    this.assertAllowedOrigin(request);
+    const actor = request.actor;
+    if (!actor || actor.kind !== 'patient') {
+      throw new DomainProblem(403, 'PATIENT_SCOPE_DENIED', 'A patient session is required');
+    }
+    try {
+      if (input.turnstileAction !== 'patient-login') {
+        throw new DomainProblem(400, 'INVALID_LOGIN_ACTION', 'Patient login action is required');
+      }
+      await this.turnstile.verifyLogin({
+        token: input.turnstileToken,
+        action: input.turnstileAction,
+        origin: request.header('origin'),
+        remoteIp: request.ip,
+      });
+      const nonce = this.googleNonceFromCookie(this.cookies(request)[this.googleNonceCookieName()]);
+      if (!nonce) {
+        throw new DomainProblem(401, 'GOOGLE_SIGN_IN_DENIED', 'Google sign-in could not be completed for this HID account');
+      }
+      await this.google.linkExistingPatient(input.idToken, nonce, input.principal, input.password,
+        actor, this.event(request));
+      await this.recordSuccess('auth.google.link', actor, request);
+      return { linked: true };
+    } finally {
+      this.clearGoogleNonceCookie(response);
+    }
+  }
+
+  private async performLogin(input: LoginDto | PatientLoginDto, request: HidRequest, response: Response, kind: 'staff' | 'patient') {
     this.assertAllowedOrigin(request);
     await this.turnstile.verifyLogin({
       token: input.turnstileToken,
@@ -333,7 +398,7 @@ export class AuthController {
       secure: this.environment.AUTH_COOKIE_SECURE,
       sameSite: 'strict',
       httpOnly: true,
-      path: '/api/v1/auth/oidc',
+      path: '/api/v1/auth',
       expires: expiresAt,
     });
   }
@@ -384,7 +449,7 @@ export class AuthController {
       secure: this.environment.AUTH_COOKIE_SECURE,
       sameSite: 'strict',
       httpOnly: true,
-      path: '/api/v1/auth/oidc',
+      path: '/api/v1/auth',
     });
   }
 
@@ -431,5 +496,16 @@ export class AuthController {
       Object.entries(value as Record<string, unknown>)
         .filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
     );
+  }
+
+  private hasCookie(request: HidRequest, name: string): boolean {
+    // Presence, not identity. `cookies` drops a repeated cookie name because
+    // the parser yields an array, so it cannot be used to decide whether the
+    // caller is signed in: doing so would let a signed-in patient reach
+    // enrollment by repeating the cookie.
+    const value = (request as Request & { cookies?: unknown }).cookies;
+    if (typeof value !== 'object' || value === null) return false;
+    return Object.prototype.hasOwnProperty.call(value, name)
+      && (value as Record<string, unknown>)[name] !== undefined;
   }
 }

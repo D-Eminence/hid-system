@@ -5,7 +5,7 @@
   "provider_name": "QoreID",
   "provider_legal_name": null,
   "nin_documentation_url": "https://docs.qoreid.com/docs/nin-with-nin",
-  "cac_documentation_url": "https://docs.qoreid.com/docs/cac-1",
+  "cac_documentation_url": "https://docs.qoreid.com/docs/copy-of-cac-basic",
   "authentication_documentation_url": "https://docs.qoreid.com/reference/get-client-token",
   "documented_nin_endpoint": "https://api.qoreid.com/v1/ng/identities/nin/{idNumber}",
   "documented_cac_endpoint": "https://api.qoreid.com/v2/ng/identities/cac-basic",
@@ -16,7 +16,8 @@
   "staging_secret_arn": null,
   "contract_review_notes": [
     "The HID QoreID adapter is implemented behind server-only normalized request/result boundaries and is disabled by default.",
-    "Patient NIN verification sends only the validated 11-digit NIN in the provider path; CAC Basic V2 sends only regNumber. Automatic retries are disabled because the POST contract has no approved idempotency mechanism.",
+    "Patient NIN verification sends the validated 11-digit NIN in the provider path plus canonical patient first name, last name, and DOB in the JSON body; CAC Basic V2 sends only regNumber. Automatic retries are disabled because the POST contract has no approved idempotency mechanism.",
+    "NIN exact name-match flags and returned NIN, names, and birth date must bind to the canonical patient, and the submitted NIN lookup HMAC must match its prior governed verified identifier. Enabled staging requires the existing NIN lookup key in the Identity sensitive secret. CAC returned registration number, company name, and active status must bind to the application. The sample CAC bare-number prefix semantics require provider confirmation.",
     "Patient NIN and organization CAC verification are evidence only for an existing HID patient or organization; neither flow creates, merges, transfers, or relinks identities.",
     "No provider credential, account action, or live QoreID request was made."
   ],
