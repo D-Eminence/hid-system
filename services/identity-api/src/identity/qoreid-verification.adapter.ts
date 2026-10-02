@@ -293,7 +293,7 @@ export class QoreIdVerificationAdapter {
       || this.normalizedName(firstName) !== this.normalizedName(claims.firstName)
       || this.normalizedName(lastName) !== this.normalizedName(claims.lastName)
       || dateOfBirth !== claims.dateOfBirth) return { ...result, state: 'not_verified' };
-    return { ...result, ninBinding: { firstName, lastName, dateOfBirth } };
+    return { ...result, ninBinding: { nin: returnedNin, firstName, lastName, dateOfBirth } };
   }
 
   private normalizedCacVerification(payload: unknown, submitted: string): QoreIdVerificationResult {

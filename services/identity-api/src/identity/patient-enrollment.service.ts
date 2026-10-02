@@ -4,12 +4,14 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, 
 import { isIP } from 'node:net';
 import * as argon2 from 'argon2';
 import type { PoolClient, QueryResultRow } from 'pg';
+import { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
+import { createContactLookupHmac } from './contact-lookup';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, type PublicPatientIdentityProvider,
   type VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 
@@ -19,6 +21,7 @@ interface EnrollmentRow extends QueryResultRow {
   state: 'verify_contact' | 'set_password' | 'active'; expires_at: Date;
   profile_ciphertext: Buffer; contact_ciphertext: Buffer | null;
   contact_hmac: string | null; contact_channel: 'phone' | 'email' | null;
+  contact_lookup_hmac: string | null;
   contact_verified_at: Date | null;
 }
 interface ChallengeRow extends QueryResultRow {
@@ -40,10 +43,11 @@ export class PatientEnrollmentService {
     private readonly ninProtector: NinIdentifierProtector,
     @Inject(PUBLIC_PATIENT_IDENTITY_PROVIDER) private readonly provider: PublicPatientIdentityProvider,
     private readonly notification: NotificationOtpClient,
-    private readonly hidCodes: HidCodeGenerator) {}
+    private readonly hidCodes: HidCodeGenerator,
+    private readonly google: GoogleAuthenticationService) {}
 
   async start(nin: string, idempotencyKey: string, remoteIp: string | undefined,
-    correlationId: string) {
+    correlationId: string, googleCookie?: string) {
     this.assertConfigured();
     if (!/^\d{11}$/.test(nin)) throw new DomainProblem(400, 'NIN_INVALID', 'An 11-digit NIN is required');
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
@@ -60,14 +64,18 @@ export class PatientEnrollmentService {
       const limited = await this.consumeRate(client, 'ip', ipHmac, this.env.OTP_RATE_MAX_REQUESTS);
       const bound = await client.query<{ bound: boolean }>(
         'select identity.public_patient_nin_already_bound($1) as bound', [lookupHmac]);
+      const readiness = await client.query<{ ready: boolean }>(
+        'select identity.public_patient_enrollment_ready() as ready');
       const query = await client.query<EnrollmentRow>(
         'select * from identity.public_patient_enrollments where nin_lookup_hmac = $1', [lookupHmac]);
       const keyed = await client.query<EnrollmentRow>(
         'select * from identity.public_patient_enrollments where request_hmac = $1', [requestHmac]);
-      return { limited, bound: bound.rows[0]?.bound === true, existing: query.rows[0],
+      return { limited, ready: readiness.rows[0]?.ready === true,
+        bound: bound.rows[0]?.bound === true, existing: query.rows[0],
         keyed: keyed.rows[0] };
     });
     if (preflight.limited) throw this.rateLimited();
+    if (!preflight.ready) throw this.reconciliationRequired();
     if (preflight.keyed && !this.equalHex(preflight.keyed.nin_lookup_hmac, lookupHmac)) {
       throw new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED',
         'This enrollment retry key belongs to a different request');
@@ -77,6 +85,10 @@ export class PatientEnrollmentService {
     if (existing?.state === 'active') throw this.duplicate();
     if (existing && existing.expires_at.getTime() > Date.now()) {
       if (!this.equalHex(existing.request_hmac, requestHmac)) throw this.duplicate();
+      if (googleCookie) {
+        await this.database.withSystemTransaction(correlationId, (client) =>
+          this.google.bindPendingInTransaction(client, googleCookie, existing.id, tokenHmac));
+      }
       return { cookie: `${existing.id}.${token}`, progress: await this.progress(existing, correlationId) };
     }
 
@@ -93,6 +105,9 @@ export class PatientEnrollmentService {
       await this.database.withSystemTransaction(correlationId, async (client) => {
         const bound = await client.query<{ bound: boolean }>(
           'select identity.public_patient_nin_already_bound($1) as bound', [lookupHmac]);
+        const readiness = await client.query<{ ready: boolean }>(
+          'select identity.public_patient_enrollment_ready() as ready');
+        if (readiness.rows[0]?.ready !== true) throw this.reconciliationRequired();
         if (bound.rows[0]?.bound) throw this.duplicate();
         if (existing) {
           const updated = await client.query(
@@ -120,15 +135,29 @@ export class PatientEnrollmentService {
             [id, lookupHmac, nin.slice(-4), ninCiphertext, profileCiphertext, profileHash,
               this.env.NIN_KEY_VERSION, verified.providerReference, requestHmac, tokenHmac]);
         }
+        if (googleCookie) await this.google.bindPendingInTransaction(client, googleCookie, id, tokenHmac);
       });
     } catch (error) { throw this.mapDatabaseError(error); }
     return { cookie: `${id}.${token}`, progress: { stage: 'verify_contact' as const,
-      expiresAt: new Date(Date.now() + ENROLLMENT_TTL_MS).toISOString() } };
+      expiresAt: new Date(Date.now() + ENROLLMENT_TTL_MS).toISOString(),
+      googleOnboardingRequired: Boolean(googleCookie) } };
   }
 
   async current(cookie: string | undefined, correlationId: string) {
     const row = await this.requireEnrollment(cookie, correlationId);
     return this.progress(row, correlationId);
+  }
+
+  async bindGoogle(cookie: string | undefined, googleCookie: string | undefined,
+    correlationId: string) {
+    if (!googleCookie) throw new DomainProblem(404, 'GOOGLE_ONBOARDING_NOT_FOUND',
+      'No pending Google onboarding was found');
+    await this.withEnrollmentLock(cookie, correlationId, async (client, row) => {
+      if (row.state === 'active') throw new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
+        'This enrollment is already active');
+      await this.google.bindPendingInTransaction(client, googleCookie, row.id, row.token_hmac);
+    });
+    return { bound: true as const };
   }
 
   async startContact(cookie: string | undefined, channel: ContactChannel, rawContact: string,
@@ -138,10 +167,11 @@ export class PatientEnrollmentService {
     if (enrollment.state !== 'verify_contact') throw new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
       'This enrollment is not waiting for contact verification');
     const contact = this.normalizeContact(channel, rawContact);
+    const lookupHmac = createContactLookupHmac(channel, contact);
     const recipientHmac = this.hmac('patient-enrollment-recipient', channel, contact);
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
     const challengeId = randomUUID();
-    const limited = await this.database.withSystemTransaction(correlationId, async (client) => {
+    const preflight = await this.database.withSystemTransaction(correlationId, async (client) => {
       const ipLimited = await this.consumeRate(client, 'ip', this.networkHmac(remoteIp),
         this.env.OTP_RATE_MAX_REQUESTS * 3);
       const recipientLimited = await this.consumeRate(client, 'recipient', recipientHmac,
@@ -149,9 +179,17 @@ export class PatientEnrollmentService {
       const enrollmentLimited = await this.consumeRate(client, 'enrollment',
         this.hmac('patient-enrollment-id', enrollment.id),
         this.env.OTP_RATE_MAX_REQUESTS * 3);
-      return ipLimited || recipientLimited || enrollmentLimited;
+      const readiness = await client.query<{ ready: boolean }>(
+        'select identity.public_patient_enrollment_ready() as ready');
+      const contactBound = await client.query<{ bound: boolean }>(
+        'select identity.public_patient_contact_already_bound($1,$2) as bound',
+        [channel, lookupHmac]);
+      return { limited: ipLimited || recipientLimited || enrollmentLimited,
+        ready: readiness.rows[0]?.ready === true, contactBound: contactBound.rows[0]?.bound === true };
     });
-    if (limited) throw this.rateLimited();
+    if (preflight.limited) throw this.rateLimited();
+    if (!preflight.ready) throw this.reconciliationRequired();
+    if (preflight.contactBound) throw this.contactAlreadyRegistered();
     const result = await this.withEnrollmentLock(cookie, correlationId, async (client, row) => {
       if (row.state !== 'verify_contact') throw new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
         'This enrollment is not waiting for contact verification');
@@ -168,8 +206,9 @@ export class PatientEnrollmentService {
       const verifierHmac = this.hmac('patient-enrollment-otp', row.id, challengeId, recipientHmac, code);
       await client.query(
         `update identity.public_patient_enrollments set contact_channel=$2, contact_hmac=$3,
-          contact_ciphertext=$4, updated_at=clock_timestamp(), row_version=row_version+1 where id=$1`,
-        [row.id, channel, recipientHmac, this.encrypt(row.id, 'contact', contact)]);
+          contact_lookup_hmac=$4, contact_ciphertext=$5,
+          updated_at=clock_timestamp(), row_version=row_version+1 where id=$1`,
+        [row.id, channel, recipientHmac, lookupHmac, this.encrypt(row.id, 'contact', contact)]);
       await client.query(
         `insert into identity.public_patient_enrollment_otps
          (id,enrollment_id,recipient_hmac,channel,verifier_hmac,verifier_key_version,
@@ -232,7 +271,8 @@ export class PatientEnrollmentService {
     return { stage: 'set_password' as const };
   }
 
-  async activate(cookie: string | undefined, password: string, correlationId: string) {
+  async activate(cookie: string | undefined, password: string, correlationId: string,
+    googleCookie?: string) {
     if (typeof password !== 'string' || password.length < 12 || password.length > 256) {
       throw new DomainProblem(400, 'PASSWORD_INVALID', 'Password must be 12–256 characters');
     }
@@ -244,16 +284,24 @@ export class PatientEnrollmentService {
       'Contact verification is required');
     const profileJson = this.decrypt(row.id, 'profile', row.profile_ciphertext);
     const contact = this.decrypt(row.id, 'contact', row.contact_ciphertext);
+    const contactLookupHmac = createContactLookupHmac(row.contact_channel!, contact);
     const hash = await argon2.hash(password, { type: argon2.argon2id,
       memoryCost: 65_536, timeCost: 3, parallelism: 1 });
     const tokenHmac = this.cookieTokenHmac(cookie);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
         const hid = this.hidCodes.generate();
-        const result = await this.database.withSystemTransaction(correlationId, (client) =>
-          client.query<{ patient_id: string; hid_code: string; account_id: string; replayed: boolean }>(
-            'select * from identity.activate_public_patient_enrollment($1,$2,$3,$4,$5,$6)',
-            [row.id, tokenHmac, profileJson, contact, hid, hash]));
+        const result = await this.database.withSystemTransaction(correlationId, async (client) => {
+          const activated = await client.query<{ patient_id: string; hid_code: string;
+            account_id: string; replayed: boolean }>(
+            'select * from identity.activate_public_patient_enrollment($1,$2,$3,$4,$5,$6,$7)',
+            [row.id, tokenHmac, profileJson, contact, hid, hash, contactLookupHmac]);
+          if (!activated.rows[0]) throw new DomainProblem(503, 'ENROLLMENT_ACTIVATION_UNAVAILABLE',
+            'Health ID activation is unavailable');
+          await this.google.consumePendingInTransaction(client, googleCookie, row.id,
+            activated.rows[0].account_id);
+          return activated;
+        });
         const activated = result.rows[0];
         if (!activated) throw new DomainProblem(503, 'ENROLLMENT_ACTIVATION_UNAVAILABLE',
           'Health ID activation is unavailable');
@@ -269,6 +317,16 @@ export class PatientEnrollmentService {
   }
 
   private async progress(row: EnrollmentRow, correlationId: string) {
+    const googleRequirement = await this.database.withSystemTransaction(correlationId, (client) =>
+      client.query<{ required: boolean; capability_expires_at: Date | null }>(
+        'select * from auth.google_onboarding_enrollment_requirement($1,$2)',
+        [row.id, row.token_hmac]));
+    const google = googleRequirement.rows[0];
+    const googleProgress = {
+      googleOnboardingRequired: google?.required === true,
+      ...(google?.capability_expires_at instanceof Date
+        ? { googleOnboardingExpiresAt: google.capability_expires_at.toISOString() } : {}),
+    };
     if (row.state === 'active') {
       const result = await this.database.withSystemTransaction(correlationId, (client) =>
         client.query<{ hid_code: string }>(
@@ -276,10 +334,10 @@ export class PatientEnrollmentService {
           [row.patient_id, 'hid-public-qoreid-enrollment']));
       if (!result.rows[0]) throw new DomainProblem(503, 'ENROLLMENT_EVIDENCE_UNAVAILABLE',
         'Enrollment evidence is unavailable');
-      return { stage: 'active' as const, hidCode: result.rows[0].hid_code };
+      return { stage: 'active' as const, hidCode: result.rows[0].hid_code, ...googleProgress };
     }
     const base = { stage: row.state, expiresAt: row.expires_at.toISOString(),
-      ...(row.contact_channel ? { contactChannel: row.contact_channel } : {}) };
+      ...(row.contact_channel ? { contactChannel: row.contact_channel } : {}), ...googleProgress };
     if (row.state === 'set_password') return base;
     const active = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<ChallengeRow>(
@@ -459,6 +517,10 @@ export class PatientEnrollmentService {
     'Too many enrollment requests; try again later'); }
   private duplicate() { return new DomainProblem(409, 'NIN_ALREADY_REGISTERED',
     'This identity already has a Health ID or a pending enrollment'); }
+  private contactAlreadyRegistered() { return new DomainProblem(409, 'CONTACT_ALREADY_REGISTERED',
+    'This contact is already associated with a Health ID'); }
+  private reconciliationRequired() { return new DomainProblem(503, 'ENROLLMENT_RECONCILIATION_REQUIRED',
+    'Patient enrollment is temporarily unavailable while identity reconciliation is incomplete'); }
   private databaseErrorCode(error: unknown) { return typeof error === 'object' && error
     && 'code' in error && typeof error.code === 'string' ? error.code : undefined; }
   private databaseConstraint(error: unknown) { return typeof error === 'object' && error
@@ -468,6 +530,9 @@ export class PatientEnrollmentService {
     const code = this.databaseErrorCode(error);
     if (code === '23505') {
       const constraint = this.databaseConstraint(error);
+      if (error instanceof Error && error.message === 'PATIENT_CONTACT_ALREADY_BOUND') {
+        return this.contactAlreadyRegistered();
+      }
       if (constraint === 'accounts_email_ci_uq' || constraint === 'patients_phone_hmac_uq'
         || constraint === 'patients_email_hmac_uq') {
         return new DomainProblem(409, 'CONTACT_ALREADY_REGISTERED',
@@ -478,6 +543,7 @@ export class PatientEnrollmentService {
     if (code === '23514') return new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
       'Enrollment conditions are not complete');
     if (code === '42501') return new DomainProblem(403, 'ENROLLMENT_DENIED', 'Enrollment is not permitted');
+    if (code === '55000') return this.reconciliationRequired();
     return new DomainProblem(503, 'ENROLLMENT_UNAVAILABLE', 'Enrollment is temporarily unavailable');
   }
 }

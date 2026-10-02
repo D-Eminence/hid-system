@@ -86,7 +86,7 @@ export class OtpService {
             and enrollment.state = 'active' and enrollment.contact_channel = 'phone'
             and enrollment.contact_verified_at is not null
             and patient.status = 'active'
-            and patient.phone_lookup_hmac = enrollment.contact_hmac
+            and patient.phone_lookup_hmac = enrollment.contact_lookup_hmac
             and patient.contact_key_version = enrollment.key_version
             and account.source_system = 'hid-public-qoreid-enrollment'
             and patient.source_system = 'hid-public-qoreid-enrollment'

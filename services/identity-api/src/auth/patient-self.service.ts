@@ -50,6 +50,7 @@ export class PatientSelfService {
   async setAccessPin(request: HidRequest, pin: string) {
     const actor = requirePatient(request.actor);
     await this.database.withSystemTransaction(request.correlationId, async (client) => {
+      await this.requireRecentAuthentication(client, actor);
       // `withSystemTransaction` starts as system:auth. Bind the verified
       // patient subject explicitly so `patient_self_session` can enforce the
       // session/subject pair inside the security-definer command.
@@ -70,6 +71,7 @@ export class PatientSelfService {
   async revokeAccessPin(request: HidRequest) {
     const actor = requirePatient(request.actor);
     await this.database.withSystemTransaction(request.correlationId, async (client) => {
+      await this.requireRecentAuthentication(client, actor);
       await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);
       const result = await client.query<{ patient_id: string }>(
         'select identity.revoke_my_patient_access_pin($1, $2) as patient_id',
@@ -80,6 +82,26 @@ export class PatientSelfService {
       }
     });
     return { revoked: true };
+  }
+
+  private async requireRecentAuthentication(client: import('pg').PoolClient,
+    actor: ActorContext & { patientId: string; sessionId: string }) {
+    // Refresh rotates a session within the same family. Checking the first
+    // issuance in that family prevents silent refresh from counting as a fresh
+    // patient authentication for a sensitive PIN change.
+    const result = await client.query<{ recent: boolean }>(
+      `select coalesce(min(family.issued_at) >= clock_timestamp() - interval '10 minutes', false) as recent
+         from auth.sessions current_session
+         join auth.sessions family on family.family_id = current_session.family_id
+        where current_session.id = $1 and current_session.account_id = $2
+          and current_session.patient_id = $3 and current_session.session_kind = 'patient'
+          and current_session.revoked_at is null`,
+      [actor.sessionId, actor.accountId, actor.patientId],
+    );
+    if (!result.rows[0]?.recent) {
+      throw new DomainProblem(403, 'PATIENT_RECENT_AUTH_REQUIRED',
+        'Sign in again before changing your Access PIN');
+    }
   }
 
   private async read(request: HidRequest, operation: 'profile' | 'access-history' | 'authorize') {

@@ -3,6 +3,7 @@
 import { createDecipheriv, createHash, createHmac } from 'node:crypto';
 import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
+import { normalizeContactForLookup, contactLookupHmac } from './contact-lookup.mjs';
 
 const { Client } = pg;
 // PostgreSQL DATE is a calendar date, not a midnight instant in the runner's
@@ -12,6 +13,7 @@ const databaseUrl = process.env.DATABASE_URL;
 const runId = process.env.MIGRATION_RUN_ID;
 const encryptionKey = decodeKey('MIGRATION_FIELD_ENCRYPTION_KEY_B64', 32);
 const lookupKey = decodeKey('MIGRATION_LOOKUP_HMAC_KEY_B64', 32);
+const contactLookupKey = decodeKey('CONTACT_LOOKUP_HMAC_KEY_B64', 32);
 const facilityTimezones = parseFacilityTimezones(process.env.MIGRATION_FACILITY_TIMEZONES_JSON);
 const batchSize = Number.parseInt(process.env.MIGRATION_BATCH_SIZE ?? '500', 10);
 
@@ -85,14 +87,6 @@ function decrypt(value, associatedData) {
   decipher.setAAD(Buffer.from(associatedData, 'utf8'));
   decipher.setAuthTag(value.subarray(13, 29));
   return Buffer.concat([decipher.update(value.subarray(29)), decipher.final()]).toString('utf8');
-}
-
-function normalizePhone(value) {
-  return value ? String(value).replace(/[^0-9+]/g, '') : null;
-}
-
-function normalizeEmail(value) {
-  return value ? String(value).trim().toLowerCase() : null;
 }
 
 function textOrNull(value) {
@@ -231,8 +225,8 @@ const definitions = [
   }), (target) => ({ id: target.id, organization_id: target.organization_id, name: target.name,
     code: target.code, active: target.active, lifecycle_status: target.lifecycle_status, timezone: target.timezone })),
   definition('patients', 'identity.patients', (source) => source.id, (source) => {
-    const phone = normalizePhone(source.phone_e164);
-    const email = normalizeEmail(source.email);
+    const phone = normalizeContactForLookup('phone', source.phone_e164);
+    const email = normalizeContactForLookup('email', source.email);
     const emergencyContact = {
       name: source.emergency_contact_name ?? null,
       relationship: source.emergency_contact_relationship ?? null,
@@ -249,9 +243,9 @@ const definitions = [
       full_name: source.full_name,
       dob: source.dob ?? null,
       phone,
-      phone_hmac: phone ? lookupHmac(phone) : null,
+      phone_hmac: phone ? contactLookupHmac('phone', phone, contactLookupKey) : null,
       email,
-      email_hmac: email ? lookupHmac(email) : null,
+      email_hmac: email ? contactLookupHmac('email', email, contactLookupKey) : null,
       emergency_contact: hasEmergencyContact ? canonicalJson(emergencyContact) : null,
       status: source.deleted_at ? 'deleted' : 'active',
     };
@@ -272,6 +266,30 @@ const definitions = [
       : null,
     status: target.status,
   })),
+  {
+    ...definition('patient_assurance_states', 'identity.patient_assurance_states',
+      (source) => source.id,
+      (source) => ({
+        patient_id: source.id,
+        account_id: source.auth_user_id,
+        state: 'LEGACY_MIGRATED',
+        source_system: 'legacy_identity',
+        source_reference: source.id,
+        verified_provider: null,
+        nin_verified_at: null,
+      }),
+      (target) => ({
+        patient_id: target.patient_id,
+        account_id: target.account_id,
+        state: target.state,
+        source_system: target.source_system,
+        source_reference: target.source_reference,
+        verified_provider: target.verified_provider,
+        nin_verified_at: target.nin_verified_at,
+      })),
+    sourceEntityType: 'patients',
+    keyColumn: 'patient_id',
+  },
   definition('patient_identifiers', 'identity.patient_identifiers', (source) => source.id, (source) => {
     const isPublic = source.identifier_type === 'hid_code';
     const normalized = String(source.normalized_value ?? source.raw_value).trim();

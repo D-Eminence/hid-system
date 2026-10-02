@@ -362,7 +362,9 @@ grant select on identity.organizations, identity.facilities, identity.staff,
   identity.access_requests, identity.consent_grants,
   identity.facility_status_events to hid_identity_runtime;
 grant select, insert on identity.patients, identity.patient_identifiers to hid_identity_runtime;
-grant select, insert, update on identity.patient_assurance_states to hid_identity_runtime;
+-- Assurance transitions are evidence-bound SECURITY DEFINER commands. Revoke
+-- legacy broad grants as well as omitting them for a fresh role bootstrap.
+revoke select, insert, update, delete on identity.patient_assurance_states from hid_identity_runtime;
 grant select, insert, update on identity.registration_cases to hid_identity_runtime;
 grant select, insert on identity.registration_case_candidates,
   identity.registration_case_events, identity.outbox_events to hid_identity_runtime;
@@ -506,6 +508,10 @@ grant select, insert, update on migration.runs,
   migration.conflicts, migration.conflict_resolutions,
   migration.entity_reconciliations, migration.legacy_identity_mappings
   to hid_migration_admin;
+grant select, insert, update (status, revoked_at, revocation_reason)
+  on migration.legacy_nin_crosswalk,
+  migration.legacy_nin_crosswalk_attestations to hid_migration_admin;
+grant select, insert on migration.patient_contact_lookup_rekeys to hid_migration_admin;
 revoke update on migration.source_rows from hid_migration_admin;
 grant select, insert on migration.source_rows to hid_migration_admin;
 grant update (promoted_at) on migration.source_rows to hid_migration_admin;
@@ -761,6 +767,11 @@ grant execute on function auth.resolve_google_identity(text),
   identity.set_my_patient_access_pin(text,uuid,text),
   identity.revoke_my_patient_access_pin(text,uuid),
   identity.access_patient_with_pin(text,text,integer),
+  identity.legacy_nin_crosswalk_patient(char),
+  identity.legacy_nin_crosswalk_ready(),
+  identity.patient_contact_lookup_ready(),
+  identity.patient_self_nin_eligibility(text,uuid,char),
+  identity.bind_my_verified_nin(text,uuid,uuid,char,bytea,text,char,text,bytea,char),
   identity.patient_self_nin_binding_matches(text,uuid,text),
   identity.record_my_nin_verification_evidence(text,uuid,text,text,text,text),
   identity.record_organization_cac_verification_evidence(text,text,text,text)
@@ -780,6 +791,11 @@ revoke all on function auth.resolve_google_identity(text),
   identity.set_my_patient_access_pin(text,uuid,text),
   identity.revoke_my_patient_access_pin(text,uuid),
   identity.access_patient_with_pin(text,text,integer),
+  identity.legacy_nin_crosswalk_patient(char),
+  identity.legacy_nin_crosswalk_ready(),
+  identity.patient_contact_lookup_ready(),
+  identity.patient_self_nin_eligibility(text,uuid,char),
+  identity.bind_my_verified_nin(text,uuid,uuid,char,bytea,text,char,text,bytea,char),
   identity.patient_self_nin_binding_matches(text,uuid,text),
   identity.record_my_nin_verification_evidence(text,uuid,text,text,text,text),
   identity.record_organization_cac_verification_evidence(text,text,text,text) from public;
@@ -844,6 +860,25 @@ grant select, insert, update, delete on identity.public_patient_enrollments,
   identity.public_patient_enrollment_rates to hid_identity_runtime, hid_schema_test_runtime;
 grant select on identity.patient_authoritative_profiles to hid_schema_test_runtime;
 grant execute on function identity.public_patient_nin_already_bound(char),
+  identity.public_patient_enrollment_ready(),
+  identity.public_patient_contact_already_bound(text,char),
   identity.prune_expired_public_patient_enrollments(),
-  identity.activate_public_patient_enrollment(uuid,char,text,text,text,text)
+  identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)
   to hid_identity_runtime, hid_schema_test_runtime;
+
+-- Google onboarding capabilities are accountless and only the Identity API
+-- may use their narrow commands. Runtime roles never read provider subjects.
+grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
+  auth.google_onboarding_capability_status(uuid,char),
+  auth.bind_google_onboarding_capability(uuid,char,uuid,char),
+  auth.google_onboarding_enrollment_requirement(uuid,char),
+  auth.consume_google_onboarding_capability(uuid,char,uuid,uuid),
+  auth.link_google_identity_to_patient_account(uuid,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function auth.create_google_onboarding_capability(uuid,char,text),
+  auth.google_onboarding_capability_status(uuid,char),
+  auth.bind_google_onboarding_capability(uuid,char,uuid,char),
+  auth.google_onboarding_enrollment_requirement(uuid,char),
+  auth.consume_google_onboarding_capability(uuid,char,uuid,uuid),
+  auth.link_google_identity_to_patient_account(uuid,text)
+  from public;

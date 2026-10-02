@@ -6,31 +6,31 @@ begin;
 insert into identity.public_patient_enrollments (
   id, nin_lookup_hmac, nin_last4, nin_ciphertext, profile_ciphertext,
   profile_sha256, key_version, provider_reference, request_hmac, token_hmac,
-  state, contact_channel, contact_hmac, contact_ciphertext,
+  state, contact_channel, contact_hmac, contact_lookup_hmac, contact_ciphertext,
   contact_verified_at, verified_challenge_id
 ) values
   ('b5100000-0000-4000-8000-000000000001', repeat('a',64), '8901', decode(repeat('a1',32),'hex'),
    decode(repeat('b1',32),'hex'),
    encode(public.digest('{"nin":"12345678901","firstName":"Amina","lastName":"Okafor","dateOfBirth":"1990-05-12","gender":"female","providerReference":"fixture-email-001"}', 'sha256'),'hex'),
    'fixture', 'fixture-email-001', repeat('1',64), repeat('2',64),
-   'set_password', 'email', repeat('c',64), decode(repeat('d1',32),'hex'),
+   'set_password', 'email', repeat('c',64), repeat('e1',32), decode(repeat('d1',32),'hex'),
    clock_timestamp(), 'b5200000-0000-4000-8000-000000000001'),
   ('b5100000-0000-4000-8000-000000000002', repeat('b',64), '8902', decode(repeat('a2',32),'hex'),
    decode(repeat('b2',32),'hex'),
    encode(public.digest('{"nin":"12345678902","firstName":"Bola","lastName":"Uche","dateOfBirth":"1988-03-04","gender":"male","providerReference":"fixture-phone-002"}', 'sha256'),'hex'),
    'fixture', 'fixture-phone-002', repeat('3',64), repeat('4',64),
-   'set_password', 'phone', repeat('d',64), decode(repeat('d2',32),'hex'),
+   'set_password', 'phone', repeat('d',64), repeat('e2',32), decode(repeat('d2',32),'hex'),
    clock_timestamp(), 'b5200000-0000-4000-8000-000000000002'),
   ('b5100000-0000-4000-8000-000000000003', repeat('e',64), '8903', decode(repeat('a3',32),'hex'),
    decode(repeat('b3',32),'hex'),
    encode(public.digest('{"nin":"12345678903","firstName":"Chika","lastName":"Eze","dateOfBirth":"1995-07-08","gender":"female","providerReference":"fixture-stage-003"}', 'sha256'),'hex'),
    'fixture', 'fixture-stage-003', repeat('5',64), repeat('6',64), 'verify_contact',
-   null, null, null, null, null),
+   null, null, null, null, null, null),
   ('b5100000-0000-4000-8000-000000000004', repeat('f',64), '8904', decode(repeat('a4',32),'hex'),
    decode(repeat('b4',32),'hex'),
    encode(public.digest('{"nin":"12345678904","firstName":"Dayo","lastName":"Ibe","dateOfBirth":"1992-11-09","gender":"other","providerReference":"fixture-duplicate-004"}', 'sha256'),'hex'),
    'fixture', 'fixture-duplicate-004', repeat('7',64), repeat('8',64),
-   'set_password', 'email', repeat('9',64), decode(repeat('d4',32),'hex'),
+   'set_password', 'email', repeat('9',64), repeat('e4',32), decode(repeat('d4',32),'hex'),
    clock_timestamp(), 'b5200000-0000-4000-8000-000000000004');
 
 insert into identity.public_patient_enrollment_otps (
@@ -82,36 +82,36 @@ begin
     perform identity.activate_public_patient_enrollment(
       'b5100000-0000-4000-8000-000000000001',repeat('0',64)::char(64),
       '{"nin":"12345678901","firstName":"Amina","lastName":"Okafor","dateOfBirth":"1990-05-12","gender":"female","providerReference":"fixture-email-001"}',
-      'amina@example.invalid','HID-ABCDEFGH',test_hash);
+      'amina@example.invalid','HID-ABCDEFGH',test_hash,repeat('e1',32)::char(64));
     raise exception 'Wrong enrollment token activated a patient';
   exception when insufficient_privilege then null; end;
   begin
     perform identity.activate_public_patient_enrollment(
       'b5100000-0000-4000-8000-000000000003',repeat('6',64)::char(64),
       '{"nin":"12345678903","firstName":"Chika","lastName":"Eze","dateOfBirth":"1995-07-08","gender":"female","providerReference":"fixture-stage-003"}',
-      'chika@example.invalid','HID-ABCDEFGJ',test_hash);
+      'chika@example.invalid','HID-ABCDEFGJ',test_hash,repeat('e3',32)::char(64));
     raise exception 'Unverified-contact enrollment activated a patient';
   exception when check_violation then null; end;
   begin
     perform identity.activate_public_patient_enrollment(
       'b5100000-0000-4000-8000-000000000004',repeat('8',64)::char(64),
       '{"nin":"12345678904","firstName":"Dayo","lastName":"Ibe","dateOfBirth":"1992-11-09","gender":"other","providerReference":"fixture-duplicate-004"}',
-      'dayo@example.invalid','HID-ABCDEFGK',test_hash);
+      'dayo@example.invalid','HID-ABCDEFGK',test_hash,repeat('e4',32)::char(64));
     raise exception 'Already-bound NIN activated a second patient';
   exception when unique_violation then null; end;
 
   select * into email_result from identity.activate_public_patient_enrollment(
     'b5100000-0000-4000-8000-000000000001',repeat('2',64)::char(64),
     '{"nin":"12345678901","firstName":"Amina","lastName":"Okafor","dateOfBirth":"1990-05-12","gender":"female","providerReference":"fixture-email-001"}',
-    'Amina@Example.Invalid','HID-ABCDEFGH',test_hash);
+    'Amina@Example.Invalid','HID-ABCDEFGH',test_hash,repeat('e1',32)::char(64));
   select * into replay_result from identity.activate_public_patient_enrollment(
     'b5100000-0000-4000-8000-000000000001',repeat('2',64)::char(64),
     '{"nin":"12345678901","firstName":"Amina","lastName":"Okafor","dateOfBirth":"1990-05-12","gender":"female","providerReference":"fixture-email-001"}',
-    'amina@example.invalid','HID-ABCDEFGH',test_hash);
+    'amina@example.invalid','HID-ABCDEFGH',test_hash,repeat('e1',32)::char(64));
   select * into phone_result from identity.activate_public_patient_enrollment(
     'b5100000-0000-4000-8000-000000000002',repeat('4',64)::char(64),
     '{"nin":"12345678902","firstName":"Bola","lastName":"Uche","dateOfBirth":"1988-03-04","gender":"male","providerReference":"fixture-phone-002"}',
-    '+2348012345678','HID-ABCDEFGM',test_hash);
+    '+2348012345678','HID-ABCDEFGM',test_hash,repeat('e2',32)::char(64));
   if email_result.replayed or not replay_result.replayed or phone_result.replayed
     or email_result.patient_id is null or email_result.account_id is null
     or email_result.patient_id <> replay_result.patient_id
@@ -151,7 +151,7 @@ begin
     or not exists (select 1 from auth.accounts account_row
       join identity.patients patient_row on patient_row.account_id=account_row.id
       where patient_row.hid_code='HID-ABCDEFGM' and account_row.email is null
-        and patient_row.phone_lookup_hmac=repeat('d',64)) then
+        and patient_row.phone_lookup_hmac=repeat('e2',32)) then
     raise exception 'Public patient activation did not persist one complete email and phone identity';
   end if;
   if exists (select 1 from identity.public_patient_enrollments

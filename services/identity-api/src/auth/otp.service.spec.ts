@@ -102,7 +102,8 @@ describe('Identity OTP credentials', () => {
     expect(lookup?.sql).toContain("enrollment.state = 'active'");
     expect(lookup?.sql).toContain('enrollment.contact_verified_at is not null');
     expect(lookup?.sql).toContain("patient.status = 'active'");
-    expect(lookup?.sql).toContain('patient.phone_lookup_hmac = enrollment.contact_hmac');
+    expect(lookup?.sql).toContain('patient.phone_lookup_hmac = enrollment.contact_lookup_hmac');
+    expect(lookup?.sql).not.toContain('patient.phone_lookup_hmac = enrollment.contact_hmac');
     expect(lookup?.sql).toContain('enrollment.account_id = account.id and enrollment.patient_id = patient.id');
     const inserted = calls.find(({ sql }) => sql.includes('insert into auth.otp_challenges'));
     expect(inserted?.values[4]).toBe('sms');

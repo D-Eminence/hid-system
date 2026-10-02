@@ -83,6 +83,12 @@ interface GoogleIdTokenSignInInput {
   actorKind?: GoogleActorKind
   path?: string
   turnstileToken?: string
+  intent?: 'sign_in' | 'enroll'
+}
+
+export interface GooglePendingPatientIdentity {
+  stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY'
+  expiresAt: string
 }
 
 interface RecoveryOtpStart {
@@ -390,8 +396,39 @@ export const identityClient = {
           idToken: input.token,
           turnstileAction: googleTurnstileAction(input),
           turnstileToken: input.turnstileToken,
+          ...(input.intent ? { intent: input.intent } : {}),
         }),
       }, 'SIGNED_IN')
+    },
+    async beginGooglePatientEnrollment(input: { token: string; turnstileToken: string }) {
+      const { payload } = await request('/api/v1/auth/oidc/exchange', {
+        method: 'POST',
+        body: JSON.stringify({ idToken: input.token, turnstileAction: 'patient-login',
+          turnstileToken: input.turnstileToken, intent: 'enroll' }),
+      })
+      const value = unwrapData(payload)
+      const session = sessionFromPayload(value)
+      if (session) {
+        emitAuthEvent('SIGNED_IN', session)
+        return { stage: 'linked' as const, session }
+      }
+      if (isRecord(value) && value.stage === 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY'
+        && readString(value.expiresAt)) {
+        return { stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY' as const,
+          expiresAt: readString(value.expiresAt)! }
+      }
+      throw new Error('Google identity onboarding could not be initialized.')
+    },
+    googleOnboarding() {
+      return canonicalRequest<GooglePendingPatientIdentity>('/api/v1/auth/google/onboarding')
+    },
+    linkGoogleIdentity(input: { token: string; principal: string; password: string; turnstileToken: string }) {
+      return canonicalRequest<{ linked: true }>('/api/v1/auth/google/link', {
+        method: 'POST',
+        body: JSON.stringify({ idToken: input.token, principal: input.principal,
+          password: input.password, turnstileAction: 'patient-login',
+          turnstileToken: input.turnstileToken }),
+      })
     },
     signUp(input: {
       email: string

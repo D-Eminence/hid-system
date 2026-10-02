@@ -77,8 +77,8 @@ class CdpSession {
 
 const fixture = `(() => {
   const id = n => n + '0000000-0000-4000-8000-000000000001';
-  const s = window.__careFixture = { mode: null, calls: [], denied: false, auditFailure: false, leaseMs: 60000 };
-  const patient = {patientId:id(2),hid:'HID-ABCDEFGH',firstName:'Synthetic',lastName:'Patient',fullName:'Synthetic Patient',dateOfBirth:'1990-01-01',gender:'female',country:'NG',state:'Lagos',version:1};
+  const s = window.__careFixture = { mode: null, calls: [], denied: false, auditFailure: false, leaseMs: 60000, pinConfigured: false };
+  const patient = {patientId:id(2),hid:'HID-ABCDEFGH',firstName:'Synthetic',lastName:'Patient',fullName:'Synthetic Patient',dateOfBirth:'1990-01-01',gender:'female',country:'NG',state:'Lagos',version:1,assuranceState:'LEGACY_MIGRATED'};
   const actor = () => ({subject:s.mode+':synthetic',accountId:id(1),kind:s.mode,patientId:s.mode==='patient'?id(2):undefined,email:'synthetic@example.invalid',displayName:'Synthetic Clinician',roles:s.mode==='patient'?[]:['doctor'],permissions:[],facilities:s.mode==='patient'?[]:[{id:id(3),membershipId:id(4),organizationId:id(5),name:'Synthetic Facility',roles:['doctor'],permissions:['identity.break-glass.write','identity.consent.write','identity.registration.write','identity.registration.approve'],isPrimary:true}]});
   const records = { encounters:[],notes:[{id:id(6),encounterId:id(7),facilityId:id(3),noteType:'progress',title:'Synthetic released note',status:'signed',revisionNo:1,content:'Synthetic clinical summary',signedAt:'2026-09-01T10:00:00Z'}],limit:50 };
   const respond=(body,status=200)=>Promise.resolve(new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json','x-csrf-token':'synthetic-csrf'}}));
@@ -94,7 +94,8 @@ const fixture = `(() => {
     if(p.endsWith('/auth/otp/verify'))return JSON.parse(init.body).code==='123456'?respond({verified:true,challengeId:id(8),verificationToken:'synthetic-verification'}):respond({detail:'Code expired or invalid'},400);
     if(p.endsWith('/auth/otp/complete'))return respond({completed:true});
     if(p.endsWith('/identity/registration-capabilities'))return respond({nin:{enabled:false,state:'deferred'},newPatientRegistrationRequiresNin:true});
-    if(p==='/api/v1/identity/me')return s.mode==='patient'?respond(patient):respond({detail:'Please sign in again.'},401);
+    if(p==='/api/v1/identity/me')return s.mode==='patient'?respond({...patient,accessPinConfigured:s.pinConfigured}):respond({detail:'Please sign in again.'},401);
+    if(p==='/api/v1/identity/me/access-pin') {if(s.mode!=='patient')return respond({detail:'Please sign in again.'},401);s.pinConfigured=init.method==='POST';return respond(init.method==='POST'?{configured:true}:{revoked:true});}
     if(p==='/api/v1/ehr/me/records')return s.mode==='patient'?respond(records):respond({detail:'Please sign in again.'},401);
     if(p.endsWith('/me/access-history'))return respond({items:[{consentGrantId:id(9),scope:'break_glass',purpose:'emergency',status:'expired',startsAt:'2026-09-01T09:00:00Z',expiresAt:'2026-09-01T10:00:00Z',reason:'Synthetic emergency care',facilityName:'Synthetic Facility'}]});
     if(p.endsWith('/identity/break-glass')) { if(s.auditFailure)return respond({detail:'Audit recording unavailable'},503);s.denied=false;return respond({accessRequestId:id(8),consentGrantId:id(9),patientId:id(2),status:'active',expiresAt:new Date(Date.now()+s.leaseMs).toISOString(),existingGrant:false}); }
@@ -134,15 +135,22 @@ try{
   async function visit(route){await session.send('Page.navigate',{url:origin+route});await delay(250)}
   async function noLegacy(){assert.equal(await session.evaluate(`window.__careFixture.calls.some(x=>x.path.includes('/functions/'))`),false)}
   await visit('/patient');await waitText('Sign in')
-  await fill('input[type=email]','synthetic@example.invalid');await fill('input[type=password]','synthetic-password');await click('Sign in');await waitText('HID-ABCDEFGH')
+  assert.equal(await session.evaluate("document.querySelector('#account-patient-password').type"),'password');await click('Show');assert.equal(await session.evaluate("document.querySelector('#account-patient-password').type"),'text');await click('Hide');assert.equal(await session.evaluate("document.querySelector('#account-patient-password').type"),'password')
+  await fill('input[autocomplete=username]','synthetic@example.invalid');await fill('#account-patient-password','synthetic-password');await click('Sign in');await waitText('HID-ABCDEFGH')
+  await fill('#patient-access-pin','1234');await fill('#patient-access-pin-confirm','1234');await click('Set PIN');await waitText('Access PIN configured')
+  await fill('#patient-access-pin','5678');await fill('#patient-access-pin-confirm','5678');await click('Replace PIN');await waitText('Earlier PIN access grants were revoked.')
+  await click('Remove Access PIN');await waitText('No Access PIN configured')
+  assert.deepEqual(await session.evaluate("window.__careFixture.calls.filter(x=>x.path.endsWith('/me/access-pin')).map(x=>x.method)"),['POST','POST','DELETE']);checks.push('patient PIN set/replace/revoke and password explicit show/hide')
   await click('My records');await waitText('Synthetic released note');await click('Access history');await waitText('Synthetic emergency care');await click('Access notifications');await waitText('requires facility review')
   await noLegacy();checks.push('patient canonical login/profile/HID/released records/history/notifications')
   await session.evaluate(`window.__careFixture.mode=null;document.dispatchEvent(new Event('visibilitychange'))`);await waitText('Please sign in again.');assert.equal(await session.evaluate(`document.body.innerText.includes('Synthetic emergency care')`),false);checks.push('patient expired session clears medical information')
   await visit('/patient');await waitText('Forgot password or activate an issued account');await click('Forgot password or activate an issued account')
-  await fill('input','synthetic@example.invalid');await click('Send recovery code');await waitText('Six-digit code');await fill('input','000000');await click('Verify code');await waitText('Code expired or invalid')
-  await fill('input','123456');await click('Verify code');await waitText('Confirm password');await fill('input[type=password]','synthetic-new-password');await fill('input[autocomplete=new-password]:nth-of-type(1)','synthetic-new-password')
-  await session.evaluate(`(()=>{const e=document.querySelectorAll('input[type=password]')[1];Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'synthetic-new-password');e.dispatchEvent(new Event('input',{bubbles:true}))})()`)
-  await click('Save password');await waitText('Password saved. Sign in using your new password.');assert.equal(await session.evaluate('window.__careFixture.mode'),null);await noLegacy();checks.push('OTP invalid code/verify/password completion requires fresh sign-in')
+  await fill('input[autocomplete=username]','synthetic@example.invalid');await click('Send recovery code');await waitText('Verify your recovery code')
+  async function pasteOtp(code){await session.evaluate(`(()=>{const e=document.querySelector('[aria-label="Verification code digit 1"]');const d=new DataTransfer();d.setData('text',${JSON.stringify(code)});e.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:d}))})()`)}
+  await pasteOtp('123');assert.equal(await session.evaluate("[...document.querySelectorAll('[aria-label^=\"Verification code digit\"]')].map(x=>x.value).join('')"),'123');assert.equal(await session.evaluate("window.__careFixture.calls.filter(x=>x.path.endsWith('/auth/otp/verify')).length"),0)
+  await pasteOtp('000000');await waitText('Code expired or invalid')
+  await pasteOtp('123456');await waitText('Confirm password');await fill('#account-patient-password','synthetic-new-password');await fill('#account-patient-confirm-password','synthetic-new-password')
+  await click('Save password');await waitText('Password saved. Sign in using your new password.');assert.equal(await session.evaluate('window.__careFixture.mode'),null);await noLegacy();checks.push('OTP partial/full paste, auto verify, invalid code and password completion require fresh sign-in')
   await visit('/hospital/auth');await waitText('Clinical account');await fill('input[type=email]','clinician@example.invalid');await fill('input[type=password]','synthetic-password');await click('Sign in');await waitText('Activate emergency read access')
   const activate=async()=>{await fill('input[placeholder="HID-ABCDEFGH"]','HID-ABCDEFGH');await fill('textarea','Urgent synthetic clinical care');await click('Activate emergency read access')}
   await activate();await waitText('Synthetic released note');assert.equal(await session.evaluate(`window.__careFixture.calls.find(x=>x.path.endsWith('/emergency-records')).headers['x-purpose-of-use']`),'emergency')

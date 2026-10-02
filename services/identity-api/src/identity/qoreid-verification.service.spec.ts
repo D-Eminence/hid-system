@@ -21,13 +21,16 @@ const patientRequest = {
 
 function setup(enabled: boolean) {
   let profileDateOfBirth: string | null = '1991-03-04';
-  let ninBindingMatches = true;
+  let ninEligibility: 'bound_exact' | 'legacy_unbound' | 'denied' = 'bound_exact';
   const query = jest.fn(async (sql: string, _values?: readonly unknown[]) => {
     if (sql.includes('patient_self_profile')) return { rows: [{ profile: {
       patientId: 'a0000000-0000-4000-8000-000000000001', firstName: 'Samplefirst', lastName: 'Samplelast',
       dateOfBirth: profileDateOfBirth,
     } }] };
-    if (sql.includes('patient_self_nin_binding_matches')) return { rows: [{ matched: ninBindingMatches }] };
+    if (sql.includes('patient_self_nin_eligibility')) return { rows: [{ state: ninEligibility }] };
+    if (sql.includes('bind_my_verified_nin')) return { rows: [{
+      evidenceId: 'a0000000-0000-4000-8000-000000000004', recordedAt: new Date('2026-01-01T00:00:00.000Z'),
+    }] };
     if (sql.includes('record_my_nin_verification_evidence')) return { rows: [{
       evidenceId: 'a0000000-0000-4000-8000-000000000004', recordedAt: new Date('2026-01-01T00:00:00.000Z'),
     }] };
@@ -40,19 +43,23 @@ function setup(enabled: boolean) {
   } as unknown as DatabaseService;
   const provider = {
     verifyNin: jest.fn().mockResolvedValue({ provider: 'qoreid', state: 'verified', providerReference: '99',
-      ninBinding: { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04' },
+      ninBinding: { nin: '12345678901', firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04' },
       respondedAt: new Date().toISOString() }),
     verifyCac: jest.fn(),
   } as unknown as QoreIdVerificationAdapter;
   const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined),
     consumePatientQuota: jest.fn().mockResolvedValue(undefined),
     consumeQuota: jest.fn().mockResolvedValue(undefined) } as unknown as IntegrationRuntimeService;
-  const ninProtector = { lookup: jest.fn().mockReturnValue('a'.repeat(64)) } as unknown as NinIdentifierProtector;
+  const ninProtector = { lookup: jest.fn().mockReturnValue('a'.repeat(64)),
+    protectPatientSelf: jest.fn().mockReturnValue({ lookupHmac: 'a'.repeat(64),
+      ciphertext: Buffer.alloc(32, 1), keyVersion: 'test-v1', last4: '8901' }),
+    protectPatientSelfProfile: jest.fn().mockReturnValue({ ciphertext: Buffer.alloc(64, 2),
+      sha256: 'b'.repeat(64), keyVersion: 'test-v1' }) } as unknown as NinIdentifierProtector;
   jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: enabled } as environment.Environment);
   return { service: new QoreIdVerificationService(database, provider, integrations, ninProtector), provider, query, database,
     integrations, ninProtector,
     setProfileDateOfBirth: (value: string | null) => { profileDateOfBirth = value; },
-    setNinBindingMatches: (value: boolean) => { ninBindingMatches = value; } };
+    setNinEligibility: (value: 'bound_exact' | 'legacy_unbound' | 'denied') => { ninEligibility = value; } };
 }
 
 describe('QoreID verification service', () => {
@@ -90,11 +97,12 @@ describe('QoreID verification service', () => {
     });
     expect(integrations.consumePatientQuota).toHaveBeenCalledWith(patientRequest.correlationId,
       'patient:subject', patientRequest.actor!.sessionId);
-    const evidenceCall = query.mock.calls.find(([sql]) => sql.includes('record_my_nin_verification_evidence'));
-    expect(evidenceCall?.[1]).toEqual([
-      'patient:subject', patientRequest.actor!.sessionId, 'verified', '99', null, 'a'.repeat(64),
+    const bindingCall = query.mock.calls.find(([sql]) => sql.includes('bind_my_verified_nin'));
+    expect(bindingCall?.[1]).toEqual([
+      'patient:subject', patientRequest.actor!.sessionId, expect.any(String), 'a'.repeat(64),
+      Buffer.alloc(32, 1), 'test-v1', '8901', '99', Buffer.alloc(64, 2), 'b'.repeat(64),
     ]);
-    expect(JSON.stringify(evidenceCall?.[1])).not.toContain('12345678901');
+    expect(JSON.stringify(bindingCall?.[1])).not.toContain('12345678901');
   });
 
   it('rejects callers that are not a current patient before provider access', async () => {
@@ -124,14 +132,43 @@ describe('QoreID verification service', () => {
     expect(integrations.consumePatientQuota).not.toHaveBeenCalled();
   });
 
-  it('does not verify or record evidence for a NIN not already bound to this patient', async () => {
-    const { service, provider, integrations, query, setNinBindingMatches } = setup(true);
-    setNinBindingMatches(false);
+  it('binds an unbound active legacy patient only after exact QoreID verification', async () => {
+    const { service, provider, query, setNinEligibility } = setup(true);
+    setNinEligibility('legacy_unbound');
+    await expect(service.verifyPatientNin(patientRequest, '12345678901')).resolves.toMatchObject({ state: 'verified' });
+    expect(provider.verifyNin).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls.some(([sql]) => sql.includes('bind_my_verified_nin'))).toBe(true);
+  });
+
+  it('rejects a verified provider result with a different returned NIN before binding', async () => {
+    const { service, provider, query, setNinEligibility } = setup(true);
+    setNinEligibility('legacy_unbound');
+    (provider.verifyNin as jest.Mock).mockResolvedValueOnce({ provider: 'qoreid', state: 'verified',
+      providerReference: '99', ninBinding: { nin: '98765432109', firstName: 'Samplefirst',
+        lastName: 'Samplelast', dateOfBirth: '1991-03-04' }, respondedAt: new Date().toISOString() });
     await expect(service.verifyPatientNin(patientRequest, '12345678901'))
-      .rejects.toMatchObject({ code: 'PATIENT_NIN_NOT_BOUND', status: 422 });
+      .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+    expect(query.mock.calls.some(([sql]) => sql.includes('bind_my_verified_nin'))).toBe(false);
+  });
+
+  it('does not call QoreID for a NIN conflict or an ineligible patient', async () => {
+    const { service, provider, integrations, query, setNinEligibility } = setup(true);
+    setNinEligibility('denied');
+    await expect(service.verifyPatientNin(patientRequest, '12345678901'))
+      .rejects.toMatchObject({ code: 'PATIENT_NIN_BINDING_CONFLICT', status: 409 });
     expect(provider.verifyNin).not.toHaveBeenCalled();
     expect(integrations.consumePatientQuota).not.toHaveBeenCalled();
     expect(query.mock.calls.some(([sql]) => sql.includes('record_my_nin_verification_evidence'))).toBe(false);
+  });
+
+  it('leaves legacy identity unbound when QoreID returns no verified match', async () => {
+    const { service, provider, query, setNinEligibility } = setup(true);
+    setNinEligibility('legacy_unbound');
+    (provider.verifyNin as jest.Mock).mockResolvedValueOnce({ provider: 'qoreid', state: 'not_verified',
+      providerReference: '100', respondedAt: new Date().toISOString() });
+    await expect(service.verifyPatientNin(patientRequest, '12345678901')).resolves.toMatchObject({ state: 'not_verified' });
+    expect(query.mock.calls.some(([sql]) => sql.includes('bind_my_verified_nin'))).toBe(false);
+    expect(query.mock.calls.some(([sql]) => sql.includes('record_my_nin_verification_evidence'))).toBe(true);
   });
 
   it('keeps an existing identity unchanged when the binding key or quota gate is unavailable', async () => {

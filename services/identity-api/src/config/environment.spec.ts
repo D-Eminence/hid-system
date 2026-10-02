@@ -22,6 +22,7 @@ describe('Identity production database transport', () => {
       IDENTITY_OCR_CALLER_SUBJECT: 'workload:ocr', OUTREACH_CALLER_SUBJECT: 'workload:outreach',
       TURNSTILE_MODE: 'required', TURNSTILE_SECRET_KEY: 'server-only-turnstile-secret',
       OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64'),
+      CONTACT_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 8).toString('base64'),
       NOTIFICATION_API_URL: 'https://notification.internal.example',
       NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
       NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE: '/var/run/secrets/notification.jwt',

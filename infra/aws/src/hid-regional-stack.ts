@@ -858,6 +858,7 @@ export class HidRegionalStack extends Stack {
         output.NIN_ENCRYPTION_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'ninEncryptionKeyB64');
       }
       output.OTP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'otpHmacKeyB64');
+      output.CONTACT_LOOKUP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'contactLookupHmacKeyB64');
       output.TURNSTILE_SECRET_KEY = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'turnstileSecretKey');
       // The allowlist is configuration rather than a Google client secret,
       // but it is an Identity-only trust decision. Keep it in the existing

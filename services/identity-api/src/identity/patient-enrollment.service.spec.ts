@@ -1,12 +1,16 @@
+jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
+
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { NotificationOtpClient } from '../auth/notification-otp.client';
+import type { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import { PatientEnrollmentService } from './patient-enrollment.service';
 import type { PublicPatientIdentityProvider } from './patient-enrollment.provider';
 import type { NinIdentifierProtector } from './nin-identifier-protector';
 import type { HidCodeGenerator } from './hid-code-generator.service';
+import { createContactLookupHmac } from './contact-lookup';
 
 const originalEnvironment = { ...process.env };
 const nin = '12345678901';
@@ -26,11 +30,15 @@ function fixture() {
   let enrollment: Record<string, unknown> | undefined;
   const challenges: Record<string, unknown>[] = [];
   let bound = false;
+  let contactBound = false;
+  let ready = true;
   let rateCount = 0;
   const queries: RecordedQuery[] = [];
   const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
     queries.push({ sql, values });
     if (sql.includes('public_patient_nin_already_bound')) return { rows: [{ bound }] };
+    if (sql.includes('public_patient_enrollment_ready')) return { rows: [{ ready }] };
+    if (sql.includes('public_patient_contact_already_bound')) return { rows: [{ bound: contactBound }] };
     if (sql.includes('from identity.public_patient_enrollment_rates')) return { rows: rateCount
       ? [{ request_count: rateCount, window_started_at: new Date() }] : [] };
     if (sql.includes('from identity.public_patient_enrollments where nin_lookup_hmac')) {
@@ -49,7 +57,7 @@ function fixture() {
         nin_ciphertext: values[3], profile_ciphertext: values[4], profile_sha256: values[5],
         provider_reference: values[7], request_hmac: values[8], token_hmac: values[9],
         state: 'verify_contact', expires_at: new Date(Date.now() + 86_400_000),
-        contact_channel: null, contact_hmac: null, contact_ciphertext: null,
+        contact_channel: null, contact_hmac: null, contact_lookup_hmac: null, contact_ciphertext: null,
         contact_verified_at: null,
       };
       return { rows: [], rowCount: 1 };
@@ -66,7 +74,7 @@ function fixture() {
     }
     if (sql.includes('update identity.public_patient_enrollments set contact_channel=')) {
       Object.assign(enrollment!, { contact_channel: values[1], contact_hmac: values[2],
-        contact_ciphertext: values[3] });
+        contact_lookup_hmac: values[3], contact_ciphertext: values[4] });
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes('insert into identity.public_patient_enrollment_otps')) {
@@ -116,13 +124,17 @@ function fixture() {
   const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
   const protector = { lookup: jest.fn().mockReturnValue('a'.repeat(64)) };
   const hidCodes = { generate: jest.fn().mockReturnValue('HID-TEST-00000001') };
+  const google = { bindPendingInTransaction: jest.fn().mockResolvedValue(undefined),
+    consumePendingInTransaction: jest.fn().mockResolvedValue(undefined) };
   const service = new PatientEnrollmentService(database, protector as unknown as NinIdentifierProtector,
     provider as PublicPatientIdentityProvider, notification as unknown as NotificationOtpClient,
-    hidCodes as unknown as HidCodeGenerator);
-  return { service, queries, provider, notification, protector,
+    hidCodes as unknown as HidCodeGenerator, google as unknown as GoogleAuthenticationService);
+  return { service, client, queries, provider, notification, protector, google,
     get enrollment() { return enrollment; }, get challenge() { return challenges.at(-1); },
     challenges,
     set bound(value: boolean) { bound = value; },
+    set contactBound(value: boolean) { contactBound = value; },
+    set ready(value: boolean) { ready = value; },
     set rateCount(value: number) { rateCount = value; } };
 }
 
@@ -135,6 +147,7 @@ describe('PatientEnrollmentService', () => {
       AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
       NIN_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 1).toString('base64'),
       NIN_ENCRYPTION_KEY_B64: Buffer.alloc(32, 2).toString('base64'),
+      CONTACT_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 4).toString('base64'),
       OTP_HMAC_KEY_B64: Buffer.alloc(32, 3).toString('base64'),
     });
     resetEnvironmentForTests();
@@ -216,6 +229,23 @@ describe('PatientEnrollmentService', () => {
     expect(f.provider.verifyNin).not.toHaveBeenCalled();
   });
 
+  it('blocks a new identity before QoreID when cross-cohort reconciliation is unsealed', async () => {
+    const f = fixture();
+    f.ready = false;
+    await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+      .rejects.toMatchObject({ code: 'ENROLLMENT_RECONCILIATION_REQUIRED', status: 503 });
+    expect(f.provider.verifyNin).not.toHaveBeenCalled();
+  });
+
+  it('rejects an existing patient contact before delivering an OTP', async () => {
+    const f = fixture();
+    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+    f.contactBound = true;
+    await expect(f.service.startContact(started.cookie, 'phone', '08012345678',
+      '203.0.113.10', correlationId)).rejects.toMatchObject({ code: 'CONTACT_ALREADY_REGISTERED' });
+    expect(f.notification.deliver).not.toHaveBeenCalled();
+  });
+
   it('rate limits before provider verification and rejects invalid cookies before charging contact quota', async () => {
     const f = fixture();
     f.rateCount = 5;
@@ -294,7 +324,65 @@ describe('PatientEnrollmentService', () => {
         lga: 'Fixture LGA', state: 'Fixture State' },
     });
     expect(activation.values[5]).toMatch(/^\$argon2id\$/);
+    expect(activation.values[6]).toBe(createContactLookupHmac('phone', '+2348012345678'));
+    expect(f.enrollment?.contact_lookup_hmac).toBe(activation.values[6]);
     expect(activation.values).not.toContain('a-strong-test-password');
+  });
+
+  it('binds Google pending proof on start and retry, then consumes it inside the account activation transaction', async () => {
+    const f = fixture();
+    const googleCookie = '30000000-0000-4000-8000-000000000001.' + 'A'.repeat(43);
+    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId,
+      googleCookie);
+    expect(f.google.bindPendingInTransaction).toHaveBeenCalledWith(f.client, googleCookie,
+      f.enrollment?.id, f.enrollment?.token_hmac);
+    await f.service.start(nin, requestKey, '203.0.113.10', correlationId, googleCookie);
+    expect(f.google.bindPendingInTransaction).toHaveBeenCalledTimes(2);
+    expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
+
+    const contact = await f.service.startContact(started.cookie, 'email',
+      'google-patient@example.test', '203.0.113.10', correlationId);
+    const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
+    await f.service.verifyContact(started.cookie, contact.challengeId, deliveredCode, correlationId);
+    await f.service.activate(started.cookie, 'a-strong-test-password', correlationId, googleCookie);
+    expect(f.google.consumePendingInTransaction).toHaveBeenCalledWith(f.client,
+      googleCookie, f.enrollment?.id, 'account-7');
+    expect(f.client.query).toHaveBeenCalledWith(
+      'select * from identity.activate_public_patient_enrollment($1,$2,$3,$4,$5,$6,$7)',
+      expect.any(Array));
+  });
+
+  it('rebinds fresh Google proof to an existing preactivation enrollment', async () => {
+    const f = fixture();
+    const firstCookie = '30000000-0000-4000-8000-000000000001.' + 'A'.repeat(43);
+    const freshCookie = '30000000-0000-4000-8000-000000000002.' + 'B'.repeat(43);
+    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId,
+      firstCookie);
+
+    await expect(f.service.bindGoogle(started.cookie, freshCookie, correlationId))
+      .resolves.toEqual({ bound: true });
+    expect(f.google.bindPendingInTransaction).toHaveBeenLastCalledWith(f.client, freshCookie,
+      f.enrollment?.id, f.enrollment?.token_hmac);
+    await expect(f.service.bindGoogle(started.cookie, undefined, correlationId))
+      .rejects.toMatchObject({ code: 'GOOGLE_ONBOARDING_NOT_FOUND' });
+  });
+
+  it('does not complete activation when a bound pending Google capability cannot be consumed', async () => {
+    const f = fixture();
+    const googleCookie = '30000000-0000-4000-8000-000000000001.' + 'A'.repeat(43);
+    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId,
+      googleCookie);
+    const contact = await f.service.startContact(started.cookie, 'email',
+      'google-patient@example.test', '203.0.113.10', correlationId);
+    const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
+    await f.service.verifyContact(started.cookie, contact.challengeId, deliveredCode, correlationId);
+    f.google.consumePendingInTransaction.mockRejectedValueOnce(new DomainProblem(404,
+      'GOOGLE_ONBOARDING_NOT_FOUND', 'No pending Google onboarding was found'));
+
+    await expect(f.service.activate(started.cookie, 'a-strong-test-password', correlationId,
+      googleCookie)).rejects.toMatchObject({ code: 'GOOGLE_ONBOARDING_NOT_FOUND' });
+    expect(f.google.consumePendingInTransaction).toHaveBeenCalledWith(f.client,
+      googleCookie, f.enrollment?.id, 'account-7');
   });
 
   it('rejects an expired code without advancing the enrollment', async () => {

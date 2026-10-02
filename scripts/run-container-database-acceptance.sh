@@ -84,6 +84,18 @@ PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/public-patient-enrollment.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/progressive-patient-nin.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/google-onboarding.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/patient-self.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/patient-access-pin.integration.sql" >/dev/null
 env NODE_ENV=test DATABASE_URL="$acceptance_admin_url" DATABASE_SSL=true \
   DATABASE_SSL_ROOT_CERT_BASE64="$acceptance_ca_base64" \
   npm --prefix "$acceptance_repository/services/ehr-api" run db:plan
@@ -317,8 +329,10 @@ acceptance_remaining="$(PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/se
   "select count(*) from pg_roles where rolname like 'hid_accept_%'")"
 [[ "$acceptance_remaining" == 0 ]]
 
+acceptance_postgresql_version="$(PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid -Atqc 'show server_version')"
 "$acceptance_pg_bindir/pg_ctl" -D "$acceptance_data" -m fast -w stop >/dev/null
 acceptance_started=false
 rm -rf -- "$acceptance_root"
 trap - EXIT INT TERM
-echo '{"status":"passed","postgresql":"16.14","migrations":"0001-0056","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}'
+printf '{"status":"passed","postgresql":"%s","migrations":"0001-0060","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}\n' "$acceptance_postgresql_version"

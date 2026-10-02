@@ -10,6 +10,8 @@ export interface PatientEnrollmentProgress {
   expiresInSeconds?: number
   resendAfterSeconds?: number
   expiresAt?: string
+  googleOnboardingRequired?: boolean
+  googleOnboardingExpiresAt?: string
 }
 
 export interface PatientContactChallenge {
@@ -63,6 +65,7 @@ export function isEnrollmentIdempotencyKey(value: string): boolean {
 export function createPatientEnrollmentApi(send: PatientEnrollmentTransport) {
   return {
     current: () => send<PatientEnrollmentProgress>(`${endpoint}/current`),
+    bindGoogle: () => send<{ bound: true }>(`${endpoint}/google`, { method: 'POST' }),
     start(ninInput: string, turnstileToken: string | null, idempotencyKey: string) {
       const nin = normalizeEnrollmentNin(ninInput)
       if (!isEnrollmentIdempotencyKey(idempotencyKey)) {

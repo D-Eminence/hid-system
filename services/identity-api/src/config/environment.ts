@@ -54,6 +54,7 @@ const environmentSchema = z.object({
   TURNSTILE_SITEVERIFY_URL: z.string().url().default('https://challenges.cloudflare.com/turnstile/v0/siteverify'),
   TURNSTILE_TIMEOUT_MS: z.coerce.number().int().min(250).max(10_000).default(3_000),
   OTP_HMAC_KEY_B64: optionalString,
+  CONTACT_LOOKUP_HMAC_KEY_B64: optionalString,
   OTP_HMAC_KEY_VERSION: z.string().trim().min(1).max(64).default('local-v1'),
   OTP_EXPIRY_SECONDS: z.coerce.number().int().min(60).max(600).default(300),
   OTP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
@@ -162,6 +163,9 @@ const environmentSchema = z.object({
   if (environment.OTP_HMAC_KEY_B64 && !isBase64Key(environment.OTP_HMAC_KEY_B64, 32)) {
     context.addIssue({ code: 'custom', path: ['OTP_HMAC_KEY_B64'], message: 'The OTP HMAC key must be exactly 32 base64-encoded bytes' });
   }
+  if (environment.CONTACT_LOOKUP_HMAC_KEY_B64 && !isBase64Key(environment.CONTACT_LOOKUP_HMAC_KEY_B64, 32)) {
+    context.addIssue({ code: 'custom', path: ['CONTACT_LOOKUP_HMAC_KEY_B64'], message: 'The contact lookup key must be exactly 32 base64-encoded bytes' });
+  }
   if (environment.NOTIFICATION_SERVICE_IDENTITY_MODE === 'local-secret'
       && !environment.NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN && environment.NODE_ENV !== 'test') {
     context.addIssue({ code: 'custom', path: ['NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN'], message: 'Local Identity-to-Notification calls require an ephemeral secret' });
@@ -206,6 +210,7 @@ const environmentSchema = z.object({
     if (!environment.TRUST_PROXY_CIDRS) context.addIssue({ code: 'custom', path: ['TRUST_PROXY_CIDRS'], message: 'Approved reverse-proxy CIDRs are required in production' });
     else if (environment.TRUST_PROXY_CIDRS.split(',').map((value) => value.trim()).some((value) => !validProxyCidr(value))) context.addIssue({ code: 'custom', path: ['TRUST_PROXY_CIDRS'], message: 'TRUST_PROXY_CIDRS must contain only explicit IP addresses or CIDR ranges' });
     if (!environment.OTP_HMAC_KEY_B64) context.addIssue({ code: 'custom', path: ['OTP_HMAC_KEY_B64'], message: 'The server-only OTP HMAC key is required in production' });
+    if (!environment.CONTACT_LOOKUP_HMAC_KEY_B64) context.addIssue({ code: 'custom', path: ['CONTACT_LOOKUP_HMAC_KEY_B64'], message: 'The server-only contact lookup key is required in production' });
     if (environment.NOTIFICATION_SERVICE_IDENTITY_MODE !== 'jwt') context.addIssue({ code: 'custom', path: ['NOTIFICATION_SERVICE_IDENTITY_MODE'], message: 'Production Identity-to-Notification calls require JWT workload identity' });
     if (environment.NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN) context.addIssue({ code: 'custom', path: ['NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN'], message: 'Local Notification service tokens are forbidden in production' });
     if (new URL(environment.NOTIFICATION_API_URL).protocol !== 'https:') context.addIssue({ code: 'custom', path: ['NOTIFICATION_API_URL'], message: 'Production Notification API URL must use HTTPS' });

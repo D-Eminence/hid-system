@@ -23,6 +23,11 @@ import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvid
 // OIDC/JWKS/database calls may occur in either isolated fixture.
 jest.mock('../auth/workload-auth.service', () => ({ WorkloadAuthService: class WorkloadAuthService {} }));
 jest.mock('../auth/token.service', () => ({ TokenService: class TokenService {} }));
+jest.mock('../auth/google-authentication.service', () => ({
+  GoogleAuthenticationService: class GoogleAuthenticationService {
+    readonly onboardingCookieName = 'hid_google_onboarding';
+  },
+}));
 
 const database = { withTransaction: jest.fn(), withSystemTransaction: jest.fn(), query: jest.fn() };
 const audit = { record: jest.fn(), recordWithClient: jest.fn() };
@@ -65,6 +70,7 @@ describe('explicitly deferred staging NIN', () => {
       IDENTITY_PHARMACY_CALLER_SUBJECT: 'hid:staging:pharmacy-api', IDENTITY_OCR_CALLER_SUBJECT: 'hid:staging:ocr-api',
       OUTREACH_CALLER_SUBJECT: 'hid:staging:outreach-api', TURNSTILE_MODE: 'required',
       TURNSTILE_SECRET_KEY: randomBytes(32).toString('base64url'), OTP_HMAC_KEY_B64: randomBytes(32).toString('base64'),
+      CONTACT_LOOKUP_HMAC_KEY_B64: randomBytes(32).toString('base64'),
       NOTIFICATION_API_URL: 'https://notification.example.test', NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
       NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE: '/synthetic/unused-notification.jwt',
     };

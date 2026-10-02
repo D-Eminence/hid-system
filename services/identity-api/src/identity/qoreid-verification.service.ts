@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { requirePatient } from '../auth/patient-self.service';
@@ -12,6 +13,7 @@ import { matchingCacIncompleteProfile, verifiedCacBinding } from './organization
 import {
   QOREID_PROVIDER,
   type QoreIdNinClaims,
+  type QoreIdNinBinding,
   type EvidenceResult,
   type OrganizationVerificationContext,
   type QoreIdVerificationResult,
@@ -34,6 +36,8 @@ interface PatientProfileRow extends QueryResultRow {
   profile: unknown;
 }
 
+type PatientNinEligibility = 'bound_exact' | 'legacy_unbound' | 'denied';
+
 @Injectable()
 export class QoreIdVerificationService {
   constructor(
@@ -45,20 +49,33 @@ export class QoreIdVerificationService {
 
   async verifyPatientNin(request: HidRequest, nin: string): Promise<VerificationResponse> {
     const actor = requirePatient(request.actor);
-    let boundLookupHmac: string | null = null;
+    let verifiedProfile: QoreIdNinBinding | undefined;
     const persist = (result: EvidenceResult, reference?: string, failure?: VerificationFailureCategory) =>
-      this.recordPatientEvidence(request, actor.subject, actor.sessionId, result, reference, failure,
-        result === 'verified' ? boundLookupHmac : null);
+      result === 'verified'
+        ? this.bindVerifiedPatientNin(request, actor.subject, actor.sessionId, nin, verifiedProfile, reference)
+        : this.recordPatientEvidence(request, actor.subject, actor.sessionId, result, reference, failure);
     return this.verify(
       async () => {
         const claims = await this.patientClaims(request, actor.subject, actor.sessionId, actor.patientId);
         const lookupHmac = this.ninProtector.lookup(nin);
-        await this.assertPatientNinBinding(request, actor.subject, actor.sessionId, lookupHmac);
-        boundLookupHmac = lookupHmac;
+        const eligibility = await this.patientNinEligibility(request, actor.subject, actor.sessionId, lookupHmac);
+        if (eligibility === 'denied') {
+          throw new DomainProblem(409, 'PATIENT_NIN_BINDING_CONFLICT',
+            'This NIN requires identity review before it can be verified');
+        }
         await this.integrations.consumePatientQuota(request.correlationId, actor.subject, actor.sessionId);
         const result = await this.provider.verifyNin(nin, claims);
-        if (result.state === 'verified' && !result.ninBinding) {
-          throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID', 'External verification returned an invalid response');
+        if (result.state === 'verified') {
+          const binding = result.ninBinding;
+          const normalizeName = (name: string) => name.trim().replace(/\s+/g, ' ').toLocaleUpperCase('en-NG');
+          if (!binding || binding.nin !== nin || !result.providerReference
+            || normalizeName(binding.firstName) !== normalizeName(claims.firstName)
+            || normalizeName(binding.lastName) !== normalizeName(claims.lastName)
+            || binding.dateOfBirth !== claims.dateOfBirth) {
+            throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
+              'External verification returned an invalid response');
+          }
+          verifiedProfile = binding;
         }
         return result;
       },
@@ -68,24 +85,52 @@ export class QoreIdVerificationService {
     );
   }
 
-  private async assertPatientNinBinding(request: HidRequest, subject: string,
-    sessionId: string, lookupHmac: string): Promise<void> {
-    let matched: boolean;
+  private async patientNinEligibility(request: HidRequest, subject: string,
+    sessionId: string, lookupHmac: string): Promise<PatientNinEligibility> {
+    let state: PatientNinEligibility;
     try {
-      matched = await this.database.withSystemTransaction(request.correlationId, async (client) => {
+      state = await this.database.withSystemTransaction(request.correlationId, async (client) => {
         await client.query("select set_config('app.actor_subject',$1,true)", [subject]);
-        const result = await client.query<{ matched: boolean }>(
-          'select identity.patient_self_nin_binding_matches($1,$2,$3) as matched',
+        const result = await client.query<{ state: PatientNinEligibility }>(
+          'select identity.patient_self_nin_eligibility($1,$2,$3) as state',
           [subject, sessionId, lookupHmac]);
-        return result.rows[0]?.matched === true;
+        return result.rows[0]?.state ?? 'denied';
       });
     } catch {
       throw new DomainProblem(503, 'PATIENT_NIN_BINDING_UNAVAILABLE',
         'Patient NIN binding is temporarily unavailable');
     }
-    if (!matched) {
-      throw new DomainProblem(422, 'PATIENT_NIN_NOT_BOUND',
-        'This NIN is not bound to the current patient identity');
+    return state;
+  }
+
+  private async bindVerifiedPatientNin(request: HidRequest, subject: string, sessionId: string,
+    nin: string, profile: QoreIdNinBinding | undefined, providerReference?: string): Promise<StoredEvidence> {
+    if (!providerReference || !profile || profile.nin !== nin) throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
+      'External verification returned an invalid response');
+    const evidenceId = randomUUID();
+    const protectedNin = this.ninProtector.protectPatientSelf(nin, evidenceId);
+    const protectedProfile = this.ninProtector.protectPatientSelfProfile({
+      firstName: profile.firstName, lastName: profile.lastName, dateOfBirth: profile.dateOfBirth,
+    }, evidenceId);
+    try {
+      return await this.database.withSystemTransaction(request.correlationId, async (client) => {
+        await client.query("select set_config('app.actor_subject',$1,true)", [subject]);
+        const recorded = await client.query<EvidenceRow>(
+          `select evidence_id as "evidenceId", recorded_at as "recordedAt"
+             from identity.bind_my_verified_nin($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [subject, sessionId, evidenceId, protectedNin.lookupHmac, protectedNin.ciphertext,
+            protectedNin.keyVersion, protectedNin.last4, providerReference,
+            protectedProfile.ciphertext, protectedProfile.sha256],
+        );
+        return this.evidenceRow(recorded.rows[0]);
+      });
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : null;
+      if (code === '23505' || code === '23514' || code === '42501') {
+        throw new DomainProblem(409, 'PATIENT_NIN_BINDING_CONFLICT',
+          'This NIN requires identity review before it can be verified');
+      }
+      throw error;
     }
   }
 
@@ -177,7 +222,7 @@ export class QoreIdVerificationService {
         (verificationType === 'cac' && ['QOREID_DISABLED', 'INTEGRATION_PAUSED'].includes(error.code))
         || [
           'VERIFICATION_QUOTA_EXCEEDED', 'VERIFICATION_QUOTA_UNAVAILABLE', 'PERMISSION_DENIED',
-          'INTEGRATION_UNAVAILABLE', 'PATIENT_NIN_NOT_BOUND', 'PATIENT_NIN_BINDING_UNAVAILABLE',
+          'INTEGRATION_UNAVAILABLE', 'PATIENT_NIN_BINDING_CONFLICT', 'PATIENT_NIN_BINDING_UNAVAILABLE',
           'NIN_PROTECTION_UNAVAILABLE', 'PATIENT_IDENTITY_PROFILE_INCOMPLETE',
         ].includes(error.code))) throw error;
       const failure = this.failureCategory(error);
@@ -217,7 +262,6 @@ export class QoreIdVerificationService {
     result: EvidenceResult,
     providerReference?: string,
     failure?: VerificationFailureCategory,
-    lookupHmac?: string | null,
   ): Promise<StoredEvidence> {
     return this.database.withSystemTransaction(request.correlationId, async (client) => {
       // The database function validates this subject/session pair before it
@@ -226,7 +270,7 @@ export class QoreIdVerificationService {
       const recorded = await client.query<EvidenceRow>(
         `select evidence_id as "evidenceId", recorded_at as "recordedAt"
            from identity.record_my_nin_verification_evidence($1, $2, $3, $4, $5, $6)`,
-        [subject, sessionId, result, providerReference ?? null, failure ?? null, lookupHmac ?? null],
+        [subject, sessionId, result, providerReference ?? null, failure ?? null, null],
       );
       return this.evidenceRow(recorded.rows[0]);
     });
@@ -264,7 +308,10 @@ export class QoreIdVerificationService {
   ): Promise<StoredEvidence> {
     try {
       return await persist(result, reference, failure);
-    } catch {
+    } catch (error) {
+      if (error instanceof DomainProblem && ['PATIENT_NIN_BINDING_CONFLICT', 'NIN_PROTECTION_UNAVAILABLE'].includes(error.code)) {
+        throw error;
+      }
       // The command should not report a provider result if its minimum audit
       // evidence cannot be made durable. Do not expose database diagnostics.
       throw new DomainProblem(503, 'VERIFICATION_EVIDENCE_UNAVAILABLE', 'Verification evidence is unavailable');

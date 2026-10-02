@@ -75,7 +75,7 @@ describe('QoreID verification adapter', () => {
 
     await expect(adapter.verifyNin('12345678901', claims)).resolves.toEqual({
       provider: 'qoreid', state: 'verified', providerReference: '48291', respondedAt: expect.any(String),
-      ninBinding: { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04' },
+      ninBinding: { nin: '12345678901', firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04' },
     });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch.mock.calls[0]).toEqual([

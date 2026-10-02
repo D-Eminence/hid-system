@@ -24,6 +24,8 @@ export interface QoreIdNinClaims {
 }
 
 export interface QoreIdNinBinding {
+  /** Returned by QoreID and required to equal the submitted 11-digit NIN. */
+  nin: string;
   firstName: string;
   lastName: string;
   dateOfBirth: string;

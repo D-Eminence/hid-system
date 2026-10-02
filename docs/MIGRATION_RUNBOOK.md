@@ -53,12 +53,18 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0054_complete_existing_cac_evidence_binding.sql` | Compare all required persisted legal-entity fields for existing-organization CAC evidence; incomplete historical bindings fail closed |
 | `database/migrations/0055_verified_incomplete_cac_result.sql` | Historical `verified_incomplete` representation for a successful sparse lookup; `0056` converts it to verified provider state plus incomplete profile state |
 | `database/migrations/0056_cac_applicant_profile_completion.sql` | Separate CAC provider verification from profile completion; preserve the verified submitted RC/BN/IT identifier when QoreID omits `cac.rcNumber`, enforce returned-number matches, store provider fields and per-field `qoreid`/`user_provided` sources, add bounded email-OTP completion, preserve non-active provider status while blocking review, and require a complete sourced active profile plus existing governed review before binding/approval |
+| `database/migrations/0057_legacy_nin_crosswalk_and_contact_lookup.sql` | Dedicated canonical contact lookup, restricted exact/absent legacy NIN inventory and verified-run attestation, and fail-closed readiness commands |
+| `database/migrations/0058_progressive_patient_nin_binding.sql` | Session-bound QoreID verification that binds an exact NIN to the preserved migrated patient and advances assurance without changing UUID or HID |
+| `database/migrations/0059_google_onboarding.sql` | Short-lived accountless Google proof, recoverable enrollment binding, atomic activation link, and explicit existing-account link command |
+| `database/migrations/0060_patient_access_pin_profile_status.sql` | Patient-safe assurance and Access PIN configured status without returning PIN material |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
 | `scripts/promote-legacy-identity.mjs` | Explicit dependency ordering, UUID/HID preservation, encryption/HMAC, holds and conflict evidence |
 | `scripts/reconcile-legacy-identity.mjs` | Independent destination read-back, counts, decryption and checksums |
 | `scripts/verify-legacy-migration.mjs` | Offline determinism, preservation, idempotency and blocking-contract verification |
+| `scripts/rekey-patient-contact-lookups.mjs` | Dry-run-default, conflict-checked canonical contact lookup rekey with an atomic completion marker |
+| `scripts/import-legacy-nin-crosswalk.mjs` | Dry-run-default import of a complete, attested exact/absent legacy NIN source inventory; never asserts QoreID verification |
 | `test/fixtures/legacy-identity.sample.json` | Synthetic account/profile/patient rehearsal with fixed UUID/HID |
 
 The migration ledger is physically under EHR for the current repository
@@ -89,6 +95,11 @@ MIGRATION_LOOKUP_HMAC_KEY_B64
 MIGRATION_FIELD_KEY_REFERENCE
 MIGRATION_FACILITY_TIMEZONES_JSON
 MIGRATION_BATCH_SIZE                      # optional, 10..5000
+CONTACT_LOOKUP_HMAC_KEY_B64               # same 32-byte key as the Identity runtime
+NIN_LOOKUP_HMAC_KEY_B64                   # same 32-byte key as the Identity runtime
+NIN_ENCRYPTION_KEY_B64                    # rekey of pending public enrollment contacts
+OTP_HMAC_KEY_B64                          # verify the old public OTP recipient HMAC
+LEGACY_NIN_ATTESTATION_PATH               # restricted, operator-reviewed JSON input; no repository copy
 DATABASE_SSL=true
 DATABASE_SSL_ROOT_CERT_BASE64
 LEGACY_DATABASE_SSL=true
@@ -99,6 +110,53 @@ LEGACY_DATABASE_SSL_ROOT_CERT_BASE64      # when source CA is not system-trusted
 Production TLS must verify the approved trust chain. Secrets must not enter
 files, shell history, screenshots, tickets, application logs, or reconciliation
 payloads.
+
+### Canonical contact and legacy NIN reconciliation order
+
+After legacy promotion is independently reconciled, run the contact rekey dry
+run with an operator-approved evidence label in `MIGRATION_SNAPSHOT_ID`, the
+operator, and the same contact/NIN/OTP keys used by Identity. The label is
+recorded for operational traceability; the command establishes completeness by
+locking and validating every current legacy patient and prior public enrollment,
+rather than treating the label itself as database proof. It decrypts every legacy patient
+contact and every existing public enrollment contact, verifies each old lookup
+or OTP recipient HMAC, detects canonical contact conflicts, and rolls back.
+Review the counts before running the same command with `--apply`. The apply
+command commits all lookup changes and its completion marker together.
+
+```bash
+npm --prefix services/ehr-api run migration:rekey-contacts
+npm --prefix services/ehr-api run migration:rekey-contacts -- --apply
+```
+
+Prepare one access-controlled JSON attestation per verified legacy migration
+run. It must identify the exact `runId`, `sourceSnapshot`,
+`sourceChecksumSha256`, `evidenceReference`, `attestedBy`, and UTC `attestedAt`.
+Its `patients` array must cover **every** staged patient in that run. Each
+patient entry contains its preserved `patientId`, a source
+`evidenceReference`, and either `ninStatus: "exact"` with an independently
+attested complete 11-digit `nin`, or `ninStatus: "absent"` with no `nin` field.
+An absent claim is rejected when the staged source has any deprecated NIN
+field; obtain exact source evidence or hold reconciliation instead. The importer
+checks source UUID/account/HID preservation, prior governed NIN ownership,
+duplicate NINs, and inventory completeness. It stores only the keyed HMAC,
+attestation metadata, and source row checksum. Exact source association does
+**not** grant `NIN_VERIFIED`; only later authoritative QoreID proof can do so.
+
+```bash
+npm --prefix services/ehr-api run migration:import-nin-crosswalk
+npm --prefix services/ehr-api run migration:import-nin-crosswalk -- --apply
+```
+
+Both commands default to dry run. Public new-patient enrollment remains closed
+while a legacy run is actively staged, a promoted patient is unreconciled or
+lacks a complete attested NIN inventory, and while old contact lookups lack the applied rekey
+marker. An installation with no migrated patients or stale contact rows needs
+no fictitious import. Terminal failed/blocked attempts remain immutable evidence
+but do not permanently poison a later complete verified inventory. Distinct verified migration runs can be attested separately;
+overlapping patient inventories require explicit governance before reimport.
+These repository commands and disposable rehearsals do not establish live
+migration readiness or authorize cutover.
 
 ## 4. Offline rehearsal
 
@@ -149,7 +207,7 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0034`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0060`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
@@ -237,7 +295,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0034`, runtime grants, RLS and purpose/deny behavior.
+6. Verify `0060`, runtime grants, RLS and purpose/deny behavior.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.

@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Headers, HttpCode, Post, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
+import { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import { TurnstileService } from '../auth/turnstile.service';
 import { AuditAction, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
@@ -19,7 +20,8 @@ export class PatientEnrollmentController {
     this.environment.CORS_ORIGINS.split(',').map((origin) => origin.trim()));
 
   constructor(private readonly enrollments: PatientEnrollmentService,
-    private readonly turnstile: TurnstileService) {}
+    private readonly turnstile: TurnstileService,
+    private readonly google: GoogleAuthenticationService) {}
 
   @Post()
   @HttpCode(200)
@@ -30,8 +32,11 @@ export class PatientEnrollmentController {
     this.assertOrigin(request);
     await this.turnstile.verify({ token: input.turnstileToken,
       action: input.turnstileAction, origin: request.header('origin'), remoteIp: request.ip });
+    const googleCookie = this.namedCookie(request, this.google.onboardingCookieName);
+    this.assertAccountlessEnrollment(request, googleCookie);
+    if (googleCookie) await this.google.onboardingStatus(googleCookie);
     const result = await this.enrollments.start(input.nin, idempotencyKey ?? '', request.ip,
-      request.correlationId);
+      request.correlationId, googleCookie);
     response.cookie(COOKIE_NAME, result.cookie, this.cookieOptions());
     return result.progress;
   }
@@ -39,7 +44,20 @@ export class PatientEnrollmentController {
   @Get('current')
   @AuditAction('identity.patient-enrollment.current')
   current(@Req() request: HidRequest) {
+    this.assertAccountlessEnrollment(request,
+      this.namedCookie(request, this.google.onboardingCookieName));
     return this.enrollments.current(this.cookie(request), request.correlationId);
+  }
+
+  @Post('google')
+  @HttpCode(200)
+  @AuditAction('identity.patient-enrollment.google-bind')
+  async bindGoogle(@Req() request: HidRequest) {
+    this.assertOrigin(request);
+    const googleCookie = this.namedCookie(request, this.google.onboardingCookieName);
+    this.assertAccountlessEnrollment(request, googleCookie);
+    await this.google.onboardingStatus(googleCookie);
+    return this.enrollments.bindGoogle(this.cookie(request), googleCookie, request.correlationId);
   }
 
   @Post('contact')
@@ -47,6 +65,8 @@ export class PatientEnrollmentController {
   @AuditAction('identity.patient-enrollment.contact')
   contact(@Body() input: PatientEnrollmentContactDto, @Req() request: HidRequest) {
     this.assertOrigin(request);
+    this.assertAccountlessEnrollment(request,
+      this.namedCookie(request, this.google.onboardingCookieName));
     return this.enrollments.startContact(this.cookie(request), input.channel,
       input.contact, request.ip, request.correlationId);
   }
@@ -57,6 +77,8 @@ export class PatientEnrollmentController {
   verifyContact(@Body() input: VerifyPatientEnrollmentContactDto,
     @Req() request: HidRequest) {
     this.assertOrigin(request);
+    this.assertAccountlessEnrollment(request,
+      this.namedCookie(request, this.google.onboardingCookieName));
     return this.enrollments.verifyContact(this.cookie(request), input.challengeId,
       input.code, request.correlationId);
   }
@@ -65,10 +87,16 @@ export class PatientEnrollmentController {
   @HttpCode(200)
   @AuditAction('identity.patient-enrollment.activate')
   async activate(@Body() input: ActivatePatientEnrollmentDto,
-    @Req() request: HidRequest) {
+    @Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
     this.assertOrigin(request);
+    const googleCookie = this.namedCookie(request, this.google.onboardingCookieName);
+    this.assertAccountlessEnrollment(request, googleCookie);
     const result = await this.enrollments.activate(this.cookie(request), input.password,
-      request.correlationId);
+      request.correlationId, googleCookie);
+    if (googleCookie) response.clearCookie(this.google.onboardingCookieName, {
+      secure: this.environment.AUTH_COOKIE_SECURE,
+      sameSite: 'strict', httpOnly: true, path: '/api/v1',
+    });
     return result;
   }
 
@@ -80,9 +108,36 @@ export class PatientEnrollmentController {
   }
 
   private cookie(request: HidRequest): string | undefined {
-    const values = (request.header('cookie') ?? '').split(';').map((part) => part.trim())
-      .filter((part) => part.startsWith(`${COOKIE_NAME}=`));
-    return values.length === 1 ? values[0]?.slice(COOKIE_NAME.length + 1) : undefined;
+    return this.namedCookie(request, COOKIE_NAME);
+  }
+
+  private namedCookie(request: HidRequest, name: string): string | undefined {
+    const values = this.namedCookies(request, name);
+    return values.length === 1 ? values[0]?.slice(name.length + 1) : undefined;
+  }
+
+  private namedCookies(request: HidRequest, name: string): string[] {
+    return (request.header('cookie') ?? '').split(';').map((part) => part.trim())
+      .filter((part) => part.startsWith(`${name}=`));
+  }
+
+  private hasCookie(request: HidRequest, name: string): boolean {
+    // Presence, not identity: `namedCookie` deliberately yields undefined for an
+    // ambiguous duplicate so a bearer token is never guessed. Reusing it here
+    // would invert that fail-closed rule into a fail-open one, letting a
+    // signed-in patient reach public enrollment by repeating the cookie.
+    return this.namedCookies(request, name).length > 0;
+  }
+
+  private assertAccountlessEnrollment(request: HidRequest,
+    googleCookie: string | undefined): void {
+    if (this.hasCookie(request, this.environment.AUTH_COOKIE_NAME)
+      || this.hasCookie(request, `${this.environment.AUTH_COOKIE_NAME}_refresh`)
+      || request.header('authorization')) {
+      throw new DomainProblem(409,
+        googleCookie ? 'GOOGLE_ONBOARDING_REQUIRES_SIGN_OUT' : 'PATIENT_ENROLLMENT_REQUIRES_SIGN_OUT',
+        'Sign out before starting or continuing a new Health ID enrollment');
+    }
   }
 
   private cookieOptions() {

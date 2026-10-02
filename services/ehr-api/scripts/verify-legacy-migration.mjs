@@ -3,6 +3,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import bcrypt from 'bcryptjs';
+import { validLegacyPinHash } from './legacy-pin-hash.mjs';
 
 const serviceRoot = resolve(import.meta.dirname, '..');
 const fixturePath = resolve(serviceRoot, 'test/fixtures/legacy-identity.sample.json');
@@ -38,6 +40,15 @@ const fixture = JSON.parse(await readFile(fixturePath, 'utf8'));
 const patient = fixture.patients[0]?.payload;
 assert.equal(patient.id, '30000000-0000-4000-8000-000000000001');
 assert.equal(patient.hid_code, 'HID-ABCDEFGH');
+assert.equal(patient.auth_user_id, fixture.accounts[0]?.payload.id,
+  'The existing patient must retain the existing account UUID');
+assert.equal(bcrypt.compareSync('FixturePassw0rd!', fixture.accounts[0]?.payload.encrypted_password), true,
+  'The preserved synthetic password hash must remain usable');
+assert.equal(validLegacyPinHash(fixture.patient_access_pins[0]?.payload.pin_hash), true);
+assert.equal(fixture.patient_access_pins[0]?.payload.patient_id, patient.id,
+  'The imported PIN must remain tied to the preserved patient UUID');
+assert.equal(bcrypt.compareSync('1234', fixture.patient_access_pins[0]?.payload.pin_hash), true,
+  'The preserved synthetic PIN hash must remain usable');
 
 const promotion = await readFile(promotionPath, 'utf8');
 for (const invariant of [
@@ -46,6 +57,10 @@ for (const invariant of [
   "hid_code: source.hid_code",
   "source_system: 'legacy_identity'",
   'legacy_identity_user_id: source.id',
+  'password_hash: passwordHash',
+  "state: 'LEGACY_MIGRATED'",
+  'pin_hash: source.pin_hash',
+  'validLegacyPinHash(source.pin_hash)',
   'verify-supabase-cutover-input.mjs',
   'enforceCutoverInputGate();',
   'on conflict',

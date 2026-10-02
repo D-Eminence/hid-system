@@ -123,9 +123,12 @@ begin
   end if;
   if not has_table_privilege('hid_identity_runtime', 'auth.otp_challenges', 'SELECT,INSERT,UPDATE')
      or not has_table_privilege('hid_identity_runtime', 'auth.otp_rate_limits', 'SELECT,INSERT,UPDATE')
-     or not has_table_privilege('hid_identity_runtime', 'identity.patient_assurance_states', 'SELECT,INSERT,UPDATE')
+     or has_table_privilege('hid_identity_runtime', 'identity.patient_assurance_states', 'SELECT')
+     or has_table_privilege('hid_identity_runtime', 'identity.patient_assurance_states', 'INSERT')
+     or has_table_privilege('hid_identity_runtime', 'identity.patient_assurance_states', 'UPDATE')
+     or has_table_privilege('hid_identity_runtime', 'identity.patient_assurance_states', 'DELETE')
      or has_table_privilege('hid_identity_runtime', 'notification.device_registrations', 'SELECT') then
-    raise exception 'Identity OTP and progressive-assurance ownership is inconsistent';
+    raise exception 'Identity OTP or evidence-bound progressive-assurance boundary is inconsistent';
   end if;
   if not has_table_privilege('hid_notification_runtime', 'notification.device_registrations', 'SELECT,INSERT,UPDATE')
      or not has_table_privilege('hid_notification_runtime', 'notification.delivery_attempts', 'SELECT,INSERT')

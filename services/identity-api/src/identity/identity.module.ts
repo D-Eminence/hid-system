@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
+import { AuthModule } from '../auth/auth.module';
 import { TurnstileModule } from '../auth/turnstile.module';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { IntegrationModule } from '../integrations/integration.module';
@@ -30,7 +31,7 @@ import { PatientEnrollmentService } from './patient-enrollment.service';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 
 @Module({
-  imports: [TurnstileModule, IntegrationModule],
+  imports: [AuthModule, TurnstileModule, IntegrationModule],
   controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
     PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
     AdminOrganizationApplicationsController,
