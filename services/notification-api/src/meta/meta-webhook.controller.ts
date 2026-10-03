@@ -1,4 +1,6 @@
-import { BadRequestException, Controller, Get, Headers, HttpCode, Post, Query, Body } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Headers, HttpCode, Post, Query, Body, Req, UnauthorizedException } from '@nestjs/common';
+import type { RawBodyRequest } from '@nestjs/common';
+import type { Request } from 'express';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { getEnvironment } from '../config/environment';
 
@@ -11,7 +13,7 @@ export class MetaWebhookController {
     @Query('hub.challenge') challenge: string | undefined,
   ) {
     const expected = getEnvironment().META_WEBHOOK_VERIFY_TOKEN;
-    if (mode !== 'subscribe' || !verifyToken || !expected || !this.equal(verifyToken, expected) || !challenge) {
+    if (mode !== 'subscribe' || !verifyToken || !expected || !challenge || !this.equal(verifyToken, expected)) {
       throw new BadRequestException('Webhook verification failed');
     }
     return challenge;
@@ -22,17 +24,17 @@ export class MetaWebhookController {
   receive(
     @Body() payload: unknown,
     @Headers('x-hub-signature-256') signature: string | undefined,
+    @Req() request: RawBodyRequest<Request>,
   ) {
+    const environment = getEnvironment();
+    if (!environment.META_APP_SECRET) {
+      throw new UnauthorizedException('Meta webhook is not configured');
+    }
+    if (!signature || !this.verifySignature(request.rawBody, signature, environment.META_APP_SECRET)) {
+      throw new UnauthorizedException('Invalid Meta webhook signature');
+    }
     if (!payload || typeof payload !== 'object') {
       throw new BadRequestException('Invalid webhook payload');
-    }
-
-    // Meta webhook signature verification requires the raw request body.
-    // Signature enforcement is enabled once the application exposes the raw body
-    // to this controller. The endpoint still validates the webhook shape and
-    // acknowledges accepted deliveries without logging message contents.
-    if (signature !== undefined && !signature.startsWith('sha256=')) {
-      throw new BadRequestException('Invalid webhook signature');
     }
 
     const body = payload as Record<string, unknown>;
@@ -41,6 +43,15 @@ export class MetaWebhookController {
     }
 
     return { status: 'ok' };
+  }
+
+  private verifySignature(rawBody: Buffer | undefined, signature: string, secret: string): boolean {
+    if (!rawBody || !/^sha256=[a-f0-9]{64}$/.test(signature)) return false;
+    const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+    const received = signature.slice('sha256='.length);
+    const expectedBuffer = Buffer.from(expected, 'hex');
+    const receivedBuffer = Buffer.from(received, 'hex');
+    return timingSafeEqual(expectedBuffer, receivedBuffer);
   }
 
   private equal(first: string, second: string): boolean {
