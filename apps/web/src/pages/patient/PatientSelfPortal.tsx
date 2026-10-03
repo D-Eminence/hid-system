@@ -6,6 +6,7 @@ import { canonicalRequest, identityClient } from '../../lib/identityClient'
 import { GoogleIdentityButton } from '../../components/GoogleIdentityButton'
 import { PasswordField } from '../../components/PasswordField'
 import { TurnstileWidget } from '../../components/TurnstileWidget'
+import { ImportedMedicalHistory } from '../../../../../packages/ui/src/ImportedMedicalHistory'
 import { ensureCaptchaReady } from '../../lib/captcha'
 
 type AccessItem = { consentGrantId: string; scope: string; purpose: string; status: string; startsAt: string; expiresAt: string; reason: string; facilityName: string }
@@ -13,6 +14,8 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
   const [profile, setProfile] = useState<PatientSelf | null>(null)
   const [records, setRecords] = useState<ReleasedRecords | null>(null)
   const [activity, setActivity] = useState<AccessItem[] | null>(null)
+  const [importedNotifications, setImportedNotifications] = useState<Awaited<ReturnType<typeof carePortalApi.importedNotifications>> | null>(null)
+  const [notificationOffset, setNotificationOffset] = useState(0)
   const [error, setError] = useState('')
   const [reload, setReload] = useState(0)
   const [nin, setNin] = useState('')
@@ -32,12 +35,12 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
   const [linkNotice, setLinkNotice] = useState('')
   useEffect(() => {
     let active = true
-    setProfile(null); setRecords(null); setActivity(null); setError('')
+    setProfile(null); setRecords(null); setActivity(null); setImportedNotifications(null); setError('')
     async function load() {
       const self = await carePortalApi.self()
       if (!active) return
       setProfile(self)
-      if (page === 'records') {
+      if (page === 'records' || page === 'biodata') {
         const value = await carePortalApi.ownRecords()
         if (active) setRecords(value)
       }
@@ -45,16 +48,20 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
         const value = await canonicalRequest<{ items: AccessItem[] }>('/api/v1/identity/me/access-history')
         if (active) setActivity(value.items)
       }
+      if (page === 'notifications') {
+        const value = await carePortalApi.importedNotifications(notificationOffset)
+        if (active) setImportedNotifications(value)
+      }
     }
-    void load().catch(reason => { if (active) { setProfile(null); setRecords(null); setActivity(null); setError(reason instanceof Error ? reason.message : 'Unable to load your account.') } })
+    void load().catch(reason => { if (active) { setProfile(null); setRecords(null); setActivity(null); setImportedNotifications(null); setError(reason instanceof Error ? reason.message : 'Unable to load your account.') } })
     const subscription = identityClient.auth.onAuthStateChange(event => {
-      if (event === 'SIGNED_OUT') { active = false; setProfile(null); setRecords(null); setActivity(null); setError('Please sign in again.') }
+      if (event === 'SIGNED_OUT') { active = false; setProfile(null); setRecords(null); setActivity(null); setImportedNotifications(null); setError('Please sign in again.') }
     })
     // Hide medical information when a background tab resumes until authority is checked again.
     const refresh = () => { if (!document.hidden) setReload(value => value + 1) }
     document.addEventListener('visibilitychange', refresh)
     return () => { active = false; subscription.data.subscription.unsubscribe(); document.removeEventListener('visibilitychange', refresh) }
-  }, [page, reload])
+  }, [page, reload, notificationOffset])
   async function verifyNin(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setVerification(null); setVerificationError(''); setVerifying(true)
@@ -160,7 +167,19 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
         {linkError && <p role="alert">{linkError}</p>}
         {linkNotice && <p role="status">{linkNotice}</p>}
       </section>}</>}
-      {page === 'records' && (records ? <RecordSummary records={records} /> : <p role="status">Loading released records…</p>)}
+      {page === 'records' && (records ? <RecordSummary key={profile.patientId} records={records} onDownload={carePortalApi.ownAttachment} /> : <p role="status">Loading released records…</p>)}
+      {page === 'biodata' && (records ? <ImportedMedicalHistory records={[]} healthProfile={records.importedHealthProfile} /> : <p role="status">Loading health profile…</p>)}
+      {page === 'notifications' && <section aria-label="Preserved notifications"><h2>Earlier notifications</h2>
+        {importedNotifications === null ? <p role="status">Loading earlier notifications…</p> : importedNotifications.length === 0 ? <p>No earlier notifications are available.</p>
+          : importedNotifications.map(item => <article key={item.id}><h3>{item.title}</h3><p style={{whiteSpace:'pre-wrap'}}>{item.message}</p>
+            <p>{new Date(item.createdAt).toLocaleString()} · {item.readAt ? 'Read' : 'Unread'}</p>
+            {!item.readAt && <button onClick={() => { void carePortalApi.markImportedNotificationRead(item.id).then(result => {
+              setImportedNotifications(current => current?.map(row => row.id === result.id ? {...row,readAt:result.readAt} : row) ?? null)
+            }).catch(() => setError('The notification could not be marked as read.')) }}>Mark as read</button>}
+          </article>)}
+        <div>{notificationOffset > 0 && <button onClick={() => setNotificationOffset(value => Math.max(0,value-50))}>Newer notifications</button>}
+          {importedNotifications?.length === 50 && <button onClick={() => setNotificationOffset(value => value+50)}>Older notifications</button>}</div>
+      </section>}
       {(page === 'history' || page === 'notifications') && <>
         {page === 'notifications' && <p>Emergency access notices recorded in your account. Email delivery status is not shown here.</p>}
         {!activity ? <p role="status">Loading access activity…</p> : (page === 'notifications' ? activity.filter(item => item.scope === 'break_glass') : activity).length === 0 ? <p>No access activity is recorded.</p> :

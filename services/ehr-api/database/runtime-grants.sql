@@ -1,4 +1,6 @@
 -- Run separately as an RDS security administrator after schema migration.
+-- Imported legacy history is read-only through current self/consent RLS.
+-- Grants are appended below after the runtime group roles exist.
 -- This file creates NOLOGIN group roles only. Login-role membership and
 -- credentials remain environment-specific infrastructure.
 
@@ -882,3 +884,14 @@ revoke all on function auth.create_google_onboarding_capability(uuid,char,text),
   auth.consume_google_onboarding_capability(uuid,char,uuid,uuid),
   auth.link_google_identity_to_patient_account(uuid,text)
   from public;
+
+grant select on ehr.imported_medical_records, ehr.imported_medical_record_versions,
+  ehr.imported_medical_record_files to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function ehr.imported_record_read_context(uuid)
+  to hid_ehr_runtime, hid_schema_test_runtime;
+
+grant select on ehr.imported_patient_health_profiles, ehr.imported_attachment_bindings,
+  ehr.imported_attachment_scan_events to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function identity.list_my_imported_notifications(integer,integer),
+  identity.mark_my_imported_notification_read(uuid), platform.admin_imported_customer_configuration()
+  to hid_identity_runtime, hid_schema_test_runtime;

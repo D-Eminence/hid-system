@@ -106,10 +106,28 @@ export class S3StorageProvider implements StorageProvider {
     };
   }
 
-  async createDownload(key: string, versionId: string): Promise<{ url: string; expiresInSeconds: number }> {
+  async inspectVersion(key: string, versionId: string): Promise<StoredObjectMetadata> {
+    const result = await this.client.send(new HeadObjectCommand({
+      Bucket: this.bucket(), Key: key, VersionId: versionId, ChecksumMode: 'ENABLED',
+    }));
+    const checksum = Buffer.from(result.ChecksumSHA256 ?? '', 'base64');
+    if (result.VersionId !== versionId || checksum.length !== 32
+      || typeof result.ContentLength !== 'number' || result.ServerSideEncryption !== 'aws:kms'
+      || !result.SSEKMSKeyId || (this.environment.S3_KMS_KEY_ID && result.SSEKMSKeyId !== this.environment.S3_KMS_KEY_ID)) {
+      throw new ServiceUnavailableException('Imported object version integrity is unavailable');
+    }
+    return { versionId, sizeBytes: result.ContentLength, mediaType: result.ContentType ?? 'application/octet-stream', sha256Hex: checksum.toString('hex') };
+  }
+
+  async createDownload(key: string, versionId: string, attachment?: { fileName: string; mediaType: string }): Promise<{ url: string; expiresInSeconds: number }> {
     const expiresInSeconds = 60;
     const url = await getSignedUrl(this.client, new GetObjectCommand({
       Bucket: this.bucket(), Key: key, VersionId: versionId,
+      ...(attachment ? {
+        ResponseContentDisposition: `attachment; filename="${attachment.fileName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'attachment'}"`,
+        ResponseContentType: attachment.mediaType,
+        ResponseCacheControl: 'private, no-store',
+      } : {}),
     }), { expiresIn: expiresInSeconds });
     return { url, expiresInSeconds };
   }

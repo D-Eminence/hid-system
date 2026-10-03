@@ -19,6 +19,32 @@ export class PatientSelfService {
   history(request: HidRequest) { return this.read(request, 'access-history'); }
   authorize(request: HidRequest) { return this.read(request, 'authorize'); }
 
+  async importedNotifications(request: HidRequest, limit = 50, itemId?: string, offset = 0) {
+    const actor = request.actor;
+    if (!actor?.sessionId || (actor.kind !== undefined && actor.kind !== 'patient' && actor.kind !== 'staff')) {
+      throw new DomainProblem(403, 'SESSION_REQUIRED', 'An active account session is required');
+    }
+    return this.database.withSystemTransaction(request.correlationId, async client => {
+      const kind = actor.kind ?? 'staff';
+      await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);
+      const session = await client.query(`select exists(select 1 from auth.sessions s join auth.accounts a on a.id=s.account_id
+        where s.id=$1 and s.account_id=$2 and a.subject=$3 and a.status='active' and s.revoked_at is null
+            and s.expires_at>clock_timestamp() and s.absolute_expires_at>clock_timestamp()
+            and s.account_token_version=a.token_version and (a.disabled_until is null or a.disabled_until<=clock_timestamp())
+            and s.session_kind=$4 and ($4<>'patient' or s.patient_id=$5::uuid)) as active`, [actor.sessionId,actor.accountId,actor.subject,kind,actor.patientId??null]);
+      if (!session.rows[0]?.active) throw new DomainProblem(403, 'SESSION_REQUIRED', 'An active account session is required');
+      const result = itemId
+        ? await client.query('select id,read_at as "readAt" from identity.mark_my_imported_notification_read($1)', [itemId])
+        : await client.query(`select id,title,message,notification_type as type,read_at as "readAt",created_at as "createdAt"
+              from identity.list_my_imported_notifications($1,$2)`, [limit,offset]);
+      await this.audit.recordWithClient(client, { correlationId: request.correlationId, actorType: kind,
+        actorSubject: actor.subject, actorAccountId: actor.accountId, patientId: actor.patientId,
+        action: itemId ? 'identity.imported.notification.mark-read' : 'identity.imported.notification.list',
+        resourceType: 'imported-notification', resourceId: itemId, outcome: 'success', purposeOfUse: 'account-self' });
+      return itemId ? result.rows[0] : result.rows;
+    });
+  }
+
   async notificationInbox(request: HidRequest, limit?: number) {
     const actor = requirePatient(request.actor);
     return this.database.withSystemTransaction(request.correlationId, async (client) => {

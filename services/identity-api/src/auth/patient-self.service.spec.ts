@@ -19,6 +19,23 @@ function setup(value: unknown, auditFailure = false) {
 }
 
 describe('Patient self service', () => {
+  it('historical inbox binds the active session and paginates only its account',async()=>{
+    const s=setup(null);s.query.mockReset();
+    s.query.mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[{active:true}]}).mockResolvedValueOnce({rows:[{id:'synthetic-item'}]});
+    await expect(s.service.importedNotifications(request,50,undefined,100)).resolves.toEqual([{id:'synthetic-item'}]);
+    expect(s.query.mock.calls[1][1]).toEqual(['session-id','account-id','patient-subject','patient','patient-id']);
+    expect(s.query.mock.calls[2][1]).toEqual([50,100]);
+    expect(s.record).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({action:'identity.imported.notification.list'}));
+  });
+  it('revoked inbox sessions cannot read or mark historical items',async()=>{
+    const s=setup(null);s.query.mockReset();s.query.mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[{active:false}]});
+    await expect(s.service.importedNotifications(request,50,'synthetic-item')).rejects.toThrow('active account session');
+    expect(s.query).toHaveBeenCalledTimes(2);
+  });
+  it('historical inbox disclosure fails when durable audit fails',async()=>{
+    const s=setup(null,true);s.query.mockReset();s.query.mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[{active:true}]}).mockResolvedValueOnce({rows:[{id:'synthetic-item'}]});
+    await expect(s.service.importedNotifications(request)).rejects.toThrow('audit unavailable');
+  });
   it('derives profile target from the verified subject/session and commits audit before returning', async () => {
     const { service, query, record } = setup({ patientId: 'patient-id', hid: 'HID-ABCDEFGH' });
     await expect(service.profile(request)).resolves.toMatchObject({ patientId: 'patient-id' });

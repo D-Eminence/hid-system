@@ -8,7 +8,6 @@ import type {
   AdminPlatformAdminAction,
   AdminPlatformAdminActionResponse,
   AdminPlatformControls,
-  AdminPlatformControlsResponse,
   AdminRoleManagementResponse,
   AdminStaffRolePolicy,
   AdminUsersExportFilters,
@@ -24,12 +23,28 @@ import { clearAllPortalSessions } from '../lib/auth'
 import { BANNED_ACCOUNT_MESSAGE, isBannedAuthMessage } from '../lib/securityMessages'
 import {
   getIdentityCsrfToken,
+  canonicalRequest,
   NETWORK_TIMEOUT_MESSAGE,
   fetchWithTimeout,
   getSafeSession,
   safeSignOut,
 } from '../lib/identityClient'
 import { identityFunctionUrl } from '../lib/identityApiConfig'
+import { createPlatformControlsApi, type PlatformControl } from '../lib/platformControlsContract'
+
+const nativeControlsApi = createPlatformControlsApi(canonicalRequest)
+function adminControls(rows: PlatformControl[]): AdminPlatformControls {
+  const enabled = (key: PlatformControl['controlKey']) => rows.find(row => row.controlKey === key)!.enabled
+  return {
+    nativeControls: rows,
+    maintenanceMode: enabled('maintenance_mode'), patientPortalEnabled: enabled('patient_portal_enabled'),
+    hospitalPortalEnabled: enabled('provider_portal_enabled'), outreachPortalEnabled: enabled('outreach_portal_enabled'),
+    breakGlassEnabled: enabled('break_glass_enabled'), uploadsEnabled: enabled('uploads_enabled'),
+    patientSignupEnabled: null, hospitalSignupEnabled: null, outreachSignupEnabled: null, migratePortalEnabled: null,
+    updatedAt: rows.reduce((latest, row) => row.updatedAt > latest ? row.updatedAt : latest, ''),
+    updatedByUserProfileId: null, updatedByName: null, updatedByEmail: null,
+  }
+}
 
 const inflightOverviewRequests = new Map<string, Promise<AdminDashboardOverview>>()
 const overviewCache = new Map<string, { expiresAt: number; value: AdminDashboardOverview }>()
@@ -877,15 +892,13 @@ export async function fetchAdminPlatformControls(options: { force?: boolean } = 
   }
 
   const request = (async () => {
-    const data = await callAdminUserManagement<AdminPlatformControlsResponse>(identityFunctionUrl('admin-platform-controls'), {
-      method: 'GET',
-    }, 500)
+    const controls = adminControls(await nativeControlsApi.list())
 
     platformControlsCache.set(cacheKey, {
       expiresAt: Date.now() + ADMIN_CONTROLS_CACHE_TTL_MS,
-      value: data.controls,
+      value: controls,
     })
-    return data.controls
+    return controls
   })()
 
   inflightPlatformControlsRequest.set(cacheKey, request)
@@ -900,27 +913,16 @@ export async function fetchAdminPlatformControls(options: { force?: boolean } = 
 }
 
 export async function updateAdminPlatformControls(
-  controls: Partial<Pick<AdminPlatformControls, 'maintenanceMode' | 'patientSignupEnabled' | 'hospitalSignupEnabled' | 'patientPortalEnabled' | 'hospitalPortalEnabled' | 'outreachSignupEnabled' | 'outreachPortalEnabled' | 'migratePortalEnabled' | 'breakGlassEnabled' | 'uploadsEnabled'>>,
+  controls: AdminPlatformControls,
+  reason: string,
 ) {
-  const data = await callAdminUserManagement<AdminPlatformControlsResponse>(identityFunctionUrl('admin-platform-controls'), {
-    method: 'POST',
-    body: JSON.stringify({
-      action: 'update_controls',
-      controls: {
-        maintenance_mode: controls.maintenanceMode,
-        patient_signup_enabled: controls.patientSignupEnabled,
-        hospital_signup_enabled: controls.hospitalSignupEnabled,
-        patient_portal_enabled: controls.patientPortalEnabled,
-        hospital_portal_enabled: controls.hospitalPortalEnabled,
-        outreach_signup_enabled: controls.outreachSignupEnabled,
-        outreach_portal_enabled: controls.outreachPortalEnabled,
-        migrate_portal_enabled: controls.migratePortalEnabled,
-        break_glass_enabled: controls.breakGlassEnabled,
-        uploads_enabled: controls.uploadsEnabled,
-      },
-    }),
-  }, 500)
-
-  invalidateAdminDashboardCaches()
-  return data.controls
+  try {
+    return adminControls(await nativeControlsApi.save(controls.nativeControls, {
+      maintenance_mode: controls.maintenanceMode, patient_portal_enabled: controls.patientPortalEnabled,
+      provider_portal_enabled: controls.hospitalPortalEnabled, outreach_portal_enabled: controls.outreachPortalEnabled,
+      break_glass_enabled: controls.breakGlassEnabled, uploads_enabled: controls.uploadsEnabled,
+    }, reason))
+  } finally {
+    invalidateAdminDashboardCaches()
+  }
 }

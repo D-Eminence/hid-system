@@ -44,7 +44,9 @@ const acceptedMigrations = new Map([
   ['0030_patient_self_service.sql', 'c25b47c46e34b0adbe384b3964636dbe26c083d2ef3bd7d787c5e1f75fe1b9d6'],
   ['0031_emergency_notification_and_rate_limit.sql', 'f04f1cc8380dc0c6bd38d69403f23b13cad6a4e02778a0817df220da3dc3f701'],
   ['0032_governed_patient_enrollment.sql', 'c4ee4ac51ce90a622901c3f8ebd4f3ac4d72acb5a8f7addd0a2b1ea993572225'],
+  ['0033_patient_record_embeddings.sql', 'a71e911253af33c92ae574da71de9bda4f8a45f27757e563d25b28abbafcd843'],
   ['0033_supabase_cutover_identity_controls.sql', '4df718e800165d27085ae4b7b79761ef2748841cb6cebe1895c3674ebc6a2bce'],
+  ['0034_legacy_patient_access_secret_preservation.sql', '73cc3c6335c6366e7276b0e94c906ad668bdb9f4a627e0f78793ce2125be62ed'],
   ['0034_qoreid_verification_evidence.sql', '7dbb417aa3ff8982316606546047c37fa00559d8790e510cfd6ac622be538c18'],
   ['0035_patient_access_request_decisions.sql', '9deac031d48c5e38587cb75090ff0b1234c81dc44b5fccd0b92fd3d38d58080b'],
   ['0036_staff_access_request_visibility.sql', 'b52347897e20781add7d5db1b36851bb5892e4c5a0b268269b7a7bc3f3cb8c32'],
@@ -72,6 +74,8 @@ const acceptedMigrations = new Map([
   ['0058_progressive_patient_nin_binding.sql', 'f7e384f1fa49c3d2a950ad08bf761644e7194a80f34ea7a622af175452608aa8'],
   ['0059_google_onboarding.sql', '2a4147ad2310c928de23c350999adea4287d84b68fee51766e6633f929052af8'],
   ['0060_patient_access_pin_profile_status.sql', '1a0b5ca25f815dcd8714cdd569e8fe336b48d8a8c53362a8e42dbe986d407f50'],
+  ['0061_imported_medical_records.sql', '6a9fa6b845963521ea58c7ade0e19fb51b8ff5034de5dec42f3ded342525b7df'],
+  ['0062_customer_history_access.sql', 'cabb4443cccf8cfd1c7aba76425cc135264d541b04255dd902b2c3c44adea271'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import { access, readdir, readFile } from 'node:fs/promises'
 import { extname, join, resolve } from 'node:path'
+import { normalizeVerificationPath } from './verification-paths.mjs'
 
 const repository = resolve(import.meta.dirname, '..')
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
@@ -39,7 +40,7 @@ const allowedBrowserStorageFiles = new Set([
   'apps/web/src/pages/patient/PatientEnrollment.tsx',
 ])
 for (const file of sourceFiles) {
-  const relative = file.slice(repository.length + 1)
+  const relative = normalizeVerificationPath(file.slice(repository.length + 1))
   const source = await readFile(file, 'utf8')
   if (/localStorage|sessionStorage/.test(source)) {
     assert.ok(allowedBrowserStorageFiles.has(relative), `${relative} uses unreviewed browser string storage`)
@@ -88,7 +89,7 @@ for (const app of apps) {
   if (app !== 'web') assert.match(worker, /new URL\(self\.registration\.scope\)\.pathname/,
     `${app} service worker must derive the current host/path scope from its registration`)
 
-  const mainCandidates = sourceFiles.filter(file => file.startsWith(join(root, 'src')) && /\/main\.(?:tsx|jsx|ts|js)$/.test(file))
+  const mainCandidates = sourceFiles.filter(file => file.startsWith(join(root, 'src')) && /\/main\.(?:tsx|jsx|ts|js)$/.test(normalizeVerificationPath(file)))
   assert.equal(mainCandidates.length, 1, `${app} must have one active frontend entrypoint`)
   const main = await readFile(mainCandidates[0], 'utf8')
   const appSource = (await Promise.all(sourceFiles.filter(file => file.startsWith(join(root, 'src')))
@@ -115,7 +116,7 @@ assert.ok(
 
 for (const file of sourceFiles) {
   const source = await readFile(file, 'utf8')
-  if (!file.includes('/packages/telemetry/')) {
+  if (!normalizeVerificationPath(file).includes('/packages/telemetry/')) {
     assert.doesNotMatch(source, /from\s+['"]posthog-js['"]|from\s+['"]@sentry\//,
       `${file.slice(repository.length + 1)} bypasses shared telemetry policy`)
   }

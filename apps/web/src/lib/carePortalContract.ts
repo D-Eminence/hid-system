@@ -1,4 +1,6 @@
 
+import type { ImportedMedicalRecord, ImportedHealthProfile } from '../../../../packages/api-client/src/imported-records';
+
 export interface PatientSelf {
   patientId: string; hid: string; firstName: string; lastName: string; fullName: string
   dateOfBirth: string | null; gender: string | null; country: string | null; state: string | null; version: number
@@ -6,6 +8,8 @@ export interface PatientSelf {
   accessPinConfigured: boolean
 }
 export interface ReleasedRecords {
+  importedRecords?: ImportedMedicalRecord[]
+  importedHealthProfile?: ImportedHealthProfile | null
   encounters: Array<{ id: string; facilityId: string; encounterType: string; status: string; startedAt: string; endedAt: string | null }>
   notes: Array<{ id: string; encounterId: string; facilityId: string; noteType: string; title: string | null; status: string; revisionNo: number; content: unknown; signedAt: string | null }>
   limit: number
@@ -38,6 +42,12 @@ export function createCarePortalApi(send: CanonicalTransport) {
   return {
     self: () => send<PatientSelf>('/api/v1/identity/me'),
     ownRecords: () => send<ReleasedRecords>('/api/v1/ehr/me/records'),
+    ownAttachment: (fileId: string) => send<{url: string; expiresInSeconds: number}>(`/api/v1/ehr/me/imported-attachments/${identifier(fileId)}/download`),
+    importedNotifications: (offset = 0) => {
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > 2147483647) throw new Error('Invalid notification offset.')
+      return send<Array<{id: string; title: string; message: string; type: string; readAt: string | null; createdAt: string}>>(`/api/v1/identity/me/imported-notifications?limit=50&offset=${offset}`)
+    },
+    markImportedNotificationRead: (id: string) => send<{id: string; readAt: string}>(`/api/v1/identity/me/imported-notifications/${identifier(id)}/read`, {method:'POST'}),
     configureAccessPin(pin: string) {
       if (!/^\d{4,8}$/.test(pin)) throw new Error('Enter an Access PIN of 4 to 8 digits.')
       return send<{ configured: true }>('/api/v1/identity/me/access-pin', {

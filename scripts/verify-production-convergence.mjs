@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { relative, resolve } from 'node:path'
+import { normalizeVerificationPath } from './verification-paths.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const deployableRoots = ['apps', 'services', 'packages', 'infra', 'gateway']
@@ -21,7 +22,7 @@ async function filesBelow(directory) {
 const files = (await Promise.all(deployableRoots.map((name) => filesBelow(resolve(root, name))))).flat()
 files.push(resolve(root, 'package.json'))
 const canonical = (await Promise.all(files.map(async (path) => ({
-  path: relative(root, path),
+  path: normalizeVerificationPath(relative(root, path)),
   source: await readFile(path, 'utf8'),
 })))).filter(({ path }) => !/^services\/ehr-api\/database\/migrations\/00(?:0[1-9]|1\d|2[0-7])_/.test(path))
 
@@ -31,7 +32,7 @@ function assertNoRuntime(label, pattern) {
 }
 
 assertNoRuntime('Infobip runtime', /InfobipFallbackProvider|infobip\.provider|INFOBIP_(?:BASE_URL|EMAIL_FROM|SMS_SENDER|WHATSAPP)|api\.infobip\.com/i)
-assertNoRuntime('Supabase runtime', /@supabase\/supabase-js|\bsupabase\.(?:auth|from|storage|channel|functions)\b|\.supabase\.co|\bcreateClient\s*\([^)]*supabase/i)
+assertNoRuntime('Supabase runtime', /@supabase\/supabase-js|\bsupabase\.(?:auth|from|storage|channel|functions)\b|\.supabase\.co\b|\bcreateClient\s*\([^)]*supabase/i)
 assertNoRuntime('legacy HTTP identity runtime', /legacy-http|LEGACY_IDENTITY_(?:URL|ANON_KEY|SERVICE_ROLE_KEY)|IDENTITY_LEGACY_(?:BASE_URL|SERVICE_TOKEN)|IDENTITY_PROVIDER_MODE/i)
 assertNoRuntime('authentication magic-link runtime', /emailRedirectTo|PASSWORD_RECOVERY|\.(?:signInWithOtp|verifyOtp)\s*\(|\bmagic[-_ ]?link\b/i)
 assertNoRuntime(
@@ -39,7 +40,7 @@ assertNoRuntime(
   /@vercel\/|\b(?:npx\s+)?vercel(?:@[^\s]+)?\s+(?:build|deploy|dev|pull)\b|\bVERCEL_(?:TOKEN|ORG_ID|PROJECT_ID)\b/i,
 )
 
-for (const path of files.map((value) => relative(root, value))) {
+for (const path of files.map((value) => normalizeVerificationPath(relative(root, value)))) {
   assert.ok(!/(?:^|\/)vercel\.json$|(?:^|\/)\.vercel\//i.test(path), `Retired Vercel target file remains: ${path}`)
 }
 

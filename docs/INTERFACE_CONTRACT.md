@@ -1,5 +1,15 @@
 # HID Interface Contract
 
+## Imported medical history (2026-10-03)
+
+Patient self/emergency record summaries add `importedRecords`; staff may read
+`GET /api/v1/ehr/patients/:patientId/imported-records` with fresh read consent,
+selected membership/facility and `ehr.note.read`. Migration 0062 also adds
+preserved health profiles, authorized attachment-download routes, recipient-owned
+historical notifications and guarded configuration reads. The current contract
+is [CUSTOMER_DATA_COMPLETION.md](CUSTOMER_DATA_COMPLETION.md). Original DTOs and preservation are specified
+in [IMPORTED_MEDICAL_HISTORY.md](IMPORTED_MEDICAL_HISTORY.md).
+
 ## Current browser and notification boundary
 
 Production browsers call relative `/api/v1/*` URLs on their own approved app

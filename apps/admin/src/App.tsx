@@ -6,6 +6,8 @@ import type { AdminSession, AuditEvent, EventFailure, Facility, IdentityReview, 
 import { Turnstile } from '@hid/ui/Turnstile';
 import { Integrations } from './Integrations';
 import { OrganizationApplications } from './OrganizationApplications';
+import { ImportedConfiguration } from './ImportedConfiguration';
+import { PlatformControls } from './PlatformControls';
 
 type LoadState<T> = { value: T | null; loading: boolean; error: string | null };
 
@@ -92,6 +94,7 @@ function Shell({ session, onSignedOut }: { session: AdminSession; onSignedOut: (
     <nav aria-label="Administration navigation">{items.map((item) => <NavLink key={item.path} to={item.path} end={item.path === '/'}>{item.label}</NavLink>)}</nav>
     <div className="actor"><strong>{actor.displayName ?? actor.email ?? 'Administrator'}</strong><span>{actor.platformRoles.join(', ')}</span><button onClick={() => void logout()}>Sign out</button></div>
   </aside><main className="content"><Routes>
+    <Route path="/controls" element={<Permission actor={actor} permission="platform.control.read"><PlatformControls canManage={actor.platformPermissions.includes('platform.control.manage')} /></Permission>} />
     <Route path="/" element={<Overview />} />
     <Route path="/facilities" element={<Permission actor={actor} permission="platform.facility.read"><Facilities actor={actor} /></Permission>} />
     <Route path="/facilities/:facilityId" element={<Permission actor={actor} permission="platform.facility.read"><FacilityDetail /></Permission>} />
@@ -102,6 +105,7 @@ function Shell({ session, onSignedOut }: { session: AdminSession; onSignedOut: (
     <Route path="/operations" element={<Permission actor={actor} permission="platform.operations.read"><Operations /></Permission>} />
     <Route path="/events" element={<Permission actor={actor} permission="platform.operations.read"><Events /></Permission>} />
     <Route path="/integrations" element={<Permission actor={actor} permission="platform.integration.read"><Integrations actor={actor} /></Permission>} />
+    <Route path="/preserved-settings" element={<Permission actor={actor} permission="platform.admin.access"><ImportedConfiguration /></Permission>} />
     <Route path="*" element={<Navigate to="/" replace />} />
   </Routes></main></div>;
 }

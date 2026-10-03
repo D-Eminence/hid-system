@@ -38,6 +38,13 @@ export class AdminController {
     return this.admin.platformControls(requireAdminContext(request));
   }
 
+  @Get('imported-configuration')
+  @RequirePermissions('platform.admin.access')
+  @AuditAction('admin.imported-configuration.read.request')
+  importedConfiguration(@Req() request: HidRequest) {
+    return this.admin.importedConfiguration(requireAdminContext(request));
+  }
+
   @Post('controls')
   @RequirePermissions('platform.control.manage')
   @AuditAction('admin.platform-control.change.request')

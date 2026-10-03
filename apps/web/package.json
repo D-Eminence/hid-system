@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "test:care-portal": "node --test scripts/care-portal.test.mjs scripts/identity-browser.test.mjs",
+    "test:pricing-controls": "node --test scripts/pricing-controls.test.mjs",
     "build": "npm run verify:identity && tsc && vite build",
     "preview": "vite preview",
     "perf:load": "node ./scripts/load-test.mjs",

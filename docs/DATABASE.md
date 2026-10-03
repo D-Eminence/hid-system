@@ -1,5 +1,17 @@
 # HID Database Architecture
 
+Migration 0062 adds immutable health profiles, exact attachment-version bindings,
+append-only scan/read/mapping evidence, recipient-private historical notifications
+and restricted customer-configuration/source disposition archives. Runtime RLS
+and owner-only import boundaries are detailed in
+[CUSTOMER_DATA_COMPLETION.md](CUSTOMER_DATA_COMPLETION.md).
+
+Migration 0061 adds immutable EHR imported-history records, versions and file
+links with canonical patient/author references and patient-bound current-version
+constraints. Runtime SELECT uses forced RLS; only the migration owner can insert.
+No runtime mutation grant or quarantine read is added. See
+[IMPORTED_MEDICAL_HISTORY.md](IMPORTED_MEDICAL_HISTORY.md).
+
 | Field | Value |
 |---|---|
 | Status | **Current database architecture and migration state; the future target architecture is governed by `docs/ARCHITECTURE.md`** |

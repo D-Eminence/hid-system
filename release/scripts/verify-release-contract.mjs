@@ -660,15 +660,20 @@ export async function verifyMachineConfiguration(configuration) {
   exact(migration.first, '0001', 'components config.migration.first')
   if (!Array.isArray(migration.files) || migration.files.length < 1) fail('components config.migration.files', 'must contain at least one migration record')
   exact(migration.count, migration.files.length, 'components config.migration.count')
-  const expectedLast = String(migration.files.length).padStart(4, '0')
+  // Retained staging files and developer files can share numeric prefixes.
+  // Full filenames plus immutable checksums identify migrations.
+  const numbers = migration.files.map(({ name }) => /^([0-9]{4})_[a-z0-9_]+\.sql$/.exec(name)?.[1])
+  if (numbers.some(number => !number)) fail('components config.migration.files', 'invalid migration filename')
+  const expectedLast = [...numbers].sort().at(-1)
   exact(migration.last, expectedLast, 'components config.migration.last')
+  for (let number = 1; number <= Number(expectedLast); number += 1) {
+    if (!numbers.includes(String(number).padStart(4, '0'))) fail('components config.migration.files', 'missing migration prefix')
+  }
   const migrationDirectory = resolve(repositoryRoot, 'services', 'ehr-api', 'database', 'migrations')
   const diskFiles = (await readdir(migrationDirectory)).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()
   exact(JSON.stringify(diskFiles), JSON.stringify(migration.files.map(({ name }) => name)), 'components config.migration.files')
   for (let index = 0; index < migration.files.length; index += 1) {
     const item = plainObject(migration.files[index], `components config.migration.files[${index}]`, ['name', 'sha256'])
-    const expectedNumber = String(index + 1).padStart(4, '0')
-    if (!item.name.startsWith(`${expectedNumber}_`)) fail(`components config.migration.files[${index}].name`, `must be migration ${expectedNumber}`)
     pattern(item.sha256, SHA256, `components config.migration.files[${index}].sha256`)
     const actual = createHash('sha256').update(await readFile(resolve(migrationDirectory, item.name))).digest('hex')
     exact(actual, item.sha256, `components config.migration.files[${index}].sha256`)

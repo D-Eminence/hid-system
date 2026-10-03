@@ -9,10 +9,13 @@ import { OcrIntegrationModule } from './ocr-integration/ocr-integration.module';
 import { PatientRecordsController } from './patient-records/patient-records.controller';
 import { PatientRecordsService } from './patient-records/patient-records.service';
 import { ClinicalInfrastructureModule } from './shared/clinical-infrastructure.module';
+import { StorageModule } from '../storage/storage.module';
+import { ImportedAttachmentService } from './patient-records/imported-attachment.service';
 
 @Module({
   imports: [
     ClinicalInfrastructureModule,
+    StorageModule,
     EncountersModule,
     ClinicalNotesModule,
     VitalsModule,
@@ -22,6 +25,6 @@ import { ClinicalInfrastructureModule } from './shared/clinical-infrastructure.m
     LabRequestsModule,
   ],
   controllers: [PatientRecordsController],
-  providers: [PatientRecordsService],
+  providers: [PatientRecordsService, ImportedAttachmentService],
 })
 export class EhrModule {}

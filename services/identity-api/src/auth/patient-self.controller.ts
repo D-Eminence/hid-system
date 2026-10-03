@@ -28,6 +28,21 @@ export class PatientSelfController {
     return this.self.notificationInbox(request, parsed);
   }
 
+  @Get('me/imported-notifications')
+  importedNotifications(@Req() request: HidRequest, @Query('limit') limit?: string, @Query('offset') offset?: string) {
+    const parsed = limit === undefined ? 50 : Number(limit);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) throw new DomainProblem(400, 'INVALID_NOTIFICATION_LIMIT', 'Notification limit must be an integer from 1 to 100');
+    const start = offset === undefined ? 0 : Number(offset);
+    if (!Number.isSafeInteger(start) || start < 0 || start > 2147483647) throw new DomainProblem(400, 'INVALID_NOTIFICATION_OFFSET', 'Notification offset must be an integer from 0 to 2147483647');
+    return this.self.importedNotifications(request, parsed, undefined, start);
+  }
+
+  @Post('me/imported-notifications/:notificationId/read')
+  @HttpCode(200)
+  markImportedNotificationRead(@Req() request: HidRequest, @Param('notificationId', new ParseUUIDPipe()) id: string) {
+    return this.self.importedNotifications(request, 50, id);
+  }
+
   @Post('me/notifications/:notificationId/read')
   @HttpCode(200)
   @AuditAction('identity.patient.notification.read.command')

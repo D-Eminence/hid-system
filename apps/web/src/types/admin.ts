@@ -357,14 +357,15 @@ export interface AdminCreatePlatformAdminResponse {
 }
 
 export interface AdminPlatformControls {
+  nativeControls: import('../lib/platformControlsContract').PlatformControl[]
   maintenanceMode: boolean
-  patientSignupEnabled: boolean
-  hospitalSignupEnabled: boolean
+  patientSignupEnabled: null
+  hospitalSignupEnabled: null
   patientPortalEnabled: boolean
   hospitalPortalEnabled: boolean
-  outreachSignupEnabled: boolean
+  outreachSignupEnabled: null
   outreachPortalEnabled: boolean
-  migratePortalEnabled: boolean
+  migratePortalEnabled: null
   breakGlassEnabled: boolean
   uploadsEnabled: boolean
   updatedAt: string

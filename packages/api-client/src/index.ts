@@ -1,3 +1,6 @@
+export { createPlatformControlsApi, platformControlKeys } from './platform-controls';
+export type { PlatformControl, PlatformControlKey } from './platform-controls';
+
 export interface HidHttpRequestOptions {
   baseUrl: string;
   path: string;

@@ -11,6 +11,9 @@ export class DisabledStorageProvider implements StorageProvider {
   inspect(_key: string): Promise<StoredObjectMetadata> {
     throw new ServiceUnavailableException('Document storage is disabled');
   }
+  inspectVersion(_key: string, _versionId: string): Promise<StoredObjectMetadata> {
+    throw new ServiceUnavailableException('Document storage is disabled');
+  }
   createDownload(_key: string, _versionId: string): Promise<{ url: string; expiresInSeconds: number }> {
     throw new ServiceUnavailableException('Document storage is disabled');
   }

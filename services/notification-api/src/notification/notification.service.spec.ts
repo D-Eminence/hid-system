@@ -72,4 +72,24 @@ describe('NotificationService fallback safety', () => {
     })).rejects.toThrow('Invalid delivery policy');
     expect(first.send).not.toHaveBeenCalled();
   });
+
+  it.each(['accepted', 'unknown', 'definitive_failure'] as const)
+  ('staging email-brevo only falls back after definitive failure (%s)', async outcome => {
+    Object.assign(process.env, { HID_DEPLOYMENT_ENV: 'staging', NOTIFICATION_DELIVERY_PROFILE: 'email-brevo',
+      NOTIFICATION_PROVIDER_MODE: 'live' }); resetEnvironmentForTests();
+    const first = provider('ses', outcome); const fallback = provider('brevo', 'accepted');
+    const result = await service(first, fallback).deliverOtp({ ...message, channel: 'email', recipient: 'patient@example.test' }, {
+      capability: 'email', primary: 'ses', fallback: 'brevo', configuration: {},
+    });
+    expect(result.outcome).toBe(outcome === 'definitive_failure' ? 'accepted' : outcome);
+    expect(fallback.send).toHaveBeenCalledTimes(outcome === 'definitive_failure' ? 1 : 0);
+  });
+
+  it.each(['sms', 'whatsapp'] as const)('staging email-brevo rejects %s without sending', async channel => {
+    Object.assign(process.env, { HID_DEPLOYMENT_ENV: 'staging', NOTIFICATION_DELIVERY_PROFILE: 'email-brevo' });
+    resetEnvironmentForTests();
+    const first = provider('ses', 'accepted'); const fallback = provider('brevo', 'accepted');
+    await expect(service(first, fallback).deliverOtp({ ...message, channel })).rejects.toThrow('supports email OTP only');
+    expect(first.send).not.toHaveBeenCalled(); expect(fallback.send).not.toHaveBeenCalled();
+  });
 });

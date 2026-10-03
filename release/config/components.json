@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0060",
-    "count": 60,
+    "last": "0062",
+    "count": 64,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -227,8 +227,16 @@
         "sha256": "c4ee4ac51ce90a622901c3f8ebd4f3ac4d72acb5a8f7addd0a2b1ea993572225"
       },
       {
+        "name": "0033_patient_record_embeddings.sql",
+        "sha256": "a71e911253af33c92ae574da71de9bda4f8a45f27757e563d25b28abbafcd843"
+      },
+      {
         "name": "0033_supabase_cutover_identity_controls.sql",
         "sha256": "4df718e800165d27085ae4b7b79761ef2748841cb6cebe1895c3674ebc6a2bce"
+      },
+      {
+        "name": "0034_legacy_patient_access_secret_preservation.sql",
+        "sha256": "73cc3c6335c6366e7276b0e94c906ad668bdb9f4a627e0f78793ce2125be62ed"
       },
       {
         "name": "0034_qoreid_verification_evidence.sql",
@@ -337,6 +345,14 @@
       {
         "name": "0060_patient_access_pin_profile_status.sql",
         "sha256": "1a0b5ca25f815dcd8714cdd569e8fe336b48d8a8c53362a8e42dbe986d407f50"
+      },
+      {
+        "name": "0061_imported_medical_records.sql",
+        "sha256": "6a9fa6b845963521ea58c7ade0e19fb51b8ff5034de5dec42f3ded342525b7df"
+      },
+      {
+        "name": "0062_customer_history_access.sql",
+        "sha256": "cabb4443cccf8cfd1c7aba76425cc135264d541b04255dd902b2c3c44adea271"
       }
     ]
   },

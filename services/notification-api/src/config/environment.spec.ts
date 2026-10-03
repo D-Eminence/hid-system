@@ -30,6 +30,26 @@ describe('Notification API delivery profile validation', () => {
     }
   });
 
+  it('accepts staging email fallback with only SES and Brevo credentials', () => {
+    Object.assign(process.env, { NOTIFICATION_DELIVERY_PROFILE: 'email-brevo',
+      BREVO_API_KEY: 'invented-test-credential', BREVO_EMAIL_FROM: 'security@example.test' });
+    expect(getEnvironment().NOTIFICATION_DELIVERY_PROFILE).toBe('email-brevo');
+    expect(getEnvironment().TERMII_API_KEY).toBeUndefined();
+    expect(getEnvironment().META_ACCESS_TOKEN).toBeUndefined();
+  });
+
+  it.each(['BREVO_API_KEY', 'BREVO_EMAIL_FROM'])('requires %s for staging fallback', key => {
+    Object.assign(process.env, { NOTIFICATION_DELIVERY_PROFILE: 'email-brevo',
+      BREVO_API_KEY: 'invented-test-credential', BREVO_EMAIL_FROM: 'security@example.test' });
+    delete process.env[key];
+    expect(() => getEnvironment()).toThrow(`${key} is required for staging email fallback`);
+  });
+
+  it('rejects staging email fallback in production', () => {
+    Object.assign(process.env, { HID_DEPLOYMENT_ENV: 'production', NOTIFICATION_DELIVERY_PROFILE: 'email-brevo' });
+    expect(() => getEnvironment()).toThrow('email-brevo delivery profile is staging-only');
+  });
+
   it.each(['production', 'development', undefined])('rejects email-only outside explicit staging (%s)', deployment => {
     if (deployment === undefined) delete process.env.HID_DEPLOYMENT_ENV;
     else process.env.HID_DEPLOYMENT_ENV = deployment;

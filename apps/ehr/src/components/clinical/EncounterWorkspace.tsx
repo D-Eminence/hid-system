@@ -8,6 +8,7 @@ import { Badge, Button, Card, Field, Input, PageHead, SectionHeader, Select, Tex
 import { ClinicalForms } from './ClinicalForms';
 import { useClinicalSubmit } from './useClinicalSubmit';
 import { WorkflowRail } from './WorkflowRail';
+import { ImportedHistory } from './ImportedHistory';
 
 interface EncounterWorkspaceProps {
   patient: Patient;
@@ -115,6 +116,7 @@ export const EncounterWorkspace: React.FC<EncounterWorkspaceProps> = ({ patient,
         actions={<Button variant="secondary" icon="arrowLeft" onClick={onBack}>Back to Patient Lookup</Button>}
       />
 
+      {patientId && <ImportedHistory key={patientId} patientId={patientId} permissions={permissions}/>}
       {!selected && (
         <Card pad>
           <SectionHeader

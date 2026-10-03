@@ -24,11 +24,11 @@ function setup() {
 describe('Owning EHR patient and emergency read boundary', () => {
   it('reauthorizes self with Identity and constrains all SQL to that canonical patient', async () => {
     const { service, authorizeSelf, query, recordWithClient } = setup();
-    await expect(service.self(request)).resolves.toEqual({ encounters: [], notes: [], limit: 50 });
+    await expect(service.self(request)).resolves.toEqual({ encounters: [], notes: [], importedRecords: [], importedHealthProfile: null, limit: 50 });
     expect(authorizeSelf).toHaveBeenCalledWith(request);
     for (const [sql, params] of query.mock.calls) {
       expect(params).toEqual(['patient-id']);
-      expect(sql).toMatch(/limit 50/);
+      expect(sql).toMatch(/limit (50|1)\b/);
     }
     expect(query.mock.calls[0]?.[0]).toContain("status='completed'");
     expect(query.mock.calls[1]?.[0]).toContain("n.status in ('signed','amended')");
@@ -50,6 +50,25 @@ describe('Owning EHR patient and emergency read boundary', () => {
     const context = { purposeOfUse: 'emergency', facilityId: 'facility' } as DataAccessContext;
     await service.emergency('patient-id', context);
     expect(run).toHaveBeenCalledWith(context, 'patient-id', 'read_records', expect.objectContaining({ breakGlassOnly: true }), expect.any(Function));
+  });
+  it('uses fresh patient/facility consent for imported staff history', async () => {
+    const {service,run} = setup();
+    const context = {purposeOfUse:'direct-care',facilityId:'facility'} as DataAccessContext;
+    await service.imported('patient-id',context);
+    expect(run).toHaveBeenCalledWith(context,'patient-id','read_records',
+      expect.objectContaining({action:'ehr.imported.records.read'}),expect.any(Function));
+  });
+  it('returns preserved versions and pending attachment metadata only after audit', async () => {
+    const {service,query,recordWithClient} = setup();
+    const imported = {id:'record',origin:'patient-provided',versions:[{record:'Synthetic note'}],files:[{accessStatus:'pending-safety-verification'}]};
+    query.mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[imported]});
+    const result = await service.self(request);
+    expect(result.importedRecords).toEqual([imported]);
+    expect(recordWithClient).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({details:expect.objectContaining({importedRecordCount:1})}));
+    const sql = query.mock.calls[2][0];
+    expect(sql).not.toContain('storage_path');
+    expect(sql).not.toContain('author_account_id');
+    expect(sql).toContain('v.patient_id=r.patient_id');
   });
 });
 

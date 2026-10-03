@@ -43,7 +43,7 @@ export class NotificationService {
   }
 
   async deliverOtp(message: OtpMessage, rawPlan?: unknown): Promise<{ primary: ProviderResult; fallback?: ProviderResult; outcome: ProviderResult['outcome'] }> {
-    if (this.environment.NOTIFICATION_DELIVERY_PROFILE === 'email-only' && message.channel !== 'email') {
+    if (this.environment.NOTIFICATION_DELIVERY_PROFILE !== 'full' && message.channel !== 'email') {
       throw new BadRequestException('This delivery profile supports email OTP only');
     }
     if (this.environment.NOTIFICATION_PROVIDER_MODE === 'disabled') {

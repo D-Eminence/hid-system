@@ -363,6 +363,7 @@ export default function AdminDashboard() {
   const [creatingAdmin, setCreatingAdmin] = useState(false)
   const [platformAdminActioning, setPlatformAdminActioning] = useState<string | null>(null)
   const [savingPlatformControls, setSavingPlatformControls] = useState(false)
+  const [platformControlReason, setPlatformControlReason] = useState('')
   const [savingStaffRole, setSavingStaffRole] = useState<string | null>(null)
   const [savingOutreachRole, setSavingOutreachRole] = useState<string | null>(null)
   const [newAdminForm, setNewAdminForm] = useState({ fullName: '', email: '' })
@@ -818,19 +819,9 @@ export default function AdminDashboard() {
 
     setSavingPlatformControls(true)
     try {
-      const updated = await updateAdminPlatformControls({
-        maintenanceMode: platformControls.maintenanceMode,
-        patientSignupEnabled: platformControls.patientSignupEnabled,
-        hospitalSignupEnabled: platformControls.hospitalSignupEnabled,
-        patientPortalEnabled: platformControls.patientPortalEnabled,
-        hospitalPortalEnabled: platformControls.hospitalPortalEnabled,
-        outreachSignupEnabled: platformControls.outreachSignupEnabled,
-        outreachPortalEnabled: platformControls.outreachPortalEnabled,
-        migratePortalEnabled: platformControls.migratePortalEnabled,
-        breakGlassEnabled: platformControls.breakGlassEnabled,
-        uploadsEnabled: platformControls.uploadsEnabled,
-      })
+      const updated = await updateAdminPlatformControls(platformControls, platformControlReason)
       setPlatformControls(updated)
+      setPlatformControlReason('')
       showToast('Platform controls updated successfully.', 'success')
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : 'Platform controls could not be updated right now.'
@@ -2080,7 +2071,7 @@ export default function AdminDashboard() {
           <div style={{ display: 'grid', gridTemplateColumns: viewportWidth < 1180 ? '1fr' : 'minmax(0, 1.1fr) minmax(0, 0.9fr)', gap: 12 }}>
             <div style={{ border: '1px solid var(--admin-border)', borderRadius: 12, background: '#fbfdff', padding: 14 }}>
               <div style={{ fontSize: 11.5, color: 'var(--admin-muted)', marginBottom: 12, lineHeight: 1.6 }}>
-                These controls take effect on live sign-up and API access. Platform admins remain able to reach this dashboard during maintenance so recovery actions stay available.
+                These controls manage portal and API access. Platform admins retain access during maintenance. Unavailable controls cannot be changed here.
               </div>
               {platformControlsError && (
                 <div style={{ ...alertToneStyle('warning'), borderRadius: 10, padding: '10px 12px', marginBottom: 12, fontSize: 11.5 }}>
@@ -2090,15 +2081,16 @@ export default function AdminDashboard() {
               <div style={{ display: 'grid', gap: 8 }}>
                 {platformControlFields.map(field => {
                   const checked = platformControls ? Boolean(platformControls[field.key]) : false
+                  const unavailable = !platformControls || platformControls[field.key] === null
                   return (
                     <label key={field.key} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, border: '1px solid #eef2f7', borderRadius: 10, padding: '10px 12px', background: '#fff' }}>
-                      <input
+                      {unavailable ? <span style={{ fontSize: 10.5 }}>Unavailable</span> : <input
                         type="checkbox"
                         checked={checked}
                         disabled={!platformControls || platformControlsLoading || savingPlatformControls}
                         onChange={event => setPlatformControls(current => current ? { ...current, [field.key]: event.target.checked } : current)}
                         style={{ marginTop: 2 }}
-                      />
+                      />}
                       <div>
                         <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--admin-text)' }}>{field.label}</div>
                         <div style={{ fontSize: 10.5, color: 'var(--admin-muted)', lineHeight: 1.5 }}>{field.helper}</div>
@@ -2107,8 +2099,14 @@ export default function AdminDashboard() {
                   )
                 })}
               </div>
+              <label style={{ display: 'block', marginTop: 12, fontSize: 12 }}>
+                Reason for changes
+                <input value={platformControlReason} onChange={event => setPlatformControlReason(event.target.value)}
+                  minLength={8} maxLength={500} disabled={savingPlatformControls}
+                  style={{ display: 'block', width: '100%', marginTop: 6 }} />
+              </label>
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
-                <Button onClick={() => void savePlatformControls()} loading={savingPlatformControls} disabled={!platformControls}>
+                <Button onClick={() => void savePlatformControls()} loading={savingPlatformControls} disabled={!platformControls || platformControlsLoading || platformControlReason.trim().length < 8}>
                   Save Controls
                 </Button>
                 <Button variant="outline" onClick={() => void loadPlatformControlsState(true)} loading={platformControlsLoading}>
@@ -2178,7 +2176,7 @@ export default function AdminDashboard() {
                 </div>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
                   <Badge color={platformControls?.outreachSignupEnabled ? 'green' : 'amber'}>
-                    Signup {platformControls?.outreachSignupEnabled ? 'enabled' : 'disabled'}
+                    Signup unavailable
                   </Badge>
                   <Badge color={platformControls?.outreachPortalEnabled ? 'green' : 'amber'}>
                     Portal {platformControls?.outreachPortalEnabled ? 'enabled' : 'disabled'}

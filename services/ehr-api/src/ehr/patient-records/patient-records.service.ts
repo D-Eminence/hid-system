@@ -6,6 +6,7 @@ import type { DataAccessContext, HidRequest } from '../../common/request-context
 import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { readImportedRecords, readImportedHealthProfile } from './imported-records.query';
 
 @Injectable()
 export class PatientRecordsService {
@@ -28,7 +29,7 @@ export class PatientRecordsService {
         correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
         actorAccountId: actor.accountId, patientId: authorization.patientId,
         action: 'ehr.patient.self.records.read', resourceType: 'patient-record-summary', outcome: 'success',
-        purposeOfUse: 'patient-self', details: { encounterCount: value.encounters.length, noteCount: value.notes.length },
+        purposeOfUse: 'patient-self', details: { encounterCount: value.encounters.length, noteCount: value.notes.length, importedRecordCount: value.importedRecords.length },
       });
       return value;
     });
@@ -38,6 +39,13 @@ export class PatientRecordsService {
     return this.clinical.run(context, patientId, 'read_records', {
       action: 'ehr.emergency.records.read', resourceType: 'patient-record-summary', breakGlassOnly: true,
     }, async (client) => ({ value: await this.read(client, patientId, context.facilityId) }));
+  }
+
+  imported(patientId: string, context: DataAccessContext) {
+    return this.clinical.run(context, patientId, 'read_records', {
+      action: 'ehr.imported.records.read', resourceType: 'imported-medical-record-summary',
+    }, async (client) => ({ value: { importedRecords: await readImportedRecords(client, patientId),
+      importedHealthProfile: await readImportedHealthProfile(client, patientId), limit: 50 } }));
   }
 
   private async read(client: PoolClient, patientId: string, facilityId?: string) {
@@ -53,6 +61,7 @@ export class PatientRecordsService {
         and r.patient_id=n.patient_id and r.facility_id=n.facility_id
       where n.patient_id=$1 and n.status in ('signed','amended')${facilityId ? ' and n.facility_id=$2' : ''}
       order by n.signed_at desc,n.id desc limit 50`,values);
-    return { encounters: encounters.rows, notes: notes.rows, limit: 50 };
+    return { encounters: encounters.rows, notes: notes.rows, importedRecords: await readImportedRecords(client,patientId),
+      importedHealthProfile: await readImportedHealthProfile(client,patientId), limit: 50 };
   }
 }

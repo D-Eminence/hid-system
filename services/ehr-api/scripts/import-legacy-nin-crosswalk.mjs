@@ -8,7 +8,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { databaseOptions } from './database-options.mjs';
+import { databaseOptions, managedDatabaseUrl } from './database-options.mjs';
 
 const { Client } = pg;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -133,7 +133,7 @@ function parseArguments(argv) {
 
 async function main() {
   const apply = parseArguments(process.argv.slice(2));
-  const databaseUrl = process.env.DATABASE_URL;
+  const databaseUrl = process.env.DATABASE_URL || managedDatabaseUrl();
   const inputPath = process.env.LEGACY_NIN_ATTESTATION_PATH;
   const runId = process.env.MIGRATION_RUN_ID;
   const operator = process.env.MIGRATION_OPERATOR;
@@ -240,6 +240,7 @@ async function main() {
     process.stdout.write(`${apply ? 'Applied' : 'Dry-run verified'} complete legacy NIN inventory: ${inventory.patientCount} patients, ${inventory.exactNinCount} exact source associations, ${inventory.absentNinCount} attested absent; run ${runId}.\n`);
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
+    if (error.code) throw new Error(`Legacy NIN database check failed (${error.code}); transaction rolled back`);
     throw error;
   } finally {
     await client.end();

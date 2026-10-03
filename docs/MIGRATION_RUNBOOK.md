@@ -1,5 +1,23 @@
 # HID 1.0 Identity and Data Migration Runbook
 
+### Customer history and file access — section 1 (2026-10-03)
+
+Use the additive 0062 contracts and protected export/scanner/import tools in
+[CUSTOMER_DATA_COMPLETION.md](CUSTOMER_DATA_COMPLETION.md). Genuine four-file scans,
+remaining source rows, reviewed settings mappings and NIN owner confirmation are
+still live inputs. The candidate now contains 64 immutable files. Existing
+recovery, review/release and populated-copy gates precede AWS execution.
+
+### Additive medical history importer (2026-10-03)
+
+Use the staging-only, dry-run-default medical importer against the already verified
+parent after migration 0061. Preserve original encryption-key reference and source
+seal. Local checks and live prerequisites are in
+[IMPORTED_MEDICAL_HISTORY.md](IMPORTED_MEDICAL_HISTORY.md). This preserves source
+authorship/history without fabricating encounters; attachment downloads await
+verified object bindings and genuine clean scan evidence. Do not replay the old
+full import against current staging.
+
 Status: repository tooling, additive schema, deterministic fixture rehearsal,
 and reconciliation contracts are implemented. No live HID 1.0 read, object
 copy, AWS migration, cutover, credential rotation, or decommissioning has been

@@ -9,7 +9,8 @@ import {
   environmentWithLocalFiles,
   loadLocalEnvironment,
 } from '../../../scripts/local-environment.mjs';
-import { databaseOptions } from './database-options.mjs';
+import { databaseOptions, managedDatabaseUrl } from './database-options.mjs';
+import { orderMigrations } from './migration-order.mjs';
 
 const { Client } = pg;
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -22,13 +23,19 @@ const localEnvironmentFiles = [
 const configuredNodeEnvironment = process.env.NODE_ENV
   ?? environmentWithLocalFiles(localEnvironmentFiles, {}).NODE_ENV;
 if (configuredNodeEnvironment !== 'production') loadLocalEnvironment(localEnvironmentFiles);
-const migrationDirectory = path.resolve(scriptDirectory, '../database/migrations');
+if (process.env.HID_TEST_MIGRATION_DIRECTORY && process.env.NODE_ENV !== 'test') {
+  throw new Error('The migration directory override is test-only');
+}
+const migrationDirectory = process.env.HID_TEST_MIGRATION_DIRECTORY
+  ? path.resolve(process.env.HID_TEST_MIGRATION_DIRECTORY)
+  : path.resolve(scriptDirectory, '../database/migrations');
+const rdsCompatibilityDirectory = path.resolve(scriptDirectory, '../database/rds-compat');
 const dryRun = process.argv.includes('--dry-run');
 const planOnly = process.argv.includes('--plan');
-const databaseUrl = process.env.DATABASE_URL;
+const databaseUrl = process.env.DATABASE_URL || managedDatabaseUrl();
 
 if (!databaseUrl) {
-  throw new Error('DATABASE_URL is required');
+  throw new Error('Set DATABASE_URL or DATABASE_HOST, DATABASE_USERNAME, and DATABASE_PASSWORD');
 }
 
 const bootstrapSql = `
@@ -40,7 +47,9 @@ const bootstrapSql = `
     applied_at timestamptz not null default clock_timestamp(),
     applied_by text not null default current_user,
     execution_ms integer not null check (execution_ms >= 0)
-  )
+  );
+  alter table migration.schema_migrations
+    add column if not exists effective_checksum_sha256 char(64)
 `;
 
 function checksum(value) {
@@ -54,44 +63,24 @@ async function loadMigrations() {
   if (names.length === 0) throw new Error('No migration files were found');
   return Promise.all(names.map(async (name) => {
     const sql = await readFile(path.join(migrationDirectory, name), 'utf8');
-    return { version: name, sql, checksum: checksum(sql) };
+    const effectiveSql = process.env.MIGRATION_TARGET === 'rds'
+      && name === '0015_ocr_claim_column_resolution.sql'
+      ? await readFile(path.join(rdsCompatibilityDirectory, name), 'utf8')
+      : sql;
+    return {
+      version: name,
+      checksum: checksum(sql),
+      effectiveSql,
+      effectiveChecksum: checksum(effectiveSql),
+    };
   }));
-}
-
-function orderMigrations(migrations) {
-  const byVersion = new Map(migrations.map((migration) => [migration.version, migration]));
-  const prerequisites = new Map([
-    // 0038 is an accepted immutable migration. Its campaign_members
-    // foreign key requires the unique key introduced by 0042, so the
-    // prerequisite must run first on a clean database.
-    ['0038_outreach_campaign_workspaces.sql', ['0042_outreach_campaign_membership_key.sql']],
-  ]);
-  const ordered = [];
-  const visiting = new Set();
-  const visited = new Set();
-
-  function visit(version) {
-    if (visited.has(version)) return;
-    if (visiting.has(version)) throw new Error(`Migration prerequisite cycle detected at ${version}`);
-    const migration = byVersion.get(version);
-    if (!migration) throw new Error(`Migration prerequisite references missing migration ${version}`);
-
-    visiting.add(version);
-    for (const prerequisite of prerequisites.get(version) ?? []) visit(prerequisite);
-    visiting.delete(version);
-    visited.add(version);
-    ordered.push(migration);
-  }
-
-  for (const migration of migrations) visit(migration.version);
-  return ordered;
 }
 
 async function appliedMigrations(client) {
   const result = await client.query(
-    'select version, checksum_sha256 from migration.schema_migrations order by version',
+    'select version, checksum_sha256, effective_checksum_sha256 from migration.schema_migrations order by version',
   );
-  return new Map(result.rows.map((row) => [row.version, row.checksum_sha256.trim()]));
+  return new Map(result.rows.map((row) => [row.version, row]));
 }
 
 async function main() {
@@ -106,10 +95,19 @@ async function main() {
     await client.query(bootstrapSql);
     const applied = await appliedMigrations(client);
 
+    const available = new Set(migrations.map((migration) => migration.version));
+    for (const version of applied.keys()) {
+      if (!available.has(version)) throw new Error(`Applied migration is missing from this release: ${version}`);
+    }
+
     for (const migration of migrations) {
-      const recordedChecksum = applied.get(migration.version);
-      if (recordedChecksum && recordedChecksum !== migration.checksum) {
+      const recorded = applied.get(migration.version);
+      if (recorded && recorded.checksum_sha256.trim() !== migration.checksum) {
         throw new Error(`Checksum mismatch for already-applied migration ${migration.version}`);
+      }
+      if (recorded?.effective_checksum_sha256
+        && recorded.effective_checksum_sha256.trim() !== migration.effectiveChecksum) {
+        throw new Error(`Effective SQL checksum mismatch for ${migration.version}`);
       }
     }
 
@@ -117,6 +115,9 @@ async function main() {
     process.stdout.write(`${pending.length} pending migration(s)\n`);
     for (const migration of pending) {
       process.stdout.write(`${migration.version} ${migration.checksum}\n`);
+      if (migration.effectiveChecksum !== migration.checksum) {
+        process.stdout.write(`  RDS compatibility SQL ${migration.effectiveChecksum}\n`);
+      }
     }
 
     if (planOnly) {
@@ -127,7 +128,13 @@ async function main() {
     if (dryRun) {
       await client.query("set local lock_timeout = '5s'");
       await client.query("set local statement_timeout = '120s'");
-      for (const migration of pending) await client.query(migration.sql);
+      for (const migration of pending) {
+        try {
+          await client.query(migration.effectiveSql);
+        } catch (error) {
+          throw new Error(`Migration ${migration.version}: ${error.message}`);
+        }
+      }
       await client.query('rollback');
       process.stdout.write('Dry run succeeded; all changes were rolled back\n');
       return;
@@ -139,11 +146,12 @@ async function main() {
         await client.query('begin');
         await client.query("set local lock_timeout = '5s'");
         await client.query("set local statement_timeout = '120s'");
-        await client.query(migration.sql);
+        await client.query(migration.effectiveSql);
         await client.query(
-          `insert into migration.schema_migrations (version, checksum_sha256, execution_ms)
-           values ($1, $2, $3)`,
-          [migration.version, migration.checksum, Date.now() - startedAt],
+          `insert into migration.schema_migrations
+             (version, checksum_sha256, effective_checksum_sha256, execution_ms)
+           values ($1, $2, $3, $4)`,
+          [migration.version, migration.checksum, migration.effectiveChecksum, Date.now() - startedAt],
         );
         await client.query('commit');
         process.stdout.write(`Applied ${migration.version}\n`);

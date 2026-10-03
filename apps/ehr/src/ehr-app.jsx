@@ -11,6 +11,7 @@ import { PatientsModule } from '@/components/clinical/PatientsModule';
 import { RegistrationModule } from '@/components/clinical/RegistrationModule';
 import { RoleDashboard } from '@/components/dashboards/RoleDashboard';
 import { TopBar, TopNav } from '@/components/layout/Shell';
+import { ImportedNotifications } from '@/components/layout/ImportedNotifications';
 import { ModuleDirectory, ModuleWorkspace } from '@/components/modules/ModuleDirectory';
 import { SetupWizard } from './ehr-setup';
 
@@ -53,6 +54,7 @@ const App = () => {
   const [patientSearchHid, setPatientSearchHid] = React.useState('');
   const [patientSearchRequestId, setPatientSearchRequestId] = React.useState(0);
   const [mobileMoreOpen, setMobileMoreOpen] = React.useState(false);
+  const [notificationsOpen, setNotificationsOpen] = React.useState(false);
 
   // Authorized patient workspace state
   const [selectedPatient, setSelectedPatient] = React.useState(null);
@@ -280,7 +282,8 @@ const App = () => {
         <TopBar
           role={role}
           facility={facility}
-          onLogout={() => { void handleLogout(); }}
+          onLogout={() => { setNotificationsOpen(false); void handleLogout(); }}
+          onNotifications={() => setNotificationsOpen(value => !value)}
           onSearch={(hid) => {
             setPatientSearchHid(hid);
             setPatientSearchRequestId(requestId => requestId + 1);
@@ -299,7 +302,7 @@ const App = () => {
 
         {/* Main Content Viewport */}
         <main className="ehr-content">
-          {renderModule()}
+          {notificationsOpen ? <ImportedNotifications onClose={() => setNotificationsOpen(false)} /> : renderModule()}
         </main>
 
         {/* Mobile Navigation Bar (< 768px) */}

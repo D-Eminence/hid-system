@@ -5,7 +5,8 @@
 // serializable reconciliation. No contact or digest is printed.
 import { createDecipheriv, createHmac } from 'node:crypto';
 import pg from 'pg';
-import { databaseOptions } from './database-options.mjs';
+import { databaseOptions, managedDatabaseUrl } from './database-options.mjs';
+import { preservedMigrationKey } from './preserved-migration-key.mjs';
 import { contactLookupHmac, normalizeContactForLookup } from './contact-lookup.mjs';
 
 const { Client } = pg;
@@ -14,7 +15,7 @@ if (process.argv.some((arg) => arg.startsWith('--') && arg !== '--apply' && arg 
   throw new Error('Only --apply or --dry-run is supported');
 }
 if (apply && process.argv.includes('--dry-run')) throw new Error('Choose --apply or --dry-run');
-const databaseUrl = process.env.DATABASE_URL;
+const databaseUrl = process.env.DATABASE_URL || managedDatabaseUrl();
 const operator = process.env.MIGRATION_OPERATOR;
 const snapshot = process.env.MIGRATION_SNAPSHOT_ID;
 if (!databaseUrl || !operator || !snapshot) {
@@ -30,8 +31,8 @@ function key(name) {
 }
 
 const contactKey = key('CONTACT_LOOKUP_HMAC_KEY_B64');
-const legacyLookupKey = key('MIGRATION_LOOKUP_HMAC_KEY_B64');
-const legacyFieldKey = key('MIGRATION_FIELD_ENCRYPTION_KEY_B64');
+const legacyLookupKey = preservedMigrationKey(process.env.MIGRATION_LOOKUP_HMAC_KEY_B64);
+const legacyFieldKey = preservedMigrationKey(process.env.MIGRATION_FIELD_ENCRYPTION_KEY_B64);
 const enrollmentKey = key('NIN_ENCRYPTION_KEY_B64');
 const otpKey = key('OTP_HMAC_KEY_B64');
 
@@ -189,6 +190,7 @@ async function main() {
     process.stdout.write(`${apply ? 'Applied' : 'Dry-run verified'} contact rekey for ${legacyChanges.length} legacy patients and ${enrollmentChanges.length} public enrollments; source snapshot ${snapshot}; operator ${operator}.\n`);
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
+    if (error.code) throw new Error(`Contact rekey database check failed (${error.code}); transaction rolled back`);
     throw error;
   } finally {
     await client.end();

@@ -37,6 +37,7 @@ import {
 } from '../../../../packages/api-client/src/index';
 
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+import type { ImportedMedicalRecord } from '../../../../packages/api-client/src/imported-records';
 
 interface RequestOptions {
   method?: HttpMethod;
@@ -443,6 +444,19 @@ export const authApi = {
 };
 
 export const identityApi = {
+  async importedNotifications(offset = 0, signal?: AbortSignal): Promise<Array<{id:string;title:string;message:string;type:string;readAt:string|null;createdAt:string}>> {
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 2147483647) throw new Error('Invalid notification offset');
+    const value = unwrapData(await apiRequest<unknown>(`/api/v1/identity/me/imported-notifications?limit=50&offset=${offset}`, {signal}));
+    if (!Array.isArray(value) || value.some(item => !isRecord(item) || typeof item.id !== 'string' || typeof item.title !== 'string'
+      || typeof item.message !== 'string' || typeof item.type !== 'string' || typeof item.createdAt !== 'string'
+      || (item.readAt !== null && typeof item.readAt !== 'string'))) throw invalidResponse('The notification response is malformed.');
+    return value;
+  },
+  async markImportedNotificationRead(id: string): Promise<{id:string;readAt:string}> {
+    const value = unwrapData(await apiRequest<unknown>(`/api/v1/identity/me/imported-notifications/${requireUuid(id,'Notification identifier')}/read`, {method:'POST'}));
+    if (!isRecord(value) || value.id !== id || typeof value.readAt !== 'string') throw invalidResponse('The notification read receipt is malformed.');
+    return {id:value.id,readAt:value.readAt};
+  },
   async lookupPatientByHid(
     hid: string,
     purpose: 'direct-care',
@@ -672,6 +686,40 @@ const parseUploadIntent = (payload: unknown): UploadIntentResponse => {
 export const newIdempotencyKey = (): string => crypto.randomUUID();
 
 export const clinicalApi = {
+  async importedHistory(patientId: string, signal?: AbortSignal): Promise<{records: ImportedMedicalRecord[]; healthProfile: import('../../../../packages/api-client/src/imported-records').ImportedHealthProfile | null}> {
+    const patient = requireUuid(patientId,'Patient identifier');
+    const payload = unwrapData(await apiRequest<unknown>(`/api/v1/ehr/patients/${patient}/imported-records`,{
+      signal,requireFacility:true,purposeOfUse:'direct-care',
+    }));
+    if (!isRecord(payload) || !Array.isArray(payload.importedRecords)) throw invalidResponse('The imported history response is malformed.');
+    for (const item of payload.importedRecords) {
+      if (!isRecord(item) || !UUID_PATTERN.test(String(item.id)) || !UUID_PATTERN.test(String(item.currentVersionId))
+        || !['patient-provided','provider-authored'].includes(String(item.origin)) || !Array.isArray(item.versions) || !Array.isArray(item.files)
+        || !Number.isFinite(Date.parse(String(item.createdAt)))) throw invalidResponse('The imported record response is malformed.');
+      for (const version of item.versions) if (!isRecord(version) || !UUID_PATTERN.test(String(version.id))
+        || !Number.isInteger(version.versionNo) || Number(version.versionNo) < 1
+        || !['patient-provided','provider-authored'].includes(String(version.origin))
+        || !Number.isFinite(Date.parse(String(version.createdAt)))) throw invalidResponse('The imported version response is malformed.');
+      if (!item.versions.some(v => isRecord(v) && v.id === item.currentVersionId)) throw invalidResponse('The current imported version is missing.');
+      for (const file of item.files) if (!isRecord(file) || !UUID_PATTERN.test(String(file.id))
+        || !Number.isSafeInteger(file.sizeBytes) || Number(file.sizeBytes) < 0
+        || !['pending-safety-verification','available','rejected'].includes(String(file.accessStatus))) throw invalidResponse('The imported attachment response is malformed.');
+    }
+    const profile = payload.importedHealthProfile;
+    if (profile != null && (!isRecord(profile) || !isRecord(profile.content) || !Number.isFinite(Date.parse(String(profile.updatedAt))))) throw invalidResponse('The health profile response is malformed.');
+    return {records: payload.importedRecords as ImportedMedicalRecord[], healthProfile: (profile ?? null) as import('../../../../packages/api-client/src/imported-records').ImportedHealthProfile | null};
+  },
+  async importedRecords(patientId: string, signal?: AbortSignal): Promise<ImportedMedicalRecord[]> {
+    return (await clinicalApi.importedHistory(patientId,signal)).records;
+  },
+  async importedAttachment(patientId: string, fileId: string, signal?: AbortSignal): Promise<{url: string; expiresInSeconds: number}> {
+    const value = unwrapData(await apiRequest<unknown>(`/api/v1/ehr/patients/${requireUuid(patientId,'Patient identifier')}/imported-attachments/${requireUuid(fileId,'File identifier')}/download`, {
+      signal,requireFacility:true,purposeOfUse:'direct-care',
+    }));
+    if (!isRecord(value) || typeof value.url !== 'string' || !Number.isInteger(value.expiresInSeconds)
+      || Number(value.expiresInSeconds) < 1 || Number(value.expiresInSeconds) > 60) throw invalidResponse('The attachment download response is malformed.');
+    return {url:value.url,expiresInSeconds:Number(value.expiresInSeconds)};
+  },
   async listDocuments(patientId: string, encounterId: string, signal?: AbortSignal): Promise<ClinicalDocumentRecord[]> {
     const expectedPatient = requireUuid(patientId, 'Patient identifier');
     const expectedEncounter = requireUuid(encounterId, 'Encounter identifier');

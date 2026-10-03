@@ -10,11 +10,14 @@ export const navigation = [
   { path: '/operations', label: 'Services', permission: 'platform.operations.read', section: 'Operations' },
   { path: '/events', label: 'Event delivery', permission: 'platform.operations.read', section: 'Operations' },
   { path: '/integrations', label: 'Integrations', permission: 'platform.integration.read', section: 'Settings' },
+  { path: '/controls', label: 'Platform controls', permission: 'platform.control.read', section: 'Settings' },
+  { path: '/preserved-settings', label: 'Preserved settings', permission: 'platform.admin.access', section: 'Settings' },
 ] as const;
 
 export function visibleNavigation(actor: AdminActor) {
   const permissions = new Set(actor.platformPermissions);
-  return navigation.filter((item) => permissions.has(item.permission));
+  return navigation.filter((item) => permissions.has(item.permission) && (item.path !== '/preserved-settings'
+    || ['platform.pricing.read','platform.control.read','platform.role.manage','platform.integration.read'].some(code => permissions.has(code))));
 }
 
 export function accessState(actor: AdminActor | null): 'unauthenticated' | 'unauthorized' | 'authorized' {

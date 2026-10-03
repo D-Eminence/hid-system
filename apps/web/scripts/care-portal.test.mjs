@@ -14,6 +14,13 @@ test('patient reads accept no caller patient or facility identity', async () => 
   await api.self(); await api.ownRecords()
   assert.deepEqual(requests, [{ path: '/api/v1/identity/me', init: undefined }, { path: '/api/v1/ehr/me/records', init: undefined }])
 })
+test('historical notification pages and attachment links cannot choose another recipient',async()=>{
+  const requests=[],api=createCarePortalApi(async(path,init)=>{requests.push({path,init});return []})
+  await api.importedNotifications(100);await api.markImportedNotificationRead(consentGrantId);await api.ownAttachment(consentGrantId)
+  assert.deepEqual(requests.map(x=>x.path),['/api/v1/identity/me/imported-notifications?limit=50&offset=100',
+    `/api/v1/identity/me/imported-notifications/${consentGrantId}/read`,`/api/v1/ehr/me/imported-attachments/${consentGrantId}/download`])
+  assert.throws(()=>api.importedNotifications(-1));assert.throws(()=>api.ownAttachment('arbitrary-path'))
+})
 test('patient NIN verification submits only a normalized NIN to the session-bound endpoint', async () => {
   const requests = []
   const api = createCarePortalApi(async (path, init) => {

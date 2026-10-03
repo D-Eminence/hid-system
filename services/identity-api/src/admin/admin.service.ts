@@ -61,6 +61,15 @@ export class AdminService {
     }, { readOnly: true });
   }
 
+  async importedConfiguration(context: DataAccessContext) {
+    return this.database.withTransaction(context, async client => {
+      const result = await client.query('select * from platform.admin_imported_customer_configuration()');
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.imported-configuration.read',
+        'imported-configuration', null, 'Review preserved customer configuration', { count: result.rows.length }));
+      return { items: result.rows };
+    });
+  }
+
   async setPlatformControl(context: DataAccessContext, input: PlatformControlCommandDto, expectedVersion: number) {
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query(`select * from platform.admin_set_control($1,$2,$3,$4)`,

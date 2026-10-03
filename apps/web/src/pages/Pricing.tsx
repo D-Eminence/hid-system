@@ -2,14 +2,14 @@ import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { CommercialLayout } from '../features/commercial/CommercialLayout'
 import { products } from '../features/commercial/catalog'
-import { invokeApiFunction } from '../lib/functionApi'
+import { fetchPublicPricing, type PublicPrice } from '../lib/publicPricingApi'
 
-type Price = { product_slug:string; context:string; visibility:string; amount_minor:number|null; currency:string; billing_period:string|null; unit:string|null }
+type Price = PublicPrice
 export default function Pricing() {
   const [prices, setPrices] = useState<Price[]>([])
   useEffect(() => {
-    void invokeApiFunction<{ data: Price[] }>('public-pricing', { method: 'GET' }, 'Pricing could not be loaded right now.')
-      .then(result => setPrices(result.data ?? []))
+    void fetchPublicPricing()
+      .then(setPrices)
       .catch(() => setPrices([]))
   }, [])
   const display = (price?: Price) => {

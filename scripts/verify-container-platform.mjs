@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { extname, join, relative, resolve } from 'node:path'
+import { isTestFixturePath, normalizeVerificationPath } from './verification-paths.mjs'
 
 const repository = resolve(import.meta.dirname, '..')
 const backends = [
@@ -56,7 +57,7 @@ function secretFindings(path, source) {
 
   for (const match of source.matchAll(/postgres(?:ql)?:\/\/[^\s:'"/]+:([^@\s'"/]+)@/gi)) {
     const normalized = match[1].toLowerCase()
-    const testFixture = /(?:\.spec\.[cm]?[jt]sx?$|\/tests?\/)/.test(path)
+    const testFixture = isTestFixturePath(path)
     if (!testFixture && !/^(?:change-me|replace-me|password|postgres|test|testing|local|example|<[^>]+>)$/.test(normalized)) {
       findings.push(`${relativePath(path)}:embedded-database-password`)
     }
@@ -162,7 +163,7 @@ const webVite = await readFile(join(repository, 'apps/web/vite.config.ts'), 'utf
 assert.match(webVite, /envPrefix:\s*\[['"]VITE_['"]\]/,
   'Web builds must expose only explicitly public VITE_* variables')
 const allFrontendSource = (await walk(join(repository, 'apps'), { textOnly: true }))
-  .filter((path) => path.includes('/src/'))
+  .filter((path) => normalizeVerificationPath(path).includes('/src/'))
 for (const path of allFrontendSource) {
   const source = await readFile(path, 'utf8')
   assert.doesNotMatch(source, /(?:from\s+['"]pg['"]|DATABASE_URL|WORKLOAD_TOKEN_FILE|node:fs|scripts\/apply-migrations)/,

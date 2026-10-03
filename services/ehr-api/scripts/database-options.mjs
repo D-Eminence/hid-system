@@ -35,3 +35,12 @@ export function databaseOptions(connectionString, applicationName, sslPrefix = '
     ...(ssl ? { ssl } : {}),
   };
 }
+
+export function managedDatabaseUrl() {
+  const { DATABASE_HOST: host, DATABASE_USERNAME: username, DATABASE_PASSWORD: password } = process.env;
+  if (!host || !username || !password) return undefined;
+  const url = new URL(`postgresql://${host}:5432/${process.env.DATABASE_NAME || 'hid'}`);
+  url.username = username;
+  url.password = password;
+  return url.toString();
+}

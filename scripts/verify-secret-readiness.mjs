@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { basename, join, relative, resolve } from 'node:path'
+import { isFrontendSourcePath, isTestFixturePath } from './verification-paths.mjs'
 
 const repository = resolve(import.meta.dirname, '..')
 const canonicalRoots = ['apps', 'services', 'packages', 'gateway', 'infra', 'scripts', 'docs']
@@ -54,8 +55,7 @@ function isIgnoredEnvironmentFile(path) {
 }
 
 function isTestFile(path) {
-  return /(?:\.spec\.[cm]?[jt]sx?$|\.test\.[cm]?[jt]sx?$|(?:^|\/)test(?:s)?\/)/.test(path)
-    || path.endsWith('/scripts/run-container-database-acceptance.sh')
+  return isTestFixturePath(path)
 }
 
 function isPlaceholder(value) {
@@ -178,7 +178,7 @@ for (const path of canonicalFiles) {
 }
 assert.deepEqual([...canonicalFindings], [], `canonical secret findings: ${[...canonicalFindings].join(', ')}`)
 
-const frontendFiles = (await walk(join(repository, 'apps'))).filter((path) => /(?:\/src\/|vite\.config\.|index\.html$)/.test(path))
+const frontendFiles = (await walk(join(repository, 'apps'))).filter(isFrontendSourcePath)
 for (const path of frontendFiles) {
   const source = await text(path)
   if (source === null) continue

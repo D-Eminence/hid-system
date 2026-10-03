@@ -68,6 +68,21 @@ This table records npm package audit evidence only. Container operating-system p
 
 ## Finding RF-005: AWS CDK bundled dependency audit
 
+Release preparation recheck (2026-10-04): the official npm registry still
+reports 2.272.0 as latest. The locked audit reports one high vulnerable package,
+with two high recursion advisories and one moderate advisory affecting the
+bundled version. The high advisories are
+[GHSA-qhr7-859c-m2p7](https://github.com/advisories/GHSA-qhr7-859c-m2p7)
+and [GHSA-6j4f-fj2g-mc7p](https://github.com/advisories/GHSA-6j4f-fj2g-mc7p).
+No patched official CDK bundle is available from this check. The installed pin,
+audit gate and open status are preserved; a dependency override is not applied.
+
+Integration observation (2026-10-03): the locked `infra/aws` audit still
+reports one high finding. A fresh registry check and inspection of the official
+2.272.0 tarball confirm that it still bundles `brace-expansion@5.0.9`.
+The staging integration has not added an override, suppression or release
+exception. This finding remains open.
+
 | Field | Record |
 |---|---|
 | Review date | 2026-10-01, PR #5 worktree only. |
@@ -81,6 +96,13 @@ React Router findings in RF-003. No production infrastructure was changed by
 this dependency review.
 
 ## Finding RF-006: Historical sandbox fixture data in PR #5
+
+Integration observation (2026-10-02): baseline
+`c4b5445ed589217bb8b4529d69e268ca56842609` is already the PR #5 merge.
+The draft/unmerged instruction below describes the earlier review and cannot
+describe the current branch state. Owner/security disposition for the historical
+exposure is still required before release. No history was rewritten and no
+exposed value is repeated here. This observation does not close the finding.
 
 | Field | Record |
 |---|---|

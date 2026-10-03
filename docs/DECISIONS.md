@@ -2,6 +2,22 @@
 
 This document records major architecture decisions.
 
+## Imported medical history decision — 2026-10-03
+
+The section-1 follow-up preserves customer settings exactly and requires explicit
+reviewed mappings for supported native fields. Unsupported billing, signup,
+staff-policy and AI semantics remain pending. Historical notifications never
+trigger delivery, legacy challenges never authorize authentication, and invalid
+outreach remains excluded. Attachment downloads require genuine clean evidence
+bound to exact versions. See [CUSTOMER_DATA_COMPLETION.md](CUSTOMER_DATA_COMPLETION.md).
+
+User-authorized direct import uses immutable EHR-owned imported-history tables
+referencing canonical Identity patients and Auth authors. Patient-provided records
+retain their origin; no encounters, origin facilities or clinician signatures are
+invented. Portable imported history requires fresh patient self or selected-facility
+staff consent authorization and RLS. Files remain pending genuine safety approval.
+See [IMPORTED_MEDICAL_HISTORY.md](IMPORTED_MEDICAL_HISTORY.md) for the full contract.
+
 Do not silently reverse an accepted decision.
 
 When a decision changes:

@@ -2,6 +2,7 @@ import React from 'react'
 import { Link } from 'react-router-dom'
 import { signOutAndClearSessions } from '../lib/auth'
 import type { ReleasedRecords } from '../lib/carePortalApi'
+import { ImportedMedicalHistory } from '../../../../packages/ui/src/ImportedMedicalHistory'
 
 export function CarePortal({ title, children, patient = false }: { title: string; children: React.ReactNode; patient?: boolean }) {
   return <main style={{ maxWidth: 960, margin: '0 auto', padding: 24, lineHeight: 1.6 }}>
@@ -23,10 +24,11 @@ function NoteContent({ value }: { value: unknown }): React.ReactElement {
   </React.Fragment>)}</dl>
   return <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{String(value)}</span>
 }
-export function RecordSummary({ records }: { records: ReleasedRecords }) {
+export function RecordSummary({ records, onDownload }: { records: ReleasedRecords;
+  onDownload?: (fileId: string) => Promise<{url: string; expiresInSeconds: number}> }) {
   return <section aria-label="Released medical records">
     <p>Completed encounters and signed or amended notes. Up to {records.limit} of each are shown.</p>
-    {records.encounters.length === 0 && records.notes.length === 0 && <p>No released records are available.</p>}
+    {records.encounters.length === 0 && records.notes.length === 0 && !(records.importedRecords?.length) && <p>No released records are available.</p>}
     {records.encounters.map(encounter => <article key={encounter.id} style={{ borderTop: '1px solid #dbe3ef', padding: '12px 0' }}>
       <h3>{encounter.encounterType}</h3><p>{new Date(encounter.startedAt).toLocaleString()} · {encounter.status}</p>
     </article>)}
@@ -34,5 +36,6 @@ export function RecordSummary({ records }: { records: ReleasedRecords }) {
       <h3>{note.title || note.noteType}</h3><p>{note.status} · Revision {note.revisionNo}{note.signedAt ? ` · ${new Date(note.signedAt).toLocaleString()}` : ''}</p>
       <NoteContent value={note.content} />
     </article>)}
+    <ImportedMedicalHistory records={records.importedRecords ?? []} healthProfile={records.importedHealthProfile} onDownload={onDownload}/>
   </section>
 }
