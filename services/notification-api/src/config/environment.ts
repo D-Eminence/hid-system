@@ -80,7 +80,7 @@ const schema = z.object({
       }
     }
     if (value.NOTIFICATION_DELIVERY_PROFILE === 'full') {
-      for (const key of ['TERMII_BASE_URL','TERMII_API_KEY','TERMII_SENDER_ID','META_PHONE_NUMBER_ID','META_ACCESS_TOKEN','META_OTP_TEMPLATE_NAME','BREVO_API_KEY'] as const) {
+      for (const key of ['TERMII_BASE_URL','TERMII_API_KEY','TERMII_SENDER_ID','META_PHONE_NUMBER_ID','META_ACCESS_TOKEN','META_OTP_TEMPLATE_NAME','META_APP_SECRET','META_WEBHOOK_VERIFY_TOKEN','BREVO_API_KEY'] as const) {
         if (!value[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
       }
     }
