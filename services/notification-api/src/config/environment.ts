@@ -32,6 +32,8 @@ const schema = z.object({
   META_ACCESS_TOKEN: optional,
   META_OTP_TEMPLATE_NAME: optional,
   META_OTP_TEMPLATE_LANGUAGE: z.string().trim().min(2).max(16).default('en_US'),
+  META_APP_SECRET: optional,
+  META_WEBHOOK_VERIFY_TOKEN: optional,
   BREVO_API_KEY: optional,
   BREVO_EMAIL_FROM: z.preprocess(empty, z.string().email().optional()),
   BREVO_SMS_SENDER: optional,
@@ -47,7 +49,7 @@ const schema = z.object({
     if (value.NODE_TLS_REJECT_UNAUTHORIZED === '0') context.addIssue({ code: 'custom', path: ['NODE_TLS_REJECT_UNAUTHORIZED'], message: 'Production TLS verification cannot be disabled' });
     if (value.NOTIFICATION_PROVIDER_MODE !== 'live') context.addIssue({ code: 'custom', path: ['NOTIFICATION_PROVIDER_MODE'], message: 'Live providers are required in production' });
     if (value.NOTIFICATION_WORKLOAD_IDENTITY_MODE !== 'jwt') context.addIssue({ code: 'custom', path: ['NOTIFICATION_WORKLOAD_IDENTITY_MODE'], message: 'JWT workload identity is required in production' });
-    for (const key of ['WORKLOAD_ISSUER_URL','WORKLOAD_JWKS_URL','IDENTITY_CALLER_SUBJECT','AWS_REGION','SES_FROM_ADDRESS'] as const) {
+    for (const key of ['WORKLOAD_ISSUER_URL','WORKLOAD_JWKS_URL','IDENTITY_CALLER_SUBJECT','AWS_REGION','SES_FROM_ADDRESS','META_APP_SECRET','META_WEBHOOK_VERIFY_TOKEN'] as const) {
       if (!value[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
     }
     if (value.NOTIFICATION_DELIVERY_PROFILE === 'full') {
@@ -67,7 +69,7 @@ let cached: Environment | undefined;
 export function getEnvironment(): Environment {
   if (cached) return cached;
   const parsed = schema.safeParse(process.env);
-  if (!parsed.success) throw new Error(`Invalid Notification API configuration: ${parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
+  if (!parsed.success) throw new Error(`Invalid Notification API configuration: ${parsed.error.issues.map(issue => `${issue.path.join('.')}\: ${issue.message}`).join('; ')}`);
   return cached = parsed.data;
 }
 export function resetEnvironmentForTests() { cached = undefined; }
