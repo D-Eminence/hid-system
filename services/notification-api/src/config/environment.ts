@@ -32,6 +32,8 @@ const schema = z.object({
   META_ACCESS_TOKEN: optional,
   META_OTP_TEMPLATE_NAME: optional,
   META_OTP_TEMPLATE_LANGUAGE: z.string().trim().min(2).max(16).default('en_US'),
+  META_APP_SECRET: optional,
+  META_WEBHOOK_VERIFY_TOKEN: optional,
   BREVO_API_KEY: optional,
   BREVO_EMAIL_FROM: z.preprocess(empty, z.string().email().optional()),
   BREVO_SMS_SENDER: optional,
@@ -67,7 +69,7 @@ let cached: Environment | undefined;
 export function getEnvironment(): Environment {
   if (cached) return cached;
   const parsed = schema.safeParse(process.env);
-  if (!parsed.success) throw new Error(`Invalid Notification API configuration: ${parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
+  if (!parsed.success) throw new Error(`Invalid Notification API configuration: ${parsed.error.issues.map(issue => `${issue.path.join('.')}\: ${issue.message}`).join('; ')}`);
   return cached = parsed.data;
 }
 export function resetEnvironmentForTests() { cached = undefined; }
