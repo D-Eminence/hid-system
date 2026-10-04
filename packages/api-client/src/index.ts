@@ -143,6 +143,7 @@ export type {
   IdentityFacilityAssignment,
   IdentityInternalCaller,
   IdentityRegistrationCase,
+  IdentityRegistrationCaseList,
   PatientSelfAuthorization,
   ResolveNinRegistration,
 } from './identity';

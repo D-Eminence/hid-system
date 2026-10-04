@@ -9,6 +9,7 @@ import { AppModule } from './app.module';
 import { DomainProblem, ProblemDetailsFilter } from './common/problem';
 import { preventResponseCaching } from './common/response-security.middleware';
 import { getEnvironment } from './config/environment';
+import { pharmacyCorsOptions } from './config/cors';
 
 async function bootstrap(): Promise<void> {
   const environment = getEnvironment();
@@ -27,19 +28,7 @@ async function bootstrap(): Promise<void> {
     hsts: environment.NODE_ENV === 'production'
       ? { maxAge: 31_536_000, includeSubDomains: true, preload: true } : false }));
   const allowedOrigins = new Set(environment.CORS_ORIGINS.split(',').map((origin) => origin.trim()));
-  app.enableCors({
-    origin: (origin: string | undefined,
-      callback: (error: Error | null, allow?: boolean) => void) => {
-      if (!origin || allowedOrigins.has(origin)) callback(null, true);
-      else callback(new Error('Origin is not permitted'), false);
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id',
-      'x-facility-id', 'x-purpose-of-use'],
-    exposedHeaders: ['location', 'x-correlation-id'],
-    maxAge: 600,
-  });
+  app.enableCors(pharmacyCorsOptions(allowedOrigins));
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true,
     forbidUnknownValues: true, transform: true,
     transformOptions: { enableImplicitConversion: false }, stopAtFirstError: false,

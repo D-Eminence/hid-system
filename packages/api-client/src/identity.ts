@@ -61,7 +61,13 @@ export interface IdentityRegistrationCase {
     | 'linked_existing' | 'approved_new_identity' | 'rejected' | 'cancelled';
   version: number;
   candidateCount: number;
+  accountEnrollmentStarted?: boolean;
   patient?: { patientId: string; hid: string };
+}
+
+export interface IdentityRegistrationCaseList {
+  items: IdentityRegistrationCase[];
+  nextBeforeCaseId: string | null;
 }
 
 export interface IdentityAuthorizationDecision {
@@ -192,6 +198,25 @@ export class IdentityApiClient {
       `/api/v1/identity/registration-cases/${encodeURIComponent(caseId)}`, 'GET', undefined, context));
   }
 
+  async listRegistrationCases(
+    query: { status?: IdentityRegistrationCase['status']; limit?: number; beforeCaseId?: string },
+    context: IdentityDelegatedContext,
+  ): Promise<IdentityRegistrationCaseList> {
+    const parameters = new URLSearchParams();
+    if (query.status) parameters.set('status', query.status);
+    if (query.limit !== undefined) parameters.set('limit', String(query.limit));
+    if (query.beforeCaseId) parameters.set('beforeCaseId', query.beforeCaseId);
+    const suffix = parameters.size ? `?${parameters}` : '';
+    const payload = await this.request(`/api/v1/identity/registration-cases${suffix}`,
+      'GET', undefined, context);
+    if (typeof payload !== 'object' || payload === null) throw new IdentityApiProblem(502, payload);
+    const value = payload as Partial<IdentityRegistrationCaseList>;
+    if (!Array.isArray(value.items) || (value.nextBeforeCaseId !== null
+      && typeof value.nextBeforeCaseId !== 'string')) throw new IdentityApiProblem(502, payload);
+    return { items: value.items.map((item) => this.registrationCase(item)),
+      nextBeforeCaseId: value.nextBeforeCaseId };
+  }
+
   async approveNewRegistration(
     caseId: string,
     input: { expectedVersion: number; reason: string },
@@ -218,7 +243,9 @@ export class IdentityApiClient {
     if (typeof payload !== 'object' || payload === null) throw new IdentityApiProblem(502, payload);
     const value = payload as Partial<IdentityRegistrationCase>;
     if (typeof value.caseId !== 'string' || typeof value.status !== 'string'
-        || typeof value.version !== 'number' || typeof value.candidateCount !== 'number') {
+        || typeof value.version !== 'number' || typeof value.candidateCount !== 'number'
+        || (value.accountEnrollmentStarted !== undefined
+          && typeof value.accountEnrollmentStarted !== 'boolean')) {
       throw new IdentityApiProblem(502, payload);
     }
     return value as IdentityRegistrationCase;

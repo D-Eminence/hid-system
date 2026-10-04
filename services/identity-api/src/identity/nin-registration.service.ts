@@ -14,6 +14,7 @@ import type { ApproveRegistrationCaseDto } from './dto/approve-registration-case
 import type { LinkRegistrationCaseDto } from './dto/link-registration-case.dto';
 import type { EnrollPatientDto } from './dto/enroll-patient.dto';
 import type { ResolveNinDto } from './dto/resolve-nin.dto';
+import type { ListRegistrationCasesDto } from './dto/list-registration-cases.dto';
 
 type RegistrationStatus =
   | 'pending_new_identity_approval'
@@ -31,6 +32,7 @@ interface RegistrationCaseRow extends QueryResultRow {
   resolved_patient_id: string | null;
   resolved_hid_code: string | null;
   candidate_count: string;
+  account_enrollment_started?: boolean;
 }
 
 export interface CandidateRow extends QueryResultRow {
@@ -64,6 +66,7 @@ export interface RegistrationCaseResult {
   status: RegistrationStatus;
   version: number;
   candidateCount: number;
+  accountEnrollmentStarted: boolean;
   candidates?: Array<{ patientId: string; fullName: string; dateOfBirth: string | null }>;
   patient?: { patientId: string; hid: string };
 }
@@ -75,6 +78,7 @@ const CASE_SELECT = `
     registration.row_version::text,
     registration.resolved_patient_id::text,
     patient.hid_code as resolved_hid_code,
+    (patient.account_id is not null) as account_enrollment_started,
     (select count(*)::text from identity.registration_case_candidates candidate where candidate.case_id = registration.id) as candidate_count
   from identity.registration_cases registration
   left join identity.patients patient on patient.id = registration.resolved_patient_id
@@ -308,6 +312,43 @@ export class NinRegistrationService {
            join identity.patients patient on patient.id = candidate.patient_id
           where candidate.case_id = $1 order by candidate.match_score desc, patient.id limit 50`, [caseId])).rows : [];
       return { ...this.project(row), candidates };
+    });
+  }
+
+  async listCases(input: ListRegistrationCasesDto, context: DataAccessContext) {
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query<RegistrationCaseRow>(
+        `${CASE_SELECT}
+         where registration.facility_id = platform.current_facility_id()
+           and ($1::text is null or registration.status = $1)
+           and ($2::uuid is null or (registration.created_at, registration.id) < (
+             select previous.created_at, previous.id
+               from identity.registration_cases previous
+              where previous.id = $2 and previous.facility_id = platform.current_facility_id()
+           ))
+         order by registration.created_at desc, registration.id desc
+         limit $3`,
+        [input.status ?? null, input.beforeCaseId ?? null, input.limit + 1],
+      );
+      const items = result.rows.slice(0, input.limit).map((row) => this.project(row));
+      await this.audit.recordWithClient(client, {
+        correlationId: context.correlationId,
+        actorType: 'staff',
+        actorSubject: context.actor.subject,
+        actorAccountId: context.actor.accountId,
+        actorMembershipId: context.membershipId,
+        organizationId: context.actor.facility?.organizationId,
+        facilityId: context.facilityId,
+        action: 'identity.registration-cases.list',
+        resourceType: 'registration-case-collection',
+        outcome: 'success',
+        purposeOfUse: context.purposeOfUse,
+        details: { returnedCount: items.length, status: input.status ?? null },
+      });
+      return {
+        items,
+        nextBeforeCaseId: result.rows.length > input.limit ? items.at(-1)?.caseId ?? null : null,
+      };
     });
   }
 
@@ -556,6 +597,7 @@ export class NinRegistrationService {
     const result = await client.query<CaseDataRow>(
       `select registration.id::text, registration.status, registration.row_version::text,
               registration.resolved_patient_id::text, patient.hid_code as resolved_hid_code,
+              (patient.account_id is not null) as account_enrollment_started,
               registration.facility_id::text, registration.first_name, registration.last_name,
               registration.full_name, registration.dob::text, registration.gender,
               registration.nin_ciphertext, registration.nin_lookup_hmac, registration.nin_last4,
@@ -603,6 +645,7 @@ export class NinRegistrationService {
       status: row.status,
       version: Number(row.row_version),
       candidateCount: Number(row.candidate_count),
+      accountEnrollmentStarted: row.account_enrollment_started === true,
       ...(row.resolved_patient_id && row.resolved_hid_code
         ? { patient: { patientId: row.resolved_patient_id, hid: row.resolved_hid_code } }
         : {}),

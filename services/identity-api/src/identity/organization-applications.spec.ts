@@ -63,6 +63,28 @@ describe('organization onboarding boundary', () => {
       'Ada Admin', 'ada@example.invalid']);
   });
 
+  it.each([
+    ['hospital', 'ehr'], ['laboratory', 'laboratory'], ['pharmacy', 'pharmacy'],
+  ] as const)('passes the final five SQL arguments for a %s application in the quota transaction',
+    async (organizationType, productCode) => {
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NODE_ENV: 'test',
+        OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64') } as environment.Environment);
+      const query = jest.fn().mockResolvedValue({ rows: [] });
+      const database = { withSystemTransaction: jest.fn(async (_correlation, work) => work({ query })) };
+      const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
+        {} as QoreIdVerificationAdapter, {} as IntegrationRuntimeService);
+      await expect(service.submit({ ...input, organizationType, productCode }, request))
+        .resolves.toEqual({ accepted: true });
+      expect(database.withSystemTransaction).toHaveBeenCalledTimes(1);
+      expect(query.mock.calls.map(([sql]) => sql)).toEqual([
+        'select platform.consume_public_application_quota($1)',
+        'select identity.submit_organization_application($1,$2,$3,$4,$5)',
+      ]);
+      expect(query.mock.calls[1]?.[1]).toEqual([
+        productCode, organizationType, 'RC1234567', 'Ada Admin', 'ada@example.invalid',
+      ]);
+    });
+
   it('returns 429 before public application persistence when a network bucket is exhausted', async () => {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NODE_ENV: 'test',
       OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64') } as environment.Environment);

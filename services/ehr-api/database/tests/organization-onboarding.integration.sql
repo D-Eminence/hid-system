@@ -617,4 +617,71 @@ do $$ begin
   end if;
 end $$;
 
+-- The current five-argument intake and governed review transaction also work
+-- for an actual hospital, while rejection never creates an organization.
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'system:auth', true);
+select set_config('app.correlation_id', 'organization-onboarding-hospital-test', true);
+do $$
+declare hospital_application uuid; rejected_application uuid;
+begin
+  select identity.submit_organization_application('ehr', 'hospital', 'RC4444444',
+    'Hospital Administrator', 'hospital-admin@example.invalid') into hospital_application;
+  select identity.submit_organization_application('pharmacy', 'pharmacy', 'BN4444444',
+    'Rejected Applicant', 'rejected-applicant@example.invalid') into rejected_application;
+  if hospital_application is null or rejected_application is null then
+    raise exception 'Five-argument application submission failed';
+  end if;
+end $$;
+select set_config('app.actor_subject', 'staff:organization-onboarding-admin', true);
+select set_config('app.facility_id', 'c4620000-0000-4000-8000-000000000001', true);
+select set_config('app.membership_id', 'c4640000-0000-4000-8000-000000000001', true);
+select set_config('app.purpose_of_use', 'healthcare-operations', true);
+do $$
+declare hospital_application uuid; rejected_application uuid; approved record; rejected record;
+begin
+  select application_id into hospital_application
+    from identity.admin_list_organization_applications('pending_verification')
+    where product_code = 'ehr' and organization_type = 'hospital' and cac_hint = 'RC*****44';
+  select application_id into rejected_application
+    from identity.admin_list_organization_applications('pending_verification')
+    where product_code = 'pharmacy' and organization_type = 'pharmacy' and cac_hint = 'BN*****44';
+  if hospital_application is null or rejected_application is null then
+    raise exception 'Hospital or pharmacy application was not available for review';
+  end if;
+  perform identity.admin_record_organization_cac_result(
+    hospital_application, 1, 'verified', '86444', null, 'RC4444444',
+    'Synthetic Hospital Limited', 'Private Limited Company', '2016-04-12',
+    '44 Synthetic Hospital Road', 'active');
+  select * into approved from identity.admin_approve_organization_application(
+    hospital_application, 2, null, null, 'Reviewed synthetic hospital application');
+  select * into rejected from identity.admin_reject_organization_application(
+    rejected_application, 1, 'Rejected synthetic application');
+  if approved.organization_id is null or approved.facility_id is null
+     or approved.first_admin_account_id is null or approved.row_version <> 3
+     or rejected.application_status <> 'rejected' or rejected.row_version <> 2 then
+    raise exception 'Hospital approval or pharmacy rejection transaction failed';
+  end if;
+end $$;
+reset role;
+do $$
+begin
+  if not exists (select 1 from identity.organization_applications application
+      join identity.organization_cac_registrations binding
+        on binding.cac_registration_number = application.cac_registration_number
+       and binding.organization_id = application.organization_id
+       and binding.primary_facility_id = application.facility_id
+      join identity.organization_products product
+        on product.source_application_id = application.id
+       and product.organization_id = application.organization_id
+       and product.facility_id = application.facility_id
+       and product.product_code = 'ehr'
+      where application.cac_registration_number = 'RC4444444'
+        and application.organization_type = 'hospital' and application.status = 'approved')
+     or exists (select 1 from identity.organization_cac_registrations
+       where cac_registration_number = 'BN4444444') then
+    raise exception 'Hospital binding or rejected application isolation failed';
+  end if;
+end $$;
+
 rollback;

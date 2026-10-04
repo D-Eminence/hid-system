@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { AuditAction, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
@@ -8,6 +8,7 @@ import { ResolveNinDto } from './dto/resolve-nin.dto';
 import { EnrollPatientDto } from './dto/enroll-patient.dto';
 import { NinRegistrationService } from './nin-registration.service';
 import { getEnvironment } from '../config/environment';
+import { ListRegistrationCasesDto } from './dto/list-registration-cases.dto';
 
 @Controller('identity')
 export class NinRegistrationController {
@@ -43,6 +44,14 @@ export class NinRegistrationController {
   getCase(@Param('caseId', new ParseUUIDPipe({ version: '4' })) caseId: string, @Req() request: HidRequest) {
     const context = requireRequestContext(request);
     return this.registrations.getCase(caseId, context);
+  }
+
+  @Get('registration-cases')
+  @RequirePermissions('identity.registration.write')
+  @AuditAction('identity.registration-cases.list.request')
+  listCases(@Query() input: ListRegistrationCasesDto, @Req() request: HidRequest) {
+    const context = requireRequestContext(request);
+    return this.registrations.listCases(input, context);
   }
 
   @Post('registration-cases/:caseId/approve-new')
