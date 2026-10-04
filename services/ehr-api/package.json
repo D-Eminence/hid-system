@@ -43,9 +43,10 @@
     "test:cov": "jest --coverage --runInBand"
   },
   "dependencies": {
-    "@hid/api-client": "file:../../packages/api-client",
+    "@aws-sdk/client-bedrock-runtime": "3.1139.0",
     "@aws-sdk/client-s3": "^3.850.0",
     "@aws-sdk/s3-request-presigner": "^3.850.0",
+    "@hid/api-client": "file:../../packages/api-client",
     "@nestjs/common": "^11.1.0",
     "@nestjs/core": "^11.1.0",
     "@nestjs/platform-express": "^11.1.0",

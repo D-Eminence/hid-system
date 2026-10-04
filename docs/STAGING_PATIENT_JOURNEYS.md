@@ -20,9 +20,10 @@ The patient receives no workforce membership or role.
 Use [staging-journey-input.template.json](../release/config/staging-journey-input.template.json)
 as the operator input shape. Keep its working copy directly under the already
 ignored `release/local/` directory. That directory must be owned by the operator,
-be canonical without symlinks, and have mode `0700`; the input file must be `0600`.
-The generator rejects other locations or permissions and never changes existing
-permissions. Keep controlled inbox addresses in the private local input and fixture
+be canonical without symlinks. On POSIX it needs mode `0700`, with input `0600`.
+On Windows use a protected ACL owned by the operator, allowing only that user,
+SYSTEM and Administrators. The generator validates existing input permissions;
+it protects only the new output directory and files. Keep controlled inbox addresses in the private local input and fixture
 to limit unnecessary disclosure. Passwords, OTPs and credentials must stay out of
 chat, Git, shell arguments and public evidence.
 
@@ -46,6 +47,12 @@ The directory must not already exist. It receives `fixture.json` and
 HID are generated once and retained in those files. Repeated invocation refuses
 overwrite; use the same reviewed files for retries. Creating another directory
 creates another identity set, not an idempotent retry of the previous import.
+
+The Windows custody implementation passed its final DACL regression: seven
+checks passed, with one POSIX-only check skipped. Existing unsafe input ACLs and
+external/symlink paths remain rejected. The current delivery has one controlled
+inbox; this fixture requires a distinct controlled staff inbox too. A made-up
+alias does not satisfy that requirement.
 
 The manifest and console output contain IDs, counts, the fixture digest and
 unverified target expectations, without emails or credentials. They say

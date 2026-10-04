@@ -14,7 +14,9 @@ ENV IDENTITY_API_UPSTREAM=http://identity-api:3001 \
     LAB_API_UPSTREAM=http://lab-api:3003 \
     PHARMACY_API_UPSTREAM=http://pharmacy-api:3004 \
     OCR_API_UPSTREAM=http://ocr-api:3005 \
-    OUTREACH_API_UPSTREAM=http://outreach-api:3006
+    OUTREACH_API_UPSTREAM=http://outreach-api:3006 \
+    SUPPORT_API_UPSTREAM=http://127.0.0.1:9 \
+    GATEWAY_TRUSTED_PROXY_CIDR=127.0.0.1/32
 COPY --from=configuration /tmp/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=configuration /tmp/hid-proxy-headers.conf /etc/nginx/hid-proxy-headers.conf
 USER 101

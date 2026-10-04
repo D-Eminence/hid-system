@@ -407,6 +407,9 @@ grant select, insert, update on ehr.encounters, ehr.clinical_notes, ehr.vitals,
 grant select, insert on ehr.ocr_import_provenance to hid_ehr_runtime;
 grant select, insert on ehr.clinical_note_revisions,
   ehr.vital_corrections to hid_ehr_runtime;
+-- Patient chat derives an index under the same patient-self RLS context.
+-- It has no update/delete capability and never gains a bypass role.
+grant select, insert on ehr.patient_record_embeddings to hid_ehr_runtime;
 grant select on ehr.document_scan_events, ehr.documents_effective,
   ehr.record_versions to hid_ehr_runtime;
 grant usage, select on all sequences in schema ehr to hid_ehr_runtime;

@@ -197,6 +197,25 @@ test('fails closed when origin authorization is absent', async () => {
   assert.equal((await response.json()).code, 'EDGE_CONFIGURATION_INVALID')
 })
 
+test('replaces a forged client-IP header with the edge-supplied address', async () => {
+  let headers
+  globalThis.fetch = async (_url, init) => { headers = init.headers; return new Response('{}') }
+  await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/support/chat', {
+    headers: { 'x-hid-client-ip': '192.0.2.99', 'cf-connecting-ip': '192.0.2.7', 'x-forwarded-for': '192.0.2.88' },
+  }), environment())
+  assert.equal(headers.get('x-hid-client-ip'), '192.0.2.7')
+  assert.equal(headers.get('x-forwarded-for'), null)
+})
+
+test('does not preserve a client-IP override without a valid edge address', async () => {
+  let headers
+  globalThis.fetch = async (_url, init) => { headers = init.headers; return new Response('{}') }
+  await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/support/chat', {
+    headers: { 'x-hid-client-ip': '192.0.2.99', 'cf-connecting-ip': 'not-an-address' },
+  }), environment())
+  assert.equal(headers.get('x-hid-client-ip'), null)
+})
+
 test('uses a safe correlation identifier when caller evidence is malformed', async () => {
   let value
   globalThis.fetch = async (_url, init) => { value = init.headers.get('x-correlation-id'); return new Response('{}') }

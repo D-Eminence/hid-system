@@ -131,8 +131,16 @@ async function proxyApi(request, deployment, requestUrl) {
   const headers = new Headers(request.headers)
   for (const name of [
     'cf-connecting-ip', 'cf-ipcountry', 'cf-ray', 'forwarded', 'host', 'x-forwarded-for',
-    'x-forwarded-host', 'x-forwarded-proto', 'x-hid-edge-origin', 'x-real-ip',
+    'x-forwarded-host', 'x-forwarded-proto', 'x-hid-edge-origin', 'x-real-ip', 'x-hid-client-ip',
   ]) headers.delete(name)
+  // Cloudflare supplies this value on deployed Workers. Never preserve a
+  // caller's x-hid-client-ip or forwarding chain. Local requests without an
+  // edge-supplied address use the gateway's peer address instead.
+  const clientIp = request.headers.get('cf-connecting-ip')
+  if (clientIp && clientIp.length <= 45 &&
+      (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(clientIp) || /^[a-fA-F0-9:]+$/.test(clientIp) && clientIp.includes(':'))) {
+    headers.set('x-hid-client-ip', clientIp)
+  }
   headers.set('x-correlation-id', requestCorrelationId)
   headers.set('x-forwarded-host', requestUrl.host)
   headers.set('x-forwarded-proto', 'https')

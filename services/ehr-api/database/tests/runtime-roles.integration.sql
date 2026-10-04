@@ -47,6 +47,14 @@ begin
      or pg_has_role('hid_ehr_api_runtime', 'hid_ocr_runtime', 'member') then
     raise exception 'EHR API aggregate violates extracted service ownership';
   end if;
+  if not has_table_privilege('hid_ehr_api_runtime', 'ehr.patient_record_embeddings', 'SELECT')
+     or not has_table_privilege('hid_ehr_api_runtime', 'ehr.patient_record_embeddings', 'INSERT')
+     or has_table_privilege('hid_ehr_api_runtime', 'ehr.patient_record_embeddings', 'UPDATE')
+     or has_table_privilege('hid_ehr_api_runtime', 'ehr.patient_record_embeddings', 'DELETE')
+     or not (select relrowsecurity and relforcerowsecurity from pg_class
+              where oid = 'ehr.patient_record_embeddings'::regclass) then
+    raise exception 'patient chat index privileges or forced RLS are inconsistent';
+  end if;
   if not pg_has_role('hid_ocr_api_runtime', 'hid_ocr_runtime', 'member')
      or not pg_has_role('hid_ocr_api_runtime', 'hid_audit_writer', 'member')
      or pg_has_role('hid_ocr_api_runtime', 'hid_identity_runtime', 'member')
@@ -261,7 +269,8 @@ begin
   foreach table_name in array array[
     'encounters', 'clinical_notes', 'clinical_note_revisions', 'vitals',
     'vital_corrections', 'diagnoses', 'prescriptions', 'lab_requests',
-    'documents', 'document_scan_events', 'idempotency_keys', 'record_versions'
+    'documents', 'document_scan_events', 'idempotency_keys', 'record_versions',
+    'patient_record_embeddings'
   ] loop
     if has_table_privilege('hid_identity_runtime', 'ehr.' || table_name, 'SELECT')
        or has_table_privilege('hid_identity_runtime', 'ehr.' || table_name, 'INSERT')

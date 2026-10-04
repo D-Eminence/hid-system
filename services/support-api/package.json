@@ -1,0 +1,15 @@
+{
+  "name": "@hid/support-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.0.0" },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "build": "node -e \"require('node:fs').cpSync('src','dist',{recursive:true})\"",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-lex-runtime-v2": "^3.1139.0"
+  }
+}

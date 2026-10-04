@@ -20,6 +20,27 @@ before(async () => {
   }
 })
 after(async () => { globalThis.fetch = originalFetch; await server?.close() })
+
+test('patient chat can wait for bounded inference without changing normal API timeouts', async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const timeouts = [];
+  globalThis.setTimeout = (callback, timeout, ...args) => {
+    timeouts.push(timeout); return originalSetTimeout(callback, timeout, ...args);
+  };
+  try {
+    responses.push(response({ status: 'ready', answer: 'Synthetic answer', sources: [] }));
+    await client.canonicalRequest('/api/v1/ehr/me/chat', { method: 'POST', body: JSON.stringify({ question: 'Synthetic question' }) }, { timeoutMs: 40_000 });
+    assert.ok(timeouts.includes(40_000));
+    responses.push(response({ actor }));
+    await client.canonicalRequest('/api/v1/auth/session');
+    assert.ok(timeouts.includes(15_000));
+    const count = calls.length;
+    for (const timeoutMs of [0, 60_001, Infinity, '40000']) {
+      await assert.rejects(client.canonicalRequest('/api/v1/ehr/me/chat', {}, { timeoutMs }), /bounded API timeout/);
+    }
+    assert.equal(calls.length, count);
+  } finally { globalThis.setTimeout = originalSetTimeout; }
+});
 const actor = { subject: 'patient:test', accountId: '10000000-0000-4000-8000-000000000001', kind: 'patient', patientId: '20000000-0000-4000-8000-000000000001', email: 'synthetic@test.invalid', roles: [], permissions: [], facilities: [] }
 function response(body, status = 200, headers = {}) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } }) }
 

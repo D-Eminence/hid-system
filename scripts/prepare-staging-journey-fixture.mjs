@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ids as sourceIds, syntheticFixture } from '../release/migration/synthetic-fixture.mjs';
+import { assertWindowsPrivate, protectWindowsPrivate } from './private-custody.mjs';
 
 const require = createRequire(new URL('../release/package.json', import.meta.url));
 const duplicateKeyJson = require('json-dup-key-validator');
@@ -107,15 +108,18 @@ export function generateJourneyFixture(input) {
 
 async function privateDirectory(path) {
   const stat = await lstat(path);
-  check(stat.isDirectory() && !stat.isSymbolicLink() && (stat.mode & 0o777) === 0o700
-    && stat.uid === process.getuid() && await realpath(path) === path);
+  check(stat.isDirectory() && !stat.isSymbolicLink() && await realpath(path) === path);
+  if (process.platform === 'win32') assertWindowsPrivate(path);
+  else check((stat.mode & 0o777) === 0o700 && stat.uid === process.getuid());
 }
 async function inputFromFile(path, root) {
   check(isAbsolute(path) && resolve(path) === path && dirname(path) === root && await realpath(path) === path);
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await handle.stat();
-    check(stat.isFile() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600 && stat.size > 0 && stat.size <= 8192);
+    check(stat.isFile() && stat.size > 0 && stat.size <= 8192);
+    if (process.platform === 'win32') assertWindowsPrivate(path);
+    else check(stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600);
     const bytes = Buffer.alloc(stat.size);
     let offset = 0;
     while (offset < bytes.length) {
@@ -130,6 +134,7 @@ async function writePrivate(path, bytes) {
   const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try { await handle.chmod(0o600); await handle.writeFile(bytes); await handle.sync(); }
   finally { await handle.close(); }
+  if (process.platform === 'win32') protectWindowsPrivate(path, false);
 }
 
 // root is injected by tests only. CLI always uses this checkout's ignored release/local.
@@ -142,6 +147,7 @@ export async function prepareJourneyFixture(inputPath, outputDirectory, { root =
   // Exclusive directory creation makes repeated execution fail before any write.
   await mkdir(outputDirectory, { mode: 0o700 });
   try {
+    if (process.platform === 'win32') protectWindowsPrivate(outputDirectory, true);
     await privateDirectory(outputDirectory);
     await writePrivate(resolve(outputDirectory, 'fixture.json'), generated.fixtureBytes);
     await writePrivate(resolve(outputDirectory, 'manifest.json'), `${JSON.stringify(generated.manifest, null, 2)}\n`);

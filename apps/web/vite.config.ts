@@ -131,6 +131,10 @@ export default defineConfig({
         target: `http://127.0.0.1:${ports.outreachApi}`,
         changeOrigin: true,
       },
+      '/api/v1/support': {
+        target: `http://127.0.0.1:${ports.supportApi}`,
+        changeOrigin: true,
+      },
       '/api/v1/auth': {
         target: `http://127.0.0.1:${ports.identityApi}`,
         changeOrigin: true,

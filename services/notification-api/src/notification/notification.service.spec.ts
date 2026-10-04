@@ -74,6 +74,22 @@ describe('NotificationService fallback safety', () => {
   });
 
   it.each(['accepted', 'unknown', 'definitive_failure'] as const)
+  ('email-SMS profile preserves safe fallback behavior for %s', async outcome => {
+    Object.assign(process.env, { NOTIFICATION_DELIVERY_PROFILE: 'email-sms-brevo' }); resetEnvironmentForTests();
+    const primary = provider('termii', outcome), fallback = provider('brevo', 'accepted');
+    await service(primary, fallback).deliverOtp(message);
+    expect(fallback.send).toHaveBeenCalledTimes(outcome === 'definitive_failure' ? 1 : 0);
+  });
+
+  it('email-SMS profile rejects WhatsApp before selecting a provider', async () => {
+    Object.assign(process.env, { NOTIFICATION_DELIVERY_PROFILE: 'email-sms-brevo' }); resetEnvironmentForTests();
+    const primary = provider('termii', 'accepted'), fallback = provider('brevo', 'accepted');
+    await expect(service(primary, fallback).deliverOtp({ ...message, channel: 'whatsapp' }))
+      .rejects.toThrow('does not support WhatsApp');
+    expect(primary.send).not.toHaveBeenCalled(); expect(fallback.send).not.toHaveBeenCalled();
+  });
+
+  it.each(['accepted', 'unknown', 'definitive_failure'] as const)
   ('staging email-brevo only falls back after definitive failure (%s)', async outcome => {
     Object.assign(process.env, { HID_DEPLOYMENT_ENV: 'staging', NOTIFICATION_DELIVERY_PROFILE: 'email-brevo',
       NOTIFICATION_PROVIDER_MODE: 'live' }); resetEnvironmentForTests();

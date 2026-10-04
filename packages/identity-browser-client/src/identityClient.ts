@@ -241,7 +241,7 @@ function isMutation(method: string): boolean {
 async function request(
   pathOrUrl: string,
   init: RequestInit = {},
-  options: { allowUnauthorized?: boolean; absolute?: boolean } = {},
+  options: { allowUnauthorized?: boolean; absolute?: boolean; timeoutMs?: number } = {},
 ): Promise<{ payload: unknown; response: Response }> {
   const method = init.method ?? 'GET'
   const headers = new Headers(init.headers)
@@ -253,7 +253,7 @@ async function request(
     credentials: 'include',
     cache: 'no-store',
     headers,
-  })
+  }, options.timeoutMs ?? NETWORK_TIMEOUT_MS)
   readCsrfToken(response)
   const payload = safeJson(await response.text())
   if (!response.ok && !(options.allowUnauthorized && response.status === 401)) {
@@ -320,11 +320,16 @@ export async function getGoogleSignInNonce(): Promise<string> {
 }
 
 /** Canonical API transport: browser cookies, CSRF and no-store apply to both Identity and EHR. */
-export async function canonicalRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function canonicalRequest<T>(path: string, init: RequestInit = {},
+  options: { timeoutMs?: number } = {}): Promise<T> {
   if (!path.startsWith('/api/v1/') || path.includes('/functions/')) {
     throw new Error('A canonical API path is required')
   }
-  const { payload } = await request(path, init)
+  if (options.timeoutMs !== undefined && (!Number.isInteger(options.timeoutMs)
+    || options.timeoutMs < 1000 || options.timeoutMs > 60_000)) {
+    throw new Error('A bounded API timeout is required')
+  }
+  const { payload } = await request(path, init, options)
   return unwrapData(payload) as T
 }
 

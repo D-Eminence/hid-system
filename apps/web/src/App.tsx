@@ -1,6 +1,7 @@
 import React, { Component, Suspense } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { AppInstallPrompt } from './components/AppInstallPrompt'
+import { SupportChat } from './components/SupportChat'
 import { HIDLogo } from './components/HIDLogo'
 import { RouteObservability } from './components/RouteObservability'
 import { RouteSeo } from './components/RouteSeo'
@@ -207,6 +208,7 @@ export default function App() {
         <RouteSeo />
         <RouteWarmup />
         <AppInstallPrompt />
+        {import.meta.env.VITE_SUPPORT_CHAT_ENABLED === 'true' && <SupportChat />}
         <Suspense fallback={<RouteLoadingScreen />}>
           <Routes>
             <Route path="/" element={<LandingPage />} />

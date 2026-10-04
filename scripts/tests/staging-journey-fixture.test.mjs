@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { generateJourneyFixture, prepareJourneyFixture, validateJourneyInput } from '../prepare-staging-journey-fixture.mjs';
+import { assertWindowsPrivate, protectWindowsPrivate } from '../private-custody.mjs';
 
 const run = promisify(execFile);
 const repository = resolve(import.meta.dirname, '../..');
@@ -21,6 +22,7 @@ async function files(t) {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const inputPath = resolve(root, 'operator-input.json'), output = resolve(root, 'staging-journey-test');
   await writeFile(inputPath, JSON.stringify(input()), { mode: 0o600 });
+  if (process.platform === 'win32') { protectWindowsPrivate(root, true); protectWindowsPrivate(inputPath, false); }
   return { temporary, root, inputPath, output };
 }
 
@@ -98,8 +100,12 @@ test('new private output persists one UUID/HID set and refuses rerun or overwrit
   const result = await prepareJourneyFixture(inputPath, output, { root });
   const fixturePath = resolve(output, 'fixture.json'), manifestPath = resolve(output, 'manifest.json');
   const fixtureBefore = await readFile(fixturePath), manifestBefore = await readFile(manifestPath);
-  assert.equal((await lstat(output)).mode & 0o777, 0o700);
-  for (const path of [fixturePath, manifestPath]) assert.equal((await lstat(path)).mode & 0o777, 0o600);
+  if (process.platform === 'win32') {
+    for (const path of [output, fixturePath, manifestPath]) assertWindowsPrivate(path);
+  } else {
+    assert.equal((await lstat(output)).mode & 0o777, 0o700);
+    for (const path of [fixturePath, manifestPath]) assert.equal((await lstat(path)).mode & 0o777, 0o600);
+  }
   assert.equal(JSON.parse(manifestBefore).ids.patient, result.ids.patient);
   assert.equal(JSON.parse(fixtureBefore).patients[0].payload.hid_code, result.hid);
   await assert.rejects(prepareJourneyFixture(inputPath, output, { root }));
@@ -110,7 +116,7 @@ test('new private output persists one UUID/HID set and refuses rerun or overwrit
   assert.notEqual(next.hid, result.hid);
 });
 
-test('unsafe paths, output symlinks, permissive input permissions and duplicate JSON are rejected', async t => {
+test('unsafe paths, output symlinks, permissive input permissions and duplicate JSON are rejected', { skip: process.platform === 'win32' }, async t => {
   const { temporary, root, inputPath, output } = await files(t);
   for (const path of [resolve(temporary, 'staging-journey-outside'), resolve(root, 'production'), resolve(root, 'nested/staging-journey-nested')]) {
     await assert.rejects(prepareJourneyFixture(inputPath, path, { root }));
@@ -128,6 +134,16 @@ test('unsafe paths, output symlinks, permissive input permissions and duplicate 
   await writeFile(inputPath, JSON.stringify(input()).replace('"environment":"staging"', '"environment":"production","environment":"staging"'));
   await assert.rejects(prepareJourneyFixture(inputPath, output, { root }));
   await writeFile(inputPath, ' '.repeat(8193));
+  await assert.rejects(prepareJourneyFixture(inputPath, output, { root }));
+  assert.equal((await readdir(root)).some(name => name.startsWith('staging-journey-')), false);
+});
+
+test('Windows broad-read ACLs and duplicate input are rejected', { skip: process.platform !== 'win32' }, async t => {
+  const { root, inputPath, output } = await files(t);
+  await run('icacls.exe', [inputPath, '/grant', '*S-1-1-0:(R)'], { windowsHide: true });
+  await assert.rejects(prepareJourneyFixture(inputPath, output, { root }));
+  protectWindowsPrivate(inputPath, false);
+  await writeFile(inputPath, JSON.stringify(input()).replace('"environment":"staging"', '"environment":"production","environment":"staging"'));
   await assert.rejects(prepareJourneyFixture(inputPath, output, { root }));
   assert.equal((await readdir(root)).some(name => name.startsWith('staging-journey-')), false);
 });

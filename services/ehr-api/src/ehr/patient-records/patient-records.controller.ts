@@ -1,14 +1,24 @@
-import { Controller, Get, Param, ParseUUIDPipe, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import { AuditFailuresOnly, FacilityOptional, PatientAllowed, RequirePermissions } from '../../common/decorators';
 import { DomainProblem } from '../../common/problem';
 import { requireRequestContext, type HidRequest } from '../../common/request-context';
 import { PatientRecordsService } from './patient-records.service';
 import { ImportedAttachmentService } from './imported-attachment.service';
+import { PatientChatService } from './patient-chat.service';
+import { PatientChatDto } from './patient-chat.dto';
 
 @Controller('ehr')
 @AuditFailuresOnly()
 export class PatientRecordsController {
-  constructor(private readonly records: PatientRecordsService, private readonly attachments: ImportedAttachmentService) {}
+  constructor(private readonly records: PatientRecordsService, private readonly attachments: ImportedAttachmentService,
+    private readonly chat: PatientChatService) {}
+
+  @Post('me/chat')
+  @FacilityOptional()
+  @PatientAllowed()
+  chatSelf(@Body() body: PatientChatDto, @Req() request: HidRequest) {
+    return this.chat.answer(request, body.question);
+  }
 
   @Get('me/imported-attachments/:fileId/download')
   @FacilityOptional()

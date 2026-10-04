@@ -107,6 +107,9 @@ try {
   const additions = await rehearseStagingAdditions(bridgeClient, url('hid_clean'));
   const medicalAdmin = await connect('postgres','hid_clean',port);
   await medicalAdmin.query(await readFile(path.resolve(scripts,'../database/runtime-grants.sql'),'utf8'));
+  const patientSelfSql = (await readFile(path.resolve(scripts,'../database/tests/patient-self.integration.sql'),'utf8'))
+    .replace(/^\\set ON_ERROR_STOP on\r?\n/, '');
+  await medicalAdmin.query(patientSelfSql);
   const medicalImport = await rehearseMedicalImport(bridgeClient,medicalAdmin);
   await medicalAdmin.end();
   await bridgeClient.end();

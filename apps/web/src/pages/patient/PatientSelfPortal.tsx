@@ -8,6 +8,7 @@ import { PasswordField } from '../../components/PasswordField'
 import { TurnstileWidget } from '../../components/TurnstileWidget'
 import { ImportedMedicalHistory } from '../../../../../packages/ui/src/ImportedMedicalHistory'
 import { ensureCaptchaReady } from '../../lib/captcha'
+import { PatientRecordChat } from '../../components/PatientRecordChat'
 
 type AccessItem = { consentGrantId: string; scope: string; purpose: string; status: string; startsAt: string; expiresAt: string; reason: string; facilityName: string }
 export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata' | 'records' | 'history' | 'notifications' }) {
@@ -168,6 +169,7 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
         {linkNotice && <p role="status">{linkNotice}</p>}
       </section>}</>}
       {page === 'records' && (records ? <RecordSummary key={profile.patientId} records={records} onDownload={carePortalApi.ownAttachment} /> : <p role="status">Loading released records…</p>)}
+      {page === 'records' && records && import.meta.env.VITE_PATIENT_CHAT_ENABLED === 'true' && <PatientRecordChat key={profile.patientId} />}
       {page === 'biodata' && (records ? <ImportedMedicalHistory records={[]} healthProfile={records.importedHealthProfile} /> : <p role="status">Loading health profile…</p>)}
       {page === 'notifications' && <section aria-label="Preserved notifications"><h2>Earlier notifications</h2>
         {importedNotifications === null ? <p role="status">Loading earlier notifications…</p> : importedNotifications.length === 0 ? <p>No earlier notifications are available.</p>

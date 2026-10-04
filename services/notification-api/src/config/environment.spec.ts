@@ -42,18 +42,37 @@ describe('Notification API delivery profile validation', () => {
     Object.assign(process.env, { NOTIFICATION_DELIVERY_PROFILE: 'email-brevo',
       BREVO_API_KEY: 'invented-test-credential', BREVO_EMAIL_FROM: 'security@example.test' });
     delete process.env[key];
-    expect(() => getEnvironment()).toThrow(`${key} is required for staging email fallback`);
+    expect(() => getEnvironment()).toThrow(`${key} is required for email fallback`);
   });
 
-  it('rejects staging email fallback in production', () => {
-    Object.assign(process.env, { HID_DEPLOYMENT_ENV: 'production', NOTIFICATION_DELIVERY_PROFILE: 'email-brevo' });
-    expect(() => getEnvironment()).toThrow('email-brevo delivery profile is staging-only');
-  });
-
-  it.each(['production', 'development', undefined])('rejects email-only outside explicit staging (%s)', deployment => {
+  it.each(['production', 'development', undefined])('permits email-only with production security checks (%s)', deployment => {
     if (deployment === undefined) delete process.env.HID_DEPLOYMENT_ENV;
     else process.env.HID_DEPLOYMENT_ENV = deployment;
-    expect(() => getEnvironment()).toThrow('email-only delivery profile is staging-only');
+    expect(getEnvironment().NOTIFICATION_DELIVERY_PROFILE).toBe('email-only');
+  });
+
+  it('permits production email fallback without SMS or Meta credentials', () => {
+    Object.assign(process.env, { HID_DEPLOYMENT_ENV: 'production', NOTIFICATION_DELIVERY_PROFILE: 'email-brevo',
+      BREVO_API_KEY: 'invented-test-credential', BREVO_EMAIL_FROM: 'security@example.test' });
+    expect(getEnvironment().NOTIFICATION_DELIVERY_PROFILE).toBe('email-brevo');
+    expect(getEnvironment().META_ACCESS_TOKEN).toBeUndefined();
+  });
+
+  const smsConfiguration = () => ({ ...emailConfiguration, HID_DEPLOYMENT_ENV: 'production',
+    NOTIFICATION_DELIVERY_PROFILE: 'email-sms-brevo', TERMII_BASE_URL: 'https://termii.example.test',
+    TERMII_API_KEY: 'invented-test-credential', TERMII_SENDER_ID: 'HID',
+    BREVO_API_KEY: 'invented-test-credential', BREVO_EMAIL_FROM: 'security@example.test', BREVO_SMS_SENDER: 'HID' });
+
+  it('permits email and SMS fallback without requiring WhatsApp credentials', () => {
+    process.env = smsConfiguration();
+    expect(getEnvironment().NOTIFICATION_DELIVERY_PROFILE).toBe('email-sms-brevo');
+    expect(getEnvironment().META_ACCESS_TOKEN).toBeUndefined();
+  });
+
+  it.each(['TERMII_BASE_URL', 'TERMII_API_KEY', 'TERMII_SENDER_ID', 'BREVO_SMS_SENDER'])
+  ('requires %s when SMS is enabled', key => {
+    process.env = smsConfiguration(); delete process.env[key];
+    expect(() => getEnvironment()).toThrow(`${key} is required for SMS delivery`);
   });
 
   it.each(['WORKLOAD_ISSUER_URL', 'WORKLOAD_JWKS_URL', 'IDENTITY_CALLER_SUBJECT', 'AWS_REGION', 'SES_FROM_ADDRESS'])

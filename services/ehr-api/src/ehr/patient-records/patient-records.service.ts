@@ -13,7 +13,7 @@ export class PatientRecordsService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityApiService,
     private readonly audit: AuditService, private readonly clinical: ClinicalRepository) {}
 
-  async self(request: HidRequest) {
+  async authorizeSelf(request: HidRequest) {
     const actor = request.actor;
     if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
       throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
@@ -23,6 +23,12 @@ export class PatientRecordsService {
       || authorization.subject !== actor.subject || authorization.sessionId !== actor.sessionId) {
       throw new DomainProblem(403, 'PATIENT_ACCESS_DENIED', 'Patient authorization changed');
     }
+    return authorization;
+  }
+
+  async self(request: HidRequest) {
+    const authorization = await this.authorizeSelf(request);
+    const actor = request.actor!;
     return this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
       const value = await this.read(client, authorization.patientId);
       await this.audit.recordWithClient(client, {

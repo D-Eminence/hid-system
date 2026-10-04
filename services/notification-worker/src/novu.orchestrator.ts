@@ -32,18 +32,24 @@ export class NovuOrchestrator implements NotificationOrchestrator {
         }),
         signal: AbortSignal.timeout(5_000),
       });
-      if (!response.ok) return {
+      if (!response.ok) return this.observe({
         outcome: response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429
           ? 'definitive_failure' : 'unknown',
         provider: 'novu', safeCode: `NOVU_HTTP_${response.status}`,
-      };
+      });
       const result = await response.json().catch(() => undefined) as { data?: { transactionId?: unknown } } | undefined;
       const messageId = result?.data?.transactionId;
-      return { outcome: 'accepted', provider: 'novu',
-        ...(typeof messageId === 'string' && messageId.length <= 255 ? { providerMessageId: messageId } : {}) };
+      return this.observe({ outcome: 'accepted', provider: 'novu',
+        ...(typeof messageId === 'string' && messageId.length <= 255 ? { providerMessageId: messageId } : {}) });
     } catch {
-      return { outcome: 'unknown', provider: 'novu', safeCode: 'NOVU_TIMEOUT_OR_UNAVAILABLE' };
+      return this.observe({ outcome: 'unknown', provider: 'novu', safeCode: 'NOVU_TIMEOUT_OR_UNAVAILABLE' });
     }
+  }
+
+  private observe(result: OrchestrationResult): OrchestrationResult {
+    console.log(JSON.stringify({ event: 'hid.provider.result', provider: 'novu', outcome: result.outcome,
+      ...(result.safeCode ? { code: result.safeCode } : {}) }));
+    return result;
   }
 
   async readiness(): Promise<void> {

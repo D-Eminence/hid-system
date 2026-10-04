@@ -13,6 +13,7 @@ const portDefinitions = Object.freeze({
   notificationApi: { environment: 'HID_NOTIFICATION_API_PORT', defaultPort: 3007 },
   notificationWorkerStatus: { environment: 'HID_NOTIFICATION_WORKER_STATUS_PORT', defaultPort: 3008 },
   eventDispatcherStatus: { environment: 'HID_EVENT_DISPATCHER_STATUS_PORT', defaultPort: 3010 },
+  supportApi: { environment: 'HID_SUPPORT_API_PORT', defaultPort: 3011 },
   webUi: { environment: 'HID_WEB_PORT', defaultPort: 3100 },
   ehrUi: { environment: 'HID_EHR_PORT', defaultPort: 3101 },
   labUi: { environment: 'HID_LAB_PORT', defaultPort: 3102 },

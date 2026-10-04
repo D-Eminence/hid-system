@@ -175,6 +175,15 @@ insert into ehr.clinical_note_revisions(clinical_note_id,patient_id,facility_id,
 select id,patient_id,facility_id,1,'Synthetic clinical content','Synthetic fixture create',created_by,created_by_membership_id
 from ehr.clinical_notes where id::text like 'a8000000-%';
 
+-- Seed a different patient's derived index as the fixture administrator. The
+-- patient runtime must neither see it nor add another model for that patient.
+insert into ehr.patient_record_embeddings
+  (note_id,revision_no,patient_id,facility_id,content_sha256,model_id,embedding)
+select clinical_note_id,revision_no,patient_id,facility_id,content_sha256,
+  'synthetic-chat-model',(array_fill(0::real,array[1024]))::public.vector
+from ehr.clinical_note_revisions
+where clinical_note_id='a8000000-0000-4000-8000-000000000003';
+
 set local role hid_ehr_api_runtime;
 select set_config('app.actor_subject','synthetic:self:1',true),set_config('app.facility_id','',true),set_config('app.membership_id','',true),
   set_config('app.purpose_of_use','patient-self',true),set_config('app.account_id','a1000000-0000-4000-8000-000000000001',true),
@@ -186,6 +195,26 @@ do $$ begin
   if (select count(*) from ehr.clinical_notes)<>1 then raise exception 'self note RLS leaked draft or another patient'; end if;
   if (select count(*) from ehr.clinical_note_revisions)<>1 then raise exception 'self revision RLS leaked unreleased content'; end if;
   if has_function_privilege(current_user,'identity.patient_self_profile(text,uuid)','EXECUTE') then raise exception 'EHR acquired Identity self lookup authority'; end if;
+  if exists(select 1 from ehr.patient_record_embeddings) then
+    raise exception 'patient chat index leaked another patient';
+  end if;
+  insert into ehr.patient_record_embeddings
+    (note_id,revision_no,patient_id,facility_id,content_sha256,model_id,embedding)
+  select clinical_note_id,revision_no,patient_id,facility_id,content_sha256,
+    'synthetic-chat-model',(array_fill(0::real,array[1024]))::public.vector
+  from ehr.clinical_note_revisions;
+  if (select count(*) from ehr.patient_record_embeddings)<>1 then
+    raise exception 'patient chat runtime cannot insert/read its own released index';
+  end if;
+  begin
+    insert into ehr.patient_record_embeddings
+      (note_id,revision_no,patient_id,facility_id,content_sha256,model_id,embedding)
+    values ('a8000000-0000-4000-8000-000000000003',1,
+      'a2000000-0000-4000-8000-000000000002','a4000000-0000-4000-8000-000000000002',
+      repeat('b',64),'synthetic-forbidden-model',(array_fill(0::real,array[1024]))::public.vector);
+    raise exception 'patient chat runtime acquired cross-patient index writes';
+  exception when insufficient_privilege then null;
+  end;
   begin
     update ehr.encounters set chief_complaint='Forbidden patient edit';
     if found then raise exception 'patient context acquired clinical mutation'; end if;
@@ -195,6 +224,7 @@ end $$;
 select set_config('app.self_authorized_until',(clock_timestamp()-interval '1 second')::text,true);
 do $$ begin
   if exists(select 1 from ehr.encounters) or exists(select 1 from ehr.clinical_notes)
+    or exists(select 1 from ehr.patient_record_embeddings)
     then raise exception 'expired self context retained clinical access'; end if;
 end $$;
 select set_config('app.self_authorized_until','',true);
