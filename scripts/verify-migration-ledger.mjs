@@ -72,6 +72,8 @@ const acceptedMigrations = new Map([
   ['0058_progressive_patient_nin_binding.sql', 'f7e384f1fa49c3d2a950ad08bf761644e7194a80f34ea7a622af175452608aa8'],
   ['0059_google_onboarding.sql', '2a4147ad2310c928de23c350999adea4287d84b68fee51766e6633f929052af8'],
   ['0060_patient_access_pin_profile_status.sql', '1a0b5ca25f815dcd8714cdd569e8fe336b48d8a8c53362a8e42dbe986d407f50'],
+  ['0061_patient_consent_context.sql', '8729e296fdf12aa91d0e032dda0af63bbc6882c34ae3c005c412ef0879e21578'],
+  ['0062_staff_session_facility_selection.sql', '411acbdf6c57986b1e0d79035abe08c05589b244ba9eade50e096910b400bf61'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

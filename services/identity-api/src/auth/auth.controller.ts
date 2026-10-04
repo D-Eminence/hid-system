@@ -318,21 +318,7 @@ export class AuthController {
       role: facility.roles[0],
       permissions: facility.permissions,
     };
-    await this.audit.record({
-      correlationId: request.correlationId,
-      actorType: 'staff',
-      actorSubject: actor.subject,
-      actorAccountId: actor.accountId,
-      actorMembershipId: facility.membershipId,
-      organizationId: facility.organizationId,
-      facilityId: facility.id,
-      action: 'auth.facility.select',
-      resourceType: 'session',
-      resourceId: actor.sessionId,
-      outcome: 'success',
-      sourceIp: request.ip,
-      userAgent: request.header('user-agent'),
-    });
+    await this.tokens.selectFacility(actor, facility.id, this.event(request));
     const csrfToken = this.cookies(request)[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
     if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
     return this.sessionResponse(selectedActor);

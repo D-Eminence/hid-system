@@ -15,10 +15,12 @@ jest.mock('jose', () => ({
 
 import { UnauthorizedException } from '@nestjs/common';
 import type { PoolClient } from 'pg';
+import type { AuditService } from '../audit/audit.service';
 import type { ActorContext } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { CurrentStaffContextService } from './current-staff-context.service';
+import type { CurrentPatientContextService } from './current-patient-context.service';
 import { TokenService } from './token.service';
 
 const actor: ActorContext = {
@@ -109,7 +111,8 @@ describe('TokenService legacy password continuity', () => {
     const query = jest.fn(async (_sql: string, _values?: readonly unknown[]) => ({ rows: [], rowCount: 0 }));
     const database = { query } as unknown as DatabaseService;
     const currentStaff = { resolve: jest.fn() } as unknown as CurrentStaffContextService;
-    const service = new TokenService(database, currentStaff);
+    const service = new TokenService(database, currentStaff,
+      {} as CurrentPatientContextService, {} as AuditService);
 
     await expect(service.refresh(
       '00000000-0000-4000-8000-000000000001.local.refresh-secret',
@@ -141,7 +144,8 @@ function serviceWithUpgradeResult(upgraded: boolean) {
   const currentStaff = {
     resolve: jest.fn(async () => actor),
   } as unknown as CurrentStaffContextService;
-  return { service: new TokenService(database, currentStaff), clientQuery };
+  return { service: new TokenService(database, currentStaff,
+    {} as CurrentPatientContextService, {} as AuditService), clientQuery };
 }
 
 function policyHash(): string {

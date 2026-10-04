@@ -44,7 +44,8 @@ describe('Patient session separation', () => {
     const patient = { resolve: jest.fn().mockResolvedValue(actor) };
     const database = { query, withSystemTransaction: async (_id: string, work: (c: PoolClient) => Promise<unknown>) => work({ query: clientQuery } as unknown as PoolClient) };
     const service = new TokenService(database as unknown as DatabaseService,
-      staff as unknown as CurrentStaffContextService, patient as unknown as CurrentPatientContextService);
+      staff as unknown as CurrentStaffContextService, patient as unknown as CurrentPatientContextService,
+      {} as AuditService);
     const result = await service.issue({ subject: actor.subject, actorKind: 'patient', email: '',
       displayName: '', facilities: [], authenticationMethod: 'local' }, { correlationId: 'patient-session-login-test' });
     expect(staff.resolve).not.toHaveBeenCalled();
@@ -61,7 +62,8 @@ describe('Patient session separation', () => {
     const query = jest.fn().mockResolvedValue({ rowCount: 1, rows: [{}] });
     const service = new TokenService({ query } as unknown as DatabaseService,
       { resolve: jest.fn() } as unknown as CurrentStaffContextService,
-      { resolve: jest.fn().mockResolvedValue({ ...actor, patientId: 'different-patient' }) } as unknown as CurrentPatientContextService);
+      { resolve: jest.fn().mockResolvedValue({ ...actor, patientId: 'different-patient' }) } as unknown as CurrentPatientContextService,
+      {} as AuditService);
     await expect(service.verify('signed')).rejects.toThrow('Patient account association changed');
     expect(query.mock.calls[0]?.[1].slice(-2)).toEqual(['patient', actor.patientId]);
     expect(query.mock.calls[0]?.[0]).toContain('session.absolute_expires_at > clock_timestamp()');

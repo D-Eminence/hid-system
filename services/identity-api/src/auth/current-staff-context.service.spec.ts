@@ -66,4 +66,30 @@ describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
       .rejects.toBeInstanceOf(UnauthorizedException);
     expect(String(query.mock.calls[0]?.[0])).toContain('join identity.staff staff');
   });
+
+  it('restores a selected facility and its exact permissions, then falls back when membership is revoked', async () => {
+    const second = { ...STAFF_CONTEXT_ROW,
+      facility_id: '10000000-0000-4000-8000-000000000003',
+      membership_id: '40000000-0000-4000-8000-000000000002',
+      facility_name: 'Second Test Facility', facility_code: 'SCHEMA-B',
+      roles: ['lab_technician'], permissions: ['lab.results.read'], is_primary: false };
+    let eligibleRows = [STAFF_CONTEXT_ROW, second];
+    const query = jest.fn(async (sql: string) => sql.includes('from auth.accounts account')
+      ? { rows: eligibleRows, rowCount: eligibleRows.length }
+      : { rows: [{ roles: [], permissions: [] }], rowCount: 1 });
+    const service = new CurrentStaffContextService({ query } as unknown as DatabaseService);
+    const selected = await service.resolve(STAFF_CONTEXT_ROW.subject, 'local', 'session-id', second.facility_id);
+    expect(selected.facility?.id).toBe(second.facility_id);
+    expect(selected.facilities.map((facility) => facility.id)).toEqual([
+      STAFF_CONTEXT_ROW.facility_id, second.facility_id,
+    ]);
+    expect(selected.permissions).toEqual(['lab.results.read']);
+    expect(selected.permissions).not.toContain('ehr.encounter.read');
+
+    eligibleRows = [STAFF_CONTEXT_ROW];
+    const restored = await service.resolve(STAFF_CONTEXT_ROW.subject, 'local', 'session-id', second.facility_id);
+    expect(restored.facility?.id).toBe(STAFF_CONTEXT_ROW.facility_id);
+    expect(restored.facilityIds).toEqual([STAFF_CONTEXT_ROW.facility_id]);
+    expect(restored.permissions).toEqual(['ehr.encounter.read']);
+  });
 });

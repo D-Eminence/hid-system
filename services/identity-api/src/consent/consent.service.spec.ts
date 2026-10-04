@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { DataAccessContext, HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import { ConsentService } from './consent.service';
 
@@ -21,6 +21,18 @@ const context: DataAccessContext = {
   },
 };
 
+const patientRequest = {
+  correlationId: 'patient-consent-correlation',
+  actor: {
+    kind: 'patient',
+    patientId: '50000000-0000-4000-8000-000000000001',
+    sessionId: '70000000-0000-4000-8000-000000000001',
+    subject: 'patient:test',
+    accountId: '30000000-0000-4000-8000-000000000002',
+  },
+  header: (name: string) => name === 'x-purpose-of-use' ? 'direct-care' : undefined,
+} as unknown as HidRequest;
+
 describe('ConsentService', () => {
   const query = jest.fn();
   const client = { query } as unknown as PoolClient;
@@ -28,13 +40,24 @@ describe('ConsentService', () => {
     async (_context: DataAccessContext, operation: (transactionClient: PoolClient) => Promise<unknown>) =>
       operation(client),
   );
-  const database = { withTransaction } as unknown as DatabaseService;
+  const withSystemTransaction = jest.fn(
+    async (_correlationId: string, operation: (transactionClient: PoolClient) => Promise<unknown>) =>
+      operation(client),
+  );
+  const database = { withTransaction, withSystemTransaction } as unknown as DatabaseService;
   const service = new ConsentService(database);
 
   beforeEach(() => {
     query.mockReset();
     withTransaction.mockClear();
+    withSystemTransaction.mockClear();
   });
+
+  function patientCommand(rows: unknown[]) {
+    query.mockResolvedValueOnce({ rows: [] });
+    query.mockResolvedValueOnce({ rows: [{ patient_id: patientRequest.actor?.patientId }] });
+    query.mockResolvedValueOnce({ rows });
+  }
 
   it('returns the governed access-request result without patient demographics', async () => {
     query.mockResolvedValueOnce({
@@ -136,11 +159,16 @@ describe('ConsentService', () => {
   });
 
   it('lists the authenticated patient access request inbox without unrelated identity data', async () => {
-    query.mockResolvedValueOnce({
-      rows: [{
+    patientCommand([{
         accessRequestId: '40000000-0000-4000-8000-000000000006',
+        patientId: patientRequest.actor?.patientId,
+        organizationId: '90000000-0000-4000-8000-000000000006',
+        organizationName: 'Example Organization',
         facilityId: '10000000-0000-4000-8000-000000000006',
         facilityName: 'Example Facility',
+        staffId: '80000000-0000-4000-8000-000000000006',
+        staffName: 'Example Clinician',
+        purposeOfUse: 'direct-care',
         scope: 'read_records',
         reason: 'Continuity of care',
         status: 'pending',
@@ -149,24 +177,25 @@ describe('ConsentService', () => {
         approvedAt: null,
         deniedAt: null,
         deniedReason: null,
-      }],
-    });
-    await expect(service.listMyAccessRequests(context)).resolves.toHaveLength(1);
-    expect(query).toHaveBeenCalledWith(expect.stringContaining('identity.list_my_access_requests()'));
+        consentGrantId: null,
+        expiresAt: null,
+      }]);
+    await expect(service.listMyAccessRequests(patientRequest)).resolves.toMatchObject([
+      { organizationName: 'Example Organization', staffName: 'Example Clinician' },
+    ]);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('identity.list_my_access_request_context()'));
   });
 
   it('returns the patient approval result from the governed consent command', async () => {
-    query.mockResolvedValueOnce({
-      rows: [{
+    patientCommand([{
         accessRequestId: '40000000-0000-4000-8000-000000000004',
         consentGrantId: '60000000-0000-4000-8000-000000000004',
         patientId: '50000000-0000-4000-8000-000000000004',
         status: 'approved',
         expiresAt: new Date('2026-09-29T13:00:00.000Z'),
         replayed: false,
-      }],
-    });
-    await expect(service.approveAccessRequest(context, '40000000-0000-4000-8000-000000000004'))
+      }]);
+    await expect(service.approveAccessRequest(patientRequest, '40000000-0000-4000-8000-000000000004'))
       .resolves.toMatchObject({ status: 'approved', replayed: false });
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('identity.approve_access_request'),
@@ -175,17 +204,15 @@ describe('ConsentService', () => {
   });
 
   it('returns the patient denial result and trims the reason', async () => {
-    query.mockResolvedValueOnce({
-      rows: [{
+    patientCommand([{
         accessRequestId: '40000000-0000-4000-8000-000000000005',
         patientId: '50000000-0000-4000-8000-000000000005',
         status: 'denied',
         deniedAt: new Date('2026-09-29T12:30:00.000Z'),
         replayed: false,
-      }],
-    });
+      }]);
     await expect(service.denyAccessRequest(
-      context,
+      patientRequest,
       '40000000-0000-4000-8000-000000000005',
       '  Not authorized  ',
     )).resolves.toMatchObject({ status: 'denied', replayed: false });
@@ -193,6 +220,23 @@ describe('ConsentService', () => {
       expect.stringContaining('identity.deny_access_request'),
       ['40000000-0000-4000-8000-000000000005', 'Not authorized'],
     );
+  });
+
+  it('rejects a changed patient session before reading or changing consent', async () => {
+    query.mockResolvedValueOnce({ rows: [] });
+    query.mockResolvedValueOnce({ rows: [{ patient_id: '50000000-0000-4000-8000-000000000099' }] });
+    await expect(service.approveAccessRequest(patientRequest, '40000000-0000-4000-8000-000000000004'))
+      .rejects.toMatchObject({ code: 'PATIENT_ACCESS_DENIED' });
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('identity.approve_access_request'), expect.anything());
+  });
+
+  it('revokes only through the patient-owned governed command', async () => {
+    patientCommand([{ consentGrantId: '60000000-0000-4000-8000-000000000004',
+      patientId: patientRequest.actor?.patientId, status: 'revoked', alreadyClosed: false }]);
+    await expect(service.revokeMyGrant(patientRequest, '60000000-0000-4000-8000-000000000004',
+      '  I no longer consent  ')).resolves.toMatchObject({ status: 'revoked' });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('identity.revoke_my_consent_grant'),
+      ['60000000-0000-4000-8000-000000000004', 'I no longer consent']);
   });
 
   it('returns a narrow governed grant only when the database command verifies the PIN', async () => {

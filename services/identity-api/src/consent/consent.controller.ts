@@ -1,7 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { AuditAction, FacilityOptional, PatientAllowed, RequirePermissions } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
-import { consentContext } from './consent-context';
+import { consentContext, patientConsentRequest } from './consent-context';
 import { ConsentService } from './consent.service';
 import { CloseGrantDto } from './dto/close-grant.dto';
 import { DenyAccessRequestDto } from './dto/deny-access-request.dto';
@@ -19,7 +19,7 @@ export class ConsentController {
   @FacilityOptional()
   @AuditAction('identity.access-request.list.request')
   listMyAccessRequests(@Req() request: HidRequest) {
-    return this.consent.listMyAccessRequests(consentContext(request, ['direct-care']));
+    return this.consent.listMyAccessRequests(patientConsentRequest(request));
   }
 
   @Get('access-requests')
@@ -52,7 +52,7 @@ export class ConsentController {
     @Req() request: HidRequest,
     @Param('requestId', new ParseUUIDPipe()) requestId: string,
   ) {
-    return this.consent.approveAccessRequest(consentContext(request, ['direct-care']), requestId);
+    return this.consent.approveAccessRequest(patientConsentRequest(request), requestId);
   }
 
   @Post('access-requests/:requestId/deny')
@@ -65,7 +65,20 @@ export class ConsentController {
     @Param('requestId', new ParseUUIDPipe()) requestId: string,
     @Body() input: DenyAccessRequestDto,
   ) {
-    return this.consent.denyAccessRequest(consentContext(request, ['direct-care']), requestId, input.reason);
+    return this.consent.denyAccessRequest(patientConsentRequest(request), requestId, input.reason);
+  }
+
+  @Post('me/consent-grants/:grantId/revoke')
+  @HttpCode(200)
+  @PatientAllowed()
+  @FacilityOptional()
+  @AuditAction('identity.patient.consent-grant.revoke.command')
+  revokeMyGrant(
+    @Req() request: HidRequest,
+    @Param('grantId', new ParseUUIDPipe()) grantId: string,
+    @Body() input: CloseGrantDto,
+  ) {
+    return this.consent.revokeMyGrant(patientConsentRequest(request), grantId, input.reason);
   }
 
   @Post('break-glass')
