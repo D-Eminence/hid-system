@@ -33,6 +33,19 @@ describe('MetaWebhookController', () => {
     expect(() => controller.verify('subscribe', 'wrong-token', 'challenge-123')).toThrow(BadRequestException);
   });
 
+  it('fails closed when the webhook credentials are absent', () => {
+    delete process.env.META_WEBHOOK_VERIFY_TOKEN;
+    delete process.env.META_APP_SECRET;
+    resetEnvironmentForTests();
+    const controller = new MetaWebhookController();
+    expect(() => controller.verify('subscribe', verifyToken, 'challenge-123')).toThrow(BadRequestException);
+    expect(() => controller.receive(
+      { object: 'whatsapp_business_account', entry: [] },
+      'sha256=' + '0'.repeat(64),
+      { rawBody: Buffer.from('{}') } as never,
+    )).toThrow(UnauthorizedException);
+  });
+
   it('accepts a valid signed WhatsApp webhook payload', () => {
     const controller = new MetaWebhookController();
     const payload = JSON.stringify({

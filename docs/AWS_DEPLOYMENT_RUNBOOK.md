@@ -33,7 +33,9 @@ Notification Worker separately requires `novuApiKey`. SES remains live, workload
 authentication and TLS remain required, and SES failures are preserved. Termii,
 Meta and Brevo fields must not be filled with placeholders. Their accounts and
 full-channel profile are deferred unless explicitly included in a later reviewed
-acceptance scope. Production retains the existing full profile.
+acceptance scope. Without Meta webhook credentials, its verification and event
+routes fail closed. The full profile requires both `META_APP_SECRET` and
+`META_WEBHOOK_VERIFY_TOKEN`; production retains the existing full profile.
 
 Novu also needs the configured workflow, canonical synthetic patient subscriber
 mapping and approved delivery integration. See
