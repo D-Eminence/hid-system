@@ -108,14 +108,32 @@ export class LabWorkItemsService {
         a.accession_number,array_remove(array_agg(s.status order by s.created_at),null) as specimen_statuses from lab.work_items w
         left join lab.accessions a on a.work_item_id=w.id left join lab.specimens s on s.accession_id=a.id
         group by w.id,a.id,a.accession_number order by w.accepted_at asc,w.id asc limit 200`);
-      return { items: result.rows.map((row) => ({ ...this.project(row),testName:row.test_name,
+      const allowedPatients = new Set<string>();
+      const patientIds = [...new Set(result.rows.map((row) => row.patient_id))];
+      for (let offset = 0; offset < patientIds.length; offset += 8) {
+        const batch = patientIds.slice(offset, offset + 8);
+        const decisions = await Promise.all(batch.map((patientId) =>
+          this.identity.authorize(patientId, 'read_records', context.purposeOfUse, context)));
+        decisions.forEach((decision, index) => {
+          if (decision.allowed && !decision.breakGlass) allowedPatients.add(batch[index]!);
+        });
+      }
+      const authorized = result.rows.filter((row) => allowedPatients.has(row.patient_id));
+      await this.audit.recordWithClient(client, {
+        correlationId: context.correlationId, actorType: 'staff', actorSubject: context.actor.subject,
+        actorAccountId: context.actor.accountId, actorMembershipId: context.membershipId,
+        organizationId: context.actor.facility?.organizationId, facilityId: context.facilityId,
+        action: 'lab.work-item.list', resourceType: 'lab-work-item-collection', outcome: 'success',
+        purposeOfUse: context.purposeOfUse, details: { resultCount: authorized.length }, sourceSystem: 'lab-api',
+      });
+      return { items: authorized.map((row) => ({ ...this.project(row),testName:row.test_name,
         accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [] })) };
     });
   }
 
   private async authorize(patientId: string, context: DataAccessContext, action: 'read_records' | 'write_records') {
     const decision = await this.identity.authorize(patientId, action, context.purposeOfUse, context);
-    if (!decision.allowed || (action === 'write_records' && decision.breakGlass)) {
+    if (!decision.allowed || decision.breakGlass) {
       throw new DomainProblem(403, 'LAB_WORK_ITEM_ACCESS_DENIED', 'Lab work-item access is not authorized');
     }
   }

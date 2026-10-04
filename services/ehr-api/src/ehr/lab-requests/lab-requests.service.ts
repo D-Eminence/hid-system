@@ -133,7 +133,7 @@ export class LabRequestsService {
     }, `ehr-order:${row.id}:${row.rowVersion}`);
   }
 
-  update(
+  async update(
     context: DataAccessContext,
     patientId: string,
     encounterId: string,
@@ -143,13 +143,24 @@ export class LabRequestsService {
     if (input.priority === undefined && input.status === undefined && input.clinicalInformation === undefined) {
       throw new DomainProblem(400, 'EMPTY_UPDATE', 'At least one clinical field must be supplied');
     }
-    return this.repository.run(
+    const row = await this.repository.run(
       context, patientId, 'write_records',
       { action: 'ehr.lab-request.update', resourceType: 'lab-request', resourceId: requestId },
       async (client) => {
         const current = await this.lock(client, context, patientId, encounterId, requestId);
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_LAB_REQUEST_TRANSITION', 'Lab request status transition is not allowed');
+        }
+        // An EHR update commits before the bounded Lab call. A retry after a
+        // failed/unknown Lab response must reuse that exact active order
+        // version; another EHR update would invalidate the immutable snapshot.
+        if (input.status === OrderStatus.Active && current.status === OrderStatus.Active
+          && (input.expectedRowVersion === Number(current.rowVersion)
+            || input.expectedRowVersion === Number(current.rowVersion) - 1)
+          && (input.priority === undefined || input.priority === current.priority)
+          && (input.clinicalInformation === undefined || input.clinicalInformation === current.clinicalInformation)) {
+          return { value: current, resourceId: requestId,
+            details: { rowVersion: current.rowVersion, handoffRetry: true } };
         }
         await this.repository.setChangeReason(client, input.changeReason);
         const result = await client.query<LabRequestRow>(
@@ -169,6 +180,10 @@ export class LabRequestsService {
       },
       (client) => this.repository.exists(client, 'lab_requests', requestId, patientId, context.facilityId, encounterId),
     );
+    const labWorkItem = input.status === OrderStatus.Active && row.status === OrderStatus.Active
+      ? await this.accept(context, row)
+      : null;
+    return { ...row, labWorkItem };
   }
 
   private async find(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {

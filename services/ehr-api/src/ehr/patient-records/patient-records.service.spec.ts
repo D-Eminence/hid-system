@@ -4,6 +4,8 @@ import type { DataAccessContext, HidRequest } from '../../common/request-context
 import type { DatabaseService } from '../../database/database.service';
 import type { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { PatientRecordsController } from './patient-records.controller';
+import { REQUIRED_PERMISSIONS } from '../../common/decorators';
 import { PatientRecordsService } from './patient-records.service';
 
 const actor = { kind: 'patient', patientId: 'patient-id', accountId: 'account-id', subject: 'subject', sessionId: 'session-id' };
@@ -51,6 +53,42 @@ describe('Owning EHR patient and emergency read boundary', () => {
     await service.emergency('patient-id', context);
     expect(run).toHaveBeenCalledWith(context, 'patient-id', 'read_records', expect.objectContaining({ breakGlassOnly: true }), expect.any(Function));
   });
+
+  it('reads a single completed encounter with exact patient and facility bounds and finalized entries', async () => {
+    const { service, run, query } = setup();
+    const context = { purposeOfUse: 'emergency', facilityId: 'facility-id' } as DataAccessContext;
+    const client = { query } as unknown as PoolClient;
+    query.mockResolvedValueOnce({ rowCount: 1, rows: [{ id: 1 }] });
+    for (let index = 0; index < 6; index += 1) query.mockResolvedValueOnce({ rows: [] });
+    run.mockImplementation(async (_context, _patientId, _access, _event, operation, scopedLookup) => {
+      expect(await scopedLookup(client)).toBe(true);
+      return (await operation(client)).value;
+    });
+    await expect(service.emergencyEncounter('patient-id', 'encounter-id', context))
+      .resolves.toMatchObject({ limitPerSection: 25, notes: [], diagnoses: [] });
+    expect(run).toHaveBeenCalledWith(context, 'patient-id', 'read_records',
+      expect.objectContaining({ action: 'ehr.emergency.encounter.read', breakGlassOnly: true }),
+      expect.any(Function), expect.any(Function));
+    for (const [sql, params] of query.mock.calls) {
+      expect(params).toEqual(['encounter-id', 'patient-id', 'facility-id']);
+      expect(sql).toContain('patient_id=$2');
+      expect(sql).toContain('facility_id=$3');
+    }
+    expect(query.mock.calls[0]?.[0]).toContain("status='completed'");
+    expect(query.mock.calls[2]?.[0]).toContain("n.status in ('signed','amended')");
+    expect(query.mock.calls[5]?.[0]).toContain("status in ('active','on_hold','completed')");
+    expect(query.mock.calls[6]?.[0]).toContain("status in ('active','completed')");
+  });
+
+  it('requires the emergency role and every clinical read permission on both emergency routes', () => {
+    const summary = Reflect.getMetadata(REQUIRED_PERMISSIONS, PatientRecordsController.prototype.emergency) as string[];
+    const detail = Reflect.getMetadata(REQUIRED_PERMISSIONS, PatientRecordsController.prototype.emergencyEncounter) as string[];
+    expect(summary).toContain('identity.break-glass.write');
+    expect(detail).toEqual(expect.arrayContaining([
+      'identity.break-glass.write', 'ehr.encounter.read', 'ehr.note.read', 'ehr.vital.read',
+      'ehr.diagnosis.read', 'ehr.prescription.read', 'ehr.lab-request.read',
+    ]));
+  });
 });
 
 
@@ -71,4 +109,20 @@ describe('Emergency read grant revalidation', () => {
       expect(record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied', patientId: 'patient-id' }));
     },
   );
+
+  it('does not run a detailed read when the exact emergency grant is revoked or expired', async () => {
+    const withTransaction = jest.fn();
+    const record = jest.fn().mockResolvedValue(undefined);
+    const repository = new ClinicalRepository({ withTransaction } as unknown as DatabaseService,
+      { record } as unknown as AuditService,
+      { authorize: jest.fn().mockResolvedValue({ allowed: false, breakGlass: false }) } as unknown as IdentityApiService);
+    const context = { purposeOfUse: 'emergency', facilityId: 'facility', membershipId: 'membership',
+      correlationId: 'emergency-expiry-test', actor: { subject: 'doctor', accountId: 'account' } } as DataAccessContext;
+    await expect(repository.run(context, 'patient-id', 'read_records', {
+      action: 'ehr.emergency.encounter.read', resourceType: 'emergency-encounter-chart',
+      resourceId: 'encounter-id', breakGlassOnly: true,
+    }, jest.fn(), jest.fn())).rejects.toThrow('Active consent and facility membership are required');
+    expect(withTransaction).not.toHaveBeenCalled();
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied', resourceId: 'encounter-id' }));
+  });
 });

@@ -15,11 +15,25 @@ export class PatientRecordsController {
   self(@Req() request: HidRequest) { return this.records.self(request); }
 
   @Get('patients/:patientId/emergency-records')
-  @RequirePermissions('ehr.encounter.read','ehr.note.read')
+  @RequirePermissions('identity.break-glass.write', 'ehr.encounter.read', 'ehr.note.read')
   emergency(@Param('patientId', new ParseUUIDPipe()) patientId: string, @Req() request: HidRequest) {
     if (request.header('x-purpose-of-use') !== 'emergency') {
       throw new DomainProblem(400, 'EMERGENCY_PURPOSE_REQUIRED', 'Emergency purpose is required');
     }
     return this.records.emergency(patientId, requireRequestContext(request, 'emergency'));
+  }
+
+  @Get('patients/:patientId/emergency-records/:encounterId')
+  @RequirePermissions('identity.break-glass.write', 'ehr.encounter.read', 'ehr.note.read',
+    'ehr.vital.read', 'ehr.diagnosis.read', 'ehr.prescription.read', 'ehr.lab-request.read')
+  emergencyEncounter(
+    @Param('patientId', new ParseUUIDPipe()) patientId: string,
+    @Param('encounterId', new ParseUUIDPipe()) encounterId: string,
+    @Req() request: HidRequest,
+  ) {
+    if (request.header('x-purpose-of-use') !== 'emergency') {
+      throw new DomainProblem(400, 'EMERGENCY_PURPOSE_REQUIRED', 'Emergency purpose is required');
+    }
+    return this.records.emergencyEncounter(patientId, encounterId, requireRequestContext(request, 'emergency'));
   }
 }

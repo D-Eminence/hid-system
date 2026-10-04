@@ -40,6 +40,76 @@ export class PatientRecordsService {
     }, async (client) => ({ value: await this.read(client, patientId, context.facilityId) }));
   }
 
+  emergencyEncounter(patientId: string, encounterId: string, context: DataAccessContext) {
+    return this.clinical.run(context, patientId, 'read_records', {
+      action: 'ehr.emergency.encounter.read', resourceType: 'emergency-encounter-chart',
+      resourceId: encounterId, breakGlassOnly: true,
+    }, async (client) => {
+      const [encounter, notes, vitals, diagnoses, prescriptions, labRequests] = await Promise.all([
+        client.query(`select id, encounter_type as "encounterType", started_at as "startedAt",
+          ended_at as "endedAt", chief_complaint as "chiefComplaint"
+          from ehr.encounters where id=$1 and patient_id=$2 and facility_id=$3 and status='completed'`,
+        [encounterId, patientId, context.facilityId]),
+        client.query(`select n.id,n.note_type as "noteType",n.title,r.content,n.signed_at as "signedAt"
+          from ehr.clinical_notes n join ehr.clinical_note_revisions r
+            on r.clinical_note_id=n.id and r.revision_no=n.current_revision_no
+            and r.patient_id=n.patient_id and r.facility_id=n.facility_id
+          where n.encounter_id=$1 and n.patient_id=$2 and n.facility_id=$3
+            and n.status in ('signed','amended')
+          order by n.signed_at desc,n.id desc limit 25`, [encounterId, patientId, context.facilityId]),
+        client.query(`select v.id,v.recorded_at as "recordedAt",
+          coalesce(c.replacement_values->>'height_cm',v.height_cm::text) as "heightCm",
+          coalesce(c.replacement_values->>'weight_kg',v.weight_kg::text) as "weightKg",
+          coalesce(c.replacement_values->>'temperature_c',v.temperature_c::text) as "temperatureC",
+          coalesce(c.replacement_values->>'pulse_bpm',v.pulse_bpm::text) as "pulseBpm",
+          coalesce(c.replacement_values->>'respiratory_rate',v.respiratory_rate::text) as "respiratoryRate",
+          coalesce(c.replacement_values->>'systolic_mmhg',v.systolic_mmhg::text) as "systolicMmhg",
+          coalesce(c.replacement_values->>'diastolic_mmhg',v.diastolic_mmhg::text) as "diastolicMmhg",
+          coalesce(c.replacement_values->>'oxygen_saturation_percent',v.oxygen_saturation_percent::text) as "oxygenSaturationPercent"
+          from ehr.vitals v left join lateral (
+            select replacement_values from ehr.vital_corrections
+            where vital_id=v.id and patient_id=v.patient_id and facility_id=v.facility_id
+            order by correction_no desc limit 1
+          ) c on true
+          where v.encounter_id=$1 and v.patient_id=$2 and v.facility_id=$3
+          order by v.recorded_at desc,v.id desc limit 25`, [encounterId, patientId, context.facilityId]),
+        client.query(`select id,code_system as "codeSystem",code,display,
+          clinical_status as "clinicalStatus",verification_status as "verificationStatus",
+          onset_at as "onsetAt"
+          from ehr.diagnoses where encounter_id=$1 and patient_id=$2 and facility_id=$3
+            and clinical_status in ('active','recurrence','relapse')
+            and verification_status in ('confirmed','provisional')
+          order by created_at desc,id desc limit 25`, [encounterId, patientId, context.facilityId]),
+        client.query(`select id,medication_display as "medicationDisplay",
+          dose_quantity as "doseQuantity",dose_unit as "doseUnit",route_code as "routeCode",
+          frequency,instructions,starts_on as "startsOn",ends_on as "endsOn",status
+          from ehr.prescriptions where encounter_id=$1 and patient_id=$2 and facility_id=$3
+            and status in ('active','on_hold','completed')
+          order by created_at desc,id desc limit 25`, [encounterId, patientId, context.facilityId]),
+        client.query(`select id,test_code_system as "testCodeSystem",test_code as "testCode",
+          test_display as "testDisplay",priority,status
+          from ehr.lab_requests where encounter_id=$1 and patient_id=$2 and facility_id=$3
+            and status in ('active','completed')
+          order by created_at desc,id desc limit 25`, [encounterId, patientId, context.facilityId]),
+      ]);
+      return {
+        value: { encounter: encounter.rows[0], notes: notes.rows, vitals: vitals.rows,
+          diagnoses: diagnoses.rows, prescriptions: prescriptions.rows, labRequests: labRequests.rows,
+          limitPerSection: 25 },
+        details: { noteCount: notes.rows.length, vitalCount: vitals.rows.length,
+          diagnosisCount: diagnoses.rows.length, prescriptionCount: prescriptions.rows.length,
+          labRequestCount: labRequests.rows.length },
+      };
+    }, async (client) => {
+      const match = await client.query(
+        `select 1 from ehr.encounters
+         where id=$1 and patient_id=$2 and facility_id=$3 and status='completed' limit 1`,
+        [encounterId, patientId, context.facilityId],
+      );
+      return (match.rowCount ?? 0) > 0;
+    });
+  }
+
   private async read(client: PoolClient, patientId: string, facilityId?: string) {
     const values = facilityId ? [patientId, facilityId] : [patientId];
     const facility = facilityId ? ' and facility_id=$2' : '';

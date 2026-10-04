@@ -74,11 +74,13 @@ export class PostgresIdentityProvider implements IdentityProvider {
             and grant_row.starts_at <= clock_timestamp()
             and grant_row.expires_at > clock_timestamp()
             and (
-              grant_row.scope = 'break_glass'
+              (grant_row.scope = 'break_glass' and $5 = 'read_records' and $6 = 'emergency')
               or grant_row.scope = $5
               or ($5 = 'read_records' and grant_row.scope = 'write_records')
             )
-          order by grant_row.break_glass asc, grant_row.expires_at desc
+          order by case when $5 = 'read_records' and $6 = 'emergency'
+            then grant_row.break_glass end desc nulls last,
+            grant_row.expires_at desc
           limit 1`,
         [
           request.patientId,

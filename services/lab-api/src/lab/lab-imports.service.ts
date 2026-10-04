@@ -104,7 +104,7 @@ export class LabImportsService {
 
   private async authorize(patientId: string, context: DataAccessContext, action: 'read_records' | 'write_records') {
     const decision = await this.identity.authorize(patientId, action, context.purposeOfUse, context);
-    if (!decision.allowed || (action === 'write_records' && decision.breakGlass)) {
+    if (!decision.allowed || decision.breakGlass) {
       throw new DomainProblem(403, 'LAB_IMPORT_ACCESS_DENIED', 'Imported Lab evidence access is not authorized');
     }
   }

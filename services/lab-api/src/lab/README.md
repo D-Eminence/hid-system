@@ -38,3 +38,19 @@ QC evidence is fabricated.
 Manual result entry creates an immutable, unverified revision. Verification is an independent exact-version action (the entry actor cannot verify their own revision); release is a separate authenticated manual approval of that verified version. Neither action represents analyzer integration, calibration, QC, a cryptographic signature, or critical-result acknowledgement.
 
 Corrections and amendments append a new unverified revision. A previously released revision remains immutable history, while the new head must be verified and released independently. Non-Lab EHR readers use the released-result history permission and do not receive an unreleased-only result.
+
+An EHR lab request may be saved as a draft. Activating it with the existing
+`PATCH /api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests/:requestId`
+accepts its exact committed active version into Lab. A retry with the same
+active snapshot reuses that version and its deterministic Lab acceptance key.
+
+`GET /api/v1/lab/patients/:patientId/released-results?limit=50&offset=0`
+returns the latest valid released version for each Lab result at the selected
+facility, ordered by release time. It requires `lab.result.released.read`, an
+authorized facility assignment, and an active patient read grant. The response
+contains `items` and `nextOffset`; each item includes the requested test,
+released result value, version, and release time. The existing
+`GET /api/v1/lab/results/:resultId/history` includes unreleased revisions only
+for actors with `lab.execution.read`; other permitted readers see valid released
+versions and a released-only head. Lab detail reads reject emergency break-glass
+grants; the EHR emergency summary is the supported emergency view.

@@ -76,19 +76,24 @@ export class ClinicalRepository {
         });
         throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Active consent and facility membership are required');
       }
+      const readEvent: SemanticEvent = event.breakGlassOnly
+        ? { ...event, details: { ...event.details,
+          consentGrantId: authorization.consentGrantId,
+          grantExpiresAt: authorization.expiresAt } }
+        : event;
       const result = await this.database.withTransaction(context, async (client): Promise<TransactionState<Value>> => {
         // Resource probes are always constrained by facility and patient before
         // authorization so an identifier from another tenant cannot be resolved.
         const resourceExists = scopedLookup ? await scopedLookup(client) : true;
         if (!resourceExists) {
-          await this.record(client, context, patientId, event, 'failure', { reason: 'not_found' });
+          await this.record(client, context, patientId, readEvent, 'failure', { reason: 'not_found' });
           return { state: 'missing' };
         }
         const operationResult = await operation(client);
         await this.record(client, context, patientId, {
-          ...event,
-          resourceId: operationResult.resourceId ?? event.resourceId,
-          details: { ...event.details, ...operationResult.details },
+          ...readEvent,
+          resourceId: operationResult.resourceId ?? readEvent.resourceId,
+          details: { ...readEvent.details, ...operationResult.details },
         }, 'success');
         return { state: 'ok', result: operationResult };
       });

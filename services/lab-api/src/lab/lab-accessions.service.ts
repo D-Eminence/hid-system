@@ -161,7 +161,7 @@ export class LabAccessionsService {
     throw new DomainProblem(403,'LAB_OPERATION_ACCESS_DENIED','Required Lab operation permission is absent'); }
   private async authorize(patientId:string,context:DataAccessContext,action:'read_records'|'write_records') {
     const decision=await this.identity.authorize(patientId,action,context.purposeOfUse,context);
-    if(!decision.allowed||(action==='write_records'&&decision.breakGlass)) throw new DomainProblem(403,'LAB_OPERATION_ACCESS_DENIED','Lab operation is not authorized');
+    if(!decision.allowed||decision.breakGlass) throw new DomainProblem(403,'LAB_OPERATION_ACCESS_DENIED','Lab operation is not authorized');
   }
   private auditEvent(context:DataAccessContext,row:{id:string;patient_id:string;facility_id:string},action:string,details?:Record<string,unknown>) {
     return { correlationId:context.correlationId,actorType:'staff' as const,actorSubject:context.actor.subject,

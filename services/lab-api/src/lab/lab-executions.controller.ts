@@ -1,8 +1,9 @@
-import { Body,Controller,Get,Headers,HttpCode,Param,ParseUUIDPipe,Post,Req } from '@nestjs/common';
+import { Body,Controller,Get,Headers,HttpCode,Param,ParseUUIDPipe,Post,Query,Req } from '@nestjs/common';
 import { AuditAction,RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext,type HidRequest } from '../common/request-context';
 import { CompleteExecutionDto,CorrectResultDto,EnterResultDto,GovernResultDto,StartExecutionDto } from './dto/execution.dto';
+import { ListReleasedResultsDto } from './dto/list-released-results.dto';
 import { LabExecutionsService } from './lab-executions.service';
 
 @Controller('lab')
@@ -29,6 +30,8 @@ export class LabExecutionsController {
  verify(@Param('resultId',new ParseUUIDPipe({version:'4'})) resultId:string,@Body() input:GovernResultDto,@Headers('idempotency-key') key:string|undefined,@Req() request:HidRequest){return this.executions.verifyResult(requireRequestContext(request),resultId,input,requireIdempotencyKey(key));}
  @Post('results/:resultId/release') @RequirePermissions('lab.result.release')
  release(@Param('resultId',new ParseUUIDPipe({version:'4'})) resultId:string,@Body() input:GovernResultDto,@Headers('idempotency-key') key:string|undefined,@Req() request:HidRequest){return this.executions.releaseResult(requireRequestContext(request),resultId,input,requireIdempotencyKey(key));}
+ @Get('patients/:patientId/released-results') @RequirePermissions('lab.result.released.read')
+ listReleasedForPatient(@Param('patientId',new ParseUUIDPipe({version:'4'})) patientId:string,@Query() query:ListReleasedResultsDto,@Req() request:HidRequest){return this.executions.listReleasedForPatient(requireRequestContext(request),patientId,query);}
  @Get('results/:resultId/history') @RequirePermissions('lab.result.released.read')
  history(@Param('resultId',new ParseUUIDPipe({version:'4'})) resultId:string,@Req() request:HidRequest){return this.executions.getResultHistory(requireRequestContext(request),resultId);}
 }
