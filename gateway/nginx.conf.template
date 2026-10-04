@@ -11,6 +11,16 @@ server {
   set_real_ip_from ${GATEWAY_TRUSTED_PROXY_CIDR};
   real_ip_header X-Hid-Client-IP;
   real_ip_recursive off;
+  # Resolve service discovery again after task replacement instead of retaining
+  # the address seen at gateway startup. Docker and AWS supply their resolvers.
+  resolver ${GATEWAY_DNS_RESOLVER} valid=10s ipv6=off;
+  set $hid_identity_upstream "${IDENTITY_API_UPSTREAM}";
+  set $hid_ehr_upstream "${EHR_API_UPSTREAM}";
+  set $hid_lab_upstream "${LAB_API_UPSTREAM}";
+  set $hid_pharmacy_upstream "${PHARMACY_API_UPSTREAM}";
+  set $hid_ocr_upstream "${OCR_API_UPSTREAM}";
+  set $hid_outreach_upstream "${OUTREACH_API_UPSTREAM}";
+  set $hid_support_upstream "${SUPPORT_API_UPSTREAM}";
 
   add_header X-Content-Type-Options "nosniff" always;
   add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -36,25 +46,25 @@ server {
     return 503 '{"type":"about:blank","title":"Service unavailable","status":503,"detail":"A required platform service is temporarily unavailable.","code":"UPSTREAM_UNAVAILABLE"}';
   }
 
-  location = /api/v1/auth { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
-  location ^~ /api/v1/auth/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
-  location = /api/v1/identity { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
-  location ^~ /api/v1/identity/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
-  location = /api/v1/audit { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
-  location ^~ /api/v1/audit/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
-  location = /api/v1/admin { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
-  location ^~ /api/v1/admin/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
-  location = /api/v1/commercial { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
-  location ^~ /api/v1/commercial/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${IDENTITY_API_UPSTREAM}; }
+  location = /api/v1/auth { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  location ^~ /api/v1/auth/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  location = /api/v1/identity { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  location ^~ /api/v1/identity/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  location = /api/v1/audit { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  location ^~ /api/v1/audit/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  location = /api/v1/admin { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  location ^~ /api/v1/admin/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  location = /api/v1/commercial { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  location ^~ /api/v1/commercial/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
 
-  location = /api/v1/lab { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${LAB_API_UPSTREAM}; }
-  location ^~ /api/v1/lab/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${LAB_API_UPSTREAM}; }
-  location = /api/v1/pharmacy { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${PHARMACY_API_UPSTREAM}; }
-  location ^~ /api/v1/pharmacy/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${PHARMACY_API_UPSTREAM}; }
-  location = /api/v1/ocr { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${OCR_API_UPSTREAM}; }
-  location ^~ /api/v1/ocr/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${OCR_API_UPSTREAM}; }
-  location = /api/v1/outreach { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${OUTREACH_API_UPSTREAM}; }
-  location ^~ /api/v1/outreach/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${OUTREACH_API_UPSTREAM}; }
+  location = /api/v1/lab { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_lab_upstream; }
+  location ^~ /api/v1/lab/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_lab_upstream; }
+  location = /api/v1/pharmacy { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_pharmacy_upstream; }
+  location ^~ /api/v1/pharmacy/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_pharmacy_upstream; }
+  location = /api/v1/ocr { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ocr_upstream; }
+  location ^~ /api/v1/ocr/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ocr_upstream; }
+  location = /api/v1/outreach { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_outreach_upstream; }
+  location ^~ /api/v1/outreach/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_outreach_upstream; }
   location = /api/v1/support/chat {
     limit_except POST { deny all; }
     limit_req zone=hid_chat burst=2 nodelay;
@@ -62,7 +72,7 @@ server {
     client_max_body_size 2k;
     proxy_read_timeout 8s;
     include /etc/nginx/hid-proxy-headers.conf;
-    proxy_pass ${SUPPORT_API_UPSTREAM};
+    proxy_pass $hid_support_upstream;
   }
   location = /api/v1/ehr/me/chat {
     limit_except POST { deny all; }
@@ -71,15 +81,15 @@ server {
     client_max_body_size 2k;
     proxy_read_timeout 45s;
     include /etc/nginx/hid-proxy-headers.conf;
-    proxy_pass ${EHR_API_UPSTREAM};
+    proxy_pass $hid_ehr_upstream;
   }
-  location = /api/v1/ehr { include /etc/nginx/hid-proxy-headers.conf; proxy_pass ${EHR_API_UPSTREAM}; }
+  location = /api/v1/ehr { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ehr_upstream; }
   location ^~ /api/v1/ehr/ {
     # Express also accepts mixed case and a trailing slash. The canonical exact
     # location above wins; reject aliases here before the ordinary EHR proxy.
     if ($uri ~* "^/api/v1/ehr/me/chat/?$") { return 404; }
     include /etc/nginx/hid-proxy-headers.conf;
-    proxy_pass ${EHR_API_UPSTREAM};
+    proxy_pass $hid_ehr_upstream;
   }
   location ^~ /api/ {
     default_type application/problem+json;

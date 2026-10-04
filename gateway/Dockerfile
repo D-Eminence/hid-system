@@ -16,7 +16,8 @@ ENV IDENTITY_API_UPSTREAM=http://identity-api:3001 \
     OCR_API_UPSTREAM=http://ocr-api:3005 \
     OUTREACH_API_UPSTREAM=http://outreach-api:3006 \
     SUPPORT_API_UPSTREAM=http://127.0.0.1:9 \
-    GATEWAY_TRUSTED_PROXY_CIDR=127.0.0.1/32
+    GATEWAY_TRUSTED_PROXY_CIDR=127.0.0.1/32 \
+    GATEWAY_DNS_RESOLVER=127.0.0.11
 COPY --from=configuration /tmp/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=configuration /tmp/hid-proxy-headers.conf /etc/nginx/hid-proxy-headers.conf
 USER 101
