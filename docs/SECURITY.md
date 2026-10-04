@@ -95,6 +95,15 @@ Patient access must respect the consent model defined by Identity.
 
 Consent decisions must be facility-aware where appropriate.
 
+Patient approval, denial, and revocation require an active patient session and
+the exact patient linked to that account. The browser does not supply a
+workforce facility for these commands. Approval binds the existing request's
+staff membership, facility, scope, purpose, and expiry to one consent grant.
+Revocation closes that grant immediately; expired or revoked grants cannot
+authorize subsequent chart access. Identity records each transition in the
+audit trail. The patient request projection exposes requester and organization
+context without expanding the authority of a grant.
+
 ## 8. Break-Glass
 
 Emergency access must:
@@ -108,6 +117,13 @@ Emergency access must:
 * identify patient
 * identify purpose
 * be distinguishable from normal access
+
+Detailed emergency EHR reads are limited to one completed encounter at a time.
+They require fresh Identity break-glass authorization for the exact patient and
+selected facility, emergency purpose, the emergency write permission, and the
+individual chart section read permissions. The route returns only final signed
+or amended records within that encounter. Detailed Lab records cannot be read
+through break-glass authorization.
 
 ## 9. Audit
 
@@ -144,6 +160,12 @@ Never place secrets or unnecessary PHI in audit details.
 ## 10. Clinical Integrity
 
 Never silently overwrite clinical records.
+
+Lab draft activation hands the exact committed active order version to Lab
+with a stable idempotency key. Lab queues and detailed reads recheck patient
+authorization before disclosing work. Provider result discovery and history
+show only valid released versions; an unreleased correction remains private
+until separately verified and released.
 
 Use as appropriate:
 
@@ -201,309 +223,14 @@ contact details, or OTP contact context as local/session storage state. Opaque
 workflow handles may be retained only for the minimum handoff lifetime and
 must not be treated as authorization.
 
+A staff member's selected facility is stored on the HID server session and
+revalidated against active staff, organization, and facility membership on
+every session resolution and refresh. Every clinical request still supplies an
+authorized facility context. Patient sessions have no selected staff facility.
+
 ## 14. API Security
 
-Apply:Read `CODEX.md`, `docs/TASK.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/SECURITY.md`, and `docs/DATABASE.md`.
-
-Continue the remaining Phase 0 database-role verification.
-
-## New host-terminal evidence
-
-From repository root:
-
-```text
-db:plan:
-0 pending migration(s)
-```
-
-Therefore migrations `0001` through `0011` are now applied according to the migration ledger.
-
-PostgreSQL role inspection returned:
-
-```text
-rolname | rolcanlogin | rolbypassrls | rolsuper
---------+-------------+--------------+---------
-(0 rows)
-```
-
-No `hid_*` database roles currently exist.
-
-Repository search found the intended provisioning file:
-
-```text
-ehr/server/database/runtime-grants.sql
-```
-
-It contains creation of:
-
-```text
-hid_ehr_runtime
-```
-
-with:
-
-```text
-NOLOGIN
-NOSUPERUSER
-NOCREATEDB
-NOCREATEROLE
-NOINHERIT
-NOBYPASSRLS
-```
-
-The schema integration test expects:
-
-```text
-hid_ehr_runtime
-hid_audit_writer
-```
-
-and attempts to grant those roles to its test runtime role.
-
-## Critical architecture issue discovered
-
-Do NOT ask me to execute `runtime-grants.sql` yet.
-
-The current runtime grants include direct EHR runtime access to Identity-owned persistence, including:
-
-```sql
-grant select, insert
-on identity.patients, identity.patient_identifiers
-to hid_ehr_runtime;
-```
-
-and:
-
-```sql
-grant select, insert, update
-on identity.registration_cases
-to hid_ehr_runtime;
-```
-
-with additional direct Identity grants.
-
-This must be reviewed against the new authoritative architecture.
-
-The new architecture requires:
-
-```text
-EHR -> Identity API -> Identity persistence
-```
-
-and prohibits:
-
-```text
-EHR -> direct writes to Identity-owned tables
-```
-
-Shared physical PostgreSQL infrastructure does not permit cross-service persistence ownership.
-
-## Objective
-
-Inspect the complete database role and grants model before provisioning any runtime roles.
-
-Review:
-
-```text
-ehr/server/database/runtime-grants.sql
-ehr/server/database/tests/schema.integration.sql
-ehr/server/database/migrations/
-```
-
-and all code that directly accesses:
-
-```text
-identity.patients
-identity.patient_identifiers
-identity.registration_cases
-identity.registration_case_candidates
-identity.registration_case_events
-identity.access_requests
-identity.consent_grants
-```
-
-Determine for each direct Identity access whether it is:
-
-1. required only by the current transitional implementation
-2. already replaced by an Identity API
-3. required for read-only authorization/context resolution
-4. an architecture violation requiring removal
-5. test-only behavior
-6. obsolete
-
-Do not mechanically remove grants before identifying their consumers.
-
-## Target database-role model
-
-Design the role model so domain ownership remains explicit.
-
-At minimum distinguish:
-
-```text
-Identity runtime role
-EHR runtime role
-Audit writer role
-Migration/admin role
-Schema-test role
-```
-
-Additional Lab, Pharmacy, Outreach, and OCR roles may be introduced later when those services are extracted.
-
-### EHR runtime
-
-`hid_ehr_runtime` must not receive direct mutation privileges over Identity-owned tables in the final service boundary.
-
-EHR should use Identity APIs for governed Identity mutations.
-
-If temporary read access remains necessary during incremental migration, document it explicitly as transitional technical debt and minimize it.
-
-Prefer removing Identity mutation privileges now if current working functionality can use the existing Identity boundary safely.
-
-### Identity runtime
-
-If Identity-owned persistence needs a runtime role and none exists, design/provision the appropriate Identity runtime role rather than allowing `hid_ehr_runtime` to own Identity mutations.
-
-### Audit writer
-
-Inspect `hid_audit_writer`.
-
-It must have the minimum append privileges required for semantic audit.
-
-It must not receive unnecessary update/delete rights over immutable audit evidence.
-
-## Important
-
-Do not weaken tests to make them pass.
-
-Do not merely create `hid_ehr_runtime` with the existing grants without reviewing ownership.
-
-Do not rewrite applied migrations `0001` through `0011`.
-
-Database-role provisioning may live outside migrations if that is the intended architecture, but it must be:
-
-* deterministic
-* repeatable
-* least privilege
-* documented
-* usable locally
-* usable in CI
-* compatible with future AWS RDS deployment
-* free of embedded production passwords
-
-## Inspect runtime implementation
-
-Search application code for direct Identity persistence access from the EHR backend.
-
-Search for:
-
-```text
-identity.patients
-identity.patient_identifiers
-identity.registration_cases
-identity.registration_case_candidates
-identity.registration_case_events
-identity.access_requests
-identity.consent_grants
-```
-
-Also inspect repositories, SQL queries, database services, registration code, consent code, and Identity integration modules.
-
-For each access classify it as:
-
-```text
-KEEP TEMPORARILY
-REPLACE WITH IDENTITY API
-MOVE TO IDENTITY SERVICE
-READ-ONLY TRANSITIONAL
-REMOVE
-```
-
-## Implement the smallest architecture-correct fix
-
-After inspection:
-
-1. correct `runtime-grants.sql`
-2. introduce missing runtime roles if required
-3. preserve current working behavior
-4. route Identity mutations through the proper Identity ownership boundary
-5. keep transitional exceptions only where removing them now would break verified functionality
-6. document every transitional exception
-
-If application code must change, add/update tests.
-
-## Provisioning safety
-
-Once the role model is corrected, provide the exact host-terminal command to provision roles.
-
-Prefer a repository-supported command such as:
-
-```text
-npm run db:bootstrap
-```
-
-or equivalent if one already exists.
-
-If no safe command exists, add a clearly named script rather than relying on developers to remember raw `psql` commands.
-
-The provisioning operation should be idempotent.
-
-Running it twice must not corrupt privileges or fail merely because roles already exist.
-
-## Schema integration test
-
-After role provisioning, the expected host-terminal sequence should ultimately be reproducible from repository root.
-
-Provide the exact commands.
-
-Then verify:
-
-* `hid_ehr_runtime` exists
-* `hid_ehr_runtime` is not SUPERUSER
-* `hid_ehr_runtime` does not BYPASSRLS
-* runtime role does not own protected tables
-* runtime role does not have inappropriate Identity write privileges
-* audit writer privileges are append-oriented and minimal
-* grants match service ownership
-* schema integration test passes
-* RLS assertions pass
-* facility isolation assertions pass
-* migration ledger remains at zero pending
-
-## Update documentation
-
-Update as required:
-
-```text
-docs/DATABASE.md
-docs/SECURITY.md
-docs/ARCHITECTURE.md
-docs/TASK.md
-```
-
-If a temporary cross-schema read is retained, document why and the exact extraction/removal milestone.
-
-Do not create an ADR merely for an implementation detail unless it changes an architectural decision.
-
-## TASK.md
-
-Record:
-
-* migrations 0001-0011 applied
-* zero pending migrations verified
-* missing runtime roles discovered
-* `runtime-grants.sql` discovered
-* cross-service Identity write-grant issue
-* final role design
-* files changed
-* tests run
-* host command required for provisioning
-* remaining database verification
-* exact next task
-
-Do not mark Phase 0 complete until the corrected role provisioning and schema integration tests have passed.
-
-Implement the correction now rather than only reporting it.
-
+Apply:
 
 * input validation
 * request-size limits
@@ -514,6 +241,11 @@ Implement the correction now rather than only reporting it.
 * idempotency
 * secure errors
 * correlation IDs
+
+Identity and Pharmacy preflight responses advertise only methods and headers
+used by their versioned routes. The configured origin allowlist, credentialed
+cookie policy, Origin checks and CSRF validation remain mandatory for unsafe
+browser requests.
 
 ## 15. Secrets
 

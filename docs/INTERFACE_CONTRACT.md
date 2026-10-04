@@ -15,6 +15,27 @@ credentials never use the ordinary-notification event path. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
 Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
+### Staff facility selection
+
+`GET /api/v1/auth/session` returns the current staff actor, its authorized
+`facilities` list, and the active `facility`. `POST /api/v1/auth/facility` accepts
+`{ "facilityId": "<UUID>" }`, requires a staff HID session, and persists the
+choice on that session. Cookie mutations retain the normal allowed-Origin and
+CSRF checks. Identity checks the active account, session, staff, membership,
+organization, and facility before saving the choice and writes a staff audit
+event in the same transaction. Session reads and refreshes restore it only
+while that membership remains active; if it is revoked, the actor falls back
+to another currently authorized facility or authentication fails when none
+remain. A directly verified external OIDC bearer has no HID session and
+receives `FACILITY_SESSION_REQUIRED` from the selection route; an OIDC login
+that received an HID session can select normally.
+
+Provider operations still require `X-Facility-ID`. Identity authorizes that
+header against current membership and derives the operation's facility roles
+and permissions from that exact assignment. Clients should send the selected
+facility ID on subsequent provider requests; the saved choice does not grant
+access to a different facility.
+
 ### Patient sessions and self service
 
 `POST /api/v1/auth/patient/login` accepts email/password and the `patient-login`
@@ -27,13 +48,36 @@ patient mapping on use.
 
 `GET /api/v1/identity/me` returns the authenticated patient's profile and HID.
 `GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
-grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
+it is a grant timeline, not a chart-read log, and grant status does not assert
+notification delivery. `GET /api/v1/ehr/me/records`
 returns at most 50 completed encounters and 50 current signed/amended note
 revisions, after fresh Identity authorization through the EHR workload caller.
 These routes accept no browser-selected patient identity. Patient record access
 is read-only and owning-service disclosure/audit is atomic. The internal
 `GET /api/v1/identity/service/patient-self-authorization` requires both the
 current patient session and the exact authenticated EHR workload caller.
+
+### Consent request and patient decision context
+
+Staff `POST /api/v1/identity/access-requests` requires the existing consent
+permission, current facility and an eligible patient. `GET
+/api/v1/identity/access-requests` lists requests scoped to the requesting
+staff membership. A patient session uses `X-Purpose-Of-Use: direct-care` and
+no facility header for `GET /api/v1/identity/me/access-requests`, `POST
+/api/v1/identity/access-requests/:requestId/approve`, `POST
+/api/v1/identity/access-requests/:requestId/deny`, and `POST
+/api/v1/identity/me/consent-grants/:grantId/revoke`. Denial and revocation bodies
+contain a validated `reason`. Cookie mutations require the existing Origin and
+CSRF evidence.
+
+The patient request list returns at most 100 records with patient, requesting
+organization/facility/staff, purpose, scope, reason, state, timestamps,
+approved grant ID and expiry. Identity derives the patient from the live
+session and database account binding; it never accepts a browser-selected
+patient or facility for these commands. Approval creates an exact-purpose,
+time-bounded grant and audit event atomically. Denial and patient revocation
+update the existing consent model and audit trail. Wrong-patient requests are
+not disclosed; expiry or revocation prevents subsequent clinical access.
 
 `POST /api/v1/identity/me/verification/nin` is a separate patient-session
 command for QoreID evidence verification. Its body is exactly `{ "nin":
@@ -49,6 +93,16 @@ within the configured 5–240 minute bounds, permits at most ten new activations
 per account per hour, and atomically emits `EmergencyAccessActivated.v1` for
 notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
+
+`GET /api/v1/ehr/patients/:patientId/emergency-records/:encounterId` is the
+dedicated detailed read for one **completed** encounter at the selected
+facility. It requires emergency purpose, `identity.break-glass.write` and the
+encounter, note, vital, diagnosis, prescription and lab-request read
+permissions, plus a fresh exact patient/facility `read_records` break-glass
+decision. It returns bounded signed/amended notes and bounded relevant
+vitals, diagnoses, prescriptions and Lab requests. The read is audited before
+disclosure. Ordinary clinical routes remain direct-care only; break-glass
+does not authorize clinical writes or detailed Lab result routes.
 
 Recovery completion atomically consumes the account/token-bound OTP credential,
 sets an Argon2 password and revokes sessions. Disabled, stale, expired and replayed
@@ -263,11 +317,21 @@ Do not persist an unkeyed digest of raw NIN in idempotency records.
 ### Registration Cases
 
 ```text
+GET  /api/v1/identity/registration-cases?status=&limit=&beforeCaseId=
 GET  /api/v1/identity/registration-cases/:caseId
 POST /api/v1/identity/registration-cases/:caseId/approve-new
 POST /api/v1/identity/registration-cases/:caseId/link-existing
 POST /api/v1/identity/registration-cases/:caseId/enroll
 ```
+
+The list requires `identity.registration.write`, a current staff facility and
+purpose, and returns at most 100 facility cases in descending creation order.
+`beforeCaseId` is a UUID cursor for the next page; the response is
+`{ "items": [...], "nextBeforeCaseId": "<UUID>|null" }`. A case result includes
+`accountEnrollmentStarted` so a resumed approved case does not offer account
+enrollment twice. That flag means an account association exists; it does not
+claim contact verification or an active login. Case lists and reads are
+audited and constrained by facility RLS.
 
 `resolve`, `approve-new`, and `link-existing` require `Idempotency-Key`.
 Review commands require `expectedVersion` and fail with a version conflict when
@@ -659,6 +723,25 @@ commands with separate permissions, reasons, and expected result versions.
 Release requires prior verification of the exact version. A post-release
 correction appends a new unverified version and preserves released history;
 ordinary released-result readers receive 404 until at least one release exists.
+After a release, a non-Lab reader sees only valid released revisions and a
+released-only head, even when a newer correction remains unverified. Detailed
+Lab work item, accession, import and execution reads require non-break-glass
+patient authorization; queue and specimen lists check authorization before
+returning patient work or result values and audit successful reads.
+
+`GET /api/v1/lab/patients/:patientId/released-results?limit=50&offset=0`
+provides clinician discovery of the latest valid released version per result
+at the selected facility. It requires `lab.result.released.read`, an active
+facility membership, `X-Purpose-Of-Use: direct-care`, and a fresh patient
+`read_records` decision. `limit` is 1–100, `offset` is 0–10,000, and the
+response is `{ "items": [...], "nextOffset": number|null }`. Patient
+self-service Lab results have no current API contract.
+
+An EHR Lab request saved as `draft` can be activated with its existing PATCH
+route. The server accepts the exact committed active order version in Lab
+using the existing deterministic EHR-order idempotency key. A retry after an
+unknown Lab response reuses the same active snapshot; it does not create a
+second EHR mutation or Lab work item.
 
 ### Extracted Lab transport
 

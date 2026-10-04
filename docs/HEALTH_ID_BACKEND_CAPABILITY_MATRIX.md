@@ -1,5 +1,11 @@
 # Health ID frontend to HID backend capability matrix
 
+The PR #5 state below is a historical baseline. The subsequent backend gap
+audit and resolved/remaining integration questions are recorded in
+[the frontend backend gap audit](HEALTH_ID_FRONTEND_BACKEND_GAP_AUDIT.md) and
+[open questions](OPEN-QUESTIONS.md). They include consent, facility session,
+Lab and emergency contract corrections without claiming staging acceptance.
+
 Reference: `D-Eminence/Health-id` public web and product routes (inspected at `8903e68`), `D-Eminence/hid-1.0` for historical behavior, and this repository as the authoritative implementation. This matrix records readiness of the executable PR #5 tree.
 
 | Future Health-id journey | Authoritative hid-system capability | State after this PR |

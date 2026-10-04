@@ -50,4 +50,11 @@ Approval requires a recorded `verified` CAC result, a complete sourced profile, 
 
 The CAC number is stored in the restricted application and binding tables so the server can verify and deduplicate it. It is never returned by public intake, admin lists, or admin verification responses and is excluded from semantic audit details. The OTP-authenticated completion session can read the identifier for its own application. The application records provider state, reference, profile state, per-field provenance, check time, reviewer, reason, and version. Historical `verified_incomplete` records are migrated to `verified` provider state with incomplete profile state; missing historical provider fields cannot be reconstructed. The database runtime has `EXECUTE` on guarded commands rather than direct table mutation rights.
 
+The accepted database contract is `identity.submit_organization_application(text,text,text,text,text)`.
+Migration `0052` replaced migration `0046`'s older six-argument form before this
+backend gap pass. The service and runtime grant already use the final
+five-argument form. The organization SQL integration test asserts that final
+signature and exercises hospital, laboratory, pharmacy, review, and binding
+transactions; the historical migrations remain unchanged.
+
 The later frontend integration supplies the product code and Turnstile proof, handles generic 202 responses and problem details, and uses the existing staff OTP and signin flow after approval. It must not derive an administrator session from a public application or profile-completion response.
