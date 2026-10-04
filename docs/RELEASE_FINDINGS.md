@@ -111,3 +111,34 @@ exposed value is repeated here. This observation does not close the finding.
 | Historical limit | Earlier pushed PR commits still contain the former fixture values. A forward commit cannot remove them from Git history, and this workstream forbids rewriting history. No live value is repeated in this finding. |
 | Release treatment | Keep PR #5 draft and unmerged. Security review must decide how to remediate the historical exposure before merge or production activation. |
 | Status | **OPEN — HISTORY REMEDIATION PENDING** |
+
+## Finding RF-007: backend locked dependency advisories
+
+The 2026-10-04 fresh registry audit found high findings in nine backend
+lockfiles. Affected packages included Multer, fast-uri, js-yaml and
+brace-expansion, plus their dependent package attribution. Compatible
+`npm audit fix --package-lock-only --ignore-scripts` updates were applied;
+no forced major update, override or suppression was used. The official lock
+audit after each update reported zero vulnerabilities. All nine locked installs,
+builds and regression suites pass. The focused importer/history/PIN checks,
+synthetic PostgreSQL rehearsal and root static verification also pass after
+the updates. Final image regeneration and vulnerability evidence remain
+required; a package audit does not stand in for an image scan.
+Earlier local images at candidate f43869a are superseded and cannot be released.
+
+Representative EHR changes: platform-express 11.1.28 to 11.2.7, Multer 2.2.0
+to 2.4.0, fast-uri 3.1.5 to 3.1.8, js-yaml 4.3.1 to 4.3.2 and qs 6.15.3 to
+6.16.0. Application dependency ranges and API code are unchanged.
+
+Status: **DEPENDENCIES REMEDIATED AND TESTED — FINAL IMAGE EVIDENCE PENDING**.
+
+## Additional moderate frontend dependency dispositions
+
+The 2026-10-04 audit also records moderate React Router findings in Admin,
+Pharmacy and HID Migrate, and Vitest/mock-server findings in Pharmacy and HID
+Migrate. There are no high/critical frontend findings. The Vitest code is a
+development test dependency, not a production browser server; no untrusted
+network listener is authorized for local tests. Router findings retain auth,
+redirect and deep-link regression requirements when upgraded. Follow-up owner:
+the application maintainer. These are tracked moderate residual risks under
+the existing severity policy, not exceptions for future high findings.

@@ -19,6 +19,11 @@ build receipts. A local candidate commit is not release approval.
   literals by the secret checker.
 - The workspace frontend builder preserves native warnings and checks the
   actual process exit code on Windows PowerShell.
+- Fresh registry audits exposed fixable high findings in nine backend locks.
+  Compatible lock-only updates clear those findings without forced major
+  upgrades or dependency overrides. All affected builds and tests pass, as do
+  the focused import checks and PostgreSQL rehearsal. The earlier f43869a
+  candidate is superseded; final artifacts must use the subsequent clean SHA.
 
 ## Checks and evidence
 
