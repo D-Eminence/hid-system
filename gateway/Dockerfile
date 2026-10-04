@@ -5,6 +5,10 @@ COPY gateway/nginx.conf.template /tmp/default.conf.template
 COPY gateway/proxy-headers.conf /tmp/hid-proxy-headers.conf
 
 FROM nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3 AS runtime
+# Patch only the vulnerable regex library from the base's signed Alpine 3.24
+# repository. Keep Nginx and its runtime contract pinned; fail if unavailable.
+USER 0
+RUN apk add --no-cache 'pcre2=10.49-r0'
 ENV IDENTITY_API_UPSTREAM=http://identity-api:3001 \
     EHR_API_UPSTREAM=http://ehr-api:3002 \
     LAB_API_UPSTREAM=http://lab-api:3003 \

@@ -180,6 +180,12 @@ for (const app of apps) {
     `API-only gateway must not package the Cloudflare-hosted ${app} frontend`)
 }
 assert.match(gatewayDockerfile, /USER 101/, 'gateway must run as the unprivileged Nginx user')
+assert.match(gatewayDockerfile, /USER 0\s+RUN apk add --no-cache 'pcre2=10\.49-r0'/,
+  'gateway must install the exact security patch from its signed Alpine repository')
+assert.doesNotMatch(gatewayDockerfile, /apk upgrade|--allow-untrusted|--no-check-certificate/,
+  'gateway must not broadly upgrade packages or bypass package trust')
+assert.equal([...gatewayDockerfile.matchAll(/^USER (.+)$/gm)].at(-1)?.[1], '101',
+  'gateway security patch must restore the non-root runtime user')
 assert.match(gatewayDockerfile, /EXPOSE 3000/)
 assert.match(gatewayDockerfile, /HEALTHCHECK[\s\S]*gateway-health\/ready/)
 assert.doesNotMatch(gatewayDockerfile, /(?:SENTRY_AUTH_TOKEN|POSTHOG_(?:PERSONAL_API_KEY|PRIVATE_KEY)|DATABASE_URL|WORKLOAD_TOKEN)/,

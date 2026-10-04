@@ -132,7 +132,31 @@ to 2.4.0, fast-uri 3.1.5 to 3.1.8, js-yaml 4.3.1 to 4.3.2 and qs 6.15.3 to
 
 Status: **DEPENDENCIES REMEDIATED AND TESTED — FINAL IMAGE EVIDENCE PENDING**.
 
-## Additional moderate frontend dependency dispositions
+## Finding RF-008: Gateway PCRE2 final-image advisories
+
+The 2026-10-04 Grype 0.120.0 scan of the exact clean cbc6bf1 Gateway
+candidate reported four high findings in Alpine 3.24's pcre2 10.47-r1:
+CVE-2026-86145, CVE-2026-89157, CVE-2026-103111 and CVE-2026-89161.
+The other eleven governed images reported zero critical/high findings.
+That candidate's Gateway is blocked; earlier clean scans do not close this
+new observation. The current same-version official Nginx image still carries
+10.47-r1. Its signed Alpine 3.24 repository provides
+[pcre2 10.49-r0](https://pkgs.alpinelinux.org/package/v3.24/main/aarch64/pcre2).
+
+The Gateway Dockerfile installs only `pcre2=10.49-r0`, restores UID 101,
+and preserves the exact Nginx base digest, version, health probe, routing and
+shutdown contract. No broad package upgrade, untrusted repository, severity
+exception or scanner suppression is used. Static verification enforces the
+pin and final runtime user. Complete rebuilt-image scans and runtime evidence
+must confirm the patch before the candidate can be accepted.
+
+An isolated patch-check build and SPDX-based Grype scan passed with zero
+critical/high findings. This proves the targeted patch is viable; final
+clean-source artifact and runtime evidence remain required below.
+
+Status: **PATCH IMPLEMENTED — FINAL CANDIDATE VALIDATION PENDING**.
+
+## Additional moderate frontend dependency dispositions (2026-10-04)
 
 The 2026-10-04 audit also records moderate React Router findings in Admin,
 Pharmacy and HID Migrate, and Vitest/mock-server findings in Pharmacy and HID
