@@ -1,60 +1,33 @@
 import type { NotificationWorkerConfig } from './config';
 import { WORKFLOW_BY_EVENT } from './event';
-import type { HidEventEnvelope, NotificationRecipient, OrchestrationResult } from './types';
+import type { HidEventEnvelope, OrchestrationResult } from './types';
 
 export interface NotificationOrchestrator {
-  trigger(event: HidEventEnvelope, recipient?: NotificationRecipient | null): Promise<OrchestrationResult>;
+  trigger(event: HidEventEnvelope, verifiedEmail: string): Promise<OrchestrationResult>;
   readiness(): Promise<void>;
 }
 
 export class NovuOrchestrator implements NotificationOrchestrator {
   constructor(private readonly config: NotificationWorkerConfig) {}
 
-  async trigger(event: HidEventEnvelope, recipient?: NotificationRecipient | null): Promise<OrchestrationResult> {
-    if (!recipient) {
-      return { outcome: 'definitive_failure', provider: 'novu', safeCode: 'PATIENT_VERIFIED_EMAIL_UNAVAILABLE' };
-    }
+  async trigger(event: HidEventEnvelope, verifiedEmail: string): Promise<OrchestrationResult> {
     if (this.config.NOVU_MODE === 'test') {
       return { outcome: 'accepted', provider: 'novu', providerMessageId: `test:${event.id}` };
     }
     if (this.config.NOVU_MODE !== 'live' || !this.config.NOVU_API_KEY) {
       return { outcome: 'definitive_failure', provider: 'novu', safeCode: 'NOVU_NOT_CONFIGURED' };
     }
-
-    const baseUrl = this.config.NOVU_API_URL.replace(/\/+$/, '');
+    const subscriberFailure = await this.syncSubscriber(
+      event.context.patientId!, verifiedEmail, `subscriber:${event.id}`,
+    );
+    if (subscriberFailure) return subscriberFailure;
     try {
-      const subscriberResponse = await fetch(baseUrl + '/v2/subscribers', {
-        method: 'POST',
-        headers: {
-          authorization: `ApiKey ${this.config.NOVU_API_KEY}`,
-          'content-type': 'application/json',
-          'idempotency-key': 'subscriber:' + event.id,
-        },
-        body: JSON.stringify({
-          subscriberId: recipient.id,
-          email: recipient.email,
-          firstName: recipient.firstName,
-          lastName: recipient.lastName,
-        }),
-        signal: AbortSignal.timeout(5_000),
+      const response = await this.request('/v1/events/trigger', 'POST', event.id, {
+        name: WORKFLOW_BY_EVENT[event.type],
+        to: { subscriberId: event.context.patientId },
+        payload: { message: 'You have a new update in HID. Sign in securely to view it.' },
       });
-      if (!subscriberResponse.ok) return this.providerFailure(subscriberResponse.status);
-
-      const response = await fetch(baseUrl + '/v1/events/trigger', {
-        method: 'POST',
-        headers: {
-          authorization: `ApiKey ${this.config.NOVU_API_KEY}`,
-          'content-type': 'application/json',
-          'idempotency-key': event.id,
-        },
-        body: JSON.stringify({
-          name: WORKFLOW_BY_EVENT[event.type],
-          to: { subscriberId: recipient.id },
-          payload: { message: 'You have a new update in HID. Sign in securely to view it.' },
-        }),
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (!response.ok) return this.providerFailure(response.status);
+      if (!response.ok) return this.httpFailure('NOVU', response.status);
       const result = await response.json().catch(() => undefined) as { data?: { transactionId?: unknown } } | undefined;
       const messageId = result?.data?.transactionId;
       return { outcome: 'accepted', provider: 'novu',
@@ -64,15 +37,64 @@ export class NovuOrchestrator implements NotificationOrchestrator {
     }
   }
 
-  async readiness(): Promise<void> {
-    if (this.config.NOVU_MODE === 'live' && !this.config.NOVU_API_KEY) throw new Error('NOVU_NOT_CONFIGURED');
+  private async syncSubscriber(
+    subscriberId: string,
+    email: string,
+    idempotencyKey: string,
+  ): Promise<OrchestrationResult | undefined> {
+    try {
+      const updated = await this.request(
+        `/v2/subscribers/${encodeURIComponent(subscriberId)}`,
+        'PATCH',
+        idempotencyKey,
+        { email },
+      );
+      if (updated.ok) return undefined;
+      if (updated.status !== 404) return this.httpFailure('NOVU_SUBSCRIBER', updated.status);
+
+      const created = await this.request('/v2/subscribers', 'POST', idempotencyKey, { subscriberId, email });
+      if (created.ok) return undefined;
+      if (created.status !== 409) return this.httpFailure('NOVU_SUBSCRIBER', created.status);
+
+      const reconciled = await this.request(
+        `/v2/subscribers/${encodeURIComponent(subscriberId)}`,
+        'PATCH',
+        idempotencyKey,
+        { email },
+      );
+      return reconciled.ok ? undefined : this.httpFailure('NOVU_SUBSCRIBER', reconciled.status);
+    } catch {
+      return { outcome: 'unknown', provider: 'novu', safeCode: 'NOVU_SUBSCRIBER_TIMEOUT_OR_UNAVAILABLE' };
+    }
   }
 
-  private providerFailure(status: number): OrchestrationResult {
+  private request(
+    path: string,
+    method: 'PATCH' | 'POST',
+    idempotencyKey: string,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    return fetch(`${this.config.NOVU_API_URL.replace(/\/+$/, '')}${path}`, {
+      method,
+      headers: {
+        authorization: `ApiKey ${this.config.NOVU_API_KEY}`,
+        'content-type': 'application/json',
+        'idempotency-key': idempotencyKey,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5_000),
+    });
+  }
+
+  private httpFailure(prefix: string, status: number): OrchestrationResult {
     return {
-      outcome: status >= 400 && status < 500 && status !== 408 && status !== 429 ? 'definitive_failure' : 'unknown',
-      provider: 'novu',
-      safeCode: `NOVU_HTTP_${status}`,
+      outcome: status >= 400 && status < 500 && status !== 408 && status !== 429
+        ? 'definitive_failure' : 'unknown',
+      provider: 'novu', safeCode: `${prefix}_HTTP_${status}`,
     };
+  }
+
+  async readiness(): Promise<void> {
+    if (this.config.NOVU_MODE === 'live' && !this.config.NOVU_API_KEY) throw new Error('NOVU_NOT_CONFIGURED');
   }
 }

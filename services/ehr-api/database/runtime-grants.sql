@@ -598,6 +598,8 @@ grant execute on function
   integration.complete_inbox_message(text,uuid,uuid),
   integration.fail_inbox_message(text,uuid,uuid,text,boolean,timestamptz,integer)
   to hid_notification_worker;
+grant execute on function notification.verified_patient_email(uuid)
+  to hid_notification_worker;
 
 -- The schema test role is intentionally more capable than any runtime role.
 -- It is NOLOGIN and is used only inside the rollback-only integration test.

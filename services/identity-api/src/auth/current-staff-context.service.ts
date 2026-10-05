@@ -5,10 +5,6 @@ import type { CredentialIdentity } from './auth.types';
 import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
 
 interface StaffContextRow {
-  account_id: string;
-  subject: string;
-  email: string;
-  display_name: string;
   facility_id: string;
   membership_id: string;
   organization_id: string;
@@ -19,16 +15,16 @@ interface StaffContextRow {
   is_primary: boolean;
 }
 
+interface AccountRow {
+  account_id: string;
+  subject: string;
+  email: string | null;
+  display_name: string;
+}
+
 interface PlatformAuthorityRow {
   roles: string[];
   permissions: string[];
-}
-
-interface PlatformAccountRow {
-  id: string;
-  subject: string;
-  email: string;
-  display_name: string;
 }
 
 @Injectable()
@@ -41,40 +37,39 @@ export class CurrentStaffContextService {
     sessionId?: string,
     preferredFacilityId?: string,
   ): Promise<ActorContext> {
-    const account = await this.resolveAccount(subject);
-    const platformAuthority = await this.resolvePlatformAuthority(account.id);
-    if (platformAuthority.permissions.includes('platform.admin.access')) {
-      return this.toPlatformAdminActor(account, platformAuthority, authenticationMethod, sessionId);
-    }
-
-    const identity = await this.resolvePostgres(subject, authenticationMethod);
-    identity.accountId = account.id;
-    return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
+    const identity = await this.resolveAccount(subject, authenticationMethod);
+    const facilities = await this.resolveFacilities(identity.accountId!);
+    const platformAuthority = await this.resolvePlatformAuthority(identity.accountId);
+    return this.toActor({ ...identity, facilities }, platformAuthority, sessionId, preferredFacilityId);
   }
 
-  private async resolveAccount(subject: string): Promise<PlatformAccountRow> {
-    const result = await this.database.query<PlatformAccountRow>(
-      `select id::text, subject, email, display_name
-         from auth.accounts
-        where subject = $1 and status = 'active'
-          and (disabled_until is null or disabled_until <= clock_timestamp())`,
-      [subject],
-    );
-    const account = result.rows[0];
-    if (!account) throw new UnauthorizedException('Authentication account is inactive');
-    return account;
-  }
-
-  private async resolvePostgres(
+  private async resolveAccount(
     subject: string,
     authenticationMethod: 'local' | 'oidc',
   ): Promise<CredentialIdentity> {
+    const result = await this.database.query<AccountRow>(
+      `select account.id::text as account_id, account.subject, account.email, account.display_name
+         from auth.accounts account
+        where account.subject = $1
+          and account.status = 'active'
+          and (account.disabled_until is null or account.disabled_until <= clock_timestamp())`,
+      [subject],
+    );
+    const account = result.rows[0];
+    if (!account) throw new UnauthorizedException('Staff account or facility membership is inactive');
+    return {
+      subject: account.subject,
+      accountId: account.account_id,
+      ...(account.email ? { email: account.email } : {}),
+      displayName: account.display_name,
+      facilities: [],
+      authenticationMethod,
+    };
+  }
+
+  private async resolveFacilities(accountId: string): Promise<FacilityAssignment[]> {
     const result = await this.database.query<StaffContextRow>(
-      `select account.id::text as account_id,
-              account.subject,
-              account.email,
-              account.display_name,
-              membership.facility_id::text,
+      `select membership.facility_id::text as facility_id,
               membership.id::text as membership_id,
               membership.organization_id::text,
               facility.name as facility_name,
@@ -112,26 +107,16 @@ export class CurrentStaffContextService {
          left join auth.permissions permission
            on permission.code = role_permission.permission_code
           and permission.active
-        where account.subject = $1
+        where account.id = $1
           and account.status = 'active'
           and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
-        group by account.id, account.subject, account.email, account.display_name,
-                 membership.id, membership.facility_id, membership.organization_id,
+        group by membership.id, membership.facility_id, membership.organization_id,
                  membership.membership_role, membership.app_role, membership.is_primary,
                  facility.name, facility.code
         order by membership.is_primary desc, facility.name, membership.facility_id`,
-      [subject, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
+      [accountId, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
     );
-    const first = result.rows[0];
-    if (!first) throw new UnauthorizedException('Staff account or facility membership is inactive');
-    return {
-      subject: first.subject,
-      accountId: first.account_id,
-      email: first.email,
-      displayName: first.display_name,
-      facilities: result.rows.map((row) => this.facility(row)),
-      authenticationMethod,
-    };
+    return result.rows.map((row) => this.facility(row));
   }
 
   private async resolvePlatformAuthority(accountId: string | undefined): Promise<PlatformAuthorityRow> {
@@ -158,29 +143,6 @@ export class CurrentStaffContextService {
     };
   }
 
-  private toPlatformAdminActor(
-    account: PlatformAccountRow,
-    platformAuthority: PlatformAuthorityRow,
-    authenticationMethod: ActorContext['authenticationMethod'],
-    sessionId?: string,
-  ): ActorContext {
-    return {
-      id: account.subject,
-      subject: account.subject,
-      accountId: account.id,
-      sessionId,
-      email: account.email,
-      displayName: account.display_name,
-      roles: [],
-      permissions: [],
-      platformRoles: platformAuthority.roles,
-      platformPermissions: platformAuthority.permissions,
-      facilityIds: [],
-      facilities: [],
-      authenticationMethod,
-    };
-  }
-
   private toActor(
     identity: CredentialIdentity,
     platformAuthority: PlatformAuthorityRow,
@@ -194,7 +156,9 @@ export class CurrentStaffContextService {
     const selected = facilities.find((facility) => facility.id === preferredFacilityId)
       ?? facilities.find((facility) => facility.isPrimary)
       ?? facilities[0];
-    if (!selected) throw new UnauthorizedException('No active facility membership');
+    if (!selected && !platformAuthority.permissions.includes('platform.admin.access')) {
+      throw new UnauthorizedException('Staff account or facility membership is inactive');
+    }
     return {
       id: identity.subject,
       subject: identity.subject,
@@ -202,14 +166,14 @@ export class CurrentStaffContextService {
       sessionId,
       email: identity.email,
       displayName: identity.displayName,
-      roles: selected.roles,
-      role: selected.roles[0],
-      permissions: selected.permissions,
+      roles: selected?.roles ?? [],
+      ...(selected?.roles[0] ? { role: selected.roles[0] } : {}),
+      permissions: selected?.permissions ?? [],
       platformRoles: platformAuthority.roles,
       platformPermissions: platformAuthority.permissions,
       facilityIds: facilities.map((facility) => facility.id),
       facilities,
-      facility: selected,
+      ...(selected ? { facility: selected } : {}),
       authenticationMethod: identity.authenticationMethod,
     };
   }

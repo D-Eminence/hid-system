@@ -44,6 +44,12 @@ const actor: ActorContext = {
   }],
 };
 
+const platformActor: ActorContext = {
+  ...actor,
+  roles: [], permissions: [], platformRoles: ['platform_super_admin'],
+  platformPermissions: ['platform.admin.access'], facilityIds: [], facilities: [], facility: undefined,
+};
+
 describe('TokenService legacy password continuity', () => {
   beforeEach(() => {
     Object.assign(process.env, {
@@ -107,6 +113,25 @@ describe('TokenService legacy password continuity', () => {
     expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes('insert into auth.sessions'))).toBe(false);
   });
 
+  it('issues a staff session for a platform administrator with no facility membership', async () => {
+    const { service, clientQuery } = serviceWithUpgradeResult(true, platformActor);
+
+    const result = await service.issue({
+      subject: platformActor.subject,
+      accountId: platformActor.accountId,
+      email: platformActor.email ?? '',
+      displayName: platformActor.displayName ?? '',
+      facilities: [],
+      authenticationMethod: 'local',
+    }, { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ' });
+
+    expect(result.actor.platformPermissions).toContain('platform.admin.access');
+    expect(result.actor.facility).toBeUndefined();
+    const sessionInsert = clientQuery.mock.calls.find(([sql]) => String(sql).includes('insert into auth.sessions'));
+    expect(sessionInsert?.[1]?.[12]).toBeNull();
+    expect(sessionInsert?.[1]?.[13]).toBe('staff');
+  });
+
   it('only accepts refresh sessions for a currently active, unsuspended account at the current token version', async () => {
     const query = jest.fn(async (_sql: string, _values?: readonly unknown[]) => ({ rows: [], rowCount: 0 }));
     const database = { query } as unknown as DatabaseService;
@@ -127,7 +152,7 @@ describe('TokenService legacy password continuity', () => {
   });
 });
 
-function serviceWithUpgradeResult(upgraded: boolean) {
+function serviceWithUpgradeResult(upgraded: boolean, resolvedActor: ActorContext = actor) {
   const clientQuery = jest.fn(async (sql: string, _values?: readonly unknown[]) => {
     if (sql.includes('auth.upgrade_legacy_password')) {
       return { rows: [{ upgraded }], rowCount: 1 };
@@ -142,7 +167,7 @@ function serviceWithUpgradeResult(upgraded: boolean) {
     ) => operation({ query: clientQuery } as unknown as PoolClient)),
   } as unknown as DatabaseService;
   const currentStaff = {
-    resolve: jest.fn(async () => actor),
+    resolve: jest.fn(async () => resolvedActor),
   } as unknown as CurrentStaffContextService;
   return { service: new TokenService(database, currentStaff,
     {} as CurrentPatientContextService, {} as AuditService), clientQuery };

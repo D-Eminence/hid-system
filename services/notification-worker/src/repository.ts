@@ -2,11 +2,15 @@ import { createHash } from 'node:crypto';
 import { Pool, type PoolConfig } from 'pg';
 import type { NotificationWorkerConfig } from './config';
 import { WORKFLOW_BY_EVENT } from './event';
-import type { ClaimedInbox, HidEventEnvelope, NotificationRecipient, OrchestrationResult } from './types';
+import type { ClaimedInbox, HidEventEnvelope, OrchestrationResult } from './types';
 
 export class NotificationRepository {
   private readonly pool: Pool;
-  constructor(private readonly config: NotificationWorkerConfig) {
+  constructor(private readonly config: NotificationWorkerConfig, pool?: Pool) {
+    if (pool) {
+      this.pool = pool;
+      return;
+    }
     const ssl: PoolConfig['ssl'] = config.NOTIFICATION_WORKER_DATABASE_SSL ? {
       rejectUnauthorized: true,
       ...(config.NOTIFICATION_WORKER_DATABASE_SSL_ROOT_CERT_BASE64 ? {
@@ -35,24 +39,13 @@ export class NotificationRepository {
       ...(row.claim_token ? { claimToken: row.claim_token } : {}) };
   }
 
-  async getPatientNotificationRecipient(patientId: string): Promise<NotificationRecipient | null> {
-    const result = await this.pool.query<NotificationRecipient>(
-      `select
-         patient.id,
-         patient.first_name as "firstName",
-         patient.last_name as "lastName",
-         account.email
-       from identity.patients patient
-       join auth.accounts account on account.id = patient.account_id
-       where patient.id = $1
-         and patient.status = 'active'
-         and account.status = 'active'
-         and account.email is not null
-         and account.email_verified_at is not null
-       limit 1`,
+  async verifiedPatientEmail(patientId: string): Promise<string | null> {
+    const result = await this.pool.query<{ email: string | null }>(
+      'select notification.verified_patient_email($1) as email',
       [patientId],
     );
-    return result.rows[0] ?? null;
+    const email = result.rows[0]?.email;
+    return typeof email === 'string' && email.length > 0 ? email : null;
   }
 
   async complete(event: HidEventEnvelope, claimToken: string, result: OrchestrationResult): Promise<void> {
@@ -104,6 +97,6 @@ export class NotificationRepository {
   }
 
   private idempotencyKey(event: HidEventEnvelope): string {
-    return createHash('sha256').update(event.id + '\u001f' + WORKFLOW_BY_EVENT[event.type], 'utf8').digest('hex');
+    return createHash('sha256').update(`${event.id}\u001f${WORKFLOW_BY_EVENT[event.type]}`, 'utf8').digest('hex');
   }
 }

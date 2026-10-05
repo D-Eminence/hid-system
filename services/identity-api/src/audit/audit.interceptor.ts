@@ -36,17 +36,18 @@ export class AuditInterceptor implements NestInterceptor {
       context.getClass(),
     ]) ?? `${request.method.toLowerCase()}.${request.route?.path ?? 'unresolved'}`;
     const startedAt = Date.now();
+    const facilityId = request.facilityId ?? request.actor?.facility?.id;
 
     const responseStream = next.handle();
     const successAudited = failuresOnly ? responseStream : responseStream.pipe(
       mergeMap((result) => from(this.audit.record({
         correlationId: request.correlationId,
-        actorType: request.actor?.kind === 'patient' ? 'patient' : undefined,
+        actorType: request.actor ? (request.actor.kind === 'patient' ? 'patient' : 'staff') : undefined,
         actorSubject: request.actor?.subject,
         actorAccountId: request.actor?.accountId,
         actorMembershipId: request.actor?.facility?.membershipId,
         organizationId: request.actor?.facility?.organizationId,
-        facilityId: request.facilityId,
+        facilityId,
         patientId: this.patientId(request),
         action: `api.${action}`,
         resourceType: 'http-request',
@@ -60,12 +61,12 @@ export class AuditInterceptor implements NestInterceptor {
     return successAudited.pipe(
       catchError((error: unknown) => from(this.audit.record({
         correlationId: request.correlationId,
-        actorType: request.actor?.kind === 'patient' ? 'patient' : undefined,
+        actorType: request.actor ? (request.actor.kind === 'patient' ? 'patient' : 'staff') : undefined,
         actorSubject: request.actor?.subject,
         actorAccountId: request.actor?.accountId,
         actorMembershipId: request.actor?.facility?.membershipId,
         organizationId: request.actor?.facility?.organizationId,
-        facilityId: request.facilityId,
+        facilityId,
         patientId: this.patientId(request),
         action: `api.${action}`,
         resourceType: 'http-request',

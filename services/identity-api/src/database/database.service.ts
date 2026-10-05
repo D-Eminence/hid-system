@@ -53,9 +53,9 @@ export class DatabaseService implements OnApplicationShutdown {
            set_config('app.purpose_of_use', $5, true)`,
         [
           context.actor.subject,
-          context.facilityId,
+          context.facilityId ?? '',
           context.correlationId,
-          context.membershipId,
+          context.membershipId ?? '',
           context.purposeOfUse,
         ],
       );

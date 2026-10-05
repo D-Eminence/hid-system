@@ -74,6 +74,7 @@ const acceptedMigrations = new Map([
   ['0060_patient_access_pin_profile_status.sql', '1a0b5ca25f815dcd8714cdd569e8fe336b48d8a8c53362a8e42dbe986d407f50'],
   ['0061_patient_consent_context.sql', '8729e296fdf12aa91d0e032dda0af63bbc6882c34ae3c005c412ef0879e21578'],
   ['0062_staff_session_facility_selection.sql', '411acbdf6c57986b1e0d79035abe08c05589b244ba9eade50e096910b400bf61'],
+  ['0063_platform_admin_and_notification_subscriber.sql', 'a461ce496c61fad0094135a99711fe3f4756b582b2038079254a23e2ff54f635'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

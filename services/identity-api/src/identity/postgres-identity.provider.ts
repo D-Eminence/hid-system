@@ -48,14 +48,15 @@ export class PostgresIdentityProvider implements IdentityProvider {
   }
 
   async authorize(request: AuthorizationRequest): Promise<AuthorizationDecision> {
+    const { facilityId, membershipId } = this.requireFacilityContext(request.context);
     return this.database.withTransaction(request.context, async (client) => {
       const policyResult = await client.query<{ allowed: boolean }>(
         `select identity.has_active_consent_grant($1, $2, $3, $4, $5, $6, clock_timestamp()) as allowed`,
         [
           request.patientId,
           request.context.actor.subject,
-          request.context.membershipId,
-          request.context.facilityId,
+          membershipId,
+          facilityId,
           request.scope,
           request.purpose,
         ],
@@ -84,8 +85,8 @@ export class PostgresIdentityProvider implements IdentityProvider {
           limit 1`,
         [
           request.patientId,
-          request.context.membershipId,
-          request.context.facilityId,
+          membershipId,
+          facilityId,
           request.context.actor.accountId,
           request.scope,
           request.purpose,
@@ -96,8 +97,8 @@ export class PostgresIdentityProvider implements IdentityProvider {
       return {
         allowed: effectiveAllowed,
         patientId: request.patientId,
-        facilityId: request.context.facilityId,
-        membershipId: request.context.membershipId,
+        facilityId,
+        membershipId,
         scope: request.scope,
         purpose: request.purpose,
         ...(grant ? { consentGrantId: grant.id, expiresAt: grant.expires_at.toISOString() } : {}),
@@ -107,17 +108,25 @@ export class PostgresIdentityProvider implements IdentityProvider {
   }
 
   async consentStatus(patientId: string, purpose: PurposeOfUse, context: DataAccessContext): Promise<ConsentStatus> {
+    const { facilityId } = this.requireFacilityContext(context);
     const read = await this.authorize({ patientId, scope: 'read_records', purpose, context });
     const write = await this.authorize({ patientId, scope: 'write_records', purpose, context });
     const expirations = [read.expiresAt, write.expiresAt].filter((value): value is string => Boolean(value)).sort();
     return {
       patientId,
-      facilityId: context.facilityId,
+      facilityId,
       purpose,
       readAllowed: read.allowed,
       writeAllowed: write.allowed,
       ...(expirations[0] ? { expiresAt: expirations[0] } : {}),
     };
+  }
+
+  private requireFacilityContext(context: DataAccessContext): { facilityId: string; membershipId: string } {
+    if (!context.facilityId || !context.membershipId) {
+      throw new Error('A facility and membership are required for clinical authorization');
+    }
+    return { facilityId: context.facilityId, membershipId: context.membershipId };
   }
 
   private patient(row: PatientRow): IdentityPatient {

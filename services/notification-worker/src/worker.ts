@@ -3,7 +3,6 @@ import type { NotificationWorkerConfig } from './config';
 import { parseSqsEvent } from './event';
 import type { NotificationOrchestrator } from './novu.orchestrator';
 import type { NotificationRepository } from './repository';
-import type { NotificationRecipient } from './types';
 
 export class NotificationWorker {
   private stopping = false;
@@ -50,28 +49,36 @@ export class NotificationWorker {
     }
     if (claim.status !== 'claimed' || !claim.claimToken) return;
 
-    let recipient: NotificationRecipient | null = null;
+    let verifiedEmail: string | null;
     try {
-      recipient = event.context.patientId
-        ? await this.repository.getPatientNotificationRecipient(event.context.patientId)
-        : null;
+      verifiedEmail = await this.repository.verifiedPatientEmail(event.context.patientId!);
     } catch {
-      const status = await this.repository.fail(event, claim.claimToken, {
-        outcome: 'unknown',
-        provider: 'novu',
-        safeCode: 'PATIENT_RECIPIENT_LOOKUP_FAILED',
-      }, true, claim.attemptCount);
-      if (status === 'failed_terminal') await this.delete(message);
+      await this.settle(event, message, claim.claimToken, claim.attemptCount, {
+        outcome: 'unknown', provider: 'novu', safeCode: 'NOVU_RECIPIENT_LOOKUP_UNAVAILABLE',
+      });
       return;
     }
-    const result = await this.orchestrator.trigger(event, recipient);
+    if (!verifiedEmail) {
+      await this.settle(event, message, claim.claimToken, claim.attemptCount, {
+        outcome: 'definitive_failure', provider: 'novu', safeCode: 'NOVU_RECIPIENT_EMAIL_UNAVAILABLE',
+      });
+      return;
+    }
+    const result = await this.orchestrator.trigger(event, verifiedEmail).catch(() => ({
+      outcome: 'unknown' as const, provider: 'novu' as const, safeCode: 'NOVU_ORCHESTRATION_UNAVAILABLE',
+    }));
+    await this.settle(event, message, claim.claimToken, claim.attemptCount, result);
+  }
+
+  private async settle(event: ReturnType<typeof parseSqsEvent>, message: Message, claimToken: string,
+    attemptCount: number, result: Awaited<ReturnType<NotificationOrchestrator['trigger']>>): Promise<void> {
     if (result.outcome === 'accepted') {
-      await this.repository.complete(event, claim.claimToken, result);
+      await this.repository.complete(event, claimToken, result);
       await this.delete(message);
       return;
     }
-    const status = await this.repository.fail(event, claim.claimToken, result,
-      result.outcome === 'unknown', claim.attemptCount);
+    const status = await this.repository.fail(event, claimToken, result,
+      result.outcome === 'unknown', attemptCount);
     if (status === 'failed_terminal') await this.delete(message);
   }
 

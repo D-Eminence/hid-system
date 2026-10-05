@@ -13,6 +13,7 @@ import { Reflector } from '@nestjs/core';
 import { jwtVerify } from 'jose';
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
+import { FACILITY_OPTIONAL, REQUIRED_PERMISSIONS } from '../common/decorators';
 import type { ActorContext, FacilityAssignment, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
@@ -210,5 +211,34 @@ describe('staff facility selection', () => {
     await expect(guard.canActivate(contextFor(requestFor(unrelatedFacilityId))))
       .rejects.toMatchObject({ code: 'FACILITY_ACCESS_DENIED' });
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied' }));
+  });
+
+  it('allows a facility-free platform administrator through a facility-optional admin route', async () => {
+    const platformAdmin: ActorContext = {
+      ...actor(), roles: [], permissions: [], facilityIds: [], facilities: [], facility: undefined,
+      platformRoles: ['platform_super_admin'], platformPermissions: ['platform.admin.access'],
+    };
+    const tokens = { verify: jest.fn().mockResolvedValue({ actor: platformAdmin, claims: {} }) };
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const reflector = { getAllAndOverride: jest.fn((key: symbol) => {
+      if (key === FACILITY_OPTIONAL) return true;
+      if (key === REQUIRED_PERMISSIONS) return ['platform.admin.access'];
+      return undefined;
+    }) };
+    const guard: CanActivate = new SecurityGuard(
+      reflector as unknown as Reflector,
+      tokens as unknown as TokenService, audit as unknown as AuditService,
+      { query: jest.fn() } as unknown as DatabaseService);
+    const request = { method: 'GET', correlationId: event.correlationId,
+      header: (name: string) => name === 'authorization' ? 'Bearer signed' : undefined } as unknown as HidRequest;
+    const context = {
+      switchToHttp: () => ({ getRequest: () => request }),
+      getHandler: () => ({}), getClass: () => ({}),
+    } as unknown as ExecutionContext;
+
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+    expect(request.facilityId).toBeUndefined();
+    expect(request.actor?.facility).toBeUndefined();
+    expect(audit.record).not.toHaveBeenCalled();
   });
 });

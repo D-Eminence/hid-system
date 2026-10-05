@@ -45,8 +45,8 @@ const PURPOSES = new Set<PurposeOfUse>(['direct-care', 'emergency', 'healthcare-
 export interface DataAccessContext {
   correlationId: string;
   actor: ActorContext;
-  facilityId: string;
-  membershipId: string;
+  facilityId?: string;
+  membershipId?: string;
   purposeOfUse: PurposeOfUse;
   authorization?: string;
 }
