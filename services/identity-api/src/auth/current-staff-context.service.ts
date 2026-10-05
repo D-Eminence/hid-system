@@ -24,6 +24,13 @@ interface PlatformAuthorityRow {
   permissions: string[];
 }
 
+interface PlatformAccountRow {
+  id: string;
+  subject: string;
+  email: string;
+  display_name: string;
+}
+
 @Injectable()
 export class CurrentStaffContextService {
   constructor(private readonly database: DatabaseService) {}
@@ -34,20 +41,28 @@ export class CurrentStaffContextService {
     sessionId?: string,
     preferredFacilityId?: string,
   ): Promise<ActorContext> {
-    const identity = await this.resolvePostgres(subject, authenticationMethod);
-    if (!identity.accountId) {
-      const account = await this.database.query<{ id: string }>(
-        `select id::text from auth.accounts
-          where subject = $1 and status = 'active'
-            and (disabled_until is null or disabled_until <= clock_timestamp())`,
-        [subject],
-      );
-      const accountId = account.rows[0]?.id;
-      if (!accountId) throw new UnauthorizedException('Migrated authentication account is unavailable');
-      identity.accountId = accountId;
+    const account = await this.resolveAccount(subject);
+    const platformAuthority = await this.resolvePlatformAuthority(account.id);
+    if (platformAuthority.permissions.includes('platform.admin.access')) {
+      return this.toPlatformAdminActor(account, platformAuthority, authenticationMethod, sessionId);
     }
-    const platformAuthority = await this.resolvePlatformAuthority(identity.accountId);
+
+    const identity = await this.resolvePostgres(subject, authenticationMethod);
+    identity.accountId = account.id;
     return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
+  }
+
+  private async resolveAccount(subject: string): Promise<PlatformAccountRow> {
+    const result = await this.database.query<PlatformAccountRow>(
+      `select id::text, subject, email, display_name
+         from auth.accounts
+        where subject = $1 and status = 'active'
+          and (disabled_until is null or disabled_until <= clock_timestamp())`,
+      [subject],
+    );
+    const account = result.rows[0];
+    if (!account) throw new UnauthorizedException('Authentication account is inactive');
+    return account;
   }
 
   private async resolvePostgres(
@@ -140,6 +155,29 @@ export class CurrentStaffContextService {
     return {
       roles: [...new Set(row?.roles ?? [])].sort(),
       permissions: [...new Set(row?.permissions ?? [])].sort(),
+    };
+  }
+
+  private toPlatformAdminActor(
+    account: PlatformAccountRow,
+    platformAuthority: PlatformAuthorityRow,
+    authenticationMethod: ActorContext['authenticationMethod'],
+    sessionId?: string,
+  ): ActorContext {
+    return {
+      id: account.subject,
+      subject: account.subject,
+      accountId: account.id,
+      sessionId,
+      email: account.email,
+      displayName: account.display_name,
+      roles: [],
+      permissions: [],
+      platformRoles: platformAuthority.roles,
+      platformPermissions: platformAuthority.permissions,
+      facilityIds: [],
+      facilities: [],
+      authenticationMethod,
     };
   }
 
