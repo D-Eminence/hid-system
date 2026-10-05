@@ -21,16 +21,22 @@ const STAFF_CONTEXT_ROW = {
 describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
   it('loads only a currently eligible account, staff record, organization, facility, and membership', async () => {
     const query = jest.fn()
-      .mockResolvedValueOnce({ rows: [STAFF_CONTEXT_ROW], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{
+        id: STAFF_CONTEXT_ROW.account_id,
+        subject: STAFF_CONTEXT_ROW.subject,
+        email: STAFF_CONTEXT_ROW.email,
+        display_name: STAFF_CONTEXT_ROW.display_name,
+      }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{
         roles: ['platform_super_admin'],
         permissions: ['platform.admin.access', 'platform.facility.manage'],
-      }], rowCount: 1 });
+      }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [STAFF_CONTEXT_ROW], rowCount: 1 });
     const service = new CurrentStaffContextService({ query } as unknown as DatabaseService);
 
     const context = await service.resolve(STAFF_CONTEXT_ROW.subject, 'local');
 
-    const call = query.mock.calls[0];
+    const call = query.mock.calls[2];
     expect(call).toBeDefined();
     const [sql, parameters] = call ?? ['', undefined];
     expect(String(sql)).toEqual(expect.stringContaining('join identity.staff staff'));
@@ -90,7 +96,7 @@ describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
     const service = new CurrentStaffContextService({ query } as unknown as DatabaseService);
     await expect(service.resolve('patient:ordinary-person', 'local'))
       .rejects.toBeInstanceOf(UnauthorizedException);
-    expect(String(query.mock.calls[0]?.[0])).toContain('join identity.staff staff');
+    expect(String(query.mock.calls[0]?.[0])).toContain('from auth.accounts');
   });
 
   it('restores a selected facility and its exact permissions, then falls back when membership is revoked', async () => {
@@ -100,9 +106,15 @@ describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
       facility_name: 'Second Test Facility', facility_code: 'SCHEMA-B',
       roles: ['lab_technician'], permissions: ['lab.results.read'], is_primary: false };
     let eligibleRows = [STAFF_CONTEXT_ROW, second];
-    const query = jest.fn(async (sql: string) => sql.includes('from auth.accounts account')
-      ? { rows: eligibleRows, rowCount: eligibleRows.length }
-      : { rows: [{ roles: [], permissions: [] }], rowCount: 1 });
+    const query = jest.fn()
+      .mockResolvedValueOnce({ rows: [{
+        id: STAFF_CONTEXT_ROW.account_id,
+        subject: STAFF_CONTEXT_ROW.subject,
+        email: STAFF_CONTEXT_ROW.email,
+        display_name: STAFF_CONTEXT_ROW.display_name,
+      }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ roles: [], permissions: [] }], rowCount: 1 })
+      .mockImplementationOnce(async () => ({ rows: eligibleRows, rowCount: eligibleRows.length }));
     const service = new CurrentStaffContextService({ query } as unknown as DatabaseService);
     const selected = await service.resolve(STAFF_CONTEXT_ROW.subject, 'local', 'session-id', second.facility_id);
     expect(selected.facility?.id).toBe(second.facility_id);
