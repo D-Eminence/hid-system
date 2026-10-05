@@ -162,7 +162,10 @@ export class AuditService {
     const facilityOptionalAuthEvent = actorType === 'staff'
       && event.action.startsWith('auth.')
       && (event.resourceType === 'authentication' || event.resourceType === 'session');
-    if (actorType === 'staff' && !event.facilityId && !facilityOptionalAuthEvent) {
+    const facilityOptionalPlatformAdminEvent = actorType === 'staff'
+      && event.action.startsWith('admin.');
+    if (actorType === 'staff' && !event.facilityId
+      && !facilityOptionalAuthEvent && !facilityOptionalPlatformAdminEvent) {
       throw new ServiceUnavailableException('Staff audit events require a resolved facility context');
     }
     if (actorType === 'system' && event.actorSubject) {
