@@ -73,19 +73,13 @@ jobs:
           node services/ehr-api/scripts/test-notification-recipient.mjs
       - name: Build ARM64 image without cloud credentials
         run: node scripts/staging-backend-build.mjs build "$COMPONENT"
-      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
-        with:
-          image: hid-ci/${{ matrix.component }}:${{ github.sha }}
-          format: spdx-json
-          output-file: build-evidence/${{ matrix.component }}/sbom.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
+      - name: Install checksum-verified official Syft and Grype binaries
+        run: node scripts/install-staging-scanners.mjs
+      - name: Generate final image SPDX SBOM
+        run: syft "docker:hid-ci/$COMPONENT:$GITHUB_SHA" --output "spdx-json=$BUILD_EVIDENCE_DIR/sbom.spdx.json"
       - id: distro
         name: Read OS distribution from the exact image
         run: node scripts/staging-backend-build.mjs distro "$COMPONENT"
-      - uses: anchore/scan-action/download-grype@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2
-        with:
-          grype-version: '0.120.0'
       - name: Scan final SBOM including the verified OS distribution
         env:
           IMAGE_DISTRO: ${{ steps.distro.outputs.distro }}
