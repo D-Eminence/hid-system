@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const components = ['identity-api','ehr-api','lab-api','pharmacy-api','ocr-api','ocr-worker',
@@ -8,10 +8,14 @@ export const components = ['identity-api','ehr-api','lab-api','pharmacy-api','oc
 const registry = '659225405023.dkr.ecr.eu-west-1.amazonaws.com';
 const run = (command,args,options={}) => (execFileSync(command,args,{encoding:'utf8',stdio:['ignore','pipe','inherit'],...options})??'').trim();
 export function selectComponents(paths, requested='changed') {
+  if(requested==='novu-update') return ['notification-worker','database-migration'];
   if(requested==='all') return components;
   if(requested!=='changed') { if(!components.includes(requested)) throw Error('Unknown backend component'); return [requested]; }
   const result=new Set();
   for(const p of paths){
+    if(p==='security/staging-novu-runtime-assessment.json'){
+      result.add('notification-worker');result.add('database-migration');continue;
+    }
     if(p.startsWith('packages/') || p.startsWith('scripts/') || p.startsWith('.github/workflows/staging-backend-images')) return components;
     if(p.startsWith('gateway/')) result.add('gateway');
     for(const c of components.filter(x=>!['gateway','database-migration'].includes(x)))
@@ -26,9 +30,23 @@ export function componentConfig(c) {
     dockerfile:c==='gateway'?'gateway/Dockerfile':`services/${c==='database-migration'?'ehr-api':c}/Dockerfile`,
     target:c==='database-migration'?'migration':'runtime'};
 }
-export function assertScan(report) {
+export function assertScan(report, assessment=null, policy=null) {
   if(!Array.isArray(report.matches) || !report.descriptor?.version || !report.distro?.name || !report.distro?.version) throw Error('Complete Grype report with OS distribution required');
   if(report.matches.some(m=>['High','Critical'].includes(m.vulnerability?.severity))) throw Error('High/Critical vulnerabilities block publication');
+  const ignored=(report.ignoredMatches??[]).filter(m=>['High','Critical'].includes(m.vulnerability?.severity));
+  if(!ignored.length) return;
+  if(!assessment||!policy||!Number.isFinite(Date.parse(assessment.expires_at))||Date.now()>=Date.parse(assessment.expires_at)
+    ||assessment.expires_at!==policy.expires_at||!policy.elf_inventory[assessment.component]
+    ||assessment.native_binary_count!==Object.keys(policy.elf_inventory[assessment.component]).length
+    ||assessment.glibc_affected_imports!==0||assessment.raw_high_matches!==ignored.length)
+    throw Error('Image-bound unexpired runtime assessment required');
+  for(const m of ignored){
+    const finding=policy.findings.find(f=>f.id===m.vulnerability.id&&f.packages.includes(m.artifact.name));
+    if(m.vulnerability.severity==='Critical'||!finding||finding.versions[m.artifact.name]!==m.artifact.version
+      ||!assessment.reviewed_not_affected.some(r=>r.id===m.vulnerability.id&&r.package===m.artifact.name&&r.version===m.artifact.version&&r.purl===m.artifact.purl)
+      ||!m.appliedIgnoreRules?.some(r=>r.namespace==='vex'&&r['vex-status']==='not_affected'))
+      throw Error('Unassessed or incorrectly suppressed High/Critical finding');
+  }
 }
 const hashFile=p=>createHash('sha256').update(readFileSync(p)).digest('hex');
 function context(){
@@ -83,15 +101,23 @@ function main(){
       fix:m.vulnerability.fix,url:m.vulnerability.dataSource,namespace:m.vulnerability.namespace})),null,2));
     return;
   }
-  const scan=JSON.parse(readFileSync(`${directory}/grype.json`));assertScan(scan);
+  const scan=JSON.parse(readFileSync(`${directory}/grype.json`));
+  const assessment=existsSync(`${directory}/runtime-assessment.json`)?JSON.parse(readFileSync(`${directory}/runtime-assessment.json`)):null;
+  const policy=assessment?JSON.parse(readFileSync('security/staging-novu-runtime-assessment.json')):null;
+  if(assessment&&(assessment.component!==c||assessment.policy_sha256!==hashFile('security/staging-novu-runtime-assessment.json'))) throw Error('Runtime assessment policy binding changed');
+  assertScan(scan,assessment,policy);
   if(mode==='pack') {
     const image=JSON.parse(run('docker',['image','inspect',local]))[0];
     if(image.Os!=='linux'||image.Architecture!=='arm64'||image.Config.Labels?.['org.opencontainers.image.revision']!==source.source_commit) throw Error('Image provenance mismatch');
+    if(assessment&&assessment.image_id!==image.Id) throw Error('Assessment covers a different image');
     run('docker',['save','--output',`${directory}/image.tar`,local]);
     const receipt={schema:'hid.staging-component-build/v1',...source,...config,local_tag:local,image_id:image.Id,
       architecture:'arm64',os:'linux',archive_sha256:hashFile(`${directory}/image.tar`),
       sbom_sha256:hashFile(`${directory}/sbom.spdx.json`),scan_sha256:hashFile(`${directory}/grype.json`),
-      high_critical_findings:0,deployment_authorized:false};
+      high_critical_findings:0,raw_high_matches:assessment?.raw_high_matches??0,
+      assessment_sha256:assessment?hashFile(`${directory}/runtime-assessment.json`):null,
+      vex_sha256:assessment?hashFile(`${directory}/runtime.vex.json`):null,
+      raw_scan_sha256:hashFile(`${directory}/grype.raw.json`),deployment_authorized:false};
     writeFileSync(`${directory}/build.json`,JSON.stringify(receipt,null,2)+'\n');return;
   }
   if(mode!=='publish') throw Error('Unknown build operation');
@@ -102,6 +128,9 @@ function main(){
   if(receipt.component!==c||receipt.source_commit!==source.source_commit||receipt.run_id!==source.run_id
     ||receipt.run_attempt!==source.run_attempt||receipt.archive_sha256!==hashFile(`${directory}/image.tar`)
     ||receipt.sbom_sha256!==hashFile(`${directory}/sbom.spdx.json`)||receipt.scan_sha256!==hashFile(`${directory}/grype.json`)) throw Error('Build evidence mismatch');
+  if(receipt.raw_scan_sha256!==hashFile(`${directory}/grype.raw.json`)
+    ||(assessment&&(receipt.assessment_sha256!==hashFile(`${directory}/runtime-assessment.json`)
+      ||receipt.vex_sha256!==hashFile(`${directory}/runtime.vex.json`)))) throw Error('Assessment evidence changed in transfer');
   const aws=(...args)=>JSON.parse(run('aws',[...args,'--region','eu-west-1','--output','json','--no-cli-pager']));
   if(aws('sts','get-caller-identity').Account!=='659225405023') throw Error('Wrong AWS account');
   const repo=aws('ecr','describe-repositories','--repository-names',config.repository).repositories[0];
@@ -109,6 +138,12 @@ function main(){
   run('docker',['load','--input',`${directory}/image.tar`]);
   const image=JSON.parse(run('docker',['image','inspect',local]))[0];
   if(image.Id!==receipt.image_id||image.Architecture!=='arm64'||image.Config.Labels?.['org.opencontainers.image.revision']!==source.source_commit) throw Error('Loaded image mismatch');
+  if(assessment){
+    run('python3',['scripts/assess-staging-runtime.py',c,local,`${directory}/grype.raw.json`,`${directory}/publish-verification`],{stdio:'inherit'});
+    const verified=JSON.parse(readFileSync(`${directory}/publish-verification/runtime-assessment.json`));
+    for(const key of ['image_id','policy_sha256','native_inventory_sha256'])
+      if(verified[key]!==assessment[key]) throw Error('Loaded native runtime assessment differs');
+  }
   const password=run('aws',['ecr','get-login-password','--region','eu-west-1']);
   run('docker',['login','--username','AWS','--password-stdin',registry],{input:password,stdio:['pipe','pipe','pipe']});
   const tag=`ci-${source.source_commit}-${source.run_id}-${source.run_attempt}-${config.target}`,target=`${registry}/${config.repository}:${tag}`;

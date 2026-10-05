@@ -64,6 +64,12 @@ Sources: [zlib](https://security-tracker.debian.org/tracker/CVE-2026-85091),
 [GCC queue](https://security-tracker.debian.org/tracker/CVE-2026-102010).
 These are scanner findings, not a claim that each is exploitable through HID.
 No blanket ignore, severity downgrade or security exception is applied.
+
+The scoped Novu update now has an exact-image not-affected assessment in
+`security/STAGING_NOVU_RUNTIME_ASSESSMENT.md`. Its expiring OpenVEX is generated
+only after native-binary/package checks, and is rechecked before publication.
+Both raw and assessed findings are retained. `component=novu-update` builds and
+publishes only the worker and migration images; no frontend is rebuilt.
 Publication remains blocked until supported patches or evidence-backed affectedness
 decisions resolve the actual findings. Gateway findings remain in its separate
 scan artifact; its Nginx/base image is unchanged by this scoped Novu update.

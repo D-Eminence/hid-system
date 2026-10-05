@@ -1,17 +1,17 @@
 name: Staging backend images
 on:
   pull_request:
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', '.github/workflows/staging-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/staging-novu-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
   push:
     branches: [staging, staging-novu-ci-20261005]
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', '.github/workflows/staging-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/staging-novu-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
   workflow_dispatch:
     inputs:
       component:
         description: Backend component name, or all
         type: choice
         default: notification-worker
-        options: [notification-worker, database-migration, identity-api, ehr-api, lab-api, pharmacy-api, ocr-api, ocr-worker, outreach-api, notification-api, event-dispatcher, gateway, support-api, all]
+        options: [notification-worker, database-migration, novu-update, identity-api, ehr-api, lab-api, pharmacy-api, ocr-api, ocr-worker, outreach-api, notification-api, event-dispatcher, gateway, support-api, all]
 permissions:
   contents: read
 concurrency:
@@ -30,7 +30,9 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Check component selection and scan guards
-        run: node --test scripts/staging-backend-build.test.mjs
+        run: |
+          node --test scripts/staging-backend-build.test.mjs
+          python3 -m unittest discover -s scripts -p 'assess_staging_runtime_test.py'
       - id: matrix
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -80,10 +82,21 @@ jobs:
       - id: distro
         name: Read OS distribution from the exact image
         run: node scripts/staging-backend-build.mjs distro "$COMPONENT"
-      - name: Scan final SBOM including the verified OS distribution
+      - name: Scan and assess the exact runtime without dropping original findings
         env:
           IMAGE_DISTRO: ${{ steps.distro.outputs.distro }}
-        run: grype "sbom:$BUILD_EVIDENCE_DIR/sbom.spdx.json" --distro "$IMAGE_DISTRO" --output json --fail-on high > "$BUILD_EVIDENCE_DIR/grype.json"
+        run: |
+          set +e
+          grype "sbom:$BUILD_EVIDENCE_DIR/sbom.spdx.json" --distro "$IMAGE_DISTRO" --output json --fail-on high > "$BUILD_EVIDENCE_DIR/grype.raw.json"
+          scan_status=$?
+          set -e
+          cp "$BUILD_EVIDENCE_DIR/grype.raw.json" "$BUILD_EVIDENCE_DIR/grype.json"
+          if [ "$scan_status" -eq 2 ]; then
+            python3 scripts/assess-staging-runtime.py "$COMPONENT" "hid-ci/$COMPONENT:$GITHUB_SHA" "$BUILD_EVIDENCE_DIR/grype.raw.json" "$BUILD_EVIDENCE_DIR"
+            grype "sbom:$BUILD_EVIDENCE_DIR/sbom.spdx.json" --distro "$IMAGE_DISTRO" --vex "$BUILD_EVIDENCE_DIR/runtime.vex.json" --output json --fail-on high > "$BUILD_EVIDENCE_DIR/grype.json"
+          elif [ "$scan_status" -ne 0 ]; then
+            exit "$scan_status"
+          fi
       - name: Report scan failures and retain diagnostics
         if: failure()
         run: node scripts/staging-backend-build.mjs findings "$COMPONENT"
@@ -95,6 +108,9 @@ jobs:
             build-evidence/${{ matrix.component }}/sbom.spdx.json
             build-evidence/${{ matrix.component }}/grype.json
             build-evidence/${{ matrix.component }}/distribution.json
+            build-evidence/${{ matrix.component }}/grype.raw.json
+            build-evidence/${{ matrix.component }}/runtime-assessment.json
+            build-evidence/${{ matrix.component }}/runtime.vex.json
           retention-days: 7
           if-no-files-found: warn
       - name: Bind image archive to source, scan and SBOM
@@ -164,5 +180,8 @@ jobs:
             build-evidence/${{ matrix.component }}/publication.json
             build-evidence/${{ matrix.component }}/sbom.spdx.json
             build-evidence/${{ matrix.component }}/grype.json
+            build-evidence/${{ matrix.component }}/grype.raw.json
+            build-evidence/${{ matrix.component }}/runtime-assessment.json
+            build-evidence/${{ matrix.component }}/runtime.vex.json
           retention-days: 30
           if-no-files-found: error
