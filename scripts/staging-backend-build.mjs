@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 export const components = ['identity-api','ehr-api','lab-api','pharmacy-api','ocr-api','ocr-worker',
   'outreach-api','notification-api','notification-worker','event-dispatcher','gateway','support-api','database-migration'];
 const registry = '659225405023.dkr.ecr.eu-west-1.amazonaws.com';
-const run = (command,args,options={}) => execFileSync(command,args,{encoding:'utf8',stdio:['ignore','pipe','inherit'],...options}).trim();
+const run = (command,args,options={}) => (execFileSync(command,args,{encoding:'utf8',stdio:['ignore','pipe','inherit'],...options})??'').trim();
 export function selectComponents(paths, requested='changed') {
   if(requested==='all') return components;
   if(requested!=='changed') { if(!components.includes(requested)) throw Error('Unknown backend component'); return [requested]; }
@@ -27,7 +27,7 @@ export function componentConfig(c) {
     target:c==='database-migration'?'migration':'runtime'};
 }
 export function assertScan(report) {
-  if(!Array.isArray(report.matches) || !report.descriptor?.version) throw Error('Complete Grype report required');
+  if(!Array.isArray(report.matches) || !report.descriptor?.version || !report.distro?.name || !report.distro?.version) throw Error('Complete Grype report with OS distribution required');
   if(report.matches.some(m=>['High','Critical'].includes(m.vulnerability?.severity))) throw Error('High/Critical vulnerabilities block publication');
 }
 const hashFile=p=>createHash('sha256').update(readFileSync(p)).digest('hex');
@@ -59,6 +59,21 @@ function main(){
       '--label',`org.opencontainers.image.revision=${source.source_commit}`,
       '--label','org.opencontainers.image.source=https://github.com/D-Eminence/hid-system',
       '-f',config.dockerfile,'-t',local,'--load','.'],{stdio:'inherit'});return;
+  }
+  if(mode==='distro') {
+    const container=run('docker',['create',local]);
+    try {
+      let osRelease;
+      for(const location of ['/etc/os-release','/usr/lib/os-release']) {
+        try {run('docker',['cp',`${container}:${location}`,`${directory}/os-release`],{stdio:['ignore','pipe','pipe']});
+          osRelease=readFileSync(`${directory}/os-release`,'utf8');break;}catch{}
+      }
+      const id=osRelease?.match(/^ID=["']?([a-z0-9_-]+)/m)?.[1],version=osRelease?.match(/^VERSION_ID=["']?([0-9.]+)/m)?.[1];
+      if(!id||!version) throw Error('Exact image distribution cannot be established');
+      writeFileSync(`${directory}/distribution.json`,JSON.stringify({id,version,image:local})+'\n');
+      if(e.GITHUB_OUTPUT)writeFileSync(e.GITHUB_OUTPUT,`distro=${id}:${version}\n`,{flag:'a'});
+      console.log(`${id}:${version}`);return;
+    }finally{run('docker',['rm',container]);}
   }
   const scan=JSON.parse(readFileSync(`${directory}/grype.json`));assertScan(scan);
   if(mode==='pack') {

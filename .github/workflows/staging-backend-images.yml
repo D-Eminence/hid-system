@@ -80,14 +80,16 @@ jobs:
           output-file: build-evidence/${{ matrix.component }}/sbom.spdx.json
           upload-artifact: false
           upload-release-assets: false
-      - uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2
+      - id: distro
+        name: Read OS distribution from the exact image
+        run: node scripts/staging-backend-build.mjs distro "$COMPONENT"
+      - uses: anchore/scan-action/download-grype@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2
         with:
-          image: hid-ci/${{ matrix.component }}:${{ github.sha }}
-          output-format: json
-          output-file: build-evidence/${{ matrix.component }}/grype.json
-          severity-cutoff: high
-          only-fixed: false
           grype-version: '0.120.0'
+      - name: Scan final SBOM including the verified OS distribution
+        env:
+          IMAGE_DISTRO: ${{ steps.distro.outputs.distro }}
+        run: grype "sbom:$BUILD_EVIDENCE_DIR/sbom.spdx.json" --distro "$IMAGE_DISTRO" --output json --fail-on high > "$BUILD_EVIDENCE_DIR/grype.json"
       - name: Bind image archive to source, scan and SBOM
         run: node scripts/staging-backend-build.mjs pack "$COMPONENT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

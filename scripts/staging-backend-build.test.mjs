@@ -9,6 +9,7 @@ test('reject unknown/path-injection components',()=>assert.throws(()=>componentC
 test('migration uses the existing EHR repository with the migration target',()=>assert.equal(componentConfig('database-migration').target,'migration'));
 test('High/Critical findings and incomplete scan reports block publication',()=>{
   assert.throws(()=>assertScan({matches:[]}));
-  assert.throws(()=>assertScan({descriptor:{version:'test'},matches:[{vulnerability:{severity:'High'}}]}));
-  assertScan({descriptor:{version:'test'},matches:[]});
+  assert.throws(()=>assertScan({descriptor:{version:'test'},distro:{name:'debian',version:'13'},matches:[{vulnerability:{severity:'High'}}]}));
+  assert.throws(()=>assertScan({descriptor:{version:'test'},matches:[]}));
+  assertScan({descriptor:{version:'test'},distro:{name:'debian',version:'13'},matches:[]});
 });
