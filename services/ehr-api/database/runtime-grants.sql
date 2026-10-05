@@ -551,6 +551,13 @@ grant select, insert, update on integration.outbox_delivery_state,
   integration.inbox_messages to hid_event_delivery_commands;
 grant usage, select on all sequences in schema integration to hid_event_delivery_commands;
 
+-- Only the private command owner resolves verified recipients. Runtime worker
+-- logins retain no direct account/patient access or command-owner membership.
+grant execute on function integration.verified_notification_recipient(uuid)
+  to hid_event_delivery_commands;
+alter function integration.notification_recipient_for_claim(uuid,uuid,uuid)
+  owner to hid_event_delivery_commands;
+
 alter function integration.outbox_envelope_sha256(
   text,uuid,text,integer,timestamptz,text,uuid,bigint,text,uuid,uuid,uuid,jsonb
 ) owner to hid_event_delivery_commands;
@@ -596,7 +603,8 @@ grant usage on schema integration to hid_notification_worker;
 grant execute on function
   integration.claim_inbox_message(text,uuid,text,text,integer,text,character,text,integer),
   integration.complete_inbox_message(text,uuid,uuid),
-  integration.fail_inbox_message(text,uuid,uuid,text,boolean,timestamptz,integer)
+  integration.fail_inbox_message(text,uuid,uuid,text,boolean,timestamptz,integer),
+  integration.notification_recipient_for_claim(uuid,uuid,uuid)
   to hid_notification_worker;
 
 -- The schema test role is intentionally more capable than any runtime role.

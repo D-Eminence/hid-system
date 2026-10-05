@@ -15,6 +15,8 @@ const message: Message = { Body: JSON.stringify({ detail: event }), ReceiptHandl
 
 function harness(outcome: 'accepted' | 'definitive_failure' | 'unknown') {
   const repositoryValue = { claim: jest.fn().mockResolvedValue({ status: 'claimed', claimToken: 'claim-1', attemptCount: 1 }),
+    getPatientNotificationRecipient: jest.fn().mockResolvedValue({ id: event.context.patientId,
+      firstName: 'Test', lastName: 'Patient', email: 'controlled@example.test' }),
     complete: jest.fn(), fail: jest.fn().mockResolvedValue(outcome === 'unknown' ? 'retry_scheduled' : 'failed_terminal') };
   const repository: NotificationRepository = repositoryValue as unknown as NotificationRepository;
   const orchestratorValue = { trigger: jest.fn().mockResolvedValue({ outcome, provider: 'novu', safeCode: 'NOVU_TEST' }), readiness: jest.fn() };
@@ -81,7 +83,8 @@ describe('ordinary notification worker', () => {
     const emergency = { ...event, type: 'EmergencyAccessActivated', producer: 'identity',
       payload: { consentGrantId: '40000000-0000-4000-8000-000000000001', reviewRequired: true } };
     await worker.process({ ...message, Body: JSON.stringify({ detail: emergency }) });
-    expect(orchestrator.trigger).toHaveBeenCalledWith(expect.objectContaining({ type: 'EmergencyAccessActivated' }));
+    expect(orchestrator.trigger).toHaveBeenCalledWith(expect.objectContaining({ type: 'EmergencyAccessActivated' }),
+      expect.objectContaining({ id: event.context.patientId }));
     expect(repository.complete).toHaveBeenCalledWith(expect.objectContaining({ type: 'EmergencyAccessActivated' }),
       'claim-1', expect.objectContaining({ outcome: 'accepted' }));
   });

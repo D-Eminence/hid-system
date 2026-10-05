@@ -53,7 +53,7 @@ export class NotificationWorker {
     let recipient: NotificationRecipient | null = null;
     try {
       recipient = event.context.patientId
-        ? await this.repository.getPatientNotificationRecipient(event.context.patientId)
+        ? await this.repository.getPatientNotificationRecipient(event, claim.claimToken)
         : null;
     } catch {
       const status = await this.repository.fail(event, claim.claimToken, {

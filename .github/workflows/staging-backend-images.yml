@@ -1,0 +1,140 @@
+name: Staging backend images
+on:
+  pull_request:
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', '.github/workflows/staging-backend-images.yml']
+  push:
+    branches: [staging, staging-novu-ci-20261005]
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', '.github/workflows/staging-backend-images.yml']
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Backend component name, or all
+        type: choice
+        default: notification-worker
+        options: [notification-worker, database-migration, identity-api, ehr-api, lab-api, pharmacy-api, ocr-api, ocr-worker, outreach-api, notification-api, event-dispatcher, gateway, support-api, all]
+permissions:
+  contents: read
+concurrency:
+  group: staging-backend-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  select:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_changes: ${{ steps.matrix.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check component selection and scan guards
+        run: node --test scripts/staging-backend-build.test.mjs
+      - id: matrix
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          REQUESTED_COMPONENT: ${{ inputs.component || 'changed' }}
+        run: node scripts/staging-backend-build.mjs matrix
+  build:
+    needs: select
+    if: needs.select.outputs.has_changes == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    env:
+      COMPONENT: ${{ matrix.component }}
+      BUILD_EVIDENCE_DIR: build-evidence/${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Locked service tests and type checks
+        if: matrix.component != 'gateway' && matrix.component != 'database-migration'
+        shell: bash
+        run: |
+          npm --prefix "services/$COMPONENT" ci
+          if [ -x "services/$COMPONENT/node_modules/.bin/tsc" ]; then
+            "services/$COMPONENT/node_modules/.bin/tsc" -p packages/api-client/tsconfig.json
+          fi
+          npm --prefix "services/$COMPONENT" run typecheck --if-present
+          npm --prefix "services/$COMPONENT" test
+      - name: Test migration under real restricted database login
+        if: matrix.component == 'database-migration'
+        run: |
+          npm --prefix services/ehr-api ci
+          node services/ehr-api/scripts/test-notification-recipient.mjs
+      - name: Build ARM64 image without cloud credentials
+        run: node scripts/staging-backend-build.mjs build "$COMPONENT"
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: hid-ci/${{ matrix.component }}:${{ github.sha }}
+          format: spdx-json
+          output-file: build-evidence/${{ matrix.component }}/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2
+        with:
+          image: hid-ci/${{ matrix.component }}:${{ github.sha }}
+          output-format: json
+          output-file: build-evidence/${{ matrix.component }}/grype.json
+          severity-cutoff: high
+          only-fixed: false
+          grype-version: '0.120.0'
+      - name: Bind image archive to source, scan and SBOM
+        run: node scripts/staging-backend-build.mjs pack "$COMPONENT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: staging-build-${{ matrix.component }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build-evidence/${{ matrix.component }}/
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+  publish:
+    needs: [select, build]
+    if: github.event_name != 'pull_request' && needs.select.outputs.has_changes == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      COMPONENT: ${{ matrix.component }}
+      BUILD_EVIDENCE_DIR: build-evidence/${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: staging-build-${{ matrix.component }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build-evidence/${{ matrix.component }}/
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: arn:aws:iam::659225405023:role/hid-staging-github-ecr-build
+          aws-region: eu-west-1
+          allowed-account-ids: '659225405023'
+          role-duration-seconds: 1800
+          unset-current-credentials: true
+      - name: Publish the tested image and verify its immutable digest
+        run: node scripts/staging-backend-build.mjs publish "$COMPONENT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: staging-digest-${{ matrix.component }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build-evidence/${{ matrix.component }}/publication.json
+            build-evidence/${{ matrix.component }}/sbom.spdx.json
+            build-evidence/${{ matrix.component }}/grype.json
+          retention-days: 30
+          if-no-files-found: error

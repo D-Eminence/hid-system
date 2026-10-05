@@ -35,22 +35,11 @@ export class NotificationRepository {
       ...(row.claim_token ? { claimToken: row.claim_token } : {}) };
   }
 
-  async getPatientNotificationRecipient(patientId: string): Promise<NotificationRecipient | null> {
+  async getPatientNotificationRecipient(event: HidEventEnvelope, claimToken: string): Promise<NotificationRecipient | null> {
     const result = await this.pool.query<NotificationRecipient>(
-      `select
-         patient.id,
-         patient.first_name as "firstName",
-         patient.last_name as "lastName",
-         account.email
-       from identity.patients patient
-       join auth.accounts account on account.id = patient.account_id
-       where patient.id = $1
-         and patient.status = 'active'
-         and account.status = 'active'
-         and account.email is not null
-         and account.email_verified_at is not null
-       limit 1`,
-      [patientId],
+      `select id, first_name as "firstName", last_name as "lastName", email
+         from integration.notification_recipient_for_claim($1, $2, $3)`,
+      [event.id, claimToken, event.context.patientId],
     );
     return result.rows[0] ?? null;
   }

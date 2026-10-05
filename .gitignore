@@ -36,3 +36,4 @@
 **/.wrangler/
 **/.dev.vars
 **/.dev.vars.*
+/build-evidence/
