@@ -106,8 +106,27 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
+  verify-publisher:
+    needs: select
+    if: github.event_name != 'pull_request' && needs.select.outputs.has_changes == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: arn:aws:iam::659225405023:role/hid-staging-github-ecr-build
+          aws-region: eu-west-1
+          allowed-account-ids: '659225405023'
+          role-duration-seconds: 900
+          unset-current-credentials: true
+      - name: Verify branch OIDC and staging repository access
+        run: |
+          test "$(aws sts get-caller-identity --query Account --output text)" = '659225405023'
+          aws ecr describe-repositories --repository-names staging/hid/notification-worker --query 'repositories[0].repositoryName' --output text
   publish:
-    needs: [select, build]
+    needs: [select, build, verify-publisher]
     if: github.event_name != 'pull_request' && needs.select.outputs.has_changes == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30

@@ -32,3 +32,38 @@ than reading identity/auth tables directly. Apply additive migration 0063 and
 the reviewed runtime grants before deploying this worker. Existing migration
 checksums remain unchanged. `test-notification-recipient.mjs` exercises real
 restricted PostgreSQL logins using synthetic data in a disposable container.
+
+## First live build and scan results (2026-10-05)
+
+The workflow runs on the dedicated staging branch. All thirteen component test,
+typecheck and ARM64 build jobs passed those steps in run `37294730067`; final
+OS-inclusive Syft/Grype scans blocked publication. The repository's action
+allowlist rejected Anchore actions, so official scanner binaries are installed
+using pinned release SHA-256 values. Failed scan artifacts retain the exact SPDX
+SBOM and full Grype report; package findings also appear in the job log.
+
+The original Node 22 distroless base had outdated OpenSSL and glibc libraries.
+The pinned base is now updated within the same Node 22/Debian 13 image family to
+`sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8`.
+Scanning that exact ARM64 base removed all Critical findings and the High findings
+with available Debian fixes. Five unique High advisory IDs remain (eleven package
+matches), with no packaged fix reported:
+
+| Advisory | Package(s) | Current scan result |
+|---|---|---|
+| CVE-2026-85091 | zlib1g | not-fixed; upstream affected-version range needs assessment |
+| CVE-2026-5435 | libc6 | wont-fix; Debian calls this a minor deprecated-function issue |
+| CVE-2026-19499 | libc6 | wont-fix; Debian calls this a minor formatting-function issue |
+| CVE-2026-95619 | GCC runtime packages including libstdc++6 | not-fixed |
+| CVE-2026-102010 | GCC runtime packages including libstdc++6 | not-fixed |
+
+Sources: [zlib](https://security-tracker.debian.org/tracker/CVE-2026-85091),
+[glibc deprecated functions](https://security-tracker.debian.org/tracker/CVE-2026-5435),
+[glibc formatting](https://security-tracker.debian.org/tracker/CVE-2026-19499),
+[GCC allocation](https://security-tracker.debian.org/tracker/CVE-2026-95619),
+[GCC queue](https://security-tracker.debian.org/tracker/CVE-2026-102010).
+These are scanner findings, not a claim that each is exploitable through HID.
+No blanket ignore, severity downgrade or security exception is applied.
+Publication remains blocked until supported patches or evidence-backed affectedness
+decisions resolve the actual findings. Gateway findings remain in its separate
+scan artifact; its Nginx/base image is unchanged by this scoped Novu update.
