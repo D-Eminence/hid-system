@@ -28,8 +28,8 @@ describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
         display_name: STAFF_CONTEXT_ROW.display_name,
       }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{
-        roles: ['platform_super_admin'],
-        permissions: ['platform.admin.access', 'platform.facility.manage'],
+        roles: ['platform_operations_admin'],
+        permissions: ['platform.operations.read'],
       }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [STAFF_CONTEXT_ROW], rowCount: 1 });
     const service = new CurrentStaffContextService({ query } as unknown as DatabaseService);
@@ -49,8 +49,8 @@ describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
     expect(parameters).toEqual([STAFF_CONTEXT_ROW.subject, [...ACTIVE_STAFF_VERIFICATION_STATUSES]]);
     expect(context.facility?.id).toBe(STAFF_CONTEXT_ROW.facility_id);
     expect(context.permissions).toEqual(['ehr.encounter.read']);
-    expect(context.platformRoles).toEqual(['platform_super_admin']);
-    expect(context.platformPermissions).toEqual(['platform.admin.access', 'platform.facility.manage']);
+    expect(context.platformRoles).toEqual(['platform_operations_admin']);
+    expect(context.platformPermissions).toEqual(['platform.operations.read']);
     const platformCall = query.mock.calls[1];
     expect(String(platformCall?.[0])).toContain("assignment.scope_type = 'platform'");
     expect(platformCall?.[1]).toEqual([STAFF_CONTEXT_ROW.account_id]);
