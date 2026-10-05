@@ -50,6 +50,32 @@ describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
     expect(platformCall?.[1]).toEqual([STAFF_CONTEXT_ROW.account_id]);
   });
 
+  it('allows an active platform admin to authenticate without a facility membership', async () => {
+    const query = jest.fn()
+      .mockResolvedValueOnce({ rows: [{
+        id: '20000000-0000-4000-8000-000000000009',
+        subject: 'staff:platform-admin',
+        email: 'admin@test.invalid',
+        display_name: 'Platform Admin',
+      }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{
+        roles: ['platform_super_admin'],
+        permissions: ['platform.admin.access', 'platform.facility.manage'],
+      }], rowCount: 1 });
+
+    const service = new CurrentStaffContextService({ query } as unknown as DatabaseService);
+    const context = await service.resolve('staff:platform-admin', 'local');
+
+    expect(context.facility).toBeUndefined();
+    expect(context.facilities).toEqual([]);
+    expect(context.facilityIds).toEqual([]);
+    expect(context.permissions).toEqual([]);
+    expect(context.platformRoles).toEqual(['platform_super_admin']);
+    expect(context.platformPermissions).toContain('platform.admin.access');
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(String(query.mock.calls[0]?.[0])).toContain('from auth.accounts');
+  });
+
   it('fails closed when no complete active authorization tuple is returned', async () => {
     const service = new CurrentStaffContextService(
       { query: jest.fn(async () => ({ rows: [], rowCount: 0 })) } as unknown as DatabaseService,
