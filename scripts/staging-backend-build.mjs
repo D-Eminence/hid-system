@@ -75,6 +75,14 @@ function main(){
       console.log(`${id}:${version}`);return;
     }finally{run('docker',['rm',container]);}
   }
+  if(mode==='findings') {
+    const scan=JSON.parse(readFileSync(`${directory}/grype.json`));
+    const findings=scan.matches.filter(m=>['High','Critical'].includes(m.vulnerability?.severity));
+    console.log(JSON.stringify(findings.map(m=>({id:m.vulnerability.id,severity:m.vulnerability.severity,
+      package:m.artifact.name,version:m.artifact.version,type:m.artifact.type,
+      fix:m.vulnerability.fix,url:m.vulnerability.dataSource,namespace:m.vulnerability.namespace})),null,2));
+    return;
+  }
   const scan=JSON.parse(readFileSync(`${directory}/grype.json`));assertScan(scan);
   if(mode==='pack') {
     const image=JSON.parse(run('docker',['image','inspect',local]))[0];

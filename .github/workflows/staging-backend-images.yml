@@ -84,6 +84,19 @@ jobs:
         env:
           IMAGE_DISTRO: ${{ steps.distro.outputs.distro }}
         run: grype "sbom:$BUILD_EVIDENCE_DIR/sbom.spdx.json" --distro "$IMAGE_DISTRO" --output json --fail-on high > "$BUILD_EVIDENCE_DIR/grype.json"
+      - name: Report scan failures and retain diagnostics
+        if: failure()
+        run: node scripts/staging-backend-build.mjs findings "$COMPONENT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure()
+        with:
+          name: staging-scan-${{ matrix.component }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build-evidence/${{ matrix.component }}/sbom.spdx.json
+            build-evidence/${{ matrix.component }}/grype.json
+            build-evidence/${{ matrix.component }}/distribution.json
+          retention-days: 7
+          if-no-files-found: warn
       - name: Bind image archive to source, scan and SBOM
         run: node scripts/staging-backend-build.mjs pack "$COMPONENT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
