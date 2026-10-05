@@ -14,6 +14,13 @@ export interface HidEventEnvelope {
   payload: Readonly<Record<string, unknown>>;
 }
 
+export interface NotificationRecipient {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+}
+
 export interface OrchestrationResult {
   outcome: DeliveryOutcome;
   provider: 'novu';
