@@ -114,7 +114,7 @@ describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
         display_name: STAFF_CONTEXT_ROW.display_name,
       }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ roles: [], permissions: [] }], rowCount: 1 })
-      .mockImplementationOnce(async () => ({ rows: eligibleRows, rowCount: eligibleRows.length }));
+      .mockImplementation(async () => ({ rows: eligibleRows, rowCount: eligibleRows.length }));
     const service = new CurrentStaffContextService({ query } as unknown as DatabaseService);
     const selected = await service.resolve(STAFF_CONTEXT_ROW.subject, 'local', 'session-id', second.facility_id);
     expect(selected.facility?.id).toBe(second.facility_id);
