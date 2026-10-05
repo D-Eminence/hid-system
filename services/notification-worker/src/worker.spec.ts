@@ -34,6 +34,35 @@ describe('ordinary notification worker', () => {
     expect(sqs.send).toHaveBeenCalledTimes(1);
   });
 
+  it('does not trigger or acknowledge an already processed event', async () => {
+    const { worker, repository, orchestrator, sqs } = harness('accepted');
+    (repository.claim as jest.Mock).mockResolvedValueOnce({
+      status: 'already_processed',
+      attemptCount: 2,
+    });
+    await worker.process(message);
+    expect(orchestrator.trigger).not.toHaveBeenCalled();
+    expect(repository.getPatientNotificationRecipient).not.toHaveBeenCalled();
+    expect(repository.complete).not.toHaveBeenCalled();
+    expect(sqs.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a patient lookup failure retryable', async () => {
+    const { worker, repository, orchestrator, sqs } = harness('accepted');
+    (repository.getPatientNotificationRecipient as jest.Mock).mockRejectedValueOnce(new Error('db unavailable'));
+    (repository.fail as jest.Mock).mockResolvedValueOnce('retry_scheduled');
+    await worker.process(message);
+    expect(repository.fail).toHaveBeenCalledWith(
+      expect.objectContaining({ id: event.id }),
+      'claim-1',
+      { outcome: 'unknown', provider: 'novu', safeCode: 'PATIENT_RECIPIENT_LOOKUP_FAILED' },
+      true,
+      1,
+    );
+    expect(orchestrator.trigger).not.toHaveBeenCalled();
+    expect(sqs.send).not.toHaveBeenCalled();
+  });
+
   it('does not acknowledge an unknown outcome so inbox/SQS retry can converge', async () => {
     const { worker, repository, sqs } = harness('unknown');
     await worker.process(message);

@@ -3,6 +3,7 @@ import type { NotificationWorkerConfig } from './config';
 import { parseSqsEvent } from './event';
 import type { NotificationOrchestrator } from './novu.orchestrator';
 import type { NotificationRepository } from './repository';
+import type { NotificationRecipient } from './types';
 
 export class NotificationWorker {
   private stopping = false;
@@ -49,7 +50,21 @@ export class NotificationWorker {
     }
     if (claim.status !== 'claimed' || !claim.claimToken) return;
 
-    const result = await this.orchestrator.trigger(event);
+    let recipient: NotificationRecipient | null = null;
+    try {
+      recipient = event.context.patientId
+        ? await this.repository.getPatientNotificationRecipient(event.context.patientId)
+        : null;
+    } catch {
+      const status = await this.repository.fail(event, claim.claimToken, {
+        outcome: 'unknown',
+        provider: 'novu',
+        safeCode: 'PATIENT_RECIPIENT_LOOKUP_FAILED',
+      }, true, claim.attemptCount);
+      if (status === 'failed_terminal') await this.delete(message);
+      return;
+    }
+    const result = await this.orchestrator.trigger(event, recipient);
     if (result.outcome === 'accepted') {
       await this.repository.complete(event, claim.claimToken, result);
       await this.delete(message);
