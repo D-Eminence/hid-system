@@ -81,7 +81,7 @@ describe('organization onboarding boundary', () => {
       .mockResolvedValueOnce({ rows: [{ application_id: applicationId, product_code: 'migrate',
         cac_registration_number: 'RC1234567', application_status: 'pending_verification', row_version: '1' }] })
       .mockResolvedValueOnce({ rows: [{ application_status: 'ready_for_review', row_version: '2' }] });
-    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const database = { withPlatformTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: '123',
       verifiedRegistrationNumber: 'RC1234567',
       cacBinding: { registrationNumber: 'RC1234567', providerRegistrationNumber: '1234567',
@@ -89,7 +89,7 @@ describe('organization onboarding boundary', () => {
         entityType: 'Private Company Limited by Shares', registrationDate: '2014-05-26',
         address: '10 Test Avenue, Lagos', registryStatus: 'Active' } }) };
     const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined),
-      consumeQuota: jest.fn().mockResolvedValue(undefined) };
+      consumePlatformQuota: jest.fn().mockResolvedValue(undefined) };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
       qoreid as unknown as QoreIdVerificationAdapter,
@@ -97,7 +97,7 @@ describe('organization onboarding boundary', () => {
     const result = await service.verify(context, applicationId, 1);
     expect(qoreid.verifyCac).toHaveBeenCalledWith('RC1234567');
     expect(integrations.assertAvailable).toHaveBeenCalledWith('qoreid', 'provider_cac');
-    expect(integrations.consumeQuota).toHaveBeenCalledWith(context, 'application_cac', applicationId);
+    expect(integrations.consumePlatformQuota).toHaveBeenCalledWith(context, 'application_cac', applicationId);
     expect(result).toEqual({ status: 'ready_for_review', version: 2, state: 'verified',
       providerVerification: 'verified', profileState: 'complete', providerReference: '123' });
     expect(JSON.stringify(result)).not.toContain('RC1234567');
@@ -111,7 +111,7 @@ describe('organization onboarding boundary', () => {
       .mockResolvedValueOnce({ rows: [{ application_id: applicationId, product_code: 'migrate',
         cac_registration_number: 'RC1234567', application_status: 'pending_verification', row_version: '1' }] })
       .mockResolvedValueOnce({ rows: [{ application_status: 'pending_verification', row_version: '2' }] });
-    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const database = { withPlatformTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified',
       verifiedRegistrationNumber: 'RC1234567',
       providerReference: '8643', cacIncompleteProfile: {
@@ -121,7 +121,7 @@ describe('organization onboarding boundary', () => {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
       qoreid as unknown as QoreIdVerificationAdapter,
-      { assertAvailable: jest.fn(), consumeQuota: jest.fn() } as unknown as IntegrationRuntimeService);
+      { assertAvailable: jest.fn(), consumePlatformQuota: jest.fn() } as unknown as IntegrationRuntimeService);
     await expect(service.verify(context, applicationId, 1)).resolves.toEqual({
       status: 'pending_verification', version: 2, state: 'verified',
       providerVerification: 'verified', profileState: 'incomplete', providerReference: '8643',
@@ -135,9 +135,9 @@ describe('organization onboarding boundary', () => {
       .mockResolvedValueOnce({ rows: [{ application_id: applicationId, product_code: 'migrate',
         cac_registration_number: 'RC1234567', application_status: 'pending_verification', row_version: '1' }] })
       .mockResolvedValueOnce({ rows: [{ application_status: 'pending_verification', row_version: '2' }] });
-    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const database = { withPlatformTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn() };
-    const integrations = { assertAvailable: jest.fn(), consumeQuota: jest.fn() };
+    const integrations = { assertAvailable: jest.fn(), consumePlatformQuota: jest.fn() };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: false } as environment.Environment);
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
       qoreid as unknown as QoreIdVerificationAdapter,
@@ -145,16 +145,16 @@ describe('organization onboarding boundary', () => {
     await expect(service.verify(context, applicationId, 1)).rejects.toMatchObject({ code: 'QOREID_DISABLED' });
     expect(qoreid.verifyCac).not.toHaveBeenCalled();
     expect(integrations.assertAvailable).not.toHaveBeenCalled();
-    expect(integrations.consumeQuota).not.toHaveBeenCalled();
+    expect(integrations.consumePlatformQuota).not.toHaveBeenCalled();
     expect(query.mock.calls.some(([sql]) => sql.includes('admin_record_organization_cac_result'))).toBe(false);
     await expect(service.approve(context, applicationId, 1, {
       reason: 'Synthetic approval', existingOrganizationId: 'c4610000-0000-4000-8000-000000000001',
     })).rejects.toMatchObject({ code: 'ORGANIZATION_LINK_INVALID' });
-    expect(database.withTransaction).toHaveBeenCalledTimes(1);
+    expect(database.withPlatformTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('maps an optimistic concurrency conflict without returning SQL details', async () => {
-    const database = { withTransaction: jest.fn().mockRejectedValue({ code: '40001',
+    const database = { withPlatformTransaction: jest.fn().mockRejectedValue({ code: '40001',
       message: 'sensitive SQL diagnostics' }) };
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
       {} as QoreIdVerificationAdapter, {} as IntegrationRuntimeService);
@@ -169,7 +169,7 @@ describe('organization onboarding boundary', () => {
       .mockResolvedValueOnce({ rows: [{ application_id: applicationId, product_code: 'ehr',
         cac_registration_number: 'RC1234567', application_status: 'pending_verification', row_version: '1' }] })
       .mockResolvedValueOnce({ rows: [{ application_status: 'pending_verification', row_version: '2' }] });
-    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const database = { withPlatformTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn().mockResolvedValue({ state: 'verified', providerReference: '123',
       verifiedRegistrationNumber: 'RC1234567',
       cacBinding: { registrationNumber: 'RC9999999', providerRegistrationNumber: '9999999',
@@ -179,7 +179,7 @@ describe('organization onboarding boundary', () => {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
       qoreid as unknown as QoreIdVerificationAdapter,
-      { assertAvailable: jest.fn(), consumeQuota: jest.fn() } as unknown as IntegrationRuntimeService);
+      { assertAvailable: jest.fn(), consumePlatformQuota: jest.fn() } as unknown as IntegrationRuntimeService);
     await expect(service.verify(context, applicationId, 1)).rejects.toMatchObject({ code: 'CAC_IDENTITY_MISMATCH' });
     expect(query.mock.calls[1]?.[1]).toEqual([applicationId, 1, 'not_verified', '123', 'not_verified',
       null, null, null, null, null, null]);
@@ -191,13 +191,13 @@ describe('organization onboarding boundary', () => {
       .mockResolvedValueOnce({ rows: [{ application_id: applicationId, product_code: 'ehr',
         cac_registration_number: 'RC1234567', application_status: status, row_version: '1' }] })
       .mockResolvedValueOnce({ rows: [{ application_status: 'pending_verification', row_version: '2' }] });
-    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const database = { withPlatformTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn() };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
       qoreid as unknown as QoreIdVerificationAdapter,
       { assertAvailable: jest.fn().mockRejectedValue(new DomainProblem(503, 'INTEGRATION_PAUSED', 'Verification unavailable')),
-        consumeQuota: jest.fn() } as unknown as IntegrationRuntimeService);
+        consumePlatformQuota: jest.fn() } as unknown as IntegrationRuntimeService);
     await expect(service.verify(context, applicationId, 1)).rejects.toMatchObject({ code: 'INTEGRATION_PAUSED' });
     expect(qoreid.verifyCac).not.toHaveBeenCalled();
     expect(query.mock.calls.some(([sql]) => sql.includes('admin_record_organization_cac_result'))).toBe(false);
@@ -206,9 +206,9 @@ describe('organization onboarding boundary', () => {
   it('preserves a review-ready application and verified legal fields when QoreID is disabled', async () => {
     const query = jest.fn().mockResolvedValue({ rows: [{ application_id: applicationId, product_code: 'ehr',
       cac_registration_number: 'RC1234567', application_status: 'ready_for_review', row_version: '2' }] });
-    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const database = { withPlatformTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn() };
-    const integrations = { assertAvailable: jest.fn(), consumeQuota: jest.fn() };
+    const integrations = { assertAvailable: jest.fn(), consumePlatformQuota: jest.fn() };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: false } as environment.Environment);
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
       qoreid as unknown as QoreIdVerificationAdapter,
@@ -222,10 +222,10 @@ describe('organization onboarding boundary', () => {
   it('preserves a review-ready application when the normalized provider fails', async () => {
     const query = jest.fn().mockResolvedValue({ rows: [{ application_id: applicationId, product_code: 'ehr',
       cac_registration_number: 'RC1234567', application_status: 'ready_for_review', row_version: '2' }] });
-    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const database = { withPlatformTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn().mockRejectedValue(
       new DomainProblem(504, 'QOREID_TIMEOUT', 'External verification timed out')) };
-    const integrations = { assertAvailable: jest.fn(), consumeQuota: jest.fn() };
+    const integrations = { assertAvailable: jest.fn(), consumePlatformQuota: jest.fn() };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
       qoreid as unknown as QoreIdVerificationAdapter,
@@ -239,9 +239,9 @@ describe('organization onboarding boundary', () => {
     const query = jest.fn().mockResolvedValue({ rows: [{ application_id: applicationId,
       product_code: 'ehr', cac_registration_number: 'RC1234567',
       application_status: 'pending_verification', row_version: '1' }] });
-    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const database = { withPlatformTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn() };
-    const integrations = { assertAvailable: jest.fn(), consumeQuota: jest.fn().mockRejectedValue(
+    const integrations = { assertAvailable: jest.fn(), consumePlatformQuota: jest.fn().mockRejectedValue(
       new DomainProblem(429, 'VERIFICATION_QUOTA_EXCEEDED', 'Verification limit reached')) };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
@@ -258,9 +258,9 @@ describe('organization onboarding boundary', () => {
     const query = jest.fn().mockResolvedValue({ rows: [{ application_id: applicationId,
       product_code: 'ehr', cac_registration_number: 'RC1234567',
       application_status: 'ready_for_review', row_version: '2' }] });
-    const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };
+    const database = { withPlatformTransaction: jest.fn(async (_context, work) => work({ query })) };
     const qoreid = { verifyCac: jest.fn() };
-    const integrations = { assertAvailable: jest.fn(), consumeQuota: jest.fn().mockRejectedValue(
+    const integrations = { assertAvailable: jest.fn(), consumePlatformQuota: jest.fn().mockRejectedValue(
       new DomainProblem(503, 'VERIFICATION_QUOTA_UNAVAILABLE', 'Quota gate unavailable')) };
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: true } as environment.Environment);
     const service = new OrganizationApplicationsService(database as unknown as DatabaseService,

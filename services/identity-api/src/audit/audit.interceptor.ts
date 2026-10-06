@@ -41,7 +41,7 @@ export class AuditInterceptor implements NestInterceptor {
     const successAudited = failuresOnly ? responseStream : responseStream.pipe(
       mergeMap((result) => from(this.audit.record({
         correlationId: request.correlationId,
-        actorType: request.actor?.kind === 'patient' ? 'patient' : undefined,
+        actorType: this.actorType(request, action),
         actorSubject: request.actor?.subject,
         actorAccountId: request.actor?.accountId,
         actorMembershipId: request.actor?.facility?.membershipId,
@@ -60,7 +60,7 @@ export class AuditInterceptor implements NestInterceptor {
     return successAudited.pipe(
       catchError((error: unknown) => from(this.audit.record({
         correlationId: request.correlationId,
-        actorType: request.actor?.kind === 'patient' ? 'patient' : undefined,
+        actorType: this.actorType(request, action),
         actorSubject: request.actor?.subject,
         actorAccountId: request.actor?.accountId,
         actorMembershipId: request.actor?.facility?.membershipId,
@@ -84,7 +84,18 @@ export class AuditInterceptor implements NestInterceptor {
   }
 
   private purpose(request: HidRequest): string | undefined {
+    if (request.actor?.platformPermissions?.includes('platform.admin.access') && !request.actor.facility) {
+      return 'healthcare-operations';
+    }
     const value = request.query?.purpose;
     return typeof value === 'string' ? value : request.header('x-purpose-of-use');
+  }
+
+  private actorType(request: HidRequest, action: string): 'staff' | 'platform' | 'patient' | undefined {
+    if (!request.actor) return undefined;
+    if (request.actor.kind === 'patient') return 'patient';
+    if (!request.actor.facility && request.actor.platformPermissions?.includes('platform.admin.access')
+        && action.startsWith('admin.')) return 'platform';
+    return 'staff';
   }
 }

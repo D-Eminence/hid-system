@@ -3,7 +3,7 @@ import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { PlatformAdminContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { PricePricingCommandDto, ProductPricingCommandDto } from './dto/pricing-command.dto';
 
@@ -58,9 +58,9 @@ export class PricingService {
     return { data: result.rows.map((row) => this.publicPrice(row)) };
   }
 
-  async adminCatalog(context: DataAccessContext) {
+  async adminCatalog(context: PlatformAdminContext) {
     try {
-      return await this.database.withTransaction(context, async (client) => {
+      return await this.database.withPlatformTransaction(context, async (client) => {
         const products = await client.query<ProductRow>(`select * from platform.admin_list_commercial_products()`);
         const prices = await client.query<AdminPriceRow>(`select * from platform.admin_list_commercial_prices()`);
         return {
@@ -77,7 +77,7 @@ export class PricingService {
     } catch (error) { throw this.commandError(error); }
   }
 
-  async updateProduct(context: DataAccessContext, slug: string, expectedVersion: number,
+  async updateProduct(context: PlatformAdminContext, slug: string, expectedVersion: number,
     input: ProductPricingCommandDto, idempotencyKey: string) {
     this.assertKey(slug);
     const name = input.name.trim();
@@ -85,7 +85,7 @@ export class PricingService {
     const digest = requestDigest('platform.pricing.product.update',
       { slug, expectedVersion, name, status: input.status, reason });
     try {
-      return await this.database.withTransaction(context, async (client) => {
+      return await this.database.withPlatformTransaction(context, async (client) => {
         const result = await client.query<ProductCommandRow>(
           `select * from platform.admin_set_commercial_product($1,$2,$3,$4,$5,$6,$7)`,
           [slug, expectedVersion, name, input.status, reason, idempotencyKey, digest],
@@ -101,7 +101,7 @@ export class PricingService {
     } catch (error) { throw this.commandError(error); }
   }
 
-  async updatePrice(context: DataAccessContext, slug: string, priceContext: string,
+  async updatePrice(context: PlatformAdminContext, slug: string, priceContext: string,
     expectedVersion: number, input: PricePricingCommandDto, idempotencyKey: string) {
     this.assertKey(slug);
     if (!/^(core|addon|standalone|usage|setup|migration_project|enterprise)$/.test(priceContext)) {
@@ -121,7 +121,7 @@ export class PricingService {
       unit, active: input.active, reason,
     });
     try {
-      return await this.database.withTransaction(context, async (client) => {
+      return await this.database.withPlatformTransaction(context, async (client) => {
         const result = await client.query<PriceCommandRow>(
           `select * from platform.admin_set_commercial_price($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
           [slug, priceContext, expectedVersion, input.visibility, input.amountMinor,
@@ -151,9 +151,9 @@ export class PricingService {
     }
   }
 
-  private auditEvent(context: DataAccessContext, action: string, resourceId: string,
+  private auditEvent(context: PlatformAdminContext, action: string, resourceId: string,
     reason: string, details: Record<string, unknown>) {
-    return { correlationId: context.correlationId, actorType: 'staff' as const,
+    return { correlationId: context.correlationId, actorType: (context.facilityId ? 'staff' : 'platform') as 'staff' | 'platform',
       actorSubject: context.actor.subject, actorAccountId: context.actor.accountId,
       actorMembershipId: context.membershipId, organizationId: context.actor.facility?.organizationId,
       facilityId: context.facilityId, action, resourceType: 'commercial-pricing', resourceId,

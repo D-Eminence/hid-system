@@ -22,7 +22,7 @@ const context: DataAccessContext = {
 
 function harness(row: Readonly<Record<string, unknown>>) {
   const client = { query: jest.fn().mockResolvedValue({ rows: [row], rowCount: 1 }) };
-  const database = { withTransaction: jest.fn(async (_context, operation) =>
+  const database = { withPlatformTransaction: jest.fn(async (_context, operation) =>
     operation(client as unknown as PoolClient)) };
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
   const service = new AdminService(database as unknown as DatabaseService, audit as unknown as AuditService);
@@ -98,7 +98,7 @@ describe('AdminService governed commands', () => {
       }],
     }) };
     const calls: unknown[] = [];
-    const database = { withTransaction: jest.fn(async (_context, operation, options) => {
+    const database = { withPlatformTransaction: jest.fn(async (_context, operation, options) => {
       calls.push(options);
       return operation(client as unknown as PoolClient);
     }) };

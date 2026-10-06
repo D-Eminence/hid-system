@@ -10,7 +10,7 @@ export type AuditOutcome = 'success' | 'denied' | 'failure';
 
 export interface AuditEventInput {
   correlationId: string;
-  actorType?: 'staff' | 'patient' | 'system' | 'workload' | 'legacy';
+  actorType?: 'staff' | 'platform' | 'patient' | 'system' | 'workload' | 'legacy';
   actorSubject?: string;
   actorAccountId?: string;
   actorMembershipId?: string;
@@ -35,7 +35,7 @@ export interface AuditEventRow extends QueryResultRow {
   eventId: string;
   occurredAt: Date;
   correlationId: string;
-  actorType: 'staff' | 'patient' | 'system' | 'workload' | 'legacy';
+  actorType: 'staff' | 'platform' | 'patient' | 'system' | 'workload' | 'legacy';
   actorSubject: string | null;
   patientId: string | null;
   action: string;
@@ -136,7 +136,7 @@ export class AuditService {
   private values(event: AuditEventInput): unknown[] {
     return [
       event.correlationId,
-      event.actorType ?? (event.actorSubject && event.facilityId ? 'staff' : 'system'),
+      event.actorType ?? (event.actorSubject ? 'staff' : 'system'),
       event.actorSubject ?? null,
       event.actorAccountId ?? null,
       event.actorMembershipId ?? null,
@@ -167,6 +167,12 @@ export class AuditService {
     }
     if (actorType === 'system' && event.actorSubject) {
       throw new ServiceUnavailableException('A staff subject cannot be recorded as a system actor');
+    }
+    if (actorType === 'platform' && (!event.actorSubject || !event.actorAccountId
+        || event.facilityId || event.actorMembershipId || event.organizationId || event.patientId
+        || event.purposeOfUse !== 'healthcare-operations'
+        || !(event.action.startsWith('admin.') || event.action.startsWith('api.admin.')))) {
+      throw new ServiceUnavailableException('Platform audit events require an identified administration actor');
     }
   }
 }

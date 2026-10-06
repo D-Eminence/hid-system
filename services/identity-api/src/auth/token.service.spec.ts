@@ -14,6 +14,7 @@ jest.mock('jose', () => ({
 }));
 
 import { UnauthorizedException } from '@nestjs/common';
+import { jwtVerify } from 'jose';
 import type { PoolClient } from 'pg';
 import type { ActorContext } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
@@ -57,6 +58,39 @@ describe('TokenService legacy password continuity', () => {
   });
 
   afterEach(() => resetEnvironmentForTests());
+
+  it('issues a platform-only session without clinical assignments', async () => {
+    const principal = { ...actor, roles: [], permissions: [], facilities: [], facilityIds: [],
+      platformRoles: ['platform_super_admin'], platformPermissions: ['platform.admin.access'] };
+    const { service } = serviceWithUpgradeResult(true, principal);
+    const result = await service.issue({ subject: principal.subject, accountId: principal.accountId,
+      displayName: 'Administrator', facilities: [], authenticationMethod: 'local' }, { correlationId: 'platform-session-test' });
+    expect(result.actor.platformPermissions).toEqual(['platform.admin.access']);
+    expect(result.actor.facilities).toEqual([]);
+    expect(result.actor.permissions).toEqual([]);
+  });
+
+  it('rechecks current platform authority when verifying an existing signed session', async () => {
+    const { service, resolve } = serviceWithUpgradeResult(true);
+    jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: actor.subject, sid: 'session-id', jti: 'access-id',
+      token_version: 1, auth_method: 'local', actor_kind: 'staff', platform_permissions: ['platform.admin.access'] } } as never);
+    resolve.mockRejectedValueOnce(new UnauthorizedException('Role revoked'));
+    await expect(service.verify('signed-access-token')).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(resolve).toHaveBeenCalledWith(actor.subject, 'local', 'session-id');
+  });
+
+  it('refuses refresh after current platform authority is revoked, before creating a new session', async () => {
+    const { service, resolve, accountQuery, clientQuery } = serviceWithUpgradeResult(true);
+    accountQuery.mockResolvedValueOnce({ rows: [{ id: 'old-session', account_id: actor.accountId,
+      actor_subject: actor.subject, family_id: 'session-family', token_version: '1', authentication_method: 'password',
+      session_kind: 'staff', revoked_at: null, expires_at: new Date(Date.now() + 60000),
+      absolute_expires_at: new Date(Date.now() + 60000) }], rowCount: 1 } as never);
+    resolve.mockRejectedValueOnce(new UnauthorizedException('Role revoked'));
+    await expect(service.refresh('old-session.random.local', { correlationId: 'platform-refresh-test' }))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+    expect(resolve).toHaveBeenCalledWith(actor.subject, 'local', undefined);
+    expect(clientQuery).not.toHaveBeenCalled();
+  });
 
   it('uses the constrained database command instead of direct account-table UPDATE', async () => {
     const { service, clientQuery } = serviceWithUpgradeResult(true);
@@ -124,24 +158,24 @@ describe('TokenService legacy password continuity', () => {
   });
 });
 
-function serviceWithUpgradeResult(upgraded: boolean) {
+function serviceWithUpgradeResult(upgraded: boolean, principal: ActorContext = actor) {
   const clientQuery = jest.fn(async (sql: string, _values?: readonly unknown[]) => {
     if (sql.includes('auth.upgrade_legacy_password')) {
       return { rows: [{ upgraded }], rowCount: 1 };
     }
     return { rows: [], rowCount: 1 };
   });
+  const accountQuery = jest.fn(async () => ({ rows: [{ token_version: '1' }], rowCount: 1 }));
   const database = {
-    query: jest.fn(async () => ({ rows: [{ token_version: '1' }], rowCount: 1 })),
+    query: accountQuery,
     withSystemTransaction: jest.fn(async (
       _correlationId: string,
       operation: (client: PoolClient) => Promise<unknown>,
     ) => operation({ query: clientQuery } as unknown as PoolClient)),
   } as unknown as DatabaseService;
-  const currentStaff = {
-    resolve: jest.fn(async () => actor),
-  } as unknown as CurrentStaffContextService;
-  return { service: new TokenService(database, currentStaff), clientQuery };
+  const resolve = jest.fn(async () => principal);
+  const currentStaff = { resolve } as unknown as CurrentStaffContextService;
+  return { service: new TokenService(database, currentStaff), clientQuery, resolve, accountQuery };
 }
 
 function policyHash(): string {

@@ -11,7 +11,7 @@ on:
         description: Backend component name, or all
         type: choice
         default: notification-worker
-        options: [notification-worker, database-migration, novu-update, identity-api, ehr-api, lab-api, pharmacy-api, ocr-api, ocr-worker, outreach-api, notification-api, event-dispatcher, gateway, support-api, all]
+        options: [notification-worker, database-migration, novu-update, admin-update, identity-api, ehr-api, lab-api, pharmacy-api, ocr-api, ocr-worker, outreach-api, notification-api, event-dispatcher, gateway, support-api, all]
 permissions:
   contents: read
 concurrency:
@@ -73,6 +73,7 @@ jobs:
         run: |
           npm --prefix services/ehr-api ci
           node services/ehr-api/scripts/test-notification-recipient.mjs
+          node services/ehr-api/scripts/test-platform-administration.mjs
       - name: Build ARM64 image without cloud credentials
         run: node scripts/staging-backend-build.mjs build "$COMPONENT"
       - name: Install checksum-verified official Syft and Grype binaries
