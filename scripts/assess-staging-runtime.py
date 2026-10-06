@@ -15,6 +15,10 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+def policy_path(component):
+    return ROOT / 'security' / ('staging-identity-runtime-assessment.json'
+        if component == 'identity-api' else 'staging-novu-runtime-assessment.json')
+
 def run(*args):
     return subprocess.check_output(args, text=True).strip()
 
@@ -37,7 +41,7 @@ def elf_imports(data):
     return result
 
 def assess(component, image, scan, directory):
-    policy = json.loads((ROOT / 'security/staging-novu-runtime-assessment.json').read_text())
+    policy = json.loads(policy_path(component).read_text())
     if datetime.datetime.now(datetime.timezone.utc) >= datetime.datetime.fromisoformat(policy['expires_at']):
         raise RuntimeError('Runtime assessment expired; re-assess before publication')
     if component not in policy['elf_inventory']:
@@ -89,7 +93,7 @@ def assess(component, image, scan, directory):
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     output = {'schema': 'hid.image-runtime-assessment/v1', 'component': component,
               'image_id': metadata['Id'], 'assessed_at': timestamp, 'expires_at': policy['expires_at'],
-              'policy_sha256': hashlib.sha256((ROOT / 'security/staging-novu-runtime-assessment.json').read_bytes()).hexdigest(),
+              'policy_sha256': hashlib.sha256(policy_path(component).read_bytes()).hexdigest(),
               'native_inventory_sha256': hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest(),
               'native_binary_count': len(inventory), 'glibc_affected_imports': 0,
               'raw_high_matches': len(reviewed), 'reviewed_not_affected': reviewed,

@@ -1,6 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {selectComponents,componentConfig,components,assertScan} from './staging-backend-build.mjs';
+import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath} from './staging-backend-build.mjs';
+test('Identity has its own assessed image policy; old Novu evidence remains bound to its original policy',()=>{
+  assert.equal(runtimePolicyPath('identity-api'),'security/staging-identity-runtime-assessment.json');
+  assert.equal(runtimePolicyPath('notification-worker'),'security/staging-novu-runtime-assessment.json');
+  assert.equal(runtimePolicyPath('database-migration'),'security/staging-novu-runtime-assessment.json');
+});
 test('frontend-only changes do not build backend images',()=>assert.deepEqual(selectComponents(['apps/web/src/App.tsx']),[]));
 test('Novu worker changes select only its image',()=>assert.deepEqual(selectComponents(['services/notification-worker/src/worker.ts']),['notification-worker']));
 test('scoped Novu dispatch builds only worker and migration',()=>assert.deepEqual(selectComponents([],'novu-update'),['notification-worker','database-migration']));

@@ -34,6 +34,9 @@ class AssessmentGuards(unittest.TestCase):
             self.assertEqual(receipt['raw_high_matches'],1)
 
     def test_exact_reviewed_image_passes(self): self.exercise()
+    def test_identity_policy_is_separate(self):
+        self.assertEqual(a.policy_path('identity-api'), a.ROOT/'security/staging-identity-runtime-assessment.json')
+        self.assertEqual(a.policy_path('notification-worker'), a.ROOT/'security/staging-novu-runtime-assessment.json')
     def test_native_drift_blocks(self):
         with self.assertRaisesRegex(RuntimeError,'inventory changed'):self.exercise(changed_binary=True)
     def test_affected_import_blocks(self):

@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 export const components = ['identity-api','ehr-api','lab-api','pharmacy-api','ocr-api','ocr-worker',
   'outreach-api','notification-api','notification-worker','event-dispatcher','gateway','support-api','database-migration'];
 const registry = '659225405023.dkr.ecr.eu-west-1.amazonaws.com';
+export const runtimePolicyPath = c => c === 'identity-api'
+  ? 'security/staging-identity-runtime-assessment.json' : 'security/staging-novu-runtime-assessment.json';
 const run = (command,args,options={}) => (execFileSync(command,args,{encoding:'utf8',stdio:['ignore','pipe','inherit'],...options})??'').trim();
 export function selectComponents(paths, requested='changed') {
   if(requested==='novu-update') return ['notification-worker','database-migration'];
@@ -103,8 +105,8 @@ function main(){
   }
   const scan=JSON.parse(readFileSync(`${directory}/grype.json`));
   const assessment=existsSync(`${directory}/runtime-assessment.json`)?JSON.parse(readFileSync(`${directory}/runtime-assessment.json`)):null;
-  const policy=assessment?JSON.parse(readFileSync('security/staging-novu-runtime-assessment.json')):null;
-  if(assessment&&(assessment.component!==c||assessment.policy_sha256!==hashFile('security/staging-novu-runtime-assessment.json'))) throw Error('Runtime assessment policy binding changed');
+  const policy=assessment?JSON.parse(readFileSync(runtimePolicyPath(c))):null;
+  if(assessment&&(assessment.component!==c||assessment.policy_sha256!==hashFile(runtimePolicyPath(c)))) throw Error('Runtime assessment policy binding changed');
   assertScan(scan,assessment,policy);
   if(mode==='pack') {
     const image=JSON.parse(run('docker',['image','inspect',local]))[0];
