@@ -29,6 +29,17 @@ describe('TurnstileService', () => {
   const request = { token: 'opaque-turnstile-token', action: 'admin-login' as const,
     origin: 'https://admin.healthidentitydirectory.com', remoteIp: '192.0.2.4' };
 
+  it.each(['book-demo', 'organization-application', 'organization-completion'] as const)(
+    'accepts only the public action %s on the separate staging website', async (action) => {
+      process.env.HID_DEPLOYMENT_ENV = 'staging';
+      resetEnvironmentForTests();
+      result({ success: true, hostname: 'www.staging.healthidentitydirectory.com', action });
+      await expect(new TurnstileService().verify({ token: 'public-token', action,
+        origin: 'https://www.staging.healthidentitydirectory.com' })).resolves.toBeUndefined();
+      await expect(new TurnstileService().verifyLogin({ ...request,
+        origin: 'https://www.staging.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_CONTEXT_MISMATCH' });
+    });
+
   function result(value: object, status = 200) {
     global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify(value), { status }));
   }
