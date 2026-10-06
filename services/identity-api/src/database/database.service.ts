@@ -1,7 +1,8 @@
 import { Injectable, OnApplicationShutdown } from '@nestjs/common';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from 'pg';
 import { getEnvironment } from '../config/environment';
-import type { DataAccessContext } from '../common/request-context';
+import { UnauthorizedException } from '@nestjs/common';
+import type { DataAccessContext, PlatformAdminContext } from '../common/request-context';
 
 export interface TransactionOptions {
   readOnly?: boolean;
@@ -38,6 +39,26 @@ export class DatabaseService implements OnApplicationShutdown {
     operation: (client: PoolClient) => Promise<Result>,
     options: TransactionOptions = {},
   ): Promise<Result> {
+    return this.runTransaction(context, operation, options);
+  }
+
+  async withPlatformTransaction<Result>(
+    context: PlatformAdminContext,
+    operation: (client: PoolClient) => Promise<Result>,
+    options: TransactionOptions = {},
+  ): Promise<Result> {
+    if (context.actor.kind === 'patient' || !context.actor.platformPermissions?.includes('platform.admin.access')
+        || context.purposeOfUse !== 'healthcare-operations') {
+      throw new UnauthorizedException('Platform administration authority is required');
+    }
+    return this.runTransaction(context, operation, options);
+  }
+
+  private async runTransaction<Result>(
+    context: DataAccessContext | PlatformAdminContext,
+    operation: (client: PoolClient) => Promise<Result>,
+    options: TransactionOptions,
+  ): Promise<Result> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -53,9 +74,9 @@ export class DatabaseService implements OnApplicationShutdown {
            set_config('app.purpose_of_use', $5, true)`,
         [
           context.actor.subject,
-          context.facilityId,
+          context.facilityId ?? '',
           context.correlationId,
-          context.membershipId,
+          context.membershipId ?? '',
           context.purposeOfUse,
         ],
       );

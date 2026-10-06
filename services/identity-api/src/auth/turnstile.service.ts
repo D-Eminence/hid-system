@@ -37,6 +37,9 @@ const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<
     'admin.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
   }),
   staging: deploymentActions({
+    'www.staging.healthidentitydirectory.com': [
+      'book-demo', 'organization-application', 'organization-completion',
+    ],
     'staging.healthidentitydirectory.com': [
       'patient-login', 'staff-login', 'admin-login', 'patient-reset-start',
       'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application',

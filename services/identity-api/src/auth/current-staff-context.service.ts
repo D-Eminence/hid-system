@@ -34,17 +34,18 @@ export class CurrentStaffContextService {
     sessionId?: string,
     preferredFacilityId?: string,
   ): Promise<ActorContext> {
-    const identity = await this.resolvePostgres(subject, authenticationMethod);
-    if (!identity.accountId) {
-      const account = await this.database.query<{ id: string }>(
-        `select id::text from auth.accounts
+    let identity = await this.resolvePostgres(subject, authenticationMethod);
+    if (!identity) {
+      const account = await this.database.query<{ id: string; email: string | null; display_name: string | null }>(
+        `select id::text, email, display_name from auth.accounts
           where subject = $1 and status = 'active'
             and (disabled_until is null or disabled_until <= clock_timestamp())`,
         [subject],
       );
-      const accountId = account.rows[0]?.id;
-      if (!accountId) throw new UnauthorizedException('Migrated authentication account is unavailable');
-      identity.accountId = accountId;
+      const row = account.rows[0];
+      if (!row) throw new UnauthorizedException('Staff account or facility membership is inactive');
+      identity = { subject, accountId: row.id, ...(row.email ? { email: row.email } : {}),
+        displayName: row.display_name ?? subject, facilities: [], authenticationMethod };
     }
     const platformAuthority = await this.resolvePlatformAuthority(identity.accountId);
     return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
@@ -53,7 +54,7 @@ export class CurrentStaffContextService {
   private async resolvePostgres(
     subject: string,
     authenticationMethod: 'local' | 'oidc',
-  ): Promise<CredentialIdentity> {
+  ): Promise<CredentialIdentity | undefined> {
     const result = await this.database.query<StaffContextRow>(
       `select account.id::text as account_id,
               account.subject,
@@ -108,7 +109,7 @@ export class CurrentStaffContextService {
       [subject, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
     );
     const first = result.rows[0];
-    if (!first) throw new UnauthorizedException('Staff account or facility membership is inactive');
+    if (!first) return undefined;
     return {
       subject: first.subject,
       accountId: first.account_id,
@@ -126,6 +127,9 @@ export class CurrentStaffContextService {
          coalesce(array_agg(distinct role.code) filter (where role.code is not null), array[]::text[]) as roles,
          coalesce(array_agg(distinct permission.code) filter (where permission.code is not null), array[]::text[]) as permissions
        from auth.account_roles assignment
+       join auth.accounts account
+         on account.id = assignment.account_id and account.status = 'active'
+        and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
        join auth.roles role
          on role.code = assignment.role_code and role.active
        left join auth.role_permissions role_permission on role_permission.role_code = role.code
@@ -156,7 +160,9 @@ export class CurrentStaffContextService {
     const selected = facilities.find((facility) => facility.id === preferredFacilityId)
       ?? facilities.find((facility) => facility.isPrimary)
       ?? facilities[0];
-    if (!selected) throw new UnauthorizedException('No active facility membership');
+    if (!selected && !platformAuthority.permissions.includes('platform.admin.access')) {
+      throw new UnauthorizedException('Staff account or facility membership is inactive');
+    }
     return {
       id: identity.subject,
       subject: identity.subject,
@@ -164,9 +170,9 @@ export class CurrentStaffContextService {
       sessionId,
       email: identity.email,
       displayName: identity.displayName,
-      roles: selected.roles,
-      role: selected.roles[0],
-      permissions: selected.permissions,
+      roles: selected?.roles ?? [],
+      role: selected?.roles[0],
+      permissions: selected?.permissions ?? [],
       platformRoles: platformAuthority.roles,
       platformPermissions: platformAuthority.permissions,
       facilityIds: facilities.map((facility) => facility.id),

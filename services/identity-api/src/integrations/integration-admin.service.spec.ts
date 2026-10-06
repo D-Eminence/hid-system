@@ -29,11 +29,11 @@ const qoreidRow = {
 
 function harness(queryResult: (sql: string, values?: unknown[]) => { rows: unknown[] } | Promise<{ rows: unknown[] }>) {
   const client = { query: jest.fn(queryResult) };
-  const database = { withTransaction: jest.fn(async (_context, operation) =>
+  const database = { withPlatformTransaction: jest.fn(async (_context, operation) =>
     operation(client as unknown as PoolClient)) };
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
   const qoreid = { testConnection: jest.fn().mockResolvedValue(undefined) };
-  const runtime = { consumeQuota: jest.fn().mockResolvedValue(undefined) };
+  const runtime = { consumePlatformQuota: jest.fn().mockResolvedValue(undefined) };
   const service = new IntegrationAdminService(database as unknown as DatabaseService,
     audit as unknown as AuditService, qoreid as unknown as QoreIdVerificationAdapter,
     runtime as unknown as IntegrationRuntimeService);
@@ -90,7 +90,7 @@ describe('IntegrationAdminService', () => {
       availableActions: expect.arrayContaining(['audit', 'pause', 'test']),
     })]);
     expect(JSON.stringify(result)).not.toMatch(/test-client-secret|deployment-secret/);
-    expect(database.withTransaction).toHaveBeenCalledWith(context, expect.any(Function), { readOnly: true });
+    expect(database.withPlatformTransaction).toHaveBeenCalledWith(context, expect.any(Function), { readOnly: true });
   });
 
   it('projects only validated non-secret settings from database rows into the API catalog', async () => {
@@ -151,7 +151,7 @@ describe('IntegrationAdminService', () => {
     await expect(service.test(context, 'qoreid', 3, 'Routine connection check', 'qoreid-test-0001'))
       .rejects.toMatchObject({ code: 'INTEGRATION_PAUSED', status: 503 });
     expect(qoreid.testConnection).not.toHaveBeenCalled();
-    expect(runtime.consumeQuota).not.toHaveBeenCalled();
+    expect(runtime.consumePlatformQuota).not.toHaveBeenCalled();
   });
 
   it('maps a database permission denial to a safe forbidden response', async () => {
@@ -228,12 +228,12 @@ describe('IntegrationAdminService', () => {
       }] }; }
       return { rows: [] };
     });
-    runtime.consumeQuota.mockImplementation(async () => { order.push('quota'); });
+    runtime.consumePlatformQuota.mockImplementation(async () => { order.push('quota'); });
     qoreid.testConnection.mockImplementation(async () => { order.push('probe'); });
     await expect(service.test(context, 'qoreid', 3, 'Routine connection check', 'qoreid-test-0001'))
       .resolves.toEqual({ provider: 'qoreid', status: 'healthy', version: 4, replayed: false });
     expect(order).toEqual(['replay', 'read', 'quota', 'lock', 'replay', 'read', 'probe', 'record']);
-    expect(runtime.consumeQuota).toHaveBeenCalledWith(context, 'connection_test', null,
+    expect(runtime.consumePlatformQuota).toHaveBeenCalledWith(context, 'connection_test', null,
       expect.stringMatching(/^[a-f0-9]{64}$/), expect.stringMatching(/^[a-f0-9]{64}$/));
     expect(client.query).toHaveBeenCalledWith(expect.stringContaining('admin_record_integration_test'),
       expect.arrayContaining(['qoreid', 3, 'healthy', 'Routine connection check', 'qoreid-test-0001']));
@@ -249,7 +249,7 @@ describe('IntegrationAdminService', () => {
     await expect(service.test(context, 'qoreid', 3, 'Routine connection check', 'qoreid-test-0001'))
       .resolves.toEqual({ provider: 'qoreid', status: 'degraded', version: 5, replayed: true });
     expect(qoreid.testConnection).not.toHaveBeenCalled();
-    expect(runtime.consumeQuota).not.toHaveBeenCalled();
+    expect(runtime.consumePlatformQuota).not.toHaveBeenCalled();
     expect(client.query).not.toHaveBeenCalledWith(
       expect.stringContaining('admin_record_integration_test'), expect.anything());
     expect(audit.recordWithClient).not.toHaveBeenCalled();
@@ -263,7 +263,7 @@ describe('IntegrationAdminService', () => {
     await expect(service.test(context, 'qoreid', 2, 'Routine connection check', 'qoreid-test-0001'))
       .rejects.toMatchObject({ code: 'VERSION_CONFLICT', status: 409 });
     expect(qoreid.testConnection).not.toHaveBeenCalled();
-    expect(runtime.consumeQuota).not.toHaveBeenCalled();
+    expect(runtime.consumePlatformQuota).not.toHaveBeenCalled();
   });
 
   it('returns 429 before the OAuth probe when the shared quota is exhausted', async () => {
@@ -271,7 +271,7 @@ describe('IntegrationAdminService', () => {
       if (sql.includes('admin_integration_test_replay')) return { rows: [{ response: null }] };
       return listRows(sql);
     });
-    runtime.consumeQuota.mockRejectedValue(new DomainProblem(429, 'VERIFICATION_QUOTA_EXCEEDED',
+    runtime.consumePlatformQuota.mockRejectedValue(new DomainProblem(429, 'VERIFICATION_QUOTA_EXCEEDED',
       'Verification request limit reached; try again later'));
     await expect(service.test(context, 'qoreid', 3, 'Routine connection check', 'qoreid-test-0001'))
       .rejects.toMatchObject({ code: 'VERIFICATION_QUOTA_EXCEEDED', status: 429 });

@@ -15,6 +15,8 @@ const message: Message = { Body: JSON.stringify({ detail: event }), ReceiptHandl
 
 function harness(outcome: 'accepted' | 'definitive_failure' | 'unknown') {
   const repositoryValue = { claim: jest.fn().mockResolvedValue({ status: 'claimed', claimToken: 'claim-1', attemptCount: 1 }),
+    getPatientNotificationRecipient: jest.fn().mockResolvedValue({ id: event.context.patientId,
+      firstName: 'Test', lastName: 'Patient', email: 'controlled@example.test' }),
     complete: jest.fn(), fail: jest.fn().mockResolvedValue(outcome === 'unknown' ? 'retry_scheduled' : 'failed_terminal') };
   const repository: NotificationRepository = repositoryValue as unknown as NotificationRepository;
   const orchestratorValue = { trigger: jest.fn().mockResolvedValue({ outcome, provider: 'novu', safeCode: 'NOVU_TEST' }), readiness: jest.fn() };
@@ -32,6 +34,35 @@ describe('ordinary notification worker', () => {
     await worker.process(message);
     expect(repository.complete).toHaveBeenCalledWith(expect.objectContaining({ id: event.id }), 'claim-1', expect.objectContaining({ outcome: 'accepted' }));
     expect(sqs.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not trigger or acknowledge an already processed event', async () => {
+    const { worker, repository, orchestrator, sqs } = harness('accepted');
+    (repository.claim as jest.Mock).mockResolvedValueOnce({
+      status: 'already_processed',
+      attemptCount: 2,
+    });
+    await worker.process(message);
+    expect(orchestrator.trigger).not.toHaveBeenCalled();
+    expect(repository.getPatientNotificationRecipient).not.toHaveBeenCalled();
+    expect(repository.complete).not.toHaveBeenCalled();
+    expect(sqs.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a patient lookup failure retryable', async () => {
+    const { worker, repository, orchestrator, sqs } = harness('accepted');
+    (repository.getPatientNotificationRecipient as jest.Mock).mockRejectedValueOnce(new Error('db unavailable'));
+    (repository.fail as jest.Mock).mockResolvedValueOnce('retry_scheduled');
+    await worker.process(message);
+    expect(repository.fail).toHaveBeenCalledWith(
+      expect.objectContaining({ id: event.id }),
+      'claim-1',
+      { outcome: 'unknown', provider: 'novu', safeCode: 'PATIENT_RECIPIENT_LOOKUP_FAILED' },
+      true,
+      1,
+    );
+    expect(orchestrator.trigger).not.toHaveBeenCalled();
+    expect(sqs.send).not.toHaveBeenCalled();
   });
 
   it('does not acknowledge an unknown outcome so inbox/SQS retry can converge', async () => {
@@ -52,7 +83,8 @@ describe('ordinary notification worker', () => {
     const emergency = { ...event, type: 'EmergencyAccessActivated', producer: 'identity',
       payload: { consentGrantId: '40000000-0000-4000-8000-000000000001', reviewRequired: true } };
     await worker.process({ ...message, Body: JSON.stringify({ detail: emergency }) });
-    expect(orchestrator.trigger).toHaveBeenCalledWith(expect.objectContaining({ type: 'EmergencyAccessActivated' }));
+    expect(orchestrator.trigger).toHaveBeenCalledWith(expect.objectContaining({ type: 'EmergencyAccessActivated' }),
+      expect.objectContaining({ id: event.context.patientId }));
     expect(repository.complete).toHaveBeenCalledWith(expect.objectContaining({ type: 'EmergencyAccessActivated' }),
       'claim-1', expect.objectContaining({ outcome: 'accepted' }));
   });

@@ -32,7 +32,7 @@ function harness(row: Readonly<Record<string, unknown>>) {
   const client = { query: jest.fn().mockResolvedValue({ rows: [row], rowCount: 1 }) };
   const database = {
     query: jest.fn().mockResolvedValue({ rows: [row], rowCount: 1 }),
-    withTransaction: jest.fn(async (_context, operation) => operation(client as unknown as PoolClient)),
+    withPlatformTransaction: jest.fn(async (_context, operation) => operation(client as unknown as PoolClient)),
   };
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
   const service = new PricingService(database as unknown as DatabaseService, audit as unknown as AuditService);
@@ -83,7 +83,7 @@ describe('PricingService', () => {
     }, 'pricing-command-0001').catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(DomainProblem);
     expect((failure as DomainProblem).code).toBe('PRICING_AMOUNT_INVALID');
-    expect(database.withTransaction).not.toHaveBeenCalled();
+    expect(database.withPlatformTransaction).not.toHaveBeenCalled();
   });
 
   it('maps stale versions to a safe conflict response', async () => {

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Pool, type PoolConfig } from 'pg';
 import type { NotificationWorkerConfig } from './config';
 import { WORKFLOW_BY_EVENT } from './event';
-import type { ClaimedInbox, HidEventEnvelope, OrchestrationResult } from './types';
+import type { ClaimedInbox, HidEventEnvelope, NotificationRecipient, OrchestrationResult } from './types';
 
 export class NotificationRepository {
   private readonly pool: Pool;
@@ -33,6 +33,15 @@ export class NotificationRepository {
     if (!row) throw new Error('INBOX_CLAIM_MISSING');
     return { status: row.claim_status, attemptCount: row.attempt_count,
       ...(row.claim_token ? { claimToken: row.claim_token } : {}) };
+  }
+
+  async getPatientNotificationRecipient(event: HidEventEnvelope, claimToken: string): Promise<NotificationRecipient | null> {
+    const result = await this.pool.query<NotificationRecipient>(
+      `select id, first_name as "firstName", last_name as "lastName", email
+         from integration.notification_recipient_for_claim($1, $2, $3)`,
+      [event.id, claimToken, event.context.patientId],
+    );
+    return result.rows[0] ?? null;
   }
 
   async complete(event: HidEventEnvelope, claimToken: string, result: OrchestrationResult): Promise<void> {
@@ -84,6 +93,6 @@ export class NotificationRepository {
   }
 
   private idempotencyKey(event: HidEventEnvelope): string {
-    return createHash('sha256').update(`${event.id}\u001f${WORKFLOW_BY_EVENT[event.type]}`, 'utf8').digest('hex');
+    return createHash('sha256').update(event.id + '\u001f' + WORKFLOW_BY_EVENT[event.type], 'utf8').digest('hex');
   }
 }

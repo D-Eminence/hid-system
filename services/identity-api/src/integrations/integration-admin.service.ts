@@ -4,7 +4,7 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { PlatformAdminContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { QoreIdVerificationAdapter } from '../identity/qoreid-verification.adapter';
@@ -52,9 +52,9 @@ export class IntegrationAdminService {
     private readonly qoreid: QoreIdVerificationAdapter,
     private readonly runtime: IntegrationRuntimeService) {}
 
-  async list(context: DataAccessContext) {
+  async list(context: PlatformAdminContext) {
     try {
-      return await this.database.withTransaction(context, async (client) => {
+      return await this.database.withPlatformTransaction(context, async (client) => {
         const providers = await client.query<ProviderRow>('select * from platform.admin_list_integration_providers()');
         const routing = await client.query<RouteRow>('select * from platform.admin_list_integration_routes()');
         return this.catalog(providers.rows, routing.rows);
@@ -62,7 +62,7 @@ export class IntegrationAdminService {
     } catch (error) { throw this.mapError(error); }
   }
 
-  async get(context: DataAccessContext, provider: string) {
+  async get(context: PlatformAdminContext, provider: string) {
     this.assertProvider(provider);
     const catalog = await this.list(context);
     const found = catalog.items.find((item) => item.provider === provider);
@@ -70,11 +70,11 @@ export class IntegrationAdminService {
     return found;
   }
 
-  async auditHistory(context: DataAccessContext, provider: string) {
+  async auditHistory(context: PlatformAdminContext, provider: string) {
     this.assertProvider(provider);
     await this.get(context, provider);
     try {
-      return await this.database.withTransaction(context, async (client) => {
+      return await this.database.withPlatformTransaction(context, async (client) => {
         const result = await client.query<EventRow>(
           'select * from platform.admin_list_integration_events($1,$2)', [provider, 100]);
         return { items: result.rows.map((row) => ({ eventId: String(row.sequence_id), action: row.action,
@@ -85,7 +85,7 @@ export class IntegrationAdminService {
     } catch (error) { throw this.mapError(error); }
   }
 
-  async changeProvider(context: DataAccessContext, provider: string, expectedVersion: number,
+  async changeProvider(context: PlatformAdminContext, provider: string, expectedVersion: number,
     action: 'enable' | 'pause' | 'configure', reason: string,
     requestedConfiguration: Record<string, unknown> | undefined, idempotencyKey: string) {
     this.assertProvider(provider);
@@ -103,7 +103,7 @@ export class IntegrationAdminService {
     const digest = requestDigest('platform.integration.provider.update',
       { provider, expectedVersion, action, enabled, configuration, reason });
     try {
-      return await this.database.withTransaction(context, async (client) => {
+      return await this.database.withPlatformTransaction(context, async (client) => {
         const result = await client.query<ProviderCommandRow>(
           'select * from platform.admin_set_integration_provider($1,$2,$3,$4::jsonb,$5,$6,$7,$8)',
           [provider, expectedVersion, enabled, JSON.stringify(configuration), action, reason, idempotencyKey, digest]);
@@ -118,7 +118,7 @@ export class IntegrationAdminService {
     } catch (error) { throw this.mapError(error); }
   }
 
-  async changeRoute(context: DataAccessContext, capability: string, expectedVersion: number,
+  async changeRoute(context: PlatformAdminContext, capability: string, expectedVersion: number,
     action: 'select' | 'fallback', provider: string | null, reason: string, idempotencyKey: string) {
     if (!routes.has(capability) || (provider !== null && !providerKey.test(provider))) {
       throw new DomainProblem(400, 'INTEGRATION_ROUTE_INVALID', 'Provider route is invalid');
@@ -132,7 +132,7 @@ export class IntegrationAdminService {
     const digest = requestDigest('platform.integration.route.update',
       { capability, expectedVersion, action, active, fallback, reason });
     try {
-      return await this.database.withTransaction(context, async (client) => {
+      return await this.database.withPlatformTransaction(context, async (client) => {
         const result = await client.query<RouteCommandRow>(
           'select * from platform.admin_set_integration_route($1,$2,$3,$4,$5,$6,$7,$8)',
           [capability, expectedVersion, active, fallback, action, reason, idempotencyKey, digest]);
@@ -147,7 +147,7 @@ export class IntegrationAdminService {
     } catch (error) { throw this.mapError(error); }
   }
 
-  async test(context: DataAccessContext, provider: string, expectedVersion: number,
+  async test(context: PlatformAdminContext, provider: string, expectedVersion: number,
     reason: string, idempotencyKey: string) {
     if (provider !== 'qoreid') {
       throw new DomainProblem(409, 'INTEGRATION_TEST_UNSUPPORTED',
@@ -162,14 +162,14 @@ export class IntegrationAdminService {
     try {
       // This read-only preflight checks permission, idempotent replay and the
       // row version without holding a pool client during quota reservation.
-      const existing = await this.database.withTransaction(context,
+      const existing = await this.database.withPlatformTransaction(context,
         (client) => this.connectionTestPreflight(client, provider, expectedVersion, idempotencyKey, digest),
         { readOnly: true });
       if (existing) return existing;
       const keyHash = createHash('sha256').update('integration.provider.test\0')
         .update(idempotencyKey).digest('hex');
-      await this.runtime.consumeQuota(context, 'connection_test', null, keyHash, digest);
-      return await this.database.withTransaction(context, async (client) => {
+      await this.runtime.consumePlatformQuota(context, 'connection_test', null, keyHash, digest);
+      return await this.database.withPlatformTransaction(context, async (client) => {
         // Serialize equal idempotency keys across the bounded token-only probe.
         // Replays return the prior result without another provider request.
         await client.query('select pg_advisory_xact_lock(hashtextextended($1,0))',
@@ -283,10 +283,10 @@ export class IntegrationAdminService {
     }
   }
 
-  private async recordAudit(client: PoolClient, context: DataAccessContext,
+  private async recordAudit(client: PoolClient, context: PlatformAdminContext,
     action: string, resourceId: string, reason: string, details: Record<string, unknown>) {
     await this.audit.recordWithClient(client, {
-      correlationId: context.correlationId, actorType: 'staff', actorSubject: context.actor.subject,
+      correlationId: context.correlationId, actorType: context.facilityId ? 'staff' : 'platform', actorSubject: context.actor.subject,
       actorAccountId: context.actor.accountId, actorMembershipId: context.membershipId,
       organizationId: context.actor.facility?.organizationId, facilityId: context.facilityId,
       action, resourceType: 'provider-integration', resourceId, outcome: 'success',

@@ -15,8 +15,10 @@ describe('ordinary notification providers', () => {
   it('Novu sends only generic content and uses the event id for idempotency', async () => {
     const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: { transactionId: 'novu-1' } }), { status: 201 }));
     const config = readConfig({ NODE_ENV: 'test', NOVU_MODE: 'live', NOVU_API_KEY: 'server-secret' });
-    await expect(new NovuOrchestrator(config).trigger(event)).resolves.toMatchObject({ outcome: 'accepted', providerMessageId: 'novu-1' });
-    const init = fetchMock.mock.calls[0][1]!;
+    await expect(new NovuOrchestrator(config).trigger(event, { id: event.context.patientId,
+      firstName: 'Test', lastName: 'Patient', email: 'controlled@example.test' }))
+      .resolves.toMatchObject({ outcome: 'accepted', providerMessageId: 'novu-1' });
+    const init = fetchMock.mock.calls[1][1]!;
     expect(new Headers(init.headers).get('idempotency-key')).toBe(event.id);
     const body = JSON.parse(String(init.body));
     expect(body.payload).toEqual({ message: 'You have a new update in HID. Sign in securely to view it.' });

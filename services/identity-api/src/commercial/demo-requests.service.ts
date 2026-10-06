@@ -3,7 +3,7 @@ import { Injectable } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext, HidRequest } from '../common/request-context';
+import type { PlatformAdminContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CreateDemoRequestDto, ListDemoRequestsDto, UpdateDemoRequestStatusDto } from './demo-request.dto';
 
@@ -69,9 +69,9 @@ export class DemoRequestsService {
     return { accepted: true, replayed: !inserted };
   }
 
-  async list(context: DataAccessContext, filters: ListDemoRequestsDto) {
+  async list(context: PlatformAdminContext, filters: ListDemoRequestsDto) {
     const limit = filters.limit ?? 50;
-    return this.database.withTransaction(context, async (client) => {
+    return this.database.withPlatformTransaction(context, async (client) => {
       const result = await client.query<DemoRequestRow>(
         `select ${DEMO_PROJECTION} from identity.demo_requests
          where ($1::text is null or status = $1)
@@ -85,9 +85,9 @@ export class DemoRequestsService {
     });
   }
 
-  async transition(context: DataAccessContext, requestId: string, expectedVersion: number,
+  async transition(context: PlatformAdminContext, requestId: string, expectedVersion: number,
     input: UpdateDemoRequestStatusDto) {
-    return this.database.withTransaction(context, async (client) => {
+    return this.database.withPlatformTransaction(context, async (client) => {
       const current = await client.query<DemoRequestRow>(
         `select ${DEMO_PROJECTION} from identity.demo_requests where id = $1 for update`, [requestId]);
       const row = current.rows[0];
@@ -120,11 +120,11 @@ export class DemoRequestsService {
       createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
   }
 
-  private adminAudit(context: DataAccessContext, action: string, resourceType: string,
+  private adminAudit(context: PlatformAdminContext, action: string, resourceType: string,
     resourceId?: string, details?: Record<string, unknown>) {
     return {
       correlationId: context.correlationId,
-      actorType: 'staff' as const,
+      actorType: context.facilityId ? 'staff' as const : 'platform' as const,
       actorSubject: context.actor.subject,
       actorAccountId: context.actor.accountId,
       actorMembershipId: context.membershipId,

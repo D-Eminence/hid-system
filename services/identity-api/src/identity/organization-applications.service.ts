@@ -3,7 +3,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { QueryResultRow } from 'pg';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext, HidRequest } from '../common/request-context';
+import type { PlatformAdminContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
@@ -74,9 +74,9 @@ export class OrganizationApplicationsService {
     return { accepted: true };
   }
 
-  async list(context: DataAccessContext, status?: string) {
+  async list(context: PlatformAdminContext, status?: string) {
     try {
-      const result = await this.database.withTransaction(context, (client) =>
+      const result = await this.database.withPlatformTransaction(context, (client) =>
         client.query<ApplicationRow>('select * from identity.admin_list_organization_applications($1)', [status ?? null]),
         { readOnly: true });
       return { items: result.rows.map((row) => ({
@@ -110,10 +110,10 @@ export class OrganizationApplicationsService {
     }
   }
 
-  async verify(context: DataAccessContext, applicationId: string, expectedVersion: number) {
+  async verify(context: PlatformAdminContext, applicationId: string, expectedVersion: number) {
     let secret: ApplicationSecretRow;
     try {
-      const result = await this.database.withTransaction(context, (client) =>
+      const result = await this.database.withPlatformTransaction(context, (client) =>
         client.query<ApplicationSecretRow>('select * from identity.admin_get_organization_application($1)', [applicationId]),
         { readOnly: true });
       const row = result.rows[0];
@@ -146,7 +146,7 @@ export class OrganizationApplicationsService {
         throw new DomainProblem(503, 'QOREID_DISABLED', 'External verification is not enabled');
       }
       await this.integrations.assertAvailable('qoreid', 'provider_cac');
-      await this.integrations.consumeQuota(context, 'application_cac', applicationId);
+      await this.integrations.consumePlatformQuota(context, 'application_cac', applicationId);
       const result = await this.qoreid.verifyCac(secret.cac_registration_number);
       reference = result.providerReference ?? null;
       if (result.state === 'verified') {
@@ -208,7 +208,7 @@ export class OrganizationApplicationsService {
     }
 
     try {
-      const recorded = await this.database.withTransaction(context, (client) =>
+      const recorded = await this.database.withPlatformTransaction(context, (client) =>
         client.query<{ application_status: string; row_version: string }>(
           'select * from identity.admin_record_organization_cac_result($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
           [applicationId, expectedVersion, outcome, reference, failure,
@@ -228,13 +228,13 @@ export class OrganizationApplicationsService {
     }
   }
 
-  async approve(context: DataAccessContext, applicationId: string, expectedVersion: number,
+  async approve(context: PlatformAdminContext, applicationId: string, expectedVersion: number,
     input: ApproveOrganizationApplicationDto) {
     if (Boolean(input.existingOrganizationId) !== Boolean(input.existingFacilityId)) {
       throw new DomainProblem(400, 'ORGANIZATION_LINK_INVALID', 'Both existing organization and facility IDs are required');
     }
     try {
-      const result = await this.database.withTransaction(context, (client) =>
+      const result = await this.database.withPlatformTransaction(context, (client) =>
         client.query<{ organization_id: string; facility_id: string; first_admin_account_id: string;
           row_version: string; organization_reused: boolean }>(
           'select * from identity.admin_approve_organization_application($1,$2,$3,$4,$5)',
@@ -251,9 +251,9 @@ export class OrganizationApplicationsService {
     }
   }
 
-  async reject(context: DataAccessContext, applicationId: string, expectedVersion: number, reason: string) {
+  async reject(context: PlatformAdminContext, applicationId: string, expectedVersion: number, reason: string) {
     try {
-      const result = await this.database.withTransaction(context, (client) =>
+      const result = await this.database.withPlatformTransaction(context, (client) =>
         client.query<{ application_status: string; row_version: string }>(
           'select * from identity.admin_reject_organization_application($1,$2,$3)',
           [applicationId, expectedVersion, reason]));

@@ -51,6 +51,12 @@ export interface DataAccessContext {
   authorization?: string;
 }
 
+/** Administration authority has no implied facility or clinical membership. */
+export interface PlatformAdminContext extends Omit<DataAccessContext, 'facilityId' | 'membershipId'> {
+  facilityId?: string;
+  membershipId?: string;
+}
+
 export function requireRequestContext(request: HidRequest, suppliedPurpose?: string): DataAccessContext {
   if (!request.actor || !request.facilityId || !request.correlationId) {
     throw new Error('Request context was not established by security guards');

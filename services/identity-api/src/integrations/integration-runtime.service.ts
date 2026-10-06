@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { randomUUID } from 'node:crypto';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { DataAccessContext, PlatformAdminContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 
 interface RuntimeProviderRow extends QueryResultRow {
@@ -81,6 +81,15 @@ export class IntegrationRuntimeService implements OnModuleInit, OnModuleDestroy 
     requestSha256: string | null = null): Promise<void> {
     try {
       await this.database.withTransaction(context, (client) =>
+        this.consumeQuotaWithClient(client, operation, targetId, null, idempotencyHash, requestSha256));
+    } catch (error) { throw this.quotaError(error); }
+  }
+
+  async consumePlatformQuota(context: PlatformAdminContext,
+    operation: 'connection_test' | 'application_cac', targetId: string | null = null,
+    idempotencyHash: string | null = null, requestSha256: string | null = null): Promise<void> {
+    try {
+      await this.database.withPlatformTransaction(context, (client) =>
         this.consumeQuotaWithClient(client, operation, targetId, null, idempotencyHash, requestSha256));
     } catch (error) { throw this.quotaError(error); }
   }
