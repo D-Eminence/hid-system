@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsEmail, IsIn, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsEmail, IsIn, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
 const products = ['ehr', 'migrate', 'laboratory', 'pharmacy'] as const;
@@ -30,6 +30,9 @@ export class StartProviderEnrollmentDto {
 }
 
 export class VerifyProviderEnrollmentDto {
+  @IsUUID('4')
+  challengeId!: string;
+
   @Matches(/^[0-9]{6}$/)
   code!: string;
 }
