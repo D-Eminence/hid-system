@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0060",
-    "count": 60,
+    "last": "0065",
+    "count": 62,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -337,6 +337,14 @@
       {
         "name": "0060_patient_access_pin_profile_status.sql",
         "sha256": "1a0b5ca25f815dcd8714cdd569e8fe336b48d8a8c53362a8e42dbe986d407f50"
+      },
+      {
+        "name": "0064_provider_cac_self_service_onboarding.sql",
+        "sha256": "6d744c1a7d464d219bdcdca69050100c967e457e64c617b0a01857fe556a1493"
+      },
+      {
+        "name": "0065_provider_cac_self_service_constraints.sql",
+        "sha256": "c4db9dce22150327a9c1fad11db1f41e849cfd90d8581d3c99a053d61a5217db"
       }
     ]
   },
