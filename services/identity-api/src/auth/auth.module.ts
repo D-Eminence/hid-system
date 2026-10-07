@@ -22,6 +22,6 @@ import { IntegrationModule } from '../integrations/integration.module';
   imports: [TurnstileModule, IntegrationModule],
   controllers: [AuthController, OtpController, PatientSelfController],
   providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService],
-  exports: [TokenService, SecurityGuard, WorkloadAuthService, TurnstileModule, GoogleAuthenticationService],
+  exports: [AuthService, TokenService, SecurityGuard, WorkloadAuthService, TurnstileModule, GoogleAuthenticationService],
 })
 export class AuthModule {}
