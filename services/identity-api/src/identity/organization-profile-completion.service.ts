@@ -3,6 +3,7 @@ import { createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { QueryResultRow } from 'pg';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
+import * as argon2 from 'argon2';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
@@ -115,6 +116,60 @@ export class OrganizationProfileCompletionService {
       if (!row) throw this.invalidSession();
       return this.profile(row);
     } catch (error) { throw this.databaseProblem(error); }
+  }
+
+  async activate(token: string | undefined, password: string, correlationId: string) {
+    if (typeof password !== 'string' || password.length < 12 || password.length > 256) {
+      throw new DomainProblem(400, 'PASSWORD_INVALID', 'Password must be 12–256 characters');
+    }
+    const sessionHash = this.sessionHash(token);
+    const passwordHash = await argon2.hash(password, {
+      type: argon2.argon2id,
+      memoryCost: 65_536,
+      timeCost: 3,
+      parallelism: 1,
+    });
+    try {
+      const result = await this.database.withSystemTransaction(correlationId, (client) =>
+        client.query<{
+          organization_id: string;
+          facility_id: string;
+          account_id: string;
+          row_version: string;
+          hid_subject: string;
+        }>(
+          'select * from identity.activate_self_service_organization_application($1,$2)',
+          [sessionHash, passwordHash],
+        ));
+      const row = result.rows[0];
+      if (!row) throw new DomainProblem(503, 'PROVIDER_ENROLLMENT_ACTIVATION_UNAVAILABLE',
+        'Provider account activation is temporarily unavailable');
+      return {
+        organizationId: row.organization_id,
+        facilityId: row.facility_id,
+        accountId: row.account_id,
+        email: await this.activationEmail(sessionHash, correlationId),
+      };
+    } catch (error) {
+      throw this.databaseProblem(error);
+    }
+  }
+
+  private async activationEmail(sessionHash: string, correlationId: string): Promise<string> {
+    const result = await this.database.withSystemTransaction(correlationId, (client) =>
+      client.query<{ administrator_email: string }>(
+        `select application.administrator_email
+           from identity.organization_profile_completion_challenges challenge
+           join identity.organization_applications application
+             on application.id = challenge.application_id
+          where challenge.session_hmac = $1
+          limit 1`,
+        [sessionHash],
+      ));
+    const email = result.rows[0]?.administrator_email;
+    if (!email) throw new DomainProblem(503, 'PROVIDER_ENROLLMENT_ACTIVATION_UNAVAILABLE',
+      'Provider account activation is temporarily unavailable');
+    return email;
   }
 
   private profile(row: CompletionProfileRow) {
