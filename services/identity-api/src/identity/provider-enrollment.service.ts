@@ -31,26 +31,36 @@ export class ProviderEnrollmentService {
       throw new DomainProblem(503, 'QOREID_DISABLED', 'External verification is not enabled');
     }
 
-    const applicationId = await this.database.withSystemTransaction(request.correlationId, async (client) => {
-      const result = await client.query<{ application_id: string }>(
-        'select identity.submit_self_service_organization_application($1,$2,$3,$4,$5) as application_id',
-        [input.productCode, input.organizationType, input.cacRegistrationNumber,
-          input.administratorName, input.administratorEmail.trim().toLowerCase()],
-      );
-      return result.rows[0]?.application_id;
-    });
+    let applicationId: string | undefined;
+    try {
+      applicationId = await this.database.withSystemTransaction(request.correlationId, async (client) => {
+        const result = await client.query<{ application_id: string }>(
+          'select identity.submit_self_service_organization_application($1,$2,$3,$4,$5) as application_id',
+          [input.productCode, input.organizationType, input.cacRegistrationNumber,
+            input.administratorName, input.administratorEmail.trim().toLowerCase()],
+        );
+        return result.rows[0]?.application_id;
+      });
+    } catch (error) {
+      throw this.mapDatabaseError(error);
+    }
     if (!applicationId) {
       throw new DomainProblem(503, 'PROVIDER_ENROLLMENT_UNAVAILABLE',
         'Provider enrollment is temporarily unavailable');
     }
 
-    const current = await this.database.withSystemTransaction(request.correlationId, async (client) => {
-      const result = await client.query<ApplicationRow>(
-        'select * from identity.public_get_organization_application($1,$2,$3)',
-        [input.cacRegistrationNumber, input.administratorEmail.trim().toLowerCase(), input.productCode],
-      );
-      return result.rows[0];
-    });
+    let current: ApplicationRow | undefined;
+    try {
+      current = await this.database.withSystemTransaction(request.correlationId, async (client) => {
+        const result = await client.query<ApplicationRow>(
+          'select * from identity.public_get_organization_application($1,$2,$3)',
+          [input.cacRegistrationNumber, input.administratorEmail.trim().toLowerCase(), input.productCode],
+        );
+        return result.rows[0];
+      });
+    } catch (error) {
+      throw this.mapDatabaseError(error);
+    }
 
     if (!current || current.application_id !== applicationId) {
       throw new DomainProblem(409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW',
@@ -105,6 +115,29 @@ export class ProviderEnrollmentService {
     }
 
     return this.startEmailVerification(input, request);
+  }
+
+  private mapDatabaseError(error: unknown): DomainProblem {
+    if (error instanceof DomainProblem) return error;
+    const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+    if (code === '23514') {
+      return new DomainProblem(409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW',
+        'This provider organization requires manual resolution');
+    }
+    if (code === '23505') {
+      return new DomainProblem(409, 'PROVIDER_EMAIL_ALREADY_REGISTERED',
+        'The administrator email is already associated with an HID account');
+    }
+    if (code === '40001') {
+      return new DomainProblem(409, 'VERSION_CONFLICT',
+        'Provider enrollment changed; start again');
+    }
+    if (code === '42501') {
+      return new DomainProblem(403, 'PROVIDER_ENROLLMENT_DENIED',
+        'Provider enrollment is not available');
+    }
+    return new DomainProblem(503, 'PROVIDER_ENROLLMENT_UNAVAILABLE',
+      'Provider enrollment is temporarily unavailable');
   }
 
   private startEmailVerification(input: StartProviderEnrollmentDto, request: HidRequest) {
