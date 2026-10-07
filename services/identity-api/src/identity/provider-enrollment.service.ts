@@ -68,35 +68,40 @@ export class ProviderEnrollmentService {
       return this.startEmailVerification(input, request);
     }
 
-    let result;
     try {
       await this.integrations.assertAvailable('qoreid', 'provider_cac');
-      result = await this.database.withSystemTransaction(request.correlationId, async (client) => {
-        await this.integrations.consumeQuotaWithClient(client, 'application_cac', applicationId);
-        const providerResult = await this.qoreid.verifyCac(input.cacRegistrationNumber);
-        if (providerResult.state !== 'verified') return providerResult;
-        const binding = verifiedCacBinding(input.cacRegistrationNumber, providerResult);
-        if (!binding || !providerResult.providerReference) {
-          throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
-            'External verification returned an invalid response');
-        }
-        await client.query(
+      await this.database.withSystemTransaction(request.correlationId, (client) =>
+        this.integrations.consumeQuotaWithClient(client, 'application_cac', applicationId));
+
+      const providerResult = await this.qoreid.verifyCac(input.cacRegistrationNumber);
+      if (providerResult.state !== 'verified') {
+        await this.database.withSystemTransaction(request.correlationId, (client) =>
+          client.query(
+            'select * from identity.public_record_organization_cac_result($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+            [applicationId, Number(current.row_version), providerResult.state,
+              providerResult.providerReference ?? null, null, null, null, null, null, null],
+          ));
+        throw new DomainProblem(422, 'CAC_NOT_VERIFIED',
+          'The CAC could not be verified. Check the registration number and try again.');
+      }
+
+      const binding = verifiedCacBinding(input.cacRegistrationNumber, providerResult);
+      if (!binding || !providerResult.providerReference) {
+        throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
+          'External verification returned an invalid response');
+      }
+
+      await this.database.withSystemTransaction(request.correlationId, (client) =>
+        client.query(
           'select * from identity.public_record_organization_cac_result($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
           [applicationId, Number(current.row_version), 'verified', providerResult.providerReference,
             binding.registrationNumber, binding.companyName, binding.entityType,
             binding.registrationDate, binding.address, binding.registryStatus],
-        );
-        return providerResult;
-      });
+        ));
     } catch (error) {
       if (error instanceof DomainProblem) throw error;
       throw new DomainProblem(503, 'PROVIDER_CAC_VERIFICATION_UNAVAILABLE',
         'CAC verification is temporarily unavailable');
-    }
-
-    if (result.state !== 'verified') {
-      throw new DomainProblem(422, 'CAC_NOT_VERIFIED',
-        'The CAC could not be verified. Check the registration number and try again.');
     }
 
     return this.startEmailVerification(input, request);
