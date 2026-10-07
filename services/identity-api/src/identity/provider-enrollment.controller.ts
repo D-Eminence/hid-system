@@ -53,7 +53,7 @@ export class ProviderEnrollmentController {
     this.assertOrigin(request);
     this.assertAccountless(request);
     const result = await this.completion.verify(
-      this.challengeId(request, input),
+      input.challengeId,
       input.code,
       request.correlationId,
     );
@@ -91,18 +91,6 @@ export class ProviderEnrollmentController {
       actor: result.actor,
       expiresAt: result.expiresAt.toISOString(),
     };
-  }
-
-  private challengeId(request: HidRequest, input: VerifyProviderEnrollmentDto): string {
-    // The challenge ID is intentionally supplied in a short-lived signed
-    // enrollment context, not accepted from the body. It is the only public
-    // identifier needed before the completion cookie exists.
-    const header = request.header('x-hid-enrollment-challenge');
-    if (!header) {
-      throw new DomainProblem(400, 'ENROLLMENT_CHALLENGE_REQUIRED',
-        'The enrollment verification challenge is required');
-    }
-    return header;
   }
 
   private enrollmentCookie(request: HidRequest): string | undefined {
