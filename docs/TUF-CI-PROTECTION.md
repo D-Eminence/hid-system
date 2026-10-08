@@ -220,7 +220,7 @@ It also runs the socket-only synthetic PostgreSQL migration/restore rehearsal
 and retains its bounded summary, excluding backups and raw SQL logs. The
 isolated historical upstream job retains reference-client evidence only; it
 has no release output or cloud authority. Production tooling and the broker
-use the independently pinned Go 1.26.8 profile and a symbol-level vulnerability
+use the independently pinned Go 1.26.9 profile and a symbol-level vulnerability
 gate; Go 1.25.0 remains only in that historical job.
 
 The publisher's credential-free tooling job uploads
