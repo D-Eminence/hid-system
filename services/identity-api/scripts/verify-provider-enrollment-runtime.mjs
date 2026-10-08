@@ -1,25 +1,23 @@
 #!/usr/bin/env node
 // Accountless provider CAC self-enrollment over HTTP, executed as the exact
 // Identity API runtime role against the owned disposable synthetic rehearsal
-// only. External boundaries are local stubs (Cloudflare Siteverify, QoreID HTTP,
-// notification delivery); no network or cloud call is made. All values are
-// synthetic.
-//
-// Known Phase 2 gap: platform.consume_qoreid_quota('application_cac') accepts
-// only an authenticated platform reviewer, so the accountless start cannot yet
-// charge QoreID quota and stops before the registry call. Until that quota
-// policy is decided, this verifier asserts that refusal and then records the
-// verified CAC evidence through the same runtime-role command the service uses
-// after a successful QoreID check. Every other step runs unmodified.
+// only. The real DatabaseService, controllers, services, Turnstile verifier and
+// QoreID adapter run; only the outbound boundaries are local stubs (Cloudflare
+// Siteverify, the QoreID HTTP API, notification delivery). No network or cloud
+// call is made. All values are synthetic.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
 assert(process.env.NODE_ENV === 'test' && socket?.startsWith('/tmp/hid-tuf-migration.')
   && process.env.PGDATABASE === 'hid_rehearsal', 'Only the owned synthetic rehearsal is supported');
+assert(process.env.OTP_HMAC_KEY_B64, 'The rehearsal OTP HMAC key is required to check keyed network digests');
+// Run in a disposable copy so synthetic organizations, quota counters and the
+// enabled QoreID control never leak into later rehearsal steps.
+const isolated = `hid_rehearsal_provider_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
 // The provider portal is served from the staging site host, which is the host
 // Turnstile accepts the provider-enrollment action for.
 const origin = 'https://staging.healthidentitydirectory.com';
@@ -29,7 +27,13 @@ Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'st
   IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: 'public-synthetic-ehr-workload-token',
   TURNSTILE_MODE: 'required', TURNSTILE_SECRET_KEY: 'example-turnstile-secret',
   QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'example-qoreid-client',
-  QOREID_CLIENT_SECRET: 'example-qoreid-secret' });
+  QOREID_CLIENT_SECRET: 'example-qoreid-secret',
+  // Every Identity API connection runs as the deployed runtime role.
+  DATABASE_URL: `postgresql://${process.env.PGUSER ?? 'postgres'}@localhost/${isolated}?host=${encodeURIComponent(socket)}`
+    + `&options=${encodeURIComponent('-c role=hid_identity_api_runtime')}`,
+  // As in main.ts: only the loopback test client is a trusted reverse proxy, so
+  // X-Forwarded-For carries the server-observed client address.
+  TRUST_PROXY_CIDRS: '127.0.0.1/32,::1/128' });
 delete process.env.AUTH_COOKIE_DOMAIN;
 for (const key of ['NIN_LOOKUP_HMAC_KEY_B64', 'NIN_ENCRYPTION_KEY_B64', 'METAMAP_CLIENT_ID',
   'METAMAP_CLIENT_SECRET', 'QOREID_API_KEY']) delete process.env[key];
@@ -51,6 +55,7 @@ const { AuthController } = load('auth/auth.controller.ts');
 const { GoogleAuthenticationService } = load('auth/google-authentication.service.ts');
 const { AuthSessionAuditService } = load('auth/auth-session-audit.service.ts');
 const { AuditService } = load('audit/audit.service.ts');
+const { AuditInterceptor } = load('audit/audit.interceptor.ts');
 const { SecurityGuard } = load('auth/security.guard.ts');
 const { WorkloadAuthService } = load('auth/workload-auth.service.ts');
 const { TurnstileService } = load('auth/turnstile.service.ts');
@@ -59,9 +64,11 @@ const { IntegrationRuntimeService } = load('integrations/integration-runtime.ser
 const { ProviderEnrollmentController } = load('identity/provider-enrollment.controller.ts');
 const { ProviderEnrollmentService } = load('identity/provider-enrollment.service.ts');
 const { OrganizationProfileCompletionService } = load('identity/organization-profile-completion.service.ts');
+const { AdminOrganizationApplicationsController } = load('identity/organization-applications.controller.ts');
+const { OrganizationApplicationsService } = load('identity/organization-applications.service.ts');
 const { QoreIdVerificationAdapter, QOREID_ADAPTER_CONFIGURATION, QOREID_FETCH } =
   load('identity/qoreid-verification.adapter.ts');
-const { ProblemDetailsFilter } = load('common/problem.ts');
+const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
 const { getEnvironment } = load('config/environment.ts');
 
 // Cloudflare Siteverify stub. A token encodes the outcome the real service
@@ -83,44 +90,41 @@ const turnstile = (action = 'provider-enrollment', host = siteHost) => `ok|${act
 
 // QoreID HTTP stub behind the real adapter. NOT_VERIFIED returns a negative
 // registry check; every other number returns a complete verified CAC record.
-const NOT_VERIFIED = 'RC9900062299';
-const companies = new Map();
-const qoreidRequests = [];
+const NOT_VERIFIED = 'RC9900063299';
+const qoreidCacLookups = [];
+let qoreidTokens = 0;
 const qoreidFetch = async (url, init) => {
-  qoreidRequests.push(String(url));
-  if (String(url).endsWith('/token')) {
+  const path = new URL(String(url)).pathname;
+  if (path === '/token') {
+    qoreidTokens += 1;
     return new Response(JSON.stringify({ accessToken: 'synthetic-qoreid-token', expiresIn: 7200,
       tokenType: 'Bearer' }), { status: 200 });
   }
+  assert.equal(path, '/v2/ng/identities/cac-basic', `Unexpected QoreID request to ${path}`);
+  assert.equal(init.headers.authorization, 'Bearer synthetic-qoreid-token');
   const { regNumber } = JSON.parse(String(init.body));
+  qoreidCacLookups.push(regNumber);
   if (regNumber === NOT_VERIFIED) {
     return new Response(JSON.stringify({ id: 990001, summary: { cac_check: 'not_verified' },
       status: { state: 'complete', status: 'not_verified' }, cac: {} }), { status: 200 });
   }
-  return new Response(JSON.stringify({ id: 990000 + companies.size, summary: { cac_check: 'verified' },
+  return new Response(JSON.stringify({ id: 990000 + qoreidCacLookups.length, summary: { cac_check: 'verified' },
     status: { state: 'complete', status: 'verified' },
-    cac: { rcNumber: regNumber.replace(/^(RC|BN|IT)/, ''), companyName: companies.get(regNumber),
+    cac: { rcNumber: regNumber.replace(/^(RC|BN|IT)/, ''), companyName: `Runtime Clinic ${regNumber} Ltd`,
       companyType: 'Private Company Limited by Shares', registrationDate: '01-Jan-21',
       headOfficeAddress: '1 Synthetic Registry Road, Lagos', status: 'Active' } }), { status: 200 });
 };
 
-// Run in a disposable copy so synthetic organizations and the enabled QoreID
-// control never leak into later rehearsal steps.
-const isolated = `hid_rehearsal_provider_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+// The digest the Identity API must store for a client network (IPv4 address
+// or IPv6 /64): keyed with the server-only OTP HMAC key, never the address.
+const networkKey = Buffer.from(process.env.OTP_HMAC_KEY_B64, 'base64');
+const digest = network => createHmac('sha256', networkKey)
+  .update('provider-self-service-cac-network\0', 'utf8').update(network, 'utf8').digest('hex');
+
 const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database: 'postgres', max: 1 });
 await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
-const pool = new Pool({ host: socket, user: process.env.PGUSER, database: isolated, max: 5 });
-const asRuntime = async (correlation, operation) => {
-  const client = await pool.connect();
-  try { await client.query('begin'); await client.query('set local role hid_identity_api_runtime');
-    if (correlation) await client.query("select set_config('app.actor_subject','system:auth',true),set_config('app.correlation_id',$1,true)", [correlation]);
-    const result = await operation(client); await client.query('commit'); return result;
-  } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
-};
-const database = {
-  query: (sql, values) => asRuntime(null, client => client.query(sql, values)),
-  withSystemTransaction: (correlation, operation) => asRuntime(correlation, operation),
-};
+// Fixture and assertion connection (database owner), never used by the API.
+const owner = new Pool({ host: socket, user: process.env.PGUSER, database: isolated, max: 2 });
 // Local delivery stub: captures the emailed code exactly as notification-api would receive it.
 const codes = new Map();
 const recipients = [];
@@ -134,12 +138,14 @@ const notification = {
 let app;
 try {
   // Fixture: the platform has enabled QoreID CAC verification (an admin action).
-  await pool.query("update platform.integration_providers set enabled=true, row_version=row_version+1 where provider='qoreid'");
-  const module = await Test.createTestingModule({ controllers: [AuthController, ProviderEnrollmentController],
-    providers: [{ provide: DatabaseService, useValue: database }, TokenService, LocalAuthProvider,
+  await owner.query("update platform.integration_providers set enabled=true, row_version=row_version+1 where provider='qoreid'");
+  const module = await Test.createTestingModule({
+    controllers: [AuthController, ProviderEnrollmentController, AdminOrganizationApplicationsController],
+    providers: [DatabaseService, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
       AuditService, WorkloadAuthService, TurnstileService, IntegrationRuntimeService,
-      ProviderEnrollmentService, OrganizationProfileCompletionService, QoreIdVerificationAdapter,
+      ProviderEnrollmentService, OrganizationProfileCompletionService, OrganizationApplicationsService,
+      QoreIdVerificationAdapter,
       { provide: QOREID_ADAPTER_CONFIGURATION, useValue: { baseUrl: 'https://api.qoreid.com',
         clientId: 'example-qoreid-client', clientSecret: 'example-qoreid-secret', timeoutMs: 2000 } },
       { provide: QOREID_FETCH, useValue: qoreidFetch },
@@ -147,14 +153,24 @@ try {
       { provide: GoogleAuthenticationService, useValue: {
         login: async () => { throw new Error('Google exchange is outside the provider-enrollment verifier'); },
       } }] }).compile();
+  const runtimeRole = (await module.get(DatabaseService).query('select current_user as role')).rows[0].role;
+  assert.equal(runtimeRole, 'hid_identity_api_runtime');
   app = module.createNestApplication({ logger: false });
+  app.getHttpAdapter().getInstance().set('trust proxy',
+    getEnvironment().TRUST_PROXY_CIDRS.split(',').map(cidr => cidr.trim()));
   app.use(require('cookie-parser')());
   app.use((req, _res, next) => { req.correlationId = randomUUID(); next(); });
   app.setGlobalPrefix('api/v1');
-  app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }));
+  // The same request validation main.ts installs.
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, forbidUnknownValues: true,
+    transform: true, transformOptions: { enableImplicitConversion: false }, stopAtFirstError: false,
+    exceptionFactory: errors => new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.',
+      errors.map(error => ({ field: error.property, messages: Object.values(error.constraints ?? {}) }))) }));
   app.useGlobalFilters(new ProblemDetailsFilter());
+  // The same global guard and request audit interceptor AppModule installs.
   app.useGlobalGuards(new SecurityGuard(module.get(Reflector), module.get(TokenService),
     module.get(AuditService), module.get(DatabaseService)));
+  app.useGlobalInterceptors(new AuditInterceptor(module.get(Reflector), module.get(AuditService)));
   await app.init();
   const http = request(app.getHttpServer());
   const cookieName = getEnvironment().AUTH_COOKIE_NAME;
@@ -162,8 +178,10 @@ try {
   const enrollment = input => ({ productCode: 'ehr', organizationType: 'clinic',
     administratorName: 'Synthetic Provider Admin', turnstileAction: 'provider-enrollment',
     turnstileToken: turnstile(), ...input });
-  const start = (body, extra = {}) => {
-    let call = http.post('/api/v1/identity/provider-enrollments').set('Origin', origin);
+  const MAIN = '198.51.100.10';
+  const start = (body, network = MAIN, extra = {}) => {
+    let call = http.post('/api/v1/identity/provider-enrollments').set('Origin', origin)
+      .set('X-Forwarded-For', network);
     for (const [name, value] of Object.entries(extra)) call = call.set(name, value);
     return call.send(body);
   };
@@ -171,62 +189,75 @@ try {
     assert.equal(response.status, status, `${code}: ${JSON.stringify(response.body)}`);
     if (code) assert.equal(response.body.code, code, JSON.stringify(response.body));
   };
-  const failures = {};
+  const application = async cac => (await owner.query(`select id, status, verification_result,
+      approval_mode from identity.organization_applications where cac_registration_number=$1`, [cac])).rows[0];
+  const networkCounters = async network => Object.fromEntries((await owner.query(
+    `select bucket_period, attempt_count from platform.self_service_cac_quota_counters
+      where network_digest=$1 and bucket_start >= date_trunc('day', statement_timestamp())
+        and (bucket_period='day' or bucket_start=date_trunc('hour', statement_timestamp()))`,
+    [digest(network)])).rows.map(row => [row.bucket_period, row.attempt_count]));
+  const email = label => `provider-${label}-${randomUUID().slice(0, 8)}@example.invalid`;
+  const security = {};
+  const quota = {};
 
-  // Request context: Origin, Turnstile action and token, CAC format and registry result.
-  const cacA = 'RC9900062201'; companies.set(cacA, 'Runtime Enrollment Clinic Ltd');
-  const emailA = `provider-a-${randomUUID().slice(0, 8)}@example.invalid`;
-  expectProblem(await http.post('/api/v1/identity/provider-enrollments')
+  // 2-3, 6, 19-20. Origin, Turnstile and CAC format are refused before any
+  // application is written or QoreID is contacted.
+  const cacA = 'RC9900063201'; const emailA = email('a');
+  expectProblem(await http.post('/api/v1/identity/provider-enrollments').set('X-Forwarded-For', MAIN)
     .send(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA })), 403, 'ORIGIN_DENIED');
+  expectProblem(await http.post('/api/v1/identity/provider-enrollments').set('Origin', 'https://attacker.example')
+    .set('X-Forwarded-For', MAIN).send(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA })),
+  403, 'ORIGIN_DENIED');
+  security.origin = 'ORIGIN_DENIED';
   expectProblem(await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA,
-    turnstileAction: 'staff-login' })), 400);
-  failures.invalid_turnstile_action_in_body = 400;
+    turnstileAction: 'staff-login' })), 400, 'VALIDATION_FAILED');
+  security.turnstile_action_in_body = 'VALIDATION_FAILED';
   expectProblem(await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA,
     turnstileToken: turnstile('patient-enrollment') })), 403, 'TURNSTILE_ACTION_MISMATCH');
-  failures.turnstile_token_for_another_action = 'TURNSTILE_ACTION_MISMATCH';
+  security.turnstile_action_mismatch = 'TURNSTILE_ACTION_MISMATCH';
   expectProblem(await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA,
     turnstileToken: 'replayed' })), 403, 'TURNSTILE_EXPIRED_OR_REPLAYED');
-  expectProblem(await start(enrollment({ cacRegistrationNumber: 'XX12', administratorEmail: emailA })), 400);
-  failures.invalid_cac_format = 400;
+  security.turnstile_replay = 'TURNSTILE_EXPIRED_OR_REPLAYED';
+  for (const malformed of ['XX12', 'RC12', 'RC12345678901234567890123']) {
+    expectProblem(await start(enrollment({ cacRegistrationNumber: malformed, administratorEmail: emailA })),
+      400, 'VALIDATION_FAILED');
+  }
+  security.malformed_cac = 'VALIDATION_FAILED';
+  assert.equal(qoreidCacLookups.length, 0, 'A refused request reached QoreID');
+  assert.equal((await owner.query('select count(*)::int n from identity.organization_applications')).rows[0].n, 0,
+    'A refused request created an application');
 
-  // Known gap (see header): the accountless start is refused at the QoreID
-  // quota before any registry call, and the application stays unverified.
-  const quotaRefused = await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA }));
-  expectProblem(quotaRefused, 403, 'PERMISSION_DENIED');
-  assert.equal(qoreidRequests.length, 0, 'QoreID must not be called before quota is charged');
-  const pending = await pool.query(
-    'select status, verification_result from identity.organization_applications where cac_registration_number=$1', [cacA]);
-  assert.deepEqual(pending.rows[0], { status: 'pending_verification', verification_result: null });
-  const knownGaps = { accountless_qoreid_quota: 'PERMISSION_DENIED before the registry call' };
-  // Record verified evidence exactly as the service does after a successful
-  // QoreID check, as the runtime role in the system enrollment context.
-  const recordVerifiedCac = (cac, email) => asRuntime(`provider-runtime-cac-${cac}`, async client => {
-    const current = (await client.query('select * from identity.public_get_organization_application($1,$2,$3)',
-      [cac, email, 'ehr'])).rows[0];
-    assert(current, `No submitted application for ${cac}`);
-    await client.query('select * from identity.public_record_organization_cac_result($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
-      [current.application_id, Number(current.row_version), 'verified', cac.replace(/^RC/, ''), cac,
-        companies.get(cac), 'Private Company Limited by Shares', '2021-01-01',
-        '1 Synthetic Registry Road, Lagos', 'active']);
-  });
-  await recordVerifiedCac(cacA, emailA);
+  // 4, 7. A registry-rejected CAC reaches QoreID through the accountless quota
+  // and returns the application error; the application stays unverified.
+  const emailRejected = email('rejected');
+  expectProblem(await start(enrollment({ cacRegistrationNumber: NOT_VERIFIED, administratorEmail: emailRejected })),
+    422, 'CAC_NOT_VERIFIED');
+  assert.deepEqual(qoreidCacLookups, [NOT_VERIFIED]);
+  assert.deepEqual(await application(NOT_VERIFIED), { id: (await application(NOT_VERIFIED)).id,
+    status: 'pending_verification', verification_result: 'not_verified', approval_mode: 'self_service' });
+  security.qoreid_rejected_cac = 'CAC_NOT_VERIFIED';
 
-  // 1-4. Accountless start, verified CAC, emailed OTP, OTP verification.
+  // 1, 4-5, 9. A valid CAC reaches QoreID, is recorded as verified, and the
+  // emailed code is sent. The lookup is charged to the keyed client network.
   const started = await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA }));
   assert.equal(started.status, 200, `start failed: ${JSON.stringify(started.body)}`);
   assert.equal(started.body.accepted, true);
+  assert.deepEqual(qoreidCacLookups, [NOT_VERIFIED, cacA]);
+  assert(qoreidTokens >= 1, 'The QoreID adapter did not authenticate');
   const challengeId = started.body.challengeId;
   assert.match(challengeId, /^[0-9a-f-]{36}$/);
   assert(codes.has(challengeId), 'The email OTP was not delivered for the started challenge');
   assert.equal(recipients.at(-1), emailA);
-  const recorded = await pool.query(
-    'select status, verification_result, approval_mode from identity.organization_applications where cac_registration_number=$1', [cacA]);
-  assert.deepEqual(recorded.rows[0], { status: 'ready_for_review', verification_result: 'verified',
-    approval_mode: 'self_service' });
+  const recordedA = await application(cacA);
+  assert.deepEqual({ ...recordedA, id: undefined }, { id: undefined, status: 'ready_for_review',
+    verification_result: 'verified', approval_mode: 'self_service' });
+  assert.deepEqual(await networkCounters(MAIN), { hour: 2, day: 2 });
+
+  // 9-10. Wrong code fails; the emailed code verifies and sets the enrollment cookie.
   const wrongCode = codes.get(challengeId) === '000000' ? '111111' : '000000';
   expectProblem(await http.post('/api/v1/identity/provider-enrollments/verify').set('Origin', origin)
     .send({ challengeId, code: wrongCode }), 401, 'ORGANIZATION_COMPLETION_CODE_INVALID');
-  failures.invalid_otp = 'ORGANIZATION_COMPLETION_CODE_INVALID';
+  security.wrong_otp = 'ORGANIZATION_COMPLETION_CODE_INVALID';
   const verified = await http.post('/api/v1/identity/provider-enrollments/verify').set('Origin', origin)
     .send({ challengeId, code: codes.get(challengeId) });
   assert.equal(verified.status, 200, `verify failed: ${JSON.stringify(verified.body)}`);
@@ -235,11 +266,11 @@ try {
   assert(enrollmentCookie, 'OTP verification did not set the enrollment cookie');
   assert.match(verified.headers['set-cookie'].join(';'), /HttpOnly/i);
 
-  // 5-10. Activation creates the organization, facility, product, account and
-  // org-admin membership, and signs the administrator in, all as the runtime role.
-  expectProblem(await http.post('/api/v1/identity/provider-enrollments/activate').set('Origin', origin)
-    .send({ password: 'Synthetic-Provider-Password-2026' }), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
+  // 12-16. Activation creates the organization, facility, EHR product, account
+  // and org-admin membership, and signs the administrator in.
   const password = 'Synthetic-Provider-Password-2026';
+  expectProblem(await http.post('/api/v1/identity/provider-enrollments/activate').set('Origin', origin)
+    .send({ password }), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
   const activated = await http.post('/api/v1/identity/provider-enrollments/activate').set('Origin', origin)
     .set('Cookie', enrollmentCookie).send({ password });
   assert.equal(activated.status, 200, `activation failed: ${JSON.stringify(activated.body)}`);
@@ -249,10 +280,11 @@ try {
   assert(activated.headers['x-csrf-token'], 'Activation did not return a CSRF token for the new session');
   const sessionCookies = cookies(activated).filter(value => value.startsWith(cookieName));
   assert(sessionCookies.some(value => value.startsWith(`${cookieName}=`)), 'Activation did not sign the provider in');
-  const created = (await pool.query(`
-    select o.name organization, f.lifecycle_status facility_status, p.product_code product,
-      a.email, a.status account_status, s.default_role staff_role, m.membership_role, m.active membership_active,
-      r.role_code, app.status application_status, app.reviewed_by_account_id reviewer,
+  const created = (await owner.query(`
+    select o.name organization, f.lifecycle_status facility_status, f.active facility_active,
+      p.product_code product, a.email, a.status account_status, s.default_role staff_role,
+      m.membership_role, m.active membership_active, r.role_code, app.status application_status,
+      app.reviewed_by_account_id reviewer, app.facility_id = f.id application_facility,
       (select count(*)::int from identity.organization_cac_registrations c where c.organization_id=o.id) cac_bindings
     from identity.organizations o
     join identity.facilities f on f.organization_id=o.id and f.id=$2
@@ -263,12 +295,12 @@ try {
     join auth.account_roles r on r.account_id=a.id and r.facility_id=f.id
     join identity.organization_applications app on app.organization_id=o.id
     where o.id=$1`, [organizationId, facilityId, accountId])).rows;
-  assert.deepEqual(created, [{ organization: 'Runtime Enrollment Clinic Ltd', facility_status: 'verified',
-    product: 'ehr', email: emailA, account_status: 'active', staff_role: 'org_admin',
+  assert.deepEqual(created, [{ organization: `Runtime Clinic ${cacA} Ltd`, facility_status: 'verified',
+    facility_active: true, product: 'ehr', email: emailA, account_status: 'active', staff_role: 'org_admin',
     membership_role: 'org_admin', membership_active: true, role_code: 'org_admin',
-    application_status: 'approved', reviewer: null, cac_bindings: 1 }]);
+    application_status: 'approved', reviewer: null, application_facility: true, cac_bindings: 1 }]);
 
-  // 11. The new provider is authenticated: the activation session works, the
+  // 17. The new provider is authenticated: the activation session works, the
   // facility can be selected, and a fresh staff login succeeds.
   const sessionHeader = sessionCookies.join('; ');
   const session = await http.get('/api/v1/auth/session').set('Cookie', sessionHeader);
@@ -282,51 +314,152 @@ try {
   assert.equal(login.status, 200, `provider login failed: ${JSON.stringify(login.body)}`);
   assert.equal(login.body.actor.accountId, accountId);
 
-  // An authenticated caller cannot use the accountless flow.
-  const cacB = 'RC9900062202'; companies.set(cacB, 'Runtime Expiry Clinic Ltd');
-  const emailB = `provider-b-${randomUUID().slice(0, 8)}@example.invalid`;
-  expectProblem(await start(enrollment({ cacRegistrationNumber: cacB, administratorEmail: emailB }),
+  // 18. A signed-in caller cannot use the accountless flow.
+  const cacB = 'RC9900063202'; const emailB = email('b');
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacB, administratorEmail: emailB }), MAIN,
     { Cookie: sessionHeader }), 409, 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT');
-  expectProblem(await start(enrollment({ cacRegistrationNumber: cacB, administratorEmail: emailB }),
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacB, administratorEmail: emailB }), MAIN,
     { Authorization: 'Bearer synthetic' }), 409, 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT');
-  failures.authenticated_caller = 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT';
+  security.signed_in_caller = 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT';
 
-  // The consumed enrollment session cannot activate again, and the CAC is now taken.
+  // The consumed enrollment session cannot activate again.
   expectProblem(await http.post('/api/v1/identity/provider-enrollments/activate').set('Origin', origin)
     .set('Cookie', enrollmentCookie).send({ password }), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
-  failures.replayed_activation = 'ORGANIZATION_COMPLETION_SESSION_INVALID';
-  const duplicate = await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA }));
-  assert.equal(duplicate.status, 409, `duplicate CAC: ${JSON.stringify(duplicate.body)}`);
-  const duplicateOther = await start(enrollment({ cacRegistrationNumber: cacA,
-    administratorEmail: `provider-c-${randomUUID().slice(0, 8)}@example.invalid` }));
-  assert.equal(duplicateOther.status, 409, `duplicate CAC, other admin: ${JSON.stringify(duplicateOther.body)}`);
-  failures.duplicate_cac = [duplicate.body.code, duplicateOther.body.code];
+  security.replayed_activation = 'ORGANIZATION_COMPLETION_SESSION_INVALID';
 
-  // An expired OTP cannot verify even with the correct code.
-  expectProblem(await start(enrollment({ cacRegistrationNumber: cacB, administratorEmail: emailB })),
-    403, 'PERMISSION_DENIED');
-  await recordVerifiedCac(cacB, emailB);
+  // 8. A registered CAC is sent to review, for its own or another
+  // administrator email, without a new registry lookup.
+  const lookupsBeforeDuplicate = qoreidCacLookups.length;
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA })),
+    409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: email('c') })),
+    409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  assert.equal(qoreidCacLookups.length, lookupsBeforeDuplicate, 'A duplicate CAC reached QoreID');
+  security.duplicate_cac = 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW';
+
+  // 11. An expired code cannot verify, even with the right digits. Starting
+  // again reuses the verified evidence: no second lookup and no quota charge.
   const startedB = await start(enrollment({ cacRegistrationNumber: cacB, administratorEmail: emailB }));
   assert.equal(startedB.status, 200, `second start failed: ${JSON.stringify(startedB.body)}`);
-  await pool.query("update identity.organization_profile_completion_challenges set expires_at=clock_timestamp()-interval '1 second' where id=$1",
+  assert.deepEqual(await networkCounters(MAIN), { hour: 3, day: 3 });
+  await owner.query("update identity.organization_profile_completion_challenges set expires_at=clock_timestamp()-interval '1 second' where id=$1",
     [startedB.body.challengeId]);
   expectProblem(await http.post('/api/v1/identity/provider-enrollments/verify').set('Origin', origin)
     .send({ challengeId: startedB.body.challengeId, code: codes.get(startedB.body.challengeId) }),
   401, 'ORGANIZATION_COMPLETION_CODE_INVALID');
-  failures.expired_otp = 'ORGANIZATION_COMPLETION_CODE_INVALID';
+  security.expired_otp = 'ORGANIZATION_COMPLETION_CODE_INVALID';
+  const lookupsBeforeRestart = qoreidCacLookups.length;
+  const restartedB = await start(enrollment({ cacRegistrationNumber: cacB, administratorEmail: emailB }));
+  assert.equal(restartedB.status, 200, `restart failed: ${JSON.stringify(restartedB.body)}`);
+  assert.notEqual(restartedB.body.challengeId, startedB.body.challengeId);
+  assert.equal(qoreidCacLookups.length, lookupsBeforeRestart, 'Verified evidence was looked up again');
+  assert.deepEqual(await networkCounters(MAIN), { hour: 3, day: 3 });
 
-  const audits = (await pool.query(
+  // 21. One application gets three lookups a day, whichever network asks.
+  for (const network of ['198.51.100.11', '198.51.100.12']) {
+    expectProblem(await start(enrollment({ cacRegistrationNumber: NOT_VERIFIED, administratorEmail: emailRejected }),
+      network), 422, 'CAC_NOT_VERIFIED');
+  }
+  const lookupsBeforeApplicationLimit = qoreidCacLookups.length;
+  const applicationLimited = await start(enrollment({ cacRegistrationNumber: NOT_VERIFIED,
+    administratorEmail: emailRejected }), '198.51.100.13');
+  expectProblem(applicationLimited, 429, 'VERIFICATION_QUOTA_EXCEEDED');
+  assert.equal(qoreidCacLookups.length, lookupsBeforeApplicationLimit, 'A refused lookup reached QoreID');
+  assert.deepEqual(await networkCounters('198.51.100.13'), {}, 'A refused lookup was charged to its network');
+  quota.application_daily_limit = { limit: 3, refusedOnAttempt: 4, status: 429 };
+
+  // 21. Five lookups an hour per IPv4 client; new CACs and emails do not reset it.
+  const IPV4 = '203.0.113.50';
+  for (let index = 1; index <= 5; index += 1) {
+    const response = await start(enrollment({ cacRegistrationNumber: `RC99000633${String(index).padStart(2, '0')}`,
+      administratorEmail: email(`v4-${index}`) }), IPV4);
+    assert.equal(response.status, 200, `IPv4 lookup ${index}: ${JSON.stringify(response.body)}`);
+  }
+  const lookupsBeforeNetworkLimit = qoreidCacLookups.length;
+  const networkLimited = await start(enrollment({ cacRegistrationNumber: 'RC9900063306',
+    administratorEmail: email('v4-6') }), IPV4);
+  expectProblem(networkLimited, 429, 'VERIFICATION_QUOTA_EXCEEDED');
+  assert.equal(qoreidCacLookups.length, lookupsBeforeNetworkLimit, 'A refused lookup reached QoreID');
+  assert.doesNotMatch(JSON.stringify(networkLimited.body), /network|hour|digest|exhausted|counter|203\.0\.113/i,
+    'The public quota refusal exposed internal quota details');
+  assert.deepEqual({ ...(await application('RC9900063306')), id: undefined }, { id: undefined,
+    status: 'pending_verification', verification_result: null, approval_mode: 'self_service' });
+  assert.deepEqual(await networkCounters(IPV4), { hour: 5, day: 5 });
+  const requestAudit = (await owner.query(`select count(*)::int n from audit.events
+    where action='api.identity.provider-enrollment.start' and outcome='failure' and source_ip=$1::inet`, [IPV4])).rows[0].n;
+  assert.equal(requestAudit, 1, 'The refused request was not audited with its server-observed address');
+  quota.ipv4_hourly_limit = { limit: 5, refusedOnAttempt: 6, status: 429 };
+
+  // 21. IPv6 clients are limited per /64, so rotating the interface ID does
+  // not reset the quota; another /64 is a different client network.
+  for (let index = 1; index <= 5; index += 1) {
+    const response = await start(enrollment({ cacRegistrationNumber: `RC99000634${String(index).padStart(2, '0')}`,
+      administratorEmail: email(`v6-${index}`) }), `2001:db8:aa:bb::${index.toString(16)}`);
+    assert.equal(response.status, 200, `IPv6 lookup ${index}: ${JSON.stringify(response.body)}`);
+  }
+  expectProblem(await start(enrollment({ cacRegistrationNumber: 'RC9900063406',
+    administratorEmail: email('v6-6') }), '2001:db8:aa:bb:ffff:ffff:ffff:fffe'), 429, 'VERIFICATION_QUOTA_EXCEEDED');
+  assert.deepEqual(await networkCounters('2001:db8:aa:bb::/64'), { hour: 5, day: 5 });
+  const otherPrefix = await start(enrollment({ cacRegistrationNumber: 'RC9900063407',
+    administratorEmail: email('v6-7') }), '2001:db8:aa:bc::1');
+  assert.equal(otherPrefix.status, 200, `another /64: ${JSON.stringify(otherPrefix.body)}`);
+  quota.ipv6_prefix_hourly_limit = { prefix: 64, limit: 5, refusedOnAttempt: 6, status: 429 };
+
+  // Every accountless quota decision is audited, without CAC, email or address.
+  const decisions = (await owner.query(`select outcome, details from audit.events
+    where action='identity.organization.self-service.cac-quota' order by sequence_id`)).rows;
+  assert.equal(decisions.filter(row => row.outcome === 'success').length, qoreidCacLookups.length);
+  assert.deepEqual(decisions.filter(row => row.outcome === 'denied').map(row => row.details.exhaustedLimit),
+    ['application_day', 'network_hour', 'network_hour']);
+  assert(decisions.every(row => /^[a-f0-9]{64}$/.test(row.details.networkDigest)
+    && !/RC99000|example\.invalid|203\.0\.113|198\.51\.100|2001:db8/.test(JSON.stringify(row.details))));
+  quota.audited_decisions = decisions.length;
+
+  // 22. The authenticated reviewer path is unchanged: a platform reviewer's
+  // CAC check is charged to the 0049 account quota, not to any network.
+  await owner.query(`insert into auth.account_roles (id, account_id, role_code, scope_type, grant_reason)
+    values ($1, $2, 'platform_super_admin', 'platform', 'Synthetic platform reviewer for the runtime verifier')`,
+  [randomUUID(), accountId]);
+  const reviewed = (await owner.query(`insert into identity.organization_applications (product_code,
+      organization_name, organization_type, cac_registration_number, administrator_name, administrator_email, status)
+    values ('ehr', 'Reviewed Runtime Clinic', 'clinic', 'RC9900063501', 'Reviewed Applicant', $1, 'pending_verification')
+    returning id, row_version`, [email('reviewed')])).rows[0];
+  const networkRowsBefore = (await owner.query('select coalesce(sum(attempt_count),0)::int n from platform.self_service_cac_quota_counters')).rows[0].n;
+  const reviewer = await http.post('/api/v1/auth/login').set('Origin', origin)
+    .send({ email: emailA, password, turnstileAction: 'staff-login', turnstileToken: turnstile('staff-login') });
+  assert.equal(reviewer.status, 200, `reviewer login failed: ${JSON.stringify(reviewer.body)}`);
+  const reviewerCookies = cookies(reviewer).join('; ');
+  const reviewerCsrf = reviewer.headers['x-csrf-token'];
+  const verifiedByReviewer = await http.post(`/api/v1/admin/organization-applications/${reviewed.id}/verify-cac`)
+    .set('Origin', origin).set('Cookie', reviewerCookies).set('x-csrf-token', reviewerCsrf)
+    .set('x-facility-id', facilityId).set('If-Match', String(reviewed.row_version)).send({});
+  assert.equal(verifiedByReviewer.status, 200, `reviewer CAC check failed: ${JSON.stringify(verifiedByReviewer.body)}`);
+  assert.equal(qoreidCacLookups.at(-1), 'RC9900063501');
+  const reviewerCounters = (await owner.query(`select scope_type, bucket_period, attempt_count
+    from platform.qoreid_quota_counters where operation='application_cac'
+      and ((scope_type='account' and scope_id=$1) or (scope_type='target' and scope_id=$2))
+    order by scope_type, bucket_period`, [accountId, reviewed.id])).rows;
+  assert.deepEqual(reviewerCounters, [{ scope_type: 'account', bucket_period: 'day', attempt_count: 1 },
+    { scope_type: 'account', bucket_period: 'hour', attempt_count: 1 },
+    { scope_type: 'target', bucket_period: 'day', attempt_count: 1 }]);
+  assert.equal((await owner.query('select coalesce(sum(attempt_count),0)::int n from platform.self_service_cac_quota_counters')).rows[0].n,
+    networkRowsBefore, 'The reviewer path charged a network quota');
+  assert.equal((await owner.query(`select count(*)::int n from audit.events
+    where action='identity.organization.self-service.cac-quota' and resource_id=$1`, [reviewed.id])).rows[0].n, 0);
+
+  const audits = (await owner.query(
     "select count(*)::int n from audit.events where action='identity.organization.self-service.activate' and organization_id=$1",
     [organizationId])).rows[0].n;
   assert.equal(audits, 1);
-  process.stdout.write(JSON.stringify({ status: 'passed', runtimeRole: 'hid_identity_api_runtime',
-    flow: ['start', 'verified_cac_evidence_via_runtime_command', 'email_otp', 'otp_verification', 'activation', 'organization',
-      'facility', 'org_admin_membership', 'account', 'product', 'authenticated_session',
-      'facility_selection', 'staff_login'],
-    failures, knownGaps, siteverifyCalls: siteverifyRequests.length }) + '\n');
+  process.stdout.write(JSON.stringify({ status: 'passed', runtimeRole,
+    flow: ['origin', 'turnstile', 'accountless_start', 'qoreid_cac_lookup', 'verified_cac', 'email_otp',
+      'otp_verification', 'activation', 'organization', 'facility', 'org_admin_membership', 'account',
+      'ehr_product', 'authenticated_session', 'facility_selection', 'staff_login'],
+    security, quota, qoreidCacLookups: qoreidCacLookups.length,
+    reviewerPath: 'account_quota_unchanged', siteverifyCalls: siteverifyRequests.length }) + '\n');
 } finally {
   await app?.close();
-  await pool.end();
+  await owner.end();
   await maintenance.query(`drop database if exists ${isolated} with (force)`);
   await maintenance.end();
 }
