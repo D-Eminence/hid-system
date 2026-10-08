@@ -172,11 +172,16 @@ are unchanged. Staging enablement is a configuration step outside this change.
 `0063_patient_account_deletion_lifecycle.sql`, `0064_patient_emergency_contacts.sql`,
 `0065_patient_access_safety.sql`, contiguous after the Phase 2 ledger (`0062`).
 
-The Phase 2 migration `0062_provider_cac_self_service_constraints.sql` fails on a
-fresh database (`record "constraint_row" is not assigned yet`): its loop variable
-shadows the query alias. This is a pre-existing Phase 2 defect, also visible as
-the failed `migration-rehearsal` gate on the Phase 2 pull request. Phase 3 does
-not modify `0062` or its checksum; the fix belongs on the Phase 2 branch.
+The Phase 2 migration `0062_provider_cac_self_service_constraints.sql` could not
+apply on any database (`record "constraint_row" is not assigned yet`). Its `DO`
+block declared a record variable with the same name as the `pg_constraint` alias
+in its `FOR` query. Under the default `plpgsql.variable_conflict = error`, the
+qualified references therefore bound to the unassigned record. It was fixed on
+the Phase 2 branch, where it belongs, by renaming only the loop variable. Only
+the `0062` checksum changed in the ledger and manifest, and
+`organization-onboarding.integration.sql` now asserts that only the self-service
+review check remains. Phase 3 picks the fix up by merging
+`phase-2-provider-reconciliation`; no Phase 3 migration changed.
 
 ## 8. Verification
 
@@ -187,10 +192,34 @@ not modify `0062` or its checksum; the fix belongs on the Phase 2 branch.
   in the synthetic migration rehearsal (local delivery stub only).
 - Unit tests in identity-api and notification-api.
 
-## 9. Remaining decisions
+## 9. Follow-up decisions (not made in Phase 3)
 
-- Legal hold authority and procedure; any non-`retain` disposition (DATABASE.md §15).
-- Product default for the deletion waiting period (configured 14 days).
-- Re-enrolling a new login for a patient whose login was deleted.
-- Whether verified emergency contacts remain eligible after the patient's login is deleted (currently: retained, because they protect the patient, not the login).
-- Production and staging enablement of emergency-contact delivery, SMS sender/template approval, and provider configuration.
+None of these is decided by this change. Each row records the current,
+fail-safe behavior and any existing project decision that already constrains
+it. Nothing here should be read as a product, legal, or compliance decision.
+
+| # | Follow-up | Decision type | Existing authoritative reference | Current behavior until decided |
+|---|---|---|---|---|
+| F1 | Deletion waiting-period default | Product/policy | None. | Configurable (`platform.patient_account_deletion_settings.waiting_period`), default 14 days, allowed 0-90 days. This is a cancellation window, not a legal period. |
+| F2 | Re-enrollment of a new login after deletion | Product/policy | `DECISIONS.md` "A patient may exist without a login" (Identity relationship model); ADR-036 lists re-enrollment as separate. Neither decides it. | The deleted account is terminal. `identity.patients.account_id` keeps pointing to the closed tombstone. No re-enrollment path exists. |
+| F3 | Emergency-contact eligibility after login deletion | Product/policy | None. | Verified contacts are retained and stay eligible for break-glass alerts, because they protect the patient, not the login. |
+| F4 | Notification suppression for deleted logins | Product/policy; external infrastructure (Novu) | None for deleted logins. Novu subscriber identity is described in `STAGING_NOTIFICATION_SETUP.md`. | Device registrations are revoked and new patient inbox items are not enqueued for deleted accounts. The external Novu subscriber is neither deleted nor suppressed. |
+| F5 | Legal hold ownership, placement, and release | Legal/compliance | `DATABASE.md` §3.5 ("Legal hold overrides lifecycle deletion") and §15 gate 6. | `platform.legal_holds` exists and an active hold blocks completion. No runtime role can place or release a hold. |
+| F6 | Retention periods for patient, clinical, consent, audit, and notification records | Legal/compliance | `DATABASE.md` §15 gate 6 (record-class retention requires decision-owner approval). The 730-day figure in the TUF/release documents applies only to immutable release evidence, not patient records. | Every record class is `retain` with `automatic_purge = false`. No period is set. |
+| F7 | Erasure or de-identification policy, including NIN de-binding | Legal/compliance | `DATABASE.md` §3.5 (erasure creates a governed case and record-class decision) and §15 gate 6; ADR-036. | Not implemented. Any purge or de-identification schema requires explicit governance approval before DDL. |
+| F8 | Approval of production emergency-contact notification | Legal/compliance; external infrastructure | The production EventBridge exclusion of `EmergencyAccessActivated.v1` (`infra/aws/src/hid-regional-stack.ts`, asserted in `infra/aws/test/infrastructure.test.ts`) and `STAGING_NOTIFICATION_SETUP.md` (staging emergency-event delivery must be verified separately). | Disabled. Identity API and notification-api refuse to start with `EMERGENCY_CONTACT_DELIVERY_ENABLED=true` in production. Staging enablement, SMS sender/template approval, and provider configuration are separate, authorized steps. |
+
+## 10. Pre-existing dependency audit failures
+
+Phase 3 changes no `package.json`, `package-lock.json`, `.npmrc`, or Go module
+file in either repository. The same CI audit commands give identical results on
+the Phase 2 base and the Phase 3 head:
+
+| Audit (CI step) | Result on Phase 2 base and Phase 3 head | Existing record |
+|---|---|---|
+| `npm --prefix infra/aws audit --audit-level=moderate` | high: `brace-expansion` (bundled in `aws-cdk-lib`) | `RELEASE_FINDINGS.md` RF-005 (open; keep the gate, no suppression) |
+| `npm --prefix infra/cloudflare audit --audit-level=moderate` | high: `sharp` via `miniflare`/`wrangler` | None |
+| EHR and shared packages (`apps/ehr`) | high: `source-map-js` | None |
+| Health-id `npm audit --audit-level=high` | 3 critical, 4 high, 1 moderate (`next`, `vitest`, `tinypool`, `undici`, `sharp`, `source-map-js`, `brace-expansion`, `@vitest/mocker`) | None |
+
+They are left unchanged. Dependency upgrades are outside Phase 3.
