@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Patch, 
 import type { Response } from 'express';
 import { requireAdminContext } from '../admin/admin-context';
 import { TurnstileService } from '../auth/turnstile.service';
-import { AuditAction, AuditFailuresOnly, FacilityOptional, Public, RequirePermissions } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, Public, PlatformScope, RequirePermissions } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -116,7 +116,7 @@ export class PublicOrganizationProfileCompletionController {
 }
 
 @Controller('admin/organization-applications')
-@FacilityOptional()
+@PlatformScope()
 @AuditFailuresOnly()
 export class AdminOrganizationApplicationsController {
   constructor(private readonly applications: OrganizationApplicationsService) {}

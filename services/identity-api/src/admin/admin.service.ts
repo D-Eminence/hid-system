@@ -3,8 +3,9 @@ import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { PlatformAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
+import { platformAuditActor } from './admin-context';
 import type { AccountStatusCommandDto, FacilityStatusCommandDto,
   PlatformRoleCommandDto, RevokeSessionsCommandDto } from './dto/admin-command.dto';
 import type { ListFacilitiesDto, ListIdentityReviewsDto,
@@ -39,7 +40,7 @@ interface SessionCommandRow extends CommandRow { account_id: string; revoked_cou
 export class AdminService {
   constructor(private readonly database: DatabaseService, private readonly audit: AuditService) {}
 
-  session(context: DataAccessContext) {
+  session(context: PlatformAccessContext) {
     return {
       actor: {
         accountId: context.actor.accountId,
@@ -53,7 +54,7 @@ export class AdminService {
   }
 
 
-  async platformControls(context: DataAccessContext) {
+  async platformControls(context: PlatformAccessContext) {
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query(`select * from platform.admin_list_controls()`);
       return result.rows.map((row) => ({ controlKey: row.control_key, enabled: row.enabled, reason: row.reason,
@@ -61,7 +62,7 @@ export class AdminService {
     }, { readOnly: true });
   }
 
-  async setPlatformControl(context: DataAccessContext, input: PlatformControlCommandDto, expectedVersion: number) {
+  async setPlatformControl(context: PlatformAccessContext, input: PlatformControlCommandDto, expectedVersion: number) {
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query(`select * from platform.admin_set_control($1,$2,$3,$4)`,
         [input.controlKey, input.enabled, expectedVersion, input.reason.trim()]);
@@ -74,7 +75,7 @@ export class AdminService {
     });
   }
 
-  async overview(context: DataAccessContext) {
+  async overview(context: PlatformAccessContext) {
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query<{
         registered_patients: string; facilities: string; verified_facilities: string;
@@ -92,7 +93,7 @@ export class AdminService {
     }, { readOnly: true });
   }
 
-  async listFacilities(context: DataAccessContext, query: ListFacilitiesDto) {
+  async listFacilities(context: PlatformAccessContext, query: ListFacilitiesDto) {
     const offset = (query.page - 1) * query.pageSize;
     const term = query.query ? `%${this.escapeLike(query.query.trim())}%` : null;
     return this.database.withTransaction(context, async (client) => {
@@ -120,7 +121,7 @@ export class AdminService {
     }, { readOnly: true });
   }
 
-  async facility(context: DataAccessContext, facilityId: string) {
+  async facility(context: PlatformAccessContext, facilityId: string) {
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query<FacilityRow>(`select facility.id::text,
         facility.organization_id::text as "organizationId", organization.name as "organizationName",
@@ -138,7 +139,7 @@ export class AdminService {
     }, { readOnly: true });
   }
 
-  async transitionFacility(context: DataAccessContext, facilityId: string, expectedVersion: number,
+  async transitionFacility(context: PlatformAccessContext, facilityId: string, expectedVersion: number,
     input: FacilityStatusCommandDto, idempotencyKey: string) {
     const digest = this.digest({ facilityId, expectedVersion, ...input });
     return this.database.withTransaction(context, async (client) => {
@@ -158,7 +159,7 @@ export class AdminService {
     });
   }
 
-  async exportPrincipals(context: DataAccessContext, query: import('./dto/admin-list.dto').ExportPrincipalsDto): Promise<string> {
+  async exportPrincipals(context: PlatformAccessContext, query: import('./dto/admin-list.dto').ExportPrincipalsDto): Promise<string> {
     const term = query.query ? `%${this.escapeLike(query.query.trim())}%` : null;
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query<PrincipalRow>(`select account.id::text, account.subject, account.email,
@@ -196,7 +197,7 @@ export class AdminService {
     });
   }
 
-  async listPrincipals(context: DataAccessContext, query: ListPrincipalsDto) {
+  async listPrincipals(context: PlatformAccessContext, query: ListPrincipalsDto) {
     const offset = (query.page - 1) * query.pageSize;
     const term = `%${this.escapeLike(query.query.trim())}%`;
     return this.database.withTransaction(context, async (client) => {
@@ -232,7 +233,7 @@ export class AdminService {
     }, { readOnly: true });
   }
 
-  async transitionAccount(context: DataAccessContext, accountId: string, expectedVersion: number,
+  async transitionAccount(context: PlatformAccessContext, accountId: string, expectedVersion: number,
     input: AccountStatusCommandDto, idempotencyKey: string) {
     return this.accountCommand(context, 'status', accountId, input.reason, idempotencyKey,
       { accountId, expectedVersion, ...input }, async (client, digest) => {
@@ -247,7 +248,7 @@ export class AdminService {
       });
   }
 
-  async changePlatformRole(context: DataAccessContext, accountId: string, expectedVersion: number,
+  async changePlatformRole(context: PlatformAccessContext, accountId: string, expectedVersion: number,
     input: PlatformRoleCommandDto, idempotencyKey: string) {
     return this.accountCommand(context, 'role', accountId, input.reason, idempotencyKey,
       { accountId, expectedVersion, ...input }, async (client, digest) => {
@@ -262,7 +263,7 @@ export class AdminService {
       });
   }
 
-  async revokeSessions(context: DataAccessContext, accountId: string, input: RevokeSessionsCommandDto,
+  async revokeSessions(context: PlatformAccessContext, accountId: string, input: RevokeSessionsCommandDto,
     idempotencyKey: string) {
     return this.accountCommand(context, 'sessions', accountId, input.reason, idempotencyKey,
       { accountId, ...input }, async (client, digest) => {
@@ -276,7 +277,7 @@ export class AdminService {
       });
   }
 
-  async listIdentityReviews(context: DataAccessContext, query: ListIdentityReviewsDto) {
+  async listIdentityReviews(context: PlatformAccessContext, query: ListIdentityReviewsDto) {
     const offset = (query.page - 1) * query.pageSize;
     return this.database.withTransaction(context, async (client) => {
       const [items, total] = await Promise.all([
@@ -301,7 +302,7 @@ export class AdminService {
     }, { readOnly: true });
   }
 
-  async listAudit(context: DataAccessContext, query: ListPlatformAuditDto) {
+  async listAudit(context: PlatformAccessContext, query: ListPlatformAuditDto) {
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query<Record<string, unknown> & QueryResultRow>(
         `select sequence_id::text as "sequenceId", event_id::text as "eventId",
@@ -320,7 +321,7 @@ export class AdminService {
     });
   }
 
-  private async accountCommand<T>(context: DataAccessContext, _kind: string, accountId: string,
+  private async accountCommand<T>(context: PlatformAccessContext, _kind: string, accountId: string,
     reason: string, _key: string, request: unknown,
     run: (client: import('pg').PoolClient, digest: string) => Promise<{
       row: CommandRow; response: T; action: string; details: Record<string, unknown>;
@@ -335,12 +336,9 @@ export class AdminService {
     });
   }
 
-  private auditEvent(context: DataAccessContext, action: string, resourceType: string,
+  private auditEvent(context: PlatformAccessContext, action: string, resourceType: string,
     resourceId: string | null, reason: string, details: Record<string, unknown>) {
-    return { correlationId: context.correlationId, actorType: 'staff' as const,
-      actorSubject: context.actor.subject, actorAccountId: context.actor.accountId,
-      actorMembershipId: context.membershipId, organizationId: context.actor.facility?.organizationId,
-      facilityId: context.facilityId, action, resourceType, resourceId: resourceId ?? undefined,
+    return { ...platformAuditActor(context), action, resourceType, resourceId: resourceId ?? undefined,
       outcome: 'success' as const, purposeOfUse: 'healthcare-operations', reason: reason.trim(), details };
   }
 
@@ -358,6 +356,8 @@ export class AdminService {
   private commandError(error: unknown): Error {
     if (error instanceof DomainProblem) return error;
     const message = typeof error === 'object' && error && 'message' in error ? String(error.message) : '';
+    if (message.includes('ADMIN_SELF_CHANGE_DENIED')) return new DomainProblem(403, 'ADMIN_SELF_CHANGE_DENIED', 'Administrators cannot change their own account status or platform roles');
+    if (message.includes('ADMIN_ACCOUNT_RECOVERY_REQUIRED')) return new DomainProblem(409, 'ACCOUNT_RECOVERY_REQUIRED', 'This account must complete its recovery flow before it can become active');
     if (message.includes('ADMIN_PERMISSION_DENIED')) return new DomainProblem(403, 'PERMISSION_DENIED', 'Administrative permission is missing');
     if (message.includes('ADMIN_VERSION_CONFLICT')) return new DomainProblem(409, 'VERSION_CONFLICT', 'The resource changed; reload before retrying');
     if (message.includes('ADMIN_IDEMPOTENCY_CONFLICT')) return new DomainProblem(409, 'IDEMPOTENCY_CONFLICT', 'The idempotency key was used for a different command');

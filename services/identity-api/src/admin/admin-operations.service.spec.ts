@@ -1,8 +1,8 @@
-import type { DataAccessContext } from '../common/request-context';
+import type { PlatformAccessContext } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import { AdminOperationsService } from './admin-operations.service';
 
-const context = { correlationId: 'admin-operations-correlation' } as DataAccessContext;
+const context = { correlationId: 'admin-operations-correlation' } as PlatformAccessContext;
 const targetVariables = [
   'ADMIN_IDENTITY_STATUS_URL', 'ADMIN_EHR_STATUS_URL', 'ADMIN_LAB_STATUS_URL',
   'ADMIN_PHARMACY_STATUS_URL', 'ADMIN_OCR_STATUS_URL', 'ADMIN_OUTREACH_STATUS_URL',

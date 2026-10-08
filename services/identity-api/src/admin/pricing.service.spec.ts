@@ -2,15 +2,16 @@ import type { PoolClient } from 'pg';
 import { validate } from 'class-validator';
 import type { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { PlatformAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import { PricePricingCommandDto } from './dto/pricing-command.dto';
 import { PricingService } from './pricing.service';
 
-const context: DataAccessContext = {
+const context: PlatformAccessContext = {
+  scope: 'platform',
   correlationId: 'pricing-test-correlation-001',
-  facilityId: '10000000-0000-4000-8000-000000000002',
-  membershipId: '40000000-0000-4000-8000-000000000001',
+  facilityId: null,
+  membershipId: null,
   purposeOfUse: 'healthcare-operations',
   actor: {
     id: 'staff:pricing-admin', subject: 'staff:pricing-admin',

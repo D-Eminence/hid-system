@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { DataAccessContext } from '../common/request-context';
+import type { PlatformAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 
 interface ServiceTarget { name: string; url?: string }
@@ -8,7 +8,7 @@ interface ServiceTarget { name: string; url?: string }
 export class AdminOperationsService {
   private readonly environment = getEnvironment();
 
-  async services(context: DataAccessContext) {
+  async services(context: PlatformAccessContext) {
     const targets: ServiceTarget[] = [
       { name: 'Identity', url: this.environment.ADMIN_IDENTITY_STATUS_URL },
       { name: 'EHR', url: this.environment.ADMIN_EHR_STATUS_URL },
@@ -25,7 +25,7 @@ export class AdminOperationsService {
     return { checkedAt, services };
   }
 
-  async events(context: DataAccessContext) {
+  async events(context: PlatformAccessContext) {
     const baseUrl = this.environment.ADMIN_EVENT_DISPATCHER_STATUS_URL;
     if (!baseUrl) return { state: 'unavailable', code: 'DISPATCHER_NOT_CONFIGURED', metrics: null, failures: [] };
     const [metrics, failures] = await Promise.all([

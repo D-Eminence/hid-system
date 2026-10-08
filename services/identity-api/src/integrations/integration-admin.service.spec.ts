@@ -1,15 +1,15 @@
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { PlatformAccessContext } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { QoreIdVerificationAdapter } from '../identity/qoreid-verification.adapter';
 import { IntegrationAdminService } from './integration-admin.service';
 import type { IntegrationRuntimeService } from './integration-runtime.service';
 
-const context: DataAccessContext = {
-  correlationId: 'integration-admin-test', facilityId: '', membershipId: '',
+const context: PlatformAccessContext = {
+  scope: 'platform', correlationId: 'integration-admin-test', facilityId: null, membershipId: null,
   purposeOfUse: 'healthcare-operations',
   actor: {
     id: 'staff:admin', subject: 'staff:admin',

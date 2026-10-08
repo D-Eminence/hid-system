@@ -41,12 +41,7 @@ export class AuditInterceptor implements NestInterceptor {
     const successAudited = failuresOnly ? responseStream : responseStream.pipe(
       mergeMap((result) => from(this.audit.record({
         correlationId: request.correlationId,
-        actorType: request.actor?.kind === 'patient' ? 'patient' : undefined,
-        actorSubject: request.actor?.subject,
-        actorAccountId: request.actor?.accountId,
-        actorMembershipId: request.actor?.facility?.membershipId,
-        organizationId: request.actor?.facility?.organizationId,
-        facilityId: request.facilityId,
+        ...this.actorFields(request),
         patientId: this.patientId(request),
         action: `api.${action}`,
         resourceType: 'http-request',
@@ -60,12 +55,7 @@ export class AuditInterceptor implements NestInterceptor {
     return successAudited.pipe(
       catchError((error: unknown) => from(this.audit.record({
         correlationId: request.correlationId,
-        actorType: request.actor?.kind === 'patient' ? 'patient' : undefined,
-        actorSubject: request.actor?.subject,
-        actorAccountId: request.actor?.accountId,
-        actorMembershipId: request.actor?.facility?.membershipId,
-        organizationId: request.actor?.facility?.organizationId,
-        facilityId: request.facilityId,
+        ...this.actorFields(request),
         patientId: this.patientId(request),
         action: `api.${action}`,
         resourceType: 'http-request',
@@ -76,6 +66,27 @@ export class AuditInterceptor implements NestInterceptor {
         details: { method: request.method, route: request.route?.path, durationMs: Date.now() - startedAt },
       })).pipe(mergeMap(() => throwError(() => error)))),
     );
+  }
+
+  // Platform administration is recorded as platform scope with no facility;
+  // every other request keeps the facility the guard bound to it.
+  private actorFields(request: HidRequest) {
+    if (request.accessScope === 'platform' && request.actor && request.actor.kind !== 'patient') {
+      return {
+        actorType: 'staff' as const,
+        actorSubject: request.actor.subject,
+        actorAccountId: request.actor.accountId,
+        accessScope: 'platform' as const,
+      };
+    }
+    return {
+      actorType: request.actor?.kind === 'patient' ? 'patient' as const : undefined,
+      actorSubject: request.actor?.subject,
+      actorAccountId: request.actor?.accountId,
+      actorMembershipId: request.actor?.facility?.membershipId,
+      organizationId: request.actor?.facility?.organizationId,
+      facilityId: request.facilityId,
+    };
   }
 
   private patientId(request: HidRequest): string | undefined {

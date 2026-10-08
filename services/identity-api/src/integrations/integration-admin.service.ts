@@ -4,7 +4,8 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import { platformAuditActor } from '../admin/admin-context';
+import type { PlatformAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { QoreIdVerificationAdapter } from '../identity/qoreid-verification.adapter';
@@ -52,7 +53,7 @@ export class IntegrationAdminService {
     private readonly qoreid: QoreIdVerificationAdapter,
     private readonly runtime: IntegrationRuntimeService) {}
 
-  async list(context: DataAccessContext) {
+  async list(context: PlatformAccessContext) {
     try {
       return await this.database.withTransaction(context, async (client) => {
         const providers = await client.query<ProviderRow>('select * from platform.admin_list_integration_providers()');
@@ -62,7 +63,7 @@ export class IntegrationAdminService {
     } catch (error) { throw this.mapError(error); }
   }
 
-  async get(context: DataAccessContext, provider: string) {
+  async get(context: PlatformAccessContext, provider: string) {
     this.assertProvider(provider);
     const catalog = await this.list(context);
     const found = catalog.items.find((item) => item.provider === provider);
@@ -70,7 +71,7 @@ export class IntegrationAdminService {
     return found;
   }
 
-  async auditHistory(context: DataAccessContext, provider: string) {
+  async auditHistory(context: PlatformAccessContext, provider: string) {
     this.assertProvider(provider);
     await this.get(context, provider);
     try {
@@ -85,7 +86,7 @@ export class IntegrationAdminService {
     } catch (error) { throw this.mapError(error); }
   }
 
-  async changeProvider(context: DataAccessContext, provider: string, expectedVersion: number,
+  async changeProvider(context: PlatformAccessContext, provider: string, expectedVersion: number,
     action: 'enable' | 'pause' | 'configure', reason: string,
     requestedConfiguration: Record<string, unknown> | undefined, idempotencyKey: string) {
     this.assertProvider(provider);
@@ -118,7 +119,7 @@ export class IntegrationAdminService {
     } catch (error) { throw this.mapError(error); }
   }
 
-  async changeRoute(context: DataAccessContext, capability: string, expectedVersion: number,
+  async changeRoute(context: PlatformAccessContext, capability: string, expectedVersion: number,
     action: 'select' | 'fallback', provider: string | null, reason: string, idempotencyKey: string) {
     if (!routes.has(capability) || (provider !== null && !providerKey.test(provider))) {
       throw new DomainProblem(400, 'INTEGRATION_ROUTE_INVALID', 'Provider route is invalid');
@@ -147,7 +148,7 @@ export class IntegrationAdminService {
     } catch (error) { throw this.mapError(error); }
   }
 
-  async test(context: DataAccessContext, provider: string, expectedVersion: number,
+  async test(context: PlatformAccessContext, provider: string, expectedVersion: number,
     reason: string, idempotencyKey: string) {
     if (provider !== 'qoreid') {
       throw new DomainProblem(409, 'INTEGRATION_TEST_UNSUPPORTED',
@@ -283,12 +284,10 @@ export class IntegrationAdminService {
     }
   }
 
-  private async recordAudit(client: PoolClient, context: DataAccessContext,
+  private async recordAudit(client: PoolClient, context: PlatformAccessContext,
     action: string, resourceId: string, reason: string, details: Record<string, unknown>) {
     await this.audit.recordWithClient(client, {
-      correlationId: context.correlationId, actorType: 'staff', actorSubject: context.actor.subject,
-      actorAccountId: context.actor.accountId, actorMembershipId: context.membershipId,
-      organizationId: context.actor.facility?.organizationId, facilityId: context.facilityId,
+      ...platformAuditActor(context),
       action, resourceType: 'provider-integration', resourceId, outcome: 'success',
       purposeOfUse: context.purposeOfUse, reason, details,
     });

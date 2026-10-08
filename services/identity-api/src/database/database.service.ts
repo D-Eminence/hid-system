@@ -1,7 +1,7 @@
 import { Injectable, OnApplicationShutdown } from '@nestjs/common';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from 'pg';
 import { getEnvironment } from '../config/environment';
-import type { DataAccessContext } from '../common/request-context';
+import type { AccessContext } from '../common/request-context';
 
 export interface TransactionOptions {
   readOnly?: boolean;
@@ -34,7 +34,7 @@ export class DatabaseService implements OnApplicationShutdown {
   }
 
   async withTransaction<Result>(
-    context: DataAccessContext,
+    context: AccessContext,
     operation: (client: PoolClient) => Promise<Result>,
     options: TransactionOptions = {},
   ): Promise<Result> {
@@ -44,19 +44,23 @@ export class DatabaseService implements OnApplicationShutdown {
       const isolationLevel = options.isolationLevel ?? 'READ COMMITTED';
       await client.query(`SET TRANSACTION ISOLATION LEVEL ${isolationLevel}`);
       if (options.readOnly) await client.query('SET TRANSACTION READ ONLY');
+      // A platform-scoped transaction carries no facility or membership; it
+      // declares app.access_scope = 'platform' instead of borrowing one.
       await client.query(
         `select
            set_config('app.actor_subject', $1, true),
            set_config('app.facility_id', $2, true),
            set_config('app.correlation_id', $3, true),
            set_config('app.membership_id', $4, true),
-           set_config('app.purpose_of_use', $5, true)`,
+           set_config('app.purpose_of_use', $5, true),
+           set_config('app.access_scope', $6, true)`,
         [
           context.actor.subject,
-          context.facilityId,
+          context.facilityId ?? '',
           context.correlationId,
-          context.membershipId,
+          context.membershipId ?? '',
           context.purposeOfUse,
+          context.scope === 'platform' ? 'platform' : 'facility',
         ],
       );
       const result = await operation(client);

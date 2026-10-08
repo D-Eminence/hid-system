@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { TurnstileService } from '../auth/turnstile.service';
 import { requireAdminContext } from '../admin/admin-context';
-import { AuditAction, AuditFailuresOnly, FacilityOptional, Public, RequirePermissions } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, Public, PlatformScope, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
@@ -34,7 +34,7 @@ export class PublicDemoRequestsController {
 }
 
 @Controller('admin/demo-requests')
-@FacilityOptional()
+@PlatformScope()
 @AuditFailuresOnly()
 export class AdminDemoRequestsController {
   constructor(private readonly demo: DemoRequestsService) {}

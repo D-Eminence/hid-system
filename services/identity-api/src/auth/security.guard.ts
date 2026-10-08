@@ -10,6 +10,7 @@ import { DatabaseService } from '../database/database.service';
 import { getEnvironment } from '../config/environment';
 import {
   FACILITY_OPTIONAL,
+  PLATFORM_SCOPE,
   PUBLIC_ROUTE,
   PATIENT_ALLOWED,
   REQUIRED_PERMISSIONS,
@@ -35,6 +36,7 @@ export class SecurityGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<HidRequest>();
     if (this.metadata<boolean>(PUBLIC_ROUTE, context)) return true;
+    const platformScope = this.metadata<boolean>(PLATFORM_SCOPE, context) === true;
 
     try {
       const { token, transport } = this.extractToken(request);
@@ -49,9 +51,27 @@ export class SecurityGuard implements CanActivate {
         this.assertCookieMutationSecurity(request, verified.claims);
       }
 
+      if (platformScope) {
+        // Platform administration acts on the whole platform. No facility is
+        // bound, even if a client sends X-Facility-ID, and the facility-derived
+        // roles and permissions of the administrator's own membership are
+        // removed so they can neither satisfy nor leak into a platform route.
+        request.accessScope = 'platform';
+        request.facilityId = undefined;
+        request.actor = {
+          ...verified.actor,
+          facility: undefined,
+          roles: [],
+          role: undefined,
+          permissions: [],
+        };
+      }
+
       const facilityOptional = this.metadata<boolean>(FACILITY_OPTIONAL, context);
       const facilityId = request.header('x-facility-id');
-      if (!facilityOptional) {
+      if (platformScope) {
+        // No facility context on platform routes.
+      } else if (!facilityOptional) {
         if (!facilityId || !this.uuid(facilityId)) {
           throw new DomainProblem(400, 'FACILITY_REQUIRED', 'A valid X-Facility-ID header is required');
         }
@@ -81,16 +101,32 @@ export class SecurityGuard implements CanActivate {
         }
       }
 
+      if (!platformScope) request.accessScope = 'facility';
       const required = this.metadata<readonly string[]>(REQUIRED_PERMISSIONS, context) ?? [];
-      const available = new Set([
-        ...(request.actor?.permissions ?? []),
-        ...(request.actor?.platformPermissions ?? []),
-      ]);
+      // Platform routes accept only platform-scope grants; every other route
+      // accepts only the permissions of the bound facility membership.
+      const available = new Set(platformScope
+        ? (request.actor?.platformPermissions ?? [])
+        : (request.actor?.permissions ?? []));
       const missing = required.filter((permission) => !available.has(permission));
       if (missing.length > 0) throw new DomainProblem(403, 'PERMISSION_DENIED', 'Required permission is missing');
       return true;
     } catch (error) {
-      if (request.actor && request.facilityId) {
+      if (platformScope && request.actor && request.actor.kind !== 'patient') {
+        await this.audit.record({
+          correlationId: request.correlationId,
+          actorType: 'staff',
+          actorSubject: request.actor.subject,
+          actorAccountId: request.actor.accountId,
+          accessScope: 'platform',
+          action: 'security.authorization',
+          resourceType: 'http-request',
+          outcome: 'denied',
+          sourceIp: request.ip,
+          userAgent: request.header('user-agent'),
+          details: { method: request.method, route: this.routeTemplate(request) },
+        });
+      } else if (request.actor && request.facilityId) {
         await this.audit.record({
           correlationId: request.correlationId,
           actorType: request.actor.kind === 'patient' ? 'patient' : 'staff',

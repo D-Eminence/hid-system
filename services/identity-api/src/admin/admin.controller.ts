@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Query, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
-import { AuditAction, AuditFailuresOnly, FacilityOptional, RequirePermissions } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, PlatformScope, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
@@ -15,7 +15,7 @@ import { ExportPrincipalsDto, ListFacilitiesDto, ListIdentityReviewsDto, ListPla
   ListPrincipalsDto } from './dto/admin-list.dto';
 
 @Controller('admin')
-@FacilityOptional()
+@PlatformScope()
 export class AdminController {
   constructor(private readonly admin: AdminService, private readonly operations: AdminOperationsService,
     private readonly pricing: PricingService) {}

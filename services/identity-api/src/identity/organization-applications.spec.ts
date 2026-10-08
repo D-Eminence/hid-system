@@ -1,6 +1,6 @@
 import { PUBLIC_ROUTE, REQUIRED_PERMISSIONS } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext, HidRequest } from '../common/request-context';
+import type { HidRequest, PlatformAccessContext } from '../common/request-context';
 import * as environment from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
@@ -21,7 +21,7 @@ const request = {
   correlationId: 'organization-application-test', ip: '203.0.113.1',
   header: (key: string) => key === 'origin' ? 'https://www.healthidentitydirectory.com' : undefined,
 } as unknown as HidRequest;
-const context = { correlationId: request.correlationId } as DataAccessContext;
+const context = { correlationId: request.correlationId } as PlatformAccessContext;
 
 describe('organization onboarding boundary', () => {
   afterEach(() => jest.restoreAllMocks());
