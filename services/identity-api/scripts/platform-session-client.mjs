@@ -40,8 +40,9 @@ export function expectStatus(response, status, code) {
  * @param origin allowed CORS origin
  * @param totp { base32Decode, totp } from src/auth/mfa/totp.ts
  * @param clock createTotpClock()
+ * @param turnstileToken optional () => token when Turnstile is required
  */
-export function platformClient({ http, origin, totp, clock, password }) {
+export function platformClient({ http, origin, totp, clock, password, turnstileToken }) {
   const code = (secret) => totp.totp(totp.base32Decode(secret), clock.next());
   const post = (path, jar = {}, body = {}, headers = {}) => {
     let call = http.post(`/api/v1${path}`).set('Origin', origin).set('Cookie', cookieHeader(jar));
@@ -50,7 +51,8 @@ export function platformClient({ http, origin, totp, clock, password }) {
   };
 
   async function login(email, { expect = 200 } = {}) {
-    const response = await post('/auth/admin/login', {}, { email, password, turnstileAction: 'admin-login' });
+    const response = await post('/auth/admin/login', {}, { email, password, turnstileAction: 'admin-login',
+      ...(turnstileToken ? { turnstileToken: turnstileToken() } : {}) });
     expectStatus(response, expect);
     return { response, jar: mergeCookies({}, response) };
   }
