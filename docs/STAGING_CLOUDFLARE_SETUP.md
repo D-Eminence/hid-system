@@ -187,3 +187,13 @@ Worker dry runs. Those dry runs do not publish Workers, modify DNS or prove live
 Turnstile acceptance. The first CI failure is retained in private evidence.
 The release-test CI job now installs the shared Cloudflare validator's locked
 dependencies before importing it; no test or gate is skipped.
+
+## October 8 CI toolchain correction
+
+`npm audit` reported Wrangler `4.131.2` affected through `miniflare` and its
+`sharp` `0.35.4` ([GHSA-wq5f-xc86-pv6w](https://github.com/advisories/GHSA-wq5f-xc86-pv6w),
+libvips). Wrangler is now pinned to `4.149.0`, the first release outside the
+advisory range. Its compatible Workers types are `5.20261006.1`, and its tree
+uses `sharp` `0.35.5`. The registry integrities and the installed schema and CLI
+hashes are rechecked against the official npm tarball. No forced peer
+resolution, audit exclusion or production configuration change was used.
