@@ -36,7 +36,13 @@ const schema = z.object({
   BREVO_EMAIL_FROM: z.preprocess(empty, z.string().email().optional()),
   BREVO_SMS_SENDER: optional,
   BREVO_WHATSAPP_SENDER: optional,
+  // Emergency-contact verification codes and emergency-access alerts are
+  // prepared in Phase 3 but not approved for production delivery.
+  EMERGENCY_CONTACT_DELIVERY_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
 }).superRefine((value, context) => {
+  if (value.EMERGENCY_CONTACT_DELIVERY_ENABLED && value.HID_DEPLOYMENT_ENV === 'production') {
+    context.addIssue({ code: 'custom', path: ['EMERGENCY_CONTACT_DELIVERY_ENABLED'], message: 'Production emergency-contact delivery is not approved' });
+  }
   if (value.NOTIFICATION_DELIVERY_PROFILE === 'email-only' && value.HID_DEPLOYMENT_ENV !== 'staging') {
     context.addIssue({ code: 'custom', path: ['NOTIFICATION_DELIVERY_PROFILE'], message: 'The email-only delivery profile is staging-only' });
   }
