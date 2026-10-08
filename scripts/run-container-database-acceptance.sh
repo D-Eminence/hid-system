@@ -350,4 +350,4 @@ acceptance_postgresql_version="$(PGSSLMODE=verify-full PGSSLROOTCERT="$acceptanc
 acceptance_started=false
 rm -rf -- "$acceptance_root"
 trap - EXIT INT TERM
-printf '{"status":"passed","postgresql":"%s","migrations":"0001-0066","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}\n' "$acceptance_postgresql_version"
+printf '{"status":"passed","postgresql":"%s","migrations":"0001-0068","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}\n' "$acceptance_postgresql_version"
