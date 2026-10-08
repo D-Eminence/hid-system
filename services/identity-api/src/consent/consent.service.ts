@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import type { QueryResultRow } from 'pg';
+import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { DataAccessContext, HidRequest } from '../common/request-context';
+import { requirePatient } from '../auth/patient-self.service';
 import { DatabaseService } from '../database/database.service';
 import type { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import type { CreateBreakGlassDto } from './dto/create-break-glass.dto';
@@ -103,47 +104,61 @@ export class ConsentService {
     }
   }
 
-  async listMyAccessRequests(context: DataAccessContext) {
-    return this.database.withTransaction(context, async (client) => {
-      const result = await client.query<Record<string, unknown> & QueryResultRow>(
+  async listMyAccessRequests(request: HidRequest) {
+    const actor = requirePatient(request.actor);
+    try {
+      return await this.asPatient(request, actor.subject, async (client) => (await client.query<Record<string, unknown> & QueryResultRow>(
         `select access_request_id as "accessRequestId", facility_id as "facilityId",
            facility_name as "facilityName", scope, reason, status,
            requested_duration_minutes as "requestedDurationMinutes",
            requested_at as "requestedAt", approved_at as "approvedAt",
            denied_at as "deniedAt", denied_reason as "deniedReason"
-         from identity.list_my_access_requests()`,
-      );
-      return result.rows;
-    }, { readOnly: true });
-  }
-
-  async approveAccessRequest(context: DataAccessContext, requestId: string) {
-    try {
-      return await this.database.withTransaction(context, async (client) => {
-        const result = await client.query<Record<string, unknown> & QueryResultRow>(
-          `select access_request_id as "accessRequestId", consent_grant_id as "consentGrantId",
-             patient_id as "patientId", status, expires_at as "expiresAt", replayed
-           from identity.approve_access_request($1)`,
-          [requestId],
-        );
-        return this.requireRow(result.rows[0]);
-      });
+         from identity.list_my_patient_access_requests($1, $2)`,
+        [actor.subject, actor.sessionId],
+      )).rows);
     } catch (error) {
       throw this.translate(error);
     }
   }
 
-  async denyAccessRequest(context: DataAccessContext, requestId: string, reason: string) {
+  async approveAccessRequest(request: HidRequest, requestId: string) {
+    const actor = requirePatient(request.actor);
     try {
-      return await this.database.withTransaction(context, async (client) => {
-        const result = await client.query<Record<string, unknown> & QueryResultRow>(
-          `select access_request_id as "accessRequestId", patient_id as "patientId",
-             status, denied_at as "deniedAt", replayed
-           from identity.deny_access_request($1, $2)`,
-          [requestId, reason.trim()],
-        );
-        return this.requireRow(result.rows[0]);
-      });
+      return await this.asPatient(request, actor.subject, async (client) => this.requireRow((await client.query<Record<string, unknown> & QueryResultRow>(
+        `select access_request_id as "accessRequestId", consent_grant_id as "consentGrantId",
+           patient_id as "patientId", status, expires_at as "expiresAt", replayed
+         from identity.approve_my_access_request($1, $2, $3)`,
+        [actor.subject, actor.sessionId, requestId],
+      )).rows[0]));
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+  async denyAccessRequest(request: HidRequest, requestId: string, reason: string) {
+    const actor = requirePatient(request.actor);
+    try {
+      return await this.asPatient(request, actor.subject, async (client) => this.requireRow((await client.query<Record<string, unknown> & QueryResultRow>(
+        `select access_request_id as "accessRequestId", patient_id as "patientId",
+           status, denied_at as "deniedAt", replayed
+         from identity.deny_my_access_request($1, $2, $3, $4)`,
+        [actor.subject, actor.sessionId, requestId, reason.trim()],
+      )).rows[0]));
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+  /** Patients may revoke access they granted; break-glass grants are not patient-revocable. */
+  async revokeMyConsentGrant(request: HidRequest, grantId: string, reason: string) {
+    const actor = requirePatient(request.actor);
+    try {
+      return await this.asPatient(request, actor.subject, async (client) => this.requireRow((await client.query<Record<string, unknown> & QueryResultRow>(
+        `select consent_grant_id as "consentGrantId", grant_status as status,
+           revoked_at as "revokedAt", replayed
+         from identity.revoke_my_consent_grant($1, $2, $3, $4)`,
+        [actor.subject, actor.sessionId, grantId, reason.trim()],
+      )).rows[0]));
     } catch (error) {
       throw this.translate(error);
     }
@@ -152,6 +167,9 @@ export class ConsentService {
   async activateBreakGlass(context: DataAccessContext, input: CreateBreakGlassDto) {
     try {
       return await this.database.withTransaction(context, async (client) => {
+        // The platform administrative control is the authoritative switch for
+        // emergency access; it is checked inside the activation transaction.
+        await client.query('select platform.require_control_enabled($1)', ['break_glass_enabled']);
         const result = await client.query<BreakGlassRow>(
           `select
              access_request_id as "accessRequestId",
@@ -234,6 +252,18 @@ export class ConsentService {
     }
   }
 
+  private asPatient<Result>(
+    request: HidRequest,
+    subject: string,
+    operation: (client: PoolClient) => Promise<Result>,
+  ): Promise<Result> {
+    return this.database.withSystemTransaction(request.correlationId, async (client) => {
+      // Bind the verified patient subject; each command re-validates the session.
+      await client.query("select set_config('app.actor_subject', $1, true)", [subject]);
+      return operation(client);
+    });
+  }
+
   private requireRow<Row>(row: Row | undefined): Row {
     if (!row) throw new DomainProblem(503, 'CONSENT_COMMAND_UNAVAILABLE', 'Consent command returned no result');
     return row;
@@ -242,6 +272,14 @@ export class ConsentService {
   private translate(error: unknown): unknown {
     if (error instanceof DomainProblem) return error;
     if (!isDatabaseError(error)) return error;
+    const raw = (error as unknown as { message?: unknown }).message;
+    const message = typeof raw === 'string' ? raw : '';
+    if (error.code === '55000' && message === 'PLATFORM_CONTROL_DISABLED:break_glass_enabled') {
+      return new DomainProblem(423, 'BREAK_GLASS_DISABLED', 'Emergency access is currently disabled by the platform administrator');
+    }
+    if (error.code === '55000' && message === 'PLATFORM_CONTROL_UNAVAILABLE') {
+      return new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
+    }
     switch (error.code) {
       case 'P0001':
         return new DomainProblem(429, 'EMERGENCY_RATE_LIMITED', 'Too many emergency activations. Contact your facility emergency access administrator.');
