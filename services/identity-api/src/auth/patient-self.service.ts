@@ -3,6 +3,7 @@ import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
+import { requireRecentPatientAuthentication } from './recent-authentication';
 
 export function requirePatient(actor: ActorContext | undefined): ActorContext & { patientId: string; sessionId: string } {
   if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
@@ -84,24 +85,9 @@ export class PatientSelfService {
     return { revoked: true };
   }
 
-  private async requireRecentAuthentication(client: import('pg').PoolClient,
+  private requireRecentAuthentication(client: import('pg').PoolClient,
     actor: ActorContext & { patientId: string; sessionId: string }) {
-    // Refresh rotates a session within the same family. Checking the first
-    // issuance in that family prevents silent refresh from counting as a fresh
-    // patient authentication for a sensitive PIN change.
-    const result = await client.query<{ recent: boolean }>(
-      `select coalesce(min(family.issued_at) >= clock_timestamp() - interval '10 minutes', false) as recent
-         from auth.sessions current_session
-         join auth.sessions family on family.family_id = current_session.family_id
-        where current_session.id = $1 and current_session.account_id = $2
-          and current_session.patient_id = $3 and current_session.session_kind = 'patient'
-          and current_session.revoked_at is null`,
-      [actor.sessionId, actor.accountId, actor.patientId],
-    );
-    if (!result.rows[0]?.recent) {
-      throw new DomainProblem(403, 'PATIENT_RECENT_AUTH_REQUIRED',
-        'Sign in again before changing your Access PIN');
-    }
+    return requireRecentPatientAuthentication(client, actor, 'Sign in again before changing your Access PIN');
   }
 
   private async read(request: HidRequest, operation: 'profile' | 'access-history' | 'authorize') {

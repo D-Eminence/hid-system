@@ -67,4 +67,36 @@ describe('NotificationOtpClient signup delivery', () => {
     expect(integrations.deliveryPlan).toHaveBeenCalledWith('email');
     expect(JSON.parse(String((global.fetch as jest.Mock).mock.calls[0][1].body)).channel).toBe('email');
   });
+
+  it('sends a minimum-necessary emergency-contact alert with a stable notification idempotency key', async () => {
+    const plan = { capability: 'sms', primary: 'termii', fallback: null, configuration: {} };
+    const integrations = { deliveryPlan: jest.fn().mockResolvedValue(plan) };
+    global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify({
+      outcome: 'accepted', primary: { provider: 'termii' },
+    }), { status: 202 }));
+    const client = new NotificationOtpClient(integrations as unknown as IntegrationRuntimeService);
+    await expect(client.deliverEmergencyContactAlert({
+      notificationId: 'c0000000-0000-4000-8000-000000000001', channel: 'sms', recipient: '+2348031234567',
+      patientFirstName: 'Ada', facilityName: 'Lagos General', occurredAt: new Date('2026-10-08T09:15:00.000Z'),
+      correlationId: 'request-9',
+    })).resolves.toEqual({ outcome: 'accepted', provider: 'termii' });
+    const [url, init] = (global.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('http://127.0.0.1:3007/api/v1/notifications/emergency-contact-alert');
+    expect(init.headers).toEqual(expect.objectContaining({
+      'idempotency-key': 'emergency-contact:c0000000-0000-4000-8000-000000000001',
+    }));
+    expect(JSON.parse(String(init.body))).toEqual({ channel: 'sms', recipient: '+2348031234567',
+      patientFirstName: 'Ada', facilityName: 'Lagos General', occurredAt: '2026-10-08T09:15:00.000Z', plan });
+  });
+
+  it('treats a missing delivery plan for an alert as retryable, not as sent', async () => {
+    const integrations = { deliveryPlan: jest.fn().mockRejectedValue(new Error('no plan')) };
+    global.fetch = jest.fn();
+    const client = new NotificationOtpClient(integrations as unknown as IntegrationRuntimeService);
+    await expect(client.deliverEmergencyContactAlert({
+      notificationId: 'c0000000-0000-4000-8000-000000000002', channel: 'email', recipient: 'ada@example.test',
+      patientFirstName: 'Ada', facilityName: null, occurredAt: new Date(), correlationId: 'request-10',
+    })).resolves.toEqual({ outcome: 'unknown', safeCode: 'delivery_policy_unavailable' });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
 });

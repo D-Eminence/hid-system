@@ -12,9 +12,10 @@ import { DatabaseModule } from './database/database.module';
 import { HealthController } from './health.controller';
 import { IdentityModule } from './identity/identity.module';
 import { IntegrationModule } from './integrations/integration.module';
+import { PatientSafetyModule } from './patient-safety/patient-safety.module';
 
 @Module({
-  imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule],
+  imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule, PatientSafetyModule],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useExisting: SecurityGuard },

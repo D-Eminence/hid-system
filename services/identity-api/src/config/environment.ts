@@ -65,6 +65,13 @@ const environmentSchema = z.object({
   NOTIFICATION_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: optionalSecret,
   NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE: optionalString,
+  // Emergency-contact verification codes and emergency-access alerts reach
+  // people who are not HID users. Phase 3 prepares the capability; production
+  // delivery is not approved and is refused below.
+  EMERGENCY_CONTACT_DELIVERY_ENABLED: booleanString,
+  // Interval for finalizing due account deletions and, when delivery is
+  // enabled, dispatching emergency-contact notifications. Zero disables it.
+  PATIENT_LIFECYCLE_SWEEP_SECONDS: z.coerce.number().int().min(0).max(3600).default(300),
   OIDC_ISSUER_URL: optionalUrl,
   OIDC_AUDIENCE: optionalString,
   OIDC_JWKS_URL: optionalUrl,
@@ -173,6 +180,12 @@ const environmentSchema = z.object({
   if (environment.NOTIFICATION_SERVICE_IDENTITY_MODE === 'jwt'
       && !environment.NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE) {
     context.addIssue({ code: 'custom', path: ['NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE'], message: 'JWT Identity-to-Notification calls require a workload token file' });
+  }
+  if (environment.EMERGENCY_CONTACT_DELIVERY_ENABLED
+      && (environment.HID_DEPLOYMENT_ENV === 'production'
+        || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging'))) {
+    context.addIssue({ code: 'custom', path: ['EMERGENCY_CONTACT_DELIVERY_ENABLED'],
+      message: 'Production emergency-contact delivery is not approved' });
   }
   if (environment.NODE_ENV === 'production') {
     if (environment.NODE_TLS_REJECT_UNAUTHORIZED === '0') context.addIssue({ code: 'custom',

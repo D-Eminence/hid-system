@@ -16,7 +16,7 @@ export class NotificationOtpClient {
     challengeId: string;
     recipient: string;
     code: string;
-    purpose: RecoveryOtpPurpose | 'SIGNUP_VERIFY' | 'EMAIL_VERIFY';
+    purpose: RecoveryOtpPurpose | 'SIGNUP_VERIFY' | 'EMAIL_VERIFY' | 'EMERGENCY_CONTACT_VERIFY';
     channel?: 'email' | 'sms';
     correlationId: string;
   }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string }> {
@@ -25,29 +25,56 @@ export class NotificationOtpClient {
     const channel = input.channel ?? 'email';
     const plan = await this.integrations.deliveryPlan(channel).catch(() => null);
     if (!plan) return { outcome: 'definitive_failure' };
+    return this.post('otp', `otp:${input.challengeId}`, input.correlationId, {
+      channel, recipient: input.recipient, code: input.code, purpose: input.purpose,
+      plan,
+    });
+  }
+
+  /**
+   * Emergency-access alert to a verified emergency contact. The body is the
+   * fixed minimum-necessary set (first name, facility, time); notification-api
+   * renders the message and applies the existing provider delivery plan.
+   */
+  async deliverEmergencyContactAlert(input: {
+    notificationId: string;
+    channel: 'email' | 'sms';
+    recipient: string;
+    patientFirstName: string;
+    facilityName: string | null;
+    occurredAt: Date;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan(input.channel).catch(() => null);
+    if (!plan) return { outcome: 'unknown', safeCode: 'delivery_policy_unavailable' };
+    return this.post('emergency-contact-alert', `emergency-contact:${input.notificationId}`, input.correlationId, {
+      channel: input.channel, recipient: input.recipient, patientFirstName: input.patientFirstName,
+      facilityName: input.facilityName, occurredAt: input.occurredAt.toISOString(), plan,
+    });
+  }
+
+  private async post(path: 'otp' | 'emergency-contact-alert', idempotencyKey: string, correlationId: string,
+    body: Record<string, unknown>): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
     let response: Response;
     try {
-      response = await fetch(`${this.environment.NOTIFICATION_API_URL.replace(/\/+$/, '')}/api/v1/notifications/otp`, {
+      response = await fetch(`${this.environment.NOTIFICATION_API_URL.replace(/\/+$/, '')}/api/v1/notifications/${path}`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'idempotency-key': `otp:${input.challengeId}`,
-          'x-correlation-id': input.correlationId,
+          'idempotency-key': idempotencyKey,
+          'x-correlation-id': correlationId,
           'x-hid-internal-caller': 'identity-api',
           ...await this.credentials(),
         },
-        body: JSON.stringify({
-          channel, recipient: input.recipient, code: input.code, purpose: input.purpose,
-          plan,
-        }),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(5_000),
       });
     } catch {
-      return { outcome: 'unknown' };
+      return { outcome: 'unknown', safeCode: 'transport_error' };
     }
     if (!response.ok) {
       return { outcome: response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429
-        ? 'definitive_failure' : 'unknown' };
+        ? 'definitive_failure' : 'unknown', safeCode: `http_${response.status}` };
     }
     try {
       const body = await response.json() as { outcome?: unknown; primary?: { provider?: unknown }; fallback?: { provider?: unknown } };

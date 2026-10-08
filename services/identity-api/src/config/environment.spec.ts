@@ -68,4 +68,17 @@ describe('Identity production database transport', () => {
     expect(getEnvironment().QOREID_ENABLED).toBe(true);
     expect(getEnvironment().QOREID_MAX_RETRIES).toBe(0);
   });
+
+  it('keeps emergency-contact delivery disabled by default and refuses it in production', () => {
+    production(); resetEnvironmentForTests();
+    expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(false);
+
+    production(); process.env.EMERGENCY_CONTACT_DELIVERY_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/emergency-contact delivery is not approved/);
+
+    production(); Object.assign(process.env, {
+      EMERGENCY_CONTACT_DELIVERY_ENABLED: 'true', HID_DEPLOYMENT_ENV: 'staging',
+    }); resetEnvironmentForTests();
+    expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(true);
+  });
 });
