@@ -164,13 +164,16 @@ are unchanged. Staging enablement is a configuration step outside this change.
 | Patient access-request routes required a facility | Session-bound patient wrappers; patient routes no longer use the staff consent context |
 | Patient "Revoke access" used a staff route | New patient route `POST /api/v1/identity/me/consent-grants/:grantId/revoke` for patient-granted, non-break-glass grants |
 | `break_glass_enabled` not enforced | Checked inside the break-glass transaction; disabled returns `423 BREAK_GLASS_DISABLED` |
-| `0035` decision commands always failed (`status` ambiguous; grant missing `purpose_of_use`) | Repeated in `0065` with `#variable_conflict use_column`; the grant carries the request purpose required by `0008` |
+| `0035` decision commands always failed (`status` ambiguous; grant missing `purpose_of_use`) | Repeated in `0066` with `#variable_conflict use_column`; the grant carries the request purpose required by `0008` |
 | identity-api audit rows labelled `ehr-api` | Default source system is `identity-api` |
 
 ## 7. Migrations
 
-`0063_patient_account_deletion_lifecycle.sql`, `0064_patient_emergency_contacts.sql`,
-`0065_patient_access_safety.sql`, contiguous after the Phase 2 ledger (`0062`).
+`0064_patient_account_deletion_lifecycle.sql`, `0065_patient_emergency_contacts.sql`,
+`0066_patient_access_safety.sql`, contiguous after the Phase 2 ledger (`0063`).
+They were first numbered `0063`–`0065`. Phase 2 then added
+`0063_provider_self_service_cac_quota.sql`, so they were renamed with
+unchanged SQL bytes and checksums.
 
 The Phase 2 migration `0062_provider_cac_self_service_constraints.sql` could not
 apply on any database (`record "constraint_row" is not assigned yet`). Its `DO`

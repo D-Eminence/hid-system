@@ -1037,10 +1037,10 @@ or staging acceptance.
 
 ## Phase 3 patient safety checkpoint
 
-Additive migrations `0063`–`0065` (ADR-036) follow the Phase 2 ledger.
-Migrations `0001`–`0062` are unchanged.
+Additive migrations `0064`–`0066` (ADR-036) follow the Phase 2 ledger.
+Migrations `0001`–`0063` are unchanged.
 
-- `0063_patient_account_deletion_lifecycle.sql` adds
+- `0064_patient_account_deletion_lifecycle.sql` adds
   `identity.patient_account_deletion_requests` (single-use confirmation token
   SHA-256, configurable cancellation window, one open request per login),
   `platform.record_class_retention_policies` (only `retain`, never automatic
@@ -1054,7 +1054,7 @@ Migrations `0001`–`0062` are unchanged.
   `identity.patient_self_session` deny a login from its scheduled deletion time.
   Patient identity, NIN binding, clinical, consent, audit, and notification rows
   are retained; this is not erasure under sections 3.5 and 15.
-- `0064_patient_emergency_contacts.sql` adds encrypted
+- `0065_patient_emergency_contacts.sql` adds encrypted
   `identity.patient_emergency_contacts`, single-use HMAC-verified
   `identity.emergency_contact_verifications`, and idempotent
   `identity.emergency_contact_notifications` (`UNIQUE (consent_grant_id,
@@ -1063,7 +1063,7 @@ Migrations `0001`–`0062` are unchanged.
   verified, consenting contacts and audits a no-eligible-contact result; any
   failure there is audited and does not fail break-glass. Legacy
   `identity.patients.emergency_contact_*` columns are not read or modified.
-- `0065_patient_access_safety.sql` adds session-bound patient wrappers for
+- `0066_patient_access_safety.sql` adds session-bound patient wrappers for
   access-request decisions, `identity.revoke_my_consent_grant`, break-glass and
   revocability labels in patient access history, and suppresses new inbox items
   for deleted logins. It repeats the `0035` decision commands with
