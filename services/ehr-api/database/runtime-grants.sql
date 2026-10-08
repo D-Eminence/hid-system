@@ -819,6 +819,14 @@ grant execute on function platform.public_list_commercial_prices(),
 grant select on platform.commercial_products, platform.commercial_prices,
   platform.commercial_catalog_events to hid_schema_test_runtime;
 
+-- Platform controls (0039) are listed and changed only through these two
+-- Identity-owned security-definer commands, which check platform.control.read
+-- and platform.control.manage themselves. No runtime receives direct privileges
+-- on the control tables or their event log.
+grant execute on function platform.admin_list_controls(),
+  platform.admin_set_control(text, boolean, bigint, text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+
 -- Runtime provider decisions and admin commands have narrow function grants.
 -- Notification API receives no direct database access or provider table grant.
 grant execute on function platform.integration_runtime_provider(text,text),

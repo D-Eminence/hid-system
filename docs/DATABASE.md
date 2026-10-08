@@ -1149,6 +1149,22 @@ Additive migrations `0069`–`0070` (ADR-038) follow `0068`. Migrations
   (`auth.other_reachable_super_admins`) counts active role holders with a
   password credential instead of requiring a facility membership.
 
+## Platform controls command fix
+
+`0071_platform_control_command_column_references.sql` replaces
+`platform.admin_set_control` with the same signature, result, permission
+checks, validation and `platform.control_events` row. In the `0039` version the
+`RETURNS TABLE` output columns shadowed `control_key` and `row_version`, so
+every call failed with `42702` (ambiguous column) before changing anything.
+`runtime-grants.sql` now also grants `EXECUTE` on `platform.admin_list_controls()`
+and `platform.admin_set_control(text,boolean,bigint,text)` to
+`hid_identity_runtime` (inherited by `hid_identity_api_runtime`) and
+`hid_schema_test_runtime`; `0039` revoked them from `public` and no runtime role
+had been granted them, so `GET /admin/controls` and `POST /admin/controls`
+returned 500. `runtime-roles.integration.sql` asserts the grants and the
+absence of direct table privileges, and `platform-controls.integration.sql`
+exercises both commands as `hid_identity_api_runtime`.
+
 Grants: the Identity runtime gets `select, insert, update` on the four MFA/assurance
 tables (no delete), `select` on approval requests, and `execute` on the new
 commands; internal helpers and trigger functions are revoked from PUBLIC.

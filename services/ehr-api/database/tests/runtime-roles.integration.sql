@@ -229,6 +229,18 @@ begin
      or has_table_privilege('hid_identity_runtime', 'audit.events', 'UPDATE,DELETE') then
     raise exception 'Identity administration runtime boundary is inconsistent';
   end if;
+  -- Platform controls (0039) are listed and changed only through the two
+  -- Identity-owned security-definer commands, which check the control permissions.
+  if not has_function_privilege('hid_identity_api_runtime', 'platform.admin_list_controls()', 'EXECUTE')
+     or not has_function_privilege(
+       'hid_identity_api_runtime', 'platform.admin_set_control(text,boolean,bigint,text)', 'EXECUTE'
+     ) or has_function_privilege('public', 'platform.admin_list_controls()', 'EXECUTE')
+     or has_function_privilege('public', 'platform.admin_set_control(text,boolean,bigint,text)', 'EXECUTE')
+     or has_function_privilege('hid_ehr_api_runtime', 'platform.admin_set_control(text,boolean,bigint,text)', 'EXECUTE')
+     or has_table_privilege('hid_identity_runtime', 'platform.control_settings', 'SELECT,INSERT,UPDATE,DELETE')
+     or has_table_privilege('hid_identity_runtime', 'platform.control_events', 'SELECT,INSERT,UPDATE,DELETE') then
+    raise exception 'platform control administration must use only the granted Identity commands';
+  end if;
   if not has_table_privilege('hid_identity_api_runtime', 'identity.patients', 'INSERT')
      or has_table_privilege('hid_identity_api_runtime', 'ehr.encounters', 'INSERT')
      or not has_table_privilege('hid_identity_api_runtime', 'audit.events', 'INSERT')
