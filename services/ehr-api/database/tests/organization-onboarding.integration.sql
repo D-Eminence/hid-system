@@ -27,6 +27,57 @@ values ('c4650000-0000-4000-8000-000000000001',
   'c4600000-0000-4000-8000-000000000001', 'platform_super_admin', 'platform',
   'Synthetic onboarding review test');
 
+-- 0062 regression: the generated-name reviewer check from 0046 and the named
+-- check from 0061 are both replaced, so only the self-service-aware check remains.
+do $$
+declare review_checks text[]; violated_constraint text;
+begin
+  select array_agg(constraint_row.conname order by constraint_row.conname)
+    into review_checks
+    from pg_constraint constraint_row
+   where constraint_row.conrelid = 'identity.organization_applications'::regclass
+     and constraint_row.contype = 'c'
+     and pg_get_constraintdef(constraint_row.oid) like '%reviewed_by_account_id%';
+  if review_checks is distinct from array['organization_applications_review_check_self_service']::text[] then
+    raise exception 'Unexpected organization application review checks: %', review_checks;
+  end if;
+
+  insert into identity.organization_applications (
+    product_code, organization_name, organization_type, cac_registration_number,
+    administrator_name, administrator_email, status, verification_result, verified_at,
+    verified_organization_name, organization_id, facility_id, review_reason, reviewed_at, approval_mode
+  ) values (
+    'ehr', 'Self Service Constraint Clinic', 'clinic', 'RC9900062001',
+    'Self Service Admin', 'self-service-0062@example.invalid', 'approved', 'verified', now(),
+    'SELF SERVICE CONSTRAINT CLINIC LTD',
+    'c4610000-0000-4000-8000-000000000001', 'c4620000-0000-4000-8000-000000000001',
+    'CAC verified automatically', now(), 'self_service'
+  );
+
+  begin
+    insert into identity.organization_applications (
+      product_code, organization_name, organization_type, cac_registration_number,
+      administrator_name, administrator_email, status, verification_result, verified_at,
+      verified_organization_name, organization_id, facility_id, review_reason, reviewed_at, approval_mode
+    ) values (
+      'ehr', 'Admin Review Constraint Clinic', 'clinic', 'RC9900062002',
+      'Admin Review Admin', 'admin-review-0062@example.invalid', 'approved', 'verified', now(),
+      'ADMIN REVIEW CONSTRAINT CLINIC LTD',
+      'c4610000-0000-4000-8000-000000000001', 'c4620000-0000-4000-8000-000000000001',
+      'Approved without a reviewer', now(), 'admin_review'
+    );
+    raise exception 'Administrator-reviewed application was approved without a reviewer';
+  exception when check_violation then
+    get stacked diagnostics violated_constraint = constraint_name;
+    if violated_constraint <> 'organization_applications_review_check_self_service' then
+      raise exception 'Unexpected constraint rejected the unreviewed approval: %', violated_constraint;
+    end if;
+  end;
+
+  delete from identity.organization_applications
+   where cac_registration_number = 'RC9900062001';
+end $$;
+
 set local role hid_identity_api_runtime;
 select set_config('app.actor_subject', 'system:auth', true);
 select set_config('app.correlation_id', 'organization-onboarding-test-0001', true);
