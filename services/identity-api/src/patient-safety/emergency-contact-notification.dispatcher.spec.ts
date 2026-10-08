@@ -54,6 +54,35 @@ describe('EmergencyContactNotificationDispatcher', () => {
       expect(outcomeParameters).toEqual([notificationId, claimParameters[0], 'accepted', 'termii', null]);
     });
 
+    it('normalizes names to the alert contract instead of failing the alert', async () => {
+      // The exact patterns notification-api's DeliverEmergencyContactAlertDto enforces.
+      const firstNamePattern = /^[\p{L}\p{M}][\p{L}\p{M}' .-]{0,59}$/u;
+      const facilityPattern = /^[\p{L}\p{N}\p{M}][\p{L}\p{N}\p{M}' .,&()/-]{0,119}$/u;
+      const { query, database } = fakeDatabase();
+      const protector = new EmergencyContactProtector();
+      const deliverEmergencyContactAlert = jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'termii' });
+      const dispatcher = new EmergencyContactNotificationDispatcher(database, protector,
+        { deliverEmergencyContactAlert } as unknown as NotificationOtpClient);
+      query.mockResolvedValueOnce({ rows: [
+        claimed(protector, { patient_first_name: 'Ọlá’ #1', facility_name: '#1 St. Mary’s: Ward+ICU_2' }),
+        claimed(protector, { notification_id: 'c0000000-0000-4000-8000-000000000003',
+          patient_first_name: '###', facility_name: '***' }),
+        claimed(protector, { notification_id: 'c0000000-0000-4000-8000-000000000004',
+          patient_first_name: 'A'.repeat(80), facility_name: null }),
+      ] }).mockResolvedValue({ rows: [{ next_status: 'delivered' }] });
+      await expect(dispatcher.dispatch('patient-lifecycle-test-4')).resolves.toEqual({ claimed: 3, delivered: 3, retried: 0, failed: 0 });
+      const sent = deliverEmergencyContactAlert.mock.calls.map(([input]) => input as Record<string, string | null>);
+      expect(sent.map(({ patientFirstName, facilityName }) => [patientFirstName, facilityName])).toEqual([
+        ['Ọlá\'', '1 St. Mary\'s Ward ICU 2'],
+        ['Someone', null],
+        ['A'.repeat(60), null],
+      ]);
+      for (const { patientFirstName, facilityName } of sent) {
+        expect(patientFirstName).toMatch(firstNamePattern);
+        if (facilityName !== null) expect(facilityName).toMatch(facilityPattern);
+      }
+    });
+
     it('schedules a retry for an unknown outcome and records protection failures as definitive', async () => {
       const { query, database } = fakeDatabase();
       const protector = new EmergencyContactProtector();

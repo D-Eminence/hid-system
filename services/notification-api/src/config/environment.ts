@@ -40,7 +40,9 @@ const schema = z.object({
   // prepared in Phase 3 but not approved for production delivery.
   EMERGENCY_CONTACT_DELIVERY_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
 }).superRefine((value, context) => {
-  if (value.EMERGENCY_CONTACT_DELIVERY_ENABLED && value.HID_DEPLOYMENT_ENV === 'production') {
+  if (value.EMERGENCY_CONTACT_DELIVERY_ENABLED
+      && (value.HID_DEPLOYMENT_ENV === 'production'
+        || (value.NODE_ENV === 'production' && value.HID_DEPLOYMENT_ENV !== 'staging'))) {
     context.addIssue({ code: 'custom', path: ['EMERGENCY_CONTACT_DELIVERY_ENABLED'], message: 'Production emergency-contact delivery is not approved' });
   }
   if (value.NOTIFICATION_DELIVERY_PROFILE === 'email-only' && value.HID_DEPLOYMENT_ENV !== 'staging') {

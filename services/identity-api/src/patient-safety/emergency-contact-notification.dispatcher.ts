@@ -17,6 +17,24 @@ interface ClaimedNotification {
   attempt_count: number;
 }
 
+// The alert contract (notification-api DeliverEmergencyContactAlertDto) accepts
+// a fixed character set and rejects anything else as a definitive failure.
+// Names are normalized to that set here so a legitimate name never stops an
+// emergency alert from being sent.
+function alertText(value: string | null, disallowed: RegExp, leading: RegExp, maxLength: number): string | null {
+  const text = (value ?? '').normalize('NFC').replace(/[‘’ʼ]/gu, "'")
+    .replace(disallowed, ' ').replace(/ +/gu, ' ').replace(leading, '');
+  return Array.from(text).slice(0, maxLength).join('').trim() || null;
+}
+
+export function alertPatientFirstName(value: string | null): string {
+  return alertText(value, /[^\p{L}\p{M}' .-]/gu, /^[^\p{L}\p{M}]+/u, 60) ?? 'Someone';
+}
+
+export function alertFacilityName(value: string | null): string | null {
+  return alertText(value, /[^\p{L}\p{N}\p{M}' .,&()/-]/gu, /^[^\p{L}\p{N}\p{M}]+/u, 120);
+}
+
 export interface DispatchSummary {
   claimed: number;
   delivered: number;
@@ -75,8 +93,8 @@ export class EmergencyContactNotificationDispatcher {
       notificationId: notice.notification_id,
       channel: notice.channel,
       recipient,
-      patientFirstName: notice.patient_first_name,
-      facilityName: notice.facility_name,
+      patientFirstName: alertPatientFirstName(notice.patient_first_name),
+      facilityName: alertFacilityName(notice.facility_name),
       occurredAt: notice.occurred_at,
       correlationId,
     });

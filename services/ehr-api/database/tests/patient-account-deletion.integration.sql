@@ -495,6 +495,61 @@ end
 $$;
 reset role;
 
+-- A legal hold placed during the waiting period blocks finalization.
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'synthetic:delete:2', true),
+  set_config('app.correlation_id', 'patient-deletion-held-final-01', true);
+do $$
+declare requested record; confirmed record;
+begin
+  select * into requested from identity.request_my_account_deletion('synthetic:delete:2',
+    'd3000000-0000-4000-8000-000000000002', encode(sha256('token-held-final'::bytea), 'hex'));
+  select * into confirmed from identity.confirm_my_account_deletion('synthetic:delete:2',
+    'd3000000-0000-4000-8000-000000000002', requested.request_id,
+    encode(sha256('token-held-final'::bytea), 'hex'), 'DELETE MY ACCOUNT');
+  if confirmed.outcome <> 'pending' then raise exception 'Held-finalization fixture was not scheduled: %', confirmed; end if;
+  perform set_config('hid.test.request_held_final', requested.request_id::text, true);
+end
+$$;
+reset role;
+update identity.patient_account_deletion_requests
+   set scheduled_for = clock_timestamp() - interval '1 second'
+ where id = current_setting('hid.test.request_held_final')::uuid;
+insert into platform.legal_holds (id, subject_type, subject_id, reason, reference) values
+  ('dc000000-0000-4000-8000-000000000002', 'account', 'd1000000-0000-4000-8000-000000000002',
+   'Synthetic hold placed during the waiting period', 'TEST-HOLD-2');
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'system:auth', true),
+  set_config('app.correlation_id', 'patient-deletion-held-final-02', true);
+do $$
+declare finalized record;
+begin
+  select * into finalized from identity.finalize_due_patient_account_deletions(10);
+  if finalized.request_id is distinct from current_setting('hid.test.request_held_final')::uuid
+     or finalized.outcome is distinct from 'blocked' then
+    raise exception 'A hold placed during the waiting period did not block finalization: %', finalized;
+  end if;
+end
+$$;
+reset role;
+do $$
+begin
+  if not exists (select 1 from identity.patient_account_deletion_requests
+                  where id = current_setting('hid.test.request_held_final')::uuid
+                    and state = 'blocked' and blocked_reason_code = 'LEGAL_HOLD')
+     or not exists (select 1 from auth.accounts where id = 'd1000000-0000-4000-8000-000000000002' and status = 'active')
+     or exists (select 1 from auth.sessions where account_id = 'd1000000-0000-4000-8000-000000000002'
+                  and revoked_at is not null)
+     or not exists (select 1 from audit.events where action = 'identity.patient-account-deletion.blocked'
+                      and resource_id = current_setting('hid.test.request_held_final')
+                      and details ->> 'stage' = 'finalization' and details ->> 'reasonCode' = 'LEGAL_HOLD') then
+    raise exception 'Finalization under a legal hold changed the login or was not audited';
+  end if;
+end
+$$;
+update platform.legal_holds set released_at = clock_timestamp(), release_reason = 'Synthetic hold released'
+ where id = 'dc000000-0000-4000-8000-000000000002';
+
 -- A zero waiting period completes inside the confirmation transaction.
 update platform.patient_account_deletion_settings set waiting_period = interval '0';
 set local role hid_identity_api_runtime;

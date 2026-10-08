@@ -691,6 +691,18 @@ begin
       perform identity.audit_emergency_contact_event(
         'identity.emergency-contact.notification.failed', 'failure', notice.patient_id, notice.facility_id,
         'emergency-contact-notification', notice.id, jsonb_build_object('reason', 'delivery_window_elapsed'));
+    elsif notice.attempt_count >= 8 then
+      -- The final attempt's outcome was never recorded and its lease expired.
+      -- Close it instead of leasing a ninth attempt, which the attempt bound
+      -- rejects and which would otherwise abort every later claim batch.
+      update identity.emergency_contact_notifications
+         set status = 'failed', closed_reason = 'attempts_exhausted', lease_owner = null,
+             lease_expires_at = null, updated_at = clock_timestamp(), row_version = row_version + 1
+       where id = notice.id;
+      perform identity.audit_emergency_contact_event(
+        'identity.emergency-contact.notification.failed', 'failure', notice.patient_id, notice.facility_id,
+        'emergency-contact-notification', notice.id,
+        jsonb_build_object('reason', 'attempts_exhausted', 'attempt', notice.attempt_count));
     elsif contact_row.status <> 'verified' or not contact_row.notify_on_emergency_access then
       update identity.emergency_contact_notifications
          set status = 'suppressed', closed_reason = 'contact_ineligible', lease_owner = null,

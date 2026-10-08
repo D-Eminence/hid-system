@@ -107,4 +107,10 @@ describe('Emergency-contact notification delivery', () => {
     resetEnvironmentForTests();
     expect(() => getEnvironment()).toThrow(/emergency-contact delivery is not approved/);
   });
+
+  it('refuses a production runtime unless the deployment is explicitly staging', () => {
+    Object.assign(process.env, { NODE_ENV: 'production', HID_DEPLOYMENT_ENV: 'development', EMERGENCY_CONTACT_DELIVERY_ENABLED: 'true' });
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/emergency-contact delivery is not approved/);
+  });
 });

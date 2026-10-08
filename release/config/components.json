@@ -352,7 +352,7 @@
       },
       {
         "name": "0064_patient_emergency_contacts.sql",
-        "sha256": "452fd08a27f1ef86bcea49cdb21810062fd0196390dbf98126fc721b7e3b4a21"
+        "sha256": "f2136603fddb738a0ef6f761ee4267761c212bbb8490843a5b056928c575b341"
       },
       {
         "name": "0065_patient_access_safety.sql",

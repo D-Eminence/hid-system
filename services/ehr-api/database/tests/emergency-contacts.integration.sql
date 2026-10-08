@@ -395,6 +395,76 @@ begin
 end
 $$;
 
+-- A final attempt whose outcome was never recorded is closed on its next claim
+-- and does not block other deliveries in the same batch.
+update identity.emergency_contact_notifications
+   set status = 'pending', closed_reason = null, last_outcome = null, attempt_count = 8,
+       lease_owner = 'identity-api-crashed', lease_expires_at = clock_timestamp() - interval '1 second',
+       next_attempt_at = clock_timestamp() - interval '2 minutes'
+ where id = 'e1a00000-0000-4000-8000-000000000001';
+update identity.emergency_contact_notifications
+   set status = 'pending', closed_reason = null, delivered_at = null, attempt_count = 2,
+       next_attempt_at = clock_timestamp() - interval '1 minute'
+ where id = current_setting('hid.test.notification')::uuid;
+set local role hid_identity_api_runtime;
+do $$
+declare claimed_ids uuid[]; claimed_attempts smallint[];
+begin
+  select array_agg(claimed.notification_id), array_agg(claimed.attempt_count)
+    into claimed_ids, claimed_attempts
+    from identity.claim_emergency_contact_notifications('identity-api-test', 10, 60) claimed;
+  if claimed_ids is distinct from array[current_setting('hid.test.notification')::uuid]
+     or claimed_attempts is distinct from array[3]::smallint[] then
+    raise exception 'An exhausted intent blocked or joined the claim batch: % %', claimed_ids, claimed_attempts;
+  end if;
+  if identity.record_emergency_contact_notification_outcome(claimed_ids[1], 'identity-api-test',
+       'accepted', 'termii', null) <> 'delivered' then
+    raise exception 'The unblocked delivery was not recorded';
+  end if;
+end
+$$;
+reset role;
+do $$
+begin
+  if not exists (select 1 from identity.emergency_contact_notifications
+                  where id = 'e1a00000-0000-4000-8000-000000000001' and status = 'failed'
+                    and closed_reason = 'attempts_exhausted' and attempt_count = 8 and lease_owner is null)
+     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.notification.failed'
+                      and resource_id = 'e1a00000-0000-4000-8000-000000000001'
+                      and details ->> 'reason' = 'attempts_exhausted') then
+    raise exception 'Exhausted intent was not closed and audited';
+  end if;
+end
+$$;
+
+-- An intent past its 24-hour delivery window expires instead of being sent.
+update identity.emergency_contact_notifications
+   set status = 'pending', closed_reason = null, last_outcome = null, attempt_count = 3,
+       lease_owner = null, lease_expires_at = null, next_attempt_at = clock_timestamp() - interval '1 minute',
+       occurred_at = clock_timestamp() - interval '25 hours', deliver_before = clock_timestamp() - interval '1 hour'
+ where id = 'e1a00000-0000-4000-8000-000000000001';
+set local role hid_identity_api_runtime;
+do $$
+begin
+  if exists (select 1 from identity.claim_emergency_contact_notifications('identity-api-test', 10, 60)) then
+    raise exception 'An intent past its delivery window was claimed for delivery';
+  end if;
+end
+$$;
+reset role;
+do $$
+begin
+  if not exists (select 1 from identity.emergency_contact_notifications
+                  where id = 'e1a00000-0000-4000-8000-000000000001' and status = 'expired'
+                    and closed_reason = 'delivery_window_elapsed')
+     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.notification.failed'
+                      and resource_id = 'e1a00000-0000-4000-8000-000000000001'
+                      and details ->> 'reason' = 'delivery_window_elapsed') then
+    raise exception 'Expired intent was not closed and audited';
+  end if;
+end
+$$;
+
 -- Notification failure inside the trigger never invalidates break-glass.
 create function pg_temp.reject_contact_intent() returns trigger language plpgsql as $$
 begin
