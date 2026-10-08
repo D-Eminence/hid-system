@@ -4,9 +4,9 @@
 -- PostgreSQL constraint name is not part of the stable contract.
 
 do $$
-declare constraint_row record;
+declare matching_constraint record;
 begin
-  for constraint_row in
+  for matching_constraint in
     select constraint_row.conname
       from pg_constraint constraint_row
      where constraint_row.conrelid = 'identity.organization_applications'::regclass
@@ -16,7 +16,7 @@ begin
        and pg_get_constraintdef(constraint_row.oid) like '%review_reason%'
   loop
     execute format('alter table identity.organization_applications drop constraint %I',
-      constraint_row.conname);
+      matching_constraint.conname);
   end loop;
 end
 $$;
