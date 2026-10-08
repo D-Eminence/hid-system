@@ -58,6 +58,16 @@ still resolved independently and do not become platform permissions. An
 administrator can perform a clinical action only if the principal separately
 holds the normal facility/domain role and follows that domain workflow.
 
+### Platform scope (Phase 4 Stage 1, ADR-037)
+
+Admin controllers are `@PlatformScope()`. The guard binds no facility, ignores
+`X-Facility-ID`, strips facility roles/permissions, and accepts only platform
+permissions; facility routes accept only the bound membership's permissions.
+`requireAdminContext` yields a `PlatformAccessContext` with no facility or
+membership, the database transaction carries `app.access_scope = 'platform'`,
+and audit rows are `access_scope = 'platform'` with no facility. Staff sign-in
+still requires an active facility membership; platform routes never use it.
+
 ## Authentication and bootstrap
 
 The Admin browser uses Identity `/auth/login`, `/auth/logout`, and the existing
@@ -95,8 +105,8 @@ All routes are under `/api/v1/admin` and are Identity-authenticated.
 | `GET /facilities`, `GET /facilities/:id` | `platform.facility.read` | Paginated/filtered lifecycle and membership metadata. |
 | `POST /facilities/:id/status` | `platform.facility.manage` | Versioned, reasoned, idempotent verify/reject/suspend/reactivate transition. |
 | `GET /principals` | `platform.principal.read` | Search-required bounded account, facility-membership, platform-role, and session status. |
-| `POST /principals/:id/status` | `platform.principal.manage` | Versioned suspension/reactivation; suspension increments token version and revokes sessions. |
-| `POST /principals/:id/platform-roles` | `platform.role.manage` | Allowlisted, versioned, reasoned, idempotent grant/revoke with last-admin protection. |
+| `POST /principals/:id/status` | `platform.principal.manage` | Versioned suspension/reactivation; suspension increments token version and revokes sessions. Reactivation restores the pre-suspension status, so `pending_reset`/`locked` accounts must still recover (`409 ACCOUNT_RECOVERY_REQUIRED`); self-targeted commands return `403 ADMIN_SELF_CHANGE_DENIED` (0068). |
+| `POST /principals/:id/platform-roles` | `platform.role.manage` | Allowlisted, versioned, reasoned, idempotent grant/revoke with last-admin protection. Administrators cannot change their own roles (0068). |
 | `POST /principals/:id/sessions/revoke` | `platform.session.revoke` | Real authoritative session revocation, not frontend state. |
 | `GET /identity/reviews` | `platform.identity-review.read` | Paginated review evidence with `NIN-****1234`; no raw NIN or merge action. |
 | `GET /audit/events` | `platform.audit.read` | Cursor-paginated immutable evidence. Patient IDs and free-form detail payloads are omitted. |
@@ -127,6 +137,10 @@ advisory transaction lock so concurrent changes cannot race the invariant;
 there is no permanent founder exception.
 
 ## Admin UI
+
+The authoritative Platform Admin frontend is `apps/patient-web/src/admin` in
+`D-Eminence/Health-id` (ADR-037). `apps/admin` below is legacy reference code:
+it is kept, receives no new features, and calls the same API contract.
 
 `apps/admin` uses React/Vite and the shared `@hid/api-client` transport. Its
 standalone development port is `3106`; users enter through

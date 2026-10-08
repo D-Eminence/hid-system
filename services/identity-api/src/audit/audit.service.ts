@@ -28,6 +28,8 @@ export interface AuditEventInput {
   details?: Readonly<Record<string, unknown>>;
   provenance?: 'application' | 'legacy_identity' | 'migration' | 'system';
   sourceSystem?: string;
+  /** 'platform' for a platform-administration action, which has no facility. */
+  accessScope?: 'platform';
 }
 
 export interface AuditEventRow extends QueryResultRow {
@@ -60,8 +62,8 @@ export class AuditService {
            correlation_id, actor_type, actor_subject, actor_account_id,
            actor_membership_id, organization_id, facility_id, patient_id, action,
            resource_type, resource_id, outcome, purpose_of_use, reason, source_ip,
-           user_agent, details, provenance, source_system
-         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19)`,
+           user_agent, details, provenance, source_system, access_scope
+         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20)`,
         this.values(event),
       );
     } catch {
@@ -76,8 +78,8 @@ export class AuditService {
          correlation_id, actor_type, actor_subject, actor_account_id,
          actor_membership_id, organization_id, facility_id, patient_id, action,
          resource_type, resource_id, outcome, purpose_of_use, reason, source_ip,
-         user_agent, details, provenance, source_system
-       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19)`,
+         user_agent, details, provenance, source_system, access_scope
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20)`,
       this.values(event),
     );
   }
@@ -136,7 +138,8 @@ export class AuditService {
   private values(event: AuditEventInput): unknown[] {
     return [
       event.correlationId,
-      event.actorType ?? (event.actorSubject && event.facilityId ? 'staff' : 'system'),
+      event.actorType ?? (event.actorSubject && (event.facilityId || event.accessScope === 'platform')
+        ? 'staff' : 'system'),
       event.actorSubject ?? null,
       event.actorAccountId ?? null,
       event.actorMembershipId ?? null,
@@ -156,10 +159,20 @@ export class AuditService {
       // Rows written by this service are Identity evidence unless a caller
       // explicitly records a different source system.
       event.sourceSystem ?? 'identity-api',
+      event.accessScope ?? null,
     ];
   }
 
   private assertActorFacility(event: AuditEventInput): void {
+    if (event.accessScope === 'platform') {
+      // Platform administration is recorded without a facility, but only for a
+      // named staff account and never with a facility membership attached.
+      if ((event.actorType ?? 'staff') !== 'staff' || !event.actorSubject || !event.actorAccountId
+        || event.facilityId || event.actorMembershipId) {
+        throw new ServiceUnavailableException('Platform audit events require a staff account without facility context');
+      }
+      return;
+    }
     const actorType = event.actorType ?? (event.actorSubject ? 'staff' : 'system');
     const facilityOptionalAuthEvent = actorType === 'staff'
       && event.action.startsWith('auth.')

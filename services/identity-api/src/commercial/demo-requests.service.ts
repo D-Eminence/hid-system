@@ -3,7 +3,8 @@ import { Injectable } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext, HidRequest } from '../common/request-context';
+import { platformAuditActor } from '../admin/admin-context';
+import type { HidRequest, PlatformAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CreateDemoRequestDto, ListDemoRequestsDto, UpdateDemoRequestStatusDto } from './demo-request.dto';
 
@@ -69,7 +70,7 @@ export class DemoRequestsService {
     return { accepted: true, replayed: !inserted };
   }
 
-  async list(context: DataAccessContext, filters: ListDemoRequestsDto) {
+  async list(context: PlatformAccessContext, filters: ListDemoRequestsDto) {
     const limit = filters.limit ?? 50;
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query<DemoRequestRow>(
@@ -85,7 +86,7 @@ export class DemoRequestsService {
     });
   }
 
-  async transition(context: DataAccessContext, requestId: string, expectedVersion: number,
+  async transition(context: PlatformAccessContext, requestId: string, expectedVersion: number,
     input: UpdateDemoRequestStatusDto) {
     return this.database.withTransaction(context, async (client) => {
       const current = await client.query<DemoRequestRow>(
@@ -120,16 +121,10 @@ export class DemoRequestsService {
       createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
   }
 
-  private adminAudit(context: DataAccessContext, action: string, resourceType: string,
+  private adminAudit(context: PlatformAccessContext, action: string, resourceType: string,
     resourceId?: string, details?: Record<string, unknown>) {
     return {
-      correlationId: context.correlationId,
-      actorType: 'staff' as const,
-      actorSubject: context.actor.subject,
-      actorAccountId: context.actor.accountId,
-      actorMembershipId: context.membershipId,
-      organizationId: context.actor.facility?.organizationId,
-      facilityId: context.facilityId,
+      ...platformAuditActor(context),
       action, resourceType, resourceId, outcome: 'success' as const,
       purposeOfUse: context.purposeOfUse,
       details,

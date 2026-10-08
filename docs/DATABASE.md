@@ -1078,3 +1078,36 @@ retention evaluation, and audit helpers are not granted. Rollback-only coverage:
 integration suites; `services/identity-api/scripts/verify-patient-safety-runtime.mjs`
 exercises the HTTP workflow under the exact Identity runtime role with a local
 delivery stub.
+
+## Phase 4 Stage 1 platform admin checkpoint
+
+Additive migrations `0067`–`0068` (ADR-037) follow the Phase 3 ledger.
+Migrations `0001`–`0066` are unchanged.
+
+- `0067_platform_admin_scope.sql` adds `platform.current_access_scope()`
+  (`app.access_scope`, `facility` or `platform`) and
+  `audit.events.access_scope`. It replaces the two `0003` staff facility and
+  membership checks with the same rules plus one exception,
+  `access_scope IS NOT DISTINCT FROM 'platform'`, and adds
+  `events_platform_scope_shape_check` (staff account, no facility or
+  membership). The BEFORE INSERT trigger `audit_events_platform_scope` marks
+  facility-less staff rows written in a platform-scoped transaction and
+  requires an active `platform.admin.access` grant for a successful platform
+  row; denied and failed rows remain recordable. `audit.list_platform_events`
+  now selects the `patient_id` its result declares (the `0027` body failed every
+  call); its signature, authorization, filters and ordering are unchanged.
+  `identity.organization_application_admin_account` keeps the `0046`
+  membership check for facility-scoped callers and relies on the platform
+  permission alone in platform scope.
+- `0068_admin_account_transition_safety.sql` adds
+  `auth.accounts.disabled_from_status` (only while `disabled`) and replaces
+  `auth.admin_transition_account` and `auth.admin_change_platform_role` with
+  the same signatures. `active` is accepted only from `disabled` and restores
+  the recorded status (`pending_reset` when none was recorded); no-op requests
+  and self-targeted commands are refused; `disabled_until` is not cleared.
+
+No grants change: both replaced commands keep their `0027` grants, and the new
+helper and trigger function are revoked from PUBLIC. Rollback-only coverage:
+`platform-admin-scope.integration.sql`;
+`services/identity-api/scripts/verify-platform-admin-runtime.mjs` exercises the
+admin HTTP boundaries under the exact Identity runtime role.

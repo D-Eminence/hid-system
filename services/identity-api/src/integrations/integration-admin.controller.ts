@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Headers, Param, Post, Req } from '@nestjs/common';
 import { requireAdminContext } from '../admin/admin-context';
-import { AuditAction, AuditFailuresOnly, FacilityOptional, RequirePermissions } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, PlatformScope, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
@@ -18,7 +18,7 @@ function version(value: string | undefined): number {
 }
 
 @Controller('admin/integrations')
-@FacilityOptional()
+@PlatformScope()
 @AuditFailuresOnly()
 export class IntegrationAdminController {
   constructor(private readonly integrations: IntegrationAdminService) {}

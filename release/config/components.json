@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0066",
-    "count": 66,
+    "last": "0068",
+    "count": 68,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -361,6 +361,14 @@
       {
         "name": "0066_patient_access_safety.sql",
         "sha256": "513faac2e4d45ac345c462ad73a83371e78ca337b918be07d2955370eb9288dd"
+      },
+      {
+        "name": "0067_platform_admin_scope.sql",
+        "sha256": "31dbcee17c952c2714dacb8d690298201642bc8e7e43a8260608416672f2d741"
+      },
+      {
+        "name": "0068_admin_account_transition_safety.sql",
+        "sha256": "3c939177cd26302d6035b049bbbb571e83de2b1abbcf74350fa33af56e2abf30"
       }
     ]
   },

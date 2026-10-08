@@ -1,19 +1,20 @@
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
-import type { DataAccessContext } from '../common/request-context';
+import type { PlatformAccessContext } from '../common/request-context';
 import { DomainProblem } from '../common/problem';
 import type { DatabaseService } from '../database/database.service';
 import { AdminService } from './admin.service';
 
-const context: DataAccessContext = {
+const context: PlatformAccessContext = {
+  scope: 'platform',
   correlationId: 'admin-test-correlation',
-  facilityId: '10000000-0000-4000-8000-000000000002',
-  membershipId: '40000000-0000-4000-8000-000000000001',
+  facilityId: null,
+  membershipId: null,
   purposeOfUse: 'healthcare-operations',
   actor: {
     id: 'staff:admin', subject: 'staff:admin',
     accountId: '20000000-0000-4000-8000-000000000001',
-    roles: ['support'], permissions: [], platformRoles: ['platform_super_admin'],
+    roles: [], permissions: [], platformRoles: ['platform_super_admin'],
     platformPermissions: ['platform.admin.access', 'platform.facility.manage'],
     facilityIds: ['10000000-0000-4000-8000-000000000002'], facilities: [],
     authenticationMethod: 'local',
@@ -45,6 +46,35 @@ describe('AdminService governed commands', () => {
     expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: 'admin.facility.suspended', reason: 'Confirmed governance suspension', outcome: 'success',
     }));
+  });
+
+  it('records platform-scoped semantic audit without a borrowed facility or membership', async () => {
+    const { service, audit } = harness({ facility_id: '10000000-0000-4000-8000-000000000002',
+      lifecycle_status: 'suspended', row_version: '3', replayed: false });
+    await service.transitionFacility(context, '10000000-0000-4000-8000-000000000002', 2,
+      { status: 'suspended', reason: 'Confirmed governance suspension' }, 'admin-command-key-0001');
+    const event = audit.recordWithClient.mock.calls[0][1] as Record<string, unknown>;
+    expect(event).toMatchObject({ actorType: 'staff', actorSubject: 'staff:admin',
+      actorAccountId: '20000000-0000-4000-8000-000000000001', accessScope: 'platform' });
+    expect(event.facilityId).toBeUndefined();
+    expect(event.actorMembershipId).toBeUndefined();
+    expect(event.organizationId).toBeUndefined();
+  });
+
+  it.each([
+    ['ADMIN_SELF_CHANGE_DENIED', 403, 'ADMIN_SELF_CHANGE_DENIED'],
+    ['ADMIN_ACCOUNT_RECOVERY_REQUIRED', 409, 'ACCOUNT_RECOVERY_REQUIRED'],
+    ['ADMIN_NO_STATE_CHANGE', 409, 'ADMIN_STATE_CONFLICT'],
+  ] as const)('maps %s account command refusals to a safe problem', async (databaseMessage, status, code) => {
+    const { service, client, audit } = harness({});
+    client.query.mockRejectedValue(new Error(databaseMessage));
+    const error = await service.transitionAccount(context, '20000000-0000-4000-8000-000000000002', 2,
+      { status: 'active', reason: 'Governed account activation' }, 'admin-account-command-0002')
+      .catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(DomainProblem);
+    expect((error as DomainProblem).getStatus()).toBe(status);
+    expect((error as DomainProblem).code).toBe(code);
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
   });
 
   it('does not duplicate semantic audit evidence on an idempotent replay', async () => {

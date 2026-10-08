@@ -3,7 +3,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { QueryResultRow } from 'pg';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext, HidRequest } from '../common/request-context';
+import type { HidRequest, PlatformAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
@@ -74,7 +74,7 @@ export class OrganizationApplicationsService {
     return { accepted: true };
   }
 
-  async list(context: DataAccessContext, status?: string) {
+  async list(context: PlatformAccessContext, status?: string) {
     try {
       const result = await this.database.withTransaction(context, (client) =>
         client.query<ApplicationRow>('select * from identity.admin_list_organization_applications($1)', [status ?? null]),
@@ -110,7 +110,7 @@ export class OrganizationApplicationsService {
     }
   }
 
-  async verify(context: DataAccessContext, applicationId: string, expectedVersion: number) {
+  async verify(context: PlatformAccessContext, applicationId: string, expectedVersion: number) {
     let secret: ApplicationSecretRow;
     try {
       const result = await this.database.withTransaction(context, (client) =>
@@ -228,7 +228,7 @@ export class OrganizationApplicationsService {
     }
   }
 
-  async approve(context: DataAccessContext, applicationId: string, expectedVersion: number,
+  async approve(context: PlatformAccessContext, applicationId: string, expectedVersion: number,
     input: ApproveOrganizationApplicationDto) {
     if (Boolean(input.existingOrganizationId) !== Boolean(input.existingFacilityId)) {
       throw new DomainProblem(400, 'ORGANIZATION_LINK_INVALID', 'Both existing organization and facility IDs are required');
@@ -251,7 +251,7 @@ export class OrganizationApplicationsService {
     }
   }
 
-  async reject(context: DataAccessContext, applicationId: string, expectedVersion: number, reason: string) {
+  async reject(context: PlatformAccessContext, applicationId: string, expectedVersion: number, reason: string) {
     try {
       const result = await this.database.withTransaction(context, (client) =>
         client.query<{ application_status: string; row_version: string }>(

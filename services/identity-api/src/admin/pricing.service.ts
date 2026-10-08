@@ -3,8 +3,9 @@ import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { PlatformAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
+import { platformAuditActor } from './admin-context';
 import type { PricePricingCommandDto, ProductPricingCommandDto } from './dto/pricing-command.dto';
 
 interface PublicPriceRow extends QueryResultRow {
@@ -58,7 +59,7 @@ export class PricingService {
     return { data: result.rows.map((row) => this.publicPrice(row)) };
   }
 
-  async adminCatalog(context: DataAccessContext) {
+  async adminCatalog(context: PlatformAccessContext) {
     try {
       return await this.database.withTransaction(context, async (client) => {
         const products = await client.query<ProductRow>(`select * from platform.admin_list_commercial_products()`);
@@ -77,7 +78,7 @@ export class PricingService {
     } catch (error) { throw this.commandError(error); }
   }
 
-  async updateProduct(context: DataAccessContext, slug: string, expectedVersion: number,
+  async updateProduct(context: PlatformAccessContext, slug: string, expectedVersion: number,
     input: ProductPricingCommandDto, idempotencyKey: string) {
     this.assertKey(slug);
     const name = input.name.trim();
@@ -101,7 +102,7 @@ export class PricingService {
     } catch (error) { throw this.commandError(error); }
   }
 
-  async updatePrice(context: DataAccessContext, slug: string, priceContext: string,
+  async updatePrice(context: PlatformAccessContext, slug: string, priceContext: string,
     expectedVersion: number, input: PricePricingCommandDto, idempotencyKey: string) {
     this.assertKey(slug);
     if (!/^(core|addon|standalone|usage|setup|migration_project|enterprise)$/.test(priceContext)) {
@@ -151,12 +152,9 @@ export class PricingService {
     }
   }
 
-  private auditEvent(context: DataAccessContext, action: string, resourceId: string,
+  private auditEvent(context: PlatformAccessContext, action: string, resourceId: string,
     reason: string, details: Record<string, unknown>) {
-    return { correlationId: context.correlationId, actorType: 'staff' as const,
-      actorSubject: context.actor.subject, actorAccountId: context.actor.accountId,
-      actorMembershipId: context.membershipId, organizationId: context.actor.facility?.organizationId,
-      facilityId: context.facilityId, action, resourceType: 'commercial-pricing', resourceId,
+    return { ...platformAuditActor(context), action, resourceType: 'commercial-pricing', resourceId,
       outcome: 'success' as const, purposeOfUse: context.purposeOfUse, reason, details };
   }
 

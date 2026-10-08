@@ -37,12 +37,15 @@ export interface HidRequest extends Request {
   facilityId?: string;
   authTransport?: 'bearer' | 'cookie';
   purposeOfUse?: PurposeOfUse;
+  /** 'platform' on @PlatformScope routes; facility context is never bound there. */
+  accessScope?: 'facility' | 'platform';
 }
 
 export type PurposeOfUse = 'direct-care' | 'emergency' | 'healthcare-operations';
 const PURPOSES = new Set<PurposeOfUse>(['direct-care', 'emergency', 'healthcare-operations']);
 
 export interface DataAccessContext {
+  scope?: 'facility';
   correlationId: string;
   actor: ActorContext;
   facilityId: string;
@@ -50,6 +53,23 @@ export interface DataAccessContext {
   purposeOfUse: PurposeOfUse;
   authorization?: string;
 }
+
+/**
+ * Platform administration context. It carries no facility or membership: the
+ * actor is authorized by platform permissions alone, and the database receives
+ * app.access_scope = 'platform'.
+ */
+export interface PlatformAccessContext {
+  scope: 'platform';
+  correlationId: string;
+  actor: ActorContext;
+  facilityId: null;
+  membershipId: null;
+  purposeOfUse: 'healthcare-operations';
+  authorization?: string;
+}
+
+export type AccessContext = DataAccessContext | PlatformAccessContext;
 
 export function requireRequestContext(request: HidRequest, suppliedPurpose?: string): DataAccessContext {
   if (!request.actor || !request.facilityId || !request.correlationId) {
