@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0062",
-    "count": 62,
+    "last": "0065",
+    "count": 65,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -345,6 +345,18 @@
       {
         "name": "0062_provider_cac_self_service_constraints.sql",
         "sha256": "c4db9dce22150327a9c1fad11db1f41e849cfd90d8581d3c99a053d61a5217db"
+      },
+      {
+        "name": "0063_patient_account_deletion_lifecycle.sql",
+        "sha256": "afee2b47c283669fbba864148b601fb0314f8847ff254600e3132c8c84010f38"
+      },
+      {
+        "name": "0064_patient_emergency_contacts.sql",
+        "sha256": "452fd08a27f1ef86bcea49cdb21810062fd0196390dbf98126fc721b7e3b4a21"
+      },
+      {
+        "name": "0065_patient_access_safety.sql",
+        "sha256": "513faac2e4d45ac345c462ad73a83371e78ca337b918be07d2955370eb9288dd"
       }
     ]
   },
