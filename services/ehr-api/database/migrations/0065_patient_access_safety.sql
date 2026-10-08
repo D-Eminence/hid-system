@@ -1,0 +1,445 @@
+-- Phase 3 focused patient-safety corrections.
+--
+-- 1. Patient access-request decisions previously depended on a staff-shaped
+--    facility context and on functions that the Identity runtime could not
+--    execute. These wrappers bind each call to the authenticated patient
+--    session first and then delegate to the existing decision commands, so the
+--    approval/denial semantics, audit, and consent rows are unchanged.
+-- 2. Patients can revoke access they granted (patient-approved requests and
+--    PIN-derived grants). Break-glass grants are not patient-revocable.
+-- 3. Access history labels emergency (break-glass) grants and whether the
+--    patient may revoke a grant, so the portal never offers a staff command.
+-- 4. A deleted login no longer receives new in-app inbox items.
+-- 5. See the decision-command correction below.
+
+-- 5. The 0035 decision commands declare output columns (`status`,
+--    `patient_id`, `expires_at`) that collide with unqualified table columns,
+--    so PL/pgSQL rejected every call as ambiguous. Their bodies are repeated
+--    with `#variable_conflict use_column` so column references keep their
+--    evident meaning. One correction is required for approval to succeed at
+--    all: the created grant now carries the request's `purpose_of_use`, which
+--    0008 (`consent_grants_purpose_or_hold_ck` and the exact request foreign
+--    key) already requires. Migration 0035 itself is not modified.
+create or replace function identity.approve_access_request(request_id uuid)
+returns table (
+  access_request_id uuid,
+  consent_grant_id uuid,
+  patient_id uuid,
+  status text,
+  expires_at timestamptz,
+  replayed boolean
+)
+language plpgsql
+security definer
+set search_path = identity, auth, audit, platform, pg_catalog, pg_temp
+as $$
+#variable_conflict use_column
+declare
+  actor_subject text := platform.current_actor_subject();
+  actor_account_id uuid := auth.account_id_for_subject(actor_subject);
+  actor_correlation_id text := platform.current_correlation_id();
+  patient_id_value uuid;
+  request_row identity.access_requests%rowtype;
+  grant_id_value uuid;
+  expires_at_value timestamptz;
+  replayed boolean := false;
+begin
+  if actor_account_id is null or actor_correlation_id is null then
+    raise exception using errcode = '42501', message = 'Authenticated patient context is required';
+  end if;
+
+  select id into patient_id_value
+    from identity.patients
+   where account_id = actor_account_id
+     and status = 'active'
+   limit 1;
+  if patient_id_value is null then
+    raise exception using errcode = '42501', message = 'Authenticated patient context is required';
+  end if;
+
+  select * into request_row
+    from identity.access_requests
+   where id = request_id
+     and patient_id = patient_id_value
+   for update;
+  if not found then
+    raise exception using errcode = 'P0002', message = 'The access request is unavailable';
+  end if;
+
+  if request_row.status = 'approved' then
+    select id, expires_at into grant_id_value, expires_at_value
+      from identity.consent_grants
+     where request_id = request_row.id
+       and patient_id = patient_id_value
+       and status = 'active'
+     order by created_at desc
+     limit 1;
+    if grant_id_value is not null then
+      replayed := true;
+      return query select request_row.id, grant_id_value, patient_id_value,
+        'approved'::text, expires_at_value, replayed;
+      return;
+    end if;
+  end if;
+
+  if request_row.status <> 'pending' or request_row.break_glass then
+    raise exception using errcode = '55000', message = 'The access request is no longer pending';
+  end if;
+
+  if request_row.facility_id is null or request_row.migration_hold_reason is not null then
+    raise exception using errcode = '55000', message = 'The access request is not eligible for approval';
+  end if;
+
+  expires_at_value := clock_timestamp() + make_interval(mins => request_row.requested_duration_minutes);
+  grant_id_value := gen_random_uuid();
+
+  update identity.access_requests
+     set status = 'approved',
+         approved_by_patient_id = patient_id_value,
+         approved_at = clock_timestamp(),
+         updated_at = clock_timestamp(),
+         row_version = row_version + 1
+   where id = request_row.id
+     and status = 'pending';
+
+  if not found then
+    raise exception using errcode = '55000', message = 'The access request changed before approval';
+  end if;
+
+  insert into identity.consent_grants (
+    id, request_id, patient_id, staff_id, account_id, membership_id, facility_id,
+    scope, purpose_of_use, status, granted_by_patient_id, reason, starts_at, expires_at,
+    break_glass, correlation_id
+  ) values (
+    grant_id_value, request_row.id, patient_id_value, request_row.staff_id,
+    (select account_id from identity.staff_facility_memberships
+      where id = request_row.membership_id and facility_id = request_row.facility_id),
+    request_row.membership_id, request_row.facility_id, request_row.scope,
+    request_row.purpose_of_use, 'active', patient_id_value, request_row.reason, clock_timestamp(),
+    expires_at_value, false, actor_correlation_id
+  );
+
+  insert into audit.events (
+    correlation_id, actor_type, actor_subject, actor_account_id, patient_id,
+    facility_id, action, outcome, resource_type, resource_id,
+    purpose_of_use, reason, provenance, source_system, details
+  ) values (
+    actor_correlation_id, 'patient', actor_subject, actor_account_id, patient_id_value,
+    request_row.facility_id, 'identity.access-request.approve', 'success',
+    'access-request', request_row.id::text, 'direct-care',
+    request_row.reason, 'application', 'identity-api',
+    jsonb_build_object('consent_grant_id', grant_id_value,
+      'scope', request_row.scope, 'expires_at', expires_at_value)
+  );
+
+  return query select request_row.id, grant_id_value, patient_id_value,
+    'approved'::text, expires_at_value, false;
+end;
+$$;
+
+create or replace function identity.deny_access_request(request_id uuid, requested_reason text)
+returns table (
+  access_request_id uuid,
+  patient_id uuid,
+  status text,
+  denied_at timestamptz,
+  replayed boolean
+)
+language plpgsql
+security definer
+set search_path = identity, auth, audit, platform, pg_catalog, pg_temp
+as $$
+#variable_conflict use_column
+declare
+  actor_subject text := platform.current_actor_subject();
+  actor_account_id uuid := auth.account_id_for_subject(actor_subject);
+  actor_correlation_id text := platform.current_correlation_id();
+  patient_id_value uuid;
+  request_row identity.access_requests%rowtype;
+  denied_at_value timestamptz;
+begin
+  if actor_account_id is null or actor_correlation_id is null then
+    raise exception using errcode = '42501', message = 'Authenticated patient context is required';
+  end if;
+  if length(btrim(coalesce(requested_reason, ''))) not between 3 and 500 then
+    raise exception using errcode = '22023', message = 'A denial reason is required';
+  end if;
+
+  select id into patient_id_value
+    from identity.patients
+   where account_id = actor_account_id
+     and status = 'active'
+   limit 1;
+  if patient_id_value is null then
+    raise exception using errcode = '42501', message = 'Authenticated patient context is required';
+  end if;
+
+  select * into request_row
+    from identity.access_requests
+   where id = request_id
+     and patient_id = patient_id_value
+   for update;
+  if not found then
+    raise exception using errcode = 'P0002', message = 'The access request is unavailable';
+  end if;
+
+  if request_row.status = 'denied' then
+    return query select request_row.id, patient_id_value, 'denied'::text,
+      request_row.denied_at, true;
+    return;
+  end if;
+  if request_row.status <> 'pending' or request_row.break_glass then
+    raise exception using errcode = '55000', message = 'The access request is no longer pending';
+  end if;
+
+  denied_at_value := clock_timestamp();
+  update identity.access_requests
+     set status = 'denied',
+         denied_at = denied_at_value,
+         denied_reason = btrim(requested_reason),
+         updated_at = denied_at_value,
+         row_version = row_version + 1
+   where id = request_row.id
+     and status = 'pending';
+  if not found then
+    raise exception using errcode = '55000', message = 'The access request changed before denial';
+  end if;
+
+  insert into audit.events (
+    correlation_id, actor_type, actor_subject, actor_account_id, patient_id,
+    facility_id, action, outcome, resource_type, resource_id,
+    purpose_of_use, reason, provenance, source_system, details
+  ) values (
+    actor_correlation_id, 'patient', actor_subject, actor_account_id, patient_id_value,
+    request_row.facility_id, 'identity.access-request.deny', 'success',
+    'access-request', request_row.id::text, 'direct-care',
+    btrim(requested_reason), 'application', 'identity-api',
+    jsonb_build_object('scope', request_row.scope)
+  );
+
+  return query select request_row.id, patient_id_value, 'denied'::text,
+    denied_at_value, false;
+end;
+$$;
+
+create or replace function identity.list_my_access_requests()
+returns table (
+  access_request_id uuid,
+  facility_id uuid,
+  facility_name text,
+  scope text,
+  reason text,
+  status text,
+  requested_duration_minutes integer,
+  requested_at timestamptz,
+  approved_at timestamptz,
+  denied_at timestamptz,
+  denied_reason text
+)
+language plpgsql
+security definer
+set search_path = identity, auth, platform, pg_catalog, pg_temp
+as $$
+#variable_conflict use_column
+declare
+  actor_account_id uuid := auth.account_id_for_subject(platform.current_actor_subject());
+  patient_id_value uuid;
+begin
+  if actor_account_id is null then
+    raise exception using errcode = '42501', message = 'Authenticated patient context is required';
+  end if;
+  select id into patient_id_value
+    from identity.patients
+   where account_id = actor_account_id
+     and status = 'active'
+   limit 1;
+  if patient_id_value is null then
+    raise exception using errcode = '42501', message = 'Authenticated patient context is required';
+  end if;
+
+  return query
+  select request_row.id, request_row.facility_id, facility.name,
+    request_row.scope, request_row.reason, request_row.status,
+    request_row.requested_duration_minutes, request_row.created_at,
+    request_row.approved_at, request_row.denied_at, request_row.denied_reason
+    from identity.access_requests request_row
+    join identity.facilities facility on facility.id = request_row.facility_id
+   where request_row.patient_id = patient_id_value
+     and request_row.break_glass = false
+     and request_row.migration_hold_reason is null
+   order by request_row.created_at desc, request_row.id desc
+   limit 100;
+end;
+$$;
+
+create function identity.list_my_patient_access_requests(
+  requested_subject text,
+  requested_session uuid
+) returns table (
+  access_request_id uuid, facility_id uuid, facility_name text, scope text, reason text,
+  status text, requested_duration_minutes integer, requested_at timestamptz,
+  approved_at timestamptz, denied_at timestamptz, denied_reason text
+)
+language plpgsql security definer
+set search_path = pg_catalog, identity, platform, pg_temp as $$
+begin
+  if identity.patient_self_session(requested_subject, requested_session) is null then
+    raise exception using errcode = '42501', message = 'Patient self session is required';
+  end if;
+  return query select * from identity.list_my_access_requests();
+end
+$$;
+
+create function identity.approve_my_access_request(
+  requested_subject text,
+  requested_session uuid,
+  requested_request_id uuid
+) returns table (
+  access_request_id uuid, consent_grant_id uuid, patient_id uuid, status text,
+  expires_at timestamptz, replayed boolean
+)
+language plpgsql security definer
+set search_path = pg_catalog, identity, platform, pg_temp as $$
+begin
+  if identity.patient_self_session(requested_subject, requested_session) is null then
+    raise exception using errcode = '42501', message = 'Patient self session is required';
+  end if;
+  return query select * from identity.approve_access_request(requested_request_id);
+end
+$$;
+
+create function identity.deny_my_access_request(
+  requested_subject text,
+  requested_session uuid,
+  requested_request_id uuid,
+  requested_reason text
+) returns table (
+  access_request_id uuid, patient_id uuid, status text, denied_at timestamptz, replayed boolean
+)
+language plpgsql security definer
+set search_path = pg_catalog, identity, platform, pg_temp as $$
+begin
+  if identity.patient_self_session(requested_subject, requested_session) is null then
+    raise exception using errcode = '42501', message = 'Patient self session is required';
+  end if;
+  return query select * from identity.deny_access_request(requested_request_id, requested_reason);
+end
+$$;
+
+create function identity.revoke_my_consent_grant(
+  requested_subject text,
+  requested_session uuid,
+  requested_grant_id uuid,
+  requested_reason text
+) returns table (consent_grant_id uuid, grant_status text, revoked_at timestamptz, replayed boolean)
+language plpgsql security definer
+set search_path = pg_catalog, identity, auth, audit, platform, pg_temp as $$
+#variable_conflict use_column
+declare
+  patient_id_value uuid;
+  account_id_value uuid;
+  grant_row identity.consent_grants%rowtype;
+  revoked_at_value timestamptz;
+begin
+  patient_id_value := identity.patient_self_session(requested_subject, requested_session);
+  if patient_id_value is null then
+    raise exception using errcode = '42501', message = 'Patient self session is required';
+  end if;
+  if length(btrim(coalesce(requested_reason, ''))) not between 3 and 500 then
+    raise exception using errcode = '22023', message = 'A revocation reason is required';
+  end if;
+  select account_id into account_id_value from identity.patients where id = patient_id_value;
+  -- Serialize with PIN verification and replacement for this patient.
+  perform pg_advisory_xact_lock(hashtextextended('patient-access-pin:' || patient_id_value::text, 0));
+  select * into grant_row from identity.consent_grants grant_candidate
+   where grant_candidate.id = requested_grant_id and grant_candidate.patient_id = patient_id_value
+   for update;
+  if not found then
+    raise exception using errcode = 'P0002', message = 'The access grant is unavailable';
+  end if;
+  if grant_row.break_glass
+     or not (grant_row.granted_by_patient_id is not distinct from patient_id_value
+       or grant_row.authorization_method is not distinct from 'patient_access_pin') then
+    raise exception using errcode = '55000', message = 'CONSENT_GRANT_NOT_PATIENT_REVOCABLE';
+  end if;
+  if grant_row.status = 'revoked' then
+    return query select grant_row.id, 'revoked'::text, grant_row.revoked_at, true;
+    return;
+  end if;
+  if grant_row.status <> 'active' or grant_row.expires_at <= clock_timestamp() then
+    raise exception using errcode = '55000', message = 'The access grant is no longer active';
+  end if;
+  revoked_at_value := clock_timestamp();
+  update identity.consent_grants
+     set status = 'revoked', revoked_at = revoked_at_value, revoked_by = account_id_value,
+         revoked_reason = btrim(requested_reason), updated_at = revoked_at_value,
+         row_version = row_version + 1
+   where id = grant_row.id;
+  insert into audit.events (
+    correlation_id, actor_type, actor_subject, actor_account_id, patient_id, facility_id,
+    action, outcome, resource_type, resource_id, purpose_of_use, reason,
+    provenance, source_system, details
+  ) values (
+    platform.current_correlation_id(), 'patient', requested_subject, account_id_value, patient_id_value,
+    grant_row.facility_id, 'identity.consent-grant.patient-revoke', 'success', 'consent-grant',
+    grant_row.id::text, 'patient-self', btrim(requested_reason), 'application', 'identity-api',
+    jsonb_build_object('scope', grant_row.scope,
+      'authorizationMethod', coalesce(grant_row.authorization_method, 'patient_approval'))
+  );
+  return query select grant_row.id, 'revoked'::text, revoked_at_value, false;
+end
+$$;
+
+create or replace function identity.patient_self_access_history(requested_subject text, requested_session uuid)
+returns jsonb language plpgsql stable security definer set search_path = pg_catalog, pg_temp as $$
+declare patient uuid; result jsonb;
+begin
+  patient := identity.patient_self_session(requested_subject,requested_session);
+  if patient is null then return null; end if;
+  select jsonb_build_object('items',coalesce(jsonb_agg(item),'[]'::jsonb)) into result from (
+    select jsonb_build_object('consentGrantId',g.id,'scope',g.scope,'purpose',g.purpose_of_use,
+      'status',case when g.status='active' and g.expires_at<=statement_timestamp() then 'expired' else g.status end,
+      'startsAt',g.starts_at,'expiresAt',g.expires_at,'reason',g.reason,'facilityName',f.name,
+      'breakGlass',g.break_glass,
+      'patientRevocable', g.status='active' and g.expires_at>statement_timestamp() and not g.break_glass
+        and (g.granted_by_patient_id is not distinct from patient
+          or g.authorization_method is not distinct from 'patient_access_pin')) as item
+    from identity.consent_grants g join identity.facilities f on f.id=g.facility_id
+    where g.patient_id=patient order by g.created_at desc,g.id desc limit 50
+  ) entries;
+  return result;
+end;
+$$;
+
+create or replace function notification.enqueue_patient_inbox_item(
+  requested_patient_id uuid,
+  requested_code text,
+  requested_resource_type text,
+  requested_resource_id uuid,
+  requested_metadata jsonb
+) returns uuid
+language plpgsql security definer
+set search_path = pg_catalog, notification, identity, auth, pg_temp
+as $$
+declare
+  recipient_account uuid;
+  item_id uuid;
+begin
+  select patient.account_id into recipient_account
+    from identity.patients patient
+    join auth.accounts account on account.id = patient.account_id
+   where patient.id = requested_patient_id and patient.status = 'active'
+     and account.status <> 'deleted';
+  if recipient_account is null then return null; end if;
+  insert into notification.inbox_items(account_id,patient_id,notification_code,resource_type,resource_id,metadata)
+    values(recipient_account,requested_patient_id,requested_code,requested_resource_type,
+      requested_resource_id,coalesce(requested_metadata,'{}'::jsonb))
+    returning id into item_id;
+  return item_id;
+end
+$$;
+
+revoke all on function identity.list_my_patient_access_requests(text, uuid),
+  identity.approve_my_access_request(text, uuid, uuid),
+  identity.deny_my_access_request(text, uuid, uuid, text),
+  identity.revoke_my_consent_grant(text, uuid, uuid, text) from public;
