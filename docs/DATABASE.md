@@ -64,6 +64,14 @@ limits for new NIN/CAC verifications, safe connection tests, and public provider
 applications. Counters contain canonical UUIDs or a keyed network digest, with
 no raw NIN, CAC, IP address, or provider payload. The Identity runtime prunes
 expired counters and test-key reservations after 48 hours.
+Migration `0063_provider_self_service_cac_quota.sql` covers the accountless
+provider self-enrollment CAC lookup, which has no account to charge. Its
+command accepts only the system enrollment context and a self-service
+application still awaiting CAC verification. It charges a keyed digest of the
+server-observed client network (IPv4 address or IPv6 /64; 5 an hour, 15 a day)
+and the application's existing daily `application_cac` target limit (3, shared
+with the reviewer path). A refusal changes no counter; every decision is
+audited. Reviewer `application_cac` quotas are unchanged.
 Migration `0050_patient_nin_evidence_binding.sql` removes the unbound
 five-argument patient evidence command. A verified result now requires the
 submitted NIN's keyed lookup HMAC to match an existing verified, unrevoked NIN

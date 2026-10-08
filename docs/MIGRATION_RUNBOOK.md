@@ -57,9 +57,12 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0058_progressive_patient_nin_binding.sql` | Session-bound QoreID verification that binds an exact NIN to the preserved migrated patient and advances assurance without changing UUID or HID |
 | `database/migrations/0059_google_onboarding.sql` | Short-lived accountless Google proof, recoverable enrollment binding, atomic activation link, and explicit existing-account link command |
 | `database/migrations/0060_patient_access_pin_profile_status.sql` | Patient-safe assurance and Access PIN configured status without returning PIN material |
-| `database/migrations/0063_patient_account_deletion_lifecycle.sql` | Patient login/account deletion lifecycle with single-use confirmation, configurable cancellation window, legal-hold and retain-only record-class policy, terminal deleted login, and atomic revocation/completion audit; no identity, NIN, clinical, or audit data is deleted |
-| `database/migrations/0064_patient_emergency_contacts.sql` | Encrypted patient emergency contacts, code verification, and idempotent minimum-necessary emergency-contact notification intents from `EmergencyAccessActivated`; break-glass authorization unchanged |
-| `database/migrations/0065_patient_access_safety.sql` | Session-bound patient access-request decisions (and corrected `0035` commands), patient-owned grant revocation, break-glass/revocability labels in access history, and no new inbox items for deleted logins |
+| `database/migrations/0061_provider_cac_self_service_onboarding.sql` | Self-service approval mode for organization applications, public application lookup, verified-CAC result recording, and atomic organization/facility/product/administrator activation |
+| `database/migrations/0062_provider_cac_self_service_constraints.sql` | Self-service-aware review constraint, accountless self-service application submission, and the runtime activation command that returns the new login email in the same transaction |
+| `database/migrations/0063_provider_self_service_cac_quota.sql` | Accountless self-service CAC lookups charged to a keyed client-network digest (IPv4 address or IPv6 /64, 5 an hour and 15 a day) and the shared per-application daily CAC limit, with every decision audited; reviewer `application_cac` quotas are unchanged |
+| `database/migrations/0064_patient_account_deletion_lifecycle.sql` | Patient login/account deletion lifecycle with single-use confirmation, configurable cancellation window, legal-hold and retain-only record-class policy, terminal deleted login, and atomic revocation/completion audit; no identity, NIN, clinical, or audit data is deleted |
+| `database/migrations/0065_patient_emergency_contacts.sql` | Encrypted patient emergency contacts, code verification, and idempotent minimum-necessary emergency-contact notification intents from `EmergencyAccessActivated`; break-glass authorization unchanged |
+| `database/migrations/0066_patient_access_safety.sql` | Session-bound patient access-request decisions (and corrected `0035` commands), patient-owned grant revocation, break-glass/revocability labels in access history, and no new inbox items for deleted logins |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
@@ -210,7 +213,7 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0060`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0066`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
@@ -298,7 +301,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0060`, runtime grants, RLS and purpose/deny behavior.
+6. Verify `0066`, runtime grants, RLS and purpose/deny behavior.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.

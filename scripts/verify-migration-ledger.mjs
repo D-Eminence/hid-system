@@ -73,10 +73,11 @@ const acceptedMigrations = new Map([
   ['0059_google_onboarding.sql', '2a4147ad2310c928de23c350999adea4287d84b68fee51766e6633f929052af8'],
   ['0060_patient_access_pin_profile_status.sql', '1a0b5ca25f815dcd8714cdd569e8fe336b48d8a8c53362a8e42dbe986d407f50'],
   ['0061_provider_cac_self_service_onboarding.sql', '6d744c1a7d464d219bdcdca69050100c967e457e64c617b0a01857fe556a1493'],
-  ['0062_provider_cac_self_service_constraints.sql', '2de751d39ecc4ded2dfafae55087c8091e029e4e8ef75a95054f4c485d1b8598'],
-  ['0063_patient_account_deletion_lifecycle.sql', 'afee2b47c283669fbba864148b601fb0314f8847ff254600e3132c8c84010f38'],
-  ['0064_patient_emergency_contacts.sql', 'f2136603fddb738a0ef6f761ee4267761c212bbb8490843a5b056928c575b341'],
-  ['0065_patient_access_safety.sql', '513faac2e4d45ac345c462ad73a83371e78ca337b918be07d2955370eb9288dd'],
+  ['0062_provider_cac_self_service_constraints.sql', '49615ea6bdc7be995e8ae00c65ce63e708d3ec943f2aef8b5871b4825e617eac'],
+  ['0063_provider_self_service_cac_quota.sql', '67bcd2a75081d5c2425e0661f3771329e382e92b0ab7e4f2f6fb9f9447f9357c'],
+  ['0064_patient_account_deletion_lifecycle.sql', 'afee2b47c283669fbba864148b601fb0314f8847ff254600e3132c8c84010f38'],
+  ['0065_patient_emergency_contacts.sql', 'f2136603fddb738a0ef6f761ee4267761c212bbb8490843a5b056928c575b341'],
+  ['0066_patient_access_safety.sql', '513faac2e4d45ac345c462ad73a83371e78ca337b918be07d2955370eb9288dd'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

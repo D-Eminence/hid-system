@@ -853,6 +853,18 @@ grant execute on function identity.submit_organization_application(text,text,tex
   identity.admin_reject_organization_application(uuid,bigint,text)
   to hid_identity_runtime, hid_schema_test_runtime;
 
+-- Accountless provider self-enrollment (0061-0063). The runtime activates only
+-- through the wrapper that returns the login email in the same transaction;
+-- the underlying activation command stays owner-only. The CAC lookup is
+-- charged through the network/application quota command, never the
+-- account-scoped `application_cac` path.
+grant execute on function identity.submit_self_service_organization_application(text,text,text,text,text),
+  identity.public_get_organization_application(text,text,text),
+  identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text),
+  identity.activate_self_service_provider_enrollment(char,text),
+  platform.consume_self_service_cac_quota(uuid,char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+
 -- Public patient enrollment persists only encrypted pending evidence. Its
 -- activation command performs the canonical account/patient writes atomically.
 grant select, insert, update, delete on identity.public_patient_enrollments,

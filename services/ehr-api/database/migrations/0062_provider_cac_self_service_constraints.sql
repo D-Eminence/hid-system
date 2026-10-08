@@ -117,3 +117,45 @@ $$;
 
 revoke all on function identity.submit_self_service_organization_application(text,text,text,text,text)
   from public;
+
+-- The Identity runtime activates through this command rather than calling the
+-- activation function directly. It returns the new login email from the same
+-- transaction, so the API never reads application or challenge tables and can
+-- never report a failure after the organization, facility, membership and
+-- account have been committed.
+create function identity.activate_self_service_provider_enrollment(
+  requested_session_hmac char(64),
+  requested_password_hash text
+) returns table (
+  organization_id uuid,
+  facility_id uuid,
+  account_id uuid,
+  row_version bigint,
+  hid_subject text,
+  account_email text
+)
+language plpgsql security definer
+set search_path = pg_catalog, identity, auth, platform, pg_temp
+as $$
+declare
+  activated record;
+  activated_email text;
+begin
+  select * into activated
+    from identity.activate_self_service_organization_application(
+      requested_session_hmac, requested_password_hash);
+
+  select account.email into activated_email
+    from auth.accounts account
+   where account.id = activated.account_id;
+
+  if activated_email is null then
+    raise exception using errcode = 'P0002', message = 'Activated provider account was not found';
+  end if;
+
+  return query select activated.organization_id, activated.facility_id, activated.account_id,
+    activated.row_version, activated.hid_subject, activated_email;
+end;
+$$;
+
+revoke all on function identity.activate_self_service_provider_enrollment(char,text) from public;

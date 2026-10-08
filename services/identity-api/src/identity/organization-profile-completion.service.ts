@@ -137,8 +137,11 @@ export class OrganizationProfileCompletionService {
           account_id: string;
           row_version: string;
           hid_subject: string;
+          account_email: string;
         }>(
-          'select * from identity.activate_self_service_organization_application($1,$2)',
+          // The login email is returned by the same transaction that creates the
+          // account; nothing is read after the activation commits.
+          'select * from identity.activate_self_service_provider_enrollment($1,$2)',
           [sessionHash, passwordHash],
         ));
       const row = result.rows[0];
@@ -148,28 +151,11 @@ export class OrganizationProfileCompletionService {
         organizationId: row.organization_id,
         facilityId: row.facility_id,
         accountId: row.account_id,
-        email: await this.activationEmail(sessionHash, correlationId),
+        email: row.account_email,
       };
     } catch (error) {
       throw this.databaseProblem(error);
     }
-  }
-
-  private async activationEmail(sessionHash: string, correlationId: string): Promise<string> {
-    const result = await this.database.withSystemTransaction(correlationId, (client) =>
-      client.query<{ administrator_email: string }>(
-        `select application.administrator_email
-           from identity.organization_profile_completion_challenges challenge
-           join identity.organization_applications application
-             on application.id = challenge.application_id
-          where challenge.session_hmac = $1
-          limit 1`,
-        [sessionHash],
-      ));
-    const email = result.rows[0]?.administrator_email;
-    if (!email) throw new DomainProblem(503, 'PROVIDER_ENROLLMENT_ACTIVATION_UNAVAILABLE',
-      'Provider account activation is temporarily unavailable');
-    return email;
   }
 
   private profile(row: CompletionProfileRow) {
