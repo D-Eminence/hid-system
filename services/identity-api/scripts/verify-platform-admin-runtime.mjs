@@ -70,6 +70,9 @@ const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database:
 await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
 // Fixture and assertion connection (database owner), never used by the API.
 const owner = new Pool({ host: socket, user: process.env.PGUSER, database: isolated, max: 2 });
+// Dropping the disposable database terminates any connection still closing;
+// that expected 57P01 must not crash the verifier after its checks passed.
+owner.on('error', () => undefined);
 let app;
 try {
   const argon2 = require('argon2');

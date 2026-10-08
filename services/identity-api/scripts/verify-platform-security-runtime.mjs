@@ -68,6 +68,9 @@ globalThis.fetch = async (input) => { throw new Error(`Unexpected outbound reque
 const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database: 'postgres', max: 1 });
 await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
 const owner = new Pool({ host: socket, user: process.env.PGUSER, database: isolated, max: 2 });
+// Dropping the disposable database terminates any connection still closing;
+// that expected 57P01 must not crash the verifier after its checks passed.
+owner.on('error', () => undefined);
 let app;
 try {
   const argon2 = require('argon2');
