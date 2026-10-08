@@ -28,6 +28,8 @@ import { OrganizationApplicationsService } from './organization-applications.ser
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
 import { PatientEnrollmentController } from './patient-enrollment.controller';
 import { PatientEnrollmentService } from './patient-enrollment.service';
+import { ProviderEnrollmentController } from './provider-enrollment.controller';
+import { ProviderEnrollmentService } from './provider-enrollment.service';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 
 @Module({
@@ -35,7 +37,7 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider }
   controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
     PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
     AdminOrganizationApplicationsController,
-    PatientEnrollmentController],
+    PatientEnrollmentController, ProviderEnrollmentController],
   providers: [
     IdentityService,
     NinRegistrationService,
@@ -57,7 +59,7 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider }
     OrganizationApplicationsService,
     OrganizationProfileCompletionService,
     NotificationOtpClient,
-    PatientEnrollmentService,
+    PatientEnrollmentService, ProviderEnrollmentService,
     QoreIdPublicPatientIdentityProvider,
     { provide: PUBLIC_PATIENT_IDENTITY_PROVIDER, useExisting: QoreIdPublicPatientIdentityProvider },
     PostgresIdentityProvider,

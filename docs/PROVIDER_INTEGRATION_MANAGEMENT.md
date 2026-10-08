@@ -147,7 +147,13 @@ separately in [QoreID verification](QOREID_VERIFICATION_CONTRACT.md).
 Migration `0049_qoreid_request_quotas.sql` applies shared hourly and daily
 limits before outbound NIN, CAC, and QoreID connection-test calls. The public
 organization application form has a separate keyed network quota after
-Turnstile verification. Quota rows contain account or application identifiers,
+Turnstile verification. Accountless provider self-enrollment has no account to
+charge, so migration `0063_provider_self_service_cac_quota.sql` charges its CAC
+lookup to a keyed digest of the server-observed client network (an IPv4
+address or IPv6 /64; 5 an hour, 15 a day) after Origin and Turnstile checks, and
+to the application's daily CAC limit shared with the reviewer path. Changing
+the CAC, email or other request fields does not reset either limit, and each
+decision is audited. Quota rows contain account or application identifiers,
 or a keyed network digest; they contain no NIN, CAC number, raw IP, or provider
 response. Identity API prunes expired rows hourly, and the database command
 also prunes bounded expired rows during use. Denials return a safe 429 and make

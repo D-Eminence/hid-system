@@ -27,6 +27,57 @@ values ('c4650000-0000-4000-8000-000000000001',
   'c4600000-0000-4000-8000-000000000001', 'platform_super_admin', 'platform',
   'Synthetic onboarding review test');
 
+-- 0062 regression: the generated-name reviewer check from 0046 and the named
+-- check from 0061 are both replaced, so only the self-service-aware check remains.
+do $$
+declare review_checks text[]; violated_constraint text;
+begin
+  select array_agg(constraint_row.conname order by constraint_row.conname)
+    into review_checks
+    from pg_constraint constraint_row
+   where constraint_row.conrelid = 'identity.organization_applications'::regclass
+     and constraint_row.contype = 'c'
+     and pg_get_constraintdef(constraint_row.oid) like '%reviewed_by_account_id%';
+  if review_checks is distinct from array['organization_applications_review_check_self_service']::text[] then
+    raise exception 'Unexpected organization application review checks: %', review_checks;
+  end if;
+
+  insert into identity.organization_applications (
+    product_code, organization_name, organization_type, cac_registration_number,
+    administrator_name, administrator_email, status, verification_result, verified_at,
+    verified_organization_name, organization_id, facility_id, review_reason, reviewed_at, approval_mode
+  ) values (
+    'ehr', 'Self Service Constraint Clinic', 'clinic', 'RC9900062001',
+    'Self Service Admin', 'self-service-0062@example.invalid', 'approved', 'verified', now(),
+    'SELF SERVICE CONSTRAINT CLINIC LTD',
+    'c4610000-0000-4000-8000-000000000001', 'c4620000-0000-4000-8000-000000000001',
+    'CAC verified automatically', now(), 'self_service'
+  );
+
+  begin
+    insert into identity.organization_applications (
+      product_code, organization_name, organization_type, cac_registration_number,
+      administrator_name, administrator_email, status, verification_result, verified_at,
+      verified_organization_name, organization_id, facility_id, review_reason, reviewed_at, approval_mode
+    ) values (
+      'ehr', 'Admin Review Constraint Clinic', 'clinic', 'RC9900062002',
+      'Admin Review Admin', 'admin-review-0062@example.invalid', 'approved', 'verified', now(),
+      'ADMIN REVIEW CONSTRAINT CLINIC LTD',
+      'c4610000-0000-4000-8000-000000000001', 'c4620000-0000-4000-8000-000000000001',
+      'Approved without a reviewer', now(), 'admin_review'
+    );
+    raise exception 'Administrator-reviewed application was approved without a reviewer';
+  exception when check_violation then
+    get stacked diagnostics violated_constraint = constraint_name;
+    if violated_constraint <> 'organization_applications_review_check_self_service' then
+      raise exception 'Unexpected constraint rejected the unreviewed approval: %', violated_constraint;
+    end if;
+  end;
+
+  delete from identity.organization_applications
+   where cac_registration_number = 'RC9900062001';
+end $$;
+
 set local role hid_identity_api_runtime;
 select set_config('app.actor_subject', 'system:auth', true);
 select set_config('app.correlation_id', 'organization-onboarding-test-0001', true);
@@ -616,5 +667,134 @@ do $$ begin
     raise exception 'Historical closed CAC record was promoted or rejected by provenance guard';
   end if;
 end $$;
+
+-- Accountless provider self-enrollment runs end to end as the Identity API
+-- runtime role: submit, read, record verified CAC evidence, email challenge,
+-- OTP verification, and activation that returns the login email in the same
+-- transaction. The underlying activation command stays owner-only.
+do $$
+declare
+  runtime_role text;
+begin
+  foreach runtime_role in array array['hid_identity_runtime', 'hid_identity_api_runtime'] loop
+    if not has_function_privilege(runtime_role,
+         'identity.submit_self_service_organization_application(text,text,text,text,text)', 'EXECUTE')
+       or not has_function_privilege(runtime_role,
+         'identity.public_get_organization_application(text,text,text)', 'EXECUTE')
+       or not has_function_privilege(runtime_role,
+         'identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text)', 'EXECUTE')
+       or not has_function_privilege(runtime_role,
+         'identity.activate_self_service_provider_enrollment(char,text)', 'EXECUTE') then
+      raise exception 'Provider self-enrollment command is not executable by %', runtime_role;
+    end if;
+    if has_function_privilege(runtime_role,
+         'identity.activate_self_service_organization_application(char,text)', 'EXECUTE') then
+      raise exception 'The owner-only activation command is executable by %', runtime_role;
+    end if;
+  end loop;
+end $$;
+
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'system:auth', true);
+select set_config('app.correlation_id', 'provider-self-enrollment-runtime-0001', true);
+do $$
+declare
+  application_id uuid; current_application record; recorded record; activated record;
+  recipient text; verified boolean;
+  challenge_id uuid := 'c4690000-0000-4000-8000-000000000001';
+  code_hmac char(64) := encode(sha256('provider-runtime-otp'::bytea), 'hex');
+  session_hmac char(64) := encode(sha256('provider-runtime-session'::bytea), 'hex');
+begin
+  application_id := identity.submit_self_service_organization_application('ehr', 'clinic',
+    'RC9900062101', 'Runtime Provider Admin', 'runtime.provider@example.invalid');
+  select * into current_application from identity.public_get_organization_application(
+    'RC9900062101', 'runtime.provider@example.invalid', 'ehr');
+  if current_application.application_id is distinct from application_id
+     or current_application.application_status <> 'pending_verification' then
+    raise exception 'Runtime role could not read its submitted application: %', current_application;
+  end if;
+  select * into recorded from identity.public_record_organization_cac_result(application_id,
+    current_application.row_version, 'verified', '9900062101', 'RC9900062101',
+    'Runtime Provider Clinic Ltd', 'Private Company Limited by Shares', '2019-04-01',
+    '1 Synthetic Registry Road, Lagos', 'ACTIVE');
+  if recorded.application_status <> 'ready_for_review' then
+    raise exception 'Verified CAC evidence was not recorded: %', recorded;
+  end if;
+
+  recipient := identity.begin_organization_profile_completion('RC9900062101',
+    'runtime.provider@example.invalid', 'ehr', challenge_id, code_hmac);
+  if recipient is distinct from 'runtime.provider@example.invalid' then
+    raise exception 'Email challenge was not issued to the stored administrator';
+  end if;
+  verified := identity.verify_organization_profile_completion_challenge(challenge_id,
+    encode(sha256('wrong-provider-runtime-otp'::bytea), 'hex'), session_hmac);
+  if verified then raise exception 'A wrong OTP verified the provider email'; end if;
+  verified := identity.verify_organization_profile_completion_challenge(challenge_id, code_hmac, session_hmac);
+  if not verified then raise exception 'The correct OTP did not verify the provider email'; end if;
+
+  begin
+    perform identity.activate_self_service_organization_application(session_hmac,
+      '$argon2id$v=19$m=65536,t=3,p=1$' || repeat('a', 22) || '$' || repeat('b', 43));
+    raise exception 'The runtime role called the owner-only activation command';
+  exception when insufficient_privilege then null;
+  end;
+
+  select * into activated from identity.activate_self_service_provider_enrollment(session_hmac,
+    '$argon2id$v=19$m=65536,t=3,p=1$' || repeat('a', 22) || '$' || repeat('b', 43));
+  if activated.account_email is distinct from 'runtime.provider@example.invalid'
+     or activated.organization_id is null or activated.facility_id is null or activated.account_id is null then
+    raise exception 'Activation did not return the login email in the same transaction: %', activated;
+  end if;
+  perform set_config('hid.test.provider_account', activated.account_id::text, true);
+  perform set_config('hid.test.provider_organization', activated.organization_id::text, true);
+  perform set_config('hid.test.provider_facility', activated.facility_id::text, true);
+
+  begin
+    perform identity.activate_self_service_provider_enrollment(session_hmac,
+      '$argon2id$v=19$m=65536,t=3,p=1$' || repeat('a', 22) || '$' || repeat('b', 43));
+    raise exception 'A consumed enrollment session activated a second time';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform identity.submit_self_service_organization_application('ehr', 'clinic',
+      'RC9900062101', 'Runtime Provider Admin', 'runtime.provider@example.invalid');
+    raise exception 'An already registered CAC was accepted for a new enrollment';
+  exception when check_violation then null;
+  end;
+end $$;
+reset role;
+
+do $$
+declare
+  provider_account uuid := current_setting('hid.test.provider_account')::uuid;
+  provider_organization uuid := current_setting('hid.test.provider_organization')::uuid;
+  provider_facility uuid := current_setting('hid.test.provider_facility')::uuid;
+begin
+  if not exists (select 1 from identity.organizations o where o.id = provider_organization
+                   and o.name = 'Runtime Provider Clinic Ltd' and o.active)
+     or not exists (select 1 from identity.facilities f where f.id = provider_facility
+                      and f.organization_id = provider_organization and f.lifecycle_status = 'verified')
+     or not exists (select 1 from identity.organization_cac_registrations r
+                      where r.cac_registration_number = 'RC9900062101' and r.organization_id = provider_organization)
+     or not exists (select 1 from identity.organization_products p
+                      where p.organization_id = provider_organization and p.product_code = 'ehr' and p.facility_id = provider_facility)
+     or not exists (select 1 from auth.accounts a where a.id = provider_account
+                      and a.email = 'runtime.provider@example.invalid' and a.status = 'active'
+                      and a.password_algorithm = 'argon2id')
+     or not exists (select 1 from identity.staff s
+                      join identity.staff_facility_memberships m on m.staff_id = s.id
+                     where s.account_id = provider_account and s.default_role = 'org_admin'
+                       and m.facility_id = provider_facility and m.membership_role = 'org_admin' and m.active)
+     or not exists (select 1 from auth.account_roles r where r.account_id = provider_account
+                      and r.role_code = 'org_admin' and r.facility_id = provider_facility)
+     or not exists (select 1 from identity.organization_applications a
+                      where a.cac_registration_number = 'RC9900062101' and a.status = 'approved'
+                        and a.first_admin_account_id = provider_account and a.reviewed_by_account_id is null)
+     or not exists (select 1 from audit.events e where e.action = 'identity.organization.self-service.activate'
+                      and e.organization_id = provider_organization) then
+    raise exception 'Runtime-role provider activation did not create the complete organization';
+  end if;
+end $$;
+
 
 rollback;

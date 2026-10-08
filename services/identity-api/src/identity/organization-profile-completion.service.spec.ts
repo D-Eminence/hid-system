@@ -56,6 +56,25 @@ describe('organization applicant profile completion', () => {
     expect(JSON.stringify(query.mock.calls[0])).not.toContain('203.0.113.44');
   });
 
+  it('activates through one runtime command that also returns the login email', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [{
+      organization_id: 'org-1', facility_id: 'facility-1', account_id: 'account-1', row_version: '7',
+      hid_subject: 'org-onboarding:account-1', account_email: 'admin@example.invalid',
+    }] });
+    const database = { withSystemTransaction: jest.fn(async (_id, work) => work({ query })) };
+    const service = new OrganizationProfileCompletionService(database as unknown as DatabaseService,
+      { deliver: jest.fn() } as unknown as NotificationOtpClient);
+    await expect(service.activate('A'.repeat(43), 'Synthetic-Provider-Password-2026', correlationId))
+      .resolves.toEqual({ organizationId: 'org-1', facilityId: 'facility-1', accountId: 'account-1',
+        email: 'admin@example.invalid' });
+    // A single transaction: nothing is read after the activation commits.
+    expect(database.withSystemTransaction).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0]?.[0]).toContain('identity.activate_self_service_provider_enrollment($1,$2)');
+    expect(query.mock.calls[0]?.[1]).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/),
+      expect.stringMatching(/^\$argon2id\$/)]);
+  });
+
   it('invalidates a challenge after a definite delivery failure', async () => {
     const query = jest.fn().mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ recipient_email: 'stored@example.invalid' }] })
