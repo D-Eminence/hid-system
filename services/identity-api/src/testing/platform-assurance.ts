@@ -58,9 +58,9 @@ export function useTestEnvironment(overrides: Record<string, string> = {}): void
   beforeEach(() => {
     saved = { ...process.env };
     Object.assign(process.env, {
-      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid', CORS_ORIGINS: 'http://localhost:5173',
-      AUTH_MODE: 'local', AUTH_SIGNING_SECRET: 'test-signing-secret-with-at-least-32-characters',
-      AUTH_LOGIN_PEPPER: 'test-login-pepper-with-at-least-32-characters', ...overrides,
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://example@localhost/hid', CORS_ORIGINS: 'http://localhost:5173',
+      AUTH_MODE: 'local', AUTH_SIGNING_SECRET: 'example-signing-secret-with-at-least-32-characters',
+      AUTH_LOGIN_PEPPER: 'example-login-pepper-with-at-least-32-characters', ...overrides,
     });
     resetEnvironmentForTests();
   });
