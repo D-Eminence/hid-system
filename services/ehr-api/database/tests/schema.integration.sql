@@ -2625,7 +2625,11 @@ begin
       'schema-admin-role-command-0001', repeat('f', 64)::character(64)
     );
     raise exception 'last platform Super Admin role was revoked';
-  exception when check_violation then null;
+  -- 0068: the actor is this Super Admin, so the self-change guard refuses it
+  -- first. platform-admin-scope.integration.sql covers the last-Super-Admin
+  -- refusal with a different actor.
+  exception when insufficient_privilege then
+    if sqlerrm <> 'ADMIN_SELF_CHANGE_DENIED' then raise; end if;
   end;
 
   begin
@@ -2637,7 +2641,8 @@ begin
       'schema-admin-account-command-0001', repeat('a', 64)::character(64)
     );
     raise exception 'last platform Super Admin account was suspended';
-  exception when check_violation then null;
+  exception when insufficient_privilege then
+    if sqlerrm <> 'ADMIN_SELF_CHANGE_DENIED' then raise; end if;
   end;
 
   select * into command_result from auth.admin_transition_account(
