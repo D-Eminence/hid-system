@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0062",
-    "count": 62,
+    "last": "0063",
+    "count": 63,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -345,6 +345,10 @@
       {
         "name": "0062_provider_cac_self_service_constraints.sql",
         "sha256": "49615ea6bdc7be995e8ae00c65ce63e708d3ec943f2aef8b5871b4825e617eac"
+      },
+      {
+        "name": "0063_provider_self_service_cac_quota.sql",
+        "sha256": "67bcd2a75081d5c2425e0661f3771329e382e92b0ab7e4f2f6fb9f9447f9357c"
       }
     ]
   },

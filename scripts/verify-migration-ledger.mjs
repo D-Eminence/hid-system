@@ -74,6 +74,7 @@ const acceptedMigrations = new Map([
   ['0060_patient_access_pin_profile_status.sql', '1a0b5ca25f815dcd8714cdd569e8fe336b48d8a8c53362a8e42dbe986d407f50'],
   ['0061_provider_cac_self_service_onboarding.sql', '6d744c1a7d464d219bdcdca69050100c967e457e64c617b0a01857fe556a1493'],
   ['0062_provider_cac_self_service_constraints.sql', '49615ea6bdc7be995e8ae00c65ce63e708d3ec943f2aef8b5871b4825e617eac'],
+  ['0063_provider_self_service_cac_quota.sql', '67bcd2a75081d5c2425e0661f3771329e382e92b0ab7e4f2f6fb9f9447f9357c'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
