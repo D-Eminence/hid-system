@@ -1,12 +1,12 @@
 import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Query, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
-import { AuditAction, AuditFailuresOnly, PlatformScope, RequirePermissions } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, HighRiskAction, PlatformScope, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { requireAdminContext } from './admin-context';
 import { AdminOperationsService } from './admin-operations.service';
-import { AdminService } from './admin.service';
+import { AdminService, PRINCIPAL_EXPORT_MAX_ROWS } from './admin.service';
 import { PricingService } from './pricing.service';
 import { PricePricingCommandDto, ProductPricingCommandDto } from './dto/pricing-command.dto';
 import { AccountStatusCommandDto, FacilityStatusCommandDto, PlatformControlCommandDto, PlatformRoleCommandDto,
@@ -40,6 +40,7 @@ export class AdminController {
 
   @Post('controls')
   @RequirePermissions('platform.control.manage')
+  @HighRiskAction('platform.control.change')
   @AuditAction('admin.platform-control.change.request')
   setControl(@Headers('if-match') ifMatch: string | undefined, @Body() input: PlatformControlCommandDto,
     @Req() request: HidRequest) {
@@ -62,6 +63,7 @@ export class AdminController {
 
   @Post('facilities/:facilityId/status')
   @RequirePermissions('platform.facility.manage')
+  @HighRiskAction('platform.facility.status')
   @AuditAction('admin.facility.status.request')
   transitionFacility(@Param('facilityId', new ParseUUIDPipe({ version: '4' })) facilityId: string,
     @Headers('if-match') ifMatch: string | undefined, @Headers('idempotency-key') key: string | undefined,
@@ -78,15 +80,25 @@ export class AdminController {
   }
 
   @Get('principals/export')
-  @RequirePermissions('platform.principal.read')
+  @RequirePermissions('platform.principal.export')
+  @HighRiskAction('platform.principals.export')
   @AuditAction('admin.principals.export.request')
   async exportPrincipals(@Query() query: ExportPrincipalsDto, @Req() request: HidRequest, @Res() response: Response) {
-    const csv = await this.admin.exportPrincipals(requireAdminContext(request), query);
-    response.status(200).type('text/csv').setHeader('Content-Disposition', 'attachment; filename="hid-principals.csv"').send(csv);
+    const exported = await this.admin.exportPrincipals(requireAdminContext(request), query);
+    response.status(200)
+      .setHeader('Content-Type', 'text/csv; charset=utf-8; header=present')
+      .setHeader('Content-Disposition', 'attachment; filename="hid-principals.csv"')
+      .setHeader('Cache-Control', 'no-store')
+      .setHeader('X-Content-Type-Options', 'nosniff')
+      .setHeader('X-HID-Export-Row-Count', String(exported.rowCount))
+      .setHeader('X-HID-Export-Row-Limit', String(PRINCIPAL_EXPORT_MAX_ROWS))
+      .setHeader('X-HID-Export-Truncated', String(exported.truncated))
+      .send(exported.csv);
   }
 
   @Post('principals/:accountId/status')
   @RequirePermissions('platform.principal.manage')
+  @HighRiskAction('platform.account.status')
   @AuditAction('admin.principal.status.request')
   transitionAccount(@Param('accountId', new ParseUUIDPipe({ version: '4' })) accountId: string,
     @Headers('if-match') ifMatch: string | undefined, @Headers('idempotency-key') key: string | undefined,
@@ -97,6 +109,7 @@ export class AdminController {
 
   @Post('principals/:accountId/platform-roles')
   @RequirePermissions('platform.role.manage')
+  @HighRiskAction('platform.role.change')
   @AuditAction('admin.platform-role.change.request')
   changeRole(@Param('accountId', new ParseUUIDPipe({ version: '4' })) accountId: string,
     @Headers('if-match') ifMatch: string | undefined, @Headers('idempotency-key') key: string | undefined,
@@ -107,6 +120,7 @@ export class AdminController {
 
   @Post('principals/:accountId/sessions/revoke')
   @RequirePermissions('platform.session.revoke')
+  @HighRiskAction('platform.sessions.revoke-all')
   @AuditAction('admin.principal.sessions.revoke.request')
   revokeSessions(@Param('accountId', new ParseUUIDPipe({ version: '4' })) accountId: string,
     @Headers('idempotency-key') key: string | undefined, @Body() input: RevokeSessionsCommandDto,
@@ -147,6 +161,7 @@ export class AdminController {
 
   @Post('pricing/products/:productSlug')
   @RequirePermissions('platform.pricing.manage')
+  @HighRiskAction('platform.pricing.product')
   @AuditAction('admin.pricing.product.update.request')
   @AuditFailuresOnly()
   updateProduct(@Param('productSlug') slug: string, @Headers('if-match') ifMatch: string | undefined,
@@ -158,6 +173,7 @@ export class AdminController {
 
   @Post('pricing/products/:productSlug/prices/:context')
   @RequirePermissions('platform.pricing.manage')
+  @HighRiskAction('platform.pricing.price')
   @AuditAction('admin.pricing.price.update.request')
   @AuditFailuresOnly()
   updatePrice(@Param('productSlug') slug: string, @Param('context') priceContext: string,

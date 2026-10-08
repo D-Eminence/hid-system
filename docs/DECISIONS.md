@@ -1388,3 +1388,59 @@ Consequences:
 - MFA, step-up, and two-person approval remain future Phase 4 work.
 
 Related ADRs: ADR-033, ADR-036. Details: `PHASE_4_STAGE_1_ADMIN_FOUNDATION.md`.
+
+# ADR-038: Platform Administration Requires MFA Sessions, Step-Up and Two-Person Elevation
+
+Status: Accepted for source implementation (Phase 4 Stage 2A, backend only)
+
+Date: 2026-10-08
+
+Decision:
+
+Platform administration uses its own session kind. `/auth/admin/login` checks
+the password and the `platform.admin.access` grant and returns only a
+short-lived, httpOnly challenge. A platform session is issued only after a TOTP
+code (RFC 6238: SHA-1, 6 digits, 30 seconds, ±1 step, each step accepted once)
+or a one-time recovery code. Email OTP is never an administrator factor. An
+administrator without a factor enrolls one at first sign-in. The session needs
+no facility membership, refreshes through `/auth/admin/refresh` only, expires 15
+minutes after its last refresh and 8 hours after sign-in, and uses separate
+cookies. Platform routes accept only platform sessions; platform sessions are
+refused everywhere else.
+
+High-risk platform commands follow one central policy
+(`services/identity-api/src/admin/high-risk-policy.ts`). Every platform
+mutation declares a registered action. The guard checks its permission,
+If-Match, Idempotency-Key, reason and a TOTP step-up from the last five minutes,
+read from server-side session assurance. Each service command repeats the
+session and step-up check in its own transaction, so a direct service call
+cannot bypass it. Critical and high tiers require step-up; the standard tier
+does not.
+
+`platform_super_admin` is granted only through two-person approval. An
+administrator with `platform.role.manage` and a fresh step-up requests it; a
+different active, MFA-enrolled Super Admin with a fresh step-up approves it
+within 24 hours. The grant executes once, inside the approval transaction. A
+lost authenticator is reset through the same flow (`platform.mfa.reset`). The
+one-step role command refuses Super Admin grants in the service and in SQL.
+
+A Super Admin counts as reachable for the last-Super-Admin rule when the
+account is active and holds the role with a password credential. Facility
+membership no longer matters.
+
+The principal export requires `platform.principal.export` (Super Admin only), a
+step-up and a reason. It returns at most 5,000 rows without credential,
+session, subject or membership data, as RFC 4180 CSV with formula-injection
+neutralization.
+
+Consequences:
+
+- Stage 1 findings S1 (platform-only sign-in), S3 (MFA, step-up, two-person
+  approval) and S4 (export defects) are closed in the backend;
+- the existing Health-id Platform Admin frontend cannot sign in to this backend
+  until Stage 2B implements admin sign-in, enrollment, step-up and approvals;
+- `MFA_SECRET_KEY_B64` must be provisioned to the Identity service before admin
+  sign-in works in a deployed environment; without it admin sign-in fails
+  closed (503) and nothing else is affected; and
+- Super Admin revocation remains one step (with step-up); whether it also needs
+  two-person approval is an open policy decision.

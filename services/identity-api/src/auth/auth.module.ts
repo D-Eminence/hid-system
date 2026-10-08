@@ -16,12 +16,15 @@ import { PatientSelfController } from './patient-self.controller';
 import { PatientSelfService } from './patient-self.service';
 import { GoogleAuthenticationService } from './google-authentication.service';
 import { IntegrationModule } from '../integrations/integration.module';
+import { MfaSecretProtector } from './mfa/mfa-secret-protector';
+import { MfaService } from './mfa/mfa.service';
+import { PlatformAuthController } from './platform-auth.controller';
 
 @Global()
 @Module({
   imports: [TurnstileModule, IntegrationModule],
-  controllers: [AuthController, OtpController, PatientSelfController],
-  providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService],
-  exports: [AuthService, TokenService, SecurityGuard, WorkloadAuthService, TurnstileModule, GoogleAuthenticationService, NotificationOtpClient],
+  controllers: [AuthController, PlatformAuthController, OtpController, PatientSelfController],
+  providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService, MfaSecretProtector, MfaService],
+  exports: [AuthService, TokenService, MfaService, SecurityGuard, WorkloadAuthService, TurnstileModule, GoogleAuthenticationService, NotificationOtpClient],
 })
 export class AuthModule {}

@@ -10,6 +10,7 @@ import { IntegrationRuntimeService } from '../integrations/integration-runtime.s
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import type { QoreIdVerificationResult, VerificationFailureCategory } from './qoreid-verification.types';
 import type { ApproveOrganizationApplicationDto, SubmitOrganizationApplicationDto } from './dto/organization-application.dto';
+import { requirePlatformAssurance } from '../auth/platform-assurance';
 
 type VerificationOutcome = 'verified' | 'not_verified' | 'incomplete' | 'provider_error' | 'disabled';
 const localApplicationHmacKey = randomBytes(32);
@@ -113,9 +114,10 @@ export class OrganizationApplicationsService {
   async verify(context: PlatformAccessContext, applicationId: string, expectedVersion: number) {
     let secret: ApplicationSecretRow;
     try {
-      const result = await this.database.withTransaction(context, (client) =>
-        client.query<ApplicationSecretRow>('select * from identity.admin_get_organization_application($1)', [applicationId]),
-        { readOnly: true });
+      const result = await this.database.withTransaction(context, async (client) => {
+        await requirePlatformAssurance(client, context, 'platform.organization-application.verify-cac');
+        return client.query<ApplicationSecretRow>('select * from identity.admin_get_organization_application($1)', [applicationId]);
+      }, { readOnly: true });
       const row = result.rows[0];
       if (!row) throw new DomainProblem(404, 'ORGANIZATION_APPLICATION_NOT_FOUND', 'Application was not found');
       if (Number(row.row_version) !== expectedVersion) {
@@ -234,13 +236,15 @@ export class OrganizationApplicationsService {
       throw new DomainProblem(400, 'ORGANIZATION_LINK_INVALID', 'Both existing organization and facility IDs are required');
     }
     try {
-      const result = await this.database.withTransaction(context, (client) =>
-        client.query<{ organization_id: string; facility_id: string; first_admin_account_id: string;
+      const result = await this.database.withTransaction(context, async (client) => {
+        await requirePlatformAssurance(client, context, 'platform.organization-application.approve');
+        return client.query<{ organization_id: string; facility_id: string; first_admin_account_id: string;
           row_version: string; organization_reused: boolean }>(
           'select * from identity.admin_approve_organization_application($1,$2,$3,$4,$5)',
           [applicationId, expectedVersion, input.existingOrganizationId ?? null,
             input.existingFacilityId ?? null, input.reason],
-        ));
+        );
+      });
       const row = result.rows[0];
       if (!row) throw new DomainProblem(503, 'ORGANIZATION_APPROVAL_UNAVAILABLE', 'Approval could not be completed');
       return { organizationId: row.organization_id, facilityId: row.facility_id,
@@ -253,10 +257,12 @@ export class OrganizationApplicationsService {
 
   async reject(context: PlatformAccessContext, applicationId: string, expectedVersion: number, reason: string) {
     try {
-      const result = await this.database.withTransaction(context, (client) =>
-        client.query<{ application_status: string; row_version: string }>(
+      const result = await this.database.withTransaction(context, async (client) => {
+        await requirePlatformAssurance(client, context, 'platform.organization-application.reject');
+        return client.query<{ application_status: string; row_version: string }>(
           'select * from identity.admin_reject_organization_application($1,$2,$3)',
-          [applicationId, expectedVersion, reason]));
+          [applicationId, expectedVersion, reason]);
+      });
       const row = result.rows[0];
       if (!row) throw new DomainProblem(503, 'ORGANIZATION_REVIEW_UNAVAILABLE', 'Review could not be completed');
       return { status: row.application_status, version: Number(row.row_version) };

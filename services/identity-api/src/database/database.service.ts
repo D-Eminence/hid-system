@@ -53,7 +53,8 @@ export class DatabaseService implements OnApplicationShutdown {
            set_config('app.correlation_id', $3, true),
            set_config('app.membership_id', $4, true),
            set_config('app.purpose_of_use', $5, true),
-           set_config('app.access_scope', $6, true)`,
+           set_config('app.access_scope', $6, true),
+           set_config('app.session_id', $7, true)`,
         [
           context.actor.subject,
           context.facilityId ?? '',
@@ -61,6 +62,8 @@ export class DatabaseService implements OnApplicationShutdown {
           context.membershipId ?? '',
           context.purposeOfUse,
           context.scope === 'platform' ? 'platform' : 'facility',
+          // Server-side step-up checks in SQL bind to the verified session id.
+          context.actor.sessionId ?? '',
         ],
       );
       const result = await operation(client);

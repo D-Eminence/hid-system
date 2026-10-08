@@ -5,11 +5,12 @@ import { lastValueFrom, of } from 'rxjs';
 import { requireAdminContext } from '../admin/admin-context';
 import { AuditInterceptor } from '../audit/audit.interceptor';
 import { AuditService } from '../audit/audit.service';
-import { FACILITY_OPTIONAL, PLATFORM_SCOPE, REQUIRED_PERMISSIONS } from '../common/decorators';
+import { FACILITY_OPTIONAL, HIGH_RISK_ACTION, PATIENT_ALLOWED, PLATFORM_SCOPE, REQUIRED_PERMISSIONS } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, FacilityAssignment, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
+import { assuranceResult, isAssuranceQuery, PLATFORM_SESSION_ID, platformActor } from '../testing/platform-assurance';
 import { SecurityGuard } from './security.guard';
 import type { TokenService } from './token.service';
 
@@ -22,33 +23,48 @@ const membership: FacilityAssignment = {
   roles: ['doctor'], permissions: ['patient.read', 'clinical.encounter.write'], isPrimary: true,
 };
 
-const platformAdmin: ActorContext = {
-  kind: 'staff', id: 'staff:platform-admin', subject: 'staff:platform-admin',
-  accountId: '20000000-0000-4000-8000-000000000001',
-  roles: [], permissions: [], platformRoles: ['security_auditor'],
+/** A platform administration session (password + TOTP), no facility. */
+const platformAdmin: ActorContext = platformActor({
+  id: 'staff:platform-admin', subject: 'staff:platform-admin', platformRoles: ['security_auditor'],
   platformPermissions: ['platform.admin.access', 'platform.audit.read'],
-  facilityIds: [facilityA], facilities: [membership], authenticationMethod: 'local',
+});
+
+/** The same administrator's ordinary staff session at their facility. */
+const staffSessionOfAdmin: ActorContext = {
+  ...platformAdmin, kind: 'staff', sessionId: '90000000-0000-4000-8000-0000000000a1',
+  facilityIds: [facilityA], facilities: [membership],
 };
 
 const provider: ActorContext = {
-  ...platformAdmin, id: 'staff:provider', subject: 'staff:provider',
+  ...staffSessionOfAdmin, id: 'staff:provider', subject: 'staff:provider',
   accountId: '20000000-0000-4000-8000-000000000002', platformRoles: [], platformPermissions: [],
 };
 
-interface RouteMetadata { platform?: boolean; facilityOptional?: boolean; permissions?: readonly string[] }
+const patient: ActorContext = {
+  ...provider, kind: 'patient', patientId: '50000000-0000-4000-8000-000000000001', facilityIds: [], facilities: [],
+};
+
+interface RouteMetadata {
+  platform?: boolean; facilityOptional?: boolean; patientAllowed?: boolean;
+  permissions?: readonly string[]; highRiskAction?: string;
+}
 
 function reflector(route: RouteMetadata): Reflector {
   return { getAllAndOverride: (key: symbol) => {
     if (key === PLATFORM_SCOPE) return route.platform;
     if (key === FACILITY_OPTIONAL) return route.facilityOptional;
+    if (key === PATIENT_ALLOWED) return route.patientAllowed;
     if (key === REQUIRED_PERMISSIONS) return route.permissions;
+    if (key === HIGH_RISK_ACTION) return route.highRiskAction;
     return undefined;
   } } as unknown as Reflector;
 }
 
-function httpRequest(headers: Record<string, string>): HidRequest {
+function httpRequest(headers: Record<string, string>, options: { method?: string; body?: unknown;
+  query?: Record<string, string>; cookies?: Record<string, string> } = {}): HidRequest {
   const lower = Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
-  return { method: 'GET', correlationId: 'platform-scope-test', ip: '127.0.0.1', route: { path: '/admin/test' },
+  return { method: options.method ?? 'GET', correlationId: 'platform-scope-test', ip: '127.0.0.1',
+    route: { path: '/admin/test' }, body: options.body, query: options.query ?? {}, cookies: options.cookies,
     header: (name: string) => lower[name.toLowerCase()] } as unknown as HidRequest;
 }
 
@@ -57,14 +73,17 @@ function executionContext(request: HidRequest): ExecutionContext {
     getHandler: () => ({}), getClass: () => ({}) } as unknown as ExecutionContext;
 }
 
-function guardFor(route: RouteMetadata, actor: ActorContext) {
+function guardFor(route: RouteMetadata, actor: ActorContext, assurance: { stepUpFresh?: boolean; active?: boolean } = {}) {
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
-  const database = { query: jest.fn(async (_sql: string, parameters: unknown[]) => ({
-    rows: [{ enabled: parameters[0] !== 'maintenance_mode' }] })) };
-  const tokens = { verify: jest.fn().mockResolvedValue({ actor, claims: {} }) };
+  const database = { query: jest.fn(async (sql: string, parameters: unknown[]) => isAssuranceQuery(sql)
+    ? assuranceResult(assurance)
+    : { rows: [{ enabled: parameters[0] !== 'maintenance_mode' }] }) };
+  const tokens = { verify: jest.fn().mockResolvedValue({ actor, claims: {} }),
+    verifyCsrf: jest.fn((_claims, cookie: string | undefined, header: string | undefined) =>
+      Boolean(cookie) && cookie === header) };
   const guard = new SecurityGuard(reflector(route), tokens as unknown as TokenService,
     audit as unknown as AuditService, database as unknown as DatabaseService);
-  return { guard, audit };
+  return { guard, audit, tokens, database };
 }
 
 async function denial(promise: Promise<unknown>): Promise<DomainProblem> {
@@ -85,7 +104,7 @@ afterEach(() => resetEnvironmentForTests());
 describe('Platform administration scope', () => {
   const auditRoute = { platform: true, permissions: ['platform.audit.read'] };
 
-  it('authorizes a platform route without X-Facility-ID and binds no facility', async () => {
+  it('authorizes a platform session on a platform route without X-Facility-ID and binds no facility', async () => {
     const { guard, audit } = guardFor(auditRoute, platformAdmin);
     const request = httpRequest({ authorization: 'Bearer signed' });
     await expect(guard.canActivate(executionContext(request))).resolves.toBe(true);
@@ -99,6 +118,7 @@ describe('Platform administration scope', () => {
     const context = requireAdminContext(request);
     expect(context).toMatchObject({ scope: 'platform', facilityId: null, membershipId: null,
       purposeOfUse: 'healthcare-operations' });
+    expect(context.actor.sessionId).toBe(PLATFORM_SESSION_ID);
   });
 
   it('ignores a supplied X-Facility-ID on a platform route instead of borrowing that membership', async () => {
@@ -123,24 +143,45 @@ describe('Platform administration scope', () => {
     expect(recorded.actorMembershipId).toBeUndefined();
   });
 
-  it('denies a facility provider without the platform permission on a platform route', async () => {
-    const { guard, audit } = guardFor(auditRoute, provider);
+  it.each([
+    ['a staff session of a platform administrator', staffSessionOfAdmin],
+    ['a facility provider session', provider],
+  ])('refuses %s on a platform route with platform-scoped evidence', async (_label, actor) => {
+    const { guard, audit } = guardFor(auditRoute, actor);
     const problem = await denial(guard.canActivate(executionContext(
       httpRequest({ authorization: 'Bearer signed', 'x-facility-id': facilityA }))));
     expect(problem.getStatus()).toBe(403);
-    expect(problem.code).toBe('PERMISSION_DENIED');
-    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ accessScope: 'platform', outcome: 'denied' }));
+    expect(problem.code).toBe('PLATFORM_SESSION_REQUIRED');
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ accessScope: 'platform', outcome: 'denied',
+      details: expect.objectContaining({ code: 'PLATFORM_SESSION_REQUIRED' }) }));
   });
 
-  it('still requires facility context on facility-scoped routes, including for platform administrators', async () => {
-    const { guard } = guardFor({ permissions: ['patient.read'] }, platformAdmin);
+  it('refuses a patient session on a platform route', async () => {
+    const { guard } = guardFor(auditRoute, patient);
+    const problem = await denial(guard.canActivate(executionContext(httpRequest({ authorization: 'Bearer signed' }))));
+    expect(problem.code).toBe('PATIENT_SCOPE_DENIED');
+  });
+
+  it.each([
+    ['a facility route', { permissions: ['patient.read'] }],
+    ['a facility-optional route', { facilityOptional: true, patientAllowed: true }],
+  ])('refuses a platform session on %s', async (_label, route) => {
+    const { guard } = guardFor(route, platformAdmin);
+    const problem = await denial(guard.canActivate(executionContext(
+      httpRequest({ authorization: 'Bearer signed', 'x-facility-id': facilityA }))));
+    expect(problem.getStatus()).toBe(403);
+    expect(problem.code).toBe('PLATFORM_SESSION_SCOPE_DENIED');
+  });
+
+  it('still requires facility context on facility-scoped routes for staff sessions of administrators', async () => {
+    const { guard } = guardFor({ permissions: ['patient.read'] }, staffSessionOfAdmin);
     const problem = await denial(guard.canActivate(executionContext(httpRequest({ authorization: 'Bearer signed' }))));
     expect(problem.getStatus()).toBe(400);
     expect(problem.code).toBe('FACILITY_REQUIRED');
   });
 
   it('does not let platform grants satisfy a facility-scoped route', async () => {
-    const { guard } = guardFor({ permissions: ['platform.audit.read'] }, platformAdmin);
+    const { guard } = guardFor({ permissions: ['platform.audit.read'] }, staffSessionOfAdmin);
     const request = httpRequest({ authorization: 'Bearer signed', 'x-facility-id': facilityA });
     const problem = await denial(guard.canActivate(executionContext(request)));
     expect(problem.getStatus()).toBe(403);
@@ -149,7 +190,7 @@ describe('Platform administration scope', () => {
   });
 
   it('gives a platform administrator no clinical permission at a facility they are not active at', async () => {
-    const { guard } = guardFor({ permissions: ['patient.read'] }, platformAdmin);
+    const { guard } = guardFor({ permissions: ['patient.read'] }, staffSessionOfAdmin);
     const problem = await denial(guard.canActivate(executionContext(
       httpRequest({ authorization: 'Bearer signed', 'x-facility-id': facilityB }))));
     expect(problem.getStatus()).toBe(403);
@@ -165,13 +206,116 @@ describe('Platform administration scope', () => {
     expect(request.actor?.permissions).toEqual(membership.permissions);
   });
 
-  it('refuses an admin context outside a platform-scoped route', () => {
+  it('reads only the platform cookie on platform routes and only the staff cookie elsewhere', async () => {
+    const cookies = { hid_access: 'staff-token', hid_access_admin: 'platform-token' };
+    const platform = guardFor(auditRoute, platformAdmin);
+    await platform.guard.canActivate(executionContext(httpRequest({}, { cookies })));
+    expect(platform.tokens.verify).toHaveBeenCalledWith('platform-token');
+    const facility = guardFor({ permissions: ['patient.read'] }, provider);
+    await facility.guard.canActivate(executionContext(httpRequest({ 'x-facility-id': facilityA }, { cookies })));
+    expect(facility.tokens.verify).toHaveBeenCalledWith('staff-token');
+  });
+
+  it('checks platform cookie mutations against the platform CSRF cookie', async () => {
+    const route = { platform: true, permissions: ['platform.admin.access'], highRiskAction: 'platform.mfa.step-up' };
+    const { guard } = guardFor(route, platformAdmin);
+    const staffCsrf = httpRequest({ origin: 'http://localhost:5173', 'x-csrf-token': 'csrf-a' },
+      { method: 'POST', body: {}, cookies: { hid_access_admin: 'platform-token', hid_access_csrf: 'csrf-a' } });
+    expect((await denial(guard.canActivate(executionContext(staffCsrf)))).code).toBe('CSRF_VALIDATION_FAILED');
+    const platformCsrf = httpRequest({ origin: 'http://localhost:5173', 'x-csrf-token': 'csrf-a' },
+      { method: 'POST', body: {}, cookies: { hid_access_admin: 'platform-token', hid_access_admin_csrf: 'csrf-a' } });
+    await expect(guard.canActivate(executionContext(platformCsrf))).resolves.toBe(true);
+  });
+
+  it('refuses an admin context outside a platform-scoped route or from a non-platform session', () => {
     const request = httpRequest({});
     Object.assign(request, { actor: platformAdmin, accessScope: 'facility', facilityId: facilityA });
     expect(() => requireAdminContext(request)).toThrow(DomainProblem);
     Object.assign(request, { accessScope: 'platform', facilityId: undefined,
       actor: { ...platformAdmin, platformPermissions: ['platform.audit.read'] } });
     expect(() => requireAdminContext(request)).toThrow('Required permission is missing');
+    Object.assign(request, { actor: staffSessionOfAdmin });
+    expect(() => requireAdminContext(request)).toThrow('An MFA-verified platform administration session is required');
+  });
+});
+
+describe('Central high-risk policy in the guard', () => {
+  const critical = { platform: true, permissions: ['platform.role.manage'], highRiskAction: 'platform.role.change' };
+  const superAdmin = platformActor();
+  const roleChange = (headers: Record<string, string> = {}, body: unknown = { reason: 'Governed role change' }) =>
+    httpRequest({ authorization: 'Bearer signed', 'if-match': '"3"', 'idempotency-key': 'guard-policy-key-0001', ...headers },
+      { method: 'POST', body });
+
+  it('refuses a platform mutation that declares no registered policy', async () => {
+    const undeclared = guardFor({ platform: true, permissions: ['platform.role.manage'] }, superAdmin);
+    expect((await denial(undeclared.guard.canActivate(executionContext(roleChange())))).code)
+      .toBe('HIGH_RISK_POLICY_MISSING');
+    const unknown = guardFor({ ...critical, highRiskAction: 'platform.unknown' }, superAdmin);
+    expect((await denial(unknown.guard.canActivate(executionContext(roleChange())))).code)
+      .toBe('HIGH_RISK_POLICY_MISSING');
+  });
+
+  it('requires a fresh server-side step-up for a critical action whatever the client claims', async () => {
+    const { guard } = guardFor(critical, superAdmin, { stepUpFresh: false });
+    const forged = roleChange({ 'x-step-up': 'true', 'x-mfa-verified': 'true' },
+      { reason: 'Governed role change', stepUp: true, mfaVerified: true });
+    const problem = await denial(guard.canActivate(executionContext(forged)));
+    expect(problem.getStatus()).toBe(403);
+    expect(problem.code).toBe('STEP_UP_REQUIRED');
+  });
+
+  it('allows a critical action after a fresh step-up and records the action on the request', async () => {
+    const { guard } = guardFor(critical, superAdmin);
+    const request = roleChange();
+    await expect(guard.canActivate(executionContext(request))).resolves.toBe(true);
+    expect(request.highRiskAction).toBe('platform.role.change');
+  });
+
+  it.each([
+    ['If-Match', { 'if-match': '' }, undefined, 428, 'IF_MATCH_REQUIRED'],
+    ['Idempotency-Key', { 'idempotency-key': 'short' }, undefined, 400, 'IDEMPOTENCY_KEY_REQUIRED'],
+    ['reason', {}, { reason: 'short' }, 400, 'REASON_REQUIRED'],
+  ] as const)('refuses a critical action without %s', async (_label, headers, body, status, code) => {
+    const { guard } = guardFor(critical, superAdmin);
+    const problem = await denial(guard.canActivate(executionContext(roleChange(headers, body))));
+    expect(problem.getStatus()).toBe(status);
+    expect(problem.code).toBe(code);
+  });
+
+  it('requires the policy permission even when the route declares fewer', async () => {
+    const { guard } = guardFor({ ...critical, permissions: [] },
+      platformActor({ platformPermissions: ['platform.admin.access'] }));
+    expect((await denial(guard.canActivate(executionContext(roleChange())))).code).toBe('PERMISSION_DENIED');
+  });
+
+  it('requires step-up for high-tier actions but not for standard-tier actions', async () => {
+    const high = guardFor({ platform: true, permissions: ['platform.facility.manage'],
+      highRiskAction: 'platform.facility.status' }, superAdmin, { stepUpFresh: false });
+    expect((await denial(high.guard.canActivate(executionContext(roleChange())))).code).toBe('STEP_UP_REQUIRED');
+    const standard = guardFor({ platform: true, permissions: ['platform.demo.manage'],
+      highRiskAction: 'platform.demo-request.status' }, superAdmin, { stepUpFresh: false });
+    await expect(standard.guard.canActivate(executionContext(roleChange({ 'idempotency-key': '' }))))
+      .resolves.toBe(true);
+  });
+
+  it('requires step-up and a reason for a principal export (GET)', async () => {
+    const route = { platform: true, permissions: ['platform.principal.export'],
+      highRiskAction: 'platform.principals.export' };
+    const stale = guardFor(route, superAdmin, { stepUpFresh: false });
+    const exportRequest = httpRequest({ authorization: 'Bearer signed' }, { query: { reason: 'Quarterly review' } });
+    expect((await denial(stale.guard.canActivate(executionContext(exportRequest)))).code).toBe('STEP_UP_REQUIRED');
+    const fresh = guardFor(route, superAdmin);
+    expect((await denial(fresh.guard.canActivate(executionContext(httpRequest({ authorization: 'Bearer signed' })))))
+      .code).toBe('REASON_REQUIRED');
+    await expect(fresh.guard.canActivate(executionContext(exportRequest))).resolves.toBe(true);
+    const support = guardFor({ ...route, permissions: ['platform.principal.read'] },
+      platformActor({ platformPermissions: ['platform.admin.access', 'platform.principal.read', 'platform.session.revoke'] }));
+    expect((await denial(support.guard.canActivate(executionContext(exportRequest)))).code).toBe('PERMISSION_DENIED');
+  });
+
+  it('treats a session whose assurance is gone as no platform session', async () => {
+    const { guard } = guardFor(critical, superAdmin, { active: false });
+    expect((await denial(guard.canActivate(executionContext(roleChange())))).code).toBe('PLATFORM_SESSION_REQUIRED');
   });
 });
 

@@ -70,8 +70,14 @@ still requires an active facility membership; platform routes never use it.
 
 ## Authentication and bootstrap
 
-The Admin browser uses Identity `/auth/login`, `/auth/logout`, and the existing
-session cookie/bearer contract. `/admin/session` returns only the authenticated
+Since Phase 4 Stage 2A (ADR-038, `docs/PHASE_4_STAGE_2A_BACKEND_SECURITY.md`)
+the Admin browser signs in through `/api/v1/auth/admin/login` (password), then
+`/auth/admin/mfa/verify` (TOTP or a one-time recovery code) or, on first sign-in,
+`/auth/admin/mfa/enroll/start` and `/enroll/activate`. That issues a separate
+platform session (`hid_access_admin*` cookies) with a 15-minute idle and 8-hour
+absolute lifetime; it needs no facility membership. Staff, patient and facility
+sessions are refused on every `/admin` route, and a platform session is refused
+everywhere else. `/admin/session` returns only the authenticated
 actor's platform roles/capabilities. Missing authentication shows sign-in;
 authentication without `platform.admin.access` shows denial. Browser guards
 are UX only; every API method has a backend permission decorator and the
@@ -88,8 +94,9 @@ npm --prefix services/ehr-api run admin:bootstrap
 
 It runs only with an explicitly injected database-administrator connection,
 serializes with an advisory transaction lock, requires migration `0027`,
-requires one exact active account with an active verified staff/facility tuple,
-refuses to run if any active legacy or current Super Admin exists, creates one
+requires one exact active account with a password credential (Stage 2A: no
+staff/facility tuple; the administrator enrolls an authenticator at first
+platform sign-in), refuses to run if any active legacy or current Super Admin exists, creates one
 explicit assignment, increments the account version, and writes a system audit
 event. It has no email inference, developer bypass, reusable login shortcut, or
 repeat-success path.
@@ -106,7 +113,11 @@ All routes are under `/api/v1/admin` and are Identity-authenticated.
 | `POST /facilities/:id/status` | `platform.facility.manage` | Versioned, reasoned, idempotent verify/reject/suspend/reactivate transition. |
 | `GET /principals` | `platform.principal.read` | Search-required bounded account, facility-membership, platform-role, and session status. |
 | `POST /principals/:id/status` | `platform.principal.manage` | Versioned suspension/reactivation; suspension increments token version and revokes sessions. Reactivation restores the pre-suspension status, so `pending_reset`/`locked` accounts must still recover (`409 ACCOUNT_RECOVERY_REQUIRED`); self-targeted commands return `403 ADMIN_SELF_CHANGE_DENIED` (0068). |
-| `POST /principals/:id/platform-roles` | `platform.role.manage` | Allowlisted, versioned, reasoned, idempotent grant/revoke with last-admin protection. Administrators cannot change their own roles (0068). |
+| `POST /principals/:id/platform-roles` | `platform.role.manage` | Allowlisted, versioned, reasoned, idempotent grant/revoke with last-admin protection. Administrators cannot change their own roles (0068). Granting `platform_super_admin` is refused (`403 TWO_PERSON_APPROVAL_REQUIRED`, 0070); use the two-person request below. |
+| `GET /principals/export` | `platform.principal.export` | Stage 2A: step-up and `reason` required; at most 5,000 rows of account id, email, display name, status, creation time and platform roles; RFC 4180 CSV with formula neutralization. |
+| `POST /principals/:id/super-admin-requests`, `POST /principals/:id/mfa-reset-requests`, `GET /approvals`, `POST /approvals/:id/{approve,reject,cancel}` | `platform.role.manage` / `platform.mfa.reset` / any of role.manage, mfa.reset, audit.read | Stage 2A two-person approval: 24-hour requests decided once by a different MFA-enrolled Super Admin with fresh step-up. |
+| `GET /mfa`, `POST /mfa/step-up`, `POST /mfa/recovery-codes/regenerate` | `platform.admin.access` | Stage 2A own-MFA status (never the secret), TOTP step-up (5 minutes), recovery-code regeneration (step-up). |
+| `GET /sessions`, `POST /sessions/:id/revoke`, `GET /principals/:id/sessions`, `POST /principals/:id/sessions/:sessionId/revoke` | `platform.admin.access` / `platform.session.revoke` | Stage 2A session visibility (no token material) and revocation, including compromised-session revocation. |
 | `POST /principals/:id/sessions/revoke` | `platform.session.revoke` | Real authoritative session revocation, not frontend state. |
 | `GET /identity/reviews` | `platform.identity-review.read` | Paginated review evidence with `NIN-****1234`; no raw NIN or merge action. |
 | `GET /audit/events` | `platform.audit.read` | Cursor-paginated immutable evidence. Patient IDs and free-form detail payloads are omitted. |

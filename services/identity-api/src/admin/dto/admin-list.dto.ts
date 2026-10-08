@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, Min, MinLength } from 'class-validator';
+import { IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { IsOptionalButNotNull } from '../../common/validation';
 
 export class AdminPageDto {
@@ -47,6 +47,12 @@ export class ExportPrincipalsDto {
   @IsOptional()
   @IsIn(['active', 'pending_reset', 'locked', 'disabled', 'deleted'])
   status?: string;
+
+  /** Recorded in the export audit event (8 to 500 characters). */
+  @IsString()
+  @MinLength(8)
+  @MaxLength(500)
+  reason!: string;
 }
 
 export class ListIdentityReviewsDto extends AdminPageDto {

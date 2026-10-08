@@ -57,28 +57,20 @@ async function main() {
       throw new Error('Bootstrap refused: an active platform Super Admin already exists');
     }
 
+    // Platform administration sign-in (0069) is password + TOTP and needs no
+    // facility membership; the administrator enrolls the authenticator at
+    // first platform sign-in. The account must therefore have a password.
     const eligible = await client.query(
       `select account.id
        from auth.accounts account
        where account.id = $1 and account.status = 'active'
          and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
-         and exists (
-           select 1 from identity.staff staff
-           join identity.staff_facility_memberships membership on membership.staff_id = staff.id
-             and membership.account_id = account.id and membership.active
-             and membership.migration_hold_reason is null
-           join identity.organizations organization on organization.id = membership.organization_id
-             and organization.active
-           join identity.facilities facility on facility.id = membership.facility_id
-             and facility.organization_id = membership.organization_id and facility.active
-           where staff.account_id = account.id and staff.active
-             and lower(btrim(staff.verification_status)) in ('verified', 'approved', 'active')
-         )
+         and account.password_hash is not null
        for update`,
       [accountId],
     );
     if (eligible.rowCount !== 1) {
-      throw new Error('Bootstrap refused: the account lacks an active verified staff and facility membership tuple');
+      throw new Error('Bootstrap refused: the account is not active or has no password credential');
     }
 
     await client.query(

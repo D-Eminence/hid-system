@@ -1,4 +1,5 @@
 import { SetMetadata } from '@nestjs/common';
+import type { PlatformAction } from '../admin/high-risk-policy';
 
 export const PUBLIC_ROUTE = Symbol('PUBLIC_ROUTE');
 export const PATIENT_ALLOWED = Symbol('PATIENT_ALLOWED');
@@ -23,3 +24,9 @@ export const AuditFailuresOnly = (): MethodDecorator & ClassDecorator => SetMeta
  * permissions, and their audit rows are platform-scoped (no facility).
  */
 export const PlatformScope = (): MethodDecorator & ClassDecorator => SetMetadata(PLATFORM_SCOPE, true);
+export const HIGH_RISK_ACTION = Symbol('HIGH_RISK_ACTION');
+/**
+ * Declares the platform action a route performs (admin/high-risk-policy.ts).
+ * The guard refuses platform mutations without one and enforces its controls.
+ */
+export const HighRiskAction = (action: PlatformAction): MethodDecorator => SetMetadata(HIGH_RISK_ACTION, action);

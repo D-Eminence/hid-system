@@ -48,6 +48,17 @@ const environmentSchema = z.object({
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('hid_access'),
   AUTH_COOKIE_SECURE: booleanString,
   AUTH_COOKIE_DOMAIN: optionalString,
+  // Platform administration sessions (0069). Idle is measured from the last
+  // refresh; the database refuses longer idle or absolute lifetimes.
+  PLATFORM_ACCESS_TTL_SECONDS: z.coerce.number().int().min(60).max(600).default(300),
+  PLATFORM_IDLE_TIMEOUT_SECONDS: z.coerce.number().int().min(300).max(900).default(900),
+  PLATFORM_ABSOLUTE_TTL_SECONDS: z.coerce.number().int().min(3600).max(28800).default(28800),
+  PLATFORM_STEP_UP_TTL_SECONDS: z.coerce.number().int().min(60).max(300).default(300),
+  // Master key for administrator TOTP secrets and recovery-code digests. When
+  // absent, platform administration sign-in fails closed (503 MFA_UNAVAILABLE)
+  // and no platform session can be issued; the rest of the service is unaffected.
+  MFA_SECRET_KEY_B64: optionalString,
+  MFA_KEY_VERSION: z.string().trim().min(1).max(64).default('local-v1'),
   HID_DEPLOYMENT_ENV: z.enum(['staging', 'production']).optional(),
   TURNSTILE_MODE: z.enum(['disabled', 'required']).default('disabled'),
   TURNSTILE_SECRET_KEY: optionalString,
@@ -169,6 +180,12 @@ const environmentSchema = z.object({
   }
   if (environment.OTP_HMAC_KEY_B64 && !isBase64Key(environment.OTP_HMAC_KEY_B64, 32)) {
     context.addIssue({ code: 'custom', path: ['OTP_HMAC_KEY_B64'], message: 'The OTP HMAC key must be exactly 32 base64-encoded bytes' });
+  }
+  if (environment.MFA_SECRET_KEY_B64 && !isBase64Key(environment.MFA_SECRET_KEY_B64, 32)) {
+    context.addIssue({ code: 'custom', path: ['MFA_SECRET_KEY_B64'], message: 'The MFA secret key must be exactly 32 base64-encoded bytes' });
+  }
+  if (environment.PLATFORM_ACCESS_TTL_SECONDS > environment.PLATFORM_IDLE_TIMEOUT_SECONDS) {
+    context.addIssue({ code: 'custom', path: ['PLATFORM_ACCESS_TTL_SECONDS'], message: 'Platform access tokens cannot outlive the idle timeout' });
   }
   if (environment.CONTACT_LOOKUP_HMAC_KEY_B64 && !isBase64Key(environment.CONTACT_LOOKUP_HMAC_KEY_B64, 32)) {
     context.addIssue({ code: 'custom', path: ['CONTACT_LOOKUP_HMAC_KEY_B64'], message: 'The contact lookup key must be exactly 32 base64-encoded bytes' });

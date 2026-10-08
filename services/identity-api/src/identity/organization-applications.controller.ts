@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Patch, 
 import type { Response } from 'express';
 import { requireAdminContext } from '../admin/admin-context';
 import { TurnstileService } from '../auth/turnstile.service';
-import { AuditAction, AuditFailuresOnly, Public, PlatformScope, RequirePermissions } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, HighRiskAction, PlatformScope, Public, RequirePermissions } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -131,6 +131,7 @@ export class AdminOrganizationApplicationsController {
   @Post(':applicationId/verify-cac')
   @HttpCode(200)
   @RequirePermissions('platform.facility.manage')
+  @HighRiskAction('platform.organization-application.verify-cac')
   @AuditAction('admin.organization-application.verify-cac')
   verify(@Param('applicationId', new ParseUUIDPipe({ version: '4' })) applicationId: string,
     @Headers('if-match') ifMatch: string | undefined, @Req() request: HidRequest) {
@@ -140,6 +141,7 @@ export class AdminOrganizationApplicationsController {
   @Post(':applicationId/approve')
   @HttpCode(200)
   @RequirePermissions('platform.facility.manage', 'platform.principal.manage', 'platform.role.manage')
+  @HighRiskAction('platform.organization-application.approve')
   @AuditAction('admin.organization-application.approve')
   approve(@Param('applicationId', new ParseUUIDPipe({ version: '4' })) applicationId: string,
     @Headers('if-match') ifMatch: string | undefined,
@@ -150,6 +152,7 @@ export class AdminOrganizationApplicationsController {
   @Post(':applicationId/reject')
   @HttpCode(200)
   @RequirePermissions('platform.facility.manage')
+  @HighRiskAction('platform.organization-application.reject')
   @AuditAction('admin.organization-application.reject')
   reject(@Param('applicationId', new ParseUUIDPipe({ version: '4' })) applicationId: string,
     @Headers('if-match') ifMatch: string | undefined,

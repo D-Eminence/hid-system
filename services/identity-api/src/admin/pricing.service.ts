@@ -7,6 +7,7 @@ import type { PlatformAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { platformAuditActor } from './admin-context';
 import type { PricePricingCommandDto, ProductPricingCommandDto } from './dto/pricing-command.dto';
+import { requirePlatformAssurance } from '../auth/platform-assurance';
 
 interface PublicPriceRow extends QueryResultRow {
   product_slug: string;
@@ -87,6 +88,7 @@ export class PricingService {
       { slug, expectedVersion, name, status: input.status, reason });
     try {
       return await this.database.withTransaction(context, async (client) => {
+        await requirePlatformAssurance(client, context, 'platform.pricing.product');
         const result = await client.query<ProductCommandRow>(
           `select * from platform.admin_set_commercial_product($1,$2,$3,$4,$5,$6,$7)`,
           [slug, expectedVersion, name, input.status, reason, idempotencyKey, digest],
@@ -123,6 +125,7 @@ export class PricingService {
     });
     try {
       return await this.database.withTransaction(context, async (client) => {
+        await requirePlatformAssurance(client, context, 'platform.pricing.price');
         const result = await client.query<PriceCommandRow>(
           `select * from platform.admin_set_commercial_price($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
           [slug, priceContext, expectedVersion, input.visibility, input.amountMinor,
