@@ -276,6 +276,27 @@ try {
   evidence.step_up = { without: 'STEP_UP_REQUIRED', if_match: 428, reason: 'REASON_REQUIRED', per_session_family: true,
     direct_super_admin_grant: 'TWO_PERSON_APPROVAL_REQUIRED' };
 
+  // 6a. Platform controls through the exact Identity runtime role. runtime-grants.sql once
+  // omitted EXECUTE on platform.admin_list_controls and platform.admin_set_control.
+  const controlEvents = async () => (await owner.query(
+    "select count(*)::int as count from platform.control_events where control_key = 'outreach_portal_enabled'")).rows[0].count;
+  const eventsBefore = await controlEvents();
+  const controls = await get(sessionA2, '/admin/controls');
+  expectStatus(controls, 200);
+  const outreach = controls.body.find(item => item.controlKey === 'outreach_portal_enabled');
+  assert(outreach, 'The outreach portal control is listed');
+  const setOutreach = (enabled, version, reason) => command(sessionA2, '/admin/controls',
+    { controlKey: 'outreach_portal_enabled', enabled, reason }, { 'If-Match': String(version) });
+  const changed = await setOutreach(!outreach.enabled, outreach.version, 'Verifier changes the outreach portal control');
+  expectStatus(changed, 201);
+  assert.deepEqual([changed.body.enabled, changed.body.replayed], [!outreach.enabled, false]);
+  const restored = await setOutreach(outreach.enabled, changed.body.version, 'Verifier restores the outreach portal control');
+  expectStatus(restored, 201);
+  assert.equal(restored.body.enabled, outreach.enabled);
+  assert.equal(await controlEvents(), eventsBefore + 2);
+  evidence.platform_controls = { listed: controls.body.length, changed_and_restored: 'outreach_portal_enabled',
+    control_events_added: 2 };
+
   // 7. Two-person Super Admin elevation.
   const elevationKey = key('elevation');
   const requestBody = { reason: 'Second operator for incident response' };

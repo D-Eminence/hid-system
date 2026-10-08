@@ -82,6 +82,7 @@ const acceptedMigrations = new Map([
   ['0068_admin_account_transition_safety.sql', '3c939177cd26302d6035b049bbbb571e83de2b1abbcf74350fa33af56e2abf30'],
   ['0069_platform_mfa_sessions.sql', '8dba4aca9afdcc8ee2ad9ae443793254ba2f0d48697956430776ec32e5f83173'],
   ['0070_platform_two_person_approval.sql', '3b732bbd473c58c7ec8ed7b56068e9c76c8d0c4f91fca16fbb3a4c9d62c3f954'],
+  ['0071_platform_control_command_column_references.sql', '7e36a04c06be641af89a34f2edc0ef3d65476454c8003cacf15e1d4b3217ef92'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

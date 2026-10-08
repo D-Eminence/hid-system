@@ -67,6 +67,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0068_admin_account_transition_safety.sql` | Admin status command cannot activate `pending_reset`/`locked` accounts or bypass recovery by disable/re-enable (`auth.accounts.disabled_from_status`); administrators cannot change their own status or platform roles |
 | `database/migrations/0069_platform_mfa_sessions.sql` | Platform administrator MFA: encrypted TOTP factors, one-time recovery-code digests, short-lived MFA sign-in challenges, the `platform` session kind with 15-minute idle and 8-hour absolute ceilings, server-side session assurance and step-up evidence, MFA session events and rate-limit scopes, the restricted principal-export and MFA-reset permissions, and session-family revocation |
 | `database/migrations/0070_platform_two_person_approval.sql` | Two-person approval (24-hour requests, executed once by a second MFA-enrolled Super Admin with fresh step-up) for Super Admin grants and MFA resets; the one-step role command refuses Super Admin grants; last-Super-Admin reachability no longer requires a facility membership |
+| `database/migrations/0071_platform_control_command_column_references.sql` | Replaces `platform.admin_set_control` (same signature, result and checks) with qualified table references; the 0039 version failed on every call because its output columns shadowed the table columns |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
@@ -217,7 +218,7 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0070`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0071`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
@@ -305,7 +306,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0070`, runtime grants, RLS and purpose/deny behavior.
+6. Verify `0071`, runtime grants, RLS and purpose/deny behavior.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.
