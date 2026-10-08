@@ -63,6 +63,8 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0064_patient_account_deletion_lifecycle.sql` | Patient login/account deletion lifecycle with single-use confirmation, configurable cancellation window, legal-hold and retain-only record-class policy, terminal deleted login, and atomic revocation/completion audit; no identity, NIN, clinical, or audit data is deleted |
 | `database/migrations/0065_patient_emergency_contacts.sql` | Encrypted patient emergency contacts, code verification, and idempotent minimum-necessary emergency-contact notification intents from `EmergencyAccessActivated`; break-glass authorization unchanged |
 | `database/migrations/0066_patient_access_safety.sql` | Session-bound patient access-request decisions (and corrected `0035` commands), patient-owned grant revocation, break-glass/revocability labels in access history, and no new inbox items for deleted logins |
+| `database/migrations/0067_platform_admin_scope.sql` | Explicit platform scope for facility-less administration audit (`audit.events.access_scope`, replaced staff checks, permission-checked BEFORE INSERT trigger), corrected `audit.list_platform_events` result, and platform-scope onboarding gate |
+| `database/migrations/0068_admin_account_transition_safety.sql` | Admin status command cannot activate `pending_reset`/`locked` accounts or bypass recovery by disable/re-enable (`auth.accounts.disabled_from_status`); administrators cannot change their own status or platform roles |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
@@ -213,7 +215,7 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0066`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0068`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
@@ -301,7 +303,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0066`, runtime grants, RLS and purpose/deny behavior.
+6. Verify `0068`, runtime grants, RLS and purpose/deny behavior.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.

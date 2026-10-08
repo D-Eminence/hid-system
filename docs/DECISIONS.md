@@ -1345,3 +1345,46 @@ Consequences:
   are external, separately authorized steps.
 
 Related ADRs: ADR-028, ADR-029, ADR-033.
+
+# ADR-037: Platform Administration Is Platform-Scoped; Admin Status Changes Cannot Bypass Recovery
+
+Status: Accepted for source implementation (Phase 4 Stage 1)
+
+Date: 2026-10-08
+
+Decision:
+
+Platform administration routes carry an explicit platform scope. They bind no
+facility, ignore `X-Facility-ID`, check only platform permissions, and run
+their database transaction with `app.access_scope = 'platform'` and no
+facility or membership. Administrators never borrow a facility membership for
+platform work, and no facility is assigned to them for it. Facility-scoped
+routes still require a facility and check only that membership's permissions;
+platform permissions do not apply to them.
+
+Audit records platform scope explicitly. `audit.events.access_scope =
+'platform'` is the only exception to the facility rules for staff rows. A
+platform row has a staff account and no facility or membership, and a
+successful row requires an active `platform.admin.access` grant. The database
+enforces both. Audit writes remain fail-closed and append-only.
+
+The generic admin status command accepts `active` only for a disabled account
+and restores the status recorded when it was disabled (`pending_reset` when
+none was recorded). It never activates a `pending_reset` or `locked` account
+and never lifts a timed suspension. An administrator cannot change their own
+account status or platform roles.
+
+The authoritative Platform Admin frontend is `apps/patient-web/src/admin` in
+`D-Eminence/Health-id`; `apps/admin` here is legacy reference code.
+
+Consequences:
+
+- every successful Platform Admin request is evidenced as platform scope
+  instead of failing (503) or being attributed to an unrelated facility;
+- staff sign-in still requires an active facility membership; platform-only
+  sign-in is a separate authentication decision;
+- legacy `locked` accounts need a governed recovery flow before they can
+  return to use; and
+- MFA, step-up, and two-person approval remain future Phase 4 work.
+
+Related ADRs: ADR-033, ADR-036. Details: `PHASE_4_STAGE_1_ADMIN_FOUNDATION.md`.
