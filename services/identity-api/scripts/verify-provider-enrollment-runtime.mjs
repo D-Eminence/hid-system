@@ -27,9 +27,9 @@ const siteHost = new URL(origin).hostname;
 Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'staging',
   NIN_PROVIDER_MODE: 'deferred', CORS_ORIGINS: origin, IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret',
   IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: 'public-synthetic-ehr-workload-token',
-  TURNSTILE_MODE: 'required', TURNSTILE_SECRET_KEY: 'synthetic-turnstile-secret',
-  QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'synthetic-qoreid-client',
-  QOREID_CLIENT_SECRET: 'synthetic-qoreid-secret' });
+  TURNSTILE_MODE: 'required', TURNSTILE_SECRET_KEY: 'example-turnstile-secret',
+  QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'example-qoreid-client',
+  QOREID_CLIENT_SECRET: 'example-qoreid-secret' });
 delete process.env.AUTH_COOKIE_DOMAIN;
 for (const key of ['NIN_LOOKUP_HMAC_KEY_B64', 'NIN_ENCRYPTION_KEY_B64', 'METAMAP_CLIENT_ID',
   'METAMAP_CLIENT_SECRET', 'QOREID_API_KEY']) delete process.env[key];
@@ -73,7 +73,7 @@ globalThis.fetch = async (input, init) => {
   const url = String(input instanceof Request ? input.url : input);
   assert.equal(url, siteverifyUrl, `Unexpected outbound request to ${url}`);
   const body = JSON.parse(String(init?.body));
-  assert.equal(body.secret, 'synthetic-turnstile-secret');
+  assert.equal(body.secret, 'example-turnstile-secret');
   siteverifyRequests.push(body.response);
   const [kind, action, hostname] = String(body.response).split('|');
   if (kind !== 'ok') return Response.json({ success: false, 'error-codes': ['timeout-or-duplicate'] });
@@ -141,7 +141,7 @@ try {
       AuditService, WorkloadAuthService, TurnstileService, IntegrationRuntimeService,
       ProviderEnrollmentService, OrganizationProfileCompletionService, QoreIdVerificationAdapter,
       { provide: QOREID_ADAPTER_CONFIGURATION, useValue: { baseUrl: 'https://api.qoreid.com',
-        clientId: 'synthetic-qoreid-client', clientSecret: 'synthetic-qoreid-secret', timeoutMs: 2000 } },
+        clientId: 'example-qoreid-client', clientSecret: 'example-qoreid-secret', timeoutMs: 2000 } },
       { provide: QOREID_FETCH, useValue: qoreidFetch },
       { provide: NotificationOtpClient, useValue: notification },
       { provide: GoogleAuthenticationService, useValue: {
