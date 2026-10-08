@@ -8,13 +8,17 @@ import { PatientRecordsService } from './patient-records.service';
 
 const actor = { kind: 'patient', patientId: 'patient-id', accountId: 'account-id', subject: 'subject', sessionId: 'session-id' };
 const request = { actor, correlationId: 'patient-record-test', header: () => undefined } as unknown as HidRequest;
+
 function setup() {
   const authorization = { ...actor, expiresAt: new Date(Date.now() + 30_000).toISOString(), allowed: true };
   const authorizeSelf = jest.fn().mockResolvedValue(authorization);
   const query = jest.fn().mockResolvedValue({ rows: [] });
-  const transaction = jest.fn(async (_auth: unknown, _correlation: string, work: (c: PoolClient) => Promise<unknown>) => work({ query } as unknown as PoolClient));
+  const transaction = jest.fn(async (_auth: unknown, _correlation: string, work: (c: PoolClient) => Promise<unknown>) =>
+    work({ query } as unknown as PoolClient));
   const recordWithClient = jest.fn().mockResolvedValue(undefined);
-  const run = jest.fn().mockResolvedValue({ encounters: [], notes: [], limit: 50 });
+  const run = jest.fn().mockResolvedValue({
+    encounters: [], notes: [], vitals: [], diagnoses: [], prescriptions: [], labRequests: [], documents: [], limit: 100,
+  });
   const service = new PatientRecordsService({ withPatientTransaction: transaction } as unknown as DatabaseService,
     { authorizeSelf } as unknown as IdentityApiService, { recordWithClient } as unknown as AuditService,
     { run } as unknown as ClinicalRepository);
@@ -22,37 +26,51 @@ function setup() {
 }
 
 describe('Owning EHR patient and emergency read boundary', () => {
-  it('reauthorizes self with Identity and constrains all SQL to that canonical patient', async () => {
+  it('reauthorizes self with Identity and constrains every SQL read to that canonical patient', async () => {
     const { service, authorizeSelf, query, recordWithClient } = setup();
-    await expect(service.self(request)).resolves.toEqual({ encounters: [], notes: [], limit: 50 });
+    await expect(service.self(request)).resolves.toEqual({
+      encounters: [], notes: [], vitals: [], diagnoses: [], prescriptions: [], labRequests: [], documents: [], limit: 100,
+    });
     expect(authorizeSelf).toHaveBeenCalledWith(request);
+    expect(query).toHaveBeenCalledTimes(7);
     for (const [sql, params] of query.mock.calls) {
       expect(params).toEqual(['patient-id']);
-      expect(sql).toMatch(/limit 50/);
+      expect(sql).toMatch(/limit (50|100)/);
     }
     expect(query.mock.calls[0]?.[0]).toContain("status='completed'");
     expect(query.mock.calls[1]?.[0]).toContain("n.status in ('signed','amended')");
-    expect(recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ actorType: 'patient', outcome: 'success' }));
+    expect(query.mock.calls[2]?.[0]).toContain('from ehr.vitals');
+    expect(query.mock.calls[3]?.[0]).toContain('from ehr.diagnoses');
+    expect(query.mock.calls[4]?.[0]).toContain('from ehr.prescriptions');
+    expect(query.mock.calls[5]?.[0]).toContain('from ehr.lab_requests');
+    expect(query.mock.calls[6]?.[0]).toContain("from ehr.documents");
+    expect(recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      actorType: 'patient', outcome: 'success',
+      details: expect.objectContaining({ vitalCount: 0, diagnosisCount: 0, prescriptionCount: 0, labRequestCount: 0, documentCount: 0 }),
+    }));
   });
+
   it('denies altered patient mapping before opening an EHR transaction', async () => {
     const { service, authorizeSelf, transaction } = setup();
     authorizeSelf.mockResolvedValue({ ...actor, patientId: 'other-patient' });
     await expect(service.self(request)).rejects.toThrow('Patient authorization changed');
     expect(transaction).not.toHaveBeenCalled();
   });
+
   it('fails closed before PHI serialization on Identity or durable audit failure', async () => {
     const { service, recordWithClient } = setup();
     recordWithClient.mockRejectedValue(new Error('audit failed'));
     await expect(service.self(request)).rejects.toThrow('audit failed');
   });
+
   it('requires a current break-glass authorization through the existing clinical repository', async () => {
     const { service, run } = setup();
     const context = { purposeOfUse: 'emergency', facilityId: 'facility' } as DataAccessContext;
     await service.emergency('patient-id', context);
-    expect(run).toHaveBeenCalledWith(context, 'patient-id', 'read_records', expect.objectContaining({ breakGlassOnly: true }), expect.any(Function));
+    expect(run).toHaveBeenCalledWith(context, 'patient-id', 'read_records',
+      expect.objectContaining({ breakGlassOnly: true }), expect.any(Function));
   });
 });
-
 
 describe('Emergency read grant revalidation', () => {
   it.each([{ allowed: false, breakGlass: false }, { allowed: true, breakGlass: false }])(
