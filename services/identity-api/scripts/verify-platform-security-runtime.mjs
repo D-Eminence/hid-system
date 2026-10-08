@@ -223,7 +223,10 @@ try {
   // 4. A TOTP code is accepted once: a replay of the last accepted step fails.
   const secondLogin = await platform.login(superA.email);
   assert.equal(secondLogin.response.body.status, 'mfa_required');
-  const replayed = totp.totp(totp.base32Decode(secretA), clock.now());
+  // Resend the exact code accepted at activation. (A code regenerated now could
+  // belong to a later, unused step if real time crossed a 30-second boundary.)
+  const replayed = platform.lastCode(secretA);
+  assert.match(replayed, /^[0-9]{6}$/);
   expectStatus(await post('/auth/admin/mfa/verify', secondLogin.jar, { code: replayed }), 401, 'MFA_INVALID_CODE');
   expectStatus(await post('/auth/admin/mfa/verify', secondLogin.jar, { code: '123456', recoveryCode: recoveryA[0] }),
     400, 'MFA_CODE_REQUIRED');

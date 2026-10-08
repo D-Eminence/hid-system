@@ -43,7 +43,15 @@ export function expectStatus(response, status, code) {
  * @param turnstileToken optional () => token when Turnstile is required
  */
 export function platformClient({ http, origin, totp, clock, password, turnstileToken }) {
-  const code = (secret) => totp.totp(totp.base32Decode(secret), clock.next());
+  // The most recent code generated per secret, so a replay test can resend
+  // exactly the code the server accepted rather than one for a later step.
+  const lastCodes = new Map();
+  const code = (secret) => {
+    const value = totp.totp(totp.base32Decode(secret), clock.next());
+    lastCodes.set(secret, value);
+    return value;
+  };
+  const lastCode = (secret) => lastCodes.get(secret);
   const post = (path, jar = {}, body = {}, headers = {}) => {
     let call = http.post(`/api/v1${path}`).set('Origin', origin).set('Cookie', cookieHeader(jar));
     for (const [name, value] of Object.entries(headers)) call = call.set(name, value);
@@ -104,5 +112,5 @@ export function platformClient({ http, origin, totp, clock, password, turnstileT
     return response;
   }
 
-  return { code, post, login, enroll, signIn, get, command, stepUp };
+  return { code, lastCode, post, login, enroll, signIn, get, command, stepUp };
 }
