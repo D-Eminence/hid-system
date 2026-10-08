@@ -1287,3 +1287,61 @@ Consequences:
   are maintained in `TUF-PRODUCTION-IMPLEMENTATION.md`.
 
 Related ADRs: ADR-025, ADR-026, ADR-032, ADR-033, ADR-034.
+
+# ADR-036: Patient Login Deletion Is Not Clinical Erasure; Verified Emergency Contacts
+
+Status: Accepted for source implementation; production emergency-contact
+delivery, legal-hold authority, and any erasure policy remain gated
+
+Date: 2026-10-08
+
+Decision:
+
+Patient account deletion closes the authentication login bound to a canonical
+patient. It revokes sessions (with session evidence), clears the password
+credential, revokes federated links and the patient access PIN, revokes access
+the patient granted (patient-approved and PIN-derived grants), expires pending
+requests addressed to the patient, revokes notification registrations, and sets
+the account to a terminal `deleted` state that a database trigger prevents from
+being reactivated or re-credentialed. The canonical patient, HID, NIN binding,
+demographics, clinical records, consent evidence, audit evidence, and
+break-glass rules are unchanged. Consistent with ADR guidance that a patient may
+exist without a login, the retained patient remains `active` for clinical
+continuity.
+
+This is not erasure under `DATABASE.md` sections 3.5 and 15. The record-class
+retention model admits only the `retain` disposition with no automatic purge,
+and an active legal hold blocks completion. Any erasure, de-identification,
+NIN de-binding, purge disposition, or statutory period requires a separately
+approved governance decision and migration.
+
+Deletion requires a patient session issued within ten minutes, a single-use
+256-bit confirmation token stored only as SHA-256, and typed confirmation. A
+configurable cancellation window (product default 14 days, not a legal period)
+precedes completion; the login is unusable from the scheduled time and an
+Identity sweeper performs completion. A login that also carries a workforce
+identity or platform role is not closed from the patient portal.
+
+Emergency contacts are patient-owned, encrypted with the existing application
+AES-256-GCM pattern under a distinct associated-data label, and become
+emergency recipients only after code verification and while the patient's
+notification preference is enabled. The existing `EmergencyAccessActivated`
+outbox row creates idempotent intents; intent failure is audited and never
+fails break-glass. Delivery is provider-neutral through notification-api with a
+fixed minimum-necessary message (first name, facility, time, guidance).
+
+Consequences:
+
+- patient login deletion is reversible only during the cancellation window and
+  never destroys regulated evidence;
+- re-enrolling a new login for a patient whose login was deleted is a separate
+  product decision;
+- legal-hold placement authority and procedure are a governance decision; no
+  runtime role can place or release a hold;
+- production emergency-contact delivery is refused by configuration in both
+  Identity and notification-api; the EventBridge production exclusion of
+  `EmergencyAccessActivated.v1` is unchanged; and
+- staging enablement, SMS sender/template approval, and provider configuration
+  are external, separately authorized steps.
+
+Related ADRs: ADR-028, ADR-029, ADR-033.

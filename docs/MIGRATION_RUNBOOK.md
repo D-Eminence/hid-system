@@ -57,6 +57,9 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0058_progressive_patient_nin_binding.sql` | Session-bound QoreID verification that binds an exact NIN to the preserved migrated patient and advances assurance without changing UUID or HID |
 | `database/migrations/0059_google_onboarding.sql` | Short-lived accountless Google proof, recoverable enrollment binding, atomic activation link, and explicit existing-account link command |
 | `database/migrations/0060_patient_access_pin_profile_status.sql` | Patient-safe assurance and Access PIN configured status without returning PIN material |
+| `database/migrations/0063_patient_account_deletion_lifecycle.sql` | Patient login/account deletion lifecycle with single-use confirmation, configurable cancellation window, legal-hold and retain-only record-class policy, terminal deleted login, and atomic revocation/completion audit; no identity, NIN, clinical, or audit data is deleted |
+| `database/migrations/0064_patient_emergency_contacts.sql` | Encrypted patient emergency contacts, code verification, and idempotent minimum-necessary emergency-contact notification intents from `EmergencyAccessActivated`; break-glass authorization unchanged |
+| `database/migrations/0065_patient_access_safety.sql` | Session-bound patient access-request decisions (and corrected `0035` commands), patient-owned grant revocation, break-glass/revocability labels in access history, and no new inbox items for deleted logins |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |

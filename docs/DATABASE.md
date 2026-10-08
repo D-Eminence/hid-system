@@ -1026,3 +1026,47 @@ rollback. The private synthetic staging rehearsal additionally runs the real
 OTP service with PostgreSQL and Argon2, a direct-delivery test double, concurrent
 completion and rate-limit checks. These tests do not establish live delivery
 or staging acceptance.
+
+## Phase 3 patient safety checkpoint
+
+Additive migrations `0063`–`0065` (ADR-036) follow the Phase 2 ledger.
+Migrations `0001`–`0062` are unchanged.
+
+- `0063_patient_account_deletion_lifecycle.sql` adds
+  `identity.patient_account_deletion_requests` (single-use confirmation token
+  SHA-256, configurable cancellation window, one open request per login),
+  `platform.record_class_retention_policies` (only `retain`, never automatic
+  purge), `platform.legal_holds` (release-only, never deleted), and
+  `platform.patient_account_deletion_settings`. Completion revokes sessions
+  with `revoked` session events, clears the password credential, revokes
+  federated identities, the access PIN, patient-granted grants, pending
+  requests, and notification devices, and marks the account `deleted`. The
+  `auth.accounts_deleted_terminal` trigger prevents reactivation or a new
+  credential. `identity.current_patient_account` and
+  `identity.patient_self_session` deny a login from its scheduled deletion time.
+  Patient identity, NIN binding, clinical, consent, audit, and notification rows
+  are retained; this is not erasure under sections 3.5 and 15.
+- `0064_patient_emergency_contacts.sql` adds encrypted
+  `identity.patient_emergency_contacts`, single-use HMAC-verified
+  `identity.emergency_contact_verifications`, and idempotent
+  `identity.emergency_contact_notifications` (`UNIQUE (consent_grant_id,
+  contact_id)`, leased delivery, bounded retry, 24-hour window). A trigger on
+  the existing `EmergencyAccessActivated` outbox row creates intents for
+  verified, consenting contacts and audits a no-eligible-contact result; any
+  failure there is audited and does not fail break-glass. Legacy
+  `identity.patients.emergency_contact_*` columns are not read or modified.
+- `0065_patient_access_safety.sql` adds session-bound patient wrappers for
+  access-request decisions, `identity.revoke_my_consent_grant`, break-glass and
+  revocability labels in patient access history, and suppresses new inbox items
+  for deleted logins. It repeats the `0035` decision commands with
+  `#variable_conflict use_column` because their output columns made every call
+  ambiguous, and sets the created grant's `purpose_of_use` from the request as
+  `0008` already requires.
+
+`runtime-grants.sql` grants these commands, and the previously ungranted
+patient inbox commands, to `hid_identity_runtime` only. Internal completion,
+retention evaluation, and audit helpers are not granted. Rollback-only coverage:
+`patient-account-deletion`, `emergency-contacts`, and `patient-access-safety`
+integration suites; `services/identity-api/scripts/verify-patient-safety-runtime.mjs`
+exercises the HTTP workflow under the exact Identity runtime role with a local
+delivery stub.
