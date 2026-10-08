@@ -5,6 +5,7 @@ import { consentContext } from './consent-context';
 import { ConsentService } from './consent.service';
 import { CloseGrantDto } from './dto/close-grant.dto';
 import { DenyAccessRequestDto } from './dto/deny-access-request.dto';
+import { RevokeConsentGrantDto } from './dto/revoke-consent-grant.dto';
 import { ListStaffAccessRequestsDto } from './dto/list-staff-access-requests.dto';
 import { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import { CreateBreakGlassDto } from './dto/create-break-glass.dto';
@@ -19,7 +20,9 @@ export class ConsentController {
   @FacilityOptional()
   @AuditAction('identity.access-request.list.request')
   listMyAccessRequests(@Req() request: HidRequest) {
-    return this.consent.listMyAccessRequests(consentContext(request, ['direct-care']));
+    // Patient decisions are bound to the authenticated patient session, not
+    // to a staff facility context that a patient never has.
+    return this.consent.listMyAccessRequests(request);
   }
 
   @Get('access-requests')
@@ -52,7 +55,7 @@ export class ConsentController {
     @Req() request: HidRequest,
     @Param('requestId', new ParseUUIDPipe()) requestId: string,
   ) {
-    return this.consent.approveAccessRequest(consentContext(request, ['direct-care']), requestId);
+    return this.consent.approveAccessRequest(request, requestId);
   }
 
   @Post('access-requests/:requestId/deny')
@@ -65,7 +68,20 @@ export class ConsentController {
     @Param('requestId', new ParseUUIDPipe()) requestId: string,
     @Body() input: DenyAccessRequestDto,
   ) {
-    return this.consent.denyAccessRequest(consentContext(request, ['direct-care']), requestId, input.reason);
+    return this.consent.denyAccessRequest(request, requestId, input.reason);
+  }
+
+  @Post('me/consent-grants/:grantId/revoke')
+  @HttpCode(200)
+  @PatientAllowed()
+  @FacilityOptional()
+  @AuditAction('identity.consent-grant.patient-revoke.command')
+  revokeMyConsentGrant(
+    @Req() request: HidRequest,
+    @Param('grantId', new ParseUUIDPipe()) grantId: string,
+    @Body() input: RevokeConsentGrantDto,
+  ) {
+    return this.consent.revokeMyConsentGrant(request, grantId, input.reason);
   }
 
   @Post('break-glass')

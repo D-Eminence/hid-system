@@ -310,6 +310,8 @@ try {
     [join(repository, 'services/identity-api/scripts/verify-otp-recovery-runtime.mjs')], workflowEnvironment));
   evidence.checks.patient_runtime = JSON.parse(command('exact-role patient HTTP workflow and sessions', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-patient-runtime.mjs')], workflowEnvironment));
+  evidence.checks.patient_safety_runtime = JSON.parse(command('exact-role patient safety HTTP workflow', process.execPath,
+    [join(repository, 'services/identity-api/scripts/verify-patient-safety-runtime.mjs')], workflowEnvironment));
   evidence.checks.provider_enrollment_runtime = JSON.parse(command('exact-role provider self-enrollment HTTP workflow',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs')],
     workflowEnvironment));

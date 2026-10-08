@@ -153,7 +153,9 @@ export class AuditService {
       event.userAgent?.slice(0, 512) ?? null,
       JSON.stringify(event.details ?? {}),
       event.provenance ?? 'application',
-      event.sourceSystem ?? 'ehr-api',
+      // Rows written by this service are Identity evidence unless a caller
+      // explicitly records a different source system.
+      event.sourceSystem ?? 'identity-api',
     ];
   }
 

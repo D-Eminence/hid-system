@@ -49,6 +49,43 @@ within the configured 5–240 minute bounds, permits at most ten new activations
 per account per hour, and atomically emits `EmergencyAccessActivated.v1` for
 notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
+Activation also requires the platform `break_glass_enabled` control inside the
+activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
+
+Patient access-request decisions are session-bound patient commands:
+`GET /api/v1/identity/me/access-requests`,
+`POST /api/v1/identity/access-requests/:requestId/approve` and
+`POST /api/v1/identity/access-requests/:requestId/deny` (`{ "reason" }`) require
+a patient session and no facility context. `POST
+/api/v1/identity/me/consent-grants/:grantId/revoke` (`{ "reason" }`) revokes a
+grant the patient authorized (patient-approved or PIN-derived); break-glass and
+workforce grants return `409`. Access-history items include `breakGlass` and
+`patientRevocable`. `GET /api/v1/identity/me/notifications` and
+`POST /api/v1/identity/me/notifications/:id/read` serve the patient inbox.
+
+Patient login/account deletion (Phase 3, ADR-036) closes the login only:
+
+| Route | Contract |
+|---|---|
+| `GET /api/v1/identity/me/account-deletion` | `{ waitingPeriodSeconds, confirmationTtlSeconds, request: { requestId, state, requestedAt, confirmationExpiresAt, scheduledFor, blockedReasonCode, cancelledAt, cancellable } \| null }` |
+| `POST /api/v1/identity/me/account-deletion` | Session issued within 10 minutes; returns `{ requestId, confirmationToken, confirmationExpiresAt, waitingPeriodSeconds }` once. `409` when a deletion is already scheduled; `429` when rate limited |
+| `POST /api/v1/identity/me/account-deletion/confirm` | `{ requestId, confirmationToken, confirmation: "DELETE MY ACCOUNT" }`, session issued within 10 minutes; returns `{ requestId, state: pending\|blocked\|completed, scheduledFor, blockedReasonCode }`; invalid, replayed, foreign, or expired proof returns `403` |
+| `POST /api/v1/identity/me/account-deletion/cancel` | `{ requestId }`; idempotent before the scheduled time |
+
+`state` is one of `awaiting_confirmation`, `pending`, `blocked`, `cancelled`,
+`completed`, `expired`, `superseded`; `blockedReasonCode` is `LEGAL_HOLD`,
+`RETENTION_POLICY_UNAVAILABLE`, or `WORKFORCE_ACCOUNT`.
+
+Patient emergency contacts (POST-only commands):
+
+| Route | Contract |
+|---|---|
+| `GET /api/v1/identity/me/emergency-contacts` | Active contacts: `contactId, name, relationship, channel (email\|sms), destinationHint, status (unverified\|verified), verifiedAt, notifyOnEmergencyAccess, eligibleForEmergencyNotification, version, pendingVerification, lastNotification`. The full destination is never returned |
+| `POST /api/v1/identity/me/emergency-contacts` | `{ name, relationship, channel, destination, notifyOnEmergencyAccess? }`; at most five; duplicates return `409` |
+| `POST /api/v1/identity/me/emergency-contacts/:contactId` | `{ expectedVersion, name?, relationship?, notifyOnEmergencyAccess? }`; the destination is immutable |
+| `POST /api/v1/identity/me/emergency-contacts/:contactId/deactivate` | Idempotent; pending alerts are suppressed |
+| `POST /api/v1/identity/me/emergency-contacts/:contactId/verification` | Sends a six-digit code to the contact; `503 EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE` while delivery is disabled |
+| `POST /api/v1/identity/me/emergency-contacts/:contactId/verification/confirm` | `{ challengeId, code }`; single use, expiring, attempt-limited |
 
 Recovery completion atomically consumes the account/token-bound OTP credential,
 sets an Argon2 password and revokes sessions. Disabled, stale, expired and replayed

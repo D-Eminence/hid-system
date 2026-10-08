@@ -2,7 +2,7 @@ import { BadRequestException, Inject, Injectable, Optional, ServiceUnavailableEx
 import { getEnvironment, type Environment } from '../config/environment';
 import { BrevoFallbackProvider } from '../providers/brevo.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
-import type { OtpMessage, OtpProvider, ProviderResult } from '../providers/provider.types';
+import { emergencyContactAlertContent, type OtpMessage, type OtpProvider, type ProviderResult } from '../providers/provider.types';
 import { SesEmailProvider } from '../providers/ses.provider';
 import { TermiiSmsProvider } from '../providers/termii.provider';
 
@@ -68,6 +68,24 @@ export class NotificationService {
     if (!next) return { primary, outcome: primary.outcome };
     const fallback = await next.send(message);
     return { primary, fallback, outcome: fallback.outcome };
+  }
+
+  /** Renders the fixed minimum-necessary alert and uses the same provider delivery plan as OTP. */
+  deliverEmergencyContactAlert(input: {
+    channel: 'email' | 'sms';
+    recipient: string;
+    patientFirstName: string;
+    facilityName: string | null;
+    occurredAt: Date;
+    idempotencyKey: string;
+  }, rawPlan?: unknown) {
+    return this.deliverOtp({
+      channel: input.channel, recipient: input.recipient, code: '', purpose: 'EMERGENCY_CONTACT_ALERT',
+      idempotencyKey: input.idempotencyKey,
+      content: emergencyContactAlertContent({
+        patientFirstName: input.patientFirstName, facilityName: input.facilityName, occurredAt: input.occurredAt,
+      }),
+    }, rawPlan);
   }
 
   private provider(name: ProviderName, configuration: Record<string, string>, channel: OtpMessage['channel']): OtpProvider {

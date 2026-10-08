@@ -1,5 +1,5 @@
 import type { Environment } from '../config/environment';
-import { classifyHttp, genericOtpText, type OtpMessage, type OtpProvider, type ProviderResult } from './provider.types';
+import { classifyHttp, messageContent, type OtpMessage, type OtpProvider, type ProviderResult } from './provider.types';
 
 export class TermiiSmsProvider implements OtpProvider {
   readonly name = 'termii' as const;
@@ -9,7 +9,7 @@ export class TermiiSmsProvider implements OtpProvider {
     try {
       const response = await this.transport(new URL('/api/sms/send', this.environment.TERMII_BASE_URL), {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ api_key: this.environment.TERMII_API_KEY, to: message.recipient, from: this.environment.TERMII_SENDER_ID, sms: genericOtpText(message.code), type: 'plain', channel: this.environment.TERMII_CHANNEL }),
+        body: JSON.stringify({ api_key: this.environment.TERMII_API_KEY, to: message.recipient, from: this.environment.TERMII_SENDER_ID, sms: messageContent(message).text, type: 'plain', channel: this.environment.TERMII_CHANNEL }),
         signal: AbortSignal.timeout(this.environment.NOTIFICATION_PROVIDER_TIMEOUT_MS),
       });
       const payload = await safeJson(response);

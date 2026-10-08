@@ -894,3 +894,43 @@ revoke all on function auth.create_google_onboarding_capability(uuid,char,text),
   auth.consume_google_onboarding_capability(uuid,char,uuid,uuid),
   auth.link_google_identity_to_patient_account(uuid,text)
   from public;
+
+-- Phase 3 patient safety. Every command below resolves the authenticated
+-- patient through `identity.patient_self_session` (or the Identity system
+-- context for asynchronous lifecycle/delivery work) and writes its own audit.
+-- Internal completion, retention evaluation, and audit helpers are not granted.
+grant execute on function identity.list_my_notification_inbox(integer),
+  identity.mark_my_notification_read(uuid),
+  identity.list_my_patient_access_requests(text,uuid),
+  identity.approve_my_access_request(text,uuid,uuid),
+  identity.deny_my_access_request(text,uuid,uuid,text),
+  identity.revoke_my_consent_grant(text,uuid,uuid,text),
+  identity.my_account_deletion_status(text,uuid),
+  identity.request_my_account_deletion(text,uuid,text),
+  identity.confirm_my_account_deletion(text,uuid,uuid,text,text),
+  identity.cancel_my_account_deletion(text,uuid,uuid),
+  identity.finalize_due_patient_account_deletions(integer),
+  identity.list_my_emergency_contacts(text,uuid),
+  identity.add_my_emergency_contact(text,uuid,uuid,text,text,bytea,text,text,boolean),
+  identity.update_my_emergency_contact(text,uuid,uuid,bigint,text,bytea,text,text,boolean),
+  identity.deactivate_my_emergency_contact(text,uuid,uuid),
+  identity.start_my_emergency_contact_verification(text,uuid,uuid,uuid,text,text,integer,integer),
+  identity.record_my_emergency_contact_verification_delivery(text,uuid,uuid,text,text),
+  identity.complete_my_emergency_contact_verification(text,uuid,uuid,uuid,text),
+  identity.claim_emergency_contact_notifications(text,integer,integer),
+  identity.record_emergency_contact_notification_outcome(uuid,text,text,text,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.patient_account_deletion_due(uuid),
+  platform.evaluate_patient_account_deletion(uuid,uuid),
+  identity.complete_patient_account_deletion(uuid,text),
+  identity.audit_emergency_contact_event(text,text,uuid,uuid,text,uuid,jsonb),
+  identity.on_emergency_access_contact_notification(),
+  identity.list_my_access_requests(), identity.approve_access_request(uuid),
+  identity.deny_access_request(uuid,text)
+  from public;
+revoke all on platform.record_class_retention_policies, platform.legal_holds,
+  platform.patient_account_deletion_settings, identity.patient_account_deletion_requests,
+  identity.patient_emergency_contacts, identity.emergency_contact_verifications,
+  identity.emergency_contact_notifications
+  from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
+    hid_ehr_api_runtime, hid_notification_runtime, hid_notification_worker;
