@@ -52,7 +52,13 @@ const { EmergencyContactProtector } = load('patient-safety/emergency-contact-pro
 const { EmergencyContactNotificationDispatcher } = load('patient-safety/emergency-contact-notification.dispatcher.ts');
 const { ProblemDetailsFilter } = load('common/problem.ts');
 const { getEnvironment } = load('config/environment.ts');
-const pool = new Pool({ host: socket, user: process.env.PGUSER, database: process.env.PGDATABASE, max: 5 });
+// Run in a disposable copy of the rehearsal database so the synthetic patients,
+// purpose codes, and settings changes below never leak into later rehearsal
+// steps (backup, restore, and ownership suites expect the rehearsal fixture).
+const isolated = `hid_rehearsal_safety_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database: 'postgres', max: 1 });
+await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
+const pool = new Pool({ host: socket, user: process.env.PGUSER, database: isolated, max: 5 });
 const asRuntime = async (correlation, operation) => {
   const client = await pool.connect();
   try { await client.query('begin'); await client.query('set local role hid_identity_api_runtime');
@@ -252,5 +258,11 @@ try {
     deleted_login_unusable: true, patient_identity_retained: true, emergency_contacts: 'encrypted-owned-verified-deactivated',
     break_glass_contact_alert: 'intent-created-stub-delivered-once', patient_inbox_runtime: true,
     patient_access_requests_runtime: 'list-approve-revoke', staff_close_route_denied_to_patient: true, audit_source_identity_api: true,
-    emergency_contact_delivery_enabled_for_this_rehearsal_only: getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED }) + '\n');
-} finally { if (app) await app.close(); await pool.end(); }
+    emergency_contact_delivery_enabled_for_this_rehearsal_only: getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED,
+    isolated_database_dropped: true }) + '\n');
+} finally {
+  if (app) await app.close();
+  await pool.end();
+  await maintenance.query(`drop database if exists ${isolated}`);
+  await maintenance.end();
+}

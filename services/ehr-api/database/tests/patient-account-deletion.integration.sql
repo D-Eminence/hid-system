@@ -90,7 +90,13 @@ insert into identity.consent_grants (id, request_id, patient_id, staff_id, accou
   ('da000000-0000-4000-8000-000000000004', 'd9000000-0000-4000-8000-000000000003', 'd2000000-0000-4000-8000-000000000002',
    'd6000000-0000-4000-8000-000000000001', 'd1000000-0000-4000-8000-000000000003', 'd7000000-0000-4000-8000-000000000001',
    'd5000000-0000-4000-8000-000000000002', 'read_records', 'direct-care', 'active', 'd2000000-0000-4000-8000-000000000002',
-   'Other patient fixture', clock_timestamp() - interval '1 minute', clock_timestamp() + interval '1 hour', false, null);
+   'Other patient fixture', clock_timestamp() - interval '1 minute', clock_timestamp() + interval '1 hour', false, null),
+  -- Workforce treatment authorization that the patient did not grant; deleting
+  -- the login must not disable it.
+  ('da000000-0000-4000-8000-000000000005', null, 'd2000000-0000-4000-8000-000000000001',
+   'd6000000-0000-4000-8000-000000000001', 'd1000000-0000-4000-8000-000000000003', 'd7000000-0000-4000-8000-000000000001',
+   'd5000000-0000-4000-8000-000000000002', 'write_records', 'direct-care', 'active', null,
+   'Treating clinician fixture', clock_timestamp() - interval '1 minute', clock_timestamp() + interval '1 hour', false, null);
 select set_config('app.actor_subject', 'synthetic:delete:doctor', true),
   set_config('app.membership_id', 'd7000000-0000-4000-8000-000000000001', true),
   set_config('app.facility_id', 'd5000000-0000-4000-8000-000000000002', true),
@@ -419,6 +425,7 @@ begin
                'da000000-0000-4000-8000-000000000002') and status <> 'revoked')
      or not exists (select 1 from identity.consent_grants where id = 'da000000-0000-4000-8000-000000000003' and status = 'active')
      or not exists (select 1 from identity.consent_grants where id = 'da000000-0000-4000-8000-000000000004' and status = 'active')
+     or not exists (select 1 from identity.consent_grants where id = 'da000000-0000-4000-8000-000000000005' and status = 'active')
      or not exists (select 1 from identity.access_requests where id = 'd9000000-0000-4000-8000-000000000002' and status = 'expired') then
     raise exception 'Provider/break-glass access boundaries were not applied exactly';
   end if;

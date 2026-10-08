@@ -131,7 +131,7 @@ select set_config('hid.test.grant_unverified',
 reset role;
 do $$
 begin
-  if exists (select 1 from identity.emergency_contact_notifications)
+  if exists (select 1 from identity.emergency_contact_notifications where patient_id = 'e1200000-0000-4000-8000-000000000001')
      or not exists (select 1 from audit.events where action = 'identity.emergency-contact.notification.no-eligible-contact'
                       and resource_id = current_setting('hid.test.grant_unverified')) then
     raise exception 'Unverified contact received an intent or no-eligible-contact was not audited';
@@ -263,7 +263,8 @@ begin
      or not exists (select 1 from identity.emergency_contact_notifications
        where consent_grant_id = current_setting('hid.test.grant_verified')::uuid
          and contact_id = 'e1800000-0000-4000-8000-000000000001' and status = 'pending' and channel = 'sms')
-     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.notification.intent-created') then
+     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.notification.intent-created'
+                      and patient_id = 'e1200000-0000-4000-8000-000000000001') then
     raise exception 'Verified contact did not receive exactly one audited intent';
   end if;
   begin
@@ -329,7 +330,8 @@ begin
   if not exists (select 1 from identity.emergency_contact_notifications
                   where id = current_setting('hid.test.notification')::uuid and status = 'pending'
                     and next_attempt_at > clock_timestamp() and lease_owner is null)
-     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.notification.retry-scheduled') then
+     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.notification.retry-scheduled'
+                      and resource_id = current_setting('hid.test.notification')) then
     raise exception 'Retry backoff or retry audit is missing';
   end if;
 end
@@ -357,6 +359,7 @@ begin
   if not exists (select 1 from audit.events where action = 'identity.emergency-contact.notification.delivered'
                    and resource_id = current_setting('hid.test.notification'))
      or exists (select 1 from audit.events where action like 'identity.emergency-contact.%'
+                  and patient_id = 'e1200000-0000-4000-8000-000000000001'
                   and (details ? 'diagnosis' or details ? 'medication' or details ? 'message')) then
     raise exception 'Delivery audit is missing or carries clinical/message content';
   end if;
@@ -453,7 +456,8 @@ begin
                   where id = 'e1a00000-0000-4000-8000-000000000002' and status = 'suppressed')
      or exists (select 1 from identity.emergency_contact_notifications
                   where consent_grant_id = current_setting('hid.test.grant_after_removal')::uuid)
-     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.deactivated') then
+     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.deactivated'
+                      and patient_id = 'e1200000-0000-4000-8000-000000000001') then
     raise exception 'Deactivated contact remained an emergency recipient';
   end if;
   -- Legacy emergency-contact data is neither used nor modified.
@@ -461,12 +465,11 @@ begin
                    and emergency_contact_ciphertext = '\x0102030405'::bytea and emergency_contact_key_version = 'legacy-v1') then
     raise exception 'Legacy emergency-contact data was modified';
   end if;
-  if not exists (select 1 from audit.events where action = 'identity.emergency-contact.created')
-     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.verification-requested')
-     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.verification-sent')
-     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.verification-failed')
-     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.verification-expired')
-     or not exists (select 1 from audit.events where action = 'identity.emergency-contact.verification-succeeded') then
+  if (select count(distinct action) from audit.events
+       where patient_id = 'e1200000-0000-4000-8000-000000000001' and action in (
+         'identity.emergency-contact.created', 'identity.emergency-contact.verification-requested',
+         'identity.emergency-contact.verification-sent', 'identity.emergency-contact.verification-failed',
+         'identity.emergency-contact.verification-expired', 'identity.emergency-contact.verification-succeeded')) <> 6 then
     raise exception 'Emergency-contact lifecycle audit is incomplete';
   end if;
 end
