@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { TurnstileService } from '../auth/turnstile.service';
 import { requireAdminContext } from '../admin/admin-context';
-import { AuditAction, AuditFailuresOnly, Public, PlatformScope, RequirePermissions } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, HighRiskAction, Public, PlatformScope, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
@@ -49,6 +49,7 @@ export class AdminDemoRequestsController {
   @Post(':requestId/status')
   @HttpCode(200)
   @RequirePermissions('platform.demo.manage')
+  @HighRiskAction('platform.demo-request.status')
   @AuditAction('admin.demo-request.status')
   transition(@Param('requestId', new ParseUUIDPipe({ version: '4' })) requestId: string,
     @Headers('if-match') ifMatch: string | undefined,

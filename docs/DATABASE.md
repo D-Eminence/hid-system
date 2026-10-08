@@ -1111,3 +1111,47 @@ helper and trigger function are revoked from PUBLIC. Rollback-only coverage:
 `platform-admin-scope.integration.sql`;
 `services/identity-api/scripts/verify-platform-admin-runtime.mjs` exercises the
 admin HTTP boundaries under the exact Identity runtime role.
+
+## Phase 4 Stage 2A platform security checkpoint
+
+Additive migrations `0069`–`0070` (ADR-038) follow `0068`. Migrations
+`0001`–`0068` are unchanged; no existing row is rewritten.
+
+- `0069_platform_mfa_sessions.sql`:
+  - `auth.sessions.session_kind` gains `platform`; `sessions_platform_lifetime_check`
+    limits platform rows to password sessions with at most 15 minutes from
+    issue (or rotation) to `expires_at` and 8 hours to `absolute_expires_at`.
+  - `auth.mfa_factors` (TOTP, SHA-1/6/30; AES-256-GCM ciphertext only; one
+    pending and one active per account; `last_used_step` only moves forward),
+    `auth.mfa_recovery_codes` (keyed digests, used or invalidated once),
+    `auth.mfa_login_challenges` (SHA-256 token digests, at most 10 minutes and 5
+    attempts) and `auth.session_assurance` (MFA method/time and step-up time per
+    platform session family). Guard triggers make secrets, digests and
+    evidence immutable and refuse deletes and backwards transitions.
+  - New `auth.session_events` types for MFA and step-up and new
+    `auth.otp_rate_limits` scopes (`mfa_failure_account`, `mfa_failure_ip`,
+    `mfa_request_account`) reuse the existing tables.
+  - Permissions `platform.principal.export` and `platform.mfa.reset`
+    (`platform_super_admin` only).
+  - `platform.current_session_id()` (`app.session_id`, now set by the Identity
+    API with the other request GUCs), `auth.account_has_active_mfa`,
+    `auth.platform_step_up_is_fresh`/`auth.require_platform_step_up` (active
+    platform session of the actor, active factor, step-up in the last 5
+    minutes) and `auth.admin_revoke_session_family`.
+- `0070_platform_two_person_approval.sql` adds `auth.admin_approval_requests`
+  (24-hour window, one pending request per action and target, immutable once
+  decided), `auth.admin_request_approval` and `auth.admin_decide_approval`
+  (row-locked, executed once, approver must be a different active
+  MFA-enrolled `platform_super_admin` with fresh step-up). It replaces
+  `auth.admin_transition_account` and `auth.admin_change_platform_role` (same
+  signatures): the role command refuses a `platform_super_admin` grant
+  (`ADMIN_APPROVAL_REQUIRED`), and last-Super-Admin reachability
+  (`auth.other_reachable_super_admins`) counts active role holders with a
+  password credential instead of requiring a facility membership.
+
+Grants: the Identity runtime gets `select, insert, update` on the four MFA/assurance
+tables (no delete), `select` on approval requests, and `execute` on the new
+commands; internal helpers and trigger functions are revoked from PUBLIC.
+Rollback-only coverage: `platform-mfa-approval.integration.sql` (killed by nine
+recorded mutants); `verify-platform-security-runtime.mjs` exercises the HTTP
+workflow under the exact Identity runtime role.

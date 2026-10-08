@@ -6,6 +6,7 @@ import type { PlatformAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import { PricePricingCommandDto } from './dto/pricing-command.dto';
 import { PricingService } from './pricing.service';
+import { assuredClient, platformActor, useTestEnvironment } from '../testing/platform-assurance';
 
 const context: PlatformAccessContext = {
   scope: 'platform',
@@ -13,14 +14,8 @@ const context: PlatformAccessContext = {
   facilityId: null,
   membershipId: null,
   purposeOfUse: 'healthcare-operations',
-  actor: {
-    id: 'staff:pricing-admin', subject: 'staff:pricing-admin',
-    accountId: '20000000-0000-4000-8000-000000000001',
-    roles: [], permissions: [], platformRoles: ['platform_super_admin'],
-    platformPermissions: ['platform.pricing.read', 'platform.pricing.manage'],
-    facilityIds: ['10000000-0000-4000-8000-000000000002'], facilities: [],
-    authenticationMethod: 'local',
-  },
+  actor: platformActor({ id: 'staff:pricing-admin', subject: 'staff:pricing-admin',
+    platformPermissions: ['platform.admin.access', 'platform.pricing.read', 'platform.pricing.manage'] }),
 };
 
 const fixedPrice = {
@@ -30,15 +25,18 @@ const fixedPrice = {
 };
 
 function harness(row: Readonly<Record<string, unknown>>) {
-  const client = { query: jest.fn().mockResolvedValue({ rows: [row], rowCount: 1 }) };
+  const command = jest.fn().mockResolvedValue({ rows: [row], rowCount: 1 });
+  const client = assuredClient(command);
   const database = {
     query: jest.fn().mockResolvedValue({ rows: [row], rowCount: 1 }),
     withTransaction: jest.fn(async (_context, operation) => operation(client as unknown as PoolClient)),
   };
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
   const service = new PricingService(database as unknown as DatabaseService, audit as unknown as AuditService);
-  return { service, database, client, audit };
+  return { service, database, client, command, audit };
 }
+
+useTestEnvironment();
 
 describe('PricingService', () => {
   it('returns only the database published price shape and preserves a null quote amount', async () => {
@@ -88,8 +86,8 @@ describe('PricingService', () => {
   });
 
   it('maps stale versions to a safe conflict response', async () => {
-    const { service, client } = harness(fixedPrice);
-    client.query.mockRejectedValue(new Error('ADMIN_VERSION_CONFLICT internal detail'));
+    const { service, command } = harness(fixedPrice);
+    command.mockRejectedValue(new Error('ADMIN_VERSION_CONFLICT internal detail'));
     const failure = await service.updateProduct(context, 'ehr', 1,
       { name: 'HID EHR', status: 'coming_soon', reason: 'Temporarily unavailable' },
       'pricing-product-command-0001').catch((error: unknown) => error);

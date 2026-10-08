@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
+import { createTotpClock, platformClient } from './platform-session-client.mjs';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
@@ -20,6 +21,7 @@ const origin = 'https://admin.staging.healthidentitydirectory.com';
 Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'staging',
   NIN_PROVIDER_MODE: 'deferred', CORS_ORIGINS: origin, IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret',
   IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: 'public-synthetic-ehr-workload-token', TURNSTILE_MODE: 'disabled',
+  MFA_SECRET_KEY_B64: Buffer.alloc(32, 0x6d).toString('base64'), MFA_KEY_VERSION: 'admin-runtime-v1',
   // Every Identity API connection runs as the deployed runtime role.
   DATABASE_URL: `postgresql://${process.env.PGUSER ?? 'postgres'}@localhost/${isolated}?host=${encodeURIComponent(socket)}`
     + `&options=${encodeURIComponent('-c role=hid_identity_api_runtime')}` });
@@ -55,6 +57,12 @@ const { AdminController } = load('admin/admin.controller.ts');
 const { AdminService } = load('admin/admin.service.ts');
 const { AdminOperationsService } = load('admin/admin-operations.service.ts');
 const { PricingService } = load('admin/pricing.service.ts');
+const { PlatformAuthController } = load('auth/platform-auth.controller.ts');
+const { MfaService, MFA_TOTP_CLOCK } = load('auth/mfa/mfa.service.ts');
+const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
+const totp = load('auth/mfa/totp.ts');
+const { PlatformSecurityController } = load('admin/platform-security.controller.ts');
+const { PlatformSecurityService } = load('admin/platform-security.service.ts');
 const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
 
 globalThis.fetch = async (input) => { throw new Error(`Unexpected outbound request to ${String(input)}`); };
@@ -62,6 +70,9 @@ const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database:
 await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
 // Fixture and assertion connection (database owner), never used by the API.
 const owner = new Pool({ host: socket, user: process.env.PGUSER, database: isolated, max: 2 });
+// Dropping the disposable database terminates any connection still closing;
+// that expected 57P01 must not crash the verifier after its checks passed.
+owner.on('error', () => undefined);
 let app;
 try {
   const argon2 = require('argon2');
@@ -110,11 +121,13 @@ try {
   const facilityAdmin = await account('facility-admin', { membershipRole: 'admin' });
   const pendingReset = await account('pending-reset', { status: 'pending_reset' });
 
+  const clock = createTotpClock();
   const module = await Test.createTestingModule({
-    controllers: [AuthController, AdminController, AuditController],
+    controllers: [AuthController, PlatformAuthController, AdminController, PlatformSecurityController, AuditController],
     providers: [DatabaseService, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
       AuditService, WorkloadAuthService, TurnstileService, AdminService, AdminOperationsService, PricingService,
+      MfaService, MfaSecretProtector, PlatformSecurityService, { provide: MFA_TOTP_CLOCK, useValue: clock.now },
       { provide: NotificationOtpClient, useValue: {
         deliver: async () => { throw new Error('Notification delivery is outside the platform admin verifier'); },
       } },
@@ -148,8 +161,9 @@ try {
       .send({ email: who.email, password, turnstileAction: 'staff-login' });
     expectStatus(response, 200);
     assert.equal(response.body.actor.accountId, who.id);
-    return { cookie: (response.headers['set-cookie'] ?? []).map(value => value.split(';')[0]).join('; '),
-      csrf: response.headers['x-csrf-token'], account: who };
+    const cookie = (response.headers['set-cookie'] ?? []).map(value => value.split(';')[0]).join('; ');
+    return { cookie, csrf: response.headers['x-csrf-token'], account: who,
+      bearer: `Bearer ${/(?:^|; )hid_access=([^;]+)/.exec(cookie)[1]}` };
   }
   const get = (who, path, headers = {}) => {
     let call = http.get(`/api/v1${path}`);
@@ -162,6 +176,10 @@ try {
     for (const [name, value] of Object.entries(headers)) call = call.set(name, value);
     return call.send(body);
   };
+  // Stage 2A: platform routes require an MFA-verified platform session.
+  const platform = platformClient({ http, origin, totp, clock, password });
+  const asPlatform = (admin) => ({ ...admin, cookie: Object.entries(admin.jar).map(([n, v]) => `${n}=${v}`).join('; '),
+    bearer: `Bearer ${admin.jar.hid_access_admin}` });
   const adminRoutes = ['/admin/session', '/admin/overview', '/admin/principals?query=admin-runtime',
     '/admin/audit/events?limit=5'];
   const boundaries = {};
@@ -170,23 +188,35 @@ try {
   for (const route of adminRoutes) expectStatus(await get(null, route), 401, 'AUTHENTICATION_REQUIRED');
   boundaries.unauthenticated = 401;
 
-  const superSession = await signIn(superAdmin);
-  const auditorSession = await signIn(auditor);
-  const supportSession = await signIn(support);
+  // Staff sessions (facility work) and separate platform sessions (password + TOTP).
+  const superStaff = await signIn(superAdmin);
   const facilitySession = await signIn(facilityAdmin);
+  const superSession = asPlatform(await platform.enroll(superAdmin.email));
+  const auditorSession = asPlatform(await platform.enroll(auditor.email));
+  const supportSession = asPlatform(await platform.enroll(support.email));
 
   // 2-3. An ordinary facility administrator is refused, with or without the
   // facility context of their own membership; the denial is platform-scoped.
+  // Stage 2A: any staff session is refused before permissions are considered.
+  // Platform routes read only the platform cookie, so a staff cookie alone is
+  // unauthenticated there (401); a staff token presented directly is refused
+  // as the wrong session kind (403) with platform-scoped evidence.
   for (const route of adminRoutes) {
-    expectStatus(await get(facilitySession, route), 403, 'PERMISSION_DENIED');
-    expectStatus(await get(facilitySession, route, { 'X-Facility-ID': facilityA }), 403, 'PERMISSION_DENIED');
+    expectStatus(await get(facilitySession, route), 401, 'AUTHENTICATION_REQUIRED');
+    expectStatus(await get(null, route, { Authorization: facilitySession.bearer }), 403, 'PLATFORM_SESSION_REQUIRED');
+    expectStatus(await get(null, route, { Authorization: facilitySession.bearer, 'X-Facility-ID': facilityA }),
+      403, 'PLATFORM_SESSION_REQUIRED');
   }
+  // The Super Admin's own staff session does not satisfy platform routes either.
+  expectStatus(await get(superStaff, '/admin/session'), 401, 'AUTHENTICATION_REQUIRED');
+  expectStatus(await get(null, '/admin/session', { Authorization: superStaff.bearer }), 403, 'PLATFORM_SESSION_REQUIRED');
   const facilityDenials = (await owner.query(`select access_scope, facility_id, actor_membership_id from audit.events
     where actor_account_id = $1 and action = 'security.authorization' and outcome = 'denied'`, [facilityAdmin.id])).rows;
   assert.equal(facilityDenials.length, adminRoutes.length * 2);
   assert(facilityDenials.every(row => row.access_scope === 'platform' && row.facility_id === null
     && row.actor_membership_id === null), 'Admin route denials must be platform-scoped evidence');
-  boundaries.facility_staff = 'PERMISSION_DENIED';
+  boundaries.facility_staff = 'PLATFORM_SESSION_REQUIRED';
+  boundaries.platform_admin_staff_session = 'PLATFORM_SESSION_REQUIRED';
 
   // 4. A platform role without the route permission is refused: the Support
   // Admin reaches the session but not the audit log; the Security Auditor
@@ -269,10 +299,16 @@ try {
   // A platform Super Admin gains no facility permission: their doctor
   // membership lacks audit.read, platform.audit.read does not substitute, and
   // they have no access at a facility they do not work at.
-  expectStatus(await facilityAudit(superSession, {}), 400, 'FACILITY_REQUIRED');
-  expectStatus(await facilityAudit(superSession, { 'X-Facility-ID': facilityA }), 403, 'PERMISSION_DENIED');
-  expectStatus(await facilityAudit(superSession, { 'X-Facility-ID': facilityB }), 403, 'FACILITY_ACCESS_DENIED');
-  expectStatus(await facilityAudit(auditorSession, { 'X-Facility-ID': facilityA }), 403, 'FACILITY_ACCESS_DENIED');
+  expectStatus(await facilityAudit(superStaff, {}), 400, 'FACILITY_REQUIRED');
+  expectStatus(await facilityAudit(superStaff, { 'X-Facility-ID': facilityA }), 403, 'PERMISSION_DENIED');
+  expectStatus(await facilityAudit(superStaff, { 'X-Facility-ID': facilityB }), 403, 'FACILITY_ACCESS_DENIED');
+  // A platform session is valid only on platform routes: its cookie is not
+  // read there, and its token is refused as the wrong session kind.
+  expectStatus(await facilityAudit(superSession, { 'X-Facility-ID': facilityA }), 401, 'AUTHENTICATION_REQUIRED');
+  for (const admin of [superSession, auditorSession]) {
+    expectStatus(await facilityAudit(null, { Authorization: admin.bearer, 'X-Facility-ID': facilityA }),
+      403, 'PLATFORM_SESSION_SCOPE_DENIED');
+  }
   const facilityRows = (await owner.query(`select facility_id, actor_membership_id, access_scope from audit.events
     where actor_account_id = $1 and action = 'api.audit.events.list.request' and outcome = 'success'`,
   [facilityAdmin.id])).rows;
@@ -281,13 +317,16 @@ try {
   assert.notEqual(facilityRows[0].actor_membership_id, null);
   assert.equal(facilityRows[0].access_scope, null);
   boundaries.facility_routes = { missing_header: 'FACILITY_REQUIRED', cross_facility: 'FACILITY_ACCESS_DENIED',
-    platform_grants_on_facility_route: 'PERMISSION_DENIED' };
+    platform_grants_on_facility_route: 'PERMISSION_DENIED', platform_session_on_facility_route: 'PLATFORM_SESSION_SCOPE_DENIED' };
 
   // 8. Account status safety over HTTP.
   const version = async id => (await owner.query('select row_version from auth.accounts where id = $1', [id])).rows[0].row_version;
   const statusCommand = async (who, target, status) => command(who, `/admin/principals/${target.id}/status`,
     { status, reason: 'Platform admin runtime verifier' },
     { 'If-Match': String(await version(target.id)), 'Idempotency-Key': `admin-runtime-${randomUUID()}` });
+  // Account status is a critical command: it needs a fresh TOTP step-up.
+  expectStatus(await statusCommand(superSession, pendingReset, 'disabled'), 403, 'STEP_UP_REQUIRED');
+  await platform.stepUp(superSession);
   expectStatus(await statusCommand(superSession, pendingReset, 'active'), 409, 'ACCOUNT_RECOVERY_REQUIRED');
   expectStatus(await statusCommand(superSession, superAdmin, 'disabled'), 403, 'ADMIN_SELF_CHANGE_DENIED');
   const disabled = await statusCommand(superSession, pendingReset, 'disabled');
@@ -300,7 +339,7 @@ try {
     where actor_account_id = $1 and action in ('admin.account.disabled', 'admin.account.active')`, [superAdmin.id])).rows;
   assert.equal(commandRows.length, 2);
   assert(commandRows.every(row => row.access_scope === 'platform' && row.facility_id === null));
-  boundaries.account_status = { pending_reset_activation: 'ACCOUNT_RECOVERY_REQUIRED',
+  boundaries.account_status = { without_step_up: 'STEP_UP_REQUIRED', pending_reset_activation: 'ACCOUNT_RECOVERY_REQUIRED',
     self_change: 'ADMIN_SELF_CHANGE_DENIED', disable_enable_restores: 'pending_reset' };
 
   process.stdout.write(JSON.stringify({ status: 'passed', runtimeRole,

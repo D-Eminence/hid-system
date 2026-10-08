@@ -10,6 +10,7 @@ import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { QoreIdVerificationAdapter } from '../identity/qoreid-verification.adapter';
 import { IntegrationRuntimeService } from './integration-runtime.service';
+import { requirePlatformAssurance } from '../auth/platform-assurance';
 
 interface ProviderRow extends QueryResultRow {
   provider: string; display_name: string; enabled: boolean; runtime_control: boolean;
@@ -105,6 +106,8 @@ export class IntegrationAdminService {
       { provider, expectedVersion, action, enabled, configuration, reason });
     try {
       return await this.database.withTransaction(context, async (client) => {
+        await requirePlatformAssurance(client, context, action === 'configure' ? 'platform.integration.configure'
+          : action === 'enable' ? 'platform.integration.enable' : 'platform.integration.pause');
         const result = await client.query<ProviderCommandRow>(
           'select * from platform.admin_set_integration_provider($1,$2,$3,$4::jsonb,$5,$6,$7,$8)',
           [provider, expectedVersion, enabled, JSON.stringify(configuration), action, reason, idempotencyKey, digest]);
@@ -134,6 +137,8 @@ export class IntegrationAdminService {
       { capability, expectedVersion, action, active, fallback, reason });
     try {
       return await this.database.withTransaction(context, async (client) => {
+        await requirePlatformAssurance(client, context,
+          action === 'select' ? 'platform.integration.selection' : 'platform.integration.fallback');
         const result = await client.query<RouteCommandRow>(
           'select * from platform.admin_set_integration_route($1,$2,$3,$4,$5,$6,$7,$8)',
           [capability, expectedVersion, active, fallback, action, reason, idempotencyKey, digest]);
@@ -163,9 +168,10 @@ export class IntegrationAdminService {
     try {
       // This read-only preflight checks permission, idempotent replay and the
       // row version without holding a pool client during quota reservation.
-      const existing = await this.database.withTransaction(context,
-        (client) => this.connectionTestPreflight(client, provider, expectedVersion, idempotencyKey, digest),
-        { readOnly: true });
+      const existing = await this.database.withTransaction(context, async (client) => {
+        await requirePlatformAssurance(client, context, 'platform.integration.test');
+        return this.connectionTestPreflight(client, provider, expectedVersion, idempotencyKey, digest);
+      }, { readOnly: true });
       if (existing) return existing;
       const keyHash = createHash('sha256').update('integration.provider.test\0')
         .update(idempotencyKey).digest('hex');

@@ -6,18 +6,15 @@ import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { QoreIdVerificationAdapter } from '../identity/qoreid-verification.adapter';
 import { IntegrationAdminService } from './integration-admin.service';
+import { assuranceResult, isAssuranceQuery, platformActor } from '../testing/platform-assurance';
 import type { IntegrationRuntimeService } from './integration-runtime.service';
 
 const context: PlatformAccessContext = {
   scope: 'platform', correlationId: 'integration-admin-test', facilityId: null, membershipId: null,
   purposeOfUse: 'healthcare-operations',
-  actor: {
-    id: 'staff:admin', subject: 'staff:admin',
-    accountId: '20000000-0000-4000-8000-000000000001', roles: [], permissions: [],
-    platformRoles: ['platform_super_admin'], platformPermissions: ['platform.integration.read',
-      'platform.integration.manage', 'platform.integration.test'],
-    facilityIds: [], facilities: [], authenticationMethod: 'local',
-  },
+  actor: platformActor({ id: 'staff:admin', subject: 'staff:admin',
+    platformPermissions: ['platform.admin.access', 'platform.integration.read',
+      'platform.integration.manage', 'platform.integration.test'] }),
 };
 
 const qoreidRow = {
@@ -28,7 +25,8 @@ const qoreidRow = {
 };
 
 function harness(queryResult: (sql: string, values?: unknown[]) => { rows: unknown[] } | Promise<{ rows: unknown[] }>) {
-  const client = { query: jest.fn(queryResult) };
+  const client = { query: jest.fn(async (sql: string, values?: unknown[]) =>
+    isAssuranceQuery(sql) ? assuranceResult() : queryResult(sql, values)) };
   const database = { withTransaction: jest.fn(async (_context, operation) =>
     operation(client as unknown as PoolClient)) };
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };

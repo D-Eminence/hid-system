@@ -12,7 +12,8 @@ export interface FacilityAssignment {
 }
 
 export interface ActorContext {
-  kind?: 'staff' | 'patient';
+  /** 'platform' only for an MFA-verified platform administration session (0069). */
+  kind?: 'staff' | 'patient' | 'platform';
   patientId?: string;
   id: string;
   subject: string;
@@ -39,6 +40,8 @@ export interface HidRequest extends Request {
   purposeOfUse?: PurposeOfUse;
   /** 'platform' on @PlatformScope routes; facility context is never bound there. */
   accessScope?: 'facility' | 'platform';
+  /** High-risk platform action the guard authorized for this request (see high-risk-policy.ts). */
+  highRiskAction?: string;
 }
 
 export type PurposeOfUse = 'direct-care' | 'emergency' | 'healthcare-operations';

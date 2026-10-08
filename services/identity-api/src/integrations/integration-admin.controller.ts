@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Headers, Param, Post, Req } from '@nestjs/common';
 import { requireAdminContext } from '../admin/admin-context';
-import { AuditAction, AuditFailuresOnly, PlatformScope, RequirePermissions } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, HighRiskAction, PlatformScope, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
@@ -44,6 +44,7 @@ export class IntegrationAdminController {
 
   @Post(':provider/enable')
   @RequirePermissions('platform.integration.manage')
+  @HighRiskAction('platform.integration.enable')
   @AuditAction('admin.integration.enable')
   enable(@Param('provider') provider: string, @Headers('if-match') ifMatch: string | undefined,
     @Headers('idempotency-key') key: string | undefined, @Body() body: IntegrationReasonDto,
@@ -54,6 +55,7 @@ export class IntegrationAdminController {
 
   @Post(':provider/pause')
   @RequirePermissions('platform.integration.manage')
+  @HighRiskAction('platform.integration.pause')
   @AuditAction('admin.integration.pause')
   pause(@Param('provider') provider: string, @Headers('if-match') ifMatch: string | undefined,
     @Headers('idempotency-key') key: string | undefined, @Body() body: IntegrationReasonDto,
@@ -64,6 +66,7 @@ export class IntegrationAdminController {
 
   @Post(':provider/configuration')
   @RequirePermissions('platform.integration.manage')
+  @HighRiskAction('platform.integration.configure')
   @AuditAction('admin.integration.configure')
   configure(@Param('provider') provider: string, @Headers('if-match') ifMatch: string | undefined,
     @Headers('idempotency-key') key: string | undefined, @Body() body: IntegrationConfigurationDto,
@@ -74,6 +77,7 @@ export class IntegrationAdminController {
 
   @Post(':provider/credential-reference')
   @RequirePermissions('platform.integration.manage')
+  @HighRiskAction('platform.integration.credential-reference')
   @AuditAction('admin.integration.credential-reference')
   credentialReference(@Param('provider') _provider: string,
     @Headers('if-match') ifMatch: string | undefined,
@@ -87,6 +91,7 @@ export class IntegrationAdminController {
 
   @Post('capabilities/:capability/selection')
   @RequirePermissions('platform.integration.manage')
+  @HighRiskAction('platform.integration.selection')
   @AuditAction('admin.integration.selection')
   selection(@Param('capability') capability: string, @Headers('if-match') ifMatch: string | undefined,
     @Headers('idempotency-key') key: string | undefined, @Body() body: IntegrationRouteDto,
@@ -97,6 +102,7 @@ export class IntegrationAdminController {
 
   @Post('capabilities/:capability/fallback')
   @RequirePermissions('platform.integration.manage')
+  @HighRiskAction('platform.integration.fallback')
   @AuditAction('admin.integration.fallback')
   fallback(@Param('capability') capability: string, @Headers('if-match') ifMatch: string | undefined,
     @Headers('idempotency-key') key: string | undefined, @Body() body: IntegrationRouteDto,
@@ -107,6 +113,7 @@ export class IntegrationAdminController {
 
   @Post(':provider/test')
   @RequirePermissions('platform.integration.test')
+  @HighRiskAction('platform.integration.test')
   @AuditAction('admin.integration.test')
   test(@Param('provider') provider: string, @Headers('if-match') ifMatch: string | undefined,
     @Headers('idempotency-key') key: string | undefined, @Body() body: IntegrationReasonDto,

@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createHmac, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
+import { createTotpClock, platformClient } from './platform-session-client.mjs';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
@@ -28,6 +29,8 @@ Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'st
   TURNSTILE_MODE: 'required', TURNSTILE_SECRET_KEY: 'example-turnstile-secret',
   QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'example-qoreid-client',
   QOREID_CLIENT_SECRET: 'example-qoreid-secret',
+  // Platform administration (the reviewer) requires an MFA platform session.
+  MFA_SECRET_KEY_B64: Buffer.alloc(32, 0x50).toString('base64'), MFA_KEY_VERSION: 'provider-runtime-v1',
   // Every Identity API connection runs as the deployed runtime role.
   DATABASE_URL: `postgresql://${process.env.PGUSER ?? 'postgres'}@localhost/${isolated}?host=${encodeURIComponent(socket)}`
     + `&options=${encodeURIComponent('-c role=hid_identity_api_runtime')}`,
@@ -70,6 +73,12 @@ const { QoreIdVerificationAdapter, QOREID_ADAPTER_CONFIGURATION, QOREID_FETCH } 
   load('identity/qoreid-verification.adapter.ts');
 const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
 const { getEnvironment } = load('config/environment.ts');
+const { PlatformAuthController } = load('auth/platform-auth.controller.ts');
+const { MfaService, MFA_TOTP_CLOCK } = load('auth/mfa/mfa.service.ts');
+const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
+const { PlatformSecurityController } = load('admin/platform-security.controller.ts');
+const { PlatformSecurityService } = load('admin/platform-security.service.ts');
+const totp = load('auth/mfa/totp.ts');
 
 // Cloudflare Siteverify stub. A token encodes the outcome the real service
 // would return: `ok|<action>|<hostname>` or `replayed`. Any other outbound
@@ -139,13 +148,16 @@ let app;
 try {
   // Fixture: the platform has enabled QoreID CAC verification (an admin action).
   await owner.query("update platform.integration_providers set enabled=true, row_version=row_version+1 where provider='qoreid'");
+  const clock = createTotpClock();
   const module = await Test.createTestingModule({
-    controllers: [AuthController, ProviderEnrollmentController, AdminOrganizationApplicationsController],
+    controllers: [AuthController, ProviderEnrollmentController, AdminOrganizationApplicationsController,
+      PlatformAuthController, PlatformSecurityController],
     providers: [DatabaseService, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
       AuditService, WorkloadAuthService, TurnstileService, IntegrationRuntimeService,
       ProviderEnrollmentService, OrganizationProfileCompletionService, OrganizationApplicationsService,
-      QoreIdVerificationAdapter,
+      QoreIdVerificationAdapter, MfaService, MfaSecretProtector, PlatformSecurityService,
+      { provide: MFA_TOTP_CLOCK, useValue: clock.now },
       { provide: QOREID_ADAPTER_CONFIGURATION, useValue: { baseUrl: 'https://api.qoreid.com',
         clientId: 'example-qoreid-client', clientSecret: 'example-qoreid-secret', timeoutMs: 2000 } },
       { provide: QOREID_FETCH, useValue: qoreidFetch },
@@ -425,14 +437,15 @@ try {
     values ('ehr', 'Reviewed Runtime Clinic', 'clinic', 'RC9900063501', 'Reviewed Applicant', $1, 'pending_verification')
     returning id, row_version`, [email('reviewed')])).rows[0];
   const networkRowsBefore = (await owner.query('select coalesce(sum(attempt_count),0)::int n from platform.self_service_cac_quota_counters')).rows[0].n;
-  const reviewer = await http.post('/api/v1/auth/login').set('Origin', origin)
-    .send({ email: emailA, password, turnstileAction: 'staff-login', turnstileToken: turnstile('staff-login') });
-  assert.equal(reviewer.status, 200, `reviewer login failed: ${JSON.stringify(reviewer.body)}`);
-  const reviewerCookies = cookies(reviewer).join('; ');
-  const reviewerCsrf = reviewer.headers['x-csrf-token'];
-  const verifiedByReviewer = await http.post(`/api/v1/admin/organization-applications/${reviewed.id}/verify-cac`)
-    .set('Origin', origin).set('Cookie', reviewerCookies).set('x-csrf-token', reviewerCsrf)
-    .set('x-facility-id', facilityId).set('If-Match', String(reviewed.row_version)).send({});
+  // Stage 2A: the reviewer signs in to platform administration (password +
+  // TOTP enrollment) and steps up, since verify-CAC is a high-tier action.
+  const platform = platformClient({ http, origin, totp, clock, password,
+    turnstileToken: () => turnstile('admin-login') });
+  const reviewer = await platform.enroll(emailA);
+  await platform.stepUp(reviewer);
+  const verifiedByReviewer = await platform.command(reviewer,
+    `/admin/organization-applications/${reviewed.id}/verify-cac`, {},
+    { 'x-facility-id': facilityId, 'If-Match': String(reviewed.row_version) });
   assert.equal(verifiedByReviewer.status, 200, `reviewer CAC check failed: ${JSON.stringify(verifiedByReviewer.body)}`);
   assert.equal(qoreidCacLookups.at(-1), 'RC9900063501');
   const reviewerCounters = (await owner.query(`select scope_type, bucket_period, attempt_count

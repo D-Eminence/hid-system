@@ -9,8 +9,10 @@ import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types
 import { CurrentStaffContextService } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
 
+type SessionKind = 'staff' | 'patient' | 'platform';
+
 interface SessionRow {
-  session_kind?: 'staff' | 'patient';
+  session_kind?: SessionKind;
   patient_id?: string | null;
   id: string;
   account_id: string;
@@ -25,6 +27,29 @@ interface SessionRow {
 }
 
 class RefreshRotationConflict extends Error {}
+
+export type SessionEventType =
+  | 'login_succeeded' | 'login_failed' | 'refresh' | 'rotated' | 'revoked' | 'logout' | 'expired' | 'reuse_detected'
+  | 'mfa_challenge_issued' | 'mfa_verified' | 'mfa_failed' | 'mfa_enrollment_started' | 'mfa_enrolled'
+  | 'mfa_recovery_code_used' | 'mfa_recovery_codes_regenerated' | 'step_up_verified' | 'step_up_failed'
+  | 'mfa_rate_limited';
+
+/** MFA evidence for a new platform session, verified by MfaService in the same transaction. */
+export interface PlatformSessionAssurance {
+  accountId: string;
+  subject: string;
+  factorId: string;
+  method: 'totp' | 'recovery_code';
+}
+
+export interface SessionEventInput {
+  eventType: SessionEventType;
+  outcome: 'success' | 'denied' | 'failure';
+  accountId: string;
+  sessionId?: string;
+  event: SessionEventMetadata;
+  details?: Readonly<Record<string, unknown>>;
+}
 
 export interface SessionEventMetadata {
   correlationId: string;
@@ -120,7 +145,61 @@ export class TokenService {
     return { actor: { ...actor, sessionId }, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt };
   }
 
-  async refresh(refreshToken: string, event: SessionEventMetadata): Promise<LoginResult> {
+  /**
+   * Issues a platform administration session (0069) inside the caller's
+   * transaction, after the password and a second factor were verified there.
+   * The session has the platform idle and absolute lifetimes, binds no
+   * facility, and records its MFA evidence in auth.session_assurance.
+   */
+  async issuePlatformSession(client: PoolClient, assurance: PlatformSessionAssurance,
+    event: SessionEventMetadata): Promise<LoginResult> {
+    const resolved = await this.currentStaff.resolvePlatform(assurance.subject);
+    if (resolved.accountId !== assurance.accountId) {
+      throw new UnauthorizedException('Resolved account does not match the authenticated identity');
+    }
+    const version = await client.query<{ token_version: string }>(
+      `select token_version::text from auth.accounts
+        where id = $1 and status = 'active'
+          and (disabled_until is null or disabled_until <= clock_timestamp())`,
+      [assurance.accountId],
+    );
+    const tokenVersion = Number(version.rows[0]?.token_version);
+    if (!Number.isSafeInteger(tokenVersion) || tokenVersion < 1) throw new UnauthorizedException('Account is inactive');
+    const sessionId = randomUUID();
+    const accessJti = randomUUID();
+    const refreshToken = this.newRefreshToken(sessionId, 'local');
+    const csrfToken = this.deriveRefreshCsrf(refreshToken);
+    const now = new Date();
+    const lifetimes = this.lifetimes('platform');
+    const expiresAt = new Date(now.getTime() + lifetimes.access * 1_000);
+    const refreshExpiresAt = new Date(now.getTime() + lifetimes.refresh * 1_000);
+    const absoluteExpiresAt = new Date(now.getTime() + lifetimes.absolute * 1_000);
+    const actor = { ...resolved, sessionId };
+    const accessToken = await this.signAccessToken(actor, sessionId, accessJti, tokenVersion, csrfToken, expiresAt);
+    await this.insertSession(client, {
+      id: sessionId, accountId: assurance.accountId, familyId: sessionId, refreshToken, accessJti,
+      accountTokenVersion: tokenVersion, authenticationMethod: 'local', actorKind: 'platform',
+      issuedAt: now, expiresAt: refreshExpiresAt, absoluteExpiresAt, event,
+    });
+    await client.query(
+      `insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
+       values ($1, $2, $3, $4, clock_timestamp())`,
+      [sessionId, assurance.accountId, assurance.factorId, assurance.method],
+    );
+    await this.insertSessionEvent(client, {
+      eventType: 'login_succeeded', outcome: 'success', accountId: assurance.accountId, sessionId, event,
+      details: { session_kind: 'platform', mfa_method: assurance.method },
+    });
+    return { actor, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt };
+  }
+
+  /**
+   * Rotates a refresh token. Platform sessions refresh only through the
+   * platform endpoint and staff/patient sessions only through the standard
+   * one, so a session of one kind can never be exchanged for the other.
+   */
+  async refresh(refreshToken: string, event: SessionEventMetadata,
+    scope: 'standard' | 'platform' = 'standard'): Promise<LoginResult> {
     const refreshHash = this.sha256(refreshToken);
     const existing = await this.database.query<SessionRow>(
       `select session.id::text, session.account_id::text,
@@ -138,6 +217,8 @@ export class TokenService {
     );
     const oldSession = existing.rows[0];
     if (!oldSession) throw new UnauthorizedException('Invalid refresh session');
+    const kind: SessionKind = oldSession.session_kind ?? 'staff';
+    if ((kind === 'platform') !== (scope === 'platform')) throw new UnauthorizedException('Invalid refresh session');
 
     if (oldSession.revoked_at) {
       await this.database.withSystemTransaction(event.correlationId, async (client) => {
@@ -167,7 +248,10 @@ export class TokenService {
     if (this.databaseMethod(authenticationMethod) !== oldSession.authentication_method) {
       throw new UnauthorizedException('Invalid refresh session');
     }
-    const actor = await this.resolveActor(oldSession.actor_subject, authenticationMethod, oldSession.session_kind ?? 'staff');
+    if (kind === 'platform' && !(await this.platformAssuranceActive(oldSession.family_id, oldSession.account_id))) {
+      throw new UnauthorizedException('Platform session assurance is no longer valid');
+    }
+    const actor = await this.resolveActor(oldSession.actor_subject, authenticationMethod, kind);
     if (actor.accountId !== oldSession.account_id) {
       throw new UnauthorizedException('Invalid refresh session');
     }
@@ -182,9 +266,13 @@ export class TokenService {
     const accessJti = randomUUID();
     const newRefreshToken = this.newRefreshToken(newSessionId, authenticationMethod);
     const csrfToken = this.deriveRefreshCsrf(newRefreshToken);
-    const accessExpiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
+    const lifetimes = this.lifetimes(kind);
+    const accessExpiresAt = new Date(Math.min(now.getTime() + lifetimes.access * 1_000,
+      oldSession.absolute_expires_at.getTime()));
+    // Platform sessions: each refresh opens a new idle window, never past the
+    // absolute end of the sign-in.
     const refreshExpiresAt = new Date(Math.min(
-      now.getTime() + this.environment.AUTH_REFRESH_TTL_SECONDS * 1_000,
+      now.getTime() + lifetimes.refresh * 1_000,
       oldSession.absolute_expires_at.getTime(),
     ));
     const accessToken = await this.signAccessToken(
@@ -201,7 +289,7 @@ export class TokenService {
           accessJti,
           accountTokenVersion,
           authenticationMethod,
-          actorKind: actor.kind ?? 'staff',
+          actorKind: kind,
           patientId: actor.patientId,
           issuedAt: now,
           expiresAt: refreshExpiresAt,
@@ -347,7 +435,11 @@ export class TokenService {
     }
     const method = payload.auth_method;
     if (method !== 'local' && method !== 'oidc') throw new UnauthorizedException('Invalid authentication method');
-    if (payload.actor_kind !== undefined && payload.actor_kind !== 'staff' && payload.actor_kind !== 'patient') {
+    if (payload.actor_kind !== undefined && payload.actor_kind !== 'staff' && payload.actor_kind !== 'patient'
+      && payload.actor_kind !== 'platform') {
+      throw new UnauthorizedException('Invalid actor context');
+    }
+    if (payload.actor_kind === 'platform' && method !== 'local') {
       throw new UnauthorizedException('Invalid actor context');
     }
     if (payload.actor_kind === 'patient' && typeof payload.patient_id !== 'string') {
@@ -387,7 +479,13 @@ export class TokenService {
           and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
           and session.revoked_at is null
           and session.expires_at > clock_timestamp()
-          and session.absolute_expires_at > clock_timestamp()`,
+          and session.absolute_expires_at > clock_timestamp()
+          and (session.session_kind <> 'platform' or exists (
+            select 1 from auth.session_assurance assurance
+            join auth.mfa_factors factor
+              on factor.id = assurance.mfa_factor_id and factor.account_id = assurance.account_id
+             and factor.status = 'active'
+            where assurance.family_id = session.family_id and assurance.account_id = session.account_id))`,
       [claims.sid, claims.sub, claims.jti, claims.token_version, this.databaseMethod(claims.auth_method), claims.actor_kind ?? 'staff', claims.patient_id ?? null],
     );
     if (result.rowCount !== 1) throw new UnauthorizedException('Session is no longer active');
@@ -410,7 +508,7 @@ export class TokenService {
     input: {
       id: string; accountId: string; familyId: string; refreshToken: string; accessJti: string;
       accountTokenVersion: number; authenticationMethod: 'local' | 'oidc';
-      actorKind: 'staff' | 'patient';
+      actorKind: SessionKind;
       patientId?: string;
       issuedAt: Date; expiresAt: Date; absoluteExpiresAt: Date; event: SessionEventMetadata;
     },
@@ -432,14 +530,12 @@ export class TokenService {
     );
   }
 
-  private async insertSessionEvent(
-    client: PoolClient,
-    input: {
-      eventType: 'login_succeeded' | 'login_failed' | 'refresh' | 'rotated' | 'revoked' | 'logout' | 'expired' | 'reuse_detected';
-      outcome: 'success' | 'denied' | 'failure'; accountId: string; sessionId?: string;
-      event: SessionEventMetadata; details?: Readonly<Record<string, unknown>>;
-    },
-  ): Promise<void> {
+  /** Appends a session event in the caller's transaction (never with secrets in details). */
+  recordSessionEvent(client: PoolClient, input: SessionEventInput): Promise<void> {
+    return this.insertSessionEvent(client, input);
+  }
+
+  private async insertSessionEvent(client: PoolClient, input: SessionEventInput): Promise<void> {
     await client.query(
       `insert into auth.session_events (
          session_id, account_id, event_type, outcome, correlation_id,
@@ -492,12 +588,40 @@ export class TokenService {
     return `${sessionId}.${randomBytes(48).toString('base64url')}.${method}`;
   }
 
+  private async platformAssuranceActive(familyId: string, accountId: string): Promise<boolean> {
+    const result = await this.database.query(
+      `select 1 from auth.session_assurance assurance
+         join auth.mfa_factors factor
+           on factor.id = assurance.mfa_factor_id and factor.account_id = assurance.account_id
+          and factor.status = 'active'
+        where assurance.family_id = $1 and assurance.account_id = $2`,
+      [familyId, accountId],
+    );
+    return result.rowCount === 1;
+  }
+
+  private lifetimes(kind: SessionKind): { access: number; refresh: number; absolute: number } {
+    if (kind === 'platform') {
+      return {
+        access: this.environment.PLATFORM_ACCESS_TTL_SECONDS,
+        refresh: this.environment.PLATFORM_IDLE_TIMEOUT_SECONDS,
+        absolute: this.environment.PLATFORM_ABSOLUTE_TTL_SECONDS,
+      };
+    }
+    return {
+      access: this.environment.AUTH_ACCESS_TTL_SECONDS,
+      refresh: this.environment.AUTH_REFRESH_TTL_SECONDS,
+      absolute: this.environment.AUTH_ABSOLUTE_TTL_SECONDS,
+    };
+  }
+
   private async resolveActor(
     subject: string,
     method: ActorContext['authenticationMethod'],
-    kind: 'staff' | 'patient',
+    kind: SessionKind,
     sessionId?: string,
   ): Promise<ActorContext> {
+    if (kind === 'platform') return this.currentStaff.resolvePlatform(subject, sessionId);
     if (kind === 'patient') {
       if (!this.currentPatient) throw new UnauthorizedException('Patient session is unavailable');
       const patient = await this.currentPatient.resolve(subject, sessionId);

@@ -1,11 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
+import { requirePlatformAssurance } from '../auth/platform-assurance';
+import { csvDocument } from '../common/csv';
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { PlatformAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
+import { adminCommandError } from './admin-command-error';
 import { platformAuditActor } from './admin-context';
+import { requiresTwoPersonApproval, type PlatformAction } from './high-risk-policy';
 import type { AccountStatusCommandDto, FacilityStatusCommandDto,
   PlatformRoleCommandDto, RevokeSessionsCommandDto } from './dto/admin-command.dto';
 import type { ListFacilitiesDto, ListIdentityReviewsDto,
@@ -29,6 +33,14 @@ interface ReviewRow extends QueryResultRow {
   maskedNin: string; provider: string; candidateCount: string; version: string;
   createdAt: Date; updatedAt: Date;
 }
+
+interface ExportRow extends QueryResultRow {
+  id: string; email: string | null; displayName: string | null; status: string; createdAt: Date;
+  platformRoles: string[];
+}
+
+/** Hard cap on one principal export; the response says when it was reached. */
+export const PRINCIPAL_EXPORT_MAX_ROWS = 5_000;
 
 interface CommandRow extends QueryResultRow { replayed: boolean }
 interface FacilityCommandRow extends CommandRow { facility_id: string; lifecycle_status: string; row_version: string }
@@ -64,6 +76,7 @@ export class AdminService {
 
   async setPlatformControl(context: PlatformAccessContext, input: PlatformControlCommandDto, expectedVersion: number) {
     return this.database.withTransaction(context, async (client) => {
+      await requirePlatformAssurance(client, context, 'platform.control.change');
       const result = await client.query(`select * from platform.admin_set_control($1,$2,$3,$4)`,
         [input.controlKey, input.enabled, expectedVersion, input.reason.trim()]);
       const row = result.rows[0];
@@ -144,6 +157,7 @@ export class AdminService {
     const digest = this.digest({ facilityId, expectedVersion, ...input });
     return this.database.withTransaction(context, async (client) => {
       try {
+        await requirePlatformAssurance(client, context, 'platform.facility.status');
         const result = await client.query<FacilityCommandRow>(
           `select * from identity.admin_transition_facility($1, $2, $3, $4, $5, $6)`,
           [facilityId, expectedVersion, input.status, input.reason.trim(), idempotencyKey, digest],
@@ -159,41 +173,38 @@ export class AdminService {
     });
   }
 
-  async exportPrincipals(context: PlatformAccessContext, query: import('./dto/admin-list.dto').ExportPrincipalsDto): Promise<string> {
+  /**
+   * Principal directory export (Stage 2A). Restricted to platform.principal.export
+   * with a fresh step-up; it carries no credential, session, token, subject or
+   * membership data, is capped at 5,000 rows, and is RFC 4180 CSV with
+   * formula-injection neutralization.
+   */
+  async exportPrincipals(context: PlatformAccessContext, query: import('./dto/admin-list.dto').ExportPrincipalsDto): Promise<{
+    csv: string; rowCount: number; truncated: boolean;
+  }> {
     const term = query.query ? `%${this.escapeLike(query.query.trim())}%` : null;
     return this.database.withTransaction(context, async (client) => {
-      const result = await client.query<PrincipalRow>(`select account.id::text, account.subject, account.email,
-          account.display_name as "displayName", account.status, account.row_version::text as version,
-          account.created_at as "createdAt",
-          (select count(*) from auth.sessions session where session.account_id = account.id
-            and session.revoked_at is null and session.expires_at > clock_timestamp())::text as "activeSessionCount",
-          coalesce((select jsonb_agg(jsonb_build_object('id', membership.id, 'facilityId', membership.facility_id,
-            'facilityName', facility.name, 'role', membership.membership_role, 'appRole', membership.app_role,
-            'active', membership.active, 'version', membership.row_version) order by facility.name)
-            from identity.staff_facility_memberships membership
-            join identity.facilities facility on facility.id = membership.facility_id
-            where membership.account_id = account.id), '[]'::jsonb) as memberships,
+      await requirePlatformAssurance(client, context, 'platform.principals.export');
+      const result = await client.query<ExportRow>(`select account.id::text, account.email,
+          account.display_name as "displayName", account.status, account.created_at as "createdAt",
           coalesce((select array_agg(assignment.role_code order by assignment.role_code)
             from auth.account_roles assignment where assignment.account_id = account.id
               and assignment.scope_type = 'platform' and assignment.revoked_at is null), array[]::text[]) as "platformRoles"
         from auth.accounts account
-        where ($1::text is null or account.email ilike $1 escape '\\' or account.display_name ilike $1 escape '\\'
-          or account.subject ilike $1 escape '\\')
+        where ($1::text is null or account.email ilike $1 escape '\\' or account.display_name ilike $1 escape '\\')
           and ($2::text is null or account.status = $2)
-        order by account.updated_at desc, account.id
-        limit 10000`, [term, query.status ?? null]);
-
-      const header = ['account_id', 'subject', 'email', 'display_name', 'status', 'version',
-        'created_at', 'active_sessions', 'platform_roles', 'facility_memberships'];
-      const rows = result.rows.map((row) => [
-        row.id, row.subject, row.email ?? '', row.displayName ?? '', row.status, Number(row.version),
-        new Date(row.createdAt).toISOString(), Number(row.activeSessionCount),
-        (row.platformRoles ?? []).join('|'), JSON.stringify(row.memberships ?? []),
+        order by account.created_at, account.id
+        limit $3`, [term, query.status ?? null, PRINCIPAL_EXPORT_MAX_ROWS + 1]);
+      const truncated = result.rows.length > PRINCIPAL_EXPORT_MAX_ROWS;
+      const rows = result.rows.slice(0, PRINCIPAL_EXPORT_MAX_ROWS).map((row) => [
+        row.id, row.email ?? '', row.displayName ?? '', row.status, new Date(row.createdAt).toISOString(),
+        (row.platformRoles ?? []).join('|'),
       ]);
       await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.principals.export',
-        'authentication-account-collection', null, 'Administrative principal export',
-        { returnedCount: rows.length, status: query.status ?? null, filtered: Boolean(query.query) }));
-      return [header, ...rows].map((row) => row.map((value) => this.csv(value)).join(',')).join('\\n') + '\\n';
+        'authentication-account-collection', null, query.reason,
+        { returnedCount: rows.length, truncated, status: query.status ?? null, filtered: Boolean(query.query) }));
+      const header = ['account_id', 'email', 'display_name', 'status', 'created_at', 'platform_roles'];
+      return { csv: csvDocument([header, ...rows]), rowCount: rows.length, truncated };
     });
   }
 
@@ -235,7 +246,7 @@ export class AdminService {
 
   async transitionAccount(context: PlatformAccessContext, accountId: string, expectedVersion: number,
     input: AccountStatusCommandDto, idempotencyKey: string) {
-    return this.accountCommand(context, 'status', accountId, input.reason, idempotencyKey,
+    return this.accountCommand(context, 'platform.account.status', accountId, input.reason, idempotencyKey,
       { accountId, expectedVersion, ...input }, async (client, digest) => {
         const result = await client.query<AccountCommandRow>(
           `select * from auth.admin_transition_account($1, $2, $3, $4, $5, $6)`,
@@ -250,7 +261,13 @@ export class AdminService {
 
   async changePlatformRole(context: PlatformAccessContext, accountId: string, expectedVersion: number,
     input: PlatformRoleCommandDto, idempotencyKey: string) {
-    return this.accountCommand(context, 'role', accountId, input.reason, idempotencyKey,
+    // Super Admin is granted only through a second Super Admin's approval
+    // (PlatformSecurityService); the one-step command refuses it here and in SQL.
+    if (requiresTwoPersonApproval('platform.role.change', { roleCode: input.roleCode, action: input.action })) {
+      throw new DomainProblem(403, 'TWO_PERSON_APPROVAL_REQUIRED',
+        'Granting Super Admin requires a second Super Admin to approve');
+    }
+    return this.accountCommand(context, 'platform.role.change', accountId, input.reason, idempotencyKey,
       { accountId, expectedVersion, ...input }, async (client, digest) => {
         const result = await client.query<RoleCommandRow>(
           `select * from auth.admin_change_platform_role($1, $2, $3, $4, $5, $6, $7)`,
@@ -265,7 +282,7 @@ export class AdminService {
 
   async revokeSessions(context: PlatformAccessContext, accountId: string, input: RevokeSessionsCommandDto,
     idempotencyKey: string) {
-    return this.accountCommand(context, 'sessions', accountId, input.reason, idempotencyKey,
+    return this.accountCommand(context, 'platform.sessions.revoke-all', accountId, input.reason, idempotencyKey,
       { accountId, ...input }, async (client, digest) => {
         const result = await client.query<SessionCommandRow>(
           `select * from auth.admin_revoke_account_sessions($1, $2, $3, $4)`,
@@ -321,13 +338,14 @@ export class AdminService {
     });
   }
 
-  private async accountCommand<T>(context: PlatformAccessContext, _kind: string, accountId: string,
+  private async accountCommand<T>(context: PlatformAccessContext, policyAction: PlatformAction, accountId: string,
     reason: string, _key: string, request: unknown,
     run: (client: import('pg').PoolClient, digest: string) => Promise<{
       row: CommandRow; response: T; action: string; details: Record<string, unknown>;
     }>): Promise<T> {
     return this.database.withTransaction(context, async (client) => {
       try {
+        await requirePlatformAssurance(client, context, policyAction);
         const result = await run(client, this.digest(request));
         if (!result.row.replayed) await this.audit.recordWithClient(client,
           this.auditEvent(context, result.action, 'authentication-account', accountId, reason, result.details));
@@ -348,23 +366,7 @@ export class AdminService {
 
   private escapeLike(value: string): string { return value.replace(/[\\%_]/g, (match) => `\\${match}`); }
 
-  private csv(value: unknown): string {
-    const text = value == null ? '' : String(value);
-    return /[",\\n\\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-  }
-
   private commandError(error: unknown): Error {
-    if (error instanceof DomainProblem) return error;
-    const message = typeof error === 'object' && error && 'message' in error ? String(error.message) : '';
-    if (message.includes('ADMIN_SELF_CHANGE_DENIED')) return new DomainProblem(403, 'ADMIN_SELF_CHANGE_DENIED', 'Administrators cannot change their own account status or platform roles');
-    if (message.includes('ADMIN_ACCOUNT_RECOVERY_REQUIRED')) return new DomainProblem(409, 'ACCOUNT_RECOVERY_REQUIRED', 'This account must complete its recovery flow before it can become active');
-    if (message.includes('ADMIN_PERMISSION_DENIED')) return new DomainProblem(403, 'PERMISSION_DENIED', 'Administrative permission is missing');
-    if (message.includes('ADMIN_VERSION_CONFLICT')) return new DomainProblem(409, 'VERSION_CONFLICT', 'The resource changed; reload before retrying');
-    if (message.includes('ADMIN_IDEMPOTENCY_CONFLICT')) return new DomainProblem(409, 'IDEMPOTENCY_CONFLICT', 'The idempotency key was used for a different command');
-    if (message.includes('ADMIN_LAST_SUPER_ADMIN')) return new DomainProblem(409, 'LAST_SUPER_ADMIN', 'At least one active platform Super Admin must remain');
-    if (message.includes('NOT_FOUND') || message.includes('NOT_ACTIVE')) return new DomainProblem(404, 'ADMIN_RESOURCE_NOT_FOUND', 'The requested administration resource was not found');
-    if (message.includes('ALREADY_ACTIVE') || message.includes('NO_STATE_CHANGE')) return new DomainProblem(409, 'ADMIN_STATE_CONFLICT', 'The requested state is already active');
-    if (message.includes('ADMIN_INVALID') || message.includes('ADMIN_REASON_REQUIRED')) return new DomainProblem(400, 'ADMIN_COMMAND_INVALID', 'The administration command is invalid');
-    return new DomainProblem(503, 'ADMIN_COMMAND_UNAVAILABLE', 'The administration command could not be completed');
+    return adminCommandError(error);
   }
 }

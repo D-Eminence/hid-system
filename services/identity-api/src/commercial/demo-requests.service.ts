@@ -7,6 +7,7 @@ import { platformAuditActor } from '../admin/admin-context';
 import type { HidRequest, PlatformAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CreateDemoRequestDto, ListDemoRequestsDto, UpdateDemoRequestStatusDto } from './demo-request.dto';
+import { requirePlatformAssurance } from '../auth/platform-assurance';
 
 interface DemoRequestRow extends QueryResultRow {
   id: string;
@@ -89,6 +90,7 @@ export class DemoRequestsService {
   async transition(context: PlatformAccessContext, requestId: string, expectedVersion: number,
     input: UpdateDemoRequestStatusDto) {
     return this.database.withTransaction(context, async (client) => {
+      await requirePlatformAssurance(client, context, 'platform.demo-request.status');
       const current = await client.query<DemoRequestRow>(
         `select ${DEMO_PROJECTION} from identity.demo_requests where id = $1 for update`, [requestId]);
       const row = current.rows[0];

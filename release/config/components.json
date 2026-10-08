@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0068",
-    "count": 68,
+    "last": "0070",
+    "count": 70,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -369,6 +369,14 @@
       {
         "name": "0068_admin_account_transition_safety.sql",
         "sha256": "3c939177cd26302d6035b049bbbb571e83de2b1abbcf74350fa33af56e2abf30"
+      },
+      {
+        "name": "0069_platform_mfa_sessions.sql",
+        "sha256": "8dba4aca9afdcc8ee2ad9ae443793254ba2f0d48697956430776ec32e5f83173"
+      },
+      {
+        "name": "0070_platform_two_person_approval.sql",
+        "sha256": "3b732bbd473c58c7ec8ed7b56068e9c76c8d0c4f91fca16fbb3a4c9d62c3f954"
       }
     ]
   },

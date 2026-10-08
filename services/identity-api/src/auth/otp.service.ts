@@ -7,6 +7,7 @@ import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import type { RecoveryOtpPurpose } from './dto/otp.dto';
 import { NotificationOtpClient, type OtpDeliveryOutcome } from './notification-otp.client';
+import { consumeRateLimit } from './rate-limit';
 
 interface AccountRow {
   id: string;
@@ -266,36 +267,11 @@ export class OtpService {
     return { completed: true };
   }
 
-  private async consumeRateLimit(client: PoolClient, scope: 'ip' | 'account' | 'recipient', bucket: string): Promise<boolean> {
-    // Serialize even an absent bucket: row locks alone lose concurrent first attempts.
-    await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [`otp-rate:${scope}:${bucket}`]);
-    const result = await client.query<{ request_count: number; window_started_at: Date; blocked_until: Date | null }>(
-      `select request_count, window_started_at, blocked_until
-         from auth.otp_rate_limits where scope = $1 and bucket_hmac = $2 for update`,
-      [scope, bucket],
-    );
-    const current = result.rows[0];
-    const now = Date.now();
-    if (current?.blocked_until && current.blocked_until.getTime() > now) return true;
-    const windowExpired = !current
-      || current.window_started_at.getTime() + this.environment.OTP_RATE_WINDOW_SECONDS * 1000 <= now;
-    const nextCount = windowExpired ? 1 : current.request_count + 1;
-    const blocked = nextCount > this.environment.OTP_RATE_MAX_REQUESTS;
-    await client.query(
-      `insert into auth.otp_rate_limits (
-         scope, bucket_hmac, window_started_at, request_count, blocked_until, updated_at
-       ) values ($1, $2, clock_timestamp(), 1, null, clock_timestamp())
-       on conflict (scope, bucket_hmac) do update set
-         window_started_at = case when $3 then clock_timestamp()
-           else auth.otp_rate_limits.window_started_at end,
-         request_count = $4,
-         blocked_until = case when $5 then clock_timestamp() + ($6 * interval '1 second')
-           else null end,
-         updated_at = clock_timestamp()`,
-      [scope, bucket, windowExpired, nextCount, blocked, this.environment.OTP_RATE_WINDOW_SECONDS],
-    );
-    return blocked;
+  private consumeRateLimit(client: PoolClient, scope: 'ip' | 'account' | 'recipient', bucket: string): Promise<boolean> {
+    return consumeRateLimit(client, scope, bucket, {
+      windowSeconds: this.environment.OTP_RATE_WINDOW_SECONDS,
+      maxRequests: this.environment.OTP_RATE_MAX_REQUESTS,
+    });
   }
 
   private async recordDelivery(challengeId: string, delivery: { outcome: OtpDeliveryOutcome; provider?: string }): Promise<void> {

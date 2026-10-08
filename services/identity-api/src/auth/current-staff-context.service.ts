@@ -50,6 +50,42 @@ export class CurrentStaffContextService {
     return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
   }
 
+  /**
+   * Platform administration actor (0069). It is resolved from the account and
+   * its platform grants alone: no staff record or facility membership is
+   * required, and none is bound. The grant is re-read on every request.
+   */
+  async resolvePlatform(subject: string, sessionId?: string): Promise<ActorContext> {
+    const result = await this.database.query<{ id: string; subject: string; email: string | null; display_name: string | null }>(
+      `select id::text, subject, email, display_name from auth.accounts
+        where subject = $1 and status = 'active'
+          and (disabled_until is null or disabled_until <= clock_timestamp())`,
+      [subject],
+    );
+    const account = result.rows[0];
+    if (!account) throw new UnauthorizedException('Platform administrator account is inactive');
+    const authority = await this.resolvePlatformAuthority(account.id);
+    if (!authority.permissions.includes('platform.admin.access')) {
+      throw new UnauthorizedException('Platform administration access is inactive');
+    }
+    return {
+      kind: 'platform',
+      id: account.subject,
+      subject: account.subject,
+      accountId: account.id,
+      sessionId,
+      ...(account.email ? { email: account.email } : {}),
+      ...(account.display_name ? { displayName: account.display_name } : {}),
+      roles: [],
+      permissions: [],
+      platformRoles: authority.roles,
+      platformPermissions: authority.permissions,
+      facilityIds: [],
+      facilities: [],
+      authenticationMethod: 'local',
+    };
+  }
+
   private async resolvePostgres(
     subject: string,
     authenticationMethod: 'local' | 'oidc',

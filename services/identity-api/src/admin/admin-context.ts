@@ -12,6 +12,10 @@ export function requireAdminContext(request: HidRequest): PlatformAccessContext 
   if (!actor || actor.kind === 'patient' || request.accessScope !== 'platform' || !request.correlationId) {
     throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid administrator authentication is required');
   }
+  // Stage 2A: only an MFA-verified platform session builds a platform context.
+  if (actor.kind !== 'platform' || !actor.sessionId) {
+    throw new DomainProblem(403, 'PLATFORM_SESSION_REQUIRED', 'An MFA-verified platform administration session is required');
+  }
   if (!(actor.platformPermissions ?? []).includes('platform.admin.access')) {
     throw new DomainProblem(403, 'PERMISSION_DENIED', 'Required permission is missing');
   }

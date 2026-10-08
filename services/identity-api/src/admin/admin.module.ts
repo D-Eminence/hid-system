@@ -7,12 +7,14 @@ import { IntegrationAdminService } from '../integrations/integration-admin.servi
 import { AdminController } from './admin.controller';
 import { AdminOperationsService } from './admin-operations.service';
 import { AdminService } from './admin.service';
+import { PlatformSecurityController } from './platform-security.controller';
+import { PlatformSecurityService } from './platform-security.service';
 import { PricingService } from './pricing.service';
 import { PublicPricingController } from './public-pricing.controller';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IdentityModule],
-  controllers: [AdminController, PublicPricingController, IntegrationAdminController],
-  providers: [AdminService, AdminOperationsService, PricingService, IntegrationAdminService],
+  controllers: [AdminController, PlatformSecurityController, PublicPricingController, IntegrationAdminController],
+  providers: [AdminService, AdminOperationsService, PricingService, IntegrationAdminService, PlatformSecurityService],
 })
 export class AdminModule {}

@@ -934,3 +934,26 @@ revoke all on platform.record_class_retention_policies, platform.legal_holds,
   identity.emergency_contact_notifications
   from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
     hid_ehr_api_runtime, hid_notification_runtime, hid_notification_worker;
+
+-- Phase 4 Stage 2A platform MFA, sessions and approvals (0069-0070). The
+-- Identity runtime verifies TOTP codes itself and maintains challenges, factors,
+-- recovery codes and session assurance; the 0069 trigger guards restrict which
+-- columns and transitions those updates may touch. It never deletes them.
+-- Approval requests are read directly but change only through the
+-- security-definer commands, which repeat permission and step-up checks.
+grant select, insert, update on auth.mfa_factors, auth.mfa_recovery_codes,
+  auth.mfa_login_challenges, auth.session_assurance to hid_identity_runtime;
+grant select on auth.admin_approval_requests to hid_identity_runtime;
+grant execute on function platform.current_session_id(),
+  auth.account_has_active_mfa(uuid),
+  auth.platform_step_up_is_fresh(uuid),
+  auth.admin_revoke_session_family(uuid, uuid, boolean, text, text, character),
+  auth.admin_request_approval(text, uuid, text, text, text, character),
+  auth.admin_decide_approval(uuid, bigint, text, text, text, character)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function auth.require_platform_step_up(uuid),
+  auth.other_reachable_super_admins(uuid, text),
+  auth.guard_mfa_factor_change(), auth.guard_mfa_recovery_code_change(),
+  auth.guard_mfa_login_challenge_change(), auth.guard_session_assurance_change(),
+  auth.guard_admin_approval_request_change()
+  from public;
