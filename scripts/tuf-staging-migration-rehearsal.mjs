@@ -122,6 +122,21 @@ async function snapshot(db) {
   });
 }
 
+// An additive nullable column on a historical table changes the row JSON but
+// not the historical content. Compare those rows without the added columns and
+// require the added columns to be null on every historical row.
+async function withoutAddedColumns(db, name, columns) {
+  const [schema, table] = name.split('.');
+  return withClient(db, async (client) => {
+    await client.query("set timezone = 'UTC'");
+    const rows = (await client.query(`select (to_jsonb(t) - $1::text[])::text as value,
+        (${columns.map((column) => `${quote(column)} is not null`).join(' or ')}) as populated
+      from ${quote(schema)}.${quote(table)} t order by (to_jsonb(t) - $1::text[])::text collate "C"`, [columns])).rows;
+    assert(rows.every((row) => !row.populated), `Upgrade populated ${columns.join(', ')} on historical ${name}`);
+    return { rows: rows.length, sha256: sha256(rows.map((row) => row.value).join('\n')) };
+  });
+}
+
 async function integrity(db) {
   return withClient(db, async (client) => {
     assert.equal((await client.query('show server_encoding')).rows[0].server_encoding, 'UTF8');
@@ -274,8 +289,13 @@ try {
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
     'auth.permissions', 'auth.role_permissions',
   ]);
+  // 0067 and 0068 add nullable columns to historical audit and account rows.
+  const addedHistoricalColumns = { 'audit.events': ['access_scope'], 'auth.accounts': ['disabled_from_status'] };
   for (const [name, value] of Object.entries(upgradeBefore)) {
-    if (!expectedChanged.has(name)) assert.deepEqual(upgradeAfter[name], value, `Upgrade changed historical ${name}`);
+    if (expectedChanged.has(name)) continue;
+    const added = addedHistoricalColumns[name];
+    assert.deepEqual(added ? await withoutAddedColumns('hid_upgrade', name, added) : upgradeAfter[name], value,
+      `Upgrade changed historical ${name}`);
   }
   restore('hid_upgrade_restored', upgradeBackup);
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
