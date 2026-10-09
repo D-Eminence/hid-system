@@ -714,6 +714,16 @@ Release requires prior verification of the exact version. A post-release
 correction appends a new unverified version and preserves released history;
 ordinary released-result readers receive 404 until at least one release exists.
 
+Reads of executions and their result revisions are patient-authorized. The
+specimen execution list (`GET /api/v1/lab/specimens/:specimenId/executions`)
+and the single execution read both require `lab.execution.read` and an Identity
+`read_records` decision for the specimen's patient before any execution or
+result value is read. A refusal returns `403 LAB_EXECUTION_ACCESS_DENIED` (an
+Identity problem, such as `503 IDENTITY_SERVICE_UNAVAILABLE`, is returned as
+is), an emergency read under an active break-glass grant is allowed as for the
+single read, and a specimen the caller cannot see (another facility, or hidden
+by Lab row-level security) returns `404 LAB_SPECIMEN_NOT_FOUND`.
+
 ### Extracted Lab transport
 
 Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
