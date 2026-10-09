@@ -16,17 +16,18 @@
 -- does not compare the facility with the session: it binds the event to its
 -- work item's accepter and to the session account and membership.
 --
--- Isolated cases: fixtures are inserted with session_replication_role =
--- replica, which skips triggers and foreign-key checks (CHECK constraints still
--- apply), and the five guard triggers are enabled with ENABLE ALWAYS TRIGGER,
--- so only the guard under test runs. They run as the suite runner, a superuser
--- that bypasses RLS. Runtime cases: every trigger, reference and RLS policy
--- applies, and the inserts are the Pharmacy API's own statements, run as
--- hid_pharmacy_api_runtime with the session the API sets. Before 0077 forced
--- RLS refused the runtime's inserts without a session (42501); now the guard
--- refuses them first. Probe cases are undone; lifecycle steps are kept. Each
--- case records 'ok' or 'SQLSTATE: message', and the suite fails at the end
--- listing every case whose outcome differs from the expected one.
+-- Isolated cases: the fixtures are inserted and these cases run with
+-- session_replication_role = replica, which skips triggers and foreign-key
+-- checks (CHECK constraints still apply), and the five guard triggers are
+-- enabled with ENABLE ALWAYS TRIGGER, so only the guard under test runs. They
+-- run as the suite runner, a superuser that bypasses RLS. Runtime cases: every
+-- trigger, reference and RLS policy applies, and the inserts are the Pharmacy
+-- API's own statements, run as hid_pharmacy_api_runtime with the session the
+-- API sets. Before 0077 forced RLS refused the runtime's inserts without a
+-- session (42501); now the guard refuses them first. Probe cases are undone;
+-- lifecycle steps are kept. Each case records 'ok' or 'SQLSTATE: message', and
+-- the suite fails at the end listing every case whose outcome differs from the
+-- expected one.
 --
 -- The rehearsal also runs this suite with a schema owner that is neither a
 -- superuser nor BYPASSRLS (release checklist P8). The guards' parent lookups
@@ -212,8 +213,13 @@ select seq, name, subject, facility, correlation, membership, purpose,
      'e8d30000-0000-4000-8000-000000000001', 'direct-care', 1)
   ) variant(seq, name, subject, facility, correlation, membership, purpose, member);
 
+-- Each case also records the role and replication mode it ran in, so a case
+-- that silently ran in the wrong mode fails the suite.
 create temporary table pharmacy_guard_cases (
-  seq serial, area text not null, name text not null, expected text not null, actual text, primary key (area, name)
+  seq serial, area text not null, name text not null, expected text not null, actual text,
+  run_as name not null default current_user,
+  replication text not null default current_setting('session_replication_role'),
+  primary key (area, name)
 ) on commit drop;
 -- The runtime cases run as the Pharmacy API runtime and record their own outcome.
 grant select, insert on pharmacy_guard_cases to public;
@@ -366,10 +372,12 @@ set local session_replication_role = origin;
 -- check, so a missing session value is refused by the guard; without a
 -- facility the event guard (no facility term) lets A's event through to RLS
 -- under an owner that bypasses RLS.
--- The API also looks for a replay with SELECT ... FOR UPDATE before each insert
--- (pharmacy.service.ts:75-78, 144, 152-154, 196-197, 204-206, 236-238). Those
+-- Before inserting, the API also runs SELECT ... FOR UPDATE: it locks the work
+-- item or dispensing it builds on (pharmacy.service.ts:144, 196-197) and looks
+-- for an earlier request to replay (75-78, 152-154, 204-206, 236-238). Those
 -- statements are not run here: the runtime roles have no UPDATE privilege on
--- the Pharmacy tables and they fail with 42501, a separate release blocker.
+-- the Pharmacy tables and they fail with 42501 (permission denied), a separate
+-- release blocker.
 set local role hid_pharmacy_api_runtime;
 select pg_temp.guard_case('runtime', 'work item: ' || name,
     case when seq = 8 then 'ok' else pg_temp.refusal('work item') end, seq,
@@ -429,6 +437,19 @@ begin
   if (select count(*) from pharmacy_guard_cases) <> 84
      or exists (select 1 from pharmacy_guard_cases where actual is null) then
     raise exception 'the Pharmacy guard suite did not run every case';
+  end if;
+  select string_agg(format('%s / %s: ran as %s with replication %s', area, name, run_as, replication), E'\n'
+           order by seq)
+    into mismatches
+    from pharmacy_guard_cases case_row
+   where case when case_row.area = 'isolated'
+              then case_row.replication is distinct from 'replica'
+                or not exists (select 1 from pg_roles role_row where role_row.rolname = case_row.run_as
+                                 and (role_row.rolsuper or role_row.rolbypassrls))
+              else case_row.replication is distinct from 'origin'
+                or case_row.run_as is distinct from 'hid_pharmacy_api_runtime' end;
+  if mismatches is not null then
+    raise exception E'Pharmacy guard cases ran in the wrong mode:\n%', mismatches;
   end if;
   select string_agg(format('%s / %s: expected %s, got %s', area, name, expected, actual), E'\n' order by seq)
     into mismatches

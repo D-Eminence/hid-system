@@ -26,11 +26,12 @@
 -- outcome differs from the expected one: 'ok', or the guard's SQLSTATE and message.
 --
 -- The rehearsal also runs this suite with a schema owner that is neither a superuser nor BYPASSRLS (release
--- checklist P8). That owner reads the fixtures only through RLS: under member A's session it sees them, without a
--- valid session it does not, and a guard then refuses for a missing parent row, possibly with another of its own
--- messages (a hidden result reads as an unbound result). The suite probes both; when the owner does not bypass RLS,
--- a refused case must be refused by its guard with one of the guard's messages, and an accepted case must still be
--- accepted.
+-- checklist P8). That owner reads the fixtures only through RLS: under member A's session it sees them, under a
+-- session that does not resolve it does not, and a guard then refuses for a missing parent row, possibly with
+-- another of its own messages (a hidden result reads as an unbound result). The suite probes, for each session it
+-- uses, whether the guards' owner sees the parent rows. Where it does, every outcome must be exactly the expected
+-- one; where it does not, a refused case must be refused by its own guard with one of the guard's messages. An
+-- accepted case must be accepted in every mode.
 begin;
 
 -- Security properties that CREATE OR REPLACE must keep: SECURITY DEFINER, the exact search_path, volatility, and
@@ -263,30 +264,36 @@ select ('e8cc0000-0000-4000-8000-00000000004' || n)::uuid, ('e8cc0000-0000-4000-
        'processing', gen_random_uuid(), clock_timestamp() + interval '1 hour', 1
   from generate_series(1, 2) n;
 
--- The session, exactly as services/lab-api/src/database/database.service.ts:48-62 sets it (actor_subject,
--- facility_id, correlation_id, membership_id, purpose_of_use), for each named session of the suite. 'none' sets
--- every value to '', which every platform.current_* function reads as missing, as if it had never been set.
+-- The named sessions of the suite. 'none' sets every value to '', which every platform.current_* function reads
+-- as missing, as if it had never been set. owner_sees is filled by the owner probe below.
+create temporary table lab_guard_sessions (
+  name text primary key, subject text not null, facility text not null, correlation text not null,
+  membership text not null, purpose text not null, owner_sees boolean
+) on commit drop;
+insert into lab_guard_sessions (name, subject, facility, correlation, membership, purpose) values
+  ('none', '', '', '', '', ''),
+  ('A', 'synthetic:lab-guard-a', 'e8c00000-0000-4000-8000-000000000002', 'lab-guard-suite',
+   'e8c30000-0000-4000-8000-000000000001', 'direct-care'),
+  ('A without membership', 'synthetic:lab-guard-a', 'e8c00000-0000-4000-8000-000000000002', 'lab-guard-suite',
+   '', 'direct-care'),
+  ('A without facility', 'synthetic:lab-guard-a', '', 'lab-guard-suite',
+   'e8c30000-0000-4000-8000-000000000001', 'direct-care'),
+  ('unknown subject with B''s membership', 'synthetic:lab-guard-unknown', 'e8c00000-0000-4000-8000-000000000002',
+   'lab-guard-suite', 'e8c30000-0000-4000-8000-000000000002', 'direct-care'),
+  ('C', 'synthetic:lab-guard-c', 'e8c00000-0000-4000-8000-000000000002', 'lab-guard-suite',
+   'e8c30000-0000-4000-8000-000000000004', 'direct-care'),
+  ('D', 'synthetic:lab-guard-d', 'e8c00000-0000-4000-8000-000000000002', 'lab-guard-suite',
+   'e8c30000-0000-4000-8000-000000000005', 'direct-care');
+-- The runtime-path cases set their session as the Lab API runtime.
+grant select on lab_guard_sessions to public;
+
+-- Sets a named session exactly as services/lab-api/src/database/database.service.ts:48-62 does (actor_subject,
+-- facility_id, correlation_id, membership_id, purpose_of_use).
 create function pg_temp.lab_session(session_name text) returns void language plpgsql as $$
 declare
   context record;
 begin
-  select * into strict context
-    from (values
-      ('none', '', '', '', '', ''),
-      ('A', 'synthetic:lab-guard-a', 'e8c00000-0000-4000-8000-000000000002', 'lab-guard-suite',
-       'e8c30000-0000-4000-8000-000000000001', 'direct-care'),
-      ('A without membership', 'synthetic:lab-guard-a', 'e8c00000-0000-4000-8000-000000000002', 'lab-guard-suite',
-       '', 'direct-care'),
-      ('A without facility', 'synthetic:lab-guard-a', '', 'lab-guard-suite',
-       'e8c30000-0000-4000-8000-000000000001', 'direct-care'),
-      ('unknown subject with B''s membership', 'synthetic:lab-guard-unknown', 'e8c00000-0000-4000-8000-000000000002',
-       'lab-guard-suite', 'e8c30000-0000-4000-8000-000000000002', 'direct-care'),
-      ('C', 'synthetic:lab-guard-c', 'e8c00000-0000-4000-8000-000000000002', 'lab-guard-suite',
-       'e8c30000-0000-4000-8000-000000000004', 'direct-care'),
-      ('D', 'synthetic:lab-guard-d', 'e8c00000-0000-4000-8000-000000000002', 'lab-guard-suite',
-       'e8c30000-0000-4000-8000-000000000005', 'direct-care'))
-      sessions(name, subject, facility, correlation, membership, purpose)
-   where sessions.name = session_name;
+  select * into strict context from lab_guard_sessions where name = session_name;
   perform set_config('app.actor_subject', context.subject, true),
           set_config('app.facility_id', context.facility, true),
           set_config('app.correlation_id', context.correlation, true),
@@ -322,7 +329,7 @@ language sql as $$
     coalesce('ocr-publication:' || publication, 'lab-guard-suite-import'))
   from pg_temp.lab_member(member) actor
 $$;
--- services/lab-api/src/lab/lab-work-items.service.ts:201-212 (acceptEhrOrder) for order LR3.
+-- services/lab-api/src/lab/lab-work-items.service.ts:51-62 (acceptEhrOrder) for order LR3.
 create function pg_temp.work_item_insert(member text) returns text language sql as $$
   select format($i$insert into lab.work_items(id,patient_id,facility_id,ordering_facility_id,source_ehr_order_id,
           source_ehr_order_version,source_encounter_id,status,priority,test_code_system,test_code,
@@ -424,8 +431,10 @@ insert into lab_guard_areas values
    '42501: Release actor must match authenticated database context', null),
   ('invalidation', '23514: Governance command must bind the exact current result version',
    '42501: Invalidation actor must match authenticated database context', null);
+-- Each case records its session, the role it ran as and the session_replication_role it ran in.
 create temporary table lab_guard_cases (
   seq serial, path text not null, area text not null references lab_guard_areas, name text not null,
+  session text not null references lab_guard_sessions, run_as name not null, replication text not null,
   expected text not null, actual text, primary key (path, area, name)
 ) on commit drop;
 -- The runtime-path cases run as the Lab API runtime and record their own outcome.
@@ -451,8 +460,9 @@ create function pg_temp.lab_case(path text, area text, case_name text, expected 
 returns void language plpgsql as $$
 begin
   perform pg_temp.lab_session(session_name);
-  insert into lab_guard_cases (path, area, name, expected, actual)
-  values (path, area, case_name, expected, pg_temp.lab_try(statement));
+  insert into lab_guard_cases (path, area, name, session, run_as, replication, expected, actual)
+  values (path, area, case_name, session_name, current_user, current_setting('session_replication_role'), expected,
+          pg_temp.lab_try(statement));
 end $$;
 -- The OCR publication branch of the import guard, under member A's session: (i) the governed chain of clinic F1,
 -- whose job has no patient; (ii) F1's job and extraction with clinic F2's validation and publication, which an
@@ -472,8 +482,8 @@ begin
       'e8cc0000-0000-4000-8000-000000000021', 'e8cc0000-0000-4000-8000-000000000041', 'E'));
 end $$;
 
--- (C) What the guards' owner can see of the parent rows the guards read: under member A's session, and without a
--- session. A superuser owner sees them either way. An owner that does not bypass RLS (P8) sees them only under
+-- Owner probe: whether the guards' owner can see the parent rows the guards read, under each session of the suite.
+-- A superuser owner sees them under every session. An owner that does not bypass RLS (P8) sees them only under
 -- A's session, through A's consent and clinic; the accepted cases need that.
 create function pg_temp.parents_visible() returns boolean language sql as $$
   select exists (select 1 from ehr.documents where id = 'e8c70000-0000-4000-8000-000000000001')
@@ -496,18 +506,18 @@ do $$
 declare
   owner_role name := (select proowner::regrole::name from pg_proc
                        where oid = 'lab.validate_imported_evidence()'::regprocedure);
+  session_name text;
   visible boolean;
 begin
-  perform pg_temp.lab_session('A');
-  execute format('set local role %I', owner_role);
-  visible := pg_temp.parents_visible();
-  reset role;
-  perform set_config('lab_guard.owner_sees', visible::text, true);
-  perform pg_temp.lab_session('none');
-  execute format('set local role %I', owner_role);
-  visible := pg_temp.parents_visible();
-  reset role;
-  perform set_config('lab_guard.owner_sees_without_session', visible::text, true);
+  for session_name in select name from lab_guard_sessions order by name loop
+    perform pg_temp.lab_session(session_name);
+    execute format('set local role %I', owner_role);
+    visible := pg_temp.parents_visible();
+    reset role;
+    update lab_guard_sessions set owner_sees = visible where name = session_name;
+  end loop;
+  perform set_config('lab_guard.owner_sees', (select owner_sees from lab_guard_sessions where name = 'A')::text,
+    true);
 end $$;
 
 -- (A) Isolated guards, as the superuser suite runner. Each row names a member; the session is one of the named
@@ -545,11 +555,13 @@ alter table lab.result_invalidations enable trigger lab_invalidation_validate;
 -- (B) Runtime path: every trigger, foreign key and RLS policy, as hid_lab_api_runtime with the Lab API's session
 -- and INSERT statements. The API binds the session's own account and membership into every row, so the
 -- missing-session variants here are accounts that do not resolve: an unknown subject, a disabled account, an
--- account disabled until later. An empty membership or facility cannot reach a guard through the API: the same ''
--- is bound into a uuid column and fails with 22P02 first (request-context.ts:67 falls back to ''). No service
--- writes lab.result_invalidations. The API's replay reads with SELECT ... FOR UPDATE (lab-imports.service.ts:65-72,
--- lab-work-items.service.ts:189-195, lab-accessions.service.ts:41-43) are not run: the runtime role has no UPDATE
--- privilege on those tables and they fail with 42501, a separate release blocker outside this stage.
+-- account disabled until later. An empty membership cannot reach a guard through the API: request-context.ts:67
+-- falls back to '', and every writer binds that '' into the row's membership column (uuid), which fails with 22P02
+-- before any trigger. An empty facility cannot occur: request-context.ts:54 refuses a request without one. No
+-- service writes lab.result_invalidations. The API's replay reads with SELECT ... FOR UPDATE
+-- (lab-imports.service.ts:65-72, lab-work-items.service.ts:39-45, lab-accessions.service.ts:41-43) are not run:
+-- the runtime role has no UPDATE privilege on those tables and they fail with 42501, a separate release blocker
+-- outside this stage.
 set local session_replication_role = origin;
 set local role hid_lab_api_runtime;
 select pg_temp.lab_case('runtime', a.area, c.name,
@@ -565,31 +577,38 @@ select pg_temp.lab_case('runtime', a.area, c.name,
 select pg_temp.ocr_cases('runtime');
 reset role;
 
--- Every case ran, and every outcome is the expected one. Accepted cases must be accepted in every mode. When the
--- owner does not bypass RLS, a refused case must be refused by its own guard, with any of the guard's messages.
+-- Every case ran in its mode, and every outcome is the expected one. Isolated cases run as a role that bypasses RLS
+-- in replica mode, runtime-path cases as hid_lab_api_runtime in origin mode. Accepted cases must be accepted in
+-- every mode. Where the owner does not see the parent rows under the case's session, a refused case must be refused
+-- by its own guard, with any of the guard's messages.
 do $$
 declare
-  owner_sees boolean := current_setting('lab_guard.owner_sees')::boolean;
-  owner_sees_without_session boolean := current_setting('lab_guard.owner_sees_without_session')::boolean;
+  owner_view text := (select string_agg(format('%s: %s', name, owner_sees), ', ' order by name)
+                        from lab_guard_sessions);
   mismatches text;
 begin
-  if (select count(*) from lab_guard_cases) <> 86 or exists (select 1 from lab_guard_cases where actual is null) then
+  if (select count(*) from lab_guard_cases) <> 86 or exists (select 1 from lab_guard_cases where actual is null)
+     or exists (select 1 from lab_guard_sessions where owner_sees is null) then
     raise exception 'the Lab session guard suite did not run every case';
   end if;
-  select string_agg(format('%s / %s / %s: expected %s, got %s', c.path, c.area, c.name, c.expected, c.actual),
-           E'\n' order by c.seq)
+  select string_agg(format('%s / %s / %s (session %s, as %s, %s): expected %s, got %s', c.path, c.area, c.name,
+           c.session, c.run_as, c.replication, c.expected, c.actual), E'\n' order by c.seq)
     into mismatches
     from lab_guard_cases c
     join lab_guard_areas a on a.area = c.area
-   where case when c.expected = 'ok' or owner_sees_without_session then c.actual <> c.expected
+    join lab_guard_sessions s on s.name = c.session
+    left join pg_roles r on r.rolname = c.run_as
+   where case c.path
+           when 'isolated' then not coalesce(r.rolsuper or r.rolbypassrls, false) or c.replication <> 'replica'
+           else c.run_as <> 'hid_lab_api_runtime' or c.replication <> 'origin' end
+      or case when c.expected = 'ok' or s.owner_sees then c.actual <> c.expected
               else c.actual not in (a.context_refusal, a.actor_refusal, coalesce(a.evidence_refusal, a.actor_refusal))
          end;
   if mismatches is not null then
-    raise exception E'Lab session guard cases failed (owner sees fixtures with A''s session: %, without: %):\n%',
-      owner_sees, owner_sees_without_session, mismatches;
+    raise exception E'Lab session guard cases failed (owner sees the parent rows under %):\n%', owner_view, mismatches;
   end if;
-  raise notice 'Lab session guard suite: % cases passed (owner sees fixtures with A''s session: %, without: %)',
-    (select count(*) from lab_guard_cases), owner_sees, owner_sees_without_session;
+  raise notice 'Lab session guard suite: % cases passed (owner sees the parent rows under %)',
+    (select count(*) from lab_guard_cases), owner_view;
 end $$;
 
 rollback;

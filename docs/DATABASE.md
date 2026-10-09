@@ -1522,13 +1522,27 @@ Tests (rollback-only, synthetic fixtures):
   OCR worker's session, through the real commands and triggers. On 0076 it
   fails with 10 wrong outcomes.
 - `ocr-job-source-and-publication.integration.sql`: 25 cases as
-  `hid_ocr_api_runtime` with the OCR API's session. On 0076 it fails with 9.
+  `hid_ocr_api_runtime` with the OCR API's session. On 0076 it fails with 10.
 - `lab-session-guards.integration.sql`, `pharmacy-session-guards.integration.sql`
   and `outreach-session-guards.integration.sql`: each guard isolated
   (`session_replication_role = replica` plus `ENABLE ALWAYS TRIGGER`) under a
   session that bypasses row-level security, and the services' own statements
-  as the runtime role with every trigger and policy. STAGE8_DOMAIN_SUITE_COUNTS
+  as the runtime role with every trigger and policy. Each records the role and
+  replication mode of every case and fails if a case ran in the wrong one.
+  - Lab: 86 cases. On 0076 it fails with 60: 42 isolated cases were accepted
+    (six missing-session variants for each of the seven guarded tables) and 18
+    runtime cases were refused only by row-level security.
+  - Pharmacy: 84 cases. On 0076 it fails with 58: 29 isolated cases accepted,
+    29 runtime cases refused only by row-level security.
+  - Outreach: 121 cases (51 isolated, 50 runtime, 20 for the API's create,
+    link, campaign and status commands). On 0076 it fails with 67: 45 change
+    with 0077 alone, 33 with the grant alone, and 11 need both.
+  - Restoring any one replaced function to its earlier body makes its suite
+    fail.
 - Each suite checks the replaced functions' `SECURITY DEFINER`, `search_path`,
   volatility, owner and enabled triggers, and probes whether the guard's owner
   can see its fixtures: under the rehearsal's non-superuser owner, refusals are
-  required but their codes may differ.
+  required but their codes may differ. Under that owner alone the Pharmacy
+  event, dispensing and reversal guards refuse a missing session anyway,
+  because their parent rows are hidden from them; the rehearsal's first run,
+  under the migration owner, is the one that detects a regression there.
