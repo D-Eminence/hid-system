@@ -87,6 +87,7 @@ const acceptedMigrations = new Map([
   ['0073_session_revocation_serialization.sql', '4901fc0a868e709db5edf28055760aa1a0cb85cefe327c0319f421d284c5df93'],
   ['0074_staff_access_request_outcome.sql', '21a412f66fa6d3d4613ab783969ec0b8fb18bd8895af97b17428c7aac4bf8efb'],
   ['0075_ocr_queue_metrics_and_outbox_insert.sql', '71063d846570742aea3a026994a888fca7a56c0f05f8f8f345b400f64dd8512f'],
+  ['0076_mfa_account_lock_and_fail_closed_ocr_guards.sql', 'd83ad67ec5e172d529bbbb8e41213f602d20458c98b0bd5229dca073d5d13834'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

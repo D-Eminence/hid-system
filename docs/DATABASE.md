@@ -1242,6 +1242,9 @@ a reachable Super Admin to be suspendable.
   that a refresh in another tab created while it waited.
   Every path that revokes sessions therefore locks the account row before any
   session row. The account actions that change the token version already did.
+- Platform MFA transactions do not use this helper: since Phase 4 Stage 7A they
+  take the account row with `auth.lock_account_for_mfa(uuid)` (0076, below),
+  which is `FOR NO KEY UPDATE`.
 - `runtime-grants.sql` grants `EXECUTE` on the helper to `hid_identity_runtime`
   only; `PUBLIC` has none. The runtime still has only `SELECT` on
   `auth.accounts`. `runtime-roles.integration.sql` asserts both.
@@ -1327,3 +1330,84 @@ a reachable Super Admin to be suspendable.
   role that does not inherit the worker, the owner's exact column limit,
   that visibility comes only from the exact policy, and same-facility outbox
   inserts by `hid_ocr_api_runtime` (another facility is refused).
+
+## MFA account lock and fail-closed OCR validation guards (0076)
+
+`0076_mfa_account_lock_and_fail_closed_ocr_guards.sql` (Phase 4 Stage 7):
+
+- `auth.lock_account_for_mfa(uuid)` takes `FOR NO KEY UPDATE` on the account row.
+  Every platform MFA transaction of the Identity API calls it before any other
+  lock or write: the password step, sign-in with a TOTP or recovery code,
+  enrolment start and activation, step-up and recovery-code regeneration. An
+  approved MFA reset (`auth.admin_decide_approval`, 0070) locks the target
+  account `FOR UPDATE` and then its factors, recovery codes and sessions. An MFA
+  transaction that locked its challenge, assurance or factor first, and reached
+  the account only through the `FOR KEY SHARE` of its later inserts, could
+  deadlock with it.
+- `FOR NO KEY UPDATE` conflicts with that `FOR UPDATE`, with the revocation
+  lock (`auth.lock_account_sessions`, 0073) and with itself, so MFA
+  transactions of one account run one at a time. Parallel second-factor
+  attempts are then checked against the failure limit one after another, and a
+  password step supersedes the open challenge of the one before it. It does not
+  conflict with the `FOR KEY SHARE` of a refresh rotation or a staff sign-in of
+  the account.
+- Two other modes were rejected after local reproductions. With `FOR UPDATE`, a
+  step-up that raced a refresh found its session rotated and was refused, and
+  the password step deadlocked with a staff sign-in through the principal's
+  `auth.login_attempts` row. With `FOR KEY SHARE`, six parallel step-ups with a
+  wrong code were all tested instead of five and a refusal, and two parallel
+  password steps each left a challenge open.
+- The helper is `SECURITY DEFINER` with `search_path = auth, pg_temp`.
+  `runtime-grants.sql` grants `EXECUTE` to `hid_identity_runtime` only, and the
+  runtime still cannot update `auth.accounts`. `mfa-account-lock.integration.sql`
+  checks the catalog contract and the exact function body, so a later `CREATE OR
+  REPLACE` cannot weaken the lock or add `SKIP LOCKED`, `NOWAIT` or a
+  condition. `runtime-roles.integration.sql` checks that the ACL names no
+  grantee but the owner and `hid_identity_runtime`. The races run in
+  `services/identity-api/scripts/verify-platform-security-runtime.mjs`.
+
+The guards (7B):
+
+- `ocr.validate_patient_confirmation()` and `ocr.validate_validation_insert()`
+  are the `BEFORE INSERT` triggers on `ocr.patient_confirmations` and
+  `ocr.validations`. They compared with `<>`, which is NULL when either side is
+  NULL, and `IF` does not raise on NULL. A confirmation was therefore accepted
+  for any patient when the guard could not read the source document (missing,
+  or hidden by row-level security from a definer owner that does not bypass it,
+  release checklist P8). A validation was accepted when the guard could not
+  read the extraction, or when the session had no account
+  (`platform.current_account_id()` NULL: no `app.actor_subject`, or no active
+  account for it) or no membership (`platform.current_membership_id()` NULL).
+- Both guards now refuse a missing job, source patient, extraction, account or
+  membership explicitly and compare with `IS DISTINCT FROM`. The confirmation
+  guard also requires `confirmed_by` and `confirmed_by_membership_id` to be the
+  session's account and membership, as the validation guard already required
+  of `validated_by` and `validated_by_membership_id`.
+- Error codes (`23514`) and messages are unchanged. `CREATE OR REPLACE` keeps
+  each function's owner and ACL; `SECURITY DEFINER`, the `search_path` and the
+  volatility are restated as in 0013 and 0016, and the triggers are unchanged.
+- Under a non-bypass owner that cannot read the source document, every
+  confirmation is refused. Validations read only facility-scoped OCR tables,
+  which the session's facility makes visible, and are unaffected.
+- `ocr-validation-guards.integration.sql` runs 23 cases with only the guard
+  under test enabled (`session_replication_role = replica` plus
+  `ENABLE ALWAYS TRIGGER`), each attempted and undone:
+  - valid writes;
+  - a missing patient, another patient than the source document's or the
+    job's own;
+  - a missing document, job or extraction, or an extraction of another job;
+  - another facility, a job not awaiting validation, a wrong version;
+  - a session without an account or membership, and another account or
+    membership than the session's.
+- The suite also checks that both functions keep `SECURITY DEFINER`, their
+  `search_path`, volatility and owner, and their enabled triggers.
+- On 0075 it fails with 10 wrong outcomes. Under the non-superuser owner of the
+  rehearsal it fails with 12, because the guard cannot read the source document
+  and also accepted the wrong patient.
+- Removing any one comparison predicate of either guard makes it fail. The
+  explicit `IS NULL` refusals are redundant in outcome only because every
+  compared column of the new row is `NOT NULL`. `IS DISTINCT FROM` refuses a
+  NULL against a value, but a NULL against a NULL is not distinct; the column's
+  `NOT NULL` constraint then refuses the row (`23502`, not the guard's
+  `23514`). A guard that compares a nullable column needs the explicit
+  refusal.

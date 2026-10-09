@@ -155,7 +155,8 @@ export class TokenService {
    */
   async issuePlatformSession(client: PoolClient, assurance: PlatformSessionAssurance,
     event: SessionEventMetadata): Promise<LoginResult> {
-    const resolved = await this.currentStaff.resolvePlatform(assurance.subject);
+    // On this transaction's client: the caller holds the account row lock (Stage 7A).
+    const resolved = await this.currentStaff.resolvePlatform(assurance.subject, undefined, client);
     if (resolved.accountId !== assurance.accountId) {
       throw new UnauthorizedException('Resolved account does not match the authenticated identity');
     }
