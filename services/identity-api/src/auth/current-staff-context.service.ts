@@ -1,4 +1,5 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
+import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 import type { ActorContext, FacilityAssignment } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CredentialIdentity } from './auth.types';
@@ -54,9 +55,13 @@ export class CurrentStaffContextService {
    * Platform administration actor (0069). It is resolved from the account and
    * its platform grants alone: no staff record or facility membership is
    * required, and none is bound. The grant is re-read on every request.
+   * Given a transaction's `client`, it reads on that client: a platform sign-in
+   * resolves the administrator while it holds the account row lock (Stage 7A),
+   * and must not need a second pool connection that the requests waiting on
+   * that lock may be holding.
    */
-  async resolvePlatform(subject: string, sessionId?: string): Promise<ActorContext> {
-    const result = await this.database.query<{ id: string; subject: string; email: string | null; display_name: string | null }>(
+  async resolvePlatform(subject: string, sessionId?: string, client?: Pick<PoolClient, 'query'>): Promise<ActorContext> {
+    const result = await this.read<{ id: string; subject: string; email: string | null; display_name: string | null }>(client,
       `select id::text, subject, email, display_name from auth.accounts
         where subject = $1 and status = 'active'
           and (disabled_until is null or disabled_until <= clock_timestamp())`,
@@ -64,7 +69,7 @@ export class CurrentStaffContextService {
     );
     const account = result.rows[0];
     if (!account) throw new UnauthorizedException('Platform administrator account is inactive');
-    const authority = await this.resolvePlatformAuthority(account.id);
+    const authority = await this.resolvePlatformAuthority(account.id, client);
     if (!authority.permissions.includes('platform.admin.access')) {
       throw new UnauthorizedException('Platform administration access is inactive');
     }
@@ -155,9 +160,10 @@ export class CurrentStaffContextService {
     };
   }
 
-  private async resolvePlatformAuthority(accountId: string | undefined): Promise<PlatformAuthorityRow> {
+  private async resolvePlatformAuthority(accountId: string | undefined,
+    client?: Pick<PoolClient, 'query'>): Promise<PlatformAuthorityRow> {
     if (!accountId) return { roles: [], permissions: [] };
-    const result = await this.database.query<PlatformAuthorityRow>(
+    const result = await this.read<PlatformAuthorityRow>(client,
       `select
          coalesce(array_agg(distinct role.code) filter (where role.code is not null), array[]::text[]) as roles,
          coalesce(array_agg(distinct permission.code) filter (where permission.code is not null), array[]::text[]) as permissions
@@ -223,5 +229,11 @@ export class CurrentStaffContextService {
       permissions: [...new Set(row.permissions)].sort(),
       isPrimary: row.is_primary,
     };
+  }
+
+  /** On the caller's transaction when one is given, otherwise on the pool. */
+  private read<Row extends QueryResultRow>(client: Pick<PoolClient, 'query'> | undefined, text: string,
+    values: unknown[]): Promise<QueryResult<Row>> {
+    return client ? client.query<Row>(text, values) : this.database.query<Row>(text, values);
   }
 }
