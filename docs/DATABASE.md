@@ -1242,6 +1242,14 @@ a reachable Super Admin to be suspendable.
   that a refresh in another tab created while it waited.
   Every path that revokes sessions therefore locks the account row before any
   session row. The account actions that change the token version already did.
+- Since Phase 4 Stage 7A, every platform MFA transaction also calls the helper
+  before any other lock or write: the password step, sign-in with a TOTP or
+  recovery code, enrolment start and activation, step-up and recovery-code
+  regeneration. An approved MFA reset (`auth.admin_decide_approval`, 0070) locks
+  the target account and then its factors, recovery codes and sessions; an MFA
+  transaction that locked its challenge or factor first, and reached the account
+  only through the `FOR KEY SHARE` of its session-event or recovery-code insert,
+  could deadlock with it.
 - `runtime-grants.sql` grants `EXECUTE` on the helper to `hid_identity_runtime`
   only; `PUBLIC` has none. The runtime still has only `SELECT` on
   `auth.accounts`. `runtime-roles.integration.sql` asserts both.
@@ -1327,3 +1335,39 @@ a reachable Super Admin to be suspendable.
   role that does not inherit the worker, the owner's exact column limit,
   that visibility comes only from the exact policy, and same-facility outbox
   inserts by `hid_ocr_api_runtime` (another facility is refused).
+
+## Fail-closed OCR validation guards (0076)
+
+`0076_ocr_validation_guards_fail_closed.sql` (Phase 4 Stage 7B):
+
+- `ocr.validate_patient_confirmation()` and `ocr.validate_validation_insert()`
+  are the `BEFORE INSERT` triggers on `ocr.patient_confirmations` and
+  `ocr.validations`. They compared with `<>`, which is NULL when either side is
+  NULL, and `IF` does not raise on NULL. A confirmation was therefore accepted
+  for any patient when the guard could not read the source document (missing,
+  or hidden by row-level security from a definer owner that does not bypass it,
+  release checklist P8). A validation was accepted when the guard could not
+  read the extraction, or when the session had no account
+  (`platform.current_account_id()` NULL: no `app.actor_subject`, or no active
+  account for it) or no membership (`platform.current_membership_id()` NULL).
+- Both guards now refuse a missing job, source patient, extraction, account or
+  membership explicitly and compare with `IS DISTINCT FROM`. The confirmation
+  guard also requires `confirmed_by` and `confirmed_by_membership_id` to be the
+  session's account and membership, as the validation guard already required
+  of `validated_by` and `validated_by_membership_id`.
+- Error codes (`23514`) and messages are unchanged. `CREATE OR REPLACE` keeps
+  each function's owner and ACL; `SECURITY DEFINER`, the `search_path` and the
+  volatility are restated as in 0013 and 0016, and the triggers are unchanged.
+- Under a non-bypass owner that cannot read the source document, every
+  confirmation is refused. Validations read only facility-scoped OCR tables,
+  which the session's facility makes visible, and are unaffected.
+- `ocr-validation-guards.integration.sql` runs 19 cases with only the guard
+  under test enabled (`session_replication_role = replica` plus
+  `ENABLE ALWAYS TRIGGER`), each attempted and undone: valid writes, a missing
+  or another patient, a missing document, job or extraction, an extraction of
+  another job, a wrong version, a session without an account or membership, and
+  another account or membership than the session's. It also checks that both
+  functions keep `SECURITY DEFINER`, their `search_path`, volatility and owner,
+  and their enabled triggers. On 0075 it fails with 10 wrong outcomes (12 under
+  the non-superuser owner of the rehearsal, where the guard cannot read the
+  source document and also accepted the wrong patient).
