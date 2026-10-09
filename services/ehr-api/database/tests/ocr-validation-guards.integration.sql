@@ -57,7 +57,8 @@ alter table ocr.validations enable always trigger ocr_validations_validate;
 -- One source document of patient P1 (fb500000-...01) in facility A
 -- (fb000000-...02). Job J1 awaits validation for it; job J2 names a document
 -- that does not exist; job J3 is another job of the same document; job J4 is
--- still queued. Extractions E1 and E3 belong to J1 and J3.
+-- still queued; job J5 awaits validation but was created for patient P2.
+-- Extractions E1, E3 and E4 belong to J1, J3 and J4.
 insert into ehr.documents (id, patient_id, facility_id, created_by, created_by_membership_id, original_file_name,
   storage_bucket, storage_key, declared_media_type, retention_class) values
   ('fb200000-0000-4000-8000-000000000001', 'fb500000-0000-4000-8000-000000000001',
@@ -82,6 +83,12 @@ insert into ocr.jobs (id, facility_id, document_id, source_object_version_id, so
    'fb200000-0000-4000-8000-000000000001', 'synthetic-version-1', repeat('a', 64), 'ocr-guard-fixture-0004',
    repeat('b', 64), 'test', 'fb300000-0000-4000-8000-000000000001', 'fb400000-0000-4000-8000-000000000001',
    'ocr-guard-fixture', 'queued');
+insert into ocr.jobs (id, facility_id, document_id, patient_id, source_object_version_id, source_sha256_hex,
+  idempotency_key, request_sha256, provider, created_by, created_by_membership_id, correlation_id, status) values
+  ('fb100000-0000-4000-8000-000000000005', 'fb000000-0000-4000-8000-000000000002',
+   'fb200000-0000-4000-8000-000000000001', 'fb500000-0000-4000-8000-000000000002', 'synthetic-version-1',
+   repeat('a', 64), 'ocr-guard-fixture-0005', repeat('b', 64), 'test', 'fb300000-0000-4000-8000-000000000001',
+   'fb400000-0000-4000-8000-000000000001', 'ocr-guard-fixture', 'awaiting_validation');
 insert into ocr.extractions (id, job_id, facility_id, document_id, extraction_version, attempt_no, provider,
   provider_model, provider_result_key, content_sha256, source_object_version_id, source_sha256_hex, provenance) values
   ('fb600000-0000-4000-8000-000000000001', 'fb100000-0000-4000-8000-000000000001',
@@ -89,7 +96,10 @@ insert into ocr.extractions (id, job_id, facility_id, document_id, extraction_ve
    'ocr-guard-result-1', repeat('c', 64), 'synthetic-version-1', repeat('a', 64), '{}'::jsonb),
   ('fb600000-0000-4000-8000-000000000003', 'fb100000-0000-4000-8000-000000000003',
    'fb000000-0000-4000-8000-000000000002', 'fb200000-0000-4000-8000-000000000001', 1, 1, 'test', 'test-model',
-   'ocr-guard-result-3', repeat('d', 64), 'synthetic-version-1', repeat('a', 64), '{}'::jsonb);
+   'ocr-guard-result-3', repeat('d', 64), 'synthetic-version-1', repeat('a', 64), '{}'::jsonb),
+  ('fb600000-0000-4000-8000-000000000004', 'fb100000-0000-4000-8000-000000000004',
+   'fb000000-0000-4000-8000-000000000002', 'fb200000-0000-4000-8000-000000000001', 1, 1, 'test', 'test-model',
+   'ocr-guard-result-4', repeat('f', 64), 'synthetic-version-1', repeat('a', 64), '{}'::jsonb);
 
 -- The reviewing session, as the OCR API sets it.
 select set_config('app.facility_id', 'fb000000-0000-4000-8000-000000000002', true),
@@ -148,11 +158,13 @@ end $$;
 -- Patient confirmations.
 create function pg_temp.confirmation(job uuid, patient uuid, version integer,
   confirmer uuid default 'fb300000-0000-4000-8000-000000000001',
-  membership uuid default 'fb400000-0000-4000-8000-000000000001') returns text language sql as $$
+  membership uuid default 'fb400000-0000-4000-8000-000000000001',
+  facility uuid default 'fb000000-0000-4000-8000-000000000002') returns text language sql as $$
   select format($insert$insert into ocr.patient_confirmations (job_id, facility_id, patient_id, confirmation_version,
       method, reason, confirmed_by, confirmed_by_membership_id, idempotency_key, request_sha256)
-    values (%L, 'fb000000-0000-4000-8000-000000000002', %L, %s, 'source_document', 'Synthetic OCR guard check',
-      %L, %L, 'ocr-guard-confirmation-0001', repeat('e', 64))$insert$, job, patient, version, confirmer, membership)
+    values (%L, %L, %L, %s, 'source_document', 'Synthetic OCR guard check',
+      %L, %L, 'ocr-guard-confirmation-0001', repeat('e', 64))$insert$, job, facility, patient, version, confirmer,
+    membership)
 $$;
 select pg_temp.run_case(name, expected, 'Patient confirmation does not match the canonical OCR source patient',
     subject, session_membership, statement)
@@ -189,18 +201,27 @@ select pg_temp.run_case(name, expected, 'Patient confirmation does not match the
     ('confirmation: another membership than the session''s', 'refused',
       'synthetic:ocr-guard-reviewer', 'fb400000-0000-4000-8000-000000000001',
       pg_temp.confirmation('fb100000-0000-4000-8000-000000000001', 'fb500000-0000-4000-8000-000000000001', 1,
-        'fb300000-0000-4000-8000-000000000001', 'fb400000-0000-4000-8000-000000000002'))
+        'fb300000-0000-4000-8000-000000000001', 'fb400000-0000-4000-8000-000000000002')),
+    ('confirmation: another facility than the job''s', 'refused',
+      'synthetic:ocr-guard-reviewer', 'fb400000-0000-4000-8000-000000000001',
+      pg_temp.confirmation('fb100000-0000-4000-8000-000000000001', 'fb500000-0000-4000-8000-000000000001', 1,
+        facility => 'fb000000-0000-4000-8000-000000000003')),
+    ('confirmation: another patient than the job''s own', 'refused',
+      'synthetic:ocr-guard-reviewer', 'fb400000-0000-4000-8000-000000000001',
+      pg_temp.confirmation('fb100000-0000-4000-8000-000000000005', 'fb500000-0000-4000-8000-000000000001', 1))
   ) cases(name, expected, subject, session_membership, statement);
 
 -- Validations.
-create function pg_temp.validation(job uuid, extraction uuid, reviewer uuid, membership uuid, version integer)
-returns text language sql as $$
+create function pg_temp.validation(job uuid, extraction uuid, reviewer uuid, membership uuid, version integer,
+  facility uuid default 'fb000000-0000-4000-8000-000000000002') returns text language sql as $$
   select format($insert$insert into ocr.validations (job_id, facility_id, extraction_id, validation_version,
       validated_payload, reason, validated_by, validated_by_membership_id)
-    values (%L, 'fb000000-0000-4000-8000-000000000002', %L, %s, '{}'::jsonb, 'Synthetic OCR guard check', %L, %L)$insert$,
-    job, extraction, version, reviewer, membership)
+    values (%L, %L, %L, %s, '{}'::jsonb, 'Synthetic OCR guard check', %L, %L)$insert$,
+    job, facility, extraction, version, reviewer, membership)
 $$;
-select pg_temp.run_case(name, expected, 'Validation does not match the authorized OCR review context',
+select pg_temp.run_case(name, expected,
+    case when name = 'validation: not the next version' then 'Validation version is not the next immutable version'
+      else 'Validation does not match the authorized OCR review context' end,
     subject, session_membership, statement)
   from (values
     ('validation: the reviewing account and membership', 'accepted',
@@ -235,10 +256,19 @@ select pg_temp.run_case(name, expected, 'Validation does not match the authorize
       'synthetic:ocr-guard-reviewer', 'fb400000-0000-4000-8000-000000000001',
       pg_temp.validation('fb100000-0000-4000-8000-000000000001', 'fb600000-0000-4000-8000-000000000001',
         'fb300000-0000-4000-8000-000000000001', 'fb400000-0000-4000-8000-000000000002', 1)),
-    ('validation: the job is not awaiting validation', 'refused',
+    ('validation: the job is not awaiting validation (its own extraction)', 'refused',
       'synthetic:ocr-guard-reviewer', 'fb400000-0000-4000-8000-000000000001',
-      pg_temp.validation('fb100000-0000-4000-8000-000000000004', 'fb600000-0000-4000-8000-000000000001',
-        'fb300000-0000-4000-8000-000000000001', 'fb400000-0000-4000-8000-000000000001', 1))
+      pg_temp.validation('fb100000-0000-4000-8000-000000000004', 'fb600000-0000-4000-8000-000000000004',
+        'fb300000-0000-4000-8000-000000000001', 'fb400000-0000-4000-8000-000000000001', 1)),
+    ('validation: another facility than the job''s', 'refused',
+      'synthetic:ocr-guard-reviewer', 'fb400000-0000-4000-8000-000000000001',
+      pg_temp.validation('fb100000-0000-4000-8000-000000000001', 'fb600000-0000-4000-8000-000000000001',
+        'fb300000-0000-4000-8000-000000000001', 'fb400000-0000-4000-8000-000000000001', 1,
+        'fb000000-0000-4000-8000-000000000003')),
+    ('validation: not the next version', 'refused',
+      'synthetic:ocr-guard-reviewer', 'fb400000-0000-4000-8000-000000000001',
+      pg_temp.validation('fb100000-0000-4000-8000-000000000001', 'fb600000-0000-4000-8000-000000000001',
+        'fb300000-0000-4000-8000-000000000001', 'fb400000-0000-4000-8000-000000000001', 2))
   ) cases(name, expected, subject, session_membership, statement);
 
 -- Every case ran, and every outcome is the expected one.
@@ -246,7 +276,7 @@ do $$
 declare
   failures text;
 begin
-  if (select count(*) from ocr_guard_cases) <> 19 or exists (select 1 from ocr_guard_cases where actual is null) then
+  if (select count(*) from ocr_guard_cases) <> 23 or exists (select 1 from ocr_guard_cases where actual is null) then
     raise exception 'the OCR guard suite did not run every case';
   end if;
   select string_agg(format('%s (expected %s, got %s)', name, expected, actual), E'\n  ' order by name)
