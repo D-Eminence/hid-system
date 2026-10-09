@@ -272,14 +272,17 @@ begin
      ) then
     raise exception 'session revocation lock helper privileges are inconsistent';
   end if;
-  -- The MFA account lock (0076) likewise: the Identity runtime only.
+  -- The MFA account lock (0076): the Identity runtime only. Its ACL must name
+  -- no grantee but the owner and hid_identity_runtime, so a grant to any other
+  -- role, PUBLIC included, fails here. A NULL ACL is the default PUBLIC grant.
   if not has_function_privilege('hid_identity_api_runtime', 'auth.lock_account_for_mfa(uuid)', 'EXECUTE')
-     or has_function_privilege('public', 'auth.lock_account_for_mfa(uuid)', 'EXECUTE')
+     or (select function_row.proacl from pg_proc function_row
+          where function_row.oid = 'auth.lock_account_for_mfa(uuid)'::regprocedure) is null
      or exists (
-       select 1 from unnest(array['hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_lab_api_runtime',
-         'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime',
-         'hid_document_scanner', 'hid_ocr_worker', 'hid_event_dispatcher']) runtime(role_name)
-       where has_function_privilege(runtime.role_name, 'auth.lock_account_for_mfa(uuid)', 'EXECUTE')
+       select 1 from pg_proc function_row, aclexplode(function_row.proacl) privilege
+       where function_row.oid = 'auth.lock_account_for_mfa(uuid)'::regprocedure
+         and privilege.grantee <> function_row.proowner
+         and privilege.grantee <> 'hid_identity_runtime'::regrole
      ) then
     raise exception 'MFA account lock helper privileges are inconsistent';
   end if;

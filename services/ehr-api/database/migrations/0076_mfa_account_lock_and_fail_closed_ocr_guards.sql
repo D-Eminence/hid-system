@@ -86,16 +86,20 @@ $$;
 -- two could deadlock. The Identity API now calls this helper first in every
 -- MFA transaction.
 --
--- FOR KEY SHARE is the weakest row lock that conflicts with FOR UPDATE. An MFA
--- transaction therefore waits for an approved reset or a session revocation
--- (0073) of the account, and they wait for it, but it does not wait for a
--- refresh rotation, a staff sign-in or another MFA transaction of the account,
--- which take FOR KEY SHARE too. auth.lock_account_sessions (0073, FOR UPDATE)
--- would also have serialized those: a step-up that raced a refresh found its
--- session rotated and was refused, and the password step could deadlock with a
--- staff sign-in of the same administrator through the principal's
--- login-attempt row. It only locks. The role bootstrap grants it to the
--- Identity runtime only.
+-- The lock is FOR NO KEY UPDATE, the lock a non-key UPDATE of the row takes.
+-- It conflicts with the FOR UPDATE of an approved reset or a session revocation
+-- (0073) of the account, so the MFA transaction and those wait for each other.
+-- It also conflicts with itself, so MFA transactions of one account run one at
+-- a time: each checks the second-factor failure limit only after the previous
+-- one committed its failure, and a password step supersedes the challenge of
+-- the one before it. It does not conflict with FOR KEY SHARE, which a refresh
+-- rotation or a staff sign-in of the account takes when it inserts a session
+-- or a session event. auth.lock_account_sessions (0073, FOR UPDATE) would also
+-- have serialized those: a step-up that raced a refresh found its session
+-- rotated and was refused, and the password step could deadlock with a staff
+-- sign-in of the same administrator through the principal's login-attempt
+-- row. It only locks. The role bootstrap grants it to the Identity runtime
+-- only.
 create function auth.lock_account_for_mfa(target_account uuid)
 returns void
 language plpgsql
@@ -103,9 +107,9 @@ security definer
 set search_path = auth, pg_temp
 as $$
 begin
-  perform 1 from auth.accounts account_row where account_row.id = target_account for key share;
+  perform 1 from auth.accounts account_row where account_row.id = target_account for no key update;
 end
 $$;
 revoke all on function auth.lock_account_for_mfa(uuid) from public;
 comment on function auth.lock_account_for_mfa(uuid) is
-  'Serializes a platform MFA transaction with an approved MFA reset and the session revocations of the account (0076). Call first in the transaction.';
+  'Serializes a platform MFA transaction with an approved MFA reset, the session revocations and the other MFA transactions of the account (0076). Call first in the transaction.';

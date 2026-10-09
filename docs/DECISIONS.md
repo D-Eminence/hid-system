@@ -1522,15 +1522,25 @@ for that account only. Platform session issue resolves the administrator on
 the same transaction, so the lock holder never needs a second pool
 connection.
 
-The helper takes `FOR KEY SHARE`, the weakest lock that conflicts with the
-`FOR UPDATE` of the reset and the revocations. It is granted to the Identity
-runtime only. The revocation helper `auth.lock_account_sessions` (0073,
-`FOR UPDATE`) was tried first and rejected. It also serialized every MFA
-transaction with refresh rotations and staff sign-ins of the account, which
-take `FOR KEY SHARE`. A step-up that raced a refresh of its sign-in then found
-its session rotated and was refused, ending the console session. The
-password step deadlocked with a staff sign-in of the same administrator
-through the principal's login-attempt row. Both were reproduced locally.
+The helper takes `FOR NO KEY UPDATE`, the lock a non-key `UPDATE` of the row
+takes. It conflicts with the `FOR UPDATE` of the reset and the revocations,
+and with itself, so MFA transactions of one account run one at a time. It does
+not conflict with the `FOR KEY SHARE` that refresh rotations and staff sign-ins
+of the account take when they insert a session or a session event. It is
+granted to the Identity runtime only. Two other modes were tried and
+rejected, each after a local reproduction:
+- `FOR UPDATE`, through the revocation helper `auth.lock_account_sessions`
+  (0073), also serialized every MFA transaction with refresh rotations and
+  staff sign-ins of the account. A step-up that raced a refresh of its sign-in
+  then found its session rotated and was refused, ending the console session.
+  The password step deadlocked with a staff sign-in of the same administrator
+  through the principal's login-attempt row.
+- `FOR KEY SHARE` does not conflict with itself, so MFA transactions of one
+  account ran together. Each read the second-factor failure counters before
+  any of them committed a failure: six parallel step-ups with a wrong code were
+  all tested, where the limit allows five failures and then refuses. Two
+  parallel password steps each left their challenge open. `main` before Stage 7
+  had no account lock and the same two gaps.
 
 A database guard that compares a new row with values it reads or with the
 session refuses the write when a compared value is missing, and compares with
@@ -1548,10 +1558,16 @@ Consequences:
   regeneration, enrolment activation and restart) deadlocked on the earlier
   code, and PostgreSQL cancelled the MFA request (`500`). With the account
   locked first, each request is refused cleanly once the reset commits;
-- an MFA transaction holds `FOR KEY SHARE` on the account row until it
+- an MFA transaction holds `FOR NO KEY UPDATE` on the account row until it
   commits, usually milliseconds. An approved reset, a session revocation, a
-  sign-out or an expiry of that account waits for it. A refresh, a staff
-  sign-in or another MFA transaction of that account does not;
+  sign-out, an expiry or another MFA transaction of that account waits for it.
+  A refresh or a staff sign-in of that account does not; a staff sign-in that
+  upgrades a legacy password hash updates the account row first, so it waits
+  for the MFA transaction, or the MFA transaction for it, without a deadlock;
+- parallel second-factor attempts of one account are checked one at a time
+  against the failure limit, and a password step supersedes the open
+  challenge of the one before it, so an account has at most one open
+  challenge;
 - the Stage 7 Identity needs 0076 and the role bootstrap before it starts;
 - pre-existing lock-order hazards that do not involve the MFA authenticator
   are unchanged: two administrators acting on each other's accounts at the same

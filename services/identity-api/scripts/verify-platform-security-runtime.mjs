@@ -944,14 +944,14 @@ try {
     enrollment_activation: 'MFA_CHALLENGE_INVALID', enrollment_restart: 'MFA_CHALLENGE_INVALID',
     deadlocks: raceDeadlocks };
 
-  // The MFA account lock is FOR KEY SHARE (0076), which conflicts only with the
-  // FOR UPDATE of a reset or a revocation. A refresh rotation in flight (another
-  // tab) and a staff sign-in of the same administrator take FOR KEY SHARE too,
-  // so neither holds up an MFA transaction. With FOR UPDATE, a step-up or a
-  // recovery-code regeneration waited for the rotation and then found its
-  // session rotated (403 PLATFORM_SESSION_REQUIRED, which ends the console
-  // session), and the password step could deadlock with the staff sign-in
-  // through the principal's login-attempt row.
+  // The MFA account lock is FOR NO KEY UPDATE (0076). It conflicts with the FOR
+  // UPDATE of a reset or a revocation, but not with the FOR KEY SHARE that a
+  // refresh rotation in flight (another tab) or a staff sign-in of the same
+  // administrator takes, so neither holds up an MFA transaction. With FOR
+  // UPDATE, a step-up or a recovery-code regeneration waited for the rotation
+  // and then found its session rotated (403 PLATFORM_SESSION_REQUIRED, which
+  // ends the console session), and the password step could deadlock with the
+  // staff sign-in through the principal's login-attempt row.
   async function duringRotation(sessionId, request) {
     const rotation = await rotationInFlight(sessionId);
     let settled = false;
@@ -1011,9 +1011,84 @@ try {
   }
   assert.deepEqual(passwordStep, { waited: true, staffSignIn: 'committed', status: 200, next: 'mfa_enrollment_required' },
     `the platform password step during a staff sign-in of the same administrator: ${JSON.stringify(passwordStep)}`);
-  evidence.mfa_lock_mode = { lock: 'FOR KEY SHARE (auth.lock_account_for_mfa)',
+  evidence.mfa_lock_mode = { lock: 'FOR NO KEY UPDATE (auth.lock_account_for_mfa)',
     step_up_during_refresh: 'not delayed, 200', regeneration_during_refresh: 'not delayed, 200',
     password_step_during_staff_sign_in: 'waits for the staff sign-in, no deadlock, 200' };
+
+  // The lock also conflicts with itself, so MFA transactions of one account run
+  // one at a time. A second connection holds the account lock until every
+  // request waits on it, then releases it. Six step-ups with a wrong code: each
+  // checks the failure limit only after the one before committed its failure,
+  // so the fifth failure blocks the account and the sixth code is never tested.
+  // Two password steps: the second supersedes the challenge of the first, so
+  // one challenge stays open. To make them meet, the second connection also
+  // holds the principal's login-attempt row, as a staff sign-in in flight does
+  // (TokenService.issue deletes it); with FOR KEY SHARE both steps then waited
+  // on that row only, ran together once it was released, and each left its own
+  // challenge open. With FOR KEY SHARE the six step-ups did not wait either: all
+  // passed the limit check before any failure was counted, and all six codes
+  // were tested.
+  /** The most backends of this database seen waiting on a lock, up to `count`; stops once `settled()`, or after 10 s. */
+  async function lockWaiters(count, settled) {
+    let most = 0;
+    for (const deadline = Date.now() + 10_000; most < count && !settled() && Date.now() < deadline;) {
+      const { rows } = await owner.query(`select count(*)::int as n from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()`);
+      most = Math.max(most, rows[0].n);
+      if (most < count) await new Promise(done => setTimeout(done, 20));
+    }
+    return most;
+  }
+  async function whileAccountLocked(accountId, requests, alsoHold = async () => undefined) {
+    const holder = new Client({ host: socket, user: process.env.PGUSER, database: isolated });
+    holder.on('error', () => undefined);
+    await holder.connect();
+    try {
+      await holder.query('begin');
+      await holder.query('select auth.lock_account_for_mfa($1)', [accountId]);
+      await alsoHold(holder);
+      let settled = false;
+      const pending = requests.map(request => Promise.resolve(request()).finally(() => { settled = true; }));
+      const waiting = await lockWaiters(requests.length, () => settled);
+      await holder.query('commit');
+      return { waiting, responses: await Promise.all(pending) };
+    } finally {
+      await holder.end();
+    }
+  }
+  const guessTarget = await resetTarget('serial-step-up');
+  const guesses = await whileAccountLocked(guessTarget.id, Array.from({ length: 6 }, () => () =>
+    command(guessTarget.enrolled, '/admin/mfa/step-up', { code: '000000' })));
+  const guessEvents = (await owner.query(`select count(*) filter (where event_type = 'step_up_failed')::int as failed,
+      count(*) filter (where event_type = 'mfa_rate_limited')::int as limited
+    from auth.session_events where account_id = $1`, [guessTarget.id])).rows[0];
+  const parallelGuesses = { waiting: guesses.waiting,
+    responses: guesses.responses.map(response => `${response.status} ${response.body?.code}`).sort(), ...guessEvents };
+  assert.deepEqual(parallelGuesses, { waiting: 6,
+    responses: [...Array(5).fill('401 MFA_INVALID_CODE'), '429 MFA_RATE_LIMITED'], failed: 5, limited: 1 },
+  `parallel step-ups with a wrong code: ${JSON.stringify(parallelGuesses)}`);
+  const serialSignIn = await account('serial-sign-in', { platformRole: 'security_auditor' });
+  expectStatus(await post('/auth/admin/login', {}, { email: serialSignIn.email, password: 'Wrong-Password-2026',
+    turnstileAction: 'admin-login' }), 401);
+  const serialPrincipal = module.get(LocalAuthProvider).principalHash(serialSignIn.email);
+  const passwordSteps = await whileAccountLocked(serialSignIn.id, [0, 1].map(() => () =>
+    post('/auth/admin/login', {}, { email: serialSignIn.email, password, turnstileAction: 'admin-login' })),
+  async (holder) => {
+    const deleted = await holder.query('delete from auth.login_attempts where principal_hmac = $1', [serialPrincipal]);
+    assert.equal(deleted.rowCount, 1, 'the failed password step recorded a login attempt');
+  });
+  const challengeStates = (await owner.query(`select
+      count(*) filter (where consumed_at is null and invalidated_at is null)::int as open,
+      count(*) filter (where invalidation_reason = 'superseded')::int as superseded
+    from auth.mfa_login_challenges where account_id = $1`, [serialSignIn.id])).rows[0];
+  const parallelPasswordSteps = { waiting: passwordSteps.waiting,
+    next: passwordSteps.responses.map(response => `${response.status} ${response.body?.status}`), ...challengeStates };
+  assert.deepEqual(parallelPasswordSteps, { waiting: 2,
+    next: ['200 mfa_enrollment_required', '200 mfa_enrollment_required'], open: 1, superseded: 1 },
+  `parallel password steps: ${JSON.stringify(parallelPasswordSteps)}`);
+  assert.equal((await deadlocks()) - deadlocksBefore, 0, 'the MFA lock races recorded a deadlock');
+  evidence.mfa_serialization = { parallel_wrong_step_ups: '5 x MFA_INVALID_CODE, then MFA_RATE_LIMITED',
+    parallel_password_steps: 'one challenge open, the other superseded', deadlocks: 0 };
 
   // 12. Principal export: restricted permission, step-up, reason, RFC 4180 CSV.
   const exporter = await platform.signIn(superBAdmin);

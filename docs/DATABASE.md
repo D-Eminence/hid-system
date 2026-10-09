@@ -1244,7 +1244,7 @@ a reachable Super Admin to be suspendable.
   session row. The account actions that change the token version already did.
 - Platform MFA transactions do not use this helper: since Phase 4 Stage 7A they
   take the account row with `auth.lock_account_for_mfa(uuid)` (0076, below),
-  which is `FOR KEY SHARE`.
+  which is `FOR NO KEY UPDATE`.
 - `runtime-grants.sql` grants `EXECUTE` on the helper to `hid_identity_runtime`
   only; `PUBLIC` has none. The runtime still has only `SELECT` on
   `auth.accounts`. `runtime-roles.integration.sql` asserts both.
@@ -1335,7 +1335,7 @@ a reachable Super Admin to be suspendable.
 
 `0076_mfa_account_lock_and_fail_closed_ocr_guards.sql` (Phase 4 Stage 7):
 
-- `auth.lock_account_for_mfa(uuid)` takes `FOR KEY SHARE` on the account row.
+- `auth.lock_account_for_mfa(uuid)` takes `FOR NO KEY UPDATE` on the account row.
   Every platform MFA transaction of the Identity API calls it before any other
   lock or write: the password step, sign-in with a TOTP or recovery code,
   enrolment start and activation, step-up and recovery-code regeneration. An
@@ -1344,17 +1344,27 @@ a reachable Super Admin to be suspendable.
   transaction that locked its challenge, assurance or factor first, and reached
   the account only through the `FOR KEY SHARE` of its later inserts, could
   deadlock with it.
-- `FOR KEY SHARE` conflicts with that `FOR UPDATE` and with the revocation lock
-  (`auth.lock_account_sessions`, 0073), but not with a refresh rotation, a staff
-  sign-in or another MFA transaction of the account. With `FOR UPDATE`, a
-  step-up that raced a refresh found its session rotated and was refused. The
-  password step also deadlocked with a staff sign-in through the principal's
-  `auth.login_attempts` row.
+- `FOR NO KEY UPDATE` conflicts with that `FOR UPDATE`, with the revocation
+  lock (`auth.lock_account_sessions`, 0073) and with itself, so MFA
+  transactions of one account run one at a time. Parallel second-factor
+  attempts are then checked against the failure limit one after another, and a
+  password step supersedes the open challenge of the one before it. It does not
+  conflict with the `FOR KEY SHARE` of a refresh rotation or a staff sign-in of
+  the account.
+- Two other modes were rejected after local reproductions. With `FOR UPDATE`, a
+  step-up that raced a refresh found its session rotated and was refused, and
+  the password step deadlocked with a staff sign-in through the principal's
+  `auth.login_attempts` row. With `FOR KEY SHARE`, six parallel step-ups with a
+  wrong code were all tested instead of five and a refusal, and two parallel
+  password steps each left a challenge open.
 - The helper is `SECURITY DEFINER` with `search_path = auth, pg_temp`.
   `runtime-grants.sql` grants `EXECUTE` to `hid_identity_runtime` only, and the
   runtime still cannot update `auth.accounts`. `mfa-account-lock.integration.sql`
-  checks the catalog contract and `runtime-roles.integration.sql` the grant; the
-  races run in `services/identity-api/scripts/verify-platform-security-runtime.mjs`.
+  checks the catalog contract and the exact function body, so a later `CREATE OR
+  REPLACE` cannot weaken the lock or add `SKIP LOCKED`, `NOWAIT` or a
+  condition. `runtime-roles.integration.sql` checks that the ACL names no
+  grantee but the owner and `hid_identity_runtime`. The races run in
+  `services/identity-api/scripts/verify-platform-security-runtime.mjs`.
 
 The guards (7B):
 

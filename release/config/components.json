@@ -400,7 +400,7 @@
       },
       {
         "name": "0076_mfa_account_lock_and_fail_closed_ocr_guards.sql",
-        "sha256": "875d9e1c3db94cd57d48e4037d202c42cff28cc745f7d2bd65f5cb9d03e24cd0"
+        "sha256": "d83ad67ec5e172d529bbbb8e41213f602d20458c98b0bd5229dca073d5d13834"
       }
     ]
   },

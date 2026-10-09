@@ -1,10 +1,14 @@
 \set ON_ERROR_STOP on
 -- The account row lock of platform MFA transactions (0076). It must take
--- FOR KEY SHARE, the weakest lock that conflicts with the FOR UPDATE of an
--- approved MFA reset (0070) and of session revocations (0073): FOR UPDATE would
--- also make MFA transactions wait for refresh rotations and staff sign-ins of
--- the account. This suite checks the catalog contract a later CREATE OR REPLACE
--- must keep; the two-connection races run in
+-- FOR NO KEY UPDATE on the account row: that conflicts with the FOR UPDATE of
+-- an approved MFA reset (0070) and of session revocations (0073), and with
+-- itself, so MFA transactions of one account run one at a time, but not with
+-- the FOR KEY SHARE that refresh rotations and staff sign-ins of the account
+-- take. FOR UPDATE would also make MFA transactions wait for those; FOR KEY
+-- SHARE would let MFA transactions of one account run together; SKIP LOCKED,
+-- NOWAIT or a condition would sometimes take no lock. This suite pins the
+-- catalog contract and the exact body that a later CREATE OR REPLACE must
+-- keep; the two-connection races run in
 -- services/identity-api/scripts/verify-platform-security-runtime.mjs.
 -- Rollback-only.
 begin;
@@ -12,16 +16,18 @@ begin;
 do $$
 declare
   lock_function constant regprocedure := 'auth.lock_account_for_mfa(uuid)'::regprocedure;
-  definition text := regexp_replace(lower(pg_get_functiondef('auth.lock_account_for_mfa(uuid)'::regprocedure)),
-    '\s+', ' ', 'g');
+  body text;
 begin
   if not exists (
     select 1 from pg_proc function_row
+    join pg_language language_row on language_row.oid = function_row.prolang
     where function_row.oid = lock_function and function_row.prosecdef
       and function_row.provolatile = 'v'
+      and function_row.prorettype = 'void'::regtype
+      and language_row.lanname = 'plpgsql'
       and function_row.proconfig = array['search_path=auth, pg_temp']
   ) then
-    raise exception 'auth.lock_account_for_mfa must be a volatile security-definer function with a fixed search_path';
+    raise exception 'auth.lock_account_for_mfa must be a volatile plpgsql security-definer function returning void with a fixed search_path';
   end if;
   -- A null ACL means the default PUBLIC execute grant.
   if (select function_row.proacl from pg_proc function_row where function_row.oid = lock_function) is null
@@ -31,9 +37,12 @@ begin
      ) then
     raise exception 'PUBLIC can execute auth.lock_account_for_mfa';
   end if;
-  if position('from auth.accounts account_row where account_row.id = target_account for key share' in definition) = 0
-     or definition ~ 'for (no key )?update|for share' then
-    raise exception 'auth.lock_account_for_mfa must take FOR KEY SHARE on the account row, and no stronger lock';
+  -- The exact body, whitespace and case aside.
+  select btrim(regexp_replace(lower(function_row.prosrc), '\s+', ' ', 'g')) into body
+    from pg_proc function_row where function_row.oid = lock_function;
+  if body is distinct from
+     'begin perform 1 from auth.accounts account_row where account_row.id = target_account for no key update; end' then
+    raise exception 'auth.lock_account_for_mfa must only take FOR NO KEY UPDATE on the account row, unconditionally: %', body;
   end if;
   if (select function_row.proowner from pg_proc function_row where function_row.oid = lock_function)
      <> (select function_row.proowner from pg_proc function_row

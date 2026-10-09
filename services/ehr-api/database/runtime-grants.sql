@@ -1007,7 +1007,8 @@ grant execute on function auth.lock_account_sessions(uuid) to hid_identity_runti
 revoke all on function auth.lock_account_sessions(uuid) from public;
 
 -- Phase 4 Stage 7A (0076): every platform MFA transaction takes the account
--- row (FOR KEY SHARE) through this helper first, so it serializes with an
--- approved MFA reset and with session revocations of the account. It only locks.
+-- row (FOR NO KEY UPDATE) through this helper first, so it serializes with an
+-- approved MFA reset, with session revocations and with the other MFA
+-- transactions of the account. It only locks.
 grant execute on function auth.lock_account_for_mfa(uuid) to hid_identity_runtime;
 revoke all on function auth.lock_account_for_mfa(uuid) from public;

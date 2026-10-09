@@ -75,8 +75,11 @@ type Failure = { kind: 'invalid' } | { kind: 'rate_limited' } | { kind: 'failed'
  * session revocation (0073) locks it before the sessions, both FOR UPDATE. A
  * flow that locked the factor first and then reached the account through the
  * FOR KEY SHARE of its session event, session or recovery code insert could
- * deadlock with them. The lock is FOR KEY SHARE: it conflicts with theirs, but
- * not with a refresh rotation or a staff sign-in of the account.
+ * deadlock with them. The lock is FOR NO KEY UPDATE: it conflicts with theirs
+ * and with itself, so MFA transactions of one account also run one at a time
+ * (each sees the failures the one before it counted, and a password step
+ * supersedes the challenge of the one before it), but not with the FOR KEY
+ * SHARE of a refresh rotation or a staff sign-in of the account.
  */
 @Injectable()
 export class MfaService {
@@ -434,7 +437,7 @@ export class MfaService {
     return challenge;
   }
 
-  /** The account row lock (0076, FOR KEY SHARE), taken before any other lock of the transaction. */
+  /** The account row lock (0076, FOR NO KEY UPDATE), taken before any other lock of the transaction. */
   private async lockAccount(client: PoolClient, accountId: string): Promise<void> {
     await client.query('select auth.lock_account_for_mfa($1)', [accountId]);
   }

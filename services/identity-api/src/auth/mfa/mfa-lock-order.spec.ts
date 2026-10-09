@@ -236,14 +236,20 @@ describe('platform MFA lock order (Stage 7A)', () => {
     await expect(service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event))
       .rejects.toMatchObject({ code: 'MFA_CHALLENGE_INVALID' });
     const statements = transactions[0] ?? [];
+    // The refusal comes from the re-read made while the account lock is held.
+    const lock = statements.findIndex(({ sql }) => sql === LOCK);
+    const refused = statements.findIndex(({ sql }) => /for update of challenge/.test(sql));
+    expect(lock).toBeGreaterThanOrEqual(0);
+    expect(statements[lock]?.values).toEqual([ACCOUNT]);
+    expect(refused).toBeGreaterThan(lock);
     expect(statements.some(({ sql }) => sql.includes('auth.mfa_factors'))).toBe(false);
     expect(statements.some(({ sql }) => sql.includes('auth.session_events') || sql.includes('auth.sessions'))).toBe(false);
   });
 
   // The account row stays locked until the MFA transaction commits, and other
-  // requests of that account (refreshes, sign-outs, audit writes) wait on it,
-  // each holding a pool connection. Issuing the session must therefore not need
-  // a second pool connection: it resolves the administrator on the
+  // requests of that account (other MFA requests, sign-outs, revocations) wait
+  // on it, each holding a pool connection. Issuing the session must therefore
+  // not need a second pool connection: it resolves the administrator on the
   // transaction's own client.
   it('issues the platform session without a second pool connection', async () => {
     const poolQuery = jest.fn(async () => { throw new Error('the pool must not be used inside the locked transaction'); });
