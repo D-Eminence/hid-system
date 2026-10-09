@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://updates.healthidentitydirectory.com/schemas/frontend-content-manifest.schema.json",
+  "title": "HID deterministic frontend archive content manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "app", "git_sha", "archive_profile", "file_count", "total_size_bytes", "files"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "app": { "enum": ["web", "ehr", "lab", "pharmacy", "ocr", "outreach", "admin"] },
+    "git_sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "archive_profile": { "const": "hid-frontend-ustar-v1" },
+    "file_count": { "type": "integer", "minimum": 3, "maximum": 20000 },
+    "total_size_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400 },
+    "files": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 20000,
+      "items": { "$ref": "#/$defs/file" }
+    }
+  },
+  "$defs": {
+    "safePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*(?:^|/)\\.(?:/|$))(?!.*//)(?!.*\\\\)[A-Za-z0-9][A-Za-z0-9._/-]*$"
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "length", "sha256", "mode"],
+      "properties": {
+        "path": { "$ref": "#/$defs/safePath" },
+        "length": { "type": "integer", "minimum": 0, "maximum": 26214400 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "mode": { "const": 420 }
+      }
+    }
+  }
+}

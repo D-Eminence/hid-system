@@ -1,0 +1,138 @@
+{
+  "schema_version": "hid.staging-bootstrap-hardening/v1",
+  "recorded_at": "2026-09-21T09:02:32Z",
+  "environment": "staging",
+  "production": "LOCKED",
+  "staging_accepted": false,
+  "deployment_authorized": false,
+  "scope": "Offline bootstrap preparation and read-only prerequisite checks; no runtime, infrastructure, provider, database or NIN change.",
+  "supersedes": "Earlier ECR bootstrap source hashes, generator guarantees and source-provenance claims in predeployment-2026-09-15.json. Historical cloud observations remain historical.",
+  "source_review": {
+    "pull_request": 2,
+    "url": "https://github.com/D-Eminence/hid-system/pull/2",
+    "last_observed_head_sha": "fe472b818caf6488d57ffb88875eec2300a4b7e9",
+    "last_observed_ci_jobs_passed": 7,
+    "draft": true,
+    "owner_approved": false,
+    "followup": "This local bootstrap follow-up requires its own ordinary CI and owner source review."
+  },
+  "completed": [
+    "Preserve all eleven complete staging application ECR definitions and URI outputs.",
+    "Reject CloudFormation intrinsics in ECR bodies and validate the self-contained CDK bootstrap parameter/rule.",
+    "Parse and hash the same strict-JSON byte buffer; reject duplicate keys.",
+    "Preflight distinct new output paths, reserve both exclusively, and clean own outputs on caught failures.",
+    "Keep source checkout unverified and refuse caller-supplied source approval.",
+    "Derive expansion resource counts only from the supplied input; require later exact approved-source synthesis.",
+    "Require the precise fixed-stack ValidationError before reporting regional-stack absence.",
+    "Install shared release validator dependencies in the clean AWS CI job.",
+    "Keep controlled contact confirmation separate from notification send authorizations."
+  ],
+  "local_artifact": {
+    "template": "release/local/20260921-staging-preparation/ecr-bootstrap-unbound.template.json",
+    "receipt": "release/local/20260921-staging-preparation/ecr-bootstrap-unbound.review.json",
+    "status": "LOCAL_UNBOUND_REVIEW_ONLY",
+    "reviewed_source_sha": null,
+    "source_checkout_verified": false,
+    "reviewed_source_sha_required_before_execution": true,
+    "bootstrap_resources": 11,
+    "repository_uri_outputs": 11,
+    "source": "Retained local economy assembly; source checkout provenance is unverified.",
+    "limitations": [
+      "No live resource-existence evidence or deployment authority.",
+      "Caught write failures clean own outputs; abrupt termination or cleanup failure can leave local artifacts.",
+      "Future execution requires exact approved-source synthesis, template hash comparison, every independent gate and a reviewed same-stack change set with no ECR action."
+    ]
+  },
+  "aws_readback": {
+    "checked_on": "2026-09-21",
+    "quota_check": "expired_browser_session",
+    "bootstrap_check": "expired_browser_session",
+    "current_quota_status": "UNVERIFIED",
+    "current_applied_vcpu": null,
+    "current_stack_and_repository_absence": "UNVERIFIED",
+    "last_successful_quota_observation": {
+      "checked_at": "2026-09-14T21:04:25Z",
+      "request_status": "CASE_OPENED",
+      "applied_vcpu": 6,
+      "requested_vcpu": 32
+    },
+    "quota_request": "53cf4fecbdee43808970dadf399dce15KHtG3UD0",
+    "region": "eu-west-1",
+    "duplicate_request_submitted": false,
+    "cloud_mutations": false
+  },
+  "validation": {
+    "aws_infrastructure_tests": {
+      "passed": 96,
+      "failed": 0
+    },
+    "release_tests": {
+      "passed": 78,
+      "failed": 0
+    },
+    "staging_preparation_javascript_tests": {
+      "passed": 16,
+      "failed": 0
+    },
+    "staging_preparation_python_tests": {
+      "passed": 29,
+      "failed": 0
+    },
+    "aws_typecheck": "passed",
+    "release_contract_verification": "passed",
+    "workflow_yaml": "passed",
+    "secret_readiness": {
+      "canonical_files": 1147,
+      "frontend_source_files": 264,
+      "frontend_artifact_files": 147,
+      "findings": 0
+    },
+    "scope": "Local and injected-transport tests; no live deployment, signing or notification delivery."
+  },
+  "source_files": [
+    {
+      "path": "infra/aws/scripts/prepare-staging-ecr-bootstrap.mjs",
+      "sha256": "c698e1c64fdccd6a7316d76a2024ab6ca36818f9630f158fee7e27372b989c15",
+      "bytes": 17531
+    },
+    {
+      "path": "infra/aws/test/staging-ecr-bootstrap.test.mjs",
+      "sha256": "1c94c7d99e3fa23aef52eb4a96152f43f3153e6989aaa455ce509e50240dcafd",
+      "bytes": 11304
+    },
+    {
+      "path": "scripts/check-staging-ecr-bootstrap.py",
+      "sha256": "edfaa19bf991b22ec96f10ac838093da385c7675f71200b3056cfa1fd53dca6e",
+      "bytes": 6333
+    },
+    {
+      "path": "scripts/tests/test_staging_ecr_bootstrap.py",
+      "sha256": "82206144fe8d419c97b5fdbebedae7014fd186312d8a7fe3a137379016d9ee8c",
+      "bytes": 7067
+    },
+    {
+      "path": "release/scripts/verify-release-contract.mjs",
+      "sha256": "323d123f895ef67cca059113696dd62189f89fb55833cc74313b7f9c36905b19",
+      "bytes": 48383
+    },
+    {
+      "path": ".github/workflows/tuf-local-gates.yml",
+      "sha256": "999359241b30877e4535d3ce82edfb80847c76efd5acac0711fe7da863dc04eb",
+      "bytes": 20484
+    }
+  ],
+  "preservation": {
+    "nin_related_recorded_hashes_checked": 26,
+    "nin_related_hash_mismatches": 0,
+    "nin_mode": "deferred",
+    "security_document_sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+    "production_api_calls": 0
+  },
+  "external_inputs": "See the current USER INPUT REQUIRED table in docs/STAGING_AWS_CHECKPOINT.md for exact secure locations and blocking stages.",
+  "post_staging": "MetaMap NIN integration is prepared but deferred. Activation requires version-specific provider contract confirmation and authorized trial/test access.",
+  "next_command": "aws login --profile hid-admin",
+  "then_read_only_commands": [
+    "python3 scripts/check-staging-fargate-quota.py",
+    "python3 scripts/check-staging-ecr-bootstrap.py"
+  ]
+}

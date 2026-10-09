@@ -1,0 +1,38 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "hid-tuf-staging",
+  "main": "../../src/tuf-repository-worker.mjs",
+  "compatibility_date": "2026-08-31",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": true,
+  "routes": [
+    {
+      "pattern": "updates.staging.healthidentitydirectory.com",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "DEPLOYMENT_ENV": "staging",
+    "EXPECTED_HOST": "updates.staging.healthidentitydirectory.com",
+    "WORKER_NAME": "hid-tuf-staging"
+  },
+  "assets": {
+    "directory": "./repository",
+    "binding": "ASSETS",
+    "html_handling": "none",
+    "not_found_handling": "none",
+    "run_worker_first": true
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": false
+    },
+    "traces": {
+      "enabled": false
+    }
+  }
+}

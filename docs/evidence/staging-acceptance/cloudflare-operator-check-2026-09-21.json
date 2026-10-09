@@ -1,0 +1,93 @@
+{
+  "schema_version": "hid.staging-cloudflare-operator-observation/v1",
+  "historical_observation_superseded_by": "cloudflare-read-inventory-2026-09-22.json",
+  "environment": "staging",
+  "source": "Operator-produced, value-free local preflight report",
+  "checked_at": "2026-09-21T21:57:01.577947+00:00",
+  "source_report": "release/local/cloudflare-operator-preflight-20260921.json",
+  "source_report_sha256": "47f5a275d073a93a2357380364dbe6f58c88d8674092d609202efa6a99cf2f0f",
+  "source_report_mode": "0600",
+  "cloudflare": {
+    "credential_source": "environment",
+    "status": "request_failed",
+    "failed_stage": "initial fixed zone read",
+    "http_status": null,
+    "provider_error_codes": null,
+    "failure_cause": "unresolved because the earlier preflight omitted HTTP status and provider codes",
+    "account_and_zone_verified": false,
+    "dns_inventory_verified": false,
+    "turnstile_inventory_verified": false,
+    "custom_domain_inventory_verified": false,
+    "limitation": "This result does not establish that the new token is expired, incorrectly scoped, or malformed. It is distinct from earlier failed Wrangler-credential checks."
+  },
+  "aws": {
+    "authenticated": true,
+    "fixed_account_matches": true,
+    "turnstile_secret_present": false,
+    "notification_provider_value_read": "denied_or_unavailable",
+    "ses_sending_enabled": true,
+    "ses_sandbox": true
+  },
+  "last_quota_read": {
+    "checked_at": "2026-09-22T02:41:04.743058+00:00",
+    "request_status": "CASE_OPENED",
+    "requested_vcpu": 32,
+    "applied_vcpu": 6,
+    "quota_gate_cleared": false
+  },
+  "diagnostic_preparation": {
+    "prepared_on": "2026-09-22",
+    "script": "scripts/check-staging-cloudflare-access.py",
+    "focused_tests_passed": 16,
+    "all_staging_preparation_tests_passed": 82,
+    "cloudflare_plan_tests_passed": 3,
+    "secret_readiness_findings": 0,
+    "features": [
+      "Hidden terminal prompt with no Wrangler fallback or credential persistence",
+      "Fixed staging GET targets and no redirects or retries",
+      "HTTP status and numeric error codes without provider messages or raw bodies",
+      "Verified zone binding before bounded DNS/widget/route/Custom Domain inventory",
+      "Private, ignored, new metadata report; no overwrite or symlink destination",
+      "Nonzero exit for failed or incomplete diagnostics"
+    ],
+    "live_operator_diagnostic": "received and source hash verified; zone/DNS reads passed, remaining API groups denied"
+  },
+  "subsequent_diagnostic": {
+    "checked_at": "2026-09-22T02:41:47.631516+00:00",
+    "source_report": "release/local/cloudflare-access-diagnostic.json",
+    "source_report_sha256": "73c0bf5f89c94c90c5f3d5fc3b7ec6d010d574844f386d128a40c1d6f083d057",
+    "script_sha256": "a515d3db0482fbb7d48054400b980e1e0fedaad7e5b999f5a517eeed79986a34",
+    "report_matches_script": true,
+    "report_mode": "0600",
+    "account_and_zone_match": true,
+    "zone_active": true,
+    "exact_staging_dns_queries_completed": 9,
+    "matching_dns_records": 0,
+    "denied_api_groups": ["Turnstile widgets", "Worker Routes", "Worker Custom Domains"],
+    "denied_custom_domain_queries": 8,
+    "denied_http_status": 403,
+    "denied_cloudflare_error_codes": [10000],
+    "inventory_reads_complete": false,
+    "publisher_write_authority_verified": false,
+    "supersedes": "Earlier unverified account/zone/DNS observations; denied widget/route/domain inventories remain unverified."
+  },
+  "scoped_rerun": {
+    "checked_at": "2026-09-22T02:45:31.199678+00:00",
+    "source_report": "release/local/cloudflare-access-diagnostic-scoped.json",
+    "source_report_sha256": "5928cc6ff2d8f697f0d7707c467c4b0ca144b29a696ab8a0fa1bf6c1f0f545fc",
+    "report_matches_script": true,
+    "result": "Zone/DNS reads passed again; the same three API groups returned HTTP 403/code 10000.",
+    "owner_clarification": "Only the command was rerun; token permissions were not changed in the dashboard.",
+    "permission_change_outstanding": true,
+    "turnstile_token_compatibility": "Use a user-owned token for this combined inventory; current Cloudflare documentation lists Turnstile as unsupported by account-owned tokens.",
+    "token_type_observed": false
+  },
+  "next_action": "Retain working DNS access; grant scoped Workers Scripts Read, Turnstile Sites Read and Workers Routes Read, or confirm their existing resource scope/user membership, then rerun the hidden-prompt diagnostic into a new sanitized report.",
+  "nin_provider_mode": "deferred",
+  "nin_files_preserved": 26,
+  "production": "LOCKED",
+  "deployment_authorized": false,
+  "staging_accepted": false,
+  "cloud_mutations": false,
+  "provider_messages_sent": false
+}

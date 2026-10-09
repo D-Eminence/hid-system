@@ -1,0 +1,5 @@
+export const ADMIN_ROOT_PATH = '/eminence'
+export const ADMIN_LOGIN_PATH = '/eminence/login'
+export const ADMIN_OVERVIEW_PATH = '/eminence/overview'
+export const ADMIN_AI_PROCESSING_PATH = '/eminence/ai-processing'
+export const ADMIN_BILLING_PATH = '/eminence/billing'

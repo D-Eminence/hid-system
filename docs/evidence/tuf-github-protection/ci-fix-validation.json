@@ -1,0 +1,80 @@
+{
+  "files": [
+    {
+      "path": ".github/workflows/tuf-local-gates.yml",
+      "sha256": "d6538c8a3ce34963cd1215858955a02b1e0a1b8f1744805ba47222bf35d9c325"
+    },
+    {
+      "path": "infra/cloudflare/test/tuf-publication-authorization.test.mjs",
+      "sha256": "99e39c40d0faa0fbbfa07ee7e058e6f7a0e32fec0eef0eb38035c5ec3ab9e587"
+    }
+  ],
+  "validation": {
+    "fixture-before.log": {
+      "sha256": "64c0fbfbc83a03f900d489e66de5402d56c53f1b780e8f6ae444da1086bfd4e9",
+      "size_bytes": 1283
+    },
+    "fixture-after.log": {
+      "sha256": "9bff6a7c93b7f54f0a21058c6db4a5658ffe0ce3aac05a85c7a340ee4f8ee963",
+      "size_bytes": 436
+    },
+    "cloudflare-tests.log": {
+      "sha256": "d577336acb18292e5816d47763d7358943dfe134696b596a92efbc28b038725e",
+      "size_bytes": 6079
+    },
+    "actionlint.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    "ehr-clean-validation.json": {
+      "sha256": "3088954c99674b32575a72c82b0bc794f4545c60cba6281d167afe584daeab42",
+      "size_bytes": 1296
+    },
+    "ordinary-ci-summary.json": {
+      "sha256": "0676e165d98b5e661323ab2da93db19fa3b67f7269db460a7636b81a24d0b3f5",
+      "size_bytes": 3845
+    },
+    "workspace-artifact.zip": {
+      "sha256": "017d88dfc0ace1a66a7acfbf74623ee2f68c2499e3b23fcf944041f0159ed866",
+      "size_bytes": 10035
+    },
+    "workspace-local-validation.json": {
+      "sha256": "28c390cf7cf5cb8f6c7a8c8e4e4db3c37130489108e55183b4bb946e1b620e46",
+      "size_bytes": 1004
+    }
+  },
+  "workflow_security_static_checks": "passed; no environment/secret reference/id-token write; 7 checkouts disable persisted credentials; actions SHA-pinned",
+  "production_validation_changed": false,
+  "commit_created": false,
+  "pushed": false,
+  "remote_workflow_rerun": false,
+  "workspace_checks": [
+    {
+      "label": "workspace-tests",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "started_at": "2026-09-07T13:57:37.832941+00:00",
+      "completed_at": "2026-09-07T13:58:14.966375+00:00",
+      "exit_code": 0,
+      "log": "workspace-tests.log",
+      "log_sha256": "49c95d683f7ae539d727e64b71197fcc20b8b9555cd84afddb5f5e56d8070987"
+    },
+    {
+      "label": "workspace-verify",
+      "command": [
+        "npm",
+        "run",
+        "verify"
+      ],
+      "started_at": "2026-09-07T13:58:14.978604+00:00",
+      "completed_at": "2026-09-07T13:59:28.705304+00:00",
+      "exit_code": 0,
+      "log": "workspace-verify.log",
+      "log_sha256": "05e54682ba03490f13a62818fcc9c20f344b9328cdd9c854afd433b3373b3adc"
+    }
+  ],
+  "git_diff_check": 0,
+  "original_evidence_sha256": "9e1081ea6dd7308bddee854cbff75cc9ff2b4acae388da91e24ecbe311928709"
+}

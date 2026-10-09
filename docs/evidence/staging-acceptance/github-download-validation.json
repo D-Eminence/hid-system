@@ -1,0 +1,40 @@
+{
+  "recorded_at": "2026-09-08T19:15:23.140614+00:00",
+  "artifacts": [
+    {
+      "id": 10061349037,
+      "name": "tuf-workspace-34238812233-1",
+      "archive_digest_verified": true
+    },
+    {
+      "id": 10061080956,
+      "name": "tuf-local-tuf-client-34238812233-1",
+      "archive_digest_verified": true
+    },
+    {
+      "id": 10061047169,
+      "name": "tuf-local-cloudflare-tuf-34238812233-1",
+      "archive_digest_verified": true
+    },
+    {
+      "id": 10061045052,
+      "name": "tuf-local-upstream-34238812233-1",
+      "archive_digest_verified": true
+    },
+    {
+      "id": 10061040828,
+      "name": "tuf-local-ehr-release-cache-34238812233-1",
+      "archive_digest_verified": true
+    },
+    {
+      "id": 10061040807,
+      "name": "tuf-local-aws-release-trust-34238812233-1",
+      "archive_digest_verified": true
+    },
+    {
+      "id": 10061031467,
+      "name": "tuf-local-release-contracts-34238812233-1",
+      "archive_digest_verified": true
+    }
+  ]
+}

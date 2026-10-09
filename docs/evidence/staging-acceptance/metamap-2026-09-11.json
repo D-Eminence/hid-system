@@ -1,0 +1,194 @@
+{
+  "schema_version": "hid.staging-metamap-preparation/v1",
+  "recorded_at": "2026-09-11T08:42:57.091423+00:00",
+  "environment": "staging",
+  "staging_accepted": false,
+  "deployment_authorized": false,
+  "production_locked": true,
+  "provider": "MetaMap",
+  "api_path_version": "govchecks/v1",
+  "openapi_document_version": "1.4",
+  "openapi_format_version": "3.1.0",
+  "documented_nin_endpoint": "https://api.prod.metamap.com/govchecks/v1/ng/nin",
+  "documented_oauth_endpoint": "https://api.prod.metamap.com/oauth/",
+  "documents": [
+    {
+      "url": "https://docs.metamap.com/reference/govchecks-nigeria-nin-1",
+      "retrieved_format": "markdown",
+      "sha256": "a6fcec0ba47e42a13f74095b47422ad45e9fcd10bc08dd5580ba2bf216c5a906"
+    },
+    {
+      "url": "https://docs.metamap.com/reference/authentication",
+      "retrieved_format": "markdown",
+      "sha256": "2fb1336746991fa7112027c8b563293e0f30343e139eb67aa5ce3953bd8f384a"
+    },
+    {
+      "url": "https://docs.metamap.com/docs/api-guide",
+      "retrieved_format": "markdown",
+      "sha256": "2c9859a160b2aab7380dcc71b056ac046c286667639485bd0076979dca5dbdf4"
+    },
+    {
+      "url": "https://docs.metamap.com/docs/configure-your-webhook-url",
+      "retrieved_format": "markdown",
+      "sha256": "e886ddf87785665ed5a0528829a8afe1b17f1b70f841563c2c0221afabec7cb3"
+    },
+    {
+      "url": "https://docs.metamap.com/docs/webhook-specifications",
+      "retrieved_format": "markdown",
+      "sha256": "5a230a2f2db3be46593b9438280cfb546d16af6c135fb3c583339be8f587ae64"
+    },
+    {
+      "url": "https://docs.metamap.com/docs/step-completed-n",
+      "retrieved_format": "markdown",
+      "sha256": "afb2f845dd3d210e0ebecc5fcfe188f85dc91181f54e36ac2871567ed3e7c5d8"
+    },
+    {
+      "url": "https://docs.metamap.com/page/faq",
+      "retrieved_format": "markdown",
+      "sha256": "c2855ca06ba2457fcd7285a927e567e8b17ce87ccec946c1427a547aa6c75315"
+    }
+  ],
+  "client_id_local_only": {
+    "path": "release/local/staging-metamap-client.json",
+    "mode": "0o600",
+    "ignored": true,
+    "value_in_receipt": false
+  },
+  "secret": {
+    "designated_name": "/hid/staging/nin-metamap",
+    "account": "659225405023",
+    "region": "eu-west-1",
+    "fields": [
+      "clientId",
+      "clientSecret"
+    ],
+    "value_supplied": false,
+    "store_tool_executed_in_write_mode": false,
+    "arn": null
+  },
+  "implementation": {
+    "isolated_transport_prepared": true,
+    "generic_signature_primitive_prepared": true,
+    "runtime_provider_mode": "unavailable",
+    "runtime_adapter_registered": false,
+    "callback_route_exposed": false,
+    "ecs_provider_credentials_injected": false
+  },
+  "checks": {
+    "identity_tests": {
+      "suites": 21,
+      "passed": 125,
+      "metamap_cases": 34
+    },
+    "secret_tool_tests": {
+      "passed": 8
+    },
+    "identity_typecheck": "PASS",
+    "identity_build": "PASS",
+    "container_verification": "PASS",
+    "secret_scan": "PASS_ZERO_FINDINGS",
+    "diff_check": "PASS"
+  },
+  "validation_logs": [
+    {
+      "path": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260911-metamap/identity-tests.log",
+      "sha256": "b73e9638d1f0af0705c998daafc5eae5d2fb386bfb2fd3dcc01691015605cee4"
+    },
+    {
+      "path": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260911-metamap/identity-typecheck.log",
+      "sha256": "6c296009fbfce66c15613f05405744962342b6fbde0a36dd58254c4969d1a916"
+    },
+    {
+      "path": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260911-metamap/identity-build.log",
+      "sha256": "58676b10a319edb96f438c9fb0345743e0d2f98e7dad8f5c47dc563ac3c06435"
+    },
+    {
+      "path": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260911-metamap/secret-tool-tests.log",
+      "sha256": "0ee7cac6c83e849998c195eb1e59d49a3f49faf3eaaa77e14cfa67988e0eb719"
+    },
+    {
+      "path": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260911-metamap/container-verification.log",
+      "sha256": "6c70d74d99e12794cc44fa59399f9b6a3e987f85cafdfc21a26ef0f99c7491d9"
+    },
+    {
+      "path": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260911-metamap/secret-readiness.log",
+      "sha256": "66aed006a9a2370d684ebaa156ab5514c5f670ff2f0d2c4b0c77aa48558d1855"
+    }
+  ],
+  "source_files": [
+    {
+      "path": "services/identity-api/src/identity/metamap-govchecks.client.ts",
+      "sha256": "a8886d5e5eeb3bddf6c4c8b830b47b5186dcf8e89522df77079c62acecc3a54b"
+    },
+    {
+      "path": "services/identity-api/src/identity/metamap-govchecks.client.spec.ts",
+      "sha256": "12711697c47d97b6ae0eb264d80c6a6115d1d83c1c00fc12506cb95e28df2fc0"
+    },
+    {
+      "path": "services/identity-api/src/identity/metamap-webhook-signature.ts",
+      "sha256": "b2bb719cd6b96e7190a020ca2e7b65612b3553be2ac055340207f9ed626b52de"
+    },
+    {
+      "path": "services/identity-api/src/identity/metamap-webhook-signature.spec.ts",
+      "sha256": "869bb364175ab5c4af1dec2ffc4a9dfd8838a9797b4ed18f7911501eef73847b"
+    },
+    {
+      "path": "scripts/staging-metamap-secret.py",
+      "sha256": "1baaa090f04bd5c9543c879695053db491952aa45a7cc660f1658419a405e555"
+    },
+    {
+      "path": "scripts/tests/test_staging_metamap_secret.py",
+      "sha256": "183ffce274d49b3e474db4ff0d9bc4b9fdedbf53ad4d96bf5e42c88d16041b78"
+    },
+    {
+      "path": "services/identity-api/.env.example",
+      "sha256": "8a9a6550cf84aa72639423ec307e96fe69729c255a8d304bb9652426823007cd"
+    },
+    {
+      "path": "release/config/staging-nin-contract.template.json",
+      "sha256": "66942b06f3c88769a9369e3376def8bc09b56322378a3e3853038827f08d7dbb"
+    },
+    {
+      "path": "docs/METAMAP_NIN_CONTRACT.md",
+      "sha256": "18045300e14518ddad9219a1dd0fd97b69f621ab3ef65a9372496fb80508bf69"
+    },
+    {
+      "path": "docs/TUF-STAGING-EXECUTION.md",
+      "sha256": "86aa3454d81e744afdae5a7745ebea1a61e70452c298d64e450d9865ef8e3fa9"
+    },
+    {
+      "path": "docs/TASK.md",
+      "sha256": "43e40b41aadd5ede28bb5f33e6783e363ee14121809dc2a3688c7de918070572"
+    },
+    {
+      "path": "docs/STAGING_EXTERNAL_PREFLIGHT.md",
+      "sha256": "4e8d13b6dea7d277cd71a5838a82af6ef3741f9c8cdf05cbb6898bbc7a8bc9f4"
+    },
+    {
+      "path": "docs/STAGING_PROVIDER_ACCOUNTS.md",
+      "sha256": "35f9586c615e4043f93317d5305fff7e5bebe9a2d308d5980a1e0c58d175183a"
+    },
+    {
+      "path": "docs/README.md",
+      "sha256": "c41fe5378b29b9b5928dc983bc7dc1bd7cefd6bf3374ca9e19e664b741dd3b9b"
+    }
+  ],
+  "security_document_sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+  "production_infrastructure": {
+    "source_changed_this_continuation": false,
+    "new_synth_performed": false,
+    "retained_template_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+    "prior_infrastructure_source_hashes_still_match": true
+  },
+  "provider_api_calls": 0,
+  "cloud_mutations": 0,
+  "messages_sent": 0,
+  "committed": false,
+  "remaining_metamap_inputs": [
+    "Version-specific standalone callback/result schema, authentication, correlation and DOB clarification",
+    "This client's permitted trial/NIN entitlement, approved test identities and charge confirmation",
+    "Client Secret entered locally into staging Secrets Manager after existing AWS browser login"
+  ],
+  "other_external_gates": "docs/TUF-STAGING-EXECUTION.md#b-user-input-required",
+  "evidence_root": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260911-metamap"
+}

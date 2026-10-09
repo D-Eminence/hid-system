@@ -1,0 +1,213 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { createFrontendWorker } from '../src/frontend-worker.mjs'
+import apexWorker from '../src/apex-redirect-worker.mjs'
+import legacyOcrDomainRedirectWorker from '../src/legacy-ocr-domain-redirect-worker.mjs'
+
+const worker = createFrontendWorker()
+const originalFetch = globalThis.fetch
+const TEST_ORIGIN_AUTH_TOKEN = 'test-origin-authorization-token-not-a-secret-123456'
+
+const deploymentProfiles = Object.freeze({
+  production: Object.freeze({
+    apiOrigin: 'https://api.healthidentitydirectory.com',
+    hosts: Object.freeze({
+      web: 'www.healthidentitydirectory.com', ehr: 'ehr.healthidentitydirectory.com',
+      lab: 'lab.healthidentitydirectory.com', pharmacy: 'pharmacy.healthidentitydirectory.com',
+      ocr: 'migrate.healthidentitydirectory.com', outreach: 'outreach.healthidentitydirectory.com',
+      admin: 'admin.healthidentitydirectory.com',
+    }),
+  }),
+  staging: Object.freeze({
+    apiOrigin: 'https://api.staging.healthidentitydirectory.com',
+    hosts: Object.freeze({
+      web: 'staging.healthidentitydirectory.com', ehr: 'ehr.staging.healthidentitydirectory.com',
+      lab: 'lab.staging.healthidentitydirectory.com', pharmacy: 'pharmacy.staging.healthidentitydirectory.com',
+      ocr: 'migrate.staging.healthidentitydirectory.com', outreach: 'outreach.staging.healthidentitydirectory.com',
+      admin: 'admin.staging.healthidentitydirectory.com',
+    }),
+  }),
+})
+
+function environment(overrides = {}) {
+  const deployment = overrides.DEPLOYMENT_ENV ?? 'production'
+  const app = overrides.APP_NAME ?? 'ehr'
+  const profile = deploymentProfiles[deployment]
+  return {
+    DEPLOYMENT_ENV: deployment,
+    API_ORIGIN: profile.apiOrigin,
+    EXPECTED_HOST: profile.hosts[app],
+    APP_NAME: app,
+    ORIGIN_AUTH_TOKEN: TEST_ORIGIN_AUTH_TOKEN,
+    ASSETS: { fetch: async request => new Response(`<p>${new URL(request.url).pathname}</p>`, {
+      status: 200, headers: { 'content-type': 'text/html' },
+    }) },
+    ...overrides,
+  }
+}
+
+test.afterEach(() => { globalThis.fetch = originalFetch })
+
+test('serves the application asset binding with security headers', async () => {
+  const response = await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/deep/link'), environment())
+  assert.equal(response.status, 200)
+  assert.equal(await response.text(), '<p>/deep/link</p>')
+  assert.equal(response.headers.get('x-frame-options'), 'DENY')
+  assert.equal(response.headers.get('permissions-policy'), 'camera=(), microphone=(), geolocation=()')
+})
+
+test('grants device capabilities only to the application host that needs them', async () => {
+  const ocr = await worker.fetch(new Request('https://migrate.healthidentitydirectory.com/'), environment({ APP_NAME: 'ocr' }))
+  assert.equal(ocr.headers.get('permissions-policy'), 'camera=(self), microphone=(), geolocation=()')
+  const outreach = await worker.fetch(new Request('https://outreach.healthidentitydirectory.com/'), environment({ APP_NAME: 'outreach' }))
+  assert.equal(outreach.headers.get('permissions-policy'), 'camera=(self), microphone=(), geolocation=(self)')
+})
+
+test('serves Migrate from its canonical hostname root and redirects legacy paths without chains', async () => {
+  const root = await worker.fetch(new Request('https://migrate.healthidentitydirectory.com/'), environment({ APP_NAME: 'ocr' }))
+  assert.equal(root.status, 200)
+  assert.equal(await root.text(), '<p>/</p>')
+
+  const directDeepLink = await worker.fetch(
+    new Request('https://migrate.healthidentitydirectory.com/jobs/123?view=safe'),
+    environment({ APP_NAME: 'ocr' }),
+  )
+  assert.equal(directDeepLink.status, 200)
+  assert.equal(await directDeepLink.text(), '<p>/jobs/123</p>')
+
+  const legacyMigrate = await worker.fetch(
+    new Request('https://migrate.healthidentitydirectory.com/migrate/jobs?view=safe'),
+    environment({ APP_NAME: 'ocr' }),
+  )
+  assert.equal(legacyMigrate.status, 308)
+  assert.equal(legacyMigrate.headers.get('location'), 'https://migrate.healthidentitydirectory.com/jobs?view=safe')
+
+  const legacy = await worker.fetch(new Request('https://migrate.healthidentitydirectory.com/ocr/jobs?view=safe'), environment({ APP_NAME: 'ocr' }))
+  assert.equal(legacy.status, 308)
+  assert.equal(legacy.headers.get('location'), 'https://migrate.healthidentitydirectory.com/jobs?view=safe')
+
+  const retiredWebRoute = await worker.fetch(
+    new Request('https://migrate.healthidentitydirectory.com/migrate/dashboard?view=safe'),
+    environment({ APP_NAME: 'ocr' }),
+  )
+  assert.equal(retiredWebRoute.status, 308)
+  assert.equal(retiredWebRoute.headers.get('location'), 'https://migrate.healthidentitydirectory.com/?view=safe')
+
+  const webLegacyRoute = await worker.fetch(
+    new Request('https://www.healthidentitydirectory.com/migrate/jobs?view=safe'),
+    environment({ APP_NAME: 'web' }),
+  )
+  assert.equal(webLegacyRoute.status, 308)
+  assert.equal(webLegacyRoute.headers.get('location'), 'https://migrate.healthidentitydirectory.com/jobs?view=safe')
+})
+
+test('redirects legacy OCR domains directly to the Migrate root application while preserving paths and queries', () => {
+  const production = legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://ocr.healthidentitydirectory.com/ocr/jobs?view=safe'),
+    { DEPLOYMENT_ENV: 'production', EXPECTED_HOST: 'ocr.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.healthidentitydirectory.com' },
+  )
+  assert.equal(production.status, 308)
+  assert.equal(production.headers.get('location'), 'https://migrate.healthidentitydirectory.com/jobs?view=safe')
+  const productionDeepLink = legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://ocr.healthidentitydirectory.com/jobs/123?view=safe'),
+    { DEPLOYMENT_ENV: 'production', EXPECTED_HOST: 'ocr.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.healthidentitydirectory.com' },
+  )
+  assert.equal(productionDeepLink.status, 308)
+  assert.equal(productionDeepLink.headers.get('location'), 'https://migrate.healthidentitydirectory.com/jobs/123?view=safe')
+  const api = legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://ocr.healthidentitydirectory.com/api/v1/ocr/jobs?view=safe', { method: 'POST' }),
+    { DEPLOYMENT_ENV: 'production', EXPECTED_HOST: 'ocr.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.healthidentitydirectory.com' },
+  )
+  assert.equal(api.status, 308)
+  assert.equal(api.headers.get('location'), 'https://migrate.healthidentitydirectory.com/api/v1/ocr/jobs?view=safe')
+  const staging = legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://ocr.staging.healthidentitydirectory.com/migrate/jobs?view=safe'),
+    { DEPLOYMENT_ENV: 'staging', EXPECTED_HOST: 'ocr.staging.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.staging.healthidentitydirectory.com' },
+  )
+  assert.equal(staging.status, 308)
+  assert.equal(staging.headers.get('location'), 'https://migrate.staging.healthidentitydirectory.com/jobs?view=safe')
+  const originInjectionAttempt = legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://ocr.healthidentitydirectory.com/migrate//attacker.example?view=safe'),
+    { DEPLOYMENT_ENV: 'production', EXPECTED_HOST: 'ocr.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.healthidentitydirectory.com' },
+  )
+  assert.equal(originInjectionAttempt.status, 308)
+  assert.equal(originInjectionAttempt.headers.get('location'), 'https://migrate.healthidentitydirectory.com//attacker.example?view=safe')
+  assert.equal(legacyOcrDomainRedirectWorker.fetch(
+    new Request('https://attacker.example/migrate/'),
+    { DEPLOYMENT_ENV: 'production', EXPECTED_HOST: 'ocr.healthidentitydirectory.com', TARGET_ORIGIN: 'https://migrate.healthidentitydirectory.com' },
+  ).status, 421)
+})
+
+for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
+  for (const [app, host] of Object.entries(profile.hosts)) {
+    test(`${deployment} ${app} proxies only to its environment API origin`, async () => {
+      let received
+      globalThis.fetch = async (url, init) => {
+        received = { url: String(url), init }
+        return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })
+      }
+      const response = await worker.fetch(new Request(`https://${host}/api/v1/auth/session?view=safe`, {
+        headers: {
+          origin: `https://${host}`, cookie: 'opaque=1', 'x-forwarded-host': 'attacker.example',
+          'x-correlation-id': 'safe-correlation-123',
+        },
+      }), environment({ DEPLOYMENT_ENV: deployment, APP_NAME: app }))
+      assert.equal(received.url, `${profile.apiOrigin}/api/v1/auth/session?view=safe`)
+      assert.equal(received.init.headers.get('origin'), `https://${host}`)
+      assert.equal(received.init.headers.get('cookie'), 'opaque=1')
+      assert.equal(received.init.headers.get('x-forwarded-host'), host)
+      assert.equal(received.init.headers.get('x-hid-edge-origin'), `https://${host}`)
+      assert.equal(received.init.headers.get('x-hid-origin-authorization'), TEST_ORIGIN_AUTH_TOKEN)
+      assert.equal(response.headers.get('cache-control'), 'private, no-store, max-age=0')
+      assert.equal(response.headers.get('cloudflare-cdn-cache-control'), 'no-store')
+    })
+  }
+}
+
+test('preserves mutation bodies and methods', async () => {
+  globalThis.fetch = async (_url, init) => new Response(await new Response(init.body).text(), { status: 202 })
+  const response = await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/auth/login', {
+    method: 'POST', body: '{"opaque":"body"}', headers: { 'content-type': 'application/json' },
+  }), environment())
+  assert.equal(response.status, 202)
+  assert.equal(await response.text(), '{"opaque":"body"}')
+})
+
+test('rejects other API namespaces and misdirected hosts', async () => {
+  assert.equal((await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/open-proxy'), environment())).status, 404)
+  assert.equal((await worker.fetch(new Request('https://attacker.example/api/v1/auth/session'), environment())).status, 421)
+})
+
+test('rejects cross-environment and arbitrary upstream overrides', async () => {
+  const staging = environment({ DEPLOYMENT_ENV: 'staging', APP_NAME: 'ehr' })
+  const productionOrigin = await worker.fetch(new Request('https://ehr.staging.healthidentitydirectory.com/api/v1/auth/session'), {
+    ...staging, API_ORIGIN: deploymentProfiles.production.apiOrigin,
+  })
+  assert.equal(productionOrigin.status, 502)
+  const arbitraryOrigin = await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/auth/session?origin=https://attacker.example'), {
+    ...environment(), API_ORIGIN: 'https://attacker.example',
+  })
+  assert.equal(arbitraryOrigin.status, 502)
+})
+
+test('fails closed when origin authorization is absent', async () => {
+  const response = await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/auth/session'),
+    environment({ ORIGIN_AUTH_TOKEN: '' }))
+  assert.equal(response.status, 502)
+  assert.equal((await response.json()).code, 'EDGE_CONFIGURATION_INVALID')
+})
+
+test('uses a safe correlation identifier when caller evidence is malformed', async () => {
+  let value
+  globalThis.fetch = async (_url, init) => { value = init.headers.get('x-correlation-id'); return new Response('{}') }
+  await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/auth/session', {
+    headers: { 'x-correlation-id': 'bad value with spaces' },
+  }), environment())
+  assert.match(value, /^[0-9a-f-]{36}$/)
+})
+
+test('redirects apex path and query to www without trusting a target parameter', async () => {
+  const response = apexWorker.fetch(new Request('https://healthidentitydirectory.com/patient?next=https://evil.example'))
+  assert.equal(response.status, 308)
+  assert.equal(response.headers.get('location'), 'https://www.healthidentitydirectory.com/patient?next=https://evil.example')
+})

@@ -1,0 +1,149 @@
+{
+  "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "recorded_at": "2026-09-08T19:20:16.448686+00:00",
+  "decision": "NOT_READY",
+  "staging_deployment_authorization": "BLOCKED",
+  "staging_acceptance": "NOT_ACCEPTED",
+  "production": "LOCKED",
+  "mutations": {
+    "source_edits": false,
+    "cloud": false,
+    "signing": false,
+    "deployment": false
+  },
+  "tests": {
+    "cloudflare": {
+      "tests": 52,
+      "passed": 52,
+      "failed": 0,
+      "skipped": 0
+    },
+    "release": {
+      "tests": 29,
+      "passed": 29,
+      "failed": 0,
+      "skipped": 0
+    }
+  },
+  "evidence": [
+    {
+      "path": "infra-cloudflare-npm-ci.log",
+      "exit_code": 0,
+      "result": "PASS",
+      "bytes": 25,
+      "sha256": "7c6197b475a5904f238815e39dd7e94fa302a8ba244d0456a2f0252184b7c276"
+    },
+    {
+      "path": "release-npm-ci.log",
+      "exit_code": 0,
+      "result": "PASS",
+      "bytes": 27,
+      "sha256": "c74570f4a41e4516832135d473966099d9d42139090caef38bac6eb366a171ed"
+    },
+    {
+      "path": "cloudflare-test.log",
+      "exit_code": 0,
+      "result": "PASS",
+      "bytes": 6093,
+      "sha256": "b3a92a4302c21e51e83f46a70cfafbf50b828046b18e291cd62db74447b9aed0"
+    },
+    {
+      "path": "release-test.log",
+      "exit_code": 0,
+      "result": "PASS",
+      "bytes": 3960,
+      "sha256": "fc4c6d70ca70de20ff05bdc741dd931019504940b43eaf9a3b92efe951124351"
+    },
+    {
+      "path": "release-verify.log",
+      "exit_code": 0,
+      "result": "PASS",
+      "bytes": 359,
+      "sha256": "e159289cd00b69b7997bc350d76dbec52978fe52a752aebb8804bc9488d76dcd"
+    },
+    {
+      "path": "publication-workflow-verify.log",
+      "exit_code": 0,
+      "result": "PASS",
+      "bytes": 93,
+      "sha256": "9df38951f21f2089ea2043edeeafd7b500eb00e51b0e00ad552b43e4f44d0905"
+    },
+    {
+      "path": "cloudflare-verify.log",
+      "exit_code": 0,
+      "result": "PASS",
+      "bytes": 472,
+      "sha256": "d666fda883d4e54654cf9b455a445341e65e1ce3adff8ced1ce96745ade86647"
+    },
+    {
+      "path": "cloudflare-frontend-staging-dry-run.log",
+      "exit_code": 0,
+      "result": "PASS_LOCAL_ONLY",
+      "bytes": 7180,
+      "sha256": "2dea2c09c57fd438c898b9b2b4b7d4ad5ec0d2c5664a4c7c3a3b9b9872533082"
+    },
+    {
+      "path": "staging-identifiers-template-check.json",
+      "exit_code": 0,
+      "result": "PASS_TEMPLATE_ONLY",
+      "bytes": 3734,
+      "sha256": "bfe59b91b86550eddd24e91ed25cbaea7870dc36c0b11e2e87c0ed7ce5dbe42f"
+    },
+    {
+      "path": "staging-identifiers-strict-check.json",
+      "exit_code": 1,
+      "result": "BLOCKED_MISSING_INPUTS",
+      "bytes": 3735,
+      "sha256": "79e888fe07a5371c0d6f6a687f146e94feaaeeccb19c254ce682efcf927c7708"
+    },
+    {
+      "path": "cloudflare-whoami.log",
+      "exit_code": 0,
+      "result": "UNAUTHENTICATED",
+      "bytes": 283,
+      "sha256": "b07a595f3fc7cc5998f972f8c4b8cb68edd2c7b8c7e48c2a886c2da93d468284"
+    },
+    {
+      "path": "cloudflare-value-free-prerequisites.json",
+      "exit_code": 0,
+      "result": "BLOCKED_MISSING_INPUTS",
+      "bytes": 590,
+      "sha256": "5989b3066ba8ff9e4e42b1bdaf3735381c142fbdea7ae77ba8e9a4f335abbe33"
+    },
+    {
+      "path": "tuf-synthetic-staging-dry-run.log",
+      "exit_code": 0,
+      "result": "PASS_SYNTHETIC_ONLY",
+      "bytes": 1173,
+      "sha256": "3a8bc3457788be52c798c61fd09bca2b2c9fbfa6b83a421cf82fac08a534eb41"
+    },
+    {
+      "path": "infra-cloudflare-npm-audit.json",
+      "exit_code": 1,
+      "result": "NOT_VERIFIED_ENDPOINT_ERROR",
+      "bytes": 162,
+      "sha256": "e7d70d69bd6982f0ab767511e2566dd5bc696909a84f31bbd885e896b4b4f9bb"
+    },
+    {
+      "path": "release-npm-audit.json",
+      "exit_code": 1,
+      "result": "NOT_VERIFIED_ENDPOINT_ERROR",
+      "bytes": 162,
+      "sha256": "e7d70d69bd6982f0ab767511e2566dd5bc696909a84f31bbd885e896b4b4f9bb"
+    },
+    {
+      "path": "cloudflare-latest-types-version.txt",
+      "exit_code": 0,
+      "result": "REFERENCE_ONLY",
+      "bytes": 13,
+      "sha256": "3ceaef11965b724cc1ccbb9dea405711e2491c86e4d9bd8ec8d9b6e9f7e757cb"
+    },
+    {
+      "path": "cloudflare-release-audit.md",
+      "exit_code": 0,
+      "result": "REPORT",
+      "bytes": 11490,
+      "sha256": "c3fb7530ed562d63c6a0f313103f0d51f4de6c73e0813222e206659fd5cd842a"
+    }
+  ]
+}

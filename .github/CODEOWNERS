@@ -1,0 +1,20 @@
+# HID sole-owner governance: D-Eminence approves contributor changes.
+# The owner may merge their own PR using the owner-only review ruleset exception.
+# PR, CI and branch safety controls still apply to the owner.
+# This file becomes effective only when installed on the target base branch.
+*                                   @D-Eminence
+/.github/                           @D-Eminence
+/release/                           @D-Eminence
+/tools/tuf-release/                  @D-Eminence
+/infra/                             @D-Eminence
+/scripts/                           @D-Eminence
+/services/ehr-api/database/          @D-Eminence
+/services/ehr-api/scripts/           @D-Eminence
+/apps/ehr/scripts/                  @D-Eminence
+/apps/ehr/public/service-worker.js  @D-Eminence
+/apps/ehr/src/release-service-worker.ts @D-Eminence
+/docs/TUF-*                         @D-Eminence
+/CODEX.md                           @D-Eminence
+/.gitignore                         @D-Eminence
+/package.json                       @D-Eminence
+**/package-lock.json                @D-Eminence

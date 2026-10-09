@@ -1,0 +1,402 @@
+{
+  "schema_version": "hid.staging-nin-deferral/v1",
+  "recorded_at": "2026-09-14T09:05:30.260518+00:00",
+  "environment": "staging",
+  "source_head": "fe1f2f45f787a12a1ab37ff82d316863a204ddcd",
+  "approved_base": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "worktree_dirty": true,
+  "committed": false,
+  "staging_accepted": false,
+  "deployment_authorized": false,
+  "production_locked": true,
+  "nin": {
+    "state": "DEFERRED_EXTERNAL_INTEGRATION_POST_STAGING",
+    "runtime_provider_mode": "deferred",
+    "required_for_staging_deployment": false,
+    "required_for_staging_acceptance": false,
+    "client_secret_required": false,
+    "client_secret_received": false,
+    "transport_activated": false,
+    "provider_calls": 0,
+    "statement": "MetaMap NIN integration is prepared but deferred. Activation requires version-specific provider contract confirmation and authorized trial/test access.",
+    "preserved_metamap_source_and_tests": [
+      {
+        "path": "services/identity-api/src/identity/metamap-govchecks.client.ts",
+        "sha256": "a8886d5e5eeb3bddf6c4c8b830b47b5186dcf8e89522df77079c62acecc3a54b"
+      },
+      {
+        "path": "services/identity-api/src/identity/metamap-govchecks.client.spec.ts",
+        "sha256": "12711697c47d97b6ae0eb264d80c6a6115d1d83c1c00fc12506cb95e28df2fc0"
+      },
+      {
+        "path": "services/identity-api/src/identity/metamap-webhook-signature.ts",
+        "sha256": "b2bb719cd6b96e7190a020ca2e7b65612b3553be2ac055340207f9ed626b52de"
+      },
+      {
+        "path": "services/identity-api/src/identity/metamap-webhook-signature.spec.ts",
+        "sha256": "869bb364175ab5c4af1dec2ffc4a9dfd8838a9797b4ed18f7911501eef73847b"
+      },
+      {
+        "path": "scripts/staging-metamap-secret.py",
+        "sha256": "1baaa090f04bd5c9543c879695053db491952aa45a7cc660f1658419a405e555"
+      },
+      {
+        "path": "scripts/tests/test_staging_metamap_secret.py",
+        "sha256": "183ffce274d49b3e474db4ff0d9bc4b9fdedbf53ad4d96bf5e42c88d16041b78"
+      }
+    ]
+  },
+  "provider_classification": {
+    "aws_ses": "REQUIRED",
+    "novu": "REQUIRED",
+    "termii": "OPTIONAL",
+    "meta_whatsapp": "OPTIONAL",
+    "infobip": "FALLBACK"
+  },
+  "checks": {
+    "identity_tests": {
+      "status": "PASS",
+      "tests": 140,
+      "suites": 22,
+      "log": {
+        "path": "release/local/20260914-nin-deferred/identity-tests-final.log",
+        "sha256": "1ce1f69bae3fa597e1d96160ed689c123c7dfa7185ea91fe757852b5c0b64ca8"
+      }
+    },
+    "python_preflight_and_preserved_metamap_secret_tests": {
+      "status": "PASS",
+      "tests": 14,
+      "log": {
+        "path": "release/local/20260914-nin-deferred/python-tests.log",
+        "sha256": "4c36b42d0c0aac9cb059f13f02b307b6ea5e30373f1e16b77ebbe954a54cc573"
+      }
+    },
+    "journey_fixture_tests": {
+      "status": "PASS",
+      "tests": 7,
+      "log": {
+        "path": "release/local/20260914-nin-deferred/journey-fixture-tests-subprocess.log",
+        "sha256": "4d3582e489e5c65c808f47624b37675685ac07f41d8967d34ccfaf712fef568c"
+      }
+    },
+    "web_contract_tests": {
+      "status": "PASS",
+      "test_files": 2,
+      "log": {
+        "path": "release/local/20260914-nin-deferred/web-tests-root.log",
+        "sha256": "dbf5a5a4978d3db222086a2cd4acecd4406c73cc1e4b027e29ae4c8e94863011"
+      }
+    },
+    "browser": {
+      "status": "PASS",
+      "scope": "SOURCE_ONLY_SYNTHETIC_API_FIXTURES",
+      "browser": "Google Chrome",
+      "checks": [
+        "patient canonical login/profile/HID/released records/history/notifications",
+        "patient expired session clears medical information",
+        "OTP invalid code/verify/password completion requires fresh sign-in",
+        "staff facility/emergency activation/read/revoked denial/revoke",
+        "emergency expiry timer clears records",
+        "audit-required denial renders no records",
+        "deferred NIN registration displays state without NIN inputs or verification calls"
+      ],
+      "log": {
+        "path": "release/local/20260914-nin-deferred/care-browser-app-directory.log",
+        "sha256": "4b8ae605a873f92fbbfea2deb0ad70c5798ac36aee353a1ebd5de4b8fc6c2ec1"
+      }
+    },
+    "infrastructure_tests": {
+      "status": "PASS",
+      "test_files": 3,
+      "log": {
+        "path": "release/local/20260914-nin-deferred/infrastructure-tests.log",
+        "sha256": "461294dfd34866c2429b3a8c22255fe936bf79fb064a127117ad1c158495e312"
+      }
+    },
+    "identity_build": {
+      "status": "PASS",
+      "log": {
+        "path": "release/local/20260914-nin-deferred/identity-build.log",
+        "sha256": "58676b10a319edb96f438c9fb0345743e0d2f98e7dad8f5c47dc563ac3c06435"
+      }
+    },
+    "repository_verify": {
+      "status": "PASS",
+      "includes": "all seven frontend and ten backend prerequisite builds; secret/container/migration/identity/infrastructure checks",
+      "log": {
+        "path": "release/local/20260914-nin-deferred/repository-verify.log",
+        "sha256": "dc771a9cfc47b811c1406023d4237ae320903d6e9e367d703f1c82eddd8051ed"
+      }
+    },
+    "release_contract_verify": {
+      "status": "PASS",
+      "log": {
+        "path": "release/local/20260914-nin-deferred/release-contract-verify.log",
+        "sha256": "a633bf72caea9855fbafeefc58e44605ae05a6ef7a39fa1b7096bee5b8e594fb"
+      }
+    },
+    "public_custody_intake": {
+      "status": "MISSING_EXTERNAL_INPUTS",
+      "template_validation_only": true,
+      "log": {
+        "path": "release/local/20260914-nin-deferred/public-custody-intake.log",
+        "sha256": "b18ad6b757eefa58a2a8b771e2227c08542013076802282fe91343b558e0c6df"
+      }
+    },
+    "disposable_migration_rehearsal": {
+      "status": "PASS",
+      "scope": "local synthetic Unix-socket PostgreSQL only",
+      "schema": {
+        "dry_run_rolled_back": true,
+        "applied": 32,
+        "rerun_pending": 0,
+        "schema_rls_suite": "passed"
+      },
+      "patient_runtime": {
+        "status": "passed",
+        "scope": "local-synthetic-only",
+        "role": "hid_identity_api_runtime",
+        "nin_provider_mode": "deferred",
+        "nin_credentials_present": false,
+        "nin_verification_required": false,
+        "http_login_profile_history": "passed",
+        "host_only_secure_cookies": true,
+        "empty_workforce_authority": true,
+        "csrf_denials": true,
+        "refresh_rotation_reuse_family_revocation": true,
+        "logout_revocation": true,
+        "current_account_token_version_enforced": true,
+        "pending_reset_login_denied": true,
+        "internal_self_authorization_workload_protected": true,
+        "patient_audit_count": 11,
+        "turnstile": "disabled-only-in-local-test-no-external-call"
+      },
+      "nin_deferred_fixture": {
+        "scope": "owned-disposable-unix-socket-only",
+        "promoted_and_reconciled": true,
+        "account_patient_link_preserved": true,
+        "passwords_absent": true,
+        "accounts_pending_reset": true,
+        "contacts_unverified": true,
+        "nin_fields_and_identifiers_absent": true,
+        "patient_workforce_authority_absent": true,
+        "clinician_exact_facility_doctor_role": true,
+        "clinical_grants_and_sessions_absent": true,
+        "pending_patient_runtime_access_denied": true,
+        "live_staging_import": false
+      },
+      "restore": {
+        "all_table_checksums_and_sequences_match": true,
+        "runtime_roles": "passed",
+        "schema_authorization_suite": "passed",
+        "application_http": "not executed"
+      },
+      "temporary_cluster_removed": true,
+      "receipt": {
+        "path": "release/local/20260914-nin-deferred/migration-rehearsal/evidence.json",
+        "sha256": "9939d060d0f4ab3314068777ee6a25bd49caa7f3be18a9a952f6a1c24965197c"
+      }
+    }
+  },
+  "external_status": {
+    "current_read_only_preflight": {
+      "path": "release/local/20260914-nin-deferred/external-preflight-network.json",
+      "sha256": "ad22d07adfa5916e7d86092880522d1029f5d3546b3f60e52444de2a28131f73"
+    },
+    "aws": "expired_browser_session",
+    "cloudflare": "oauth_expired_could_not_refresh_noninteractively",
+    "last_authenticated_inventory": "2026-09-11",
+    "last_authenticated_inventory_path": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260911-nin-deferred",
+    "latest_known_gaps": [
+      "Turnstile secret absent",
+      "notification-provider secret zero versions",
+      "SES sandbox with zero identities",
+      "Cloudflare DNS/Turnstile reads forbidden",
+      "no regional stack, staging RDS or ECS cluster found"
+    ],
+    "latest_known_gaps_require_fresh_readback": true
+  },
+  "user_input_required": [
+    "Renew existing AWS hid-admin browser session",
+    "Renew existing Cloudflare session and authorize staging DNS/Turnstile plus secure version-pinned scoped publisher token",
+    "Confirm controlled SES sender and two distinct authorized patient/clinician test inboxes; dedicated Novu staging environment and selected delivery integration",
+    "Actual release custodians and public trust material; exact protected successor approval and concrete immutable retention authorization after plan review"
+  ],
+  "deferred_post_staging": [
+    "Version-specific MetaMap callback documentation",
+    "Signature verification contract",
+    "Request correlation",
+    "Date/time formats",
+    "Authorized NIN trial/test identities",
+    "Pricing and charges",
+    "Securely store Client Secret",
+    "Provider verification tests",
+    "Enable only after acceptance checks pass"
+  ],
+  "staging_parameter_plan": {
+    "template_sha256": "56141dc6e28585b8d1b0dcd7570fbed2797cd332a71b13912c446eab3d999122",
+    "parameter_names_match": true,
+    "parameter_count": 54,
+    "unresolved": [
+      "StagingCloudflareOriginSecret",
+      "IdentityApiImageUri",
+      "EhrApiImageUri",
+      "LabApiImageUri",
+      "PharmacyApiImageUri",
+      "OcrApiImageUri",
+      "OcrWorkerImageUri",
+      "OutreachApiImageUri",
+      "NotificationApiImageUri",
+      "NotificationWorkerImageUri",
+      "EventDispatcherImageUri",
+      "GatewayImageUri",
+      "MigrationImageUri"
+    ],
+    "origin_and_database_secret_values_are_not_user_inputs": true
+  },
+  "production": {
+    "fresh_offline_template": {
+      "path": "release/local/20260914-nin-deferred/production-baseline-assembly/Hid-production-Regional.template.json",
+      "sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6"
+    },
+    "bytes": 464453,
+    "baseline_equal": true,
+    "cloud_calls": 0,
+    "mutations": 0
+  },
+  "security_document_sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+  "cloud_resource_mutations_this_continuation": 0,
+  "messages_sent": 0,
+  "live_database_changes": 0,
+  "deployment_or_publication": false,
+  "source_files": [
+    {
+      "path": "services/identity-api/src/config/environment.ts",
+      "sha256": "dd4ca4740a6bed205baa2f7eaf57f01dd930d5381f2d5507d20957bde1e2d5d4"
+    },
+    {
+      "path": "services/identity-api/src/identity/identity.module.ts",
+      "sha256": "948d2ba78a314be999f66ca267492d0cf9d0c693c8d93f18dfaf04197337aa80"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-verification.provider.ts",
+      "sha256": "f81a23f6cca6a2704cd75992c07998576d5284aaccca8583fbebcff9d716f744"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-registration.controller.ts",
+      "sha256": "3466401533702b2280d23ba35e7173754a791542069c2c6e30620dfcbf4c6bc4"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-registration.service.ts",
+      "sha256": "0c006ea5fb16bbf1fb5d6d5d6c5115a7e27c0ba09324f3604e81f0510f383125"
+    },
+    {
+      "path": "services/identity-api/src/identity/nin-deferred-staging.spec.ts",
+      "sha256": "33c2218a0b51fe46c9124635fcb7ccc41b38b1a5cf17cb1eab02a73002039c28"
+    },
+    {
+      "path": "services/identity-api/scripts/verify-patient-runtime.mjs",
+      "sha256": "6ef3c40e2d53d2cdc504731cd9c5bd1fda5715567a35c2460df82adef57ea162"
+    },
+    {
+      "path": "services/identity-api/.env.example",
+      "sha256": "cab45b20ccdb5835c03eaf5cdc9bc8913e17390ee3892254944e8bfd299b7445"
+    },
+    {
+      "path": "apps/web/src/lib/patientRegistrationApi.ts",
+      "sha256": "1f539d0a789bf17c8ba778c7fd2b6fb0d2398df036b16902625da03044b04481"
+    },
+    {
+      "path": "apps/web/src/pages/doctor/PatientRegistration.tsx",
+      "sha256": "0576eab8928a5f2738a01668cd70f57d4b17a7d86d200855f0ae85e7a5dad8f3"
+    },
+    {
+      "path": "apps/web/scripts/care-portal.browser.mjs",
+      "sha256": "7776879a98f4fe51223500feee42fb82837f4b8972ecc670f89bd39e275845b9"
+    },
+    {
+      "path": "infra/aws/src/hid-regional-stack.ts",
+      "sha256": "5c50ee5d0c9471d1c13007750f9d19792461316f368488545332a8b5e4129fd5"
+    },
+    {
+      "path": "infra/aws/test/infrastructure.test.ts",
+      "sha256": "b6dc12d52c2015864ebcc220a527ae776f49db0ebcbc8bedfc106b00444f31de"
+    },
+    {
+      "path": "scripts/staging-external-preflight.py",
+      "sha256": "ffd23997d2bdff8ca2d2afc00a598cfeb3b9e9910429bf414f94f45b8f3cad1b"
+    },
+    {
+      "path": "scripts/tests/test_staging_external_preflight.py",
+      "sha256": "c8cb6af68bb20684d48443f66332ca1da920bd91abeb5d477a1bf4a41510801f"
+    },
+    {
+      "path": "scripts/prepare-staging-journey-fixture.mjs",
+      "sha256": "91a246970ca262e88dc736b6c297cdbeef537d3694b9b55a26a10904ca2065e0"
+    },
+    {
+      "path": "scripts/tests/staging-journey-fixture.test.mjs",
+      "sha256": "f1307c2a1621f42a38ebb84b2e8ae4718a375b196d76e86ec0c871e2532b906a"
+    },
+    {
+      "path": "scripts/tuf-staging-migration-rehearsal.mjs",
+      "sha256": "c3d6d683eee4beebcebb46becb8e4529e4c94e904cd6b581a38b8450b56648c1"
+    },
+    {
+      "path": "release/config/staging-nin-contract.template.json",
+      "sha256": "6ddd3c4560a10db69347604a2a07242dc635322c7950fae124375bfa62051781"
+    },
+    {
+      "path": "release/config/staging-journey-input.template.json",
+      "sha256": "2e359e1394beb9e0b7481f734075df76605e480526bcc9460ffd9219eaf912cf"
+    },
+    {
+      "path": "docs/METAMAP_NIN_CONTRACT.md",
+      "sha256": "e93b0694f9bfa584fe3765aae71a667f6991808b60ae8753d38691b923b4e92f"
+    },
+    {
+      "path": "docs/STAGING_PATIENT_JOURNEYS.md",
+      "sha256": "10a8e85726d91c2d8719ab74ae20a492f8d9c9f902757cd2e14ad713449247c0"
+    },
+    {
+      "path": "docs/STAGING_PROVIDER_ACCOUNTS.md",
+      "sha256": "2cc5605c9d8a9e57b8e20768075bdd82e2dfad45e9f03a2ea33755862cfd4c4e"
+    },
+    {
+      "path": "docs/STAGING_EXTERNAL_PREFLIGHT.md",
+      "sha256": "a11821c4d64825f0b5d73496e9496abc1989260db75162938caebbdd31ab4666"
+    },
+    {
+      "path": "docs/TUF-STAGING-EXECUTION.md",
+      "sha256": "85aab5e8ac739427c9ea37fecec3675bffc1855e87b3936b74a59ceeedd37e64"
+    },
+    {
+      "path": "docs/TASK.md",
+      "sha256": "dce4e1afcb929d498f311620639203a36372758f469c7c97d89523e66339d70d"
+    },
+    {
+      "path": "docs/INTERFACE_CONTRACT.md",
+      "sha256": "efe76d43d8e579c94ba646dbbe6ebaa343934dda46c3b983cc5f9702cfbc08dc"
+    },
+    {
+      "path": "docs/AWS_DEPLOYMENT_RUNBOOK.md",
+      "sha256": "681de6e93e2f5c08324b2a44cf6d89c4fa96cd5f615b0101b3bd97393855ab65"
+    },
+    {
+      "path": "docs/README.md",
+      "sha256": "69c76522594e6c7392959ae82e92c7c6d7a48c13c620a9df29110c74ec2c15c3"
+    },
+    {
+      "path": "docs/evidence/staging-acceptance/README.md",
+      "sha256": "1d5783f24355cf94f436e9fdd54a84d6b3cd72d259c8c7f00c1993d219647125"
+    }
+  ],
+  "evidence_root": "/home/l2e/hid-system/release/local/20260914-nin-deferred",
+  "retained_failed_attempts": [
+    "Sandbox blocked initial local HTTP test sockets and fixture subprocesses; approved local retries passed",
+    "Sandbox blocked initial cloud network check; network-enabled retry confirmed expired sessions",
+    "Initial browser run used repository root instead of apps/web and could not find dist; corrected working directory passed",
+    "Initial web test command used absent package script; repository test:web passed"
+  ],
+  "next_user_command": "aws login --profile hid-admin"
+}

@@ -1,0 +1,22 @@
+{
+  "scope": "local-synthetic-restored-backup-only",
+  "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "staging_accepted": false,
+  "privileges": {
+    "select_accounts": true,
+    "update_accounts": false,
+    "update_challenges": true
+  },
+  "runtime_completion": {
+    "postgres_code": "42501",
+    "message": "permission denied for table accounts"
+  },
+  "test_role_only_status_regression": {
+    "before": "disabled",
+    "after": "active",
+    "completed": true,
+    "scope": "test role has broad UPDATE; this is NOT evidence of a deployed runtime bypass"
+  },
+  "status": "passed",
+  "temporary_cluster_removed": true
+}

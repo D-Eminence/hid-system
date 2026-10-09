@@ -1,0 +1,339 @@
+import { createDecipheriv, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { Injectable } from '@nestjs/common';
+import * as argon2 from 'argon2';
+import type { PoolClient } from 'pg';
+import { DomainProblem } from '../common/problem';
+import { getEnvironment } from '../config/environment';
+import { DatabaseService } from '../database/database.service';
+import type { RecoveryOtpPurpose } from './dto/otp.dto';
+import { NotificationOtpClient, type OtpDeliveryOutcome } from './notification-otp.client';
+import { consumeRateLimit } from './rate-limit';
+
+interface AccountRow {
+  id: string;
+  email: string | null;
+  token_version: string;
+  phone_enrollment_id: string | null;
+  phone_ciphertext: Buffer | null;
+  phone_key_version: string | null;
+}
+interface RecoveryRecipient { channel: 'email' | 'sms'; value: string }
+interface ActiveChallengeRow { id: string; created_at: Date; }
+interface ChallengeRow {
+  id: string;
+  account_id: string;
+  recipient_hmac: string;
+  verifier_hmac: string;
+  expires_at: Date;
+  failed_attempts: number;
+  max_attempts: number;
+}
+
+interface VerifiedChallengeRow {
+  id: string;
+  account_id: string;
+  completion_token_hmac: string;
+  completion_expires_at: Date;
+}
+
+export function generateSixDigitOtp(draw: (minimum: number, maximum: number) => number = randomInt): string {
+  return draw(0, 1_000_000).toString().padStart(6, '0');
+}
+
+@Injectable()
+export class OtpService {
+  private readonly environment = getEnvironment();
+  private readonly key = this.environment.OTP_HMAC_KEY_B64
+    ? Buffer.from(this.environment.OTP_HMAC_KEY_B64, 'base64') : undefined;
+
+  constructor(
+    private readonly database: DatabaseService,
+    private readonly notification: NotificationOtpClient,
+  ) {}
+
+  async start(input: {
+    identifier: string;
+    purpose: RecoveryOtpPurpose;
+    remoteIp?: string;
+    correlationId: string;
+  }): Promise<{
+    accepted: true;
+    challengeId: string;
+    deliveryChannels: ['email', 'sms'];
+    expiresInSeconds: number;
+    resendAfterSeconds: number;
+  }> {
+    this.assertConfigured();
+    const identifier = input.identifier.trim();
+    const ipHmac = this.hmac('ip', input.remoteIp ?? 'unavailable');
+    const code = generateSixDigitOtp();
+    const candidateChallengeId = randomUUID();
+
+    const challenge = await this.database.withSystemTransaction(input.correlationId, async (client): Promise<
+      { kind: 'challenge'; id: string; recipient: RecoveryRecipient }
+      | { kind: 'none' }
+      | { kind: 'rate_limited' }
+      | { kind: 'cooldown'; id: string }
+    > => {
+      const account = (await client.query<AccountRow>(
+        `select account.id::text, lower(account.email)::text as email, account.token_version::text,
+                enrollment.id::text as phone_enrollment_id,
+                enrollment.contact_ciphertext as phone_ciphertext,
+                enrollment.key_version as phone_key_version
+           from auth.accounts account
+           left join identity.patients patient on patient.account_id = account.id
+           left join identity.public_patient_enrollments enrollment
+             on enrollment.account_id = account.id and enrollment.patient_id = patient.id
+            and enrollment.state = 'active' and enrollment.contact_channel = 'phone'
+            and enrollment.contact_verified_at is not null
+            and patient.status = 'active'
+            and patient.phone_lookup_hmac = enrollment.contact_lookup_hmac
+            and patient.contact_key_version = enrollment.key_version
+            and account.source_system = 'hid-public-qoreid-enrollment'
+            and patient.source_system = 'hid-public-qoreid-enrollment'
+          where account.status in ('active', 'pending_reset')
+            and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+            and (lower(account.email) = lower($1) or upper(patient.hid_code) = upper($1))
+          order by case when lower(account.email) = lower($1) then 0 else 1 end
+          limit 1`,
+        [identifier],
+      )).rows[0];
+      const recipient = account?.email
+        ? { channel: 'email' as const, value: account.email }
+        : account ? this.verifiedEnrollmentPhone(account) : null;
+      const recipientHmac = this.hmac('recipient', recipient?.value ?? identifier.toLowerCase());
+      const recipientLimited = await this.consumeRateLimit(client, 'recipient', recipientHmac);
+      const ipLimited = await this.consumeRateLimit(client, 'ip', ipHmac);
+      const accountLimited = account
+        ? await this.consumeRateLimit(client, 'account', this.hmac('account', account.id)) : false;
+      if (recipientLimited || ipLimited || accountLimited) return { kind: 'rate_limited' };
+
+      const active = (await client.query<ActiveChallengeRow>(
+        `select id::text, created_at from auth.otp_challenges
+          where account_id = $1 and purpose = $2
+            and consumed_at is null and invalidated_at is null
+          order by created_at desc limit 1 for update`,
+        [account?.id ?? null, input.purpose],
+      )).rows[0];
+      if (active && active.created_at.getTime() + this.environment.OTP_RESEND_COOLDOWN_SECONDS * 1000 > Date.now()) {
+        return { kind: 'cooldown', id: active.id };
+      }
+      if (!account || !recipient) return { kind: 'none' };
+      await client.query(
+        `update auth.otp_challenges set invalidated_at = clock_timestamp(),
+            invalidation_reason = 'resend', row_version = row_version + 1
+          where account_id = $1 and purpose = $2
+            and consumed_at is null and invalidated_at is null`,
+        [account.id, input.purpose],
+      );
+      const verifierHmac = this.hmac('otp', input.purpose, recipientHmac, code);
+      await client.query(
+        `insert into auth.otp_challenges (
+           id, account_id, recipient_hmac, purpose, channel, verifier_hmac,
+           verifier_key_version, expires_at, max_attempts, request_ip_hmac, account_token_version
+         ) values ($1, $2, $3, $4, $5, $6, $7,
+           clock_timestamp() + ($8 * interval '1 second'), $9, $10, $11)`,
+        [candidateChallengeId, account.id, recipientHmac, input.purpose, recipient.channel, verifierHmac,
+          this.environment.OTP_HMAC_KEY_VERSION, this.environment.OTP_EXPIRY_SECONDS,
+          this.environment.OTP_MAX_ATTEMPTS, ipHmac, account.token_version],
+      );
+      return { kind: 'challenge', id: candidateChallengeId, recipient };
+    });
+
+    if (challenge.kind === 'rate_limited') throw this.rateLimited();
+    if (challenge.kind === 'challenge') {
+      const delivery = await this.notification.deliver({
+        challengeId: challenge.id, recipient: challenge.recipient.value, code, purpose: input.purpose,
+        channel: challenge.recipient.channel,
+        correlationId: input.correlationId,
+      });
+      await this.recordDelivery(challenge.id, delivery);
+    }
+
+    return {
+      accepted: true,
+      challengeId: challenge.kind === 'challenge' || challenge.kind === 'cooldown'
+        ? challenge.id : candidateChallengeId,
+      // This is the generic set of possible channels, not the chosen account
+      // channel. Keep the public response identical for unknown identifiers.
+      deliveryChannels: ['email', 'sms'],
+      expiresInSeconds: this.environment.OTP_EXPIRY_SECONDS,
+      resendAfterSeconds: this.environment.OTP_RESEND_COOLDOWN_SECONDS,
+    };
+  }
+
+  async verify(input: {
+    challengeId: string;
+    purpose: RecoveryOtpPurpose;
+    code: string;
+    correlationId: string;
+  }): Promise<{ verified: true; challengeId: string; verificationToken: string }> {
+    this.assertConfigured();
+    const verificationToken = randomBytes(32).toString('base64url');
+    const completionTokenHmac = this.hmac('otp-completion', input.challengeId, verificationToken);
+    const outcome = await this.database.withSystemTransaction(input.correlationId, async (client) => {
+      const challenge = (await client.query<ChallengeRow>(
+        `select challenge.id::text, challenge.account_id::text, challenge.recipient_hmac::text,
+                challenge.verifier_hmac::text, challenge.expires_at,
+                challenge.failed_attempts, challenge.max_attempts
+           from auth.otp_challenges challenge
+           join auth.accounts account on account.id = challenge.account_id
+          where account.status in ('active', 'pending_reset')
+            and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+            and challenge.account_token_version = account.token_version
+            and challenge.id = $1 and challenge.purpose = $2
+            and challenge.verified_at is null
+            and challenge.consumed_at is null and challenge.invalidated_at is null
+          limit 1 for update of challenge`,
+        [input.challengeId, input.purpose],
+      )).rows[0];
+      if (!challenge) return 'invalid' as const;
+      if (challenge.expires_at.getTime() <= Date.now()) {
+        await this.invalidate(client, challenge.id, 'expired');
+        return 'invalid' as const;
+      }
+      if (challenge.failed_attempts >= challenge.max_attempts) {
+        await this.invalidate(client, challenge.id, 'attempts_exhausted');
+        return 'invalid' as const;
+      }
+      const suppliedVerifier = this.hmac('otp', input.purpose, challenge.recipient_hmac, input.code);
+      if (!this.equalHex(challenge.verifier_hmac, suppliedVerifier)) {
+        await client.query(
+          `update auth.otp_challenges
+              set failed_attempts = failed_attempts + 1,
+                  last_attempt_at = clock_timestamp(),
+                  invalidated_at = case when failed_attempts + 1 >= max_attempts
+                    then clock_timestamp() else null end,
+                  invalidation_reason = case when failed_attempts + 1 >= max_attempts
+                    then 'attempts_exhausted' else null end,
+                  row_version = row_version + 1
+            where id = $1`,
+          [challenge.id],
+        );
+        return 'invalid' as const;
+      }
+
+      await client.query(
+        `update auth.otp_challenges
+            set verified_at = clock_timestamp(), last_attempt_at = clock_timestamp(),
+                completion_token_hmac = $2,
+                completion_expires_at = clock_timestamp() + ($3 * interval '1 second'),
+                row_version = row_version + 1
+          where id = $1`,
+        [challenge.id, completionTokenHmac, this.environment.OTP_EXPIRY_SECONDS],
+      );
+      return 'verified' as const;
+    });
+    if (outcome !== 'verified') throw this.invalid();
+    return { verified: true, challengeId: input.challengeId, verificationToken };
+  }
+
+  async complete(input: {
+    challengeId: string;
+    purpose: RecoveryOtpPurpose;
+    verificationToken: string;
+    newPassword: string;
+    correlationId: string;
+  }): Promise<{ completed: true }> {
+    this.assertConfigured();
+    const suppliedTokenHmac = this.hmac('otp-completion', input.challengeId, input.verificationToken);
+    const outcome = await this.database.withSystemTransaction(input.correlationId, async (client) => {
+      const challenge = (await client.query<VerifiedChallengeRow>(
+        `select challenge.id::text, challenge.account_id::text,
+                challenge.completion_token_hmac::text, challenge.completion_expires_at
+           from auth.otp_challenges challenge
+           join auth.accounts account on account.id = challenge.account_id
+          where challenge.id = $1 and challenge.purpose = $2 and challenge.verified_at is not null
+            and challenge.consumed_at is null and challenge.invalidated_at is null
+            and challenge.account_token_version = account.token_version
+            and account.status in ('active', 'pending_reset')
+            and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+          limit 1`,
+        [input.challengeId, input.purpose],
+      )).rows[0];
+      if (!challenge || challenge.completion_expires_at.getTime() <= Date.now()
+        || !this.equalHex(challenge.completion_token_hmac, suppliedTokenHmac)) return 'invalid' as const;
+
+      const passwordHash = await argon2.hash(input.newPassword, {
+        type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1,
+      });
+      const completed = await client.query<{ completed: boolean }>(
+        'select auth.complete_recovery_otp($1, $2, $3, $4) as completed',
+        [input.challengeId, input.purpose, suppliedTokenHmac, passwordHash],
+      );
+      return completed.rows[0]?.completed === true ? 'completed' as const : 'invalid' as const;
+    });
+    if (outcome !== 'completed') throw this.invalid();
+    return { completed: true };
+  }
+
+  private consumeRateLimit(client: PoolClient, scope: 'ip' | 'account' | 'recipient', bucket: string): Promise<boolean> {
+    return consumeRateLimit(client, scope, bucket, {
+      windowSeconds: this.environment.OTP_RATE_WINDOW_SECONDS,
+      maxRequests: this.environment.OTP_RATE_MAX_REQUESTS,
+    });
+  }
+
+  private async recordDelivery(challengeId: string, delivery: { outcome: OtpDeliveryOutcome; provider?: string }): Promise<void> {
+    await this.database.query(
+      `update auth.otp_challenges set delivery_outcome = $2, delivery_provider = $3,
+          invalidated_at = case when $2 = 'definitive_failure' then clock_timestamp() else invalidated_at end,
+          invalidation_reason = case when $2 = 'definitive_failure' then 'delivery_failed' else invalidation_reason end,
+          row_version = row_version + 1 where id = $1 and consumed_at is null`,
+      [challengeId, delivery.outcome, delivery.provider ?? null],
+    );
+  }
+
+  private verifiedEnrollmentPhone(account: AccountRow): RecoveryRecipient | null {
+    const { phone_enrollment_id: enrollmentId, phone_ciphertext: ciphertext,
+      phone_key_version: keyVersion } = account;
+    const encodedKey = this.environment.NIN_ENCRYPTION_KEY_B64;
+    if (!enrollmentId || !ciphertext || !encodedKey || keyVersion !== this.environment.NIN_KEY_VERSION
+      || ciphertext.length < 30 || ciphertext[0] !== 1) return null;
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', Buffer.from(encodedKey, 'base64'),
+        ciphertext.subarray(1, 13));
+      decipher.setAAD(Buffer.from(`identity:public-patient-enrollment:${enrollmentId}:contact`));
+      decipher.setAuthTag(ciphertext.subarray(ciphertext.length - 16));
+      const phone = Buffer.concat([decipher.update(ciphertext.subarray(13, -16)),
+        decipher.final()]).toString('utf8');
+      return /^\+[1-9]\d{7,14}$/.test(phone) ? { channel: 'sms', value: phone } : null;
+    } catch {
+      // Missing or rotated encryption material cannot authorize recovery.
+      return null;
+    }
+  }
+
+  private invalidate(client: PoolClient, challengeId: string, reason: 'expired' | 'attempts_exhausted'): Promise<unknown> {
+    return client.query(
+      `update auth.otp_challenges set invalidated_at = clock_timestamp(),
+          invalidation_reason = $2, row_version = row_version + 1 where id = $1`,
+      [challengeId, reason],
+    );
+  }
+
+  private hmac(...parts: string[]): string {
+    this.assertConfigured();
+    return createHmac('sha256', this.key!).update(parts.join('\u001f'), 'utf8').digest('hex');
+  }
+
+  private equalHex(expected: string, supplied: string): boolean {
+    const left = Buffer.from(expected, 'hex');
+    const right = Buffer.from(supplied, 'hex');
+    return left.length === right.length && timingSafeEqual(left, right);
+  }
+
+  private assertConfigured(): void {
+    if (!this.key || this.key.length !== 32) {
+      throw new DomainProblem(503, 'OTP_UNAVAILABLE', 'Verification codes are unavailable');
+    }
+  }
+
+  private invalid(): DomainProblem {
+    return new DomainProblem(403, 'OTP_INVALID_OR_EXPIRED', 'The verification code is invalid or expired');
+  }
+
+  private rateLimited(): DomainProblem {
+    return new DomainProblem(429, 'OTP_RATE_LIMITED', 'Too many verification-code requests');
+  }
+}

@@ -1,0 +1,29 @@
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { AuditInterceptor } from './audit/audit.interceptor';
+import { AuditModule } from './audit/audit.module';
+import { AdminModule } from './admin/admin.module';
+import { AuthModule } from './auth/auth.module';
+import { SecurityGuard } from './auth/security.guard';
+import { CorrelationMiddleware } from './common/correlation.middleware';
+import { CommercialModule } from './commercial/commercial.module';
+import { ConsentModule } from './consent/consent.module';
+import { DatabaseModule } from './database/database.module';
+import { HealthController } from './health.controller';
+import { IdentityModule } from './identity/identity.module';
+import { IntegrationModule } from './integrations/integration.module';
+import { PatientSafetyModule } from './patient-safety/patient-safety.module';
+
+@Module({
+  imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule, PatientSafetyModule],
+  controllers: [HealthController],
+  providers: [
+    { provide: APP_GUARD, useExisting: SecurityGuard },
+    { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+  ],
+})
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(CorrelationMiddleware).forRoutes('{*path}');
+  }
+}

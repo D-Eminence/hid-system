@@ -1,0 +1,19 @@
+{
+  "schema_version": "hid.tuf.go-vulnerability-evidence/v1",
+  "recorded_at": "2026-09-06T21:40:10.252Z",
+  "scanner": "golang.org/x/vuln/cmd/govulncheck@v1.1.4",
+  "config": {
+    "protocol_version": "v1.0.0",
+    "scanner_name": "govulncheck",
+    "scanner_version": "v1.1.4",
+    "db": "https://vuln.go.dev",
+    "db_last_modified": "2026-09-02T19:12:04Z",
+    "go_version": "go1.26.8",
+    "scan_level": "symbol",
+    "scan_mode": "source"
+  },
+  "passed": true,
+  "reachable_findings": 0,
+  "reachable_osv_ids": [],
+  "scanner_output_sha256": "1b0d5bb7959becdb39eb6ed11097295fc63adeded112a5566175c16d594fe7a2"
+}

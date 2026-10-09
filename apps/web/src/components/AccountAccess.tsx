@@ -1,0 +1,137 @@
+import React, { useEffect, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import { identityClient, getSafeSession } from '../lib/identityClient'
+import { TurnstileWidget } from './TurnstileWidget'
+import { OtpInputs } from './OtpInputs'
+import { PasswordField } from './PasswordField'
+import { GoogleIdentityButton } from './GoogleIdentityButton'
+import { useCaptchaGate } from '../hooks/useCaptchaGate'
+
+type Challenge = { challengeId: string; expiresAt: number; resendAt: number }
+export function AccountAccess({ patient }: { patient: boolean }) {
+  const navigate = useNavigate()
+  const [step, setStep] = useState<'login' | 'start' | 'verify' | 'complete'>('login')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [code, setCode] = useState('')
+  const [challenge, setChallenge] = useState<Challenge | null>(null)
+  const [verification, setVerification] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [now, setNow] = useState(Date.now())
+  const captcha = useCaptchaGate()
+  const purpose = 'PASSWORD_RESET' as const
+  const verifyingCode = React.useRef(false)
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+  useEffect(() => {
+    if (!patient) return
+    let active = true
+    void getSafeSession().then(session => {
+      if (active && session?.user.user_metadata.requested_role === 'patient') navigate('/patient/profile', { replace: true })
+    }).catch(() => undefined)
+    return () => { active = false }
+  }, [navigate, patient])
+  function changeStep(value: typeof step) {
+    setStep(value); setPassword(''); setConfirmation(''); setCode(''); setVerification(''); setError(''); captcha.resetCaptcha()
+    if (value === 'login' || value === 'start') setChallenge(null)
+  }
+  async function run(task: () => Promise<void>) {
+    setBusy(true); setError('')
+    try { await task() } catch (reason) { setError(reason instanceof Error ? reason.message : 'The request could not be completed.') }
+    finally { setBusy(false) }
+  }
+  function startRecovery() {
+    captcha.runWithCaptcha(token => run(async () => {
+      try {
+        const result = await identityClient.auth.startRecoveryOtp({ identifier: email.trim(), purpose,
+          turnstileAction: patient ? 'patient-reset-start' : 'staff-reset', turnstileToken: token || undefined })
+        if (result.error) throw result.error
+        if (!result.data?.accepted) throw new Error('Recovery could not be started.')
+        setChallenge({ challengeId: result.data.challengeId, expiresAt: Date.now() + result.data.expiresInSeconds * 1000, resendAt: Date.now() + result.data.resendAfterSeconds * 1000 })
+        setCode(''); setVerification(''); setPassword(''); setStep('verify')
+        setNotice('If this account is eligible, a recovery code will arrive at its verified account contact.')
+      } finally { captcha.resetCaptcha() }
+    }))
+  }
+  function verifyRecoveryCode(submittedCode: string) {
+    if (busy || verifyingCode.current || !/^\d{6}$/.test(submittedCode)) return
+    verifyingCode.current = true
+    void run(async () => {
+      if (!challenge || challenge.expiresAt <= Date.now()) throw new Error('This code has expired. Request another code.')
+      const result = await identityClient.auth.verifyRecoveryOtp({ challengeId: challenge.challengeId, purpose, code: submittedCode })
+      if (result.error) throw result.error
+      if (!result.data?.verified) throw new Error('Code verification failed.')
+      setVerification(result.data.verificationToken); setCode(''); setStep('complete'); setNotice('Code verified. Set your new password.')
+    }).finally(() => { verifyingCode.current = false })
+  }
+  async function signInWithGoogle(credential: string) {
+    if (!patient || !captcha.captchaToken || busy) return
+    await run(async () => {
+      try {
+        const result = await identityClient.auth.signInWithIdToken({
+          provider: 'google', token: credential, actorKind: 'patient',
+          turnstileToken: captcha.captchaToken ?? undefined,
+        })
+        if (result.error) throw result.error
+        if (!result.data.session) throw new Error('Google sign-in did not create a patient session.')
+        navigate('/patient/profile', { replace: true })
+      } finally { captcha.resetCaptcha() }
+    })
+  }
+  function submit(event: React.FormEvent) {
+    event.preventDefault()
+    if (busy) return
+    if (step === 'login') {
+      captcha.runWithCaptcha(token => run(async () => {
+        try {
+          const result = patient
+            ? await identityClient.auth.signInPatientWithPassword({ email: email.trim(), password, turnstileToken: token || undefined })
+            : await identityClient.auth.signInWithPassword({ email: email.trim(), password, options: { captchaToken: token || undefined, captchaAction: 'staff-login' } })
+          if (result.error) throw result.error
+          if (!result.data.session) throw new Error('A valid session was not returned.')
+          setPassword('')
+          navigate(patient ? '/patient/profile' : '/hospital/emergency', { replace: true })
+        } finally { captcha.resetCaptcha() }
+      }))
+    } else if (step === 'start') startRecovery()
+    else if (step === 'verify') verifyRecoveryCode(code)
+    else void run(async () => {
+      if (!challenge || !verification) throw new Error('Verify a recovery code first.')
+      if (password.length < 12 || password.length > 256 || password !== confirmation) throw new Error('Use matching passwords of 12–256 characters.')
+      const result = await identityClient.auth.completeRecoveryOtp({ challengeId: challenge.challengeId, purpose, verificationToken: verification, newPassword: password })
+      if (result.error) throw result.error
+      if (!result.data?.completed) throw new Error('Password recovery did not complete.')
+      changeStep('login'); setNotice('Password saved. Sign in using your new password.')
+    })
+  }
+  return <main style={{ maxWidth: 520, margin: '0 auto', padding: 24, lineHeight: 1.6 }}>
+    <Link to="/">Health Identity Directory</Link>
+    <h1>{patient ? 'Patient account' : 'Clinical account'}</h1>
+    <h2>{step === 'login' ? 'Sign in' : step === 'start' ? 'Recover or activate your account' : step === 'verify' ? 'Verify your recovery code' : 'Set your password'}</h2>
+    {step === 'start' && patient && <p>Use your email or Health ID. If you enrolled with a phone number, enter your Health ID to receive a code at your verified phone number.</p>}
+    {notice && <p role="status">{notice}</p>}{error && <p role="alert">{error}</p>}
+    <form onSubmit={submit} style={{ display: 'grid', gap: 16 }}>
+      {(step === 'login' || step === 'start') && <label>{patient ? 'Email or Health ID' : step === 'login' ? 'Email' : 'Email or HID'}<input required type={step === 'login' && !patient ? 'email' : 'text'} autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} style={{ display: 'block', width: '100%' }} /></label>}
+      {(step === 'login' || step === 'complete') && <PasswordField id={`account-${patient ? 'patient' : 'staff'}-password`} label="Password" value={password} onChange={setPassword} minLength={step === 'complete' ? 12 : undefined} autoComplete={step === 'login' ? 'current-password' : 'new-password'} />}
+      {step === 'complete' && <PasswordField id={`account-${patient ? 'patient' : 'staff'}-confirm-password`} label="Confirm password" value={confirmation} onChange={setConfirmation} minLength={12} autoComplete="new-password" />}
+      {step === 'verify' && <><div role="group" aria-label="Six-digit verification code"><OtpInputs value={code} onChange={setCode} onComplete={verifyRecoveryCode} /></div>
+        <p>{challenge && now < challenge.expiresAt ? `Code expires in ${Math.ceil((challenge.expiresAt - now) / 1000)} seconds.` : 'Code expired. Request another code.'}</p></>}
+      <TurnstileWidget action={step === 'login' ? patient ? 'patient-login' : 'staff-login' : patient ? 'patient-reset-start' : 'staff-reset'} onTokenChange={captcha.onTokenChange} resetKey={captcha.captchaResetKey} visible={captcha.captchaVisible || (patient && step === 'login')} message={captcha.captchaNotice?.message} messageTone={captcha.captchaNotice?.tone} />
+      <button disabled={busy || (step === 'verify' && (!challenge || now >= challenge.expiresAt))} type="submit">{busy ? 'Working…' : step === 'login' ? 'Sign in' : step === 'start' ? 'Send recovery code' : step === 'verify' ? 'Verify code' : 'Save password'}</button>
+    </form>
+    {patient && step === 'login' && import.meta.env.VITE_GOOGLE_CLIENT_ID && <section aria-label="Google sign in" style={{ marginTop: 18 }}>
+      <p>Already linked Google to this Health ID?</p>
+      <GoogleIdentityButton text="signin_with" disabled={busy || !captcha.captchaToken}
+        onIdentity={identity => signInWithGoogle(identity.credential)} />
+      {!captcha.captchaToken && <p role="status">Complete the security check above to continue with Google.</p>}
+    </section>}
+    {step === 'verify' && <button disabled={busy || !challenge || now < challenge.resendAt} onClick={startRecovery}>Send another code{challenge && now < challenge.resendAt ? ` (${Math.ceil((challenge.resendAt - now) / 1000)}s)` : ''}</button>}
+    <p><button disabled={busy} onClick={() => changeStep(step === 'login' ? 'start' : 'login')}>{step === 'login' ? 'Forgot password or activate an issued account' : 'Back to sign in'}</button></p>
+    {patient && <section><h2>New to HID?</h2><p>Verify your NIN and contact to get your Health ID. You can also use an account issued by an authorized facility.</p><Link to="/patient/enroll">Get your Health ID</Link></section>}
+  </main>
+}

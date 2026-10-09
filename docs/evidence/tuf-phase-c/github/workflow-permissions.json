@@ -1,0 +1,9 @@
+{
+  "read_at": "2026-09-06T21:45:09.441503+00:00",
+  "endpoint": "repos/D-Eminence/hid-system/actions/permissions/workflow",
+  "exit_code": 0,
+  "response": {
+    "default_workflow_permissions": "read",
+    "can_approve_pull_request_reviews": false
+  }
+}

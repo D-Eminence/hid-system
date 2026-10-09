@@ -1,0 +1,28 @@
+{
+  "schema_version": "hid.staging-signing-submission/v1",
+  "environment": "staging",
+  "role": null,
+  "candidate": null,
+  "source_sha": null,
+  "workflow_sha": null,
+  "caller_workflow_path": null,
+  "aws_account_id": "659225405023",
+  "aws_region": "eu-west-1",
+  "submitter_role_arn": null,
+  "broker_version_arn": null,
+  "candidate_spki_sha256": null,
+  "request_bucket": null,
+  "storage_kms_key_arn": null,
+  "release_id": null,
+  "root_version": null,
+  "root_sha256": null,
+  "input_version": null,
+  "input_sha256": null,
+  "request_lifetime_seconds": null,
+  "producer": {
+    "run_id": null,
+    "artifact_id": null,
+    "artifact_digest": null,
+    "workflow_path": null
+  }
+}

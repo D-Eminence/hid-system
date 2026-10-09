@@ -1,0 +1,983 @@
+{
+  "schema_version": 1,
+  "head_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+  "branch": "tuf-production-release",
+  "index_empty": true,
+  "proposed_commit_message": "Implement TUF release trust and prepare protected staging gates",
+  "proposed_commit_files": [
+    {
+      "path": ".github/CODEOWNERS.template",
+      "size_bytes": 1160,
+      "sha256": "b604f166dbac1c47773011f6154e45ee79021cc4daa7c63c7fc49aa607c7179c"
+    },
+    {
+      "path": ".github/workflows/tuf-local-gates.yml",
+      "size_bytes": 20022,
+      "sha256": "f278f676b5f8a6bfe67d646113d96243e31133180fc40308c9c47d956719ebd0"
+    },
+    {
+      "path": ".github/workflows/tuf-publish.yml",
+      "size_bytes": 13404,
+      "sha256": "dc07d4b48a267867127342b2f0ce54c8b33f09ce526233dde356ec9ce9ad49a0"
+    },
+    {
+      "path": ".gitignore",
+      "size_bytes": 632,
+      "sha256": "b82eba65104f0f3d225a48d7f14a4896b23d032fa53e4a58d5cda915ad65fb09"
+    },
+    {
+      "path": "apps/admin/src/App.spec.tsx",
+      "size_bytes": 10282,
+      "sha256": "2ebd04396f3d76a56a88a6e32bca798f86ba7e1328916214707a98b954f73bb0"
+    },
+    {
+      "path": "apps/admin/src/test-setup.ts",
+      "size_bytes": 316,
+      "sha256": "92360d34bb7f51327b989a8e26875784a12150615a8299060d75261ffe3be9af"
+    },
+    {
+      "path": "apps/ehr/ARCHITECTURE.md",
+      "size_bytes": 4556,
+      "sha256": "2848a8d1259707f6ad0e9ca3e92b90f1757002366902e4e8c46d3126a036f202"
+    },
+    {
+      "path": "apps/ehr/package-lock.json",
+      "size_bytes": 34301,
+      "sha256": "f09f4d1463fbd2f10c1e668dd76771cd2bc2b59a4c2e7e8cafc4f79be272b5db"
+    },
+    {
+      "path": "apps/ehr/package.json",
+      "size_bytes": 869,
+      "sha256": "4013cc940f5ba33ecd2e778327a2f42acee56741d8872b4bd33792e5e02b1bca"
+    },
+    {
+      "path": "apps/ehr/public/service-worker.js",
+      "size_bytes": 3260,
+      "sha256": "c80649d78e2324531520623ee476092f3d3023752cb4d05863cc4cd439d49a6d"
+    },
+    {
+      "path": "apps/ehr/scripts/service-worker-release.mjs",
+      "size_bytes": 4415,
+      "sha256": "d6af94388576a15ef4c0442c4dc03e1dd05d62b0a6bb5000e5a2988371ce0b60"
+    },
+    {
+      "path": "apps/ehr/src/canonical-platform-runtime.ts",
+      "size_bytes": 2698,
+      "sha256": "166324462938d223e7a5828ef3d06b79b68e7d21a66fe367a31545747000f671"
+    },
+    {
+      "path": "apps/ehr/src/main.tsx",
+      "size_bytes": 1705,
+      "sha256": "7b9e1cc99048a55337514db47c265ccffa8551fedfb60cc876fb57553c5fac65"
+    },
+    {
+      "path": "apps/ehr/src/release-service-worker.ts",
+      "size_bytes": 1768,
+      "sha256": "d7bad6128f6c2f657f9c8f4d3c5a0158cd6dc498394be2199565e2a4fe98eba3"
+    },
+    {
+      "path": "apps/ehr/src/vite-env.d.ts",
+      "size_bytes": 347,
+      "sha256": "6581cf4e87c3de6eddebffa1e4576492ec08387bdac003a16548f51513b92434"
+    },
+    {
+      "path": "apps/ehr/test/service-worker-release.test.mjs",
+      "size_bytes": 8417,
+      "sha256": "a0d5e0afc8d3ed241bac8d5b4c142193b00840293104f110a3bc9cc73b7821ec"
+    },
+    {
+      "path": "apps/ehr/vite.config.ts",
+      "size_bytes": 2184,
+      "sha256": "62374eac5ca5eac5922223ff2956131661108440616906ae04ab34a8b7991a78"
+    },
+    {
+      "path": "docs/ARCHITECTURE.md",
+      "size_bytes": 43180,
+      "sha256": "16bb990043fc3de6b6365dba26326b3519e058c377e2b245a7879a70d7fd1eee"
+    },
+    {
+      "path": "docs/DECISIONS.md",
+      "size_bytes": 46461,
+      "sha256": "f5649fb49189e1dd9bbd4f2d0603b4c1645a696bfb0832432452986e897fc60d"
+    },
+    {
+      "path": "docs/README.md",
+      "size_bytes": 5974,
+      "sha256": "359b81231976abc1c4b0db4095b10f0abffa3c1d41b564224d85f35fc3fa924c"
+    },
+    {
+      "path": "docs/RELEASE_ARTIFACT_GATE.md",
+      "size_bytes": 10170,
+      "sha256": "2e990b5e31eefb061689e80d08f13b6281735a84a9edb3dca6427fb3b604e480"
+    },
+    {
+      "path": "docs/TASK.md",
+      "size_bytes": 130008,
+      "sha256": "c38b8df58e179008dd6ee24790fc8e809a2633c5c22cfc89b29f42bb1afbd0f9"
+    },
+    {
+      "path": "docs/TUF-CI-PROTECTION.md",
+      "size_bytes": 12720,
+      "sha256": "3d9d5a7261230fe78acf31f255814169be57f8a9f838f4a0b5c0bab76df7079f"
+    },
+    {
+      "path": "docs/TUF-PRODUCTION-IMPLEMENTATION.md",
+      "size_bytes": 82865,
+      "sha256": "1dd00ff053157fa24224e5a1811a77effbf5ea06e9bc164b89f9394b67f07659"
+    },
+    {
+      "path": "docs/TUF-STAGING-EXECUTION.md",
+      "size_bytes": 20803,
+      "sha256": "71e81d963800dbc572c4c8056048917347f47cc193504f413de6dd15bee4cdb3"
+    },
+    {
+      "path": "docs/TUF-STAGING-INFRASTRUCTURE.md",
+      "size_bytes": 11717,
+      "sha256": "a4f03f606200656222a0b4af74bb70194d7b8aea13bb53ce2d66943946232419"
+    },
+    {
+      "path": "docs/TUF-STAGING-MIGRATION.md",
+      "size_bytes": 12001,
+      "sha256": "56210ce6ca4177e8dfd9f1605a920ae9f341005d3e13453aaba4a6312fdf8aa9"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/README.md",
+      "size_bytes": 8496,
+      "sha256": "bb74d94babfc4e9eb66e9852bf4b5b0440db6b79657066ba500720d285d3b001"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/files.json",
+      "size_bytes": null,
+      "sha256": null,
+      "note": "inventory itself; retain final hash independently"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/github/action-pins.json",
+      "size_bytes": 744,
+      "sha256": "50fb1faafccba2bce2bf76fd433ed8fa82f1de9640e888b9c0a53100b005fdc7"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/github/actions-permissions.json",
+      "size_bytes": 241,
+      "sha256": "87c9fb92f843b31bfdc193f714ff30417a285a73e14c06a2d5dc841df32caa79"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/github/environments.json",
+      "size_bytes": 194,
+      "sha256": "06e7eac0143dea86696602daf93a5f4c399d3e2eb548b3545ec52567f361189f"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/github/main-protection.json",
+      "size_bytes": 326,
+      "sha256": "37689418032e8fdea895e2abfbcaa5f14ae378fae607145b8ab99e6ff159510c"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/github/release-protection.json",
+      "size_bytes": 340,
+      "sha256": "567455df58e84ba68e7415f2db2da1627f476150a363e41f57832058a849da18"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/github/repository.json",
+      "size_bytes": 372,
+      "sha256": "fc9540c49aa667107be86fa444d89ce34d61f450eda1231b1b47800ef2f4f6f5"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/github/rulesets.json",
+      "size_bytes": 142,
+      "sha256": "70c3560c60d2529111e688540749826a48183d14cfe40ddaf1a485118562045f"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/github/workflow-permissions.json",
+      "size_bytes": 255,
+      "sha256": "7a395706b37f03b9107fbc2d6b5092975da3ad3fe85ead4aeec2359a26b8cdd6"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/github/workflows.json",
+      "size_bytes": 196,
+      "sha256": "b8ac97b606ae64ba3cdb98dae8b0347079ffb9c78494c2bcf8407cccdbd5df5e"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/go-vulnerabilities.json",
+      "size_bytes": 618,
+      "sha256": "76cdc657847e43fee4af22f4576b65571d76a0a1ac5b2b11621e71d68f245ddc"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/historical-go-vulnerabilities.json",
+      "size_bytes": 1222,
+      "sha256": "c4a05f641415458c0f32c5c595b4fc056c4f0b8355fb2ebfff1762975cd3f9a4"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/migration-regression.json",
+      "size_bytes": 430,
+      "sha256": "7c31ac340096a9d465e263257305520e3c6e6b7b9cccf0080a807a282ce20e20"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/migration.json",
+      "size_bytes": 9011,
+      "sha256": "22b18bca65aabb216783df65572467064cae46696b635ba542ae3e034b9ec984"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/offline-plans.json",
+      "size_bytes": 25988,
+      "sha256": "0e8ed45e210f63cb4f0371bb3b93541c371a72078fdaab084aac45c768a5d378"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/reproducibility.json",
+      "size_bytes": 1380,
+      "sha256": "c5aae864fd6fd70b6c95662606178108410f915e1729fd54d4b83098859941c3"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/unfilled-plan-denial.json",
+      "size_bytes": 203,
+      "sha256": "b53b267c514adda1f8fb69fef8f3a193f8df441ca6b6ae1b1ffd77a12cf4584a"
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/verification.json",
+      "size_bytes": 16519,
+      "sha256": "1adadf3de2cbb96b191c08a89685d8e0d36871ddf6a54ba9c2c770dfcd51ef57"
+    },
+    {
+      "path": "infra/aws/package-lock.json",
+      "size_bytes": 24656,
+      "sha256": "a0eff3e43917539989e5f072ef5c63cd1b929b56344b5d244520d00bb15f5ab0"
+    },
+    {
+      "path": "infra/aws/package.json",
+      "size_bytes": 1683,
+      "sha256": "c743422d57ef30567dc25483b9d4f7bfed85709f871c61e351e10205dec815c9"
+    },
+    {
+      "path": "infra/aws/scripts/plan-tuf-staging.mjs",
+      "size_bytes": 4643,
+      "sha256": "aef6664e3f4b3442f991a659734b1a7744bcb22870bedf4dfca585056d998ce4"
+    },
+    {
+      "path": "infra/aws/src/hid-release-trust-stack.ts",
+      "size_bytes": 41982,
+      "sha256": "f13123e54b119bb68e6e4a65b7edc6f13463314c394dce2ec29023618e77ff83"
+    },
+    {
+      "path": "infra/aws/src/tuf-signing-broker.ts",
+      "size_bytes": 61754,
+      "sha256": "97f2ac2250a0f670ff02951584404856e96a384ce2cf315aab672acba020c001"
+    },
+    {
+      "path": "infra/aws/test/release-trust-stack.test.ts",
+      "size_bytes": 59875,
+      "sha256": "5c77ba4d44fb234141ece18a635259b3c771b39abedf4247543c0849c31d9b35"
+    },
+    {
+      "path": "infra/cloudflare/.gitignore",
+      "size_bytes": 77,
+      "sha256": "069347838b37dd2965b7af334a46d0b19229e49470959ee97884803aa185b058"
+    },
+    {
+      "path": "infra/cloudflare/package-lock.json",
+      "size_bytes": 50516,
+      "sha256": "9a44b7cc44835e47ab352256f79ce16d68f9e3a32f1936e45308fa47e2c26ee9"
+    },
+    {
+      "path": "infra/cloudflare/package.json",
+      "size_bytes": 1546,
+      "sha256": "1418bdce59da8515aaa2c279bdb9cd0bba7b65ab0361827bab801783595e50d6"
+    },
+    {
+      "path": "infra/cloudflare/scripts/tuf-preview-gate.mjs",
+      "size_bytes": 5527,
+      "sha256": "71e62decc0942471040aec9ae1ebaa1200237e2f21db33740fa3b10bae5ab002"
+    },
+    {
+      "path": "infra/cloudflare/scripts/tuf-publication-authorization.mjs",
+      "size_bytes": 8484,
+      "sha256": "5def02f4d28c192d92b50ae8edcba051e201968ea70639afdea7f68606df3178"
+    },
+    {
+      "path": "infra/cloudflare/scripts/tuf-repository-layout.mjs",
+      "size_bytes": 23836,
+      "sha256": "bfbfad996d04ef95113d00ee6229419fb5203724159b800712bdf8e417829f3e"
+    },
+    {
+      "path": "infra/cloudflare/scripts/tuf-validate-repository.mjs",
+      "size_bytes": 2276,
+      "sha256": "d7f5505265b8d400b6b3983a15a67443bb913f1d3e252222112e18995381d04a"
+    },
+    {
+      "path": "infra/cloudflare/scripts/tuf-wrangler.mjs",
+      "size_bytes": 30796,
+      "sha256": "f62cd159f1d34909cd39964c94b5b1afa59464652a229685df0732428af6235d"
+    },
+    {
+      "path": "infra/cloudflare/scripts/verify-config.mjs",
+      "size_bytes": 10143,
+      "sha256": "44905e56bf0e3a52378e5a46fbb944fad3c901a4957800369736df676beab70d"
+    },
+    {
+      "path": "infra/cloudflare/scripts/wrangler-dry-run.mjs",
+      "size_bytes": 2250,
+      "sha256": "803a148642a594699459786c908cba1d6d14a0cd5e96cf626baf0f33fa2bf40a"
+    },
+    {
+      "path": "infra/cloudflare/src/tuf-bootstrap-worker.mjs",
+      "size_bytes": 410,
+      "sha256": "fe3efd91cf161afb005b53991ae9908de79326bef6f89412897898cd92eef251"
+    },
+    {
+      "path": "infra/cloudflare/src/tuf-path-policy.mjs",
+      "size_bytes": 1192,
+      "sha256": "bcfae20015bbefdd9fc1a67ce8d68d27beeb257a8236f75bd6614c8304060c96"
+    },
+    {
+      "path": "infra/cloudflare/src/tuf-repository-worker.mjs",
+      "size_bytes": 5468,
+      "sha256": "04048d017f0f23a7ca11d6060e2a804c3948f312a74cbd87c3dd1db6451dc835"
+    },
+    {
+      "path": "infra/cloudflare/test/helpers/tuf-publication-fixture.mjs",
+      "size_bytes": 1407,
+      "sha256": "9367ff61b6c88b4e63bd2752c08608adb1aa241baa2ab980444b8abe2f93c826"
+    },
+    {
+      "path": "infra/cloudflare/test/helpers/tuf-repository-fixture.mjs",
+      "size_bytes": 4960,
+      "sha256": "20b79e76168d351e81a511882ab0083bfda1f05ce9634805c572fb0b86c00ce7"
+    },
+    {
+      "path": "infra/cloudflare/test/tuf-canonical.test.mjs",
+      "size_bytes": 1275,
+      "sha256": "7b645319d6b1a650684607c4a5354eac325098f27e127ce44074fab255841159"
+    },
+    {
+      "path": "infra/cloudflare/test/tuf-config.test.mjs",
+      "size_bytes": 22203,
+      "sha256": "f7d985739ab9c658ff8d7a471650e73b1e73b8970c3cac0bb3c102e6ed53cd4d"
+    },
+    {
+      "path": "infra/cloudflare/test/tuf-journal-pipeline.test.mjs",
+      "size_bytes": 6984,
+      "sha256": "9dbcecdf5b16c9d18277952d36d3b2fadbd3929a5fbfc0a3538c319aac2f49b4"
+    },
+    {
+      "path": "infra/cloudflare/test/tuf-preview-gate.test.mjs",
+      "size_bytes": 4272,
+      "sha256": "9f894404bba79fd1338f2d74e2e8f9da6f62cbc2865407d9c871a5c980bd2668"
+    },
+    {
+      "path": "infra/cloudflare/test/tuf-publication-authorization.test.mjs",
+      "size_bytes": 10999,
+      "sha256": "d92a385a67a8b2de2387b14ca052ab77bba8c8117c86720644b4294c6cbe398d"
+    },
+    {
+      "path": "infra/cloudflare/test/tuf-repository-worker.test.mjs",
+      "size_bytes": 7603,
+      "sha256": "94529339ccf7e9b2302bca47326f872c60cd6b455e632f4ea597c7e8eecef369"
+    },
+    {
+      "path": "infra/cloudflare/test/tuf-validate-repository.test.mjs",
+      "size_bytes": 5026,
+      "sha256": "80411f34f294a6e3d61d0390b38ef685f342fcb57c6068b23f9fd2aa5df1db78"
+    },
+    {
+      "path": "infra/cloudflare/test/wrangler-dry-run.test.mjs",
+      "size_bytes": 2430,
+      "sha256": "9a8453d278be271d629d0500143646d1f816e620797f55b6d96f6caa625b858a"
+    },
+    {
+      "path": "infra/cloudflare/workers/hid-tuf-production/wrangler.json",
+      "size_bytes": 912,
+      "sha256": "af356cddf651e425e812057bf327c11b3f0c5f1d2dd5225c2885d903e446a4af"
+    },
+    {
+      "path": "infra/cloudflare/workers/hid-tuf-staging/wrangler.json",
+      "size_bytes": 919,
+      "sha256": "3b7762bfb2ef140663f36ed2821e5a2e57e31bc9ab0c9eb21f3d9c5f81b265db"
+    },
+    {
+      "path": "release/config/components.json",
+      "size_bytes": 6385,
+      "sha256": "d5133595bcd75bb46069d75266a8542ec5ed96a7fe9bbd4f0992e669be226d0e"
+    },
+    {
+      "path": "release/config/environments.json",
+      "size_bytes": 2327,
+      "sha256": "95c853b20d11f6efa2019d1f73cac4af8d3668ea223b6c84ffcd7d6926d80e1b"
+    },
+    {
+      "path": "release/config/staging-identifiers.template.json",
+      "size_bytes": 7258,
+      "sha256": "b11cda88293455dc16fe82903a493e431b3dc189421f403286abf760bb937980"
+    },
+    {
+      "path": "release/migration/synthetic-fixture.mjs",
+      "size_bytes": 7203,
+      "sha256": "87efca59106b8f4e69ebc763d3ef0ff24504703a4dad4968e9fc3646c693804c"
+    },
+    {
+      "path": "release/package-lock.json",
+      "size_bytes": 4120,
+      "sha256": "f78dc011e54ac38fde7b280834c1cd406839c9d408a2aded4fddf55dc2bfaea3"
+    },
+    {
+      "path": "release/package.json",
+      "size_bytes": 396,
+      "sha256": "2ebd590063529a1cedc8da192b442210b6ac75c87b9fbe84dc67d87f750835d9"
+    },
+    {
+      "path": "release/schemas/channel.schema.json",
+      "size_bytes": 1672,
+      "sha256": "4bd3d1f238be0ca98aeb3f0176945e886d91344c2975f3518ef56638e449c45b"
+    },
+    {
+      "path": "release/schemas/frontend-content-manifest.schema.json",
+      "size_bytes": 1593,
+      "sha256": "7a3a54c2a820742bb49d634de3517f277c4dccfa8b7925301916521b0e58d90f"
+    },
+    {
+      "path": "release/schemas/promotion-evidence.schema.json",
+      "size_bytes": 3089,
+      "sha256": "8115f11e97db9cc778e352c268a510e54434bdecb27631d92ac0c342f680fa92"
+    },
+    {
+      "path": "release/schemas/release-bundle.schema.json",
+      "size_bytes": 16449,
+      "sha256": "190a6d4cf111d93262ab81ad4d008e1ab75cf8e7e90347db56ca1c3bbbc747bf"
+    },
+    {
+      "path": "release/scripts/admit-release.mjs",
+      "size_bytes": 15401,
+      "sha256": "5f42c6d2cbec5b66c4506986c4e5440fe013c3e0bdb91143af10cebc81220ac8"
+    },
+    {
+      "path": "release/scripts/collect-ci-evidence.mjs",
+      "size_bytes": 3772,
+      "sha256": "82b49aa6ff2167b38133f857de980e6d5283b27320b9f07ed81189a06c0ebabc"
+    },
+    {
+      "path": "release/scripts/collect-local-gate-evidence.mjs",
+      "size_bytes": 2902,
+      "sha256": "03487813eb70702d69dd22e8caede398ce43f79f80edb702abba903a3eaa632c"
+    },
+    {
+      "path": "release/scripts/go-vulnerability-gate.mjs",
+      "size_bytes": 2961,
+      "sha256": "385eb3a7a45aedd9d6e2058b411c3870c23d6a053e47982d1fc19cf31b6373f5"
+    },
+    {
+      "path": "release/scripts/publication-pipeline.mjs",
+      "size_bytes": 7660,
+      "sha256": "e14ca492bdbe2ed74e8e3d5c43a42f2793b9714a39dc51b00f7c463722dc9027"
+    },
+    {
+      "path": "release/scripts/run-protected-publication.mjs",
+      "size_bytes": 16583,
+      "sha256": "95bbd75052d03d525fdc7a3b43c184c9908103d55ade892a1ddf3577e195a0a3"
+    },
+    {
+      "path": "release/scripts/run-workspace-gates.mjs",
+      "size_bytes": 2629,
+      "sha256": "dc85adeebed18bcc3f6a6c3399c48f529c278a421e387ef5127ddeb047f58ea7"
+    },
+    {
+      "path": "release/scripts/validate-staging-identifiers.mjs",
+      "size_bytes": 8181,
+      "sha256": "5cefd98ed002080a5f0975ec856d3ead6bf0107f8f23e883074b51451d1d0dc6"
+    },
+    {
+      "path": "release/scripts/verify-ci-candidate.mjs",
+      "size_bytes": 6272,
+      "sha256": "ea4983ac920a08e1c7dcf5cccedf214a1a4b49c553c4679854ab2ab981ebd5c7"
+    },
+    {
+      "path": "release/scripts/verify-publication-workflow.mjs",
+      "size_bytes": 6296,
+      "sha256": "9bbe074deffc8cb36f0e39e8f470212ed219c8bc6e43909ee19da1d43b2c2527"
+    },
+    {
+      "path": "release/scripts/verify-release-contract.mjs",
+      "size_bytes": 48223,
+      "sha256": "7091e6b92ce60f56963185f546ab63998368531844c6b9ec5dbc74fc9687ad83"
+    },
+    {
+      "path": "release/test/ci-evidence.test.mjs",
+      "size_bytes": 3322,
+      "sha256": "451134408afc067d89ff1cbbbd266a64d42516e7c7f395657e70cee9be10c4f2"
+    },
+    {
+      "path": "release/test/go-vulnerability-gate.test.mjs",
+      "size_bytes": 797,
+      "sha256": "d721c82ec338ae2470c9ad5fb46ef4d01d5ae5424a191cafbdb914ebb31f895b"
+    },
+    {
+      "path": "release/test/publication-pipeline.test.mjs",
+      "size_bytes": 7012,
+      "sha256": "7ae6417256e68432df75992b3c9dd95353600e9a57686d35846d52bfa7b08539"
+    },
+    {
+      "path": "release/test/publication-workflow.test.mjs",
+      "size_bytes": 8296,
+      "sha256": "4863a8a24ab86cab01b4543b0e556094f808c88466d2485bd17e5098a6397e9f"
+    },
+    {
+      "path": "release/test/release-contract.test.mjs",
+      "size_bytes": 27247,
+      "sha256": "494fe1ffe8350823532b8ed0584e842fef1f2cea0ea3f8f329b11d464395c241"
+    },
+    {
+      "path": "release/test/staging-identifiers.test.mjs",
+      "size_bytes": 1937,
+      "sha256": "49fd58b5e4059906ba28873f3645e92f0bfa9eeef8adf660a63fab42b09e3c11"
+    },
+    {
+      "path": "scripts/tuf-staging-migration-rehearsal.mjs",
+      "size_bytes": 21932,
+      "sha256": "503a638f0be7c20beff978bfa308f5c16364acad505d97f42c67119635aa49b5"
+    },
+    {
+      "path": "services/ehr-api/scripts/promote-legacy-identity.mjs",
+      "size_bytes": 35780,
+      "sha256": "23b37bad256493011763a6fca97e663f9a42962bd66cf88852b8576809bb8926"
+    },
+    {
+      "path": "services/ehr-api/scripts/reconcile-legacy-identity.mjs",
+      "size_bytes": 25182,
+      "sha256": "287e7930667ca42e925f1b221da12134ce019a2338a82ac3db1b2311b1ebe6c2"
+    },
+    {
+      "path": "tools/tuf-release/Dockerfile.signing-broker",
+      "size_bytes": 1314,
+      "sha256": "7cd54211d4d94a8553a39d2bb87c659b8bf335aa6201be038a8e45d9fa3b4883"
+    },
+    {
+      "path": "tools/tuf-release/README.md",
+      "size_bytes": 15091,
+      "sha256": "24d3def094bdc7a354f1d91307483d0074c80d31422d67d442d75e029c973394"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf-journal/main.go",
+      "size_bytes": 6699,
+      "sha256": "49a6165f5b46a1b93866ec8d492410769a6248506c6fe84e6183ab29377eaebe"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf-journal/main_test.go",
+      "size_bytes": 8803,
+      "sha256": "92daa70fd7b3f8c0923a7dcc21b2aeaf0274fb491a75fccc69231724e722b443"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf-publication/confirmation.go",
+      "size_bytes": 2349,
+      "sha256": "c29047c4c694db25b568435db27d274f9a88296e61f8e5afcf790286183f3512"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf-publication/confirmation_test.go",
+      "size_bytes": 2462,
+      "sha256": "9b3c7b8fc72731d9e500b0060da8ceb29c8cc3e2993166977345ec13a4e46ba6"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf-publication/main.go",
+      "size_bytes": 7842,
+      "sha256": "795fbf0b12141114cc1f9f468a2f9f19055f5a0c3144f26f566483827f755bdc"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf-publication/main_test.go",
+      "size_bytes": 17760,
+      "sha256": "c32fc932c3342eb6f68d61d81abc0e70d248b9138130e41dc258abd48000d8e4"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf-repo/main.go",
+      "size_bytes": 21383,
+      "sha256": "b499885d294729af4e30a22649da348435a47c35bc4b85c49470478d4e1c29c2"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf-repo/main_test.go",
+      "size_bytes": 16889,
+      "sha256": "c5910d89f2ab6b7d2091b614f90e0d6e7a099aca0e2ce648dad60005b465511a"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf-signing-broker/main.go",
+      "size_bytes": 4035,
+      "sha256": "83dd9e33057952945545c9fc8568ccece9b29265aefd388332d32da4c9216bf8"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf/main.go",
+      "size_bytes": 11510,
+      "sha256": "351933ff933f626f57836e485e8e839ed757d677f1fc33d8d5cc508b89f533b9"
+    },
+    {
+      "path": "tools/tuf-release/cmd/hid-tuf/main_test.go",
+      "size_bytes": 4571,
+      "sha256": "554fee1e3758b19813bf97d84056a3d700ae8201fe1996ef9e6fd88cb2e959d0"
+    },
+    {
+      "path": "tools/tuf-release/go.mod",
+      "size_bytes": 2095,
+      "sha256": "af23b78b039ea0ee9d2e6144a264022ba1e7331c027a06f891e147a5e8da6494"
+    },
+    {
+      "path": "tools/tuf-release/go.sum",
+      "size_bytes": 8029,
+      "sha256": "76fd3d25015706b851d3d8172952e6216620c4b752264e25113cff0814b64910"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/decision.go",
+      "size_bytes": 22303,
+      "sha256": "ecf117ac30451e568333500eae50baddf952c03d95f88be6e4a61eb036657ba6"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/doc.go",
+      "size_bytes": 373,
+      "sha256": "856326be311a991df0b8a8736ef2481431bc1b684d235103953ac62896e0e7d2"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/object.go",
+      "size_bytes": 7160,
+      "sha256": "7e1a231067739f85adbfd64ebf3dec5538a6bf03d6ac05983f7637a89d549322"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication.go",
+      "size_bytes": 12139,
+      "sha256": "4b34f5f24c7b4df9d6309a65a6160d98960dd68fe08ffdbaa2716cf6c7f51e47"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_archive.go",
+      "size_bytes": 8878,
+      "sha256": "f18b010be7558d4ea03df20789be2f530cf74eb5635641c39b3673af4474269c"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_archive_test.go",
+      "size_bytes": 8385,
+      "sha256": "b8d678289d9551a9b170aa774c3257c5e69f896397111f7986f92d3ca6684e20"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_evidence.go",
+      "size_bytes": 4979,
+      "sha256": "88a9f8acfb3a508c04a52b4e6d529bd38eb137032d2bb37b58acce9376f818c7"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_journal.go",
+      "size_bytes": 19357,
+      "sha256": "f8d85ca3122d02d942e78214e0f6fda798f2ad39f37ff3faa69fb17dc76d9bb8"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_journal_config.go",
+      "size_bytes": 2877,
+      "sha256": "bd2d0993d21587c2aeb3bd72f46ab5ac2e01981f7cd6191c5c33cc07ed6abe15"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_journal_test.go",
+      "size_bytes": 14704,
+      "sha256": "69cded20d876d0a8e34ec448870960ab5bc196719f99b36907fdada5a9f798d0"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_reader.go",
+      "size_bytes": 4912,
+      "sha256": "4862c26303642a69fac25dca98a0781c06dca5bc75e85897c12c10f166bcfc8b"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_reader_test.go",
+      "size_bytes": 4858,
+      "sha256": "99ac18cc910aaeda794249d4c4c34aba13df603243b828ac2d53f3a4b9c4337a"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_test.go",
+      "size_bytes": 14508,
+      "sha256": "ad01dcb435e280212404837f1ae8e69cf0a7f43030b6b6ad6caf09f59d66ef62"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/request.go",
+      "size_bytes": 4159,
+      "sha256": "ca75e04d91b094968cca8b4efea2d8eb4c6a2883242c0c38e1f2dafbbe5a2757"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/request_test.go",
+      "size_bytes": 8482,
+      "sha256": "482d6adba6bff5bb9aa982fcb5f294b7f4fa2fe697517f2fca86416eafc1f201"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/runtime.go",
+      "size_bytes": 15179,
+      "sha256": "603000c27e3ddd5752db264d83ae02b973601cc6174a47db1fae620cdb35d41e"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/runtime_test.go",
+      "size_bytes": 16469,
+      "sha256": "c884e807955d19baa9ec15ffe9947c4f080db1f4cebf5d4f0ae199fbb61db939"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/state.go",
+      "size_bytes": 55712,
+      "sha256": "84db7407a377cf0d8c654896364d6167fdaf3675187068acd4ad3a18582ecc6f"
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/state_test.go",
+      "size_bytes": 50900,
+      "sha256": "e42aa6e91540d126911da94d695d0c21dad66482035f3a92e2de91baf49b1bb3"
+    },
+    {
+      "path": "tools/tuf-release/internal/frontendarchive/archive.go",
+      "size_bytes": 17062,
+      "sha256": "968726973bef4f8101928ea4c2614298e14e22367838e8a5b11b87703c97f7b5"
+    },
+    {
+      "path": "tools/tuf-release/internal/frontendarchive/archive_test.go",
+      "size_bytes": 9471,
+      "sha256": "61054b8055cf13fabe6d4e90adf472cc5b13442e4632c5869c0d23d705f3c604"
+    },
+    {
+      "path": "tools/tuf-release/internal/kmssigner/doc.go",
+      "size_bytes": 460,
+      "sha256": "ade630d4b03633bea65b4ec4700dd0ae6bbdbc8c6a0740dedae876a23bb22a0e"
+    },
+    {
+      "path": "tools/tuf-release/internal/kmssigner/signer.go",
+      "size_bytes": 12132,
+      "sha256": "d82fa7cbd4719abe7dd178cbf969dbb64d86cf43cc80bb673a184c5e71bc2419"
+    },
+    {
+      "path": "tools/tuf-release/internal/kmssigner/signer_test.go",
+      "size_bytes": 23033,
+      "sha256": "fb41381b111ba586946a6eba2305ecaa22ff65914375b40829a971a41d8c482e"
+    },
+    {
+      "path": "tools/tuf-release/internal/publicationjournal/journal.go",
+      "size_bytes": 24547,
+      "sha256": "42450b22245d30790a88424131b405f2c68011f05b00d141d9d109886a4ca919"
+    },
+    {
+      "path": "tools/tuf-release/internal/publicationjournal/journal_test.go",
+      "size_bytes": 13777,
+      "sha256": "e8585b758c80fd81e564c5bbd286166cce579434e78537c87079e71f2f7df7cf"
+    },
+    {
+      "path": "tools/tuf-release/internal/publicationjournal/policy_regression_test.go",
+      "size_bytes": 23527,
+      "sha256": "9511a17925b64c69fe68a67e9eac98b82af8b83a48f75390208effe47c245d4f"
+    },
+    {
+      "path": "tools/tuf-release/internal/publicationjournal/validation.go",
+      "size_bytes": 2944,
+      "sha256": "5a938d36cba9eb2335e9e0a4646cf9c27256b8306f01bc546257fbf07ec1e575"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/checkpoint.go",
+      "size_bytes": 11337,
+      "sha256": "0a1a9387c0a378a0b5173056f16d28196322406f3bafc214c8ed47dd370e6c7d"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/files.go",
+      "size_bytes": 2795,
+      "sha256": "eef60ff61923c5fb6c91012adc751832cb8b463c69bcdd0087f665b2772dbf0d"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/generation.go",
+      "size_bytes": 44628,
+      "sha256": "39e8750f1b4793ed3185f42d3611e080135f8c0574bab9b2391852c576dd1267"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/generation_plan.go",
+      "size_bytes": 8592,
+      "sha256": "c110ea243210dc087babed9228ff6d8df1f404c074524419bdb9d9b4ef485e01"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/io.go",
+      "size_bytes": 6941,
+      "sha256": "e00347f280aa8b1f81bbdad3817e3d6091fce15a61db981971718a69315f16b7"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/metadata.go",
+      "size_bytes": 13656,
+      "sha256": "e4192ed44dfa3edbe6d24cf5d16c788ee51288287adf75b0b6c73b072d1a3d06"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/online.go",
+      "size_bytes": 23274,
+      "sha256": "69e7a054061850293d1f44dc23b1becbe640cd543c55a6a1c7f6428db78c3b99"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/online_plan.go",
+      "size_bytes": 9593,
+      "sha256": "2ffe65b41a0f739011b781ab1a6c31f1b5b47900cadb95af92c4517d31484e03"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/plan.go",
+      "size_bytes": 7625,
+      "sha256": "95eaff330eef3d5d7f09de5ba7a33f7f0d405205122cb0aed5e491601c4f68a5"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/publication.go",
+      "size_bytes": 5842,
+      "sha256": "778727a281702a6edb46d5b3e87a512d68a9ddd6f0244b3ea2392343f08d2a0d"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/publication_test.go",
+      "size_bytes": 3883,
+      "sha256": "1a1a0e921f0b731edcb44dd277d98a78a37a2a053f30ea8317371a979c2df91a"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/release_discovery_test.go",
+      "size_bytes": 1929,
+      "sha256": "15326a7eee822ea2f25a858af45fd5d1820a45474099fade24ff17a65b16d01b"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/repository_test.go",
+      "size_bytes": 73629,
+      "sha256": "a36a3fb4299c513c9b84941c79fa3555a488cf0c26532565dd324c4088f66b54"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/request.go",
+      "size_bytes": 10549,
+      "sha256": "e46ff0e7238484077e2d47ac18a7e4c6e28b97396113165e71c4f4307187f055"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/root.go",
+      "size_bytes": 5606,
+      "sha256": "74b0eb0ed934b15b92b3d67fce0844f44d397acb0fe336e0d19f8902dc96303e"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/root_history.go",
+      "size_bytes": 2475,
+      "sha256": "2af9319f06c4d772ea9997d67fe994a7635dc6c5c2de9a906467e2414ea7ad2e"
+    },
+    {
+      "path": "tools/tuf-release/internal/repository/targets.go",
+      "size_bytes": 25225,
+      "sha256": "1fa29e3b0277ae9fa4658b1eb4b401ead8676565a92ba7d427f6c340b4b9ff83"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/authorization.go",
+      "size_bytes": 10299,
+      "sha256": "ca1b99d0f0bab137c318b28f9114a5e437181d1376892f392e4c00ec31156560"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/authorization_materialization_test.go",
+      "size_bytes": 5294,
+      "sha256": "1823f079bbd052dec3d3b4d3317800efe6b8aab41557bab37c3191d20afd4bd4"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/authorization_test.go",
+      "size_bytes": 7893,
+      "sha256": "1518bb80c5ea10df56dfc2b592d3c60a5e0a71176723a9a2ce6f9dab220233b7"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/broker.go",
+      "size_bytes": 27205,
+      "sha256": "5e7e358ff296d3f32d20e0d51b509b1ac24d15d42ed0dfdeb80a5f6b35e4e0fb"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/broker_test.go",
+      "size_bytes": 50670,
+      "sha256": "d8816df0760762dbe9312915a8643d801308d23e1c05cbb8fad4e765fa7b4284"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/confirmation.go",
+      "size_bytes": 5643,
+      "sha256": "d6801e75280e3c833dd8a42d0c259adf31b47e66892c662cfb3d5988e41b946e"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/confirmation_test.go",
+      "size_bytes": 8353,
+      "sha256": "6963cb147062bd5b7b3edc23b879d539674a5ee89c519187589f0dfdfd182b5b"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/publication.go",
+      "size_bytes": 10783,
+      "sha256": "28ce784212521a693477c6cce5c0dcd5bd9011557bc23267e7e8a598df130de4"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/request.go",
+      "size_bytes": 11172,
+      "sha256": "a477e1d7ab70e366b1b1c6730f4d6dea3f93a9cbabf08355c324b4f545c39f6c"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/state.go",
+      "size_bytes": 17383,
+      "sha256": "2f32ce0580f367500c9e793de219565d46cdf89849c43b58f513db014cc081a1"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/state_limits_test.go",
+      "size_bytes": 1551,
+      "sha256": "4d1fd412eed323ddb834400a3fcbebf18270e005b0a9326f666dee0d9ebee14f"
+    },
+    {
+      "path": "tools/tuf-release/internal/signingbroker/types.go",
+      "size_bytes": 7888,
+      "sha256": "ab9e904809dbf7fcd37be55e4b3fc02196c97a85e36fa3e145ba52315d6582ea"
+    },
+    {
+      "path": "tools/tuf-release/internal/strictjson/strictjson.go",
+      "size_bytes": 2575,
+      "sha256": "3996bb57e8a7830a0b4b9bdcaba3e22b5a09ea9eb32bca4ea5d04dd93f880c86"
+    },
+    {
+      "path": "tools/tuf-release/internal/strictjson/strictjson_test.go",
+      "size_bytes": 882,
+      "sha256": "74f941f09bea369c122a7dafa0819d6ab74d79aef3376186c7544dbb8f21312f"
+    },
+    {
+      "path": "tools/tuf-release/internal/testrepo/hid.go",
+      "size_bytes": 6629,
+      "sha256": "0ee4a6e86fdf1cf0c3f7a731bd1436ab0ed7efe80e521662b23e2464e52677fb"
+    },
+    {
+      "path": "tools/tuf-release/internal/testrepo/repository.go",
+      "size_bytes": 7548,
+      "sha256": "26f64d60df79caa1a09f7d4824900988baba5ae3f8cf17edf35c3f9bad06da0f"
+    },
+    {
+      "path": "tools/tuf-release/internal/tufclient/batch.go",
+      "size_bytes": 4533,
+      "sha256": "662e194bffd0d325309434bfefe66c3eb7cca7ff50d519f75b280f0aacb758ed"
+    },
+    {
+      "path": "tools/tuf-release/internal/tufclient/batch_test.go",
+      "size_bytes": 5990,
+      "sha256": "c322677f00d7179a76d27e6b1d52fd96e5e67910e55b69b800bca76245501303"
+    },
+    {
+      "path": "tools/tuf-release/internal/tufclient/client.go",
+      "size_bytes": 26022,
+      "sha256": "9589a6b166241b4e7d8632165db3ea0b445cdf5a0443d0c9f4c5e05cca347f8f"
+    },
+    {
+      "path": "tools/tuf-release/internal/tufclient/client_test.go",
+      "size_bytes": 18882,
+      "sha256": "f4e230427a6d3dffd2367ec950f4a5a0897767737f3be2b99b1fe01bd637a94b"
+    },
+    {
+      "path": "tools/tuf-release/internal/tufclient/configfile.go",
+      "size_bytes": 1627,
+      "sha256": "209e3bc8a1819b4999bc05cadc03d477c4dcd702e454b641a67a5e89866dcaa0"
+    },
+    {
+      "path": "tools/tuf-release/internal/tufclient/configfile_test.go",
+      "size_bytes": 5375,
+      "sha256": "0ae1ecf0d044ea591cae763a99c23192105a4602e7d82feafb0f281f65710dea"
+    },
+    {
+      "path": "tools/tuf-release/scripts/verify-production-toolchain.mjs",
+      "size_bytes": 1179,
+      "sha256": "6431bd2dd2f4a6ec5f98c56b8c6b6949f3f24873edae2a17d6c0f3d30626378a"
+    },
+    {
+      "path": "tools/tuf-release/scripts/verify-toolchain.mjs",
+      "size_bytes": 14032,
+      "sha256": "6cbfe04ff37f9cb16ac59dfd48a8a6f804c4a9141c3a0daa92951b14fd7d1dd4"
+    },
+    {
+      "path": "tools/tuf-release/toolchain/production-build.json",
+      "size_bytes": 977,
+      "sha256": "a11b0874be880749da6fcd3dbeaa90c29837e0281dd66715bf4d01d8928734ec"
+    },
+    {
+      "path": "tools/tuf-release/toolchain/verified-upstream-build.json",
+      "size_bytes": 2622,
+      "sha256": "c0a1e025bcd49d9307fba9dffbcde74796f5a8318d0e1e60eef1b977a21f79ee"
+    }
+  ],
+  "excluded": [
+    {
+      "path": "docs/SECURITY.md",
+      "size_bytes": 12950,
+      "sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+      "reason": "unrelated pre-existing edit; preserved untouched"
+    }
+  ]
+}

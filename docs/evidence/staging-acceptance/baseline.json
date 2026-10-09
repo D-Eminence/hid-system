@@ -1,0 +1,21 @@
+{
+  "recorded_at": "2026-09-08T14:47:20.287371+00:00",
+  "approved_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "original_branch": "tuf-production-release",
+  "original_head": "fe1f2f45f787a12a1ab37ff82d316863a204ddcd",
+  "approved_tree": "890a8c4cb6de07af10eabbee2609d80484cb4129",
+  "original_head_tree": "890a8c4cb6de07af10eabbee2609d80484cb4129",
+  "initial_status": " M docs/SECURITY.md",
+  "security_sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+  "remote": "origin\thttps://github.com/D-Eminence/hid-system.git (fetch)\norigin\thttps://github.com/D-Eminence/hid-system.git (push)\nupstream\thttps://github.com/D-Eminence/hid-1.0.git (fetch)\nupstream\thttps://github.com/D-Eminence/hid-1.0.git (push)",
+  "remote_release": "a709e643a731b444f7cb775b2b16fe28164146a7\trefs/heads/tuf-production-release",
+  "merge": "a709e643a731b444f7cb775b2b16fe28164146a7 ba2cd3290e7c1fe72817c3bdfb806dd306b2c633 fe1f2f45f787a12a1ab37ff82d316863a204ddcd 890a8c4cb6de07af10eabbee2609d80484cb4129",
+  "instructions": [
+    "CODEX.md",
+    "apps/ehr/AGENTS.md (EHR only)",
+    "docs/README.md and required context",
+    "user staging brief overrides historical no-staging authorization; production and irreversible operations remain forbidden"
+  ],
+  "canonical_report": "docs/TUF-STAGING-EXECUTION.md",
+  "result": "PASS: approved merge verified; tracked trees identical; original checkout and SECURITY edit preserved"
+}

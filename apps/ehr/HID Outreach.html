@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HID - Field & Community Outreach</title>
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="ehr-theme.css">
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="ehr-green">
+  <div id="root"></div>
+
+  <script type="text/babel" src="primitives.jsx"></script>
+  <script type="text/babel" src="hospital-data.jsx"></script>
+  <script type="text/babel" src="ehr-data.jsx"></script>
+  <script type="text/babel" src="ehr-extra.jsx"></script>
+
+  <script type="text/babel">
+    const OutreachApp = () => {
+      const [online, setOnline] = React.useState(() => navigator.onLine);
+      const [queue] = React.useState([]);
+      const [registrations] = React.useState([]);
+      const [vaccinations] = React.useState([]);
+
+      React.useEffect(() => {
+        const updateConnection = () => setOnline(navigator.onLine);
+        window.addEventListener('online', updateConnection);
+        window.addEventListener('offline', updateConnection);
+        return () => {
+          window.removeEventListener('online', updateConnection);
+          window.removeEventListener('offline', updateConnection);
+        };
+      }, []);
+
+      const handleSync = () => {
+        showToast('Sync requires the connected Outreach service.', 'shield');
+      };
+
+      return (
+        <ToastProvider>
+          <div className="ehr-shell">
+            <header className="ehr-topbar">
+              <div className="ehr-topbar-brand">
+                <div style={{ width: 32, height: 32, borderRadius: 'var(--radius-md)', background: 'var(--accent)', color: '#fff', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>HID</div>
+                <div>
+                  <div className="ehr-topbar-brand-name">HID Field & Community Outreach Unit</div>
+                  <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>Mobile Offline-First Clinical Node</div>
+                </div>
+              </div>
+
+              <div className="ehr-topbar-actions">
+                <Badge variant={online ? 'success' : 'warning'}>{online ? 'ONLINE' : 'OFFLINE MODE'}</Badge>
+                <Button variant="secondary" size="sm" icon="refresh" onClick={handleSync}>Sync Queue ({queue.length})</Button>
+              </div>
+            </header>
+
+            <main className="ehr-content fade-in">
+              <PageHead
+                title="Field Outreach & Community Immunisation"
+                sub="Mobile-first encounter capture with tier-2 offline sync capability (DECISIONS.md D14 / D15)"
+              />
+
+              <div className="ehr-grid-3" style={{ marginBottom: 'var(--space-600)' }}>
+                <KPICard label="Campaign Patients Registered" value={registrations.length} icon="users" />
+                <KPICard label="Vaccines Administered" value={vaccinations.length} icon="shield" />
+                <KPICard label="Pending Sync Queue" value={queue.length} icon="refresh" />
+              </div>
+
+              <ReferralsModule />
+            </main>
+          </div>
+        </ToastProvider>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<OutreachApp />);
+  </script>
+</body>
+</html>

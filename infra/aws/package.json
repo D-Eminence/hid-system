@@ -1,0 +1,40 @@
+{
+  "name": "@hid/aws-infrastructure",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts test/*.test.mjs",
+    "synth": "node scripts/synth.mjs",
+    "verify:synth": "node scripts/verify-synth.mjs",
+    "verify:policy": "node scripts/verify-policy.mjs",
+    "synth:dev": "HID_INFRA_ENV=development node scripts/synth.mjs",
+    "synth:staging:sleep": "HID_INFRA_ENV=staging HID_STAGING_MODE=sleep node scripts/synth.mjs",
+    "synth:staging:economy": "HID_INFRA_ENV=staging HID_STAGING_MODE=economy node scripts/synth.mjs",
+    "synth:staging:fidelity": "HID_INFRA_ENV=staging HID_STAGING_MODE=fidelity node scripts/synth.mjs",
+    "synth:prod": "HID_INFRA_ENV=production node scripts/synth.mjs",
+    "cost:inventory": "node --import tsx scripts/cost-inventory.mjs",
+    "cost:inventory:check": "node --import tsx scripts/cost-inventory.mjs --check",
+    "staging:start": "node scripts/staging-operation.mjs start",
+    "staging:sleep": "node scripts/staging-operation.mjs sleep",
+    "staging:fidelity:enable": "node scripts/staging-operation.mjs fidelity-enable",
+    "staging:fidelity:disable": "node scripts/staging-operation.mjs fidelity-disable",
+    "staging:teardown": "node scripts/staging-operation.mjs teardown"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.273.0",
+    "constructs": "10.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "aws-cdk": "2.1144.0",
+    "tsx": "4.23.12",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "recorded_at": "2026-09-08T19:12:48.451541+00:00",
+  "queries": [
+    {
+      "host": "updates.staging.healthidentitydirectory.com",
+      "error": "[Errno -3] Temporary failure in name resolution",
+      "result": "DNS_NOT_RESOLVED"
+    },
+    {
+      "host": "api.staging.healthidentitydirectory.com",
+      "error": "[Errno -5] No address associated with hostname",
+      "result": "DNS_NOT_RESOLVED"
+    },
+    {
+      "host": "staging.healthidentitydirectory.com",
+      "error": "[Errno -5] No address associated with hostname",
+      "result": "DNS_NOT_RESOLVED"
+    },
+    {
+      "host": "ehr.staging.healthidentitydirectory.com",
+      "error": "[Errno -2] Name or service not known",
+      "result": "DNS_NOT_RESOLVED"
+    },
+    {
+      "host": "lab.staging.healthidentitydirectory.com",
+      "error": "[Errno -3] Temporary failure in name resolution",
+      "result": "DNS_NOT_RESOLVED"
+    },
+    {
+      "host": "pharmacy.staging.healthidentitydirectory.com",
+      "error": "[Errno -3] Temporary failure in name resolution",
+      "result": "DNS_NOT_RESOLVED"
+    },
+    {
+      "host": "ocr.staging.healthidentitydirectory.com",
+      "error": "[Errno -3] Temporary failure in name resolution",
+      "result": "DNS_NOT_RESOLVED"
+    },
+    {
+      "host": "outreach.staging.healthidentitydirectory.com",
+      "error": "[Errno -3] Temporary failure in name resolution",
+      "result": "DNS_NOT_RESOLVED"
+    },
+    {
+      "host": "admin.staging.healthidentitydirectory.com",
+      "error": "[Errno -3] Temporary failure in name resolution",
+      "result": "DNS_NOT_RESOLVED"
+    }
+  ],
+  "http_requests_performed": false
+}

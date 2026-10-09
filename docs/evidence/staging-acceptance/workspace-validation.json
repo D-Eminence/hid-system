@@ -1,0 +1,59 @@
+{
+  "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "execution": "local credential-free validation, not GitHub CI or staging acceptance",
+  "node": "v24.13.1",
+  "results": [
+    {
+      "label": "workspace-build",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "started_at": "2026-09-08T19:09:18.445870+00:00",
+      "completed_at": "2026-09-08T19:10:38.217058+00:00",
+      "exit_code": 0,
+      "log": "workspace-build.log",
+      "log_sha256": "5c8b21f5e8bda54be6710f337563d576f01b930426ed8c340a0f0c34299648d6"
+    },
+    {
+      "label": "workspace-test",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "started_at": "2026-09-08T19:10:38.225762+00:00",
+      "completed_at": "2026-09-08T19:11:25.523073+00:00",
+      "exit_code": 0,
+      "log": "workspace-test.log",
+      "log_sha256": "ade8ba1c76ea8cde69bfceb7060e8f79988fe83bc763e0276f1bbf124520d517"
+    },
+    {
+      "label": "workspace-verify",
+      "command": [
+        "npm",
+        "run",
+        "verify"
+      ],
+      "started_at": "2026-09-08T19:11:25.530989+00:00",
+      "completed_at": "2026-09-08T19:12:38.631546+00:00",
+      "exit_code": 0,
+      "log": "workspace-verify.log",
+      "log_sha256": "0a9f43c84680eddede3f0d4309e1d9d94bb4f8711be6f545382256746f3d5acd"
+    },
+    {
+      "label": "ehr-release-cache-test",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/ehr",
+        "test"
+      ],
+      "started_at": "2026-09-08T19:12:38.638900+00:00",
+      "completed_at": "2026-09-08T19:12:39.092741+00:00",
+      "exit_code": 0,
+      "log": "ehr-release-cache-test.log",
+      "log_sha256": "717c4fd8541206feb36b26a69af5d5a1467273d23c94589686729b344e2a86d7"
+    }
+  ]
+}

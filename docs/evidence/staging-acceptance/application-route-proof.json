@@ -1,0 +1,197 @@
+{
+  "scope": "local-compiled-application-with-test-doubles-only",
+  "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "staging_accepted": false,
+  "database_connections": 0,
+  "database_test_double_calls": 1,
+  "http_results": [
+    {
+      "method": "get",
+      "path": "/api/v1/health/live",
+      "status": 200,
+      "body": {
+        "status": "ok"
+      }
+    },
+    {
+      "method": "post",
+      "path": "/api/v1/functions/patient-login",
+      "status": 404,
+      "body": {
+        "message": "Cannot POST /api/v1/functions/patient-login",
+        "error": "Not Found",
+        "statusCode": 404
+      }
+    },
+    {
+      "method": "post",
+      "path": "/api/v1/functions/signup-start",
+      "status": 404,
+      "body": {
+        "message": "Cannot POST /api/v1/functions/signup-start",
+        "error": "Not Found",
+        "statusCode": 404
+      }
+    },
+    {
+      "method": "post",
+      "path": "/api/v1/functions/patient-register",
+      "status": 404,
+      "body": {
+        "message": "Cannot POST /api/v1/functions/patient-register",
+        "error": "Not Found",
+        "statusCode": 404
+      }
+    },
+    {
+      "method": "get",
+      "path": "/api/v1/functions/patients-me",
+      "status": 404,
+      "body": {
+        "message": "Cannot GET /api/v1/functions/patients-me",
+        "error": "Not Found",
+        "statusCode": 404
+      }
+    },
+    {
+      "method": "post",
+      "path": "/api/v1/functions/break-glass",
+      "status": 404,
+      "body": {
+        "message": "Cannot POST /api/v1/functions/break-glass",
+        "error": "Not Found",
+        "statusCode": 404
+      }
+    },
+    {
+      "method": "post",
+      "path": "/api/v1/auth/signup",
+      "status": 404,
+      "body": {
+        "message": "Cannot POST /api/v1/auth/signup",
+        "error": "Not Found",
+        "statusCode": 404
+      }
+    },
+    {
+      "method": "post",
+      "path": "/api/v1/auth/token-exchange",
+      "status": 404,
+      "body": {
+        "message": "Cannot POST /api/v1/auth/token-exchange",
+        "error": "Not Found",
+        "statusCode": 404
+      }
+    },
+    {
+      "method": "post",
+      "path": "/api/v1/auth/oidc/exchange",
+      "status": 404,
+      "body": {
+        "message": "Cannot POST /api/v1/auth/oidc/exchange",
+        "error": "Not Found",
+        "statusCode": 404
+      }
+    }
+  ],
+  "patient_without_staff_membership": {
+    "status": 401,
+    "message": "Staff account or facility membership is inactive"
+  },
+  "compiled_web_assets": [
+    {
+      "name": "AdminDashboard-DyaQtQep.js",
+      "bytes": 94987,
+      "sha256": "8e3808c163a65cac927c6a6cb160fe39eb6d17077de1ad52f1d7144e60fa43d2",
+      "matched_tokens": [
+        "break-glass"
+      ]
+    },
+    {
+      "name": "AdminDashboard-legacy-DIUSvMUz.js",
+      "bytes": 118289,
+      "sha256": "8c4dbaa646f7b50262e4072d610f1ba2de4ec60ec7cca845cf58e701f1b41451",
+      "matched_tokens": [
+        "break-glass"
+      ]
+    },
+    {
+      "name": "DoctorEmergency-ClXTuJSv.js",
+      "bytes": 13207,
+      "sha256": "72aca719305deb326b1bf49738c3d2768393ad0c4d4874e868fe988a4010c7ce",
+      "matched_tokens": [
+        "break-glass"
+      ]
+    },
+    {
+      "name": "DoctorEmergency-legacy-vTaEoVr5.js",
+      "bytes": 21305,
+      "sha256": "4d2cefbf81874366d9c6f72da2430273dbba94cc8585f6de16f1a74f279e94b9",
+      "matched_tokens": [
+        "break-glass"
+      ]
+    },
+    {
+      "name": "PatientAuth-legacy-BGK0yubX.js",
+      "bytes": 32192,
+      "sha256": "687472d8b697ce0592e9853fe43d575c71633cb01b980c9a701bc97acc2ee6d8",
+      "matched_tokens": [
+        "patient-login"
+      ]
+    },
+    {
+      "name": "PatientAuth-sDIjK-cQ.js",
+      "bytes": 21076,
+      "sha256": "7c4582abc85724d96a444955d311b5d7050a4af5806044ae03e99fa09a29a70d",
+      "matched_tokens": [
+        "patient-login"
+      ]
+    },
+    {
+      "name": "hidApi-CzUwVYNf.js",
+      "bytes": 31260,
+      "sha256": "d7e67bc3a273d76d0fe29ae5798daeacc9ec6b671af3c1d4ddbb240213aef7b0",
+      "matched_tokens": [
+        "patient-login",
+        "signup-start",
+        "patient-register",
+        "patients-me",
+        "break-glass"
+      ]
+    },
+    {
+      "name": "hidApi-legacy-0g_G8RBb.js",
+      "bytes": 64134,
+      "sha256": "72dd41fe9ec1483d0066a51e763133d53aa24959195497ccb6d8614201e62641",
+      "matched_tokens": [
+        "patient-login",
+        "signup-start",
+        "patient-register",
+        "patients-me",
+        "break-glass"
+      ]
+    },
+    {
+      "name": "index-CZLlAsZa.js",
+      "bytes": 65916,
+      "sha256": "247462fdc8eb440cee6f8b72ae80731392a5825517a1ab6bb4724ef396303bb2",
+      "matched_tokens": [
+        "/api/v1/functions"
+      ]
+    },
+    {
+      "name": "index-legacy-0mmg7HAr.js",
+      "bytes": 127062,
+      "sha256": "00707d6250b919c3efb5940c0a4f3366235517d8d08e20937f41004ea0f0f12e",
+      "matched_tokens": [
+        "/api/v1/functions"
+      ]
+    }
+  ],
+  "limits": [
+    "No deployed staging HTTP proof",
+    "No real database login or patient credentials used",
+    "Supertest transient local HTTP server only",
+    "Gateway source independently rejects all /api/v1/functions/* at gateway/nginx.conf.template:49-52"
+  ]
+}

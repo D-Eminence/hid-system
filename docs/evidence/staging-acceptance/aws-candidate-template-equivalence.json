@@ -1,0 +1,20 @@
+[
+  {
+    "profile": "production",
+    "before": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-production-baseline-assembly/Hid-production-Regional.template.json",
+    "after": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-production-candidate-assembly/Hid-production-Regional.template.json",
+    "before_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+    "after_sha256": "f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6",
+    "bytes": 464453,
+    "byte_identical": true
+  },
+  {
+    "profile": "development",
+    "before": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-default-assembly/Hid-development-Regional.template.json",
+    "after": "/home/l2e/hid-staging-evidence/a709e643a731b444f7cb775b2b16fe28164146a7/20260908-acceptance/aws-candidate-default-assembly/Hid-development-Regional.template.json",
+    "before_sha256": "42cadadc0cda9ef7f13c86f27937b066662f417e5e5925fc2a46a1bb708db73c",
+    "after_sha256": "42cadadc0cda9ef7f13c86f27937b066662f417e5e5925fc2a46a1bb708db73c",
+    "bytes": 517254,
+    "byte_identical": true
+  }
+]

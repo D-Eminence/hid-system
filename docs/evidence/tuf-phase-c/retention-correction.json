@@ -1,0 +1,425 @@
+{
+  "schema_version": "hid.tuf.retention-correction/v1",
+  "recorded_at": "2026-09-07T08:37:03.984056+00:00",
+  "scope": "local 730-day retention correction and authorized post-commit documentation only",
+  "base_commit_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+  "corrected_source_commit_sha": null,
+  "worktree_dirty": true,
+  "index_empty": true,
+  "retention_requirement": {
+    "years": 2,
+    "days": 730,
+    "writer_lifetime_days": 730,
+    "iam_remaining_days_min": 729,
+    "iam_remaining_days_max": 730,
+    "iam_rounding": "one-day request-transit tolerance; original 730-day readback remains required",
+    "bucket_defaults_changed": false,
+    "object_lock_status": "UNAPPROVED / NOT CREATED"
+  },
+  "last_authorized_local_commit": {
+    "previous_sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+    "commit_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+    "tree_sha": "689609263c58d9c002ad656ced78e402a072edcc",
+    "commit_message": "Implement TUF release trust and prepare protected staging gates",
+    "commit_timestamp": "2026-09-07T04:11:04+01:00",
+    "manifest_sha256": "11dc85ec4dbbaeecbb63ba72ce8127e85026499a44a7ea39a1eb36e85503c0d1",
+    "commit_file_count": 193,
+    "statistics": "193 files changed, 46165 insertions(+), 1375 deletions(-)",
+    "exact_reviewed_scope": true,
+    "security_excluded_and_unchanged": true,
+    "commit_object_hash_verified": true
+  },
+  "validation": {
+    "local_commands": [
+      {
+        "label": "identifier-template",
+        "command": [
+          "node",
+          "release/scripts/validate-staging-identifiers.mjs",
+          "--check-template",
+          "release/config/staging-identifiers.template.json"
+        ],
+        "source_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+        "worktree_dirty": true,
+        "started_at": "2026-09-07T03:28:25.611070+00:00",
+        "completed_at": "2026-09-07T03:28:25.688381+00:00",
+        "exit_code": 0,
+        "log": "identifier-template.log",
+        "log_sha256": "3a9dde34c1b86ea5d8c72bfd5ae5748a874e601ceb303a7bd7cd75ae8a8fe695"
+      },
+      {
+        "label": "offline-broker",
+        "command": [
+          "node",
+          "--import",
+          "./infra/aws/node_modules/tsx/dist/loader.mjs",
+          "infra/aws/scripts/plan-tuf-staging.mjs",
+          "--broker",
+          "<PRIVATE_CORRECTION_EVIDENCE>/synthetic-broker-identifiers.json",
+          "<PRIVATE_CORRECTION_EVIDENCE>/synthetic-broker-plan"
+        ],
+        "source_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+        "worktree_dirty": true,
+        "started_at": "2026-09-07T03:28:25.696529+00:00",
+        "completed_at": "2026-09-07T03:28:32.463326+00:00",
+        "exit_code": 0,
+        "log": "offline-broker.log",
+        "log_sha256": "ddb1abd1dac896b296a89567d30be1393c6c4c3f359d13bf3ed35dcbd73de24a"
+      },
+      {
+        "label": "offline-foundation",
+        "command": [
+          "node",
+          "--import",
+          "./infra/aws/node_modules/tsx/dist/loader.mjs",
+          "infra/aws/scripts/plan-tuf-staging.mjs",
+          "--foundation",
+          "<PRIVATE_CORRECTION_EVIDENCE>/synthetic-plan-identifiers.json",
+          "<PRIVATE_CORRECTION_EVIDENCE>/synthetic-foundation-plan"
+        ],
+        "source_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+        "worktree_dirty": true,
+        "started_at": "2026-09-07T03:28:21.433640+00:00",
+        "completed_at": "2026-09-07T03:28:25.627886+00:00",
+        "exit_code": 0,
+        "log": "offline-foundation.log",
+        "log_sha256": "44252b35097fa890d1c6f872aa02645d9baf5502e55e04662de98a4ad133779b"
+      },
+      {
+        "label": "release-config",
+        "command": [
+          "npm",
+          "--prefix",
+          "release",
+          "run",
+          "verify"
+        ],
+        "source_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+        "worktree_dirty": true,
+        "started_at": "2026-09-07T03:28:24.475799+00:00",
+        "completed_at": "2026-09-07T03:28:25.545770+00:00",
+        "exit_code": 0,
+        "log": "release-config.log",
+        "log_sha256": "3365412476bc1ede20a18422605b230261baebe774e85d4840827f53d07b2698"
+      },
+      {
+        "label": "release-tests",
+        "command": [
+          "npm",
+          "--prefix",
+          "release",
+          "test"
+        ],
+        "source_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+        "worktree_dirty": true,
+        "started_at": "2026-09-07T03:28:21.456106+00:00",
+        "completed_at": "2026-09-07T03:28:24.388978+00:00",
+        "exit_code": 0,
+        "log": "release-tests.log",
+        "log_sha256": "8fd27ad44f88ee9cf4141668b079e3919194d1190c81b786396abb769e1936d7"
+      },
+      {
+        "label": "reproducibility",
+        "command": [
+          "python3",
+          "<PRIVATE_CORRECTION_EVIDENCE>/reproduce.py"
+        ],
+        "source_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+        "worktree_dirty": true,
+        "started_at": "2026-09-07T03:28:21.458726+00:00",
+        "completed_at": "2026-09-07T03:29:18.958579+00:00",
+        "exit_code": 0,
+        "log": "reproducibility.log",
+        "log_sha256": "104bdd4c4989f8fd944788b40fa1a0d796afa28601937eaa3503b67477541280"
+      },
+      {
+        "label": "security",
+        "command": [
+          "node",
+          "scripts/verify-secret-readiness.mjs"
+        ],
+        "source_sha": "46e76cecf9e846061203c8fd68a0fcfd0c2825a5",
+        "worktree_dirty": true,
+        "started_at": "2026-09-07T03:28:25.752646+00:00",
+        "completed_at": "2026-09-07T03:28:28.432241+00:00",
+        "exit_code": 0,
+        "log": "security.log",
+        "log_sha256": "e481eab8ad58652b4247d5de171358d55e51b6359dbf5e60e4ab48b148fef830"
+      }
+    ],
+    "go_toolchain": "production-build.json verified Go 1.26.8; GOTOOLCHAIN=local; HID_REQUIRE_CLOUDFLARE_VALIDATOR=1",
+    "go_commands": [
+      {
+        "name": "toolchain",
+        "command": [
+          "node",
+          "tools/tuf-release/scripts/verify-production-toolchain.mjs"
+        ],
+        "cwd": ".",
+        "start_utc": "2026-09-07T03:25:05.523084+00:00",
+        "finish_utc": "2026-09-07T03:25:05.686042+00:00",
+        "exit_code": 0,
+        "log_sha256": "a250728ff67abf1419221c3699c1c4f11e3c638f89f9c9387f3828326dda6ae7",
+        "log": "toolchain.log"
+      },
+      {
+        "name": "go-test",
+        "command": [
+          "<VERIFIED_GO_1_26_8>",
+          "test",
+          "-count=1",
+          "./..."
+        ],
+        "cwd": "tools/tuf-release",
+        "start_utc": "2026-09-07T03:25:05.524150+00:00",
+        "finish_utc": "2026-09-07T03:25:20.148301+00:00",
+        "exit_code": 0,
+        "log_sha256": "860e1857e2ef695db8078425c3a0a4fb931bd2e0f8019594b92cb1df06e7a364",
+        "log": "go-test.log"
+      },
+      {
+        "name": "go-race",
+        "command": [
+          "<VERIFIED_GO_1_26_8>",
+          "test",
+          "-race",
+          "-count=1",
+          "./..."
+        ],
+        "cwd": "tools/tuf-release",
+        "start_utc": "2026-09-07T03:25:05.524537+00:00",
+        "finish_utc": "2026-09-07T03:26:06.955663+00:00",
+        "exit_code": 0,
+        "log_sha256": "2114ce8ffaf9fd470f1659ce24e4c271dabcf1d48169f929706226c1f0995031",
+        "log": "go-race.log"
+      },
+      {
+        "name": "go-vet",
+        "command": [
+          "<VERIFIED_GO_1_26_8>",
+          "vet",
+          "./..."
+        ],
+        "cwd": "tools/tuf-release",
+        "start_utc": "2026-09-07T03:25:05.687048+00:00",
+        "finish_utc": "2026-09-07T03:25:08.013075+00:00",
+        "exit_code": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "go-vet.log"
+      },
+      {
+        "name": "go-mod-verify",
+        "command": [
+          "<VERIFIED_GO_1_26_8>",
+          "mod",
+          "verify"
+        ],
+        "cwd": "tools/tuf-release",
+        "start_utc": "2026-09-07T03:25:08.013973+00:00",
+        "finish_utc": "2026-09-07T03:25:09.938524+00:00",
+        "exit_code": 0,
+        "log_sha256": "b4537ed75f533f993f371954de47e42a793b8e5b0587577de7e27fb3e50696bd",
+        "log": "go-mod-verify.log"
+      }
+    ],
+    "aws_commands": [
+      {
+        "command": "npm --prefix infra/aws test",
+        "status": "PASS",
+        "tests": 58
+      },
+      {
+        "command": "npm --prefix infra/aws run typecheck",
+        "status": "PASS"
+      }
+    ],
+    "aws_logs": [
+      {
+        "name": "aws-tests.log",
+        "sha256": "f5eddeda4c33601f3f8087badc41fe0fa3859c8ece4b27f9115418b7bdba87df",
+        "bytes": 5194
+      },
+      {
+        "name": "aws-typecheck.log",
+        "sha256": "ec7030a0d6bcf65e073f311f54d73558d0c24c0b4f1291f6955096f000e470db",
+        "bytes": 76
+      }
+    ],
+    "obsolete_active_configuration_references": 0,
+    "search_scope": "all Git-tracked source/documentation, generated corrected foundation/broker templates, and new correction evidence",
+    "intentional_search_exceptions": [
+      {
+        "path": "apps/web/public/nigeria_health_facilities_deduped.json",
+        "line": 1,
+        "classification": "unrelated public facility business names"
+      },
+      {
+        "path": "docs/TUF-PRODUCTION-IMPLEMENTATION.md",
+        "line": 69,
+        "classification": "required explicit correction notice"
+      }
+    ],
+    "diff_check": "passed"
+  },
+  "artifacts": [
+    {
+      "path": "docs/evidence/tuf-phase-c/offline-plans.json",
+      "sha256": "5bbf52fecf4eb1da6bf3b540b607d4b03d91aaa1c771d3010e83d133901fe5d2",
+      "size_bytes": 26222
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/reproducibility.json",
+      "sha256": "61723c568c1f590d4162810a02a9ed2ede8e37fac24d257d160848a8a4e2dd0b",
+      "size_bytes": 1405
+    }
+  ],
+  "changed_files": [
+    {
+      "path": "docs/TASK.md",
+      "sha256": "86291710453e9e9afa3a24585c5a3691822c1bf7be362c61cef0e0b4ce8ff87f",
+      "size_bytes": 129361
+    },
+    {
+      "path": "docs/TUF-PRODUCTION-IMPLEMENTATION.md",
+      "sha256": "76bcea18daeb9ad4323638c30ead3f0bfda68b795b3f40bbaa7cd32e1a475021",
+      "size_bytes": 88087
+    },
+    {
+      "path": "docs/TUF-STAGING-EXECUTION.md",
+      "sha256": "129e49dac027668ac732d8b6a1626baccdcd55a25c1c5db4949430e84d870481",
+      "size_bytes": 21028
+    },
+    {
+      "path": "docs/TUF-STAGING-INFRASTRUCTURE.md",
+      "sha256": "d968f52edb3c0c908ed9758603fb5b9faeb843108782eb4eb2d427a80144e2e9",
+      "size_bytes": 12526
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/README.md",
+      "sha256": "77afa329cc43aa7887f1418e6963d1bc0e81b8392be94e1588b7e8f16f9a7a28",
+      "size_bytes": 9790
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/offline-plans.json",
+      "sha256": "5bbf52fecf4eb1da6bf3b540b607d4b03d91aaa1c771d3010e83d133901fe5d2",
+      "size_bytes": 26222
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/reproducibility.json",
+      "sha256": "61723c568c1f590d4162810a02a9ed2ede8e37fac24d257d160848a8a4e2dd0b",
+      "size_bytes": 1405
+    },
+    {
+      "path": "docs/evidence/tuf-phase-c/retention-correction.json",
+      "sha256": null,
+      "size_bytes": null,
+      "note": "evidence itself; retain final hash independently"
+    },
+    {
+      "path": "infra/aws/src/hid-release-trust-stack.ts",
+      "sha256": "0fbefd776e01fe890f7a5bb44249021e39bac10a0e9cae894683cdc9c81b6acf",
+      "size_bytes": 42715
+    },
+    {
+      "path": "infra/aws/src/tuf-signing-broker.ts",
+      "sha256": "e44b9a2289ace7a799497c2de33646f49036f0b3ae3dacf8d0436feed502e859",
+      "size_bytes": 62266
+    },
+    {
+      "path": "infra/aws/test/release-trust-stack.test.ts",
+      "sha256": "ab6fa565e795f3c6fee8614ac06f1a2129929e05722ff7d5475e92568e2e5d97",
+      "size_bytes": 62700
+    },
+    {
+      "path": "release/config/staging-identifiers.template.json",
+      "sha256": "26140ee32c4ae1176d0e95ff2c8ba42ca3ddecbcb301e364f72a2bd1351981ac",
+      "size_bytes": 7256
+    },
+    {
+      "path": "release/test/staging-identifiers.test.mjs",
+      "sha256": "3cec4a14c9e5ead1b157ee231da0999f25d36a418da953e07e7e487c3a8182ea",
+      "size_bytes": 2224
+    },
+    {
+      "path": "tools/tuf-release/README.md",
+      "sha256": "131e4aec8f310ac252c0cb0f7ad5928bc3a1a1e2efe8f4b6bc9d1632b1960a2c",
+      "size_bytes": 15223
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/object.go",
+      "sha256": "dbeda8d903e8665c33fd32464a288e020d1e5565ed90d7e27e122076688caf78",
+      "size_bytes": 7188
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_archive.go",
+      "sha256": "dfb6959d31cb7380901c1e127c75aac50a44b025246017f270a4a7fd94b7026c",
+      "size_bytes": 8891
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_archive_test.go",
+      "sha256": "eef255849086cb5901ad840c6ed36e824308f9cf37824b81be7d23fa7527a310",
+      "size_bytes": 8750
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/publication_journal_test.go",
+      "sha256": "3c3b507859e28e73968ce253df8a0282529e0fd22fe2e0a035d8e5a89a8deae7",
+      "size_bytes": 14815
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/request_test.go",
+      "sha256": "79154293a7a3195153af26ad93ceff493c24dc067b75a090981aefaa1dd3ae30",
+      "size_bytes": 8963
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/runtime.go",
+      "sha256": "397a3f22f3e7b2fa3dc0cc2a1885c88e08d54578b0d2d151d25556cf42d3ea5a",
+      "size_bytes": 15177
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/runtime_test.go",
+      "sha256": "971d11a37c097d75a255194ed4cadcdfccc874ff874750c7e75c978cc43d5449",
+      "size_bytes": 16663
+    },
+    {
+      "path": "tools/tuf-release/internal/awsbroker/state_test.go",
+      "sha256": "fed9be12a0d9c522aff4bbcb9b21abd1b228fa95209c04d12cf742e07005c111",
+      "size_bytes": 50950
+    }
+  ],
+  "exclusions": [
+    {
+      "path": "docs/SECURITY.md",
+      "sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+      "unchanged": true
+    }
+  ],
+  "gates": {
+    "original_scope": "COMMITTED LOCALLY",
+    "retention_correction": "VERIFIED LOCALLY / UNCOMMITTED",
+    "push": "BLOCKED/PENDING AUTHORIZATION",
+    "protected_ci": "NOT RUN",
+    "github_protections": "PENDING OWNER CONFIGURATION",
+    "aws_cloudflare_identifiers": "PENDING",
+    "object_lock": "UNAPPROVED / NOT CREATED",
+    "signing_custody_review": "PENDING",
+    "live_restore": "UNVERIFIED",
+    "live_rollback": "UNVERIFIED",
+    "staging_authorization": "PENDING",
+    "staging": "NOT ACCEPTED",
+    "data_migration": "NOT AUTHORIZED",
+    "production": "LOCKED"
+  },
+  "authorization": {
+    "new_commit": false,
+    "amend": false,
+    "push": false,
+    "external_mutation": false
+  },
+  "verification_limits": [
+    "The current correction has no immutable source commit or protected CI evidence.",
+    "The original committed inventory is preserved unchanged; corrected files are listed separately here.",
+    "Prior workspace/migration/audit evidence remains historical; unrelated suites were not rerun for this scoped change.",
+    "Synthetic infrastructure templates are local models; no actual account diff or resource was created.",
+    "The first toolchain check without an explicit path rejected the host Go 1.22.2; the approved Go 1.26.8 check passed."
+  ]
+}

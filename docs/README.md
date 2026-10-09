@@ -1,0 +1,223 @@
+# HID Architecture Documentation
+
+This directory contains the architectural source of truth for the HID platform.
+
+Current browser application placement, gateway paths, and offline/PWA
+boundaries are recorded in
+[`FRONTEND_LAYOUT_CONVERGENCE.md`](FRONTEND_LAYOUT_CONVERGENCE.md).
+The Migrate domain/application consolidation, including its root canonical URL
+and compatibility redirects, is recorded in
+[`MIGRATE_CONSOLIDATION.md`](MIGRATE_CONSOLIDATION.md).
+The same document records the seven-app telemetry policy and current local
+browser evidence; [`OFFLINE.md`](OFFLINE.md) and [`SECURITY.md`](SECURITY.md)
+remain authoritative for capability and PHI controls.
+
+Current staging implementation, live prerequisites and acceptance evidence are in
+[`TUF-STAGING-EXECUTION.md`](TUF-STAGING-EXECUTION.md). Staging is not accepted;
+production remains locked. Provider account requirements are in
+[`STAGING_PROVIDER_ACCOUNTS.md`](STAGING_PROVIDER_ACCOUNTS.md); repeatable
+read-only gate checks are in [`STAGING_EXTERNAL_PREFLIGHT.md`](STAGING_EXTERNAL_PREFLIGHT.md).
+The [AWS checkpoint](STAGING_AWS_CHECKPOINT.md) records dated resource,
+permission and quota checks, prepared acceptance settings, and the remaining
+deployment-versus-acceptance inputs. The September 15 AWS session has expired;
+quota capacity is unverified. The [release installation guide](TUF_STAGING_RELEASE_INSTALLATION.md)
+indexes the prepared build, audit, signing and evidence adapters.
+[Cloudflare setup](STAGING_CLOUDFLARE_SETUP.md) and
+[notification setup](STAGING_NOTIFICATION_SETUP.md) give the secure local input paths.
+The HID QoreID NIN/CAC adapter and minimal evidence boundary are implemented but
+disabled by default; legacy governed NIN registration remains deferred in
+staging. The current route, security, and activation contract is in
+[`QOREID_VERIFICATION_CONTRACT.md`](QOREID_VERIFICATION_CONTRACT.md).
+Historic MetaMap research remains retained only for evidence continuity in
+[`METAMAP_NIN_CONTRACT.md`](METAMAP_NIN_CONTRACT.md).
+
+## Documentation Map
+
+### `PRODUCT.md`
+
+Defines:
+
+* what HID is
+* platform goals
+* major product domains
+* target operating environment
+* core product principles
+
+### `ARCHITECTURE.md`
+
+Defines the target system architecture including:
+
+* apps
+* services
+* API Gateway
+* event-driven communication
+* database ownership
+* frontend strategy
+* AWS target architecture
+* OCR
+* NIN integration
+* service boundaries
+* observability
+* development ports
+* future extensibility
+
+### `MIGRATE_CONSOLIDATION.md`
+
+Defines the active Migrate implementation, the retired duplicate Web feature,
+the canonical hostname-root URL, and compatibility redirect behavior.
+
+### `DECISIONS.md`
+
+Contains Architecture Decision Records.
+
+Significant architectural decisions must be recorded here.
+
+### `INTERFACE_CONTRACT.md`
+
+Defines:
+
+* API conventions
+* service boundaries
+* required headers
+* API versioning
+* identity resolution
+* OCR interfaces
+* EHR interfaces
+* Lab interfaces
+* Pharmacy interfaces
+* Outreach temporary-registration interfaces
+* event contracts
+* error handling
+
+### `OFFLINE.md`
+
+Defines HID's offline-first architecture for low-connectivity environments.
+
+### `OUTREACH_EXTRACTION_INVENTORY.md`
+
+Records the active/historical Outreach inventory, ownership classification,
+direct-access findings, implemented minimum boundary, and deliberately deferred
+features.
+
+### `SECURITY.md`
+
+Defines:
+
+* authentication
+* authorization
+* RBAC
+* facility isolation
+* audit requirements
+* consent
+* break-glass
+* NIN protection
+* file security
+* offline security
+
+### `SECRET_ROTATION_AND_BASELINE_READINESS.md`
+
+Defines the pre-release secret-audit scope, value-free rotation inventory,
+frontend public-variable policy, Git baseline safety, migration integrity
+ledger, and required local/external release gates.
+
+### `CODING_STANDARDS.md`
+
+Defines engineering standards for implementation, refactoring, testing, folder structure, documentation, CI/CD, and code quality.
+
+### `ROADMAP.md`
+
+Defines platform implementation phases and future modules.
+
+### `TASK.md`
+
+Defines the current implementation scope.
+
+This file may change frequently.
+
+### `PLATFORM_INTEGRATION_ACCEPTANCE.md`
+
+Records the current executable service inventory, dependency and ownership
+matrices, ports, gateway routing, runtime roles, workload identity,
+authorization, idempotency/retry, database isolation, negative tests, health,
+build/migration evidence, external verification gaps, and exact next stage.
+
+### AWS deployment foundation
+
+`AWS_DEPLOYMENT_ARCHITECTURE.md` records the synthesized regional AWS topology
+and external Cloudflare frontend/edge boundary, parameters, local acceptance
+and external evidence. `AWS_IAM_MATRIX.md` maps execution/task/database authority.
+`AWS_COST_MODEL.md` identifies environment cost variables without fabricated
+totals. `AWS_DEPLOYMENT_RUNBOOK.md` defines account through rollback gates.
+`RELEASE_ARTIFACT_GATE.md` and `RELEASE_FINDINGS.md` govern immutable digests,
+SBOM/scans and the dependency findings resolved before release.
+
+`TUF-PRODUCTION-IMPLEMENTATION.md` is the canonical trusted-release execution
+record. It contains the release surface, TUF trust architecture, exact key and
+role boundaries, implementation milestones, verification evidence, staging
+gates, blockers, and the explicit production prohibition/status.
+
+### `EVENT_DELIVERY_ARCHITECTURE.md`
+
+Records the active outbox inventory, normalized event envelope, dispatcher
+claim/retry and transport semantics, durable consumer inbox transaction rule,
+least-privilege roles, operations contract, and acceptance evidence.
+
+### `EVENT_DISPATCHER_DEPLOYMENT_ACCEPTANCE.md`
+
+Records dispatcher image/build-context review, host and PostgreSQL deployment
+acceptance, representative non-owner LOGIN and verified-TLS evidence, health,
+metrics, SIGTERM, horizontal-scale checks, exact-bus IAM contract, and the
+container/AWS evidence that still requires an external environment.
+
+### `SUPER_ADMIN_FOUNDATION.md`
+
+Records the active/legacy admin inventory, explicit platform capability model,
+one-time bootstrap, Identity-owned command/API surface, dedicated Admin UI,
+facility/principal/audit/operations semantics, migration/runtime-role/RLS
+boundaries, local acceptance evidence, and external verification gaps.
+
+### Extraction inventories
+
+`IDENTITY_EXTRACTION_INVENTORY.md`, `LAB_EXTRACTION_INVENTORY.md`,
+`PHARMACY_EXTRACTION_INVENTORY.md`, `OUTREACH_EXTRACTION_INVENTORY.md`, and
+`OCR_EXTRACTION_INVENTORY.md`
+preserve the repository evidence and ownership classification that governed
+each physical service cutover.
+
+## Codex Reading Order
+
+For substantial work, Codex should read:
+
+1. `/CODEX.md`
+2. `README.md`
+3. `ARCHITECTURE.md`
+4. `DECISIONS.md`
+5. `INTERFACE_CONTRACT.md`
+6. relevant security/offline standards
+7. `TASK.md`
+
+`CODEX.md` contains permanent operating rules.
+
+`TASK.md` contains temporary implementation objectives.
+
+## Documentation Rule
+
+Implementation and documentation must remain synchronized.
+
+A significant architecture change must update:
+
+* Architecture
+* Decisions
+* Interface Contract when interfaces change
+* Security when security boundaries change
+* Offline architecture when synchronization behavior changes
+* Roadmap when implementation phases change
+
+Documentation updates are part of implementation, not optional cleanup.
+
+### Phase C staging preparation
+
+- [Staging readiness, execution and acceptance report](TUF-STAGING-EXECUTION.md)
+- [GitHub protection and CI evidence](TUF-CI-PROTECTION.md)
+- [Identifier binding and irreversible infrastructure plan](TUF-STAGING-INFRASTRUCTURE.md)
+- [Synthetic migration, restore and forward rollback](TUF-STAGING-MIGRATION.md)

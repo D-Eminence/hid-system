@@ -1,0 +1,26 @@
+{
+  "name": "@hid/telemetry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "verify": "node ./scripts/verify-telemetry-contracts.mjs"
+  },
+  "dependencies": {
+    "@sentry/react": "^10.58.0",
+    "posthog-js": "^1.388.1"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "react": "^18.2.0",
+    "typescript": "^5.8.3"
+  }
+}

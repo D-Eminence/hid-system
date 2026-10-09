@@ -1,0 +1,1415 @@
+{
+  "schema_version": "hid.tuf.solo-governance-validation/v1",
+  "recorded_at": "2026-09-07T19:09:28.560239+00:00",
+  "preparation_commit_audit": {
+    "recorded_at": "2026-09-07T14:54:35.507730+00:00",
+    "commit": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+    "parent": "ba2cd3290e7c1fe72817c3bdfb806dd306b2c633",
+    "message": "Harden GitHub release protections and prepare staging readiness checks",
+    "head_matches": true,
+    "commit_object_hash_verified": true,
+    "exact_manifest_scope_verified": true,
+    "file_count": 17,
+    "files": [
+      {
+        "path": ".github/CODEOWNERS",
+        "sha256": "0534d71501077d5f027a291286edf916a77c3f8d32af3e235904bacf20cddca4",
+        "size_bytes": 957
+      },
+      {
+        "path": ".github/workflows/tuf-local-gates.yml",
+        "sha256": "d6538c8a3ce34963cd1215858955a02b1e0a1b8f1744805ba47222bf35d9c325",
+        "size_bytes": 20299
+      },
+      {
+        "path": ".github/workflows/tuf-protected-readiness.yml",
+        "sha256": "8c8e47512d0125bdd7e5cd8de21a88b4a815cba64f5f9ae230d0d13952f7681f",
+        "size_bytes": 3115
+      },
+      {
+        "path": "docs/TASK.md",
+        "sha256": "772fdd6c6423863282a872b44a09c4a3c65ae1e1910103b745060318ea819e6c",
+        "size_bytes": 134165
+      },
+      {
+        "path": "docs/TUF-CI-PROTECTION.md",
+        "sha256": "eb18a972d7bcc2c008bf8e65046f8b3fba5d8f31eb497c872d3a7da25c17a76a",
+        "size_bytes": 18224
+      },
+      {
+        "path": "docs/TUF-PRODUCTION-IMPLEMENTATION.md",
+        "sha256": "1f43d92116a3b8844c996a91073a42f7b98af41f30bc62b00fe32ed58521bb14",
+        "size_bytes": 101697
+      },
+      {
+        "path": "docs/evidence/tuf-github-protection/README.md",
+        "sha256": "7bd6a641a724c5e8e059b4362a9a8730b0542a1b1f077d235c76217aafe8044b",
+        "size_bytes": 2590
+      },
+      {
+        "path": "docs/evidence/tuf-github-protection/ci-fix-validation.json",
+        "sha256": "257043fdb845f3d941671779efe8c1a1a3809d31c6e2833a3bd0647fa37b9317",
+        "size_bytes": 2719
+      },
+      {
+        "path": "docs/evidence/tuf-github-protection/files.json",
+        "sha256": "739ec585eb93962e640eaf6639957d38e4019e756b6866cef378feaeba04546f",
+        "size_bytes": 3704
+      },
+      {
+        "path": "docs/evidence/tuf-github-protection/ordinary-ci.json",
+        "sha256": "0676e165d98b5e661323ab2da93db19fa3b67f7269db460a7636b81a24d0b3f5",
+        "size_bytes": 3845
+      },
+      {
+        "path": "docs/evidence/tuf-github-protection/readiness-denial.json",
+        "sha256": "76838cf6ec1287bc38387bf89fdc2d5dcbfe0c6624d70a65d8b83e5fd1916e52",
+        "size_bytes": 408
+      },
+      {
+        "path": "docs/evidence/tuf-github-protection/state.json",
+        "sha256": "14fa70bcaca241e4f98a4e4a3fb7318c6a7668d9c889d86a949701a650e0575c",
+        "size_bytes": 10791
+      },
+      {
+        "path": "docs/evidence/tuf-github-protection/validation.json",
+        "sha256": "3bb69c188fe37ea5ed25dd0836e0e416cf6921c3138c3b994703e0d7994d640a",
+        "size_bytes": 2966
+      },
+      {
+        "path": "infra/cloudflare/test/tuf-publication-authorization.test.mjs",
+        "sha256": "99e39c40d0faa0fbbfa07ee7e058e6f7a0e32fec0eef0eb38035c5ec3ab9e587",
+        "size_bytes": 11564
+      },
+      {
+        "path": "release/config/protected-ci-prerequisites.json",
+        "sha256": "19a50e767b2fb3dc45154d5893c3ecfdcf19478a18b5113a8f75b821356a2c9e",
+        "size_bytes": 7503
+      },
+      {
+        "path": "release/scripts/verify-protected-readiness.mjs",
+        "sha256": "7e975cb6dec261de59a0663f025daab19770e1869be3efe938604285222fee9e",
+        "size_bytes": 13254
+      },
+      {
+        "path": "release/test/protected-readiness.test.mjs",
+        "sha256": "e54dd7d0274e0a3d93b5cf998d3b4077f395fb30dafbd62a9352b02fc71b15d2",
+        "size_bytes": 12260
+      }
+    ],
+    "diff_statistics": "17 files changed, 2009 insertions(+), 135 deletions(-)",
+    "security_file_excluded": true,
+    "security_worktree_sha256": "a7cfe105005cee6c48fb243142667d2451b478ca6bf7d1ca7983ad552a59df93",
+    "secret_pattern_findings": [],
+    "secret_scan_scope": "All complete blobs in the 17-file preparation commit; private keys, GitHub/AWS/Slack credentials, JWT literals, environment/key file paths; manual diff review alongside pattern scan",
+    "ehr_ci_install_fix_present": true,
+    "cloudflare_private_executable_fixture_fix_present": true,
+    "cloudflare_writable_executable_rejections_preserved": true,
+    "codeowners_existing_patterns": [
+      {
+        "pattern": "/.github/",
+        "owner": "@D-Eminence",
+        "existing_path_count": 5
+      },
+      {
+        "pattern": "/release/",
+        "owner": "@D-Eminence",
+        "existing_path_count": 30
+      },
+      {
+        "pattern": "/tools/tuf-release/",
+        "owner": "@D-Eminence",
+        "existing_path_count": 86
+      },
+      {
+        "pattern": "/infra/",
+        "owner": "@D-Eminence",
+        "existing_path_count": 61
+      },
+      {
+        "pattern": "/scripts/tuf-*",
+        "owner": "@D-Eminence",
+        "existing_path_count": 1
+      },
+      {
+        "pattern": "/services/ehr-api/database/",
+        "owner": "@D-Eminence",
+        "existing_path_count": 31
+      },
+      {
+        "pattern": "/services/ehr-api/scripts/",
+        "owner": "@D-Eminence",
+        "existing_path_count": 8
+      },
+      {
+        "pattern": "/apps/ehr/scripts/",
+        "owner": "@D-Eminence",
+        "existing_path_count": 3
+      },
+      {
+        "pattern": "/apps/ehr/public/service-worker.js",
+        "owner": "@D-Eminence",
+        "existing_path_count": 1
+      },
+      {
+        "pattern": "/apps/ehr/src/release-service-worker.ts",
+        "owner": "@D-Eminence",
+        "existing_path_count": 1
+      },
+      {
+        "pattern": "/docs/TUF-*",
+        "owner": "@D-Eminence",
+        "existing_path_count": 5
+      },
+      {
+        "pattern": "/CODEX.md",
+        "owner": "@D-Eminence",
+        "existing_path_count": 1
+      },
+      {
+        "pattern": "/.gitignore",
+        "owner": "@D-Eminence",
+        "existing_path_count": 1
+      },
+      {
+        "pattern": "/package.json",
+        "owner": "@D-Eminence",
+        "existing_path_count": 1
+      },
+      {
+        "pattern": "**/package-lock.json",
+        "owner": "@D-Eminence",
+        "existing_path_count": 25
+      }
+    ],
+    "codeowners_uncovered_security_scripts": [
+      "scripts/verify-secret-readiness.mjs",
+      "scripts/verify-migration-ledger.mjs",
+      "scripts/verify-prebaseline-git.sh"
+    ],
+    "recommended_codeowners_pattern": "/scripts/ @D-Eminence",
+    "git_status": " M .github/workflows/tuf-protected-readiness.yml\n M docs/SECURITY.md\n M docs/TASK.md\n M docs/TUF-PRODUCTION-IMPLEMENTATION.md\n M release/scripts/verify-protected-readiness.mjs\n",
+    "remote_ci_result": "NOT RERUN; previously failed run 34103460898 remains only observed evidence; local tests do not establish remote success"
+  },
+  "correction_checks": [
+    {
+      "name": "release-tests",
+      "command": [
+        "npm",
+        "--prefix",
+        "release",
+        "test"
+      ],
+      "started_at": "2026-09-07T18:55:49.135662+00:00",
+      "completed_at": "2026-09-07T18:55:50.599176+00:00",
+      "exit_code": 0,
+      "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-20260907T145359Z/release-tests.log",
+      "sha256": "6d8c0df11e16eb36f34ea1ae39de5ffe479f38a2b57095479ba612b6ef5d096f"
+    },
+    {
+      "name": "release-config",
+      "command": [
+        "npm",
+        "--prefix",
+        "release",
+        "run",
+        "verify"
+      ],
+      "started_at": "2026-09-07T18:55:49.135923+00:00",
+      "completed_at": "2026-09-07T18:55:49.498001+00:00",
+      "exit_code": 0,
+      "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-20260907T145359Z/release-config.log",
+      "sha256": "ef91b5d22ddc7f108b9b9c0df6208ec4cc8ae3c17c09922e0283ba68540eef51"
+    },
+    {
+      "name": "publication-workflow",
+      "command": [
+        "node",
+        "release/scripts/verify-publication-workflow.mjs"
+      ],
+      "started_at": "2026-09-07T18:55:49.136011+00:00",
+      "completed_at": "2026-09-07T18:55:49.193659+00:00",
+      "exit_code": 0,
+      "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-20260907T145359Z/publication-workflow.log",
+      "sha256": "9df38951f21f2089ea2043edeeafd7b500eb00e51b0e00ad552b43e4f44d0905"
+    },
+    {
+      "name": "actionlint",
+      "command": [
+        "/home/l2e/.local/share/hid-release-tools/actionlint/actionlint",
+        "-shellcheck=",
+        ".github/workflows/tuf-local-gates.yml",
+        ".github/workflows/tuf-protected-readiness.yml",
+        ".github/workflows/tuf-publish.yml"
+      ],
+      "started_at": "2026-09-07T18:55:49.136165+00:00",
+      "completed_at": "2026-09-07T18:55:49.142965+00:00",
+      "exit_code": 0,
+      "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-20260907T145359Z/actionlint.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "secret-readiness",
+      "command": [
+        "node",
+        "scripts/verify-secret-readiness.mjs"
+      ],
+      "started_at": "2026-09-07T18:55:49.143098+00:00",
+      "completed_at": "2026-09-07T18:55:50.038361+00:00",
+      "exit_code": 0,
+      "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-20260907T145359Z/secret-readiness.log",
+      "sha256": "4098a1b43212c9ae3eacdc4548cbc35f0b68578db8336cdbab47a4b4eb61fd74"
+    },
+    {
+      "name": "aws-tests",
+      "command": [
+        "npm",
+        "--prefix",
+        "infra/aws",
+        "test"
+      ],
+      "started_at": "2026-09-07T18:55:49.193762+00:00",
+      "completed_at": "2026-09-07T18:55:54.938276+00:00",
+      "exit_code": 0,
+      "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-20260907T145359Z/aws-tests.log",
+      "sha256": "b04449fa7cd1b36b0932a97f991dbfefc5315c4d5e6d4da0d0f8d23414ca9046"
+    }
+  ],
+  "exact_commit_ci_validation": {
+    "commit": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+    "archive": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/exact-preparation-eqpw737i",
+    "isolation": "Exact git archive; no ambient node_modules; whitelisted environment; npm offline cache",
+    "checks": [
+      {
+        "label": "runtime",
+        "command": [
+          "node",
+          "--version"
+        ],
+        "started_at": "2026-09-07T14:55:11.398530+00:00",
+        "completed_at": "2026-09-07T14:55:11.402029+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/runtime.log",
+        "sha256": "adc2fc6c2cfc7713e5d938152d45594a33c82a28857fb99667a5a5388c399e1a"
+      },
+      {
+        "label": "install-packages-offline",
+        "command": [
+          "npm",
+          "--prefix",
+          "packages/offline",
+          "ci",
+          "--offline",
+          "--no-audit",
+          "--no-fund"
+        ],
+        "started_at": "2026-09-07T14:55:11.402202+00:00",
+        "completed_at": "2026-09-07T14:55:11.656316+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/install-packages-offline.log",
+        "sha256": "3d86c47ce3599acb8c21aeb7b2842926fe25b5e8ed4e627ad8eab25b532b0c30"
+      },
+      {
+        "label": "install-packages-telemetry",
+        "command": [
+          "npm",
+          "--prefix",
+          "packages/telemetry",
+          "ci",
+          "--offline",
+          "--no-audit",
+          "--no-fund"
+        ],
+        "started_at": "2026-09-07T14:55:11.656631+00:00",
+        "completed_at": "2026-09-07T14:55:12.612904+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/install-packages-telemetry.log",
+        "sha256": "37515476e30d426958e780a4425a798932461826600c4c79b004635629392457"
+      },
+      {
+        "label": "install-packages-ui",
+        "command": [
+          "npm",
+          "--prefix",
+          "packages/ui",
+          "ci",
+          "--offline",
+          "--no-audit",
+          "--no-fund"
+        ],
+        "started_at": "2026-09-07T14:55:12.613454+00:00",
+        "completed_at": "2026-09-07T14:55:12.890058+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/install-packages-ui.log",
+        "sha256": "9060828b6667ee2a892745f809bd265623a04d92d177b37e290783e86f3c46f4"
+      },
+      {
+        "label": "install-apps-ehr",
+        "command": [
+          "npm",
+          "--prefix",
+          "apps/ehr",
+          "ci",
+          "--offline",
+          "--no-audit",
+          "--no-fund"
+        ],
+        "started_at": "2026-09-07T14:55:12.890397+00:00",
+        "completed_at": "2026-09-07T14:55:13.810159+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/install-apps-ehr.log",
+        "sha256": "7aa02f7d647c1f0ba57aed1f548da790ff69b97eefba22d9f5fcc5330f2cc4ca"
+      },
+      {
+        "label": "ehr-tests",
+        "command": [
+          "npm",
+          "--prefix",
+          "apps/ehr",
+          "test"
+        ],
+        "started_at": "2026-09-07T14:55:13.810624+00:00",
+        "completed_at": "2026-09-07T14:55:14.269977+00:00",
+        "exit_code": 1,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/ehr-tests.log",
+        "sha256": "3dd8a4bab39a77de9f682add8ba185fbfb072c8df08e931708ae3925281ac76a"
+      },
+      {
+        "label": "ehr-tests-with-git-metadata",
+        "command": [
+          "npm",
+          "--prefix",
+          "apps/ehr",
+          "test"
+        ],
+        "started_at": "2026-09-07T14:56:09.556543+00:00",
+        "completed_at": "2026-09-07T14:56:10.021141+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/ehr-tests-with-git-metadata.log",
+        "sha256": "59644d8d300e545d69a64a107974b1942b152b3c454b42839ae600a7165fe29a"
+      },
+      {
+        "label": "ehr-root-release-build",
+        "command": [
+          "npm",
+          "--prefix",
+          "apps/ehr",
+          "run",
+          "build"
+        ],
+        "started_at": "2026-09-07T14:56:10.021575+00:00",
+        "completed_at": "2026-09-07T14:56:12.808518+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/ehr-root-release-build.log",
+        "sha256": "af1213d509d0bb906aa786aa9d7f56bebdcf50c867eb359539d526e6d5b0c5dd"
+      },
+      {
+        "label": "ehr-worker-binding",
+        "command": [
+          "node",
+          "--input-type=module",
+          "-e",
+          "import assert from 'node:assert/strict'; import { readFile } from 'node:fs/promises'; const sw=await readFile('apps/ehr/dist/service-worker.js','utf8'); const html=await readFile('apps/ehr/dist/index.html','utf8'); assert.ok(sw.includes(process.env.HID_RELEASE_SHA));assert.ok(!sw.includes('__HID_EHR_RELEASE_SHA__'));assert.ok(!sw.includes('__HID_EHR_SHELL_ASSETS__'));assert.match(sw,/assets\\/canonical-platform-runtime\\.js/);assert.match(html,/(?:src|href)=\"\\/assets\\//);console.log('Built service worker matches exact preparation SHA; shell assets and root paths verified');"
+        ],
+        "started_at": "2026-09-07T14:56:12.808928+00:00",
+        "completed_at": "2026-09-07T14:56:12.846711+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/ehr-worker-binding.log",
+        "sha256": "fd559fe573eabfdf1d3c75c4991bc68696451ad3ddb570fea1d93a40e257c474"
+      },
+      {
+        "label": "install-infra-cloudflare",
+        "command": [
+          "npm",
+          "--prefix",
+          "infra/cloudflare",
+          "ci",
+          "--offline",
+          "--ignore-scripts",
+          "--no-audit",
+          "--no-fund"
+        ],
+        "started_at": "2026-09-07T14:56:12.847533+00:00",
+        "completed_at": "2026-09-07T14:56:13.991946+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/install-infra-cloudflare.log",
+        "sha256": "2a7ab41c00eefe9ccec06f9f0defd000d75cc1cc927a39d46123e0ef67749dda"
+      },
+      {
+        "label": "install-release",
+        "command": [
+          "npm",
+          "--prefix",
+          "release",
+          "ci",
+          "--offline",
+          "--ignore-scripts",
+          "--no-audit",
+          "--no-fund"
+        ],
+        "started_at": "2026-09-07T14:56:13.992441+00:00",
+        "completed_at": "2026-09-07T14:56:14.241444+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/install-release.log",
+        "sha256": "72ad7fe364e5c86bbde490ad6cef111a81a77bbe4db8be0a15f7b293dbc3082c"
+      },
+      {
+        "label": "cloudflare-tests",
+        "command": [
+          "npm",
+          "--prefix",
+          "infra/cloudflare",
+          "test"
+        ],
+        "started_at": "2026-09-07T14:56:14.242004+00:00",
+        "completed_at": "2026-09-07T14:56:15.213802+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/cloudflare-tests.log",
+        "sha256": "6e6843b83fb7b38982e2b6441c1738b219a1b6fc423ab714737da99bb6c85f31"
+      },
+      {
+        "label": "secret-readiness",
+        "command": [
+          "node",
+          "scripts/verify-secret-readiness.mjs"
+        ],
+        "started_at": "2026-09-07T14:56:15.214143+00:00",
+        "completed_at": "2026-09-07T14:56:15.539700+00:00",
+        "exit_code": 1,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-governance-ci-audit/secret-readiness.log",
+        "sha256": "f1fd76b5d15bdb24d98e33aedbcdb976d18797e1e7a223eca57ebbcd99ae5568"
+      }
+    ],
+    "remote_ci_rerun": false,
+    "cloud_access": false,
+    "archive_git_metadata": "Private local bare clone metadata with core.bare false, exact SHA; no changes to shared repository Git state",
+    "initial_harness_failure": "Archive alone omitted Git metadata required by mismatch-rejection assertion. Supplied private cloned metadata then reran; this is a harness limitation, not source regression."
+  },
+  "local_actual_environment_check": {
+    "recorded_at": "2026-09-07T19:08:07.750Z",
+    "scope": "Local policy evaluation of actual GitHub metadata; no protected run or OIDC request",
+    "environment_policy": "PASS",
+    "environments": [
+      {
+        "name": "staging",
+        "id": 21412878104,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true,
+        "custom_branch_policies": false,
+        "reviewers": [
+          {
+            "type": "User",
+            "id": 182018869,
+            "login": "D-Eminence"
+          }
+        ]
+      },
+      {
+        "name": "production",
+        "id": 21412879562,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true,
+        "custom_branch_policies": false,
+        "reviewers": [
+          {
+            "type": "User",
+            "id": 182018869,
+            "login": "D-Eminence"
+          }
+        ]
+      },
+      {
+        "name": "staging-publisher",
+        "id": 21412881394,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true,
+        "custom_branch_policies": false,
+        "reviewers": [
+          {
+            "type": "User",
+            "id": 182018869,
+            "login": "D-Eminence"
+          }
+        ]
+      },
+      {
+        "name": "production-publisher",
+        "id": 21412883002,
+        "prevent_self_review": false,
+        "can_admins_bypass": false,
+        "protected_branches": true,
+        "custom_branch_policies": false,
+        "reviewers": [
+          {
+            "type": "User",
+            "id": 182018869,
+            "login": "D-Eminence"
+          }
+        ]
+      }
+    ],
+    "missing_approval_history": "REJECTED",
+    "protected_ci_run": false,
+    "token_requested": false,
+    "cloud_mutation": false
+  },
+  "limitations": [
+    "No remote CI rerun or protected run",
+    "No real GitHub OIDC token, AWS trust or assume-role verification",
+    "GitHub environment and branch settings verified through API; no test PR/merge/deployment",
+    "Isolated archive initial EHR failure lacked Git metadata; private clone metadata fixed harness and 5 tests passed",
+    "Isolated secret-readiness check lacked other frontend build artifacts; full shared-workspace secret-readiness passed with zero findings",
+    "Go/race/vet/module/reproducibility suites are unchanged historical evidence; no Go/runtime/IAM source or lockfile changed"
+  ],
+  "retention_days": 730,
+  "object_lock": "UNAPPROVED / NOT CREATED",
+  "staging": "NOT ACCEPTED",
+  "production": "LOCKED",
+  "configuration_final": {
+    "recorded_at": "2026-09-07T19:10:41.259149+00:00",
+    "configuration_validation": "PASS",
+    "unchanged_unresolved_template_fields": 96,
+    "retention_days": 730,
+    "codeowners_actual_paths": "PASS",
+    "obsolete_active_reviewer_requirements": "NONE",
+    "head_unchanged": true,
+    "index_empty": true,
+    "security_untouched": true,
+    "diff_check": "PASS"
+  },
+  "exact_sha_push_reverification": {
+    "recorded_at": "2026-09-07T19:21:41.313188+00:00",
+    "commit_object_sha_verified": true,
+    "parent_message_and_17_original_files_verified": true,
+    "ci_fixes_contained_in_exact_commit": true,
+    "prior_pass_log_hashes_verified": true,
+    "eight_prepared_source_hashes_unchanged": true,
+    "local_tests_rerun": false,
+    "rationale": "Exact committed CI files and retained isolated pass logs are unchanged; current edits are documentation only.",
+    "github_configuration_readback_pass": true,
+    "protected_execution_accepted": false,
+    "no_external_mutation": true,
+    "evidence_directory": "/home/l2e/.local/state/hid-phase-c/exact-push-readiness-20260907T191927Z"
+  },
+  "authorized_pr_creation": {
+    "recorded_at": "2026-09-07T22:54:40.724301+00:00",
+    "repository": "D-Eminence/hid-system",
+    "pr_number": 1,
+    "url": "https://github.com/D-Eminence/hid-system/pull/1",
+    "state": "open",
+    "created_at": "2026-09-07T22:53:43Z",
+    "head_branch": "review/tuf-preparation-5ee3118",
+    "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+    "base_branch": "tuf-production-release",
+    "base_sha": "ba2cd3290e7c1fe72817c3bdfb806dd306b2c633",
+    "commit_count": 1,
+    "file_count": 17,
+    "source_and_base_independently_verified": true,
+    "review_branch_push_observation": "Already present at authorized SHA before this turn; no push performed by this agent in PR creation phase",
+    "merged": false,
+    "auto_merge": false,
+    "merge_authorized": false,
+    "review_submitted": false,
+    "required_checks": [
+      {
+        "context": "AWS release-trust source policy",
+        "app_id": 15368
+      },
+      {
+        "context": "Cloudflare TUF Workers",
+        "app_id": 15368
+      },
+      {
+        "context": "Complete workspace verification",
+        "app_id": 15368
+      },
+      {
+        "context": "EHR release-bound offline cache",
+        "app_id": 15368
+      },
+      {
+        "context": "Historical upstream reference oracle",
+        "app_id": 15368
+      },
+      {
+        "context": "Pinned TUF client and reproducibility",
+        "app_id": 15368
+      },
+      {
+        "context": "Release contracts and admission",
+        "app_id": 15368
+      }
+    ],
+    "review_rules": {
+      "id": 22459937,
+      "name": "HID owner-approved contributor reviews",
+      "target": "branch",
+      "source_type": "Repository",
+      "source": "D-Eminence/hid-system",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "refs/heads/main",
+            "refs/heads/tuf-production-release"
+          ]
+        }
+      },
+      "rules": [
+        {
+          "type": "pull_request",
+          "parameters": {
+            "required_approving_review_count": 1,
+            "dismiss_stale_reviews_on_push": true,
+            "required_reviewers": [],
+            "require_code_owner_review": true,
+            "require_last_push_approval": false,
+            "required_review_thread_resolution": true,
+            "require_extra_approval_for_unattributed_changes": true,
+            "allowed_merge_methods": [
+              "merge",
+              "squash",
+              "rebase"
+            ]
+          }
+        }
+      ],
+      "node_id": "RRS_lACqUmVwb3NpdG9yec5OhQaDzgFWtiE",
+      "created_at": "2026-09-07T15:56:05.891+01:00",
+      "updated_at": "2026-09-07T15:56:05.920+01:00",
+      "bypass_actors": [
+        {
+          "actor_id": 182018869,
+          "actor_type": "User",
+          "bypass_mode": "pull_request"
+        }
+      ],
+      "current_user_can_bypass": "pull_requests_only",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/D-Eminence/hid-system/rulesets/22459937"
+        },
+        "html": {
+          "href": "https://github.com/D-Eminence/hid-system/rules/22459937"
+        }
+      }
+    },
+    "deployment_protections_unchanged": true,
+    "environment_reviewer": "Only D-Eminence; self-review allowed; admin bypass false; protected branches only; zero secrets/variables at preflight",
+    "uncommitted_corrections_included": false,
+    "security_file_included": false,
+    "ordinary_runs": [
+      {
+        "id": 34168206030,
+        "event": "pull_request",
+        "status": "in_progress",
+        "conclusion": null,
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "url": "https://github.com/D-Eminence/hid-system/actions/runs/34168206030"
+      },
+      {
+        "id": 34167766797,
+        "event": "push",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "url": "https://github.com/D-Eminence/hid-system/actions/runs/34167766797"
+      }
+    ],
+    "checks": [
+      {
+        "name": "Release contracts and admission",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34168206030/job/101883347602"
+      },
+      {
+        "name": "Cloudflare TUF Workers",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34168206030/job/101883347600"
+      },
+      {
+        "name": "EHR release-bound offline cache",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34168206030/job/101883347544"
+      },
+      {
+        "name": "Pinned TUF client and reproducibility",
+        "status": "in_progress",
+        "conclusion": null,
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34168206030/job/101883347542"
+      },
+      {
+        "name": "AWS release-trust source policy",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34168206030/job/101883347538"
+      },
+      {
+        "name": "Historical upstream reference oracle",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34168206030/job/101883347536"
+      },
+      {
+        "name": "Complete workspace verification",
+        "status": "in_progress",
+        "conclusion": null,
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34168206030/job/101883347446"
+      },
+      {
+        "name": "Cloudflare TUF Workers",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34167766797/job/101882112033"
+      },
+      {
+        "name": "Historical upstream reference oracle",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34167766797/job/101882111931"
+      },
+      {
+        "name": "Complete workspace verification",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34167766797/job/101882111862"
+      },
+      {
+        "name": "Pinned TUF client and reproducibility",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34167766797/job/101882111861"
+      },
+      {
+        "name": "Release contracts and admission",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34167766797/job/101882111846"
+      },
+      {
+        "name": "AWS release-trust source policy",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34167766797/job/101882111807"
+      },
+      {
+        "name": "EHR release-bound offline cache",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "details_url": "https://github.com/D-Eminence/hid-system/actions/runs/34167766797/job/101882111723"
+      }
+    ],
+    "protected_ci": "NOT RUN",
+    "aws_cloudflare_access": false,
+    "object_lock": "UNAPPROVED / NOT CREATED",
+    "retention_days": 730,
+    "staging": "NOT ACCEPTED",
+    "data_migration": "NOT AUTHORIZED",
+    "production": "LOCKED",
+    "ordinary_push_ci_verified": {
+      "run_id": 34167766797,
+      "source_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+      "conclusion": "success",
+      "all_seven_jobs_successful": true,
+      "verified_at": "2026-09-07T22:55:23.415726+00:00",
+      "protected_execution": false
+    },
+    "final_pr_snapshot": {
+      "recorded_at": "2026-09-07T22:58:01.682296+00:00",
+      "pr_state": "open",
+      "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+      "merged": false,
+      "auto_merge": false,
+      "merge_state": "blocked",
+      "pr_ci": {
+        "id": 34168206030,
+        "status": "in_progress",
+        "conclusion": null,
+        "head_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+        "jobs": [
+          {
+            "name": "Complete workspace verification",
+            "status": "in_progress",
+            "conclusion": null
+          },
+          {
+            "name": "Historical upstream reference oracle",
+            "status": "completed",
+            "conclusion": "success"
+          },
+          {
+            "name": "AWS release-trust source policy",
+            "status": "completed",
+            "conclusion": "success"
+          },
+          {
+            "name": "Pinned TUF client and reproducibility",
+            "status": "completed",
+            "conclusion": "success"
+          },
+          {
+            "name": "EHR release-bound offline cache",
+            "status": "completed",
+            "conclusion": "success"
+          },
+          {
+            "name": "Cloudflare TUF Workers",
+            "status": "completed",
+            "conclusion": "success"
+          },
+          {
+            "name": "Release contracts and admission",
+            "status": "completed",
+            "conclusion": "success"
+          }
+        ]
+      }
+    }
+  },
+  "authority_note": "Earlier fields and limitations retain historical checks; current_correction records the freshly rerun full local suite.",
+  "current_correction": {
+    "recorded_at": "2026-09-08T10:37:24.145536+00:00",
+    "status": "PASS",
+    "source_commit_sha": "11b52d1ea59e572ad649d8f71fd84997d10749aa",
+    "source_parent_sha": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+    "tests_run_before_source_commit": true,
+    "tested_worktree_note": "Tests ran on reviewed corrected source above preparation HEAD. Subsequent configuration edits clarified status/approval labels only and passed configuration validation. No Go/runtime/IAM/lockfile changes. Logs and binary hashes independently rechecked.",
+    "checks": [
+      {
+        "name": "workspace-build",
+        "command": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "started_at": "2026-09-08T09:47:49.539781+00:00",
+        "completed_at": "2026-09-08T09:49:13.491615+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/workspace/workspace-build.log",
+        "log_sha256": "82feaae8dc911159d5e599eb209edd8f2c69c0ad621620391769e8900e328d8f"
+      },
+      {
+        "name": "workspace-tests",
+        "command": [
+          "npm",
+          "test"
+        ],
+        "started_at": "2026-09-08T09:49:13.493612+00:00",
+        "completed_at": "2026-09-08T09:50:16.660852+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/workspace/workspace-tests.log",
+        "log_sha256": "d3d96dc7c21c57390b5c9592868c54253bef03396c5197d0e4f47d023c049057"
+      },
+      {
+        "name": "workspace-verify",
+        "command": [
+          "npm",
+          "run",
+          "verify"
+        ],
+        "started_at": "2026-09-08T09:50:16.661530+00:00",
+        "completed_at": "2026-09-08T09:51:30.281776+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/workspace/workspace-verify.log",
+        "log_sha256": "ed52a2498cc8288c31281cb63093c86a4357a90ffabdcd66680b45cf458f5bbf"
+      },
+      {
+        "name": "release-tests",
+        "command": [
+          "npm",
+          "--prefix",
+          "release",
+          "test"
+        ],
+        "started_at": "2026-09-08T09:48:39.411886+00:00",
+        "completed_at": "2026-09-08T09:48:41.833395+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/focused/release-tests.log",
+        "log_sha256": "e2f86d99a7d9af9644fd901bf3c92c0f89f8d06b2bec7e9f2271c1547b217316"
+      },
+      {
+        "name": "protected-readiness-tests",
+        "command": [
+          "node",
+          "--test",
+          "release/test/protected-readiness.test.mjs"
+        ],
+        "started_at": "2026-09-08T09:48:41.833826+00:00",
+        "completed_at": "2026-09-08T09:48:42.850165+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/focused/protected-readiness-tests.log",
+        "log_sha256": "b59399e63a1d225db7b0d1c0eb808df38cc618fcfaa2be616217f7fdc33d8634"
+      },
+      {
+        "name": "publication-workflow-tests",
+        "command": [
+          "node",
+          "--test",
+          "release/test/publication-workflow.test.mjs"
+        ],
+        "started_at": "2026-09-08T09:48:42.850570+00:00",
+        "completed_at": "2026-09-08T09:48:44.267840+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/focused/publication-workflow-tests.log",
+        "log_sha256": "c0d21eb914309242ff82810fa0ab7dd11b1f41f1b44f82bf3f37ef94b39f3afb"
+      },
+      {
+        "name": "release-contracts",
+        "command": [
+          "npm",
+          "--prefix",
+          "release",
+          "run",
+          "verify"
+        ],
+        "started_at": "2026-09-08T09:48:44.268300+00:00",
+        "completed_at": "2026-09-08T09:48:44.783983+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/focused/release-contracts.log",
+        "log_sha256": "275dcddba98ae60107551f6b2650e0490987af400e8203d149fa70a29dff845f"
+      },
+      {
+        "name": "aws-typecheck",
+        "command": [
+          "npm",
+          "--prefix",
+          "infra/aws",
+          "run",
+          "typecheck"
+        ],
+        "started_at": "2026-09-08T09:48:44.784610+00:00",
+        "completed_at": "2026-09-08T09:48:50.112678+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/focused/aws-typecheck.log",
+        "log_sha256": "ec7030a0d6bcf65e073f311f54d73558d0c24c0b4f1291f6955096f000e470db"
+      },
+      {
+        "name": "ehr-tests",
+        "command": [
+          "npm",
+          "--prefix",
+          "apps/ehr",
+          "test"
+        ],
+        "started_at": "2026-09-08T09:48:50.113175+00:00",
+        "completed_at": "2026-09-08T09:48:51.079915+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/focused/ehr-tests.log",
+        "log_sha256": "6a8df988bc83ab6a6fba485560900862e938c08d0c9cfd21ba0b84e4d89132d4"
+      },
+      {
+        "name": "workflow-action-lint",
+        "command": [
+          "/home/l2e/.local/share/hid-release-tools/actionlint/actionlint",
+          "-color",
+          "-shellcheck=",
+          "-pyflakes=",
+          ".github/workflows/tuf-local-gates.yml",
+          ".github/workflows/tuf-protected-readiness.yml",
+          ".github/workflows/tuf-publish.yml"
+        ],
+        "started_at": "2026-09-08T09:48:51.080449+00:00",
+        "completed_at": "2026-09-08T09:48:51.088808+00:00",
+        "exit_code": 0,
+        "log": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/focused/workflow-action-lint.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "go": {
+      "schema_version": "hid.tuf.solo-correction-go-validation/v1",
+      "started_at": "2026-09-08T09:48:15.923099+00:00",
+      "source_head": "5ee3118688e04c364b6d351d1b3ef3385c71abb4",
+      "worktree_dirty": true,
+      "toolchain": "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+      "environment": {
+        "GOTOOLCHAIN": "local",
+        "GOENV": "off",
+        "GOPROXY": "off",
+        "GOFLAGS": "-mod=readonly",
+        "HID_REQUIRE_CLOUDFLARE_VALIDATOR": "1",
+        "GOMAXPROCS": "4",
+        "AWS_EC2_METADATA_DISABLED": "true"
+      },
+      "commands": [
+        {
+          "name": "toolchain",
+          "command": [
+            "node",
+            "scripts/verify-production-toolchain.mjs"
+          ],
+          "started_at": "2026-09-08T09:48:15.924952+00:00",
+          "completed_at": "2026-09-08T09:48:15.988362+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/toolchain.log",
+          "log_sha256": "a250728ff67abf1419221c3699c1c4f11e3c638f89f9c9387f3828326dda6ae7"
+        },
+        {
+          "name": "go-tests",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "test",
+            "-count=1",
+            "-json",
+            "./..."
+          ],
+          "started_at": "2026-09-08T09:48:15.988829+00:00",
+          "completed_at": "2026-09-08T09:48:25.053279+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/go-tests.log",
+          "log_sha256": "b63b6945e4933e3870a213133324cb7f9a867e0fcf6753bd64b57f852a041f07",
+          "passing_tests": 587,
+          "skipped_tests": 0,
+          "passing_packages": 12
+        },
+        {
+          "name": "go-race",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "test",
+            "-race",
+            "-count=1",
+            "-json",
+            "./..."
+          ],
+          "started_at": "2026-09-08T09:48:25.073327+00:00",
+          "completed_at": "2026-09-08T09:49:13.967379+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/go-race.log",
+          "log_sha256": "d507d9020f7647100b7b54d3cf86ec5f72c6811f8c745c27cedacb2546c1d842",
+          "passing_tests": 587,
+          "skipped_tests": 0,
+          "passing_packages": 12
+        },
+        {
+          "name": "go-vet",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "vet",
+            "./..."
+          ],
+          "started_at": "2026-09-08T09:49:13.978839+00:00",
+          "completed_at": "2026-09-08T09:49:14.177536+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/go-vet.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "go-module-verification",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "mod",
+            "verify"
+          ],
+          "started_at": "2026-09-08T09:49:14.177911+00:00",
+          "completed_at": "2026-09-08T09:49:15.326878+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/go-module-verification.log",
+          "log_sha256": "b4537ed75f533f993f371954de47e42a793b8e5b0587577de7e27fb3e50696bd"
+        },
+        {
+          "name": "build-hid-tuf-a",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-a/hid-tuf",
+            "./cmd/hid-tuf"
+          ],
+          "started_at": "2026-09-08T09:49:15.327623+00:00",
+          "completed_at": "2026-09-08T09:49:29.036972+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-hid-tuf-a.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "build-hid-tuf-repo-a",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-a/hid-tuf-repo",
+            "./cmd/hid-tuf-repo"
+          ],
+          "started_at": "2026-09-08T09:49:29.037503+00:00",
+          "completed_at": "2026-09-08T09:49:33.793053+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-hid-tuf-repo-a.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "build-hid-tuf-publication-a",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-a/hid-tuf-publication",
+            "./cmd/hid-tuf-publication"
+          ],
+          "started_at": "2026-09-08T09:49:33.793591+00:00",
+          "completed_at": "2026-09-08T09:49:41.483559+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-hid-tuf-publication-a.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "build-hid-tuf-journal-a",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-a/hid-tuf-journal",
+            "./cmd/hid-tuf-journal"
+          ],
+          "started_at": "2026-09-08T09:49:41.484122+00:00",
+          "completed_at": "2026-09-08T09:49:42.385073+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-hid-tuf-journal-a.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "build-hid-tuf-signing-broker-a",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-a/hid-tuf-signing-broker",
+            "./cmd/hid-tuf-signing-broker"
+          ],
+          "started_at": "2026-09-08T09:49:42.385572+00:00",
+          "completed_at": "2026-09-08T09:49:44.370247+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-hid-tuf-signing-broker-a.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "build-hid-tuf-b",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-b/hid-tuf",
+            "./cmd/hid-tuf"
+          ],
+          "started_at": "2026-09-08T09:49:44.370931+00:00",
+          "completed_at": "2026-09-08T09:49:56.097202+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-hid-tuf-b.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "build-hid-tuf-repo-b",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-b/hid-tuf-repo",
+            "./cmd/hid-tuf-repo"
+          ],
+          "started_at": "2026-09-08T09:49:56.097717+00:00",
+          "completed_at": "2026-09-08T09:50:00.317754+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-hid-tuf-repo-b.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "build-hid-tuf-publication-b",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-b/hid-tuf-publication",
+            "./cmd/hid-tuf-publication"
+          ],
+          "started_at": "2026-09-08T09:50:00.318271+00:00",
+          "completed_at": "2026-09-08T09:50:07.264301+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-hid-tuf-publication-b.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "build-hid-tuf-journal-b",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-b/hid-tuf-journal",
+            "./cmd/hid-tuf-journal"
+          ],
+          "started_at": "2026-09-08T09:50:07.264905+00:00",
+          "completed_at": "2026-09-08T09:50:08.013026+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-hid-tuf-journal-b.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "build-hid-tuf-signing-broker-b",
+          "command": [
+            "/home/l2e/.local/share/hid-release-tools/go/1.26.8/go/bin/go",
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-b/hid-tuf-signing-broker",
+            "./cmd/hid-tuf-signing-broker"
+          ],
+          "started_at": "2026-09-08T09:50:08.013587+00:00",
+          "completed_at": "2026-09-08T09:50:09.911983+00:00",
+          "exit_code": 0,
+          "log_path": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908/go/run-20260908T094815Z/build-hid-tuf-signing-broker-b.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "reproducibility": [
+        {
+          "command": "hid-tuf",
+          "identical": true,
+          "size_bytes": 15050352,
+          "sha256": "7b4424f4d86201977fb537059ce8b16ec128f5c405defef438d499d9df167165",
+          "independent_caches": true
+        },
+        {
+          "command": "hid-tuf-repo",
+          "identical": true,
+          "size_bytes": 22352759,
+          "sha256": "45f775be8eca9200c660616f8b446fc4afdc332fa1af29b34bb3c56e1568e527",
+          "independent_caches": true
+        },
+        {
+          "command": "hid-tuf-publication",
+          "identical": true,
+          "size_bytes": 30827305,
+          "sha256": "4a3538b7feda8b37f09e7e089c0a43c1e7c13ebd1a3549d2d22b1b014031d881",
+          "independent_caches": true
+        },
+        {
+          "command": "hid-tuf-journal",
+          "identical": true,
+          "size_bytes": 30467324,
+          "sha256": "d6f22b046339659eb6b6d176cf01486158fa15574b9aaa69ddccc3a4600c7eba",
+          "independent_caches": true
+        },
+        {
+          "command": "hid-tuf-signing-broker",
+          "identical": true,
+          "size_bytes": 34288881,
+          "sha256": "706b30c877cc769370a120b6830c95889844d89658ce184eb5b60b7c876c77d6",
+          "independent_caches": true
+        }
+      ],
+      "external_mutations": false,
+      "completed_at": "2026-09-08T09:50:10.133158+00:00",
+      "passed": true
+    },
+    "source_security_validation": {
+      "recorded_at": "2026-09-08T10:32:05.796974+00:00",
+      "source_files": [
+        ".github/CODEOWNERS",
+        ".github/workflows/tuf-protected-readiness.yml",
+        ".github/workflows/tuf-publish.yml",
+        "release/config/protected-ci-prerequisites.json",
+        "release/scripts/verify-protected-readiness.mjs",
+        "release/scripts/verify-publication-workflow.mjs",
+        "release/test/protected-readiness.test.mjs",
+        "release/test/publication-workflow.test.mjs"
+      ],
+      "findings": [],
+      "reviewed_benign_matches": [
+        {
+          "path": "release/test/protected-readiness.test.mjs",
+          "kind": "credential_url",
+          "line": 146,
+          "reason": "Deliberately rejected synthetic credential-bearing fixture URL; no usable credential"
+        }
+      ],
+      "scan_note": "Complete file scan plus manual diff review; synthetic negative-test URL reviewed. No secrets/private keys or environment files.",
+      "configuration_validation": "PASS",
+      "retention_days": 730,
+      "source_blob_hashes": {
+        ".github/CODEOWNERS": "6f6ec5250aca144b962ac43e07d217dfa51c52ad139d45ab33fe95606ed06cfa",
+        ".github/workflows/tuf-protected-readiness.yml": "79b09470988c8624a5d1d06fcdb53bb6637d71434878320908127f6db33c6734",
+        ".github/workflows/tuf-publish.yml": "38c6a6ea98315c6389904779c4c11f482e9ce1a4a9c20bc5c19ebdaa60c764bf",
+        "release/config/protected-ci-prerequisites.json": "e51c968f8a66706761807bfe741eefffdd43fc831833e10aa8c0a0197e26a92b",
+        "release/scripts/verify-protected-readiness.mjs": "4771b541acd41112052b1d9a454bd60f66dbd3effaaa1f292bef9a1c980f05b0",
+        "release/scripts/verify-publication-workflow.mjs": "52ce106598e0e114c005f3eb44487fceb51fff52285b0ab5216102a44b2229b7",
+        "release/test/protected-readiness.test.mjs": "99a76ab0b212889d148837cbe7bf86bed14131976ed4e678ca3a771add78db14",
+        "release/test/publication-workflow.test.mjs": "9f2f743ebf06e9ca044d7396e71b19f56d4cc6f229d2bb90e6417de9b51e9460"
+      },
+      "unrelated_security_unchanged": true
+    },
+    "github_readback_status": "PASS",
+    "github_readback_sha256": "86c9150a6a5e48343e4286565f79ddb20d327c0a167d42bd05822ff3f4a6a4c2",
+    "retention_validation": {
+      "days": 730,
+      "years": 2,
+      "active_obsolete_settings": false,
+      "existing_historical_correction_notice_preserved": true,
+      "iam_and_writer_tests": "PASS"
+    },
+    "workflow_lint_limit": "actionlint passed; optional shellcheck and pyflakes integrations disabled because unavailable; executable identity tests pass",
+    "new_head_remote_ci": "UNVERIFIED_UNTIL_AUTHORIZED_PUSH",
+    "protected_ci": "NOT_RUN",
+    "staging": "NOT_ACCEPTED",
+    "data_migration": "NOT_AUTHORIZED",
+    "production": "LOCKED",
+    "evidence_root": "/home/l2e/.local/state/hid-phase-c/solo-correction-20260908"
+  }
+}

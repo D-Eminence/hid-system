@@ -1,0 +1,185 @@
+{
+  "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+  "phase": "1-2 read-only audit",
+  "audited_at_utc": "2026-09-08T19:15:21.250540+00:00",
+  "decision": "NOT READY",
+  "staging_deployment_authorization": "BLOCKED",
+  "actual_staging_account_region": "NOT VERIFIED",
+  "source_modified_by_aws_auditor": false,
+  "cloud_mutations": 0,
+  "authenticated_aws_calls_by_auditor": 0,
+  "findings": [
+    {
+      "id": "AWS-01",
+      "status": "PASS",
+      "title": "Exact-source dependency installation, static checks and 58 infrastructure tests",
+      "evidence": [
+        "npm ci --ignore-scripts exit0; ordinary worktree-local node_modules, not symlink",
+        "npm run typecheck exit0; npm test exit0, 58/58; npm run cost:inventory:check exit0",
+        "aws-command-results.json records commands, configurations, durations and log paths"
+      ],
+      "remediation": null
+    },
+    {
+      "id": "AWS-02",
+      "status": "PASS",
+      "title": "Default and all three staging offline synth and declared-template verifiers pass",
+      "evidence": [
+        "Default development, staging sleep/economy/fidelity: synth --no-lookups, verify:synth and verify:policy all exit0",
+        "infra/aws/scripts/synth.mjs:15-24; infra/aws/scripts/verify-synth.mjs; aws-template-measurements.json",
+        "No authenticated AWS, deployment, diff or change-set command performed by AWS auditor"
+      ],
+      "remediation": null
+    },
+    {
+      "id": "AWS-03",
+      "status": "PASS",
+      "title": "Submitted templates are within S3 template, parameter, resource and output quotas",
+      "evidence": [
+        "Default:517254 bytes/412 resources/62 parameters/21 outputs; sleep:276200/207/37/20; economy:507484/408/62/21; fidelity:514974/414/62/21",
+        "All exceed 51200-byte inline request limit, so S3 template URL/CDK asset path is required",
+        "AWS limits:200 parameters,500 resources,200 outputs,4096-byte parameter values,51200-byte inline templates,1MB S3 templates",
+        "https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cloudformation-limits.html"
+      ],
+      "remediation": null
+    },
+    {
+      "id": "AWS-04",
+      "status": "WARNING",
+      "title": "Full RDS bundles exceed parameter quota; a verified matching root certificate can fit",
+      "evidence": [
+        "infra/aws/src/hid-regional-stack.ts:411,675,745,751,756,942 declares one String parameter used in ten task environments",
+        "Downloaded public global bundle:165408 PEM bytes/220544 base64 bytes/108 certs; illustrative us-east-1 regional:4576/6104/3",
+        "Illustrative individual us-east-1 roots:RSA2048 1932 base64 bytes; RSA4096 2852; ECC3841320. Each fits 4096 bytes",
+        "Global-inline hypothetical expansion of economy template:2549705 compact bytes; native template remains507484 bytes. This is diagnostic, not actual CloudFormation submitted-template size",
+        "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html says register root CA only; actual staging region and selected RDS CA remain unavailable"
+      ],
+      "remediation": "Bind actual staging region and DB CA identifier; provide matching public root only and verified TLS evidence. Add staging-only MaxLength4096/input documentation; do not inline a global bundle or weaken TLS. A full-bundle deployment input is blocked, but delivery redesign is not inherently required."
+    },
+    {
+      "id": "AWS-05",
+      "status": "BLOCKER",
+      "title": "Economy lacks ECR/Logs network path for Gateway, OCR Worker and Event Dispatcher",
+      "evidence": [
+        "infra/aws/src/config.ts:104-107 selects only secrets-manager,eventbridge,sqs,textract endpoints",
+        "infra/aws/src/hid-regional-stack.ts:654-662 excludes gateway,ocr-worker,event-dispatcher from public443 egress",
+        "Synthesized economy security groups confirm only endpointSG443/S3prefix443 (+ owner ports or RDS); no ecr-api/ecr-docker/logs endpoints",
+        "https://docs.aws.amazon.com/AmazonECR/latest/userguide/vpc-endpoints.html documents Fargate ECR API+DKR+S3 and required Logs connectivity"
+      ],
+      "remediation": "Add ecr-api,ecr-docker,logs to economy profile endpoints in one AZ; keep restrictive security groups. Update staging economy cost inventory/docs/assertions. Production/fidelity/development settings remain unchanged."
+    },
+    {
+      "id": "AWS-06",
+      "status": "BLOCKER",
+      "title": "Migration task cannot bootstrap because its security group allows only RDS egress",
+      "evidence": [
+        "infra/aws/src/hid-regional-stack.ts:367-372 adds RDS outbound plus endpoint inbound only",
+        "infra/aws/src/hid-regional-stack.ts:947-951 sets allowAllOutbound:false; no matching migration443 outbound exists",
+        "Economy synthesized MigrationSecurityGroupBCB362A0 has one outbound rule to DatabaseSecurityGroup7319C0F6 tcp5432; no endpoint or S3 path"
+      ],
+      "remediation": "For staging live profiles only, add migration-to-endpointSG tcp443 and migration-to-S3 managed prefix list tcp443. Keep no public egress; sleep remains closed. Verify full image/secret/log boot chain and actual task startup after approved deployment."
+    },
+    {
+      "id": "AWS-07",
+      "status": "BLOCKER",
+      "title": "EHR and OCR Worker HeadBucket permission is ineffective",
+      "evidence": [
+        "infra/aws/src/hid-regional-stack.ts:807 and822 grant s3:HeadBucket instead of s3:ListBucket",
+        "services/ehr-api/src/storage/s3-storage.provider.ts:41 and services/ocr-worker/src/s3-document-reader.ts:18 issue real HeadBucket API calls",
+        "https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadBucket.html requires s3:ListBucket for general-purpose buckets"
+      ],
+      "remediation": "In staging only replace the unsupported s3:HeadBucket action with s3:ListBucket on the exact document bucket ARN. Retain every object/KMS bound and cross-bucket denial; cover action contract with source assertions. Preserve production template byte-for-byte as user requires."
+    },
+    {
+      "id": "AWS-08",
+      "status": "PASS",
+      "title": "Declared private data and environment separation boundaries",
+      "evidence": [
+        "infra/aws/src/config.ts:146-166 assigns staging API/browser namespace,independent origin-secret parameter and10.30.0.0/16 CIDR",
+        "infra/aws/src/hid-regional-stack.ts:110-115 separates edge/application/isolated database subnets;153-164 private encrypted RDS/TLS enforcement at139; 637-642 no public task IPs and circuit-breaker rollback",
+        "Nine runtime LOGIN secrets plus separate migration secret;12 separate task/execution roles;private versioned KMS document bucket;origin WAF;no CloudFront;passed assertions"
+      ],
+      "remediation": null
+    },
+    {
+      "id": "AWS-09",
+      "status": "NOT VERIFIED",
+      "title": "Actual staging account/region, AZ context, cloud state and deployment permission unavailable",
+      "evidence": [
+        "Parent read-only AWS audit reported hid-admin session expired, sts get-caller-identity exit255; no non-secret staging manifest is present",
+        "Actual account/region synthesis not performed or claimed",
+        "Illustrative account111111111111/us-east-1 synth --no-lookups exit1:missing availability-zones context. Its emitted assembly is incomplete diagnostic output, not successful synthesis",
+        "infra/aws/bin/hid-infrastructure.ts:8-13; infra/aws/src/config.ts:196-201; aws-economy-bound-fixture-synth.log"
+      ],
+      "remediation": "Owner refreshes approved AWS staging login locally; independently verify actual STS/account/region and existing resources, supply validated non-secret staging manifest and approved observed AZ context. Then rerun exact-source account-bound no-lookup synthesis, API validation and read-only diff; do not use fixture identifiers."
+    },
+    {
+      "id": "AWS-10",
+      "status": "NOT VERIFIED",
+      "title": "Live credentials, CA/certificates, workload token delivery, providers and admitted image digests absent",
+      "evidence": [
+        "infra/aws/src/hid-regional-stack.ts:399-444 declares required certificates/prefix/root/workload/secret/digest interfaces",
+        "Six task-local read-only workload volumes are empty contracts:627-628; no delivery sidecar/provider is present",
+        "docs/AWS_DEPLOYMENT_RUNBOOK.md:14-32 and179-194 require independently bound inputs and provider/rotation/deny proof",
+        "Imported external Secrets Manager CMK decrypt authority must be checked against actual key metadata:secret import at556-560 supplies no encryptionKey"
+      ],
+      "remediation": "Bind12 actual ARM64 image identities plus secrets metadata/version/CMK grants,9 runtime DB logins and migration operator,public/internal ACM,origin secret,CA/prefix list,issuer/JWKS/rotating tokens and staging providers; prove negative and positive runtime paths. Never substitute production secrets or fixture pins."
+    },
+    {
+      "id": "AWS-11",
+      "status": "WARNING",
+      "title": "Eight API/provider tasks permit public HTTPS egress without endpoint destination restriction",
+      "evidence": [
+        "infra/aws/src/hid-regional-stack.ts:659-662 allows anyIPv4:443 through NAT for request APIs and notification API/worker",
+        "CODEX.md section41 requires approved PHI egress needs; source description says approved issuer/provider but security group itself is destination-broad"
+      ],
+      "remediation": "Record specific approved issuer/provider egress need and account network controls; validate real paths and least privilege. Do not broaden Gateway/OCR Worker/Dispatcher/migration egress to repair bootstrap."
+    },
+    {
+      "id": "AWS-12",
+      "status": "WARNING",
+      "title": "Runtime observability exists but active alert delivery and network access-log configuration are not declared",
+      "evidence": [
+        "Economy template has47 CloudWatch alarms and13 log metric filters; zero AlarmActions",
+        "No ALB access logging,VPC FlowLogs,WAF LoggingConfiguration found in HidRegionalStack; CloudWatch resource declaration is not witnessed alert delivery",
+        "infra/aws/src/hid-regional-stack.ts:1150 onward defines alarms; application logs are configured per task at599-613"
+      ],
+      "remediation": "Before acceptance identify approved operational alert destination/account-level log integration and prove failure detection, sanitized logs and witnessed alert receipt. If absent, add separate staging-scoped reviewed observability controls; no hypothetical claim of existing monitoring."
+    },
+    {
+      "id": "AWS-13",
+      "status": "NOT VERIFIED",
+      "title": "Operational rollback and backup restoration remain unexecuted",
+      "evidence": [
+        "RDS14-day backups/deletion protection and Snapshot delete/replace policies,retained keys/docs/ECR and ECS deployment rollback exist in source",
+        "docs/AWS_DEPLOYMENT_RUNBOOK.md:248-254 gives generic previous-artifact rollback; later docs/TUF-STAGING-MIGRATION.md requires forward release C,higher metadata/high-water and safe single-writer recovery",
+        "No accepted A/B/C retained artifact/DB/Cloudflare receipts available"
+      ],
+      "remediation": "Use canonical TUF forward recovery procedure, not stale timestamp or old Worker generation. Prove exact backup/restore/application integrity and staging A/B/C release recovery before acceptance; no stack destroy or destructive DB rollback."
+    },
+    {
+      "id": "AWS-14",
+      "status": "WARNING",
+      "title": "Staging-operation wrapper is not a read-only audit command or first-foundation provisioner",
+      "evidence": [
+        "infra/aws/scripts/staging-operation.mjs:38-43 requires existing RDS;54 invokes CDK diff without --no-change-set;57 can start database;66 deploys with require-approval never after acknowledgments;71 destroys on teardown",
+        "Current auditor did not run wrapper or diff. Source acknowledgments are not substitute for actual evidence/authorization"
+      ],
+      "remediation": "Do not run this wrapper for Phase1/4 read-only validation. Establish existing-vs-new staging stack first; use explicitly read-only diff flags after credential binding; forbid teardown per user task. Review concrete command/parameters before any authorized deployment."
+    },
+    {
+      "id": "AWS-15",
+      "status": "NOT VERIFIED",
+      "title": "Release trust infrastructure and immutable retention/custody are separate gated dependencies",
+      "evidence": [
+        "infra/aws/bin/hid-infrastructure.ts normal app includes regional and optional cost stack only; release trust stack is deliberately absent",
+        "docs/TUF-STAGING-INFRASTRUCTURE.md requires concrete account-bound plan and explicit Object Lock/key custody approval; no such identity/approval is available",
+        "58 tests include source release-trust policy tests but prove no live signing/journal/publication"
+      ],
+      "remediation": "Bind staging release-trust identifiers and reviewed current source; obtain exact irreversible Object Lock/key custody approval only after concrete reviewable plan. Do not invent keys/signatures or treat local fixtures as deployment evidence."
+    }
+  ],
+  "commands_file": "aws-command-results.json",
+  "template_measurements_file": "aws-template-measurements.json",
+  "certificate_options_file": "aws-rds-selected-root-options.json"
+}

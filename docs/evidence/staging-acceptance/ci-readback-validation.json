@@ -1,0 +1,92 @@
+[
+  {
+    "job": "aws-release-trust",
+    "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+    "gates": 4,
+    "all_gates_success": true,
+    "checked_source_files": [
+      ".github/workflows/tuf-local-gates.yml",
+      "tools/tuf-release/toolchain/verified-upstream-build.json",
+      "tools/tuf-release/toolchain/production-build.json",
+      "tools/tuf-release/go.mod",
+      "tools/tuf-release/go.sum",
+      "release/config/components.json"
+    ],
+    "evidence_sha256": "667f487c023c5fcbed07a6d68443ec14a2bc6a4bf54816332c81ac2a537f6a30"
+  },
+  {
+    "job": "cloudflare-tuf",
+    "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+    "gates": 8,
+    "all_gates_success": true,
+    "checked_source_files": [
+      ".github/workflows/tuf-local-gates.yml",
+      "tools/tuf-release/toolchain/verified-upstream-build.json",
+      "tools/tuf-release/toolchain/production-build.json",
+      "tools/tuf-release/go.mod",
+      "tools/tuf-release/go.sum",
+      "release/config/components.json"
+    ],
+    "evidence_sha256": "29e3f5bac9415a32aeef76a1d38c4d2778d8a0dbad1f427297b83ee4d9cfcb41"
+  },
+  {
+    "job": "release-contracts",
+    "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+    "gates": 4,
+    "all_gates_success": true,
+    "checked_source_files": [
+      ".github/workflows/tuf-local-gates.yml",
+      "tools/tuf-release/toolchain/verified-upstream-build.json",
+      "tools/tuf-release/toolchain/production-build.json",
+      "tools/tuf-release/go.mod",
+      "tools/tuf-release/go.sum",
+      "release/config/components.json"
+    ],
+    "evidence_sha256": "99f3579a119b332d1483f4e09eda0e941636411d164a82d217bbc4f1255efe9d"
+  },
+  {
+    "job": "upstream-reference",
+    "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+    "gates": 2,
+    "all_gates_success": true,
+    "checked_source_files": [
+      ".github/workflows/tuf-local-gates.yml",
+      "tools/tuf-release/toolchain/verified-upstream-build.json",
+      "tools/tuf-release/toolchain/production-build.json",
+      "tools/tuf-release/go.mod",
+      "tools/tuf-release/go.sum",
+      "release/config/components.json"
+    ],
+    "evidence_sha256": "bdc897ee4efd651785d402ab8cdffc2371dda8af71fc42fd834cf97b70b3c0d3"
+  },
+  {
+    "job": "tuf-client",
+    "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+    "gates": 9,
+    "all_gates_success": true,
+    "checked_source_files": [
+      ".github/workflows/tuf-local-gates.yml",
+      "tools/tuf-release/toolchain/verified-upstream-build.json",
+      "tools/tuf-release/toolchain/production-build.json",
+      "tools/tuf-release/go.mod",
+      "tools/tuf-release/go.sum",
+      "release/config/components.json"
+    ],
+    "evidence_sha256": "42c1dcedf99da4cd3bd77666b0179f726d80d7536eb0981e0163179087b9c4e6"
+  },
+  {
+    "job": "ehr-release-cache",
+    "source_sha": "a709e643a731b444f7cb775b2b16fe28164146a7",
+    "gates": 5,
+    "all_gates_success": true,
+    "checked_source_files": [
+      ".github/workflows/tuf-local-gates.yml",
+      "tools/tuf-release/toolchain/verified-upstream-build.json",
+      "tools/tuf-release/toolchain/production-build.json",
+      "tools/tuf-release/go.mod",
+      "tools/tuf-release/go.sum",
+      "release/config/components.json"
+    ],
+    "evidence_sha256": "b0402e4b9fbc73c35117c98789e951ec8866e21fce5190e70e81397d530d6f48"
+  }
+]

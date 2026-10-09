@@ -1,0 +1,14 @@
+{
+  "recorded_at": "2026-09-09T08:32:16.414609+00:00",
+  "command": [
+    "aws",
+    "sts",
+    "get-caller-identity",
+    "--profile",
+    "hid-admin",
+    "--no-cli-pager"
+  ],
+  "exit_code": 255,
+  "stdout": "",
+  "stderr": "aws: [ERROR]: Your session has expired. Please reauthenticate using 'aws login'."
+}

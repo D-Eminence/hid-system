@@ -1,0 +1,5 @@
+export const OUTREACH_PATH = '/'
+export const OUTREACH_LOGIN_PATH = '/login'
+export const OUTREACH_SIGNUP_PATH = '/signup'
+export const OUTREACH_JOIN_PATH = '/join'
+export const OUTREACH_VERIFY_PATH = '/verify'

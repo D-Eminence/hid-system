@@ -1,0 +1,6 @@
+{
+  "check": "unfilled staging identifiers rejected before offline synthesis",
+  "passed": true,
+  "exit_code": 1,
+  "output_sha256": "c4d03c52cb4f4077d868eaaafa08396b52ed93bda287c0cd02952cf69c056734"
+}

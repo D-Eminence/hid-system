@@ -1,0 +1,18 @@
+# TEMPLATE ONLY: GitHub does not enforce this file. Owner must replace each
+# placeholder with verified users/teams and install reviewed .github/CODEOWNERS.
+# Require code-owner reviews in branch protection; prohibit bypass.
+/.github/                           <RELEASE_SECURITY_OWNER>
+/release/                           <RELEASE_SECURITY_OWNER>
+/tools/tuf-release/                  <RELEASE_SECURITY_OWNER>
+/infra/                             <INFRASTRUCTURE_SECURITY_OWNER>
+/scripts/tuf-*                      <MIGRATION_SECURITY_OWNER>
+/services/ehr-api/database/          <MIGRATION_SECURITY_OWNER>
+/services/ehr-api/scripts/           <MIGRATION_SECURITY_OWNER>
+/apps/ehr/scripts/                  <RELEASE_SECURITY_OWNER>
+/apps/ehr/public/service-worker.js  <RELEASE_SECURITY_OWNER>
+/apps/ehr/src/release-service-worker.ts <RELEASE_SECURITY_OWNER>
+/docs/TUF-*                         <RELEASE_SECURITY_OWNER>
+/CODEX.md                           <RELEASE_SECURITY_OWNER>
+/.gitignore                         <RELEASE_SECURITY_OWNER>
+/package.json                       <RELEASE_SECURITY_OWNER>
+**/package-lock.json                <RELEASE_SECURITY_OWNER>

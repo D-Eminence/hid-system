@@ -1,0 +1,378 @@
+{
+  "schema_version": "hid.tuf.github-protection-evidence/v1",
+  "recorded_at": "2026-09-07T14:04:55.964923+00:00",
+  "source_sha": "ba2cd3290e7c1fe72817c3bdfb806dd306b2c633",
+  "repository": {
+    "id": 1317340803,
+    "full_name": "D-Eminence/hid-system",
+    "visibility": "public",
+    "default_branch": "main",
+    "permissions": {
+      "admin": true,
+      "maintain": true,
+      "push": true,
+      "triage": true,
+      "pull": true
+    }
+  },
+  "owner": {
+    "login": "D-Eminence",
+    "id": 182018869
+  },
+  "initial_branches": [
+    {
+      "name": "aws-cost-safety",
+      "sha": "328faee9522f66051067c9a522725e4b7e370f8d",
+      "protected_at_initial_inspection": false
+    },
+    {
+      "name": "main",
+      "sha": "2ae17cdabedf6709608966276de83e921a5db6da",
+      "protected_at_initial_inspection": false
+    },
+    {
+      "name": "platform-baseline",
+      "sha": "4f5e5140b33cf351962dad9903459d20c51f8f0a",
+      "protected_at_initial_inspection": false
+    },
+    {
+      "name": "release-reproducibility-fix",
+      "sha": "4aca7933ae1e041fdacca432fa5cbf98658ddaa7",
+      "protected_at_initial_inspection": false
+    },
+    {
+      "name": "release-security-remediation",
+      "sha": "6a247e5ecac5b34947c924bc75b6ca9d54c96733",
+      "protected_at_initial_inspection": false
+    },
+    {
+      "name": "release-verify-reproducibility-fix",
+      "sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "protected_at_initial_inspection": false
+    },
+    {
+      "name": "staging-readiness",
+      "sha": "df4f41328375c9a2235c2e6d48dd482ff6f432af",
+      "protected_at_initial_inspection": false
+    },
+    {
+      "name": "tuf-production-release",
+      "sha": "ba2cd3290e7c1fe72817c3bdfb806dd306b2c633",
+      "protected_at_initial_inspection": false
+    }
+  ],
+  "current_branch_protection": {
+    "main": {
+      "required_status_checks": {
+        "strict": true,
+        "contexts": [
+          "AWS release-trust source policy",
+          "Cloudflare TUF Workers",
+          "Complete workspace verification",
+          "EHR release-bound offline cache",
+          "Historical upstream reference oracle",
+          "Pinned TUF client and reproducibility",
+          "Release contracts and admission"
+        ],
+        "checks": [
+          {
+            "context": "AWS release-trust source policy",
+            "app_id": 15368
+          },
+          {
+            "context": "Cloudflare TUF Workers",
+            "app_id": 15368
+          },
+          {
+            "context": "Complete workspace verification",
+            "app_id": 15368
+          },
+          {
+            "context": "EHR release-bound offline cache",
+            "app_id": 15368
+          },
+          {
+            "context": "Historical upstream reference oracle",
+            "app_id": 15368
+          },
+          {
+            "context": "Pinned TUF client and reproducibility",
+            "app_id": 15368
+          },
+          {
+            "context": "Release contracts and admission",
+            "app_id": 15368
+          }
+        ]
+      },
+      "required_pull_request_reviews": {
+        "dismiss_stale_reviews": true,
+        "require_code_owner_reviews": true,
+        "require_last_push_approval": true,
+        "required_approving_review_count": 1
+      },
+      "enforce_admins": {
+        "enabled": true
+      },
+      "allow_force_pushes": {
+        "enabled": false
+      },
+      "allow_deletions": {
+        "enabled": false
+      },
+      "required_conversation_resolution": {
+        "enabled": true
+      }
+    },
+    "tuf-production-release": {
+      "required_status_checks": {
+        "strict": true,
+        "contexts": [
+          "AWS release-trust source policy",
+          "Cloudflare TUF Workers",
+          "Complete workspace verification",
+          "EHR release-bound offline cache",
+          "Historical upstream reference oracle",
+          "Pinned TUF client and reproducibility",
+          "Release contracts and admission"
+        ],
+        "checks": [
+          {
+            "context": "AWS release-trust source policy",
+            "app_id": 15368
+          },
+          {
+            "context": "Cloudflare TUF Workers",
+            "app_id": 15368
+          },
+          {
+            "context": "Complete workspace verification",
+            "app_id": 15368
+          },
+          {
+            "context": "EHR release-bound offline cache",
+            "app_id": 15368
+          },
+          {
+            "context": "Historical upstream reference oracle",
+            "app_id": 15368
+          },
+          {
+            "context": "Pinned TUF client and reproducibility",
+            "app_id": 15368
+          },
+          {
+            "context": "Release contracts and admission",
+            "app_id": 15368
+          }
+        ]
+      },
+      "required_pull_request_reviews": {
+        "dismiss_stale_reviews": true,
+        "require_code_owner_reviews": true,
+        "require_last_push_approval": true,
+        "required_approving_review_count": 1
+      },
+      "enforce_admins": {
+        "enabled": true
+      },
+      "allow_force_pushes": {
+        "enabled": false
+      },
+      "allow_deletions": {
+        "enabled": false
+      },
+      "required_conversation_resolution": {
+        "enabled": true
+      }
+    }
+  },
+  "rulesets": [],
+  "environments": {
+    "staging": {
+      "id": 21412878104,
+      "required_reviewers": [
+        {
+          "type": "User",
+          "id": 182018869,
+          "login": "D-Eminence"
+        }
+      ],
+      "prevent_self_review": true,
+      "can_admins_bypass": false,
+      "deployment_branch_policy": {
+        "protected_branches": true,
+        "custom_branch_policies": false
+      },
+      "secret_count": 0,
+      "variable_count": 0
+    },
+    "production": {
+      "id": 21412879562,
+      "required_reviewers": [
+        {
+          "type": "User",
+          "id": 182018869,
+          "login": "D-Eminence"
+        }
+      ],
+      "prevent_self_review": true,
+      "can_admins_bypass": false,
+      "deployment_branch_policy": {
+        "protected_branches": true,
+        "custom_branch_policies": false
+      },
+      "secret_count": 0,
+      "variable_count": 0
+    },
+    "staging-publisher": {
+      "id": 21412881394,
+      "required_reviewers": [
+        {
+          "type": "User",
+          "id": 182018869,
+          "login": "D-Eminence"
+        }
+      ],
+      "prevent_self_review": true,
+      "can_admins_bypass": false,
+      "deployment_branch_policy": {
+        "protected_branches": true,
+        "custom_branch_policies": false
+      },
+      "secret_count": 0,
+      "variable_count": 0
+    },
+    "production-publisher": {
+      "id": 21412883002,
+      "required_reviewers": [
+        {
+          "type": "User",
+          "id": 182018869,
+          "login": "D-Eminence"
+        }
+      ],
+      "prevent_self_review": true,
+      "can_admins_bypass": false,
+      "deployment_branch_policy": {
+        "protected_branches": true,
+        "custom_branch_policies": false
+      },
+      "secret_count": 0,
+      "variable_count": 0
+    }
+  },
+  "actions_permissions": {
+    "enabled": true,
+    "allowed_actions": "selected",
+    "selected_actions_url": "https://api.github.com/repositories/1317340803/actions/permissions/selected-actions",
+    "sha_pinning_required": true
+  },
+  "allowed_actions": {
+    "github_owned_allowed": false,
+    "patterns_allowed": [
+      "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+      "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+      "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
+      "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+      "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+      "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a"
+    ],
+    "verified_allowed": false
+  },
+  "workflow_permissions": {
+    "default_workflow_permissions": "read",
+    "can_approve_pull_request_reviews": false
+  },
+  "fork_pr_policy": {
+    "approval_policy": "all_external_contributors"
+  },
+  "oidc_customization": {
+    "use_default": true,
+    "use_immutable_subject": false,
+    "sub_claim_prefix": "repo:D-Eminence@182018869/hid-system@1317340803"
+  },
+  "repository_secret_count": 0,
+  "repository_variable_count": 0,
+  "self_hosted_runner_count": 0,
+  "codeowners": {
+    "remote_main": "ABSENT",
+    "remote_release_branch": "ABSENT",
+    "local_preparation": "VERIFIED_OWNER_ONLY; independent coverage pending"
+  },
+  "active_workflows": [
+    {
+      "id": 352141631,
+      "name": "TUF local security gates",
+      "path": ".github/workflows/tuf-local-gates.yml",
+      "state": "active"
+    }
+  ],
+  "release_tags": {
+    "rulesets": [],
+    "legacy_endpoint": "404 retired/unavailable endpoint; absence established by ruleset inspection",
+    "policy": "No tag-based release identity or trigger exists; branch-only publisher rejects tags; no invented tag pattern installed."
+  },
+  "reviewer_coverage": {
+    "collaborators": [
+      {
+        "login": "D-Eminence",
+        "id": 182018869,
+        "role": "admin"
+      }
+    ],
+    "independent_of_current_initiator": false,
+    "required_owner_action": "Name and add independent reviewer coverage; preserve prevent_self_review and administrator enforcement."
+  },
+  "protected_ci": "NOT_RUN",
+  "readiness": "BLOCKED_OWNER_REVIEWER_COVERAGE_AND_UNPUBLISHED_PREPARATION",
+  "cloud_mutation": false,
+  "object_lock": "UNAPPROVED / NOT CREATED",
+  "retention_days": 730,
+  "final_verified_at": "2026-09-07T14:21:29.929053+00:00",
+  "current_branches": [
+    {
+      "name": "aws-cost-safety",
+      "sha": "328faee9522f66051067c9a522725e4b7e370f8d",
+      "protected": false
+    },
+    {
+      "name": "main",
+      "sha": "2ae17cdabedf6709608966276de83e921a5db6da",
+      "protected": true
+    },
+    {
+      "name": "platform-baseline",
+      "sha": "4f5e5140b33cf351962dad9903459d20c51f8f0a",
+      "protected": false
+    },
+    {
+      "name": "release-reproducibility-fix",
+      "sha": "4aca7933ae1e041fdacca432fa5cbf98658ddaa7",
+      "protected": false
+    },
+    {
+      "name": "release-security-remediation",
+      "sha": "6a247e5ecac5b34947c924bc75b6ca9d54c96733",
+      "protected": false
+    },
+    {
+      "name": "release-verify-reproducibility-fix",
+      "sha": "abc77af52f1c09831e1fcdb9c3ba1aaafd0f60b0",
+      "protected": false
+    },
+    {
+      "name": "staging-readiness",
+      "sha": "df4f41328375c9a2235c2e6d48dd482ff6f432af",
+      "protected": false
+    },
+    {
+      "name": "tuf-production-release",
+      "sha": "ba2cd3290e7c1fe72817c3bdfb806dd306b2c633",
+      "protected": true
+    }
+  ],
+  "remote_sha_unchanged": true,
+  "protected_run_count": 0,
+  "ordinary_run_count": 1
+}

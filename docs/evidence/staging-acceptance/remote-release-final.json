@@ -1,0 +1,12 @@
+{
+  "recorded_at": "2026-09-09T08:32:18.011659+00:00",
+  "command": [
+    "git",
+    "ls-remote",
+    "origin",
+    "refs/heads/tuf-production-release"
+  ],
+  "exit_code": 0,
+  "stdout": "a709e643a731b444f7cb775b2b16fe28164146a7\trefs/heads/tuf-production-release",
+  "stderr": ""
+}

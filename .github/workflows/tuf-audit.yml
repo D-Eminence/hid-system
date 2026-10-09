@@ -1,0 +1,81 @@
+name: Read-only staging release trust audit
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: tuf-staging-auditor
+  cancel-in-progress: false
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: staging-auditor
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      APPROVED_SOURCE_SHA: ${{ vars.TUF_AUDITOR_SOURCE_SHA }}
+      APPROVED_WORKFLOW_SHA: ${{ vars.TUF_AUDITOR_WORKFLOW_SHA }}
+      REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+      AUDIT_CONFIG_JSON: ${{ vars.TUF_AUDITOR_CONFIG_JSON }}
+      AUDIT_CONFIG_SHA256: ${{ vars.TUF_AUDITOR_CONFIG_SHA256 }}
+      AUDITOR_ROLE_ARN: ${{ vars.TUF_AUDITOR_ROLE_ARN }}
+    steps:
+      - name: Bind approved staging source and configuration before checkout
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { writeFile } from 'node:fs/promises';
+          const e = process.env;
+          if (e.GITHUB_REPOSITORY !== 'D-Eminence/hid-system' || e.GITHUB_REPOSITORY_ID !== '1317340803'
+            || e.GITHUB_REPOSITORY_OWNER_ID !== '182018869' || !['push', 'workflow_dispatch'].includes(e.GITHUB_EVENT_NAME)
+            || e.GITHUB_REF !== 'refs/heads/tuf-production-release' || e.GITHUB_REF_PROTECTED !== 'true'
+            || e.GITHUB_REF_TYPE !== 'branch' || e.GITHUB_HEAD_REF || e.GITHUB_BASE_REF || e.GITHUB_RUN_ATTEMPT !== '1'
+            || !/^[a-f0-9]{40}$/.test(e.APPROVED_SOURCE_SHA) || e.GITHUB_SHA !== e.APPROVED_SOURCE_SHA
+            || !/^[a-f0-9]{40}$/.test(e.APPROVED_WORKFLOW_SHA)
+            || e.GITHUB_WORKFLOW_SHA !== e.APPROVED_SOURCE_SHA || e.REQUESTED_SOURCE_SHA !== e.APPROVED_SOURCE_SHA
+            || !/^[a-f0-9]{64}$/.test(e.AUDIT_CONFIG_SHA256) || !e.AUDIT_CONFIG_JSON
+            || Buffer.byteLength(e.AUDIT_CONFIG_JSON) > 16384
+            || createHash('sha256').update(e.AUDIT_CONFIG_JSON).digest('hex') !== e.AUDIT_CONFIG_SHA256) throw Error('staging audit approval rejected');
+          await writeFile(`${e.RUNNER_TEMP}/staging-audit-config.json`, e.AUDIT_CONFIG_JSON, { flag: 'wx', mode: 0o600 });
+          NODE
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ vars.TUF_AUDITOR_WORKFLOW_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.23.2
+          package-manager-cache: false
+      - name: Install locked validators without lifecycle scripts
+        run: npm --prefix release ci --ignore-scripts
+      - name: Verify owner policy configuration and immutable workload identity
+        env:
+          GH_AUDIT_READ_TOKEN: ${{ github.token }}
+        run: node release/scripts/audit-staging-release-trust.mjs preflight
+      - name: Assume only the immutable workflow bound staging auditor role
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ vars.TUF_AUDITOR_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: '659225405023'
+          role-duration-seconds: 900
+          role-session-name: hid-staging-audit-${{ github.run_id }}
+          unset-current-credentials: true
+      - name: Read archive retention and public key bindings using scoped IAM
+        run: node release/scripts/audit-staging-release-trust.mjs audit
+      - name: Retain bounded read-only audit receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-staging-audit-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/staging-release-trust-audit.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

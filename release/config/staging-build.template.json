@@ -1,0 +1,11 @@
+{
+  "schema_version": "hid.staging-image-build/v1",
+  "environment": "staging",
+  "source_sha": "<APPROVED_PROTECTED_CALLER_AND_SOURCE_COMMIT>",
+  "workflow_sha": "<INSTALLED_IMMUTABLE_REUSABLE_WORKFLOW_COMMIT>",
+  "caller_workflow_path": ".github/workflows/<REVIEWED_STAGING_CALLER>.yml",
+  "aws_account_id": "659225405023",
+  "aws_region": "eu-west-1",
+  "build_role_arn": "<ACTUAL_STAGING_BUILD_ROLE_ARN>",
+  "build_kind": "applications"
+}

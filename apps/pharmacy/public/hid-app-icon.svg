@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">HID application</title>
+  <rect width="512" height="512" rx="112" fill="#1a6fd4"/>
+  <path fill="#ffffff" d="M128 112h72v108h112V112h72v288h-72V292H200v108h-72z"/>
+  <circle cx="400" cy="112" r="48" fill="#22c55e"/>
+  <path stroke="#ffffff" stroke-width="20" stroke-linecap="round" d="M400 88v48M376 112h48"/>
+</svg>
