@@ -59,6 +59,13 @@ describe('Identity CORS preflight (Stage 5)', () => {
     expect(list(response.headers['access-control-allow-methods']).sort()).toEqual(['delete', 'get', 'options', 'patch', 'post']);
   });
 
+  it('lists exactly the request headers Identity accepts from a browser', async () => {
+    const response = await preflight(port, '/api/v1/admin/session', ALLOWED, 'GET');
+    expect(list(response.headers['access-control-allow-headers']).sort()).toEqual(['authorization', 'content-type',
+      'idempotency-key', 'if-match', 'x-correlation-id', 'x-csrf-token', 'x-facility-id', 'x-hid-internal-caller',
+      'x-hid-scanner-authorization', 'x-hid-service-authorization', 'x-hid-service-token', 'x-purpose-of-use']);
+  });
+
   it('gives no CORS permission to an origin that is not allowed', async () => {
     const response = await preflight(port, '/api/v1/identity/me/access-pin', 'https://attacker.example.test', 'DELETE');
     expect(response.headers['access-control-allow-origin']).toBeUndefined();

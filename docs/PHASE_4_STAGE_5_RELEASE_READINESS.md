@@ -20,7 +20,9 @@ deployed, and no staging or production database has been migrated.** Every
 
 - **Refresh-token revocation reason** (`token.service.ts`):
   - Only a rotated refresh token presented again is treated as reuse. Its family is revoked and `reuse_detected` is recorded, as before.
-  - A token whose session ended any other way is refused. This covers sign-out, expiry, an administrator or account action, and an earlier reuse in the family. The refusal is recorded as a `refresh` session event with outcome `denied` and details `{ reason: 'session_ended', revocation_reason, session_kind }`. It is no longer recorded as reuse, and the family is not revoked again.
+  - A token whose session ended any other way is refused. This covers sign-out, expiry, an administrator's revocation (revoke-all or a family revoke, including one marked compromised), a self-revocation, and an earlier reuse in the family. The refusal is recorded as a `refresh` session event with outcome `denied` and details `{ reason: 'session_ended', revocation_reason, session_kind }`. It is no longer recorded as reuse, and the family is not revoked again.
+  - The same rule applies when a session ends while its refresh is in flight. A sign-out, expiry or revocation that commits first is reported as that end. Only a concurrent rotation of the same token counts as reuse.
+  - Unchanged: a token whose account changed token version (suspension, platform MFA reset, password recovery, deletion) is not found by the refresh lookup at all. It is refused without a session event, as before. Platform tokens are answered `PLATFORM_SESSION_REVOKED`.
   - Answers are unchanged: platform `401 PLATFORM_SESSION_EXPIRED` (expired) or `PLATFORM_SESSION_REVOKED`, and generic `401 AUTHENTICATION_REQUIRED` for staff and patients. Only the problem `detail` changes, from "Refresh token reuse detected" to "Refresh session ended".
   - Before this fix, the console's normal refresh after an administrator revoked a session recorded `reuse_detected` twice per revocation. That made real token theft harder to spot.
 - **CORS**:
@@ -34,7 +36,8 @@ deployed, and no staging or production database has been migrated.** Every
 
 | Identity build | Stage 3 console (Health-id `d5ce01c`) | Stage 4B console (`a180cea`) and later |
 | --- | --- | --- |
-| Before Stage 4A | Supported (the earlier release) | Works with less. Approvals list one capped page and the target audit filter returns `400`. Authenticator enrolment shows "Not reported" and the session-end notice is generic. See the Health-id Stage 4B release note. |
+| Before Stage 2A (no migration 0069; no platform MFA sign-in) | Not usable: platform sign-in needs Stage 2A. | Not usable for the same reason. Admin sign-in fails until Stage 2A Identity is deployed. |
+| Stage 2A to Stage 3 (0069–0071) | Supported (the earlier release) | Works with less. Approvals list one capped page and the target audit filter returns `400`. Authenticator enrolment shows "Not reported" and the session-end notice is generic. See the Health-id Stage 4B release note. |
 | Stage 4A (`deb6fba`) and later, including Stage 5 | **Not supported.** The console does not handle `STEP_UP_EXPIRED`, so every high-risk action is refused once the first step-up is five minutes old. | Supported, and verified end to end (§8). |
 
 Stage 5 changes no request or response contract the console uses, so Stage 4B
@@ -46,33 +49,36 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 
 | # | Check | Owner | How |
 | --- | --- | --- | --- |
-| P1 | The production migration ledger's last applied version is known. | Database operator | `npm run db:plan` with read-only credentials. The rehearsal covers 0028 → 0072; any other starting point needs its own rehearsal. |
+| P1 | The production migration ledger's last applied version is known. | Database operator | `npm run db:plan` as the migration administrator, as in `MIGRATION_RUNBOOK.md` §6. It applies nothing, but its ledger bootstrap statements need the administrator's privileges, so it cannot run with read-only credentials. The local rehearsal covers 0028 → 0072; any other starting point needs its own rehearsal. |
 | P2 | A restorable backup of the target database exists and its restore was tested. | Database operator | Snapshot or `pg_dump` taken immediately before the window. The rehearsal checks backup and restore integrity, but the real restore must be proven on staging. |
-| P3 | `MFA_SECRET_KEY_B64` is provisioned for Identity: 32 random bytes, base64, from the secret store. `MFA_KEY_VERSION` is set. | Security owner | Without it, platform sign-in fails closed with `503 MFA_UNAVAILABLE`. A malformed key stops Identity at start-up. Never reuse a staging key in production. Rotating it later invalidates enrolled authenticators unless a re-encryption plan exists. |
+| P3 | `MFA_SECRET_KEY_B64` is provisioned for Identity: 32 random bytes, base64, from the secret store. `MFA_KEY_VERSION` is set. | Security owner and infrastructure owner | **The infrastructure code does not do this yet.** `infra/aws/src/hid-regional-stack.ts` maps no `MFA_SECRET_KEY_B64` from the Identity secret and sets no `MFA_KEY_VERSION`, which then defaults to `local-v1`. Stage 2A recorded this as an infrastructure task. An infrastructure change must add both before step 6. Without the key, platform sign-in fails closed with `503 MFA_UNAVAILABLE`, and a malformed key stops Identity at start-up. Never reuse a staging key in production. The key and `MFA_KEY_VERSION` are fixed when the first authenticator is enrolled: changing either later invalidates every enrolled authenticator unless a re-encryption release exists. |
 | P4 | Identity `CORS_ORIGINS` lists only the exact HTTPS console origins, with no paths. | Platform operator | Enforced at start-up in production. With same-origin `/api/v1`, CORS is not used by the console. |
-| P5 | The audit table size is known, for the 0072 index build. | Database operator | `select count(*) from audit.events` and `pg_total_relation_size('audit.events')` on a recent snapshot. See §5. |
-| P6 | Two Super Admins can sign in and confirm. | Security owner | Two-person approval needs a second Super Admin. Facility suspension needs at least one reachable Super Admin (0072). |
+| P5 | The sizes of `audit.events`, `auth.sessions` and `auth.session_events` are known, for the lock windows of 0067, 0069 and 0072. | Database operator | `select count(*)` and `pg_total_relation_size(...)` for each table on a recent snapshot. See §5. |
+| P6 | Two Super Admins can sign in and confirm. | Security owner | Two-person approval needs a second Super Admin. Facility suspension needs at least one reachable Super Admin (0072). On a first deployment of Stage 2A (no platform sign-in yet), check this after step 6, when the Super Admins enrol their authenticators. |
 | P7 | The staging acceptance in §7 passed on the exact builds being released. | Release owner | Evidence attached to the release record. |
 
-## 5. Migration order and the 0072 index-build window
+## 5. Migration order and lock windows
 
-1. Apply migrations in ledger order with `npm run db:migrate`. Every migration runs in one transaction with `lock_timeout 5s` and `statement_timeout 120s`, and a failed migration rolls back completely. Never edit an applied migration; checksums are verified.
-2. **0072 builds `audit_resource_uuid_sequence_idx` without `CONCURRENTLY`.** This is possible only inside the runner's transaction. The build holds a `SHARE` lock on `audit.events`:
+1. Apply migrations in ledger order with `npm run db:migrate`. Every migration runs in one transaction with `lock_timeout 5s` and `statement_timeout 120s` (each statement), and a failed migration rolls back completely. Never edit an applied migration; checksums are verified.
+2. **0067** adds `access_scope` with a `CHECK` to `audit.events`, then replaces three checks and validates them. This runs in one transaction under an `ACCESS EXCLUSIVE` lock, held to commit, with full-table validation scans. **Reads and writes of `audit.events` are blocked for the whole migration**, which stops nearly every audited request.
+3. **0069** drops and re-adds validated `CHECK` constraints on `auth.sessions` and `auth.session_events` under `ACCESS EXCLUSIVE`. Sign-in, refresh and session checks wait while it scans.
+4. **0072 builds `audit_resource_uuid_sequence_idx` without `CONCURRENTLY`.** This is possible only inside the runner's transaction. The build holds a `SHARE` lock on `audit.events`:
    - every audited write waits until the build finishes, and that includes most authenticated requests;
    - reads continue.
-3. The build must finish within 120 s, or the migration rolls back and nothing changes. Measured locally (Stage 5, PostgreSQL 16, synthetic rows, development container, not production hardware): over 1,000,000 audit rows (414 MB, two thirds with a UUID target), the index statement ran in 1.1 s under the runner's settings and produced a 35 MB index. Scale that by the P5 row count, with a wide margin for production I/O, and apply 0072 in a low-traffic window. If the table is too large, stop and plan a separate change: a `CONCURRENTLY` build outside the runner, followed by a no-op 0072. Do not raise the timeout ad hoc.
-4. **Immediately after the migrations, run `npm run db:bootstrap`, then `npm run db:verify-roles`.**
+5. Each of these statements must finish within 120 s, or its migration rolls back and nothing changes. The 5 s `lock_timeout` also fails a migration that cannot get its lock, so stop traffic to Identity, or keep it low, during the window. Measured locally for 0072 only (Stage 5, PostgreSQL 16, synthetic rows, development container, not production hardware): over 1,000,000 audit rows (414 MB, two thirds with a UUID target), the index statement ran in 1.1 s under the runner's settings and produced a 35 MB index. 0067 and 0069 were not measured. Measure all three in the staging rehearsal (S1), scale by the P5 sizes with a wide margin for production I/O, and size the window on the combined cost.
+6. If any estimate approaches 120 s, stop and re-plan before the release. 0072 cannot be edited or worked around in place: an index built beforehand under the same name makes 0072 fail. Do not raise the timeouts ad hoc.
+7. **Immediately after the migrations, run `npm run db:bootstrap`, then `npm run db:verify-roles`.**
    - 0072 drops and recreates `audit.list_platform_events` with eleven arguments. Until the bootstrap grants `EXECUTE` on the new signature, any running Identity is refused on the platform audit list.
    - The bootstrap also runs the runtime-role assertions.
 
 ## 6. Deployment order
 
 1. Pass the pre-release checks P1–P7.
-2. Deploy the **admin console** (Health-id `main`). It works with the Identity build already running (§3).
+2. Deploy the **admin console** (Health-id `main`). If the running Identity is Stage 2A or later, it keeps working with it (§3). If it is older, admin sign-in fails until step 6 whichever console runs; deploy the console with Identity instead.
 3. Take the backup (P2).
 4. Apply the **migrations** (§5).
 5. Run the **role bootstrap** and verify it (§5).
-6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`.
+6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`. This needs the infrastructure change in P3.
 7. Deploy the **Pharmacy API**. This is independent of the other steps.
 8. Run the smoke checks:
    - a Super Admin signs in with TOTP;
@@ -89,7 +95,7 @@ has been run, because no staging environment exists yet (Health-id
 
 | # | Test | Evidence |
 | --- | --- | --- |
-| S1 | Migration rehearsal on a staging snapshot (`scripts/tuf-staging-migration-rehearsal.mjs`): dry run, apply to 0072, SQL suites, restore. | Rehearsal evidence JSON. |
+| S1 | Migration rehearsal on a restored staging snapshot. Restore it into an isolated database, then, as the migration administrator, run `db:plan`, `db:dry-run`, `db:migrate`, `db:bootstrap` and `db:verify-roles`. Run the SQL suites and the restore check of `docs/TUF-STAGING-MIGRATION.md`, timing 0067, 0069 and 0072. `scripts/tuf-staging-migration-rehearsal.mjs` is local and synthetic only: it builds its own cluster and cannot use a snapshot. | Command output, timings and restore result. |
 | S2 | `db:verify-roles` on staging. | Command output. |
 | S3 | The Identity runtime verifiers against staging Identity, especially `verify-platform-security-runtime.mjs` and `verify-platform-admin-runtime.mjs`. | Verifier JSON. |
 | S4 | The browser checks of §8, by hand with real authenticators, on the staging console and API. Check 3 needs a confirmation older than five minutes: wait it out, or use a second session. | Screenshots and notes for each check. |
@@ -104,8 +110,8 @@ the non-root `postgres` user, on a new local cluster
 Other local clusters were not touched.
 
 - **Unit tests:**
-  - Identity 703/703. The new `refresh-revocation-reason.spec.ts`, the updated `platform-session-end.spec.ts` and the new `config/cors.spec.ts` fail 39 and 3 times on `deb6fba`.
-  - Pharmacy 21/21. The new `config/cors.spec.ts` fails once on the old header list.
+  - Identity 702/702. The new and updated tests (`refresh-revocation-reason.spec.ts`, `platform-session-end.spec.ts`, `config/cors.spec.ts`, `admin-contracts.spec.ts`) fail 36 of 103 against the `deb6fba` token service and CORS options. The 8 tests of a session ending during a refresh also fail on the first Stage 5 commit (`04b4903`), whose conflict path still recorded reuse.
+  - Pharmacy 22/22. The new `config/cors.spec.ts` fails against the old header list.
 - **Runtime verifier:** `verify-platform-security-runtime.mjs` passes. Its new checks fail on `deb6fba`:
   - "a signed-out refresh token is not reuse": 2 `reuse_detected` events instead of 0;
   - "CORS does not allow DELETE".
@@ -124,12 +130,12 @@ Other local clusters were not touched.
   12. no browser errors.
 
   Results:
-  - **Stage 5 backend and console:** 12/12, on three separate fresh-database runs.
+  - **Stage 5 backend and console:** 12/12, on four separate fresh-database runs. The last run used the final code with the stricter check 12, which fails on any response other than the expected `401` and `403`.
   - **Health-id `main` (`a180cea`) console:** check 7 fails, because the revoke-all confirmation disappears (§2).
   - **Refresh logic of `deb6fba`:** check 11 fails with 2 `reuse_detected` events.
 - **Not run:** staging or production anything (§7). The browser run uses the backend's own TOTP clock seam to issue codes, not a real authenticator app.
 
-To reproduce, run as the owner of a local cluster migrated to 0072 and role-bootstrapped (`services/ehr-api` `db:migrate` and `db:bootstrap`).
+To reproduce, run as the owner of a local cluster migrated to 0072 and role-bootstrapped (`services/ehr-api` `db:migrate` and `db:bootstrap`). The harness defaults to the database `hid_rehearsal`, the superuser `hid_rehearsal_admin` and ports 4010 and 4011. Change them with `HID_E2E_TEMPLATE_DB`, `HID_E2E_DB_SUPERUSER`, `HID_E2E_API_PORT` and `HID_E2E_CONTROL_PORT`; see the script headers. Stop `server.mjs` with Ctrl-C or SIGTERM, which drops its database copy.
 
 1. Build the console from Health-id:
 

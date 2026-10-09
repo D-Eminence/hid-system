@@ -54,6 +54,12 @@ describe('Pharmacy CORS preflight (Stage 5)', () => {
     expect(list(response.headers['access-control-allow-methods']).sort()).toEqual(['get', 'options', 'post']);
   });
 
+  it('lists exactly the request headers the pharmacy console sends', async () => {
+    const response = await preflight(port, '/api/v1/pharmacy/prescriptions', ALLOWED, 'GET', 'content-type');
+    expect(list(response.headers['access-control-allow-headers']).sort()).toEqual(['authorization', 'content-type',
+      'idempotency-key', 'x-correlation-id', 'x-csrf-token', 'x-facility-id', 'x-purpose-of-use']);
+  });
+
   it('gives no CORS permission to an origin that is not allowed', async () => {
     const response = await preflight(port, '/api/v1/pharmacy/dispensations', 'https://attacker.example.test', 'POST',
       'x-csrf-token');

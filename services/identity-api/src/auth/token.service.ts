@@ -232,17 +232,14 @@ export class TokenService {
     if (oldSession.revoked_at) {
       // Only a rotated refresh token presented again is reuse: it was already
       // exchanged for a newer one, so whoever holds it now is not the session's
-      // holder. A token whose session ended any other way (sign-out, expiry,
-      // an administrator or account action, or an earlier reuse in its family)
-      // is refused and recorded as a denied refresh, not as reuse. A platform
-      // refresh cookie outlives the idle window so the end can be reported, so
-      // several tabs may present such a token at once.
+      // holder. A token whose session ended any other way (sign-out, expiry, a
+      // session revocation, or an earlier reuse in its family) is refused and
+      // recorded as a denied refresh, not as reuse. A platform refresh cookie
+      // outlives the idle window so the end can be reported, so several tabs
+      // may present such a token at once. (Account actions that change the
+      // token version never reach here: the lookup above no longer finds them.)
       if (oldSession.revocation_reason !== 'rotated') {
-        await this.recordEndedSessionRefresh(oldSession, kind, event);
-        if (kind === 'platform') {
-          throw platformSessionEnded(oldSession.revocation_reason === 'expired' ? 'expired' : 'revoked');
-        }
-        throw new UnauthorizedException('Refresh session ended');
+        throw await this.endedSessionRefusal(oldSession, kind, event);
       }
       await this.database.withSystemTransaction(event.correlationId, async (client) => {
         await client.query(
@@ -337,6 +334,13 @@ export class TokenService {
       });
     } catch (error) {
       if (!(error instanceof RefreshRotationConflict)) throw error;
+      // The session ended while this refresh was in flight. Only a concurrent
+      // rotation (the same token presented twice) is reuse; a sign-out, expiry
+      // or revocation that committed first is reported as that end.
+      const endedAs = await this.revocationReason(oldSession.id);
+      if (endedAs !== 'rotated') {
+        throw await this.endedSessionRefusal({ ...oldSession, revocation_reason: endedAs }, kind, event);
+      }
       await this.revokeReusedFamily(oldSession, event);
       if (kind === 'platform') throw platformSessionEnded('revoked');
       throw new UnauthorizedException('Concurrent refresh token reuse detected');
@@ -625,13 +629,24 @@ export class TokenService {
     });
   }
 
-  /** A refresh token of a session that ended other than by rotation: refused, not reuse. */
-  private async recordEndedSessionRefresh(session: SessionRow, kind: SessionKind,
-    event: SessionEventMetadata): Promise<void> {
+  /**
+   * A refresh token of a session that ended other than by rotation: recorded as
+   * a denied refresh (not reuse) and answered with how the session ended.
+   */
+  private async endedSessionRefusal(session: SessionRow, kind: SessionKind,
+    event: SessionEventMetadata): Promise<Error> {
     await this.database.withSystemTransaction(event.correlationId, (client) => this.insertSessionEvent(client, {
       eventType: 'refresh', outcome: 'denied', accountId: session.account_id, sessionId: session.id, event,
       details: { reason: 'session_ended', revocation_reason: session.revocation_reason ?? null, session_kind: kind },
     }));
+    if (kind === 'platform') return platformSessionEnded(session.revocation_reason === 'expired' ? 'expired' : 'revoked');
+    return new UnauthorizedException('Refresh session ended');
+  }
+
+  private async revocationReason(sessionId: string): Promise<string | null> {
+    const result = await this.database.query<{ revocation_reason: string | null }>(
+      'select revocation_reason from auth.sessions where id = $1', [sessionId]);
+    return result.rows[0]?.revocation_reason ?? null;
   }
 
   private async revokeReusedFamily(session: SessionRow, event: SessionEventMetadata): Promise<void> {

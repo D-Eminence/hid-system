@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileSync } from 'node:fs';
 
@@ -29,6 +29,8 @@ const service = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const require = createRequire(join(service, 'package.json'));
 const required = (name) => process.env[name] || (() => { throw new Error(`${name} is required`); })();
 const socket = required('HID_E2E_SOCKET');
+// A Unix socket directory only: this harness never connects over TCP.
+assert(isAbsolute(socket), 'HID_E2E_SOCKET must be an absolute Unix socket directory');
 const workdir = required('HID_E2E_WORKDIR');
 const superuser = process.env.HID_E2E_DB_SUPERUSER || 'hid_rehearsal_admin';
 const template = process.env.HID_E2E_TEMPLATE_DB || 'hid_rehearsal';

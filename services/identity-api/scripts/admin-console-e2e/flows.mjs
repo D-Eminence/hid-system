@@ -41,8 +41,14 @@ async function context(label) {
   const problems = [];
   page.on('pageerror', (error) => problems.push(`${label} page error: ${error.message}`));
   page.on('console', (message) => {
-    // Refused requests (401/403/409) are expected in these flows and logged by the browser.
-    if (message.type() === 'error' && !/status of (40[0-9]|409|428)/.test(message.text())) problems.push(`${label} console: ${message.text()}`);
+    // Only the refusals these flows cause on purpose (401 ended sessions, 403 step-up) are expected;
+    // the browser logs them as console errors. Every other failed response is recorded below.
+    if (message.type() === 'error' && !/status of 40[13]\b/.test(message.text())) problems.push(`${label} console: ${message.text()}`);
+  });
+  page.on('response', (response) => {
+    if (response.status() >= 400 && ![401, 403].includes(response.status())) {
+      problems.push(`${label} ${response.status()} ${response.request().method()} ${new URL(response.url()).pathname}`);
+    }
   });
   return { ctx, page, problems };
 }
@@ -199,8 +205,9 @@ await check('3. STEP_UP_EXPIRED: facility restoration after the step-up aged pas
   const row = (await db.query('select lifecycle_status from identity.facilities where id = $1', [fixtures.facilities.ikeja])).rows[0];
   assert.equal(row.lifecycle_status, 'verified');
   await page.reload();
-  await main(page).getByRole('region', { name: 'Platform changes to this facility' })
-    .getByText('Synthetic restoration: inspection passed').waitFor();
+  const reloaded = main(page).getByRole('region', { name: 'Platform changes to this facility' });
+  await reloaded.getByText('Synthetic restoration: inspection passed').waitFor();
+  await reloaded.getByText('Synthetic suspension: licence inspection pending').waitFor();
   return { stepUp: 'STEP_UP_EXPIRED dialog with the expiry note', status: row.lifecycle_status, history: 'both changes listed, also after reload' };
 });
 

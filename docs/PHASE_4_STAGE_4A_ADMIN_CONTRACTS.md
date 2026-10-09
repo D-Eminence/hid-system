@@ -200,9 +200,10 @@ These are recorded, not built:
 
 Follow-ups:
 - Resolved in Stage 5 (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2): a refresh
-  token whose session was revoked for a reason other than rotation (sign-out,
-  revocation, MFA reset) took the reuse path and recorded `reuse_detected`.
-  Only a rotated token presented again is reuse now; the others are recorded
-  as a denied `refresh`.
+  token whose session ended for a reason other than rotation (sign-out, expiry,
+  an administrator's session revocation) took the reuse path and recorded
+  `reuse_detected`. Only a rotated token presented again is reuse now; the
+  others are recorded as a denied `refresh`. (Tokens of accounts whose token
+  version changed, for example after an MFA reset, never reached that path.)
 - The approvals and demo-request lists return no total. If the console needs
   exact waiting counts, add them to `GET /admin/overview`.
