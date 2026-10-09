@@ -27,8 +27,8 @@ import { totp } from './totp';
 
 /**
  * Stage 7A: every platform MFA transaction locks the account row
- * (auth.lock_account_for_mfa, 0076: FOR KEY SHARE) before any other row lock
- * or write.
+ * (auth.lock_account_for_mfa, 0076: FOR NO KEY UPDATE) before any other row
+ * lock or write.
  *
  * An approved MFA reset (auth.admin_decide_approval, 0070) locks the target
  * account and then revokes its factors, recovery codes and sessions. A sign-in,
@@ -38,11 +38,13 @@ import { totp } from './totp';
  * insert takes on the account row, held the authenticator while waiting for
  * the account, and the reset held the account while waiting for the
  * authenticator. Taking the account first gives every one of these
- * transactions the order the reset and the 0073 revocations use. FOR KEY SHARE
- * conflicts with their FOR UPDATE but not with a refresh rotation or a staff
- * sign-in of the account, so the MFA transaction never takes the revocation
- * lock (auth.lock_account_sessions, FOR UPDATE). The two-connection races run in
- * verify-platform-security-runtime.mjs.
+ * transactions the order the reset and the 0073 revocations use. FOR NO KEY
+ * UPDATE conflicts with their FOR UPDATE and with itself, so MFA transactions
+ * of one account run one at a time, but not with the FOR KEY SHARE of a refresh
+ * rotation or a staff sign-in of the account; the MFA transaction never takes
+ * the revocation lock (auth.lock_account_sessions, FOR UPDATE). The lock mode
+ * is pinned by mfa-account-lock.integration.sql, and the two-connection races
+ * run in verify-platform-security-runtime.mjs.
  */
 const ACCOUNT = '40000000-0000-4000-8000-0000000000c1';
 const FACTOR = '41000000-0000-4000-8000-0000000000c1';

@@ -5,10 +5,11 @@
 -- itself, so MFA transactions of one account run one at a time, but not with
 -- the FOR KEY SHARE that refresh rotations and staff sign-ins of the account
 -- take. FOR UPDATE would also make MFA transactions wait for those; FOR KEY
--- SHARE would let MFA transactions of one account run together; SKIP LOCKED,
--- NOWAIT or a condition would sometimes take no lock. This suite pins the
--- catalog contract and the exact body that a later CREATE OR REPLACE must
--- keep; the two-connection races run in
+-- SHARE would let MFA transactions of one account run together; SKIP LOCKED
+-- or a condition would sometimes take no lock, and NOWAIT would fail the MFA
+-- request instead of waiting (55P03). This suite pins the catalog contract
+-- and the exact body that a later CREATE OR REPLACE must keep; the
+-- two-connection races run in
 -- services/identity-api/scripts/verify-platform-security-runtime.mjs.
 -- Rollback-only.
 begin;

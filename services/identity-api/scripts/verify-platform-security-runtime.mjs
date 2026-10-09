@@ -947,7 +947,9 @@ try {
   // The MFA account lock is FOR NO KEY UPDATE (0076). It conflicts with the FOR
   // UPDATE of a reset or a revocation, but not with the FOR KEY SHARE that a
   // refresh rotation in flight (another tab) or a staff sign-in of the same
-  // administrator takes, so neither holds up an MFA transaction. With FOR
+  // administrator takes, so neither holds up an MFA transaction at the account
+  // row. (A staff sign-in and the password step still meet at the principal's
+  // login-attempt row, which both delete; the last race below.) With FOR
   // UPDATE, a step-up or a recovery-code regeneration waited for the rotation
   // and then found its session rotated (403 PLATFORM_SESSION_REQUIRED, which
   // ends the console session), and the password step could deadlock with the
@@ -1025,9 +1027,9 @@ try {
   // holds the principal's login-attempt row, as a staff sign-in in flight does
   // (TokenService.issue deletes it); with FOR KEY SHARE both steps then waited
   // on that row only, ran together once it was released, and each left its own
-  // challenge open. With FOR KEY SHARE the six step-ups did not wait either: all
-  // passed the limit check before any failure was counted, and all six codes
-  // were tested.
+  // challenge open. With FOR KEY SHARE the six step-ups did not wait on the
+  // account lock: all passed the limit check before any failure was counted,
+  // then queued on their session assurance, and all six codes were tested.
   /** The most backends of this database seen waiting on a lock, up to `count`; stops once `settled()`, or after 10 s. */
   async function lockWaiters(count, settled) {
     let most = 0;

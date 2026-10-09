@@ -1561,9 +1561,12 @@ Consequences:
 - an MFA transaction holds `FOR NO KEY UPDATE` on the account row until it
   commits, usually milliseconds. An approved reset, a session revocation, a
   sign-out, an expiry or another MFA transaction of that account waits for it.
-  A refresh or a staff sign-in of that account does not; a staff sign-in that
-  upgrades a legacy password hash updates the account row first, so it waits
-  for the MFA transaction, or the MFA transaction for it, without a deadlock;
+  A refresh or a staff sign-in of that account does not wait for it at the
+  account row. A staff sign-in and a platform password step of the same
+  principal still wait for each other at the principal's login-attempt row,
+  which both delete, without a deadlock. A staff sign-in that upgrades a legacy
+  password hash updates the account row first, so it waits for the MFA
+  transaction, or the MFA transaction for it, without a deadlock;
 - parallel second-factor attempts of one account are checked one at a time
   against the failure limit, and a password step supersedes the open
   challenge of the one before it, so an account has at most one open
@@ -1646,9 +1649,9 @@ Decision (proposed):
    their owner but would apply to a technical owner. Most of the 101 are
    outside these schemas; examples are `lab.validate_imported_evidence`,
    `platform.control_enabled`, `outreach.registration_campaign_member` and
-   `ehr.capture_record_version`.
-   They work under a non-bypass owner only where the calling session's own
-   policies admit the rows they read. Before the superuser requirement is
+   `ehr.capture_record_version`. Under a non-bypass owner, the 65 work only
+   where the calling session's own policies admit the rows they read, and so
+   would the other 36 under an owner that does not own their tables. Before the superuser requirement is
    dropped, each must be checked, by running `schema.integration.sql` and every
    runtime verifier under the non-superuser owner. Any that fail need a
    technical owner too.
@@ -1684,13 +1687,17 @@ Decision (proposed):
    plpgsql.variable_conflict` is refused to a non-superuser even when it owns
    the function (verified). A database migrated from 0001 by a non-superuser
    administrator, as every RDS environment would be, therefore stops at 0015,
-   unless that administrator holds `SET` on the parameter for the run.
+   unless that administrator holds `SET` on the parameter.
    `GRANT SET ON PARAMETER plpgsql.variable_conflict` (PostgreSQL 15 and later)
    gives it. A superuser must grant it, or the RDS master user if RDS permits
-   that, which is unverified. It is cluster-wide and lets the grantee set the
-   parameter in any session, so it should be revoked after the migration run.
-   0015 is immutable and checksum-pinned, so any other route needs its own
-   decision.
+   that, which is unverified. The grant cannot be revoked after the migration
+   run: `ocr.claim_worker_job`, the only function with 0015's setting, applies
+   it as its owner on every call, so every OCR claim needs it for as long as
+   that owner owns the function with the setting (verified locally: after the
+   revoke, a call fails with `permission denied to set parameter`). It is
+   cluster-wide and lets the grantee set the parameter in any session; the
+   in-body replacement above removes the need. 0015 is immutable and
+   checksum-pinned, so any other route needs its own decision.
 4. **No superuser schema owner.** These PostgreSQL 16 behaviours, verified
    locally on 16.15 with a `NOSUPERUSER CREATEROLE` administrator, decide the
    bootstrap:
