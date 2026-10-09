@@ -404,7 +404,7 @@
       },
       {
         "name": "0077_fail_closed_session_guards_and_ocr_worker_leases.sql",
-        "sha256": "4881f847ee37f707a67644112466e468dc170d61be20087ad38e082736609011"
+        "sha256": "b243b7a0161ea386aba2e477db9f62669571bd9440fe50321ab74f86e089bc79"
       }
     ]
   },

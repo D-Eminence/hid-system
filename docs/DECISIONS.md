@@ -1587,7 +1587,8 @@ Consequences:
   the same way, so a missing scan does not refuse a job. The OCR API refuses a
   source that is not clean before it inserts a job. Hardening the trigger
   needs a check of existing jobs and scans first, because it also runs on every
-  job update (a follow-up).
+  job update (a follow-up; closed for binding writes by 0077, see the Stage 8
+  addendum).
 
 ## ADR-040 addendum: Stage 8 (0077)
 
@@ -1614,8 +1615,14 @@ compared, except where Stage 8 closes a named gap:
 
 0077 also makes OCR lease renewal work: the job state machine had no
 `processing` to `processing` transition, so every renewal was refused. The new
-transition allows a strictly later lease expiry and the next version only; the
-trigger compares the rest of the row as a whole.
+transition allows an active lease to move later, at most an hour ahead as
+`renew_worker_claim` allows, with the next version only; the trigger compares
+the rest of the row as a whole, and the job-event trigger records nothing for
+it. And taking a job out of play (failed, cancelled, back to the queue) no
+longer re-reads its source evidence: a guard must never stop a job from
+failing, or lease recovery from running, because the evidence it would refuse
+to start from has since changed. Before, one document withdrawn during OCR
+stopped every claim of its provider.
 
 Consequences:
 

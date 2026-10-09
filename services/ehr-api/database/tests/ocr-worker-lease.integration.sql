@@ -7,7 +7,9 @@
 -- subject could complete or fail a job that another worker replica held.
 -- ocr.renew_worker_claim never worked: the job trigger (0016) allowed no
 -- processing-to-processing update, so every renewal was refused and a job that
--- ran longer than its lease could not complete.
+-- ran longer than its lease could not complete. A job whose document was
+-- withdrawn while it was processing could not be failed, and its lease
+-- recovery in ocr.claim_worker_job raised for every claim of its provider.
 --
 -- Fixtures are inserted with session_replication_role = replica, which skips
 -- triggers and foreign-key checks; every case then runs with triggers and
@@ -37,8 +39,10 @@ begin
        '{"search_path=ocr, audit, auth, platform, pg_temp"}'::text[]),
       ('ocr.fail_worker_job(uuid,uuid,text,text,boolean,integer,text)'::regprocedure,
        '{"search_path=ocr, audit, auth, platform, pg_temp"}'::text[]),
-      ('ocr.renew_worker_claim(uuid,uuid,integer)'::regprocedure, '{"search_path=ocr, auth, platform, pg_temp"}'::text[]),
-      ('ocr.validate_job_write()'::regprocedure, '{"search_path=ocr, ehr, identity, auth, platform, pg_temp"}'::text[]))
+      ('ocr.renew_worker_claim(uuid,uuid,integer)'::regprocedure,
+       '{"search_path=ocr, auth, platform, pg_temp"}'::text[]),
+      ('ocr.validate_job_write()'::regprocedure, '{"search_path=ocr, ehr, identity, auth, platform, pg_temp"}'::text[]),
+      ('ocr.record_job_event()'::regprocedure, '{"search_path=ocr, platform, pg_temp"}'::text[]))
       expected(proc, config) on p.oid = expected.proc
    where not p.prosecdef or p.proconfig is distinct from expected.config or p.provolatile <> 'v'
       or p.proowner <> (select proowner from pg_proc where oid = 'ocr.claim_worker_job(text,integer)'::regprocedure);
@@ -46,8 +50,10 @@ begin
     raise exception 'OCR worker command security properties changed: %', mismatch;
   end if;
   -- Only the worker (and the schema test runtime) may execute the three commands.
-  select string_agg(format('%s on %s', grantee.rolname, p.oid::regprocedure), '; ') into mismatch
-    from pg_proc p, aclexplode(p.proacl) privilege
+  -- A NULL ACL is the default, which grants EXECUTE to PUBLIC.
+  select string_agg(format('%s on %s', coalesce(grantee.rolname, 'PUBLIC'), p.oid::regprocedure), '; ')
+    into mismatch
+    from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) privilege
     left join pg_roles grantee on grantee.oid = privilege.grantee
    where p.oid in ('ocr.complete_worker_job(uuid,uuid,text,text,text,text,text,jsonb,numeric,jsonb,text)'::regprocedure,
                    'ocr.fail_worker_job(uuid,uuid,text,text,boolean,integer,text)'::regprocedure,
@@ -96,30 +102,45 @@ insert into ehr.documents (id, patient_id, facility_id, created_by, created_by_m
    'e8a00000-0000-4000-8000-000000000002', 'e8a10000-0000-4000-8000-000000000001',
    'e8a30000-0000-4000-8000-000000000001', 'ocr-lease-source.pdf', 'synthetic-bucket',
    'synthetic/ocr-lease-source.pdf', 'lease-v1', 'application/pdf', 1024, repeat('1', 64), 'uploaded',
+   'clinical_record'),
+  -- Scanned clean, then withdrawn (entered in error) while J7 and J8 were processing.
+  ('e8a50000-0000-4000-8000-000000000002', 'e8a40000-0000-4000-8000-000000000001',
+   'e8a00000-0000-4000-8000-000000000002', 'e8a10000-0000-4000-8000-000000000001',
+   'e8a30000-0000-4000-8000-000000000001', 'ocr-lease-withdrawn.pdf', 'synthetic-bucket',
+   'synthetic/ocr-lease-withdrawn.pdf', 'lease-v2', 'application/pdf', 1024, repeat('3', 64), 'entered_in_error',
    'clinical_record');
 insert into ehr.document_scan_events (document_id, patient_id, facility_id, created_by, event_type,
   detected_media_type, scanner_engine, scanner_version, idempotency_key, correlation_id, object_version_id,
   object_sha256_hex) values
   ('e8a50000-0000-4000-8000-000000000001', 'e8a40000-0000-4000-8000-000000000001',
    'e8a00000-0000-4000-8000-000000000002', 'e8a10000-0000-4000-8000-000000000001', 'clean', 'application/pdf',
-   'synthetic-scanner', '1.0', 'ocr-lease-scan-0001', 'ocr-lease-scan', 'lease-v1', repeat('1', 64));
+   'synthetic-scanner', '1.0', 'ocr-lease-scan-0001', 'ocr-lease-scan', 'lease-v1', repeat('1', 64)),
+  ('e8a50000-0000-4000-8000-000000000002', 'e8a40000-0000-4000-8000-000000000001',
+   'e8a00000-0000-4000-8000-000000000002', 'e8a10000-0000-4000-8000-000000000001', 'clean', 'application/pdf',
+   'synthetic-scanner', '1.0', 'ocr-lease-scan-0002', 'ocr-lease-scan', 'lease-v2', repeat('3', 64));
 -- J1, J2, J4 and J6 are held by worker A; J3 by worker A with an expired lease;
--- J5 by worker B. Tokens are fixed so the cases can name them.
+-- J5 by worker B. J7 (expired lease) and J8 are held by worker A on the
+-- withdrawn document, for their own provider. Tokens are fixed so the cases
+-- can name them.
 insert into ocr.jobs (id, facility_id, document_id, source_object_version_id, source_sha256_hex, idempotency_key,
   request_sha256, provider, max_attempts, created_by, created_by_membership_id, correlation_id, status,
   attempt_count, started_at, claim_token, claim_expires_at, claimed_by_subject)
 select ('e8a60000-0000-4000-8000-00000000000' || job.n)::uuid, 'e8a00000-0000-4000-8000-000000000002',
-       'e8a50000-0000-4000-8000-000000000001', 'lease-v1', repeat('1', 64), 'ocr-lease-fixture-000' || job.n,
-       repeat('2', 64), 'lease-provider', 3, 'e8a10000-0000-4000-8000-000000000001',
+       ('e8a50000-0000-4000-8000-00000000000' || job.document)::uuid, 'lease-v' || job.document,
+       repeat(case job.document when 1 then '1' else '3' end, 64), 'ocr-lease-fixture-000' || job.n,
+       repeat('2', 64), job.provider, 3, 'e8a10000-0000-4000-8000-000000000001',
        'e8a30000-0000-4000-8000-000000000001', 'ocr-lease-fixture', 'processing', 1,
        clock_timestamp() - interval '1 minute', ('e8a70000-0000-4000-8000-00000000000' || job.n)::uuid,
        clock_timestamp() + job.lease, job.subject
-  from (values (1, interval '10 minutes', 'workload:ocr-lease-worker-a'),
-               (2, interval '10 minutes', 'workload:ocr-lease-worker-a'),
-               (3, interval '-1 minute', 'workload:ocr-lease-worker-a'),
-               (4, interval '2 minutes', 'workload:ocr-lease-worker-a'),
-               (5, interval '10 minutes', 'workload:ocr-lease-worker-b'),
-               (6, interval '10 minutes', 'workload:ocr-lease-worker-a')) job(n, lease, subject);
+  from (values (1, 1, 'lease-provider', interval '10 minutes', 'workload:ocr-lease-worker-a'),
+               (2, 1, 'lease-provider', interval '10 minutes', 'workload:ocr-lease-worker-a'),
+               (3, 1, 'lease-provider', interval '-1 minute', 'workload:ocr-lease-worker-a'),
+               (4, 1, 'lease-provider', interval '2 minutes', 'workload:ocr-lease-worker-a'),
+               (5, 1, 'lease-provider', interval '10 minutes', 'workload:ocr-lease-worker-b'),
+               (6, 1, 'lease-provider', interval '10 minutes', 'workload:ocr-lease-worker-a'),
+               (7, 2, 'lease-provider-withdrawn', interval '-1 minute', 'workload:ocr-lease-worker-a'),
+               (8, 2, 'lease-provider-withdrawn', interval '10 minutes', 'workload:ocr-lease-worker-a'))
+    job(n, document, provider, lease, subject);
 set local session_replication_role = origin;
 
 -- Can the worker commands' owner see the fixture job? Not under a non-bypass
@@ -201,10 +222,39 @@ select pg_temp.lease_case('complete another worker''s job with its token', '5500
 select pg_temp.lease_case('complete another worker''s job with a NULL token', '55000', $s$
   select ocr.complete_worker_job('e8a60000-0000-4000-8000-000000000005', null, 'lease-result-5', repeat('a', 64),
     'lease-model', null, 'forged text', '{}'::jsonb, 0.5, '{}'::jsonb, 'ocr-lease-suite-worker')$s$, false);
--- Missing failure metadata is refused, not treated as a terminal failure.
+-- Missing failure or result metadata is refused, not treated as a terminal
+-- failure or passed on to the extraction.
 select pg_temp.lease_case('fail with a NULL retryable flag', '22023', $s$
   select ocr.fail_worker_job('e8a60000-0000-4000-8000-000000000006', 'e8a70000-0000-4000-8000-000000000006',
     'PROVIDER_UNAVAILABLE', 'Provider unavailable', null, 0, 'ocr-lease-suite-worker')$s$, false);
+select pg_temp.lease_case('fail with a NULL retry delay', '22023', $s$
+  select ocr.fail_worker_job('e8a60000-0000-4000-8000-000000000006', 'e8a70000-0000-4000-8000-000000000006',
+    'UNSUPPORTED_DOCUMENT', 'Unsupported document', false, null, 'ocr-lease-suite-worker')$s$, false);
+select pg_temp.lease_case('fail with a NULL error code', '22023', $s$
+  select ocr.fail_worker_job('e8a60000-0000-4000-8000-000000000006', 'e8a70000-0000-4000-8000-000000000006',
+    null, 'No code', false, 0, 'ocr-lease-suite-worker')$s$, false);
+select pg_temp.lease_case('complete with a NULL structured payload', '22023', $s$
+  select ocr.complete_worker_job('e8a60000-0000-4000-8000-000000000006', 'e8a70000-0000-4000-8000-000000000006',
+    'lease-result-6', repeat('a', 64), 'lease-model', null, 'Synthetic OCR text', null, 0.5, '{}'::jsonb,
+    'ocr-lease-suite-worker')$s$, false);
+select pg_temp.lease_case('complete with a NULL provenance', '22023', $s$
+  select ocr.complete_worker_job('e8a60000-0000-4000-8000-000000000006', 'e8a70000-0000-4000-8000-000000000006',
+    'lease-result-6', repeat('a', 64), 'lease-model', null, 'Synthetic OCR text', '{}'::jsonb, 0.5, null,
+    'ocr-lease-suite-worker')$s$, false);
+
+-- The document of J7 and J8 was withdrawn while they were processing. A job
+-- can no longer complete from it, but its holder can still fail it, and the
+-- next claim of its provider recovers the expired J7 (kept) instead of
+-- raising for every claim.
+select pg_temp.lease_case('complete a job whose document was withdrawn', '23514', $s$
+  select ocr.complete_worker_job('e8a60000-0000-4000-8000-000000000008', 'e8a70000-0000-4000-8000-000000000008',
+    'lease-result-8', repeat('a', 64), 'lease-model', null, 'Synthetic OCR text', '{}'::jsonb, 0.5, '{}'::jsonb,
+    'ocr-lease-suite-worker')$s$, false);
+select pg_temp.lease_case('fail a job whose document was withdrawn', 'ok', $s$
+  select ocr.fail_worker_job('e8a60000-0000-4000-8000-000000000008', 'e8a70000-0000-4000-8000-000000000008',
+    'UNSUPPORTED_DOCUMENT', 'Source document withdrawn', false, 0, 'ocr-lease-suite-worker')$s$, false);
+select pg_temp.lease_case('claim that recovers a job whose document was withdrawn', 'ok', $s$
+  select * from ocr.claim_worker_job('lease-provider-withdrawn', 300)$s$, true);
 
 -- The holder completes J1 (kept), then replays it.
 select pg_temp.lease_case('complete by the holder', 'ok', $s$
@@ -294,29 +344,79 @@ select pg_temp.lease_case('complete after a renewal', 'ok', $s$
 reset role;
 
 -- Direct updates of J6 by the OCR API runtime, which has UPDATE on ocr.jobs:
--- only the lease of a processing job may change, and only forward.
+-- only the lease of a processing job may change, only forward, only while it
+-- is active and at most an hour ahead. Each refused probe also extends the
+-- lease, so only the rule it names can refuse it.
 set local role hid_ocr_api_runtime;
 select set_config('app.facility_id', 'e8a00000-0000-4000-8000-000000000002', true),
        set_config('app.actor_subject', 'synthetic:ocr-lease-clinician', true),
        set_config('app.membership_id', 'e8a30000-0000-4000-8000-000000000001', true),
        set_config('app.purpose_of_use', 'healthcare-operations', true),
        set_config('app.correlation_id', 'ocr-lease-suite-api', true);
-select pg_temp.lease_case('direct update that swaps the claim token', '23514', $s$
-  update ocr.jobs set claim_token = gen_random_uuid(), row_version = row_version + 1
+select pg_temp.lease_case('direct lease extension that swaps the claim token', '23514', $s$
+  update ocr.jobs set claim_token = gen_random_uuid(), claim_expires_at = claim_expires_at + interval '5 minutes',
+    row_version = row_version + 1 where id = 'e8a60000-0000-4000-8000-000000000006'$s$, false);
+select pg_temp.lease_case('direct lease extension that moves the claim to another worker', '23514', $s$
+  update ocr.jobs set claimed_by_subject = 'workload:ocr-lease-worker-b',
+    claim_expires_at = claim_expires_at + interval '5 minutes', row_version = row_version + 1
    where id = 'e8a60000-0000-4000-8000-000000000006'$s$, false);
-select pg_temp.lease_case('direct update that moves the claim to another worker', '23514', $s$
-  update ocr.jobs set claimed_by_subject = 'workload:ocr-lease-worker-b', row_version = row_version + 1
-   where id = 'e8a60000-0000-4000-8000-000000000006'$s$, false);
-select pg_temp.lease_case('direct update of the attempt count', '23514', $s$
-  update ocr.jobs set attempt_count = attempt_count + 1, row_version = row_version + 1
+select pg_temp.lease_case('direct lease extension that resets the attempt count', '23514', $s$
+  update ocr.jobs set attempt_count = 0, claim_expires_at = claim_expires_at + interval '5 minutes',
+    row_version = row_version + 1 where id = 'e8a60000-0000-4000-8000-000000000006'$s$, false);
+select pg_temp.lease_case('direct lease extension that changes the correlation id', '23514', $s$
+  update ocr.jobs set correlation_id = 'ocr-lease-suite-other',
+    claim_expires_at = claim_expires_at + interval '5 minutes', row_version = row_version + 1
    where id = 'e8a60000-0000-4000-8000-000000000006'$s$, false);
 select pg_temp.lease_case('direct update that ends the lease early', '23514', $s$
   update ocr.jobs set claim_expires_at = clock_timestamp() - interval '1 minute', row_version = row_version + 1
    where id = 'e8a60000-0000-4000-8000-000000000006'$s$, false);
+select pg_temp.lease_case('direct update that makes the lease endless', '23514', $s$
+  update ocr.jobs set claim_expires_at = 'infinity', row_version = row_version + 1
+   where id = 'e8a60000-0000-4000-8000-000000000006'$s$, false);
+select pg_temp.lease_case('direct update that extends the lease beyond an hour', '23514', $s$
+  update ocr.jobs set claim_expires_at = clock_timestamp() + interval '2 hours', row_version = row_version + 1
+   where id = 'e8a60000-0000-4000-8000-000000000006'$s$, false);
+select pg_temp.lease_case('direct update that revives an expired lease', '23514', $s$
+  update ocr.jobs set claim_expires_at = clock_timestamp() + interval '5 minutes', row_version = row_version + 1
+   where id = 'e8a60000-0000-4000-8000-000000000003'$s$, false);
 select pg_temp.lease_case('direct update that only extends the lease', 'ok', $s$
   update ocr.jobs set claim_expires_at = claim_expires_at + interval '5 minutes', row_version = row_version + 1
    where id = 'e8a60000-0000-4000-8000-000000000006'$s$, false);
+-- An extension that names the unchanged status is not a status change: it
+-- records no job event and no outbox event.
+select pg_temp.lease_case('lease extension naming the status records no event', 'ok', $s$
+  do $d$
+  declare
+    events bigint := (select count(*) from ocr.job_events where job_id = 'e8a60000-0000-4000-8000-000000000006');
+    outbox bigint := (select count(*) from ocr.outbox_events
+                       where aggregate_id = 'e8a60000-0000-4000-8000-000000000006');
+  begin
+    update ocr.jobs set status = 'processing', claim_expires_at = claim_expires_at + interval '5 minutes',
+      row_version = row_version + 1 where id = 'e8a60000-0000-4000-8000-000000000006';
+    if (select count(*) from ocr.job_events where job_id = 'e8a60000-0000-4000-8000-000000000006') <> events
+       or (select count(*) from ocr.outbox_events where aggregate_id = 'e8a60000-0000-4000-8000-000000000006') <> outbox
+    then
+      raise exception using errcode = 'P0002', message = 'a lease extension recorded a status event';
+    end if;
+  end $d$$s$, false);
 reset role;
+
+do $$
+declare
+  owner_sees_jobs boolean := current_setting('ocr_lease.owner_sees_jobs')::boolean;
+  mismatches text;
+begin
+  select string_agg(format('%s: expected %s, got %s', name, expected, actual), E'\n' order by seq)
+    into mismatches
+    from ocr_lease_cases
+   where case when owner_sees_jobs then actual is distinct from expected
+              else actual is not distinct from 'ok' end;
+  if mismatches is not null then
+    raise exception E'OCR worker lease cases failed (owner sees jobs: %):\n%', owner_sees_jobs, mismatches;
+  end if;
+  raise notice 'OCR worker lease suite: % cases passed (owner sees jobs: %)',
+    (select count(*) from ocr_lease_cases), owner_sees_jobs;
+end $$;
 
 -- Outcomes that the case results alone do not show, checked as the suite owner.
 do $$
@@ -336,28 +436,15 @@ begin
   if job.status <> 'awaiting_validation' then
     raise exception 'the renewed job did not complete: %', row_to_json(job);
   end if;
+  select * into job from ocr.jobs where id = 'e8a60000-0000-4000-8000-000000000007';
+  if job.status <> 'queued' or job.last_error_code <> 'WORKER_LEASE_EXPIRED' or job.claim_token is not null then
+    raise exception 'the expired job on the withdrawn document was not recovered: %', row_to_json(job);
+  end if;
   if (select count(*) from ocr.extractions where job_id = 'e8a60000-0000-4000-8000-000000000001') <> 1
      or (select count(*) from audit.events where resource_id = 'e8a60000-0000-4000-8000-000000000001'
            and action in ('ocr.worker.complete', 'ocr.worker.fail')) <> 1 then
     raise exception 'refused or replayed calls wrote an extraction or an audit event';
   end if;
-end $$;
-
-do $$
-declare
-  owner_sees_jobs boolean := current_setting('ocr_lease.owner_sees_jobs')::boolean;
-  mismatches text;
-begin
-  select string_agg(format('%s: expected %s, got %s', name, expected, actual), E'\n' order by seq)
-    into mismatches
-    from ocr_lease_cases
-   where case when owner_sees_jobs then actual is distinct from expected
-              else actual is not distinct from 'ok' end;
-  if mismatches is not null then
-    raise exception E'OCR worker lease cases failed (owner sees jobs: %):\n%', owner_sees_jobs, mismatches;
-  end if;
-  raise notice 'OCR worker lease suite: % cases passed (owner sees jobs: %)',
-    (select count(*) from ocr_lease_cases), owner_sees_jobs;
 end $$;
 
 rollback;

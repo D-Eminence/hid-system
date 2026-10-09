@@ -77,7 +77,8 @@ function databaseState() {
         triggerFunctions.set(name, (triggerFunctions.get(name) ?? new Set()).add(`trigger ${trigger[1]} on ${trigger[2]}`));
         continue;
       }
-      const reset = /^\s*revoke\s+all\s+privileges\s+on\s+all\s+functions\s+in\s+schema\s+([\s\S]+?)\s+from\s+([\s\S]+)$/i.exec(statement);
+      const reset = /^\s*revoke\s+(?:all(?:\s+privileges)?|execute)\s+on\s+all\s+functions\s+in\s+schema\s+([\s\S]+?)\s+from\s+([\s\S]+)$/i
+        .exec(statement);
       if (reset) {
         const schemas = roleNames(reset[1]!);
         const roles = roleNames(reset[2]!);
@@ -149,9 +150,31 @@ function invokerReach(state: ReturnType<typeof databaseState>) {
   return reached;
 }
 
+/**
+ * SQL forms the replay above does not follow. None occurs today; if one is
+ * added, extend the replay instead of trusting a pass.
+ */
+function unfollowedForms() {
+  const found: string[] = [];
+  for (const script of databaseScripts()) {
+    const raw = withoutComments(readFileSync(script, 'utf8'));
+    const name = relative(database, script);
+    if (/\balter\s+policy\s+\S+\s+on\s+"?outreach"?\./i.test(raw)) found.push(`${name}: ALTER POLICY on Outreach`);
+    if (/\balter\s+function\b[^;]*\bsecurity\s+(?:invoker|definer)\b/i.test(raw)) found.push(`${name}: ALTER FUNCTION ... SECURITY`);
+    for (const [body] of raw.matchAll(/\$([a-z_]*)\$[\s\S]*?\$\1\$/gi)) {
+      if (/\bcreate\s+policy\s+\S+\s+on\s+"?outreach"?\./i.test(body)) found.push(`${name}: Outreach policy in a dollar-quoted body`);
+    }
+  }
+  return found;
+}
+
 describe('Outreach runtime function grants', () => {
   const state = databaseState();
   const reached = invokerReach(state);
+
+  it('meets no SQL form it cannot follow', () => {
+    expect(unfollowedForms()).toEqual([]);
+  });
 
   it('reads the Outreach policies, invoker triggers and API calls', () => {
     expect(state.definitions.get('platform.current_account_id')?.definer).toBe(false);

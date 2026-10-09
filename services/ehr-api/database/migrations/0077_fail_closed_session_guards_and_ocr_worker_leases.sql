@@ -1,10 +1,10 @@
 -- Phase 4 Stage 8: the remaining session guards fail closed (ADR-040). OCR
 -- worker leases require the caller's claim token and OCR lease renewal works,
--- an OCR job is bound to a clean scan of its source, an OCR publication is
--- requested by the session's own staff member, and the Lab, Pharmacy and
--- Outreach guards refuse a missing session account, membership or facility
--- instead of comparing it with <>. Applied migrations 0001 through 0076 are
--- immutable.
+-- an OCR job is bound to a clean scan of its source and can always be taken
+-- out of play, an OCR publication is requested by the session's own staff
+-- member, and the Lab, Pharmacy and Outreach guards refuse a missing session
+-- account, membership or facility instead of comparing it with <>. Applied
+-- migrations 0001 through 0076 are immutable.
 --
 -- Every function below is replaced with CREATE OR REPLACE, which keeps its
 -- owner, ACL and triggers; the signature, SECURITY DEFINER attribute (or its
@@ -18,10 +18,13 @@
 -- NULL token before anything else, as renew_worker_claim already did, and
 -- compare with IS DISTINCT FROM. fail_worker_job also refuses an expired lease,
 -- as complete_worker_job and renew_worker_claim do: once the lease has ended
--- the job belongs to lease recovery. Missing result or failure metadata is
--- refused as invalid (22023) instead of slipping through a NULL comparison:
--- before, a NULL content hash replayed a stored extraction and a NULL
--- retryable flag failed the job for good. A NULL confidence stays allowed.
+-- the job belongs to lease recovery. Missing result or failure metadata (the
+-- content hash, structured payload or provenance; the error code, retry flag
+-- or retry delay) is refused as invalid (22023) instead of slipping through a
+-- NULL comparison: before, a NULL content hash replayed a stored extraction
+-- and a NULL retryable flag failed the job for good. A NULL confidence stays
+-- allowed. As in 0014, replaying a completed result depends only on the job,
+-- the result key and the content hash, not on the token.
 create or replace function ocr.complete_worker_job(
   requested_job_id uuid, requested_claim_token uuid,
   requested_provider_result_key text, requested_content_sha256 text,
@@ -156,24 +159,32 @@ begin
 end
 $$;
 
--- The OCR job trigger (0016). Two changes:
+-- The OCR job trigger (0016). Three changes:
 -- * Source evidence: the latest scan was compared with <>, so a document with
 --   no scan event at all passed. A write that binds the job to its source (an
 --   insert, or a change of the document or source object) or starts
 --   processing it now needs an exact clean scan, and refuses a missing one.
---   Any other update keeps the 0016 rule, under which a missing scan is not
---   refused: jobs created before this migration for a document without a scan
---   event can still be cancelled, failed, recovered, retried and validated.
---   A scan that does exist must still be exactly clean on every write.
+--   Other updates keep the 0016 rule, under which a missing scan is not
+--   refused, so jobs created before this migration for a document without a
+--   scan event keep working; a scan that does exist must be exactly clean.
+-- * Taking a job out of play (to failed or cancelled, or a failed job back to
+--   the queue) no longer re-reads the source evidence. Before, a job whose
+--   document was withdrawn or rescanned as not clean while it was processing
+--   could be neither completed nor failed, and the lease recovery in
+--   ocr.claim_worker_job, which fails and requeues it, then raised for every
+--   claim of its provider. A requeued job is claimed only with exact clean
+--   evidence, which ocr.claim_worker_job checks itself.
 -- * Lease renewal: the state machine allowed no processing-to-processing
 --   update, so ocr.renew_worker_claim was always refused and a job that ran
---   longer than its lease could not complete. A processing job may now take a
---   later lease expiry and the next version, and nothing else: the token,
---   holder, attempt and every other column must stay exactly as they were.
+--   longer than its lease could not complete. A processing job whose lease is
+--   still active may now take a later expiry, at most an hour ahead as
+--   renew_worker_claim allows, and the next version, and nothing else: the
+--   token, holder, attempt and every other column must stay as they were.
 create or replace function ocr.validate_job_write()
 returns trigger language plpgsql security definer
 set search_path = ocr, ehr, identity, auth, platform, pg_temp as $$
 declare document_row record; latest_scan record; scan_found boolean; binds_source boolean;
+  leaves_play boolean;
 begin
   select document.id, document.patient_id, document.facility_id, document.object_version_id,
          document.sha256_hex, document.status into document_row
@@ -190,7 +201,9 @@ begin
       or new.source_sha256_hex is distinct from old.source_sha256_hex
       or (new.status = 'processing' and old.status is distinct from 'processing');
   end if;
-  if document_row.id is null or document_row.facility_id is distinct from new.facility_id
+  leaves_play := tg_op = 'UPDATE' and not binds_source
+    and (new.status in ('failed', 'cancelled') or (old.status = 'failed' and new.status = 'queued'));
+  if not leaves_play and (document_row.id is null or document_row.facility_id is distinct from new.facility_id
      or document_row.object_version_id is distinct from new.source_object_version_id
      or document_row.sha256_hex is distinct from new.source_sha256_hex
      or document_row.status is distinct from 'uploaded'
@@ -198,7 +211,7 @@ begin
      or (scan_found and (latest_scan.event_type is distinct from 'clean'
        or latest_scan.object_version_id is distinct from new.source_object_version_id
        or latest_scan.object_sha256_hex is distinct from new.source_sha256_hex
-       or latest_scan.binding_migration_hold_reason is not null)) then
+       or latest_scan.binding_migration_hold_reason is not null))) then
     raise exception using errcode = '23514', message = 'OCR requires exact clean immutable document evidence';
   end if;
   if new.patient_id is not null and new.patient_id is distinct from document_row.patient_id then
@@ -223,13 +236,44 @@ begin
       or (old.status = 'awaiting_validation' and new.status in ('validated', 'rejected'))
       or (old.status = 'failed' and new.status in ('queued', 'cancelled'))
       or (old.status = 'processing' and new.status = 'processing'
-        and old.claim_token is not null and new.claim_expires_at > old.claim_expires_at
+        and old.claim_token is not null and old.claim_expires_at > clock_timestamp()
+        and new.claim_expires_at > old.claim_expires_at
+        and new.claim_expires_at <= clock_timestamp() + interval '3600 seconds'
         and (to_jsonb(new) - array['claim_expires_at', 'row_version', 'updated_at'])
           = (to_jsonb(old) - array['claim_expires_at', 'row_version', 'updated_at']))) then
       raise exception using errcode = '23514', message = 'Invalid OCR job state transition';
     end if;
     new.updated_at := clock_timestamp();
   end if;
+  return new;
+end
+$$;
+
+-- The OCR job event trigger (0016) fires on every update that names the
+-- status. The only same-status update the job trigger allows is a lease
+-- renewal, which is not a status change: it records no job event and no
+-- outbox event, even when the update names the status.
+create or replace function ocr.record_job_event()
+returns trigger language plpgsql security definer set search_path = ocr, platform, pg_temp as $$
+declare event_name text;
+begin
+  if tg_op = 'UPDATE' and new.status is not distinct from old.status then
+    return new;
+  end if;
+  event_name := case new.status when 'queued' then 'OcrJobQueued'
+    when 'processing' then 'OcrProcessingStarted' when 'extracted' then 'OcrExtractionCreated'
+    when 'awaiting_validation' then 'OcrAwaitingValidation' when 'validated' then 'OcrValidated'
+    when 'rejected' then 'OcrValidationRejected' when 'failed' then 'OcrFailed'
+    else 'OcrJobCancelled' end;
+  insert into ocr.job_events (job_id, facility_id, from_status, to_status, job_version,
+    actor_subject, correlation_id, reason_code) values (new.id, new.facility_id,
+    case when tg_op = 'UPDATE' then old.status end, new.status, new.row_version,
+    platform.current_actor_subject(), new.correlation_id, new.last_error_code);
+  insert into ocr.outbox_events (event_type, aggregate_id, aggregate_version,
+    facility_id, correlation_id, payload) values (event_name, new.id, new.row_version,
+    new.facility_id, new.correlation_id, jsonb_build_object('jobId', new.id,
+      'documentId', new.document_id, 'status', new.status,
+      'patientResolved', new.patient_id is not null));
   return new;
 end
 $$;

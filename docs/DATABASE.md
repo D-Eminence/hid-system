@@ -1416,7 +1416,7 @@ The guards (7B):
 
 `0077_fail_closed_session_guards_and_ocr_worker_leases.sql` (Phase 4 Stage 8)
 applies the fail-closed rule of ADR-040 to every remaining guard that compared
-a row with the session's account or membership using `<>`. It replaces 17
+a row with the session's account or membership using `<>`. It replaces 18
 functions with `CREATE OR REPLACE`, which keeps each owner, ACL and trigger;
 `SECURITY DEFINER` (or its absence), the `search_path` and the volatility are
 restated as before. Error codes and messages are unchanged.
@@ -1428,15 +1428,18 @@ OCR worker commands (0014):
   session of the OCR worker subject (shared by every worker replica) could
   complete or fail a job another replica held. Both now refuse a NULL token
   (`55000 OCR claim is not active`), as `ocr.renew_worker_claim` did, and
-  compare token, holder and status with `IS DISTINCT FROM`. A NULL token no
-  longer replays a stored extraction either.
+  compare token, holder and status with `IS DISTINCT FROM`. Replaying a
+  completed result still depends only on the job, the result key and the
+  content hash, as in 0014, not on the token; a NULL token is refused before
+  the replay.
 - `fail_worker_job` also refuses an expired lease, as `complete_worker_job`
   and `renew_worker_claim` do; the job then belongs to the lease recovery in
   `ocr.claim_worker_job`.
-- Missing result or failure metadata is refused as invalid (`22023`) instead of
-  passing a NULL comparison: before, a NULL content hash replayed a stored
-  extraction and a NULL retryable flag failed a job for good. A NULL
-  confidence stays allowed.
+- Missing result or failure metadata (content hash, structured payload,
+  provenance, error code, retry flag, retry delay) is refused as invalid
+  (`22023`) instead of passing a NULL comparison: before, a NULL content hash
+  replayed a stored extraction and a NULL retryable flag failed a job for
+  good. A NULL confidence stays allowed.
 
 OCR job trigger (`ocr.validate_job_write`, 0016):
 
@@ -1444,20 +1447,35 @@ OCR job trigger (`ocr.validate_job_write`, 0016):
   update, so every `ocr.renew_worker_claim` was refused (`23514 Invalid OCR job
   state transition`) and the worker logged `ocr.job.lease_renewal_failed` every
   third of a lease. A job that ran longer than its lease (300 s by default)
-  could not complete. A processing job may now take a strictly later lease
-  expiry and the next `row_version`, and nothing else changes: the trigger
+  could not complete. A processing job whose lease is still active may now
+  take a later expiry, at most an hour ahead (the `renew_worker_claim`
+  maximum), and the next `row_version`, and nothing else changes: the trigger
   compares the whole old and new rows without `claim_expires_at`,
-  `row_version` and `updated_at`.
+  `row_version` and `updated_at`. An expired lease, an endless one and any
+  other column change are refused, also for the OCR API runtime, which has
+  `UPDATE` on `ocr.jobs`. `ocr.record_job_event` records no job or outbox
+  event for an update that leaves the status unchanged, so a renewal that
+  names the status is not reported as a new start.
 - Source evidence: the latest scan of the source document was compared with
   `<>`, so a document with no scan event at all passed. A write that binds a
   job to its source (an insert, or a change of the document or the source
   object) or starts processing it now needs an exact clean scan and refuses a
   missing one. Other updates keep the 0016 rule, so a job created earlier for
-  a document without a scan event can still be cancelled, failed, recovered,
-  retried and validated; the worker never claimed such a job. A scan that does
-  exist must still be exactly clean on every write. Changing the document of a
-  job now fails with `23514` before the immutability check (`55000`); no
-  application path changes it.
+  a document without a scan event can still be failed, recovered, retried,
+  renewed and validated; the worker never claimed such a job. A scan that does
+  exist must be exactly clean, except as below. Changing the document of a job
+  to one without an exact clean scan now fails with `23514` before the
+  immutability check (`55000`); no application path changes it.
+- Taking a job out of play (to `failed` or `cancelled`, or a failed job back to
+  `queued`) no longer reads the source evidence. Before, a job whose document
+  was withdrawn (`entered_in_error`) or scanned as not clean while it was
+  processing could be neither completed nor failed, and the lease recovery in
+  `ocr.claim_worker_job`, which fails and requeues it, raised for every claim
+  of its provider until an operator repaired the data. A
+  requeued job is still claimed only with exact clean evidence, which the
+  claim checks itself, and completing or validating such a job is still
+  refused. No API route cancels a job; an operator cancels one with a direct
+  update (`status = 'cancelled'`, next `row_version`).
 
 OCR publication trigger (`ocr.validate_publication_write`, 0016):
 
@@ -1482,10 +1500,16 @@ Lab, Pharmacy and Outreach guards:
 - Each now reads the session's account, membership and facility once, refuses
   a missing value wherever the 0017–0045 body compared it, and compares with
   `IS DISTINCT FROM`; missing parent rows are refused explicitly. The
-  Outreach registration guard also refuses a missing purpose of use. Where a
-  guard did not compare a value, it still does not: the Pharmacy work-item
-  event guard has no facility term and the Outreach campaign update compares
-  only the facility.
+  Outreach registration guard also refuses a missing purpose of use, and
+  reports a missing account or membership as missing context (`42501 Valid
+  Outreach registration context is required`) rather than with the insert or
+  resolution message. Where a guard did not compare a value, it still does
+  not: the Pharmacy work-item event guard has no facility term and the
+  Outreach campaign update compares only the facility.
+- The guards read the session values when they start. A malformed
+  `app.membership_id` or `app.facility_id` (not a UUID) therefore raises
+  `22023` before a guard's own refusal, also on the Outreach campaign update,
+  which did not read the membership before. The services always set UUIDs.
 - Forced row-level security already refused these NULL-session writes for the
   runtime roles, after the guard had let them through. A session that bypasses
   row-level security (a superuser, or an owner without `FORCE ROW LEVEL
@@ -1511,18 +1535,28 @@ Outreach runtime grant:
   account_id_for_subject`. `runtime-grants.sql` now grants it to
   `hid_outreach_runtime`, as to the Identity and EHR runtimes.
   `runtime-roles.integration.sql` asserts that no runtime can reach a table
-  whose policy or invoker trigger resolves the session account without that
-  grant, and `services/outreach-api/src/database/runtime-function-grants.spec.ts`
-  checks the same without a database, following policies, invoker triggers and
-  invoker functions from the migrations.
+  whose policy expression or invoker trigger body calls
+  `platform.current_account_id()` directly without that grant.
+  `services/outreach-api/src/database/runtime-function-grants.spec.ts` checks
+  the Outreach roles without a database, following policies, invoker triggers
+  and invoker functions through the migrations, and fails on SQL forms it
+  cannot follow.
 
 Tests (rollback-only, synthetic fixtures):
 
-- `ocr-worker-lease.integration.sql`: 29 cases as `hid_ocr_worker`, with the
-  OCR worker's session, through the real commands and triggers. On 0076 it
-  fails with 10 wrong outcomes.
-- `ocr-job-source-and-publication.integration.sql`: 25 cases as
-  `hid_ocr_api_runtime` with the OCR API's session. On 0076 it fails with 10.
+- `ocr-worker-lease.integration.sql`: 41 cases. The worker commands run as
+  `hid_ocr_worker` with the worker's session, including the lease recovery of
+  a job whose document was withdrawn, and direct job updates as
+  `hid_ocr_api_runtime`. On 0076 it fails with 17 wrong outcomes.
+- `ocr-job-source-and-publication.integration.sql`: 30 cases as
+  `hid_ocr_api_runtime` with the OCR API's session. On 0076 it fails with 12
+  (two of them only by error code: `55000` and the foreign key's `23503`).
+- Of twelve single-point mutants of the 0077 OCR functions (the row equality,
+  the expiry and active-lease bounds of renewal, the start-of-processing
+  binding, the out-of-play exemption, each metadata refusal, the same-status
+  event rule), the two OCR suites catch eleven. The survivor drops the
+  explicit NULL-token refusal in `fail_worker_job`, which the `IS DISTINCT
+  FROM` token comparison makes redundant.
 - `lab-session-guards.integration.sql`, `pharmacy-session-guards.integration.sql`
   and `outreach-session-guards.integration.sql`: each guard isolated
   (`session_replication_role = replica` plus `ENABLE ALWAYS TRIGGER`) under a
@@ -1542,7 +1576,9 @@ Tests (rollback-only, synthetic fixtures):
 - Each suite checks the replaced functions' `SECURITY DEFINER`, `search_path`,
   volatility, owner and enabled triggers, and probes whether the guard's owner
   can see its fixtures: under the rehearsal's non-superuser owner, refusals are
-  required but their codes may differ. Under that owner alone the Pharmacy
-  event, dispensing and reversal guards refuse a missing session anyway,
-  because their parent rows are hidden from them; the rehearsal's first run,
-  under the migration owner, is the one that detects a regression there.
+  required but their codes may differ. Under that owner the OCR worker
+  commands cannot claim or see jobs at all (P8) and the Pharmacy event,
+  dispensing and reversal guards refuse a missing session anyway, because
+  their parent rows are hidden from them; so for the OCR lease, OCR job
+  source and those Pharmacy guards, the rehearsal's first run, under the
+  migration owner, is the one that detects a regression.

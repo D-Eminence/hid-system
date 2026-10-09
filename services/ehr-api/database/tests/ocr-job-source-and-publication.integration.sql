@@ -9,7 +9,10 @@
 -- a change of the document or source object) or starts processing it needs an
 -- exact clean scan; other updates of existing jobs keep the 0016 rule, so a
 -- job created before Stage 8 for a document without a scan event can still be
--- cancelled, retried, failed and validated.
+-- cancelled, retried, failed, renewed and validated. Taking a job out of play
+-- (failed, cancelled, or back to the queue) no longer reads the evidence, so
+-- a job whose document was later scanned as not clean can be cancelled, while
+-- its validation is still refused.
 --
 -- ocr.validate_publication_write (0016) did not bind the requester to the
 -- session: a publication could name any member of the facility as requester.
@@ -119,7 +122,8 @@ select ('e8b50000-0000-4000-8000-00000000000' || scan.n)::uuid, 'e8b40000-0000-4
                (3, 1, 'scan_started', null, interval '3 minutes'),
                (4, 1, 'scan_started', null, interval '3 minutes'),
                (4, 2, 'failed', 'SCANNER_UNAVAILABLE', interval '2 minutes'),
-               (5, 1, 'rejected', 'MALWARE_DETECTED', interval '3 minutes')) scan(n, step, event_type, reason_code, age);
+               (5, 1, 'rejected', 'MALWARE_DETECTED', interval '3 minutes'))
+    scan(n, step, event_type, reason_code, age);
 -- Jobs of clinic A. J1 is queued for the clean document. J2 (queued), J3
 -- (failed) and J4 (awaiting validation) were created before Stage 8 for the
 -- never-scanned document. J5 is validated, with extraction E5, validation V5
@@ -135,7 +139,19 @@ select ('e8b60000-0000-4000-8000-00000000000' || job.n)::uuid, 'e8b00000-0000-40
        case when job.status = 'failed' then 'PROVIDER_UNAVAILABLE' end,
        case when job.status = 'validated' then clock_timestamp() end
   from (values (1, 1, 'queued', 0), (2, 2, 'queued', 0), (3, 2, 'failed', 1), (4, 2, 'awaiting_validation', 1),
-               (5, 1, 'validated', 1)) job(n, document, status, attempts);
+               (5, 1, 'validated', 1), (7, 3, 'queued', 0), (8, 5, 'awaiting_validation', 1))
+    job(n, document, status, attempts);
+-- J6 is processing for the never-scanned document, with an active lease. J7
+-- (queued) and J8 (awaiting validation) were created before their documents'
+-- scans started (D3) or rejected them (D5).
+insert into ocr.jobs (id, facility_id, document_id, source_object_version_id, source_sha256_hex, idempotency_key,
+  request_sha256, provider, max_attempts, created_by, created_by_membership_id, correlation_id, status,
+  attempt_count, started_at, claim_token, claim_expires_at, claimed_by_subject) values
+  ('e8b60000-0000-4000-8000-000000000006', 'e8b00000-0000-4000-8000-000000000002',
+   'e8b50000-0000-4000-8000-000000000002', 'source-v2', repeat('2', 64), 'ocr-source-fixture-0006', repeat('a', 64),
+   'source-provider', 3, 'e8b10000-0000-4000-8000-000000000001', 'e8b30000-0000-4000-8000-000000000001',
+   'ocr-source-fixture', 'processing', 1, clock_timestamp() - interval '1 minute',
+   'e8b70000-0000-4000-8000-0000000000a6', clock_timestamp() + interval '10 minutes', 'workload:ocr-source');
 insert into ocr.extractions (id, job_id, facility_id, document_id, extraction_version, attempt_no, provider,
   provider_model, provider_result_key, content_sha256, source_object_version_id, source_sha256_hex, provenance) values
   ('e8b70000-0000-4000-8000-000000000005', 'e8b60000-0000-4000-8000-000000000005',
@@ -181,7 +197,8 @@ begin
     into visible;
   reset role;
   perform set_config('ocr_source.owner_sees_documents', visible::text, true);
-  owner_role := (select proowner::regrole::name from pg_proc where oid = 'ocr.validate_publication_write()'::regprocedure);
+  owner_role := (select proowner::regrole::name from pg_proc
+                  where oid = 'ocr.validate_publication_write()'::regprocedure);
   execute format('set local role %I', owner_role);
   select exists (select 1 from ocr.validations where id = 'e8b80000-0000-4000-8000-000000000005')
      and exists (select 1 from ocr.patient_confirmations where id = 'e8b90000-0000-4000-8000-000000000005')
@@ -288,6 +305,29 @@ select pg_temp.source_case('job', 'reject an unscanned job awaiting validation (
       correlation_id = 'ocr-source-suite', row_version = row_version + 1
     where id = 'e8b60000-0000-4000-8000-000000000004' and facility_id = 'e8b00000-0000-4000-8000-000000000002'
       and row_version = 1$u$)$s$, false);
+select pg_temp.source_case('job', 'validate an unscanned job awaiting validation (the OCR API validation)', 'ok', $s$
+  select pg_temp.one_row($u$update ocr.jobs set status = 'validated', completed_at = clock_timestamp(),
+      correlation_id = 'ocr-source-suite', row_version = row_version + 1
+    where id = 'e8b60000-0000-4000-8000-000000000004' and facility_id = 'e8b00000-0000-4000-8000-000000000002'
+      and row_version = 1$u$)$s$, false);
+-- A job in flight for the never-scanned document keeps its lease and can fail.
+select pg_temp.source_case('job', 'extend the lease of an unscanned processing job', 'ok', $s$
+  select pg_temp.one_row($u$update ocr.jobs set claim_expires_at = claim_expires_at + interval '5 minutes',
+      row_version = row_version + 1 where id = 'e8b60000-0000-4000-8000-000000000006'$u$)$s$, false);
+select pg_temp.source_case('job', 'fail an unscanned processing job', 'ok', $s$
+  select pg_temp.one_row($u$update ocr.jobs set status = 'failed', failed_at = clock_timestamp(),
+      last_error_code = 'UNSUPPORTED_DOCUMENT', claim_token = null, claim_expires_at = null,
+      claimed_by_subject = null, row_version = row_version + 1
+    where id = 'e8b60000-0000-4000-8000-000000000006'$u$)$s$, false);
+-- A job whose document was later scanned as not clean can be cancelled, but
+-- not validated.
+select pg_temp.source_case('job', 'cancel a queued job whose document scan is still running', 'ok', $s$
+  select pg_temp.one_row($u$update ocr.jobs set status = 'cancelled', correlation_id = 'ocr-source-suite',
+      row_version = row_version + 1 where id = 'e8b60000-0000-4000-8000-000000000007'$u$)$s$, false);
+select pg_temp.source_case('job', 'validate a job whose document the scanner rejected', '23514', $s$
+  select pg_temp.one_row($u$update ocr.jobs set status = 'validated', completed_at = clock_timestamp(),
+      correlation_id = 'ocr-source-suite', row_version = row_version + 1
+    where id = 'e8b60000-0000-4000-8000-000000000008'$u$)$s$, false);
 -- Moving a job to another source is refused whatever that source's scan.
 select pg_temp.source_case('job', 'move a clean job to the never-scanned document', '23514', $s$
   select pg_temp.one_row($u$update ocr.jobs set document_id = 'e8b50000-0000-4000-8000-000000000002',
