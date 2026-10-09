@@ -286,6 +286,50 @@ begin
      ) then
     raise exception 'MFA account lock helper privileges are inconsistent';
   end if;
+  -- RLS policies and invoker-rights trigger functions run with the querying
+  -- role's rights. platform.current_account_id() is an invoker SQL function
+  -- that calls auth.account_id_for_subject(text), which is revoked from PUBLIC.
+  -- A runtime that can reach a table whose policy or invoker trigger resolves
+  -- the session account must be able to execute it, or each such statement
+  -- fails with 42501 (every Outreach command did until 0077).
+  if exists (
+    select 1
+    from unnest(array[
+      'hid_identity_runtime', 'hid_ehr_runtime', 'hid_api_runtime',
+      'hid_identity_api_runtime', 'hid_ehr_api_runtime', 'hid_ocr_api_runtime',
+      'hid_audit_writer', 'hid_document_scanner', 'hid_ocr_runtime', 'hid_ocr_worker',
+      'hid_lab_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_runtime',
+      'hid_pharmacy_api_runtime', 'hid_outreach_runtime',
+      'hid_outreach_api_runtime', 'hid_migration_admin',
+      'hid_schema_test_runtime', 'hid_event_delivery_commands',
+      'hid_event_dispatcher', 'hid_notification_runtime',
+      'hid_notification_api_runtime', 'hid_notification_worker',
+      'hid_ocr_queue_metrics'
+    ]) runtime(role_name)
+    join pg_class relation on relation.relkind in ('r', 'p')
+    join pg_namespace namespace_row on namespace_row.oid = relation.relnamespace
+    where namespace_row.nspname not in ('pg_catalog', 'information_schema')
+      and has_table_privilege(runtime.role_name, relation.oid, 'SELECT,INSERT,UPDATE,DELETE')
+      and not has_function_privilege(runtime.role_name, 'auth.account_id_for_subject(text)', 'EXECUTE')
+      and (
+        exists (
+          select 1 from pg_policy policy
+          where policy.polrelid = relation.oid
+            and (coalesce(pg_get_expr(policy.polqual, policy.polrelid), '') ~ 'current_account_id\('
+              or coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '') ~ 'current_account_id\(')
+        )
+        or exists (
+          select 1 from pg_trigger trigger_row
+          join pg_proc function_row on function_row.oid = trigger_row.tgfoid
+          where trigger_row.tgrelid = relation.oid
+            and not trigger_row.tgisinternal
+            and not function_row.prosecdef
+            and function_row.prosrc ~ 'current_account_id\('
+        )
+      )
+  ) or not has_function_privilege('hid_outreach_api_runtime', 'auth.account_id_for_subject(text)', 'EXECUTE') then
+    raise exception 'a runtime cannot resolve the session account its RLS policies or invoker triggers require';
+  end if;
   -- A clinician's own access-request list (0036) runs as the Identity runtime;
   -- the function itself checks the caller's membership and identity.consent.write.
   if not has_function_privilege('hid_identity_api_runtime', 'identity.list_my_staff_access_requests(text)', 'EXECUTE')
