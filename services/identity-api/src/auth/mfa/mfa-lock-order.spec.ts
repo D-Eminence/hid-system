@@ -1,12 +1,26 @@
-jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn(), SignJWT: class {} }));
+jest.mock('jose', () => ({
+  createRemoteJWKSet: jest.fn(),
+  jwtVerify: jest.fn(),
+  SignJWT: class {
+    setProtectedHeader() { return this; }
+    setSubject() { return this; }
+    setIssuer() { return this; }
+    setAudience() { return this; }
+    setJti() { return this; }
+    setIssuedAt() { return this; }
+    setExpirationTime() { return this; }
+    async sign() { return 'signed-access-token'; }
+  },
+}));
 
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../../audit/audit.service';
 import type { PlatformAccessContext } from '../../common/request-context';
 import type { DatabaseService } from '../../database/database.service';
 import { isAssuranceQuery, assuranceResult, platformActor, useTestEnvironment } from '../../testing/platform-assurance';
+import { CurrentStaffContextService } from '../current-staff-context.service';
 import type { LocalAuthProvider } from '../local-auth.provider';
-import type { TokenService } from '../token.service';
+import { TokenService } from '../token.service';
 import type { MfaSecretProtector } from './mfa-secret-protector';
 import { MfaService } from './mfa.service';
 import { totp } from './totp';
@@ -217,5 +231,35 @@ describe('platform MFA lock order (Stage 7A)', () => {
     const statements = transactions[0] ?? [];
     expect(statements.some(({ sql }) => sql.includes('auth.mfa_factors'))).toBe(false);
     expect(statements.some(({ sql }) => sql.includes('auth.session_events') || sql.includes('auth.sessions'))).toBe(false);
+  });
+
+  // The account row stays locked until the MFA transaction commits, and other
+  // requests of that account (refreshes, sign-outs, audit writes) wait on it,
+  // each holding a pool connection. Issuing the session must therefore not need
+  // a second pool connection: it resolves the administrator on the
+  // transaction's own client.
+  it('issues the platform session without a second pool connection', async () => {
+    const poolQuery = jest.fn(async () => { throw new Error('the pool must not be used inside the locked transaction'); });
+    const database = { query: poolQuery } as unknown as DatabaseService;
+    const tokens = new TokenService(database, new CurrentStaffContextService(database));
+    const statements: string[] = [];
+    const client = { query: jest.fn(async (sql: string) => {
+      statements.push(String(sql));
+      if (sql.includes('from auth.accounts') && sql.includes('select id::text, subject')) {
+        return { rowCount: 1, rows: [{ id: ACCOUNT, subject: 'synthetic:mfa-lock', email: null, display_name: null }] };
+      }
+      if (sql.includes('from auth.account_roles assignment')) {
+        return { rowCount: 1, rows: [{ roles: ['platform_super_admin'], permissions: ['platform.admin.access'] }] };
+      }
+      if (sql.includes('select token_version::text from auth.accounts')) return { rowCount: 1, rows: [{ token_version: '3' }] };
+      return { rowCount: 1, rows: [] };
+    }) } as unknown as PoolClient;
+
+    const session = await tokens.issuePlatformSession(client,
+      { accountId: ACCOUNT, subject: 'synthetic:mfa-lock', factorId: FACTOR, method: 'totp' }, event);
+
+    expect(session.actor).toMatchObject({ kind: 'platform', accountId: ACCOUNT, platformPermissions: ['platform.admin.access'] });
+    expect(poolQuery).not.toHaveBeenCalled();
+    expect(statements.some((sql) => sql.includes('from auth.account_roles assignment'))).toBe(true);
   });
 });
