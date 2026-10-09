@@ -518,9 +518,13 @@ grant select, insert on outreach.campaign_events to hid_outreach_runtime;
 grant select, insert on outreach.patient_mappings, outreach.registration_case_events,
   outreach.command_idempotency, outreach.outbox_events to hid_outreach_runtime;
 grant usage, select on all sequences in schema outreach to hid_outreach_runtime;
+-- Outreach RLS policies and the invoker-rights event trigger call
+-- platform.current_account_id() as the runtime, and that SQL function calls
+-- auth.account_id_for_subject(text), which is revoked from PUBLIC below.
 grant execute on function platform.current_actor_subject(), platform.current_account_id(),
   platform.current_facility_id(), platform.current_membership_id(), platform.current_correlation_id(),
   platform.current_purpose_of_use(),
+  auth.account_id_for_subject(text),
   auth.membership_has_permission(text, uuid, uuid, text),
   outreach.context_allows(uuid,text),
   outreach.registration_campaign_member(uuid,uuid) to hid_outreach_runtime;

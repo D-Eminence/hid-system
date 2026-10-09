@@ -1589,6 +1589,55 @@ Consequences:
   needs a check of existing jobs and scans first, because it also runs on every
   job update (a follow-up).
 
+## ADR-040 addendum: Stage 8 (0077)
+
+Date: 2026-10-09
+
+The fail-closed rule now covers every guard that compared a row with the
+session's account or membership: the Lab (5), Pharmacy (5) and Outreach (3)
+guards, the OCR worker commands `ocr.complete_worker_job` and
+`ocr.fail_worker_job`, and the OCR job and publication triggers. Each reads the
+session values once, refuses a missing value wherever it compares it, and
+compares with `IS DISTINCT FROM`. A guard does not gain a comparison it did not
+make: the rewrite changes how a missing value is treated, not what is
+compared, except where Stage 8 closes a named gap:
+- an OCR publication must name the session's own account and membership as
+  its requester (the gap 0076 closed for confirmations);
+- an OCR job needs an exact clean scan of its source when the write binds it
+  to that source or starts processing it. Other updates keep the 0016 rule,
+  because a stricter check on every update refuses cancelling a historical job
+  without a scan event and makes the lease recovery in `ocr.claim_worker_job`
+  fail for the whole provider when such a job holds an expired lease (both
+  reproduced locally);
+- an OCR worker command needs the caller's own claim token, and failing a job
+  needs an unexpired lease, as completing and renewing already did.
+
+0077 also makes OCR lease renewal work: the job state machine had no
+`processing` to `processing` transition, so every renewal was refused. The new
+transition allows a strictly later lease expiry and the next version only; the
+trigger compares the rest of the row as a whole.
+
+Consequences:
+
+- a session that bypasses row-level security (a superuser, or an owner without
+  `FORCE ROW LEVEL SECURITY`) can no longer write Lab, Pharmacy or Outreach rows
+  attributed to another member without a request context. Maintenance writes
+  to these tables need a real staff context;
+- refusals that row-level security made before now come from the guard, with
+  the guard's code; no API maps them differently;
+- under an owner that does not bypass row-level security (P8),
+  `lab.validate_imported_evidence` refuses another facility's OCR evidence
+  instead of accepting it;
+- the Outreach runtime gains `EXECUTE` on `auth.account_id_for_subject(text)`,
+  which its policies always needed, as the Identity and EHR runtimes have. It
+  can resolve a subject to its account identifier; making
+  `platform.current_account_id()` a definer function would avoid that but
+  changes every runtime and was not done;
+- the lock-order hazards listed under ADR-040's consequences were reproduced
+  locally as real deadlocks (release checklist §9). They stay for a dedicated
+  lock-order change with two-connection race tests: each is fail-safe, and
+  the fix rewrites the two-person approval and last-Super-Admin commands.
+
 # ADR-041: Dedicated Technical Owners for OCR, Document-Scanner and Outreach Definer Functions
 
 Status: Proposed (Phase 4 Stage 7C). Design only: no ownership, grant or
