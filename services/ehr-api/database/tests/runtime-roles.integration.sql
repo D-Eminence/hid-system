@@ -16,7 +16,8 @@ begin
     'hid_outreach_api_runtime', 'hid_migration_admin',
     'hid_schema_test_runtime', 'hid_event_delivery_commands',
     'hid_event_dispatcher', 'hid_notification_runtime',
-    'hid_notification_api_runtime', 'hid_notification_worker'
+    'hid_notification_api_runtime', 'hid_notification_worker',
+    'hid_ocr_queue_metrics'
   ] loop
     if not exists (select 1 from pg_roles where rolname = role_name) then
       raise exception 'required HID role is missing: %', role_name;
@@ -428,6 +429,53 @@ begin
      or has_table_privilege('hid_ocr_worker', 'ocr.jobs', 'UPDATE') then
     raise exception 'OCR worker is not constrained to lease-bound commands';
   end if;
+  -- OCR queue metrics (0075): only the worker executes the aggregate command
+  -- (besides its owner). The non-login technical owner holds exactly SELECT on
+  -- ocr.jobs (status, queued_at) and nothing else, reads rows only through one
+  -- exact policy, has no member and is a member of no role.
+  if not has_function_privilege('hid_ocr_worker', 'ocr.worker_queue_metrics()', 'EXECUTE')
+     or has_function_privilege('public', 'ocr.worker_queue_metrics()', 'EXECUTE')
+     or (select coalesce(array_agg(distinct privilege.grantee::regrole::text), '{}')
+           from pg_proc proc, aclexplode(proc.proacl) privilege
+          where proc.oid = 'ocr.worker_queue_metrics()'::regprocedure
+            and privilege.grantee <> proc.proowner) <> array['hid_ocr_worker']
+     or (select owner_role.rolname from pg_proc proc join pg_roles owner_role on owner_role.oid = proc.proowner
+          where proc.oid = 'ocr.worker_queue_metrics()'::regprocedure) <> 'hid_ocr_queue_metrics'
+     or not (select prosecdef from pg_proc where oid = 'ocr.worker_queue_metrics()'::regprocedure)
+     or (select coalesce(array_agg(relation.oid::regclass::text || '.' || attribute.attname || ':' || privilege.privilege_type
+              order by relation.oid::regclass::text, attribute.attname, privilege.privilege_type), '{}')
+           from pg_class relation
+           join pg_attribute attribute on attribute.attrelid = relation.oid
+           cross join lateral aclexplode(attribute.attacl) privilege
+          where privilege.grantee = 'hid_ocr_queue_metrics'::regrole)
+        <> array['ocr.jobs.queued_at:SELECT', 'ocr.jobs.status:SELECT']
+     or exists (
+       select 1 from pg_class relation, aclexplode(relation.relacl) privilege
+        where privilege.grantee = 'hid_ocr_queue_metrics'::regrole
+     )
+     or not exists (
+       select 1 from pg_policy policy
+        where policy.polrelid = 'ocr.jobs'::regclass and policy.polname = 'ocr_jobs_queue_metrics_read'
+          and policy.polcmd = 'r' and policy.polpermissive
+          and policy.polroles = array['hid_ocr_queue_metrics'::regrole::oid]
+          and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+     )
+     or exists (
+       select 1 from pg_auth_members
+        where roleid = 'hid_ocr_queue_metrics'::regrole or member = 'hid_ocr_queue_metrics'::regrole
+     ) then
+    raise exception 'OCR queue metrics command privileges are inconsistent';
+  end if;
+  -- The OCR API appends outbox events for its own facility only (0075).
+  if not has_table_privilege('hid_ocr_api_runtime', 'ocr.outbox_events', 'INSERT')
+     or not exists (
+       select 1 from pg_policy policy
+        where policy.polrelid = 'ocr.outbox_events'::regclass and policy.polname = 'ocr_outbox_staff_insert'
+          and policy.polcmd = 'a' and policy.polpermissive
+          and pg_get_expr(policy.polwithcheck, policy.polrelid) = '(facility_id = platform.current_facility_id())'
+     ) then
+    raise exception 'OCR outbox insert policy is missing or not facility-scoped';
+  end if;
 
   if not has_table_privilege(
        'hid_schema_test_runtime', 'ehr.document_scan_events', 'SELECT'
@@ -484,7 +532,8 @@ begin
         'hid_ocr_worker', 'hid_lab_runtime', 'hid_pharmacy_runtime',
         'hid_pharmacy_api_runtime', 'hid_outreach_runtime',
         'hid_outreach_api_runtime', 'hid_schema_test_runtime',
-        'hid_event_delivery_commands', 'hid_event_dispatcher'
+        'hid_event_delivery_commands', 'hid_event_dispatcher',
+        'hid_ocr_queue_metrics'
       )
   ) then
     raise exception 'a runtime or test role owns a protected application relation';

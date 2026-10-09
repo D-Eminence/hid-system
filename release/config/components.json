@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0074",
-    "count": 74,
+    "last": "0075",
+    "count": 75,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -393,6 +393,10 @@
       {
         "name": "0074_staff_access_request_outcome.sql",
         "sha256": "21a412f66fa6d3d4613ab783969ec0b8fb18bd8895af97b17428c7aac4bf8efb"
+      },
+      {
+        "name": "0075_ocr_queue_metrics_and_outbox_insert.sql",
+        "sha256": "71063d846570742aea3a026994a888fca7a56c0f05f8f8f345b400f64dd8512f"
       }
     ]
   },

@@ -1,8 +1,9 @@
 # Phase 4 Stage 5: platform administration release readiness
 
 This is the combined release checklist for the platform administration work
-of Phase 4 and the governed-access slice that followed it. It covers Identity
-and the database in this repository, and in Health-id the admin console
+of Phase 4, the governed-access slice that followed it, and the Stage 6 OCR
+audit and queue-metrics slice. It covers Identity, the OCR API and worker, and
+the database in this repository, and in Health-id the admin console
 (`apps/patient-web/src/admin`) and the provider portal's governed-access pages
 (`apps/patient-web/src/staff`). It records what was
 verified locally and what an operator must still do. **Nothing here has been
@@ -13,10 +14,12 @@ deployed, and no staging or production database has been migrated.** Every
 
 | Component | Source | Contents |
 | --- | --- | --- |
-| Database | `services/ehr-api/database/migrations` through `0074_staff_access_request_outcome.sql` | Phase 1–4 schema. The platform admin migrations are 0067–0072. Stage 5 adds no migration; Stage 5B adds 0073 and governed access adds 0074 (§2). |
-| Runtime grants | `services/ehr-api/database/runtime-grants.sql`, applied by the role bootstrap | Governed access grants the Identity runtime the clinician's access-request list (§2). |
+| Database | `services/ehr-api/database/migrations` through `0075_ocr_queue_metrics_and_outbox_insert.sql` | Phase 1–4 schema. The platform admin migrations are 0067–0072. Stage 5 adds no migration; Stage 5B adds 0073, governed access adds 0074 and Stage 6 adds 0075 (§2). |
+| Runtime grants | `services/ehr-api/database/runtime-grants.sql`, applied by the role bootstrap | Governed access grants the Identity runtime the clinician's access-request list. Stage 6 adds the technical role `hid_ocr_queue_metrics`, its policy, and the OCR worker's grant on the queue metrics command (§2). |
 | Identity API | `services/identity-api` on `main` (Stage 2A, 4A, 5, 5B and governed access) | Platform MFA sessions, step-up, two-person approval and the Stage 4A admin contracts. Stage 5 adds the two fixes in §2; Stage 5B adds the revocation lock; governed access adds the access-request outcome fields (§2). |
 | Pharmacy API | `services/pharmacy-api` | Stage 5 CORS header fix (§2). |
+| OCR API | `services/ocr-api` (Stage 6) | Patient-linked audit events for OCR evidence reads (§2). |
+| OCR worker | `services/ocr-worker` (Stage 6) | Queue depth and age through the new aggregate command (§2). |
 | Admin console | Health-id `main` (Stage 4B and the Stage 5 fix) | The console for the contracts above. |
 | Provider portal | Health-id `main` (governed access, D-Eminence/Health-id#18 and D-Eminence/Health-id#19) | The clinician's access requests with their outcomes, closing a grant, and write gating on the clinical page. |
 
@@ -38,6 +41,10 @@ deployed, and no staging or production database has been migrated.** Every
 - **Admin console (Health-id)**: after **Revoke all sessions**, the confirmation stays visible. Before, the reload reported no sessions and the form, with its confirmation, disappeared. This was found by the browser run in §8.
 - **Governed access: the clinician's access-request list** (D-Eminence/hid-system#26, no migration). `GET /identity/access-requests` calls `identity.list_my_staff_access_requests(text)`, but the runtime grants never gave the Identity runtime `EXECUTE` on it. Every clinician's list was refused (`403`). The role bootstrap now grants it, and `runtime-roles.integration.sql` asserts the grant. `runtime-function-grants.spec.ts` checks, without a database, that every database function the Identity source calls is granted to its runtime.
 - **Governed access: access-request outcomes** (D-Eminence/hid-system#28, migration 0074). An approved request stayed `approved` after its grant expired, was revoked by the patient or was closed by the clinician. The list now also returns, from the latest grant made from each request, `consentGrantId`, `grantExpiresAt`, `authorizationMethod` and `effectiveStatus`. For an approval with a grant, `effectiveStatus` reports whichever ended the grant first: `active`, `expired`, `closed` (by the requesting clinician) or `revoked` (by anyone else). Otherwise it is the request status. The `status` filter matches either the request status or the outcome, and also accepts `active` and `closed`. The function's arguments, caller checks, order and 100-row limit are unchanged.
+- **OCR audit, queue metrics and outbox inserts (Stage 6, migration 0075)**:
+  - **Read audit:** the OCR job lookup by document, the validation list and the publication list now write a patient-linked audit event (`ocr.job.find`, `ocr.validation.list`, `ocr.publication.list`) in the read transaction, after authorization; a failed audit write fails the read. Every OCR API job event, including the existing reads and writes, now names the source document's patient, which authorization resolves. Before, it used the job's own `patient_id`, which stays null for a job created without one, so those events were not linked to any patient. Details carry identifiers and counts only.
+  - **Queue metrics:** the worker read `ocr.jobs` directly, which `hid_ocr_worker` may not do. Every read was refused, so `ocr.job.claimed` never carried `queueDepth` or `oldestQueueAgeSeconds`, and `OcrQueueAgeAlarm` and the QueueDepth signal had no data. The worker now calls `ocr.worker_queue_metrics()`, which returns only those two aggregates, with the same definitions. Its owner, the new non-login role `hid_ocr_queue_metrics`, reads only `ocr.jobs.status` and `queued_at` through one exact policy. The worker still has no table privileges.
+  - **Outbox inserts:** `ocr.outbox_events` had only `SELECT` policies under `FORCE ROW LEVEL SECURITY`, so the OCR API runtime could not append outbox events. Patient confirmation and every publication request, success and failure failed with `new row violates row-level security policy`. 0075 adds a same-facility insert policy. The confirmation event is keyed by the job version, which a confirmation does not change, so a second confirmation of the same job version is now refused with `409 OCR_PATIENT_ALREADY_CONFIRMED`. Without that check it would fail on the outbox unique key with a `500`.
 - **Provider portal (Health-id)**:
   - D-Eminence/Health-id#18 reads the list above, closes a grant, and enables clinical writes only when `POST /identity/consent-status` allows them.
   - D-Eminence/Health-id#19 shows each approval's outcome and expiry, offers **Close access** for an active grant, and adds the outcome filters. The new fields and filters appear only when Identity reports them.
@@ -55,6 +62,11 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 
 **Rule:** never run Identity at Stage 4A or later with a console older than Stage 4B.
 
+**OCR (Stage 6):**
+- The Stage 6 OCR API needs no schema change: its new audit events use the existing `audit.events` contract. It can be deployed before or after 0075.
+- The outbox insert policy takes effect for every OCR API build as soon as 0075 is applied.
+- A Stage 6 worker that runs before 0075 and the bootstrap cannot execute `ocr.worker_queue_metrics()`. It logs `ocr.queue.metrics_unavailable` and claims jobs exactly as earlier workers do. Earlier workers keep reading `ocr.jobs` directly after 0075 and keep logging that warning.
+
 **Governed access:**
 - The provider portal of D-Eminence/Health-id#19 works with any Identity build that serves the access-request list. It shows outcomes and offers the outcome filters only when Identity reports `effectiveStatus`. Otherwise it shows the request status, as before.
 - An Identity build with the 0074 mapping selects the new columns by name, so it fails on the list (`5xx`) until 0074 is applied.
@@ -64,13 +76,14 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 
 | # | Check | Owner | How |
 | --- | --- | --- | --- |
-| P1 | The production migration ledger's last applied version is known. | Database operator | `npm run db:plan` as the migration administrator, as in `MIGRATION_RUNBOOK.md` §6. It applies nothing, but its ledger bootstrap statements need the administrator's privileges, so it cannot run with read-only credentials. The local rehearsal covers 0028 → 0074; any other starting point needs its own rehearsal. |
+| P1 | The production migration ledger's last applied version is known. | Database operator | `npm run db:plan` as the migration administrator, as in `MIGRATION_RUNBOOK.md` §6. It applies nothing, but its ledger bootstrap statements need the administrator's privileges, so it cannot run with read-only credentials. The local rehearsal covers 0028 → 0075; any other starting point needs its own rehearsal. |
 | P2 | A restorable backup of the target database exists and its restore was tested. | Database operator | Snapshot or `pg_dump` taken immediately before the window. The rehearsal checks backup and restore integrity, but the real restore must be proven on staging. |
 | P3 | `MFA_SECRET_KEY_B64` is provisioned for Identity: 32 random bytes, base64, from the secret store. `MFA_KEY_VERSION` is set. | Security owner and infrastructure owner | **The infrastructure code does not do this yet.** `infra/aws/src/hid-regional-stack.ts` maps no `MFA_SECRET_KEY_B64` from the Identity secret and sets no `MFA_KEY_VERSION`, which then defaults to `local-v1`. Stage 2A recorded this as an infrastructure task. An infrastructure change must add both before step 6. Without the key, platform sign-in fails closed with `503 MFA_UNAVAILABLE`, and a malformed key stops Identity at start-up. Never reuse a staging key in production. The key and `MFA_KEY_VERSION` are fixed when the first authenticator is enrolled: changing either later invalidates every enrolled authenticator unless a re-encryption release exists. |
 | P4 | Identity `CORS_ORIGINS` lists only the exact HTTPS console origins, with no paths. | Platform operator | Enforced at start-up in production. With same-origin `/api/v1`, CORS is not used by the console. |
 | P5 | The sizes of `audit.events`, `auth.sessions`, `auth.session_events` and `identity.consent_grants` are known, for the lock windows of 0067, 0069, 0072 and 0074. | Database operator | `select count(*)` and `pg_total_relation_size(...)` for each table on a recent snapshot. See §5. |
 | P6 | Two Super Admins can sign in and confirm. | Security owner | Two-person approval needs a second Super Admin. Facility suspension needs at least one reachable Super Admin (0072). On a first deployment of Stage 2A (no platform sign-in yet), check this after step 6, when the Super Admins enrol their authenticators. |
 | P7 | The staging acceptance in §7 passed on the exact builds being released. | Release owner | Evidence attached to the release record. |
+| P8 | The role that owns the schema objects (the migration administrator) is a superuser, or is otherwise allowed to own functions that `SET plpgsql.variable_conflict` and bypasses `FORCE ROW LEVEL SECURITY`. | Database operator | Document scanning, the OCR pipeline and Outreach campaign registration depend on it, because their security-definer commands and triggers read row-level-secured tables as their owner. The rehearsal migrates as a superuser, and its non-superuser owner check runs only the additional suites, which do not cover these paths. Run locally on a copy with every function and table owned by a `NOSUPERUSER NOBYPASSRLS` role (§8), `schema.integration.sql` failed in turn at each of these, and passed in full once all of them were returned to a superuser owner:<br>• `ehr.append_document_scan_event` (`Document not found`);<br>• the `ocr.record_job_event` trigger (row-level security on `ocr.job_events`);<br>• `ocr.claim_worker_job` (`permission denied to set parameter "plpgsql.variable_conflict"`, set by 0015);<br>• `ocr.validate_job_write`, `ocr.complete_worker_job`, `ocr.validate_extraction_insert` and `ocr.fail_worker_job`;<br>• `ocr.validate_patient_confirmation`, whose wrong-patient check failed open because it compares with a document it cannot see. Under such an owner this path is unreachable, because claims already fail;<br>• `outreach.validate_registration_campaign_write` (`Exact Outreach campaign membership is required`).<br>The list covers what `schema.integration.sql` exercises; other definer paths may share the dependency. Before the release, confirm the owner's attributes as the migration administrator (`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`). On a managed service whose administrator is not a superuser, such as Amazon RDS, also confirm in the staging rehearsal (S1) that 0015 applies and that an OCR claim succeeds (S4b). The alternative is technical owners for these commands, which is a follow-up. The new `ocr.worker_queue_metrics()` depends on none of this. |
 
 ## 5. Migration order and lock windows
 
@@ -85,30 +98,34 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 7. **0074** has two effects:
    - It builds `consent_grants_request_idx` without `CONCURRENTLY`, under a `SHARE` lock on `identity.consent_grants`. New grants wait until the build finishes, that is, a patient's approval and a clinician's PIN access. Reads continue. Not measured; measure it with the others in S1.
    - It drops and recreates `identity.list_my_staff_access_requests(text)`, because its result type changes.
-8. If any estimate approaches 120 s, stop and re-plan before the release. 0072 cannot be edited or worked around in place: an index built beforehand under the same name makes 0072 fail. Do not raise the timeouts ad hoc.
-9. **Immediately after the migrations, run `npm run db:bootstrap`, then `npm run db:verify-roles`.**
+8. **0075** creates `ocr.worker_queue_metrics()` (no table lock) and the policy `ocr_outbox_staff_insert`. `CREATE POLICY` takes an `ACCESS EXCLUSIVE` lock on `ocr.outbox_events` for the catalog change only. It waits for in-flight OCR transactions on that table within the 5 s lock timeout. The bootstrap likewise recreates `ocr_jobs_queue_metrics_read` on `ocr.jobs` under a brief `ACCESS EXCLUSIVE` lock, as it already does for the outbox delivery policies.
+9. If any estimate approaches 120 s, stop and re-plan before the release. 0072 cannot be edited or worked around in place: an index built beforehand under the same name makes 0072 fail. Do not raise the timeouts ad hoc.
+10. **Immediately after the migrations, run `npm run db:bootstrap`, then `npm run db:verify-roles`.**
    - 0072 drops and recreates `audit.list_platform_events` with eleven arguments. Until the bootstrap grants `EXECUTE` on the new signature, any running Identity is refused on the platform audit list.
    - The bootstrap grants `EXECUTE` on `identity.list_my_staff_access_requests(text)` to the Identity runtime (D-Eminence/hid-system#26). Before that grant existed, the clinician list was refused (`403`) everywhere. 0074 recreates the function, so after 0074 the list is refused for every Identity build until the bootstrap runs.
    - The bootstrap grants `EXECUTE` on `auth.lock_account_sessions(uuid)` (0073) to the Identity runtime. A Stage 5B Identity running before this, or before 0073, fails with a database error (`5xx`) on every sign-out, every refresh of an expired session, an administrator's own-session revocation and refresh-token reuse; a reused family is then not revoked. Earlier Identity builds do not call it.
    - Between this step and step 6, and during a rolling Identity deploy, an earlier Identity runs against 0073. Its sign-out, expired refresh, refresh-reuse revocation and own-session revocation lock session rows before the account row, so each can deadlock with an administrator's revocation of the same account at the same moment. PostgreSQL cancels one of the two, which fails with an error and can be retried (§9). Keep that interval short.
+   - The bootstrap creates `hid_ocr_queue_metrics`, makes it the owner of `ocr.worker_queue_metrics()`, creates its policy and grants the OCR worker `EXECUTE` (0075). Until then a Stage 6 worker logs `ocr.queue.metrics_unavailable`, as every worker does today.
    - The bootstrap also runs the runtime-role assertions.
 
 ## 6. Deployment order
 
-1. Pass the pre-release checks P1–P7.
+1. Pass the pre-release checks P1–P8.
 2. Deploy the **admin console** (Health-id `main`). If the running Identity is Stage 2A or later, it keeps working with it (§3). If it is older, admin sign-in fails until step 6 whichever console runs; deploy the console with Identity instead.
 3. Take the backup (P2).
 4. Apply the **migrations** (§5).
 5. Run the **role bootstrap** and verify it (§5).
 6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`. This needs the infrastructure change in P3. A Stage 5B Identity must not start before steps 4 and 5 (0073 and its grant), and an Identity with the governed-access outcome mapping must not start before 0074 and the bootstrap.
 7. Deploy the **Pharmacy API**. This is independent of the other steps.
-8. Run the smoke checks:
+8. Deploy the **OCR API** and the **OCR worker** (Stage 6). The API is independent of the other steps. The worker reports queue metrics once steps 4 and 5 (0075 and its grant) are done.
+9. Run the smoke checks:
    - a Super Admin signs in with TOTP;
    - a high-risk action asks for step-up;
    - `GET /admin/audit/events?resourceType=facility` answers `200`;
    - `GET /admin/approvals` returns `{ items, nextCursor }`;
    - a clinician's `GET /identity/access-requests` answers `200`, and each item has `effectiveStatus`;
-   - CloudWatch shows no `MFA_UNAVAILABLE`.
+   - CloudWatch shows no `MFA_UNAVAILABLE`;
+   - once the OCR worker has claimed a job, its `ocr.job.claimed` logs carry `queueDepth` and `oldestQueueAgeSeconds`, and no `ocr.queue.metrics_unavailable` follows a claim. A worker logs neither while it claims nothing.
 
 ## 7. Staging acceptance
 
@@ -118,11 +135,12 @@ has been run, because no staging environment exists yet (Health-id
 
 | # | Test | Evidence |
 | --- | --- | --- |
-| S1 | Migration rehearsal on a restored staging snapshot. Restore it into an isolated database, then, as the migration administrator, run `db:plan`, `db:dry-run`, `db:migrate`, `db:bootstrap` and `db:verify-roles`. Run the SQL suites and the restore check of `docs/TUF-STAGING-MIGRATION.md`, timing 0067, 0069, 0072 and 0074. `scripts/tuf-staging-migration-rehearsal.mjs` is local and synthetic only: it builds its own cluster and cannot use a snapshot. | Command output, timings and restore result. |
+| S1 | Migration rehearsal on a restored staging snapshot. Restore it into an isolated database, then, as the migration administrator, run `db:plan`, `db:dry-run`, `db:migrate`, `db:bootstrap` and `db:verify-roles`. Run the SQL suites and the restore check of `docs/TUF-STAGING-MIGRATION.md`, timing 0067, 0069, 0072, 0074 and 0075. `scripts/tuf-staging-migration-rehearsal.mjs` is local and synthetic only: it builds its own cluster and cannot use a snapshot. | Command output, timings and restore result. |
 | S2 | `db:verify-roles` on staging. | Command output. |
 | S3 | The Identity runtime verifiers against staging Identity, especially `verify-platform-security-runtime.mjs`, `verify-platform-admin-runtime.mjs` and `verify-patient-safety-runtime.mjs`. | Verifier JSON. |
 | S4 | The browser checks of §8, by hand with real authenticators, on the staging console and API. Check 3 needs a confirmation older than five minutes: wait it out, or use a second session. | Screenshots and notes for each check. |
 | S4a | The governed-access loop in the staging provider and patient portals: a clinician requests access, the patient approves, the clinician sees **Access active** with its expiry, writes a clinical record, closes access (**Closed by you**, writes disabled), then requests again and the patient revokes (**Access revoked**). No browser run of these pages has been done; only component tests and the HTTP verifier (§8). | Screenshots and notes. |
+| S4b | The OCR pipeline on staging: create a job, let the worker extract it, validate, confirm the patient and publish. Confirm the outbox events, the patient-linked audit rows for `ocr.job.find`, `ocr.validation.list` and `ocr.publication.list`, the worker's `queueDepth` and `oldestQueueAgeSeconds`, and `OcrQueueAgeAlarm` datapoints. No OCR HTTP or worker run against a database has been done; the evidence is the unit, SQL and compiled-worker checks in §8. | Logs, audit rows and alarm history. |
 | S5 | Cross-origin preflights, only if staging serves the console from another origin. | `OPTIONS` responses. |
 | S6 | Rollback drill: redeploy the previous Identity build against the migrated staging database and sign in. | Notes. |
 
@@ -131,7 +149,7 @@ has been run, because no staging environment exists yet (Health-id
 All of this was run on 2026-10-09 against local synthetic data. It was run as
 the non-root `postgres` user, on a new local cluster
 (`/tmp/hid-tuf-migration.stage5`, migrated 0001 → 0072 and role-bootstrapped).
-Other local clusters were not touched.
+No other local cluster was touched. Later stages say which cluster they used.
 
 - **Unit tests:**
   - Identity 702/702. The new and updated tests (`refresh-revocation-reason.spec.ts`, `platform-session-end.spec.ts`, `config/cors.spec.ts`, `admin-contracts.spec.ts`) fail 36 of 103 against the `deb6fba` token service and CORS options. The 8 tests of a session ending during a refresh also fail on the first Stage 5 commit (`04b4903`), whose conflict path still recorded reuse.
@@ -193,6 +211,35 @@ Other local clusters were not touched.
   - Workspace gates passed (Identity 713/713).
   - Health-id: 399/399 tests and both builds passed. `GovernedAccess.test.tsx` has 12 tests, 4 of which fail on the first version of D-Eminence/Health-id#19.
   - **No browser run** of the provider or patient portal pages (S4a).
+- **Stage 6 (0075):** on the local cluster `/tmp/hid-tuf-migration.stage6`, migrated 0001 → 0075 and role-bootstrapped (twice, to check the bootstrap is repeatable), and in the synthetic rehearsal of the branch. The rehearsal ran 0028 → 0075 with 25 additional suites, also under the non-superuser definer owner, plus every runtime verifier and the restore check.
+  - `ocr-read-audit.spec.ts` has 21 tests:
+    - for each of the three reads: the event, its patient (the source document's, while the job's own `patient_id` is null), its details, one transaction shared with the read, ordering after authorization, failing closed when the audit write fails, and no event when unauthorized or when no job exists;
+    - every other OCR API job event names the canonical patient: read, extractions, retry, create, reuse, validation, confirmation, publication request, success and failure;
+    - a second confirmation of the same job version gets `409`.
+
+    16 of the 21 fail against the `main` OCR service; the other 5 check refusals that `main` already gets right. A mutant that writes the read event in a second transaction fails the transaction check.
+  - `ocr-queue-metrics-and-outbox.integration.sql` checks:
+    - the worker's aggregate equals a superuser count across two facilities, from a session naming a different facility;
+    - the worker cannot read `ocr.jobs`;
+    - six other roles cannot execute the command, and no other non-superuser role that does not inherit the worker holds `EXECUTE`;
+    - the owner can read no column but `status` and `queued_at`;
+    - visibility comes only from the exact policy;
+    - `hid_ocr_api_runtime` appends outbox events for its facility, and another facility is refused.
+
+    It passes on the branch and fails on `main` (`function ocr.worker_queue_metrics() does not exist`). Ten mutants each fail `runtime-roles.integration.sql`, and eight of them also fail the suite:
+    - no outbox insert policy;
+    - no metrics policy;
+    - a superuser function owner;
+    - worker `SELECT` on `ocr.jobs`;
+    - OCR runtime `EXECUTE`;
+    - full-table `SELECT` for the owner;
+    - owner `SELECT` on `document_id`;
+    - migration administrator `EXECUTE`;
+    - owner `UPDATE (status)`, caught by `runtime-roles` only;
+    - the owner made a member of `hid_ocr_runtime`, caught by `runtime-roles` only.
+  - Worker: `repository.spec.ts` and `database-privileges.spec.ts` check that the worker reads only through commands that `hid_ocr_worker` can execute. 3 of 4 fail on `main`.
+  - The compiled worker repository was run as a login that inherits `hid_ocr_worker`. It returned `{"queueDepth":2,"oldestQueueAgeSeconds":7211}` for two facilities. `main`'s query as the same login failed with `42501 permission denied for table jobs`.
+  - On a copy whose functions and tables are all owned by a `NOSUPERUSER NOBYPASSRLS` role (P8), the new suite passes. `schema.integration.sql` fails at each function listed in P8, one by one, and passes once those functions are returned to a superuser owner.
 - **Not run:** staging or production anything (§7). The browser run uses the backend's own TOTP clock seam to issue codes, not a real authenticator app.
 
 To reproduce, run as the owner of a local cluster migrated to 0073 and role-bootstrapped (Stage 5B Identity calls `auth.lock_account_sessions` on sign-out and expiry; a cluster left at 0072 needs `db:migrate` and `db:bootstrap` again) (`services/ehr-api` `db:migrate` and `db:bootstrap`). The harness defaults to the database `hid_rehearsal`, the superuser `hid_rehearsal_admin` and ports 4010 and 4011. Change them with `HID_E2E_TEMPLATE_DB`, `HID_E2E_DB_SUPERUSER`, `HID_E2E_API_PORT` and `HID_E2E_CONTROL_PORT`; see the script headers. Stop `server.mjs` with Ctrl-C or SIGTERM, which drops its database copy.
@@ -233,9 +280,18 @@ To reproduce, run as the owner of a local cluster migrated to 0073 and role-boot
   - **Do not roll the console back below Stage 4B while Identity is at Stage 4A or later (§3).**
 - **Identity after 0073:** Stage 5 and earlier builds run unchanged. The two admin commands keep their contracts, and only Stage 5B calls the new helper. Rolling Identity back to Stage 5 removes the lock from the reuse, own-session, sign-out and expiry paths. The two admin revocations keep it, because it is in the database. With that combination, any of those four paths at the same moment as an administrator's revocation of the same account can deadlock. PostgreSQL then cancels one of the two. Either the sign-out or refresh fails with a `5xx` (reproduced locally, §8), or the administrator's revocation fails and must be retried. Prefer rolling forward.
 - **Identity after 0074:** once the bootstrap has run, earlier builds keep working (§3); roll Identity back freely. The new index and the new result columns stay. Rolling back the Health-id portal only hides the outcomes.
+- **OCR after 0075:** roll the OCR API and worker back freely. Earlier workers lose the metrics again; earlier APIs write the earlier, possibly unlinked, events. The function, the role and both policies stay. Removing the outbox insert policy would stop patient confirmation and publication again.
 - **Refresh-event change:** this is code only. Rolling back Identity brings back the old misclassification and nothing else. Existing `refresh`/`denied` events remain valid rows.
 - **MFA key:** if `MFA_SECRET_KEY_B64` is lost, every enrolled authenticator must be re-enrolled. Store it with the same care as the field-encryption keys.
 - **Lockout:** if every Super Admin is locked out (lost authenticators and recovery codes), recovery needs the documented break-glass procedure. That procedure is not built yet; see the product decisions in `PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §9. Keep two independent Super Admins with stored recovery codes.
+
+**Known limits of Stage 6:**
+- Queue metrics are emitted with each claim. A worker that claims nothing (stopped, stalled, wrong provider, ineligible documents) emits none, and `treatMissingData` is `NOT_BREACHING`. So `OcrQueueAgeAlarm` cannot detect a stopped worker, and `OcrDrainRateAlarm` cannot breach. Fixing this needs two changes, both out of scope here:
+  - an OCR worker change to log a separate, periodic queue-metrics event from `ocr.worker_queue_metrics()` (it cannot reuse `ocr.job.claimed`, whose `claimedJobs` feeds the throughput metric);
+  - matching metric filters in `infra/aws`.
+- The OCR worker's own database audit events (`ocr.worker.claim`, `ocr.worker.complete`, `ocr.worker.fail`, `ocr.worker.lease_recovered`) still carry `ocr.jobs.patient_id`, so for a job created without a patient they remain unlinked.
+- The age is time since the earliest `queued_at`, as before. A job retried by the worker keeps its first `queued_at`, so the age includes earlier attempts and back-off.
+- Replays of idempotent OCR writes return the stored result without a new read event; the original write event remains.
 
 **Known pre-existing lock-order hazard (not changed by 0073):** approving a platform MFA reset locks the target's account row and then its authenticator. A sign-in or step-up of that account at the same moment locks the authenticator, then the account through its session event. The two can deadlock, and PostgreSQL then cancels one. The fix is to lock the account first in the MFA sign-in, step-up, recovery-code and enrolment paths. That is a follow-up.
 

@@ -71,6 +71,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0072_platform_admin_contract_gaps.sql` | Target filter (`resource_type`/`resource_id`) on `audit.list_platform_events` (dropped and recreated with eleven arguments; the role bootstrap grants the new signature) and its `audit_resource_uuid_sequence_idx` index (audit inserts wait while it builds); `identity.admin_transition_facility` counts the platform-session reachable Super Admins (same signature); null-safe `auth.other_reachable_super_admins`. Release the Identity API of this stage with the Health-id Stage 4B admin console (`PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §7); the release order, index-build window and checks are in `PHASE_4_STAGE_5_RELEASE_READINESS.md` |
 | `database/migrations/0073_session_revocation_serialization.sql` | `auth.admin_revoke_account_sessions` and `auth.admin_revoke_session_family` lock the target and acting administrator's account rows (`FOR UPDATE`, in account order) before revoking (same signatures and results), and the new `auth.lock_account_sessions(uuid)` gives the Identity API the same lock. A revocation then waits for a refresh rotation in flight and also revokes the session that rotation created. No table lock; the role bootstrap grants the helper to the Identity runtime. Apply 0073 and the bootstrap before a Stage 5B Identity starts (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, §9) |
 | `database/migrations/0074_staff_access_request_outcome.sql` | `identity.list_my_staff_access_requests` reports the outcome of each approval: `consent_grant_id`, `grant_expires_at`, `effective_status` (`active`, `expired`, `closed`, `revoked`, or the request status) and `authorization_method`. The status filter also matches these outcomes. The result type changes, so the function is dropped and recreated: until the role bootstrap restores its `EXECUTE` grant, every Identity build is refused the clinician list (`403`), so run the bootstrap immediately after the migrations, and before an Identity build that reads the new columns (earlier builds keep working after it). `consent_grants_request_idx` is built without `CONCURRENTLY` under a `SHARE` lock on `identity.consent_grants`: new grants wait while it builds, reads continue. Time it in the staging rehearsal with the table's size |
+| `database/migrations/0075_ocr_queue_metrics_and_outbox_insert.sql` | `ocr.worker_queue_metrics()` returns the OCR queue depth and the oldest queued age, aggregates only, for the OCR worker, which has no table privileges and could not read them before (`42501`, logged as `ocr.queue.metrics_unavailable`). The role bootstrap grants `EXECUTE` to `hid_ocr_worker` only and makes the new non-login role `hid_ocr_queue_metrics` its owner, which reads only `ocr.jobs.status` and `queued_at`, across facilities, through the exact policy `ocr_jobs_queue_metrics_read`. A worker of this release that runs before the bootstrap keeps logging the warning and claims jobs as before. `ocr_outbox_staff_insert` lets the OCR API runtime append outbox events for the current facility: without it, `FORCE ROW LEVEL SECURITY` refused every insert, so patient confirmation and every publication request, success and failure failed. `CREATE POLICY` holds an `ACCESS EXCLUSIVE` lock on `ocr.outbox_events` only for the catalog change; it waits for in-flight OCR transactions within the 5 s lock timeout |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
@@ -221,7 +222,7 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0074`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0075`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
@@ -309,7 +310,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0074`, runtime grants, RLS and purpose/deny behavior.
+6. Verify `0075`, runtime grants, RLS and purpose/deny behavior.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.

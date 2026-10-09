@@ -47,12 +47,13 @@ export class PostgresWorkerRepository implements WorkerRepository {
     });
   }
 
+  // hid_ocr_worker has no table privileges; queue depth and age come only from
+  // the aggregate-only command (0075), whose technical owner reads ocr.jobs.
   async metrics(): Promise<Readonly<{ queueDepth: number; oldestQueueAgeSeconds: number }>> {
     const result = await this.pool.query<QueueMetricsRow>(
-      `select count(*)::text as queue_depth,
-              coalesce(extract(epoch from (clock_timestamp() - min(queued_at))), 0)::bigint::text
-                as oldest_queue_age_seconds
-         from ocr.jobs where status = 'queued'`,
+      `select queue_depth::text as queue_depth,
+              oldest_queue_age_seconds::text as oldest_queue_age_seconds
+         from ocr.worker_queue_metrics()`,
     );
     const row = result.rows[0];
     if (!row) throw new Error('OCR queue metrics returned no row');

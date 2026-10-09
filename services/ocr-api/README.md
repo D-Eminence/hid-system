@@ -18,7 +18,7 @@ audience-bound workload JWTs.
 
 The OCR extraction worker remains a distinct process at
 `services/ocr-worker`. It uses only the lease-bound `hid_ocr_worker`
-database commands and can start without this API or the EHR API. Likewise this
+database commands and the aggregate-only queue metrics command and can start without this API or the EHR API. Likewise this
 API can start without the worker. Provider selection, object reads, Textract
 polling, leases, retries, and immutable extraction writes remain worker-owned.
 

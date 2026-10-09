@@ -161,7 +161,7 @@ The reviewed role model is:
 | `hid_audit_writer` | Semantic audit append | `INSERT` on `audit.events` only | No audit `SELECT`, `UPDATE`, or `DELETE`. |
 | `hid_document_scanner` | Scanner callback command | None | Executes only the security-definer scan append function. |
 | `hid_ocr_runtime` | OCR persistence | None | OCR-owned jobs, evidence, publications, and outbox only; inherited by the OCR API aggregate. |
-| `hid_ocr_worker` | OCR asynchronous commands | None | No direct table access; lease/token-bound claim, renewal, extraction-result, and safe-failure functions only. |
+| `hid_ocr_worker` | OCR asynchronous commands | None | No direct table access; lease/token-bound claim, renewal, extraction-result, and safe-failure functions, plus the aggregate-only queue metrics function (0075). |
 | `hid_lab_runtime` | Lab-owned persistence | None | No Identity, EHR, OCR, or Pharmacy mutation privilege. |
 | `hid_lab_api_runtime` | Extracted Lab API aggregate | None | Composes Lab persistence and append-only audit only. |
 | `hid_pharmacy_runtime` | Pharmacy work, dispense, reversal, import, and outbox persistence | None | No Identity, EHR, Lab, or OCR mutation privilege. |
@@ -170,6 +170,7 @@ The reviewed role model is:
 | `hid_outreach_api_runtime` | Extracted Outreach API aggregate | None | Composes Outreach persistence and append-only audit only. |
 | `hid_event_dispatcher` | Event transport command surface | None | No direct table access; executes only lease-bound claim/result/status functions. |
 | `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. |
+| `hid_ocr_queue_metrics` | Technical security-definer owner | None | Never inherited; owns `ocr.worker_queue_metrics()` and reads only `ocr.jobs.status` and `queued_at` through one exact RLS policy (0075). |
 | `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. |
 | `hid_schema_test_runtime` | Rollback-only schema/RLS acceptance | Test-only explicit grants | NOLOGIN and never used by application processes. |
 
@@ -1280,3 +1281,49 @@ a reachable Super Admin to be suspendable.
 - `staff-access-request-outcome.integration.sql` covers each outcome, the
   filter, a colleague's isolation and a member without `identity.consent.write`,
   as `hid_identity_api_runtime`.
+
+## OCR queue metrics, OCR read audit and OCR outbox inserts (0075)
+
+`0075_ocr_queue_metrics_and_outbox_insert.sql` (Phase 4 Stage 6):
+
+- With every claim, the OCR worker logs queue depth and the age of the oldest
+  queued job (`ocr.job.claimed`, read by the `OcrQueueAgeAlarm` and QueueDepth
+  metric filters). It read `ocr.jobs` directly, which `hid_ocr_worker` may not
+  do, so the read was always refused and only
+  `ocr.queue.metrics_unavailable` was logged. `ocr.worker_queue_metrics()`
+  returns the two aggregates with the same definitions as before: queued rows
+  across every facility, and the time since the earliest `queued_at` (worker
+  retries keep the original `queued_at`; an API retry resets it).
+- The function is `SECURITY DEFINER` with `search_path = pg_catalog, ocr,
+  pg_temp`, and `PUBLIC` cannot execute it. `runtime-grants.sql` grants
+  `EXECUTE` to `hid_ocr_worker` only and makes `hid_ocr_queue_metrics` its
+  owner. That role is `NOLOGIN NOINHERIT NOBYPASSRLS`, is never granted to
+  another role, and holds only `USAGE` on schema `ocr` and `SELECT` on
+  `ocr.jobs (status, queued_at)`. It sees every facility's jobs through the
+  policy `ocr_jobs_queue_metrics_read ... for select to hid_ocr_queue_metrics
+  using (true)`, so the function does not depend on its owner bypassing
+  `FORCE ROW LEVEL SECURITY`. This is the pattern of
+  `integration.event_delivery_status()` and `hid_event_delivery_commands`.
+- `ocr.outbox_events` had only `SELECT` policies under `FORCE ROW LEVEL
+  SECURITY`, so every insert by the OCR API runtime was refused. Patient
+  confirmation and every publication request, success and failure append an
+  outbox event in the same transaction, so all of them failed under the
+  least-privilege role. `ocr_outbox_staff_insert` admits rows for the current
+  facility only, like the existing extraction and validation insert policies.
+- The OCR API now records a patient-linked audit event, in the same transaction
+  as the read and after authorization, for the job lookup by document
+  (`ocr.job.find`), the validation list (`ocr.validation.list`) and the
+  publication list (`ocr.publication.list`). Every OCR API job event names the
+  source document's patient, which authorization resolves, rather than the
+  job's own `patient_id`, which stays null for jobs created without one.
+  Details hold identifiers and counts only. A document with no OCR job
+  discloses nothing and is recorded only by the request audit. The worker's
+  own database audit events (`ocr.worker.*`) still carry `ocr.jobs.patient_id`.
+- The `OcrPatientConfirmed` outbox event is keyed by the job version, which a
+  confirmation does not change. A second confirmation of the same job version is
+  refused with `409 OCR_PATIENT_ALREADY_CONFIRMED`.
+- `ocr-queue-metrics-and-outbox.integration.sql` covers the worker's aggregate
+  across facilities, the refusal of six other roles and of any other non-superuser
+  role that does not inherit the worker, the owner's exact column limit,
+  that visibility comes only from the exact policy, and same-facility outbox
+  inserts by `hid_ocr_api_runtime` (another facility is refused).
