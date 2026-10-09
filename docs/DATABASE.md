@@ -1405,5 +1405,9 @@ The guards (7B):
   rehearsal it fails with 12, because the guard cannot read the source document
   and also accepted the wrong patient.
 - Removing any one comparison predicate of either guard makes it fail. The
-  explicit `IS NULL` refusals are redundant with `IS DISTINCT FROM`, which
-  already refuses a NULL operand, and only state the intent.
+  explicit `IS NULL` refusals are redundant in outcome only because every
+  compared column of the new row is `NOT NULL`. `IS DISTINCT FROM` refuses a
+  NULL against a value, but a NULL against a NULL is not distinct; the column's
+  `NOT NULL` constraint then refuses the row (`23502`, not the guard's
+  `23514`). A guard that compares a nullable column needs the explicit
+  refusal.

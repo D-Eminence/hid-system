@@ -1638,11 +1638,15 @@ Decision (proposed):
    trigger is created.
 
    **Scope.** These are the functions P8 found failing, the lease renewal, the
-   test wrappers and the guards 0076 changed. They are not all of them: 65 of
-   the 175 definer functions the migration administrator owns name a
-   row-level-secured table. Most are outside these schemas; examples are
-   `lab.validate_imported_evidence`, `platform.control_enabled`,
-   `outreach.registration_campaign_member` and `ehr.capture_record_version`.
+   test wrappers, the guards 0076 changed and `ocr.validate_publication_write`,
+   the remaining OCR insert guard. They are not all of them: of the 175 definer
+   functions the migration administrator owns, 65 name a table with `FORCE ROW
+   LEVEL SECURITY` and 101 name any table with row-level security. The other
+   36 name only identity tables without `FORCE`, whose policies do not apply to
+   their owner but would apply to a technical owner. Most of the 101 are
+   outside these schemas; examples are `lab.validate_imported_evidence`,
+   `platform.control_enabled`, `outreach.registration_campaign_member` and
+   `ehr.capture_record_version`.
    They work under a non-bypass owner only where the calling session's own
    policies admit the rows they read. Before the superuser requirement is
    dropped, each must be checked, by running `schema.integration.sql` and every
