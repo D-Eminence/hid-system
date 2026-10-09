@@ -1444,3 +1444,49 @@ Consequences:
   closed (503) and nothing else is affected; and
 - Super Admin revocation remains one step (with step-up); whether it also needs
   two-person approval is an open policy decision.
+
+
+# ADR-039: OCR Evidence Reads Are Patient-Linked; Worker Metrics Use a Technical Owner
+
+Status: Accepted for source implementation (Phase 4 Stage 6)
+
+Date: 2026-10-09
+
+Decision:
+
+Every OCR API read that returns job-linked evidence writes a semantic audit
+event in the read transaction, after authorization and before the response:
+the job lookup by document (`ocr.job.find`), the job (`ocr.job.read`), its
+extractions (`ocr.extraction.list`), validations (`ocr.validation.list`) and
+publications (`ocr.publication.list`). A failed audit write fails the read.
+Every OCR job event names the patient of the source document, which
+authorization resolves, not the job's own `patient_id`, which stays null for a
+job created without one. Event details carry identifiers and counts only. A
+lookup that finds no job discloses nothing and is recorded only by the request
+audit.
+
+`hid_ocr_worker` keeps no table privileges. It reads queue depth and the oldest
+queued age only through `ocr.worker_queue_metrics()` (0075), which returns two
+aggregates. The function's owner is `hid_ocr_queue_metrics`, a non-login,
+non-inherited, non-bypass technical role that reads only `ocr.jobs.status` and
+`queued_at` through one exact policy, as `hid_event_delivery_commands` does for
+outboxes. The function therefore works whether or not the schema owner
+bypasses `FORCE ROW LEVEL SECURITY`.
+
+The OCR API appends outbox events for its own facility under an explicit insert
+policy; `FORCE ROW LEVEL SECURITY` had refused every such insert.
+
+Consequences:
+
+- OCR job, validation, publication and extraction reads can be traced to the
+  patient in `audit.events`, including for jobs created without a patient;
+- the queue-age signal is emitted with each claim. A worker that claims nothing
+  emits no metrics, so `OcrQueueAgeAlarm` cannot detect a stopped or stalled
+  worker, and `OcrDrainRateAlarm` cannot breach, until metrics are also emitted
+  on a timer (an infrastructure follow-up);
+- the existing OCR worker commands (claim, renew, complete, fail) and the OCR
+  job triggers still read `FORCE ROW LEVEL SECURITY` tables as their owner. They
+  work only while that owner bypasses row-level security; moving them to
+  technical owners is a follow-up; and
+- the replay paths of idempotent OCR writes return the stored result without a
+  new read event; the original write event remains.

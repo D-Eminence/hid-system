@@ -149,7 +149,8 @@ ALB request count; their p95 latency and aggregate 5xx rates are alarms rather
 than high-cardinality scaling dimensions. Notification Worker scales on SQS
 visible backlog with oldest age/drain visibility. OCR Worker scales on PHI-free
 queue depth and emits age, claims, processed pages, retries, failed pages and
-duplicates avoided. Event Dispatcher scales on PHI-free outbox depth and emits
+duplicates avoided. Queue depth and age are logged with each claim (from
+migration 0075), so a worker that claims nothing emits neither. Event Dispatcher scales on PHI-free outbox depth and emits
 oldest age/drain rate without weakening at-least-once delivery.
 
 Typed database pool sizes are part of this contract. Synthesis sums each

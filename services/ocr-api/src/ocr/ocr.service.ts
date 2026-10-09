@@ -151,7 +151,7 @@ export class OcrService {
       const reusableJob = reusable.rows[0];
       if (reusableJob) {
         await this.audit.recordWithClient(client,
-          this.auditEvent(context, 'ocr.job.reuse', reusableJob));
+          this.auditEvent(context, 'ocr.job.reuse', reusableJob, source.patientId));
         this.logger.log(JSON.stringify({ event: 'ocr.job.duplicate_avoided', duplicateAvoided: 1,
           jobId: reusableJob.id, correlationId: context.correlationId,
           provider: input.provider, processingContract: OCR_PROCESSING_CONTRACT }));
@@ -175,7 +175,7 @@ export class OcrService {
       );
       const row = inserted.rows[0];
       if (!row) throw new DomainProblem(503, 'OCR_JOB_NOT_CREATED', 'OCR job could not be created');
-      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.job.create', row));
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.job.create', row, source.patientId));
       return this.project(row);
     });
   }
@@ -183,8 +183,8 @@ export class OcrService {
   async getJob(jobId: string, context: DataAccessContext) {
     return this.database.withTransaction(context, async (client) => {
       const row = await this.findJob(client, jobId);
-      await this.authorizeJob(row, context, 'read_records');
-      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.job.read', row));
+      const source = await this.authorizeJob(row, context, 'read_records');
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.job.read', row, source.patientId));
       return this.project(row);
     });
   }
@@ -194,8 +194,12 @@ export class OcrService {
       const result = await client.query<OcrJobRow>(
         `${JOB_SELECT} where document_id=$1 order by created_at desc,id desc limit 1`, [documentId]);
       const row = result.rows[0];
+      // No job means nothing was disclosed and no patient is known; the
+      // request audit records the lookup itself.
       if (!row) return { job: null };
-      await this.authorizeJob(row, context, 'read_records');
+      const source = await this.authorizeJob(row, context, 'read_records');
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.job.find', row,
+        source.patientId, { documentId }));
       return { job: this.project(row) };
     });
   }
@@ -203,7 +207,7 @@ export class OcrService {
   async listExtractions(jobId: string, context: DataAccessContext) {
     return this.database.withTransaction(context, async (client) => {
       const job = await this.findJob(client, jobId);
-      await this.authorizeJob(job, context, 'read_records');
+      const source = await this.authorizeJob(job, context, 'read_records');
       const result = await client.query(
         `select id::text as "id", extraction_version as "version", attempt_no as "attempt",
                 provider, provider_model as "providerModel", raw_text as "rawText",
@@ -211,7 +215,7 @@ export class OcrService {
            from ocr.extractions where job_id = $1 order by extraction_version`,
         [jobId],
       );
-      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.extraction.list', job));
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.extraction.list', job, source.patientId));
       return { items: result.rows };
     });
   }
@@ -219,7 +223,7 @@ export class OcrService {
   async retry(jobId: string, input: RetryOcrJobDto, context: DataAccessContext) {
     return this.database.withTransaction(context, async (client) => {
       const current = await this.findJob(client, jobId, true);
-      await this.authorizeJob(current, context, 'write_records');
+      const source = await this.authorizeJob(current, context, 'write_records');
       const result = await client.query<OcrJobRow>(
         `update ocr.jobs set status = 'queued', queued_at = clock_timestamp(),
                 next_attempt_at = clock_timestamp(), started_at = null,
@@ -233,7 +237,8 @@ export class OcrService {
       );
       const row = result.rows[0];
       if (!row) throw new DomainProblem(412, 'OCR_VERSION_CONFLICT', 'OCR job is not retryable at the expected version');
-      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.job.retry', row, { reason: input.reason }));
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.job.retry', row, source.patientId,
+        { reason: input.reason }));
       return this.project(row);
     });
   }
@@ -244,7 +249,7 @@ export class OcrService {
     const digest = requestDigest('ocr.validation.create', { jobId, ...input });
     return this.database.withTransaction(context, async (client) => {
       const job = await this.findJob(client, jobId, true);
-      await this.authorizeJob(job, context, 'write_records');
+      const source = await this.authorizeJob(job, context, 'write_records');
       const replayResult = await client.query<ValidationRow>(
         `select validation.*, job.document_id::text, job.patient_id::text,
                 job.status as job_status
@@ -296,7 +301,7 @@ export class OcrService {
       if (!row) throw new DomainProblem(412, 'OCR_VERSION_CONFLICT', 'OCR job changed during validation');
       await this.audit.recordWithClient(client, this.auditEvent(context,
         input.disposition === 'validated' ? 'ocr.validation.accept' : 'ocr.validation.reject', row,
-        { validationId, validationVersion, targetDomain: input.targetDomain }));
+        source.patientId, { validationId, validationVersion, targetDomain: input.targetDomain }));
       return { ...this.project(row), validationId, validationVersion,
         disposition: input.disposition, targetDomain: input.targetDomain, candidateType: input.candidateType };
     }, { isolationLevel: 'SERIALIZABLE' });
@@ -305,12 +310,14 @@ export class OcrService {
   async listValidations(jobId: string, context: DataAccessContext) {
     return this.database.withTransaction(context, async (client) => {
       const job = await this.findJob(client, jobId);
-      await this.authorizeJob(job, context, 'read_records');
+      const source = await this.authorizeJob(job, context, 'read_records');
       const result = await client.query<ValidationRow>(
         `select validation.*, job.document_id::text, job.patient_id::text,
                 job.status as job_status
            from ocr.validations validation join ocr.jobs job on job.id = validation.job_id
           where validation.job_id = $1 order by validation.validation_version`, [jobId]);
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.validation.list', job,
+        source.patientId, { validationCount: result.rows.length }));
       return { items: result.rows.map((row) => this.projectValidation(row)) };
     });
   }
@@ -355,7 +362,7 @@ export class OcrService {
       const confirmation = inserted.rows[0];
       if (!confirmation) throw new DomainProblem(503, 'OCR_CONFIRMATION_NOT_CREATED', 'Patient confirmation could not be created');
       await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.patient.confirm', job,
-        { confirmationId: confirmation.id, method: input.method }));
+        source.patientId, { confirmationId: confirmation.id, method: input.method }));
       await this.appendOutbox(client, job, 'OcrPatientConfirmed', Number(job.row_version),
         { confirmationId: confirmation.id });
       return this.projectConfirmation(confirmation);
@@ -369,7 +376,7 @@ export class OcrService {
     const publication = await this.database.withTransaction(context, async (client) => {
       const validation = await this.findValidation(client, validationId, true);
       const job = await this.findJob(client, validation.job_id, true);
-      await this.authorizeJob(job, context, 'write_records');
+      const source = await this.authorizeJob(job, context, 'write_records');
       this.assertPublicationRequest(validation, input);
       const confirmation = await this.findConfirmation(client, input.patientConfirmationId, validation.job_id);
       const replayResult = await client.query<PublicationRow>(
@@ -397,7 +404,7 @@ export class OcrService {
       const created = inserted.rows[0];
       if (!created) throw new DomainProblem(503, 'OCR_PUBLICATION_NOT_CREATED', 'Publication command could not be created');
       await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.request', job,
-        { publicationId: created.id, validationId, targetDomain: validation.target_domain }));
+        source.patientId, { publicationId: created.id, validationId, targetDomain: validation.target_domain }));
       await this.appendOutbox(client, job, 'OcrPublicationRequested', Number(created.row_version),
         { publicationId: created.id, validationId });
       return created;
@@ -414,9 +421,11 @@ export class OcrService {
     return this.database.withTransaction(context, async (client) => {
       const validation = await this.findValidation(client, validationId);
       const job = await this.findJob(client, validation.job_id);
-      await this.authorizeJob(job, context, 'read_records');
+      const source = await this.authorizeJob(job, context, 'read_records');
       const result = await client.query<PublicationRow>(
         `select * from ocr.publications where validation_id=$1 order by requested_at`, [validationId]);
+      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.list', job,
+        source.patientId, { validationId, publicationCount: result.rows.length }));
       return { items: result.rows.map((row) => this.projectPublication(row)) };
     });
   }
@@ -447,8 +456,8 @@ export class OcrService {
       const evidence = await this.database.withTransaction(context, async (client) => {
         const validation = await this.findValidation(client, claimed.validation_id);
         const job = await this.findJob(client, claimed.job_id);
-        await this.authorizeJob(job, context, 'write_records');
-        return { validation, job };
+        const source = await this.authorizeJob(job, context, 'write_records');
+        return { validation, job, patientId: source.patientId };
       });
       let resourceType: string;
       let resourceId: string;
@@ -502,6 +511,7 @@ export class OcrService {
         const published = result.rows[0];
         if (!published) throw new DomainProblem(409, 'OCR_PUBLICATION_CLAIM_LOST', 'Publication ownership expired before completion');
         await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.succeed', evidence.job,
+          evidence.patientId,
           { publicationId: published.id, targetResourceType: resourceType, targetResourceId: resourceId }));
         await this.appendOutbox(client, evidence.job, 'OcrPublicationSucceeded', Number(published.row_version),
           { publicationId: published.id, targetResourceType: resourceType, targetResourceId: resourceId });
@@ -524,6 +534,7 @@ export class OcrService {
         if (failed) {
           const job = await this.findJob(client, failed.job_id);
           await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.fail', job,
+            failed.patient_id,
             { publicationId: failed.id, failureCode: failed.failure_code, retryable: !terminal }));
           await this.appendOutbox(client, job, 'OcrPublicationFailed', Number(failed.row_version),
             { publicationId: failed.id, failureCode: failed.failure_code, retryable: !terminal });
@@ -652,10 +663,14 @@ export class OcrService {
     return source;
   }
 
+  // Every OCR job event names the canonical patient of the source document:
+  // authorizeJob's source.patientId, or a publication's confirmed patient.
+  // ocr.jobs.patient_id stays null when a job was created without one.
   private auditEvent(
     context: DataAccessContext,
     action: string,
     row: OcrJobRow,
+    patientId: string,
     details?: Readonly<Record<string, unknown>>,
   ) {
     return {
@@ -666,7 +681,7 @@ export class OcrService {
       actorMembershipId: context.membershipId,
       organizationId: context.actor.facility?.organizationId,
       facilityId: context.facilityId,
-      patientId: row.patient_id ?? undefined,
+      patientId,
       action,
       resourceType: 'ocr-job',
       resourceId: row.id,

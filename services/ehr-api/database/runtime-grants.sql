@@ -61,6 +61,9 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'hid_event_delivery_commands') then
     create role hid_event_delivery_commands nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
   end if;
+  if not exists (select 1 from pg_roles where rolname = 'hid_ocr_queue_metrics') then
+    create role hid_ocr_queue_metrics nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
+  end if;
   if not exists (select 1 from pg_roles where rolname = 'hid_event_dispatcher') then
     create role hid_event_dispatcher nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
   end if;
@@ -97,6 +100,7 @@ alter role hid_outreach_api_runtime nologin nosuperuser nocreatedb nocreaterole 
 alter role hid_migration_admin nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
 alter role hid_schema_test_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
 alter role hid_event_delivery_commands nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
+alter role hid_ocr_queue_metrics nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
 alter role hid_event_dispatcher nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
 alter role hid_notification_runtime nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
 alter role hid_notification_api_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
@@ -140,6 +144,8 @@ comment on role hid_schema_test_runtime is
   'Test-only non-login role for transactional schema and RLS acceptance tests.';
 comment on role hid_event_delivery_commands is
   'Technical owner for narrowly scoped security-definer delivery and inbox commands; never granted to a runtime login.';
+comment on role hid_ocr_queue_metrics is
+  'Technical owner of the aggregate-only OCR queue metrics command; reads OCR job status and queue time only; never granted to a runtime login.';
 comment on role hid_event_dispatcher is
   'Transport dispatcher command role with no direct domain or integration table privileges.';
 comment on role hid_notification_runtime is
@@ -240,6 +246,11 @@ revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, 
 revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_delivery_commands;
 revoke all privileges on all sequences in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_delivery_commands;
 revoke all privileges on all functions in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_delivery_commands;
+
+revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_ocr_queue_metrics;
+revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_ocr_queue_metrics;
+revoke all privileges on all sequences in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_ocr_queue_metrics;
+revoke all privileges on all functions in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_ocr_queue_metrics;
 
 revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_dispatcher;
 revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_dispatcher;
@@ -346,6 +357,11 @@ revoke hid_notification_runtime, hid_notification_api_runtime, hid_notification_
   hid_api_runtime, hid_migration_admin, hid_schema_test_runtime,
   hid_event_dispatcher, hid_event_delivery_commands;
 grant hid_notification_runtime to hid_notification_api_runtime, hid_notification_worker;
+revoke hid_ocr_queue_metrics from hid_ocr_worker, hid_ocr_runtime, hid_ocr_api_runtime,
+  hid_api_runtime, hid_identity_api_runtime, hid_ehr_api_runtime, hid_lab_api_runtime,
+  hid_pharmacy_api_runtime, hid_outreach_api_runtime, hid_schema_test_runtime,
+  hid_migration_admin, hid_event_dispatcher, hid_event_delivery_commands,
+  hid_notification_api_runtime, hid_notification_worker;
 
 -- Identity owns canonical patients, registration, consent, workforce context,
 -- and the local authentication persistence used by the current Identity API.
@@ -454,6 +470,19 @@ grant execute on function ocr.claim_worker_job(text, integer),
   ocr.renew_worker_claim(uuid, uuid, integer),
   ocr.complete_worker_job(uuid, uuid, text, text, text, text, text, jsonb, numeric, jsonb, text),
   ocr.fail_worker_job(uuid, uuid, text, text, boolean, integer, text) to hid_ocr_worker;
+
+-- Phase 4 Stage 6 (0075): the worker reads queue depth and age only through
+-- this aggregate command. Its technical owner can read job status and queue
+-- time across facilities through one exact policy, so the command does not
+-- depend on its owner bypassing FORCE ROW LEVEL SECURITY. The owner is never
+-- granted to a login, and the worker still has no table privileges.
+drop policy if exists ocr_jobs_queue_metrics_read on ocr.jobs;
+create policy ocr_jobs_queue_metrics_read on ocr.jobs
+  for select to hid_ocr_queue_metrics using (true);
+grant usage on schema ocr to hid_ocr_queue_metrics;
+grant select (status, queued_at) on ocr.jobs to hid_ocr_queue_metrics;
+alter function ocr.worker_queue_metrics() owner to hid_ocr_queue_metrics;
+grant execute on function ocr.worker_queue_metrics() to hid_ocr_worker;
 
 grant usage on schema platform,identity,lab to hid_lab_runtime;
 grant select,insert on lab.imported_evidence,lab.imported_observations,lab.work_items,
@@ -720,6 +749,7 @@ revoke all on function auth.account_id_for_subject(text),
   ocr.renew_worker_claim(uuid, uuid, integer),
   ocr.complete_worker_job(uuid, uuid, text, text, text, text, text, jsonb, numeric, jsonb, text),
   ocr.fail_worker_job(uuid, uuid, text, text, boolean, integer, text),
+  ocr.worker_queue_metrics(),
   ehr.append_document_scan_event(uuid, text, text, text, text, text, text, text, text, text),
   lab.context_allows(uuid,uuid,text),
   pharmacy.context_allows(uuid,uuid,text),

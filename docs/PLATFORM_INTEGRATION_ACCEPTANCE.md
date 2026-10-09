@@ -150,9 +150,10 @@ Pharmacy-to-Lab, and Identity-to-EHR wrong-service routes also returned 404.
 | `hid_lab_api_runtime` | `hid_lab_runtime`, `hid_audit_writer` | Identity, EHR, OCR, Pharmacy, Outreach |
 | `hid_pharmacy_api_runtime` | `hid_pharmacy_runtime`, `hid_audit_writer` | Identity, EHR, OCR, Lab, Outreach |
 | `hid_outreach_api_runtime` | `hid_outreach_runtime`, `hid_audit_writer` | Identity, EHR, OCR, Lab, Pharmacy |
-| `hid_ocr_worker` | No domain role | All tables; only exact lease-bound OCR functions |
+| `hid_ocr_worker` | No domain role | All tables; only exact lease-bound OCR functions and the aggregate-only queue metrics function (0075) |
 | `hid_event_dispatcher` | No domain role | All tables; only exact delivery claim/result/status functions |
 | `hid_event_delivery_commands` | Never inherited | Technical function owner; five domain outbox reads and `integration` state only |
+| `hid_ocr_queue_metrics` | Never inherited | Technical owner of `ocr.worker_queue_metrics()`; reads `ocr.jobs` status and queue time only |
 | `hid_api_runtime` | Nothing | Retired and privilege-free |
 
 The idempotent local bootstrap and assertion-only catalog verification passed.
