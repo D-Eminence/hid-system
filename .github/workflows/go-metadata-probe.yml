@@ -1,0 +1,42 @@
+# Temporary, read-only probe. Never merged; the branch is deleted after use.
+# Fetches the official Go release metadata and archive from go.dev so the
+# go1.26.9 linux/amd64 distribution SHA-256 and size can be recorded from an
+# authoritative source and checked against the downloaded bytes.
+name: Go release metadata probe (temporary)
+on:
+  push:
+    branches: [probe/go-1.26.9-metadata]
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Fetch official Go metadata and verify the archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 'https://go.dev/dl/?mode=json&include=all' -o dl.json
+          echo "DL_JSON_SHA256 $(sha256sum dl.json | cut -d' ' -f1)"
+          for version in go1.26.8 go1.26.9; do
+            file="${version}.linux-amd64.tar.gz"
+            python3 - "$version" "$file" <<'PY'
+          import json, sys
+          version, name = sys.argv[1], sys.argv[2]
+          releases = [r for r in json.load(open('dl.json')) if r['version'] == version]
+          assert len(releases) == 1, f'{version}: {len(releases)} releases'
+          files = [f for f in releases[0]['files'] if f['filename'] == name]
+          assert len(files) == 1, f'{name}: {len(files)} entries'
+          print('OFFICIAL_JSON_ENTRY', json.dumps(files[0], sort_keys=True))
+          print('OFFICIAL_RELEASE_STABLE', version, releases[0].get('stable'))
+          PY
+            curl -fsSL --proto '=https' --tlsv1.2 "https://dl.google.com/go/${file}.sha256" -o "${file}.sha256"
+            echo "DL_GOOGLE_SHA256_FILE ${file} $(tr -d '[:space:]' < "${file}.sha256")"
+            curl -fsSL --proto '=https' --tlsv1.2 "https://go.dev/dl/${file}" -o "${file}"
+            echo "DOWNLOADED_SHA256 ${file} $(sha256sum "${file}" | cut -d' ' -f1)"
+            echo "DOWNLOADED_SIZE ${file} $(stat -c %s "${file}")"
+            rm -rf extract && mkdir extract
+            tar -xzf "${file}" -C extract go/bin/go go/VERSION
+            echo "ARCHIVE_BIN_GO_SHA256 ${file} $(sha256sum extract/go/bin/go | cut -d' ' -f1)"
+            echo "ARCHIVE_VERSION ${file} $(head -1 extract/go/VERSION)"
+          done
