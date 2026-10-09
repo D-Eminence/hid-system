@@ -161,16 +161,23 @@ describe('platform session end codes (Stage 4A)', () => {
       const { service, clientQuery } = harness({ refreshRow: storedRefresh('platform', { revoked: 'expired' }) });
       await expect(problemCode(service.refresh(refreshToken, event, 'platform')))
         .resolves.toEqual({ status: 401, code: 'PLATFORM_SESSION_EXPIRED' });
-      expect(clientQuery).not.toHaveBeenCalled();
+      expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes('refresh_token_reuse'))).toBe(false);
+      expect(clientQuery.mock.calls.some(([, values]) => (values as unknown[] | undefined)?.includes('reuse_detected'))).toBe(false);
     });
 
     it.each([
       ['logout', 'PLATFORM_SESSION_REVOKED'],
-      ['admin_revoked', 'PLATFORM_SESSION_REVOKED'],
-      ['rotated', 'PLATFORM_SESSION_REVOKED'],
-    ])('reports a refresh token already ended by %s, after revoking its family', async (reason, code) => {
+      ['platform_admin_revocation', 'PLATFORM_SESSION_REVOKED'],
+    ])('reports a refresh token already ended by %s without revoking its family as reuse', async (reason, code) => {
       const { service, clientQuery } = harness({ refreshRow: storedRefresh('platform', { revoked: reason }) });
       await expect(problemCode(service.refresh(refreshToken, event, 'platform'))).resolves.toEqual({ status: 401, code });
+      expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes('refresh_token_reuse'))).toBe(false);
+    });
+
+    it('reports a rotated platform refresh token presented again as reuse, after revoking its family', async () => {
+      const { service, clientQuery } = harness({ refreshRow: storedRefresh('platform', { revoked: 'rotated' }) });
+      await expect(problemCode(service.refresh(refreshToken, event, 'platform')))
+        .resolves.toEqual({ status: 401, code: 'PLATFORM_SESSION_REVOKED' });
       expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes('refresh_token_reuse'))).toBe(true);
     });
 
@@ -196,7 +203,11 @@ describe('platform session end codes (Stage 4A)', () => {
       const expired = harness({ refreshRow: storedRefresh('staff', { expired: true }) });
       await expect(problemCode(expired.service.refresh(refreshToken, event)))
         .resolves.toEqual({ status: 401, code: 'AUTHENTICATION_REQUIRED' });
-      const reused = harness({ refreshRow: storedRefresh('staff', { revoked: 'expired' }) });
+      const ended = harness({ refreshRow: storedRefresh('staff', { revoked: 'expired' }) });
+      await expect(problemCode(ended.service.refresh(refreshToken, event)))
+        .resolves.toEqual({ status: 401, code: 'AUTHENTICATION_REQUIRED' });
+      expect(ended.clientQuery.mock.calls.some(([sql]) => String(sql).includes('refresh_token_reuse'))).toBe(false);
+      const reused = harness({ refreshRow: storedRefresh('staff', { revoked: 'rotated' }) });
       await expect(problemCode(reused.service.refresh(refreshToken, event)))
         .resolves.toEqual({ status: 401, code: 'AUTHENTICATION_REQUIRED' });
       expect(reused.clientQuery.mock.calls.some(([sql]) => String(sql).includes('refresh_token_reuse'))).toBe(true);

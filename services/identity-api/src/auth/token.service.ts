@@ -230,10 +230,20 @@ export class TokenService {
     if ((kind === 'platform') !== (scope === 'platform')) throw new UnauthorizedException('Invalid refresh session');
 
     if (oldSession.revoked_at) {
-      // A platform refresh cookie outlives the idle window so the end can be
-      // reported, so several tabs may present an expired token at once. That is
-      // not token theft, and an expired session's family has no live session.
-      if (kind === 'platform' && oldSession.revocation_reason === 'expired') throw platformSessionEnded('expired');
+      // Only a rotated refresh token presented again is reuse: it was already
+      // exchanged for a newer one, so whoever holds it now is not the session's
+      // holder. A token whose session ended any other way (sign-out, expiry,
+      // an administrator or account action, or an earlier reuse in its family)
+      // is refused and recorded as a denied refresh, not as reuse. A platform
+      // refresh cookie outlives the idle window so the end can be reported, so
+      // several tabs may present such a token at once.
+      if (oldSession.revocation_reason !== 'rotated') {
+        await this.recordEndedSessionRefresh(oldSession, kind, event);
+        if (kind === 'platform') {
+          throw platformSessionEnded(oldSession.revocation_reason === 'expired' ? 'expired' : 'revoked');
+        }
+        throw new UnauthorizedException('Refresh session ended');
+      }
       await this.database.withSystemTransaction(event.correlationId, async (client) => {
         await client.query(
           `update auth.sessions
@@ -613,6 +623,15 @@ export class TokenService {
         sessionId: session.id, event,
       });
     });
+  }
+
+  /** A refresh token of a session that ended other than by rotation: refused, not reuse. */
+  private async recordEndedSessionRefresh(session: SessionRow, kind: SessionKind,
+    event: SessionEventMetadata): Promise<void> {
+    await this.database.withSystemTransaction(event.correlationId, (client) => this.insertSessionEvent(client, {
+      eventType: 'refresh', outcome: 'denied', accountId: session.account_id, sessionId: session.id, event,
+      details: { reason: 'session_ended', revocation_reason: session.revocation_reason ?? null, session_kind: kind },
+    }));
   }
 
   private async revokeReusedFamily(session: SessionRow, event: SessionEventMetadata): Promise<void> {

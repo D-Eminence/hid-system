@@ -235,7 +235,8 @@ describe('Identity CORS policy', () => {
     return Promise.all([decide('https://admin.example.invalid'), decide('https://www.example.invalid'),
       decide('https://evil.example.invalid'), decide(undefined)]).then((answers) => {
       expect(answers).toEqual([true, true, 'denied', true]);
-      expect(options.methods).toEqual(['GET', 'POST', 'OPTIONS']);
+      // Stage 5: PATCH and DELETE for the organization profile completion and access PIN routes.
+      expect(options.methods).toEqual(['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']);
       expect(options.credentials).toBe(true);
     });
   });
