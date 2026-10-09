@@ -1171,3 +1171,42 @@ commands; internal helpers and trigger functions are revoked from PUBLIC.
 Rollback-only coverage: `platform-mfa-approval.integration.sql` (killed by nine
 recorded mutants); `verify-platform-security-runtime.mjs` exercises the HTTP
 workflow under the exact Identity runtime role.
+
+## Platform admin contract gaps (0072)
+
+`0072_platform_admin_contract_gaps.sql` (Phase 4 Stage 4A,
+`PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md`):
+
+- `audit.list_platform_events` gains `requested_resource_type` and
+  `requested_resource_id` (both default null), so the console can read one
+  target's history. Adding parameters changes the signature, so the `0067`
+  function is dropped and recreated. Authorization (`platform.audit.read`), the
+  result, the other filters and the newest-first `sequence_id` keyset are
+  unchanged. A UUID-shaped id matches the generated `resource_uuid` column (any
+  letter case) through the new `audit_resource_uuid_sequence_idx (resource_type,
+  resource_uuid, sequence_id desc)`. Other ids match `resource_id` exactly. An id
+  without a type, or a value outside the documented patterns, raises `22023
+  ADMIN_INVALID_AUDIT_FILTER`. The function sets `plan_cache_mode =
+  force_custom_plan` so each call is planned for its own filters.
+- `identity.admin_transition_facility` keeps its `0027` signature, checks,
+  advisory lock, idempotency and evidence. Its last-Super-Admin count is now
+  `auth.other_reachable_super_admins(null, null)`, the platform-session
+  reachable set of `0070`, instead of Super Admins with a membership at another
+  verified facility. A facility change removes no platform-session path, so the
+  command is refused only while a Super Admin works at the facility and no
+  Super Admin can open a platform session.
+- `auth.other_reachable_super_admins` treated a null excluded account as
+  excluding every account. A null now excludes nobody; every existing caller
+  passes a non-null account.
+
+`runtime-grants.sql` grants `EXECUTE` on the eleven-argument signature to
+`hid_identity_runtime` (inherited by `hid_identity_api_runtime`) and
+`hid_schema_test_runtime`, the roles that held the old one.
+`runtime-roles.integration.sql` asserts:
+- the old signature is gone;
+- `PUBLIC` and the other API runtimes cannot execute the new one;
+- the reachability helper stays internal.
+
+`platform-admin-contracts.integration.sql` exercises both commands as
+`hid_identity_api_runtime`. `schema.integration.sql` now expects the facility of
+a reachable Super Admin to be suspendable.

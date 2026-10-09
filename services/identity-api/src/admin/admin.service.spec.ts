@@ -3,7 +3,7 @@ import type { AuditService } from '../audit/audit.service';
 import type { PlatformAccessContext } from '../common/request-context';
 import { DomainProblem } from '../common/problem';
 import type { DatabaseService } from '../database/database.service';
-import { assuredClient, platformActor, useTestEnvironment } from '../testing/platform-assurance';
+import { assuredClient, type AssuranceOptions, platformActor, useTestEnvironment } from '../testing/platform-assurance';
 import { AdminService, PRINCIPAL_EXPORT_MAX_ROWS } from './admin.service';
 
 const context: PlatformAccessContext = {
@@ -15,7 +15,7 @@ const context: PlatformAccessContext = {
   actor: platformActor({ id: 'staff:admin', subject: 'staff:admin' }),
 };
 
-function harness(row: Readonly<Record<string, unknown>>, assurance: { stepUpFresh?: boolean; active?: boolean } = {}) {
+function harness(row: Readonly<Record<string, unknown>>, assurance: AssuranceOptions = {}) {
   const command = jest.fn().mockResolvedValue({ rows: [row], rowCount: 1 });
   const client = assuredClient(command, assurance);
   const database = { withTransaction: jest.fn(async (_context, operation) =>
@@ -165,6 +165,7 @@ describe('AdminService governed commands', () => {
   it.each([
     ['without a platform session', { active: false }, 'PLATFORM_SESSION_REQUIRED'],
     ['without a fresh step-up', { stepUpFresh: false }, 'STEP_UP_REQUIRED'],
+    ['with an expired step-up', { stepUpFresh: false, stepUpExpired: true }, 'STEP_UP_EXPIRED'],
   ] as const)('refuses every governed command called directly %s', async (_label, assurance, code) => {
     const { service, command, audit } = harness({ replayed: false }, assurance);
     const calls: [string, () => Promise<unknown>][] = [

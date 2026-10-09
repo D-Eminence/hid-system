@@ -241,6 +241,24 @@ begin
      or has_table_privilege('hid_identity_runtime', 'platform.control_events', 'SELECT,INSERT,UPDATE,DELETE') then
     raise exception 'platform control administration must use only the granted Identity commands';
   end if;
+  -- Platform audit (0072): the eleven-argument reader with the target filter
+  -- replaces the 0067 reader and is executable by the Identity runtime only.
+  -- The reachability helper stays internal to the security-definer commands.
+  if to_regprocedure('audit.list_platform_events(integer,bigint,text,uuid,text,text,text,timestamptz,timestamptz)') is not null
+     or not has_function_privilege('hid_identity_api_runtime',
+       'audit.list_platform_events(integer,bigint,text,uuid,text,text,text,timestamptz,timestamptz,text,text)', 'EXECUTE')
+     or has_function_privilege('public',
+       'audit.list_platform_events(integer,bigint,text,uuid,text,text,text,timestamptz,timestamptz,text,text)', 'EXECUTE')
+     or exists (
+       select 1 from unnest(array['hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_lab_api_runtime',
+         'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime']) runtime(role_name)
+       where has_function_privilege(runtime.role_name,
+         'audit.list_platform_events(integer,bigint,text,uuid,text,text,text,timestamptz,timestamptz,text,text)', 'EXECUTE')
+     )
+     or has_function_privilege('public', 'auth.other_reachable_super_admins(uuid,text)', 'EXECUTE')
+     or has_function_privilege('hid_identity_api_runtime', 'auth.other_reachable_super_admins(uuid,text)', 'EXECUTE') then
+    raise exception 'platform audit reader or Super Admin reachability helper privileges are inconsistent';
+  end if;
   if not has_table_privilege('hid_identity_api_runtime', 'identity.patients', 'INSERT')
      or has_table_privilege('hid_identity_api_runtime', 'ehr.encounters', 'INSERT')
      or not has_table_privilege('hid_identity_api_runtime', 'audit.events', 'INSERT')

@@ -3,6 +3,7 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requirePlatformAssurance } from '../auth/platform-assurance';
 import { TokenService, type SessionEventMetadata } from '../auth/token.service';
+import { cursorPage, cursorTimestampSql, decodeCursor } from '../common/cursor';
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { PlatformAccessContext } from '../common/request-context';
@@ -20,8 +21,10 @@ interface ApprovalRow extends QueryResultRow {
   id: string; action: string; roleCode: string | null; targetAccountId: string; targetEmail: string | null;
   targetDisplayName: string | null; reason: string; status: string; requestedBy: string; requestedAt: Date;
   expiresAt: Date; decidedBy: string | null; decidedAt: Date | null; decisionReason: string | null;
-  executedAt: Date | null; version: string;
+  executedAt: Date | null; version: string; cursorAt: string;
 }
+
+const APPROVALS_CURSOR = 'admin.approvals';
 
 interface DecisionRow extends QueryResultRow {
   request_id: string; request_status: string; action: string; target_account_id: string;
@@ -118,11 +121,18 @@ export class PlatformSecurityService {
     });
   }
 
-  async listApprovals(context: PlatformAccessContext, status?: string) {
+  /**
+   * Approval requests, newest first (requested_at desc, id), one page per call.
+   * `nextCursor` is null on the last page; a cursor is bound to the status filter.
+   */
+  async listApprovals(context: PlatformAccessContext, query: { status?: string; limit?: number; cursor?: string }) {
     const granted = new Set(context.actor.platformPermissions ?? []);
     if (!['platform.role.manage', 'platform.mfa.reset', 'platform.audit.read'].some((code) => granted.has(code))) {
       throw new DomainProblem(403, 'PERMISSION_DENIED', 'Required permission is missing');
     }
+    const limit = query.limit ?? 50;
+    const filters = { status: query.status ?? null };
+    const after = query.cursor ? decodeCursor(query.cursor, APPROVALS_CURSOR, filters) : null;
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query<ApprovalRow>(
         `select request.id::text, request.action, request.role_code as "roleCode",
@@ -133,17 +143,22 @@ export class PlatformSecurityService {
                 request.requested_by::text as "requestedBy", request.requested_at as "requestedAt",
                 request.expires_at as "expiresAt", request.decided_by::text as "decidedBy",
                 request.decided_at as "decidedAt", request.decision_reason as "decisionReason",
-                request.executed_at as "executedAt", request.row_version::text as version
+                request.executed_at as "executedAt", request.row_version::text as version,
+                ${cursorTimestampSql('request.requested_at')} as "cursorAt"
            from auth.admin_approval_requests request
            join auth.accounts target on target.id = request.target_account_id
-          where $1::text is null
+          where ($1::text is null
              or (case when request.status = 'pending' and request.expires_at <= clock_timestamp()
-                   then 'expired' else request.status end) = $1
+                   then 'expired' else request.status end) = $1)
+            and ($2::timestamptz is null or request.requested_at < $2::timestamptz
+              or (request.requested_at = $2::timestamptz and request.id > $3::uuid))
           order by request.requested_at desc, request.id
-          limit 200`,
-        [status ?? null],
+          limit $4`,
+        [filters.status, after?.at ?? null, after?.id ?? null, limit + 1],
       );
-      return { items: result.rows.map((row) => ({ ...row, version: Number(row.version) })) };
+      const page = cursorPage(result.rows, limit, APPROVALS_CURSOR, filters);
+      return { items: page.rows.map(({ cursorAt: _cursorAt, ...row }) => ({ ...row, version: Number(row.version) })),
+        nextCursor: page.nextCursor };
     }, { readOnly: true });
   }
 

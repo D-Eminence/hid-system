@@ -29,13 +29,21 @@ export function isAssuranceQuery(sql: unknown): boolean {
     && sql.includes('step_up_fresh');
 }
 
-export function assuranceResult(options: { stepUpFresh?: boolean; active?: boolean } = {}) {
+export interface AssuranceOptions {
+  stepUpFresh?: boolean;
+  active?: boolean;
+  /** With `stepUpFresh: false`: the session stepped up, but more than five minutes ago. */
+  stepUpExpired?: boolean;
+}
+
+export function assuranceResult(options: AssuranceOptions = {}) {
   if (options.active === false) return { rows: [], rowCount: 0 };
   const now = Date.now();
   const stepUpFresh = options.stepUpFresh ?? true;
+  const stepUpAt = stepUpFresh ? new Date(now - 10_000) : options.stepUpExpired ? new Date(now - 360_000) : null;
   return { rowCount: 1, rows: [{
-    mfa_verified_at: new Date(now - 60_000), mfa_method: 'totp',
-    step_up_at: stepUpFresh ? new Date(now - 10_000) : null, step_up_fresh: stepUpFresh,
+    mfa_verified_at: new Date(now - 600_000), mfa_method: 'totp',
+    step_up_at: stepUpAt, step_up_fresh: stepUpFresh,
     step_up_expires_at: stepUpFresh ? new Date(now + 290_000) : null,
     expires_at: new Date(now + 600_000), absolute_expires_at: new Date(now + 3_600_000),
   }] };
@@ -45,7 +53,7 @@ export function assuranceResult(options: { stepUpFresh?: boolean; active?: boole
  * A pg client mock whose assurance lookup answers as configured and whose
  * other queries go to `command`, which each test controls.
  */
-export function assuredClient(command: jest.Mock, options: { stepUpFresh?: boolean; active?: boolean } = {}) {
+export function assuredClient(command: jest.Mock, options: AssuranceOptions = {}) {
   return {
     query: jest.fn(async (sql: unknown, parameters?: unknown[]) =>
       isAssuranceQuery(sql) ? assuranceResult(options) : command(sql, parameters)),

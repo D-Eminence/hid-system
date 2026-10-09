@@ -20,7 +20,7 @@ import {
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
-import { readPlatformAssurance } from './platform-assurance';
+import { readPlatformAssurance, stepUpProblem } from './platform-assurance';
 import { TokenService } from './token.service';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -46,7 +46,7 @@ export class SecurityGuard implements CanActivate {
       // Platform routes read only the platform session cookie and every other
       // route only the staff/patient cookie, so one browser can hold both.
       const { token, transport } = this.extractToken(request, platformScope);
-      const verified = await this.tokens.verify(token);
+      const verified = platformScope ? await this.tokens.verify(token, 'platform') : await this.tokens.verify(token);
       request.actor = verified.actor;
       request.authTransport = transport;
       await this.enforceRuntimeControls(request);
@@ -229,9 +229,7 @@ export class SecurityGuard implements CanActivate {
         throw new DomainProblem(403, 'PLATFORM_SESSION_REQUIRED',
           'An MFA-verified platform administration session is required');
       }
-      if (!state.stepUpFresh) {
-        throw new DomainProblem(403, 'STEP_UP_REQUIRED', 'Confirm with your authenticator code to continue');
-      }
+      if (!state.stepUpFresh) throw stepUpProblem(state);
     }
   }
 

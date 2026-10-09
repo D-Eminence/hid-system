@@ -7,7 +7,7 @@
 // or network call is made. All values are synthetic.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
 import { cookieHeader, createTotpClock, expectStatus, mergeCookies, platformClient } from './platform-session-client.mjs';
 
@@ -63,6 +63,7 @@ const { PricingService } = load('admin/pricing.service.ts');
 const { PlatformSecurityController } = load('admin/platform-security.controller.ts');
 const { PlatformSecurityService } = load('admin/platform-security.service.ts');
 const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
+const { corsOptions } = load('config/cors.ts');
 
 globalThis.fetch = async (input) => { throw new Error(`Unexpected outbound request to ${String(input)}`); };
 const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database: 'postgres', max: 1 });
@@ -138,6 +139,8 @@ try {
   app.useGlobalGuards(new SecurityGuard(module.get(Reflector), module.get(TokenService),
     module.get(AuditService), module.get(DatabaseService)));
   app.useGlobalInterceptors(new AuditInterceptor(module.get(Reflector), module.get(AuditService)));
+  // The production CORS policy (main.ts), so the export headers it exposes are checked over HTTP.
+  app.enableCors(corsOptions(origin));
   await app.init();
   const http = request(app.getHttpServer());
   const platform = platformClient({ http, origin, totp, clock, password });
@@ -215,7 +218,7 @@ try {
   const crossRefresh = await http.post('/api/v1/auth/refresh').set('Origin', origin)
     .set('Cookie', `hid_access_refresh=${sessionA1.jar.hid_access_admin_refresh}; hid_access_csrf=${sessionA1.jar.hid_access_admin_csrf}`)
     .set('x-csrf-token', sessionA1.jar.hid_access_admin_csrf);
-  expectStatus(crossRefresh, 401);
+  expectStatus(crossRefresh, 401, 'AUTHENTICATION_REQUIRED');
   expectStatus(await get(sessionA1, '/admin/session'), 200);
   evidence.session_kinds = { staff_on_platform: 'PLATFORM_SESSION_REQUIRED', platform_on_staff: 'PLATFORM_SESSION_SCOPE_DENIED',
     platform_refresh_on_staff_endpoint: 401 };
@@ -270,11 +273,30 @@ try {
   // Step-up belongs to one session family: the earlier session still has none.
   expectStatus(await roleChange(sessionA1, { ...roleBody, action: 'revoke' },
     { 'If-Match': String(await accountVersion(target.id)), 'Idempotency-Key': key('role-5') }), 403, 'STEP_UP_REQUIRED');
+  // Stage 4A: a step-up older than the five-minute window is reported as
+  // expired, not missing. The assurance row refuses to move backwards
+  // (0069), so time is simulated with its trigger disabled for one statement.
+  const ageStepUp = async (admin) => {
+    const client = await owner.connect();
+    try {
+      await client.query('set session_replication_role = replica');
+      await client.query(`update auth.session_assurance set mfa_verified_at = mfa_verified_at - interval '6 minutes',
+          step_up_at = step_up_at - interval '6 minutes'
+        where family_id = (select family_id from auth.sessions where id = $1)`, [admin.sessionId]);
+    } finally {
+      await client.query('reset session_replication_role');
+      client.release();
+    }
+  };
+  await ageStepUp(sessionA2);
+  expectStatus(await roleChange(sessionA2, { ...roleBody, action: 'revoke' },
+    { 'If-Match': String(await accountVersion(target.id)), 'Idempotency-Key': key('role-expired') }), 403, 'STEP_UP_EXPIRED');
+  await platform.stepUp(sessionA2);
   // Super Admin is never granted in one step.
   expectStatus(await roleChange(sessionA2, { roleCode: 'platform_super_admin', action: 'grant', reason: 'One-step elevation' },
     { 'If-Match': String(await accountVersion(target.id)), 'Idempotency-Key': key('role-6') }), 403, 'TWO_PERSON_APPROVAL_REQUIRED');
-  evidence.step_up = { without: 'STEP_UP_REQUIRED', if_match: 428, reason: 'REASON_REQUIRED', per_session_family: true,
-    direct_super_admin_grant: 'TWO_PERSON_APPROVAL_REQUIRED' };
+  evidence.step_up = { without: 'STEP_UP_REQUIRED', expired: 'STEP_UP_EXPIRED', if_match: 428, reason: 'REASON_REQUIRED',
+    per_session_family: true, direct_super_admin_grant: 'TWO_PERSON_APPROVAL_REQUIRED' };
 
   // 6a. Platform controls through the exact Identity runtime role. runtime-grants.sql once
   // omitted EXECUTE on platform.admin_list_controls and platform.admin_set_control.
@@ -359,6 +381,58 @@ try {
   evidence.two_person = { self_approval: 'SELF_APPROVAL_DENIED', non_super_admin: 'APPROVER_INELIGIBLE',
     without_step_up: 'STEP_UP_REQUIRED', concurrent_approvals: statuses, grants: grants.length, expired: 'APPROVAL_EXPIRED' };
 
+  // 7a. Stage 4A: approvals page newest first (requested_at desc, id) through an
+  // opaque cursor, with no 200-row cap. Five decided requests share edges: two
+  // in one millisecond and two at the same instant.
+  const approvalBase = new Date(Date.now() - 7_200_000);
+  const approvalAt = (seconds, micros = 0) => {
+    const at = new Date(approvalBase.getTime() + seconds * 1_000);
+    return `${at.toISOString().slice(0, 19)}.${String(micros).padStart(6, '0')}Z`;
+  };
+  const rejectedRows = [['r1', approvalAt(1)], ['tieA', approvalAt(2)], ['tieB', approvalAt(2)],
+    ['r4', approvalAt(3, 100)], ['r5', approvalAt(3, 900)]];
+  const rejectedIds = {};
+  for (const [label, requestedAt] of rejectedRows) {
+    rejectedIds[label] = randomUUID();
+    await owner.query(`insert into auth.admin_approval_requests (id, action, target_account_id, role_code, reason,
+        status, requested_by, requested_at, expires_at, decided_by, decided_at, decision_reason, correlation_id)
+      values ($1, 'mfa.reset', $2, null, 'Synthetic paging fixture', 'rejected', $3, $4::timestamptz,
+        $4::timestamptz + interval '1 hour', $5, $4::timestamptz + interval '1 minute', 'Synthetic paging decision',
+        'security-runtime-paging')`, [rejectedIds[label], plain.id, superA.id, requestedAt, superB.id]);
+  }
+  const [tieLow, tieHigh] = [rejectedIds.tieA, rejectedIds.tieB].sort();
+  const everyRejected = await get(superBAdmin, '/admin/approvals?status=rejected&limit=100');
+  expectStatus(everyRejected, 200);
+  assert.equal(everyRejected.body.nextCursor, null);
+  assert.deepEqual(everyRejected.body.items.map(item => item.id),
+    [rejectedIds.r5, rejectedIds.r4, tieLow, tieHigh, rejectedIds.r1]);
+  const pagedApprovals = [];
+  let approvalCursor = null;
+  let approvalPages = 0;
+  do {
+    const page = await get(superBAdmin, `/admin/approvals?status=rejected&limit=2${approvalCursor ? `&cursor=${approvalCursor}` : ''}`);
+    expectStatus(page, 200);
+    for (const item of page.body.items) assert(!('cursorAt' in item));
+    pagedApprovals.push(...page.body.items.map(item => item.id));
+    approvalCursor = page.body.nextCursor;
+    approvalPages += 1;
+  } while (approvalCursor && approvalPages < 10);
+  assert.deepEqual(pagedApprovals, everyRejected.body.items.map(item => item.id), 'approval pages must return every row once, in order');
+  assert.equal(approvalPages, 3);
+  const firstApprovals = await get(superBAdmin, '/admin/approvals?status=rejected&limit=2');
+  const approvalsCursor = firstApprovals.body.nextCursor;
+  const tamperedApprovals = `${approvalsCursor.slice(0, 15)}${approvalsCursor[15] === 'A' ? 'B' : 'A'}${approvalsCursor.slice(16)}`;
+  for (const cursor of [tamperedApprovals, approvalsCursor.slice(0, -2), `${approvalsCursor}=`, 'bm90LWpzb24']) {
+    expectStatus(await get(superBAdmin, `/admin/approvals?status=rejected&limit=2&cursor=${encodeURIComponent(cursor)}`),
+      400, 'ADMIN_INVALID_CURSOR');
+  }
+  expectStatus(await get(superBAdmin, `/admin/approvals?status=approved&limit=2&cursor=${approvalsCursor}`), 400, 'ADMIN_INVALID_CURSOR');
+  expectStatus(await get(superBAdmin, '/admin/approvals?limit=101'), 400, 'VALIDATION_FAILED');
+  expectStatus(await get(supportAdmin, `/admin/approvals?status=rejected&limit=2&cursor=${approvalsCursor}`), 403, 'PERMISSION_DENIED');
+  evidence.approvals_cursor = { rows: pagedApprovals.length, pages: approvalPages, microsecond_boundary: true,
+    equal_timestamps: 'id order', tampered: 'ADMIN_INVALID_CURSOR', other_filter: 'ADMIN_INVALID_CURSOR',
+    without_permission: 'PERMISSION_DENIED' };
+
   // 8. Governed MFA reset (lost authenticator): request + second Super Admin approval.
   expectStatus(await command(supportAdmin, `/admin/principals/${support.id}/mfa-reset-requests`,
     { reason: 'Reset my own authenticator' }, { 'Idempotency-Key': key('self-reset') }), 403, 'PERMISSION_DENIED');
@@ -370,7 +444,7 @@ try {
   const resetDecision = await decide(superBAdmin, reset.body.requestId, 'approve', reset.body.version, 'reset');
   expectStatus(resetDecision, 200);
   assert.equal(resetDecision.body.executed, true);
-  expectStatus(await get(supportAdmin, '/admin/session'), 401);
+  expectStatus(await get(supportAdmin, '/admin/session'), 401, 'PLATFORM_SESSION_REVOKED');
   const supportFactors = (await owner.query(`select status, revocation_reason from auth.mfa_factors where account_id = $1`,
     [support.id])).rows;
   assert.deepEqual(supportFactors, [{ status: 'revoked', revocation_reason: 'admin_reset' }]);
@@ -413,7 +487,15 @@ try {
     }
   }
   expectStatus(await command(sessionA2, `/admin/sessions/${sessionA1.sessionId}/revoke`), 200);
-  expectStatus(await get(sessionA1, '/admin/session'), 401);
+  // Stage 4A: the holder of the revoked session's own token learns it was revoked.
+  expectStatus(await get(sessionA1, '/admin/session'), 401, 'PLATFORM_SESSION_REVOKED');
+  // The same session id with a forged signature, or the token outside platform
+  // routes, gets only the generic answer: nothing to probe.
+  const [header, payload, signature] = sessionA1.jar.hid_access_admin.split('.');
+  const forged = `${header}.${payload}.${signature.slice(0, -2)}${signature.endsWith('AA') ? 'BB' : 'AA'}`;
+  expectStatus(await get({ jar: { ...sessionA1.jar, hid_access_admin: forged } }, '/admin/session'), 401, 'AUTHENTICATION_REQUIRED');
+  expectStatus(await http.get('/api/v1/auth/session').set('Authorization', `Bearer ${sessionA1.jar.hid_access_admin}`),
+    401, 'AUTHENTICATION_REQUIRED');
   const targetStaff = mergeCookies({}, await http.post('/api/v1/auth/login').set('Origin', origin)
     .send({ email: target.email, password, turnstileAction: 'staff-login' }));
   const targetSessions = await get(superBAdmin, `/admin/principals/${target.id}/sessions`);
@@ -421,11 +503,14 @@ try {
   const targetSession = targetSessions.body.items.find(item => item.kind === 'staff');
   expectStatus(await command(superBAdmin, `/admin/principals/${target.id}/sessions/${targetSession.sessionId}/revoke`,
     { reason: 'Reported lost laptop', compromised: true }, { 'Idempotency-Key': key('compromised') }), 200);
-  expectStatus(await http.get('/api/v1/auth/session').set('Cookie', cookieHeader(targetStaff)), 401);
+  // Staff sessions keep the generic answer.
+  expectStatus(await http.get('/api/v1/auth/session').set('Cookie', cookieHeader(targetStaff)), 401, 'AUTHENTICATION_REQUIRED');
   const revokedEvent = (await owner.query(`select details from auth.session_events where account_id = $1
     and event_type = 'revoked' and details->>'compromised' = 'true'`, [target.id])).rows;
   assert.equal(revokedEvent.length, 1);
-  evidence.sessions = { list_safe_metadata: true, own_revoke: 401, compromised_revoke: 'recorded' };
+  evidence.sessions = { list_safe_metadata: true, own_revoke: 'PLATFORM_SESSION_REVOKED', forged_signature: 'AUTHENTICATION_REQUIRED',
+    platform_token_on_staff_route: 'AUTHENTICATION_REQUIRED', staff_session_revoked: 'AUTHENTICATION_REQUIRED',
+    compromised_revoke: 'recorded' };
 
   // 11. Idle timeout, refresh rotation and the absolute lifetime cap.
   const refresh = (admin) => http.post('/api/v1/auth/admin/refresh').set('Origin', origin)
@@ -433,19 +518,50 @@ try {
   const rotated = await refresh(superBAdmin);
   expectStatus(rotated, 200);
   assert(new Date(rotated.body.idleExpiresAt).getTime() <= Date.now() + 901_000, 'idle window is at most 15 minutes');
+  // Stage 4A: the refresh and CSRF cookies last until one idle window after
+  // the end of the sign-in, so a refresh after an idle timeout or the 8-hour
+  // limit reaches the server and is told why.
+  const cookieExpiry = (response, name) => {
+    const header = response.headers['set-cookie'].find(value => value.startsWith(`${name}=`));
+    return new Date(/;\s*Expires=([^;]+)/i.exec(header)[1]).getTime();
+  };
+  const familyEnd = (await owner.query('select absolute_expires_at from auth.sessions where id = $1',
+    [rotated.body.actor.sessionId])).rows[0].absolute_expires_at.getTime();
+  for (const name of ['hid_access_admin_refresh', 'hid_access_admin_csrf']) {
+    assert(Math.abs(cookieExpiry(rotated, name) - (familyEnd + 900_000)) < 1_000,
+      `${name} must expire one idle window after the sign-in ends`);
+  }
+  assert(cookieExpiry(rotated, 'hid_access_admin') <= Date.now() + 301_000, 'the access cookie keeps the access-token lifetime');
   const superBRotated = { ...superBAdmin, jar: mergeCookies(superBAdmin.jar, rotated), csrf: rotated.headers['x-csrf-token'] };
   // Step-up is recorded on the session family, so it survives rotation.
   const exportPath = `/admin/principals/export?query=security-runtime&reason=${encodeURIComponent('Quarterly access review')}`;
   expectStatus(await get(superBRotated, exportPath), 200);
   // Reusing the rotated refresh token revokes the whole family.
-  expectStatus(await refresh(superBAdmin), 401);
-  expectStatus(await get(superBRotated, '/admin/session'), 401);
+  expectStatus(await refresh(superBAdmin), 401, 'PLATFORM_SESSION_REVOKED');
+  expectStatus(await get(superBRotated, '/admin/session'), 401, 'PLATFORM_SESSION_REVOKED');
   // Idle: a platform session not refreshed within its window ends.
   await owner.query(`update auth.sessions set issued_at = now() - interval '16 minutes',
     expires_at = now() - interval '1 minute', absolute_expires_at = now() - interval '16 minutes' + interval '8 hours'
     where id = $1`, [sessionA3.sessionId]);
-  expectStatus(await get(sessionA3, '/admin/session'), 401);
-  expectStatus(await refresh(sessionA3), 401);
+  expectStatus(await get(sessionA3, '/admin/session'), 401, 'PLATFORM_SESSION_EXPIRED');
+  expectStatus(await refresh(sessionA3), 401, 'PLATFORM_SESSION_EXPIRED');
+  // A second tab presenting the same expired refresh token is told the same,
+  // and it is not recorded as refresh-token reuse.
+  expectStatus(await refresh(sessionA3), 401, 'PLATFORM_SESSION_EXPIRED');
+  assert.equal((await owner.query(`select count(*)::int as n from auth.session_events where session_id = $1
+    and event_type = 'reuse_detected'`, [sessionA3.sessionId])).rows[0].n, 0);
+  // No refresh credential is a missing sign-in (401), a wrong CSRF token stays
+  // 403, and an unknown refresh token is generic even with a matching CSRF value.
+  expectStatus(await http.post('/api/v1/auth/admin/refresh').set('Origin', origin), 401, 'AUTHENTICATION_REQUIRED');
+  expectStatus(await http.post('/api/v1/auth/admin/refresh').set('Origin', origin)
+    .set('Cookie', `hid_access_admin_refresh=${sessionA3.jar.hid_access_admin_refresh}; hid_access_admin_csrf=wrong`)
+    .set('x-csrf-token', 'wrong'), 403, 'CSRF_VALIDATION_FAILED');
+  const unknownRefresh = `${randomUUID()}.${randomBytes(48).toString('base64url')}.local`;
+  const unknownCsrf = createHmac('sha256', process.env.AUTH_SIGNING_SECRET).update(`csrf:${unknownRefresh}`, 'utf8')
+    .digest('base64url');
+  expectStatus(await http.post('/api/v1/auth/admin/refresh').set('Origin', origin)
+    .set('Cookie', `hid_access_admin_refresh=${unknownRefresh}; hid_access_admin_csrf=${unknownCsrf}`)
+    .set('x-csrf-token', unknownCsrf), 401, 'AUTHENTICATION_REQUIRED');
   // Absolute: a refresh never extends past the end of the sign-in.
   await owner.query(`update auth.sessions set issued_at = now() - interval '5 minutes',
     expires_at = now() + interval '1 minute', absolute_expires_at = now() + interval '2 minutes' where id = $1`,
@@ -455,15 +571,33 @@ try {
   const absolute = (await owner.query('select absolute_expires_at from auth.sessions where id = $1', [sessionA2.sessionId]))
     .rows[0].absolute_expires_at;
   assert.equal(new Date(capped.body.idleExpiresAt).getTime(), absolute.getTime());
-  evidence.session_policy = { idle: 401, refresh_reuse: 'family revoked', absolute_cap: 'refresh capped at sign-in + 8h' };
+  // The refresh cookie still reaches the server after the 8-hour limit, which then answers why.
+  assert(Math.abs(cookieExpiry(capped, 'hid_access_admin_refresh') - (absolute.getTime() + 900_000)) < 1_000);
+  const cappedJar = mergeCookies(sessionA2.jar, capped);
+  await owner.query(`update auth.sessions set issued_at = now() - interval '10 minutes',
+    expires_at = now() - interval '1 second', absolute_expires_at = now() - interval '1 second' where id = $1`,
+  [capped.body.actor.sessionId]);
+  expectStatus(await http.post('/api/v1/auth/admin/refresh').set('Origin', origin).set('Cookie', cookieHeader(cappedJar))
+    .set('x-csrf-token', cappedJar.hid_access_admin_csrf), 401, 'PLATFORM_SESSION_EXPIRED');
+  evidence.session_policy = { idle: 'PLATFORM_SESSION_EXPIRED', refresh_reuse: 'PLATFORM_SESSION_REVOKED (family revoked)',
+    absolute_cap: 'refresh capped at sign-in + 8h', refresh_cookie_lifetime: 'sign-in end + idle window',
+    absolute_end: 'PLATFORM_SESSION_EXPIRED',
+    repeated_expired_refresh: 'not reuse', missing_refresh_cookie: 'AUTHENTICATION_REQUIRED',
+    unknown_refresh_token: 'AUTHENTICATION_REQUIRED' };
 
   // 12. Principal export: restricted permission, step-up, reason, RFC 4180 CSV.
   const exporter = await platform.signIn(superBAdmin);
   expectStatus(await get(exporter, exportPath), 403, 'STEP_UP_REQUIRED');
   await platform.stepUp(exporter);
   expectStatus(await get(exporter, '/admin/principals/export?query=security-runtime'), 400, 'REASON_REQUIRED');
-  const exported = await get(exporter, exportPath);
+  const exported = await get(exporter, exportPath, { Origin: origin });
   expectStatus(exported, 200);
+  // Stage 4A: an allowed cross-origin console may read the export metadata.
+  assert.equal(exported.headers['access-control-allow-origin'], origin);
+  const exposedHeaders = String(exported.headers['access-control-expose-headers']).toLowerCase().split(',').map(value => value.trim());
+  for (const name of ['x-hid-export-row-count', 'x-hid-export-row-limit', 'x-hid-export-truncated']) {
+    assert(exposedHeaders.includes(name), `CORS does not expose ${name}`);
+  }
   assert.equal(exported.headers['content-type'], 'text/csv; charset=utf-8; header=present');
   assert.equal(exported.headers['cache-control'], 'no-store');
   assert.equal(exported.headers['x-hid-export-row-limit'], '5000');
@@ -479,7 +613,8 @@ try {
     order by sequence_id desc limit 1`)).rows[0];
   assert.equal(exportAudit.reason, 'Quarterly access review');
   evidence.export = { permission: 'platform.principal.export', step_up: true, reason: true, crlf: true,
-    formula_neutralized: true, rows: Number(exported.headers['x-hid-export-row-count']) };
+    formula_neutralized: true, rows: Number(exported.headers['x-hid-export-row-count']),
+    cors_exposed: ['x-hid-export-row-count', 'x-hid-export-row-limit', 'x-hid-export-truncated'] };
 
   // 13. No secret, code or token is written to audit or session evidence.
   const secrets = [secretA, limitedAdmin.secret, superBAdmin.secret, ...recoveryA, ...regenerated.body.recoveryCodes,

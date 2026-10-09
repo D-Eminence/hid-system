@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
+import { cursorPage, cursorTimestampSql, decodeCursor } from '../common/cursor';
 import { DomainProblem } from '../common/problem';
 import { platformAuditActor } from '../admin/admin-context';
 import type { HidRequest, PlatformAccessContext } from '../common/request-context';
@@ -27,6 +28,8 @@ interface DemoRequestRow extends QueryResultRow {
   createdAt: Date;
   updatedAt: Date;
 }
+
+const DEMO_REQUESTS_CURSOR = 'admin.demo-requests';
 
 const DEMO_PROJECTION = `id::text, contact_name as "contactName", contact_email as "contactEmail",
   contact_phone as "contactPhone", contact_role as "contactRole", organization_name as "organizationName",
@@ -71,19 +74,29 @@ export class DemoRequestsService {
     return { accepted: true, replayed: !inserted };
   }
 
+  /**
+   * Demo requests, newest first (created_at desc, id desc), one page per call.
+   * `nextCursor` is null on the last page; a cursor is bound to the filters.
+   */
   async list(context: PlatformAccessContext, filters: ListDemoRequestsDto) {
     const limit = filters.limit ?? 50;
+    const binding = { status: filters.status ?? null, productCode: filters.productCode ?? null };
+    const after = filters.cursor ? decodeCursor(filters.cursor, DEMO_REQUESTS_CURSOR, binding) : null;
     return this.database.withTransaction(context, async (client) => {
-      const result = await client.query<DemoRequestRow>(
-        `select ${DEMO_PROJECTION} from identity.demo_requests
+      const result = await client.query<DemoRequestRow & { cursorAt: string }>(
+        `select ${DEMO_PROJECTION}, ${cursorTimestampSql('created_at')} as "cursorAt"
+         from identity.demo_requests
          where ($1::text is null or status = $1)
            and ($2::text is null or product_code = $2)
-         order by created_at desc, id desc limit $3`,
-        [filters.status ?? null, filters.productCode ?? null, limit],
+           and ($3::timestamptz is null or (created_at, id) < ($3::timestamptz, $4::uuid))
+         order by created_at desc, id desc limit $5`,
+        [binding.status, binding.productCode, after?.at ?? null, after?.id ?? null, limit + 1],
       );
+      const page = cursorPage(result.rows, limit, DEMO_REQUESTS_CURSOR, binding);
       await this.audit.recordWithClient(client, this.adminAudit(context, 'commercial.demo-requests.list',
-        'demo-request-collection', undefined, { returnedCount: result.rows.length }));
-      return { items: result.rows.map(this.present) };
+        'demo-request-collection', undefined, { returnedCount: page.rows.length }));
+      return { items: page.rows.map(({ cursorAt: _cursorAt, ...row }) => this.present(row)),
+        nextCursor: page.nextCursor };
     });
   }
 

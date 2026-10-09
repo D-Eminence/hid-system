@@ -26,6 +26,8 @@ interface PrincipalRow extends QueryResultRow {
   id: string; subject: string; email: string | null; displayName: string | null;
   status: string; version: string; createdAt: Date; activeSessionCount: string;
   memberships: unknown; platformRoles: string[];
+  /** An active (confirmed) authenticator exists; no factor detail is ever returned. */
+  mfaEnrolled: boolean;
 }
 
 interface ReviewRow extends QueryResultRow {
@@ -226,7 +228,9 @@ export class AdminService {
             where membership.account_id = account.id), '[]'::jsonb) as memberships,
           coalesce((select array_agg(assignment.role_code order by assignment.role_code)
             from auth.account_roles assignment where assignment.account_id = account.id
-              and assignment.scope_type = 'platform' and assignment.revoked_at is null), array[]::text[]) as "platformRoles"
+              and assignment.scope_type = 'platform' and assignment.revoked_at is null), array[]::text[]) as "platformRoles",
+          exists (select 1 from auth.mfa_factors factor where factor.account_id = account.id
+            and factor.status = 'active') as "mfaEnrolled"
         from auth.accounts account
         where (account.email ilike $1 escape '\\' or account.display_name ilike $1 escape '\\'
           or account.subject ilike $1 escape '\\')
@@ -239,7 +243,7 @@ export class AdminService {
         [term, query.status ?? null]),
       ]);
       return { items: items.rows.map((row) => ({ ...row, version: Number(row.version),
-          activeSessionCount: Number(row.activeSessionCount) })), page: query.page,
+          activeSessionCount: Number(row.activeSessionCount), mfaEnrolled: row.mfaEnrolled === true })), page: query.page,
         pageSize: query.pageSize, total: Number(total.rows[0]?.count ?? 0) };
     }, { readOnly: true });
   }
@@ -327,10 +331,10 @@ export class AdminService {
           actor_subject as "actorSubject", facility_id::text as "facilityId",
           action, outcome, resource_type as "resourceType", resource_id as "resourceId",
           purpose_of_use as "purposeOfUse", reason, source_system as "sourceSystem"
-        from audit.list_platform_events($1, $2::bigint, $3, $4::uuid, $5, $6, $7, $8, $9)`,
+        from audit.list_platform_events($1, $2::bigint, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11)`,
         [query.limit, query.beforeSequenceId ?? null, query.actor ?? null, query.facilityId ?? null,
           query.action ?? null, query.correlationId ?? null, query.outcome ?? null,
-          query.from ?? null, query.to ?? null]);
+          query.from ?? null, query.to ?? null, query.resourceType ?? null, query.resourceId ?? null]);
       await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.audit.list',
         'audit-event-collection', null, 'Platform audit review', { returnedCount: result.rows.length }));
       const tail = result.rows.at(-1) as { sequenceId?: string } | undefined;

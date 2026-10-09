@@ -1,6 +1,6 @@
 import { Type } from 'class-transformer';
 import { IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
-import { IsOptionalButNotNull } from '../../common/validation';
+import { IsOptionalButNotNull, RequiresProperty } from '../../common/validation';
 
 export class AdminPageDto {
   @IsOptionalButNotNull()
@@ -82,4 +82,13 @@ export class ListPlatformAuditDto {
   @IsOptionalButNotNull() @IsIn(['success', 'denied', 'failure']) outcome?: string;
   @IsOptionalButNotNull() @IsDateString() from?: string;
   @IsOptionalButNotNull() @IsDateString() to?: string;
+
+  /** Target type as audit records it, for example `facility` or `authentication-account`. */
+  @IsOptionalButNotNull() @IsString() @MaxLength(80) @Matches(/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/)
+  resourceType?: string;
+
+  /** One target's id (a UUID matches in any letter case); requires `resourceType`. */
+  @IsOptionalButNotNull() @IsString() @MaxLength(255) @Matches(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/)
+  @RequiresProperty('resourceType')
+  resourceId?: string;
 }

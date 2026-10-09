@@ -10,7 +10,7 @@ import { DomainProblem } from '../common/problem';
 import type { ActorContext, FacilityAssignment, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
-import { assuranceResult, isAssuranceQuery, PLATFORM_SESSION_ID, platformActor } from '../testing/platform-assurance';
+import { assuranceResult, type AssuranceOptions, isAssuranceQuery, PLATFORM_SESSION_ID, platformActor } from '../testing/platform-assurance';
 import { SecurityGuard } from './security.guard';
 import type { TokenService } from './token.service';
 
@@ -73,7 +73,7 @@ function executionContext(request: HidRequest): ExecutionContext {
     getHandler: () => ({}), getClass: () => ({}) } as unknown as ExecutionContext;
 }
 
-function guardFor(route: RouteMetadata, actor: ActorContext, assurance: { stepUpFresh?: boolean; active?: boolean } = {}) {
+function guardFor(route: RouteMetadata, actor: ActorContext, assurance: AssuranceOptions = {}) {
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
   const database = { query: jest.fn(async (sql: string, parameters: unknown[]) => isAssuranceQuery(sql)
     ? assuranceResult(assurance)
@@ -210,7 +210,8 @@ describe('Platform administration scope', () => {
     const cookies = { hid_access: 'staff-token', hid_access_admin: 'platform-token' };
     const platform = guardFor(auditRoute, platformAdmin);
     await platform.guard.canActivate(executionContext(httpRequest({}, { cookies })));
-    expect(platform.tokens.verify).toHaveBeenCalledWith('platform-token');
+    // Stage 4A: a platform route asks for the platform session-end classification.
+    expect(platform.tokens.verify).toHaveBeenCalledWith('platform-token', 'platform');
     const facility = guardFor({ permissions: ['patient.read'] }, provider);
     await facility.guard.canActivate(executionContext(httpRequest({ 'x-facility-id': facilityA }, { cookies })));
     expect(facility.tokens.verify).toHaveBeenCalledWith('staff-token');
@@ -264,6 +265,13 @@ describe('Central high-risk policy in the guard', () => {
     expect(problem.code).toBe('STEP_UP_REQUIRED');
   });
 
+  it('says when the session stepped up but the five-minute window has passed (Stage 4A)', async () => {
+    const { guard } = guardFor(critical, superAdmin, { stepUpFresh: false, stepUpExpired: true });
+    const problem = await denial(guard.canActivate(executionContext(roleChange())));
+    expect(problem.getStatus()).toBe(403);
+    expect(problem.code).toBe('STEP_UP_EXPIRED');
+  });
+
   it('allows a critical action after a fresh step-up and records the action on the request', async () => {
     const { guard } = guardFor(critical, superAdmin);
     const request = roleChange();
@@ -312,6 +320,15 @@ describe('Central high-risk policy in the guard', () => {
       platformActor({ platformPermissions: ['platform.admin.access', 'platform.principal.read', 'platform.session.revoke'] }));
     expect((await denial(support.guard.canActivate(executionContext(exportRequest)))).code).toBe('PERMISSION_DENIED');
   });
+
+  it.each(['PLATFORM_SESSION_EXPIRED', 'PLATFORM_SESSION_REVOKED'])(
+    'passes %s from token verification through unchanged (Stage 4A)', async (code) => {
+      const { guard, tokens, audit } = guardFor(critical, superAdmin);
+      tokens.verify.mockRejectedValue(new DomainProblem(401, code, 'Sign in again to continue'));
+      const problem = await denial(guard.canActivate(executionContext(roleChange())));
+      expect([problem.getStatus(), problem.code]).toEqual([401, code]);
+      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied' }));
+    });
 
   it('treats a session whose assurance is gone as no platform session', async () => {
     const { guard } = guardFor(critical, superAdmin, { active: false });

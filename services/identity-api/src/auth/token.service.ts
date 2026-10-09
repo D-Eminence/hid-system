@@ -8,6 +8,7 @@ import type { ActorContext } from '../common/request-context';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
 import { CurrentStaffContextService } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
+import { classifyPlatformSessionEnd, platformSessionEnded, type StoredPlatformSessionState } from './platform-session-end';
 
 type SessionKind = 'staff' | 'patient' | 'platform';
 
@@ -23,6 +24,7 @@ interface SessionRow {
   expires_at: Date;
   absolute_expires_at: Date;
   revoked_at: Date | null;
+  revocation_reason?: string | null;
   authentication_method: 'password' | 'oidc';
 }
 
@@ -190,7 +192,7 @@ export class TokenService {
       eventType: 'login_succeeded', outcome: 'success', accountId: assurance.accountId, sessionId, event,
       details: { session_kind: 'platform', mfa_method: assurance.method },
     });
-    return { actor, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt };
+    return { actor, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt, absoluteExpiresAt };
   }
 
   /**
@@ -206,7 +208,7 @@ export class TokenService {
               account.subject as actor_subject, session.family_id::text,
               session.access_jti::text, session.account_token_version::text as token_version,
               session.authentication_method, session.session_kind, session.patient_id::text,
-              session.expires_at, session.absolute_expires_at, session.revoked_at
+              session.expires_at, session.absolute_expires_at, session.revoked_at, session.revocation_reason
          from auth.sessions session
          join auth.accounts account on account.id = session.account_id
         where session.refresh_token_sha256 = $1
@@ -216,11 +218,22 @@ export class TokenService {
       [refreshHash],
     );
     const oldSession = existing.rows[0];
-    if (!oldSession) throw new UnauthorizedException('Invalid refresh session');
+    if (!oldSession) {
+      // A platform refresh token matching a stored session whose account was
+      // since suspended or whose credentials changed (token version) was revoked.
+      if (scope === 'platform' && await this.storedPlatformSession('session.refresh_token_sha256 = $1', [refreshHash])) {
+        throw platformSessionEnded('revoked');
+      }
+      throw new UnauthorizedException('Invalid refresh session');
+    }
     const kind: SessionKind = oldSession.session_kind ?? 'staff';
     if ((kind === 'platform') !== (scope === 'platform')) throw new UnauthorizedException('Invalid refresh session');
 
     if (oldSession.revoked_at) {
+      // A platform refresh cookie outlives the idle window so the end can be
+      // reported, so several tabs may present an expired token at once. That is
+      // not token theft, and an expired session's family has no live session.
+      if (kind === 'platform' && oldSession.revocation_reason === 'expired') throw platformSessionEnded('expired');
       await this.database.withSystemTransaction(event.correlationId, async (client) => {
         await client.query(
           `update auth.sessions
@@ -235,12 +248,14 @@ export class TokenService {
           sessionId: oldSession.id, event,
         });
       });
+      if (kind === 'platform') throw platformSessionEnded('revoked');
       throw new UnauthorizedException('Refresh token reuse detected');
     }
 
     const now = new Date();
     if (oldSession.expires_at <= now || oldSession.absolute_expires_at <= now) {
       await this.expireSession(oldSession, event);
+      if (kind === 'platform') throw platformSessionEnded('expired');
       throw new UnauthorizedException('Refresh session expired');
     }
 
@@ -249,7 +264,8 @@ export class TokenService {
       throw new UnauthorizedException('Invalid refresh session');
     }
     if (kind === 'platform' && !(await this.platformAssuranceActive(oldSession.family_id, oldSession.account_id))) {
-      throw new UnauthorizedException('Platform session assurance is no longer valid');
+      // The authenticator that verified this sign-in was reset.
+      throw platformSessionEnded('revoked');
     }
     const actor = await this.resolveActor(oldSession.actor_subject, authenticationMethod, kind);
     if (actor.accountId !== oldSession.account_id) {
@@ -312,6 +328,7 @@ export class TokenService {
     } catch (error) {
       if (!(error instanceof RefreshRotationConflict)) throw error;
       await this.revokeReusedFamily(oldSession, event);
+      if (kind === 'platform') throw platformSessionEnded('revoked');
       throw new UnauthorizedException('Concurrent refresh token reuse detected');
     }
 
@@ -322,10 +339,18 @@ export class TokenService {
       csrfToken,
       expiresAt: accessExpiresAt,
       refreshExpiresAt,
+      absoluteExpiresAt: oldSession.absolute_expires_at,
     };
   }
 
-  async verify(token: string): Promise<{ actor: ActorContext; claims: HidJwtClaims | JWTPayload }> {
+  /**
+   * Verifies an access token. On a platform route (`scope` platform), a
+   * validly signed platform token whose session ended is answered with
+   * PLATFORM_SESSION_EXPIRED or PLATFORM_SESSION_REVOKED; every other refusal
+   * stays generic.
+   */
+  async verify(token: string, scope: 'standard' | 'platform' = 'standard'):
+    Promise<{ actor: ActorContext; claims: HidJwtClaims | JWTPayload }> {
     if (this.environment.AUTH_MODE === 'oidc') return this.verifyOidc(token);
     if (!this.signingKey) throw new UnauthorizedException('Token verification is unavailable');
     const { payload } = await jwtVerify(token, this.signingKey, {
@@ -334,7 +359,7 @@ export class TokenService {
       algorithms: ['HS256'],
     }).catch(() => { throw new UnauthorizedException('Invalid or expired access token'); });
     const claims = this.parseInternalClaims(payload);
-    await this.assertSessionActive(claims);
+    await this.assertSessionActive(claims, scope);
     const actor = await this.resolveActor(claims.sub, claims.auth_method, claims.actor_kind ?? 'staff', claims.sid);
     if (actor.kind === 'patient' && actor.patientId !== claims.patient_id) {
       throw new UnauthorizedException('Patient account association changed');
@@ -462,7 +487,7 @@ export class TokenService {
     };
   }
 
-  private async assertSessionActive(claims: HidJwtClaims): Promise<void> {
+  private async assertSessionActive(claims: HidJwtClaims, scope: 'standard' | 'platform'): Promise<void> {
     const result = await this.database.query(
       `select 1
          from auth.sessions session
@@ -488,7 +513,30 @@ export class TokenService {
             where assurance.family_id = session.family_id and assurance.account_id = session.account_id))`,
       [claims.sid, claims.sub, claims.jti, claims.token_version, this.databaseMethod(claims.auth_method), claims.actor_kind ?? 'staff', claims.patient_id ?? null],
     );
-    if (result.rowCount !== 1) throw new UnauthorizedException('Session is no longer active');
+    if (result.rowCount !== 1) {
+      // The signature is valid, so the presenter holds this platform session's
+      // own token: say whether it expired or was revoked.
+      if (scope === 'platform' && claims.actor_kind === 'platform') {
+        const ended = classifyPlatformSessionEnd(await this.storedPlatformSession(
+          'session.id = $1 and account.subject = $2 and session.access_jti = $3', [claims.sid, claims.sub, claims.jti]));
+        if (ended) throw platformSessionEnded(ended);
+      }
+      throw new UnauthorizedException('Session is no longer active');
+    }
+  }
+
+  /** State of one stored platform session, for classifying why it was refused. */
+  private async storedPlatformSession(match: string, values: unknown[]): Promise<StoredPlatformSessionState | undefined> {
+    const result = await this.database.query<{ revoked: boolean; revocation_reason: string | null; lapsed: boolean }>(
+      `select session.revoked_at is not null as revoked, session.revocation_reason,
+              (session.expires_at <= clock_timestamp() or session.absolute_expires_at <= clock_timestamp()) as lapsed
+         from auth.sessions session
+         join auth.accounts account on account.id = session.account_id
+        where session.session_kind = 'platform' and ${match}`,
+      values,
+    );
+    const row = result.rows[0];
+    return row ? { revoked: row.revoked, revocationReason: row.revocation_reason, lapsed: row.lapsed } : undefined;
   }
 
   private async accountTokenVersion(accountId: string): Promise<number> {

@@ -2604,17 +2604,28 @@ begin
   exception when serialization_failure then null;
   end;
 
-  begin
-    perform identity.admin_transition_facility(
-      '10000000-0000-4000-8000-000000000002',
-      (select row_version from identity.facilities
-        where id = '10000000-0000-4000-8000-000000000002'),
-      'suspended', 'Schema last reachable administrator facility check',
-      'schema-admin-facility-command-0003', repeat('3', 64)::character(64)
-    );
-    raise exception 'last reachable platform Super Admin facility was suspended';
-  exception when check_violation then null;
-  end;
+  -- 0072: platform sign-in does not depend on a facility membership, so the
+  -- facility where the only Super Admin works can be suspended while that
+  -- Super Admin can still open a platform session (a password credential).
+  -- platform-admin-contracts.integration.sql covers the remaining refusal.
+  select * into command_result from identity.admin_transition_facility(
+    '10000000-0000-4000-8000-000000000002',
+    (select row_version from identity.facilities
+      where id = '10000000-0000-4000-8000-000000000002'),
+    'suspended', 'Schema reachable administrator facility check',
+    'schema-admin-facility-command-0003', repeat('3', 64)::character(64)
+  );
+  if command_result.lifecycle_status <> 'suspended' then
+    raise exception 'facility of a platform-session-reachable Super Admin was not suspended';
+  end if;
+  select * into command_result from identity.admin_transition_facility(
+    '10000000-0000-4000-8000-000000000002', command_result.row_version, 'verified',
+    'Schema restores the administrator facility', 'schema-admin-facility-command-0004',
+    repeat('4', 64)::character(64)
+  );
+  if command_result.lifecycle_status <> 'verified' then
+    raise exception 'the administrator facility was not restored';
+  end if;
 
   begin
     perform auth.admin_change_platform_role(

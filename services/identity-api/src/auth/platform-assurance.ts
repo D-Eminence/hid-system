@@ -78,8 +78,18 @@ export async function requirePlatformAssurance(client: Pick<PoolClient, 'query'>
   if (policy.permissions.some((permission) => !granted.has(permission))) {
     throw new DomainProblem(403, 'PERMISSION_DENIED', 'Required permission is missing');
   }
-  if (policy.stepUp && !state.stepUpFresh) {
-    throw new DomainProblem(403, 'STEP_UP_REQUIRED', 'Confirm with your authenticator code to continue');
-  }
+  if (policy.stepUp && !state.stepUpFresh) throw stepUpProblem(state);
   return state;
+}
+
+/**
+ * The 403 for a command whose step-up is not fresh (Stage 4A):
+ * STEP_UP_EXPIRED when this session's last step-up is older than the
+ * five-minute window, STEP_UP_REQUIRED when the session has none. It concerns
+ * only the caller's own verified session.
+ */
+export function stepUpProblem(state: Pick<PlatformAssuranceState, 'stepUpAt'>): DomainProblem {
+  return state.stepUpAt
+    ? new DomainProblem(403, 'STEP_UP_EXPIRED', 'Your authenticator confirmation expired; confirm again to continue')
+    : new DomainProblem(403, 'STEP_UP_REQUIRED', 'Confirm with your authenticator code to continue');
 }
