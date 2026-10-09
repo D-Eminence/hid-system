@@ -968,3 +968,10 @@ revoke all on function auth.require_platform_step_up(uuid),
   auth.guard_mfa_login_challenge_change(), auth.guard_session_assurance_change(),
   auth.guard_admin_approval_request_change()
   from public;
+
+-- Phase 4 Stage 5B (0073): the Identity API's own revocations (refresh-token
+-- reuse, an administrator revoking their own session, sign-out, expiry) take the
+-- account row lock through this helper before revoking, as the 0073 admin
+-- commands do. It only locks; the runtime still cannot update auth.accounts.
+grant execute on function auth.lock_account_sessions(uuid) to hid_identity_runtime;
+revoke all on function auth.lock_account_sessions(uuid) from public;

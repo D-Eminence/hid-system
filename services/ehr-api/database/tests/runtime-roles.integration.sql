@@ -259,6 +259,18 @@ begin
      or has_function_privilege('hid_identity_api_runtime', 'auth.other_reachable_super_admins(uuid,text)', 'EXECUTE') then
     raise exception 'platform audit reader or Super Admin reachability helper privileges are inconsistent';
   end if;
+  -- Session revocation serialization (0073): the account-row lock helper is
+  -- executable by the Identity runtime only, which still cannot update accounts.
+  if not has_function_privilege('hid_identity_api_runtime', 'auth.lock_account_sessions(uuid)', 'EXECUTE')
+     or has_function_privilege('public', 'auth.lock_account_sessions(uuid)', 'EXECUTE')
+     or has_table_privilege('hid_identity_api_runtime', 'auth.accounts', 'UPDATE')
+     or exists (
+       select 1 from unnest(array['hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_lab_api_runtime',
+         'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime']) runtime(role_name)
+       where has_function_privilege(runtime.role_name, 'auth.lock_account_sessions(uuid)', 'EXECUTE')
+     ) then
+    raise exception 'session revocation lock helper privileges are inconsistent';
+  end if;
   -- A clinician's own access-request list (0036) runs as the Identity runtime;
   -- the function itself checks the caller's membership and identity.consent.write.
   if not has_function_privilege('hid_identity_api_runtime', 'identity.list_my_staff_access_requests(text)', 'EXECUTE')

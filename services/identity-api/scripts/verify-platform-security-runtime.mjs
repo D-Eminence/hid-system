@@ -619,6 +619,161 @@ try {
   }
   evidence.cors_preflight = { delete_access_pin: 204, patch_completion_profile: 204, unlisted_origin: 'no CORS headers' };
 
+  // Stage 5B (0073): revocations racing a refresh rotation. A second connection
+  // holds a rotation open exactly as TokenService.refresh makes it (new session
+  // inserted, old one marked rotated, not yet committed) while a revocation runs
+  // over HTTP. The revocation must wait for the rotation and then revoke the
+  // session it created; before 0073 that session stayed live.
+  const { Client } = require('pg');
+  async function rotationInFlight(sessionId) {
+    const client = new Client({ host: socket, user: process.env.PGUSER, database: isolated });
+    client.on('error', () => undefined);
+    await client.connect();
+    const next = randomUUID();
+    try {
+      await client.query('begin');
+      await client.query(`insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti,
+          account_token_version, authentication_method, issued_at, expires_at, absolute_expires_at, session_kind, patient_id)
+        select $2, account_id, family_id, $3, gen_random_uuid(), account_token_version, authentication_method,
+          issued_at, expires_at, absolute_expires_at, session_kind, patient_id
+        from auth.sessions where id = $1`, [sessionId, next, randomBytes(32).toString('hex')]);
+      const marked = await client.query(`update auth.sessions set revoked_at = clock_timestamp(),
+          revocation_reason = 'rotated', replaced_by_session_id = $2, row_version = row_version + 1
+        where id = $1 and revoked_at is null`, [sessionId, next]);
+      assert.equal(marked.rowCount, 1, 'the simulated rotation marks the old session rotated');
+    } catch (error) {
+      await client.end();
+      throw error;
+    }
+    return { sessionId: next, commit: async () => { try { await client.query('commit'); } finally { await client.end(); } } };
+  }
+  /** True once another backend of this database waits on a lock; false if `settled()` first or after 10 s. */
+  async function lockWaitSeen(settled) {
+    for (const deadline = Date.now() + 10_000; !settled() && Date.now() < deadline;) {
+      const { rows } = await owner.query(`select count(*)::int as n from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()`);
+      if (rows[0].n > 0) return true;
+      await new Promise(done => setTimeout(done, 20));
+    }
+    return false;
+  }
+  /** Starts `revocation` while a rotation of `sessionId` is open, commits the rotation once the revocation waits on it. */
+  async function revokeDuringRotation(sessionId, revocation) {
+    const rotation = await rotationInFlight(sessionId);
+    let settled = false;
+    const pending = Promise.resolve(revocation()).finally(() => { settled = true; });
+    const waited = await lockWaitSeen(() => settled);
+    await rotation.commit();
+    const response = await pending;
+    assert(waited, 'the revocation must reach the database while the rotation is still open');
+    const created = (await owner.query('select revoked_at, revocation_reason from auth.sessions where id = $1',
+      [rotation.sessionId])).rows[0];
+    return { response, created };
+  }
+  const newestSession = async (accountId) => (await owner.query(`select id::text from auth.sessions
+    where account_id = $1 and revoked_at is null order by issued_at desc, id limit 1`, [accountId])).rows[0].id;
+  const staffSignIn = async () => {
+    expectStatus(await http.post('/api/v1/auth/login').set('Origin', origin)
+      .send({ email: target.email, password, turnstileAction: 'staff-login' }), 200);
+    return newestSession(target.id);
+  };
+  const raceAdmin = await platform.signIn(superBAdmin);
+  await platform.stepUp(raceAdmin);
+
+  const familyRaceSession = await staffSignIn();
+  const familyRace = await revokeDuringRotation(familyRaceSession, () => command(raceAdmin,
+    `/admin/principals/${target.id}/sessions/${familyRaceSession}/revoke`,
+    { reason: 'Reported stolen phone', compromised: true }, { 'Idempotency-Key': key('race-family') }));
+  expectStatus(familyRace.response, 200);
+  assert.equal(familyRace.response.body.revokedCount, 1, 'the compromised-family revocation revokes the rotated-in session');
+  assert(familyRace.created.revoked_at, 'a session created during a compromised-family revocation must not stay live');
+  assert.equal(familyRace.created.revocation_reason, 'platform_admin_compromised_session');
+
+  const allRace = await revokeDuringRotation(await staffSignIn(), () => command(raceAdmin,
+    `/admin/principals/${target.id}/sessions/revoke`, { reason: 'Account may be compromised' },
+    { 'Idempotency-Key': key('race-all') }));
+  expectStatus(allRace.response, 201);
+  assert(allRace.created.revoked_at, 'a session created during a revoke-all must not stay live');
+  assert.equal(allRace.created.revocation_reason, 'platform_admin_revocation');
+
+  const ownOther = await platform.signIn(superBAdmin);
+  const ownRace = await revokeDuringRotation(ownOther.sessionId, () => command(raceAdmin,
+    `/admin/sessions/${ownOther.sessionId}/revoke`));
+  expectStatus(ownRace.response, 200);
+  assert(ownRace.created.revoked_at, 'a session created while an administrator revokes their own session must not stay live');
+  assert.equal(ownRace.created.revocation_reason, 'self_revoked');
+
+  // Refresh-token reuse: the first token of a family is presented again while
+  // the family's current session is being rotated by its legitimate holder.
+  const reusedFamily = await platform.signIn(superBAdmin);
+  const reusedOnce = await refresh(reusedFamily);
+  expectStatus(reusedOnce, 200);
+  const reuseRace = await revokeDuringRotation(reusedOnce.body.actor.sessionId, () => refresh(reusedFamily));
+  expectStatus(reuseRace.response, 401, 'PLATFORM_SESSION_REVOKED');
+  assert(reuseRace.created.revoked_at, 'a session created during a reuse revocation must not stay live');
+  assert.equal(reuseRace.created.revocation_reason, 'refresh_token_reuse');
+  // A sign-out or an expiry during an administrator's revocation of the same
+  // account: both lock the account row before the session, as every revocation
+  // does (0073), so neither deadlocks. A second connection holds the
+  // revocation the way the 0073 commands make it (account row locked, then the
+  // UPDATE) and revokes only once the request waits on it.
+  async function revocationWhile(accountId, request) {
+    const revoker = new Client({ host: socket, user: process.env.PGUSER, database: isolated });
+    revoker.on('error', () => undefined);
+    await revoker.connect();
+    let failure = null;
+    try {
+      await revoker.query('begin');
+      await revoker.query('select auth.lock_account_sessions($1)', [accountId]);
+      let settled = false;
+      const pending = Promise.resolve(request()).finally(() => { settled = true; });
+      const waited = await lockWaitSeen(() => settled);
+      try {
+        await revoker.query(`update auth.sessions set revoked_at = clock_timestamp(),
+            revocation_reason = 'platform_admin_revocation', row_version = row_version + 1
+          where account_id = $1 and revoked_at is null`, [accountId]);
+        await revoker.query('commit');
+      } catch (error) {
+        failure = error.code ?? String(error);
+        await revoker.query('rollback').catch(() => undefined);
+      }
+      const response = await pending;
+      assert(waited, 'the request must reach the database while the revocation is still open');
+      assert.equal(failure, null, `the revocation failed while the request waited (${failure})`);
+      return response;
+    } finally {
+      await revoker.end();
+    }
+  }
+  const targetLogin = async () => {
+    const response = await http.post('/api/v1/auth/login').set('Origin', origin)
+      .send({ email: target.email, password, turnstileAction: 'staff-login' });
+    expectStatus(response, 200);
+    return { jar: mergeCookies({}, response), csrf: response.headers['x-csrf-token'], sessionId: await newestSession(target.id) };
+  };
+  const leaving = await targetLogin();
+  expectStatus(await revocationWhile(target.id, () => http.post('/api/v1/auth/logout').set('Origin', origin)
+    .set('Cookie', cookieHeader(leaving.jar)).set('x-csrf-token', leaving.csrf)), 204);
+  const expiring = await targetLogin();
+  await owner.query(`update auth.sessions set issued_at = now() - interval '2 hours',
+    expires_at = now() - interval '1 minute' where id = $1`, [expiring.sessionId]);
+  expectStatus(await revocationWhile(target.id, () => http.post('/api/v1/auth/refresh').set('Origin', origin)
+    .set('Cookie', cookieHeader(expiring.jar)).set('x-csrf-token', expiring.jar.hid_access_csrf)), 401, 'AUTHENTICATION_REQUIRED');
+  assert.deepEqual((await owner.query(`select id::text, revocation_reason from auth.sessions where id = any($1::uuid[])
+    order by id`, [[leaving.sessionId, expiring.sessionId]])).rows.map(row => row.revocation_reason),
+  ['platform_admin_revocation', 'platform_admin_revocation'], 'the revocation that committed first keeps its reason');
+  // A sign-out while a refresh of the same sign-in is in flight (another tab)
+  // ends the session that refresh creates too.
+  const racingSignOut = await targetLogin();
+  const signOutRace = await revokeDuringRotation(racingSignOut.sessionId, () => http.post('/api/v1/auth/logout')
+    .set('Origin', origin).set('Cookie', cookieHeader(racingSignOut.jar)).set('x-csrf-token', racingSignOut.csrf));
+  expectStatus(signOutRace.response, 204);
+  assert(signOutRace.created.revoked_at, 'a session created during a sign-out of its sign-in must not stay live');
+  assert.equal(signOutRace.created.revocation_reason, 'logout');
+  evidence.revocation_races = { waited_for_rotation: true, compromised_family: 'new session revoked',
+    all_sessions: 'new session revoked', own_session: 'new session revoked', refresh_reuse: 'new session revoked',
+    sign_out: 'new session revoked', sign_out_during_revocation: 'no deadlock', expiry_during_revocation: 'no deadlock' };
+
   // 12. Principal export: restricted permission, step-up, reason, RFC 4180 CSV.
   const exporter = await platform.signIn(superBAdmin);
   expectStatus(await get(exporter, exportPath), 403, 'STEP_UP_REQUIRED');

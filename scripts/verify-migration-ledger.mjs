@@ -84,6 +84,7 @@ const acceptedMigrations = new Map([
   ['0070_platform_two_person_approval.sql', '3b732bbd473c58c7ec8ed7b56068e9c76c8d0c4f91fca16fbb3a4c9d62c3f954'],
   ['0071_platform_control_command_column_references.sql', '7e36a04c06be641af89a34f2edc0ef3d65476454c8003cacf15e1d4b3217ef92'],
   ['0072_platform_admin_contract_gaps.sql', '565f759bac8f6b2bc60c4bbf57e7dbdaae0f020b53d3f2af431c7aa22f886e4b'],
+  ['0073_session_revocation_serialization.sql', '4901fc0a868e709db5edf28055760aa1a0cb85cefe327c0319f421d284c5df93'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
