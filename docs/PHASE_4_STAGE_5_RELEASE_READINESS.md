@@ -1,8 +1,10 @@
 # Phase 4 Stage 5: platform administration release readiness
 
 This is the combined release checklist for the platform administration work
-of Phase 4. It covers Identity and the database in this repository, and the
-admin console in Health-id (`apps/patient-web/src/admin`). It records what was
+of Phase 4 and the governed-access slice that followed it. It covers Identity
+and the database in this repository, and in Health-id the admin console
+(`apps/patient-web/src/admin`) and the provider portal's governed-access pages
+(`apps/patient-web/src/staff`). It records what was
 verified locally and what an operator must still do. **Nothing here has been
 deployed, and no staging or production database has been migrated.** Every
 "verified" below means a local synthetic environment unless it says otherwise.
@@ -11,10 +13,12 @@ deployed, and no staging or production database has been migrated.** Every
 
 | Component | Source | Contents |
 | --- | --- | --- |
-| Database | `services/ehr-api/database/migrations` through `0073_session_revocation_serialization.sql` | Phase 1–4 schema. The platform admin migrations are 0067–0072. Stage 5 adds no migration; Stage 5B adds 0073 (§2). |
-| Identity API | `services/identity-api` on `main` (Stage 2A, 4A, 5 and 5B) | Platform MFA sessions, step-up, two-person approval and the Stage 4A admin contracts. Stage 5 adds the two fixes in §2; Stage 5B adds the revocation lock (§2). |
+| Database | `services/ehr-api/database/migrations` through `0074_staff_access_request_outcome.sql` | Phase 1–4 schema. The platform admin migrations are 0067–0072. Stage 5 adds no migration; Stage 5B adds 0073 and governed access adds 0074 (§2). |
+| Runtime grants | `services/ehr-api/database/runtime-grants.sql`, applied by the role bootstrap | Governed access grants the Identity runtime the clinician's access-request list (§2). |
+| Identity API | `services/identity-api` on `main` (Stage 2A, 4A, 5, 5B and governed access) | Platform MFA sessions, step-up, two-person approval and the Stage 4A admin contracts. Stage 5 adds the two fixes in §2; Stage 5B adds the revocation lock; governed access adds the access-request outcome fields (§2). |
 | Pharmacy API | `services/pharmacy-api` | Stage 5 CORS header fix (§2). |
 | Admin console | Health-id `main` (Stage 4B and the Stage 5 fix) | The console for the contracts above. |
+| Provider portal | Health-id `main` (governed access, D-Eminence/Health-id#18 and D-Eminence/Health-id#19) | The clinician's access requests with their outcomes, closing a grant, and write gating on the clinical page. |
 
 ## 2. Stage 5 changes
 
@@ -32,6 +36,11 @@ deployed, and no staging or production database has been migrated.** Every
   - Same-origin `/api/v1` routing, the production design, never needed these. They matter only to a cross-origin deployment.
 - **Session revocation serialization (Stage 5B, migration 0073)**: an administrator's family revocation (including one marked compromised), revoke-all, an administrator revoking one of their own sessions, and the family revocation after refresh-token reuse could each miss the session that a refresh in flight was creating. That session stayed live until it expired, even after a "compromised" revocation. Each of these revocations now takes the account row lock (`FOR UPDATE`) before revoking. The two admin commands lock the acting administrator's row with the target's, in account order: their idempotency row references the actor's account, so locking only the target would let two administrators revoking each other's sessions at the same moment deadlock. It waits for a refresh in flight to commit, then revokes the session that refresh created. A refresh that starts after the lock waits, then finds its session revoked and is refused. The admin commands `auth.admin_revoke_account_sessions` and `auth.admin_revoke_session_family` keep their signatures, permissions, checks, idempotency and results. The Identity API's own revocations call the new `auth.lock_account_sessions(uuid)`, which is granted to the Identity runtime only. These are refresh-token reuse, an administrator revoking their own session, sign-out and expiry. Sign-out and expiry end one session, but they take the lock first too. Every path that revokes sessions then locks the account row before any session row, so no two of them can deadlock. Without this, a sign-out during an administrator's revocation of the same account could deadlock. Account actions that change the token version (suspension, MFA reset, password recovery, deletion) already invalidated such a session and already locked the account first; they are unchanged. A sign-out now ends the whole sign-in, that is, the presented session's family. Before, a sign-out whose session another tab had just refreshed ended nothing, recorded a successful sign-out, and left the new session live.
 - **Admin console (Health-id)**: after **Revoke all sessions**, the confirmation stays visible. Before, the reload reported no sessions and the form, with its confirmation, disappeared. This was found by the browser run in §8.
+- **Governed access: the clinician's access-request list** (D-Eminence/hid-system#26, no migration). `GET /identity/access-requests` calls `identity.list_my_staff_access_requests(text)`, but the runtime grants never gave the Identity runtime `EXECUTE` on it. Every clinician's list was refused (`403`). The role bootstrap now grants it, and `runtime-roles.integration.sql` asserts the grant. `runtime-function-grants.spec.ts` checks, without a database, that every database function the Identity source calls is granted to its runtime.
+- **Governed access: access-request outcomes** (D-Eminence/hid-system#28, migration 0074). An approved request stayed `approved` after its grant expired, was revoked by the patient or was closed by the clinician. The list now also returns, from the latest grant made from each request, `consentGrantId`, `grantExpiresAt`, `authorizationMethod` and `effectiveStatus`. For an approval with a grant, `effectiveStatus` reports whichever ended the grant first: `active`, `expired`, `closed` (by the requesting clinician) or `revoked` (by anyone else). Otherwise it is the request status. The `status` filter matches either the request status or the outcome, and also accepts `active` and `closed`. The function's arguments, caller checks, order and 100-row limit are unchanged.
+- **Provider portal (Health-id)**:
+  - D-Eminence/Health-id#18 reads the list above, closes a grant, and enables clinical writes only when `POST /identity/consent-status` allows them.
+  - D-Eminence/Health-id#19 shows each approval's outcome and expiry, offers **Close access** for an active grant, and adds the outcome filters. The new fields and filters appear only when Identity reports them.
 
 ## 3. Compatibility
 
@@ -46,15 +55,20 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 
 **Rule:** never run Identity at Stage 4A or later with a console older than Stage 4B.
 
+**Governed access:**
+- The provider portal of D-Eminence/Health-id#19 works with any Identity build that serves the access-request list. It shows outcomes and offers the outcome filters only when Identity reports `effectiveStatus`. Otherwise it shows the request status, as before.
+- An Identity build with the 0074 mapping selects the new columns by name, so it fails on the list (`5xx`) until 0074 is applied.
+- Earlier Identity builds keep working after 0074 and the bootstrap. They ignore the new columns, and their request validation refuses the `active` and `closed` filters (`400`). The portal offers those filters only to an Identity that reports outcomes.
+
 ## 4. Prerequisites and pre-release checks
 
 | # | Check | Owner | How |
 | --- | --- | --- | --- |
-| P1 | The production migration ledger's last applied version is known. | Database operator | `npm run db:plan` as the migration administrator, as in `MIGRATION_RUNBOOK.md` §6. It applies nothing, but its ledger bootstrap statements need the administrator's privileges, so it cannot run with read-only credentials. The local rehearsal covers 0028 → 0073; any other starting point needs its own rehearsal. |
+| P1 | The production migration ledger's last applied version is known. | Database operator | `npm run db:plan` as the migration administrator, as in `MIGRATION_RUNBOOK.md` §6. It applies nothing, but its ledger bootstrap statements need the administrator's privileges, so it cannot run with read-only credentials. The local rehearsal covers 0028 → 0074; any other starting point needs its own rehearsal. |
 | P2 | A restorable backup of the target database exists and its restore was tested. | Database operator | Snapshot or `pg_dump` taken immediately before the window. The rehearsal checks backup and restore integrity, but the real restore must be proven on staging. |
 | P3 | `MFA_SECRET_KEY_B64` is provisioned for Identity: 32 random bytes, base64, from the secret store. `MFA_KEY_VERSION` is set. | Security owner and infrastructure owner | **The infrastructure code does not do this yet.** `infra/aws/src/hid-regional-stack.ts` maps no `MFA_SECRET_KEY_B64` from the Identity secret and sets no `MFA_KEY_VERSION`, which then defaults to `local-v1`. Stage 2A recorded this as an infrastructure task. An infrastructure change must add both before step 6. Without the key, platform sign-in fails closed with `503 MFA_UNAVAILABLE`, and a malformed key stops Identity at start-up. Never reuse a staging key in production. The key and `MFA_KEY_VERSION` are fixed when the first authenticator is enrolled: changing either later invalidates every enrolled authenticator unless a re-encryption release exists. |
 | P4 | Identity `CORS_ORIGINS` lists only the exact HTTPS console origins, with no paths. | Platform operator | Enforced at start-up in production. With same-origin `/api/v1`, CORS is not used by the console. |
-| P5 | The sizes of `audit.events`, `auth.sessions` and `auth.session_events` are known, for the lock windows of 0067, 0069 and 0072. | Database operator | `select count(*)` and `pg_total_relation_size(...)` for each table on a recent snapshot. See §5. |
+| P5 | The sizes of `audit.events`, `auth.sessions`, `auth.session_events` and `identity.consent_grants` are known, for the lock windows of 0067, 0069, 0072 and 0074. | Database operator | `select count(*)` and `pg_total_relation_size(...)` for each table on a recent snapshot. See §5. |
 | P6 | Two Super Admins can sign in and confirm. | Security owner | Two-person approval needs a second Super Admin. Facility suspension needs at least one reachable Super Admin (0072). On a first deployment of Stage 2A (no platform sign-in yet), check this after step 6, when the Super Admins enrol their authenticators. |
 | P7 | The staging acceptance in §7 passed on the exact builds being released. | Release owner | Evidence attached to the release record. |
 
@@ -66,11 +80,15 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 4. **0072 builds `audit_resource_uuid_sequence_idx` without `CONCURRENTLY`.** This is possible only inside the runner's transaction. The build holds a `SHARE` lock on `audit.events`:
    - every audited write waits until the build finishes, and that includes most authenticated requests;
    - reads continue.
-5. Each of these statements must finish within 120 s, or its migration rolls back and nothing changes. The 5 s `lock_timeout` also fails a migration that cannot get its lock, so stop traffic to Identity, or keep it low, during the window. Measured locally for 0072 only (Stage 5, PostgreSQL 16, synthetic rows, development container, not production hardware): over 1,000,000 audit rows (414 MB, two thirds with a UUID target), the index statement ran in 1.1 s under the runner's settings and produced a 35 MB index. 0067 and 0069 were not measured. Measure all three in the staging rehearsal (S1), scale by the P5 sizes with a wide margin for production I/O, and size the window on the combined cost.
+5. Each of these statements must finish within 120 s, or its migration rolls back and nothing changes. The 5 s `lock_timeout` also fails a migration that cannot get its lock, so stop traffic to Identity, or keep it low, during the window. Measured locally for 0072 only (Stage 5, PostgreSQL 16, synthetic rows, development container, not production hardware): over 1,000,000 audit rows (414 MB, two thirds with a UUID target), the index statement ran in 1.1 s under the runner's settings and produced a 35 MB index. 0067, 0069 and 0074 (step 7) were not measured. Measure all four in the staging rehearsal (S1), scale by the P5 sizes with a wide margin for production I/O, and size the window on the combined cost.
 6. **0073** replaces two functions and adds one. It takes no table lock and needs no window. At run time, each session revocation, sign-out and expiry holds its account row lock until it commits, usually milliseconds. Sign-ins, refreshes and sign-outs of that one account wait for that long. Once every Identity instance runs Stage 5B, every path that revokes sessions takes the account row before any session row, so they cannot deadlock with each other. Pre-existing, and unchanged: two administrators changing each other's accounts at the same moment (status, platform role) can deadlock, because each command locks its target and then references its actor. A session revocation can join that cycle when the target's account id sorts before the actor's. PostgreSQL cancels one command, which fails and can be retried; nothing is half applied.
-7. If any estimate approaches 120 s, stop and re-plan before the release. 0072 cannot be edited or worked around in place: an index built beforehand under the same name makes 0072 fail. Do not raise the timeouts ad hoc.
-8. **Immediately after the migrations, run `npm run db:bootstrap`, then `npm run db:verify-roles`.**
+7. **0074** has two effects:
+   - It builds `consent_grants_request_idx` without `CONCURRENTLY`, under a `SHARE` lock on `identity.consent_grants`. New grants wait until the build finishes, that is, a patient's approval and a clinician's PIN access. Reads continue. Not measured; measure it with the others in S1.
+   - It drops and recreates `identity.list_my_staff_access_requests(text)`, because its result type changes.
+8. If any estimate approaches 120 s, stop and re-plan before the release. 0072 cannot be edited or worked around in place: an index built beforehand under the same name makes 0072 fail. Do not raise the timeouts ad hoc.
+9. **Immediately after the migrations, run `npm run db:bootstrap`, then `npm run db:verify-roles`.**
    - 0072 drops and recreates `audit.list_platform_events` with eleven arguments. Until the bootstrap grants `EXECUTE` on the new signature, any running Identity is refused on the platform audit list.
+   - The bootstrap grants `EXECUTE` on `identity.list_my_staff_access_requests(text)` to the Identity runtime (D-Eminence/hid-system#26). Before that grant existed, the clinician list was refused (`403`) everywhere. 0074 recreates the function, so after 0074 the list is refused for every Identity build until the bootstrap runs.
    - The bootstrap grants `EXECUTE` on `auth.lock_account_sessions(uuid)` (0073) to the Identity runtime. A Stage 5B Identity running before this, or before 0073, fails with a database error (`5xx`) on every sign-out, every refresh of an expired session, an administrator's own-session revocation and refresh-token reuse; a reused family is then not revoked. Earlier Identity builds do not call it.
    - Between this step and step 6, and during a rolling Identity deploy, an earlier Identity runs against 0073. Its sign-out, expired refresh, refresh-reuse revocation and own-session revocation lock session rows before the account row, so each can deadlock with an administrator's revocation of the same account at the same moment. PostgreSQL cancels one of the two, which fails with an error and can be retried (§9). Keep that interval short.
    - The bootstrap also runs the runtime-role assertions.
@@ -82,13 +100,14 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 3. Take the backup (P2).
 4. Apply the **migrations** (§5).
 5. Run the **role bootstrap** and verify it (§5).
-6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`. This needs the infrastructure change in P3. A Stage 5B Identity must not start before steps 4 and 5 (0073 and its grant).
+6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`. This needs the infrastructure change in P3. A Stage 5B Identity must not start before steps 4 and 5 (0073 and its grant), and an Identity with the governed-access outcome mapping must not start before 0074 and the bootstrap.
 7. Deploy the **Pharmacy API**. This is independent of the other steps.
 8. Run the smoke checks:
    - a Super Admin signs in with TOTP;
    - a high-risk action asks for step-up;
    - `GET /admin/audit/events?resourceType=facility` answers `200`;
    - `GET /admin/approvals` returns `{ items, nextCursor }`;
+   - a clinician's `GET /identity/access-requests` answers `200`, and each item has `effectiveStatus`;
    - CloudWatch shows no `MFA_UNAVAILABLE`.
 
 ## 7. Staging acceptance
@@ -99,10 +118,11 @@ has been run, because no staging environment exists yet (Health-id
 
 | # | Test | Evidence |
 | --- | --- | --- |
-| S1 | Migration rehearsal on a restored staging snapshot. Restore it into an isolated database, then, as the migration administrator, run `db:plan`, `db:dry-run`, `db:migrate`, `db:bootstrap` and `db:verify-roles`. Run the SQL suites and the restore check of `docs/TUF-STAGING-MIGRATION.md`, timing 0067, 0069 and 0072. `scripts/tuf-staging-migration-rehearsal.mjs` is local and synthetic only: it builds its own cluster and cannot use a snapshot. | Command output, timings and restore result. |
+| S1 | Migration rehearsal on a restored staging snapshot. Restore it into an isolated database, then, as the migration administrator, run `db:plan`, `db:dry-run`, `db:migrate`, `db:bootstrap` and `db:verify-roles`. Run the SQL suites and the restore check of `docs/TUF-STAGING-MIGRATION.md`, timing 0067, 0069, 0072 and 0074. `scripts/tuf-staging-migration-rehearsal.mjs` is local and synthetic only: it builds its own cluster and cannot use a snapshot. | Command output, timings and restore result. |
 | S2 | `db:verify-roles` on staging. | Command output. |
-| S3 | The Identity runtime verifiers against staging Identity, especially `verify-platform-security-runtime.mjs` and `verify-platform-admin-runtime.mjs`. | Verifier JSON. |
+| S3 | The Identity runtime verifiers against staging Identity, especially `verify-platform-security-runtime.mjs`, `verify-platform-admin-runtime.mjs` and `verify-patient-safety-runtime.mjs`. | Verifier JSON. |
 | S4 | The browser checks of §8, by hand with real authenticators, on the staging console and API. Check 3 needs a confirmation older than five minutes: wait it out, or use a second session. | Screenshots and notes for each check. |
+| S4a | The governed-access loop in the staging provider and patient portals: a clinician requests access, the patient approves, the clinician sees **Access active** with its expiry, writes a clinical record, closes access (**Closed by you**, writes disabled), then requests again and the patient revokes (**Access revoked**). No browser run of these pages has been done; only component tests and the HTTP verifier (§8). | Screenshots and notes. |
 | S5 | Cross-origin preflights, only if staging serves the console from another origin. | `OPTIONS` responses. |
 | S6 | Rollback drill: redeploy the previous Identity build against the migrated staging database and sign in. | Notes. |
 
@@ -150,6 +170,29 @@ Other local clusters were not touched.
 
   - `session-revocation-lock.spec.ts`: 9/9 pass. Each fails against the Stage 5 token and platform-security services.
   - `session-revocation-serialization.integration.sql` checks the catalog contract: the helper is security definer, `PUBLIC` cannot execute it, and both admin commands lock the target and actor rows, in account order, before their `UPDATE`. `runtime-roles.integration.sql` checks the helper's grant.
+- **Governed access (D-Eminence/hid-system#26 and D-Eminence/hid-system#28):**
+  - Rehearsal: `scripts/tuf-staging-migration-rehearsal.mjs` was run as `postgres` on `4a1ec18`, which has the same tree as `main` after D-Eminence/hid-system#28. It covered:
+    - 0028 → 0074, with the dry run unchanged;
+    - 438 foreign keys and 0 orphans;
+    - 24 SQL suites, also under the non-superuser definer owner;
+    - every runtime HTTP verifier;
+    - backup and restore integrity.
+  - `verify-patient-safety-runtime.mjs` runs over HTTP with the exact runtime role. The clinician's list:
+    - reports the active grant and its expiry after the patient approves, and `?status=active` finds it;
+    - reports `revoked` after the patient revokes, `?status=revoked` finds it, and `?status=active` no longer does.
+
+    With the earlier Identity mapping it fails at the first of these checks. Without the D-Eminence/hid-system#26 grant, the list answers `403`.
+  - `staff-access-request-outcome.integration.sql` covers:
+    - every outcome, including grants that the patient or the clinician revoked only after they lapsed;
+    - each filter value;
+    - isolation from a colleague's requests;
+    - a member without `identity.consent.write`.
+
+    It fails against the first version of 0074.
+  - `runtime-function-grants.spec.ts` names the ungranted function on the code before D-Eminence/hid-system#26.
+  - Workspace gates passed (Identity 713/713).
+  - Health-id: 399/399 tests and both builds passed. `GovernedAccess.test.tsx` has 12 tests, 4 of which fail on the first version of D-Eminence/Health-id#19.
+  - **No browser run** of the provider or patient portal pages (S4a).
 - **Not run:** staging or production anything (§7). The browser run uses the backend's own TOTP clock seam to issue codes, not a real authenticator app.
 
 To reproduce, run as the owner of a local cluster migrated to 0073 and role-bootstrapped (Stage 5B Identity calls `auth.lock_account_sessions` on sign-out and expiry; a cluster left at 0072 needs `db:migrate` and `db:bootstrap` again) (`services/ehr-api` `db:migrate` and `db:bootstrap`). The harness defaults to the database `hid_rehearsal`, the superuser `hid_rehearsal_admin` and ports 4010 and 4011. Change them with `HID_E2E_TEMPLATE_DB`, `HID_E2E_DB_SUPERUSER`, `HID_E2E_API_PORT` and `HID_E2E_CONTROL_PORT`; see the script headers. Stop `server.mjs` with Ctrl-C or SIGTERM, which drops its database copy.
@@ -189,6 +232,7 @@ To reproduce, run as the owner of a local cluster migrated to 0073 and role-boot
   - A pre-4A build also runs. Its nine-argument audit call resolves to the new function through the defaulted arguments; `platform-admin-contracts.integration.sql` checks this.
   - **Do not roll the console back below Stage 4B while Identity is at Stage 4A or later (§3).**
 - **Identity after 0073:** Stage 5 and earlier builds run unchanged. The two admin commands keep their contracts, and only Stage 5B calls the new helper. Rolling Identity back to Stage 5 removes the lock from the reuse, own-session, sign-out and expiry paths. The two admin revocations keep it, because it is in the database. With that combination, any of those four paths at the same moment as an administrator's revocation of the same account can deadlock. PostgreSQL then cancels one of the two. Either the sign-out or refresh fails with a `5xx` (reproduced locally, §8), or the administrator's revocation fails and must be retried. Prefer rolling forward.
+- **Identity after 0074:** once the bootstrap has run, earlier builds keep working (§3); roll Identity back freely. The new index and the new result columns stay. Rolling back the Health-id portal only hides the outcomes.
 - **Refresh-event change:** this is code only. Rolling back Identity brings back the old misclassification and nothing else. Existing `refresh`/`denied` events remain valid rows.
 - **MFA key:** if `MFA_SECRET_KEY_B64` is lost, every enrolled authenticator must be re-enrolled. Store it with the same care as the field-encryption keys.
 - **Lockout:** if every Super Admin is locked out (lost authenticators and recovery codes), recovery needs the documented break-glass procedure. That procedure is not built yet; see the product decisions in `PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §9. Keep two independent Super Admins with stored recovery codes.
