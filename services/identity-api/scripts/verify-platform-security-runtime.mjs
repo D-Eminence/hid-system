@@ -762,9 +762,17 @@ try {
   assert.deepEqual((await owner.query(`select id::text, revocation_reason from auth.sessions where id = any($1::uuid[])
     order by id`, [[leaving.sessionId, expiring.sessionId]])).rows.map(row => row.revocation_reason),
   ['platform_admin_revocation', 'platform_admin_revocation'], 'the revocation that committed first keeps its reason');
+  // A sign-out while a refresh of the same sign-in is in flight (another tab)
+  // ends the session that refresh creates too.
+  const racingSignOut = await targetLogin();
+  const signOutRace = await revokeDuringRotation(racingSignOut.sessionId, () => http.post('/api/v1/auth/logout')
+    .set('Origin', origin).set('Cookie', cookieHeader(racingSignOut.jar)).set('x-csrf-token', racingSignOut.csrf));
+  expectStatus(signOutRace.response, 204);
+  assert(signOutRace.created.revoked_at, 'a session created during a sign-out of its sign-in must not stay live');
+  assert.equal(signOutRace.created.revocation_reason, 'logout');
   evidence.revocation_races = { waited_for_rotation: true, compromised_family: 'new session revoked',
     all_sessions: 'new session revoked', own_session: 'new session revoked', refresh_reuse: 'new session revoked',
-    sign_out_during_revocation: 'no deadlock', expiry_during_revocation: 'no deadlock' };
+    sign_out: 'new session revoked', sign_out_during_revocation: 'no deadlock', expiry_during_revocation: 'no deadlock' };
 
   // 12. Principal export: restricted permission, step-up, reason, RFC 4180 CSV.
   const exporter = await platform.signIn(superBAdmin);

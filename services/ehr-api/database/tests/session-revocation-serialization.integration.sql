@@ -1,6 +1,7 @@
 \set ON_ERROR_STOP on
 -- Session revocation serialization (0073). Every family or account session
 -- revocation that keeps the account's token version takes the account row lock
+-- (for the admin commands, the target's and the actor's, in account order)
 -- before its UPDATE, so it waits for a refresh rotation in flight and then
 -- revokes the session that rotation created. This suite checks the catalog
 -- contract a later CREATE OR REPLACE must keep; the two-connection race itself
@@ -39,11 +40,13 @@ begin
     'auth.admin_revoke_account_sessions(uuid,text,text,character)'::regprocedure,
     'auth.admin_revoke_session_family(uuid,uuid,boolean,text,text,character)'::regprocedure
   ] loop
-    definition := lower(pg_get_functiondef(command));
-    lock_at := position('perform auth.lock_account_sessions(requested_account_id)' in definition);
+    definition := regexp_replace(lower(pg_get_functiondef(command)), '\s+', ' ', 'g');
+    -- Target and actor rows together, in account order, before the UPDATE.
+    lock_at := position('where account_row.id in (requested_account_id, actor_account) order by account_row.id for update'
+      in definition);
     update_at := position('update auth.sessions' in definition);
     if lock_at = 0 or update_at = 0 or lock_at > update_at then
-      raise exception '% must lock the account before revoking its sessions', command;
+      raise exception '% must lock the target and actor accounts, in order, before revoking sessions', command;
     end if;
     if (select function_row.proowner from pg_proc function_row where function_row.oid = command)
        <> (select function_row.proowner from pg_proc function_row where function_row.oid = lock_function) then

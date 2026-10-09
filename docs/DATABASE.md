@@ -1229,11 +1229,16 @@ a reachable Super Admin to be suspendable.
   rotation that starts after the lock waits, then finds its old session revoked
   and is refused.
 - `auth.admin_revoke_account_sessions` and `auth.admin_revoke_session_family`
-  are replaced with the lock added before their `UPDATE`. Signatures,
+  are replaced with the lock added before their `UPDATE`. They lock the target's
+  and the acting administrator's account rows in one statement, in account
+  order, because their idempotency row references the actor's account; two
+  administrators revoking each other's sessions at once then cannot deadlock. Signatures,
   permissions, checks, idempotency and results are unchanged, and `CREATE OR
   REPLACE` keeps their owner and grants.
 - The Identity API calls the helper before its own revocations: refresh-token
-  reuse, an administrator revoking their own session, sign-out and expiry.
+  reuse, an administrator revoking their own session, sign-out and expiry. A
+  sign-out revokes the presented session's family, so it also ends a session
+  that a refresh in another tab created while it waited.
   Every path that revokes sessions therefore locks the account row before any
   session row. The account actions that change the token version already did.
 - `runtime-grants.sql` grants `EXECUTE` on the helper to `hid_identity_runtime`

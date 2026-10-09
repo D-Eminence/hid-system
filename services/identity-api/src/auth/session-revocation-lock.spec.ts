@@ -114,9 +114,17 @@ describe('session revocation serialization (Stage 5B)', () => {
     const statements = transactions[0] ?? [];
     const lock = statements.findIndex(({ sql, values }) => sql.includes('auth.lock_account_sessions(session_row.account_id)')
       && sql.includes('where session_row.id = $1') && values[0] === SESSION);
-    const end = statements.findIndex(({ sql }) => sql.includes('update auth.sessions') && sql.includes('where id = $1'));
+    const end = statements.findIndex(({ sql }) => sql.includes('update auth.sessions') && sql.includes("'logout'"));
     expect(lock).toBeGreaterThanOrEqual(0);
     expect(lock).toBeLessThan(end);
+  });
+
+  it('a sign-out ends the whole sign-in: the presented session and any session its family rotated into', async () => {
+    const { service, transactions } = refreshHarness('staff', {});
+    await service.revoke(SESSION, 'synthetic:lock', event);
+    const signOut = (transactions[0] ?? []).find(({ sql }) => sql.includes('update auth.sessions') && sql.includes("'logout'"));
+    expect(signOut?.sql).toMatch(/where family_id = \(select presented\.family_id from auth\.sessions presented where presented\.id = \$1\)\s+and \(id = \$1 or revoked_at is null\)/);
+    expect(signOut?.values).toEqual([SESSION]);
   });
 
   it.each<'staff' | 'platform'>(['staff', 'platform'])('an expired %s session locks the account before it is marked expired',

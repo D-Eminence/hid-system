@@ -20,8 +20,12 @@
 --
 -- * auth.admin_revoke_account_sessions (0027) and
 --   auth.admin_revoke_session_family (0069): same signatures, permissions,
---   checks, idempotency and results; only the lock is added. CREATE OR
---   REPLACE keeps their owner and grants.
+--   checks, idempotency and results; only the lock is added. It covers the
+--   target and the acting administrator's rows in account order: the
+--   idempotency row references the actor's account (a FOR KEY SHARE through
+--   its foreign key), so locking only the target would let two administrators
+--   revoking each other's sessions deadlock. CREATE OR REPLACE keeps their
+--   owner and grants.
 -- * auth.lock_account_sessions(uuid): takes the same lock for the Identity
 --   API's own revocations (refresh-token reuse, an administrator revoking one
 --   of their own sessions, sign-out and expiry), whose runtime role cannot lock
@@ -83,7 +87,13 @@ begin
     return;
   end if;
   -- 0073: wait for any refresh in flight, so a session it creates is revoked too.
-  perform auth.lock_account_sessions(requested_account_id);
+  -- The actor's row, which the idempotency row below references, is locked
+  -- with it in account order, so two administrators revoking each other's
+  -- sessions at the same moment cannot deadlock.
+  perform 1 from auth.accounts account_row
+   where account_row.id in (requested_account_id, actor_account)
+   order by account_row.id
+   for update;
   update auth.sessions as session_row
   set revoked_at = clock_timestamp(), revocation_reason = 'platform_admin_revocation',
       row_version = session_row.row_version + 1
@@ -147,7 +157,13 @@ begin
     raise exception using errcode = 'P0002', message = 'ADMIN_SESSION_NOT_FOUND';
   end if;
   -- 0073: wait for any refresh in flight, so a session it creates is revoked too.
-  perform auth.lock_account_sessions(requested_account_id);
+  -- The actor's row, which the idempotency row below references, is locked
+  -- with it in account order, so two administrators revoking each other's
+  -- sessions at the same moment cannot deadlock.
+  perform 1 from auth.accounts account_row
+   where account_row.id in (requested_account_id, actor_account)
+   order by account_row.id
+   for update;
   update auth.sessions as session_row
   set revoked_at = clock_timestamp(),
       revocation_reason = case when requested_compromised

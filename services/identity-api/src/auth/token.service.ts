@@ -381,12 +381,16 @@ export class TokenService {
         'select auth.lock_account_sessions(session_row.account_id) from auth.sessions session_row where session_row.id = $1',
         [sessionId],
       );
+      // Sign-out ends the sign-in: the presented session and whatever its
+      // family rotated into, such as the session a refresh in another tab just
+      // created while this sign-out waited for it.
       const result = await client.query<{ account_id: string }>(
         `update auth.sessions
             set revoked_at = coalesce(revoked_at, clock_timestamp()),
                 revocation_reason = coalesce(revocation_reason, 'logout'),
                 row_version = row_version + 1
-          where id = $1
+          where family_id = (select presented.family_id from auth.sessions presented where presented.id = $1)
+            and (id = $1 or revoked_at is null)
           returning account_id::text`,
         [sessionId],
       );
