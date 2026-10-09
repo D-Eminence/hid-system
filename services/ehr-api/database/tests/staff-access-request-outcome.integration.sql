@@ -40,7 +40,7 @@ on conflict (code) do nothing;
 -- Requests by the clinician (1-8) and by a colleague at the same facility (9).
 insert into identity.access_requests (id, patient_id, staff_id, membership_id, facility_id, scope, purpose_of_use,
   reason, status, requested_duration_minutes, approved_at, denied_at, denied_reason, created_at)
-select ('f9600000-0000-4000-8000-00000000000' || n)::uuid, 'f9200000-0000-4000-8000-000000000001',
+select ('f9600000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'f9200000-0000-4000-8000-000000000001',
   ('f9400000-0000-4000-8000-00000000000' || requester)::uuid, ('f9500000-0000-4000-8000-00000000000' || requester)::uuid,
   'f9300000-0000-4000-8000-000000000002', 'read_records', 'direct-care', 'Outcome request ' || n, request_status, 60,
   case when request_status = 'approved' then clock_timestamp() - interval '2 hours' end,
@@ -48,13 +48,16 @@ select ('f9600000-0000-4000-8000-00000000000' || n)::uuid, 'f9200000-0000-4000-8
   case when request_status = 'denied' then 'Not now' end,
   clock_timestamp() - make_interval(mins => 100 - n)
 from (values (1, 2, 'pending'), (2, 2, 'approved'), (3, 2, 'approved'), (4, 2, 'approved'), (5, 2, 'approved'),
-  (6, 2, 'approved'), (7, 2, 'approved'), (8, 2, 'denied'), (9, 3, 'pending')) request(n, requester, request_status);
+  (6, 2, 'approved'), (7, 2, 'approved'), (8, 2, 'denied'), (9, 3, 'pending'), (10, 2, 'approved'),
+  (11, 2, 'approved')) request(n, requester, request_status);
 -- The grants made from the approvals: current, lapsed but unswept, marked
--- expired, revoked by the patient, closed by the clinician, and a PIN grant.
+-- expired, revoked by the patient, closed by the clinician, a PIN grant, and
+-- two that lapsed before the patient (a later PIN change) or the clinician
+-- revoked them, which stay expired.
 insert into identity.consent_grants (id, request_id, patient_id, staff_id, account_id, membership_id, facility_id,
   scope, purpose_of_use, status, granted_by_patient_id, reason, starts_at, expires_at, revoked_at, revoked_by,
   revoked_reason, authorization_method, break_glass)
-select ('f9700000-0000-4000-8000-00000000000' || n)::uuid, ('f9600000-0000-4000-8000-00000000000' || n)::uuid,
+select ('f9700000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, ('f9600000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid,
   'f9200000-0000-4000-8000-000000000001', 'f9400000-0000-4000-8000-000000000002',
   'f9100000-0000-4000-8000-000000000002', 'f9500000-0000-4000-8000-000000000002',
   'f9300000-0000-4000-8000-000000000002', 'read_records', 'direct-care', grant_status,
@@ -67,7 +70,9 @@ from (values
   (4, 'expired', interval '-30 minutes', null, null),
   (5, 'revoked', interval '30 minutes', 'f9100000-0000-4000-8000-000000000001'::uuid, null),
   (6, 'revoked', interval '30 minutes', 'f9100000-0000-4000-8000-000000000002'::uuid, null),
-  (7, 'active', interval '30 minutes', null, 'patient_access_pin')) grant_fixture(n, grant_status, ends_in, revoker, method);
+  (7, 'active', interval '30 minutes', null, 'patient_access_pin'),
+  (10, 'revoked', interval '-90 minutes', 'f9100000-0000-4000-8000-000000000001'::uuid, 'patient_access_pin'),
+  (11, 'revoked', interval '-90 minutes', 'f9100000-0000-4000-8000-000000000002'::uuid, null)) grant_fixture(n, grant_status, ends_in, revoker, method);
 
 set local role hid_identity_api_runtime;
 select set_config('app.actor_subject', 'synthetic:outcome:clinician', true),
@@ -91,7 +96,9 @@ begin
       ('f9600000-0000-4000-8000-000000000005', 'revoked', 'patient_approval', 'f9700000-0000-4000-8000-000000000005'),
       ('f9600000-0000-4000-8000-000000000006', 'closed', 'patient_approval', 'f9700000-0000-4000-8000-000000000006'),
       ('f9600000-0000-4000-8000-000000000007', 'active', 'patient_access_pin', 'f9700000-0000-4000-8000-000000000007'),
-      ('f9600000-0000-4000-8000-000000000008', 'denied', null, null)
+      ('f9600000-0000-4000-8000-000000000008', 'denied', null, null),
+      ('f9600000-0000-4000-8000-000000000010', 'expired', 'patient_access_pin', 'f9700000-0000-4000-8000-000000000010'),
+      ('f9600000-0000-4000-8000-000000000011', 'expired', 'patient_approval', 'f9700000-0000-4000-8000-000000000011')
     ) expected(id, effective_status, method, grant_id)
     full join identity.list_my_staff_access_requests(null) actual on actual.access_request_id = expected.id
    where actual.access_request_id is null or expected.id is null
@@ -102,10 +109,19 @@ begin
     raise exception 'unexpected access-request outcomes (a colleague''s request must not appear): %', mismatches;
   end if;
 
-  -- The filter stays on the request's own status; every approval keeps 'approved'.
-  if (select count(*) from identity.list_my_staff_access_requests('approved') where status = 'approved') <> 6
-     or exists (select 1 from identity.list_my_staff_access_requests('approved') where status <> 'approved') then
-    raise exception 'the status filter must keep matching the request status';
+  -- The filter matches the request status or the outcome: 'approved' still
+  -- returns every approval, and each outcome returns the approvals it names.
+  select string_agg(format('%s: %s', expected.filter, expected.ids), '; ')
+    into mismatches
+    from (values
+      ('approved', '2,3,4,5,6,7,10,11'), ('active', '2,7'), ('expired', '3,4,10,11'), ('closed', '6'),
+      ('revoked', '5'), ('pending', '1'), ('denied', '8')
+    ) expected(filter, ids)
+   where expected.ids is distinct from (
+     select string_agg(ltrim(right(listed.access_request_id::text, 12), '0'), ',' order by listed.access_request_id)
+       from identity.list_my_staff_access_requests(expected.filter) listed);
+  if mismatches is not null then
+    raise exception 'the status filter must match the request status or the outcome: %', mismatches;
   end if;
   if (select grant_expires_at from identity.list_my_staff_access_requests('approved')
        where access_request_id = 'f9600000-0000-4000-8000-000000000002') <= clock_timestamp() then

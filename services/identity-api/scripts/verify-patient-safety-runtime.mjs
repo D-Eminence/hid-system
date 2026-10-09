@@ -279,6 +279,8 @@ try {
   assert.deepEqual([activeOutcome.effectiveStatus, activeOutcome.consentGrantId, activeOutcome.authorizationMethod],
     ['active', approved.body.consentGrantId, 'patient_approval'], 'an approval reports its active grant');
   assert(Date.parse(activeOutcome.grantExpiresAt) > Date.now(), 'an active grant reports its expiry');
+  assert((await staffRequests(clinician, '?status=active').expect(200)).body
+    .some((item) => item.accessRequestId === accessRequestId), 'the outcome filter finds the active approval');
   const history = (await get(sa, '/identity/me/access-history').expect(200)).body;
   const approvedGrant = history.items.find((item) => item.consentGrantId === approved.body.consentGrantId);
   const emergencyGrant = history.items.find((item) => item.consentGrantId === grant.consent_grant_id);
@@ -289,6 +291,10 @@ try {
   assert.equal((await post(sa, `/identity/me/consent-grants/${approved.body.consentGrantId}/revoke`, { reason: 'No longer needed' })
     .expect(200)).body.status, 'revoked');
   assert.equal((await ownOutcome()).effectiveStatus, 'revoked', 'the clinician sees the patient revoked the approval');
+  assert((await staffRequests(clinician, '?status=revoked').expect(200)).body
+    .some((item) => item.accessRequestId === accessRequestId), 'the outcome filter finds the revoked approval');
+  assert(!(await staffRequests(clinician, '?status=active').expect(200)).body
+    .some((item) => item.accessRequestId === accessRequestId), 'a revoked approval is no longer active');
   // Staff-only grant close is not reachable with a patient session.
   await post(sa, `/identity/consent-grants/${approved.body.consentGrantId}/close`, { reason: 'Patient attempt' }).expect(403);
 
