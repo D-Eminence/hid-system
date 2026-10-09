@@ -199,10 +199,11 @@ These are recorded, not built:
 - first-factor enrolment policy.
 
 Follow-ups:
-- A refresh token whose session was revoked for a reason other than rotation
-  (sign-out, revocation, MFA reset) still takes the reuse path and records a
-  `reuse_detected` session event, as before this stage. No live session is
-  affected, but the event overstates the cause. Narrowing it changes security
-  evidence and is left for a separate review.
+- Resolved in Stage 5 (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2): a refresh
+  token whose session ended for a reason other than rotation (sign-out, expiry,
+  an administrator's session revocation) took the reuse path and recorded
+  `reuse_detected`. Only a rotated token presented again is reuse now; the
+  others are recorded as a denied `refresh`. (Tokens of accounts whose token
+  version changed, for example after an MFA reset, never reached that path.)
 - The approvals and demo-request lists return no total. If the console needs
   exact waiting counts, add them to `GET /admin/overview`.

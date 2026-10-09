@@ -539,6 +539,24 @@ try {
   // Reusing the rotated refresh token revokes the whole family.
   expectStatus(await refresh(superBAdmin), 401, 'PLATFORM_SESSION_REVOKED');
   expectStatus(await get(superBRotated, '/admin/session'), 401, 'PLATFORM_SESSION_REVOKED');
+  const sessionEvents = async (sessionId, eventType) => (await owner.query(`select details from auth.session_events
+    where session_id = $1 and event_type = $2`, [sessionId, eventType])).rows;
+  assert.equal((await sessionEvents(superBAdmin.sessionId, 'reuse_detected')).length, 1, 'rotated-token reuse is recorded');
+  // Stage 5: a refresh token whose session was signed out is refused with the
+  // revoked code, recorded as a denied refresh, and not treated as reuse.
+  const signedOut = await platform.signIn(superBAdmin);
+  expectStatus(await platform.command(signedOut, '/auth/admin/logout'), 204);
+  expectStatus(await refresh(signedOut), 401, 'PLATFORM_SESSION_REVOKED');
+  expectStatus(await refresh(signedOut), 401, 'PLATFORM_SESSION_REVOKED');
+  assert.equal((await sessionEvents(signedOut.sessionId, 'reuse_detected')).length, 0, 'a signed-out refresh token is not reuse');
+  const deniedAfterLogout = await sessionEvents(signedOut.sessionId, 'refresh');
+  assert.equal(deniedAfterLogout.length, 2);
+  for (const { details } of deniedAfterLogout) {
+    assert.deepEqual(details, { reason: 'session_ended', revocation_reason: 'logout', session_kind: 'platform' });
+  }
+  assert.equal((await owner.query(`select count(*)::int as n from auth.sessions where family_id = (
+    select family_id from auth.sessions where id = $1) and revocation_reason = 'refresh_token_reuse'`,
+  [signedOut.sessionId])).rows[0].n, 0, 'a signed-out family is not marked as reused');
   // Idle: a platform session not refreshed within its window ends.
   await owner.query(`update auth.sessions set issued_at = now() - interval '16 minutes',
     expires_at = now() - interval '1 minute', absolute_expires_at = now() - interval '16 minutes' + interval '8 hours'
@@ -548,8 +566,9 @@ try {
   // A second tab presenting the same expired refresh token is told the same,
   // and it is not recorded as refresh-token reuse.
   expectStatus(await refresh(sessionA3), 401, 'PLATFORM_SESSION_EXPIRED');
-  assert.equal((await owner.query(`select count(*)::int as n from auth.session_events where session_id = $1
-    and event_type = 'reuse_detected'`, [sessionA3.sessionId])).rows[0].n, 0);
+  assert.equal((await sessionEvents(sessionA3.sessionId, 'reuse_detected')).length, 0);
+  assert.deepEqual((await sessionEvents(sessionA3.sessionId, 'refresh')).map(row => row.details),
+    [{ reason: 'session_ended', revocation_reason: 'expired', session_kind: 'platform' }]);
   // No refresh credential is a missing sign-in (401), a wrong CSRF token stays
   // 403, and an unknown refresh token is generic even with a matching CSRF value.
   expectStatus(await http.post('/api/v1/auth/admin/refresh').set('Origin', origin), 401, 'AUTHENTICATION_REQUIRED');
@@ -582,8 +601,23 @@ try {
   evidence.session_policy = { idle: 'PLATFORM_SESSION_EXPIRED', refresh_reuse: 'PLATFORM_SESSION_REVOKED (family revoked)',
     absolute_cap: 'refresh capped at sign-in + 8h', refresh_cookie_lifetime: 'sign-in end + idle window',
     absolute_end: 'PLATFORM_SESSION_EXPIRED',
-    repeated_expired_refresh: 'not reuse', missing_refresh_cookie: 'AUTHENTICATION_REQUIRED',
-    unknown_refresh_token: 'AUTHENTICATION_REQUIRED' };
+    repeated_expired_refresh: 'not reuse', signed_out_refresh: 'PLATFORM_SESSION_REVOKED, denied refresh, not reuse',
+    missing_refresh_cookie: 'AUTHENTICATION_REQUIRED', unknown_refresh_token: 'AUTHENTICATION_REQUIRED' };
+
+  // Stage 5: browser preflights for the Identity routes that use PATCH and DELETE.
+  const preflight = (path, method, from = origin) => http.options(path).set('Origin', from)
+    .set('Access-Control-Request-Method', method).set('Access-Control-Request-Headers', 'content-type,x-csrf-token');
+  for (const [method, path] of [['DELETE', '/api/v1/identity/me/access-pin'],
+    ['PATCH', '/api/v1/identity/organization-applications/completion/profile']]) {
+    const allowed = await preflight(path, method);
+    expectStatus(allowed, 204);
+    assert.equal(allowed.headers['access-control-allow-origin'], origin);
+    assert(String(allowed.headers['access-control-allow-methods']).split(',').includes(method), `CORS does not allow ${method}`);
+    assert(String(allowed.headers['access-control-allow-headers']).split(',').includes('x-csrf-token'));
+    const denied = await preflight(path, method, 'https://attacker.example.invalid');
+    assert.equal(denied.headers['access-control-allow-origin'], undefined, 'an unlisted origin gets no CORS permission');
+  }
+  evidence.cors_preflight = { delete_access_pin: 204, patch_completion_profile: 204, unlisted_origin: 'no CORS headers' };
 
   // 12. Principal export: restricted permission, step-up, reason, RFC 4180 CSV.
   const exporter = await platform.signIn(superBAdmin);
