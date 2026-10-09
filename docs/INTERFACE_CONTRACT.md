@@ -717,12 +717,16 @@ ordinary released-result readers receive 404 until at least one release exists.
 Reads of executions and their result revisions are patient-authorized. The
 specimen execution list (`GET /api/v1/lab/specimens/:specimenId/executions`)
 and the single execution read both require `lab.execution.read` and an Identity
-`read_records` decision for the specimen's patient before any execution or
-result value is read. A refusal returns `403 LAB_EXECUTION_ACCESS_DENIED` (an
-Identity problem, such as `503 IDENTITY_SERVICE_UNAVAILABLE`, is returned as
-is), an emergency read under an active break-glass grant is allowed as for the
-single read, and a specimen the caller cannot see (another facility, or hidden
-by Lab row-level security) returns `404 LAB_SPECIMEN_NOT_FOUND`.
+`read_records` decision for the patient before any execution or result is
+returned. The list resolves the patient from the specimen and authorizes before
+reading executions; the single read resolves it from the execution row and
+authorizes before reading results. A refusal returns
+`403 LAB_EXECUTION_ACCESS_DENIED` (an Identity problem, such as
+`503 IDENTITY_SERVICE_UNAVAILABLE`, is returned as is), and an emergency read
+under an active break-glass grant is allowed. A specimen the caller cannot see
+returns `404 LAB_SPECIMEN_NOT_FOUND`. Lab row-level security applies the same
+consent check, so an absent or revoked grant normally hides the specimen and
+returns that 404; the 403 applies when the row is visible but Identity refuses.
 
 ### Extracted Lab transport
 

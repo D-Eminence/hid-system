@@ -31,10 +31,10 @@ describe('LabExecutionsService.listForSpecimen patient authorization',()=>{
  const unreleased={id:'d0000000-0000-4000-8000-000000000001',result_id:resultId,execution_id:executionId,patient_id:patientId,facility_id:context.facilityId,version:'1',result_type:'numeric',numeric_value:'7.1',text_value:null,unit:'g/dL',reference_range:'12.0-16.0',abnormal_flag:'low',entry_source:'manual',verification_status:'unverified',entered_at:new Date('2026-08-10T10:30:00Z'),correction_reason:null,request_sha256:'c'.repeat(64),verified_at:null,released_at:null,invalidated_at:null};
  const RESULT_READS=/\blab\.(test_executions|results|result_revisions)\b/;
  const decision=(overrides:Partial<AuthorizationDecision>={}):AuthorizationDecision=>({allowed:true,patientId,facilityId:context.facilityId,membershipId:context.membershipId,scope:'read_records',purpose:'direct-care',consentGrantId:grantId,breakGlass:false,...overrides});
- const listHarness=(authorize:(request:AuthorizationRequest)=>Promise<AuthorizationDecision>,specimenRow:typeof specimen|null=specimen)=>{
+ const listHarness=(authorize:(request:AuthorizationRequest)=>Promise<AuthorizationDecision>,specimenRow:typeof specimen|null=specimen,executions=[execution])=>{
   const client={query:jest.fn(async(sql:string,_values?:readonly unknown[])=>{
    if(/\bfrom lab\.specimens\b/.test(sql))return {rows:specimenRow?[specimenRow]:[]};
-   if(sql.includes('from lab.test_executions e'))return {rows:[execution]};
+   if(sql.includes('from lab.test_executions e'))return {rows:executions};
    if(sql.includes('select id::text from lab.results where execution_id'))return {rows:[{id:resultId}]};
    if(sql.includes('from lab.results where id=$1'))return {rows:[{id:resultId,execution_id:executionId,status:'entered_unverified',current_version:'1'}]};
    if(sql.includes('from lab.result_revisions rr'))return {rows:[unreleased]};
@@ -69,7 +69,21 @@ describe('LabExecutionsService.listForSpecimen patient authorization',()=>{
   expect(listed.items[0]).toMatchObject({id:executionId,patientId,result:{id:resultId,status:'entered_unverified'}});
   expect(listed.items[0]?.result?.revisions?.[0]).toMatchObject({numericValue:7.1,releaseStatus:'not_released'});
   expect(harness.authorizationOutcomes()).toEqual([expect.objectContaining({outcome:'success',patientId})]);
+  const specimenLookup=harness.client.query.mock.calls.find(call=>/\bfrom lab\.specimens\b/.test(String(call[0])));
+  expect(specimenLookup?.[1]).toEqual([specimenId]);
  });
+
+ it('authorizes a visible specimen with no executions yet and returns an empty list',async()=>{
+  const harness=listHarness(async()=>decision(),specimen,[]);
+  await expect(harness.service.listForSpecimen(context,specimenId)).resolves.toEqual({items:[]});
+  expect(harness.provider.authorize).toHaveBeenCalledWith({patientId,scope:'read_records',purpose:'direct-care',context});
+  expect(harness.authorizationOutcomes()).toEqual([expect.objectContaining({outcome:'success',patientId})]);
+ });
+
+ // Lab row-level security applies the same consent check (lab.context_allows), so at
+ // runtime an absent or revoked grant usually hides the specimen and returns 404 before
+ // Identity is asked. These cases cover a row that is still visible while Identity refuses,
+ // e.g. a grant that ends between the two checks or an Identity-only policy.
 
  it('reads executions only for the patient that was authorized',async()=>{
   const harness=listHarness(async()=>decision());
