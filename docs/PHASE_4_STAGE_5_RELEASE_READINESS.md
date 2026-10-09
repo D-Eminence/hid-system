@@ -42,9 +42,9 @@ deployed, and no staging or production database has been migrated.** Every
 - **Governed access: the clinician's access-request list** (D-Eminence/hid-system#26, no migration). `GET /identity/access-requests` calls `identity.list_my_staff_access_requests(text)`, but the runtime grants never gave the Identity runtime `EXECUTE` on it. Every clinician's list was refused (`403`). The role bootstrap now grants it, and `runtime-roles.integration.sql` asserts the grant. `runtime-function-grants.spec.ts` checks, without a database, that every database function the Identity source calls is granted to its runtime.
 - **Governed access: access-request outcomes** (D-Eminence/hid-system#28, migration 0074). An approved request stayed `approved` after its grant expired, was revoked by the patient or was closed by the clinician. The list now also returns, from the latest grant made from each request, `consentGrantId`, `grantExpiresAt`, `authorizationMethod` and `effectiveStatus`. For an approval with a grant, `effectiveStatus` reports whichever ended the grant first: `active`, `expired`, `closed` (by the requesting clinician) or `revoked` (by anyone else). Otherwise it is the request status. The `status` filter matches either the request status or the outcome, and also accepts `active` and `closed`. The function's arguments, caller checks, order and 100-row limit are unchanged.
 - **OCR audit, queue metrics and outbox inserts (Stage 6, migration 0075)**:
-  - **Read audit:** the OCR job lookup by document, the validation list and the publication list now write a patient-linked audit event (`ocr.job.find`, `ocr.validation.list`, `ocr.publication.list`) in the read transaction, after authorization; a failed audit write fails the read. Every OCR job event, including the existing reads and writes, now names the source document's patient, which authorization resolves. Before, it used the job's own `patient_id`, which stays null for a job created without one, so those events were not linked to any patient. Details carry identifiers and counts only.
+  - **Read audit:** the OCR job lookup by document, the validation list and the publication list now write a patient-linked audit event (`ocr.job.find`, `ocr.validation.list`, `ocr.publication.list`) in the read transaction, after authorization; a failed audit write fails the read. Every OCR API job event, including the existing reads and writes, now names the source document's patient, which authorization resolves. Before, it used the job's own `patient_id`, which stays null for a job created without one, so those events were not linked to any patient. Details carry identifiers and counts only.
   - **Queue metrics:** the worker read `ocr.jobs` directly, which `hid_ocr_worker` may not do. Every read was refused, so `ocr.job.claimed` never carried `queueDepth` or `oldestQueueAgeSeconds`, and `OcrQueueAgeAlarm` and the QueueDepth signal had no data. The worker now calls `ocr.worker_queue_metrics()`, which returns only those two aggregates, with the same definitions. Its owner, the new non-login role `hid_ocr_queue_metrics`, reads only `ocr.jobs.status` and `queued_at` through one exact policy. The worker still has no table privileges.
-  - **Outbox inserts:** `ocr.outbox_events` had only `SELECT` policies under `FORCE ROW LEVEL SECURITY`, so the OCR API runtime could not append outbox events. Patient confirmation and every publication request, success and failure failed with `new row violates row-level security policy`. 0075 adds a same-facility insert policy.
+  - **Outbox inserts:** `ocr.outbox_events` had only `SELECT` policies under `FORCE ROW LEVEL SECURITY`, so the OCR API runtime could not append outbox events. Patient confirmation and every publication request, success and failure failed with `new row violates row-level security policy`. 0075 adds a same-facility insert policy. The confirmation event is keyed by the job version, which a confirmation does not change, so a second confirmation of the same job version is now refused with `409 OCR_PATIENT_ALREADY_CONFIRMED`. Without that check it would fail on the outbox unique key with a `500`.
 - **Provider portal (Health-id)**:
   - D-Eminence/Health-id#18 reads the list above, closes a grant, and enables clinical writes only when `POST /identity/consent-status` allows them.
   - D-Eminence/Health-id#19 shows each approval's outcome and expiry, offers **Close access** for an active grant, and adds the outcome filters. The new fields and filters appear only when Identity reports them.
@@ -83,7 +83,7 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 | P5 | The sizes of `audit.events`, `auth.sessions`, `auth.session_events` and `identity.consent_grants` are known, for the lock windows of 0067, 0069, 0072 and 0074. | Database operator | `select count(*)` and `pg_total_relation_size(...)` for each table on a recent snapshot. See §5. |
 | P6 | Two Super Admins can sign in and confirm. | Security owner | Two-person approval needs a second Super Admin. Facility suspension needs at least one reachable Super Admin (0072). On a first deployment of Stage 2A (no platform sign-in yet), check this after step 6, when the Super Admins enrol their authenticators. |
 | P7 | The staging acceptance in §7 passed on the exact builds being released. | Release owner | Evidence attached to the release record. |
-| P8 | The role that owns the schema objects (the migration administrator) is a superuser, or is otherwise allowed to own functions with `SET plpgsql.variable_conflict` and bypasses `FORCE ROW LEVEL SECURITY`. | Database operator | Document scanning and the OCR pipeline depend on it. Their security-definer commands and triggers read row-level-secured tables as their owner. The rehearsal migrates as a superuser. Its non-superuser owner check runs the additional suites only, and they do not cover these paths. Run locally on a copy with every function and table owned by a `NOSUPERUSER NOBYPASSRLS` role (§8), `schema.integration.sql` fails in turn at `ehr.append_document_scan_event` (`Document not found`), the `ocr.record_job_event` trigger (row-level security on `ocr.job_events`), `ocr.claim_worker_job` (`permission denied to set parameter "plpgsql.variable_conflict"`, set by 0015), `ocr.validate_job_write`, `ocr.complete_worker_job`, `ocr.validate_extraction_insert` and `ocr.fail_worker_job`. With those returned to a superuser owner, the wrong-patient confirmation check in `ocr.validate_patient_confirmation` failed open: it compares with a document it cannot see. Confirm the owner's attributes (`select rolsuper, rolbypassrls from pg_roles where rolname = current_user` as the migration administrator) before relying on OCR. The new `ocr.worker_queue_metrics()` does not depend on them. |
+| P8 | The role that owns the schema objects (the migration administrator) is a superuser, or is otherwise allowed to own functions that `SET plpgsql.variable_conflict` and bypasses `FORCE ROW LEVEL SECURITY`. | Database operator | Document scanning, the OCR pipeline and Outreach campaign registration depend on it, because their security-definer commands and triggers read row-level-secured tables as their owner. The rehearsal migrates as a superuser, and its non-superuser owner check runs only the additional suites, which do not cover these paths. Run locally on a copy with every function and table owned by a `NOSUPERUSER NOBYPASSRLS` role (§8), `schema.integration.sql` failed in turn at each of these, and passed in full once all of them were returned to a superuser owner:<br>• `ehr.append_document_scan_event` (`Document not found`);<br>• the `ocr.record_job_event` trigger (row-level security on `ocr.job_events`);<br>• `ocr.claim_worker_job` (`permission denied to set parameter "plpgsql.variable_conflict"`, set by 0015);<br>• `ocr.validate_job_write`, `ocr.complete_worker_job`, `ocr.validate_extraction_insert` and `ocr.fail_worker_job`;<br>• `ocr.validate_patient_confirmation`, whose wrong-patient check failed open because it compares with a document it cannot see. Under such an owner this path is unreachable, because claims already fail;<br>• `outreach.validate_registration_campaign_write` (`Exact Outreach campaign membership is required`).<br>The list covers what `schema.integration.sql` exercises; other definer paths may share the dependency. Before the release, confirm the owner's attributes as the migration administrator (`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`). On a managed service whose administrator is not a superuser, such as Amazon RDS, also confirm in the staging rehearsal (S1) that 0015 applies and that an OCR claim succeeds (S4b). The alternative is technical owners for these commands, which is a follow-up. The new `ocr.worker_queue_metrics()` depends on none of this. |
 
 ## 5. Migration order and lock windows
 
@@ -125,7 +125,7 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
    - `GET /admin/approvals` returns `{ items, nextCursor }`;
    - a clinician's `GET /identity/access-requests` answers `200`, and each item has `effectiveStatus`;
    - CloudWatch shows no `MFA_UNAVAILABLE`;
-   - OCR worker `ocr.job.claimed` logs carry `queueDepth` and `oldestQueueAgeSeconds`, and no `ocr.queue.metrics_unavailable` follows a claim.
+   - once the OCR worker has claimed a job, its `ocr.job.claimed` logs carry `queueDepth` and `oldestQueueAgeSeconds`, and no `ocr.queue.metrics_unavailable` follows a claim. A worker logs neither while it claims nothing.
 
 ## 7. Staging acceptance
 
@@ -149,7 +149,7 @@ has been run, because no staging environment exists yet (Health-id
 All of this was run on 2026-10-09 against local synthetic data. It was run as
 the non-root `postgres` user, on a new local cluster
 (`/tmp/hid-tuf-migration.stage5`, migrated 0001 → 0072 and role-bootstrapped).
-Other local clusters were not touched.
+No other local cluster was touched. Later stages say which cluster they used.
 
 - **Unit tests:**
   - Identity 702/702. The new and updated tests (`refresh-revocation-reason.spec.ts`, `platform-session-end.spec.ts`, `config/cors.spec.ts`, `admin-contracts.spec.ts`) fail 36 of 103 against the `deb6fba` token service and CORS options. The 8 tests of a session ending during a refresh also fail on the first Stage 5 commit (`04b4903`), whose conflict path still recorded reuse.
@@ -211,20 +211,35 @@ Other local clusters were not touched.
   - Workspace gates passed (Identity 713/713).
   - Health-id: 399/399 tests and both builds passed. `GovernedAccess.test.tsx` has 12 tests, 4 of which fail on the first version of D-Eminence/Health-id#19.
   - **No browser run** of the provider or patient portal pages (S4a).
-- **Stage 6 (0075), local cluster migrated 0001 → 0075 and role-bootstrapped:**
-  - `ocr-read-audit.spec.ts` (13 tests) covers each of the three reads: the event, its patient (the source document's, with the job's own `patient_id` null), its details, ordering after authorization, failing closed when the audit write fails, and no event when unauthorized or when no job exists. It also checks that the existing read and retry events name the canonical patient. 9 of the 13 fail against the `main` OCR service; the other 4 check refusals that `main` already gets right.
+- **Stage 6 (0075):** on the local cluster `/tmp/hid-tuf-migration.stage6`, migrated 0001 → 0075 and role-bootstrapped (twice, to check the bootstrap is repeatable), and in the synthetic rehearsal of the branch. The rehearsal ran 0028 → 0075 with 25 additional suites, also under the non-superuser definer owner, plus every runtime verifier and the restore check.
+  - `ocr-read-audit.spec.ts` has 21 tests:
+    - for each of the three reads: the event, its patient (the source document's, while the job's own `patient_id` is null), its details, one transaction shared with the read, ordering after authorization, failing closed when the audit write fails, and no event when unauthorized or when no job exists;
+    - every other OCR API job event names the canonical patient: read, extractions, retry, create, reuse, validation, confirmation, publication request, success and failure;
+    - a second confirmation of the same job version gets `409`.
+
+    16 of the 21 fail against the `main` OCR service; the other 5 check refusals that `main` already gets right. A mutant that writes the read event in a second transaction fails the transaction check.
   - `ocr-queue-metrics-and-outbox.integration.sql` checks:
-    - the worker's aggregate equals a superuser count across two facilities, whatever facility the session names;
+    - the worker's aggregate equals a superuser count across two facilities, from a session naming a different facility;
     - the worker cannot read `ocr.jobs`;
-    - six other roles cannot execute the command;
-    - the owner cannot read patient or job identity columns;
+    - six other roles cannot execute the command, and no other non-superuser role that does not inherit the worker holds `EXECUTE`;
+    - the owner can read no column but `status` and `queued_at`;
     - visibility comes only from the exact policy;
     - `hid_ocr_api_runtime` appends outbox events for its facility, and another facility is refused.
 
-    It passes on the branch and fails on `main` (`function ocr.worker_queue_metrics() does not exist`). Six mutants each fail the suite and `runtime-roles.integration.sql`: no outbox insert policy, no metrics policy, a superuser function owner, worker `SELECT` on `ocr.jobs`, OCR runtime `EXECUTE`, and full-table `SELECT` for the owner.
+    It passes on the branch and fails on `main` (`function ocr.worker_queue_metrics() does not exist`). Ten mutants each fail `runtime-roles.integration.sql`, and eight of them also fail the suite:
+    - no outbox insert policy;
+    - no metrics policy;
+    - a superuser function owner;
+    - worker `SELECT` on `ocr.jobs`;
+    - OCR runtime `EXECUTE`;
+    - full-table `SELECT` for the owner;
+    - owner `SELECT` on `document_id`;
+    - migration administrator `EXECUTE`;
+    - owner `UPDATE (status)`, caught by `runtime-roles` only;
+    - the owner made a member of `hid_ocr_runtime`, caught by `runtime-roles` only.
   - Worker: `repository.spec.ts` and `database-privileges.spec.ts` check that the worker reads only through commands that `hid_ocr_worker` can execute. 3 of 4 fail on `main`.
   - The compiled worker repository was run as a login that inherits `hid_ocr_worker`. It returned `{"queueDepth":2,"oldestQueueAgeSeconds":7211}` for two facilities. `main`'s query as the same login failed with `42501 permission denied for table jobs`.
-  - Under a copy owned by a `NOSUPERUSER NOBYPASSRLS` role (P8), the new suite passes and `schema.integration.sql` fails as listed in P8.
+  - On a copy whose functions and tables are all owned by a `NOSUPERUSER NOBYPASSRLS` role (P8), the new suite passes. `schema.integration.sql` fails at each function listed in P8, one by one, and passes once those functions are returned to a superuser owner.
 - **Not run:** staging or production anything (§7). The browser run uses the backend's own TOTP clock seam to issue codes, not a real authenticator app.
 
 To reproduce, run as the owner of a local cluster migrated to 0073 and role-bootstrapped (Stage 5B Identity calls `auth.lock_account_sessions` on sign-out and expiry; a cluster left at 0072 needs `db:migrate` and `db:bootstrap` again) (`services/ehr-api` `db:migrate` and `db:bootstrap`). The harness defaults to the database `hid_rehearsal`, the superuser `hid_rehearsal_admin` and ports 4010 and 4011. Change them with `HID_E2E_TEMPLATE_DB`, `HID_E2E_DB_SUPERUSER`, `HID_E2E_API_PORT` and `HID_E2E_CONTROL_PORT`; see the script headers. Stop `server.mjs` with Ctrl-C or SIGTERM, which drops its database copy.
@@ -271,7 +286,10 @@ To reproduce, run as the owner of a local cluster migrated to 0073 and role-boot
 - **Lockout:** if every Super Admin is locked out (lost authenticators and recovery codes), recovery needs the documented break-glass procedure. That procedure is not built yet; see the product decisions in `PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §9. Keep two independent Super Admins with stored recovery codes.
 
 **Known limits of Stage 6:**
-- Queue metrics are emitted with each claim. A worker that claims nothing (stopped, stalled, wrong provider, ineligible documents) emits none, and `treatMissingData` is `NOT_BREACHING`. So `OcrQueueAgeAlarm` cannot detect a stopped worker, and `OcrDrainRateAlarm` cannot breach. Emitting the metrics on a timer needs a metric-filter change (`infra/aws`), which is out of scope here.
+- Queue metrics are emitted with each claim. A worker that claims nothing (stopped, stalled, wrong provider, ineligible documents) emits none, and `treatMissingData` is `NOT_BREACHING`. So `OcrQueueAgeAlarm` cannot detect a stopped worker, and `OcrDrainRateAlarm` cannot breach. Fixing this needs two changes, both out of scope here:
+  - an OCR worker change to log a separate, periodic queue-metrics event from `ocr.worker_queue_metrics()` (it cannot reuse `ocr.job.claimed`, whose `claimedJobs` feeds the throughput metric);
+  - matching metric filters in `infra/aws`.
+- The OCR worker's own database audit events (`ocr.worker.claim`, `ocr.worker.complete`, `ocr.worker.fail`, `ocr.worker.lease_recovered`) still carry `ocr.jobs.patient_id`, so for a job created without a patient they remain unlinked.
 - The age is time since the earliest `queued_at`, as before. A job retried by the worker keeps its first `queued_at`, so the age includes earlier attempts and back-off.
 - Replays of idempotent OCR writes return the stored result without a new read event; the original write event remains.
 

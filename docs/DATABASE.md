@@ -1313,12 +1313,17 @@ a reachable Super Admin to be suspendable.
 - The OCR API now records a patient-linked audit event, in the same transaction
   as the read and after authorization, for the job lookup by document
   (`ocr.job.find`), the validation list (`ocr.validation.list`) and the
-  publication list (`ocr.publication.list`). Every OCR job event names the
+  publication list (`ocr.publication.list`). Every OCR API job event names the
   source document's patient, which authorization resolves, rather than the
   job's own `patient_id`, which stays null for jobs created without one.
   Details hold identifiers and counts only. A document with no OCR job
-  discloses nothing and is recorded only by the request audit.
+  discloses nothing and is recorded only by the request audit. The worker's
+  own database audit events (`ocr.worker.*`) still carry `ocr.jobs.patient_id`.
+- The `OcrPatientConfirmed` outbox event is keyed by the job version, which a
+  confirmation does not change. A second confirmation of the same job version is
+  refused with `409 OCR_PATIENT_ALREADY_CONFIRMED`.
 - `ocr-queue-metrics-and-outbox.integration.sql` covers the worker's aggregate
-  across facilities, the refusal of every other role, the owner's column limit,
+  across facilities, the refusal of six other roles and of any other non-superuser
+  role that does not inherit the worker, the owner's exact column limit,
   that visibility comes only from the exact policy, and same-facility outbox
   inserts by `hid_ocr_api_runtime` (another facility is refused).

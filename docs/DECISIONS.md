@@ -1459,7 +1459,7 @@ event in the read transaction, after authorization and before the response:
 the job lookup by document (`ocr.job.find`), the job (`ocr.job.read`), its
 extractions (`ocr.extraction.list`), validations (`ocr.validation.list`) and
 publications (`ocr.publication.list`). A failed audit write fails the read.
-Every OCR job event names the patient of the source document, which
+Every OCR API job event names the patient of the source document, which
 authorization resolves, not the job's own `patient_id`, which stays null for a
 job created without one. Event details carry identifiers and counts only. A
 lookup that finds no job discloses nothing and is recorded only by the request
@@ -1482,11 +1482,16 @@ Consequences:
   patient in `audit.events`, including for jobs created without a patient;
 - the queue-age signal is emitted with each claim. A worker that claims nothing
   emits no metrics, so `OcrQueueAgeAlarm` cannot detect a stopped or stalled
-  worker, and `OcrDrainRateAlarm` cannot breach, until metrics are also emitted
-  on a timer (an infrastructure follow-up);
-- the existing OCR worker commands (claim, renew, complete, fail) and the OCR
-  job triggers still read `FORCE ROW LEVEL SECURITY` tables as their owner. They
-  work only while that owner bypasses row-level security; moving them to
-  technical owners is a follow-up; and
+  worker, and `OcrDrainRateAlarm` cannot breach. Fixing this needs a worker
+  change to log a separate, periodic queue-metrics event, and matching metric
+  filters in `infra/aws` (a follow-up);
+- the OCR worker's own database audit events (`ocr.worker.*`) still carry
+  `ocr.jobs.patient_id` and stay unlinked for a job created without a patient;
+- the existing OCR worker commands and the OCR job triggers, like the document
+  scanner command and an Outreach registration trigger, still read `FORCE ROW
+  LEVEL SECURITY` tables as their owner, and `ocr.claim_worker_job` sets a
+  superuser-only parameter. They work only while that owner is a superuser that
+  bypasses row-level security (release checklist P8); moving them to technical
+  owners is a follow-up; and
 - the replay paths of idempotent OCR writes return the stored result without a
   new read event; the original write event remains.

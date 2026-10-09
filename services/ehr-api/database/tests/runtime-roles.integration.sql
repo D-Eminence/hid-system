@@ -429,30 +429,30 @@ begin
      or has_table_privilege('hid_ocr_worker', 'ocr.jobs', 'UPDATE') then
     raise exception 'OCR worker is not constrained to lease-bound commands';
   end if;
-  -- OCR queue metrics (0075): the worker executes the aggregate command and no
-  -- one else does. Its non-login technical owner reads ocr.jobs status and
-  -- queue time only, through one exact policy, and is never a member of
-  -- another role.
+  -- OCR queue metrics (0075): only the worker executes the aggregate command
+  -- (besides its owner). The non-login technical owner holds exactly SELECT on
+  -- ocr.jobs (status, queued_at) and nothing else, reads rows only through one
+  -- exact policy, has no member and is a member of no role.
   if not has_function_privilege('hid_ocr_worker', 'ocr.worker_queue_metrics()', 'EXECUTE')
      or has_function_privilege('public', 'ocr.worker_queue_metrics()', 'EXECUTE')
-     or exists (
-       select 1 from unnest(array['hid_ocr_runtime', 'hid_ocr_api_runtime', 'hid_api_runtime',
-         'hid_identity_api_runtime', 'hid_ehr_api_runtime', 'hid_lab_api_runtime',
-         'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime',
-         'hid_notification_worker', 'hid_event_dispatcher', 'hid_schema_test_runtime']) runtime(role_name)
-       where has_function_privilege(runtime.role_name, 'ocr.worker_queue_metrics()', 'EXECUTE')
-     )
+     or (select coalesce(array_agg(distinct privilege.grantee::regrole::text), '{}')
+           from pg_proc proc, aclexplode(proc.proacl) privilege
+          where proc.oid = 'ocr.worker_queue_metrics()'::regprocedure
+            and privilege.grantee <> proc.proowner) <> array['hid_ocr_worker']
      or (select owner_role.rolname from pg_proc proc join pg_roles owner_role on owner_role.oid = proc.proowner
           where proc.oid = 'ocr.worker_queue_metrics()'::regprocedure) <> 'hid_ocr_queue_metrics'
      or not (select prosecdef from pg_proc where oid = 'ocr.worker_queue_metrics()'::regprocedure)
-     or not has_column_privilege('hid_ocr_queue_metrics', 'ocr.jobs', 'status', 'SELECT')
-     or not has_column_privilege('hid_ocr_queue_metrics', 'ocr.jobs', 'queued_at', 'SELECT')
-     or has_column_privilege('hid_ocr_queue_metrics', 'ocr.jobs', 'patient_id', 'SELECT')
-     or has_column_privilege('hid_ocr_queue_metrics', 'ocr.jobs', 'facility_id', 'SELECT')
-     or has_table_privilege('hid_ocr_queue_metrics', 'ocr.jobs', 'SELECT')
-     or has_table_privilege('hid_ocr_queue_metrics', 'ocr.jobs', 'INSERT')
-     or has_table_privilege('hid_ocr_queue_metrics', 'ocr.jobs', 'UPDATE')
-     or has_table_privilege('hid_ocr_queue_metrics', 'ocr.jobs', 'DELETE')
+     or (select coalesce(array_agg(relation.oid::regclass::text || '.' || attribute.attname || ':' || privilege.privilege_type
+              order by relation.oid::regclass::text, attribute.attname, privilege.privilege_type), '{}')
+           from pg_class relation
+           join pg_attribute attribute on attribute.attrelid = relation.oid
+           cross join lateral aclexplode(attribute.attacl) privilege
+          where privilege.grantee = 'hid_ocr_queue_metrics'::regrole)
+        <> array['ocr.jobs.queued_at:SELECT', 'ocr.jobs.status:SELECT']
+     or exists (
+       select 1 from pg_class relation, aclexplode(relation.relacl) privilege
+        where privilege.grantee = 'hid_ocr_queue_metrics'::regrole
+     )
      or not exists (
        select 1 from pg_policy policy
         where policy.polrelid = 'ocr.jobs'::regclass and policy.polname = 'ocr_jobs_queue_metrics_read'
@@ -460,7 +460,10 @@ begin
           and policy.polroles = array['hid_ocr_queue_metrics'::regrole::oid]
           and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
      )
-     or exists (select 1 from pg_auth_members where roleid = 'hid_ocr_queue_metrics'::regrole) then
+     or exists (
+       select 1 from pg_auth_members
+        where roleid = 'hid_ocr_queue_metrics'::regrole or member = 'hid_ocr_queue_metrics'::regrole
+     ) then
     raise exception 'OCR queue metrics command privileges are inconsistent';
   end if;
   -- The OCR API appends outbox events for its own facility only (0075).

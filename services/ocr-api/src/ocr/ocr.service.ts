@@ -363,8 +363,17 @@ export class OcrService {
       if (!confirmation) throw new DomainProblem(503, 'OCR_CONFIRMATION_NOT_CREATED', 'Patient confirmation could not be created');
       await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.patient.confirm', job,
         source.patientId, { confirmationId: confirmation.id, method: input.method }));
+      // The event is keyed by the job version, which a confirmation does not
+      // change, so one job version takes one confirmation event.
       await this.appendOutbox(client, job, 'OcrPatientConfirmed', Number(job.row_version),
-        { confirmationId: confirmation.id });
+        { confirmationId: confirmation.id }).catch((error: unknown) => {
+        if ((error as { code?: unknown; constraint?: unknown }).code === '23505'
+          && (error as { constraint?: unknown }).constraint === 'outbox_events_aggregate_id_event_type_aggregate_version_key') {
+          throw new DomainProblem(409, 'OCR_PATIENT_ALREADY_CONFIRMED',
+            'This OCR job version already has a patient confirmation');
+        }
+        throw error;
+      });
       return this.projectConfirmation(confirmation);
     }, { isolationLevel: 'SERIALIZABLE' });
   }

@@ -75,7 +75,9 @@ exception when insufficient_privilege then null;
 end $$;
 reset role;
 
--- Only the worker may execute the command.
+-- Only the worker may execute the command. Six roles are tried for real; then
+-- no other non-superuser HID role (or role that does not inherit the worker)
+-- may hold EXECUTE at all.
 do $$
 declare
   role_name text;
@@ -90,20 +92,34 @@ begin
     end;
     reset role;
   end loop;
+  select string_agg(rolname, ', ' order by rolname) into role_name
+    from pg_roles
+   where not rolsuper and rolname <> 'hid_ocr_queue_metrics'
+     and has_function_privilege(oid, 'ocr.worker_queue_metrics()', 'EXECUTE')
+     and not pg_has_role(oid, 'hid_ocr_worker', 'usage');
+  if role_name is not null then
+    raise exception 'roles other than the OCR worker can execute ocr.worker_queue_metrics(): %', role_name;
+  end if;
 end $$;
 
--- The technical owner can read job status and queue time, never patient or
--- job identity columns.
+-- The technical owner can read job status and queue time, and no other column.
 set local role hid_ocr_queue_metrics;
-do $$ begin
-  perform patient_id from ocr.jobs limit 1;
-  raise exception 'the OCR metrics owner must not read patient columns';
-exception when insufficient_privilege then null;
-end $$;
-do $$ begin
-  perform facility_id, document_id from ocr.jobs limit 1;
-  raise exception 'the OCR metrics owner must not read job identity columns';
-exception when insufficient_privilege then null;
+do $$
+declare
+  column_name name;
+begin
+  for column_name in
+    select attname from pg_attribute
+     where attrelid = 'ocr.jobs'::regclass and attnum > 0 and not attisdropped
+       and attname not in ('status', 'queued_at')
+     order by attnum
+  loop
+    begin
+      execute format('select %I from ocr.jobs limit 1', column_name);
+      raise exception 'the OCR metrics owner must not read ocr.jobs.%', column_name;
+    exception when insufficient_privilege then null;
+    end;
+  end loop;
 end $$;
 reset role;
 
