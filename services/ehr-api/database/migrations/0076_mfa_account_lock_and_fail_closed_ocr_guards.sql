@@ -1,6 +1,8 @@
--- Phase 4 Stage 7B: the OCR patient-confirmation and validation guards fail
--- closed. Applied migrations 0001 through 0075 are immutable.
+-- Phase 4 Stage 7: the OCR patient-confirmation and validation guards fail
+-- closed (7B), and the account row lock for platform MFA transactions (7A).
+-- Applied migrations 0001 through 0075 are immutable.
 --
+-- 7B.
 -- ocr.validate_patient_confirmation (0016) and ocr.validate_validation_insert
 -- (0013) are the BEFORE INSERT triggers that refuse a confirmation or a
 -- validation that does not match the canonical OCR source and the reviewing
@@ -75,3 +77,35 @@ begin
   return new;
 end
 $$;
+
+-- 7A. An approved MFA reset (auth.admin_decide_approval, 0070) locks the
+-- target account row FOR UPDATE, then revokes its factors, recovery codes and
+-- sessions. A platform MFA transaction (sign-in, step-up, recovery-code
+-- regeneration, enrolment) locked its challenge and factor first and reached
+-- the account row only through the FOR KEY SHARE of its later inserts, so the
+-- two could deadlock. The Identity API now calls this helper first in every
+-- MFA transaction.
+--
+-- FOR KEY SHARE is the weakest row lock that conflicts with FOR UPDATE. An MFA
+-- transaction therefore waits for an approved reset or a session revocation
+-- (0073) of the account, and they wait for it, but it does not wait for a
+-- refresh rotation, a staff sign-in or another MFA transaction of the account,
+-- which take FOR KEY SHARE too. auth.lock_account_sessions (0073, FOR UPDATE)
+-- would also have serialized those: a step-up that raced a refresh found its
+-- session rotated and was refused, and the password step could deadlock with a
+-- staff sign-in of the same administrator through the principal's
+-- login-attempt row. It only locks. The role bootstrap grants it to the
+-- Identity runtime only.
+create function auth.lock_account_for_mfa(target_account uuid)
+returns void
+language plpgsql
+security definer
+set search_path = auth, pg_temp
+as $$
+begin
+  perform 1 from auth.accounts account_row where account_row.id = target_account for key share;
+end
+$$;
+revoke all on function auth.lock_account_for_mfa(uuid) from public;
+comment on function auth.lock_account_for_mfa(uuid) is
+  'Serializes a platform MFA transaction with an approved MFA reset and the session revocations of the account (0076). Call first in the transaction.';

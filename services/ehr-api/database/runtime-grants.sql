@@ -1005,3 +1005,9 @@ revoke all on function auth.require_platform_step_up(uuid),
 -- commands do. It only locks; the runtime still cannot update auth.accounts.
 grant execute on function auth.lock_account_sessions(uuid) to hid_identity_runtime;
 revoke all on function auth.lock_account_sessions(uuid) from public;
+
+-- Phase 4 Stage 7A (0076): every platform MFA transaction takes the account
+-- row (FOR KEY SHARE) through this helper first, so it serializes with an
+-- approved MFA reset and with session revocations of the account. It only locks.
+grant execute on function auth.lock_account_for_mfa(uuid) to hid_identity_runtime;
+revoke all on function auth.lock_account_for_mfa(uuid) from public;

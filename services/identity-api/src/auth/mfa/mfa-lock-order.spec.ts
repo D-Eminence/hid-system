@@ -27,7 +27,8 @@ import { totp } from './totp';
 
 /**
  * Stage 7A: every platform MFA transaction locks the account row
- * (auth.lock_account_sessions, 0073) before any other row lock or write.
+ * (auth.lock_account_for_mfa, 0076: FOR KEY SHARE) before any other row lock
+ * or write.
  *
  * An approved MFA reset (auth.admin_decide_approval, 0070) locks the target
  * account and then revokes its factors, recovery codes and sessions. A sign-in,
@@ -37,8 +38,11 @@ import { totp } from './totp';
  * insert takes on the account row, held the authenticator while waiting for
  * the account, and the reset held the account while waiting for the
  * authenticator. Taking the account first gives every one of these
- * transactions the order the reset and the 0073 revocations use. The
- * two-connection races run in verify-platform-security-runtime.mjs.
+ * transactions the order the reset and the 0073 revocations use. FOR KEY SHARE
+ * conflicts with their FOR UPDATE but not with a refresh rotation or a staff
+ * sign-in of the account, so the MFA transaction never takes the revocation
+ * lock (auth.lock_account_sessions, FOR UPDATE). The two-connection races run in
+ * verify-platform-security-runtime.mjs.
  */
 const ACCOUNT = '40000000-0000-4000-8000-0000000000c1';
 const FACTOR = '41000000-0000-4000-8000-0000000000c1';
@@ -47,7 +51,8 @@ const FAMILY = '43000000-0000-4000-8000-0000000000c1';
 const TOKEN = 'C'.repeat(43);
 const SECRET = Buffer.from('12345678901234567890', 'ascii');
 const NOW = 1_700_000_000_000;
-const LOCK = 'select auth.lock_account_sessions($1)';
+const LOCK = 'select auth.lock_account_for_mfa($1)';
+const REVOCATION_LOCK = /auth\.lock_account_sessions/;
 const event = { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPT', sourceIp: '192.0.2.10' };
 
 type Statement = { sql: string; values: unknown[] };
@@ -137,6 +142,8 @@ function expectAccountFirst(transactions: Statement[][]) {
   expect(statements[lock]?.values).toEqual([ACCOUNT]);
   expect(firstOther).toBeGreaterThan(lock);
   expect(statements.filter(({ sql }) => sql === LOCK)).toHaveLength(1);
+  // Never the FOR UPDATE revocation lock, which would also wait for refresh rotations and staff sign-ins.
+  expect(statements.filter(({ sql }) => REVOCATION_LOCK.test(sql))).toEqual([]);
   return statements;
 }
 

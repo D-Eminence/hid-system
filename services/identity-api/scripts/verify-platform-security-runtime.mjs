@@ -782,9 +782,9 @@ try {
   // authenticator rows the request holds while it waits, then runs the
   // approval command itself in the same transaction. Every MFA transaction
   // now locks the account first, so it waits holding no authenticator row and
-  // the approval completes. Before, it waited holding the challenge and the
-  // factor (or a recovery code), the approval then waited for the factor, and
-  // PostgreSQL aborted one of the two with a deadlock.
+  // the approval completes. Before, it waited holding its factor, and its
+  // challenge, session assurance or recovery codes; the approval then waited
+  // for the factor, and PostgreSQL aborted one of the two with a deadlock.
   const AUTHENTICATOR_PROBES = [
     ['mfa_login_challenges', 'select 1 from auth.mfa_login_challenges where account_id = $1 for update nowait'],
     ['mfa_factors', 'select 1 from auth.mfa_factors where account_id = $1 for update nowait'],
@@ -943,6 +943,77 @@ try {
     step_up: 'PLATFORM_SESSION_REQUIRED', recovery_code_regeneration: 'PLATFORM_SESSION_REQUIRED',
     enrollment_activation: 'MFA_CHALLENGE_INVALID', enrollment_restart: 'MFA_CHALLENGE_INVALID',
     deadlocks: raceDeadlocks };
+
+  // The MFA account lock is FOR KEY SHARE (0076), which conflicts only with the
+  // FOR UPDATE of a reset or a revocation. A refresh rotation in flight (another
+  // tab) and a staff sign-in of the same administrator take FOR KEY SHARE too,
+  // so neither holds up an MFA transaction. With FOR UPDATE, a step-up or a
+  // recovery-code regeneration waited for the rotation and then found its
+  // session rotated (403 PLATFORM_SESSION_REQUIRED, which ends the console
+  // session), and the password step could deadlock with the staff sign-in
+  // through the principal's login-attempt row.
+  async function duringRotation(sessionId, request) {
+    const rotation = await rotationInFlight(sessionId);
+    let settled = false;
+    const pending = Promise.resolve(request()).finally(() => { settled = true; });
+    const waited = await lockWaitSeen(() => settled);
+    await rotation.commit();
+    const response = await pending;
+    return { waited, status: response.status, code: response.body?.code ?? null };
+  }
+  const rotatingAdmin = (await resetTarget('rotation-step-up')).enrolled;
+  const stepUpDuringRotation = await duringRotation(rotatingAdmin.sessionId,
+    () => command(rotatingAdmin, '/admin/mfa/step-up', { code: platform.code(rotatingAdmin.secret) }));
+  assert.deepEqual(stepUpDuringRotation, { waited: false, status: 200, code: null },
+    `a step-up during a refresh of its sign-in: ${JSON.stringify(stepUpDuringRotation)}`);
+  const regeneratingAdmin = (await resetTarget('rotation-regenerate')).enrolled;
+  await platform.stepUp(regeneratingAdmin);
+  const regenerateDuringRotation = await duringRotation(regeneratingAdmin.sessionId,
+    () => command(regeneratingAdmin, '/admin/mfa/recovery-codes/regenerate'));
+  assert.deepEqual(regenerateDuringRotation, { waited: false, status: 200, code: null },
+    `a recovery-code regeneration during a refresh of its sign-in: ${JSON.stringify(regenerateDuringRotation)}`);
+
+  // A staff sign-in of the same administrator holds the principal's login-attempt
+  // row, as TokenService.issue does (delete it, then insert the session), while
+  // the platform password step runs; a second connection plays the staff
+  // sign-in and continues once the password step waits on that row.
+  const dualAdmin = await account('dual-role', { platformRole: 'security_auditor', membershipRole: 'doctor' });
+  expectStatus(await post('/auth/admin/login', {}, { email: dualAdmin.email, password: 'Wrong-Password-2026',
+    turnstileAction: 'admin-login' }), 401);
+  const principalHmac = module.get(LocalAuthProvider).principalHash(dualAdmin.email);
+  assert.equal((await owner.query('select count(*)::int as n from auth.login_attempts where principal_hmac = $1',
+    [principalHmac])).rows[0].n, 1, 'the failed password step recorded a login attempt');
+  const staffTransaction = new Client({ host: socket, user: process.env.PGUSER, database: isolated });
+  staffTransaction.on('error', () => undefined);
+  await staffTransaction.connect();
+  let staffOutcome;
+  let passwordStep;
+  try {
+    await staffTransaction.query('begin');
+    await staffTransaction.query('delete from auth.login_attempts where principal_hmac = $1', [principalHmac]);
+    let settled = false;
+    const pending = Promise.resolve(post('/auth/admin/login', {}, { email: dualAdmin.email, password,
+      turnstileAction: 'admin-login' })).finally(() => { settled = true; });
+    const waited = await lockWaitSeen(() => settled);
+    try {
+      await staffTransaction.query(`insert into auth.session_events (account_id, event_type, outcome, correlation_id, details)
+        values ($1, 'login_succeeded', 'success', $2, '{}'::jsonb)`, [dualAdmin.id, randomUUID()]);
+      await staffTransaction.query('commit');
+      staffOutcome = 'committed';
+    } catch (error) {
+      staffOutcome = error.code ?? String(error);
+      await staffTransaction.query('rollback').catch(() => undefined);
+    }
+    const response = await pending;
+    passwordStep = { waited, staffSignIn: staffOutcome, status: response.status, next: response.body?.status ?? null };
+  } finally {
+    await staffTransaction.end();
+  }
+  assert.deepEqual(passwordStep, { waited: true, staffSignIn: 'committed', status: 200, next: 'mfa_enrollment_required' },
+    `the platform password step during a staff sign-in of the same administrator: ${JSON.stringify(passwordStep)}`);
+  evidence.mfa_lock_mode = { lock: 'FOR KEY SHARE (auth.lock_account_for_mfa)',
+    step_up_during_refresh: 'not delayed, 200', regeneration_during_refresh: 'not delayed, 200',
+    password_step_during_staff_sign_in: 'waits for the staff sign-in, no deadlock, 200' };
 
   // 12. Principal export: restricted permission, step-up, reason, RFC 4180 CSV.
   const exporter = await platform.signIn(superBAdmin);

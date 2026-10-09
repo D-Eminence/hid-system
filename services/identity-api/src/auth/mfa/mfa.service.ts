@@ -68,13 +68,15 @@ type Failure = { kind: 'invalid' } | { kind: 'rate_limited' } | { kind: 'failed'
  * only once. Secrets never leave this service except once, at enrollment.
  *
  * Lock order (Stage 7A): every transaction here locks the account row
- * (auth.lock_account_sessions, 0073) before any other row lock or write, then
- * the challenge, the factor and the recovery codes, then writes sessions and
- * events. An approved MFA reset (0070) locks the account before the factor,
- * and every session revocation (0073) locks it before the sessions. A flow
- * that locked the factor first and then reached the account through the
- * FOR KEY SHARE its session event, session or recovery code insert takes on
- * the account row could deadlock with them.
+ * (auth.lock_account_for_mfa, 0076) before any other row lock or write; then
+ * the challenge (sign-in, enrolment) or the session assurance (step-up), the
+ * factor and the recovery codes; then it writes sessions and events. An
+ * approved MFA reset (0070) locks the account before the factor, and every
+ * session revocation (0073) locks it before the sessions, both FOR UPDATE. A
+ * flow that locked the factor first and then reached the account through the
+ * FOR KEY SHARE of its session event, session or recovery code insert could
+ * deadlock with them. The lock is FOR KEY SHARE: it conflicts with theirs, but
+ * not with a refresh rotation or a staff sign-in of the account.
  */
 @Injectable()
 export class MfaService {
@@ -432,9 +434,9 @@ export class MfaService {
     return challenge;
   }
 
-  /** The account row lock (0073), taken before any other lock of the transaction. */
+  /** The account row lock (0076, FOR KEY SHARE), taken before any other lock of the transaction. */
   private async lockAccount(client: PoolClient, accountId: string): Promise<void> {
-    await client.query('select auth.lock_account_sessions($1)', [accountId]);
+    await client.query('select auth.lock_account_for_mfa($1)', [accountId]);
   }
 
   private async lockActiveFactor(client: PoolClient, accountId: string): Promise<FactorRow | null> {

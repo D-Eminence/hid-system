@@ -132,6 +132,9 @@ PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/ocr-validation-guards.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/mfa-account-lock.integration.sql" >/dev/null
 env NODE_ENV=test DATABASE_URL="$acceptance_admin_url" DATABASE_SSL=true \
   DATABASE_SSL_ROOT_CERT_BASE64="$acceptance_ca_base64" \
   npm --prefix "$acceptance_repository/services/ehr-api" run db:plan
