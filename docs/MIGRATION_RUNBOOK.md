@@ -69,6 +69,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0070_platform_two_person_approval.sql` | Two-person approval (24-hour requests, executed once by a second MFA-enrolled Super Admin with fresh step-up) for Super Admin grants and MFA resets; the one-step role command refuses Super Admin grants; last-Super-Admin reachability no longer requires a facility membership |
 | `database/migrations/0071_platform_control_command_column_references.sql` | Replaces `platform.admin_set_control` (same signature, result and checks) with qualified table references; the 0039 version failed on every call because its output columns shadowed the table columns |
 | `database/migrations/0072_platform_admin_contract_gaps.sql` | Target filter (`resource_type`/`resource_id`) on `audit.list_platform_events` (dropped and recreated with eleven arguments; the role bootstrap grants the new signature) and its `audit_resource_uuid_sequence_idx` index (audit inserts wait while it builds); `identity.admin_transition_facility` counts the platform-session reachable Super Admins (same signature); null-safe `auth.other_reachable_super_admins`. Release the Identity API of this stage with the Health-id Stage 4B admin console (`PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §7); the release order, index-build window and checks are in `PHASE_4_STAGE_5_RELEASE_READINESS.md` |
+| `database/migrations/0073_session_revocation_serialization.sql` | `auth.admin_revoke_account_sessions` and `auth.admin_revoke_session_family` lock the target account row (`FOR UPDATE`) before revoking (same signatures and results), and the new `auth.lock_account_sessions(uuid)` gives the Identity API the same lock. A revocation then waits for a refresh rotation in flight and also revokes the session that rotation created. No table lock; the role bootstrap grants the helper to the Identity runtime. Apply 0073 and the bootstrap before a Stage 5B Identity starts (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, §9) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
@@ -219,7 +220,7 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0072`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0073`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
@@ -307,7 +308,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0072`, runtime grants, RLS and purpose/deny behavior.
+6. Verify `0073`, runtime grants, RLS and purpose/deny behavior.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.

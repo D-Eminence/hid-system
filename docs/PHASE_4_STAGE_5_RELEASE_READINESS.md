@@ -11,8 +11,8 @@ deployed, and no staging or production database has been migrated.** Every
 
 | Component | Source | Contents |
 | --- | --- | --- |
-| Database | `services/ehr-api/database/migrations` through `0072_platform_admin_contract_gaps.sql` | Phase 1–4 schema. The platform admin migrations are 0067–0072. Stage 5 adds no migration. |
-| Identity API | `services/identity-api` on `main` (Stage 2A, 4A and Stage 5) | Platform MFA sessions, step-up, two-person approval and the Stage 4A admin contracts. Stage 5 adds the two fixes in §2. |
+| Database | `services/ehr-api/database/migrations` through `0073_session_revocation_serialization.sql` | Phase 1–4 schema. The platform admin migrations are 0067–0072. Stage 5 adds no migration; Stage 5B adds 0073 (§2). |
+| Identity API | `services/identity-api` on `main` (Stage 2A, 4A, 5 and 5B) | Platform MFA sessions, step-up, two-person approval and the Stage 4A admin contracts. Stage 5 adds the two fixes in §2; Stage 5B adds the revocation lock (§2). |
 | Pharmacy API | `services/pharmacy-api` | Stage 5 CORS header fix (§2). |
 | Admin console | Health-id `main` (Stage 4B and the Stage 5 fix) | The console for the contracts above. |
 
@@ -30,6 +30,7 @@ deployed, and no staging or production database has been migrated.** Every
   - Pharmacy allows the `x-csrf-token` header that its cookie sessions send.
   - Origins, credentials and every other header are unchanged. No other service had a route whose method or header was missing. EHR's `PATCH` routes were already covered. Lab still lists `PATCH` without a route; that is left as is.
   - Same-origin `/api/v1` routing, the production design, never needed these. They matter only to a cross-origin deployment.
+- **Session revocation serialization (Stage 5B, migration 0073)**: an administrator's family revocation (including one marked compromised), revoke-all, an administrator revoking one of their own sessions, and the family revocation after refresh-token reuse could each miss the session that a refresh in flight was creating. That session stayed live until it expired, even after a "compromised" revocation. Each of these revocations now takes the account row lock (`FOR UPDATE`) before revoking. It waits for a refresh in flight to commit, then revokes the session that refresh created. A refresh that starts after the lock waits, then finds its session revoked and is refused. The admin commands `auth.admin_revoke_account_sessions` and `auth.admin_revoke_session_family` keep their signatures, permissions, checks, idempotency and results. The Identity API's own revocations call the new `auth.lock_account_sessions(uuid)`, which is granted to the Identity runtime only. These are refresh-token reuse, an administrator revoking their own session, sign-out and expiry. Sign-out and expiry end one session, but they take the lock first too. Every path that revokes sessions then locks the account row before any session row, so no two of them can deadlock. Without this, a sign-out during an administrator's revocation of the same account could deadlock. Account actions that change the token version (suspension, MFA reset, password recovery, deletion) already invalidated such a session and already locked the account first; they are unchanged. A sign-out still ends only the presented session.
 - **Admin console (Health-id)**: after **Revoke all sessions**, the confirmation stays visible. Before, the reload reported no sessions and the form, with its confirmation, disappeared. This was found by the browser run in §8.
 
 ## 3. Compatibility
@@ -49,7 +50,7 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 
 | # | Check | Owner | How |
 | --- | --- | --- | --- |
-| P1 | The production migration ledger's last applied version is known. | Database operator | `npm run db:plan` as the migration administrator, as in `MIGRATION_RUNBOOK.md` §6. It applies nothing, but its ledger bootstrap statements need the administrator's privileges, so it cannot run with read-only credentials. The local rehearsal covers 0028 → 0072; any other starting point needs its own rehearsal. |
+| P1 | The production migration ledger's last applied version is known. | Database operator | `npm run db:plan` as the migration administrator, as in `MIGRATION_RUNBOOK.md` §6. It applies nothing, but its ledger bootstrap statements need the administrator's privileges, so it cannot run with read-only credentials. The local rehearsal covers 0028 → 0073; any other starting point needs its own rehearsal. |
 | P2 | A restorable backup of the target database exists and its restore was tested. | Database operator | Snapshot or `pg_dump` taken immediately before the window. The rehearsal checks backup and restore integrity, but the real restore must be proven on staging. |
 | P3 | `MFA_SECRET_KEY_B64` is provisioned for Identity: 32 random bytes, base64, from the secret store. `MFA_KEY_VERSION` is set. | Security owner and infrastructure owner | **The infrastructure code does not do this yet.** `infra/aws/src/hid-regional-stack.ts` maps no `MFA_SECRET_KEY_B64` from the Identity secret and sets no `MFA_KEY_VERSION`, which then defaults to `local-v1`. Stage 2A recorded this as an infrastructure task. An infrastructure change must add both before step 6. Without the key, platform sign-in fails closed with `503 MFA_UNAVAILABLE`, and a malformed key stops Identity at start-up. Never reuse a staging key in production. The key and `MFA_KEY_VERSION` are fixed when the first authenticator is enrolled: changing either later invalidates every enrolled authenticator unless a re-encryption release exists. |
 | P4 | Identity `CORS_ORIGINS` lists only the exact HTTPS console origins, with no paths. | Platform operator | Enforced at start-up in production. With same-origin `/api/v1`, CORS is not used by the console. |
@@ -66,9 +67,11 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
    - every audited write waits until the build finishes, and that includes most authenticated requests;
    - reads continue.
 5. Each of these statements must finish within 120 s, or its migration rolls back and nothing changes. The 5 s `lock_timeout` also fails a migration that cannot get its lock, so stop traffic to Identity, or keep it low, during the window. Measured locally for 0072 only (Stage 5, PostgreSQL 16, synthetic rows, development container, not production hardware): over 1,000,000 audit rows (414 MB, two thirds with a UUID target), the index statement ran in 1.1 s under the runner's settings and produced a 35 MB index. 0067 and 0069 were not measured. Measure all three in the staging rehearsal (S1), scale by the P5 sizes with a wide margin for production I/O, and size the window on the combined cost.
-6. If any estimate approaches 120 s, stop and re-plan before the release. 0072 cannot be edited or worked around in place: an index built beforehand under the same name makes 0072 fail. Do not raise the timeouts ad hoc.
-7. **Immediately after the migrations, run `npm run db:bootstrap`, then `npm run db:verify-roles`.**
+6. **0073** replaces two functions and adds one. It takes no table lock and needs no window. At run time, each session revocation, sign-out and expiry holds its account row lock until it commits, usually milliseconds. Sign-ins, refreshes and sign-outs of that one account wait for that long. Every path that revokes sessions takes the account row before any session row, so they cannot deadlock with each other.
+7. If any estimate approaches 120 s, stop and re-plan before the release. 0072 cannot be edited or worked around in place: an index built beforehand under the same name makes 0072 fail. Do not raise the timeouts ad hoc.
+8. **Immediately after the migrations, run `npm run db:bootstrap`, then `npm run db:verify-roles`.**
    - 0072 drops and recreates `audit.list_platform_events` with eleven arguments. Until the bootstrap grants `EXECUTE` on the new signature, any running Identity is refused on the platform audit list.
+   - The bootstrap grants `EXECUTE` on `auth.lock_account_sessions(uuid)` (0073) to the Identity runtime. A Stage 5B Identity running before this, or before 0073, fails its refresh-reuse revocation and own-session revocation with a database error, so the reused family is not revoked. Earlier Identity builds do not call it.
    - The bootstrap also runs the runtime-role assertions.
 
 ## 6. Deployment order
@@ -78,7 +81,7 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 3. Take the backup (P2).
 4. Apply the **migrations** (§5).
 5. Run the **role bootstrap** and verify it (§5).
-6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`. This needs the infrastructure change in P3.
+6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`. This needs the infrastructure change in P3. A Stage 5B Identity must not start before steps 4 and 5 (0073 and its grant).
 7. Deploy the **Pharmacy API**. This is independent of the other steps.
 8. Run the smoke checks:
    - a Super Admin signs in with TOTP;
@@ -133,6 +136,19 @@ Other local clusters were not touched.
   - **Stage 5 backend and console:** 12/12, on four separate fresh-database runs. The last run used the final code with the stricter check 12, which fails on any response other than the expected `401` and `403`.
   - **Health-id `main` (`a180cea`) console:** check 7 fails, because the revoke-all confirmation disappears (§2).
   - **Refresh logic of `deb6fba`:** check 11 fails with 2 `reuse_detected` events.
+- **Stage 5B (0073), same cluster, migrated 0001 → 0073:**
+  - `verify-platform-security-runtime.mjs` races each revocation against a second connection. That connection holds a refresh rotation open, as `TokenService.refresh` makes it: the new session inserted and the old one marked rotated, not yet committed. The connection commits only once the revocation is waiting on it. The four revocations are a compromised-family revoke, revoke-all, an own-session revoke and a refresh-token reuse.
+  - The verifier also holds an administrator's revocation open while a sign-out, and then an expired refresh, run against the same account.
+  - Results by build (each case recorded separately):
+
+    | Schema | Identity | Session from the rotation in flight | Sign-out / expiry during a revocation |
+    | --- | --- | --- | --- |
+    | 0072 | Stage 5 (`6ec5037`) | live after all four revocations | not applicable |
+    | 0073 | Stage 5 | revoked by the two admin commands; live after the own-session and reuse revocations | deadlock; the request fails (`503` and `500`) |
+    | 0073 | Stage 5B | revoked by all four | `204` and `401`; the revocation completes |
+
+  - `session-revocation-lock.spec.ts`: 8/8 pass, and all 8 fail against the Stage 5 token and platform-security services.
+  - `session-revocation-serialization.integration.sql` checks the catalog contract: the helper is security definer, `PUBLIC` cannot execute it, and both admin commands take the lock before their `UPDATE`. `runtime-roles.integration.sql` checks the helper's grant.
 - **Not run:** staging or production anything (§7). The browser run uses the backend's own TOTP clock seam to issue codes, not a real authenticator app.
 
 To reproduce, run as the owner of a local cluster migrated to 0072 and role-bootstrapped (`services/ehr-api` `db:migrate` and `db:bootstrap`). The harness defaults to the database `hid_rehearsal`, the superuser `hid_rehearsal_admin` and ports 4010 and 4011. Change them with `HID_E2E_TEMPLATE_DB`, `HID_E2E_DB_SUPERUSER`, `HID_E2E_API_PORT` and `HID_E2E_CONTROL_PORT`; see the script headers. Stop `server.mjs` with Ctrl-C or SIGTERM, which drops its database copy.
@@ -171,6 +187,7 @@ To reproduce, run as the owner of a local cluster migrated to 0072 and role-boot
   - The previous Stage 4A build runs unchanged, because Stage 5 has no schema change.
   - A pre-4A build also runs. Its nine-argument audit call resolves to the new function through the defaulted arguments; `platform-admin-contracts.integration.sql` checks this.
   - **Do not roll the console back below Stage 4B while Identity is at Stage 4A or later (§3).**
+- **Identity after 0073:** Stage 5 and earlier builds run unchanged. The two admin commands keep their contracts, and only Stage 5B calls the new helper. Rolling Identity back to Stage 5 removes the lock from the reuse, own-session, sign-out and expiry paths. The two admin revocations keep it, because it is in the database. With that combination, a sign-out or expiry at the same moment as an administrator's revocation of the same account can deadlock. PostgreSQL then cancels one of the two. Either the sign-out or refresh fails with a `5xx` (reproduced locally, §8), or the administrator's revocation fails and must be retried. Prefer rolling forward.
 - **Refresh-event change:** this is code only. Rolling back Identity brings back the old misclassification and nothing else. Existing `refresh`/`denied` events remain valid rows.
 - **MFA key:** if `MFA_SECRET_KEY_B64` is lost, every enrolled authenticator must be re-enrolled. Store it with the same care as the field-encryption keys.
 - **Lockout:** if every Super Admin is locked out (lost authenticators and recovery codes), recovery needs the documented break-glass procedure. That procedure is not built yet; see the product decisions in `PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §9. Keep two independent Super Admins with stored recovery codes.

@@ -241,20 +241,7 @@ export class TokenService {
       if (oldSession.revocation_reason !== 'rotated') {
         throw await this.endedSessionRefusal(oldSession, kind, event);
       }
-      await this.database.withSystemTransaction(event.correlationId, async (client) => {
-        await client.query(
-          `update auth.sessions
-              set revoked_at = coalesce(revoked_at, clock_timestamp()),
-                  revocation_reason = coalesce(revocation_reason, 'refresh_token_reuse'),
-                  row_version = row_version + 1
-            where family_id = $1 and revoked_at is null`,
-          [oldSession.family_id],
-        );
-        await this.insertSessionEvent(client, {
-          eventType: 'reuse_detected', outcome: 'denied', accountId: oldSession.account_id,
-          sessionId: oldSession.id, event,
-        });
-      });
+      await this.revokeReusedFamily(oldSession, event);
       if (kind === 'platform') throw platformSessionEnded('revoked');
       throw new UnauthorizedException('Refresh token reuse detected');
     }
@@ -388,6 +375,12 @@ export class TokenService {
   ): Promise<void> {
     if (!sessionId) return;
     await this.database.withSystemTransaction(event.correlationId, async (client) => {
+      // Account row first, then the session (0073): the order every revocation
+      // uses, so a sign-out cannot deadlock with an administrator's revocation.
+      await client.query(
+        'select auth.lock_account_sessions(session_row.account_id) from auth.sessions session_row where session_row.id = $1',
+        [sessionId],
+      );
       const result = await client.query<{ account_id: string }>(
         `update auth.sessions
             set revoked_at = coalesce(revoked_at, clock_timestamp()),
@@ -614,6 +607,8 @@ export class TokenService {
 
   private async expireSession(session: SessionRow, event: SessionEventMetadata): Promise<void> {
     await this.database.withSystemTransaction(event.correlationId, async (client) => {
+      // Account row first, then the session (0073), as every revocation does.
+      await client.query('select auth.lock_account_sessions($1)', [session.account_id]);
       await client.query(
         `update auth.sessions
             set revoked_at = coalesce(revoked_at, clock_timestamp()),
@@ -649,8 +644,14 @@ export class TokenService {
     return result.rows[0]?.revocation_reason ?? null;
   }
 
+  /**
+   * Revokes the family of a reused refresh token. The account row lock (0073)
+   * first waits for any rotation in flight in the family, so the session that
+   * rotation creates is revoked too rather than surviving the reuse.
+   */
   private async revokeReusedFamily(session: SessionRow, event: SessionEventMetadata): Promise<void> {
     await this.database.withSystemTransaction(event.correlationId, async (client) => {
+      await client.query('select auth.lock_account_sessions($1)', [session.account_id]);
       await client.query(
         `update auth.sessions
             set revoked_at = coalesce(revoked_at, clock_timestamp()),

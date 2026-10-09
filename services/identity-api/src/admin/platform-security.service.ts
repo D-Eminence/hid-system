@@ -86,6 +86,8 @@ export class PlatformSecurityService {
         [sessionId, context.actor.accountId],
       )).rows[0];
       if (!family) throw new DomainProblem(404, 'ADMIN_RESOURCE_NOT_FOUND', 'The requested administration resource was not found');
+      // 0073: wait for any refresh in flight, so a session it creates is revoked too.
+      await client.query('select auth.lock_account_sessions($1)', [context.actor.accountId]);
       const revoked = await client.query(
         `update auth.sessions set revoked_at = clock_timestamp(), revocation_reason = 'self_revoked',
             row_version = row_version + 1

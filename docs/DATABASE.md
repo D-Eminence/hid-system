@@ -1210,3 +1210,35 @@ workflow under the exact Identity runtime role.
 `platform-admin-contracts.integration.sql` exercises both commands as
 `hid_identity_api_runtime`. `schema.integration.sql` now expects the facility of
 a reachable Super Admin to be suspendable.
+
+## Session revocation serialization (0073)
+
+`0073_session_revocation_serialization.sql` (Phase 4 Stage 5B,
+`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2):
+
+- A refresh inserts the new session, then marks the old one `rotated`, in one
+  transaction. Under READ COMMITTED, a family or account revocation whose
+  `UPDATE` ran in between waited for the old row, skipped it as already revoked,
+  and could not see the uncommitted new session. That session stayed live, even
+  after a revocation marked compromised.
+- The new session's `INSERT` takes `FOR KEY SHARE` on the account row through
+  the `auth.sessions.account_id` foreign key. `auth.lock_account_sessions(uuid)`
+  takes `FOR UPDATE` on that row, which conflicts with it. A revocation that
+  calls it first waits for a rotation in flight, and its `UPDATE`, a new
+  statement with a new snapshot, then sees and revokes the new session. A
+  rotation that starts after the lock waits, then finds its old session revoked
+  and is refused.
+- `auth.admin_revoke_account_sessions` and `auth.admin_revoke_session_family`
+  are replaced with the lock added before their `UPDATE`. Signatures,
+  permissions, checks, idempotency and results are unchanged, and `CREATE OR
+  REPLACE` keeps their owner and grants.
+- The Identity API calls the helper before its own revocations: refresh-token
+  reuse, an administrator revoking their own session, sign-out and expiry.
+  Every path that revokes sessions therefore locks the account row before any
+  session row. The account actions that change the token version already did.
+- `runtime-grants.sql` grants `EXECUTE` on the helper to `hid_identity_runtime`
+  only; `PUBLIC` has none. The runtime still has only `SELECT` on
+  `auth.accounts`. `runtime-roles.integration.sql` asserts both.
+- `session-revocation-serialization.integration.sql` checks the catalog contract
+  that a later `CREATE OR REPLACE` must keep. The two-connection races run in
+  `services/identity-api/scripts/verify-platform-security-runtime.mjs`.

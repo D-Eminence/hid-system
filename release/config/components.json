@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0072",
-    "count": 72,
+    "last": "0073",
+    "count": 73,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -385,6 +385,10 @@
       {
         "name": "0072_platform_admin_contract_gaps.sql",
         "sha256": "565f759bac8f6b2bc60c4bbf57e7dbdaae0f020b53d3f2af431c7aa22f886e4b"
+      },
+      {
+        "name": "0073_session_revocation_serialization.sql",
+        "sha256": "423a47c05f615ca6b9ac2f1aa129cf5d833e3feb50af3f4478585febea9821ec"
       }
     ]
   },
