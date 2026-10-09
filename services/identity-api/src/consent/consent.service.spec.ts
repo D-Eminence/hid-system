@@ -188,6 +188,12 @@ describe('ConsentService', () => {
       expect.stringContaining('identity.list_my_staff_access_requests($1)'),
       ['approved'],
     );
+    // 0074: each approval's outcome (grant, expiry, effective status, method).
+    const [sql] = query.mock.calls.find(([text]) => String(text).includes('list_my_staff_access_requests')) as [string];
+    for (const column of ['consent_grant_id as "consentGrantId"', 'grant_expires_at as "grantExpiresAt"',
+      'effective_status as "effectiveStatus"', 'authorization_method as "authorizationMethod"']) {
+      expect(sql).toContain(column);
+    }
   });
 
   it('lists the authenticated patient access request inbox without unrelated identity data', async () => {

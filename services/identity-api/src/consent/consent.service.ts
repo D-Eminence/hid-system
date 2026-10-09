@@ -93,7 +93,9 @@ export class ConsentService {
              scope, purpose_of_use as "purposeOfUse", reason, status,
              requested_duration_minutes as "requestedDurationMinutes",
              requested_at as "requestedAt", approved_at as "approvedAt",
-             denied_at as "deniedAt", denied_reason as "deniedReason"
+             denied_at as "deniedAt", denied_reason as "deniedReason",
+             consent_grant_id as "consentGrantId", grant_expires_at as "grantExpiresAt",
+             effective_status as "effectiveStatus", authorization_method as "authorizationMethod"
            from identity.list_my_staff_access_requests($1)`,
           [query.status ?? null],
         );

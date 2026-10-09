@@ -69,7 +69,14 @@ The requesting clinician's own list is `GET /api/v1/identity/access-requests`
 `direct-care` or `healthcare-operations`; without that header it returns
 `400 PURPOSE_OF_USE_REQUIRED`. It returns at most 100 non-break-glass requests,
 newest first, made by the caller's account, membership and facility. A caller
-without `identity.consent.write` gets `403`. Until the role bootstrap of this
+without `identity.consent.write` gets `403`. Each item also carries
+`consentGrantId`, `grantExpiresAt`, `authorizationMethod`
+(`patient_access_pin` or `patient_approval`) and `effectiveStatus`: for an
+approval with a grant, whichever ended it first, `active`, `expired` (also when
+it was revoked only after it lapsed), `closed` (by the requesting clinician) or
+`revoked` (by anyone else); otherwise the request `status` (0074). The `status`
+filter accepts `pending`, `approved`, `denied`, `revoked`, `expired`, `active`
+and `closed`, and matches the request status or the effective status. Until the role bootstrap of this
 fix, the Identity runtime could not execute `identity.list_my_staff_access_requests`,
 and every caller got `403 CONSENT_COMMAND_DENIED`.
 

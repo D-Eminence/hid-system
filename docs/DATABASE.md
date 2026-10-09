@@ -1247,3 +1247,36 @@ a reachable Super Admin to be suspendable.
 - `session-revocation-serialization.integration.sql` checks the catalog contract
   that a later `CREATE OR REPLACE` must keep. The two-connection races run in
   `services/identity-api/scripts/verify-platform-security-runtime.mjs`.
+
+## Staff access-request outcomes (0074)
+
+`0074_staff_access_request_outcome.sql` (Phase 4 governed access):
+
+- A request stays `approved` after its grant expires, is revoked by the patient
+  or is closed by the clinician. `identity.list_my_staff_access_requests` now
+  also returns, from the latest grant made from each request:
+  - `consent_grant_id` and `grant_expires_at`;
+  - `effective_status`: the request status, except for an approved request with
+    a grant. That reports whichever ended the grant first: `active` (current),
+    `expired` (lapsed, whether or not a sweep has marked it, and also when it
+    was revoked only after it lapsed, for example by a later PIN change or
+    account deletion), `closed` (revoked by the requesting clinician, the
+    grant's own account, before it lapsed) or `revoked` (by anyone else before
+    it lapsed). Who revoked it is not returned, and nothing done after a grant
+    lapsed changes its outcome;
+  - `authorization_method`: `patient_access_pin` or `patient_approval`.
+- Pending requests have no expiry of their own; they stay `pending`.
+- The status filter matches the request status or the outcome: `approved`
+  still returns every approval, and `active`, `expired`, `closed` and `revoked`
+  return the approvals with that outcome (the Identity DTO accepts the two new
+  values). Argument, caller checks, order and the 100-row limit are unchanged.
+- The result type changes, so the function is dropped and recreated;
+  `runtime-grants.sql` restores `EXECUTE` for `hid_identity_runtime` and
+  `hid_schema_test_runtime` at the role bootstrap. Until it runs, every Identity
+  build is refused the list (`403`), so it runs immediately after the
+  migrations.
+- `consent_grants_request_idx (request_id, created_at desc) where request_id is
+  not null` serves the per-request lookup.
+- `staff-access-request-outcome.integration.sql` covers each outcome, the
+  filter, a colleague's isolation and a member without `identity.consent.write`,
+  as `hid_identity_api_runtime`.
