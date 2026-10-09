@@ -74,7 +74,8 @@ This table records npm package audit evidence only. Container operating-system p
 | Current issue | `infra/aws` pins `aws-cdk-lib@2.267.0`. Its bundled `brace-expansion@5.0.9` is within npm's affected range; `npm audit --audit-level=high` reports one high-severity vulnerability. |
 | Compatible-version check | The latest published `aws-cdk-lib@2.272.0` supports this repository's Node range but its package tarball still bundles `brace-expansion@5.0.9`. Upgrading only to that release would leave the high-severity finding open. |
 | Decision | Keep the AWS dependency audit gate enabled. Do not add an override, ignore, or suppression for a bundled dependency. Recheck a future official CDK release and run the AWS tests and synthesis before changing the pin. |
-| Status | **OPEN — HIGH, AWS RELEASE GATE BLOCKED** |
+| Resolution (2026-10-08) | `aws-cdk-lib@2.273.0` (published 2026-10-08) is the first official release whose package tarball bundles `brace-expansion@5.0.12`; 2.268.0 through 2.272.0 still bundle 5.0.9. The pin moved to 2.273.0. Its assembly requires CDK CLI 2.1144.0, so `aws-cdk` moved from 2.1135.1 to 2.1144.0. `npm audit --audit-level=moderate` reports 0 vulnerabilities; typecheck and all 98 AWS tests pass. Development, staging (fidelity) and production synthesis change only in two ways: the stack tags now propagate to `AWS::ApplicationAutoScaling::ScalableTarget` resources, and the CDK analytics metadata changed. No resources are added or removed, and no override or suppression was added. |
+| Status | **RESOLVED IN SOURCE — not deployed** |
 
 RF-005 is separate from the earlier final-image finding and from the moderate
 React Router findings in RF-003. No production infrastructure was changed by

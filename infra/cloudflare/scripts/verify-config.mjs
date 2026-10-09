@@ -8,8 +8,8 @@ const root = resolve(import.meta.dirname, '..', '..', '..')
 const cloudflareRoot = resolve(root, 'infra', 'cloudflare')
 const packagePins = Object.freeze({
   '@cloudflare/workers-types': Object.freeze({
-    version: '5.20260911.1',
-    integrity: 'sha512-yiAvknjulcU85B3yB4aKOn9+l+garWP+AbHgsdCFckeRYDdhZ1rPULi64BDf52R3VTaKqxi47kF+o9ZbjsCt5g==',
+    version: '5.20261006.1',
+    integrity: 'sha512-5OclwQK1d8f5LCPvOlyldC3ryKLUa4nLXegcgPZeUxAPudczQ9xujJDdpS2Tenp7JqbBLW3OgGciHJmuc7QShg==',
     lockPath: 'node_modules/@cloudflare/workers-types',
   }),
   'json-dup-key-validator': Object.freeze({
@@ -18,14 +18,14 @@ const packagePins = Object.freeze({
     lockPath: 'node_modules/json-dup-key-validator',
   }),
   wrangler: Object.freeze({
-    version: '4.131.2',
-    integrity: 'sha512-jmkGE7monbPKyYQr1FPQN+SARVhddqw2fhXOmTKCw4lroqlFGSS6rit/RTvPi/qzNLKrXxkS8DhWXasJnStplg==',
+    version: '4.149.0',
+    integrity: 'sha512-OzK7xmB5r5iLKb3cIT3783g13fe6T7xyeKu9LEdUyl+DKAM2KP/jkjnE0OUhyw+mB/XJM9ycjgF3MWm8PR9amg==',
     lockPath: 'node_modules/wrangler',
   }),
 })
-const wranglerSchemaSha256 = '98558789c186dd107116085374e5c80e8b9ed5f583bfde96f5c58657b57d1de9'
+const wranglerSchemaSha256 = '12dbdc9ba08cb4db1213bbe3d917a6f5f0bb6ee0852b56d9b4c66b3ab588c42c'
 const wranglerBinSha256 = '780661a508810f3b65786895b1ca9aacbc4f55d329ae6b8c1e49ec8433569f77'
-const wranglerCliSha256 = 'd57dc4633d667dc20d210afc7f54afc5f4b29e8494174ecaacb7c56f379a902a'
+const wranglerCliSha256 = '31866b9a3686777254819158e60ebe4920d1d91141cde68846c62b52f75d7a66'
 
 function parseStrictJson(raw, label) {
   try {
