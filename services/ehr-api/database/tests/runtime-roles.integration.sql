@@ -259,6 +259,18 @@ begin
      or has_function_privilege('hid_identity_api_runtime', 'auth.other_reachable_super_admins(uuid,text)', 'EXECUTE') then
     raise exception 'platform audit reader or Super Admin reachability helper privileges are inconsistent';
   end if;
+  -- A clinician's own access-request list (0036) runs as the Identity runtime;
+  -- the function itself checks the caller's membership and identity.consent.write.
+  if not has_function_privilege('hid_identity_api_runtime', 'identity.list_my_staff_access_requests(text)', 'EXECUTE')
+     or not has_function_privilege('hid_schema_test_runtime', 'identity.list_my_staff_access_requests(text)', 'EXECUTE')
+     or has_function_privilege('public', 'identity.list_my_staff_access_requests(text)', 'EXECUTE')
+     or exists (
+       select 1 from unnest(array['hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_lab_api_runtime',
+         'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime']) runtime(role_name)
+       where has_function_privilege(runtime.role_name, 'identity.list_my_staff_access_requests(text)', 'EXECUTE')
+     ) then
+    raise exception 'staff access-request list privileges are inconsistent';
+  end if;
   if not has_table_privilege('hid_identity_api_runtime', 'identity.patients', 'INSERT')
      or has_table_privilege('hid_identity_api_runtime', 'ehr.encounters', 'INSERT')
      or not has_table_privilege('hid_identity_api_runtime', 'audit.events', 'INSERT')
