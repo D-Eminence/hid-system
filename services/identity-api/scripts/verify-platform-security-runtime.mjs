@@ -774,6 +774,176 @@ try {
     all_sessions: 'new session revoked', own_session: 'new session revoked', refresh_reuse: 'new session revoked',
     sign_out: 'new session revoked', sign_out_during_revocation: 'no deadlock', expiry_during_revocation: 'no deadlock' };
 
+  // Stage 7A: an approved MFA reset racing an MFA transaction of its target.
+  // auth.admin_decide_approval (0070) locks the target account row, then
+  // revokes the target's factors, recovery codes and sessions. A second
+  // connection makes that approval: it locks the target account as 0070 does,
+  // waits until the MFA request reaches the database, notes which
+  // authenticator rows the request holds while it waits, then runs the
+  // approval command itself in the same transaction. Every MFA transaction
+  // now locks the account first, so it waits holding no authenticator row and
+  // the approval completes. Before, it waited holding the challenge and the
+  // factor (or a recovery code), the approval then waited for the factor, and
+  // PostgreSQL aborted one of the two with a deadlock.
+  const AUTHENTICATOR_PROBES = [
+    ['mfa_login_challenges', 'select 1 from auth.mfa_login_challenges where account_id = $1 for update nowait'],
+    ['mfa_factors', 'select 1 from auth.mfa_factors where account_id = $1 for update nowait'],
+    ['mfa_recovery_codes', 'select 1 from auth.mfa_recovery_codes where account_id = $1 for update nowait'],
+    ['session_assurance', 'select 1 from auth.session_assurance where account_id = $1 for update nowait'],
+  ];
+  /** Authenticator tables in which another transaction holds a row of `accountId` (NOWAIT refused with 55P03). */
+  async function heldAuthenticatorRows(accountId) {
+    const held = [];
+    const probe = await owner.connect();
+    try {
+      for (const [table, sql] of AUTHENTICATOR_PROBES) {
+        await probe.query('begin');
+        try {
+          await probe.query(sql, [accountId]);
+        } catch (error) {
+          if (error.code !== '55P03') throw error;
+          held.push(table);
+        } finally {
+          await probe.query('rollback');
+        }
+      }
+    } finally {
+      probe.release();
+    }
+    return held;
+  }
+  const deadlocks = async () => Number((await owner.query(`select deadlocks from pg_stat_database
+    where datname = current_database()`)).rows[0].deadlocks);
+  async function approvalWhile(approver, reset, targetId, request) {
+    const approval = new Client({ host: socket, user: process.env.PGUSER, database: isolated });
+    approval.on('error', () => undefined);
+    await approval.connect();
+    try {
+      await approval.query('begin');
+      // The approver's request context, as DatabaseService.withTransaction sets it.
+      await approval.query(`select set_config('app.actor_subject', $1, true), set_config('app.session_id', $2, true),
+          set_config('app.correlation_id', $3, true), set_config('app.access_scope', 'platform', true),
+          set_config('app.facility_id', '', true), set_config('app.membership_id', '', true),
+          set_config('app.purpose_of_use', 'healthcare-operations', true)`,
+      [approver.subject, approver.sessionId, randomUUID()]);
+      // 0070: the approval locks the target account row before it revokes the factor.
+      await approval.query('select 1 from auth.accounts where id = $1 for update', [targetId]);
+      let settled = false;
+      const pending = Promise.resolve(request()).finally(() => { settled = true; });
+      const waited = await lockWaitSeen(() => settled);
+      const held = waited ? await heldAuthenticatorRows(targetId) : null;
+      let outcome;
+      try {
+        const decided = (await approval.query('select executed from auth.admin_decide_approval($1, $2, $3, $4, $5, $6)',
+          [reset.requestId, reset.version, 'approve', 'Second Super Admin approves the lost authenticator reset',
+            key('race-decide'), createHmac('sha256', 'race').update(reset.requestId).digest('hex')])).rows[0];
+        await approval.query('commit');
+        outcome = decided?.executed === true ? 'committed' : 'not executed';
+      } catch (error) {
+        outcome = error.code ?? String(error);
+        await approval.query('rollback').catch(() => undefined);
+      }
+      const response = await pending;
+      return { waited, held, approval: outcome, status: response.status, code: response.body?.code ?? null };
+    } finally {
+      await approval.end();
+    }
+  }
+  const requester = await platform.signIn({ email: superA.email, secret: secretA });
+  await platform.stepUp(requester);
+  const approver = { ...await platform.signIn(superBAdmin), subject: 'synthetic:security-runtime:super-b' };
+  await platform.stepUp(approver);
+  /** A platform account with an enrolled TOTP factor and a pending, approvable MFA reset request. */
+  async function resetTarget(label, { enroll = true } = {}) {
+    const target = await account(label, { platformRole: 'security_auditor' });
+    const enrolled = enroll ? await platform.enroll(target.email) : null;
+    return { ...target, enrolled };
+  }
+  async function requestReset(targetId) {
+    const created = await command(requester, `/admin/principals/${targetId}/mfa-reset-requests`,
+      { reason: 'Target administrator reported a lost authenticator' }, { 'Idempotency-Key': key('race-reset') });
+    expectStatus(created, 201);
+    return created.body;
+  }
+  const expectRace = (race, status, code) => assert.deepEqual(race,
+    { waited: true, held: [], approval: 'committed', status, code },
+    `an approved MFA reset racing its target's MFA transaction: ${JSON.stringify(race)}`);
+  const liveSessions = async (accountId) => (await owner.query(`select count(*)::int as n from auth.sessions
+    where account_id = $1 and revoked_at is null`, [accountId])).rows[0].n;
+  const deadlocksBefore = await deadlocks();
+
+  // Sign-in with a TOTP code: the challenge is refused once the reset changed the token version.
+  const totpTarget = await resetTarget('race-totp');
+  const totpReset = await requestReset(totpTarget.id);
+  const totpLogin = await platform.login(totpTarget.email);
+  const totpRace = await approvalWhile(approver, totpReset, totpTarget.id,
+    () => post('/auth/admin/mfa/verify', totpLogin.jar, { code: platform.code(totpTarget.enrolled.secret) }));
+  expectRace(totpRace, 401, 'MFA_CHALLENGE_INVALID');
+  assert.equal(await liveSessions(totpTarget.id), 0, 'no session survives a reset that raced the sign-in');
+
+  // Sign-in with a recovery code: refused, and the code is invalidated by the reset, never spent.
+  const recoveryTarget = await resetTarget('race-recovery');
+  const recoveryReset = await requestReset(recoveryTarget.id);
+  const recoveryRaceLogin = await platform.login(recoveryTarget.email);
+  const recoveryRace = await approvalWhile(approver, recoveryReset, recoveryTarget.id,
+    () => post('/auth/admin/mfa/verify', recoveryRaceLogin.jar, { recoveryCode: recoveryTarget.enrolled.recoveryCodes[0] }));
+  expectRace(recoveryRace, 401, 'MFA_CHALLENGE_INVALID');
+  assert.deepEqual((await owner.query(`select count(*) filter (where used_at is not null)::int as used,
+      count(*) filter (where invalidated_at is null)::int as open
+    from auth.mfa_recovery_codes where account_id = $1`, [recoveryTarget.id])).rows[0], { used: 0, open: 0 });
+  assert.equal(await liveSessions(recoveryTarget.id), 0);
+
+  // Step-up: the session the reset revoked can no longer step up.
+  const stepUpTarget = await resetTarget('race-step-up');
+  const stepUpReset = await requestReset(stepUpTarget.id);
+  const stepUpRace = await approvalWhile(approver, stepUpReset, stepUpTarget.id,
+    () => command(stepUpTarget.enrolled, '/admin/mfa/step-up', { code: platform.code(stepUpTarget.enrolled.secret) }));
+  expectRace(stepUpRace, 403, 'PLATFORM_SESSION_REQUIRED');
+  assert.equal((await owner.query(`select count(*)::int as n from auth.session_assurance
+    where account_id = $1 and step_up_at is not null`, [stepUpTarget.id])).rows[0].n, 0, 'no step-up is recorded');
+
+  // Recovery-code regeneration: refused; the reset leaves no open code.
+  const regenerateTarget = await resetTarget('race-regenerate');
+  await platform.stepUp(regenerateTarget.enrolled);
+  const regenerateReset = await requestReset(regenerateTarget.id);
+  const regenerateRace = await approvalWhile(approver, regenerateReset, regenerateTarget.id,
+    () => command(regenerateTarget.enrolled, '/admin/mfa/recovery-codes/regenerate'));
+  expectRace(regenerateRace, 403, 'PLATFORM_SESSION_REQUIRED');
+  assert.equal((await owner.query(`select count(*)::int as n from auth.mfa_recovery_codes
+    where account_id = $1 and invalidated_at is null`, [regenerateTarget.id])).rows[0].n, 0);
+
+  // Enrolment: activating a pending factor, and starting enrolment again over a pending factor.
+  const activateTarget = await resetTarget('race-activate', { enroll: false });
+  const activating = await platform.login(activateTarget.email);
+  const pendingFactor = await post('/auth/admin/mfa/enroll/start', activating.jar);
+  expectStatus(pendingFactor, 200);
+  const activateReset = await requestReset(activateTarget.id);
+  const activateRace = await approvalWhile(approver, activateReset, activateTarget.id,
+    () => post('/auth/admin/mfa/enroll/activate', activating.jar, { code: platform.code(pendingFactor.body.secret) }));
+  expectRace(activateRace, 401, 'MFA_CHALLENGE_INVALID');
+  const restartTarget = await resetTarget('race-restart', { enroll: false });
+  const restarting = await platform.login(restartTarget.email);
+  expectStatus(await post('/auth/admin/mfa/enroll/start', restarting.jar), 200);
+  const restartReset = await requestReset(restartTarget.id);
+  const restartRace = await approvalWhile(approver, restartReset, restartTarget.id,
+    () => post('/auth/admin/mfa/enroll/start', restarting.jar));
+  expectRace(restartRace, 401, 'MFA_CHALLENGE_INVALID');
+  for (const target of [activateTarget, restartTarget]) {
+    assert.deepEqual((await owner.query(`select status, revocation_reason from auth.mfa_factors where account_id = $1`,
+      [target.id])).rows, [{ status: 'revoked', revocation_reason: 'admin_reset' }], 'the reset revoked the pending factor');
+  }
+  // Every reset target signs in to enrolment afterwards, and the races recorded no deadlock.
+  for (const target of [totpTarget, recoveryTarget, stepUpTarget, regenerateTarget, activateTarget, restartTarget]) {
+    assert.equal((await platform.login(target.email)).response.body.status, 'mfa_enrollment_required');
+  }
+  const raceDeadlocks = (await deadlocks()) - deadlocksBefore;
+  assert.equal(raceDeadlocks, 0, 'the MFA reset races recorded a deadlock');
+  evidence.mfa_reset_races = { approval: 'committed', authenticator_rows_held_while_waiting: 'none',
+    totp_sign_in: 'MFA_CHALLENGE_INVALID', recovery_code_sign_in: 'MFA_CHALLENGE_INVALID (code not spent)',
+    step_up: 'PLATFORM_SESSION_REQUIRED', recovery_code_regeneration: 'PLATFORM_SESSION_REQUIRED',
+    enrollment_activation: 'MFA_CHALLENGE_INVALID', enrollment_restart: 'MFA_CHALLENGE_INVALID',
+    deadlocks: raceDeadlocks };
+
   // 12. Principal export: restricted permission, step-up, reason, RFC 4180 CSV.
   const exporter = await platform.signIn(superBAdmin);
   expectStatus(await get(exporter, exportPath), 403, 'STEP_UP_REQUIRED');

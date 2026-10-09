@@ -66,6 +66,15 @@ type Failure = { kind: 'invalid' } | { kind: 'rate_limited' } | { kind: 'failed'
  * recovery codes are the only accepted second factors; email OTP is not one.
  * Every verification serializes on the factor row and accepts a time step
  * only once. Secrets never leave this service except once, at enrollment.
+ *
+ * Lock order (Stage 7A): every transaction here locks the account row
+ * (auth.lock_account_sessions, 0073) before any other row lock or write, then
+ * the challenge, the factor and the recovery codes, then writes sessions and
+ * events. An approved MFA reset (0070) locks the account before the factor,
+ * and every session revocation (0073) locks it before the sessions. A flow
+ * that locked the factor first and then reached the account through the
+ * FOR KEY SHARE its session event, session or recovery code insert takes on
+ * the account row could deadlock with them.
  */
 @Injectable()
 export class MfaService {
@@ -90,6 +99,7 @@ export class MfaService {
     if (!identity.accountId) throw new UnauthorizedException('Invalid credentials');
     const token = randomBytes(32).toString('base64url');
     const result = await this.database.withSystemTransaction(event.correlationId, async (client) => {
+      await this.lockAccount(client, identity.accountId!);
       const account = (await client.query<{ eligible: boolean; enrolled: boolean; token_version: string; subject: string }>(
         `select auth.account_has_platform_permission(account.id, 'platform.admin.access') as eligible,
                 auth.account_has_active_mfa(account.id) as enrolled,
@@ -277,6 +287,7 @@ export class MfaService {
   }> {
     this.protector.assertConfigured();
     const outcome = await this.database.withTransaction(context, async (client) => {
+      await this.lockAccount(client, context.actor.accountId!);
       const state = await requirePlatformAssurance(client, context, 'platform.mfa.step-up');
       const accountId = context.actor.accountId;
       if (await this.blocked(client, accountId, event)) return { kind: 'rate_limited' } as const;
@@ -323,6 +334,7 @@ export class MfaService {
     this.protector.assertConfigured();
     const recoveryCodes = this.newRecoveryCodes();
     const outcome = await this.database.withTransaction(context, async (client) => {
+      await this.lockAccount(client, context.actor.accountId!);
       await requirePlatformAssurance(client, context, 'platform.mfa.recovery-codes.regenerate');
       const accountId = context.actor.accountId;
       if (await consumeRateLimit(client, 'mfa_request_account',
@@ -380,20 +392,35 @@ export class MfaService {
     }, { readOnly: true });
   }
 
+  /**
+   * Locks the challenge, after the account it belongs to. The account is found
+   * without a lock first; the challenge is then read again, locked, for that
+   * account only, so it reflects any MFA reset or token version change that
+   * committed while this transaction waited for the account.
+   */
   private async lockChallenge(client: PoolClient, token: string, purpose: PlatformChallengePurpose): Promise<ChallengeRow | null> {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+    const digest = this.protector.tokenDigest(token);
+    const owner = (await client.query<{ account_id: string }>(
+      `select challenge.account_id::text from auth.mfa_login_challenges challenge
+        where challenge.token_sha256 = $1 and challenge.purpose = $2
+          and challenge.consumed_at is null and challenge.invalidated_at is null`,
+      [digest, purpose],
+    )).rows[0];
+    if (!owner) return null;
+    await this.lockAccount(client, owner.account_id);
     const challenge = (await client.query<ChallengeRow>(
       `select challenge.id::text, challenge.account_id::text, account.subject, account.email,
               challenge.failed_attempts, challenge.max_attempts, challenge.expires_at
          from auth.mfa_login_challenges challenge
          join auth.accounts account on account.id = challenge.account_id
-        where challenge.token_sha256 = $1 and challenge.purpose = $2
+        where challenge.token_sha256 = $1 and challenge.purpose = $2 and challenge.account_id = $3
           and challenge.consumed_at is null and challenge.invalidated_at is null
           and account.status = 'active'
           and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
           and account.token_version = challenge.account_token_version
         for update of challenge`,
-      [this.protector.tokenDigest(token), purpose],
+      [digest, purpose, owner.account_id],
     )).rows[0];
     if (!challenge) return null;
     if (challenge.expires_at.getTime() <= Date.now()) {
@@ -403,6 +430,11 @@ export class MfaService {
       return null;
     }
     return challenge;
+  }
+
+  /** The account row lock (0073), taken before any other lock of the transaction. */
+  private async lockAccount(client: PoolClient, accountId: string): Promise<void> {
+    await client.query('select auth.lock_account_sessions($1)', [accountId]);
   }
 
   private async lockActiveFactor(client: PoolClient, accountId: string): Promise<FactorRow | null> {
