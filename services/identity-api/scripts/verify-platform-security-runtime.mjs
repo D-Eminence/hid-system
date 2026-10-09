@@ -518,8 +518,9 @@ try {
   const rotated = await refresh(superBAdmin);
   expectStatus(rotated, 200);
   assert(new Date(rotated.body.idleExpiresAt).getTime() <= Date.now() + 901_000, 'idle window is at most 15 minutes');
-  // Stage 4A: the refresh and CSRF cookies last until the end of the sign-in,
-  // so a refresh after an idle timeout reaches the server and is told why.
+  // Stage 4A: the refresh and CSRF cookies last until one idle window after
+  // the end of the sign-in, so a refresh after an idle timeout or the 8-hour
+  // limit reaches the server and is told why.
   const cookieExpiry = (response, name) => {
     const header = response.headers['set-cookie'].find(value => value.startsWith(`${name}=`));
     return new Date(/;\s*Expires=([^;]+)/i.exec(header)[1]).getTime();
@@ -527,7 +528,8 @@ try {
   const familyEnd = (await owner.query('select absolute_expires_at from auth.sessions where id = $1',
     [rotated.body.actor.sessionId])).rows[0].absolute_expires_at.getTime();
   for (const name of ['hid_access_admin_refresh', 'hid_access_admin_csrf']) {
-    assert(Math.abs(cookieExpiry(rotated, name) - familyEnd) < 1_000, `${name} must expire with the sign-in`);
+    assert(Math.abs(cookieExpiry(rotated, name) - (familyEnd + 900_000)) < 1_000,
+      `${name} must expire one idle window after the sign-in ends`);
   }
   assert(cookieExpiry(rotated, 'hid_access_admin') <= Date.now() + 301_000, 'the access cookie keeps the access-token lifetime');
   const superBRotated = { ...superBAdmin, jar: mergeCookies(superBAdmin.jar, rotated), csrf: rotated.headers['x-csrf-token'] };
@@ -569,8 +571,17 @@ try {
   const absolute = (await owner.query('select absolute_expires_at from auth.sessions where id = $1', [sessionA2.sessionId]))
     .rows[0].absolute_expires_at;
   assert.equal(new Date(capped.body.idleExpiresAt).getTime(), absolute.getTime());
+  // The refresh cookie still reaches the server after the 8-hour limit, which then answers why.
+  assert(Math.abs(cookieExpiry(capped, 'hid_access_admin_refresh') - (absolute.getTime() + 900_000)) < 1_000);
+  const cappedJar = mergeCookies(sessionA2.jar, capped);
+  await owner.query(`update auth.sessions set issued_at = now() - interval '10 minutes',
+    expires_at = now() - interval '1 second', absolute_expires_at = now() - interval '1 second' where id = $1`,
+  [capped.body.actor.sessionId]);
+  expectStatus(await http.post('/api/v1/auth/admin/refresh').set('Origin', origin).set('Cookie', cookieHeader(cappedJar))
+    .set('x-csrf-token', cappedJar.hid_access_admin_csrf), 401, 'PLATFORM_SESSION_EXPIRED');
   evidence.session_policy = { idle: 'PLATFORM_SESSION_EXPIRED', refresh_reuse: 'PLATFORM_SESSION_REVOKED (family revoked)',
-    absolute_cap: 'refresh capped at sign-in + 8h', refresh_cookie_lifetime: 'sign-in end',
+    absolute_cap: 'refresh capped at sign-in + 8h', refresh_cookie_lifetime: 'sign-in end + idle window',
+    absolute_end: 'PLATFORM_SESSION_EXPIRED',
     repeated_expired_refresh: 'not reuse', missing_refresh_cookie: 'AUTHENTICATION_REQUIRED',
     unknown_refresh_token: 'AUTHENTICATION_REQUIRED' };
 

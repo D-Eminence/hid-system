@@ -117,11 +117,15 @@ export class PlatformAuthController {
 
   private sessionResponse(response: Response, session: LoginResult) {
     const common = { secure: this.environment.AUTH_COOKIE_SECURE, sameSite: 'strict' as const };
-    // The refresh and CSRF cookies last until the end of the sign-in, not the
-    // idle window, so a refresh after an idle timeout still reaches the server
-    // and is told PLATFORM_SESSION_EXPIRED. The server refuses that refresh
-    // either way: the idle window is enforced on the stored session.
-    const refreshCookieExpires = session.absoluteExpiresAt ?? session.refreshExpiresAt;
+    // The refresh and CSRF cookies outlive the idle window and, by one more
+    // idle window, the end of the sign-in, so a refresh after an idle timeout
+    // or the 8-hour limit still reaches the server and is told
+    // PLATFORM_SESSION_EXPIRED. The server refuses that refresh either way:
+    // both lifetimes are enforced on the stored session, and a refusal clears
+    // the cookies.
+    const refreshCookieExpires = session.absoluteExpiresAt
+      ? new Date(session.absoluteExpiresAt.getTime() + this.environment.PLATFORM_IDLE_TIMEOUT_SECONDS * 1_000)
+      : session.refreshExpiresAt;
     response.cookie(this.cookieName(), session.accessToken,
       { ...common, httpOnly: true, path: '/api/v1', expires: session.expiresAt });
     response.cookie(`${this.cookieName()}_refresh`, session.refreshToken,

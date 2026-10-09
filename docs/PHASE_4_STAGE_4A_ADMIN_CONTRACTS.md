@@ -99,12 +99,13 @@ Enumeration:
 
 Two supporting changes make the expired code observable in a browser:
 
-- The platform refresh and CSRF cookies now expire at the end of the sign-in
-  (absolute expiry) instead of the idle window. The idle window is still
-  enforced on the stored session, so a refresh after it is refused; the browser
-  now presents it, and the answer is `PLATFORM_SESSION_EXPIRED`. Any refusal
-  clears the cookies. The access cookie keeps the 5-minute token lifetime, and
-  the response's `idleExpiresAt` is unchanged.
+- The platform refresh and CSRF cookies now expire one idle window (15
+  minutes) after the end of the sign-in (absolute expiry), instead of at the
+  idle window. Both lifetimes are still enforced on the stored session, so a
+  refresh after either is refused. The browser now presents it, and the answer
+  is `PLATFORM_SESSION_EXPIRED`. Any refusal clears the cookies. The access
+  cookie keeps the 5-minute token lifetime, and the response's `idleExpiresAt`
+  is unchanged.
 - `POST /auth/admin/refresh` without a refresh cookie is
   `401 AUTHENTICATION_REQUIRED` (was `403 CSRF_VALIDATION_FAILED`). A refresh
   cookie with a wrong CSRF value is still `403 CSRF_VALIDATION_FAILED`.
@@ -170,7 +171,7 @@ at 0071) and passing after it.
 | Unit (`admin-contracts.spec.ts`, `platform-session-end.spec.ts`, updates to `token.service.spec.ts`, `platform-scope.spec.ts`, `admin.service.spec.ts`) | Cursor codec and refusals; approvals and demo pages, binding and permission order; audit target parameters and validation; `mfaEnrolled`; CORS options; every session-end classification and the generic answers; step-up codes in the guard and the services. 33 of them fail on the base code. |
 | SQL (`platform-admin-contracts.integration.sql`, as `hid_identity_api_runtime`, rollback-only) | Reachability helper with a null exclusion; facility suspension accepted with a membership-free reachable Super Admin and still refused when nobody can sign in; target filter by UUID in either case, by text id, by type, with other filters and the keyset; invalid filters; permission unchanged; one eleven-argument reader and the index. Each part fails on 0071. `schema.integration.sql` now expects the suspension to be accepted. |
 | HTTP (`verify-platform-admin-runtime.mjs`) | Facility suspension over HTTP where the only Super Admin works; the facility's history by target (case-insensitive, keyset, not found by `facilityId`); validation and permission; `mfaEnrolled` per principal; demo-request cursor round trip across a sub-millisecond boundary and equal timestamps; tampered, foreign-list and other-filter cursors; permission. |
-| HTTP (`verify-platform-security-runtime.mjs`) | `STEP_UP_EXPIRED` vs `STEP_UP_REQUIRED`; approvals cursor round trip (sub-millisecond boundary, equal timestamps, tampered and other-filter cursors, `limit` bound, permission); `PLATFORM_SESSION_REVOKED` after own revocation, MFA reset and refresh reuse; `PLATFORM_SESSION_EXPIRED` from the guard and refresh, twice without a reuse event; generic answers for a forged signature, a platform token on a staff route, a revoked staff session, an unknown refresh token and a missing refresh cookie; refresh and CSRF cookie lifetime; CORS exposure of the export headers. |
+| HTTP (`verify-platform-security-runtime.mjs`) | `STEP_UP_EXPIRED` vs `STEP_UP_REQUIRED`; approvals cursor round trip (sub-millisecond boundary, equal timestamps, tampered and other-filter cursors, `limit` bound, permission); `PLATFORM_SESSION_REVOKED` after own revocation, MFA reset and refresh reuse; `PLATFORM_SESSION_EXPIRED` from the guard and refresh, twice without a reuse event; generic answers for a forged signature, a platform token on a staff route, a revoked staff session, an unknown refresh token and a missing refresh cookie; refresh and CSRF cookie lifetime (sign-in end plus one idle window) and `PLATFORM_SESSION_EXPIRED` after the absolute limit; CORS exposure of the export headers. |
 
 ## 9. Not built here (product or policy decisions)
 

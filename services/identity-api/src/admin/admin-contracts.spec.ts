@@ -70,6 +70,7 @@ describe('opaque list cursors', () => {
     ['another list', reencode({ l: 'admin.demo-requests' })],
     ['another filter binding', reencode({ f: 'AAAAAAAAAAAAAAAAAAAAAA' })],
     ['an impossible date', reencode({ t: '2026-02-30T08:00:00.000000Z' })],
+    ['year zero, which Postgres does not have', reencode({ t: '0000-01-01T00:00:00.000000Z' })],
     ['millisecond precision', reencode({ t: '2026-10-09T08:00:00.123Z' })],
     ['an upper-case id', reencode({ i: uuid(1).toUpperCase() })],
     ['an injected id', reencode({ i: `${uuid(1)}' or 1=1 --` })],

@@ -66,9 +66,12 @@ export function cursorPage<Row extends { cursorAt: string; id: string }>(rows: r
     nextCursor: rows.length > limit && last ? encodeCursor(list, filters, { at: last.cursorAt, id: last.id }) : null };
 }
 
-/** A real calendar instant in the issued format (Postgres would reject, for example, 30 February). */
+/**
+ * A real calendar instant in the issued format that Postgres accepts. JavaScript
+ * also accepts year 0000 and 30 February-style overflow; Postgres rejects both.
+ */
 function isCalendarTimestamp(value: string): boolean {
-  if (!TIMESTAMP.test(value)) return false;
+  if (!TIMESTAMP.test(value) || value.startsWith('0000')) return false;
   const milliseconds = Date.parse(`${value.slice(0, 23)}Z`);
   return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === `${value.slice(0, 23)}Z`;
 }
