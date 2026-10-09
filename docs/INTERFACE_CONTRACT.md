@@ -63,6 +63,16 @@ workforce grants return `409`. Access-history items include `breakGlass` and
 `patientRevocable`. `GET /api/v1/identity/me/notifications` and
 `POST /api/v1/identity/me/notifications/:id/read` serve the patient inbox.
 
+The requesting clinician's own list is `GET /api/v1/identity/access-requests`
+(optional `?status=pending|approved|denied|revoked|expired`). It needs
+`identity.consent.write` at the `X-Facility-ID` facility and `X-Purpose-Of-Use`
+`direct-care` or `healthcare-operations`; without that header it returns
+`400 PURPOSE_OF_USE_REQUIRED`. It returns at most 100 non-break-glass requests,
+newest first, made by the caller's account, membership and facility. A caller
+without `identity.consent.write` gets `403`. Until the role bootstrap of this
+fix, the Identity runtime could not execute `identity.list_my_staff_access_requests`,
+and every caller got `403 CONSENT_COMMAND_DENIED`.
+
 Patient login/account deletion (Phase 3, ADR-036) closes the login only:
 
 | Route | Contract |

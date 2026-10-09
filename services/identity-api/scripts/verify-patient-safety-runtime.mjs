@@ -69,6 +69,21 @@ const asRuntime = async (correlation, operation) => {
 const database = {
   query: (sql, values) => asRuntime(null, client => client.query(sql, values)),
   withSystemTransaction: (correlation, operation) => asRuntime(correlation, operation),
+  // A staff request's transaction, with the request context DatabaseService.withTransaction sets.
+  withTransaction: async (context, operation, options = {}) => {
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      if (options.readOnly) await client.query('set transaction read only');
+      await client.query('set local role hid_identity_api_runtime');
+      await client.query(`select set_config('app.actor_subject',$1,true), set_config('app.facility_id',$2,true),
+        set_config('app.correlation_id',$3,true), set_config('app.membership_id',$4,true),
+        set_config('app.purpose_of_use',$5,true), set_config('app.access_scope',$6,true), set_config('app.session_id',$7,true)`,
+      [context.actor.subject, context.facilityId ?? '', context.correlationId, context.membershipId ?? '',
+        context.purposeOfUse, context.scope === 'platform' ? 'platform' : 'facility', context.actor.sessionId ?? '']);
+      const result = await operation(client); await client.query('commit'); return result;
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  },
 };
 // Local delivery stub: captures what notification-api would receive.
 const delivered = [];
@@ -222,10 +237,41 @@ try {
     [accessRequestId, a.patientId, ids.staff, ids.membership, ids.facility]);
   const requests = (await get(sa, '/identity/me/access-requests').expect(200)).body;
   assert(requests.some((item) => item.accessRequestId === accessRequestId && item.status === 'pending'));
+  // The requesting clinician lists their own requests through
+  // identity.list_my_staff_access_requests as the Identity runtime role.
+  const staffSession = async (accountId) => {
+    await pool.query("update auth.accounts set password_hash=$2, password_algorithm='argon2id' where id=$1", [accountId, passwordHash]);
+    const email = (await pool.query('select email from auth.accounts where id=$1', [accountId])).rows[0].email;
+    return { cookie: cookies(await http.post('/api/v1/auth/login').set('Origin', origin)
+      .send({ email, password, turnstileAction: 'staff-login' }).expect(200)) };
+  };
+  const clinician = await staffSession(ids.staffAccount);
+  const staffRequests = (who, query = '', purpose = 'direct-care') => {
+    const call = http.get(`/api/v1/identity/access-requests${query}`).set('Cookie', who.cookie).set('X-Facility-ID', ids.facility);
+    return purpose ? call.set('X-Purpose-Of-Use', purpose) : call;
+  };
+  assert((await staffRequests(clinician).expect(200)).body
+    .some((item) => item.accessRequestId === accessRequestId && item.status === 'pending'), 'the clinician sees their pending request');
+  assert.equal((await staffRequests(clinician, '', null).expect(400)).body.code, 'PURPOSE_OF_USE_REQUIRED');
+  // A facility member without identity.consent.write is refused.
+  const orgAdmin = { account: randomUUID(), staff: randomUUID(), membership: randomUUID() };
+  await pool.query("insert into auth.accounts(id,subject,email,display_name,status) values($1,$2,$3,'Synthetic org admin','active')",
+    [orgAdmin.account, `synthetic:org-admin:${orgAdmin.account}`, `org-admin-${orgAdmin.account}@example.invalid`]);
+  await pool.query("insert into identity.staff(id,account_id,full_name,email,verification_status,default_role) values($1,$2,'Synthetic org admin',$3,'verified','org_admin')",
+    [orgAdmin.staff, orgAdmin.account, `org-admin-${orgAdmin.account}@example.invalid`]);
+  await pool.query("insert into identity.staff_facility_memberships(id,staff_id,account_id,organization_id,facility_id,membership_role,app_role,is_primary,active) values($1,$2,$3,$4,$5,'org_admin','org_admin',true,true)",
+    [orgAdmin.membership, orgAdmin.staff, orgAdmin.account, ids.org, ids.facility]);
+  await pool.query("insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason) values($1,$2,'org_admin','facility',$3,$4,'Synthetic rehearsal role')",
+    [randomUUID(), orgAdmin.account, orgAdmin.membership, ids.facility]);
+  await staffRequests(await staffSession(orgAdmin.account)).expect(403);
   assert((await get(sa, '/identity/me/notifications').expect(200)).body.some((item) => item.resourceId === accessRequestId));
   await post(sb, `/identity/access-requests/${accessRequestId}/approve`).expect(404);
   const approved = await post(sa, `/identity/access-requests/${accessRequestId}/approve`).expect(200);
   assert.equal(approved.body.status, 'approved');
+  assert((await staffRequests(clinician, '?status=approved').expect(200)).body
+    .some((item) => item.accessRequestId === accessRequestId && item.status === 'approved'), 'the clinician sees the approval');
+  assert(!(await staffRequests(clinician, '?status=pending').expect(200)).body
+    .some((item) => item.accessRequestId === accessRequestId), 'the status filter excludes the approved request');
   const history = (await get(sa, '/identity/me/access-history').expect(200)).body;
   const approvedGrant = history.items.find((item) => item.consentGrantId === approved.body.consentGrantId);
   const emergencyGrant = history.items.find((item) => item.consentGrantId === grant.consent_grant_id);
@@ -257,7 +303,7 @@ try {
     delivery: 'local-stub-only', account_deletion: 'request-confirm-replay-cancel-complete', csrf_required: true,
     deleted_login_unusable: true, patient_identity_retained: true, emergency_contacts: 'encrypted-owned-verified-deactivated',
     break_glass_contact_alert: 'intent-created-stub-delivered-once', patient_inbox_runtime: true,
-    patient_access_requests_runtime: 'list-approve-revoke', staff_close_route_denied_to_patient: true, audit_source_identity_api: true,
+    patient_access_requests_runtime: 'list-approve-revoke', staff_access_requests_runtime: 'own-list-status-filter-purpose-permission', staff_close_route_denied_to_patient: true, audit_source_identity_api: true,
     emergency_contact_delivery_enabled_for_this_rehearsal_only: getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED,
     isolated_database_dropped: true }) + '\n');
 } finally {
