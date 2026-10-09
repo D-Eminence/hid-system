@@ -15,7 +15,7 @@ deployed, and no staging or production database has been migrated.** Every
 
 | Component | Source | Contents |
 | --- | --- | --- |
-| Database | `services/ehr-api/database/migrations` through `0076_ocr_validation_guards_fail_closed.sql` | Phase 1–4 schema. The platform admin migrations are 0067–0072. Stage 5 adds no migration; Stage 5B adds 0073, governed access adds 0074, Stage 6 adds 0075 and Stage 7 adds 0076 (§2). |
+| Database | `services/ehr-api/database/migrations` through `0076_mfa_account_lock_and_fail_closed_ocr_guards.sql` | Phase 1–4 schema. The platform admin migrations are 0067–0072. Stage 5 adds no migration; Stage 5B adds 0073, governed access adds 0074, Stage 6 adds 0075 and Stage 7 adds 0076 (§2). |
 | Runtime grants | `services/ehr-api/database/runtime-grants.sql`, applied by the role bootstrap | Governed access grants the Identity runtime the clinician's access-request list. Stage 6 adds the technical role `hid_ocr_queue_metrics`, its policy, and the OCR worker's grant on the queue metrics command (§2). |
 | Identity API | `services/identity-api` on `main` (Stage 2A, 4A, 5, 5B, governed access and 7) | Platform MFA sessions, step-up, two-person approval and the Stage 4A admin contracts. Stage 5 adds the two fixes in §2; Stage 5B adds the revocation lock; governed access adds the access-request outcome fields; Stage 7 locks the account first in every MFA transaction (§2). |
 | Pharmacy API | `services/pharmacy-api` | Stage 5 CORS header fix (§2). |
@@ -46,8 +46,12 @@ deployed, and no staging or production database has been migrated.** Every
   - **Read audit:** the OCR job lookup by document, the validation list and the publication list now write a patient-linked audit event (`ocr.job.find`, `ocr.validation.list`, `ocr.publication.list`) in the read transaction, after authorization; a failed audit write fails the read. Every OCR API job event, including the existing reads and writes, now names the source document's patient, which authorization resolves. Before, it used the job's own `patient_id`, which stays null for a job created without one, so those events were not linked to any patient. Details carry identifiers and counts only.
   - **Queue metrics:** the worker read `ocr.jobs` directly, which `hid_ocr_worker` may not do. Every read was refused, so `ocr.job.claimed` never carried `queueDepth` or `oldestQueueAgeSeconds`, and `OcrQueueAgeAlarm` and the QueueDepth signal had no data. The worker now calls `ocr.worker_queue_metrics()`, which returns only those two aggregates, with the same definitions. Its owner, the new non-login role `hid_ocr_queue_metrics`, reads only `ocr.jobs.status` and `queued_at` through one exact policy. The worker still has no table privileges.
   - **Outbox inserts:** `ocr.outbox_events` had only `SELECT` policies under `FORCE ROW LEVEL SECURITY`, so the OCR API runtime could not append outbox events. Patient confirmation and every publication request, success and failure failed with `new row violates row-level security policy`. 0075 adds a same-facility insert policy. The confirmation event is keyed by the job version, which a confirmation does not change, so a second confirmation of the same job version is now refused with `409 OCR_PATIENT_ALREADY_CONFIRMED`. Without that check it would fail on the outbox unique key with a `500`.
-- **MFA lock order (Stage 7A, no migration)**: approving a platform MFA reset (`auth.admin_decide_approval`, 0070) locks the target's account row, then revokes its factors, recovery codes and sessions. Every MFA transaction of that account locked its challenge and factor (or wrote a recovery code) first, and reached the account row only through the `FOR KEY SHARE` that its session event, session, recovery code or factor insert takes. The two could deadlock, and PostgreSQL then cancelled one. Reproduced locally for TOTP and recovery-code sign-in, step-up, recovery-code regeneration, enrolment activation and enrolment restart: each MFA request failed with `500` (§8). Every MFA transaction now calls `auth.lock_account_sessions(uuid)` (0073) before any other lock or write, so it takes the order the reset and every session revocation use: account, challenge, factor, recovery codes, then sessions and events. That covers the password step, both sign-in methods, enrolment start and activation, step-up and regeneration. A challenge is found without a lock only to learn its account, then read again, locked, for that account. A request that waited for a reset is refused cleanly: `401 MFA_CHALLENGE_INVALID` for a sign-in or enrolment, `403 PLATFORM_SESSION_REQUIRED` for a step-up or regeneration. No helper, grant or migration is added (ADR-040).
-- **Fail-closed OCR validation guards (Stage 7B, migration 0076)**: `ocr.validate_patient_confirmation` and `ocr.validate_validation_insert` compared with `<>`, which is NULL when either side is NULL, and a NULL condition did not raise. So a confirmation was accepted for any patient when the guard could not read the source document (missing, or hidden by row-level security from a non-bypass owner, P8), and a validation was accepted when the guard could not read the extraction or the session had no account or membership. Both now refuse a missing job, source patient, extraction, account or membership, and compare with `IS DISTINCT FROM`. The confirmation guard also binds `confirmed_by` and `confirmed_by_membership_id` to the session, as the validation guard does for the reviewer; before, any session in the facility could attribute a confirmation to another member. Error codes and messages are unchanged, and the OCR API always writes the session's own account and membership, so its confirmations and validations pass as before. CREATE OR REPLACE keeps each function's owner and ACL; `SECURITY DEFINER`, `search_path` and volatility are restated exactly.
+- **MFA lock order (Stage 7A, migration 0076)**: approving a platform MFA reset (`auth.admin_decide_approval`, 0070) locks the target's account row `FOR UPDATE`, then revokes its factors, recovery codes and sessions. Every MFA transaction of that account first locked its challenge and factor, or its session assurance and factor, or wrote a recovery code. It reached the account row only through the `FOR KEY SHARE` that its session event, session, recovery code or factor insert takes. The two could deadlock, and PostgreSQL then cancelled one. Reproduced locally for TOTP and recovery-code sign-in, step-up, recovery-code regeneration, enrolment activation and enrolment restart: each MFA request failed with `500` (§8). Every MFA transaction now calls the new `auth.lock_account_for_mfa(uuid)` (0076, granted to the Identity runtime only) before any other lock or write. That covers the password step, both sign-in methods, enrolment start and activation, step-up and regeneration. The order is then: the account; the challenge (sign-in and enrolment) or the session assurance (step-up); the factor and the recovery codes; then sessions and events. A challenge is found without a lock only to learn its account, then read again, locked, for that account. A request that waited for a reset is refused cleanly: `401 MFA_CHALLENGE_INVALID` for a sign-in or enrolment, `403 PLATFORM_SESSION_REQUIRED` for a step-up or regeneration. The helper takes `FOR KEY SHARE`, the weakest lock that conflicts with the reset's and every revocation's `FOR UPDATE`. A first version reused the revocation helper `auth.lock_account_sessions` (0073, `FOR UPDATE`), which the adversarial review showed made MFA transactions also wait for refresh rotations and staff sign-ins of the account. Reproduced locally:
+  - a step-up or regeneration that raced a refresh of its own sign-in waited, then found its session rotated and was refused `403 PLATFORM_SESSION_REQUIRED`, which ends the console session;
+  - the password step deadlocked with a staff sign-in of the same administrator through the principal's login-attempt row (`500`).
+
+  With `FOR KEY SHARE` neither happens (§8). Platform session issue also resolves the administrator on the locked transaction's own connection, so the lock holder never needs a second pool connection (ADR-040).
+- **Fail-closed OCR validation guards (Stage 7B, migration 0076)**: `ocr.validate_patient_confirmation` and `ocr.validate_validation_insert` compared with `<>`, which is NULL when either side is NULL, and a NULL condition did not raise. So a confirmation was accepted for any patient when the guard could not read the source document (missing, or hidden by row-level security from a non-bypass owner, P8), and a validation was accepted when the guard could not read the extraction or the session had no account or membership. Both now refuse a missing job, source patient, extraction, account or membership, and compare with `IS DISTINCT FROM`, which already refuses a NULL operand; the explicit `IS NULL` refusals state the intent. The confirmation guard also binds `confirmed_by` and `confirmed_by_membership_id` to the session, as the validation guard does for the reviewer; before, any session in the facility could attribute a confirmation to another member. Error codes and messages are unchanged, and the OCR API always writes the session's own account and membership, so its confirmations and validations pass as before. CREATE OR REPLACE keeps each function's owner and ACL; `SECURITY DEFINER`, `search_path` and volatility are restated exactly.
 - **Provider portal (Health-id)**:
   - D-Eminence/Health-id#18 reads the list above, closes a grant, and enables clinical writes only when `POST /identity/consent-status` allows them.
   - D-Eminence/Health-id#19 shows each approval's outcome and expiry, offers **Close access** for an active grant, and adds the outcome filters. The new fields and filters appear only when Identity reports them.
@@ -71,7 +75,7 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 - A Stage 6 worker that runs before 0075 and the bootstrap cannot execute `ocr.worker_queue_metrics()`. It logs `ocr.queue.metrics_unavailable` and claims jobs exactly as earlier workers do. Earlier workers keep reading `ocr.jobs` directly after 0075 and keep logging that warning.
 
 **Stage 7:**
-- The Stage 7 Identity needs `auth.lock_account_sessions(uuid)` and its grant to the Identity runtime, as Stage 5B already does (0073 and the bootstrap). It changes no request or response contract.
+- The Stage 7 Identity calls `auth.lock_account_for_mfa(uuid)`, so it must not start before 0076 and the role bootstrap: without them every platform MFA transaction (sign-in, enrolment, step-up, regeneration) fails with a database error (`5xx`). Earlier Identity builds do not call it. Stage 7 changes no request or response contract.
 - 0076 works with every OCR API build: each writes the session's own account and membership, so its confirmations and validations pass when the compared values are present. Under a schema owner that cannot read the source document (P8), every confirmation is now refused by the database (`23514`), which the OCR API answers with `500`, instead of being accepted for any patient.
 
 **Governed access:**
@@ -95,13 +99,14 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 ### 4.1 P8 follow-up: dedicated technical owners (proposal, Stage 7C)
 
 This is a design proposal only, recorded in full in ADR-041. No ownership,
-grant or policy has been changed. It would remove the superuser requirement
-of P8, using the pattern of `hid_ocr_queue_metrics` (0075) and
-`hid_event_delivery_commands`.
+grant or policy has been changed. It would remove the run-time superuser
+requirement of P8 for the functions listed, using the pattern of
+`hid_ocr_queue_metrics` (0075) and `hid_event_delivery_commands`.
 
 - **Functions and owners.** Five non-login, non-inherited, non-bypass roles:
   - `hid_ocr_worker_commands` owns the four worker commands (claim, renew,
-    complete, fail);
+    complete, fail), and the test-only wrappers `ocr.claim_next_job`,
+    `ocr.record_extraction` and `ocr.fail_job` that call them;
   - `hid_ocr_job_guard` owns the five OCR insert and job guards
     (`validate_job_write`, `validate_extraction_insert`,
     `validate_validation_insert`, `validate_patient_confirmation`,
@@ -111,22 +116,30 @@ of P8, using the pattern of `hid_ocr_queue_metrics` (0075) and
   - `hid_outreach_campaign_guard` owns
     `outreach.validate_registration_campaign_write`.
 
-  The test-only wrappers `ocr.claim_next_job`, `ocr.record_extraction` and
-  `ocr.fail_job` stay with the migration owner, and need `EXECUTE` on the
-  commands they call. `ocr.worker_queue_metrics()` is already done.
-- **Minimum privileges.** Each role gets `USAGE` on its schemas and column
-  grants for exactly the columns its functions read, insert or update. A row
-  lock needs `UPDATE` on at least one column. Each role also gets `EXECUTE` on
-  the helpers it calls. No role owns a relation, and no runtime role is
-  granted a technical role.
-- **Row-level security.** Each role gets exact cross-facility policies
-  `TO <role> USING (true)`, which is what today's superuser owner sees. The
-  worker, the scanner and the job triggers inside worker transactions name no
-  facility. Locking roles get a `FOR UPDATE` policy; for the guards, which
-  never update, it is `WITH CHECK (false)`. `ocr.job_events` gets its first
-  insert policy, for `hid_ocr_job_events` only. `outreach.campaign_members`
-  gets its first update policy, for the guard only; its no-update trigger still
-  refuses real updates.
+  `ocr.worker_queue_metrics()` is already done. These are not all the
+  definer functions involved: 65 of the 175 that the migration administrator
+  owns name a row-level-secured table, most outside these schemas. Each must
+  pass `schema.integration.sql` and the runtime verifiers under the
+  non-superuser owner before the requirement is dropped, or get a technical
+  owner too.
+- **Minimum privileges.**
+  - Each role gets `USAGE` on its schemas, grants for the columns its
+    functions read, insert or update, and `EXECUTE` on the helpers it calls.
+  - The guards read whole rows (`select *`) of `ocr.jobs`, `ocr.validations`
+    and `ocr.patient_confirmations`, so they need every column of those
+    tables, unless the implementing migration rewrites those reads.
+  - A row lock needs `UPDATE` on at least one column.
+  - No role owns a relation, and no runtime role is granted a technical role.
+- **Row-level security.**
+  - Each role gets exact cross-facility policies `TO <role> USING (true)`,
+    which is what today's superuser owner sees. The worker, the scanner and
+    the job triggers inside worker transactions name no facility.
+  - Locking roles get a `FOR UPDATE` policy.
+  - A lock-only role also gets a restrictive `FOR UPDATE … WITH CHECK (false)`
+    policy. A permissive one would not stop an update that an existing `PUBLIC`
+    update policy admits.
+  - `ocr.job_events` gets its first insert policy, for `hid_ocr_job_events`
+    only.
 - **`plpgsql.variable_conflict`.** A new migration replaces
   `ocr.claim_worker_job` with `#variable_conflict use_column` on the first
   line of its body and no 0015 setting. Verified locally on PostgreSQL 16.15:
@@ -136,20 +149,28 @@ of P8, using the pattern of `hid_ocr_queue_metrics` (0075) and
   - a non-superuser can replace the function this way, but cannot
     `ALTER FUNCTION … RESET` the setting.
 
-  `GRANT SET ON PARAMETER` also works, but needs a superuser to grant it and
-  is cluster-wide.
+  This does not let a non-superuser apply 0015 itself, which is also refused
+  to it. A database migrated from 0001 by a non-superuser administrator, as on
+  RDS, stops at 0015 unless that administrator holds `SET` on the parameter
+  for the run (`GRANT SET ON PARAMETER`, PostgreSQL 15 and later). A superuser
+  must grant it, or the RDS master if RDS allows it, which is unverified. This
+  part of P8 stays open.
 - **No superuser schema owner** (each point verified locally with a
   `NOSUPERUSER CREATEROLE` administrator):
   - the bootstrap must create roles with their attributes and check them, not
     `ALTER ROLE … NOSUPERUSER`;
   - transferring a function needs `SET` on the technical role, and `CREATE` on
     the schema for that role, granted and revoked around the transfer;
-  - a later `CREATE OR REPLACE` of a technical-owned function needs the
-    migration administrator to hold the role `WITH INHERIT TRUE`.
-    `runtime-roles.integration.sql` would allow exactly those memberships.
+  - a later `CREATE OR REPLACE` of a technical-owned function runs as the
+    technical role (`SET ROLE`), again with `CREATE` granted for that
+    statement only.
+  - An `INHERIT` membership would also work, but every technical policy would
+    then apply to the migration administrator and to the definer functions it
+    still owns. `runtime-roles.integration.sql` would allow exactly the
+    administrator's `SET`-only memberships.
 - **Migration, rollback, compatibility.**
-  - Order: one behaviour-neutral migration (the claim body; explicit columns in
-    the scanner command), then the bootstrap.
+  - Order: one behaviour-neutral migration (the claim body; explicit columns
+    in the scanner command and, if chosen, in the guards), then the bootstrap.
   - No API, worker or contract change.
   - Rollback: return ownership to the migration owner and drop the technical
     policies.
@@ -170,7 +191,7 @@ of P8, using the pattern of `hid_ocr_queue_metrics` (0075) and
    - It builds `consent_grants_request_idx` without `CONCURRENTLY`, under a `SHARE` lock on `identity.consent_grants`. New grants wait until the build finishes, that is, a patient's approval and a clinician's PIN access. Reads continue. Not measured; measure it with the others in S1.
    - It drops and recreates `identity.list_my_staff_access_requests(text)`, because its result type changes.
 8. **0075** creates `ocr.worker_queue_metrics()` (no table lock) and the policy `ocr_outbox_staff_insert`. `CREATE POLICY` takes an `ACCESS EXCLUSIVE` lock on `ocr.outbox_events` for the catalog change only. It waits for in-flight OCR transactions on that table within the 5 s lock timeout. The bootstrap likewise recreates `ocr_jobs_queue_metrics_read` on `ocr.jobs` under a brief `ACCESS EXCLUSIVE` lock, as it already does for the outbox delivery policies.
-9. **0076** replaces the trigger functions `ocr.validate_patient_confirmation()` and `ocr.validate_validation_insert()` (`CREATE OR REPLACE`). It takes no table lock and needs no window; an OCR confirmation or validation in flight keeps the definition it started with.
+9. **0076** replaces the trigger functions `ocr.validate_patient_confirmation()` and `ocr.validate_validation_insert()` (`CREATE OR REPLACE`) and creates `auth.lock_account_for_mfa(uuid)`. It takes no table lock and needs no window; an OCR confirmation or validation in flight keeps the definition it started with.
 10. If any estimate approaches 120 s, stop and re-plan before the release. 0072 cannot be edited or worked around in place: an index built beforehand under the same name makes 0072 fail. Do not raise the timeouts ad hoc.
 11. **Immediately after the migrations, run `npm run db:bootstrap`, then `npm run db:verify-roles`.**
    - 0072 drops and recreates `audit.list_platform_events` with eleven arguments. Until the bootstrap grants `EXECUTE` on the new signature, any running Identity is refused on the platform audit list.
@@ -178,6 +199,7 @@ of P8, using the pattern of `hid_ocr_queue_metrics` (0075) and
    - The bootstrap grants `EXECUTE` on `auth.lock_account_sessions(uuid)` (0073) to the Identity runtime. A Stage 5B Identity running before this, or before 0073, fails with a database error (`5xx`) on every sign-out, every refresh of an expired session, an administrator's own-session revocation and refresh-token reuse; a reused family is then not revoked. Earlier Identity builds do not call it.
    - Between this step and step 6, and during a rolling Identity deploy, an earlier Identity runs against 0073. Its sign-out, expired refresh, refresh-reuse revocation and own-session revocation lock session rows before the account row, so each can deadlock with an administrator's revocation of the same account at the same moment. PostgreSQL cancels one of the two, which fails with an error and can be retried (§9). Keep that interval short.
    - The bootstrap creates `hid_ocr_queue_metrics`, makes it the owner of `ocr.worker_queue_metrics()`, creates its policy and grants the OCR worker `EXECUTE` (0075). Until then a Stage 6 worker logs `ocr.queue.metrics_unavailable`, as every worker does today.
+   - The bootstrap grants `EXECUTE` on `auth.lock_account_for_mfa(uuid)` (0076) to the Identity runtime. A Stage 7 Identity running before this, or before 0076, fails every platform MFA transaction with a database error (`5xx`). Earlier Identity builds do not call it.
    - The bootstrap also runs the runtime-role assertions.
 
 ## 6. Deployment order
@@ -187,7 +209,7 @@ of P8, using the pattern of `hid_ocr_queue_metrics` (0075) and
 3. Take the backup (P2).
 4. Apply the **migrations** (§5).
 5. Run the **role bootstrap** and verify it (§5).
-6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`. This needs the infrastructure change in P3. A Stage 5B or later Identity, including Stage 7, must not start before steps 4 and 5 (0073 and its grant), and an Identity with the governed-access outcome mapping must not start before 0074 and the bootstrap.
+6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`. This needs the infrastructure change in P3. A Stage 5B or later Identity must not start before steps 4 and 5 (0073 and its grant), a Stage 7 Identity not before 0076 and its grant, and an Identity with the governed-access outcome mapping must not start before 0074 and the bootstrap.
 7. Deploy the **Pharmacy API**. This is independent of the other steps.
 8. Deploy the **OCR API** and the **OCR worker** (Stage 6). The API is independent of the other steps. The worker reports queue metrics once steps 4 and 5 (0075 and its grant) are done.
 9. Run the smoke checks:
@@ -312,19 +334,23 @@ No other local cluster was touched. Later stages say which cluster they used.
   - Worker: `repository.spec.ts` and `database-privileges.spec.ts` check that the worker reads only through commands that `hid_ocr_worker` can execute. 3 of 4 fail on `main`.
   - The compiled worker repository was run as a login that inherits `hid_ocr_worker`. It returned `{"queueDepth":2,"oldestQueueAgeSeconds":7211}` for two facilities. `main`'s query as the same login failed with `42501 permission denied for table jobs`.
   - On a copy whose functions and tables are all owned by a `NOSUPERUSER NOBYPASSRLS` role (P8), the new suite passes. `schema.integration.sql` fails at each function listed in P8, one by one, and passes once those functions are returned to a superuser owner.
-- **Stage 7 (no migration for 7A; 0076 for 7B):** on the new local cluster `/tmp/hid-tuf-migration.stage7`, run as `postgres`. One database was migrated 0001 → 0076 from the branch, and one 0001 → 0075 from `main` (`dafe147`). Each had a copy with every schema, table and function owned by a `NOSUPERUSER NOBYPASSRLS` role, as in the rehearsal's owner check. REHEARSAL_PLACEHOLDER
+- **Stage 7 (0076):** on the new local cluster `/tmp/hid-tuf-migration.stage7`, run as `postgres`. One database was migrated 0001 → 0076 from the branch, and one 0001 → 0075 from `main` (`dafe147`). Each had a copy with every schema, table and function owned by a `NOSUPERUSER NOBYPASSRLS` role, as in the rehearsal's owner check. REHEARSAL_PLACEHOLDER
   - **MFA lock order:**
-    - `mfa-lock-order.spec.ts` has 10 tests: one per MFA transaction (the account lock comes first, in the same transaction), the challenge locked only after the account and for that account, and a challenge refused once the lock is held. 9 fail against the `main` service, because no account lock is taken; the tenth checks a refusal that `main` already makes.
+    - `mfa-lock-order.spec.ts` has 11 tests: one per MFA transaction (the account lock comes first, in the same transaction, and is never the `FOR UPDATE` revocation lock), the challenge locked only after the account and for that account, a challenge refused once the lock is held, and platform session issue without a second pool connection. 10 fail against the `main` services; 9 fail against the first version, which used `auth.lock_account_sessions`.
     - `verify-platform-security-runtime.mjs` races an approved MFA reset against six MFA requests of its target: TOTP and recovery-code sign-in, step-up, recovery-code regeneration, enrolment activation, and enrolment started again over a pending factor. A second connection runs the real `auth.admin_decide_approval`, holding the target's account row as 0070 does until the request waits. While the request waits, it checks with `NOWAIT` which authenticator rows the request holds.
-    - On `main`, every request held its challenge and factor, and also its recovery codes or session assurance where it used them. PostgreSQL detected six deadlocks (`pg_stat_database.deadlocks` +6, six `deadlock detected` reports in the server log), cancelled each MFA request (`500`) and committed the approval.
+    - On `main`, every request held its factor while it waited. Sign-in and enrolment requests also held their challenge, step-up held its session assurance, and recovery-code sign-in and regeneration held their recovery codes. PostgreSQL detected six deadlocks (`pg_stat_database.deadlocks` +6, six `deadlock detected` reports in the server log), cancelled each MFA request (`500`) and committed the approval.
     - On the branch, each request waits holding no authenticator row, and the approval commits. The request is then refused (`401 MFA_CHALLENGE_INVALID` for sign-in and enrolment, `403 PLATFORM_SESSION_REQUIRED` for step-up and regeneration). It records no deadlock, leaves no live session, and never spends the recovery code.
-  - **OCR guards:** `ocr-validation-guards.integration.sql` runs 19 cases.
+    - The verifier also runs a step-up and a regeneration while a refresh of the same sign-in is in flight, and the platform password step while a staff sign-in of the same administrator holds the principal's login-attempt row.
+      - On the branch, neither MFA request waits for the refresh and both answer `200`. The password step waits for the staff sign-in, which commits, and then answers `200`.
+      - Against the first version (`FOR UPDATE`): both MFA requests waited, then answered `403 PLATFORM_SESSION_REQUIRED`. The password step deadlocked with the staff sign-in and answered `500`, while the staff sign-in committed. The server log shows the `deadlock detected` report between `delete from auth.login_attempts` and the staff `insert into auth.session_events`.
+  - **OCR guards:** `ocr-validation-guards.integration.sql` runs 23 cases.
     - On 0075 it fails with 10 wrong outcomes:
       - two confirmations whose source document is missing;
       - confirmations with no session account or membership, or with another member's account or membership;
       - validations whose extraction is missing, with no session account (empty or unknown subject) or no membership.
     - Under the non-superuser owner, 0075 also accepts the wrong patient and the right patient (12), because the guard cannot read the source document.
-    - On 0076 it passes in both. `schema.integration.sql`, the 26 additional suites and the role assertions pass on 0076; the 26 additional suites also pass under the non-superuser owner.
+    - On 0076 it passes in both. `schema.integration.sql`, the 27 additional suites (including `mfa-account-lock.integration.sql`) and the role assertions pass on 0076; the additional suites also pass under the non-superuser owner.
+    - Mutation check: each of the 12 comparison predicates of the two guards, removed in turn, makes the suite fail at the case named for it. That covers facility, source patient, job patient, version, account, membership, status and extraction. Removing an explicit `IS NULL` refusal alone changes no outcome, because the `IS DISTINCT FROM` comparison that follows refuses the NULL operand too.
     - The functions keep their owner, ACL, `SECURITY DEFINER` and `search_path`.
   - **P8 proposal probes**, on throwaway databases and roles that were dropped afterwards (PostgreSQL 16.15), for §4.1 and ADR-041. They confirmed:
     - the `plpgsql.variable_conflict` behaviour under a non-superuser owner;
@@ -372,8 +398,8 @@ To reproduce, run as the owner of a local cluster migrated to 0073 and role-boot
   - **Do not roll the console back below Stage 4B while Identity is at Stage 4A or later (§3).**
 - **Identity after 0073:** Stage 5 and earlier builds run unchanged. The two admin commands keep their contracts, and only Stage 5B calls the new helper. Rolling Identity back to Stage 5 removes the lock from the reuse, own-session, sign-out and expiry paths. The two admin revocations keep it, because it is in the database. With that combination, any of those four paths at the same moment as an administrator's revocation of the same account can deadlock. PostgreSQL then cancels one of the two. Either the sign-out or refresh fails with a `5xx` (reproduced locally, §8), or the administrator's revocation fails and must be retried. Prefer rolling forward.
 - **Identity after 0074:** once the bootstrap has run, earlier builds keep working (§3); roll Identity back freely. The new index and the new result columns stay. Rolling back the Health-id portal only hides the outcomes.
-- **Identity after Stage 7:** roll back freely; there is no schema change. A Stage 6 or earlier Identity brings back the deadlock between an approved MFA reset and an MFA transaction of the same account (§2): PostgreSQL then cancels one, and either the MFA request fails with a `5xx` or the approval fails and must be retried.
-- **0076:** forward-only like every migration. To restore the earlier guard bodies, a new migration would have to recreate them; that would accept a confirmation for any patient again under a non-bypass owner, and validations from sessions without an account or membership. No OCR build depends on the earlier behaviour.
+- **Identity after Stage 7:** roll back freely; 0076's helper stays and earlier builds do not call it. A Stage 6 or earlier Identity brings back the deadlock between an approved MFA reset and an MFA transaction of the same account (§2): PostgreSQL then cancels one, and either the MFA request fails with a `5xx` or the approval fails and must be retried.
+- **0076:** forward-only like every migration. To restore the earlier guard bodies, a new migration would have to recreate them; that would accept a confirmation for any patient again under a non-bypass owner, and validations from sessions without an account or membership. No OCR build depends on the earlier behaviour. The Stage 7 Identity needs `auth.lock_account_for_mfa`.
 - **OCR after 0075:** roll the OCR API and worker back freely. Earlier workers lose the metrics again; earlier APIs write the earlier, possibly unlinked, events. The function, the role and both policies stay. Removing the outbox insert policy would stop patient confirmation and publication again.
 - **Refresh-event change:** this is code only. Rolling back Identity brings back the old misclassification and nothing else. Existing `refresh`/`denied` events remain valid rows.
 - **MFA key:** if `MFA_SECRET_KEY_B64` is lost, every enrolled authenticator must be re-enrolled. Store it with the same care as the field-encryption keys.
@@ -394,7 +420,13 @@ To reproduce, run as the owner of a local cluster migrated to 0073 and role-boot
 
 Each would be fixed the same way: lock every account involved, in account order, before anything else. That is a follow-up.
 
-**Known limit of Stage 7B:** `ocr.validate_job_write` compares the source document's latest scan in the same way, so a source with no scan event is not refused by the trigger. Confirmed locally on a rolled-back copy. The OCR API refuses a source that is not clean before it inserts a job, so this is defence in depth. The trigger also runs on every job update, so hardening it needs a check of existing jobs and their scans first (a follow-up).
+**Known limits of Stage 7B:** 0076 applies the fail-closed rule (ADR-040) to the two guards above only. Comparisons of the same kind remain elsewhere, each defence in depth today:
+- `ocr.validate_job_write` compares the source document's latest scan in the same way, so a source with no scan event is not refused by the trigger. Confirmed locally on a rolled-back copy. The OCR API refuses a source that is not clean before it inserts a job. The trigger also runs on every job update, so hardening it needs a check of existing jobs and their scans first.
+- `ocr.complete_worker_job` and `ocr.fail_worker_job` (0014) check `job_row.claim_token <> requested_claim_token`, so a NULL claim token passes the lease check: a session acting as the shared OCR worker subject could complete or fail a job that another worker replica holds. The shipped worker always sends its token. `ocr.renew_worker_claim` refuses a NULL token.
+- `lab.validate_imported_evidence` (0017) compares the OCR job, extraction, validation and publication it imports with `<>` and does not check they were found. Row-level security on `lab.imported_evidence` refuses a session without an account or membership, so the session comparisons cannot be bypassed that way.
+- `ocr.validate_publication_write` (0016) does not bind `requested_by` and its membership to the session, the attribution gap 0076 closes for confirmations.
+
+Each is a follow-up.
 
 ## 10. Operator actions, not performed here
 

@@ -1505,17 +1505,32 @@ Date: 2026-10-09
 Decision:
 
 Every platform MFA transaction of the Identity API locks the account row
-through `auth.lock_account_sessions(uuid)` (0073) before any other row lock or
+through `auth.lock_account_for_mfa(uuid)` (0076) before any other row lock or
 write. That covers the password step that issues a challenge, sign-in with a
 TOTP code or a recovery code, the start and the activation of enrolment,
-step-up and recovery-code regeneration. The order is then the account, the
-challenge, the factor and the recovery codes, then the session, assurance and
-event rows. It is the order of an approved MFA reset (0070), which locks the
-target account and then revokes its factors, recovery codes and sessions, and
-of every session revocation (0073). A challenge is first found without a lock,
+step-up and recovery-code regeneration. The order is then:
+1. the account;
+2. the challenge (sign-in, enrolment) or the session assurance (step-up);
+3. the factor and the recovery codes;
+4. the session and event rows.
+
+That is the order of an approved MFA reset (0070), which locks the target
+account and then revokes its factors, recovery codes and sessions, and of
+every session revocation (0073). A challenge is first found without a lock,
 only to learn its account; after the account lock it is read again, locked,
-for that account only. The existing helper and its grant to the Identity
-runtime are reused; no migration, helper or grant is added.
+for that account only. Platform session issue resolves the administrator on
+the same transaction, so the lock holder never needs a second pool
+connection.
+
+The helper takes `FOR KEY SHARE`, the weakest lock that conflicts with the
+`FOR UPDATE` of the reset and the revocations. It is granted to the Identity
+runtime only. The revocation helper `auth.lock_account_sessions` (0073,
+`FOR UPDATE`) was tried first and rejected. It also serialized every MFA
+transaction with refresh rotations and staff sign-ins of the account, which
+take `FOR KEY SHARE`. A step-up that raced a refresh of its sign-in then found
+its session rotated and was refused, ending the console session. The
+password step deadlocked with a staff sign-in of the same administrator
+through the principal's login-attempt row. Both were reproduced locally.
 
 A database guard that compares a new row with values it reads or with the
 session refuses the write when a compared value is missing, and compares with
@@ -1533,9 +1548,11 @@ Consequences:
   regeneration, enrolment activation and restart) deadlocked on the earlier
   code, and PostgreSQL cancelled the MFA request (`500`). With the account
   locked first, each request is refused cleanly once the reset commits;
-- an MFA transaction holds the account row until it commits, usually
-  milliseconds. Refreshes, sign-outs and revocations of that account wait for
-  it, as they wait for a revocation since 0073;
+- an MFA transaction holds `FOR KEY SHARE` on the account row until it
+  commits, usually milliseconds. An approved reset, a session revocation, a
+  sign-out or an expiry of that account waits for it. A refresh, a staff
+  sign-in or another MFA transaction of that account does not;
+- the Stage 7 Identity needs 0076 and the role bootstrap before it starts;
 - pre-existing lock-order hazards that do not involve the MFA authenticator
   are unchanged: two administrators acting on each other's accounts at the same
   moment (status, platform role, approval request or decision, session
@@ -1591,8 +1608,8 @@ Decision (proposed):
 
    | Role | Owns | Reads and writes |
    | --- | --- | --- |
-   | `hid_ocr_worker_commands` | `ocr.claim_worker_job`, `ocr.renew_worker_claim`, `ocr.complete_worker_job`, `ocr.fail_worker_job` | `ocr.jobs`: select, plus update of the lease, status, attempt and error columns. `ocr.extractions`: select, insert. `ehr.documents` and `ehr.document_scan_events`: select of the columns the claim checks. `audit.events`: insert |
-   | `hid_ocr_job_guard` | `ocr.validate_job_write`, `ocr.validate_extraction_insert`, `ocr.validate_validation_insert`, `ocr.validate_patient_confirmation`, `ocr.validate_publication_write` | Select of the compared columns of `ocr.jobs`, `ocr.extractions`, `ocr.validations`, `ocr.patient_confirmations`, `ehr.documents` and `ehr.document_scan_events`. `UPDATE` on one column of `ocr.jobs` only, because `SELECT … FOR UPDATE` requires it |
+   | `hid_ocr_worker_commands` | `ocr.claim_worker_job`, `ocr.renew_worker_claim`, `ocr.complete_worker_job`, `ocr.fail_worker_job`, and the test-only wrappers `ocr.claim_next_job`, `ocr.record_extraction` and `ocr.fail_job` that call them | `ocr.jobs`: select, plus update of every column the commands change (status, claim, lease, attempt, error, timing, correlation and row version). `ocr.extractions`: select, insert. `ehr.documents`: select of the columns the claim checks and returns (including the storage bucket, key, size and media type). `ehr.document_scan_events`: select of the scan columns. `audit.events`: insert |
+   | `hid_ocr_job_guard` | `ocr.validate_job_write`, `ocr.validate_extraction_insert`, `ocr.validate_validation_insert`, `ocr.validate_patient_confirmation`, `ocr.validate_publication_write` | Select on every column of `ocr.jobs`, `ocr.validations` and `ocr.patient_confirmations`: four of these guards read whole rows (`select *` into `%rowtype` variables). The alternative is a migration that rewrites those reads to column lists. Select of the compared columns of `ocr.extractions`, `ehr.documents` and `ehr.document_scan_events`. `UPDATE` on one column of `ocr.jobs` only, because `SELECT … FOR UPDATE` requires it |
    | `hid_ocr_job_events` | `ocr.record_job_event` | `ocr.job_events` and `ocr.outbox_events`: insert only |
    | `hid_document_scan_commands` | `ehr.append_document_scan_event` | `ehr.documents`: select, and `UPDATE` on one column for its row lock (its `select *` becomes an explicit column list). `ehr.document_scan_events`: select, insert. `audit.events`: insert |
    | `hid_outreach_campaign_guard` | `outreach.validate_registration_campaign_write` | `outreach.campaigns` and `outreach.campaign_members`: select, and `UPDATE` on one column each for `FOR SHARE` |
@@ -1604,10 +1621,17 @@ Decision (proposed):
    need none: PostgreSQL checks `EXECUTE` on a trigger function only when the
    trigger is created.
 
-   The test-only wrappers `ocr.claim_next_job`, `ocr.record_extraction` and
-   `ocr.fail_job` stay with the migration owner. Their owner then needs an
-   explicit `EXECUTE` on the worker commands they call. The definer functions
-   that read no row-level-secured table stay too.
+   **Scope.** These are the functions P8 found failing, the lease renewal, the
+   test wrappers and the guards 0076 changed. They are not all of them: 65 of
+   the 175 definer functions the migration administrator owns name a
+   row-level-secured table. Most are outside these schemas; examples are
+   `lab.validate_imported_evidence`, `platform.control_enabled`,
+   `outreach.registration_campaign_member` and `ehr.capture_record_version`.
+   They work under a non-bypass owner only where the calling session's own
+   policies admit the rows they read. Before the superuser requirement is
+   dropped, each must be checked, by running `schema.integration.sql` and every
+   runtime verifier under the non-superuser owner. Any that fail need a
+   technical owner too.
 2. **Policies.**
    - Each role gets `FOR SELECT` (and, where it inserts, `FOR INSERT`) policies
      `TO <role> USING (true)` / `WITH CHECK (true)`, which are cross-facility.
@@ -1615,9 +1639,15 @@ Decision (proposed):
      also fire inside worker transactions, which name no facility. Today's
      superuser owner sees every row.
    - Where a function locks rows, its role gets a `FOR UPDATE` policy
-     `USING (true)`. For a role that never updates, the policy is
-     `WITH CHECK (false)`: `SELECT … FOR UPDATE` and `FOR SHARE` apply only the
-     update policy's `USING`, so that role still cannot change a row.
+     `USING (true)`: `SELECT … FOR UPDATE` and `FOR SHARE` apply the update
+     policies' `USING`.
+   - A lock-only role must still not change rows. Permissive policies are
+     combined with `OR`, so a permissive `WITH CHECK (false)` would not stop an
+     update that a `PUBLIC` update policy admits; `ocr.jobs`, `ehr.documents`
+     and `outreach.campaigns` have one. The proposal is a `RESTRICTIVE`
+     `FOR UPDATE TO <role> USING (true) WITH CHECK (false)` policy, to be
+     verified in the implementation, besides function bodies that issue no
+     `UPDATE`.
    - Column grants keep each role to the columns its functions use. No role
      owns a relation.
 3. **`plpgsql.variable_conflict`.** A new migration replaces
@@ -1630,9 +1660,17 @@ Decision (proposed):
    `ALTER FUNCTION … RESET plpgsql.variable_conflict` fails for a
    non-superuser. 0015 stays unchanged.
 
-   `GRANT SET ON PARAMETER` (PostgreSQL 15 and later) is not preferred. It
-   needs a superuser grantor, is cluster-wide, lets the grantee set the
-   parameter in any session, and is unverified on RDS.
+   This fixes calls, not 0015 itself. `ALTER FUNCTION … SET
+   plpgsql.variable_conflict` is refused to a non-superuser even when it owns
+   the function (verified). A database migrated from 0001 by a non-superuser
+   administrator, as every RDS environment would be, therefore stops at 0015,
+   unless that administrator holds `SET` on the parameter for the run.
+   `GRANT SET ON PARAMETER plpgsql.variable_conflict` (PostgreSQL 15 and later)
+   gives it. A superuser must grant it, or the RDS master user if RDS permits
+   that, which is unverified. It is cluster-wide and lets the grantee set the
+   parameter in any session, so it should be revoked after the migration run.
+   0015 is immutable and checksum-pinned, so any other route needs its own
+   decision.
 4. **No superuser schema owner.** These PostgreSQL 16 behaviours, verified
    locally on 16.15 with a `NOSUPERUSER CREATEROLE` administrator, decide the
    bootstrap:
@@ -1651,18 +1689,26 @@ Decision (proposed):
      function and revokes it, in one transaction;
    - a later migration that replaces a technical-owned function needs the
      owner's privileges. With `SET` but not `INHERIT` it fails with "must be
-     owner". The migration administrator is therefore granted each technical
-     role `WITH INHERIT TRUE, SET TRUE`. It already owns every table, so it
-     gains no data access. `runtime-roles.integration.sql`, which today
-     forbids any membership of a technical role, then allows exactly these
-     memberships of the migration administrator and no other.
+     owner". Two ways work (both verified):
+     - `INHERIT TRUE` membership. It is rejected: every `TO <technical role>`
+       policy would then also apply to the migration administrator, to its
+       sessions, and to every definer function it still owns. That widens
+       their row visibility on those tables, the masking this ADR rejects
+       `BYPASSRLS` for.
+     - `SET` only. The migration switches to the technical role (`SET ROLE`)
+       for the replacement, with `CREATE` on the schema granted to the role
+       for that statement. This one is proposed.
 
-   With every function that reads row-level-secured tables owned by a
-   technical role that has its own policies, the schema owner needs neither
-   superuser nor `BYPASSRLS`.
+     `runtime-roles.integration.sql`, which today forbids any membership of a
+     technical role, would allow exactly these `SET`-only memberships of the
+     migration administrator, and no other.
+
+   For the functions this ADR moves, this removes the run-time dependency on
+   a superuser owner. It does not remove the one-time need to apply 0015
+   (item 3), or the check of the other definer functions (item 1).
 5. **Migration, rollback and compatibility.**
    - **Order.** First the new migration: the `ocr.claim_worker_job` body
-     change and, for the scanner, explicit columns. It behaves the same under
+     change, explicit columns for the scanner and, if chosen, for the guards. It behaves the same under
      today's owner. Then the bootstrap: roles, revoke-all blocks, policies,
      grants, ownership transfers and memberships.
    - **No service change.** Signatures, results, error codes and runtime
@@ -1680,12 +1726,15 @@ Decision (proposed):
 
 Consequences:
 
-- P8 changes from "the schema owner must be a superuser" to an automated
-  check, and the release no longer depends on a privilege RDS does not grant;
+- for the moved functions, P8's run-time dependency on a superuser owner
+  becomes an automated check. Applying 0015 still needs `SET` on its
+  parameter once (item 3), and the other definer functions need the check of
+  item 1;
 - five new non-login roles each see their tables across facilities, limited to
   the columns their functions use. As for today's superuser owner, that
   visibility is reachable only through those functions, none of which builds
-  SQL dynamically;
+  SQL dynamically. The migration administrator can also reach it through
+  `SET ROLE`; as the owner of the tables it could already read them;
 - the role bootstrap must be changed to run without a superuser before any
   managed-service release, whether or not this proposal is adopted; and
 - every function this ADR moves must keep its owner across later migrations.
