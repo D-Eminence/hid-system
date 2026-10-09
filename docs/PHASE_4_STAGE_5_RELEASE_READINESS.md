@@ -334,7 +334,16 @@ No other local cluster was touched. Later stages say which cluster they used.
   - Worker: `repository.spec.ts` and `database-privileges.spec.ts` check that the worker reads only through commands that `hid_ocr_worker` can execute. 3 of 4 fail on `main`.
   - The compiled worker repository was run as a login that inherits `hid_ocr_worker`. It returned `{"queueDepth":2,"oldestQueueAgeSeconds":7211}` for two facilities. `main`'s query as the same login failed with `42501 permission denied for table jobs`.
   - On a copy whose functions and tables are all owned by a `NOSUPERUSER NOBYPASSRLS` role (P8), the new suite passes. `schema.integration.sql` fails at each function listed in P8, one by one, and passes once those functions are returned to a superuser owner.
-- **Stage 7 (0076):** on the new local cluster `/tmp/hid-tuf-migration.stage7`, run as `postgres`. One database was migrated 0001 → 0076 from the branch, and one 0001 → 0075 from `main` (`dafe147`). Each had a copy with every schema, table and function owned by a `NOSUPERUSER NOBYPASSRLS` role, as in the rehearsal's owner check. REHEARSAL_PLACEHOLDER
+- **Stage 7 (0076):** on the new local cluster `/tmp/hid-tuf-migration.stage7`, run as `postgres`. One database was migrated 0001 → 0076 from the branch, and one 0001 → 0075 from `main` (`dafe147`). Each had a copy with every schema, table and function owned by a `NOSUPERUSER NOBYPASSRLS` role, as in the rehearsal's owner check.
+  - **Rehearsal and acceptance:** `scripts/tuf-staging-migration-rehearsal.mjs` ran as `postgres` on the branch head, with a clean worktree. It covered:
+    - 0028 → 0076, with the dry run unchanged;
+    - 438 foreign keys and 0 orphans;
+    - 27 additional suites, also under the non-superuser definer owner;
+    - every runtime HTTP verifier, including the MFA races below;
+    - backup and restore integrity.
+
+    `scripts/run-container-database-acceptance.sh` passed for 0001–0076, including both new suites.
+  - **Workspace gates passed:** build, tests, verify, release tests, release contracts, the EHR app tests and `git diff --check`. Identity has 724 tests, the OCR API 51 and the OCR worker 17.
   - **MFA lock order:**
     - `mfa-lock-order.spec.ts` has 11 tests: one per MFA transaction (the account lock comes first, in the same transaction, and is never the `FOR UPDATE` revocation lock), the challenge locked only after the account and for that account, a challenge refused once the lock is held, and platform session issue without a second pool connection. 10 fail against the `main` services; 9 fail against the first version, which used `auth.lock_account_sessions`.
     - `verify-platform-security-runtime.mjs` races an approved MFA reset against six MFA requests of its target: TOTP and recovery-code sign-in, step-up, recovery-code regeneration, enrolment activation, and enrolment started again over a pending factor. A second connection runs the real `auth.admin_decide_approval`, holding the target's account row as 0070 does until the request waits. While the request waits, it checks with `NOWAIT` which authenticator rows the request holds.
