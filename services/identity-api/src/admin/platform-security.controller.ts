@@ -83,7 +83,7 @@ export class PlatformSecurityController {
   @RequirePermissions('platform.admin.access')
   @AuditAction('admin.approvals.list.request')
   approvals(@Query() query: ListApprovalsDto, @Req() request: HidRequest) {
-    return this.security.listApprovals(requireAdminContext(request), query.status);
+    return this.security.listApprovals(requireAdminContext(request), query);
   }
 
   @Post('principals/:accountId/super-admin-requests')

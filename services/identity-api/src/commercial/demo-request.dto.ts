@@ -55,6 +55,10 @@ export class ListDemoRequestsDto {
 
   @IsOptional() @Transform(({ value }) => Number(value)) @IsInt() @Min(1) @Max(100)
   limit?: number;
+
+  /** The opaque `nextCursor` of the previous page. */
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(512)
+  cursor?: string;
 }
 
 export class UpdateDemoRequestStatusDto {

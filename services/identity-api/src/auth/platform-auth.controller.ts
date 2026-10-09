@@ -92,7 +92,9 @@ export class PlatformAuthController {
     this.assertAllowedOrigin(request);
     const cookies = this.cookies(request);
     const refreshToken = cookies[`${this.cookieName()}_refresh`];
-    if (!refreshToken || !this.tokens.verifyRefreshCsrf(refreshToken, cookies[`${this.cookieName()}_csrf`],
+    // No refresh credential at all is a missing sign-in (401), not a CSRF failure.
+    if (!refreshToken) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+    if (!this.tokens.verifyRefreshCsrf(refreshToken, cookies[`${this.cookieName()}_csrf`],
       request.header('x-csrf-token'))) {
       throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'Refresh CSRF validation failed');
     }
@@ -115,12 +117,17 @@ export class PlatformAuthController {
 
   private sessionResponse(response: Response, session: LoginResult) {
     const common = { secure: this.environment.AUTH_COOKIE_SECURE, sameSite: 'strict' as const };
+    // The refresh and CSRF cookies last until the end of the sign-in, not the
+    // idle window, so a refresh after an idle timeout still reaches the server
+    // and is told PLATFORM_SESSION_EXPIRED. The server refuses that refresh
+    // either way: the idle window is enforced on the stored session.
+    const refreshCookieExpires = session.absoluteExpiresAt ?? session.refreshExpiresAt;
     response.cookie(this.cookieName(), session.accessToken,
       { ...common, httpOnly: true, path: '/api/v1', expires: session.expiresAt });
     response.cookie(`${this.cookieName()}_refresh`, session.refreshToken,
-      { ...common, httpOnly: true, path: '/api/v1/auth/admin', expires: session.refreshExpiresAt });
+      { ...common, httpOnly: true, path: '/api/v1/auth/admin', expires: refreshCookieExpires });
     response.cookie(`${this.cookieName()}_csrf`, session.csrfToken,
-      { ...common, httpOnly: false, path: '/', expires: session.refreshExpiresAt });
+      { ...common, httpOnly: false, path: '/', expires: refreshCookieExpires });
     response.setHeader('x-csrf-token', session.csrfToken);
     response.setHeader('Cache-Control', 'no-store');
     return {

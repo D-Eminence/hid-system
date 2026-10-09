@@ -25,6 +25,8 @@ export interface LoginResult {
   refreshToken: string;
   expiresAt: Date;
   refreshExpiresAt: Date;
+  /** End of the sign-in (platform sessions): no refresh extends a session past it. */
+  absoluteExpiresAt?: Date;
 }
 
 export interface CredentialIdentity {

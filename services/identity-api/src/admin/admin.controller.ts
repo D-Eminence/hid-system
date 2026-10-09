@@ -4,6 +4,7 @@ import { AuditAction, AuditFailuresOnly, HighRiskAction, PlatformScope, RequireP
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
+import { EXPORT_RESPONSE_HEADERS } from '../config/cors';
 import { requireAdminContext } from './admin-context';
 import { AdminOperationsService } from './admin-operations.service';
 import { AdminService, PRINCIPAL_EXPORT_MAX_ROWS } from './admin.service';
@@ -90,9 +91,9 @@ export class AdminController {
       .setHeader('Content-Disposition', 'attachment; filename="hid-principals.csv"')
       .setHeader('Cache-Control', 'no-store')
       .setHeader('X-Content-Type-Options', 'nosniff')
-      .setHeader('X-HID-Export-Row-Count', String(exported.rowCount))
-      .setHeader('X-HID-Export-Row-Limit', String(PRINCIPAL_EXPORT_MAX_ROWS))
-      .setHeader('X-HID-Export-Truncated', String(exported.truncated))
+      .setHeader(EXPORT_RESPONSE_HEADERS.rowCount, String(exported.rowCount))
+      .setHeader(EXPORT_RESPONSE_HEADERS.rowLimit, String(PRINCIPAL_EXPORT_MAX_ROWS))
+      .setHeader(EXPORT_RESPONSE_HEADERS.truncated, String(exported.truncated))
       .send(exported.csv);
   }
 

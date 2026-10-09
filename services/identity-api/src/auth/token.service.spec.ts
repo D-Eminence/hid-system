@@ -203,7 +203,9 @@ describe('TokenService platform session separation (Stage 2A)', () => {
 
   it('refuses a platform refresh once its MFA assurance is gone (factor reset or revoked)', async () => {
     const { service, staff } = refreshHarness('platform', false);
-    await expect(service.refresh(token, event, 'platform')).rejects.toThrow('Platform session assurance is no longer valid');
+    // Stage 4A: reported as a revoked platform session.
+    await expect(service.refresh(token, event, 'platform')).rejects.toMatchObject({
+      code: 'PLATFORM_SESSION_REVOKED', status: 401 });
     expect(staff.resolvePlatform).not.toHaveBeenCalled();
   });
 

@@ -11,7 +11,7 @@ database. ADR-038 records the decisions.
 | Password | `POST /api/v1/auth/admin/login` (`turnstileAction: admin-login`) | Valid password **and** `platform.admin.access` → `{ status: mfa_required \| mfa_enrollment_required }` and an httpOnly `hid_access_admin_mfa` challenge cookie (5 minutes; 10 for enrollment; 5 attempts). Anything else → the same `401` as a wrong password. |
 | Second factor | `POST /auth/admin/mfa/verify` `{ code }` or `{ recoveryCode }` | Platform session. |
 | First sign-in | `POST /auth/admin/mfa/enroll/start` → `{ secret, otpauthUri }` (only time the secret is returned); `POST /auth/admin/mfa/enroll/activate` `{ code }` | Activates the factor, returns 10 recovery codes once, opens the platform session. |
-| Refresh | `POST /auth/admin/refresh` (refresh cookie + CSRF header) | Rotation with reuse detection; new 15-minute idle window, never past sign-in + 8 h. |
+| Refresh | `POST /auth/admin/refresh` (refresh cookie + CSRF header) | Rotation with reuse detection; new 15-minute idle window, never past sign-in + 8 h. Since Stage 4A a refused platform session is `401 PLATFORM_SESSION_EXPIRED` or `PLATFORM_SESSION_REVOKED`, and the refresh and CSRF cookies last until the end of the sign-in (`PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §4). |
 | Sign out | `POST /auth/admin/logout` | Revokes the session. |
 
 Platform sessions (`auth.sessions.session_kind = 'platform'`):
@@ -88,7 +88,8 @@ token is refused by `/auth/refresh`, and a staff token by `/auth/admin/refresh`.
   names an action on each route. The guard refuses a platform mutation without
   one (`HIGH_RISK_POLICY_MISSING`), then checks the policy's permissions,
   If-Match (`428`), Idempotency-Key (`400`), reason (`400 REASON_REQUIRED`) and
-  step-up (`403 STEP_UP_REQUIRED`).
+  step-up (`403 STEP_UP_REQUIRED`; since Stage 4A, `403 STEP_UP_EXPIRED` when
+  the session's last step-up is older than five minutes).
 - Every service command calls `requirePlatformAssurance` with its own action in
   its own transaction. SQL approval and session-family commands check step-up
   again through `app.session_id`. Direct service calls are refused; unit tests
@@ -196,7 +197,7 @@ The rehearsal runs the new SQL suite automatically and records
 | MFA reset and password | A reset does not change the password or account status. For a suspected compromise, also suspend the account or require a password reset. Policy decision. |
 | Legacy `platform_admin` (S6) | Still holds `role.manage`/`principal.manage` and counts for last-Super-Admin reachability; cannot approve (approver must be `platform_super_admin`). |
 | `platform_operations_admin` controls (S5) | Still holds `control.manage`, now critical with step-up. |
-| Facility transition reachability | `identity.admin_transition_facility` (0027) still counts only membership-reachable Super Admins and can refuse a suspension unnecessarily. Not changed here. |
+| Facility transition reachability | Done in Stage 4A (0072): the command counts the platform-session reachable set. See `PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md`. |
 | `MFA_SECRET_KEY_B64` | Must be added to the Identity secret and ECS task definition (infra not changed in this stage). Without it, admin sign-in fails closed. Key rotation needs a re-encryption tool or re-enrollment. |
 | Frontend (Stage 2B) | Health-id admin must implement admin sign-in, enrollment (QR from `otpauthUri`), recovery codes, step-up prompts on `STEP_UP_REQUIRED`, approvals, session management and the export reason. Until then it cannot use this backend. |
 | S2 (`locked` recovery), S7 (legal holds, session-event review UI) | Unchanged. |

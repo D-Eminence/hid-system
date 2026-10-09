@@ -63,6 +63,9 @@ const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
 const totp = load('auth/mfa/totp.ts');
 const { PlatformSecurityController } = load('admin/platform-security.controller.ts');
 const { PlatformSecurityService } = load('admin/platform-security.service.ts');
+const { AdminDemoRequestsController } = load('commercial/demo-requests.controller.ts');
+const { DemoRequestsService } = load('commercial/demo-requests.service.ts');
+const { encodeCursor } = load('common/cursor.ts');
 const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
 
 globalThis.fetch = async (input) => { throw new Error(`Unexpected outbound request to ${String(input)}`); };
@@ -123,11 +126,13 @@ try {
 
   const clock = createTotpClock();
   const module = await Test.createTestingModule({
-    controllers: [AuthController, PlatformAuthController, AdminController, PlatformSecurityController, AuditController],
+    controllers: [AuthController, PlatformAuthController, AdminController, PlatformSecurityController, AuditController,
+      AdminDemoRequestsController],
     providers: [DatabaseService, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
       AuditService, WorkloadAuthService, TurnstileService, AdminService, AdminOperationsService, PricingService,
-      MfaService, MfaSecretProtector, PlatformSecurityService, { provide: MFA_TOTP_CLOCK, useValue: clock.now },
+      MfaService, MfaSecretProtector, PlatformSecurityService, DemoRequestsService,
+      { provide: MFA_TOTP_CLOCK, useValue: clock.now },
       { provide: NotificationOtpClient, useValue: {
         deliver: async () => { throw new Error('Notification delivery is outside the platform admin verifier'); },
       } },
@@ -342,8 +347,123 @@ try {
   boundaries.account_status = { without_step_up: 'STEP_UP_REQUIRED', pending_reset_activation: 'ACCOUNT_RECOVERY_REQUIRED',
     self_change: 'ADMIN_SELF_CHANGE_DENIED', disable_enable_restores: 'pending_reset' };
 
+  // 9. Stage 4A: facility suspension reachability, the audit target filter,
+  // per-principal MFA enrolment and demo-request cursors.
+  // The Super Admin works only at facility A and no other Super Admin works at
+  // another verified facility. They still open platform sessions without a
+  // membership (0069), so suspending facility A is accepted (0072); 0027
+  // refused it with LAST_SUPER_ADMIN.
+  const facilityVersion = async id => (await owner.query('select row_version from identity.facilities where id = $1', [id]))
+    .rows[0].row_version;
+  const facilityStatus = async (who, id, status) => command(who, `/admin/facilities/${id}/status`,
+    { status, reason: 'Stage 4A facility reachability check' },
+    { 'If-Match': String(await facilityVersion(id)), 'Idempotency-Key': `admin-runtime-${randomUUID()}` });
+  const suspended = await facilityStatus(superSession, facilityA, 'suspended');
+  expectStatus(suspended, 201);
+  assert.equal(suspended.body.status, 'suspended');
+  const reverified = await facilityStatus(superSession, facilityA, 'verified');
+  expectStatus(reverified, 201);
+  assert.equal(reverified.body.status, 'verified');
+
+  // Platform changes to one facility, by target: platform rows carry no
+  // facility_id, so the facility filter alone never finds them.
+  const targetPath = id => `/admin/audit/events?resourceType=facility&resourceId=${id}`;
+  const facilityHistory = await get(auditorSession, targetPath(facilityA));
+  expectStatus(facilityHistory, 200);
+  assert.deepEqual(facilityHistory.body.items.map(item => item.action), ['admin.facility.verified', 'admin.facility.suspended']);
+  assert(facilityHistory.body.items.every(item => item.resourceType === 'facility' && item.resourceId === facilityA
+    && !('patientId' in item)));
+  const upperCase = await get(auditorSession, targetPath(facilityA.toUpperCase()));
+  expectStatus(upperCase, 200);
+  assert.deepEqual(upperCase.body.items.map(item => item.sequenceId), facilityHistory.body.items.map(item => item.sequenceId));
+  const firstOfTarget = await get(auditorSession, `${targetPath(facilityA)}&limit=1`);
+  expectStatus(firstOfTarget, 200);
+  const secondOfTarget = await get(auditorSession,
+    `${targetPath(facilityA)}&limit=1&beforeSequenceId=${firstOfTarget.body.nextBeforeSequenceId}`);
+  expectStatus(secondOfTarget, 200);
+  assert.deepEqual([...firstOfTarget.body.items, ...secondOfTarget.body.items].map(item => item.sequenceId),
+    facilityHistory.body.items.map(item => item.sequenceId));
+  const byFacilityColumn = await get(auditorSession, `/admin/audit/events?facilityId=${facilityA}&action=admin.facility.suspended`);
+  expectStatus(byFacilityColumn, 200);
+  assert.equal(byFacilityColumn.body.items.length, 0, 'platform rows carry no facility_id; the target filter is needed');
+  expectStatus(await get(auditorSession, targetPath(facilityB)), 200);
+  assert.equal((await get(auditorSession, targetPath(facilityB))).body.items.length, 0);
+  for (const invalid of [`/admin/audit/events?resourceId=${facilityA}`, '/admin/audit/events?resourceType=Facility',
+    '/admin/audit/events?resourceType=facility&resourceId=a%20b', `/admin/audit/events?resourceType=facility&resourceId=${'a'.repeat(256)}`]) {
+    expectStatus(await get(auditorSession, invalid), 400, 'VALIDATION_FAILED');
+  }
+  expectStatus(await get(supportSession, targetPath(facilityA)), 403, 'PERMISSION_DENIED');
+  boundaries.facility_reachability = { only_super_admin_works_there: 'suspended and restored' };
+  boundaries.audit_target_filter = { events: facilityHistory.body.items.length, case_insensitive_uuid: true,
+    keyset_pages: 2, facility_column_finds: 0, invalid: 'VALIDATION_FAILED', support: 'PERMISSION_DENIED' };
+
+  // Per-principal MFA enrolment: true only with an active authenticator; no factor detail.
+  const listed = await get(superSession, '/admin/principals?query=admin-runtime&pageSize=100');
+  expectStatus(listed, 200);
+  const enrolment = Object.fromEntries(listed.body.items.map(item => [item.id, item.mfaEnrolled]));
+  assert.deepEqual([enrolment[superAdmin.id], enrolment[auditor.id], enrolment[support.id],
+    enrolment[facilityAdmin.id], enrolment[pendingReset.id]], [true, true, true, false, false]);
+  for (const item of listed.body.items) {
+    assert.equal(typeof item.mfaEnrolled, 'boolean');
+    for (const key of Object.keys(item)) assert(!/secret|factor|recovery|totp/i.test(key), `principal row exposes ${key}`);
+  }
+  boundaries.principal_mfa_state = { enrolled: 3, not_enrolled: 2, factor_detail: 'none' };
+
+  // Demo requests: newest first by (created_at, id), in pages joined by an
+  // opaque cursor. Microsecond-distinct and equal timestamps sit at page edges.
+  const demoBase = new Date(Date.now() - 3_600_000);
+  const demoAt = (minutes, micros = 0) => {
+    const at = new Date(demoBase.getTime() + minutes * 60_000);
+    return `${at.toISOString().slice(0, 19)}.${String(micros).padStart(6, '0')}Z`;
+  };
+  const demoRows = [['d1', demoAt(1)], ['d2', demoAt(2)], ['tieA', demoAt(3)], ['tieB', demoAt(3)],
+    ['d6', demoAt(4, 100)], ['d7', demoAt(4, 900)], ['d5', demoAt(5, 123456)]];
+  const demoIds = {};
+  for (const [label, createdAt] of demoRows) {
+    demoIds[label] = randomUUID();
+    await owner.query(`insert into identity.demo_requests (id, idempotency_key_sha256, contact_name, contact_email,
+        product_code, status, created_at, updated_at) values ($1, $2, $3, $4, 'migrate', 'qualified', $5, $5)`,
+    [demoIds[label], randomUUID().replaceAll('-', '').padEnd(64, '0'), `Demo ${label}`, `${label}@example.invalid`, createdAt]);
+  }
+  const demoPath = (extra = '') => `/admin/demo-requests?status=qualified&productCode=migrate${extra}`;
+  const everyDemo = await get(superSession, demoPath('&limit=100'));
+  expectStatus(everyDemo, 200);
+  assert.equal(everyDemo.body.nextCursor, null);
+  const [tieHigh, tieLow] = [demoIds.tieA, demoIds.tieB].sort().reverse();
+  assert.deepEqual(everyDemo.body.items.map(item => item.id),
+    [demoIds.d5, demoIds.d7, demoIds.d6, tieHigh, tieLow, demoIds.d2, demoIds.d1]);
+  const pagedDemo = [];
+  let demoCursor = null;
+  let demoPages = 0;
+  do {
+    const page = await get(superSession, demoPath(`&limit=2${demoCursor ? `&cursor=${demoCursor}` : ''}`));
+    expectStatus(page, 200);
+    assert(page.body.items.length <= 2);
+    for (const item of page.body.items) assert(!('cursorAt' in item));
+    pagedDemo.push(...page.body.items.map(item => item.id));
+    demoCursor = page.body.nextCursor;
+    demoPages += 1;
+  } while (demoCursor && demoPages < 10);
+  assert.deepEqual(pagedDemo, everyDemo.body.items.map(item => item.id), 'cursor pages must return every row once, in order');
+  assert.equal(demoPages, 4);
+  const demoFirst = await get(superSession, demoPath('&limit=2'));
+  const issued = demoFirst.body.nextCursor;
+  const flipped = `${issued.slice(0, 12)}${issued[12] === 'A' ? 'B' : 'A'}${issued.slice(13)}`;
+  for (const cursor of [flipped, issued.slice(0, -3), `${issued}x`, 'not-a-cursor!',
+    encodeCursor('admin.approvals', { status: null }, { at: demoAt(1), id: demoIds.d1 })]) {
+    expectStatus(await get(superSession, demoPath(`&limit=2&cursor=${encodeURIComponent(cursor)}`)), 400, 'ADMIN_INVALID_CURSOR');
+  }
+  expectStatus(await get(superSession, `/admin/demo-requests?status=new&productCode=migrate&limit=2&cursor=${issued}`),
+    400, 'ADMIN_INVALID_CURSOR');
+  expectStatus(await get(superSession, demoPath(`&cursor=${'A'.repeat(513)}`)), 400, 'VALIDATION_FAILED');
+  expectStatus(await get(supportSession, demoPath(`&limit=2&cursor=${issued}`)), 403, 'PERMISSION_DENIED');
+  boundaries.demo_request_cursor = { rows: pagedDemo.length, pages: demoPages, microsecond_boundary: true,
+    tampered: 'ADMIN_INVALID_CURSOR', other_filter: 'ADMIN_INVALID_CURSOR', other_list: 'ADMIN_INVALID_CURSOR',
+    without_permission: 'PERMISSION_DENIED' };
+
   process.stdout.write(JSON.stringify({ status: 'passed', runtimeRole,
-    routes: ['/admin/session', '/admin/overview', '/admin/principals', '/admin/audit/events'], boundaries }) + '\n');
+    routes: ['/admin/session', '/admin/overview', '/admin/principals', '/admin/audit/events', '/admin/facilities/:id/status',
+      '/admin/demo-requests'], boundaries }) + '\n');
 } finally {
   await app?.close();
   await owner.end();
