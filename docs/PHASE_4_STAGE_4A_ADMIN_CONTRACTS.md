@@ -160,6 +160,20 @@ nobody instead of everyone. Every existing caller passes a non-null account.
 - The index build holds a share lock on `audit.events`, so audit inserts wait
   while it runs. Apply 0072 in the release window; the runner's 120 s statement
   timeout bounds it.
+- **Release with the Stage 4B console.** Deploy this Identity build together
+  with, or after, the Health-id admin console from Stage 4B
+  (`phase-4-stage-4b-admin-contracts`). The Stage 3 console does not handle the
+  new contracts:
+  - Its step-up dialog opens only on `STEP_UP_REQUIRED`. A session's first
+    step-up stays recorded, so once it is more than five minutes old every
+    high-risk action would be refused with `STEP_UP_EXPIRED` and never prompt.
+    This fails closed but blocks administration until a new sign-in.
+  - It treats `PLATFORM_SESSION_REVOKED` as a page error rather than a session
+    end. It recovers when the 5-minute access cookie lapses.
+  - It reads only the first approvals page, now at most 50 rows, not 200.
+
+  The two `main` branches are briefly out of step between the two merges;
+  nothing is deployed from either in that window.
 
 ## 8. Tests
 
