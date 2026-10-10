@@ -75,6 +75,25 @@ describe('Lab DatabaseService transaction retry', () => {
     expect(retryDelayMs(SERIALIZABLE_ATTEMPTS, () => 0)).toBe(0);
   });
 
+  it('runs a transaction again after a unique violation only once: a second one is a conflict', async () => {
+    for (const [codes, outcome, attempts] of [
+      [['23505', '23505'], '23505', 2],
+      [['40001', '23505', '23505'], '23505', 3],
+      [['23505', '40001', '40001'], 'committed', 4],
+    ] as const) {
+      const { database } = service();
+      let calls = 0;
+      const run = database.withTransaction(context, async () => {
+        calls += 1;
+        if (calls <= codes.length) throw sqlError(codes[calls - 1]!);
+        return 'committed';
+      }, { isolationLevel: 'SERIALIZABLE' });
+      if (outcome === 'committed') await expect(run).resolves.toBe('committed');
+      else await expect(run).rejects.toMatchObject({ code: outcome });
+      expect(calls).toBe(attempts);
+    }
+  });
+
   it('runs other transactions and other failures once', async () => {
     for (const [error, options] of [
       [sqlError('40001'), {}],

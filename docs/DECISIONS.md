@@ -1886,8 +1886,11 @@ Decision:
    up to twelve attempts in all, when PostgreSQL cancels it with `40001`,
    `40P01` or `23505` (the conflicts the PostgreSQL manual lists under
    serialization failure handling), after a random pause within a window that
-   doubles from 20 ms up to 1 s. The retried transaction sees the winner and
-   answers its replay, `409` or `412`. Other isolation levels and other errors
+   doubles from 20 ms up to 1 s; a unique violation only once, because it
+   means the conflicting row has committed and the next attempt sees it. The
+   retried transaction sees the winner and answers its replay, `409` or `412`.
+   A service maps a remaining conflict to `409` outside the transaction, after
+   the retries, never inside it. Other isolation levels and other errors
    run once. `SERIALIZABLE` tracks reads by index page, so on small tables
    requests for different rows also cancel each other and only one of an
    overlapping group commits; a short fixed retry (three attempts 5–15 ms

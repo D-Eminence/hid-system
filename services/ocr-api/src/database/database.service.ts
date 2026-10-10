@@ -29,8 +29,12 @@ export function retryDelayMs(attempt: number, random: () => number = Math.random
  * Handling"). Domain problems carry their own non-SQLSTATE codes.
  */
 export function isRetryableConflict(error: unknown): boolean {
-  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  const code = sqlState(error);
   return code === '40001' || code === '40P01' || code === '23505';
+}
+
+function sqlState(error: unknown): unknown {
+  return typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
 }
 
 @Injectable()
@@ -74,11 +78,15 @@ export class DatabaseService implements OnApplicationShutdown {
     options: TransactionOptions = {},
   ): Promise<Result> {
     const attempts = options.isolationLevel === 'SERIALIZABLE' ? SERIALIZABLE_ATTEMPTS : 1;
+    let uniqueViolations = 0;
     for (let attempt = 1; ; attempt += 1) {
       try {
         return await this.transaction(context, operation, options);
       } catch (error) {
         if (attempt >= attempts || !isRetryableConflict(error)) throw error;
+        // A unique violation means the conflicting row has committed, so the
+        // next attempt sees it and replays it; a second one is a conflict.
+        if (sqlState(error) === '23505' && (uniqueViolations += 1) > 1) throw error;
         await this.pauseBeforeRetry(attempt);
       }
     }

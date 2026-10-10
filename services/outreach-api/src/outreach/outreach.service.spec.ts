@@ -1,5 +1,6 @@
 import { requestDigest } from '../common/idempotency';
 import type { DataAccessContext } from '../common/request-context';
+import { DatabaseService } from '../database/database.service';
 import { OutreachService } from './outreach.service';
 
 const ids = {
@@ -62,6 +63,38 @@ describe('OutreachService', () => {
       .create(input, 'idempotency-key-1234', context)).resolves.toMatchObject({ id: ids.case });
     expect(query).toHaveBeenCalledTimes(2);
     expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  // The real DatabaseService retry over a fake pool: transaction control is
+  // answered by the pool, the service's statements by `query`.
+  function retryingDatabase(query: jest.Mock): DatabaseService {
+    const database = Object.create(DatabaseService.prototype) as DatabaseService;
+    const pool = { connect: async () => ({ release: () => undefined,
+      query: async (sql: string, values?: unknown[]) => (/^(BEGIN|COMMIT|ROLLBACK|SET )/.test(sql)
+        || sql.includes('set_config(') ? { rows: [] } : query(sql, values)) }) };
+    Object.assign(database, { pool, pauseBeforeRetry: async () => undefined });
+    return database;
+  }
+  const duplicate = () => Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+
+  it('replays a registration whose concurrent identical request committed first, not 409 (Phase 4 Stage 9)', async () => {
+    const digest = requestDigest('outreach.registration-case.create', { ...input,
+      fullName: input.fullName, phone: null, operationalNotes: null });
+    // Attempt 1 misses the winner in its snapshot and meets its row at the insert; attempt 2 replays it.
+    const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(duplicate())
+      .mockResolvedValueOnce({ rows: [{ request_sha256: digest, registration_case_id: ids.case }] })
+      .mockResolvedValueOnce({ rows: [row] });
+    await expect(new OutreachService(retryingDatabase(query), audit as never, identity as never)
+      .create(input, 'idempotency-key-1234', context)).resolves.toMatchObject({ id: ids.case });
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it('answers 409 when the unique violation remains after the retry', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(duplicate())
+      .mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(duplicate());
+    await expect(new OutreachService(retryingDatabase(query), audit as never, identity as never)
+      .create(input, 'idempotency-key-5678', context)).rejects.toMatchObject({ code: 'OUTREACH_REGISTRATION_CONFLICT' });
+    expect(query).toHaveBeenCalledTimes(4);
   });
 
   it('binds a registration to an active campaign with exact staff membership', async () => {

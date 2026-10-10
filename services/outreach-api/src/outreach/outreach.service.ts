@@ -29,10 +29,10 @@ export class OutreachService {
     const normalized = { ...input, fullName: input.fullName.trim(),
       phone: input.phone?.trim() || null, operationalNotes: input.operationalNotes?.trim() || null };
     const digest = requestDigest('outreach.registration-case.create', normalized);
-    return this.database.withTransaction(context, async (client) => {
-      const replay = await this.replay(client, context, 'registration_case_create', idempotencyKey, digest);
-      if (replay) return replay;
-      try {
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const replay = await this.replay(client, context, 'registration_case_create', idempotencyKey, digest);
+        if (replay) return replay;
         if (normalized.campaignId) await this.assertCampaignAcceptsRegistration(client, normalized.campaignId, context);
         const inserted = await client.query<RegistrationRow>(`insert into outreach.registration_cases (
           facility_id,created_by_account_id,created_by_membership_id,local_command_id,
@@ -57,12 +57,14 @@ export class OutreachService {
             campaignId: row.campaign_id, status: 'identity_resolution_pending' });
         await this.audit.recordWithClient(client, context, 'outreach.registration-case.received', row.id);
         return registrationCase(row);
-      } catch (error) {
-        this.translateConflict(error, 'OUTREACH_REGISTRATION_CONFLICT',
-          'This local Outreach registration was already received');
-        throw error;
-      }
-    }, { isolationLevel: 'SERIALIZABLE' });
+      }, { isolationLevel: 'SERIALIZABLE' });
+    } catch (error) {
+      // Outside the transaction: a duplicate of a concurrent identical request
+      // is retried and replayed; only a conflict that remains is a 409.
+      this.translateConflict(error, 'OUTREACH_REGISTRATION_CONFLICT',
+        'This local Outreach registration was already received');
+      throw error;
+    }
   }
 
   async list(context: DataAccessContext): Promise<readonly OutreachRegistrationCase[]> {
