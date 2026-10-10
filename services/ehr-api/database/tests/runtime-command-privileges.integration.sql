@@ -23,8 +23,8 @@
 -- Case 1 plans (EXPLAIN, which performs the start-of-statement privilege
 -- checks without running anything) a no-op SELECT, INSERT, UPDATE, DELETE and
 -- row lock as each runtime role on every table where that role holds the
--- matching privilege, and fails listing every refusal. Case 2 runs the exact
--- lock statements the services take after Stage 9 as their runtime roles.
+-- matching privilege, and fails listing every refusal. Case 2 runs the lock
+-- statements Stage 9 kept, changed or added, exactly, as their runtime roles.
 -- Case 3 pins the boundary: Stage 9 granted no UPDATE, so the insert-only
 -- tables whose locks were dropped still cannot be locked by their runtime role.
 -- The rehearsal also runs this suite with a schema owner that is neither a
@@ -129,6 +129,8 @@ insert into runtime_lock_case(name, run_as, statement) values
             and registration.facility_id = platform.current_facility_id() for update$sql$),
   ('ocr job lock (validation, confirmation, publication)', 'hid_ocr_api_runtime',
    $sql$select id from ocr.jobs where id = '00000000-0000-4000-8000-000000000000' for update$sql$),
+  ('ocr job key share before a publication row (publish and failure)', 'hid_ocr_api_runtime',
+   $sql$select id from ocr.jobs where id = '00000000-0000-4000-8000-000000000000' for key share$sql$),
   ('outreach campaign share lock for a campaign-linked registration', 'hid_outreach_api_runtime',
    $sql$select campaign.status from outreach.campaigns campaign
           join outreach.campaign_members member on member.campaign_id = campaign.id
