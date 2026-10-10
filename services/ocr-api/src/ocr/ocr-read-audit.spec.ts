@@ -114,8 +114,10 @@ function harness(options: Options = {}) {
       return rows(options.publishLost ? [] : [{ ...publicationRow, status: 'published', row_version: '3' }]);
     }
     if (sql.includes("update ocr.publications set status='failed'")) {
-      return rows([{ ...publicationRow, status: 'failed', failure_code: params[2], failure_summary: params[3],
-        row_version: '3' }]);
+      // The failure update requires the same processing token as the publish
+      // update, so after a lost claim it matches no row either.
+      return rows(options.publishLost ? [] : [{ ...publicationRow, status: 'failed', failure_code: params[2],
+        failure_summary: params[3], row_version: '3' }]);
     }
     if (sql.includes('from ocr.publications where validation_id=$1 order by requested_at')) {
       order.push('select publications');
@@ -248,16 +250,34 @@ describe('Every OCR API job event names the canonical patient', () => {
     });
 
   it('ocr.publication.fail names the publication patient', async () => {
-    const { service, audit } = harness({ jobRow: validatedJob, publishLost: true });
+    // A failure inside an attempt that still holds its claim, so the failure
+    // update matches the publication and records the event.
+    const attemptReadError = new Error('Synthetic attempt read failure');
+    const { service, audit } = harness({ jobRow: validatedJob, attemptReadError });
 
     await expect(service.createPublication(validationId, { validationVersion: 1,
       patientConfirmationId: confirmationId, targetOperation: 'retain_validated_document',
       purpose: 'direct-care' }, 'ocr-publish-key-000002', context))
-      .rejects.toMatchObject({ code: 'OCR_PUBLICATION_CLAIM_LOST' });
+      .rejects.toBe(attemptReadError);
 
     const events = auditEvents(audit).map(([, event]) => event);
     expect(events.map((event) => event.action)).toEqual(['ocr.publication.request', 'ocr.publication.fail']);
     expect(events[1]?.patientId).toBe(patientId);
+  });
+
+  it('a lost claim answers claim lost and records no failure event', async () => {
+    const { service, audit, clients } = harness({ jobRow: validatedJob, publishLost: true });
+
+    await expect(service.createPublication(validationId, { validationVersion: 1,
+      patientConfirmationId: confirmationId, targetOperation: 'retain_validated_document',
+      purpose: 'direct-care' }, 'ocr-publish-key-000003', context))
+      .rejects.toMatchObject({ code: 'OCR_PUBLICATION_CLAIM_LOST' });
+
+    expect(auditEvents(audit).map(([, event]) => event.action)).toEqual(['ocr.publication.request']);
+    const outbox = clients.flatMap((client) => (client.query as unknown as jest.Mock).mock.calls)
+      .filter(([sql]) => String(sql).includes('insert into ocr.outbox_events'))
+      .map(([, params]) => (params as unknown[])[0]);
+    expect(outbox).toEqual(['OcrPublicationRequested']);
   });
 });
 
