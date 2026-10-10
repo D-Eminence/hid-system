@@ -38,6 +38,13 @@ const labImports = [];
 const labRejections = [];
 let labUnavailable = false;
 let labRejects = false;
+// Settles as `promise` does, or rejects with `message` after `ms`. The timer is
+// cleared once the race settles, so none outlives it.
+const within = (promise, message, ms = 10_000) => {
+  let timer;
+  const timeout = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
 // Holds the next upstream call that `matches` until released, so a race can
 // start while the OCR API has no transaction open.
 let pause;
@@ -46,8 +53,25 @@ const pauseAt = (matches) => {
   let release;
   const reached = new Promise((resolve) => { arrived = resolve; });
   const gate = new Promise((resolve) => { release = resolve; });
-  pause = { matches, arrived, gate };
-  return { reached, release };
+  const held = { matches, arrived, gate };
+  pause = held;
+  // Waits for the held call. The call arrives within milliseconds; if `request`
+  // answers or fails first, or the call does not come within `ms`, the run
+  // fails, and the pause is cleared and the gate opened so that a late call
+  // passes and the cleanup can finish.
+  const arrival = async (label, request, ms = 30_000) => {
+    const answered = request.then(
+      (response) => { throw new Error(`${label}: the request answered ${response.status} ${response.body?.code ?? ''} before the held call`); },
+      (error) => { throw new Error(`${label}: the request failed before the held call: ${error?.message}`); });
+    try {
+      await within(Promise.race([reached, answered]), `${label}: the held call did not come within ${ms / 1000} s`, ms);
+    } catch (error) {
+      if (pause === held) pause = undefined;
+      release();
+      throw error;
+    }
+  };
+  return { release, arrival };
 };
 const upstream = await fakeService(async (call) => {
   const { method, path, headers, body } = call;
@@ -327,7 +351,7 @@ try {
   const atEvidence = pauseAt(({ method, path }) => method === 'GET' && path.endsWith('/source') && ++sourceReads === 2);
   const publishing = send(`/validations/${raceValidation}/publications`, { ...publicationBody, patientConfirmationId: raceConfirmed.id },
     { key: key('race-publish'), purpose: 'direct-care' });
-  await atEvidence.reached;
+  await atEvidence.arrival('the publish race', publishing);
   const { pending: pendingPublish } = await holdingRow('select id from ocr.jobs where id=$1 for update', [j2.job],
     async ({ waitedFor, probe }) => {
       atEvidence.release();
@@ -350,7 +374,7 @@ try {
   const failRequest = [`/validations/${failValidated.validationId}/publications`, { ...publicationBody,
     patientConfirmationId: failConfirmed.id, targetOperation: 'create_imported_lab_evidence' }, { key: key('race-fail'), purpose: 'direct-care' }];
   const failing = send(...failRequest);
-  await atLab.reached;
+  await atLab.arrival('the failure race', failing);
   const { pending: pendingFailure } = await holdingRow('select id from ocr.jobs where id=$1 for update', [j5.job],
     async ({ waitedFor, probe }) => {
       atLab.release();
@@ -365,6 +389,43 @@ try {
     [failValidated.validationId])).rows, [{ status: 'failed', failure_code: 'OWNING_SERVICE_UNAVAILABLE' }]);
   check('publish: while another request holds the job, the failure transaction waits for it before taking the publication row (no deadlock), then records the retryable failure');
 
+  // Every Lab import request the fake received, held and refused calls
+  // included, and those of one publication.
+  const labCalls = () => upstream.calls.filter(({ method, path }) => method === 'POST' && path === '/api/v1/lab/imports/from-ocr');
+  const labCallsFor = (publicationId) => labCalls().filter(({ body }) => body?.publicationId === publicationId);
+  const failedRow = async () => (await database.owner.query(`select id::text, status, failure_code, failure_summary, attempt_count,
+      row_version::text, failed_at::text, next_attempt_at::text, processing_token::text
+    from ocr.publications where validation_id=$1`, [failValidated.validationId])).rows;
+  const [failedBefore] = await failedRow();
+  // Two today: the Lab client asks once more after a 503 when it sends a key.
+  const outageCalls = labCallsFor(failedBefore.id).length;
+  assert(outageCalls >= 1, 'the failed attempt did not reach the Lab API');
+
+  // Before its retry time the same request answers 409 in progress: the stored
+  // failure is retryable, so not terminal, and the claim requires
+  // next_attempt_at <= clock_timestamp(). The request asks the Lab API nothing,
+  // changes neither the publication nor the job, and writes only its request
+  // audit. The failure transaction set next_attempt_at 15 s after failed_at;
+  // the check requires more than 5 s of it left, so the resend cannot cross it.
+  const [{ backoff, remaining }] = (await database.owner.query(`select
+      extract(epoch from next_attempt_at - failed_at)::float8 as backoff,
+      extract(epoch from next_attempt_at - clock_timestamp())::float8 as remaining
+    from ocr.publications where validation_id=$1`, [failValidated.validationId])).rows;
+  assert(Math.abs(backoff - 15) < 0.5, `the retry backoff is ${backoff} s, not 15 s`);
+  assert(remaining > 5, `only ${remaining} s of the retry backoff were left for the early resend`);
+  const [callsBeforeEarly, importsBeforeEarly, jobBeforeEarly] = [labCalls().length, labImports.length, await job(j5.job)];
+  const early = `verifier-early-retry-${id()}`;
+  assert.equal(expectStatus(await send(failRequest[0], failRequest[1], { ...failRequest[2], correlationId: early }),
+    409, 'a resent publication before its retry time').code, 'OCR_PUBLICATION_IN_PROGRESS');
+  assert.deepEqual([labCalls().length, labImports.length], [callsBeforeEarly, importsBeforeEarly],
+    'the Lab API was asked before the retry time');
+  assert.deepEqual(await failedRow(), [failedBefore], 'the early resend changed the publication');
+  assert.deepEqual(await job(j5.job), jobBeforeEarly, 'the early resend changed the job');
+  assert.deepEqual((await database.owner.query('select action, outcome from audit.events where correlation_id=$1', [early])).rows,
+    [{ action: 'api.ocr.publication.create.request', outcome: 'failure' }]);
+  assert.equal(await count('select count(*) from ocr.outbox_events where correlation_id=$1', [early]), 0);
+  check('publish: before its retry time the same request answers 409 in progress, asks the Lab API nothing and changes neither the publication nor the job');
+
   // The Lab API is back. Once the retry time has come (moved forward here, with
   // triggers off as for fixtures), the same request claims the publication
   // again and publishes it; a replay of the published publication does not ask
@@ -373,23 +434,29 @@ try {
     'update ocr.publications set next_attempt_at = clock_timestamp() where validation_id=$1', [failValidated.validationId]));
   const importsBeforeRetry = labImports.length;
   assert.equal(expectStatus(await send(...failRequest), 201, 'the resent publication after the Lab outage').status, 'published');
+  assert.equal(labCallsFor(failedBefore.id).length, outageCalls + 1, 'the retry did not ask the Lab API exactly once');
   assert.equal(expectStatus(await send(...failRequest), 201, 'a replay of the published publication').status, 'published');
+  assert.equal(labCallsFor(failedBefore.id).length, outageCalls + 1, 'the replay asked the Lab API');
   const retriedPublication = (await database.owner.query(
     'select id::text, status, failure_code, attempt_count from ocr.publications where validation_id=$1',
     [failValidated.validationId])).rows;
-  assert.deepEqual(retriedPublication.map(({ status, failure_code, attempt_count }) => ({ status, failure_code, attempt_count })),
-    [{ status: 'published', failure_code: null, attempt_count: 2 }]);
+  assert.deepEqual(retriedPublication.map(({ id: publicationId, status, failure_code, attempt_count }) =>
+    ({ publicationId, status, failure_code, attempt_count })),
+  [{ publicationId: failedBefore.id, status: 'published', failure_code: null, attempt_count: 2 }]);
   assert.equal(labImports.length, importsBeforeRetry + 1, 'the Lab API imported the retried publication once');
   assert.equal(labImports.at(-1)?.publicationId, retriedPublication[0].id, 'the Lab API imported another publication');
-  check('publish: after a Lab outage the same request publishes on retry, once, and a replay does not ask the Lab API again');
+  // Every Lab call of the publication, refused or not, sent its own key and the same body.
+  const sentToLab = labCallsFor(failedBefore.id);
+  assert.deepEqual([...new Set(sentToLab.map(({ headers }) => headers['idempotency-key']))],
+    [`ocr-publication:${failedBefore.id}`], 'a Lab call of the publication sent another idempotency key');
+  for (const call of sentToLab) assert.deepEqual(call.body, sentToLab[0].body, 'a Lab call of the publication sent another body');
+  check('publish: after a Lab outage the same request publishes on retry, once, every Lab call with the publication\'s own key and body, and a replay does not ask the Lab API again');
 
   // A resent request whose snapshot predates a terminal failure. It waits for
   // the job, here behind a key share like the failure transaction's own, while
   // the Lab API rejects the first request; its replay read then still shows the
   // publication processing, and the claim must refuse the terminal failure.
   const [, , , , , j6] = f.jobs;
-  const within = (promise, message) => Promise.race([promise,
-    new Promise((resolve, reject) => setTimeout(() => reject(new Error(message)), 10_000).unref())]);
   const terminalValidated = expectStatus(await send(`/jobs/${j6.job}/validation`, validationBody(j6.extraction, { targetDomain: 'LAB',
     candidateType: 'lab_document', acceptedFields: { observations: [{ testName: 'Glucose', value: '5.4', unit: 'mmol/L' }] } }),
   { key: key('terminal-validate') }), 201, 'validate the terminal race job');
@@ -401,7 +468,7 @@ try {
   labRejects = true;
   const atRejection = pauseAt(({ method, path }) => method === 'POST' && path === '/api/v1/lab/imports/from-ocr');
   const rejected = send(...terminalRequest);
-  await atRejection.reached;
+  await atRejection.arrival('the terminal race', rejected);
   let resentSettled = false;
   const { resent } = await holdingRow('select id from ocr.jobs where id=$1 for key share', [j6.job],
     async ({ waitedFor }) => {
