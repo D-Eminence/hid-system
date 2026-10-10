@@ -248,6 +248,10 @@ export class OcrService {
     assertCandidateClassification(input);
     const digest = requestDigest('ocr.validation.create', { jobId, ...input });
     return this.database.withTransaction(context, async (client) => {
+      // The job row lock is the serialization point of the job's validation,
+      // confirmation and publication commands; validations and confirmations
+      // are insert-only (0013, 0016 triggers) and the runtime role cannot lock
+      // them, so their replay lookups take no lock (Phase 4 Stage 9).
       const job = await this.findJob(client, jobId, true);
       const source = await this.authorizeJob(job, context, 'write_records');
       const replayResult = await client.query<ValidationRow>(
@@ -255,7 +259,7 @@ export class OcrService {
                 job.status as job_status
            from ocr.validations validation join ocr.jobs job on job.id = validation.job_id
           where validation.facility_id = $1 and validation.validated_by = $2
-            and validation.idempotency_key = $3 for update`,
+            and validation.idempotency_key = $3`,
         [context.facilityId, context.actor.accountId, idempotencyKey],
       );
       const replay = replayResult.rows[0];
@@ -343,7 +347,7 @@ export class OcrService {
         `select id::text, job_id::text, patient_id::text, confirmation_version,
                 method, created_at, request_sha256
            from ocr.patient_confirmations where facility_id = $1 and confirmed_by = $2
-            and idempotency_key = $3 for update`,
+            and idempotency_key = $3`,
         [context.facilityId, context.actor.accountId, idempotencyKey]);
       const replay = replayResult.rows[0];
       if (replay) {
@@ -383,7 +387,9 @@ export class OcrService {
     const idempotencyKey = requireIdempotencyKey(idempotencyHeader);
     const digest = requestDigest('ocr.publication.create', { validationId, ...input });
     const publication = await this.database.withTransaction(context, async (client) => {
-      const validation = await this.findValidation(client, validationId, true);
+      // The validation is insert-only; the job row lock, taken first in every
+      // command of the job, serializes publication requests (Phase 4 Stage 9).
+      const validation = await this.findValidation(client, validationId);
       const job = await this.findJob(client, validation.job_id, true);
       const source = await this.authorizeJob(job, context, 'write_records');
       this.assertPublicationRequest(validation, input);
@@ -553,12 +559,12 @@ export class OcrService {
     }
   }
 
-  private async findValidation(client: PoolClient, validationId: string, lock = false): Promise<ValidationRow> {
+  private async findValidation(client: PoolClient, validationId: string): Promise<ValidationRow> {
     const result = await client.query<ValidationRow>(
       `select validation.*, job.document_id::text, job.patient_id::text,
               job.status as job_status
          from ocr.validations validation join ocr.jobs job on job.id=validation.job_id
-        where validation.id=$1${lock ? ' for update of validation' : ''}`, [validationId]);
+        where validation.id=$1`, [validationId]);
     const row = result.rows[0];
     if (!row) throw new DomainProblem(404, 'OCR_VALIDATION_NOT_FOUND', 'OCR validation was not found');
     return row;

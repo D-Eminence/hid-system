@@ -36,12 +36,15 @@ export class LabWorkItemsService {
     const key = `ehr-lab-order:${command.sourceEhrOrderId}:v${command.sourceEhrOrderVersion}`;
     const digest = requestDigest('lab.work-item.accept-ehr-order', command);
     return this.database.withTransaction(context, async (client) => {
+      // Work items are insert-only (0018 trigger; no UPDATE for the runtime role,
+      // so no row lock). Unique keys allow one work item per EHR order and
+      // idempotency key; DatabaseService reruns the SERIALIZABLE loser of a race (Stage 9).
       const existingResult = await client.query<WorkItemRow & { request_sha256: string }>(
         `select id::text,patient_id::text,facility_id::text,ordering_facility_id::text,
           source_ehr_order_id::text,source_ehr_order_version::text,source_encounter_id::text,status,
           priority,accepted_by::text,accepted_at,row_version::text,created_at,request_sha256
          from lab.work_items where (facility_id=$1 and accepted_by=$2 and idempotency_key=$3)
-           or (source_ehr_order_id=$4 and source_ehr_order_version=$5) for update`,
+           or (source_ehr_order_id=$4 and source_ehr_order_version=$5)`,
         [context.facilityId, context.actor.accountId, key, command.sourceEhrOrderId, command.sourceEhrOrderVersion]);
       const existing = existingResult.rows[0];
       if (existing) {

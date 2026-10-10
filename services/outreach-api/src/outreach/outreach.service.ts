@@ -260,6 +260,17 @@ export class OutreachService {
     return this.find(client, replay.registration_case_id);
   }
 
+  /**
+   * Requires the actor's membership in an active registration campaign, and
+   * share-locks the campaign until the registration commits: a status change
+   * locks it FOR UPDATE, so it waits for the registration, or the registration
+   * for it. The membership row is read, not locked. The runtime role cannot
+   * lock campaign_members (no UPDATE, 42501), and no command changes or deletes
+   * a membership (Phase 4 Stage 9). The campaign lock needs the campaign UPDATE
+   * policy, so it relies on every role with outreach.registration.write also
+   * holding outreach.campaign.write (runtime-command-privileges.integration.sql
+   * checks this); without it the lock returns no row and the request is refused.
+   */
   private async assertCampaignAcceptsRegistration(client: PoolClient, campaignId: string,
     context: DataAccessContext): Promise<void> {
     const result = await client.query<{ status: string; services: string[];
@@ -267,7 +278,7 @@ export class OutreachService {
         campaign.starts_at,campaign.ends_at from outreach.campaigns campaign
         join outreach.campaign_members member on member.campaign_id=campaign.id
           and member.facility_id=campaign.facility_id and member.membership_id=$3
-        where campaign.id=$1 and campaign.facility_id=$2 for share of campaign,member`,
+        where campaign.id=$1 and campaign.facility_id=$2 for share of campaign`,
     [campaignId, context.facilityId, context.membershipId]);
     const campaign = result.rows[0];
     if (!campaign) throw new DomainProblem(403, 'OUTREACH_CAMPAIGN_ACCESS_DENIED',
