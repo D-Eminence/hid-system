@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0077",
-    "count": 77,
+    "last": "0078",
+    "count": 78,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -405,6 +405,10 @@
       {
         "name": "0077_fail_closed_session_guards_and_ocr_worker_leases.sql",
         "sha256": "b243b7a0161ea386aba2e477db9f62669571bd9440fe50321ab74f86e089bc79"
+      },
+      {
+        "name": "0078_runtime_command_repairs.sql",
+        "sha256": "ff7958acbe8de8a618ae99ca50a57a5f93d3014fb305f253be9d59bcd74a8e8b"
       }
     ]
   },

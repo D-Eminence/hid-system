@@ -286,6 +286,21 @@ begin
      ) then
     raise exception 'MFA account lock helper privileges are inconsistent';
   end if;
+  -- The self-NIN evidence predicate (0078) of the patient_identifiers insert
+  -- policy: every role that inserts identifiers needs it, as the policy applies
+  -- to all of them; no other grantee, PUBLIC included.
+  if not has_function_privilege('hid_identity_api_runtime',
+       'identity.patient_self_nin_evidence_matches(uuid,uuid,text,timestamptz)', 'EXECUTE')
+     or (select function_row.proacl from pg_proc function_row
+          where function_row.oid = 'identity.patient_self_nin_evidence_matches(uuid,uuid,text,timestamptz)'::regprocedure) is null
+     or exists (
+       select 1 from pg_proc function_row, aclexplode(function_row.proacl) privilege
+       where function_row.oid = 'identity.patient_self_nin_evidence_matches(uuid,uuid,text,timestamptz)'::regprocedure
+         and privilege.grantee <> function_row.proowner
+         and privilege.grantee not in ('hid_identity_runtime'::regrole, 'hid_schema_test_runtime'::regrole)
+     ) then
+    raise exception 'self-NIN evidence predicate privileges are inconsistent';
+  end if;
   -- RLS policies and invoker-rights trigger functions run with the querying
   -- role's rights. platform.current_account_id() is an invoker SQL function
   -- that calls auth.account_id_for_subject(text), which is revoked from PUBLIC.

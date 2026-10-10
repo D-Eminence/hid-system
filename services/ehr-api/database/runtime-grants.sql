@@ -1016,3 +1016,12 @@ revoke all on function auth.lock_account_sessions(uuid) from public;
 -- transactions of the account. It only locks.
 grant execute on function auth.lock_account_for_mfa(uuid) to hid_identity_runtime;
 revoke all on function auth.lock_account_for_mfa(uuid) from public;
+
+-- Phase 4 Stage 9 (0078): the self-NIN insert policy on patient_identifiers
+-- applies to every role and checks QoreID evidence through this definer
+-- predicate, so each role that inserts identifiers needs EXECUTE on it, even
+-- for inserts another policy allows. It answers only whether one exact
+-- evidence row exists; the roles still cannot read verification_evidence.
+grant execute on function identity.patient_self_nin_evidence_matches(uuid, uuid, text, timestamptz)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.patient_self_nin_evidence_matches(uuid, uuid, text, timestamptz) from public;

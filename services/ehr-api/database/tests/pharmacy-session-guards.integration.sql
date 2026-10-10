@@ -372,12 +372,12 @@ set local session_replication_role = origin;
 -- check, so a missing session value is refused by the guard; without a
 -- facility the event guard (no facility term) lets A's event through to RLS
 -- under an owner that bypasses RLS.
--- Before inserting, the API also runs SELECT ... FOR UPDATE: it locks the work
--- item or dispensing it builds on (pharmacy.service.ts:144, 196-197) and looks
--- for an earlier request to replay (75-78, 152-154, 204-206, 236-238). Those
--- statements are not run here: the runtime roles have no UPDATE privilege on
--- the Pharmacy tables and they fail with 42501 (permission denied), a separate
--- release blocker.
+-- Before inserting, the API reads the work item or dispensing it builds on and
+-- looks for an earlier request to replay. Until Phase 4 Stage 9 those reads
+-- took FOR UPDATE row locks, which the runtime role cannot take (no UPDATE on
+-- these insert-only tables, 42501); they now take none. The Pharmacy runtime
+-- verifier (services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs) runs
+-- every Pharmacy write command, those reads included, as this role.
 set local role hid_pharmacy_api_runtime;
 select pg_temp.guard_case('runtime', 'work item: ' || name,
     case when seq = 8 then 'ok' else pg_temp.refusal('work item') end, seq,
