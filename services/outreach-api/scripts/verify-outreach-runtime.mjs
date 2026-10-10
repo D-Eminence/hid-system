@@ -117,16 +117,21 @@ try {
   assert.equal(expectStatus(await send('', body, { key: registerKey }), 201, 'registration replay').id, created.id);
   assert.equal(expectStatus(await send('', { ...body, ageYears: 35 }, { key: registerKey }), 409, 'registration key reuse').code,
     'IDEMPOTENCY_CONFLICT');
-  const concurrentBody = registration();
-  const concurrentKey = key('register');
-  const concurrent = await together(4, () => send('', concurrentBody, { key: concurrentKey }));
-  for (const response of concurrent) expectStatus(response, 201, 'four concurrent identical registrations');
-  assert.equal(new Set(concurrent.map((response) => response.body.id)).size, 1);
-  assert.equal(await database.count('select count(*) from outreach.registration_cases where local_command_id=$1',
-    [concurrentBody.localCommandId]), 1);
-  check('register: 201 linked to the campaign; replay 201; key reuse 409; four concurrent identical registrations create one case and all return it');
+  // Ten rounds: one round can be serialized by timing and pass even when the
+  // loser of a race is refused instead of replayed (Phase 4 Stage 9 review).
+  for (let round = 0; round < 10; round += 1) {
+    const concurrentBody = registration();
+    const concurrentKey = key('register');
+    const concurrent = await together(4, () => send('', concurrentBody, { key: concurrentKey }));
+    for (const response of concurrent) expectStatus(response, 201, `four concurrent identical registrations, round ${round + 1}`);
+    assert.equal(new Set(concurrent.map((response) => response.body.id)).size, 1);
+    assert.equal(await database.count('select count(*) from outreach.registration_cases where local_command_id=$1',
+      [concurrentBody.localCommandId]), 1);
+  }
+  check('register: 201 linked to the campaign; replay 201; key reuse 409; in ten rounds, four concurrent identical registrations create one case and all return it');
 
   // A status change holds the campaign lock: the registration waits for it.
+  const casesBeforeLock = await casesOf(f.campaign);
   const waitForLock = async () => {
     for (let attempt = 0; attempt < 200; attempt += 1) {
       const waiting = await database.count(`select count(*) from pg_stat_activity where datname=current_database()
@@ -155,7 +160,7 @@ try {
     assert.equal(expectStatus(refused, 409, 'registration that waited for the campaign to close').code,
       'OUTREACH_CAMPAIGN_NOT_ACCEPTING_REGISTRATIONS');
   } finally { holder.release(); }
-  assert.equal(await casesOf(f.campaign), 3);
+  assert.equal(await casesOf(f.campaign), casesBeforeLock + 1, 'only the registration after the rollback was written');
   check('register: a registration waits for a concurrent campaign status change; after a rollback it registers (201), after the campaign closes it is refused (409)');
 
   // Rollback: the outbox insert of one registration fails after its case,
