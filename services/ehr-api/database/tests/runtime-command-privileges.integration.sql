@@ -221,5 +221,70 @@ begin
   end if;
 end $$;
 
+-- Case 5: lab.validate_work_item_child (0018, repaired by 0078) guards both the
+-- requested tests and the events of a work item. Every Lab acceptance of an EHR
+-- order inserts its acceptance event, which failed with 42703 because the
+-- requested-test check read new.ordinal on lab.work_item_events. Isolated: the
+-- work item is inserted in replica mode, and only this guard is enabled
+-- (ENABLE ALWAYS TRIGGER) for the requested-test and event inserts.
+set local session_replication_role = replica;
+insert into lab.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_order_id,
+  source_ehr_order_version, source_encounter_id, priority, test_code_system, test_code, test_name,
+  clinical_indication, requested_by, requested_at, accepted_by, accepted_by_membership_id, idempotency_key,
+  request_sha256, correlation_id) values
+  ('e8f90000-0000-4000-8000-000000000001', 'e8f90000-0000-4000-8000-000000000002',
+   'e8f90000-0000-4000-8000-000000000003', 'e8f90000-0000-4000-8000-000000000003',
+   'e8f90000-0000-4000-8000-000000000004', 1, 'e8f90000-0000-4000-8000-000000000005', 'routine',
+   'http://loinc.org', '718-7', 'Haemoglobin', 'Synthetic Stage 9 order', 'e8f90000-0000-4000-8000-000000000006',
+   '2026-10-01 09:00:00+00', 'e8f90000-0000-4000-8000-000000000006', 'e8f90000-0000-4000-8000-000000000007',
+   'runtime-command-privileges-work-item', repeat('a', 64), 'runtime-command-privileges');
+alter table lab.work_item_events enable always trigger lab_work_item_event_validate;
+alter table lab.work_item_requested_tests enable always trigger lab_work_item_test_validate;
+create temporary table lab_child_case (name text primary key, expected text not null, outcome text);
+grant all on lab_child_case to public;
+insert into lab_child_case (name, expected) values
+  ('acceptance event of the work item', 'ok'),
+  ('event naming another patient', '23514'),
+  ('requested test matching the order', 'ok'),
+  ('requested test with another ordinal', '23514'),
+  ('requested test with another code', '23514');
+do $$
+declare child record;
+begin
+  for child in select * from lab_child_case loop
+    begin
+      if child.name like 'requested test%' then
+        insert into lab.work_item_requested_tests (work_item_id, facility_id, patient_id, "ordinal", code_system, code, name)
+        values ('e8f90000-0000-4000-8000-000000000001', 'e8f90000-0000-4000-8000-000000000003',
+                'e8f90000-0000-4000-8000-000000000002',
+                case when child.name like '%ordinal' then 2 else 1 end, 'http://loinc.org',
+                case when child.name like '%code' then '2345-7' else '718-7' end, 'Haemoglobin');
+      else
+        insert into lab.work_item_events (work_item_id, facility_id, patient_id, event_version, event_type, actor_id,
+          actor_membership_id, reason, correlation_id)
+        values ('e8f90000-0000-4000-8000-000000000001', 'e8f90000-0000-4000-8000-000000000003',
+                case when child.name like '%another patient' then 'e8f90000-0000-4000-8000-000000000008'::uuid
+                     else 'e8f90000-0000-4000-8000-000000000002'::uuid end,
+                1, 'accepted', 'e8f90000-0000-4000-8000-000000000006', 'e8f90000-0000-4000-8000-000000000007',
+                'Accepted exact EHR laboratory order version', 'runtime-command-privileges');
+      end if;
+      raise exception using errcode = 'S9000', message = 'undo the probe';
+    exception when others then
+      update lab_child_case set outcome = case when sqlstate = 'S9000' then 'ok' else sqlstate || ': ' || sqlerrm end
+       where name = child.name;
+    end;
+  end loop;
+end $$;
+alter table lab.work_item_events enable trigger lab_work_item_event_validate;
+alter table lab.work_item_requested_tests enable trigger lab_work_item_test_validate;
+set local session_replication_role = origin;
+do $$
+declare failures text := (select string_agg(format('%s: expected %s, got %s', name, expected, coalesce(outcome, 'not run')),
+                            '; ' order by name)
+                            from lab_child_case where outcome is null or split_part(outcome, ':', 1) <> expected);
+begin
+  if failures is not null then raise exception 'Lab work-item child guard: %', failures; end if;
+end $$;
+
 select 'runtime command privileges: ' || count(*) || ' probes passed' as result from runtime_command_probe;
 rollback;

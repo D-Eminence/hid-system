@@ -558,10 +558,9 @@ alter table lab.result_invalidations enable trigger lab_invalidation_validate;
 -- account disabled until later. An empty membership cannot reach a guard through the API: request-context.ts:67
 -- falls back to '', and every writer binds that '' into the row's membership column (uuid), which fails with 22P02
 -- before any trigger. An empty facility cannot occur: request-context.ts:54 refuses a request without one. No
--- service writes lab.result_invalidations. The API's replay reads with SELECT ... FOR UPDATE
--- (lab-imports.service.ts:65-72, lab-work-items.service.ts:39-45, lab-accessions.service.ts:41-43) are not run:
--- the runtime role has no UPDATE privilege on those tables and they fail with 42501, a separate release blocker
--- outside this stage.
+-- service writes lab.result_invalidations. The API's replay reads of imported evidence, work items and accessions
+-- took FOR UPDATE row locks until Phase 4 Stage 9, which the runtime role cannot take (42501); they now take none,
+-- and services/lab-api/scripts/verify-lab-runtime.mjs runs those commands, replay reads included, as this role.
 set local session_replication_role = origin;
 set local role hid_lab_api_runtime;
 select pg_temp.lab_case('runtime', a.area, c.name,
