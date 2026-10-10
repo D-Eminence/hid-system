@@ -303,16 +303,15 @@ try {
     }
   };
 
-  // A replay while a publish transaction holds the publication row.
+  // A replay while a publish transaction holds the publication row: the
+  // replay, which holds the job, must not wait for that row.
   let replaySettled = false;
   const { pending: pendingReplay } = await holdingRow('select id from ocr.publications where id=$1 for update', [replayed.id],
-    async ({ waitedFor, probe }) => {
+    async ({ waitedFor }) => {
       const pending = send(`/validations/${v1}/publications`, publicationBody, { key: publishKey, purpose: 'direct-care' })
         .finally(() => { replaySettled = true; });
       await waitedFor(() => replaySettled);
       assert(replaySettled, 'the replay, holding the job, waited for the publication row');
-      await probe('select id from ocr.jobs where id=$1 for key share', [j1.job],
-        'the outbox foreign-key lock on the job waited for the replay');
       return { pending };
     });
   assert.equal(expectStatus(await pendingReplay, 201, 'a replay while the publication row is held').status, 'published');

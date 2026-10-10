@@ -1690,8 +1690,9 @@ Checks:
     (`42501 permission denied for table verification_evidence`).
   - Case 2 runs the lock statements Stage 9 kept, changed or added, as their
     runtime roles.
-  - Case 3 requires the eleven insert-only tables whose locks were dropped to
-    stay unlockable for their runtime roles (`42501`): Stage 9 granted no
+  - Case 3 requires the eleven tables whose locks were dropped (nine
+    insert-only tables, `outreach.campaign_members` and `identity.patients`)
+    to stay unlockable for their runtime roles (`42501`): Stage 9 granted no
     `UPDATE`.
   - Case 4 requires every role with `outreach.registration.write` to hold
     `outreach.campaign.write`.
@@ -1707,15 +1708,19 @@ Checks:
     verified QoreID evidence row of the same patient. It fails on the first
     version of 0078.
 - Runtime HTTP verifiers, run by the rehearsal one at a time on disposable
-  copies of its database, each with the service's real `AppModule` and every
-  database connection starting as the runtime role (libpq `options=-c
-  role=...`), the other HID services replaced by local fakes:
-  `services/identity-api/scripts/verify-registration-review-runtime.mjs`,
+  copies of its database, with every database connection starting as the
+  runtime role (libpq `options=-c role=...`) and the other HID services
+  replaced by local fakes:
   `services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs`,
   `services/lab-api/scripts/verify-lab-runtime.mjs`,
   `services/ocr-api/scripts/verify-ocr-runtime.mjs` and
-  `services/outreach-api/scripts/verify-outreach-runtime.mjs`, sharing
-  `scripts/service-runtime-harness.mjs`. They cover authorized success,
+  `services/outreach-api/scripts/verify-outreach-runtime.mjs` run the
+  service's real `AppModule` through `scripts/service-runtime-harness.mjs`;
+  `services/identity-api/scripts/verify-registration-review-runtime.mjs`
+  composes the authentication and NIN registration controllers with their
+  real providers, the global security guard and audit interceptor, and the
+  test NIN verification provider; the OTP notification client and Google
+  sign-in are stubbed. They cover authorized success,
   denials (permission, facility, Identity decision), concurrent identical and
   conflicting requests, replays and key reuse, stale versions, and rollback
   after a failure injected late in the transaction. The OCR verifier races a

@@ -88,6 +88,10 @@ test('resolves or reports an interpolated lock strength', () => {
   const parameter = lockingStatements(`function find(lock?: 'update' | 'share') {
     return query(\`select * from pharmacy.dispensing_reversals where id=$1\${lock ? \` for \${lock}\` : ''}\`); }`);
   assert.deepEqual(parameter.map(({ sql, unassembled }) => [sql, Boolean(unassembled)]), [['for «»', true]]);
+  // A keyword assembled from parts is not taken for its first part.
+  const assembled = lockingStatements(`const lock = 'FOR' + ' UPDATE';
+    query(\`select * from pharmacy.dispensings where id=$1 \${lock}\`);`);
+  assert.deepEqual(assembled.map(({ sql, unassembled }) => [sql, unassembled]), [['FOR', true]]);
   const direct = lockingStatements('function find(strength) { return query(`select * from lab.accessions where id=$1 for ${strength}`); }');
   assert.deepEqual(direct.map(({ unassembled, reason }) => [unassembled, reason]),
     [[true, 'the lock strength is an interpolation this check cannot resolve']]);

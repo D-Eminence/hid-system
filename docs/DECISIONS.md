@@ -1886,9 +1886,10 @@ Decision:
    happens: the publication claim refuses a terminal failure.
 3. **`SERIALIZABLE` transactions retry.** The Pharmacy, Lab, OCR and Outreach
    `DatabaseService` run a `SERIALIZABLE` transaction again from the start,
-   up to twelve attempts in all, when PostgreSQL cancels it with `40001`,
-   `40P01` or `23505` (the conflicts the PostgreSQL manual lists under
-   serialization failure handling), after a random pause within a window that
+   up to twelve attempts in all, when PostgreSQL cancels it with `40001` or
+   `40P01` (which the PostgreSQL manual recommends retrying) or with `23505`
+   (which it says may be worth retrying but can be persistent), after a
+   random pause within a window that
    doubles from 20 ms up to 1 s; a unique violation only once, because it
    means the conflicting row has committed and the next attempt sees it. The
    retried transaction sees the winner and answers its replay, `409` or `412`.

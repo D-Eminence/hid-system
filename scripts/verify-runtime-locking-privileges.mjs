@@ -254,9 +254,12 @@ function literalBindings(source, literals) {
   const context = { bindings, ambiguous: new Set() };
   for (const match of source.matchAll(/\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[\w$<>[\]| '"]+)?=\s*/g)) {
     const start = match.index + match[0].length;
+    // A literal binds only when it is the whole initializer ('a' + b does not).
     const literal = byStart.get(start);
+    const whole = literal && /^\s*(?:as\s+const\s*)?(?:[;,)}]|$)/.test(source.slice(literal.end));
     let value;
     let end;
+    if (literal && !whole) continue;
     if (literal) {
       value = (depth, trace) => templateValues(literal, context, depth, trace);
       end = literal.end;

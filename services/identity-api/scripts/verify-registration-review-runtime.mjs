@@ -20,7 +20,6 @@ const RUNTIME_ROLE = 'hid_identity_api_runtime';
 const isolated = `hid_rehearsal_review_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
 const SERVICE_APPLICATION = 'hid-registration-review-verifier';
 const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database: 'postgres', max: 1 });
-await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
 Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', NIN_PROVIDER_MODE: 'test', TURNSTILE_MODE: 'disabled',
   IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret', PATIENT_LIFECYCLE_SWEEP_SECONDS: '0',
   NIN_ENCRYPTION_KEY_B64: Buffer.alloc(32, 0x5a).toString('base64'),
@@ -63,6 +62,9 @@ const { DeterministicTestNinVerificationProvider } = load('identity/nin-verifica
 const { NIN_VERIFICATION_PROVIDER } = load('identity/nin.types.ts');
 const { ProblemDetailsFilter } = load('common/problem.ts');
 
+// Created only once every module has loaded, right before the try whose
+// finally drops it, so a load failure leaves no database behind.
+await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
 const pool = new Pool({ host: socket, user: process.env.PGUSER, database: isolated, max: 3 });
 const evidence = { database: 'disposable copy of hid_rehearsal', runAs: RUNTIME_ROLE, checks: [] };
 const check = (name) => evidence.checks.push(name);
