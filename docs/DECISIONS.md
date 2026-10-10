@@ -1894,23 +1894,32 @@ Decision:
    means the conflicting row has committed and the next attempt sees it. The
    retried transaction sees the winner and answers its replay, `409` or `412`.
    A service maps a remaining conflict to `409` outside the transaction, after
-   the retries, never inside it. Other isolation levels and other errors
+   the retries, except two real conflicts that no retry resolves, mapped
+   inside it: the OCR confirmation outbox key (an identical-key race meets the
+   confirmation's own unique keys first, which are retried) and an existing
+   Outreach campaign member. Other isolation levels and other errors
    run once. `SERIALIZABLE` tracks reads by index page, so on small tables
    requests for different rows also cancel each other and only one of an
    overlapping group commits; a short fixed retry (three attempts 5–15 ms
    apart) still failed eight concurrent dispenses, and the budget was sized by
    measurement. Work inside a retried transaction must be safe to repeat:
    today it is reads, the database writes of the same transaction, and
-   Identity or EHR authorization calls, which change nothing but which
-   Identity audits once per attempt.
+   Identity or EHR calls that change no clinical data but are audited once per
+   attempt: Identity records each authorization check, Lab records its own
+   authorization audit outside the transaction, and each OCR attempt reads the
+   source document from the EHR, which records a patient-linked
+   `ehr.document.ocr-source.read` event and its own Identity check. Moving
+   those calls before the transaction is the follow-up.
 4. **Checked in CI** (the workspace gates job of `tuf-local-gates.yml`, through
    `release/scripts/run-workspace-gates.mjs`: `npm run verify`, `npm test` and
    the synthetic rehearsal). `scripts/verify-runtime-locking-privileges.mjs`
    compares every lock clause in the service source with the runtime role's
    privileges and policies replayed from the migrations and grants, and
    refuses lock text it cannot place in a statement;
-   `runtime-command-privileges.integration.sql` runs every command each runtime
-   role holds a privilege for, and the lock statements, as that role; the
+   `runtime-command-privileges.integration.sql` plans (`EXPLAIN`) every command
+   each runtime role holds a privilege for, as that role, and runs one
+   representative lock statement per role whose locks Stage 9 kept or changed;
+   the
    runtime verifiers run the affected commands over HTTP as their roles and
    fail on any deadlock.
 

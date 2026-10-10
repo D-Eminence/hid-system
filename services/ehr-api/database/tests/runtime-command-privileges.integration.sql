@@ -24,8 +24,9 @@
 -- Case 1 plans (EXPLAIN, which performs the start-of-statement privilege
 -- checks without running anything) a no-op SELECT, INSERT, UPDATE, DELETE and
 -- row lock as each runtime role on every table where that role holds the
--- matching privilege, and fails listing every refusal. Case 2 runs the lock
--- statements Stage 9 kept, changed or added, exactly, as their runtime roles.
+-- matching privilege, and fails listing every refusal. Case 2 runs one
+-- representative lock statement per role whose locks Stage 9 kept, changed or
+-- added, as that runtime role (the static check covers every clause).
 -- Case 3 pins the boundary: Stage 9 granted no UPDATE, so the insert-only
 -- tables whose locks were dropped still cannot be locked by their runtime role.
 -- Case 4 checks the Outreach campaign-write pairing, Case 5 the Lab work-item

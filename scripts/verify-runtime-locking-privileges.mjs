@@ -176,34 +176,35 @@ function codeOnly(source, literals) {
   return out;
 }
 
+/** Decodes the escape sequences of a string literal or template text, as JavaScript does. */
+function decodeEscapes(text) {
+  return text.replace(/\\(?:x([0-9a-fA-F]{2})|u\{([0-9a-fA-F]+)\}|u([0-9a-fA-F]{4})|(\r\n|[\r\n\u2028\u2029])|([\s\S]))/g,
+    (_, hex, codePoint, unit, lineBreak, char) => {
+      if (hex) return String.fromCharCode(parseInt(hex, 16));
+      if (codePoint) return String.fromCodePoint(parseInt(codePoint, 16));
+      if (unit) return String.fromCharCode(parseInt(unit, 16));
+      if (lineBreak) return '';
+      return { n: '\n', r: '\r', t: '\t', v: '\v', f: '\f', b: '\b', 0: '\0' }[char] ?? char;
+    });
+}
+
 /**
- * Names an interpolation cannot be resolved from a literal binding, because
- * the same name is also something else somewhere in the file: a parameter, a
- * destructured or non-literal declaration, or a variable assigned again. The
- * bindings are collected by name, not by scope, so such a name could stand for
- * another value at the interpolation (Phase 4 Stage 9 review).
+ * Names an interpolation cannot be resolved from a literal binding. Bindings
+ * are collected by name, not by scope, so a name resolves only when every
+ * occurrence of it in the file's code is one of its literal declarations or a
+ * whole `${name}` interpolation; a parameter, a destructuring, a loop
+ * variable, an assignment, another declaration or any other use of the same
+ * name could stand for another value (Phase 4 Stage 9 review).
  */
-function ambiguousNames(code, bindings) {
+function ambiguousNames(code, literals, bindings) {
+  const interpolations = new Map();
+  for (const literal of literals) {
+    for (const expression of literal.expressions) interpolations.set(expression, (interpolations.get(expression) ?? 0) + 1);
+  }
   const names = new Set();
-  const identifiers = (list) => list.split(',').map((part) => /^\s*(?:(?:public|private|protected|readonly)\s+)*(?:\.\.\.)?\s*([A-Za-z_$][\w$]*)/
-    .exec(part)?.[1]).filter(Boolean);
-  // Parameter lists: a parenthesised list followed by an arrow or a body, not a control statement.
-  for (const match of code.matchAll(/(\b[A-Za-z_$][\w$]*\s*)?\(([^()]*(?:\([^()]*\)[^()]*)*)\)\s*(?::\s*[^=;{}()]+?)?\s*(?:=>|\{)/g)) {
-    if (/^(?:if|for|while|switch|catch|with|return)\s*$/.test(match[1] ?? '')) continue;
-    for (const name of identifiers(match[2])) names.add(name);
-  }
-  for (const match of code.matchAll(/([A-Za-z_$][\w$]*)\s*=>/g)) names.add(match[1]);
-  for (const match of code.matchAll(/\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g)) names.add(match[1]);
-  // Destructuring declarations.
-  for (const match of code.matchAll(/\b(?:const|let|var)\s*[{[]([^=;]*)[}\]]\s*(?::[^=;]+)?=/g)) {
-    for (const name of match[1].matchAll(/[A-Za-z_$][\w$]*/g)) names.add(name[0]);
-  }
-  // Declarations that are not literal bindings, and assignments after the declaration.
-  const declared = new Map();
-  for (const match of code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) declared.set(match[1], (declared.get(match[1]) ?? 0) + 1);
-  for (const [name, count] of declared) if (count > (bindings.get(name)?.length ?? 0)) names.add(name);
-  for (const match of code.matchAll(/(?<![\w$.]|\b(?:const|let|var)\s+)([A-Za-z_$][\w$]*)\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|\?\?|&&|\|\|)?=(?![=>])/g)) {
-    names.add(match[1]);
+  for (const [name, values] of bindings) {
+    const occurrences = [...code.matchAll(new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g'))].length;
+    if (occurrences !== values.length + (interpolations.get(name) ?? 0)) names.add(name);
   }
   return names;
 }
@@ -211,7 +212,7 @@ function ambiguousNames(code, bindings) {
 /** A literal's possible string values; null when the expression is not a plain literal. */
 function stringValues(expression) {
   const literal = /^(['"`])((?:(?!\1)[^\\]|\\.)*)\1$/s.exec(expression.trim());
-  if (literal && !(literal[1] === '`' && literal[2].includes('${'))) return [literal[2]];
+  if (literal && !(literal[1] === '`' && literal[2].includes('${'))) return [decodeEscapes(literal[2])];
   return null;
 }
 
@@ -229,10 +230,14 @@ function expressionValues(expression, span, context, depth, trace) {
   const text = expression.trim();
   const literal = stringValues(text);
   if (literal) { if (span) trace.resolved.push(span); return literal; }
-  const ternary = /^[^?]+\?\s*((['"`])(?:(?!\2)[^\\]|\\.)*\2)\s*:\s*((['"`])(?:(?!\4)[^\\]|\\.)*\4)\s*$/s.exec(text);
+  const ternary = /^[^?]+\?\s*((['"`])(?:(?!\2)[^\\]|\\.)*\2)\s*:\s*((['"`])(?:(?!\4)[^\\]|\\.)*\4)\s*$/sd.exec(text);
   if (ternary) {
     const branches = [stringValues(ternary[1]), stringValues(ternary[3])];
-    if (span && branches.every(Boolean)) trace.resolved.push(span);
+    // Only the two branch literals count as placed, not the condition.
+    if (span && branches.every(Boolean)) {
+      const offset = span.start + context.source.slice(span.start, span.end).search(/\S/);
+      for (const group of [1, 3]) trace.resolved.push({ start: offset + ternary.indices[group][0], end: offset + ternary.indices[group][1] });
+    }
     return branches.flatMap((values, index) => values ?? [placeholder(index ? ternary[3] : ternary[1])]);
   }
   if (/^[A-Za-z_$][\w$]*$/.test(text) && context.bindings.has(text) && !context.ambiguous.has(text) && depth < 8) {
@@ -251,7 +256,7 @@ function literalBindings(source, literals) {
   const bindings = new Map();
   const initializers = [];
   const byStart = new Map(literals.map((literal) => [literal.start, literal]));
-  const context = { bindings, ambiguous: new Set() };
+  const context = { bindings, ambiguous: new Set(), source };
   for (const match of source.matchAll(/\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[\w$<>[\]| '"]+)?=\s*/g)) {
     const start = match.index + match[0].length;
     // A literal binds only when it is the whole initializer ('a' + b does not).
@@ -277,7 +282,7 @@ function literalBindings(source, literals) {
 }
 
 function templateValues(literal, context, depth = 0, trace = newTrace()) {
-  if (literal.kind === 'string') return [literal.text];
+  if (literal.kind === 'string') return [decodeEscapes(literal.text)];
   const parts = literal.expressions.map((expression, index) =>
     expressionValues(expression, literal.expressionSpans[index], context, depth, trace));
   if (parts.reduce((count, values) => count * values.length, 1) > MAX_VARIANTS) {
@@ -285,9 +290,10 @@ function templateValues(literal, context, depth = 0, trace = newTrace()) {
     trace.lockInValues ||= parts.some((values) => values.some((value) => LOCK_TEST.test(value)));
     return [];
   }
-  let variants = [literal.quasis[0]];
+  const quasis = literal.quasis.map(decodeEscapes);
+  let variants = [quasis[0]];
   parts.forEach((values, index) => {
-    variants = variants.flatMap((variant) => values.map((value) => variant + value + literal.quasis[index + 1]));
+    variants = variants.flatMap((variant) => values.map((value) => variant + value + quasis[index + 1]));
   });
   return variants;
 }
@@ -305,7 +311,7 @@ export function lockingStatements(source) {
   const literals = scanLiterals(source);
   const { context, initializers } = literalBindings(source, literals);
   const code = codeOnly(source, literals);
-  context.ambiguous = ambiguousNames(code, context.bindings);
+  context.ambiguous = ambiguousNames(code, literals, context.bindings);
   const statements = [];
   const seen = new Set();
   const consumed = [];
@@ -318,9 +324,11 @@ export function lockingStatements(source) {
   for (const literal of literals) {
     const raw = source.slice(literal.start, literal.end);
     const line = lineOf(source, literal.start + Math.max(raw.search(LOCK_TEST), 0));
-    const text = literal.kind === 'string' ? literal.text : literal.quasis.join('«»');
-    const lockText = LOCK_TEST.test(text) || /^\s*for\s*(?:$|(?:no\s+key\s+)?«)/i.test(text)
-      || (SQL_TEXT.test(text) && (LOCK_HOLE.test(text) || /\bfor\s*$/i.test(text)));
+    const text = literal.kind === 'string' ? decodeEscapes(literal.text) : literal.quasis.map(decodeEscapes).join('«»');
+    // SQL comments are whitespace to PostgreSQL, and text in SQL strings is not a lock.
+    const sqlText = maskSql(text);
+    const lockText = LOCK_TEST.test(sqlText) || /^\s*for\s*(?:$|(?:no\s+key\s+)?«)/i.test(sqlText)
+      || (SQL_TEXT.test(sqlText) && (LOCK_HOLE.test(sqlText) || /\bfor\s*$/i.test(sqlText)));
     const trace = newTrace();
     const variants = new Set(templateValues(literal, context, 0, trace));
     if (trace.overflow && (lockText || trace.lockInValues)) {
@@ -329,13 +337,14 @@ export function lockingStatements(source) {
     }
     let complete = false;
     for (const sql of variants) {
-      if (!/\bselect\b/i.test(sql) || !/\bfrom\b/i.test(sql)) continue;
-      if (LOCK_HOLE.test(sql)) {
+      const masked = maskSql(sql);
+      if (!/\bselect\b/i.test(masked) || !/\bfrom\b/i.test(masked)) continue;
+      if (LOCK_HOLE.test(masked)) {
         unassembled(literal, sql, 'the lock strength is an interpolation this check cannot resolve');
         complete = true;
         continue;
       }
-      if (!LOCK_TEST.test(sql)) continue;
+      if (!LOCK_TEST.test(masked)) continue;
       complete = true;
       const key = `${line}\0${sql}`;
       if (seen.has(key)) continue;
@@ -351,12 +360,16 @@ export function lockingStatements(source) {
   }
   // Lock text outside a whole statement (a conditional fragment, a constant)
   // must be part of one: inside an interpolation that a locking statement
-  // resolved, or bound to a name that is used only as such interpolations.
+  // resolved, or bound to a name, not exported, that is used only as such
+  // interpolations (another file could import and append an exported one).
   const references = (name) => [...code.matchAll(new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g'))].length;
+  const exported = (name) => new RegExp(`\\bexport\\s+(?:const|let)\\s+${name.replace(/\$/g, '\\$')}\\b`).test(code)
+    || [...code.matchAll(/\bexport\s*(?:\{([^}]*)\}|default\s+([A-Za-z_$][\w$]*))/g)]
+      .some((match) => (match[1] ?? match[2]).split(',').some((part) => part.trim().split(/\s+as\s+/)[0].trim() === name));
   for (const { literal, text } of pending) {
     if (consumed.some((range) => within(literal.start, range))) continue;
     const bound = initializers.filter((range) => within(literal.start, range));
-    const used = bound.length > 0 && bound.every(({ name }) => !context.ambiguous.has(name)
+    const used = bound.length > 0 && bound.every(({ name }) => !context.ambiguous.has(name) && !exported(name)
       && (nameUses.get(name)?.size ?? 0) > 0
       && references(name) - context.bindings.get(name).length === nameUses.get(name).size);
     if (!used) unassembled(literal, text, 'lock text that is not part of a statement this check can assemble');
@@ -381,10 +394,13 @@ function flattenParentheses(sql) {
 
 /** Masks string literals, quoted identifiers and comments so keywords inside them are ignored. */
 function maskSql(sql) {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, (match) => ' '.repeat(match.length))
-    .replace(/--[^\n]*/g, (match) => ' '.repeat(match.length))
-    .replace(/'(?:[^']|'')*'/g, (match) => `'${' '.repeat(match.length - 2)}'`);
+  // One pass, left to right, so a quote inside a comment or `--` inside a string is not taken for the other.
+  return sql.replace(/[Ee]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'|\$([A-Za-z_]*)\$[\s\S]*?\$\1\$|--[^\n]*|\/\*[\s\S]*?\*\//g, (match) => {
+    if (match.startsWith('--') || match.startsWith('/*')) return match.replace(/[^\n]/g, ' ');
+    const open = match.startsWith('$') ? match.indexOf('$', 1) + 1 : match.indexOf("'") + 1;
+    const close = match.startsWith('$') ? match.length - open : 1;
+    return match.slice(0, open) + match.slice(open, match.length - close).replace(/[^\n]/g, ' ') + match.slice(match.length - close);
+  });
 }
 
 const JOIN = /\s*(,|\bnatural\s+|\b(?:left|right|full)(?:\s+outer)?\s+join\b|\bcross\s+join\b|\b(?:inner\s+)?join\b)\s*/gi;
@@ -438,11 +454,13 @@ function fromItems(level) {
 }
 
 const AGGREGATE = /\b(?:count|sum|avg|min|max|array_agg|string_agg|json_agg|jsonb_agg|json_object_agg|jsonb_object_agg|bool_and|bool_or|every|bit_and|bit_or|xmlagg)\s*\(/i;
+const SET_RETURNING = /\b(?:generate_series|generate_subscripts|unnest|regexp_matches|regexp_split_to_table|jsonb?_array_elements(?:_text)?|jsonb?_each(?:_text)?|jsonb?_object_keys|jsonb?_to_recordset|jsonb?_populate_recordset)\s*\(/i;
 
 /**
  * Query forms with which PostgreSQL refuses a row lock for every role (0A000):
- * DISTINCT, GROUP BY, HAVING, aggregates, window functions and set operations
- * at the lock's own query level.
+ * DISTINCT, GROUP BY, HAVING, aggregates, window functions, set-returning
+ * functions in the select list, and set operations that the lock's query level
+ * is part of.
  */
 function refusedForms(masked, start, lock, level, strength) {
   const flat = flattenParentheses(level);
@@ -452,18 +470,29 @@ function refusedForms(masked, start, lock, level, strength) {
   if (/^\s*select\s+distinct\b/i.test(flat)) found.push(`${name} is not allowed with DISTINCT`);
   if (/\bgroup\s+by\b/i.test(flat)) found.push(`${name} is not allowed with GROUP BY`);
   if (/\bhaving\b/i.test(flat)) found.push(`${name} is not allowed with HAVING`);
-  if (AGGREGATE.test(selectList)) found.push(`${name} is not allowed with aggregate functions`);
-  if (/\bover\s*(?:\(|[a-z_])/i.test(flat) || /\bwindow\b/i.test(flat)) found.push(`${name} is not allowed with window functions`);
-  // A set operation joins this level with others: look back to the enclosing parenthesis.
+  if (AGGREGATE.test(flat)) found.push(`${name} is not allowed with aggregate functions`);
+  if (/\bover\s*\(|\bover\s+[a-z_]/i.test(flat) || /\bwindow\b/i.test(flat)) found.push(`${name} is not allowed with window functions`);
+  if (SET_RETURNING.test(selectList)) found.push(`${name} is not allowed with set-returning functions in the target list`);
+  // A set operation joins this level with others: within the enclosing
+  // parentheses, or around them when the level is a parenthesised operand.
   let depth = 0;
   let from = 0;
   for (let index = start - 1; index >= 0; index--) {
     if (masked[index] === ')') depth++;
     else if (masked[index] === '(') { if (depth === 0) { from = index + 1; break; } depth--; }
   }
-  if (/\b(?:union|intersect|except)\b/i.test(flattenParentheses(masked.slice(from, lock)))) {
-    found.push(`${name} is not allowed with UNION, INTERSECT or EXCEPT`);
+  let to = masked.length;
+  depth = 0;
+  for (let index = lock; index < masked.length; index++) {
+    if (masked[index] === '(') depth++;
+    else if (masked[index] === ')') { if (depth === 0) { to = index; break; } depth--; }
   }
+  const SET_OPERATION = /\b(?:union|intersect|except)\b/i;
+  const inside = SET_OPERATION.test(flattenParentheses(masked.slice(from, lock)))
+    || SET_OPERATION.test(flattenParentheses(masked.slice(lock, to)));
+  const around = from > 0 && (/\b(?:union|intersect|except)(?:\s+(?:all|distinct))?\s*$/i.test(masked.slice(0, from - 1))
+    || /^\s*(?:union|intersect|except)\b/i.test(masked.slice(to + 1)));
+  if (inside || around) found.push(`${name} is not allowed with UNION, INTERSECT or EXCEPT`);
   return found;
 }
 
@@ -491,6 +520,18 @@ export function analyseLocks(sql) {
     const clause = { strength, of: of ? of[1].split(',').map((name) => name.trim().toLowerCase()) : null,
       tables: [], defects: [] };
     clauses.push(clause);
+    // The rest of the lock clause, up to the next lock clause or the end of its
+    // query level, must be readable: an interpolation there could add locked
+    // aliases (FOR UPDATE OF s${more}).
+    let tailEnd = after.length;
+    for (let index = 0, depth = 0; index < after.length; index++) {
+      if (after[index] === '(') depth++;
+      else if (after[index] === ')') { if (depth === 0) { tailEnd = index; break; } depth--; }
+    }
+    const nextLock = after.slice(0, tailEnd).search(/\bfor\s+(?:no\s+key\s+update|update|key\s+share|share)\b/i);
+    if (after.slice(0, nextLock < 0 ? tailEnd : nextLock).includes('«')) {
+      clause.defects.push(`FOR ${strength.toUpperCase()} is followed by an interpolation this check cannot resolve`);
+    }
     if (start < 0) { clause.defects.push('cannot find the SELECT this lock clause belongs to'); continue; }
     const level = masked.slice(start, match.index);
     const { items, error } = fromItems(level);
@@ -549,6 +590,8 @@ export function unfollowedForms(scripts) {
     if (/\balter\s+table\s+[^;]*\brename\s+to\b/i.test(top)) found.push(`${name}: ALTER TABLE ... RENAME TO`);
     if (/\balter\s+default\s+privileges\b[^;]*\bgrant\b/i.test(top)) found.push(`${name}: ALTER DEFAULT PRIVILEGES ... GRANT`);
     if (/\bgrant\s+[^;]*\bon\s+all\s+tables\b[^;]*\bwith\s+grant\s+option\b/i.test(top)) found.push(`${name}: GRANT ... WITH GRANT OPTION`);
+    // CREATE ROLE ... ROLE / ADMIN / USER add members to the new role; IN ROLE is followed.
+    if (/\bcreate\s+role\s+\w+[^;]*?(?<!\bin\s+)\b(?:role|admin|user)\s+[a-z_]/i.test(raw)) found.push(`${name}: CREATE ROLE ... ROLE, ADMIN or USER`);
   }
   return found;
 }
@@ -590,16 +633,36 @@ export function databaseModel(scripts) {
     }
     return out;
   };
+  const grantRole = (member, role, option) => {
+    const set = members.get(member) ?? members.set(member, new Set()).get(member);
+    set.add(role);
+    // PostgreSQL 16: a membership passes on privileges per its INHERIT
+    // option, which defaults to the member's INHERIT attribute at grant time.
+    inherits.set(`${member}|${role}`, option ?? roleInherit.get(member) ?? true);
+  };
   for (const [, text] of scripts) {
-    // Role attributes: roles are created in dollar-quoted DO blocks and altered at the top level.
-    for (const match of stripComments(text).matchAll(/\b(?:create|alter)\s+role\s+([a-z_][\w]*)\b([^;]*)/gi)) {
-      const attribute = /\b(no)?inherit\b/i.exec(match[2]);
-      if (attribute) roleInherit.set(match[1].toLowerCase(), !attribute[1]);
-      else if (/^create/i.test(match[0]) && !roleInherit.has(match[1].toLowerCase())) roleInherit.set(match[1].toLowerCase(), true);
-    }
-    const top = stripComments(text).replace(DOLLAR, "''");
-    for (const raw of top.split(';')) {
-      const statement = raw.trim().replace(/\s+/g, ' ');
+    const stripped = stripComments(text);
+    // Role attributes and CREATE ROLE ... IN ROLE, in statement order: roles are
+    // created in dollar-quoted DO blocks and altered at the top level, and a
+    // grant takes the member's INHERIT attribute at the time it is made.
+    const roleEvents = [...stripped.matchAll(/\b(create|alter)\s+role\s+([a-z_][\w]*)\b([^;]*)/gi)];
+    let nextEvent = 0;
+    const applyRoleEventsBefore = (offset) => {
+      for (; nextEvent < roleEvents.length && roleEvents[nextEvent].index < offset; nextEvent++) {
+        const [, verb, roleName, rest] = roleEvents[nextEvent];
+        const role = roleName.toLowerCase();
+        const attribute = /\b(no)?inherit\b/i.exec(rest);
+        if (attribute) roleInherit.set(role, !attribute[1]);
+        else if (/^create$/i.test(verb) && !roleInherit.has(role)) roleInherit.set(role, true);
+        const inRole = /^create$/i.test(verb) && /\bin\s+(?:role|group)\s+([a-z_]\w*(?:\s*,\s*[a-z_]\w*)*)/i.exec(rest);
+        if (inRole) for (const parent of names(inRole[1])) grantRole(role, parent);
+      }
+    };
+    // Dollar-quoted bodies blanked to the same length, so offsets line up with roleEvents.
+    const top = stripped.replace(DOLLAR, (body) => `'${' '.repeat(body.length - 2)}'`);
+    for (const chunk of top.matchAll(/[^;]+/g)) {
+      applyRoleEventsBefore(chunk.index);
+      const statement = chunk[0].trim().replace(/\s+/g, ' ');
       if (!statement) continue;
       let match;
       if ((match = /^create (?:unlogged )?table (?:if not exists )?([a-z_]+\.[a-z_][\w]*)/i.exec(statement))) {
@@ -636,23 +699,19 @@ export function databaseModel(scripts) {
         for (const member of names(match[2])) for (const role of names(match[1])) inherits.set(`${member}|${role}`, false);
       } else if ((match = /^(grant|revoke) ([\w, ]+?) (to|from) ([\w, ]+?)((?: with (?:admin|inherit|set) (?:option|true|false))*)(?: granted by \w+)?$/i.exec(statement))
         && !/\bon\b/i.test(match[2]) && !/^(?:all|usage|select|insert|update|delete|execute|connect|create|temporary|temp|truncate|references|trigger)\b/i.test(match[2])) {
-        // PostgreSQL 16: a membership passes on privileges per its INHERIT
-        // option, which defaults to the member's INHERIT attribute at grant time.
         const option = /\bwith inherit (option|true|false)\b/i.exec(match[5] ?? '');
         for (const member of names(match[4])) {
-          const set = members.get(member) ?? members.set(member, new Set()).get(member);
           for (const role of names(match[2])) {
-            if (match[1].toLowerCase() === 'grant') {
-              set.add(role);
-              inherits.set(`${member}|${role}`, option ? option[1].toLowerCase() !== 'false' : roleInherit.get(member) ?? true);
-            } else {
-              set.delete(role);
+            if (match[1].toLowerCase() === 'grant') grantRole(member, role, option ? option[1].toLowerCase() !== 'false' : undefined);
+            else {
+              members.get(member)?.delete(role);
               inherits.delete(`${member}|${role}`);
             }
           }
         }
       }
     }
+    applyRoleEventsBefore(Infinity);
   }
   return { tables, privileges, members, inherits, rls, policies };
 }
@@ -721,7 +780,12 @@ export function inspectServices(model, servicesDirectory = join(repository, 'ser
             violations: ['lock text that is not part of a statement this check can assemble'], sql: statement.sql });
           continue;
         }
-        for (const clause of analyseLocks(statement.sql)) {
+        const clauses = analyseLocks(statement.sql);
+        if (clauses.length === 0) {
+          results.push({ service, role: role ?? null, location, strength: null, of: null, tables: [],
+            violations: ['a locking statement in which this check finds no lock clause'], sql: statement.sql });
+        }
+        for (const clause of clauses) {
           const violations = [...clause.defects];
           if (!role) violations.push(`service ${service} has no runtime role in SERVICE_ROLES`);
           else for (const table of clause.tables) {

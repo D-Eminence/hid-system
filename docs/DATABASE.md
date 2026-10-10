@@ -1631,7 +1631,9 @@ and repairs, in
 
 Dropping the policy takes an `ACCESS EXCLUSIVE` lock on
 `identity.patient_identifiers` for the catalog change only; nothing is scanned
-or rewritten. 0078 needs no role bootstrap change.
+or rewritten. 0078 needs no grant change, but the Stage 9 role assertions
+(`runtime-roles.integration.sql`, run by `db:bootstrap` and `db:verify-roles`)
+require the self-NIN policy to be gone, so run them after 0078.
 
 Service changes that the database relies on:
 
@@ -1665,31 +1667,47 @@ Checks:
 
 - `scripts/verify-runtime-locking-privileges.mjs` (`npm run verify`) finds every
   lock clause in the service source, including clauses built from constants,
-  ternaries and helper flags. Lock text it cannot place fails the check: a
-  fragment counts only inside an interpolation a locking statement resolved,
-  or bound to a constant used only as such interpolations; an unresolved lock
-  strength (`for ${...}`), a statement with more than 64 variants, and a name
-  that is also a parameter, a reassigned variable or another declaration in
-  the file are refused, not guessed. It resolves the locked tables (`OF`
+  ternaries and helper flags. It reads each literal as the string JavaScript
+  makes of it (escape sequences decoded) and each statement as PostgreSQL
+  reads it (comments as whitespace, text in SQL strings not a lock). Lock text
+  it cannot place fails the check: a fragment counts only inside an
+  interpolation a locking statement resolved (the branches of a ternary, not
+  its condition), or bound to a constant, not exported, used only as such
+  interpolations; an unresolved lock strength (`for ${...}`), an
+  interpolation after the lock clause (`of s${more}`), a statement with more
+  than 64 variants or with no lock clause the analysis can read, and a name
+  that occurs anywhere in the file other than in its literal declaration or
+  as a whole interpolation (a parameter, a destructuring, a loop variable, an
+  assignment) are refused, not guessed. It resolves the locked tables (`OF`
   aliases, outer joins) and replays the migrations and `runtime-grants.sql`
   to model each runtime role's effective privileges, following only
-  memberships that pass on privileges (`INHERIT`), row-level security and
-  `UPDATE` policies. It fails on a lock the role cannot take, and on the locks
-  PostgreSQL refuses for every role (`0A000`): the nullable side of an outer
-  join, `DISTINCT`, `GROUP BY`, `HAVING`, aggregates, window functions and set
-  operations. On `main` before Stage 9 it reports 14 of 43 clauses, exactly the
-  §4.2 statements; now 0 of 31. The rehearsal also runs it with `--catalog`,
-  comparing the replayed model with the migrated catalogue (146 tables, no
-  difference). CI runs it, its tests and the rehearsal in the workspace gates
-  job of `tuf-local-gates.yml` (`release/scripts/run-workspace-gates.mjs`).
+  memberships that pass on privileges (the `INHERIT` attribute as it is when
+  each grant is made, `WITH INHERIT`, `REVOKE INHERIT OPTION`, `CREATE ROLE
+  ... IN ROLE`), row-level security and `UPDATE` policies. It fails on a lock
+  the role cannot take, and on the locks PostgreSQL refuses for every role
+  (`0A000`): the nullable side of an outer join, `DISTINCT`, `GROUP BY`,
+  `HAVING`, aggregates, window functions, set-returning functions in the
+  select list and set operations. It does not follow SQL assembled by string
+  operations outside literals: a keyword split across a concatenation
+  (`'fo' + 'r update'`) or a `.replace()` on an assembled statement; the
+  runtime command suite and the runtime verifiers, which run the commands as
+  their roles, are the check for those. On `main` before Stage 9 it reports
+  14 of 43 clauses, exactly the §4.2 statements; now 0 of 31. The rehearsal
+  also runs it with `--catalog`, comparing the replayed model with the
+  migrated catalogue (146 tables, no difference). CI runs it, its tests and
+  the rehearsal in the workspace gates job of `tuf-local-gates.yml`
+  (`release/scripts/run-workspace-gates.mjs`).
 - `runtime-command-privileges.integration.sql` (rollback-only):
   - Case 1 plans (`EXPLAIN`, which performs the start-of-statement privilege
     checks) a no-op select, insert, update, delete and row lock as each of ten
     runtime roles on every table where it holds the privilege (239 probes) and
     fails on any refusal. On 0077 it fails with the Identity identifier insert
     (`42501 permission denied for table verification_evidence`).
-  - Case 2 runs the lock statements Stage 9 kept, changed or added, as their
-    runtime roles.
+  - Case 2 runs one representative lock statement per role whose locks Stage 9
+    kept, changed or added (the Identity registration case, the OCR job
+    `FOR UPDATE` and key share, the Outreach `FOR SHARE OF campaign`, a Lab
+    specimen), as their runtime roles; the static check covers every clause,
+    and the runtime verifiers run the commands.
   - Case 3 requires the eleven tables whose locks were dropped (nine
     insert-only tables, `outreach.campaign_members` and `identity.patients`)
     to stay unlockable for their runtime roles (`42501`): Stage 9 granted no

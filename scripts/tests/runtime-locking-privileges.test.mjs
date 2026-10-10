@@ -109,6 +109,49 @@ test('does not resolve a name that is also a parameter, a reassigned variable or
     [[[], ['locks a FROM item that is not a schema-qualified table: «table»']]]);
 });
 
+test('reads lock text as the JavaScript string and SQL it becomes (Phase 4 Stage 9 final review)', () => {
+  const tables = (source) => lockingStatements(source).flatMap((statement) => statement.unassembled ? [['unassembled', statement.sql]]
+    : analyseLocks(statement.sql).map((clause) => [clause.tables, clause.defects]));
+  // Escape sequences: the runtime SQL is '...$4<newline>for update'.
+  assert.deepEqual(tables("query('select * from pharmacy.dispensing_reversals\\nwhere dispensing_id=$4\\nfor update');"),
+    [[['pharmacy.dispensing_reversals'], []]]);
+  assert.deepEqual(tables("query(`select * from lab.accessions where id=$1 for\\u0020update`);"), [[['lab.accessions'], []]]);
+  // A comment between FOR and the strength is whitespace to PostgreSQL.
+  assert.deepEqual(tables('query(`select * from ocr.validations where id=$1 for /* replay */ update`);'), [[['ocr.validations'], []]]);
+  assert.deepEqual(tables('query(`select * from ocr.validations where id=$1 for -- serialize\nupdate`);'), [[['ocr.validations'], []]]);
+  // `--` inside a SQL string is not a comment.
+  assert.deepEqual(tables("query(`select * from pharmacy.dispensing_reversals where coalesce(reason, '--') <> '' for update`);"),
+    [[['pharmacy.dispensing_reversals'], []]]);
+  // Lock text only inside a SQL string is not a lock.
+  assert.deepEqual(tables("query(`select id from lab.results where note = 'for update'`);"), []);
+});
+
+test('does not place an exported lock constant, a lock in a ternary condition, or an interpolation after OF', () => {
+  const unplaced = (source) => lockingStatements(source).filter((statement) => statement.unassembled).map((statement) => statement.sql);
+  assert.deepEqual(unplaced(`export const ROW_LOCK = ' for update';
+    query(\`select id from lab.specimens where id=$1\${ROW_LOCK}\`);`), ['for update']);
+  assert.deepEqual(unplaced(`const ROW_LOCK = ' for update';
+    query(\`select id from lab.specimens where id=$1\${ROW_LOCK}\`);
+    export { ROW_LOCK };`), ['for update']);
+  assert.deepEqual(unplaced(`let clause = '';
+    query(\`select id from lab.specimens where id=$1\${(clause = ' for update') ? ' for update' : ''}\`);
+    query('select * from lab.accessions where id=$1' + clause);`), ['for update']);
+  const [statement] = lockingStatements('function f(extra) { return query(`select * from lab.specimens s join lab.accessions a on true where s.id=$1 for update of s${extra}`); }');
+  assert.deepEqual(analyseLocks(statement.sql).flatMap((clause) => clause.defects),
+    ['FOR UPDATE is followed by an interpolation this check cannot resolve']);
+});
+
+test('does not resolve a name that is also destructured, a loop variable or assigned by destructuring', () => {
+  const defects = (source) => lockingStatements(source).flatMap((statement) => analyseLocks(statement.sql)).flatMap((clause) => clause.defects);
+  const refused = ['locks a FROM item that is not a schema-qualified table: «table»'];
+  assert.deepEqual(defects(`const table = 'lab.specimens';
+    async function lockRow(client, { table, id }) { return client.query(\`select id from \${table} where id=$1 for update\`, [id]); }`), refused);
+  assert.deepEqual(defects(`const table = 'lab.specimens';
+    for (const [, table] of Object.entries(targets)) query(\`select id from \${table} where id=$1 for update\`);`), refused);
+  assert.deepEqual(defects(`let table = 'lab.specimens'; [table] = ['lab.accessions'];
+    query(\`select id from \${table} where id=$1 for update\`);`), refused);
+});
+
 test('reports a statement with more variants than it expands', () => {
   const filters = Array.from({ length: 6 }, (_, index) => `\${f${index} ? ' and c${index}=$2' : ''}`).join('');
   const [statement] = lockingStatements(`const table = kind ? 'lab.results' : 'lab.accessions';
@@ -164,6 +207,15 @@ test('reports the other lock forms PostgreSQL refuses for every role (0A000)', (
   // Sub-selects, and IS DISTINCT FROM, are not the locked level.
   assert.deepEqual(defects('select r.id, (select count(*) from lab.specimens s) from lab.results r where r.x is distinct from $1 for update of r'), []);
   assert.deepEqual(defects('select id from lab.results where id in (select id from lab.specimens union select id from lab.accessions) for update'), []);
+  assert.deepEqual(defects('(select id from lab.results for update) union select id from lab.specimens'),
+    ['FOR UPDATE is not allowed with UNION, INTERSECT or EXCEPT']);
+  assert.deepEqual(defects('select id from lab.specimens union (select id from lab.results for update)'),
+    ['FOR UPDATE is not allowed with UNION, INTERSECT or EXCEPT']);
+  assert.deepEqual(defects('select id, generate_series(1, 2) from lab.results for update'),
+    ['FOR UPDATE is not allowed with set-returning functions in the target list']);
+  assert.deepEqual(defects('select 1 from lab.results order by count(*) for update'), ['FOR UPDATE is not allowed with aggregate functions']);
+  // Identifiers that start with "over" are not window functions.
+  assert.deepEqual(defects('select id, over_limit from lab.results where overdue for update'), []);
 });
 
 test('follows only memberships that pass on privileges', () => {
@@ -182,6 +234,23 @@ test('follows only memberships that pass on privileges', () => {
     assert.match(lockPermission(model, role, 's.t').reason, /no UPDATE privilege/, role);
   }
   assert.deepEqual(lockPermission(model, 'open_role', 's.t'), { allowed: true });
+  // The INHERIT attribute counts as it is when the grant is made, and
+  // CREATE ROLE ... IN ROLE is a membership.
+  const ordered = databaseModel([['fixture.sql', `
+    create table s.t (id uuid);
+    grant update on s.t to g;
+    create role later_inherit nologin noinherit;
+    grant g to later_inherit;
+    alter role later_inherit inherit;
+    create role later_noinherit nologin inherit;
+    grant g to later_noinherit;
+    alter role later_noinherit noinherit;
+    do $$ begin create role created_in nologin in role g; end $$;
+  `]]);
+  assert.match(lockPermission(ordered, 'later_inherit', 's.t').reason, /no UPDATE privilege/);
+  assert.deepEqual(lockPermission(ordered, 'later_noinherit', 's.t'), { allowed: true });
+  assert.deepEqual(lockPermission(ordered, 'created_in', 's.t'), { allowed: true });
+  assert.deepEqual(unfollowedForms([['a.sql', 'create role r nologin role other_role;']]), ['a.sql: CREATE ROLE ... ROLE, ADMIN or USER']);
 });
 
 test('replays table privileges, role membership, row-level security and policies', () => {
