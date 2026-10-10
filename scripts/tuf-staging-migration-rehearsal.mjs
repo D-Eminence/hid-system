@@ -311,6 +311,11 @@ try {
   migration('schema apply', 'apply-migrations.mjs');
   migration('bootstrap runtime roles', 'bootstrap-database-roles.mjs');
   assert.match(migration('schema rerun', 'apply-migrations.mjs'), /^0 pending migration\(s\)/);
+  // Every service row lock must be one its runtime role can take, and the
+  // static privilege replay CI relies on must match this catalogue (Stage 9).
+  evidence.checks.runtime_locking_privileges = JSON.parse(command('runtime row locks against the role bootstrap and catalogue',
+    process.execPath, [join(repository, 'scripts/verify-runtime-locking-privileges.mjs'), '--catalog', database,
+      '--psql', join(pgBindir, 'psql')]));
   command('full rollback-only schema integration', join(pgBindir, 'psql'),
     ['-X', '-d', database, '-v', 'ON_ERROR_STOP=1', '-f', join(service, 'database/tests/schema.integration.sql')]);
   const additionalSuites = (await readdir(join(service, 'database/tests')))
@@ -341,6 +346,19 @@ try {
   evidence.checks.platform_security_runtime = JSON.parse(command(
     'exact-role platform MFA, step-up, approval and export HTTP workflow', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-platform-security-runtime.mjs')], workflowEnvironment));
+  // Phase 4 Stage 9: the commands whose row locks their runtime roles could not
+  // take, each through its real API as its runtime role, with concurrency,
+  // replay, denial and rollback cases.
+  evidence.checks.registration_review_runtime = JSON.parse(command('exact-role NIN registration review HTTP workflow',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-registration-review-runtime.mjs')],
+    workflowEnvironment));
+  for (const [name, script] of [['pharmacy_runtime', 'services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs'],
+    ['lab_runtime', 'services/lab-api/scripts/verify-lab-runtime.mjs'],
+    ['ocr_runtime', 'services/ocr-api/scripts/verify-ocr-runtime.mjs'],
+    ['outreach_runtime', 'services/outreach-api/scripts/verify-outreach-runtime.mjs']]) {
+    evidence.checks[name] = JSON.parse(command(`exact-role ${name.replace('_runtime', '')} HTTP write commands`,
+      process.execPath, [join(repository, script)], workflowEnvironment));
+  }
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);
