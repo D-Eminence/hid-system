@@ -4,9 +4,14 @@
 // disposable copy of the owned synthetic rehearsal. Before Stage 9 EHR-order
 // acceptance, accession, and Lab evidence import (external and from OCR)
 // failed with 42501: their replay lookups locked insert-only rows (work items,
-// accessions, imported evidence) that the runtime role cannot update. Only the
-// Identity API is replaced, by a local fake; every database check (row-level
-// security, the 0077 guards, immutability triggers, unique constraints) is real.
+// accessions, imported evidence) that the runtime role cannot update. With no
+// accession, no specimen, execution or result could exist; the verifier then
+// follows one specimen through receipt, execution start and completion, and
+// one result through entry, verification and release, whose FOR UPDATE locks
+// fall on lab.specimens, lab.test_executions and lab.results, rows the role may
+// update. Only the Identity API is replaced, by a local fake; every database
+// check (row-level security, the 0077 guards, immutability triggers, unique
+// constraints) is real.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
@@ -51,17 +56,18 @@ try {
   const id = () => randomUUID();
   const f = { org: id(), facility: id(), patient: id(), encounter: id(), document: id(),
     a: { account: id(), staff: id(), membership: id() }, b: { account: id(), staff: id(), membership: id() },
+    c: { account: id(), staff: id(), membership: id() }, d: { account: id(), staff: id(), membership: id() },
     orders: [id(), id(), id()], work: [id(), id(), id()],
     ocr: { job: id(), extraction: id(), validation: id(), confirmation: id(), publication: id() } };
-  f.a.subject = `synthetic:lab-verifier-a:${f.a.account}`;
-  f.b.subject = `synthetic:lab-verifier-b:${f.b.account}`;
+  const members = [['a', f.a], ['b', f.b], ['c', f.c], ['d', f.d]];
+  for (const [name, member] of members) member.subject = `synthetic:lab-verifier-${name}:${member.account}`;
   const requestedAt = '2026-10-01T09:00:00.000Z';
   await database.fixture(async (client) => {
     await client.query('insert into identity.organizations (id,name,slug) values ($1,$2,$3)',
       [f.org, 'Lab Verifier Org', `lab-verifier-${f.org.slice(0, 8)}`]);
     await client.query(`insert into identity.facilities (id,organization_id,name,code,timezone,active,lifecycle_status)
       values ($1,$2,'Lab Verifier Clinic',$3,'Africa/Lagos',true,'verified')`, [f.facility, f.org, `LV-${f.facility.slice(0, 8)}`]);
-    for (const [name, member] of [['a', f.a], ['b', f.b]]) {
+    for (const [name, member] of members) {
       await client.query(`insert into auth.accounts (id,subject,email,display_name,status) values ($1,$2,$3,$4,'active')`,
         [member.account, member.subject, `lab-verifier-${name}-${member.account}@example.invalid`, `Lab Verifier ${name}`]);
       await client.query(`insert into identity.staff (id,account_id,full_name,email,verification_status,default_role)
@@ -75,11 +81,14 @@ try {
       values ($1,'HID-LBVRFYAA','Verifier','Patient','Verifier Patient','active')`, [f.patient]);
     await client.query(`insert into identity.purpose_of_use_codes (code,display,source_system)
       values ('direct-care','Direct patient care','lab-verifier') on conflict (code) do nothing`);
-    // Only A holds a database consent grant; B is allowed by the fake Identity only.
-    await client.query(`insert into identity.consent_grants (id,patient_id,staff_id,account_id,membership_id,facility_id,scope,
-      purpose_of_use,status,reason,starts_at,expires_at) values ($1,$2,$3,$4,$5,$6,'write_records','direct-care','active',
-      'Synthetic Lab verifier consent',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '30 days')`,
-    [id(), f.patient, f.a.staff, f.a.account, f.a.membership, f.facility]);
+    // A, and the result verifiers C and D, hold a database consent grant; B is
+    // allowed by the fake Identity only.
+    for (const member of [f.a, f.c, f.d]) {
+      await client.query(`insert into identity.consent_grants (id,patient_id,staff_id,account_id,membership_id,facility_id,scope,
+        purpose_of_use,status,reason,starts_at,expires_at) values ($1,$2,$3,$4,$5,$6,'write_records','direct-care','active',
+        'Synthetic Lab verifier consent',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '30 days')`,
+      [id(), f.patient, member.staff, member.account, member.membership, f.facility]);
+    }
     await client.query(`insert into ehr.encounters (id,patient_id,facility_id,created_by,created_by_membership_id,encounter_type,
       status,started_at) values ($1,$2,$3,$4,$5,'ambulatory','in_progress',clock_timestamp())`,
     [f.encounter, f.patient, f.facility, f.a.account, f.a.membership]);
@@ -93,7 +102,8 @@ try {
         'http://loinc.org','718-7','Haemoglobin','routine','active','Synthetic Lab verifier order',$7)`,
       [order, f.encounter, f.patient, f.facility, f.a.account, f.a.membership, requestedAt]);
     }
-    // Work items accepted earlier by A, without accessions.
+    // Work items accepted earlier by A, without accessions, each with the one
+    // requested test acceptance records (execution start requires exactly one).
     for (const [index, work] of f.work.entries()) {
       const order = id();
       await client.query(`insert into lab.work_items (id,patient_id,facility_id,ordering_facility_id,source_ehr_order_id,
@@ -102,6 +112,8 @@ try {
         values ($1,$2,$3,$3,$4,1,$5,'routine','http://loinc.org','718-7','Haemoglobin','Synthetic Lab verifier order',
         $6,$7,$6,$8,$9,repeat('a',64),'lab-verifier-fixture')`,
       [work, f.patient, f.facility, order, f.encounter, f.a.account, requestedAt, f.a.membership, `lab-verifier-work-${index}-${work}`]);
+      await client.query(`insert into lab.work_item_requested_tests (work_item_id,facility_id,patient_id,"ordinal",code_system,code,name)
+        values ($1,$2,$3,1,'http://loinc.org','718-7','Haemoglobin')`, [work, f.facility, f.patient]);
     }
     // A governed OCR publication for Lab, validated by A and being processed.
     const o = f.ocr;
@@ -131,16 +143,19 @@ try {
       f.a.account, f.a.membership]);
   });
   const permissions = ['lab.work-item.accept', 'lab.work-item.read', 'lab.accession.create', 'lab.accession.read',
-    'lab.specimen.collect', 'lab.import.write', 'lab.import.read'];
+    'lab.specimen.collect', 'lab.specimen.receive', 'lab.execution.start', 'lab.execution.complete', 'lab.result.enter',
+    'lab.result.verify', 'lab.result.release', 'lab.import.write', 'lab.import.read'];
   const actor = (member, granted) => ({ id: member.account, subject: member.subject, accountId: member.account,
     sessionId: id(), roles: [], permissions: [], facilityIds: [f.facility], authenticationMethod: 'local',
     facilities: [{ id: f.facility, membershipId: member.membership, organizationId: f.org, name: 'Lab Verifier Clinic',
       roles: ['lab'], permissions: granted, isPrimary: true }] });
   actors.set('token-a', actor(f.a, permissions));
   actors.set('token-b', actor(f.b, permissions));
+  actors.set('token-c', actor(f.c, permissions));
+  actors.set('token-d', actor(f.d, permissions));
   actors.set('token-a-read-only', actor(f.a, ['lab.work-item.read', 'lab.accession.read', 'lab.import.read']));
   const decide = (member, scope, rule) => decisions.set(`${member.account}:${f.patient}:${scope}`, rule);
-  for (const member of [f.a, f.b]) for (const scope of ['read_records', 'write_records']) decide(member, scope, { allowed: true, breakGlass: false });
+  for (const member of [f.a, f.b, f.c, f.d]) for (const scope of ['read_records', 'write_records']) decide(member, scope, { allowed: true, breakGlass: false });
 
   lab = await startService({ require, service });
   assert.deepEqual((await lab.database.query('select current_user as role')).rows[0], { role: RUNTIME_ROLE });
@@ -255,6 +270,123 @@ try {
     { expectedVersion: specimen.version, collectedAt: '2026-10-02T08:00:00.000Z' }, { key: key('collect') }), 412,
   'collect at a stale version').code, 'VERSION_CONFLICT');
   check('specimen collect (FOR UPDATE on specimens, which the role may update): 201, then stale version 412');
+
+  // Receive the collected specimen (FOR UPDATE on lab.specimens).
+  const outboxOf = (aggregate, type) => count('select count(*) from lab.outbox_events where aggregate_id=$1 and event_type=$2', [aggregate, type]);
+  const receiveBody = { expectedVersion: collected.version, receivedAt: '2026-10-02T09:00:00.000Z', condition: 'Synthetic specimen intact' };
+  const received = expectStatus(await send(`/accessions/${accession.id}/specimens/${specimen.id}/receive`, receiveBody,
+    { key: key('receive') }), 201, 'receive the collected specimen');
+  assert.deepEqual([received.status, received.version], ['received', collected.version + 1]);
+  assert.equal(expectStatus(await send(`/accessions/${accession.id}/specimens/${specimen.id}/receive`, receiveBody,
+    { key: key('receive') }), 412, 'receive at a stale version').code, 'VERSION_CONFLICT');
+  assert.deepEqual(await Promise.all([
+    count("select count(*) from lab.specimens where id=$1 and status='received' and received_by=$2", [specimen.id, f.a.account]),
+    count("select count(*) from lab.specimen_command_idempotency where specimen_id=$1 and operation='receive'", [specimen.id]),
+    count("select count(*) from lab.specimen_events where specimen_id=$1 and event_type='specimen_received'", [specimen.id]),
+    outboxOf(specimen.id, 'LabSpecimenReceived')]), [1, 1, 1, 1]);
+  check('specimen receive (FOR UPDATE on specimens): 201 moves the collected specimen to received at the next version; the same receipt at the stale version 412; one receipt command row, event and outbox row');
+
+  // Start the execution of the received specimen (FOR UPDATE on lab.specimens).
+  const startBody = { expectedSpecimenVersion: received.version, startedAt: '2026-10-02T10:00:00.000Z',
+    method: 'Synthetic photometry', reason: 'Synthetic analytical run started' };
+  const startKey = key('start');
+  const start = (body) => send(`/specimens/${specimen.id}/executions`, body, { key: startKey });
+  const execution = sameResult(await together(4, () => start(startBody)), 'four concurrent identical execution starts');
+  assert.deepEqual([execution.status, execution.version, execution.specimenId], ['in_progress', 1, specimen.id]);
+  assert.deepEqual(await Promise.all([count('select count(*) from lab.test_executions where specimen_id=$1', [specimen.id]),
+    count("select count(*) from lab.execution_events where execution_id=$1 and event_type='execution_started'", [execution.id]),
+    outboxOf(execution.id, 'LabTestExecutionStarted')]), [1, 1, 1]);
+  assert.equal(expectStatus(await start(startBody), 201, 'execution start replay').id, execution.id);
+  assert.equal(expectStatus(await start({ ...startBody, reason: 'A different synthetic start reason' }), 409,
+    'execution start key reuse').code, 'IDEMPOTENCY_CONFLICT');
+  assert.equal(await count('select count(*) from lab.test_executions where specimen_id=$1', [specimen.id]), 1);
+  check('execution start (FOR UPDATE on specimens): four concurrent identical requests start one execution, event and outbox row and all return it; replay 201; key reuse with a different body 409');
+
+  // Complete the execution (FOR UPDATE on lab.test_executions).
+  const completeBody = { expectedVersion: execution.version, completedAt: '2026-10-02T11:00:00.000Z', notes: 'Synthetic run completed' };
+  const completeKey = key('complete');
+  const completed = expectStatus(await send(`/executions/${execution.id}/complete`, completeBody, { key: completeKey }), 201,
+    'complete the execution');
+  assert.deepEqual([completed.id, completed.status, completed.version], [execution.id, 'completed', execution.version + 1]);
+  assert.equal(expectStatus(await send(`/executions/${execution.id}/complete`, completeBody, { key: completeKey }), 201,
+    'execution complete replay').version, completed.version);
+  assert.equal(expectStatus(await send(`/executions/${execution.id}/complete`, completeBody, { key: key('complete') }), 412,
+    'complete at a stale version').code, 'VERSION_CONFLICT');
+  assert.deepEqual(await Promise.all([
+    count("select count(*) from lab.test_executions where id=$1 and status='completed' and row_version=$2", [execution.id, completed.version]),
+    count("select count(*) from lab.execution_events where execution_id=$1 and event_type='execution_completed'", [execution.id]),
+    outboxOf(execution.id, 'LabTestExecutionCompleted')]), [1, 1, 1]);
+  check('execution complete (FOR UPDATE on test_executions): 201 completes it at the next version; replay 201; the same completion at the stale version under a new key 412; one completion event and outbox row');
+
+  // Enter a manual numeric result (FOR UPDATE on lab.test_executions).
+  const resultBody = { expectedExecutionVersion: completed.version, resultType: 'numeric', numericValue: 13.4, unit: 'g/dL',
+    referenceRange: '12.0-15.5', abnormalFlag: 'normal' };
+  const enterKey = key('result');
+  const enter = (body) => send(`/executions/${execution.id}/results`, body, { key: enterKey });
+  const result = sameResult(await together(4, () => enter(resultBody)), 'four concurrent identical result entries');
+  assert.deepEqual([result.status, result.currentVersion, result.revisions.length, result.revisions[0].numericValue],
+    ['entered_unverified', 1, 1, 13.4]);
+  assert.deepEqual(await Promise.all([count('select count(*) from lab.results where execution_id=$1', [execution.id]),
+    count('select count(*) from lab.result_revisions where result_id=$1 and entered_by=$2', [result.id, f.a.account]),
+    count("select count(*) from lab.result_events where result_id=$1 and event_type='result_entered'", [result.id]),
+    outboxOf(result.id, 'LabResultEntered')]), [1, 1, 1, 1]);
+  assert.equal(expectStatus(await enter(resultBody), 201, 'result entry replay').id, result.id);
+  assert.equal(expectStatus(await enter({ ...resultBody, numericValue: 13.5 }), 409, 'result entry key reuse').code, 'IDEMPOTENCY_CONFLICT');
+  check('result enter (FOR UPDATE on test_executions): four concurrent identical entries create one result, revision 1 by A, event and outbox row and all return it; replay 201; key reuse with a different value 409');
+
+  // Verify the result. The database refuses a verifier who entered the result.
+  const governBody = (occurredAt, reason, expectedResultVersion = result.currentVersion) => ({ expectedResultVersion, occurredAt, reason });
+  const verificationsOf = () => count('select count(*) from lab.result_verifications where result_id=$1', [result.id]);
+  const selfCorrelation = 'verifier-self-verification-lab-0001';
+  const selfVerified = await send(`/results/${result.id}/verify`, governBody('2026-10-02T12:00:00.000Z', 'Synthetic self verification'),
+    { key: key('verify'), correlationId: selfCorrelation });
+  expectStatus(selfVerified, 500, 'verification by the member who entered the result');
+  assert.equal(selfVerified.sqlstate, '23514', 'the database guard refuses the verification');
+  assert.match(selfVerified.message, /^Result verifier must be independent/);
+  assert.deepEqual(await Promise.all([verificationsOf(), outboxOf(result.id, 'LabResultVerified'),
+    count("select count(*) from audit.events where correlation_id=$1 and action='lab.result.verify'", [selfCorrelation])]), [0, 0, 0]);
+  check('result verify by the member who entered the result: the database guard refuses it (23514, Result verifier must be independent), no verification, outbox or audit row is written; the API answers 500 because the service has no mapping for it (a known limit)');
+
+  // Two independent members, C and D, verify the same result version at once.
+  assert.equal(expectStatus(await send(`/results/${result.id}/verify`,
+    governBody('2026-10-02T12:00:00.000Z', 'Synthetic stale verification', result.currentVersion + 1), { token: 'token-c', key: key('verify') }),
+  412, 'verification of a version that is not current').code, 'VERSION_CONFLICT');
+  assert.equal(await verificationsOf(), 0);
+  const verifiers = [['token-c', f.c], ['token-d', f.d]].map(([token, member]) => ({ token, member, key: key('verify'),
+    body: governBody('2026-10-02T12:30:00.000Z', `Synthetic independent verification by ${token}`) }));
+  const verifications = await Promise.all(verifiers.map(({ token, key: verifyKey, body }) =>
+    send(`/results/${result.id}/verify`, body, { token, key: verifyKey })));
+  const outcome = JSON.stringify(verifications.map((response) => [response.status, response.body?.code, response.sqlstate]));
+  assert.deepEqual(verifications.map((response) => response.status).sort(), [201, 500], outcome);
+  const winner = verifiers[verifications.findIndex((response) => response.status === 201)];
+  const verified = verifications.find((response) => response.status === 201).body;
+  // The loser's insert meets unique(result_id,result_version); DatabaseService
+  // reruns it once and the second unique violation is not mapped to a 4xx.
+  assert.equal(verifications.find((response) => response.status === 500).sqlstate, '23505', outcome);
+  assert.deepEqual([verified.id, verified.status, verified.verificationStatus], [result.id, 'verified_not_released', 'verified']);
+  assert.deepEqual(await Promise.all([verificationsOf(),
+    count('select count(*) from lab.result_verifications where result_id=$1 and result_version=1 and verified_by=$2', [result.id, winner.member.account]),
+    outboxOf(result.id, 'LabResultVerified')]), [1, 1, 1]);
+  assert.equal(expectStatus(await send(`/results/${result.id}/verify`, winner.body, { token: winner.token, key: winner.key }), 201,
+    'verification replay').status, 'verified_not_released');
+  assert.equal(expectStatus(await send(`/results/${result.id}/verify`, { ...winner.body, reason: 'A different synthetic verification' },
+    { token: winner.token, key: winner.key }), 409, 'verification key reuse').code, 'IDEMPOTENCY_CONFLICT');
+  assert.equal(await verificationsOf(), 1);
+  check('result verify by independent members (FOR UPDATE on results): a version that is not current 412, nothing written; two concurrent verifications of version 1 by C and D: one 201 writes one verification and outbox row, the other is refused by unique(result_id,result_version) and the API answers 500 (23505, no mapping; a known limit); the winner\'s replay 201 and key reuse 409');
+
+  // Release the verified result (FOR UPDATE on lab.results).
+  const releaseKey = key('release');
+  const releaseBody = governBody('2026-10-02T13:00:00.000Z', 'Synthetic release attestation');
+  const release = (body) => send(`/results/${result.id}/release`, body, { token: 'token-c', key: releaseKey });
+  const released = sameResult(await together(4, () => release(releaseBody)), 'four concurrent identical releases');
+  assert.deepEqual([released.status, released.currentReleasedVersion, released.revisions[0].releaseStatus], ['released', 1, 'released']);
+  assert.deepEqual(await Promise.all([count('select count(*) from lab.result_releases where result_id=$1 and result_version=1 and released_by=$2',
+    [result.id, f.c.account]), outboxOf(result.id, 'LabResultReleased')]), [1, 1]);
+  assert.equal(expectStatus(await release(releaseBody), 201, 'release replay').status, 'released');
+  assert.equal(expectStatus(await release({ ...releaseBody, reason: 'A different synthetic release' }), 409, 'release key reuse').code,
+    'IDEMPOTENCY_CONFLICT');
+  assert.equal(await count('select count(*) from lab.result_releases where result_id=$1', [result.id]), 1);
+  check('result release (FOR UPDATE on results): four concurrent identical releases of the verified version release it once (one release and outbox row) and all return it released; replay 201; key reuse with a different body 409');
 
   // Import external Lab evidence, and Lab evidence published by OCR.
   const observations = [{ testName: 'Haemoglobin', value: '12.5', unit: 'g/dL', abnormalFlag: 'normal' }];
