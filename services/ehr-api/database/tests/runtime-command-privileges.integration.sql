@@ -50,6 +50,7 @@ begin
          'hid_notification_api_runtime', 'hid_notification_worker', 'hid_event_dispatcher')
        and class.relkind in ('r', 'p')
        and namespace.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+       and namespace.nspname !~ '^pg_(toast_)?temp_'
      order by 1, 2, 3
   loop
     foreach command in array array['select', 'insert', 'update', 'delete', 'lock'] loop
@@ -228,7 +229,11 @@ end $$;
 -- order inserts its acceptance event, which failed with 42703 because the
 -- requested-test check read new.ordinal on lab.work_item_events. Isolated: the
 -- work item is inserted in replica mode, and only this guard is enabled
--- (ENABLE ALWAYS TRIGGER) for the requested-test and event inserts.
+-- (ENABLE ALWAYS TRIGGER) for the requested-test and event inserts. The guard
+-- reads the work item as its owner, with no session here: an owner that does
+-- not bypass row-level security (the rehearsal's second run, release checklist
+-- P8) cannot see it, and must then refuse every case (23514); the run under the
+-- migration owner is the one that checks the accepted cases.
 set local session_replication_role = replica;
 insert into lab.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_order_id,
   source_ehr_order_version, source_encounter_id, priority, test_code_system, test_code, test_name,
@@ -244,6 +249,18 @@ alter table lab.work_item_events enable always trigger lab_work_item_event_valid
 alter table lab.work_item_requested_tests enable always trigger lab_work_item_test_validate;
 create temporary table lab_child_case (name text primary key, expected text not null, outcome text);
 grant all on lab_child_case to public;
+create temporary table lab_child_owner (sees boolean not null);
+grant all on lab_child_owner to public;
+do $$
+declare
+  owner_role name := (select proowner::regrole::name from pg_proc where oid = 'lab.validate_work_item_child()'::regprocedure);
+  visible boolean;
+begin
+  execute format('set local role %I', owner_role);
+  visible := exists (select 1 from lab.work_items where id = 'e8f90000-0000-4000-8000-000000000001');
+  reset role;
+  insert into lab_child_owner values (visible);
+end $$;
 insert into lab_child_case (name, expected) values
   ('acceptance event of the work item', 'ok'),
   ('event naming another patient', '23514'),
@@ -281,11 +298,19 @@ alter table lab.work_item_events enable trigger lab_work_item_event_validate;
 alter table lab.work_item_requested_tests enable trigger lab_work_item_test_validate;
 set local session_replication_role = origin;
 do $$
-declare failures text := (select string_agg(format('%s: expected %s, got %s', name, expected, coalesce(outcome, 'not run')),
-                            '; ' order by name)
-                            from lab_child_case where outcome is null or split_part(outcome, ':', 1) <> expected);
+declare
+  owner_sees boolean := (select sees from lab_child_owner);
+  failures text := (select string_agg(format('%s: expected %s, got %s', name,
+                       case when owner_sees then expected else '23514' end, coalesce(outcome, 'not run')), '; ' order by name)
+                      from lab_child_case
+                     where outcome is null
+                        or split_part(outcome, ':', 1) <> case when owner_sees then expected else '23514' end);
 begin
-  if failures is not null then raise exception 'Lab work-item child guard: %', failures; end if;
+  if failures is not null then
+    raise exception 'Lab work-item child guard (owner sees the work item: %): %', owner_sees, failures;
+  end if;
+  raise notice 'Lab work-item child guard: % cases passed (owner sees the work item: %)',
+    (select count(*) from lab_child_case), owner_sees;
 end $$;
 
 select 'runtime command privileges: ' || count(*) || ' probes passed' as result from runtime_command_probe;

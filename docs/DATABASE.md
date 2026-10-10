@@ -1685,7 +1685,10 @@ Checks:
   - Case 5 isolates `lab.validate_work_item_child` (replication mode plus
     `ENABLE ALWAYS TRIGGER`): the acceptance event and a matching requested
     test pass, mismatched snapshots and parents are refused. On 0077 it fails
-    with `42703`.
+    with `42703`. The guard reads the work item as its owner, with no session
+    in this case, so under the rehearsal's non-superuser owner (P8) it cannot
+    see it and must refuse every case; the run under the migration owner is
+    the one that checks the accepted cases.
 - Runtime HTTP verifiers, run by the rehearsal one at a time on disposable
   copies of its database, each with the service's real `AppModule` and every
   database connection starting as the runtime role (libpq `options=-c
