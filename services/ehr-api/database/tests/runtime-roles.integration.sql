@@ -286,6 +286,17 @@ begin
      ) then
     raise exception 'MFA account lock helper privileges are inconsistent';
   end if;
+  -- Self-NIN identifiers are written only by identity.bind_my_verified_nin, a
+  -- definer owned by the table owner, which bypasses row-level security on
+  -- this table. No policy may let another role insert one directly (0078).
+  if exists (
+       select 1 from pg_policy policy_row
+       where policy_row.polrelid = 'identity.patient_identifiers'::regclass
+         and policy_row.polcmd in ('a', '*')
+         and pg_get_expr(policy_row.polwithcheck, policy_row.polrelid) like '%hid-patient-self-qoreid-verification%'
+     ) or (select relforcerowsecurity from pg_class where oid = 'identity.patient_identifiers'::regclass) then
+    raise exception 'a policy lets a role other than the binding function insert a self-NIN identifier';
+  end if;
   -- RLS policies and invoker-rights trigger functions run with the querying
   -- role's rights. platform.current_account_id() is an invoker SQL function
   -- that calls auth.account_id_for_subject(text), which is revoked from PUBLIC.

@@ -8,6 +8,35 @@ export interface TransactionOptions {
   isolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
 }
 
+export const SERIALIZABLE_ATTEMPTS = 12;
+
+/**
+ * The pause before attempt `attempt + 1`: a random time within a window that
+ * doubles from 20 ms up to 1000 ms. PostgreSQL tracks SERIALIZABLE reads by
+ * index page, so on small tables requests for different rows also cancel each
+ * other, and of a group that overlapped only one commits; spreading the
+ * retries apart lets the others commit in turn.
+ */
+export function retryDelayMs(attempt: number, random: () => number = Math.random): number {
+  return Math.floor(random() * Math.min(1000, 20 * 2 ** (attempt - 1)));
+}
+
+/**
+ * Conflicts PostgreSQL resolves by cancelling one SERIALIZABLE transaction: a
+ * serialization failure (40001), a deadlock (40P01), and a unique violation
+ * (23505), which is how two transactions that each looked for a key and then
+ * inserted it can surface (PostgreSQL manual, "Serialization Failure
+ * Handling"). Domain problems carry their own non-SQLSTATE codes.
+ */
+export function isRetryableConflict(error: unknown): boolean {
+  const code = sqlState(error);
+  return code === '40001' || code === '40P01' || code === '23505';
+}
+
+function sqlState(error: unknown): unknown {
+  return typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+}
+
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
   private readonly pool: Pool;
@@ -34,8 +63,38 @@ export class DatabaseService implements OnApplicationShutdown {
     return this.pool.query<Row>(text, [...values]);
   }
 
+  /**
+   * Runs the operation in one transaction. A SERIALIZABLE transaction that
+   * PostgreSQL cancels to keep concurrent requests serializable is run again
+   * from the start, up to twelve attempts in all: the retry sees the committed
+   * winner, so a duplicate registration replays it and a registration that
+   * waited for a campaign status change re-reads the campaign, instead of
+   * failing with a 5xx (Phase 4 Stage 9).
+   */
   async withTransaction<Result>(context: DataAccessContext,
     operation: (client: PoolClient) => Promise<Result>, options: TransactionOptions = {}): Promise<Result> {
+    const attempts = options.isolationLevel === 'SERIALIZABLE' ? SERIALIZABLE_ATTEMPTS : 1;
+    let uniqueViolations = 0;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.transaction(context, operation, options);
+      } catch (error) {
+        if (attempt >= attempts || !isRetryableConflict(error)) throw error;
+        // A unique violation means the conflicting row has committed, so the
+        // next attempt sees it and replays it; a second one is a conflict.
+        if (sqlState(error) === '23505' && (uniqueViolations += 1) > 1) throw error;
+        await this.pauseBeforeRetry(attempt);
+      }
+    }
+  }
+
+  /** Waits before the next attempt of a cancelled SERIALIZABLE transaction. */
+  protected async pauseBeforeRetry(attempt: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+  }
+
+  private async transaction<Result>(context: DataAccessContext,
+    operation: (client: PoolClient) => Promise<Result>, options: TransactionOptions): Promise<Result> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');

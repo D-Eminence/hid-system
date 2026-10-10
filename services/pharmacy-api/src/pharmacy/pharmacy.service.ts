@@ -55,6 +55,15 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
 const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
   from pharmacy.dispensings d left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id`;
 
+// Work items, dispensings, reversals and imports are insert-only: a trigger
+// refuses every UPDATE and DELETE (0023), and the runtime role has no UPDATE
+// on them, so it cannot lock them (42501). The commands take no row locks.
+// Unique constraints allow one work item per prescription, one dispensing per
+// work item, one reversal per dispensing, one import per publication and one
+// row per idempotency key; the SERIALIZABLE transaction cancels the loser of a
+// race (40001 or 23505), and DatabaseService runs it again, when it replays
+// the winner or refuses the request (Phase 4 Stage 9).
+
 @Injectable()
 export class PharmacyService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
@@ -74,7 +83,7 @@ export class PharmacyService {
     return this.database.withTransaction(context, async (client) => {
       const existing = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT}
         where (w.facility_id=$1 and w.accepted_by=$2 and w.idempotency_key=$3)
-          or w.source_ehr_prescription_id=$4 for update of w`,
+          or w.source_ehr_prescription_id=$4`,
       [context.facilityId, context.actor.accountId, key, input.sourceEhrPrescriptionId])).rows[0];
       if (existing) {
         if (existing.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
@@ -141,7 +150,7 @@ export class PharmacyService {
 
   async dispense(context: DataAccessContext, workItemId: string, input: CreateDispensingDto, key: string) {
     return this.database.withTransaction(context, async (client) => {
-      const work = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1 for update of w`,
+      const work = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1`,
         [workItemId])).rows[0];
       if (!work) throw new DomainProblem(404, 'PHARMACY_WORK_ITEM_NOT_FOUND',
         'Pharmacy work item was not found');
@@ -150,8 +159,8 @@ export class PharmacyService {
         'PHARMACY_WORK_ITEM_VERSION_CONFLICT', 'Dispensing must bind to the exact accepted work-item version');
       const digest = requestDigest('pharmacy.dispensing.create', { workItemId, ...input });
       const existing = (await client.query<DispensingRow>(`${DISPENSING_SELECT}
-        where (d.facility_id=$1 and d.dispensed_by=$2 and d.idempotency_key=$3) or d.work_item_id=$4
-        for update of d`, [context.facilityId, context.actor.accountId, key, workItemId])).rows[0];
+        where (d.facility_id=$1 and d.dispensed_by=$2 and d.idempotency_key=$3) or d.work_item_id=$4`,
+      [context.facilityId, context.actor.accountId, key, workItemId])).rows[0];
       if (existing) {
         if (existing.request_sha256 === digest) return this.projectDispensing(existing);
         throw new DomainProblem(409, 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED',
@@ -194,7 +203,7 @@ export class PharmacyService {
   async reverse(context: DataAccessContext, dispensingId: string, input: ReverseDispensingDto, key: string) {
     return this.database.withTransaction(context, async (client) => {
       const dispensing = (await client.query<DispensingRow>(`${DISPENSING_SELECT}
-        where d.id=$1 for update of d`, [dispensingId])).rows[0];
+        where d.id=$1`, [dispensingId])).rows[0];
       if (!dispensing) throw new DomainProblem(404, 'PHARMACY_DISPENSING_NOT_FOUND',
         'Dispensing was not found');
       await this.authorize(dispensing.patient_id, context, 'write_records');
@@ -202,7 +211,7 @@ export class PharmacyService {
         'PHARMACY_DISPENSING_VERSION_CONFLICT', 'Reversal must bind to the exact dispensing version');
       const digest = requestDigest('pharmacy.dispensing.reverse', { dispensingId, ...input });
       const existing = (await client.query<ReversalRow>(`select * from pharmacy.dispensing_reversals
-        where (facility_id=$1 and reversed_by=$2 and idempotency_key=$3) or dispensing_id=$4 for update`,
+        where (facility_id=$1 and reversed_by=$2 and idempotency_key=$3) or dispensing_id=$4`,
       [context.facilityId, context.actor.accountId, key, dispensingId])).rows[0];
       if (existing) {
         if (existing.request_sha256 === digest) return this.projectReversal(existing);
@@ -234,7 +243,7 @@ export class PharmacyService {
     const digest = requestDigest('pharmacy.imported-medication-evidence.create', input);
     return this.database.withTransaction(context, async (client) => {
       const existing = (await client.query<ImportRow>(`select * from pharmacy.imported_medication_evidence
-        where (facility_id=$1 and created_by=$2 and idempotency_key=$3) or publication_id=$4 for update`,
+        where (facility_id=$1 and created_by=$2 and idempotency_key=$3) or publication_id=$4`,
       [context.facilityId, context.actor.accountId, key, input.publicationId])).rows[0];
       if (existing) {
         if (existing.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',

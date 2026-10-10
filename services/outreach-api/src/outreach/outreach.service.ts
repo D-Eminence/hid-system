@@ -29,10 +29,10 @@ export class OutreachService {
     const normalized = { ...input, fullName: input.fullName.trim(),
       phone: input.phone?.trim() || null, operationalNotes: input.operationalNotes?.trim() || null };
     const digest = requestDigest('outreach.registration-case.create', normalized);
-    return this.database.withTransaction(context, async (client) => {
-      const replay = await this.replay(client, context, 'registration_case_create', idempotencyKey, digest);
-      if (replay) return replay;
-      try {
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const replay = await this.replay(client, context, 'registration_case_create', idempotencyKey, digest);
+        if (replay) return replay;
         if (normalized.campaignId) await this.assertCampaignAcceptsRegistration(client, normalized.campaignId, context);
         const inserted = await client.query<RegistrationRow>(`insert into outreach.registration_cases (
           facility_id,created_by_account_id,created_by_membership_id,local_command_id,
@@ -57,12 +57,14 @@ export class OutreachService {
             campaignId: row.campaign_id, status: 'identity_resolution_pending' });
         await this.audit.recordWithClient(client, context, 'outreach.registration-case.received', row.id);
         return registrationCase(row);
-      } catch (error) {
-        this.translateConflict(error, 'OUTREACH_REGISTRATION_CONFLICT',
-          'This local Outreach registration was already received');
-        throw error;
-      }
-    }, { isolationLevel: 'SERIALIZABLE' });
+      }, { isolationLevel: 'SERIALIZABLE' });
+    } catch (error) {
+      // Outside the transaction: a duplicate of a concurrent identical request
+      // is retried and replayed; only a conflict that remains is a 409.
+      this.translateConflict(error, 'OUTREACH_REGISTRATION_CONFLICT',
+        'This local Outreach registration was already received');
+      throw error;
+    }
   }
 
   async list(context: DataAccessContext): Promise<readonly OutreachRegistrationCase[]> {
@@ -260,6 +262,19 @@ export class OutreachService {
     return this.find(client, replay.registration_case_id);
   }
 
+  /**
+   * Requires the actor's membership in an active registration campaign, and
+   * share-locks the campaign until the registration commits: a status change
+   * locks it FOR UPDATE, so it waits for the registration, or the registration
+   * for it. The membership row is read, not locked. The runtime role cannot
+   * lock campaign_members (no UPDATE, 42501), and no API command changes or
+   * deletes a membership; a membership deleted after this check is caught by
+   * the registration trigger, which locks the campaign and the membership as
+   * its owner (Phase 4 Stage 9). The campaign lock needs the campaign UPDATE
+   * policy, so it relies on every role with outreach.registration.write also
+   * holding outreach.campaign.write (runtime-command-privileges.integration.sql
+   * checks this); without it the lock returns no row and the request is refused.
+   */
   private async assertCampaignAcceptsRegistration(client: PoolClient, campaignId: string,
     context: DataAccessContext): Promise<void> {
     const result = await client.query<{ status: string; services: string[];
@@ -267,7 +282,7 @@ export class OutreachService {
         campaign.starts_at,campaign.ends_at from outreach.campaigns campaign
         join outreach.campaign_members member on member.campaign_id=campaign.id
           and member.facility_id=campaign.facility_id and member.membership_id=$3
-        where campaign.id=$1 and campaign.facility_id=$2 for share of campaign,member`,
+        where campaign.id=$1 and campaign.facility_id=$2 for share of campaign`,
     [campaignId, context.facilityId, context.membershipId]);
     const campaign = result.rows[0];
     if (!campaign) throw new DomainProblem(403, 'OUTREACH_CAMPAIGN_ACCESS_DENIED',

@@ -1582,3 +1582,167 @@ Tests (rollback-only, synthetic fixtures):
   their parent rows are hidden from them; so for the OCR lease, OCR job
   source and those Pharmacy guards, the rehearsal's first run, under the
   migration owner, is the one that detects a regression.
+
+## Runtime command repairs and row locks (0078, Phase 4 Stage 9)
+
+The runtime roles could not run several of their own commands (release
+checklist §4.2). `SELECT ... FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE` and
+`FOR KEY SHARE` need `UPDATE` on each locked table, checked when the statement
+starts, and under row-level security the table's `UPDATE` policies also filter
+the locked rows. The Pharmacy, Lab, OCR and Outreach APIs locked insert-only
+rows their runtime roles cannot update (`42501` before any row is read), and
+Identity locked the nullable side of an outer join (`0A000` for every role).
+Stage 9 changes the services to lock only rows their role may update (ADR-042)
+and repairs, in
+`0078_runtime_command_repairs.sql`, two defects hidden behind those locks:
+
+- **Self-NIN identifier policy.** `patient_identifiers_self_nin_insert` (0058)
+  has no `TO` clause, so it applies to every role, and its `WITH CHECK` read
+  `identity.verification_evidence`. PostgreSQL combines permissive policies
+  with `OR` but checks, as the querying role, the privileges on everything
+  every applicable policy reads before evaluating any of them. The Identity
+  runtime has no `SELECT` on `verification_evidence`, so every Identity
+  runtime insert into `identity.patient_identifiers` failed with `42501`,
+  including the governed NIN registration review, which another policy
+  allows. 0078 drops the policy. The only writer of self-NIN identifiers is
+  `identity.bind_my_verified_nin`, a `SECURITY DEFINER` function owned by the
+  table's owner, and `identity.patient_identifiers` does not force row-level
+  security, so that function never used the policy. The policy only let
+  another role insert a self-NIN identifier directly, without the binding
+  function's checks (the patient's own session, crosswalk ownership, manual
+  review, single-NIN eligibility, the per-NIN lock); repairing its privileges
+  (a first version of 0078 did, through a definer predicate) would have given
+  that to the Identity runtime, and granting `SELECT` on
+  `verification_evidence` would also have exposed every patient's evidence.
+  `runtime-roles.integration.sql` requires that no insert policy names the
+  self-NIN source and that the table does not force row-level security.
+- **Lab work-item child guard.** `lab.validate_work_item_child` (0018) guards
+  `lab.work_item_requested_tests` and `lab.work_item_events`. Its
+  requested-test check read `NEW.ordinal`, `NEW.code` and other snapshot
+  columns in the same `IF` condition as the table-name test. PL/pgSQL resolves
+  a condition's record fields before `AND` short-circuits, so on
+  `lab.work_item_events`, which has no `ordinal`, it failed with `42703 record
+  "new" has no field "ordinal"`, and every Lab acceptance of an EHR order
+  failed at its acceptance event. 0078 reaches the check only for
+  `lab.work_item_requested_tests`; the checks are unchanged and compare with
+  `IS DISTINCT FROM` (ADR-040; the same as `<>` here, as every compared column
+  is `NOT NULL`). Signature, owner, ACL, `SECURITY DEFINER`, `search_path`,
+  volatility, error code and messages are kept.
+
+Dropping the policy takes an `ACCESS EXCLUSIVE` lock on
+`identity.patient_identifiers` for the catalog change only; nothing is scanned
+or rewritten. 0078 needs no grant change, but the Stage 9 role assertions
+(`runtime-roles.integration.sql`, run by `db:bootstrap` and `db:verify-roles`)
+require the self-NIN policy to be gone, so run them after 0078.
+
+Service changes that the database relies on:
+
+- Pharmacy, Lab and OCR no longer lock their insert-only evidence (work items,
+  dispensings, reversals, imported evidence, accessions, OCR validations and
+  confirmations). Their append-only triggers refuse every update and delete,
+  and unique keys decide concurrent writes. OCR keeps the job row lock
+  (`FOR UPDATE` on `ocr.jobs`) as the first lock of retry, validation,
+  confirmation and publication requests; the publish and failure transactions
+  of a publication take the job's `FOR KEY SHARE` (the lock their outbox
+  insert's foreign key takes) before the publication row, so every OCR
+  transaction reaches the job before the publication. A publication replay
+  reads its row without a lock, on a snapshot that can predate a failure that
+  committed while it waited for the job, so the publication claim itself
+  refuses a terminal failure.
+- Outreach locks `FOR SHARE OF campaign` for a campaign-linked registration,
+  not the membership row. The campaign `UPDATE` policy then applies, so a role
+  with `outreach.registration.write` needs `outreach.campaign.write` too.
+- Identity's NIN registration review locks the registration case alone, then
+  reads it with its patient.
+- The Pharmacy, Lab, OCR and Outreach `DatabaseService` run a `SERIALIZABLE`
+  transaction again, up to twelve attempts in all, on `40001`, `40P01` and
+  `23505` (a unique violation once only: the next attempt sees the committed
+  row and replays it, and a second one is a real conflict), after a random
+  pause within a window that doubles from 20 ms to 1 s. `SERIALIZABLE` tracks
+  reads by index page, so on small tables
+  concurrent requests for different rows also cancel each other; the pauses
+  let them commit one after another.
+
+Checks:
+
+- `scripts/verify-runtime-locking-privileges.mjs` (`npm run verify`) finds every
+  lock clause in the service source, including clauses built from constants,
+  ternaries and helper flags. It reads each literal as the string JavaScript
+  makes of it (escape sequences decoded) and each statement as PostgreSQL
+  reads it (comments as whitespace, text in SQL strings not a lock). Lock text
+  it cannot place fails the check: a fragment counts only inside an
+  interpolation a locking statement resolved (the branches of a ternary, not
+  its condition), or bound to a constant, not exported, used only as such
+  interpolations; an unresolved lock strength (`for ${...}`), an
+  interpolation after the lock clause (`of s${more}`), a statement with more
+  than 64 variants or with no lock clause the analysis can read, and a name
+  that occurs anywhere in the file other than in its literal declaration or
+  as a whole interpolation (a parameter, a destructuring, a loop variable, an
+  assignment) are refused, not guessed. It resolves the locked tables (`OF`
+  aliases, outer joins) and replays the migrations and `runtime-grants.sql`
+  to model each runtime role's effective privileges, following only
+  memberships that pass on privileges (the `INHERIT` attribute as it is when
+  each grant is made, `WITH INHERIT`, `REVOKE INHERIT OPTION`, `CREATE ROLE
+  ... IN ROLE`), row-level security and `UPDATE` policies. It fails on a lock
+  the role cannot take, and on the locks PostgreSQL refuses for every role
+  (`0A000`): the nullable side of an outer join, `DISTINCT`, `GROUP BY`,
+  `HAVING`, aggregates, window functions, set-returning functions in the
+  select list and set operations. It does not follow SQL assembled by string
+  operations outside literals: a keyword split across a concatenation
+  (`'fo' + 'r update'`) or a `.replace()` on an assembled statement; the
+  runtime command suite and the runtime verifiers, which run the commands as
+  their roles, are the check for those. On `main` before Stage 9 it reports
+  14 of 43 clauses, exactly the §4.2 statements; now 0 of 31. The rehearsal
+  also runs it with `--catalog`, comparing the replayed model with the
+  migrated catalogue (146 tables, no difference). CI runs it, its tests and
+  the rehearsal in the workspace gates job of `tuf-local-gates.yml`
+  (`release/scripts/run-workspace-gates.mjs`).
+- `runtime-command-privileges.integration.sql` (rollback-only):
+  - Case 1 plans (`EXPLAIN`, which performs the start-of-statement privilege
+    checks) a no-op select, insert, update, delete and row lock as each of ten
+    runtime roles on every table where it holds the privilege (239 probes) and
+    fails on any refusal. On 0077 it fails with the Identity identifier insert
+    (`42501 permission denied for table verification_evidence`).
+  - Case 2 runs one representative lock statement per role whose locks Stage 9
+    kept, changed or added (the Identity registration case, the OCR job
+    `FOR UPDATE` and key share, the Outreach `FOR SHARE OF campaign`, a Lab
+    specimen), as their runtime roles; the static check covers every clause,
+    and the runtime verifiers run the commands.
+  - Case 3 requires the eleven tables whose locks were dropped (nine
+    insert-only tables, `outreach.campaign_members` and `identity.patients`)
+    to stay unlockable for their runtime roles (`42501`): Stage 9 granted no
+    `UPDATE`.
+  - Case 4 requires every role with `outreach.registration.write` to hold
+    `outreach.campaign.write`.
+  - Case 5 isolates `lab.validate_work_item_child` (replication mode plus
+    `ENABLE ALWAYS TRIGGER`): the acceptance event and a matching requested
+    test pass, mismatched snapshots and parents are refused. On 0077 it fails
+    with `42703`. The guard reads the work item as its owner, with no session
+    in this case, so under the rehearsal's non-superuser owner (P8) it cannot
+    see it and must refuse every case; the run under the migration owner is
+    the one that checks the accepted cases.
+  - Case 6 requires the Identity runtime to be refused (`42501`, row-level
+    security) when it inserts a self-NIN identifier directly, even for a
+    verified QoreID evidence row of the same patient. It fails on the first
+    version of 0078.
+- Runtime HTTP verifiers, run by the rehearsal one at a time on disposable
+  copies of its database, with every database connection starting as the
+  runtime role (libpq `options=-c role=...`) and the other HID services
+  replaced by local fakes:
+  `services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs`,
+  `services/lab-api/scripts/verify-lab-runtime.mjs`,
+  `services/ocr-api/scripts/verify-ocr-runtime.mjs` and
+  `services/outreach-api/scripts/verify-outreach-runtime.mjs` run the
+  service's real `AppModule` through `scripts/service-runtime-harness.mjs`;
+  `services/identity-api/scripts/verify-registration-review-runtime.mjs`
+  composes the authentication and NIN registration controllers with their
+  real providers, the global security guard and audit interceptor, and the
+  test NIN verification provider; the OTP notification client and Google
+  sign-in are stubbed. They cover authorized success,
+  denials (permission, facility, Identity decision), concurrent identical and
+  conflicting requests, replays and key reuse, stale versions, and rollback
+  after a failure injected late in the transaction. The OCR verifier races a
+  held job or publication row against the publication transactions and probes
+  the other row below the deadlock timeout. Each verifier ends by requiring
+  `pg_stat_database` to report no deadlock for its database, read after the
+  service's connections closed, so a deadlock the retry hid still fails it.

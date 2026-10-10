@@ -1837,3 +1837,107 @@ Alternatives considered:
   privileges with the guards'. It is simpler, but it is not least privilege.
 
 Related: ADR-028, ADR-039, ADR-040; release checklist P8 and §4.1.
+
+# ADR-042: Services Lock Only Rows Their Runtime Role May Update; SERIALIZABLE Transactions Retry
+
+Status: Accepted (Phase 4 Stage 9).
+
+Date: 2026-10-10
+
+Context:
+
+`SELECT ... FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE` and `FOR KEY SHARE`
+need `UPDATE` privilege on every locked table, checked when the statement
+starts, and under row-level security the table's `UPDATE` policies also
+filter the locked rows. The Pharmacy, Lab, OCR and Outreach APIs locked rows
+their runtime roles may only insert (work items, dispensings, reversals,
+imported evidence, accessions, OCR validations and confirmations, Outreach
+campaign memberships), and Identity locked the nullable side of an outer join,
+which PostgreSQL refuses for every role. Each of those commands failed with a
+`5xx` since the baseline (release checklist §4.2). Granting `UPDATE` would make
+append-only evidence updatable by the runtimes; a column grant without an
+`UPDATE` policy makes the lock silently match no row, which turns a replay
+into a duplicate insert and a dispense into `404`.
+
+Most of those locks protected nothing. A row lock cannot lock a row that a
+concurrent request has inserted but not committed, so it never serialized two
+first requests, and an insert-only row cannot change once visible. The unique
+constraints on target and idempotency key, and `SERIALIZABLE`, already decide
+those races, but the loser received `40001` or `23505` as a `500`.
+
+Decision:
+
+1. **Lock only rows the runtime role may update, and only mutable rows.** A
+   service locks a row only when another transaction may change it under the
+   command (a job's status, a registration case's resolution, a campaign's
+   status), and only on a table whose runtime role has `UPDATE` and an
+   `UPDATE` policy. Insert-only rows are not locked; their unique constraints
+   and the transaction isolation decide concurrent writes. Locks name the
+   mutable table with `FOR ... OF` when a statement joins others, and never
+   lock the nullable side of an outer join: lock the row alone, then read the
+   projection in a second statement.
+2. **One serialization point per aggregate, taken first.** OCR commands of a
+   job lock the job row first. A transaction that will insert a row referencing
+   the job (its outbox event), while holding another row of that job, takes
+   the job's `FOR KEY SHARE` before that row, so every OCR transaction reaches
+   the job before the publication. A request that waited for the job keeps
+   its older snapshot when the transaction it waited for changed no job row,
+   so a decision read without a lock is enforced again where the write
+   happens: the publication claim refuses a terminal failure.
+3. **`SERIALIZABLE` transactions retry.** The Pharmacy, Lab, OCR and Outreach
+   `DatabaseService` run a `SERIALIZABLE` transaction again from the start,
+   up to twelve attempts in all, when PostgreSQL cancels it with `40001` or
+   `40P01` (which the PostgreSQL manual recommends retrying) or with `23505`
+   (which it says may be worth retrying but can be persistent), after a
+   random pause within a window that
+   doubles from 20 ms up to 1 s; a unique violation only once, because it
+   means the conflicting row has committed and the next attempt sees it. The
+   retried transaction sees the winner and answers its replay, `409` or `412`.
+   A service maps a remaining conflict to `409` outside the transaction, after
+   the retries, except two real conflicts that no retry resolves, mapped
+   inside it: the OCR confirmation outbox key (an identical-key race meets the
+   confirmation's own unique keys first, which are retried) and an existing
+   Outreach campaign member. Other isolation levels and other errors
+   run once. `SERIALIZABLE` tracks reads by index page, so on small tables
+   requests for different rows also cancel each other and only one of an
+   overlapping group commits; a short fixed retry (three attempts 5–15 ms
+   apart) still failed eight concurrent dispenses, and the budget was sized by
+   measurement. Work inside a retried transaction must be safe to repeat:
+   today it is reads, the database writes of the same transaction, and
+   Identity or EHR calls that change no clinical data but are audited once per
+   attempt: Identity records each authorization check, Lab records its own
+   authorization audit outside the transaction, and each OCR attempt reads the
+   source document from the EHR, which records a patient-linked
+   `ehr.document.ocr-source.read` event and its own Identity check. Moving
+   those calls before the transaction is the follow-up.
+4. **Checked in CI** (the workspace gates job of `tuf-local-gates.yml`, through
+   `release/scripts/run-workspace-gates.mjs`: `npm run verify`, `npm test` and
+   the synthetic rehearsal). `scripts/verify-runtime-locking-privileges.mjs`
+   compares every lock clause in the service source with the runtime role's
+   privileges and policies replayed from the migrations and grants, and
+   refuses lock text it cannot place in a statement;
+   `runtime-command-privileges.integration.sql` plans (`EXPLAIN`) every command
+   each runtime role holds a privilege for, as that role, and runs one
+   representative lock statement per role whose locks Stage 9 kept or changed;
+   the
+   runtime verifiers run the affected commands over HTTP as their roles and
+   fail on any deadlock.
+
+Consequences:
+
+- No `UPDATE` privilege or policy was added. The Outreach campaign lock applies
+  the campaign `UPDATE` policy, so campaign-linked registration requires
+  `outreach.campaign.write` as well as `outreach.registration.write`; the
+  runtime command suite checks that every role with the first holds the
+  second.
+- A conflict that a retry cannot resolve (a row hidden by row-level security
+  in another facility, two members verifying one Lab result version) still
+  answers `500`, after one retry; mapping those constraints to `409` is a
+  follow-up.
+- Removing a lock made reachable code that had always failed before it. 0078
+  fixed two defects behind the locks: it drops the self-NIN identifier insert
+  policy, whose sub-select the Identity runtime cannot read and which no
+  legitimate writer uses (repairing its privileges would have let the Identity
+  runtime insert self-NIN identifiers without `bind_my_verified_nin`), and it
+  repairs the Lab work-item child guard. One lock-order cycle between OCR
+  publication requests and publication completion was fixed by decision 2.
