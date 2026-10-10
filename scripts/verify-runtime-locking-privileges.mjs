@@ -38,6 +38,9 @@ export const SERVICE_ROLES = Object.freeze({
 
 const LOCK = /\bfor\s+(no\s+key\s+update|update|key\s+share|share)\b/gi;
 const LOCK_TEST = /\bfor\s+(?:no\s+key\s+update|update|key\s+share|share)\b/i;
+// A lock clause whose strength is an interpolation this check cannot resolve.
+const LOCK_HOLE = /\bfor\s+(?:no\s+key\s+)?«/i;
+const SQL_TEXT = /\b(?:select|from|where|join)\b/i;
 const MAX_VARIANTS = 64;
 
 // ---------------------------------------------------------------------------
@@ -45,12 +48,14 @@ const MAX_VARIANTS = 64;
 
 /**
  * Returns the string and template literals of a TypeScript source, including
- * templates nested in ${...} expressions. Comments are skipped. Throws when the
- * source ends inside a literal, so a scanner mistake fails the check instead of
- * hiding statements.
+ * templates nested in ${...} expressions, with the offsets of each template
+ * expression. Comments are skipped; their ranges are in the result's
+ * `comments`. Throws when the source ends inside a literal, so a scanner
+ * mistake fails the check instead of hiding statements.
  */
 export function scanLiterals(source) {
   const literals = [];
+  const comments = [];
   let index = 0;
   const fail = (message) => { throw new Error(`${message} at offset ${index}`); };
   const quoted = (quote) => {
@@ -70,6 +75,7 @@ export function scanLiterals(source) {
     const start = index++;
     const quasis = [];
     const expressions = [];
+    const expressionSpans = [];
     let quasiStart = index;
     while (index < source.length && source[index] !== '`') {
       if (source[index] === '\\') { index += 2; continue; }
@@ -79,6 +85,7 @@ export function scanLiterals(source) {
         const expressionStart = index;
         code('}');
         expressions.push(source.slice(expressionStart, index).trim());
+        expressionSpans.push({ start: expressionStart, end: index });
         index++;
         quasiStart = index;
         continue;
@@ -88,7 +95,7 @@ export function scanLiterals(source) {
     if (index >= source.length) fail('Unterminated template literal');
     quasis.push(source.slice(quasiStart, index));
     index++;
-    const literal = { kind: 'template', start, end: index, quasis, expressions };
+    const literal = { kind: 'template', start, end: index, quasis, expressions, expressionSpans };
     literals.push(literal);
     return literal;
   };
@@ -123,10 +130,12 @@ export function scanLiterals(source) {
       const char = source[index];
       if (char === '/' && source[index + 1] === '/') {
         const end = source.indexOf('\n', index);
+        comments.push({ start: index, end: end < 0 ? source.length : end });
         index = end < 0 ? source.length : end;
       } else if (char === '/' && source[index + 1] === '*') {
         const end = source.indexOf('*/', index + 2);
         if (end < 0) fail('Unterminated comment');
+        comments.push({ start: index, end: end + 2 });
         index = end + 2;
       } else if (char === '/' && regexAllowed(index)) {
         regex();
@@ -146,109 +155,208 @@ export function scanLiterals(source) {
     if (closing) fail('Unterminated template expression');
   };
   code(null);
-  return literals.sort((left, right) => left.start - right.start);
+  literals.sort((left, right) => left.start - right.start);
+  literals.comments = comments;
+  return literals;
 }
 
 const lineOf = (source, offset) => source.slice(0, offset).split('\n').length;
 
-/** A literal's possible string values; empty when an expression is not a literal (left as a placeholder). */
+/** The source with comments, string contents and template text blanked; template expressions stay. */
+function codeOnly(source, literals) {
+  const blank = new Uint8Array(source.length);
+  for (const { start, end } of literals.comments) blank.fill(1, start, end);
+  for (const literal of literals) {
+    let from = literal.start;
+    for (const span of literal.expressionSpans ?? []) { blank.fill(1, from, span.start); from = span.end; }
+    blank.fill(1, from, literal.end);
+  }
+  let out = '';
+  for (let index = 0; index < source.length; index++) out += blank[index] && source[index] !== '\n' ? ' ' : source[index];
+  return out;
+}
+
+/**
+ * Names an interpolation cannot be resolved from a literal binding, because
+ * the same name is also something else somewhere in the file: a parameter, a
+ * destructured or non-literal declaration, or a variable assigned again. The
+ * bindings are collected by name, not by scope, so such a name could stand for
+ * another value at the interpolation (Phase 4 Stage 9 review).
+ */
+function ambiguousNames(code, bindings) {
+  const names = new Set();
+  const identifiers = (list) => list.split(',').map((part) => /^\s*(?:(?:public|private|protected|readonly)\s+)*(?:\.\.\.)?\s*([A-Za-z_$][\w$]*)/
+    .exec(part)?.[1]).filter(Boolean);
+  // Parameter lists: a parenthesised list followed by an arrow or a body, not a control statement.
+  for (const match of code.matchAll(/(\b[A-Za-z_$][\w$]*\s*)?\(([^()]*(?:\([^()]*\)[^()]*)*)\)\s*(?::\s*[^=;{}()]+?)?\s*(?:=>|\{)/g)) {
+    if (/^(?:if|for|while|switch|catch|with|return)\s*$/.test(match[1] ?? '')) continue;
+    for (const name of identifiers(match[2])) names.add(name);
+  }
+  for (const match of code.matchAll(/([A-Za-z_$][\w$]*)\s*=>/g)) names.add(match[1]);
+  for (const match of code.matchAll(/\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g)) names.add(match[1]);
+  // Destructuring declarations.
+  for (const match of code.matchAll(/\b(?:const|let|var)\s*[{[]([^=;]*)[}\]]\s*(?::[^=;]+)?=/g)) {
+    for (const name of match[1].matchAll(/[A-Za-z_$][\w$]*/g)) names.add(name[0]);
+  }
+  // Declarations that are not literal bindings, and assignments after the declaration.
+  const declared = new Map();
+  for (const match of code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) declared.set(match[1], (declared.get(match[1]) ?? 0) + 1);
+  for (const [name, count] of declared) if (count > (bindings.get(name)?.length ?? 0)) names.add(name);
+  for (const match of code.matchAll(/(?<![\w$.]|\b(?:const|let|var)\s+)([A-Za-z_$][\w$]*)\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|\?\?|&&|\|\|)?=(?![=>])/g)) {
+    names.add(match[1]);
+  }
+  return names;
+}
+
+/** A literal's possible string values; null when the expression is not a plain literal. */
 function stringValues(expression) {
   const literal = /^(['"`])((?:(?!\1)[^\\]|\\.)*)\1$/s.exec(expression.trim());
   if (literal && !(literal[1] === '`' && literal[2].includes('${'))) return [literal[2]];
   return null;
 }
 
+// A visible placeholder: never a schema-qualified table, never a keyword, so an
+// unresolved table name in a locked FROM list or an unresolved lock strength is refused.
+const placeholder = (text) => `«${text.trim().replace(/[^\w.$]+/g, '_')}»`;
+
 /**
- * The values an interpolated expression can take: a module or local constant
- * bound to a literal (or to a ternary of literals), or a ternary of literals.
- * Anything else becomes a placeholder that never names a table.
+ * The values an interpolated expression can take: a literal, a ternary of
+ * literals, or a name bound to them (see literalBindings). Anything else
+ * becomes a placeholder. `trace` collects what the values came from: the
+ * expression spans resolved from literals and the names resolved by binding.
  */
-function expressionValues(expression, bindings, depth) {
+function expressionValues(expression, span, context, depth, trace) {
   const text = expression.trim();
   const literal = stringValues(text);
-  if (literal) return literal;
+  if (literal) { if (span) trace.resolved.push(span); return literal; }
   const ternary = /^[^?]+\?\s*((['"`])(?:(?!\2)[^\\]|\\.)*\2)\s*:\s*((['"`])(?:(?!\4)[^\\]|\\.)*\4)\s*$/s.exec(text);
-  if (ternary) return [...(stringValues(ternary[1]) ?? []), ...(stringValues(ternary[3]) ?? [])];
-  if (/^[A-Za-z_$][\w$]*$/.test(text) && bindings.has(text) && depth < 8) {
-    return bindings.get(text).flatMap((value) => value(depth + 1));
+  if (ternary) {
+    const branches = [stringValues(ternary[1]), stringValues(ternary[3])];
+    if (span && branches.every(Boolean)) trace.resolved.push(span);
+    return branches.flatMap((values, index) => values ?? [placeholder(index ? ternary[3] : ternary[1])]);
   }
-  // A visible placeholder: never a schema-qualified table, never a keyword,
-  // so an unresolved table name in a locked FROM list is refused.
-  return [`«${text.replace(/[^\w.$]+/g, '_')}»`];
+  if (/^[A-Za-z_$][\w$]*$/.test(text) && context.bindings.has(text) && !context.ambiguous.has(text) && depth < 8) {
+    if (span) trace.names.push({ name: text, at: span.start });
+    return context.bindings.get(text).flatMap((value) => value(depth + 1, trace));
+  }
+  return [placeholder(text)];
 }
 
 /**
  * Constants bound to a string or template literal, or to a ternary of string
- * literals, anywhere in the file, by name. A name bound more than once keeps
- * every binding, so each is checked.
+ * literals, anywhere in the file, by name, with the range of each initializer.
+ * A name bound more than once keeps every binding, so each is checked.
  */
 function literalBindings(source, literals) {
   const bindings = new Map();
+  const initializers = [];
   const byStart = new Map(literals.map((literal) => [literal.start, literal]));
-  for (const match of source.matchAll(/\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[\w$<>[\]| ]+)?=\s*/g)) {
+  const context = { bindings, ambiguous: new Set() };
+  for (const match of source.matchAll(/\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[\w$<>[\]| '"]+)?=\s*/g)) {
     const start = match.index + match[0].length;
     const literal = byStart.get(start);
     let value;
+    let end;
     if (literal) {
-      value = (depth) => templateValues(literal, bindings, depth);
+      value = (depth, trace) => templateValues(literal, context, depth, trace);
+      end = literal.end;
     } else {
-      const end = source.indexOf(';', start);
-      const expression = source.slice(start, end < 0 ? undefined : end);
+      const stop = source.indexOf(';', start);
+      end = stop < 0 ? source.length : stop;
+      const expression = source.slice(start, end);
       if (!/^[^;\n]*\?[^;]*:/s.test(expression) || /[`]/.test(expression)) continue;
-      value = (depth) => expressionValues(expression, bindings, depth);
+      value = (depth, trace) => expressionValues(expression, null, context, depth, trace);
     }
     bindings.set(match[1], [...(bindings.get(match[1]) ?? []), value]);
+    initializers.push({ name: match[1], start, end });
   }
-  return bindings;
+  return { context, initializers };
 }
 
-function templateValues(literal, bindings, depth = 0) {
+function templateValues(literal, context, depth = 0, trace = newTrace()) {
   if (literal.kind === 'string') return [literal.text];
-  let variants = [''];
-  literal.quasis.forEach((quasi, index) => {
-    variants = variants.map((variant) => variant + quasi);
-    if (index < literal.expressions.length) {
-      const values = expressionValues(literal.expressions[index], bindings, depth);
-      variants = variants.flatMap((variant) => values.map((value) => variant + value)).slice(0, MAX_VARIANTS);
-    }
+  const parts = literal.expressions.map((expression, index) =>
+    expressionValues(expression, literal.expressionSpans[index], context, depth, trace));
+  if (parts.reduce((count, values) => count * values.length, 1) > MAX_VARIANTS) {
+    trace.overflow = true;
+    trace.lockInValues ||= parts.some((values) => values.some((value) => LOCK_TEST.test(value)));
+    return [];
+  }
+  let variants = [literal.quasis[0]];
+  parts.forEach((values, index) => {
+    variants = variants.flatMap((variant) => values.map((value) => variant + value + literal.quasis[index + 1]));
   });
   return variants;
 }
 
+const newTrace = () => ({ resolved: [], names: [], overflow: false, lockInValues: false });
+const within = (offset, range) => offset >= range.start && offset < range.end;
+
 /**
  * The SQL statements of a TypeScript source that take a row lock, with every
- * variant of their interpolated constants and conditional fragments.
+ * variant of their interpolated constants and conditional fragments. Lock
+ * text this check cannot place in such a statement is returned as unassembled,
+ * with the reason, instead of being skipped.
  */
 export function lockingStatements(source) {
   const literals = scanLiterals(source);
-  const bindings = literalBindings(source, literals);
+  const { context, initializers } = literalBindings(source, literals);
+  const code = codeOnly(source, literals);
+  context.ambiguous = ambiguousNames(code, context.bindings);
   const statements = [];
   const seen = new Set();
-  const fragments = [];
+  const consumed = [];
+  const nameUses = new Map();
+  const pending = [];
+  const unassembled = (literal, text, reason) => {
+    const raw = source.slice(literal.start, literal.end);
+    statements.push({ line: lineOf(source, literal.start + Math.max(raw.search(/\bfor\b/i), 0)), sql: text.trim(), unassembled: true, reason });
+  };
   for (const literal of literals) {
     const raw = source.slice(literal.start, literal.end);
-    const offset = raw.search(LOCK_TEST);
-    const line = lineOf(source, literal.start + Math.max(offset, 0));
+    const line = lineOf(source, literal.start + Math.max(raw.search(LOCK_TEST), 0));
+    const text = literal.kind === 'string' ? literal.text : literal.quasis.join('«»');
+    const lockText = LOCK_TEST.test(text) || /^\s*for\s*(?:$|(?:no\s+key\s+)?«)/i.test(text)
+      || (SQL_TEXT.test(text) && (LOCK_HOLE.test(text) || /\bfor\s*$/i.test(text)));
+    const trace = newTrace();
+    const variants = new Set(templateValues(literal, context, 0, trace));
+    if (trace.overflow && (lockText || trace.lockInValues)) {
+      unassembled(literal, text, `more than ${MAX_VARIANTS} variants`);
+      continue;
+    }
     let complete = false;
-    for (const sql of new Set(templateValues(literal, bindings))) {
-      if (!LOCK_TEST.test(sql)) continue;
+    for (const sql of variants) {
       if (!/\bselect\b/i.test(sql) || !/\bfrom\b/i.test(sql)) continue;
+      if (LOCK_HOLE.test(sql)) {
+        unassembled(literal, sql, 'the lock strength is an interpolation this check cannot resolve');
+        complete = true;
+        continue;
+      }
+      if (!LOCK_TEST.test(sql)) continue;
       complete = true;
       const key = `${line}\0${sql}`;
       if (seen.has(key)) continue;
       seen.add(key);
       statements.push({ line, sql });
     }
-    // Lock text outside a whole statement (a conditional fragment, a constant)
-    // must end up in one; otherwise the SQL is assembled in a way this check
-    // cannot follow, and the lock is reported instead of skipped.
-    const text = literal.kind === 'string' ? literal.text : literal.quasis.join(' ');
-    if (!complete && LOCK_TEST.test(text)) fragments.push({ line, text: text.trim() });
-  }
-  for (const fragment of fragments) {
-    if (!statements.some((statement) => statement.sql.includes(fragment.text))) {
-      statements.push({ line: fragment.line, sql: fragment.text, unassembled: true });
+    if (complete) {
+      consumed.push(...trace.resolved);
+      for (const { name, at } of trace.names) nameUses.set(name, new Set([...(nameUses.get(name) ?? []), at]));
+    } else if (lockText) {
+      pending.push({ literal, text });
     }
+  }
+  // Lock text outside a whole statement (a conditional fragment, a constant)
+  // must be part of one: inside an interpolation that a locking statement
+  // resolved, or bound to a name that is used only as such interpolations.
+  const references = (name) => [...code.matchAll(new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g'))].length;
+  for (const { literal, text } of pending) {
+    if (consumed.some((range) => within(literal.start, range))) continue;
+    const bound = initializers.filter((range) => within(literal.start, range));
+    const used = bound.length > 0 && bound.every(({ name }) => !context.ambiguous.has(name)
+      && (nameUses.get(name)?.size ?? 0) > 0
+      && references(name) - context.bindings.get(name).length === nameUses.get(name).size);
+    if (!used) unassembled(literal, text, 'lock text that is not part of a statement this check can assemble');
   }
   return statements;
 }
@@ -326,6 +434,36 @@ function fromItems(level) {
   return { items };
 }
 
+const AGGREGATE = /\b(?:count|sum|avg|min|max|array_agg|string_agg|json_agg|jsonb_agg|json_object_agg|jsonb_object_agg|bool_and|bool_or|every|bit_and|bit_or|xmlagg)\s*\(/i;
+
+/**
+ * Query forms with which PostgreSQL refuses a row lock for every role (0A000):
+ * DISTINCT, GROUP BY, HAVING, aggregates, window functions and set operations
+ * at the lock's own query level.
+ */
+function refusedForms(masked, start, lock, level, strength) {
+  const flat = flattenParentheses(level);
+  const name = `FOR ${strength.toUpperCase()}`;
+  const found = [];
+  const selectList = flat.slice(0, (/\bfrom\b/i.exec(flat)?.index) ?? flat.length);
+  if (/^\s*select\s+distinct\b/i.test(flat)) found.push(`${name} is not allowed with DISTINCT`);
+  if (/\bgroup\s+by\b/i.test(flat)) found.push(`${name} is not allowed with GROUP BY`);
+  if (/\bhaving\b/i.test(flat)) found.push(`${name} is not allowed with HAVING`);
+  if (AGGREGATE.test(selectList)) found.push(`${name} is not allowed with aggregate functions`);
+  if (/\bover\s*(?:\(|[a-z_])/i.test(flat) || /\bwindow\b/i.test(flat)) found.push(`${name} is not allowed with window functions`);
+  // A set operation joins this level with others: look back to the enclosing parenthesis.
+  let depth = 0;
+  let from = 0;
+  for (let index = start - 1; index >= 0; index--) {
+    if (masked[index] === ')') depth++;
+    else if (masked[index] === '(') { if (depth === 0) { from = index + 1; break; } depth--; }
+  }
+  if (/\b(?:union|intersect|except)\b/i.test(flattenParentheses(masked.slice(from, lock)))) {
+    found.push(`${name} is not allowed with UNION, INTERSECT or EXCEPT`);
+  }
+  return found;
+}
+
 /**
  * Every lock clause of a statement, with the tables it locks and the defects
  * PostgreSQL refuses for every role.
@@ -351,8 +489,10 @@ export function analyseLocks(sql) {
       tables: [], defects: [] };
     clauses.push(clause);
     if (start < 0) { clause.defects.push('cannot find the SELECT this lock clause belongs to'); continue; }
-    const { items, error } = fromItems(masked.slice(start, match.index));
+    const level = masked.slice(start, match.index);
+    const { items, error } = fromItems(level);
     if (error) { clause.defects.push(error); continue; }
+    clause.defects.push(...refusedForms(masked, start, match.index, level, strength));
     const targets = clause.of
       ? clause.of.map((name) => items.find((item) => item.alias === name)
         ?? { table: null, alias: name, missing: true })
@@ -419,6 +559,8 @@ export function databaseModel(scripts) {
   const tables = new Set();
   const privileges = new Map(); // table -> role -> Set of privileges (column privileges as 'update(col)')
   const members = new Map(); // role -> Set of roles it is a direct member of
+  const inherits = new Map(); // 'member|role' -> whether the membership passes on privileges
+  const roleInherit = new Map(); // role -> its INHERIT attribute (default true)
   const rls = new Set();
   const policies = new Map(); // table -> name -> { command, permissive, roles }
   const tablePrivileges = (table) => privileges.get(table) ?? privileges.set(table, new Map()).get(table);
@@ -446,6 +588,12 @@ export function databaseModel(scripts) {
     return out;
   };
   for (const [, text] of scripts) {
+    // Role attributes: roles are created in dollar-quoted DO blocks and altered at the top level.
+    for (const match of stripComments(text).matchAll(/\b(?:create|alter)\s+role\s+([a-z_][\w]*)\b([^;]*)/gi)) {
+      const attribute = /\b(no)?inherit\b/i.exec(match[2]);
+      if (attribute) roleInherit.set(match[1].toLowerCase(), !attribute[1]);
+      else if (/^create/i.test(match[0]) && !roleInherit.has(match[1].toLowerCase())) roleInherit.set(match[1].toLowerCase(), true);
+    }
     const top = stripComments(text).replace(DOLLAR, "''");
     for (const raw of top.split(';')) {
       const statement = raw.trim().replace(/\s+/g, ' ');
@@ -481,26 +629,39 @@ export function databaseModel(scripts) {
             }
           }
         }
-      } else if ((match = /^(grant|revoke) ([\w, ]+?) (to|from) ([\w, ]+?)(?: with (?:admin|inherit|set) (?:option|true|false))?(?: granted by \w+)?$/i.exec(statement))
+      } else if ((match = /^revoke inherit option for ([\w, ]+?) from ([\w, ]+?)(?: cascade| restrict)?$/i.exec(statement))) {
+        for (const member of names(match[2])) for (const role of names(match[1])) inherits.set(`${member}|${role}`, false);
+      } else if ((match = /^(grant|revoke) ([\w, ]+?) (to|from) ([\w, ]+?)((?: with (?:admin|inherit|set) (?:option|true|false))*)(?: granted by \w+)?$/i.exec(statement))
         && !/\bon\b/i.test(match[2]) && !/^(?:all|usage|select|insert|update|delete|execute|connect|create|temporary|temp|truncate|references|trigger)\b/i.test(match[2])) {
+        // PostgreSQL 16: a membership passes on privileges per its INHERIT
+        // option, which defaults to the member's INHERIT attribute at grant time.
+        const option = /\bwith inherit (option|true|false)\b/i.exec(match[5] ?? '');
         for (const member of names(match[4])) {
           const set = members.get(member) ?? members.set(member, new Set()).get(member);
           for (const role of names(match[2])) {
-            if (match[1].toLowerCase() === 'grant') set.add(role); else set.delete(role);
+            if (match[1].toLowerCase() === 'grant') {
+              set.add(role);
+              inherits.set(`${member}|${role}`, option ? option[1].toLowerCase() !== 'false' : roleInherit.get(member) ?? true);
+            } else {
+              set.delete(role);
+              inherits.delete(`${member}|${role}`);
+            }
           }
         }
       }
     }
   }
-  return { tables, privileges, members, rls, policies };
+  return { tables, privileges, members, inherits, rls, policies };
 }
 
-/** The role, every role it inherits (transitively) and PUBLIC. */
+/** The role, every role whose privileges it inherits (transitively) and PUBLIC. */
 export function effectiveRoles(model, role) {
   const roles = new Set([role, 'public']);
   const pending = [role];
   while (pending.length > 0) {
-    for (const parent of model.members.get(pending.pop()) ?? []) {
+    const member = pending.pop();
+    for (const parent of model.members.get(member) ?? []) {
+      if (model.inherits?.get(`${member}|${parent}`) === false) continue;
       if (!roles.has(parent)) { roles.add(parent); pending.push(parent); }
     }
   }

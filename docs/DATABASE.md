@@ -1664,16 +1664,24 @@ Service changes that the database relies on:
 Checks:
 
 - `scripts/verify-runtime-locking-privileges.mjs` (`npm run verify`) finds every
-  lock clause in the service source (including clauses built from constants,
-  ternaries and helper flags; text it cannot assemble fails the check),
-  resolves the locked tables (`OF` aliases, outer joins) and replays the
-  migrations and `runtime-grants.sql` to model each runtime role's effective
-  privileges, row-level security and `UPDATE` policies. It fails on a lock the
-  role cannot take and on `FOR UPDATE` over the nullable side of an outer
-  join. On `main` before Stage 9 it reports 14 of 43 clauses, exactly the
+  lock clause in the service source, including clauses built from constants,
+  ternaries and helper flags. Lock text it cannot place fails the check: a
+  fragment counts only inside an interpolation a locking statement resolved,
+  or bound to a constant used only as such interpolations; an unresolved lock
+  strength (`for ${...}`), a statement with more than 64 variants, and a name
+  that is also a parameter, a reassigned variable or another declaration in
+  the file are refused, not guessed. It resolves the locked tables (`OF`
+  aliases, outer joins) and replays the migrations and `runtime-grants.sql`
+  to model each runtime role's effective privileges, following only
+  memberships that pass on privileges (`INHERIT`), row-level security and
+  `UPDATE` policies. It fails on a lock the role cannot take, and on the locks
+  PostgreSQL refuses for every role (`0A000`): the nullable side of an outer
+  join, `DISTINCT`, `GROUP BY`, `HAVING`, aggregates, window functions and set
+  operations. On `main` before Stage 9 it reports 14 of 43 clauses, exactly the
   §4.2 statements; now 0 of 31. The rehearsal also runs it with `--catalog`,
   comparing the replayed model with the migrated catalogue (146 tables, no
-  difference).
+  difference). CI runs it, its tests and the rehearsal in the workspace gates
+  job of `tuf-local-gates.yml` (`release/scripts/run-workspace-gates.mjs`).
 - `runtime-command-privileges.integration.sql` (rollback-only):
   - Case 1 plans (`EXPLAIN`, which performs the start-of-statement privilege
     checks) a no-op select, insert, update, delete and row lock as each of ten

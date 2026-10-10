@@ -52,7 +52,64 @@ test('reports lock text it cannot place in a statement instead of skipping it', 
     function lockClause() { return 'for update'; }
     const message = 'Reload the record before you update it';
     query(\`select * from a.b where id = $1 \${lockClause()}\`);`);
-  assert.deepEqual(statements, [{ line: 2, sql: 'for update', unassembled: true }]);
+  assert.deepEqual(statements, [{ line: 2, sql: 'for update', unassembled: true,
+    reason: 'lock text that is not part of a statement this check can assemble' }]);
+});
+
+// Each shape below reintroduces a Stage 8 lock in a file that also has a
+// valid lock, so the lock text appears in a statement elsewhere in the file;
+// the check must still report it (Phase 4 Stage 9 review).
+test('reports lock text a statement elsewhere in the file also contains', () => {
+  const valid = 'const job = () => query(`select id from ocr.jobs where id=$1 for update`);';
+  const unplaced = (code) => lockingStatements(`${valid}\n${code}`).filter((statement) => statement.unassembled)
+    .map((statement) => statement.sql);
+  // A lock clause passed as an argument.
+  assert.deepEqual(unplaced(`function find(id, lockClause = '') { return query(\`select * from ocr.validations where id=$1 \${lockClause}\`); }
+    find(id, 'for update');`), ['for update']);
+  // Concatenation.
+  assert.deepEqual(unplaced("query('select * from lab.accessions where id=$1' + ' for update');"), ['for update']);
+  // A map lookup, and a class field.
+  assert.deepEqual(unplaced("const LOCKS = { strong: ' for update' }; query(`select * from lab.accessions where id=$1${LOCKS[mode]}`);"),
+    ['for update']);
+  assert.deepEqual(unplaced("class A { private lock = ' for update'; f() { return query(`select * from lab.accessions${this.lock}`); } }"),
+    ['for update']);
+  // A constant used as a whole interpolation of a locking statement is placed;
+  // the same constant also concatenated elsewhere is not.
+  const fragment = "const LOCK = ' for update';\nquery(`select id from lab.specimens where id=$1${LOCK}`);";
+  assert.deepEqual(unplaced(fragment), []);
+  assert.deepEqual(unplaced(`${fragment}\nquery('select id from lab.accessions where id=$1' + LOCK);`), ['for update']);
+});
+
+test('resolves or reports an interpolated lock strength', () => {
+  const typed = lockingStatements(`const strength: 'update' | 'share' = 'update';
+    query(\`select * from pharmacy.dispensing_reversals where dispensing_id=$1 for \${strength}\`);`);
+  assert.deepEqual(typed.map((statement) => statement.sql), ['select * from pharmacy.dispensing_reversals where dispensing_id=$1 for update']);
+  assert.match(lockPermission(realModel, 'hid_pharmacy_api_runtime', 'pharmacy.dispensing_reversals').reason, /no UPDATE privilege/);
+  const parameter = lockingStatements(`function find(lock?: 'update' | 'share') {
+    return query(\`select * from pharmacy.dispensing_reversals where id=$1\${lock ? \` for \${lock}\` : ''}\`); }`);
+  assert.deepEqual(parameter.map(({ sql, unassembled }) => [sql, Boolean(unassembled)]), [['for «»', true]]);
+  const direct = lockingStatements('function find(strength) { return query(`select * from lab.accessions where id=$1 for ${strength}`); }');
+  assert.deepEqual(direct.map(({ unassembled, reason }) => [unassembled, reason]),
+    [[true, 'the lock strength is an interpolation this check cannot resolve']]);
+});
+
+test('does not resolve a name that is also a parameter, a reassigned variable or a non-literal declaration', () => {
+  const tables = (source) => lockingStatements(source).flatMap((statement) => analyseLocks(statement.sql))
+    .map((clause) => [clause.tables, clause.defects]);
+  const shadowing = `function pick(operation) { const table = operation === 'verify' ? 'lab.result_verifications' : 'lab.result_releases'; return table; }
+    function lockRow(table, id) { return query(\`select 1 from \${table} where id=$1 for update\`); }`;
+  assert.deepEqual(tables(shadowing), [[[], ['locks a FROM item that is not a schema-qualified table: «table»']]]);
+  assert.deepEqual(tables(`let table = 'lab.specimens'; table = other;
+    query(\`select 1 from \${table} where id=$1 for update\`);`), [[[], ['locks a FROM item that is not a schema-qualified table: «table»']]]);
+  assert.deepEqual(tables(`const table = 'lab.specimens'; function f() { const table = choose(); return query(\`select 1 from \${table} for update\`); }`),
+    [[[], ['locks a FROM item that is not a schema-qualified table: «table»']]]);
+});
+
+test('reports a statement with more variants than it expands', () => {
+  const filters = Array.from({ length: 6 }, (_, index) => `\${f${index} ? ' and c${index}=$2' : ''}`).join('');
+  const [statement] = lockingStatements(`const table = kind ? 'lab.results' : 'lab.accessions';
+    query(\`select * from \${table} where id=$1${filters} for update\`);`);
+  assert.deepEqual([statement.unassembled, statement.reason], [true, 'more than 64 variants']);
 });
 
 test('resolves the tables each lock clause locks', () => {
@@ -89,6 +146,38 @@ test('reports locks PostgreSQL refuses for every role', () => {
   const [unresolved] = lockingStatements('query(`select * from ${tableFor(kind)} where id=$1 for update`)');
   assert.deepEqual(analyseLocks(unresolved.sql).flatMap((clause) => clause.defects),
     ['locks a FROM item that is not a schema-qualified table: «tableFor_kind_»']);
+});
+
+test('reports the other lock forms PostgreSQL refuses for every role (0A000)', () => {
+  const defects = (sql) => analyseLocks(sql).flatMap((clause) => clause.defects);
+  assert.deepEqual(defects('select count(*) from lab.results where id=$1 for update'), ['FOR UPDATE is not allowed with aggregate functions']);
+  assert.deepEqual(defects('select distinct id from lab.results for update'), ['FOR UPDATE is not allowed with DISTINCT']);
+  assert.deepEqual(defects('select status from lab.results group by status having true for share'),
+    ['FOR SHARE is not allowed with GROUP BY', 'FOR SHARE is not allowed with HAVING']);
+  assert.deepEqual(defects('select id, rank() over (order by id) from lab.results for update'), ['FOR UPDATE is not allowed with window functions']);
+  assert.deepEqual(defects('select id from lab.results union select id from lab.specimens for update'),
+    ['FOR UPDATE is not allowed with UNION, INTERSECT or EXCEPT']);
+  // Sub-selects, and IS DISTINCT FROM, are not the locked level.
+  assert.deepEqual(defects('select r.id, (select count(*) from lab.specimens s) from lab.results r where r.x is distinct from $1 for update of r'), []);
+  assert.deepEqual(defects('select id from lab.results where id in (select id from lab.specimens union select id from lab.accessions) for update'), []);
+});
+
+test('follows only memberships that pass on privileges', () => {
+  const model = databaseModel([['fixture.sql', `
+    create table s.t (id uuid);
+    grant update on s.t to group_role;
+    do $$ begin create role sealed nologin noinherit; end $$;
+    alter role sealed noinherit;
+    grant group_role to sealed;
+    grant group_role to explicit with inherit false;
+    grant group_role to revoked;
+    revoke inherit option for group_role from revoked;
+    grant group_role to open_role;
+  `]]);
+  for (const role of ['sealed', 'explicit', 'revoked']) {
+    assert.match(lockPermission(model, role, 's.t').reason, /no UPDATE privilege/, role);
+  }
+  assert.deepEqual(lockPermission(model, 'open_role', 's.t'), { allowed: true });
 });
 
 test('replays table privileges, role membership, row-level security and policies', () => {

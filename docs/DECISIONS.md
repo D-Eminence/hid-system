@@ -1902,9 +1902,12 @@ Decision:
    today it is reads, the database writes of the same transaction, and
    Identity or EHR authorization calls, which change nothing but which
    Identity audits once per attempt.
-4. **Checked in CI.** `scripts/verify-runtime-locking-privileges.mjs` compares
-   every lock clause in the service source with the runtime role's privileges
-   and policies replayed from the migrations and grants;
+4. **Checked in CI** (the workspace gates job of `tuf-local-gates.yml`, through
+   `release/scripts/run-workspace-gates.mjs`: `npm run verify`, `npm test` and
+   the synthetic rehearsal). `scripts/verify-runtime-locking-privileges.mjs`
+   compares every lock clause in the service source with the runtime role's
+   privileges and policies replayed from the migrations and grants, and
+   refuses lock text it cannot place in a statement;
    `runtime-command-privileges.integration.sql` runs every command each runtime
    role holds a privilege for, and the lock statements, as that role; the
    runtime verifiers run the affected commands over HTTP as their roles and
