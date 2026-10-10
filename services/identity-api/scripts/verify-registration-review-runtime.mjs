@@ -18,6 +18,7 @@ assert(process.env.NODE_ENV === 'test' && socket?.startsWith('/tmp/hid-tuf-migra
 const { Pool } = require('pg');
 const RUNTIME_ROLE = 'hid_identity_api_runtime';
 const isolated = `hid_rehearsal_review_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+const SERVICE_APPLICATION = 'hid-registration-review-verifier';
 const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database: 'postgres', max: 1 });
 await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
 Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', NIN_PROVIDER_MODE: 'test', TURNSTILE_MODE: 'disabled',
@@ -29,7 +30,7 @@ Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', NIN_PROVIDER_MODE: 'tes
   // settings, commit and rollback); every connection it opens starts as the
   // runtime role (the libpq startup option role), as a login of that role would.
   DATABASE_URL: `postgresql://${encodeURIComponent(process.env.PGUSER)}@localhost/${isolated}?host=${encodeURIComponent(socket)}`
-    + `&options=${encodeURIComponent(`-c role=${RUNTIME_ROLE}`)}` });
+    + `&application_name=${SERVICE_APPLICATION}&options=${encodeURIComponent(`-c role=${RUNTIME_ROLE}`)}` });
 delete process.env.HID_DEPLOYMENT_ENV;
 delete process.env.AUTH_COOKIE_DOMAIN;
 require('ts-node').register({ project: join(service, 'tsconfig.json'), transpileOnly: true });
@@ -257,6 +258,19 @@ try {
   assert.equal(twins[0].body.patient.hid, 'HID-REVTWN22');
   assert.equal(await events(twin.caseId, 'linked_existing'), 1);
   check('link-existing: two concurrent identical requests link once and both return the patient');
+  // Each connection flushes its statistics as it exits; count deadlocks once the API's have closed.
+  await app.close();
+  app = undefined;
+  for (let waited = 0; ; waited += 100) {
+    const open = await pool.query(`select count(*)::int as count from pg_stat_activity
+      where datname = current_database() and application_name = $1`, [SERVICE_APPLICATION]);
+    if (open.rows[0].count === 0) break;
+    assert(waited < 10_000, 'the API connections did not close');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(Number((await pool.query('select deadlocks from pg_stat_database where datname = current_database()')).rows[0].deadlocks), 0,
+    'PostgreSQL detected a deadlock during the run');
+  check('no deadlock: pg_stat_database reports none for the run');
   process.stdout.write(`${JSON.stringify({ status: 'passed', ...evidence })}\n`);
 } finally {
   await app?.close();
