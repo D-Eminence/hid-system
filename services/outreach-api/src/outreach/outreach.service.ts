@@ -265,8 +265,10 @@ export class OutreachService {
    * share-locks the campaign until the registration commits: a status change
    * locks it FOR UPDATE, so it waits for the registration, or the registration
    * for it. The membership row is read, not locked. The runtime role cannot
-   * lock campaign_members (no UPDATE, 42501), and no command changes or deletes
-   * a membership (Phase 4 Stage 9). The campaign lock needs the campaign UPDATE
+   * lock campaign_members (no UPDATE, 42501), and no API command changes or
+   * deletes a membership; a membership deleted after this check is caught by
+   * the registration trigger, which locks the campaign and the membership as
+   * its owner (Phase 4 Stage 9). The campaign lock needs the campaign UPDATE
    * policy, so it relies on every role with outreach.registration.write also
    * holding outreach.campaign.write (runtime-command-privileges.integration.sql
    * checks this); without it the lock returns no row and the request is refused.

@@ -250,6 +250,10 @@ try {
   assert.equal(refused.sqlstate, '42501');
   assert.equal(await count('select count(*) from pharmacy.imported_medication_evidence where publication_id=$1', [unconsented.publicationId]), 0);
   check('import: no OCR caller 401, Identity denial 403, no database consent refused by row-level security (42501, nothing written); four concurrent identical imports import once; replay 201; second import 409');
+  await pharmacy.close();
+  pharmacy = undefined;
+  assert.equal(await database.deadlocks(), 0, 'PostgreSQL detected a deadlock during the run');
+  check('no deadlock: pg_stat_database reports none for the run, retried commands included');
   process.stdout.write(`${JSON.stringify({ status: 'passed', ...evidence })}\n`);
 } finally {
   await pharmacy?.close();

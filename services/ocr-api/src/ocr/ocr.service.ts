@@ -394,8 +394,12 @@ export class OcrService {
       const source = await this.authorizeJob(job, context, 'write_records');
       this.assertPublicationRequest(validation, input);
       const confirmation = await this.findConfirmation(client, input.patientConfirmationId, validation.job_id);
+      // A replay only reads its publication; executePublication's conditional
+      // update claims it. Locking the row here, while holding the job, waited
+      // for a publish or failure transaction that holds the row and needs the
+      // job for its outbox insert: a deadlock (Phase 4 Stage 9).
       const replayResult = await client.query<PublicationRow>(
-        `select * from ocr.publications where facility_id=$1 and requested_by=$2 and idempotency_key=$3 for update`,
+        `select * from ocr.publications where facility_id=$1 and requested_by=$2 and idempotency_key=$3`,
         [context.facilityId, context.actor.accountId, idempotencyKey]);
       const replay = replayResult.rows[0];
       if (replay) {
@@ -517,6 +521,7 @@ export class OcrService {
         throw new DomainProblem(409, 'OCR_TARGET_UNAVAILABLE', 'The owning domain does not support this publication operation');
       }
       return await this.database.withTransaction(context, async (client) => {
+        await this.lockJobKey(client, claimed.job_id);
         const result = await client.query<PublicationRow>(
           `update ocr.publications set status='published', completed_at=clock_timestamp(),
             failed_at=null, processing_token=null, processing_expires_at=null,
@@ -538,6 +543,7 @@ export class OcrService {
       const code = error instanceof DomainProblem ? error.code : 'OWNING_SERVICE_UNAVAILABLE';
       const summary = terminal ? 'Publication was rejected by the owning domain' : 'Owning clinical service is temporarily unavailable';
       await this.database.withTransaction(context, async (client) => {
+        await this.lockJobKey(client, claimed.job_id);
         const result = await client.query<PublicationRow>(
           `update ocr.publications set status='failed', failed_at=clock_timestamp(),
             processing_token=null,processing_expires_at=null,failure_code=$3,failure_summary=$4,
@@ -557,6 +563,17 @@ export class OcrService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Takes the key share on a publication's job that the outbox insert's foreign
+   * key takes anyway, but before the publication row. createPublication holds
+   * the job while it reaches that row (its replay read, or the unique index of
+   * its insert), so a publish or failure transaction that held the row first
+   * and then waited for the job deadlocked with it (Phase 4 Stage 9).
+   */
+  private async lockJobKey(client: PoolClient, jobId: string) {
+    await client.query('select id from ocr.jobs where id = $1 for key share', [jobId]);
   }
 
   private async findValidation(client: PoolClient, validationId: string): Promise<ValidationRow> {

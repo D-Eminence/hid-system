@@ -177,6 +177,10 @@ try {
     database.count('select count(*) from outreach.command_idempotency where idempotency_key=$1', [rollbackKey])]), [0, 0]);
   expectStatus(await send('', rollbackBody, { key: rollbackKey }), 201, 'registration after the failure');
   check('register: a failure after the case insert rolls back the case, event and idempotency record; the same key then succeeds');
+  await outreach.close();
+  outreach = undefined;
+  assert.equal(await database.deadlocks(), 0, 'PostgreSQL detected a deadlock during the run');
+  check('no deadlock: pg_stat_database reports none for the run, retried commands included');
   process.stdout.write(`${JSON.stringify({ status: 'passed', ...evidence })}\n`);
 } finally {
   await outreach?.close();

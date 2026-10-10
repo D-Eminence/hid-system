@@ -284,6 +284,10 @@ try {
   assert.equal(expectStatus(await send('/imports/from-ocr', { ...ocrBody, observations: [{ ...observations[0], value: '13.1' }] },
     { key: key('ocr'), internal: 'ocr-api' }), 409, 'a different OCR import of one publication').code, 'IDEMPOTENCY_CONFLICT');
   check('import: Identity denial 403, no database consent refused by row-level security (42501, nothing written); four concurrent identical external imports and four concurrent imports of one OCR publication each import once; replay 201; conflicting requests 409');
+  await lab.close();
+  lab = undefined;
+  assert.equal(await database.deadlocks(), 0, 'PostgreSQL detected a deadlock during the run');
+  check('no deadlock: pg_stat_database reports none for the run, retried commands included');
   process.stdout.write(`${JSON.stringify({ status: 'passed', ...evidence })}\n`);
 } finally {
   await lab?.close();

@@ -19,6 +19,8 @@ export function rehearsalDatabase() {
   return { socket, admin: process.env.PGUSER, template: process.env.PGDATABASE };
 }
 
+const SERVICE_APPLICATION = 'hid-runtime-verifier-service';
+
 /**
  * A copy of the rehearsal database, dropped by close(). The copy needs the
  * rehearsal database to have no other session, so the verifiers run one at a
@@ -38,7 +40,22 @@ export async function disposableDatabase(require, label) {
   return {
     name, owner,
     url: (role) => `postgresql://${encodeURIComponent(admin)}@localhost/${name}?host=${encodeURIComponent(socket)}`
-      + `&options=${encodeURIComponent(`-c role=${role}`)}`,
+      + `&application_name=${SERVICE_APPLICATION}&options=${encodeURIComponent(`-c role=${role}`)}`,
+    /**
+     * Deadlocks PostgreSQL detected in the copy. Call it after the service has
+     * closed: each connection flushes its statistics as it exits. A command the
+     * service retried after a deadlock still counts.
+     */
+    deadlocks: async () => {
+      for (let waited = 0; ; waited += 100) {
+        const open = await owner.query(`select count(*)::int as count from pg_stat_activity
+          where datname = current_database() and application_name = $1`, [SERVICE_APPLICATION]);
+        if (open.rows[0].count === 0) break;
+        assert(waited < 10_000, 'the service connections did not close');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return Number((await owner.query('select deadlocks from pg_stat_database where datname = current_database()')).rows[0].deadlocks);
+    },
     /** Runs fixture SQL as the owner in one transaction, triggers and foreign keys off as in the SQL suites. */
     fixture: async (build) => {
       const client = await owner.connect();

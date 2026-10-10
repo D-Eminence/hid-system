@@ -35,7 +35,26 @@ f.c.subject = `synthetic:ocr-verifier-c:${f.c.account}`;
 const actors = new Map();
 const decisions = new Map();
 const labImports = [];
-const upstream = await fakeService(({ method, path, headers, body }) => {
+let labUnavailable = false;
+// Holds the next upstream call that `matches` until released, so a race can
+// start while the OCR API has no transaction open.
+let pause;
+const pauseAt = (matches) => {
+  let arrived;
+  let release;
+  const reached = new Promise((resolve) => { arrived = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  pause = { matches, arrived, gate };
+  return { reached, release };
+};
+const upstream = await fakeService(async (call) => {
+  const { method, path, headers, body } = call;
+  if (pause?.matches(call)) {
+    const held = pause;
+    pause = undefined;
+    held.arrived();
+    await held.gate;
+  }
   if (path.startsWith('/api/v1/auth/') || path.startsWith('/api/v1/identity/')) {
     if (headers['x-hid-internal-caller'] !== 'ocr-api' || headers['x-hid-service-token'] !== TOKENS.identity) {
       return [401, { code: 'WORKLOAD_AUTHENTICATION_REQUIRED', detail: 'Synthetic Identity refused the workload' }];
@@ -58,6 +77,7 @@ const upstream = await fakeService(({ method, path, headers, body }) => {
   }
   if (method === 'POST' && path === '/api/v1/lab/imports/from-ocr') {
     if (headers['x-hid-service-token'] !== TOKENS.lab) return [401, { code: 'INTERNAL_SERVICE_AUTH_REQUIRED' }];
+    if (labUnavailable) return [503, { code: 'LAB_IMPORT_UNAVAILABLE', detail: 'Synthetic Lab outage' }];
     labImports.push(body);
     return [201, { id: `00000000-0000-4000-8000-${String(labImports.length).padStart(12, '0')}`, status: 'created', version: 1 }];
   }
@@ -240,6 +260,105 @@ try {
     409, 'a second publication of one validation').code, 'OCR_ALREADY_PUBLISHED');
   check('publish: four concurrent identical requests create one publication and publish it once (the others replay or answer in progress); replay published; a second publication 409');
 
+  // Lock order (Phase 4 Stage 9). createPublication locks the job, then reaches
+  // the publication row: its replay read, or the unique index of its insert
+  // when its snapshot predates a concurrent request's publication. The publish
+  // and failure transactions of executePublication take the job's key share for
+  // their outbox insert. Each check holds one row on a second connection, as the
+  // other transaction would, and probes the other row with a lock timeout below
+  // PostgreSQL's deadlock timeout: a wait there is the deadlock it would become.
+  const holdingRow = async (lockSql, values, race) => {
+    const holder = await database.owner.connect();
+    const observer = await database.owner.connect();
+    try {
+      await holder.query('begin');
+      await holder.query(lockSql, values);
+      const pid = (await holder.query('select pg_backend_pid() as pid')).rows[0].pid;
+      const waitedFor = async (settled) => {
+        for (let waited = 0; !settled() && waited < 10_000; waited += 50) {
+          const blocked = await observer.query('select count(*)::int as count from pg_stat_activity where $1 = any(pg_blocking_pids(pid))', [pid]);
+          if (blocked.rows[0].count > 0) return true;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return false;
+      };
+      const probe = async (sql, probeValues, cycle) => {
+        await holder.query("set local lock_timeout = '500ms'");
+        await holder.query(sql, probeValues).catch((error) => {
+          assert.notEqual(error.code, '55P03', cycle);
+          throw error;
+        });
+      };
+      return await race({ waitedFor, probe });
+    } finally {
+      await holder.query('rollback').catch(() => undefined);
+      holder.release();
+      observer.release();
+    }
+  };
+
+  // A replay while a publish transaction holds the publication row.
+  let replaySettled = false;
+  const { pending: pendingReplay } = await holdingRow('select id from ocr.publications where id=$1 for update', [replayed.id],
+    async ({ waitedFor, probe }) => {
+      const pending = send(`/validations/${v1}/publications`, publicationBody, { key: publishKey, purpose: 'direct-care' })
+        .finally(() => { replaySettled = true; });
+      await waitedFor(() => replaySettled);
+      assert(replaySettled, 'the replay, holding the job, waited for the publication row');
+      await probe('select id from ocr.jobs where id=$1 for key share', [j1.job],
+        'the outbox foreign-key lock on the job waited for the replay');
+      return { pending };
+    });
+  assert.equal(expectStatus(await pendingReplay, 201, 'a replay while the publication row is held').status, 'published');
+  check('publish: a replay while a publish transaction holds the publication row answers without waiting for it (no deadlock)');
+
+  // A publish transaction while createPublication holds the job: it must wait
+  // for the job before it takes the publication row.
+  const [, , , , j5] = f.jobs;
+  const raceValidation = (await database.owner.query('select id::text from ocr.validations where job_id=$1', [j2.job])).rows[0].id;
+  const raceConfirmed = expectStatus(await send(`/jobs/${j2.job}/patient-confirmation`, confirmBody(), { key: key('race-confirm') }),
+    201, 'confirm the publish race job');
+  let sourceReads = 0;
+  const atEvidence = pauseAt(({ method, path }) => method === 'GET' && path.endsWith('/source') && ++sourceReads === 2);
+  const publishing = send(`/validations/${raceValidation}/publications`, { ...publicationBody, patientConfirmationId: raceConfirmed.id },
+    { key: key('race-publish'), purpose: 'direct-care' });
+  await atEvidence.reached;
+  const { pending: pendingPublish } = await holdingRow('select id from ocr.jobs where id=$1 for update', [j2.job],
+    async ({ waitedFor, probe }) => {
+      atEvidence.release();
+      assert(await waitedFor(() => false), 'the publish transaction did not wait for the job');
+      await probe('select id from ocr.publications where validation_id=$1 for update', [raceValidation],
+        'the publish transaction held the publication row while it waited for the job');
+      return { pending: publishing };
+    });
+  assert.equal(expectStatus(await pendingPublish, 201, 'a publication published after the job lock').status, 'published');
+  check('publish: while another request holds the job, the publish transaction waits for it before taking the publication row (no deadlock), then publishes');
+
+  // A failure transaction while createPublication holds the job.
+  const failValidated = expectStatus(await send(`/jobs/${j5.job}/validation`, validationBody(j5.extraction, { targetDomain: 'LAB',
+    candidateType: 'lab_document', acceptedFields: { observations: [{ testName: 'Platelets', value: '250', unit: '10^9/L' }] } }),
+  { key: key('race-validate') }), 201, 'validate the failure race job');
+  const failConfirmed = expectStatus(await send(`/jobs/${j5.job}/patient-confirmation`, confirmBody(), { key: key('race-confirm') }),
+    201, 'confirm the failure race job');
+  labUnavailable = true;
+  const atLab = pauseAt(({ method, path }) => method === 'POST' && path === '/api/v1/lab/imports/from-ocr');
+  const failing = send(`/validations/${failValidated.validationId}/publications`, { ...publicationBody,
+    patientConfirmationId: failConfirmed.id, targetOperation: 'create_imported_lab_evidence' }, { key: key('race-fail'), purpose: 'direct-care' });
+  await atLab.reached;
+  const { pending: pendingFailure } = await holdingRow('select id from ocr.jobs where id=$1 for update', [j5.job],
+    async ({ waitedFor, probe }) => {
+      atLab.release();
+      assert(await waitedFor(() => false), 'the failure transaction did not wait for the job');
+      await probe('select id from ocr.publications where validation_id=$1 for update', [failValidated.validationId],
+        'the failure transaction held the publication row while it waited for the job');
+      return { pending: failing };
+    });
+  labUnavailable = false;
+  assert.equal(expectStatus(await pendingFailure, 503, 'a publication the Lab API refused').code, 'LAB_IMPORT_UNAVAILABLE');
+  assert.deepEqual((await database.owner.query('select status, failure_code from ocr.publications where validation_id=$1',
+    [failValidated.validationId])).rows, [{ status: 'failed', failure_code: 'LAB_IMPORT_UNAVAILABLE' }]);
+  check('publish: while another request holds the job, the failure transaction waits for it before taking the publication row (no deadlock), then records the retryable failure');
+
   // A Lab publication through the fake Lab API: concurrent requests import once.
   const labValidation = validationBody(j4.extraction, { targetDomain: 'LAB', candidateType: 'lab_document',
     acceptedFields: { observations: [{ testName: 'Haemoglobin', value: '12.5', unit: 'g/dL' }] } });
@@ -254,6 +373,10 @@ try {
   assert.equal(labImports.length, 1, 'the Lab import is requested once');
   assert.equal(await count("select count(*) from ocr.publications where validation_id=$1 and status='published'", [labValidated.validationId]), 1);
   check('publish to Lab: three concurrent identical requests publish once and call the Lab API once');
+  await ocr.close();
+  ocr = undefined;
+  assert.equal(await database.deadlocks(), 0, 'PostgreSQL detected a deadlock during the run');
+  check('no deadlock: pg_stat_database reports none for the run, retried commands included');
   process.stdout.write(`${JSON.stringify({ status: 'passed', ...evidence })}\n`);
 } finally {
   await ocr?.close();
