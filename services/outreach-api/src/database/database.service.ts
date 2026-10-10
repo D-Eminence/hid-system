@@ -8,7 +8,18 @@ export interface TransactionOptions {
   isolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
 }
 
-export const SERIALIZABLE_ATTEMPTS = 3;
+export const SERIALIZABLE_ATTEMPTS = 12;
+
+/**
+ * The pause before attempt `attempt + 1`: a random time within a window that
+ * doubles from 20 ms up to 1000 ms. PostgreSQL tracks SERIALIZABLE reads by
+ * index page, so on small tables requests for different rows also cancel each
+ * other, and of a group that overlapped only one commits; spreading the
+ * retries apart lets the others commit in turn.
+ */
+export function retryDelayMs(attempt: number, random: () => number = Math.random): number {
+  return Math.floor(random() * Math.min(1000, 20 * 2 ** (attempt - 1)));
+}
 
 /**
  * Conflicts PostgreSQL resolves by cancelling one SERIALIZABLE transaction: a
@@ -51,10 +62,10 @@ export class DatabaseService implements OnApplicationShutdown {
   /**
    * Runs the operation in one transaction. A SERIALIZABLE transaction that
    * PostgreSQL cancels to keep concurrent requests serializable is run again
-   * from the start, up to three times: the retry sees the committed winner, so
-   * a duplicate registration replays it and a registration that waited for a
-   * campaign status change re-reads the campaign, instead of failing with a 5xx
-   * (Phase 4 Stage 9).
+   * from the start, up to twelve attempts in all: the retry sees the committed
+   * winner, so a duplicate registration replays it and a registration that
+   * waited for a campaign status change re-reads the campaign, instead of
+   * failing with a 5xx (Phase 4 Stage 9).
    */
   async withTransaction<Result>(context: DataAccessContext,
     operation: (client: PoolClient) => Promise<Result>, options: TransactionOptions = {}): Promise<Result> {
@@ -64,9 +75,14 @@ export class DatabaseService implements OnApplicationShutdown {
         return await this.transaction(context, operation, options);
       } catch (error) {
         if (attempt >= attempts || !isRetryableConflict(error)) throw error;
-        await new Promise((resolve) => setTimeout(resolve, attempt * 5 + Math.floor(Math.random() * 10)));
+        await this.pauseBeforeRetry(attempt);
       }
     }
+  }
+
+  /** Waits before the next attempt of a cancelled SERIALIZABLE transaction. */
+  protected async pauseBeforeRetry(attempt: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
   }
 
   private async transaction<Result>(context: DataAccessContext,

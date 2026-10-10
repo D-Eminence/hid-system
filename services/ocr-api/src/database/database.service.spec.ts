@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
-import { DatabaseService, isRetryableConflict, SERIALIZABLE_ATTEMPTS } from './database.service';
+import { DatabaseService, isRetryableConflict, retryDelayMs, SERIALIZABLE_ATTEMPTS } from './database.service';
 
 const context = { actor: { subject: 'synthetic:ocr-reviewer' }, facilityId: 'facility', correlationId: 'correlation',
   membershipId: 'membership', purposeOfUse: 'direct-care' } as unknown as DataAccessContext;
@@ -12,6 +12,7 @@ function sqlError(code: string) { return Object.assign(new Error(`synthetic ${co
 function service(commitFailures: string[] = []) {
   const transactions: string[][] = [];
   let released = 0;
+  const pauses: number[] = [];
   const pool = {
     connect: async () => {
       const statements: string[] = [];
@@ -27,8 +28,9 @@ function service(commitFailures: string[] = []) {
     },
   };
   const database = Object.create(DatabaseService.prototype) as DatabaseService;
-  Object.assign(database, { pool });
-  return { database, transactions, released: () => released };
+  // The pause between attempts is recorded instead of waited for.
+  Object.assign(database, { pool, pauseBeforeRetry: async (attempt: number) => { pauses.push(attempt); } });
+  return { database, transactions, pauses, released: () => released };
 }
 
 describe('OCR DatabaseService transaction retry', () => {
@@ -53,13 +55,24 @@ describe('OCR DatabaseService transaction retry', () => {
     expect(transactions).toHaveLength(2);
   });
 
-  it(`gives up after ${SERIALIZABLE_ATTEMPTS} attempts with the last conflict`, async () => {
-    const { database, transactions } = service();
+  it(`gives up after ${SERIALIZABLE_ATTEMPTS} attempts with the last conflict, pausing in between`, async () => {
+    const { database, transactions, pauses } = service();
     let calls = 0;
     await expect(database.withTransaction(context, async () => { calls += 1; throw sqlError('40001'); },
       { isolationLevel: 'SERIALIZABLE' })).rejects.toMatchObject({ code: '40001' });
     expect(calls).toBe(SERIALIZABLE_ATTEMPTS);
     expect(transactions.every((statements) => statements.at(-1) === 'ROLLBACK')).toBe(true);
+    expect(pauses).toEqual(Array.from({ length: SERIALIZABLE_ATTEMPTS - 1 }, (_, index) => index + 1));
+  });
+
+  it('pauses for a random time within a window that doubles from 20 ms up to 1000 ms', () => {
+    const longest = Array.from({ length: SERIALIZABLE_ATTEMPTS },
+      (_, index) => retryDelayMs(index + 1, () => 0.999999));
+    expect(longest[0]).toBe(19);
+    expect(longest[1]).toBe(39);
+    expect(Math.max(...longest)).toBe(999);
+    expect(longest).toEqual([...longest].sort((left, right) => left - right));
+    expect(retryDelayMs(SERIALIZABLE_ATTEMPTS, () => 0)).toBe(0);
   });
 
   it('runs other transactions and other failures once', async () => {

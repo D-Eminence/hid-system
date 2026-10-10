@@ -1650,7 +1650,11 @@ Service changes that the database relies on:
 - Identity's NIN registration review locks the registration case alone, then
   reads it with its patient.
 - The Pharmacy, Lab, OCR and Outreach `DatabaseService` run a `SERIALIZABLE`
-  transaction again, up to three attempts, on `40001`, `40P01` and `23505`.
+  transaction again, up to twelve attempts in all, on `40001`, `40P01` and
+  `23505`, after a random pause within a window that doubles from 20 ms to
+  1 s. `SERIALIZABLE` tracks reads by index page, so on small tables
+  concurrent requests for different rows also cancel each other; the pauses
+  let them commit one after another.
 
 Checks:
 

@@ -1882,14 +1882,20 @@ Decision:
    the job's `FOR KEY SHARE` before that row, so every OCR transaction reaches
    the job before the publication.
 3. **`SERIALIZABLE` transactions retry.** The Pharmacy, Lab, OCR and Outreach
-   `DatabaseService` run a `SERIALIZABLE` transaction again from the start, up
-   to three attempts with a short jittered pause, when PostgreSQL cancels it
-   with `40001`, `40P01` or `23505` (the conflicts the PostgreSQL manual lists
-   under serialization failure handling). The retried transaction sees the
-   winner and answers its replay, `409` or `412`. Other isolation levels and
-   other errors run once. Work inside a retried transaction must be safe to
-   repeat: today it is reads, the database writes of the same transaction and
-   read-only Identity or EHR authorization calls.
+   `DatabaseService` run a `SERIALIZABLE` transaction again from the start,
+   up to twelve attempts in all, when PostgreSQL cancels it with `40001`,
+   `40P01` or `23505` (the conflicts the PostgreSQL manual lists under
+   serialization failure handling), after a random pause within a window that
+   doubles from 20 ms up to 1 s. The retried transaction sees the winner and
+   answers its replay, `409` or `412`. Other isolation levels and other errors
+   run once. `SERIALIZABLE` tracks reads by index page, so on small tables
+   requests for different rows also cancel each other and only one of an
+   overlapping group commits; a short fixed retry (three attempts 5–15 ms
+   apart) still failed eight concurrent dispenses, and the budget was sized by
+   measurement. Work inside a retried transaction must be safe to repeat:
+   today it is reads, the database writes of the same transaction, and
+   Identity or EHR authorization calls, which change nothing but which
+   Identity audits once per attempt.
 4. **Checked in CI.** `scripts/verify-runtime-locking-privileges.mjs` compares
    every lock clause in the service source with the runtime role's privileges
    and policies replayed from the migrations and grants;

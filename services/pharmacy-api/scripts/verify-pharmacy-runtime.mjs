@@ -25,7 +25,11 @@ const check = (name) => evidence.checks.push(name);
 // scope authorization decisions.
 const actors = new Map();
 const decisions = new Map();
-const identity = await fakeService(({ path, headers, body }) => {
+// Milliseconds the fake takes to answer an authorization check, as a real
+// Identity API does; dispense and reverse make that call inside their
+// SERIALIZABLE transaction.
+let authorizationLatency = () => 0;
+const identity = await fakeService(async ({ path, headers, body }) => {
   if (headers['x-hid-internal-caller'] !== 'pharmacy-api' || headers['x-hid-service-token'] !== IDENTITY_TOKEN) {
     return [401, { code: 'WORKLOAD_AUTHENTICATION_REQUIRED', detail: 'Synthetic Identity refused the workload' }];
   }
@@ -33,6 +37,7 @@ const identity = await fakeService(({ path, headers, body }) => {
   if (!actor) return [401, { code: 'AUTHENTICATION_REQUIRED', detail: 'Unknown synthetic session' }];
   if (path === '/api/v1/auth/service-session') return [200, { actor }];
   if (path === '/api/v1/identity/service/authorization/check') {
+    await new Promise((resolve) => setTimeout(resolve, authorizationLatency()));
     const facilityId = headers['x-facility-id'];
     const rule = decisions.get(`${actor.accountId}:${body.patientId}:${body.scope}`) ?? { allowed: false, breakGlass: false };
     return [200, { allowed: rule.allowed, patientId: body.patientId, facilityId,
@@ -53,7 +58,8 @@ try {
   const id = () => randomUUID();
   const f = { org: id(), facility: id(), patient: id(), encounter: id(), prescriber: id(),
     a: { account: id(), staff: id(), membership: id() }, b: { account: id(), staff: id(), membership: id() },
-    work: Array.from({ length: 5 }, () => ({ id: id(), prescription: id() })), dispensing: id() };
+    work: Array.from({ length: 5 }, () => ({ id: id(), prescription: id() })), dispensing: id(),
+    parallel: Array.from({ length: 8 }, () => ({ id: id(), prescription: id() })) };
   f.a.subject = `synthetic:pharmacy-verifier-a:${f.a.account}`;
   f.b.subject = `synthetic:pharmacy-verifier-b:${f.b.account}`;
   const insertWorkItem = (client, work) => client.query(`insert into pharmacy.work_items (id,patient_id,facility_id,
@@ -92,7 +98,7 @@ try {
       purpose_of_use,status,reason,starts_at,expires_at) values ($1,$2,$3,$4,$5,$6,'write_records','direct-care','active',
       'Synthetic Pharmacy verifier consent',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '30 days')`,
     [id(), f.patient, f.a.staff, f.a.account, f.a.membership, f.facility]);
-    for (const work of f.work) await insertWorkItem(client, work);
+    for (const work of [...f.work, ...f.parallel]) await insertWorkItem(client, work);
     await client.query(`insert into pharmacy.dispensings (id,work_item_id,work_item_version,patient_id,facility_id,
       medication_code_system,medication_code,medication_display,quantity_dispensed,quantity_unit,dispensed_by,
       dispensed_by_membership_id,reason,idempotency_key,request_sha256,correlation_id) values ($1,$2,1,$3,$4,
@@ -227,6 +233,25 @@ try {
     send(`/dispensings/${recovered.id}/reversals`, { ...reverseBody, reason: 'A rival synthetic reversal' }, { key: key('rival-b') })]);
   assert.deepEqual(recoveredReversal.map((response) => response.status).sort(), [201, 409]);
   check('reverse: no consent 404, missing permission 403, stale version 412; four concurrent identical reversals reverse once; rivals 201 and 409');
+
+  // Unrelated concurrent writes. SERIALIZABLE tracks the replay reads by index
+  // page, so on small tables transactions on different work items conflict and
+  // PostgreSQL cancels all but one of each overlapping group (40001); the
+  // authorization call inside the transaction widens the overlap. The retry
+  // must still let every request through.
+  authorizationLatency = () => 20 + Math.floor(Math.random() * 21);
+  const parallelDispensed = await Promise.all(f.parallel.map((work) => send(`/work-items/${work.id}/dispensings`, dispenseBody,
+    { key: key('parallel-dispense') })));
+  for (const response of parallelDispensed) expectStatus(response, 201, 'eight concurrent dispenses of different work items');
+  const parallelReversed = await Promise.all(parallelDispensed.map((response) => send(`/dispensings/${response.body.id}/reversals`,
+    reverseBody, { key: key('parallel-reverse') })));
+  for (const response of parallelReversed) expectStatus(response, 201, 'eight concurrent reversals of different dispensings');
+  authorizationLatency = () => 0;
+  assert.deepEqual(await Promise.all([
+    count('select count(*) from pharmacy.dispensings where work_item_id = any($1::uuid[])', [f.parallel.map((work) => work.id)]),
+    count('select count(*) from pharmacy.dispensing_reversals where dispensing_id = any($1::uuid[])',
+      [parallelDispensed.map((response) => response.body.id)])]), [8, 8]);
+  check('dispense and reverse: eight concurrent requests on different work items, with 20-40 ms Identity latency inside the transaction, all succeed once');
 
   // Import OCR medication evidence (internal caller ocr-api).
   const importBody = { patientId: f.patient, sourceDocumentId: id(), ocrJobId: id(), extractionId: id(), validationId: id(),
