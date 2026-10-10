@@ -1880,7 +1880,10 @@ Decision:
    job lock the job row first. A transaction that will insert a row referencing
    the job (its outbox event), while holding another row of that job, takes
    the job's `FOR KEY SHARE` before that row, so every OCR transaction reaches
-   the job before the publication.
+   the job before the publication. A request that waited for the job keeps
+   its older snapshot when the transaction it waited for changed no job row,
+   so a decision read without a lock is enforced again where the write
+   happens: the publication claim refuses a terminal failure.
 3. **`SERIALIZABLE` transactions retry.** The Pharmacy, Lab, OCR and Outreach
    `DatabaseService` run a `SERIALIZABLE` transaction again from the start,
    up to twelve attempts in all, when PostgreSQL cancels it with `40001`,

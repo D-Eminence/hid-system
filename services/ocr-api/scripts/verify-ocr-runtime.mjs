@@ -27,7 +27,7 @@ const check = (name) => evidence.checks.push(name);
 const id = () => randomUUID();
 const f = { org: id(), facility: id(), otherFacility: id(), patient: id(), otherPatient: id(), document: id(),
   a: { account: id(), staff: id(), membership: id() }, c: { account: id(), staff: id(), membership: id() },
-  jobs: Array.from({ length: 5 }, () => ({ job: id(), extraction: id() })) };
+  jobs: Array.from({ length: 6 }, () => ({ job: id(), extraction: id() })) };
 f.a.subject = `synthetic:ocr-verifier-a:${f.a.account}`;
 f.c.subject = `synthetic:ocr-verifier-c:${f.c.account}`;
 
@@ -35,7 +35,9 @@ f.c.subject = `synthetic:ocr-verifier-c:${f.c.account}`;
 const actors = new Map();
 const decisions = new Map();
 const labImports = [];
+const labRejections = [];
 let labUnavailable = false;
+let labRejects = false;
 // Holds the next upstream call that `matches` until released, so a race can
 // start while the OCR API has no transaction open.
 let pause;
@@ -78,6 +80,10 @@ const upstream = await fakeService(async (call) => {
   if (method === 'POST' && path === '/api/v1/lab/imports/from-ocr') {
     if (headers['x-hid-service-token'] !== TOKENS.lab) return [401, { code: 'INTERNAL_SERVICE_AUTH_REQUIRED' }];
     if (labUnavailable) return [503, { code: 'LAB_IMPORT_UNAVAILABLE', detail: 'Synthetic Lab outage' }];
+    if (labRejects) {
+      labRejections.push(body);
+      return [422, { code: 'LAB_IMPORT_REJECTED', detail: 'Synthetic Lab rejection' }];
+    }
     labImports.push(body);
     return [201, { id: `00000000-0000-4000-8000-${String(labImports.length).padStart(12, '0')}`, status: 'created', version: 1 }];
   }
@@ -358,6 +364,43 @@ try {
   assert.deepEqual((await database.owner.query('select status, failure_code from ocr.publications where validation_id=$1',
     [failValidated.validationId])).rows, [{ status: 'failed', failure_code: 'LAB_IMPORT_UNAVAILABLE' }]);
   check('publish: while another request holds the job, the failure transaction waits for it before taking the publication row (no deadlock), then records the retryable failure');
+
+  // A resent request whose snapshot predates a terminal failure. It waits for
+  // the job, here behind a key share like the failure transaction's own, while
+  // the Lab API rejects the first request; its replay read then still shows the
+  // publication processing, and the claim must refuse the terminal failure.
+  const [, , , , , j6] = f.jobs;
+  const within = (promise, message) => Promise.race([promise,
+    new Promise((resolve, reject) => setTimeout(() => reject(new Error(message)), 10_000).unref())]);
+  const terminalValidated = expectStatus(await send(`/jobs/${j6.job}/validation`, validationBody(j6.extraction, { targetDomain: 'LAB',
+    candidateType: 'lab_document', acceptedFields: { observations: [{ testName: 'Glucose', value: '5.4', unit: 'mmol/L' }] } }),
+  { key: key('terminal-validate') }), 201, 'validate the terminal race job');
+  const terminalConfirmed = expectStatus(await send(`/jobs/${j6.job}/patient-confirmation`, confirmBody(), { key: key('terminal-confirm') }),
+    201, 'confirm the terminal race job');
+  const terminalRequest = [`/validations/${terminalValidated.validationId}/publications`, { ...publicationBody,
+    patientConfirmationId: terminalConfirmed.id, targetOperation: 'create_imported_lab_evidence' },
+  { key: key('terminal-publish'), purpose: 'direct-care' }];
+  labRejects = true;
+  const atRejection = pauseAt(({ method, path }) => method === 'POST' && path === '/api/v1/lab/imports/from-ocr');
+  const rejected = send(...terminalRequest);
+  await atRejection.reached;
+  let resentSettled = false;
+  const { resent } = await holdingRow('select id from ocr.jobs where id=$1 for key share', [j6.job],
+    async ({ waitedFor }) => {
+      const resent = send(...terminalRequest).finally(() => { resentSettled = true; });
+      assert(await waitedFor(() => resentSettled), 'the resent request did not wait for the job');
+      atRejection.release();
+      assert.equal(expectStatus(await within(rejected, 'the failure transaction waited for the job'), 422,
+        'a publication the Lab API rejected').code, 'LAB_IMPORT_REJECTED');
+      return { resent };
+    });
+  const resentResponse = await resent;
+  labRejects = false;
+  assert.equal(expectStatus(resentResponse, 409, 'a resent request after the terminal failure').code, 'OCR_PUBLICATION_TERMINAL');
+  assert.equal(labRejections.length, 1, 'the Lab API was asked again after a terminal failure');
+  assert.deepEqual((await database.owner.query('select status, failure_code, attempt_count from ocr.publications where validation_id=$1',
+    [terminalValidated.validationId])).rows, [{ status: 'failed', failure_code: 'LAB_IMPORT_REJECTED', attempt_count: 1 }]);
+  check('publish: a resent request that waited for the job while the Lab API rejected the first one answers 409 terminal and is not sent to the Lab API again');
 
   // A Lab publication through the fake Lab API: concurrent requests import once.
   const labValidation = validationBody(j4.extraction, { targetDomain: 'LAB', candidateType: 'lab_document',

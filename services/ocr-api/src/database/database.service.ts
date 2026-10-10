@@ -67,10 +67,10 @@ export class DatabaseService implements OnApplicationShutdown {
    * Runs the operation in one transaction. A SERIALIZABLE transaction that
    * PostgreSQL cancels to keep concurrent requests serializable is run again
    * from the start, up to twelve attempts in all. The OCR commands lock the job
-   * row and replay insert-only validations, confirmations and publications;
-   * a request that waited for a concurrent one on the job lock is cancelled
-   * under SERIALIZABLE, and the retry sees the committed winner, so it replays
-   * it or refuses the request instead of failing with a 5xx (Phase 4 Stage 9).
+   * row first; a request that waited there for a concurrent one is cancelled
+   * when that one changed the job (40001) or inserted the row it would insert
+   * (40001 or 23505), and the retry sees the committed winner, so it replays it
+   * or refuses the request instead of failing with a 5xx (Phase 4 Stage 9).
    */
   async withTransaction<Result>(
     context: DataAccessContext,

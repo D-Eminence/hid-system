@@ -1643,7 +1643,10 @@ Service changes that the database relies on:
   confirmation and publication requests; the publish and failure transactions
   of a publication take the job's `FOR KEY SHARE` (the lock their outbox
   insert's foreign key takes) before the publication row, so every OCR
-  transaction reaches the job before the publication.
+  transaction reaches the job before the publication. A publication replay
+  reads its row without a lock, on a snapshot that can predate a failure that
+  committed while it waited for the job, so the publication claim itself
+  refuses a terminal failure.
 - Outreach locks `FOR SHARE OF campaign` for a campaign-linked registration,
   not the membership row. The campaign `UPDATE` policy then applies, so a role
   with `outreach.registration.write` needs `outreach.campaign.write` too.

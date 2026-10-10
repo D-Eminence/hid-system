@@ -80,6 +80,14 @@ const JOB_SELECT = `
 
 const OCR_PROCESSING_CONTRACT = 'hid-textract-v1';
 
+/** Publication failure codes a later request may retry; any other failure is terminal. */
+const RETRYABLE_PUBLICATION_FAILURES = ['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS'];
+
+function isTerminalFailure(publication: PublicationRow): boolean {
+  return publication.status === 'failed' && publication.failure_code !== null
+    && !RETRYABLE_PUBLICATION_FAILURES.includes(publication.failure_code);
+}
+
 @Injectable()
 export class OcrService {
   private readonly logger = new Logger(OcrService.name);
@@ -248,10 +256,12 @@ export class OcrService {
     assertCandidateClassification(input);
     const digest = requestDigest('ocr.validation.create', { jobId, ...input });
     return this.database.withTransaction(context, async (client) => {
-      // The job row lock is the serialization point of the job's validation,
-      // confirmation and publication commands; validations and confirmations
-      // are insert-only (0013, 0016 triggers) and the runtime role cannot lock
-      // them, so their replay lookups take no lock (Phase 4 Stage 9).
+      // Every command of the job locks the job row first, so they queue in one
+      // order. Validations and confirmations are insert-only (0013, 0016
+      // triggers) and the runtime role cannot lock them, so their replay
+      // lookups take no lock; a request that waited here is cancelled when the
+      // one before it changed the job or inserted the row it would insert, and
+      // the retry sees that row (Phase 4 Stage 9).
       const job = await this.findJob(client, jobId, true);
       const source = await this.authorizeJob(job, context, 'write_records');
       const replayResult = await client.query<ValidationRow>(
@@ -397,7 +407,9 @@ export class OcrService {
       // A replay only reads its publication; executePublication's conditional
       // update claims it. Locking the row here, while holding the job, waited
       // for a publish or failure transaction that holds the row and needs the
-      // job for its outbox insert: a deadlock (Phase 4 Stage 9).
+      // job for its outbox insert: a deadlock (Phase 4 Stage 9). The read can
+      // be older than a failure that committed while this request waited for
+      // the job, so the claim refuses a terminal failure again.
       const replayResult = await client.query<PublicationRow>(
         `select * from ocr.publications where facility_id=$1 and requested_by=$2 and idempotency_key=$3`,
         [context.facilityId, context.actor.accountId, idempotencyKey]);
@@ -429,10 +441,7 @@ export class OcrService {
       return created;
     }, { isolationLevel: 'SERIALIZABLE' });
     if (publication.status === 'published') return this.projectPublication(publication);
-    if (publication.status === 'failed' && publication.failure_code
-      && !['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS'].includes(publication.failure_code)) {
-      throw new DomainProblem(409, 'OCR_PUBLICATION_TERMINAL', 'Publication failed terminally and requires corrected validation evidence');
-    }
+    if (isTerminalFailure(publication)) throw this.terminalPublication();
     return this.executePublication(publication.id, context);
   }
 
@@ -458,8 +467,9 @@ export class OcrService {
           attempt_count=attempt_count+1, failure_code=null, failure_summary=null,
           row_version=row_version+1, correlation_id=$3
          where id=$1 and attempt_count < max_attempts and next_attempt_at <= clock_timestamp()
-           and (status in ('pending','failed') or (status='processing' and processing_expires_at <= clock_timestamp()))
-         returning *`, [publicationId, token, context.correlationId]);
+           and (status='pending' or (status='failed' and failure_code = any($4::text[]))
+             or (status='processing' and processing_expires_at <= clock_timestamp()))
+         returning *`, [publicationId, token, context.correlationId, RETRYABLE_PUBLICATION_FAILURES]);
       return result.rows[0];
     });
     if (!claimed) {
@@ -468,6 +478,7 @@ export class OcrService {
         return result.rows[0];
       });
       if (current?.status === 'published') return this.projectPublication(current);
+      if (current && isTerminalFailure(current)) throw this.terminalPublication();
       throw new DomainProblem(409, 'OCR_PUBLICATION_IN_PROGRESS', 'Publication is already processing or is not retryable');
     }
 
@@ -574,6 +585,10 @@ export class OcrService {
    */
   private async lockJobKey(client: PoolClient, jobId: string) {
     await client.query('select id from ocr.jobs where id = $1 for key share', [jobId]);
+  }
+
+  private terminalPublication() {
+    return new DomainProblem(409, 'OCR_PUBLICATION_TERMINAL', 'Publication failed terminally and requires corrected validation evidence');
   }
 
   private async findValidation(client: PoolClient, validationId: string): Promise<ValidationRow> {

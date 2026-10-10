@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
+import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
@@ -54,6 +55,9 @@ interface Options {
   reusable?: boolean;
   outboxError?: Error;
   publishLost?: boolean;
+  replayed?: Record<string, unknown>;
+  claimRefused?: boolean;
+  current?: Record<string, unknown>;
 }
 
 type Rows = { rows: unknown[]; rowCount: number };
@@ -85,12 +89,13 @@ function harness(options: Options = {}) {
       if (options.outboxError) throw options.outboxError;
       return rows([]);
     }
-    if (sql.includes('from ocr.publications where facility_id=$1')) return rows([]);
+    if (sql.includes('from ocr.publications where facility_id=$1')) return rows(options.replayed ? [options.replayed] : []);
     if (sql.includes('select id::text from ocr.publications where validation_id=$1')) return rows([]);
     if (sql.includes('insert into ocr.publications')) return rows([publication]);
     if (sql.includes("update ocr.publications set status='processing'")) {
-      return rows([{ ...publication, status: 'processing', attempt_count: 1, row_version: '2' }]);
+      return rows(options.claimRefused ? [] : [{ ...publication, status: 'processing', attempt_count: 1, row_version: '2' }]);
     }
+    if (sql === 'select * from ocr.publications where id=$1') return rows(options.current ? [options.current] : []);
     if (sql.includes("update ocr.publications set status='published'")) {
       return rows(options.publishLost ? [] : [{ ...publication, status: 'published', row_version: '3' }]);
     }
@@ -301,5 +306,20 @@ describe('OCR publication lock order', () => {
     const [first, second] = transactionWith(clients, update);
     expect(first).toBe('select id from ocr.jobs where id = $1 for key share');
     expect(second).toContain(update);
+  });
+
+  it('refuses at the claim a terminal failure that committed after the replay read', async () => {
+    // The replay waited for the job while the failure transaction recorded the
+    // terminal failure, so its snapshot still shows the publication processing.
+    const digest = requestDigest('ocr.publication.create', { validationId, validationVersion: 1,
+      patientConfirmationId: confirmationId, targetOperation: 'retain_validated_document', purpose: 'direct-care' });
+    const { service, clients } = harness({ jobRow: validatedJob, claimRefused: true,
+      replayed: { ...publication, status: 'processing', attempt_count: 1, request_sha256: digest },
+      current: { ...publication, status: 'failed', attempt_count: 1, failure_code: 'LAB_IMPORT_REJECTED' } });
+    await expect(publish(service)).rejects.toMatchObject({ code: 'OCR_PUBLICATION_TERMINAL' });
+    const claim = clients.flatMap((client) => (client.query as unknown as jest.Mock).mock.calls)
+      .find(([sql]) => String(sql).includes("update ocr.publications set status='processing'"));
+    expect(String(claim?.[0])).toContain("status='failed' and failure_code = any($4::text[])");
+    expect(claim?.[1]?.[3]).toEqual(['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS']);
   });
 });
