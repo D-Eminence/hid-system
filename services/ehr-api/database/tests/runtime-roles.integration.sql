@@ -286,20 +286,16 @@ begin
      ) then
     raise exception 'MFA account lock helper privileges are inconsistent';
   end if;
-  -- The self-NIN evidence predicate (0078) of the patient_identifiers insert
-  -- policy: every role that inserts identifiers needs it, as the policy applies
-  -- to all of them; no other grantee, PUBLIC included.
-  if not has_function_privilege('hid_identity_api_runtime',
-       'identity.patient_self_nin_evidence_matches(uuid,uuid,text,timestamptz)', 'EXECUTE')
-     or (select function_row.proacl from pg_proc function_row
-          where function_row.oid = 'identity.patient_self_nin_evidence_matches(uuid,uuid,text,timestamptz)'::regprocedure) is null
-     or exists (
-       select 1 from pg_proc function_row, aclexplode(function_row.proacl) privilege
-       where function_row.oid = 'identity.patient_self_nin_evidence_matches(uuid,uuid,text,timestamptz)'::regprocedure
-         and privilege.grantee <> function_row.proowner
-         and privilege.grantee not in ('hid_identity_runtime'::regrole, 'hid_schema_test_runtime'::regrole)
-     ) then
-    raise exception 'self-NIN evidence predicate privileges are inconsistent';
+  -- Self-NIN identifiers are written only by identity.bind_my_verified_nin, a
+  -- definer owned by the table owner, which bypasses row-level security on
+  -- this table. No policy may let another role insert one directly (0078).
+  if exists (
+       select 1 from pg_policy policy_row
+       where policy_row.polrelid = 'identity.patient_identifiers'::regclass
+         and policy_row.polcmd in ('a', '*')
+         and pg_get_expr(policy_row.polwithcheck, policy_row.polrelid) like '%hid-patient-self-qoreid-verification%'
+     ) or (select relforcerowsecurity from pg_class where oid = 'identity.patient_identifiers'::regclass) then
+    raise exception 'a policy lets a role other than the binding function insert a self-NIN identifier';
   end if;
   -- RLS policies and invoker-rights trigger functions run with the querying
   -- role's rights. platform.current_account_id() is an invoker SQL function

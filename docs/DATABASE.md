@@ -1604,16 +1604,18 @@ and repairs, in
   runtime has no `SELECT` on `verification_evidence`, so every Identity
   runtime insert into `identity.patient_identifiers` failed with `42501`,
   including the governed NIN registration review, which another policy
-  allows. 0078 recreates the policy with the same name, command, roles and
-  conditions, and moves the evidence sub-select into
-  `identity.patient_self_nin_evidence_matches(uuid, uuid, text, timestamptz)`:
-  `SECURITY DEFINER`, `STABLE`, `search_path = identity, pg_temp`. It answers
-  only whether one exact verified QoreID NIN evidence row exists for that
-  patient, reference and time, and returns nothing else. `EXECUTE` is revoked
-  from PUBLIC; `runtime-grants.sql` grants it to `hid_identity_runtime` and
-  `hid_schema_test_runtime`, and `runtime-roles.integration.sql` asserts that
-  exact ACL. Granting `SELECT` on `verification_evidence` instead would have
-  exposed every patient's evidence to the Identity runtime.
+  allows. 0078 drops the policy. The only writer of self-NIN identifiers is
+  `identity.bind_my_verified_nin`, a `SECURITY DEFINER` function owned by the
+  table's owner, and `identity.patient_identifiers` does not force row-level
+  security, so that function never used the policy. The policy only let
+  another role insert a self-NIN identifier directly, without the binding
+  function's checks (the patient's own session, crosswalk ownership, manual
+  review, single-NIN eligibility, the per-NIN lock); repairing its privileges
+  (a first version of 0078 did, through a definer predicate) would have given
+  that to the Identity runtime, and granting `SELECT` on
+  `verification_evidence` would also have exposed every patient's evidence.
+  `runtime-roles.integration.sql` requires that no insert policy names the
+  self-NIN source and that the table does not force row-level security.
 - **Lab work-item child guard.** `lab.validate_work_item_child` (0018) guards
   `lab.work_item_requested_tests` and `lab.work_item_events`. Its
   requested-test check read `NEW.ordinal`, `NEW.code` and other snapshot
@@ -1627,11 +1629,9 @@ and repairs, in
   is `NOT NULL`). Signature, owner, ACL, `SECURITY DEFINER`, `search_path`,
   volatility, error code and messages are kept.
 
-The policy change takes an `ACCESS EXCLUSIVE` lock on
+Dropping the policy takes an `ACCESS EXCLUSIVE` lock on
 `identity.patient_identifiers` for the catalog change only; nothing is scanned
-or rewritten. Apply the role bootstrap right after 0078: until the grant
-exists, Identity runtime identifier inserts fail on the predicate instead of
-the table, as they have since 0058.
+or rewritten. 0078 needs no role bootstrap change.
 
 Service changes that the database relies on:
 
@@ -1691,6 +1691,10 @@ Checks:
     in this case, so under the rehearsal's non-superuser owner (P8) it cannot
     see it and must refuse every case; the run under the migration owner is
     the one that checks the accepted cases.
+  - Case 6 requires the Identity runtime to be refused (`42501`, row-level
+    security) when it inserts a self-NIN identifier directly, even for a
+    verified QoreID evidence row of the same patient. It fails on the first
+    version of 0078.
 - Runtime HTTP verifiers, run by the rehearsal one at a time on disposable
   copies of its database, each with the service's real `AppModule` and every
   database connection starting as the runtime role (libpq `options=-c

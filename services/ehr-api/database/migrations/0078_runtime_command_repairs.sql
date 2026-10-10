@@ -19,41 +19,17 @@
 -- patient_identifiers_registration_insert policy allows. hid_schema_test_runtime
 -- can read verification_evidence, so the schema suite did not show this.
 --
--- The policy keeps its name, command, roles and conditions; only the evidence
--- sub-select moves into a SECURITY DEFINER predicate that answers one exact
--- question (does this verified QoreID NIN evidence of this patient, with this
--- reference and time, exist) and returns nothing else. EXECUTE is revoked from
--- PUBLIC; the role bootstrap grants it to the two roles that insert
--- identifiers (runtime-grants.sql). Granting SELECT on verification_evidence
--- instead would expose every patient's evidence rows to the Identity runtime.
-create function identity.patient_self_nin_evidence_matches(
-  p_evidence_id uuid, p_patient_id uuid, p_provider_reference text, p_verified_at timestamptz
-) returns boolean language sql stable security definer
-set search_path = identity, pg_temp as $$
-  select exists (
-    select 1 from identity.verification_evidence evidence
-     where evidence.id = p_evidence_id
-       and evidence.patient_id = p_patient_id
-       and evidence.subject_type = 'patient'
-       and evidence.verification_type = 'nin'
-       and evidence.result = 'verified'
-       and evidence.provider = 'qoreid'
-       and evidence.provider_reference = p_provider_reference
-       and evidence.verified_at = p_verified_at
-  )
-$$;
-revoke all on function identity.patient_self_nin_evidence_matches(uuid, uuid, text, timestamptz) from public;
-
+-- The policy is dropped, not repaired. The only writer of self-NIN identifiers
+-- is identity.bind_my_verified_nin, a SECURITY DEFINER function owned by the
+-- owner of identity.patient_identifiers, which does not force row-level
+-- security, so that function never used the policy. The policy only let a
+-- role other than the owner insert a self-NIN identifier directly, without the
+-- binding function's checks (the patient's own session, crosswalk ownership,
+-- manual review, single-NIN eligibility, the per-NIN lock). Repairing its
+-- privileges would have given exactly that to the Identity runtime; granting
+-- it SELECT on verification_evidence would also have exposed every patient's
+-- evidence.
 drop policy patient_identifiers_self_nin_insert on identity.patient_identifiers;
-create policy patient_identifiers_self_nin_insert on identity.patient_identifiers
-  for insert with check (
-    identifier_type = 'nin' and verified and patient_self_evidence_id is not null
-    and registration_case_id is null and public_enrollment_id is null
-    and source_system = 'hid-patient-self-qoreid-verification'
-    and verification_provider = 'qoreid'
-    and identity.patient_self_nin_evidence_matches(
-      patient_self_evidence_id, patient_id, verification_reference, verified_at)
-  );
 
 -- 2. Lab can record the acceptance event of a work item.
 --

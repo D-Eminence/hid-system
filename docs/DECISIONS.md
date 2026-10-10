@@ -1916,10 +1916,12 @@ Consequences:
   second.
 - A conflict that a retry cannot resolve (a row hidden by row-level security
   in another facility, two members verifying one Lab result version) still
-  answers `500`, after two extra attempts; mapping those constraints to `409`
-  is a follow-up.
-- Removing a lock made reachable code that had always failed before it. Two
-  defects behind the locks were repaired by 0078 (the self-NIN identifier
-  policy's privileges and the Lab work-item child guard), and one lock-order
-  cycle between OCR publication requests and publication completion was
-  fixed by decision 2.
+  answers `500`, after one retry; mapping those constraints to `409` is a
+  follow-up.
+- Removing a lock made reachable code that had always failed before it. 0078
+  fixed two defects behind the locks: it drops the self-NIN identifier insert
+  policy, whose sub-select the Identity runtime cannot read and which no
+  legitimate writer uses (repairing its privileges would have let the Identity
+  runtime insert self-NIN identifiers without `bind_my_verified_nin`), and it
+  repairs the Lab work-item child guard. One lock-order cycle between OCR
+  publication requests and publication completion was fixed by decision 2.

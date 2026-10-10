@@ -18,7 +18,8 @@
 -- - Since 0058 the self-NIN insert policy on identity.patient_identifiers read
 --   identity.verification_evidence, which the Identity runtime cannot read, so
 --   every Identity runtime insert of an identifier failed, including the NIN
---   registration review. 0078 moves that check into a definer predicate.
+--   registration review. 0078 drops that policy; Case 6 checks that the
+--   Identity runtime still cannot insert a self-NIN identifier directly.
 --
 -- Case 1 plans (EXPLAIN, which performs the start-of-statement privilege
 -- checks without running anything) a no-op SELECT, INSERT, UPDATE, DELETE and
@@ -27,8 +28,11 @@
 -- statements Stage 9 kept, changed or added, exactly, as their runtime roles.
 -- Case 3 pins the boundary: Stage 9 granted no UPDATE, so the insert-only
 -- tables whose locks were dropped still cannot be locked by their runtime role.
--- The rehearsal also runs this suite with a schema owner that is neither a
--- superuser nor BYPASSRLS; nothing here depends on the owner.
+-- Case 4 checks the Outreach campaign-write pairing, Case 5 the Lab work-item
+-- child guard and Case 6 that the Identity runtime cannot insert a self-NIN
+-- identifier. The rehearsal also runs this suite with a schema owner that is
+-- neither a superuser nor BYPASSRLS; only Case 5 depends on the owner, and it
+-- probes it.
 begin;
 
 create temporary table runtime_command_probe (
@@ -311,6 +315,46 @@ begin
   end if;
   raise notice 'Lab work-item child guard: % cases passed (owner sees the work item: %)',
     (select count(*) from lab_child_case), owner_sees;
+end $$;
+
+-- Case 6: the Identity runtime cannot insert a self-NIN identifier directly,
+-- even for a verified QoreID evidence row of the same patient. Only
+-- identity.bind_my_verified_nin writes them, with the patient's own session
+-- and its eligibility checks; as the table owner it bypasses row-level
+-- security. 0058's policy let any role write one when the evidence matched;
+-- 0078 drops it rather than let the Identity runtime use it.
+set local session_replication_role = replica;
+insert into identity.patients (id, hid_code, first_name, last_name, full_name, status)
+values ('e8f90000-0000-4000-8000-000000000011', 'HID-RCPSNFAA', 'Synthetic', 'Patient', 'Synthetic Patient', 'active');
+insert into identity.verification_evidence (id, subject_type, patient_id, verification_type, provider, provider_reference,
+  result, verified_at, created_at, correlation_id, actor_account_id, source_system)
+values ('e8f90000-0000-4000-8000-000000000012', 'patient', 'e8f90000-0000-4000-8000-000000000011', 'nin', 'qoreid',
+  'synthetic-qoreid-reference', 'verified', '2026-10-01 09:00:00+00', '2026-10-01 09:00:00+00', 'runtime-command-privileges',
+  'e8f90000-0000-4000-8000-000000000013', 'identity-api');
+set local session_replication_role = origin;
+create temporary table self_nin_insert (outcome text);
+grant all on self_nin_insert to public;
+do $$
+begin
+  set local role hid_identity_api_runtime;
+  insert into identity.patient_identifiers (id, patient_id, identifier_type, value_ciphertext, lookup_hmac,
+    encryption_key_version, display_hint, verified, source_system, verified_at, verification_provider,
+    verification_reference, patient_self_evidence_id)
+  values ('e8f90000-0000-4000-8000-000000000014', 'e8f90000-0000-4000-8000-000000000011', 'nin', '\x00'::bytea,
+    repeat('e', 64), 'synthetic-v1', '0001', true, 'hid-patient-self-qoreid-verification', '2026-10-01 09:00:00+00',
+    'qoreid', 'synthetic-qoreid-reference', 'e8f90000-0000-4000-8000-000000000012');
+  reset role;
+  raise exception using errcode = 'S9000', message = 'undo the probe';
+exception when others then
+  reset role;
+  insert into self_nin_insert values (case when sqlstate = 'S9000' then 'inserted' else sqlstate || ': ' || sqlerrm end);
+end $$;
+do $$
+declare outcome text := (select outcome from self_nin_insert);
+begin
+  if outcome is null or outcome not like '42501: new row violates row-level security policy%' then
+    raise exception 'Identity runtime direct self-NIN identifier insert: expected 42501 row-level security refusal, got %', outcome;
+  end if;
 end $$;
 
 select 'runtime command privileges: ' || count(*) || ' probes passed' as result from runtime_command_probe;
