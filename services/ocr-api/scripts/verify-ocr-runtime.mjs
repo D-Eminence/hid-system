@@ -206,6 +206,19 @@ try {
   assert.deepEqual([await job(j1.job), await count('select count(*) from ocr.validations where job_id=$1', [j1.job])],
     [{ status: 'awaiting_validation', version: 1 }, 0]);
   check('validate: missing permission 403, other facility 404 (row-level security), Identity denial 404, stale version 412, nothing written');
+  // Publication refuses these candidates as terminal and a validated job cannot
+  // be validated again, so validation refuses them before writing anything.
+  for (const [overrides, code] of [
+    [{ targetDomain: 'EHR', candidateType: 'clinical_note', acceptedFields: {} }, 'OCR_INVALID_CLINICAL_NOTE'],
+    [{ targetDomain: 'LAB', candidateType: 'lab_document', acceptedFields: { observations: [{ testName: 'Sodium' }] } },
+      'OCR_INVALID_LAB_EVIDENCE'],
+  ]) {
+    assert.equal(expectStatus(await send(`/jobs/${j1.job}/validation`, validationBody(j1.extraction, overrides),
+      { key: key('unpublishable') }), 400, `validate an unpublishable ${overrides.targetDomain} candidate`).code, code);
+  }
+  assert.deepEqual([await job(j1.job), await count('select count(*) from ocr.validations where job_id=$1', [j1.job])],
+    [{ status: 'awaiting_validation', version: 1 }, 0]);
+  check('validate: a candidate its publication would refuse (EHR clinical note, Lab observation) 400, nothing written');
   const validateKey = key('validate');
   const validations = await together(4, () => send(`/jobs/${j1.job}/validation`, validationBody(j1.extraction), { key: validateKey }));
   for (const response of validations) expectStatus(response, 201, 'four concurrent identical validations');

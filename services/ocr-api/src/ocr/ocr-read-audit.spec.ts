@@ -9,6 +9,7 @@ import type { IdentityApiService } from '../integrations/identity-api.service';
 import type { LabApiService } from '../integrations/lab-api.service';
 import type { PharmacyApiService } from '../integrations/pharmacy-api.service';
 import type { CreateOcrPublicationDto } from './dto/create-ocr-publication.dto';
+import type { ValidateOcrJobDto } from './dto/validate-ocr-job.dto';
 import { OcrService } from './ocr.service';
 
 const context = {
@@ -67,6 +68,8 @@ interface Options {
   attemptReadError?: Error;
   /** attempt_count once the claim has raised it; the failure update returns it unchanged (default 1). */
   claimedAttempt?: number;
+  /** A validation already stored under the request's Idempotency-Key. */
+  validationReplay?: Record<string, unknown>;
 }
 
 type Rows = { rows: unknown[]; rowCount: number };
@@ -87,7 +90,7 @@ function harness(options: Options = {}) {
     if (/from ocr\.jobs\s+where id = \$1/.test(sql)) { order.push('select job'); return rows(jobRow ? [jobRow] : []); }
     if (sql.includes("update ocr.jobs set status = 'queued'")) return rows([{ ...job, status: 'queued', row_version: '5' }]);
     if (sql.includes('update ocr.jobs set status = $5')) return rows([{ ...job, status: 'validated', row_version: '5' }]);
-    if (sql.includes('validation.idempotency_key = $3')) return rows([]);
+    if (sql.includes('validation.idempotency_key = $3')) return rows(options.validationReplay ? [options.validationReplay] : []);
     if (sql.includes('coalesce(max(validation_version), 0) + 1')) return rows([{ version: 1 }]);
     if (sql.includes('insert into ocr.validations')) return rows([{ id: validationId }]);
     if (sql.includes('on job.id = validation.job_id')) { order.push('select validations'); return rows([validation]); }
@@ -559,5 +562,88 @@ describe('OCR publication failure classification', () => {
     expect(calls(clients).some(([sql]) => sql.includes("update ocr.publications set status='failed'"))).toBe(false);
     expect(calls(clients).some(([sql]) => sql.includes('insert into ocr.outbox_events'))).toBe(false);
     expect(auditEvents(audit).some(([, item]) => item.action === 'ocr.publication.fail')).toBe(false);
+  });
+});
+
+describe('OCR validation refuses a candidate that publication would refuse', () => {
+  // Publication stores these refusals as terminal and a validated job cannot be
+  // validated again (0077), so a validation that publication would refuse
+  // stranded the reviewed record.
+  const note = { encounterId: 'c0000000-0000-4000-8000-000000000001', noteType: 'historical-record',
+    title: 'Imported discharge note', content: 'Reviewed content' };
+  const body = (fields: Partial<ValidateOcrJobDto>): ValidateOcrJobDto => ({
+    extractionId: validation.extraction_id, expectedVersion: 4, validatedPayload: {}, disposition: 'validated',
+    targetDomain: 'EHR', candidateType: 'clinical_note', acceptedFields: note, rejectedFields: [], corrections: [],
+    reason: 'Reviewed against the source', purpose: 'healthcare-operations', ...fields });
+  const writes = (clients: PoolClient[]) => clients.flatMap((client) => (client.query as unknown as jest.Mock).mock.calls)
+    .map(([sql]) => String(sql))
+    .filter((sql) => sql.includes('insert into ocr.validations') || sql.includes('update ocr.jobs'));
+
+  it.each([
+    { targetDomain: 'EHR', candidateType: 'clinical_note', acceptedFields: {}, code: 'OCR_INVALID_CLINICAL_NOTE' },
+    { targetDomain: 'EHR', candidateType: 'clinical_note', acceptedFields: { ...note, encounterId: undefined },
+      code: 'OCR_INVALID_CLINICAL_NOTE' },
+    { targetDomain: 'EHR', candidateType: 'clinical_note', acceptedFields: { ...note, content: ' ' },
+      code: 'OCR_INVALID_CLINICAL_NOTE' },
+    { targetDomain: 'LAB', candidateType: 'lab_document', acceptedFields: {}, code: 'OCR_INVALID_LAB_EVIDENCE' },
+    { targetDomain: 'LAB', candidateType: 'lab_document', acceptedFields: { observations: [{ testName: 'Sodium' }] },
+      code: 'OCR_INVALID_LAB_EVIDENCE' },
+    { targetDomain: 'PHARMACY', candidateType: 'historical_medication_evidence', acceptedFields: {},
+      code: 'OCR_INVALID_MEDICATION_EVIDENCE' },
+  ] as (Partial<ValidateOcrJobDto> & { code: string })[])(
+    'refuses a validated $targetDomain candidate with 400 $code and writes nothing', async ({ code, ...fields }) => {
+      const { service, clients, audit } = harness();
+
+      const failure = await service.validate(jobId, body(fields), 'ocr-validate-key-000101', context)
+        .catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(DomainProblem);
+      expect(failure).toMatchObject({ code });
+      expect((failure as DomainProblem).getStatus()).toBe(400);
+      expect(writes(clients)).toEqual([]);
+      expect(auditEvents(audit)).toEqual([]);
+    });
+
+  it.each([
+    { targetDomain: 'EHR', candidateType: 'clinical_note', acceptedFields: note },
+    { targetDomain: 'LAB', candidateType: 'lab_document',
+      acceptedFields: { observations: [{ testName: 'Sodium', value: '140', unit: 'mmol/L' }] } },
+    { targetDomain: 'PHARMACY', candidateType: 'historical_medication_evidence',
+      acceptedFields: { medicationText: 'Metformin 500 mg' } },
+    { targetDomain: 'DOCUMENT_ONLY', candidateType: 'document_only', acceptedFields: {} },
+  ] as Partial<ValidateOcrJobDto>[])('validates a publishable $targetDomain candidate', async (fields) => {
+    const { service, clients, audit } = harness();
+
+    await service.validate(jobId, body(fields), 'ocr-validate-key-000102', context);
+
+    expect(writes(clients)).toHaveLength(2);
+    expect(auditEvents(audit).map(([, event]) => event.action)).toEqual(['ocr.validation.accept']);
+  });
+
+  it('still records a rejection whose fields could not be published', async () => {
+    const { service, clients, audit } = harness();
+
+    await service.validate(jobId, body({ disposition: 'rejected', acceptedFields: {} }), 'ocr-validate-key-000103', context);
+
+    expect(writes(clients)).toHaveLength(2);
+    expect(auditEvents(audit).map(([, event]) => event.action)).toEqual(['ocr.validation.reject']);
+  });
+
+  it('answers a replay with the stored validation, even one this check would now refuse', async () => {
+    const input = body({ acceptedFields: {} });
+    const stored = { ...validation, target_domain: 'EHR', candidate_type: 'clinical_note', accepted_fields: {},
+      request_sha256: requestDigest('ocr.validation.create', { jobId, ...input }) };
+    const { service, clients } = harness({ validationReplay: stored });
+
+    await expect(service.validate(jobId, input, 'ocr-validate-key-000104', context))
+      .resolves.toMatchObject({ id: validationId, targetDomain: 'EHR' });
+    expect(writes(clients)).toEqual([]);
+  });
+
+  it('authorizes the caller before checking the candidate', async () => {
+    const { service } = harness({ allowed: false });
+
+    await expect(service.validate(jobId, body({ acceptedFields: {} }), 'ocr-validate-key-000105', context))
+      .rejects.toMatchObject({ code: 'OCR_JOB_NOT_FOUND' });
   });
 });

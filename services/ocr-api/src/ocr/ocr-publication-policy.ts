@@ -108,6 +108,17 @@ export function clinicalNoteCandidate(fields: Record<string, unknown>) {
   return { encounterId, noteType: noteType.trim(), title: title.trim(), content };
 }
 
+/**
+ * Runs the owning domain's candidate check that publication runs on the same
+ * accepted fields. Publication stores its refusal as terminal, and a validated
+ * job cannot be validated again (0077), so validation must refuse first.
+ */
+export function assertPublishableCandidate(domain: OcrTargetDomain, fields: Record<string, unknown>): void {
+  if (domain === 'EHR') clinicalNoteCandidate(fields);
+  else if (domain === 'LAB') importedLabCandidate(fields);
+  else if (domain === 'PHARMACY') importedMedicationCandidate(fields);
+}
+
 export function publicationCanRetry(attemptCount: number, maxAttempts: number,
   failure: 'transient' | 'terminal'): boolean {
   return failure === 'transient' && attemptCount < maxAttempts;
