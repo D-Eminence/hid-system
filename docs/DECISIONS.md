@@ -1837,3 +1837,66 @@ Alternatives considered:
   privileges with the guards'. It is simpler, but it is not least privilege.
 
 Related: ADR-028, ADR-039, ADR-040; release checklist P8 and §4.1.
+
+# ADR-043: Identity Trusts a Workload-Reported Method for Delegated Cookie Reads
+
+Status: Proposed (D-Eminence/hid-system#38, an open pull request that is not
+merged).
+
+Date: 2026-10-11
+
+Context:
+
+EHR, Lab, OCR and Pharmacy authorize each patient-scoped request with
+`POST /api/v1/identity/service/authorization/check`, forwarding the user's
+cookie and authenticating separately as approved workloads (ADR-025).
+Identity's `SecurityGuard` requires an allowed `Origin` and a valid
+`X-CSRF-Token` on every cookie request with an unsafe method, and the decision
+call is always a `POST`. A same-origin browser `GET` carries neither, so on
+`main` every delegated patient-scoped read from a same-origin cookie session is
+refused `403 ORIGIN_DENIED` at the decision call. This was reproduced locally
+over HTTP for a doctor's cookie-only read of encounters through EHR.
+
+Decision (proposed):
+
+- The calling services report the method of the request they are serving in
+  `X-HID-Original-Method`. The typed Identity client sends it upper-cased, and
+  only when it is 1–16 letters. Only the patient authorization call sends it.
+- `@DelegatedBrowserRequest()` marks the routes where Identity may use that
+  report. Only `POST /api/v1/identity/service/authorization/check` is marked.
+- On a marked route, Identity skips the cookie Origin and CSRF check only when
+  the reported method is exactly `GET`, `HEAD` or `OPTIONS` and the same
+  request authenticates through `WorkloadAuthService.authenticateService` as an
+  approved caller (`ehr-api`, `lab-api`, `pharmacy-api`, `ocr-api`,
+  `outreach-api`). Any other value, and any workload authentication failure,
+  keeps the check.
+- The header carries no authority by itself. Session verification, runtime
+  controls, facility, permission, the handler's own workload authentication
+  and the patient decision are unchanged, as are bearer requests and every
+  other route, including `POST /api/v1/auth/service-session`.
+
+Consequences:
+
+- same-origin cookie reads through EHR, Lab, OCR and Pharmacy are authorized
+  once both the service and Identity include the change; either side alone
+  behaves as before;
+- Identity cannot verify the reported method. It relies on any approved
+  workload with valid credentials to report it truthfully, so such a workload
+  can have the Origin and CSRF check skipped on the patient decision. A browser
+  write is still checked first: EHR, Lab, OCR and Pharmacy revalidate the
+  session through `POST /api/v1/auth/service-session`, and Outreach checks
+  writes in its own guard and through
+  `POST /api/v1/identity/outreach/authorize`;
+- for a service hop that forwards the user's cookie, the reported method is
+  that hop's, not the browser's. For example, EHR reports `GET` for OCR's
+  source-document read during job creation, after OCR has revalidated the
+  browser's `POST`;
+- Outreach reports no method, and its own Identity routes are not marked. Its
+  guard still requires Origin and CSRF on every cookie request, so same-origin
+  cookie reads from Outreach are likely refused (from reading the code, not
+  reproduced; a follow-up); and
+- the HTTP evidence is local and synthetic and covers EHR only; Lab, OCR and
+  Pharmacy have unit coverage only (release checklist §8).
+
+Related: ADR-025; `INTERFACE_CONTRACT.md` (Extracted Identity boundary);
+release checklist §2, §3 and §9.

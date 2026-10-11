@@ -199,6 +199,18 @@ Identity patient decision endpoint with the same user evidence. Workload
 credentials are never put in `Authorization`, and user credentials are never
 put in workload headers.
 
+Later change (2026-10-11, D-Eminence/hid-system#38, open PR): that decision
+call is a `POST` even for a browser read, and a same-origin cookie `GET`
+carries no Origin or CSRF token, so Identity on `main` refuses every delegated
+same-origin cookie read there with `403 ORIGIN_DENIED`. With #38, EHR, Lab,
+OCR and Pharmacy also send the method of the request they serve as
+`X-HID-Original-Method`. Identity skips its cookie Origin/CSRF check on
+`POST /identity/service/authorization/check` only, and only for a reported
+`GET`, `HEAD` or `OPTIONS` from a caller that passes workload authentication;
+every other case, and `POST /auth/service-session`, keeps the check. See the
+Extracted Identity boundary in `INTERFACE_CONTRACT.md`. Its HTTP evidence is
+local and synthetic, for EHR only.
+
 ## 8. Idempotency matrix
 
 | Flow | Stable key / binding | Owner behavior |

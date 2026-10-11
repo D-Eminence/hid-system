@@ -3,8 +3,9 @@
 This is the combined release checklist for the platform administration work
 of Phase 4, the governed-access slice that followed it, the Stage 6 OCR
 audit and queue-metrics slice, Stage 7 (MFA lock order and fail-closed OCR
-validation guards) and Stage 8 (fail-closed session guards and OCR worker
-leases). It covers Identity, the OCR API and worker, and
+validation guards), Stage 8 (fail-closed session guards and OCR worker
+leases) and the delegated cookie-read fix (D-Eminence/hid-system#38). It covers
+Identity, the EHR, Lab, Pharmacy and OCR APIs, the OCR worker, and
 the database in this repository, and in Health-id the admin console
 (`apps/patient-web/src/admin`) and the provider portal's governed-access pages
 (`apps/patient-web/src/staff`). It records what was
@@ -18,9 +19,10 @@ deployed, and no staging or production database has been migrated.** Every
 | --- | --- | --- |
 | Database | `services/ehr-api/database/migrations` through `0077_fail_closed_session_guards_and_ocr_worker_leases.sql` | Phase 1–4 schema. The platform admin migrations are 0067–0072. Stage 5 adds no migration; Stage 5B adds 0073, governed access adds 0074, Stage 6 adds 0075, Stage 7 adds 0076 and Stage 8 adds 0077 (§2). |
 | Runtime grants | `services/ehr-api/database/runtime-grants.sql`, applied by the role bootstrap | Governed access grants the Identity runtime the clinician's access-request list. Stage 6 adds the technical role `hid_ocr_queue_metrics`, its policy, and the OCR worker's grant on the queue metrics command. Stage 8 grants the Outreach runtime `auth.account_id_for_subject(text)` (§2). |
-| Identity API | `services/identity-api` on `main` (Stage 2A, 4A, 5, 5B, governed access and 7) | Platform MFA sessions, step-up, two-person approval and the Stage 4A admin contracts. Stage 5 adds the two fixes in §2; Stage 5B adds the revocation lock; governed access adds the access-request outcome fields; Stage 7 locks the account first in every MFA transaction (§2). |
-| Pharmacy API | `services/pharmacy-api` | Stage 5 CORS header fix (§2). |
-| OCR API | `services/ocr-api` (Stage 6) | Patient-linked audit events for OCR evidence reads (§2). |
+| Identity API | `services/identity-api` on `main` (Stage 2A, 4A, 5, 5B, governed access and 7), and D-Eminence/hid-system#38 | Platform MFA sessions, step-up, two-person approval and the Stage 4A admin contracts. Stage 5 adds the two fixes in §2; Stage 5B adds the revocation lock; governed access adds the access-request outcome fields; Stage 7 locks the account first in every MFA transaction; #38 lets the patient authorization check accept a workload-reported browser read without Origin and CSRF (§2). |
+| EHR and Lab APIs | `services/ehr-api`, `services/lab-api` and `packages/api-client` (D-Eminence/hid-system#38) | Report the method of the request they serve to Identity's patient authorization check (§2). |
+| Pharmacy API | `services/pharmacy-api`, and D-Eminence/hid-system#38 | Stage 5 CORS header fix; #38 reports the method of the request it serves (§2). |
+| OCR API | `services/ocr-api` (Stage 6), and D-Eminence/hid-system#38 | Patient-linked audit events for OCR evidence reads; #38 reports the method of the request it serves (§2). |
 | OCR worker | `services/ocr-worker` (Stage 6) | Queue depth and age through the new aggregate command (§2). |
 | Admin console | Health-id `main` (Stage 4B and the Stage 5 fix) | The console for the contracts above. |
 | Provider portal | Health-id `main` (governed access, D-Eminence/Health-id#18 and D-Eminence/Health-id#19) | The clinician's access requests with their outcomes, closing a grant, and write gating on the clinical page. |
@@ -61,6 +63,10 @@ deployed, and no staging or production database has been migrated.** Every
   - **OCR publication requester:** a publication request may only name the session's own account and membership as requester (the attribution gap 0076 closed for confirmations).
   - **Lab, Pharmacy and Outreach guards:** the 13 guards that compared a row with the session's account or membership using `<>` (five Lab, five Pharmacy, three Outreach) refuse a missing session account, membership or facility, and Outreach a purpose other than direct care, with their existing codes and messages. Forced row-level security already refused such writes for the runtime roles; a session that bypasses it (a superuser, or an owner without `FORCE ROW LEVEL SECURITY`) could write rows attributed to any member with no context. The Lab OCR-import guard also refuses another facility's OCR evidence when its owner cannot read it (P8).
   - **Outreach runtime grant:** Outreach policies call `platform.current_account_id()` as the runtime, which calls `auth.account_id_for_subject(text)`, revoked from PUBLIC. The Outreach runtime had no `EXECUTE` on it, so every Outreach write failed with `42501` since the baseline. The bootstrap now grants it; `runtime-roles.integration.sql` and the Outreach API spec `runtime-function-grants.spec.ts` check it. Campaign-linked registration still fails on a separate defect (§4.2).
+- **Delegated cookie reads (D-Eminence/hid-system#38, no migration)**. EHR, Lab, OCR and Pharmacy authorize each patient-scoped request through `POST /identity/service/authorization/check`, forwarding the browser's cookie. Identity's `SecurityGuard` treated that POST as a browser write and required `Origin` and `X-CSRF-Token`, which a same-origin browser `GET` does not send, so every delegated read from a cookie session was refused `403 ORIGIN_DENIED`. Reproduced locally over HTTP for a doctor's cookie-only `GET /ehr/patients/:id/encounters`; Lab, OCR and Pharmacy reads take the same path.
+  - **Services:** each `requireRequestContext` now records `request.method` as `requestMethod`, and `@hid/api-client` sends it to Identity as `X-HID-Original-Method` (upper-cased, only when it is 1–16 letters). Only the patient authorization call passes it.
+  - **Identity:** the new `@DelegatedBrowserRequest()` (`common/decorators.ts`) marks `service/authorization/check` only. On that route `SecurityGuard.delegatedSafeBrowserRequest` skips the cookie Origin and CSRF check when the reported method is exactly `GET`, `HEAD` or `OPTIONS` and the request authenticates through `WorkloadAuthService.authenticateService` as any approved caller (`ehr-api`, `lab-api`, `pharmacy-api`, `ocr-api`, `outreach-api`). Identity cannot check the reported method itself; it relies on the authenticated workload (§9; proposed ADR-043).
+  - **Unchanged:** a reported write, a missing, lower-case or unknown method, a wrong or missing workload token and an unapproved caller name all keep the check (`ORIGIN_DENIED`, or `CSRF_VALIDATION_FAILED` with an allowed Origin and no CSRF). Every other route keeps it, including `POST /auth/service-session`, through which the four services still revalidate a real cookie write's Origin and CSRF before acting. Bearer transport, facility, permission, workload authentication in the handler and the patient decision are unchanged. Outreach's own Identity routes (`POST /identity/outreach/authorize` and `POST /identity/outreach/patient-authorization`) are not marked. Its one patient authorization call, for the link-existing write (`IdentityService.authorizeExistingPatient`), goes to the marked route but sends no method, so the check still applies.
 - **Provider portal (Health-id)**:
   - D-Eminence/Health-id#18 reads the list above, closes a grant, and enables clinical writes only when `POST /identity/consent-status` allows them.
   - D-Eminence/Health-id#19 shows each approval's outcome and expiry, offers **Close access** for an active grant, and adds the outcome filters. The new fields and filters appear only when Identity reports them.
@@ -91,6 +97,11 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 - 0077 needs no service change and works with every build. The OCR worker always sends its claim token and the OCR API always names the session's member, so their writes pass as before. A worker's lease renewals now succeed. A worker that fails a job after its lease expired is now refused (`55000`) and logs `ocr.job.failure_persistence_failed`; the next claim's lease recovery takes the job over, as it already did for completions.
 - The Lab, Pharmacy and Outreach APIs always set the full session, so their writes pass as before. A maintenance write to those tables from a superuser or migration session without a staff context is now refused; set a real staff context, or change the data under change control.
 - The Outreach API can write only after the bootstrap's new grant (§5). Earlier, every Outreach write failed (`5xx`).
+
+**Delegated cookie reads (D-Eminence/hid-system#38):**
+- No schema, grant or browser contract change; Health-id needs no change.
+- Same-origin cookie reads through a service work only once both that service and Identity run #38. Either side alone behaves exactly as before: an earlier Identity ignores `X-HID-Original-Method`, and an earlier service does not send it, so the read is still refused `403 ORIGIN_DENIED`. Deploy in either order.
+- Writes, bearer requests and Outreach behave the same with any combination of builds.
 
 **Governed access:**
 - The provider portal of D-Eminence/Health-id#19 works with any Identity build that serves the access-request list. It shows outcomes and offers the outcome filters only when Identity reports `effectiveStatus`. Otherwise it shows the request status, as before.
@@ -272,15 +283,17 @@ Unit tests mock the database and no runtime verifier exercises these commands, w
 6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`. This needs the infrastructure change in P3. A Stage 5B or later Identity must not start before steps 4 and 5 (0073 and its grant), a Stage 7 Identity not before 0076 and its grant, and an Identity with the governed-access outcome mapping must not start before 0074 and the bootstrap.
 7. Deploy the **Pharmacy API**. This is independent of the other steps.
 8. Deploy the **OCR API** and the **OCR worker** (Stage 6). The API is independent of the other steps. The worker reports queue metrics once steps 4 and 5 (0075 and its grant) are done.
-9. Run the smoke checks:
-   - a Super Admin signs in with TOTP;
-   - a high-risk action asks for step-up;
-   - `GET /admin/audit/events?resourceType=facility` answers `200`;
-   - `GET /admin/approvals` returns `{ items, nextCursor }`;
-   - a clinician's `GET /identity/access-requests` answers `200`, and each item has `effectiveStatus`;
-   - CloudWatch shows no `MFA_UNAVAILABLE`;
-   - once the OCR worker has claimed a job, its `ocr.job.claimed` logs carry `queueDepth` and `oldestQueueAgeSeconds`, and no `ocr.queue.metrics_unavailable` follows a claim. A worker logs neither while it claims nothing;
-   - if the Outreach API is deployed: a registration without a campaign (`POST /outreach/registration-cases`) answers `2xx` and PostgreSQL logs no `permission denied for function account_id_for_subject`. A campaign-linked registration still fails until the §4.2 Outreach fix.
+9. If D-Eminence/hid-system#38 is released, deploy the **EHR and Lab APIs** with it, alongside the Pharmacy and OCR APIs of steps 7 and 8. This is independent of the other steps; a service's same-origin cookie reads work once it and Identity both run #38 (§3).
+10. Run the smoke checks:
+    - a Super Admin signs in with TOTP;
+    - a high-risk action asks for step-up;
+    - `GET /admin/audit/events?resourceType=facility` answers `200`;
+    - `GET /admin/approvals` returns `{ items, nextCursor }`;
+    - a clinician's `GET /identity/access-requests` answers `200`, and each item has `effectiveStatus`;
+    - with #38: a clinician's same-origin cookie `GET /ehr/patients/:id/encounters`, for a patient whose grant is active, answers `200` and not `403 ORIGIN_DENIED`; a cookie write with an allowed `Origin` and no `X-CSRF-Token` is still refused `403 CSRF_VALIDATION_FAILED`;
+    - CloudWatch shows no `MFA_UNAVAILABLE`;
+    - once the OCR worker has claimed a job, its `ocr.job.claimed` logs carry `queueDepth` and `oldestQueueAgeSeconds`, and no `ocr.queue.metrics_unavailable` follows a claim. A worker logs neither while it claims nothing;
+    - if the Outreach API is deployed: a registration without a campaign (`POST /outreach/registration-cases`) answers `2xx` and PostgreSQL logs no `permission denied for function account_id_for_subject`. A campaign-linked registration still fails until the §4.2 Outreach fix.
 
 ## 7. Staging acceptance
 
@@ -297,6 +310,7 @@ has been run, because no staging environment exists yet (Health-id
 | S4a | The governed-access loop in the staging provider and patient portals: a clinician requests access, the patient approves, the clinician sees **Access active** with its expiry, writes a clinical record, closes access (**Closed by you**, writes disabled), then requests again and the patient revokes (**Access revoked**). No browser run of these pages has been done; only component tests and the HTTP verifier (§8). | Screenshots and notes. |
 | S4b | The OCR pipeline on staging: create a job, let the worker extract it, validate, confirm the patient and publish. Validation and confirmation fail until the §4.2 OCR defect is fixed. With a provider slower than a third of the lease, the worker must log no `ocr.job.lease_renewal_failed` (0077). A confirmation of the correct patient that fails with `500`, while PostgreSQL logs `Patient confirmation does not match the canonical OCR source patient`, means the schema owner cannot read the source document (P8, 0076). Confirm the outbox events, the patient-linked audit rows for `ocr.job.find`, `ocr.validation.list` and `ocr.publication.list`, the worker's `queueDepth` and `oldestQueueAgeSeconds`, and `OcrQueueAgeAlarm` datapoints. No OCR HTTP or worker run against a database has been done; the evidence is the unit, SQL and compiled-worker checks in §8. | Logs, audit rows and alarm history. |
 | S4c | If the Outreach API is deployed: after the bootstrap, a registration without a campaign, a link to an existing patient and a campaign create succeed (0077 grant). A campaign-linked registration fails until the §4.2 Outreach fix. | Responses and logs. |
+| S4d | Delegated cookie reads (#38), from the staging Health-id apps signed in with cookie sessions: patient-scoped reads through EHR, Lab, OCR and Pharmacy answer `200`, not `403 ORIGIN_DENIED`. A cookie write without CSRF is still refused. `verify-delegated-cookie-read-runtime.mjs` cannot be pointed at staging: it accepts only the rehearsal's own synthetic database. Only the EHR path has been exercised over HTTP, locally (§8). | Responses and notes. |
 | S5 | Cross-origin preflights, only if staging serves the console from another origin. | `OPTIONS` responses. |
 | S6 | Rollback drill: redeploy the previous Identity build against the migrated staging database and sign in. | Notes. |
 
@@ -441,6 +455,16 @@ No other local cluster was touched. Later stages say which cluster they used.
   - **Reproduced on 0076:** a NULL claim token completed and failed another replica's job; every lease renewal was refused; a superuser session with no context wrote Lab, Pharmacy and Outreach rows attributed to another member; under the non-superuser owner a Lab import bound another facility's OCR validation and publication; a document marked entered in error during OCR made `ocr.claim_worker_job` raise for its provider; every Outreach write failed with `42501` as the Outreach runtime. The §4.2 locking statements failed as each service's runtime role, and the three §9 lock-order hazards (and the facility-suspension one) deadlocked with two connections.
   - **Read-only data check:** no local database holds an OCR job without an exact clean scan of its source; the P9 query lists such jobs on synthetic data.
   - **Adversarial review:** five independent reviewers (semantics, security, tests, docs, registration) and one verifier per finding. Every confirmed finding is fixed here or recorded above: the unbounded lease renewal, the out-of-play exemption, the same-status job event, the untested renewal and metadata rules, P9's cancel instructions and the counts.
+- **Delegated cookie reads (D-Eminence/hid-system#38)**, as recorded in that PR (the PR and its commit are dated 2026-10-11); local and synthetic only. The with-fix rehearsal used its own temporary Unix-socket cluster, which it creates and removes on each run (`docs/TUF-STAGING-MIGRATION.md`); the failing-first run used a disposable clone of the repository, per the PR, which does not name the cluster of its verifier run:
+  - **HTTP verifier:** `services/ehr-api/scripts/verify-delegated-cookie-read-runtime.mjs`, run by `scripts/tuf-staging-migration-rehearsal.mjs` as `checks.delegated_cookie_read_runtime`. It runs only inside the rehearsal (`NODE_ENV=test`, `PGHOST` a `/tmp/hid-tuf-migration.*` socket, `PGDATABASE=hid_rehearsal`) and works on a disposable copy of that database, which it drops. It runs Identity in a child process as `hid_identity_api_runtime` and EHR as `hid_ehr_api_runtime`, and generates the EHR local workload secret per run. It checks that:
+    - after the patient approves the doctor's request, the doctor's same-origin cookie `GET /ehr/patients/:id/encounters`, with no Origin and no CSRF, is authorized through Identity and returns the encounter; the same read with an allowed Origin also passes;
+    - EHR cookie writes are refused `403 CSRF_VALIDATION_FAILED` without CSRF and `403 ORIGIN_DENIED` without Origin;
+    - called directly, Identity's check answers `201` with `allowed: true` for the EHR workload reporting `GET`, and `403` for a wrong or missing workload token (`ORIGIN_DENIED`), a reported `POST` with Origin and no CSRF (`CSRF_VALIDATION_FAILED`) and no reported method (`ORIGIN_DENIED`);
+    - the patient's own `GET /ehr/me/records` still reads through the self-authorization path.
+  - **Unit:** Identity `delegated-browser-request.spec.ts` (12 tests, against the real handlers' decorator metadata) and `delegated-browser-method.spec.ts` in EHR, Lab, OCR and Pharmacy (2 each).
+  - **Failing first:** with the tests only, on `c28d04c` (request path identical to `main`), the Identity spec did not compile, each client spec failed 2/2 and the verifier got `403 ORIGIN_DENIED`.
+  - **With the fix,** on `main` (`54f79d2`) plus the PR commit: Identity 738/738, EHR 59/59, OCR 77/77, Lab 55/55 and Pharmacy 33/33 with all typechecks; the workspace gates (build, tests, verify, release tests and contracts, the EHR app tests and `git diff --check`); and the rehearsal, with `checks.delegated_cookie_read_runtime.status = passed`.
+  - Lab, OCR and Pharmacy have unit coverage only; no HTTP run covers their delegated reads.
 - **Not run:** staging or production anything (§7). The browser run uses the backend's own TOTP clock seam to issue codes, not a real authenticator app.
 
 To reproduce, run as the owner of a local cluster migrated to 0073 and role-bootstrapped (Stage 5B Identity calls `auth.lock_account_sessions` on sign-out and expiry; a cluster left at 0072 needs `db:migrate` and `db:bootstrap` again) (`services/ehr-api` `db:migrate` and `db:bootstrap`). The harness defaults to the database `hid_rehearsal`, the superuser `hid_rehearsal_admin` and ports 4010 and 4011. Change them with `HID_E2E_TEMPLATE_DB`, `HID_E2E_DB_SUPERUSER`, `HID_E2E_API_PORT` and `HID_E2E_CONTROL_PORT`; see the script headers. Stop `server.mjs` with Ctrl-C or SIGTERM, which drops its database copy.
@@ -485,6 +509,7 @@ To reproduce, run as the owner of a local cluster migrated to 0073 and role-boot
 - **0076:** forward-only like every migration. To restore the earlier guard bodies, a new migration would have to recreate them; that would accept a confirmation for any patient again under a non-bypass owner, and validations from sessions without an account or membership. No OCR build depends on the earlier behaviour. The Stage 7 Identity needs `auth.lock_account_for_mfa`.
 - **0077:** forward-only. Restoring the earlier bodies would need a new migration and would bring back the NULL claim token, the refused lease renewals, jobs for unscanned documents, publications attributed to any member and the NULL-session gaps of the Lab, Pharmacy and Outreach guards. No service build depends on the earlier behaviour. Revoking the Outreach grant would stop every Outreach write again.
 - **OCR after 0075:** roll the OCR API and worker back freely. Earlier workers lose the metrics again; earlier APIs write the earlier, possibly unlinked, events. The function, the role and both policies stay. Removing the outbox insert policy would stop patient confirmation and publication again.
+- **Delegated cookie reads (#38):** code only, no persisted state. Rolling back Identity brings back the `403 ORIGIN_DENIED` refusal for the same-origin cookie reads of all four services (EHR, Lab, OCR and Pharmacy); rolling back one service brings it back for that service only (§3). Nothing else changes.
 - **Refresh-event change:** this is code only. Rolling back Identity brings back the old misclassification and nothing else. Existing `refresh`/`denied` events remain valid rows.
 - **MFA key:** if `MFA_SECRET_KEY_B64` is lost, every enrolled authenticator must be re-enrolled. Store it with the same care as the field-encryption keys.
 - **Lockout:** if every Super Admin is locked out (lost authenticators and recovery codes), recovery needs the documented break-glass procedure. That procedure is not built yet; see the product decisions in `PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §9. Keep two independent Super Admins with stored recovery codes.
@@ -519,6 +544,11 @@ A prototype on a copy (the 0073 ordered account lock in `auth.admin_transition_a
 - The Lab, Pharmacy, OCR, notification and event runtimes cannot call `platform.current_account_id()` directly (no `USAGE` on schema `auth`). No policy, invoker trigger or service of theirs does; a future one would need the grant and the schema usage.
 
 Each is a follow-up.
+
+**Known limits of the delegated cookie-read fix (#38):**
+- Identity cannot check the reported method. Any approved workload caller with valid credentials can have the cookie Origin and CSRF check skipped on the patient authorization check by reporting `GET`, `HEAD` or `OPTIONS`. A real browser write is still checked first: EHR, Lab, OCR and Pharmacy revalidate the session through `POST /auth/service-session` (Outreach checks writes in `outreach-security.guard.ts` and through `POST /identity/outreach/authorize`, neither of which is marked). The reported method is the method of the request the service is serving: for a service hop that forwards the user's cookie, such as OCR's `GET /api/v1/ehr/internal/ocr/documents/:documentId/source` during job creation, EHR reports that hop's `GET`, after OCR has already revalidated the originating browser write.
+- Outreach's own guard (`outreach-security.guard.ts`) requires an allowed Origin and an `X-CSRF-Token` on every cookie request, `GET` included, and refuses it otherwise with `403 CSRF_VALIDATION_FAILED`. A same-origin browser `GET` carries no Origin, and neither the Cloudflare frontend worker (`infra/cloudflare/src/frontend-worker.mjs`) nor the gateway (`gateway/proxy-headers.conf`) adds one. Health-id also sends `X-CSRF-Token` only on writes (Health-id `packages/http/src/client.ts`). Same-origin cookie reads from Outreach are therefore likely refused; this is from reading the code and was not reproduced. It is a separate follow-up.
+- The HTTP verifier covers EHR only (§8).
 
 ## 10. Operator actions, not performed here
 

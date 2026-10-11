@@ -114,6 +114,10 @@ verified. Review that synthetic facility-scoped assignment explicitly.
    required reason and emergency purpose. Read through the owning EHR route, then
    revoke/expire the grant and confirm further reads are denied. Review the
    recorded patient access history, audit and notification outcomes.
+   From a same-origin browser cookie session that read reaches Identity's
+   patient authorization check with no Origin or CSRF token. It succeeds only when both
+   EHR and Identity include D-Eminence/hid-system#38; otherwise it is refused
+   `403 ORIGIN_DENIED` before any grant is evaluated.
 4. An empty records collection is valid for this fixture; verify the actual
    authenticated read and audit, not fabricated note content. Positive signed-note
    content remains a separate clinical-sample check unless normal clinical APIs
@@ -142,7 +146,14 @@ contacts, `pending_reset` accounts, no patient workforce authority, and the exac
 synthetic clinician facility role. Pending recovery remains denied by the patient
 runtime. The existing patient HTTP checks also run with NIN explicitly deferred
 and its credentials absent; local-only Turnstile and notification test doubles
-remain local-only. The rehearsal removes its cluster after completion and retains
+remain local-only. With D-Eminence/hid-system#38 the rehearsal also runs
+`services/ehr-api/scripts/verify-delegated-cookie-read-runtime.mjs` on a
+disposable copy of its synthetic `hid_rehearsal` database: after the synthetic
+patient approves a synthetic doctor's access request, the doctor's same-origin
+cookie read of the patient's encounters through EHR, with no Origin or CSRF
+token, is authorized by Identity, and EHR cookie writes without Origin or CSRF
+are refused. That check is local and synthetic; it does not exercise the
+staging fixture or break-glass access. The rehearsal removes its cluster after completion and retains
 its result in the printed evidence directory.
 
 Local fixture validation does not prove staging import, OTP delivery, emergency
