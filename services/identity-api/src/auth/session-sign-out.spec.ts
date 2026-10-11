@@ -140,12 +140,14 @@ describe('POST /auth/logout', () => {
     expect(auth.revokeByRefreshToken).not.toHaveBeenCalled();
   });
 
-  it('keeps the CSRF check for a live access cookie', async () => {
+  it('keeps the CSRF check for a live access cookie, and audits the refusal against that actor', async () => {
     const { controller, auth } = harness();
     const res = response();
-    const problem = await refusal(controller.logout(request({ origin: ORIGIN, 'x-csrf-token': 'forged' },
-      { hid_access: 'access-A', hid_access_refresh: 'refresh-A', hid_access_csrf: 'csrf-A' }), res as unknown as Response));
+    const forged = request({ origin: ORIGIN, 'x-csrf-token': 'forged' },
+      { hid_access: 'access-A', hid_access_refresh: 'refresh-A', hid_access_csrf: 'csrf-A' });
+    const problem = await refusal(controller.logout(forged, res as unknown as Response));
     expect(problem.code).toBe('CSRF_VALIDATION_FAILED');
+    expect(forged.actor?.sessionId).toBe(sessionA);
     expect(auth.revoke).not.toHaveBeenCalled();
     expect(auth.revokeByRefreshToken).not.toHaveBeenCalled();
     expect(cleared(res)).toEqual(ALL_COOKIES);

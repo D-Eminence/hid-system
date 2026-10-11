@@ -145,7 +145,11 @@ try {
   const reuse = await http.post('/api/v1/auth/refresh').set('Cookie', cookie(refreshOnly(first.cookies))).set('Origin', origin)
     .set('x-csrf-token', first.cookies[`${name}_csrf`]);
   assert.equal(reuse.status, 401, JSON.stringify(reuse.body));
-  checks.push('a sign-out carrying only the refresh cookie and its CSRF token ends that sign-in (logout, presented: refresh_token, audited) and clears all three cookies; the refresh cookie no longer refreshes');
+  const replayed = await logout(refreshOnly(first.cookies), first.cookies[`${name}_csrf`]);
+  assert.equal(replayed.status, 204); clearsAll(replayed);
+  assert.equal(Number((await pool.query(`select count(*) from auth.session_events where session_id = $1 and event_type = 'logout'`,
+    [first.sessionId])).rows[0].count), 1, 'a replayed sign-out cookie records no second sign-out');
+  checks.push('a sign-out carrying only the refresh cookie and its CSRF token ends that sign-in (logout, presented: refresh_token, audited) and clears all three cookies; the refresh cookie no longer refreshes, and replaying it records no second sign-out');
 
   // 2. An access cookie that is no longer live (the sign-in rotated in another tab) falls back to the refresh cookie.
   const rotating = await signIn(ada, 'patient');
@@ -220,7 +224,17 @@ try {
   assert.equal(await kindOf(patientRotated.body.actor.sessionId), 'patient');
   const unnamed = await refresh(jar(staffRotated), undefined);
   assert.equal(unnamed.status, 200, JSON.stringify(unnamed.body));
-  checks.push('patient-web refreshing a staff sign-in and staff-web refreshing a patient sign-in are 403 SESSION_CLIENT_MISMATCH with no cookie set and the sign-in unrotated; each app then refreshes its own; a client that does not name itself refreshes as before');
+  // A dead sign-in has no kind to protect: refresh() refuses it and clears its cookies.
+  const signedOut = await signIn(ada, 'patient');
+  assert.equal((await logout(signedOut.cookies, signedOut.cookies[`${name}_csrf`])).status, 204);
+  const dead = await refresh(signedOut.cookies, 'staff-web');
+  assert.equal(dead.status, 401, JSON.stringify(dead.body)); clearsAll(dead);
+  // A staff sign-in signs out by its refresh cookie too.
+  const staffJar = jar(unnamed);
+  const staffOut = await logout(refreshOnly(staffJar), staffJar[`${name}_csrf`]);
+  assert.equal(staffOut.status, 204, JSON.stringify(staffOut.body)); clearsAll(staffOut);
+  assert.equal(await live(unnamed.body.actor.sessionId), false);
+  checks.push('patient-web refreshing a staff sign-in and staff-web refreshing a patient sign-in are 403 SESSION_CLIENT_MISMATCH with no cookie set and the sign-in unrotated; each app then refreshes its own; a client that does not name itself refreshes as before; an ended sign-in sent with the other app\'s name is refused by refresh as 401 with its cookies cleared; a staff sign-in signs out by its refresh cookie');
 
   process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: 'hid_identity_api_runtime', checks })}\n`);
 } finally { if (app) await app.close(); await pool.end(); }

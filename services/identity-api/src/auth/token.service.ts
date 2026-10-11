@@ -411,7 +411,10 @@ export class TokenService {
    * Signs out the staff or patient sign-in a refresh token belongs to, for a
    * browser whose access token has already expired. The caller has verified
    * the CSRF token derived from this refresh token. The sign-in ends as
-   * revoke() ends it; a platform refresh token is never accepted here.
+   * revoke() ends it; a platform refresh token is never accepted here. Only a
+   * live session, or one rotated into a session that may still be live, is
+   * ended: a sign-in already ended another way has nothing left to end, so a
+   * replayed cookie records no second sign-out.
    */
   async revokeByRefreshToken(refreshToken: string, event: SessionEventMetadata):
     Promise<{ sessionId: string; accountId: string; actorSubject: string; kind: 'staff' | 'patient' } | undefined> {
@@ -421,7 +424,8 @@ export class TokenService {
          from auth.sessions session
          join auth.accounts account on account.id = session.account_id
         where session.refresh_token_sha256 = $1
-          and session.session_kind in ('staff', 'patient')`,
+          and session.session_kind in ('staff', 'patient')
+          and (session.revoked_at is null or session.revocation_reason = 'rotated')`,
       [this.sha256(refreshToken)],
     );
     const session = presented.rows[0];
@@ -432,13 +436,17 @@ export class TokenService {
   }
 
   /**
-   * The kind of the staff or patient sign-in a refresh token belongs to,
-   * read without rotating it; undefined for any other token.
+   * The kind of the staff or patient sign-in a refresh token belongs to, read
+   * without rotating it. Only a live session, or one just rotated by the other
+   * app's tab, has a kind here: any other token is left to refresh(), which
+   * refuses it, records the refusal and clears its cookies.
    */
   async refreshSessionKind(refreshToken: string): Promise<'staff' | 'patient' | undefined> {
     const result = await this.database.query<{ session_kind: 'staff' | 'patient' }>(
       `select session_kind from auth.sessions
-        where refresh_token_sha256 = $1 and session_kind in ('staff', 'patient')`,
+        where refresh_token_sha256 = $1 and session_kind in ('staff', 'patient')
+          and ((revoked_at is null and expires_at > clock_timestamp() and absolute_expires_at > clock_timestamp())
+            or revocation_reason = 'rotated')`,
       [this.sha256(refreshToken)],
     );
     return result.rows[0]?.session_kind;

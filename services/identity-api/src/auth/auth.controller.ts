@@ -323,6 +323,7 @@ export class AuthController {
       if (bearer) {
         const verified = await this.liveSession(bearer);
         if (!verified) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+        request.actor = verified.actor;
         await this.endSignIn(verified.actor, request);
         return;
       }
@@ -332,6 +333,8 @@ export class AuthController {
       const access = cookies[this.environment.AUTH_COOKIE_NAME];
       const verified = access ? await this.liveSession(access) : undefined;
       if (verified) {
+        // A refusal from here on is audited against the signed-in actor.
+        request.actor = verified.actor;
         if (!this.tokens.verifyCsrf(verified.claims, csrfCookie, csrfHeader)) {
           throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'CSRF validation failed');
         }
