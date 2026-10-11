@@ -1,5 +1,5 @@
 import { Body, Controller, Post, Req } from '@nestjs/common';
-import { AuditAction, Public, RequirePermissions } from '../common/decorators';
+import { AuditAction, DelegatedBrowserRequest, Public, RequirePermissions } from '../common/decorators';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { AuthorizationCheckDto } from './dto/authorization-check.dto';
 import { AuthorizeOutreachDto } from './dto/authorize-outreach.dto';
@@ -33,6 +33,7 @@ export class IdentityController {
   }
 
   @Post('service/authorization/check')
+  @DelegatedBrowserRequest()
   @RequirePermissions('identity.authorization.check')
   @AuditAction('identity.service.authorization.check.request')
   async authorizeService(@Body() input: AuthorizationCheckDto, @Req() request: HidRequest) {
