@@ -571,13 +571,17 @@ export class OcrService {
           [claimed.id, token, code, summary, !terminal]);
         const failed = result.rows[0];
         if (failed) {
+          // The claim takes the publication again only while attempt_count <
+          // max_attempts (the count this attempt's claim raised), so after the
+          // last permitted attempt no further attempt follows, whatever the code.
+          const retryable = !terminal && failed.attempt_count < failed.max_attempts;
           const job = await this.findJob(client, failed.job_id);
           await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.fail', job,
             failed.patient_id,
             { publicationId: failed.id, failureCode: failed.failure_code, ownerFailureCode: ownerCode,
-              retryable: !terminal }));
+              retryable }));
           await this.appendOutbox(client, job, 'OcrPublicationFailed', Number(failed.row_version),
-            { publicationId: failed.id, failureCode: failed.failure_code, retryable: !terminal });
+            { publicationId: failed.id, failureCode: failed.failure_code, retryable });
         }
       });
       throw error;

@@ -27,7 +27,7 @@ const check = (name) => evidence.checks.push(name);
 const id = () => randomUUID();
 const f = { org: id(), facility: id(), otherFacility: id(), patient: id(), otherPatient: id(), document: id(),
   a: { account: id(), staff: id(), membership: id() }, c: { account: id(), staff: id(), membership: id() },
-  jobs: Array.from({ length: 7 }, () => ({ job: id(), extraction: id() })) };
+  jobs: Array.from({ length: 8 }, () => ({ job: id(), extraction: id() })) };
 f.a.subject = `synthetic:ocr-verifier-a:${f.a.account}`;
 f.c.subject = `synthetic:ocr-verifier-c:${f.c.account}`;
 
@@ -561,6 +561,86 @@ try {
     atFresh?.release();
   }
   check('publish: a stale attempt whose claim expired and was claimed again answers 409 claim lost, changes nothing and emits no failure; the resend publishes once');
+
+  // Retry exhaustion. A Lab outage fails one publication on every permitted
+  // attempt; between attempts its retry time is moved forward (triggers off, as
+  // for fixtures). The claim takes a failed publication again only while
+  // attempt_count < max_attempts, so the failure events of every attempt but the
+  // last say retryable: true, and the last one's say retryable: false; the last
+  // failure has no backoff. A resend afterwards, with the Lab API back, answers
+  // 409 in progress, asks the Lab API nothing and changes nothing.
+  const [, , , , , , , j8] = f.jobs;
+  const exhaustValidated = expectStatus(await send(`/jobs/${j8.job}/validation`, validationBody(j8.extraction, { targetDomain: 'LAB',
+    candidateType: 'lab_document', acceptedFields: { observations: [{ testName: 'Potassium', value: '4.1', unit: 'mmol/L' }] } }),
+  { key: key('exhaust-validate') }), 201, 'validate the retry exhaustion job');
+  const exhaustConfirmed = expectStatus(await send(`/jobs/${j8.job}/patient-confirmation`, confirmBody(), { key: key('exhaust-confirm') }),
+    201, 'confirm the retry exhaustion job');
+  const exhaustRequest = [`/validations/${exhaustValidated.validationId}/publications`, { ...publicationBody,
+    patientConfirmationId: exhaustConfirmed.id, targetOperation: 'create_imported_lab_evidence' },
+  { key: key('exhaust-publish'), purpose: 'direct-care' }];
+  const exhaustRow = async () => (await database.owner.query(`select id::text, status, failure_code, attempt_count, max_attempts,
+      row_version::text, failed_at::text, next_attempt_at::text,
+      extract(epoch from next_attempt_at - failed_at)::float8 as backoff
+    from ocr.publications where validation_id=$1`, [exhaustValidated.validationId])).rows;
+  const failureEvents = async (correlationId) => ({
+    audit: (await database.owner.query(`select details->>'publicationId' as "publicationId",
+        details->>'failureCode' as "failureCode", details->>'ownerFailureCode' as "ownerFailureCode",
+        (details->>'retryable')::boolean as retryable,
+        (select array_agg(name order by name) from jsonb_object_keys(details) as name) as keys
+      from audit.events where correlation_id=$1 and action='ocr.publication.fail'`, [correlationId])).rows,
+    outbox: (await database.owner.query(`select payload from ocr.outbox_events
+      where correlation_id=$1 and event_type='OcrPublicationFailed'`, [correlationId])).rows.map(({ payload }) => payload),
+  });
+  let exhausted;
+  labUnavailable = true;
+  try {
+    for (let attempt = 1; !exhausted; attempt += 1) {
+      const correlationId = `verifier-exhaust-${attempt}-${id()}`;
+      const callsBefore = labCalls().length;
+      assert.equal(expectStatus(await send(exhaustRequest[0], exhaustRequest[1], { ...exhaustRequest[2], correlationId }),
+        503, `attempt ${attempt} of the publication during the Lab outage`).code, 'LAB_IMPORT_UNAVAILABLE');
+      assert(labCalls().length > callsBefore, `attempt ${attempt} did not reach the Lab API`);
+      const [row] = await exhaustRow();
+      assert.equal(row.max_attempts, 3, 'the publication does not have the default budget of three attempts');
+      assert.deepEqual([row.status, row.failure_code, row.attempt_count], ['failed', 'OWNING_SERVICE_UNAVAILABLE', attempt],
+        `attempt ${attempt} did not store a retryable failure`);
+      const last = attempt === row.max_attempts;
+      assert.deepEqual(await failureEvents(correlationId), {
+        audit: [{ publicationId: row.id, failureCode: 'OWNING_SERVICE_UNAVAILABLE', ownerFailureCode: 'LAB_IMPORT_UNAVAILABLE',
+          retryable: !last, keys: ['failureCode', 'ownerFailureCode', 'publicationId', 'retryable'] }],
+        outbox: [{ jobId: j8.job, publicationId: row.id, failureCode: 'OWNING_SERVICE_UNAVAILABLE', retryable: !last }],
+      }, `the failure events of attempt ${attempt} of ${row.max_attempts}`);
+      if (last) {
+        assert(row.backoff < 0.5, `the last attempt set its retry time ${row.backoff} s after its failure`);
+        exhausted = row;
+      } else {
+        assert(Math.abs(row.backoff - 15) < 0.5, `attempt ${attempt} set a retry backoff of ${row.backoff} s, not 15 s`);
+        assert.equal((await database.fixture((client) => client.query(
+          'update ocr.publications set next_attempt_at = clock_timestamp() where id=$1', [row.id]))).rowCount, 1);
+      }
+    }
+  } finally {
+    labUnavailable = false;
+  }
+  const exhaustedCalls = labCallsFor(exhausted.id);
+  assert.deepEqual([...new Set(exhaustedCalls.map(({ headers }) => headers['idempotency-key']))],
+    [`ocr-publication:${exhausted.id}`], 'a Lab call of the exhausted publication sent another idempotency key');
+  for (const call of exhaustedCalls) assert.deepEqual(call.body, exhaustedCalls[0].body, 'a Lab call of the exhausted publication sent another body');
+  // Its retry time has passed, so only the attempt budget refuses the resend.
+  assert.equal((await database.owner.query('select next_attempt_at <= clock_timestamp() as due from ocr.publications where id=$1',
+    [exhausted.id])).rows[0].due, true, 'the exhausted publication is not past its retry time');
+  const [callsBeforeResend, importsBeforeResend, jobBeforeResend] = [labCalls().length, labImports.length, await job(j8.job)];
+  const exhaustedResend = `verifier-exhausted-resend-${id()}`;
+  assert.equal(expectStatus(await send(exhaustRequest[0], exhaustRequest[1], { ...exhaustRequest[2], correlationId: exhaustedResend }),
+    409, 'a resend after the last permitted attempt failed').code, 'OCR_PUBLICATION_IN_PROGRESS');
+  assert.deepEqual([labCalls().length, labImports.length], [callsBeforeResend, importsBeforeResend],
+    'the resend after the last permitted attempt asked the Lab API');
+  assert.deepEqual(await exhaustRow(), [exhausted], 'the resend after the last permitted attempt changed the publication');
+  assert.deepEqual(await job(j8.job), jobBeforeResend, 'the resend after the last permitted attempt changed the job');
+  assert.deepEqual((await database.owner.query('select action, outcome from audit.events where correlation_id=$1', [exhaustedResend])).rows,
+    [{ action: 'api.ocr.publication.create.request', outcome: 'failure' }]);
+  assert.equal(await count('select count(*) from ocr.outbox_events where correlation_id=$1', [exhaustedResend]), 0);
+  check('publish: during a Lab outage the failure events of every attempt but the last say retryable: true and the last one\'s say retryable: false, with no backoff; a later resend answers 409 in progress, asks the Lab API nothing and changes nothing');
 
   // A Lab publication through the fake Lab API: concurrent requests import once.
   const labValidation = validationBody(j4.extraction, { targetDomain: 'LAB', candidateType: 'lab_document',

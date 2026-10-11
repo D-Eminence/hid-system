@@ -65,6 +65,8 @@ interface Options {
   ehrNote?: jest.Mock;
   /** Thrown by the validation read of the claimed attempt (the second one). */
   attemptReadError?: Error;
+  /** attempt_count once the claim has raised it; the failure update returns it unchanged (default 1). */
+  claimedAttempt?: number;
 }
 
 type Rows = { rows: unknown[]; rowCount: number };
@@ -107,7 +109,8 @@ function harness(options: Options = {}) {
     if (sql.includes('select id::text from ocr.publications where validation_id=$1')) return rows([]);
     if (sql.includes('insert into ocr.publications')) return rows([publicationRow]);
     if (sql.includes("update ocr.publications set status='processing'")) {
-      return rows(options.claimRefused ? [] : [{ ...publicationRow, status: 'processing', attempt_count: 1, row_version: '2' }]);
+      return rows(options.claimRefused ? [] : [{ ...publicationRow, status: 'processing',
+        attempt_count: options.claimedAttempt ?? 1, row_version: '2' }]);
     }
     if (sql === 'select * from ocr.publications where id=$1') return rows(options.current ? [options.current] : []);
     if (sql.includes("update ocr.publications set status='published'")) {
@@ -117,7 +120,7 @@ function harness(options: Options = {}) {
       // The failure update requires the same processing token as the publish
       // update, so after a lost claim it matches no row either.
       return rows(options.publishLost ? [] : [{ ...publicationRow, status: 'failed', failure_code: params[2],
-        failure_summary: params[3], row_version: '3' }]);
+        failure_summary: params[3], attempt_count: options.claimedAttempt ?? 1, row_version: '3' }]);
     }
     if (sql.includes('from ocr.publications where validation_id=$1 order by requested_at')) {
       order.push('select publications');
@@ -394,10 +397,10 @@ describe('OCR publication failure classification', () => {
     if (!call) throw new Error('No OcrPublicationFailed event');
     return JSON.parse(String(call[1][4])) as Record<string, unknown>;
   };
-  const failAtLab = (error: Error) => {
+  const failAtLab = (error: Error, overrides: Options = {}) => {
     const createOcrImport = jest.fn().mockRejectedValue(error);
     return { ...harness({ jobRow: validatedJob, validationRow: labValidation, publicationRow: labPublication,
-      labApi: { createOcrImport } }), createOcrImport };
+      labApi: { createOcrImport }, ...overrides }), createOcrImport };
   };
 
   it.each([
@@ -487,5 +490,74 @@ describe('OCR publication failure classification', () => {
     await expect(publishTo(service, 'create_imported_lab_evidence')).rejects.toMatchObject({ code: 'OCR_PUBLICATION_TERMINAL' });
     expect(calls(clients).some(([sql]) => sql.includes("update ocr.publications set status='processing'"))).toBe(false);
     expect(createOcrImport).not.toHaveBeenCalled();
+  });
+
+  // The claim takes a failed publication again only while attempt_count < max_attempts,
+  // counted after the claim that started the attempt, so the last permitted attempt's
+  // failure is reported as not retryable although its code stays retryable.
+  it.each([
+    { claimedAttempt: 1, maxAttempts: 3, retryable: true },
+    { claimedAttempt: 2, maxAttempts: 3, retryable: true },
+    { claimedAttempt: 3, maxAttempts: 3, retryable: false },
+    { claimedAttempt: 1, maxAttempts: 1, retryable: false },
+  ])('reports a Lab outage on attempt $claimedAttempt of $maxAttempts as retryable: $retryable', async ({
+    claimedAttempt, maxAttempts, retryable }) => {
+    const error = new DomainProblem(503, 'LAB_SERVICE_UNAVAILABLE', 'Lab service is unavailable');
+    const { service, clients, audit } = failAtLab(error,
+      { claimedAttempt, publicationRow: { ...labPublication, max_attempts: maxAttempts } });
+    await expect(publishTo(service, 'create_imported_lab_evidence')).rejects.toBe(error);
+    // The stored code and the backoff parameter keep the outage retryable; the
+    // failure update itself skips the backoff once attempt_count reaches max_attempts.
+    expect(failureUpdate(clients)).toEqual({ code: 'OWNING_SERVICE_UNAVAILABLE',
+      summary: 'Owning clinical service is temporarily unavailable (LAB_SERVICE_UNAVAILABLE)', retryable: true });
+    const event = auditEvents(audit).find(([, item]) => item.action === 'ocr.publication.fail')?.[1];
+    expect(event?.details).toEqual({ publicationId, failureCode: 'OWNING_SERVICE_UNAVAILABLE',
+      ownerFailureCode: 'LAB_SERVICE_UNAVAILABLE', retryable });
+    expect(failedEvent(clients)).toEqual({ jobId, publicationId, failureCode: 'OWNING_SERVICE_UNAVAILABLE', retryable });
+  });
+
+  it.each([
+    { claimedAttempt: 1, retryable: true },
+    { claimedAttempt: 2, retryable: true },
+    { claimedAttempt: 3, retryable: false },
+  ])('reports REQUEST_IN_PROGRESS on attempt $claimedAttempt of 3 as retryable: $retryable', async ({
+    claimedAttempt, retryable }) => {
+    const error = new DomainProblem(409, 'REQUEST_IN_PROGRESS', 'An operation with this Idempotency-Key is already in progress');
+    const { service, clients, audit } = harness({ jobRow: validatedJob, validationRow: noteValidation,
+      publicationRow: notePublication, ehrNote: jest.fn().mockRejectedValue(error), claimedAttempt });
+    await expect(publishTo(service, 'create_imported_clinical_note')).rejects.toBe(error);
+    expect(failureUpdate(clients)).toMatchObject({ code: 'REQUEST_IN_PROGRESS', retryable: true });
+    const event = auditEvents(audit).find(([, item]) => item.action === 'ocr.publication.fail')?.[1];
+    expect(event?.details).toMatchObject({ failureCode: 'REQUEST_IN_PROGRESS', retryable });
+    expect(failedEvent(clients)).toMatchObject({ failureCode: 'REQUEST_IN_PROGRESS', retryable });
+  });
+
+  it.each([1, 2])('reports a Lab rejection on attempt %i of 3 as not retryable in both events', async (claimedAttempt) => {
+    const error = new DomainProblem(422, 'LAB_IMPORT_REJECTED', 'Rejected');
+    const { service, clients, audit } = failAtLab(error, { claimedAttempt });
+    await expect(publishTo(service, 'create_imported_lab_evidence')).rejects.toBe(error);
+    expect(failureUpdate(clients)).toMatchObject({ code: 'LAB_IMPORT_REJECTED', retryable: false });
+    const event = auditEvents(audit).find(([, item]) => item.action === 'ocr.publication.fail')?.[1];
+    expect(event?.details).toMatchObject({ failureCode: 'LAB_IMPORT_REJECTED', retryable: false });
+    expect(failedEvent(clients)).toMatchObject({ failureCode: 'LAB_IMPORT_REJECTED', retryable: false });
+  });
+
+  it('answers a resend after the last permitted attempt failed with 409 in progress and does not call the Lab API', async () => {
+    const digest = requestDigest('ocr.publication.create', { validationId, validationVersion: 1,
+      patientConfirmationId: confirmationId, targetOperation: 'create_imported_lab_evidence', purpose: 'direct-care' });
+    const exhausted = { ...labPublication, status: 'failed', attempt_count: 3, max_attempts: 3, request_sha256: digest,
+      failure_code: 'OWNING_SERVICE_UNAVAILABLE' };
+    const createOcrImport = jest.fn();
+    const { service, clients, audit } = harness({ jobRow: validatedJob, validationRow: labValidation,
+      publicationRow: labPublication, labApi: { createOcrImport }, replayed: exhausted, claimRefused: true,
+      current: exhausted });
+    await expect(publishTo(service, 'create_imported_lab_evidence')).rejects.toMatchObject({ code: 'OCR_PUBLICATION_IN_PROGRESS' });
+    // The harness refuses the claim; the attempt budget it stands for is the claim's own guard.
+    const claim = calls(clients).find(([sql]) => sql.includes("update ocr.publications set status='processing'"));
+    expect(String(claim?.[0])).toContain('attempt_count < max_attempts');
+    expect(createOcrImport).not.toHaveBeenCalled();
+    expect(calls(clients).some(([sql]) => sql.includes("update ocr.publications set status='failed'"))).toBe(false);
+    expect(calls(clients).some(([sql]) => sql.includes('insert into ocr.outbox_events'))).toBe(false);
+    expect(auditEvents(audit).some(([, item]) => item.action === 'ocr.publication.fail')).toBe(false);
   });
 });
