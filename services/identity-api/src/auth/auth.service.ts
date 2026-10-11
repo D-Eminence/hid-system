@@ -40,7 +40,7 @@ export class AuthService {
     return this.tokens.revoke(sessionId, actorSubject, event);
   }
 
-  revokeByRefreshToken(refreshToken: string, event: SessionEventMetadata) {
-    return this.tokens.revokeByRefreshToken(refreshToken, event);
+  revokeByRefreshToken(refreshToken: string, event: SessionEventMetadata, expectedKind?: 'staff' | 'patient') {
+    return this.tokens.revokeByRefreshToken(refreshToken, event, expectedKind);
   }
 }

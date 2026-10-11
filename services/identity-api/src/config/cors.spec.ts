@@ -62,6 +62,14 @@ describe('Identity CORS preflight (Stage 5)', () => {
       expect.arrayContaining(['x-csrf-token', 'x-hid-client']));
   });
 
+  it('allows X-HID-Client on a cookie sign-out preflight, so each app ends only its own kind of sign-in', async () => {
+    const response = await preflight(port, '/api/v1/auth/logout', ALLOWED, 'POST', 'x-csrf-token,x-hid-client');
+    expect(response.status).toBe(204);
+    expect(response.headers['access-control-allow-credentials']).toBe('true');
+    expect(list(response.headers['access-control-allow-headers'])).toEqual(
+      expect.arrayContaining(['x-csrf-token', 'x-hid-client']));
+  });
+
   it('still lists only the methods Identity routes use', async () => {
     const response = await preflight(port, '/api/v1/admin/session', ALLOWED, 'GET');
     expect(list(response.headers['access-control-allow-methods']).sort()).toEqual(['delete', 'get', 'options', 'patch', 'post']);

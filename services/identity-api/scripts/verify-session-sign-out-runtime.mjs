@@ -3,8 +3,8 @@
 // hid_identity_api_runtime. A browser whose access cookie has expired still
 // holds its refresh cookie, so sign-out must end that sign-in by its refresh
 // token, and only that one. The staff and patient apps share the cookies, so
-// a client that names itself must not refresh, and so rotate, the other's
-// sign-in. Executes only against the owned disposable synthetic rehearsal.
+// a client that names itself must not refresh, and so rotate, or sign out the
+// other's sign-in. Executes only against the owned disposable synthetic rehearsal.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -235,6 +235,83 @@ try {
   assert.equal(staffOut.status, 204, JSON.stringify(staffOut.body)); clearsAll(staffOut);
   assert.equal(await live(unnamed.body.actor.sessionId), false);
   checks.push('patient-web refreshing a staff sign-in and staff-web refreshing a patient sign-in are 403 SESSION_CLIENT_MISMATCH with no cookie set and the sign-in unrotated; each app then refreshes its own; a client that does not name itself refreshes as before; an ended sign-in sent with the other app\'s name is refused by refresh as 401 with its cookies cleared; a staff sign-in signs out by its refresh cookie');
+
+  // 7. X-HID-Client on sign-out: each app ends only its own kind of sign-in, on
+  // either path; the other app's is refused, nothing ends and its cookies stay.
+  const logoutAs = (cookies, client) => logout(cookies, cookies[`${name}_csrf`], { Origin: origin, 'x-hid-client': client });
+  const logoutEvents = async (id) => Number((await pool.query(`select count(*) from auth.session_events
+    where session_id = $1 and event_type = 'logout'`, [id])).rows[0].count);
+  const heldStaff = await signIn(doctor, 'staff');
+  const heldPatient = await signIn(bola, 'patient');
+  for (const [label, held, cookies, client, kind] of [
+    ['patient-web with a staff refresh cookie', heldStaff, refreshOnly(heldStaff.cookies), 'patient-web', 'staff'],
+    ['staff-web with a patient refresh cookie', heldPatient, refreshOnly(heldPatient.cookies), 'staff-web', 'patient'],
+    // A staff actor from CurrentStaffContextService carries no kind.
+    ['patient-web with a live staff access cookie', heldStaff, heldStaff.cookies, 'patient-web', 'staff'],
+    ['staff-web with a live patient access cookie', heldPatient, heldPatient.cookies, 'staff-web', 'patient'],
+  ]) {
+    const refused = await logoutAs(cookies, client);
+    assert.equal(refused.status, 403, `${label}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.body.code, 'SESSION_CLIENT_MISMATCH', label); assert.match(refused.body.detail, new RegExp(kind));
+    assert.equal(refused.headers['set-cookie'], undefined, `${label} must keep the other app's cookies`);
+    assert.equal(await live(held.sessionId), true, `${label} must not end the other app's sign-in`);
+    assert.equal(await logoutEvents(held.sessionId), 0, `${label} records no sign-out`);
+  }
+  const ownStaff = await logoutAs(heldStaff.cookies, 'staff-web');
+  assert.equal(ownStaff.status, 204, JSON.stringify(ownStaff.body)); clearsAll(ownStaff);
+  assert.equal(await live(heldStaff.sessionId), false);
+  const ownPatient = await logoutAs(refreshOnly(heldPatient.cookies), 'patient-web');
+  assert.equal(ownPatient.status, 204, JSON.stringify(ownPatient.body)); clearsAll(ownPatient);
+  assert.equal(await live(heldPatient.sessionId), false);
+  checks.push('a cookie sign-out naming the other app (patient-web with a staff sign-in, staff-web with a patient one), by refresh cookie or by live access cookie, is 403 SESSION_CLIENT_MISMATCH with no cookie set, the sign-in live and no sign-out recorded; naming its own app, each ends its sign-in and clears the cookies');
+
+  // 8. A rotated cookie whose sign-in has ended finds nothing more to end.
+  const before = await signIn(ada, 'patient');
+  const after = await refresh(before.cookies, 'patient-web');
+  assert.equal(after.status, 200, JSON.stringify(after.body));
+  const byOldCookie = await logout(refreshOnly(before.cookies), before.cookies[`${name}_csrf`]);
+  assert.equal(byOldCookie.status, 204, JSON.stringify(byOldCookie.body)); clearsAll(byOldCookie);
+  assert.equal(await live(after.body.actor.sessionId), false, 'a sign-out by the just-rotated cookie ends the sign-in it rotated into');
+  const replayedOld = await logout(refreshOnly(before.cookies), before.cookies[`${name}_csrf`]);
+  assert.equal(replayedOld.status, 204); clearsAll(replayedOld);
+  assert.equal(await logoutEvents(before.sessionId), 1, 'a replayed rotated cookie records no second sign-out');
+  assert.equal(Number((await pool.query(`select count(*) from audit.events where action = 'auth.logout'
+    and outcome = 'success' and resource_id = $1`, [before.sessionId])).rows[0].count), 1, 'nor a second sign-out audit');
+  checks.push('a sign-out by a just-rotated refresh cookie ends the sign-in it rotated into; replaying that cookie once the sign-in has ended records no second sign-out event or audit');
+
+  // 9. A rotated token tells its kind only moments after rotation (the other
+  // app's tab refreshed first). Older, it is reuse, which refresh() answers
+  // by ending the whole sign-in.
+  const racing = await signIn(doctor, 'staff');
+  const raced = await refresh(racing.cookies, 'staff-web');
+  assert.equal(raced.status, 200, JSON.stringify(raced.body));
+  const justRotated = await refresh(racing.cookies, 'patient-web');
+  assert.equal(justRotated.status, 403, JSON.stringify(justRotated.body));
+  assert.equal(justRotated.body.code, 'SESSION_CLIENT_MISMATCH');
+  assert.equal(justRotated.headers['set-cookie'], undefined);
+  assert.equal(await live(raced.body.actor.sessionId), true, 'a refresh that raced the other app leaves its sign-in live');
+  // Age the rotation past the grace window (owner write to the disposable rehearsal only).
+  await pool.query(`update auth.sessions set revoked_at = revoked_at - interval '2 minutes' where id = $1`, [racing.sessionId]);
+  const staleRotated = await refresh(racing.cookies, 'patient-web');
+  assert.equal(staleRotated.status, 401, JSON.stringify(staleRotated.body)); clearsAll(staleRotated);
+  assert.equal(await live(raced.body.actor.sessionId), false, 'an older rotated token is reuse: the whole sign-in ends');
+  checks.push('a refresh token rotated moments ago, sent with the other app\'s name, is 403 SESSION_CLIENT_MISMATCH and its sign-in stays live; rotated more than a minute ago it is refresh-token reuse: 401, cookies cleared and the whole sign-in ended');
+
+  // 10. The kind lookup answers only for a sign-in refresh() could renew: a
+  // temporarily disabled account gets refresh()'s refusal, not the kind.
+  const locked = await account('doctor-locked');
+  const lockedStaff = randomUUID(); const lockedMembership = randomUUID();
+  await pool.query(`insert into identity.staff(id,account_id,full_name,email,verification_status,default_role)
+    values($1,$2,'Synthetic locked doctor',$3,'verified','doctor')`, [lockedStaff, locked.id, locked.email]);
+  await pool.query(`insert into identity.staff_facility_memberships(id,staff_id,account_id,organization_id,facility_id,membership_role,app_role,is_primary,active)
+    values($1,$2,$3,$4,$5,'doctor','doctor',true,true)`, [lockedMembership, lockedStaff, locked.id, ids.org, ids.facility]);
+  await pool.query(`insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason)
+    values($1,$2,'doctor','facility',$3,$4,'Synthetic rehearsal role')`, [randomUUID(), locked.id, lockedMembership, ids.facility]);
+  const lockedSignIn = await signIn(locked, 'staff');
+  await pool.query(`update auth.accounts set disabled_until = clock_timestamp() + interval '1 hour' where id = $1`, [locked.id]);
+  const lockedRefresh = await refresh(lockedSignIn.cookies, 'patient-web');
+  assert.equal(lockedRefresh.status, 401, JSON.stringify(lockedRefresh.body)); clearsAll(lockedRefresh);
+  checks.push('a refresh of a temporarily disabled account\'s sign-in sent with the other app\'s name gets refresh\'s 401 with its cookies cleared, not SESSION_CLIENT_MISMATCH');
 
   process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: 'hid_identity_api_runtime', checks })}\n`);
 } finally { if (app) await app.close(); await pool.end(); }

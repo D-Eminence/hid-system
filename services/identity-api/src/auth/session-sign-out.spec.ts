@@ -29,6 +29,12 @@ function actor(kind: 'staff' | 'patient' | 'platform', sessionId = sessionA): Ac
     authenticationMethod: 'local' } as unknown as ActorContext;
 }
 
+/** A staff actor as CurrentStaffContextService builds it: with no `kind` at all. */
+function staffActor(sessionId = sessionB): ActorContext {
+  const { kind: _omitted, ...rest } = actor('staff', sessionId) as ActorContext & { kind?: string };
+  return { ...rest, id: 'staff:s', subject: 'staff:s' } as unknown as ActorContext;
+}
+
 /** Access token "access-A" is live for sign-in A with CSRF "csrf-A"; refresh tokens derive "csrf-<token>". */
 function harness(liveAccess: Record<string, ActorContext> = { 'access-A': actor('patient') },
   refreshKinds: Record<string, 'staff' | 'patient'> = { 'refresh-A': 'patient', 'refresh-B': 'staff' }) {
@@ -46,9 +52,14 @@ function harness(liveAccess: Record<string, ActorContext> = { 'access-A': actor(
   };
   const auth = {
     revoke: jest.fn().mockResolvedValue(undefined),
-    revokeByRefreshToken: jest.fn(async (refresh: string) => refreshKinds[refresh]
-      ? { sessionId: refresh === 'refresh-A' ? sessionA : sessionB, accountId: 'account', actorSubject: 'subject',
-        kind: refreshKinds[refresh] } : undefined),
+    // As TokenService decides it: a sign-in of another kind than the one the
+    // calling app names is refused before anything is ended.
+    revokeByRefreshToken: jest.fn(async (refresh: string, _event: unknown, expectedKind?: 'staff' | 'patient') => {
+      const kind = refreshKinds[refresh];
+      if (!kind) return undefined;
+      if (expectedKind && kind !== expectedKind) return { refusedKind: kind };
+      return { sessionId: refresh === 'refresh-A' ? sessionA : sessionB, accountId: 'account', actorSubject: 'subject', kind };
+    }),
     refresh: jest.fn(async () => ({ actor: actor('patient', 'rotated'), accessToken: 'new-access', refreshToken: 'new-refresh',
       csrfToken: 'new-csrf', expiresAt: new Date('2030-01-01T00:00:00Z'), refreshExpiresAt: new Date('2030-01-01T08:00:00Z') })),
   };
@@ -93,7 +104,7 @@ describe('POST /auth/logout', () => {
     await controller.logout(request({ origin: ORIGIN, 'x-csrf-token': 'csrf-A' },
       { hid_access_refresh: 'refresh-A', hid_access_csrf: 'csrf-A' }), res as unknown as Response);
     expect(auth.revokeByRefreshToken).toHaveBeenCalledWith('refresh-A', expect.objectContaining({
-      correlationId: 'session-sign-out-test' }));
+      correlationId: 'session-sign-out-test' }), undefined);
     expect(auth.revoke).not.toHaveBeenCalled();
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.logout', resourceId: sessionA,
       actorType: 'patient', outcome: 'success' }));
@@ -106,7 +117,7 @@ describe('POST /auth/logout', () => {
     await controller.logout(request({ origin: ORIGIN, 'x-csrf-token': 'csrf-A' },
       { hid_access: 'access-expired', hid_access_refresh: 'refresh-A', hid_access_csrf: 'csrf-A' }),
     res as unknown as Response);
-    expect(auth.revokeByRefreshToken).toHaveBeenCalledWith('refresh-A', expect.anything());
+    expect(auth.revokeByRefreshToken).toHaveBeenCalledWith('refresh-A', expect.anything(), undefined);
     expect(cleared(res)).toEqual(ALL_COOKIES);
   });
 
@@ -182,6 +193,88 @@ describe('POST /auth/logout', () => {
     expect((await refusal(controller.logout(request({ authorization: 'Bearer access-P' }, {}),
       response() as unknown as Response))).code).toBe('PLATFORM_SESSION_SCOPE_DENIED');
     expect(auth.revoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('POST /auth/logout with X-HID-Client', () => {
+  // The staff and patient apps share the session cookies on one origin. An app
+  // that names itself signs out only its own kind of sign-in: the other app's
+  // is refused before anything ends, and its cookies are kept.
+  const liveAccess = { 'access-A': actor('patient'), 'access-S': staffActor() };
+  const signingOut = (client: string | undefined, cookies: Record<string, string>, csrf: string) => request(
+    { origin: ORIGIN, 'x-csrf-token': csrf, ...(client ? { 'x-hid-client': client } : {}) },
+    { ...cookies, hid_access_csrf: csrf });
+
+  it.each([
+    ['staff-web', 'refresh-A', 'patient'],
+    ['patient-web', 'refresh-B', 'staff'],
+  ])('refuses %s signing out %s, a %s sign-in held by the refresh cookie, ending nothing and keeping the cookies',
+    async (client, refresh, kind) => {
+      const { controller, auth, audit } = harness(liveAccess);
+      const res = response();
+      const problem = await refusal(controller.logout(signingOut(client, { hid_access_refresh: refresh },
+        `csrf-${refresh.slice('refresh-'.length)}`), res as unknown as Response));
+      expect([problem.getStatus(), problem.code]).toEqual([403, 'SESSION_CLIENT_MISMATCH']);
+      expect(problem.message).toContain(kind);
+      expect(auth.revokeByRefreshToken).toHaveBeenCalledWith(refresh, expect.anything(), client === 'staff-web' ? 'staff' : 'patient');
+      expect(auth.revoke).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+      expect(res.clearCookie).not.toHaveBeenCalled();
+    });
+
+  it.each([
+    ['staff-web', 'access-A', 'patient', 'csrf-A', sessionA],
+    ['patient-web', 'access-S', 'staff', 'csrf-S', sessionB],
+  ])('refuses %s signing out %s, a live %s access token, ending nothing and keeping the cookies',
+    async (client, access, kind, csrf, sessionId) => {
+      const { controller, auth } = harness(liveAccess);
+      const res = response();
+      const signOut = signingOut(client, { hid_access: access, hid_access_refresh: 'refresh-A' }, csrf);
+      const problem = await refusal(controller.logout(signOut, res as unknown as Response));
+      expect([problem.getStatus(), problem.code]).toEqual([403, 'SESSION_CLIENT_MISMATCH']);
+      expect(problem.message).toContain(kind);
+      // The refusal is audited against the signed-in actor, as other refusals on this path are.
+      expect(signOut.actor?.sessionId).toBe(sessionId);
+      expect(auth.revoke).not.toHaveBeenCalled();
+      expect(auth.revokeByRefreshToken).not.toHaveBeenCalled();
+      expect(res.clearCookie).not.toHaveBeenCalled();
+    });
+
+  it('ends the sign-in the calling app names, on either path, and clears the cookies', async () => {
+    const { controller, auth } = harness(liveAccess);
+    const byRefresh = response();
+    await controller.logout(signingOut('patient-web', { hid_access_refresh: 'refresh-A' }, 'csrf-A'),
+      byRefresh as unknown as Response);
+    expect(auth.revokeByRefreshToken).toHaveBeenCalledWith('refresh-A', expect.anything(), 'patient');
+    expect(cleared(byRefresh)).toEqual(ALL_COOKIES);
+    // A staff actor carries no kind: staff-web must still end it.
+    const byAccess = response();
+    await controller.logout(signingOut('staff-web', { hid_access: 'access-S' }, 'csrf-S'), byAccess as unknown as Response);
+    expect(auth.revoke).toHaveBeenCalledWith(sessionB, 'staff:s', expect.anything());
+    expect(cleared(byAccess)).toEqual(ALL_COOKIES);
+  });
+
+  it.each([[undefined], ['admin-web']])('signs out as before when the client names %s', async (client) => {
+    const { controller, auth } = harness(liveAccess);
+    const res = response();
+    await controller.logout(signingOut(client, { hid_access_refresh: 'refresh-B' }, 'csrf-B'), res as unknown as Response);
+    expect(auth.revokeByRefreshToken).toHaveBeenCalledWith('refresh-B', expect.anything(), undefined);
+    expect(cleared(res)).toEqual(ALL_COOKIES);
+  });
+
+  it('checks the CSRF token before reading whose sign-in it is', async () => {
+    const { controller, auth } = harness(liveAccess);
+    const problem = await refusal(controller.logout(request({ origin: ORIGIN, 'x-csrf-token': 'forged', 'x-hid-client': 'staff-web' },
+      { hid_access_refresh: 'refresh-A', hid_access_csrf: 'csrf-A' }), response() as unknown as Response));
+    expect(problem.code).toBe('CSRF_VALIDATION_FAILED');
+    expect(auth.revokeByRefreshToken).not.toHaveBeenCalled();
+  });
+
+  it('ignores the header on a bearer sign-out, which names its sign-in explicitly', async () => {
+    const { controller, auth } = harness(liveAccess);
+    await controller.logout(request({ authorization: 'Bearer access-S', 'x-hid-client': 'patient-web' }, {}),
+      response() as unknown as Response);
+    expect(auth.revoke).toHaveBeenCalledWith(sessionB, 'staff:s', expect.anything());
   });
 });
 

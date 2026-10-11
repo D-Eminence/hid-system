@@ -61,8 +61,34 @@ export interface SessionEventMetadata {
   pepperVersion?: number;
 }
 
+/** The sign-in a refresh-cookie sign-out ended. */
+export interface RefreshSignOut {
+  sessionId: string;
+  accountId: string;
+  actorSubject: string;
+  kind: 'staff' | 'patient';
+}
+
 @Injectable()
 export class TokenService {
+  /** refresh()'s account checks, for the lookups that must answer only for a sign-in refresh() could find. */
+  private static readonly ACCOUNT_LIVE = `account.status = 'active'
+          and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+          and account.token_version = session.account_token_version`;
+
+  /** The sign-in a rotated session was exchanged into still has a live session. */
+  private static readonly FAMILY_LIVE = `exists (select 1 from auth.sessions live
+                where live.family_id = session.family_id
+                  and live.revoked_at is null and live.expires_at > clock_timestamp())`;
+
+  /**
+   * How long a rotated refresh token still identifies its sign-in's kind: well
+   * above a browser's wait for one refresh (Health-id gives a request 15
+   * seconds), so only a refresh that raced the other app's tab is answered
+   * with the kind.
+   */
+  private static readonly ROTATED_KIND_GRACE_SECONDS = 60;
+
   private readonly environment = getEnvironment();
   private readonly signingKey = this.environment.AUTH_SIGNING_SECRET
     ? new TextEncoder().encode(this.environment.AUTH_SIGNING_SECRET)
@@ -411,13 +437,21 @@ export class TokenService {
    * Signs out the staff or patient sign-in a refresh token belongs to, for a
    * browser whose access token has already expired. The caller has verified
    * the CSRF token derived from this refresh token. The sign-in ends as
-   * revoke() ends it; a platform refresh token is never accepted here. Only a
-   * live session, or one rotated into a session that may still be live, is
-   * ended: a sign-in already ended another way has nothing left to end, so a
-   * replayed cookie records no second sign-out.
+   * revoke() ends it; a platform refresh token is never accepted here.
+   *
+   * Only a sign-in that is still live is ended: the token's own session is
+   * live, or it was rotated into a session that still is. A sign-in already
+   * ended, or one refresh() would refuse for its account, has nothing left to
+   * end, so a replayed cookie records no second sign-out.
+   *
+   * When the calling app names the kind of sign-in it holds (X-HID-Client), a
+   * sign-in of the other kind is refused before anything ends: the staff and
+   * patient apps share these cookies, and one app's sign-out must not end the
+   * other's sign-in. The kind is read from the same row that would be ended,
+   * and it never changes for the life of a sign-in.
    */
-  async revokeByRefreshToken(refreshToken: string, event: SessionEventMetadata):
-    Promise<{ sessionId: string; accountId: string; actorSubject: string; kind: 'staff' | 'patient' } | undefined> {
+  async revokeByRefreshToken(refreshToken: string, event: SessionEventMetadata,
+    expectedKind?: 'staff' | 'patient'): Promise<RefreshSignOut | { refusedKind: 'staff' | 'patient' } | undefined> {
     const presented = await this.database.query<{ id: string; account_id: string; actor_subject: string;
       session_kind: 'staff' | 'patient' }>(
       `select session.id::text, session.account_id::text, account.subject as actor_subject, session.session_kind
@@ -425,11 +459,15 @@ export class TokenService {
          join auth.accounts account on account.id = session.account_id
         where session.refresh_token_sha256 = $1
           and session.session_kind in ('staff', 'patient')
-          and (session.revoked_at is null or session.revocation_reason = 'rotated')`,
+          and ${TokenService.ACCOUNT_LIVE}
+          and session.absolute_expires_at > clock_timestamp()
+          and ((session.revoked_at is null and session.expires_at > clock_timestamp())
+            or (session.revocation_reason = 'rotated' and ${TokenService.FAMILY_LIVE}))`,
       [this.sha256(refreshToken)],
     );
     const session = presented.rows[0];
     if (!session) return undefined;
+    if (expectedKind && session.session_kind !== expectedKind) return { refusedKind: session.session_kind };
     await this.revoke(session.id, session.actor_subject, event, 'refresh_token');
     return { sessionId: session.id, accountId: session.account_id, actorSubject: session.actor_subject,
       kind: session.session_kind };
@@ -437,17 +475,28 @@ export class TokenService {
 
   /**
    * The kind of the staff or patient sign-in a refresh token belongs to, read
-   * without rotating it. Only a live session, or one just rotated by the other
-   * app's tab, has a kind here: any other token is left to refresh(), which
-   * refuses it, records the refusal and clears its cookies.
+   * without rotating it, for a sign-in refresh() could still renew: its own
+   * session is live, or the token was rotated within the last
+   * ROTATED_KIND_GRACE_SECONDS into a sign-in that is still live (the other
+   * app's tab refreshed first). Any other token has no kind here and is left
+   * to refresh(), which refuses it, records the refusal and clears its cookies;
+   * an older rotated token is reuse, which refresh() answers by ending the
+   * whole sign-in.
    */
   async refreshSessionKind(refreshToken: string): Promise<'staff' | 'patient' | undefined> {
     const result = await this.database.query<{ session_kind: 'staff' | 'patient' }>(
-      `select session_kind from auth.sessions
-        where refresh_token_sha256 = $1 and session_kind in ('staff', 'patient')
-          and ((revoked_at is null and expires_at > clock_timestamp() and absolute_expires_at > clock_timestamp())
-            or revocation_reason = 'rotated')`,
-      [this.sha256(refreshToken)],
+      `select session.session_kind
+         from auth.sessions session
+         join auth.accounts account on account.id = session.account_id
+        where session.refresh_token_sha256 = $1
+          and session.session_kind in ('staff', 'patient')
+          and ${TokenService.ACCOUNT_LIVE}
+          and session.absolute_expires_at > clock_timestamp()
+          and ((session.revoked_at is null and session.expires_at > clock_timestamp())
+            or (session.revocation_reason = 'rotated'
+              and session.revoked_at > clock_timestamp() - make_interval(secs => $2)
+              and ${TokenService.FAMILY_LIVE}))`,
+      [this.sha256(refreshToken), TokenService.ROTATED_KIND_GRACE_SECONDS],
     );
     return result.rows[0]?.session_kind;
   }

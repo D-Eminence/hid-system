@@ -225,14 +225,10 @@ export class AuthController {
     // The staff and patient apps share the session cookies on one origin. A
     // client that names itself refreshes only its own kind of sign-in; the
     // other app's sign-in is refused before rotation and its cookies kept.
-    const client = request.header('x-hid-client');
-    const expectedKind = client === 'staff-web' ? 'staff' : client === 'patient-web' ? 'patient' : undefined;
+    const expectedKind = this.namedClientKind(request);
     if (expectedKind) {
       const kind = await this.tokens.refreshSessionKind(refreshToken);
-      if (kind && kind !== expectedKind) {
-        throw new DomainProblem(403, 'SESSION_CLIENT_MISMATCH',
-          `This sign-in belongs to the ${kind} application, not ${client}`);
-      }
+      if (kind && kind !== expectedKind) throw this.clientMismatch(kind, request);
     }
     try {
       const result = await this.auth.refresh(refreshToken, this.event(request));
@@ -302,14 +298,22 @@ export class AuthController {
   }
 
   /**
-   * Ends the sign-in and always clears the session cookies. A live access
-   * token ends its own sign-in, as a bearer token or as the cookie with an
-   * allowed Origin and its CSRF token. A browser whose access token has
-   * already expired signs out with its refresh cookie instead: the CSRF token
-   * is derived from that refresh token, so a request ends only the sign-in
-   * whose refresh cookie and CSRF token it carries together. A live access
-   * token always decides, so a request carrying one sign-in's access token and
-   * another's refresh cookie ends only the first.
+   * Ends the sign-in and clears the session cookies. A live access token ends
+   * its own sign-in, as a bearer token or as the cookie with an allowed Origin
+   * and its CSRF token. A browser whose access token has already expired signs
+   * out with its refresh cookie instead: the CSRF token is derived from that
+   * refresh token, so a request ends only the sign-in whose refresh cookie and
+   * CSRF token it carries together. A live access token always decides, so a
+   * request carrying one sign-in's access token and another's refresh cookie
+   * ends only the first.
+   *
+   * The staff and patient apps share the session cookies on one origin. A
+   * cookie sign-out from an app that names itself in X-HID-Client ('staff-web'
+   * or 'patient-web') ends only its own kind of sign-in: the other app's is
+   * refused with 403 SESSION_CLIENT_MISMATCH after the Origin and CSRF checks,
+   * nothing ends and its cookies are kept. A bearer sign-out names its sign-in
+   * explicitly and ignores the header; an unnamed app signs out as before.
+   * Every other outcome clears the cookies.
    */
   @Post('logout')
   @Public()
@@ -319,6 +323,9 @@ export class AuthController {
     const bearer = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
     // A cookie sign-out from an unapproved origin changes nothing, cookies included.
     if (!bearer) this.assertAllowedOrigin(request);
+    const expectedKind = this.namedClientKind(request);
+    // Set only when the other app's sign-in is refused: its cookies stay.
+    let keepCookies = false;
     try {
       if (bearer) {
         const verified = await this.liveSession(bearer);
@@ -338,6 +345,12 @@ export class AuthController {
         if (!this.tokens.verifyCsrf(verified.claims, csrfCookie, csrfHeader)) {
           throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'CSRF validation failed');
         }
+        // A staff actor carries no kind; a platform token is refused by endSignIn.
+        const kind = verified.actor.kind === 'patient' ? 'patient' : verified.actor.kind === 'platform' ? undefined : 'staff';
+        if (expectedKind && kind && kind !== expectedKind) {
+          keepCookies = true;
+          throw this.clientMismatch(kind, request);
+        }
         await this.endSignIn(verified.actor, request);
         return;
       }
@@ -347,7 +360,11 @@ export class AuthController {
       if (!this.tokens.verifyRefreshCsrf(refreshToken, csrfCookie, csrfHeader)) {
         throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'CSRF validation failed');
       }
-      const ended = await this.auth.revokeByRefreshToken(refreshToken, this.event(request));
+      const ended = await this.auth.revokeByRefreshToken(refreshToken, this.event(request), expectedKind);
+      if (ended && 'refusedKind' in ended) {
+        keepCookies = true;
+        throw this.clientMismatch(ended.refusedKind, request);
+      }
       if (ended) {
         await this.audit.record({
           correlationId: request.correlationId,
@@ -363,7 +380,7 @@ export class AuthController {
         });
       }
     } finally {
-      this.clearCookies(response);
+      if (!keepCookies) this.clearCookies(response);
     }
   }
 
@@ -411,6 +428,17 @@ export class AuthController {
       actor,
       ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
     };
+  }
+
+  /** The kind of sign-in the calling app holds, when it names itself in X-HID-Client. */
+  private namedClientKind(request: HidRequest): 'staff' | 'patient' | undefined {
+    const client = request.header('x-hid-client');
+    return client === 'staff-web' ? 'staff' : client === 'patient-web' ? 'patient' : undefined;
+  }
+
+  private clientMismatch(kind: 'staff' | 'patient', request: HidRequest): DomainProblem {
+    return new DomainProblem(403, 'SESSION_CLIENT_MISMATCH',
+      `This sign-in belongs to the ${kind} application, not ${request.header('x-hid-client')}`);
   }
 
   /** The verified access token, or undefined when it is no longer a live staff or patient session. */
