@@ -54,6 +54,14 @@ describe('Identity CORS preflight (Stage 5)', () => {
       expect.arrayContaining(['content-type', 'x-csrf-token', 'if-match', 'idempotency-key']));
   });
 
+  it('allows X-HID-Client on a cookie refresh preflight, so the staff and patient apps can name themselves', async () => {
+    const response = await preflight(port, '/api/v1/auth/refresh', ALLOWED, 'POST', 'x-csrf-token,x-hid-client');
+    expect(response.status).toBe(204);
+    expect(response.headers['access-control-allow-credentials']).toBe('true');
+    expect(list(response.headers['access-control-allow-headers'])).toEqual(
+      expect.arrayContaining(['x-csrf-token', 'x-hid-client']));
+  });
+
   it('still lists only the methods Identity routes use', async () => {
     const response = await preflight(port, '/api/v1/admin/session', ALLOWED, 'GET');
     expect(list(response.headers['access-control-allow-methods']).sort()).toEqual(['delete', 'get', 'options', 'patch', 'post']);
@@ -62,7 +70,7 @@ describe('Identity CORS preflight (Stage 5)', () => {
   it('lists exactly the request headers Identity accepts from a browser', async () => {
     const response = await preflight(port, '/api/v1/admin/session', ALLOWED, 'GET');
     expect(list(response.headers['access-control-allow-headers']).sort()).toEqual(['authorization', 'content-type',
-      'idempotency-key', 'if-match', 'x-correlation-id', 'x-csrf-token', 'x-facility-id', 'x-hid-internal-caller',
+      'idempotency-key', 'if-match', 'x-correlation-id', 'x-csrf-token', 'x-facility-id', 'x-hid-client', 'x-hid-internal-caller',
       'x-hid-scanner-authorization', 'x-hid-service-authorization', 'x-hid-service-token', 'x-purpose-of-use']);
   });
 

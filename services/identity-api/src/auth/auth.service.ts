@@ -39,4 +39,8 @@ export class AuthService {
   ): Promise<void> {
     return this.tokens.revoke(sessionId, actorSubject, event);
   }
+
+  revokeByRefreshToken(refreshToken: string, event: SessionEventMetadata) {
+    return this.tokens.revokeByRefreshToken(refreshToken, event);
+  }
 }

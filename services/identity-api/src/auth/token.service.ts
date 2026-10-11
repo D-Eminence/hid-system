@@ -373,6 +373,7 @@ export class TokenService {
     sessionId: string | undefined,
     actorSubject: string | undefined,
     event: SessionEventMetadata,
+    presented: 'access_token' | 'refresh_token' = 'access_token',
   ): Promise<void> {
     if (!sessionId) return;
     await this.database.withSystemTransaction(event.correlationId, async (client) => {
@@ -399,10 +400,48 @@ export class TokenService {
       if (accountId) {
         await this.insertSessionEvent(client, {
           eventType: 'logout', outcome: 'success', accountId, sessionId, event,
-          details: actorSubject ? { actor_subject: actorSubject } : {},
+          details: { ...(actorSubject ? { actor_subject: actorSubject } : {}),
+            ...(presented === 'refresh_token' ? { presented: 'refresh_token' } : {}) },
         });
       }
     });
+  }
+
+  /**
+   * Signs out the staff or patient sign-in a refresh token belongs to, for a
+   * browser whose access token has already expired. The caller has verified
+   * the CSRF token derived from this refresh token. The sign-in ends as
+   * revoke() ends it; a platform refresh token is never accepted here.
+   */
+  async revokeByRefreshToken(refreshToken: string, event: SessionEventMetadata):
+    Promise<{ sessionId: string; accountId: string; actorSubject: string; kind: 'staff' | 'patient' } | undefined> {
+    const presented = await this.database.query<{ id: string; account_id: string; actor_subject: string;
+      session_kind: 'staff' | 'patient' }>(
+      `select session.id::text, session.account_id::text, account.subject as actor_subject, session.session_kind
+         from auth.sessions session
+         join auth.accounts account on account.id = session.account_id
+        where session.refresh_token_sha256 = $1
+          and session.session_kind in ('staff', 'patient')`,
+      [this.sha256(refreshToken)],
+    );
+    const session = presented.rows[0];
+    if (!session) return undefined;
+    await this.revoke(session.id, session.actor_subject, event, 'refresh_token');
+    return { sessionId: session.id, accountId: session.account_id, actorSubject: session.actor_subject,
+      kind: session.session_kind };
+  }
+
+  /**
+   * The kind of the staff or patient sign-in a refresh token belongs to,
+   * read without rotating it; undefined for any other token.
+   */
+  async refreshSessionKind(refreshToken: string): Promise<'staff' | 'patient' | undefined> {
+    const result = await this.database.query<{ session_kind: 'staff' | 'patient' }>(
+      `select session_kind from auth.sessions
+        where refresh_token_sha256 = $1 and session_kind in ('staff', 'patient')`,
+      [this.sha256(refreshToken)],
+    );
+    return result.rows[0]?.session_kind;
   }
 
   verifyCsrf(claims: HidJwtClaims | JWTPayload, cookieToken: string | undefined, headerToken: string | undefined): boolean {

@@ -338,6 +338,9 @@ try {
   evidence.checks.platform_admin_runtime = JSON.parse(command('exact-role platform admin HTTP boundaries',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-platform-admin-runtime.mjs')],
     workflowEnvironment));
+  evidence.checks.session_sign_out_runtime = JSON.parse(command('exact-role sign-out by refresh cookie and client-kind refresh',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-session-sign-out-runtime.mjs')],
+    workflowEnvironment));
   evidence.checks.platform_security_runtime = JSON.parse(command(
     'exact-role platform MFA, step-up, approval and export HTTP workflow', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-platform-security-runtime.mjs')], workflowEnvironment));
