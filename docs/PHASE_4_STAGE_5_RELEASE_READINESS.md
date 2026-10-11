@@ -3,10 +3,10 @@
 This is the combined release checklist for the platform administration work
 of Phase 4, the governed-access slice that followed it, the Stage 6 OCR
 audit and queue-metrics slice, Stage 7 (MFA lock order and fail-closed OCR
-validation guards) and Stage 8 (fail-closed session guards and OCR worker
-leases). It covers Identity, the OCR API and worker, and
-the database in this repository, and in Health-id the admin console
-(`apps/patient-web/src/admin`) and the provider portal's governed-access pages
+validation guards), Stage 8 (fail-closed session guards and OCR worker
+leases) and the EHR clinical list paging fix. It covers Identity, the EHR API,
+the OCR API and worker, and the database in this repository, and in Health-id
+the admin console (`apps/patient-web/src/admin`) and the provider portal's governed-access pages
 (`apps/patient-web/src/staff`). It records what was
 verified locally and what an operator must still do. **Nothing here has been
 deployed, and no staging or production database has been migrated.** Every
@@ -19,6 +19,7 @@ deployed, and no staging or production database has been migrated.** Every
 | Database | `services/ehr-api/database/migrations` through `0077_fail_closed_session_guards_and_ocr_worker_leases.sql` | Phase 1–4 schema. The platform admin migrations are 0067–0072. Stage 5 adds no migration; Stage 5B adds 0073, governed access adds 0074, Stage 6 adds 0075, Stage 7 adds 0076 and Stage 8 adds 0077 (§2). |
 | Runtime grants | `services/ehr-api/database/runtime-grants.sql`, applied by the role bootstrap | Governed access grants the Identity runtime the clinician's access-request list. Stage 6 adds the technical role `hid_ocr_queue_metrics`, its policy, and the OCR worker's grant on the queue metrics command. Stage 8 grants the Outreach runtime `auth.account_id_for_subject(text)` (§2). |
 | Identity API | `services/identity-api` on `main` (Stage 2A, 4A, 5, 5B, governed access and 7) | Platform MFA sessions, step-up, two-person approval and the Stage 4A admin contracts. Stage 5 adds the two fixes in §2; Stage 5B adds the revocation lock; governed access adds the access-request outcome fields; Stage 7 locks the account first in every MFA transaction (§2). |
+| EHR API | `services/ehr-api` (EHR clinical list paging, branch `claude/ehr-timeline-cursor-precision`) | The six newest-first clinical lists page at the sort key's microsecond precision; cursors from earlier builds are refused (§2). |
 | Pharmacy API | `services/pharmacy-api` | Stage 5 CORS header fix (§2). |
 | OCR API | `services/ocr-api` (Stage 6) | Patient-linked audit events for OCR evidence reads (§2). |
 | OCR worker | `services/ocr-worker` (Stage 6) | Queue depth and age through the new aggregate command (§2). |
@@ -61,6 +62,10 @@ deployed, and no staging or production database has been migrated.** Every
   - **OCR publication requester:** a publication request may only name the session's own account and membership as requester (the attribution gap 0076 closed for confirmations).
   - **Lab, Pharmacy and Outreach guards:** the 13 guards that compared a row with the session's account or membership using `<>` (five Lab, five Pharmacy, three Outreach) refuse a missing session account, membership or facility, and Outreach a purpose other than direct care, with their existing codes and messages. Forced row-level security already refused such writes for the runtime roles; a session that bypasses it (a superuser, or an owner without `FORCE ROW LEVEL SECURITY`) could write rows attributed to any member with no context. The Lab OCR-import guard also refuses another facility's OCR evidence when its owner cannot read it (P8).
   - **Outreach runtime grant:** Outreach policies call `platform.current_account_id()` as the runtime, which calls `auth.account_id_for_subject(text)`, revoked from PUBLIC. The Outreach runtime had no `EXECUTE` on it, so every Outreach write failed with `42501` since the baseline. The bootstrap now grants it; `runtime-roles.integration.sql` and the Outreach API spec `runtime-function-grants.spec.ts` check it. Campaign-linked registration still fails on a separate defect (§4.2).
+- **EHR clinical list paging (no migration)**. The six newest-first clinical lists (`GET /ehr/patients/:id/encounters`, and an encounter's `clinical-notes`, `diagnoses`, `lab-requests`, `prescriptions` and `vitals`) page with a keyset cursor on (sort key, `id`). The keys are `timestamptz` columns with microseconds: `created_at` defaults to `clock_timestamp()`, and `started_at` and `recorded_at` keep any fraction the client sends. The cursor was built from the row's JavaScript `Date`, which node-postgres gives only milliseconds, so the next page's bound fell to the start of the last row's millisecond. Rows that sort after the last row shown within its millisecond (earlier in that millisecond, or tied with a lower `id`) were never listed, most likely rows created in bulk or by import (Health-id `docs/OPEN-QUESTIONS.md`, "Timeline pages skip rows within a millisecond").
+  - Each list now also selects its key as microsecond text (`to_char(key at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`), and the cursor carries that text, never the `Date`. The text has a five- or six-digit year after 9999, which `started_at` and `recorded_at` can hold because they take any instant the client sends; the cursor accepts those years, up to 294276, the last a `timestamptz` holds.
+  - The cursor is now version 1, bound to its list, its patient and, for the five encounter lists, its encounter, and accepted only in the exact form issued, as Identity's admin cursors are. A well-formed cursor (16–512 base64url characters) in any other form, including every cursor in the earlier millisecond format, is `400 INVALID_CURSOR`. A `cursor` that is not well formed is still `400 VALIDATION_FAILED`.
+  - The response shape `{ items, nextCursor }`, `limit` (1–100, default 50) and the queries' predicates, order and parameters are unchanged (`INTERFACE_CONTRACT.md` §11, `DATABASE.md`).
 - **Provider portal (Health-id)**:
   - D-Eminence/Health-id#18 reads the list above, closes a grant, and enables clinical writes only when `POST /identity/consent-status` allows them.
   - D-Eminence/Health-id#19 shows each approval's outcome and expiry, offers **Close access** for an active grant, and adds the outcome filters. The new fields and filters appear only when Identity reports them.
@@ -91,6 +96,11 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 - 0077 needs no service change and works with every build. The OCR worker always sends its claim token and the OCR API always names the session's member, so their writes pass as before. A worker's lease renewals now succeed. A worker that fails a job after its lease expired is now refused (`55000`) and logs `ocr.job.failure_persistence_failed`; the next claim's lease recovery takes the job over, as it already did for completions.
 - The Lab, Pharmacy and Outreach APIs always set the full session, so their writes pass as before. A maintenance write to those tables from a superuser or migration session without a staff context is now refused; set a real staff context, or change the data under change control.
 - The Outreach API can write only after the bootstrap's new grant (§5). Earlier, every Outreach write failed (`5xx`).
+
+**EHR clinical list paging:**
+- No schema, grant or response-shape change.
+- The new EHR build refuses every cursor an earlier build issued, and an earlier build refuses the new cursors, both with `400 INVALID_CURSOR`. A browser that holds a cursor across the deploy, or meets both builds during a rolling deploy, gets that refusal on its next paged request.
+- Health-id's clinical record (`apps/patient-web/src/staff/routes/Clinical.tsx` on Health-id `main`) then reloads the first page of that list and says that it restarted; it needs no change. The in-repo EHR app (`apps/ehr`) requests only first pages (`limit=50`, no cursor).
 
 **Governed access:**
 - The provider portal of D-Eminence/Health-id#19 works with any Identity build that serves the access-request list. It shows outcomes and offers the outcome filters only when Identity reports `effectiveStatus`. Otherwise it shows the request status, as before.
@@ -272,15 +282,17 @@ Unit tests mock the database and no runtime verifier exercises these commands, w
 6. Deploy **Identity**, with `MFA_SECRET_KEY_B64`, `MFA_KEY_VERSION` and `CORS_ORIGINS`. This needs the infrastructure change in P3. A Stage 5B or later Identity must not start before steps 4 and 5 (0073 and its grant), a Stage 7 Identity not before 0076 and its grant, and an Identity with the governed-access outcome mapping must not start before 0074 and the bootstrap.
 7. Deploy the **Pharmacy API**. This is independent of the other steps.
 8. Deploy the **OCR API** and the **OCR worker** (Stage 6). The API is independent of the other steps. The worker reports queue metrics once steps 4 and 5 (0075 and its grant) are done.
-9. Run the smoke checks:
-   - a Super Admin signs in with TOTP;
-   - a high-risk action asks for step-up;
-   - `GET /admin/audit/events?resourceType=facility` answers `200`;
-   - `GET /admin/approvals` returns `{ items, nextCursor }`;
-   - a clinician's `GET /identity/access-requests` answers `200`, and each item has `effectiveStatus`;
-   - CloudWatch shows no `MFA_UNAVAILABLE`;
-   - once the OCR worker has claimed a job, its `ocr.job.claimed` logs carry `queueDepth` and `oldestQueueAgeSeconds`, and no `ocr.queue.metrics_unavailable` follows a claim. A worker logs neither while it claims nothing;
-   - if the Outreach API is deployed: a registration without a campaign (`POST /outreach/registration-cases`) answers `2xx` and PostgreSQL logs no `permission denied for function account_id_for_subject`. A campaign-linked registration still fails until the §4.2 Outreach fix.
+9. Deploy the **EHR API** with the clinical list paging fix. This is independent of the other steps and needs no migration or bootstrap (§3).
+10. Run the smoke checks:
+    - a Super Admin signs in with TOTP;
+    - a high-risk action asks for step-up;
+    - `GET /admin/audit/events?resourceType=facility` answers `200`;
+    - `GET /admin/approvals` returns `{ items, nextCursor }`;
+    - a clinician's `GET /identity/access-requests` answers `200`, and each item has `effectiveStatus`;
+    - with the EHR paging fix, as a clinician with active access to a patient who has at least two encounters in the facility, sending `X-Facility-ID` and `X-Purpose-Of-Use: direct-care`: `GET /ehr/patients/:id/encounters?limit=1` returns a `nextCursor`, and the same request with that `cursor` returns the next encounter. The same cursor sent with another patient's ID answers `400 INVALID_CURSOR`; EHR checks the cursor before it asks Identity to authorize the read, so this needs no access to that patient;
+    - CloudWatch shows no `MFA_UNAVAILABLE`;
+    - once the OCR worker has claimed a job, its `ocr.job.claimed` logs carry `queueDepth` and `oldestQueueAgeSeconds`, and no `ocr.queue.metrics_unavailable` follows a claim. A worker logs neither while it claims nothing;
+    - if the Outreach API is deployed: a registration without a campaign (`POST /outreach/registration-cases`) answers `2xx` and PostgreSQL logs no `permission denied for function account_id_for_subject`. A campaign-linked registration still fails until the §4.2 Outreach fix.
 
 ## 7. Staging acceptance
 
@@ -297,6 +309,7 @@ has been run, because no staging environment exists yet (Health-id
 | S4a | The governed-access loop in the staging provider and patient portals: a clinician requests access, the patient approves, the clinician sees **Access active** with its expiry, writes a clinical record, closes access (**Closed by you**, writes disabled), then requests again and the patient revokes (**Access revoked**). No browser run of these pages has been done; only component tests and the HTTP verifier (§8). | Screenshots and notes. |
 | S4b | The OCR pipeline on staging: create a job, let the worker extract it, validate, confirm the patient and publish. Validation and confirmation fail until the §4.2 OCR defect is fixed. With a provider slower than a third of the lease, the worker must log no `ocr.job.lease_renewal_failed` (0077). A confirmation of the correct patient that fails with `500`, while PostgreSQL logs `Patient confirmation does not match the canonical OCR source patient`, means the schema owner cannot read the source document (P8, 0076). Confirm the outbox events, the patient-linked audit rows for `ocr.job.find`, `ocr.validation.list` and `ocr.publication.list`, the worker's `queueDepth` and `oldestQueueAgeSeconds`, and `OcrQueueAgeAlarm` datapoints. No OCR HTTP or worker run against a database has been done; the evidence is the unit, SQL and compiled-worker checks in §8. | Logs, audit rows and alarm history. |
 | S4c | If the Outreach API is deployed: after the bootstrap, a registration without a campaign, a link to an existing patient and a campaign create succeed (0077 grant). A campaign-linked registration fails until the §4.2 Outreach fix. | Responses and logs. |
+| S4d | The EHR clinical list paging fix on staging (§2), with the headers of the §6 smoke check. Before the deploy, open the second page of a patient's encounters in Health-id's clinical record (Health-id reads 50 to a page, so the patient needs more than 50 encounters in the facility). After the deploy, press **Refresh encounters**: the first page must load with the restart notice (`RESTARTED`, `apps/patient-web/src/staff/routes/Clinical.tsx` on Health-id `main`). Then create encounters for one patient through the API whose `startedAt` values share a millisecond (for example `.123456`, and `.123400` twice), page `GET /ehr/patients/:id/encounters?limit=1` to the end, and check that each encounter is listed once. No HTTP or browser run of EHR paging has been done; the evidence is the unit specs and the SQL suite in §8. | Responses, screenshots and notes. |
 | S5 | Cross-origin preflights, only if staging serves the console from another origin. | `OPTIONS` responses. |
 | S6 | Rollback drill: redeploy the previous Identity build against the migrated staging database and sign in. | Notes. |
 
@@ -441,6 +454,10 @@ No other local cluster was touched. Later stages say which cluster they used.
   - **Reproduced on 0076:** a NULL claim token completed and failed another replica's job; every lease renewal was refused; a superuser session with no context wrote Lab, Pharmacy and Outreach rows attributed to another member; under the non-superuser owner a Lab import bound another facility's OCR validation and publication; a document marked entered in error during OCR made `ocr.claim_worker_job` raise for its provider; every Outreach write failed with `42501` as the Outreach runtime. The §4.2 locking statements failed as each service's runtime role, and the three §9 lock-order hazards (and the facility-suspension one) deadlocked with two connections.
   - **Read-only data check:** no local database holds an OCR job without an exact clean scan of its source; the P9 query lists such jobs on synthetic data.
   - **Adversarial review:** five independent reviewers (semantics, security, tests, docs, registration) and one verifier per finding. Every confirmed finding is fixed here or recorded above: the unbounded lease renewal, the out-of-play exemption, the same-status job event, the untested renewal and metadata rules, P9's cancel instructions and the counts.
+- **EHR clinical list paging** (branch `claude/ehr-timeline-cursor-precision`, commit `0a9668e` on `main` `54f79d2`, local and not pushed), local and synthetic only:
+  - **Unit:** `services/ehr-api/src/ehr/shared/clinical-context.spec.ts` covers the microsecond position, rows tied on the sort key split by `id`, round trips (including `0001-01-01`, leap days, `9999-12-31` and five- and six-digit years up to 294276), binding to the list, patient and encounter, refusal of 23 variants (among them the earlier `{ sortAt, id }` format, a millisecond timestamp, 30 February, 29 February 2100, a five-digit year with a leading zero, a year after 294276, hour 24, a leap second, an upper-case id, an extra field, reordered fields and padding), that the items keep the named column types of a pg row, and that no millisecond cursor is ever issued. `timeline-paging.service.spec.ts` checks, for each of the six lists, that the SQL selects the key as text, the cursor carries its microseconds and the next page binds them. On the branch both pass (2 suites, 28 tests). On `main` both fail to compile, because `decodeTimelineCursor` and `timelinePage` there take no list scope.
+  - **SQL:** `ehr-timeline-cursor.integration.sql` (rollback-only; `DATABASE.md`) runs with the rehearsal's additional suites and in `scripts/run-container-database-acceptance.sh`. This record includes no run of it, of the rehearsal or of the container acceptance.
+  - No HTTP or browser run pages an EHR list against a database (§7 S4d).
 - **Not run:** staging or production anything (§7). The browser run uses the backend's own TOTP clock seam to issue codes, not a real authenticator app.
 
 To reproduce, run as the owner of a local cluster migrated to 0073 and role-bootstrapped (Stage 5B Identity calls `auth.lock_account_sessions` on sign-out and expiry; a cluster left at 0072 needs `db:migrate` and `db:bootstrap` again) (`services/ehr-api` `db:migrate` and `db:bootstrap`). The harness defaults to the database `hid_rehearsal`, the superuser `hid_rehearsal_admin` and ports 4010 and 4011. Change them with `HID_E2E_TEMPLATE_DB`, `HID_E2E_DB_SUPERUSER`, `HID_E2E_API_PORT` and `HID_E2E_CONTROL_PORT`; see the script headers. Stop `server.mjs` with Ctrl-C or SIGTERM, which drops its database copy.
@@ -485,6 +502,7 @@ To reproduce, run as the owner of a local cluster migrated to 0073 and role-boot
 - **0076:** forward-only like every migration. To restore the earlier guard bodies, a new migration would have to recreate them; that would accept a confirmation for any patient again under a non-bypass owner, and validations from sessions without an account or membership. No OCR build depends on the earlier behaviour. The Stage 7 Identity needs `auth.lock_account_for_mfa`.
 - **0077:** forward-only. Restoring the earlier bodies would need a new migration and would bring back the NULL claim token, the refused lease renewals, jobs for unscanned documents, publications attributed to any member and the NULL-session gaps of the Lab, Pharmacy and Outreach guards. No service build depends on the earlier behaviour. Revoking the Outreach grant would stop every Outreach write again.
 - **OCR after 0075:** roll the OCR API and worker back freely. Earlier workers lose the metrics again; earlier APIs write the earlier, possibly unlinked, events. The function, the role and both policies stay. Removing the outbox insert policy would stop patient confirmation and publication again.
+- **EHR clinical list paging:** code only, no persisted state. Rolling the EHR API back brings back the rows skipped within a millisecond. Cursors issued by either build are refused by the other with `400 INVALID_CURSOR`, after which Health-id reloads the first page (§3).
 - **Refresh-event change:** this is code only. Rolling back Identity brings back the old misclassification and nothing else. Existing `refresh`/`denied` events remain valid rows.
 - **MFA key:** if `MFA_SECRET_KEY_B64` is lost, every enrolled authenticator must be re-enrolled. Store it with the same care as the field-encryption keys.
 - **Lockout:** if every Super Admin is locked out (lost authenticators and recovery codes), recovery needs the documented break-glass procedure. That procedure is not built yet; see the product decisions in `PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §9. Keep two independent Super Admins with stored recovery codes.

@@ -47,6 +47,22 @@ boundary without echoing submitted clinical content.
 
 Optimistic updates require `expectedRowVersion` and a non-trivial `changeReason`. Cross-facility identifiers are never sufficient to resolve a record: application predicates, RLS, membership checks, consent, and composite foreign keys all enforce the same boundary.
 
+The six clinical lists (a patient's encounters, and an encounter's clinical
+notes, diagnoses, lab requests, prescriptions and vitals) are newest first and
+keyset-paged: `limit` 1–100 (default 50), and `cursor` set to the previous
+page's `nextCursor`. `src/ehr/shared/clinical-context.ts` issues the cursor
+(version 1, following Identity's admin cursors in
+`services/identity-api/src/common/cursor.ts`). It carries the sort
+key as PostgreSQL renders it to the microsecond (`timelineCursorSql`), never
+the row's JavaScript `Date`, which node-postgres limits to milliseconds, and
+it is bound to its list, patient and, for the five encounter lists, encounter.
+A well-formed cursor (16–512 base64url characters) not in the exact form
+issued, including one from before this format, is `400 INVALID_CURSOR`; any
+other `cursor` value is `400 VALIDATION_FAILED`. See
+[EHR clinical list paging](../../docs/INTERFACE_CONTRACT.md#ehr-clinical-list-paging);
+`database/tests/ehr-timeline-cursor.integration.sql` checks the bound in
+PostgreSQL.
+
 ## Local verification
 
 Use Node.js 22 or newer and provide a development configuration based on

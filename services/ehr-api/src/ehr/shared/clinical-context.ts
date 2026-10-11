@@ -42,6 +42,12 @@ export interface TimelinePage<Row> {
 }
 
 /**
+ * A row without its `cursorAt`. Unlike Omit, it keeps the named columns of a
+ * pg row type, whose index signature would otherwise swallow them.
+ */
+export type WithoutCursor<Row> = { [Key in keyof Row as Key extends 'cursorAt' ? never : Key]: Row[Key] };
+
+/**
  * SQL that renders a timestamptz sort key at the microsecond, for the row's
  * `cursorAt`. node-postgres returns a timestamptz as a JavaScript Date, which
  * keeps only milliseconds, so the cursor must never be built from the Date.
@@ -51,7 +57,11 @@ export const timelineCursorSql = (column: string) =>
 
 const CURSOR_VERSION = 1;
 const MAX_CURSOR_LENGTH = 512;
-const CURSOR_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+// to_char's YYYY: four digits, or five or six from year 10000 on, without a
+// leading zero. 294276 is the last year a timestamptz holds.
+const CURSOR_TIMESTAMP = /^(\d{4}|[1-9]\d{4,5})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.\d{6}Z$/;
+const LAST_TIMESTAMPTZ_YEAR = 294276;
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 const CURSOR_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function encodeTimelineCursor(scope: TimelineScope, position: TimelineCursor): string {
@@ -93,7 +103,7 @@ export function timelinePage<Row extends { id: string; cursorAt: string }>(
   rows: readonly Row[],
   limit: number,
   scope: TimelineScope,
-): TimelinePage<Omit<Row, 'cursorAt'>> {
+): TimelinePage<WithoutCursor<Row>> {
   const page = rows.slice(0, limit);
   const tail = rows.length > limit ? page.at(-1) : undefined;
   return {
@@ -102,21 +112,26 @@ export function timelinePage<Row extends { id: string; cursorAt: string }>(
   };
 }
 
-function withoutCursor<Row extends { cursorAt: string }>(row: Row): Omit<Row, 'cursorAt'> {
-  const item: Partial<Row> = { ...row };
+function withoutCursor<Row extends { cursorAt: string }>(row: Row): WithoutCursor<Row> {
+  const item: Record<PropertyKey, unknown> = { ...row };
   delete item.cursorAt;
-  return item as Omit<Row, 'cursorAt'>;
+  return item as WithoutCursor<Row>;
 }
 
 /**
- * A real calendar instant in the issued format that Postgres accepts.
- * JavaScript also accepts year 0000 and 30 February-style overflow; Postgres
- * rejects both.
+ * A real calendar instant in the issued format that Postgres accepts: year 1
+ * to 294276, no 30 February, no hour 24 and no leap second. Checked by
+ * arithmetic, since JavaScript dates neither reach year 294276 nor reject
+ * 30 February.
  */
 function isCalendarTimestamp(value: string): boolean {
-  if (!CURSOR_TIMESTAMP.test(value) || value.startsWith('0000')) return false;
-  const milliseconds = Date.parse(`${value.slice(0, 23)}Z`);
-  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === `${value.slice(0, 23)}Z`;
+  const fields = CURSOR_TIMESTAMP.exec(value)?.slice(1).map(Number);
+  if (!fields) return false;
+  const [year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0] = fields;
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = month === 2 && leap ? 29 : DAYS_IN_MONTH[month - 1];
+  return year >= 1 && year <= LAST_TIMESTAMPTZ_YEAR && days !== undefined && day >= 1 && day <= days
+    && hour <= 23 && minute <= 59 && second <= 59;
 }
 
 function scopeBinding(scope: TimelineScope): string {

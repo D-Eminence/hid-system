@@ -443,6 +443,49 @@ All writes require:
 * audit
 * appropriate concurrency protection
 
+### EHR clinical list paging
+
+Six lists are newest first and keyset-paged. Paths are under
+`/api/v1/ehr/patients/:patientId`:
+
+| Route | Rows | Order |
+|---|---|---|
+| `GET .../encounters` | the patient's encounters | `started_at` desc, then `id` desc |
+| `GET .../encounters/:encounterId/clinical-notes` | the encounter's notes | `created_at` desc, then `id` desc |
+| `GET .../encounters/:encounterId/diagnoses` | the encounter's diagnoses | `created_at` desc, then `id` desc |
+| `GET .../encounters/:encounterId/lab-requests` | the encounter's lab requests | `created_at` desc, then `id` desc |
+| `GET .../encounters/:encounterId/prescriptions` | the encounter's prescriptions | `created_at` desc, then `id` desc |
+| `GET .../encounters/:encounterId/vitals` | the encounter's vitals | `recorded_at` desc, then `id` desc |
+
+Every list returns only rows of the active facility (`X-Facility-ID`). Each
+takes `limit` (1–100, default 50) and an optional `cursor`, and returns
+`{ items, nextCursor }`. `nextCursor` is null on the last page; otherwise pass
+it back as `cursor` to the same route. No total is returned.
+
+A cursor is opaque. It names the last row of the page, by its sort key at
+microsecond precision (as PostgreSQL stores it) and its id, and the list,
+patient and, for the five encounter lists, encounter it was issued for. It is
+a position, not a credential: every page re-applies the caller's
+authorization, the active facility and the patient decision. The facility is
+not part of the cursor.
+
+- A cursor of 16–512 base64url characters that is not in the exact form EHR
+  issues for that route, patient and encounter is `400 INVALID_CURSOR`. This
+  includes a cursor issued for another list, patient or encounter, one that
+  was altered or re-encoded, one that names an impossible time, and one in an
+  earlier format, such as the millisecond cursors EHR issued before the
+  current format (version 1). Clients reload the list from its first page.
+- A `cursor` that is shorter, longer or contains other characters, or a
+  `limit` outside 1–100, is `400 VALIDATION_FAILED`.
+
+No EHR route changes a row's sort key, and rows tied on the sort key are
+ordered by `id`, so paging neither repeats nor skips a row that existed when
+the previous page was read. A row added while paging is listed on a later page
+only if it sorts after the last row shown; reload the first page to see newer
+rows. Before the microsecond cursor, rows that sort after the last row shown
+within its millisecond (earlier in that millisecond, or tied with a lower
+`id`) were skipped.
+
 ## 12. Lab
 
 EHR communicates with Lab through Lab APIs.

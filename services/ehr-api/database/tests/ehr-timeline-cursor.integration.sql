@@ -16,7 +16,10 @@
 --
 -- Case 1 checks that the text form casts back to exactly the same instant
 -- whatever the session time zone, so the cursor binds to the existing
--- $n::timestamptz parameter unchanged. Case 2 runs the clinical-notes list
+-- $n::timestamptz parameter unchanged. That includes a year after 9999, which
+-- to_char renders with five or six digits (started_at and recorded_at take
+-- any instant the client sends), up to 294276, the last year a timestamptz
+-- holds. Case 2 runs the clinical-notes list
 -- query on rows that share a millisecond, with the microsecond bound and with
 -- the millisecond bound a cursor used to carry. Fixtures are inserted with
 -- session_replication_role = replica (no foreign-key checks; CHECK constraints
@@ -33,9 +36,10 @@ begin
   foreach zone in array array['UTC', 'Africa/Lagos', 'America/Los_Angeles', 'Asia/Kolkata'] loop
     perform set_config('timezone', zone, true);
     foreach instant in array array['2026-10-11 08:00:00.123456+00', '2026-10-11 08:00:00.000001+00',
-      '2026-10-11 08:00:00.999999+00', '0001-01-01 00:00:00+00', '2028-02-29 23:59:59.999999+00']::timestamptz[] loop
+      '2026-10-11 08:00:00.999999+00', '0001-01-01 00:00:00+00', '2028-02-29 23:59:59.999999+00',
+      '9999-12-31 23:00:00-05:00', '294276-12-31 23:59:59.999999+00']::timestamptz[] loop
       rendered := to_char(instant at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"');
-      if rendered !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$' or rendered::timestamptz <> instant then
+      if rendered !~ '^(\d{4}|[1-9]\d{4,5})-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$' or rendered::timestamptz <> instant then
         raise exception 'the cursor text of % under time zone % is %, which is not that instant', instant, zone, rendered;
       end if;
     end loop;

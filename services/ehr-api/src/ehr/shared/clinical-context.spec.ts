@@ -1,5 +1,6 @@
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import type { QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import {
   decodeTimelineCursor,
@@ -94,8 +95,13 @@ describe('timeline cursors', () => {
     expect(page.nextCursor).toBeNull();
   });
 
+  // Postgres renders a year after 9999 with five or six digits, up to its
+  // last timestamptz year, 294276. started_at and recorded_at take any
+  // instant the client sends, so such a key can end a page.
   it.each(['2026-10-11T08:00:00.000000Z', '2026-10-11T08:00:00.000001Z', '2026-10-11T08:00:00.999999Z',
-    '0001-01-01T00:00:00.000000Z', '2028-02-29T23:59:59.999999Z'])('round-trips %s', (cursorAt) => {
+    '0001-01-01T00:00:00.000000Z', '2028-02-29T23:59:59.999999Z', '2000-02-29T00:00:00.000000Z',
+    '9999-12-31T23:59:59.999999Z', '10000-01-01T04:00:00.000000Z', '10000-02-29T00:00:00.000000Z',
+    '294276-12-31T23:59:59.999999Z'])('round-trips %s', (cursorAt) => {
     const page = timelinePage([row(2, cursorAt), row(1, cursorAt)], 1, notes);
     expect(decodeTimelineCursor(page.nextCursor ?? undefined, notes)).toEqual({ sortAt: cursorAt, id: id(2) });
   });
@@ -118,6 +124,15 @@ describe('timeline cursors', () => {
       ['an offset instead of Z', encode({ v, l, f, t: '2026-10-11T08:00:00.123456+00:00', i })],
       ['30 February', encode({ v, l, f, t: '2026-02-30T08:00:00.123456Z', i })],
       ['year 0000', encode({ v, l, f, t: '0000-10-11T08:00:00.123456Z', i })],
+      ['29 February of a century year', encode({ v, l, f, t: '2100-02-29T08:00:00.123456Z', i })],
+      ['29 February of a five-digit common year', encode({ v, l, f, t: '10001-02-29T08:00:00.123456Z', i })],
+      ['a five-digit year with a leading zero', encode({ v, l, f, t: '09999-10-11T08:00:00.123456Z', i })],
+      ['a year after Postgres\'s last', encode({ v, l, f, t: '294277-01-01T00:00:00.000000Z', i })],
+      ['a seven-digit year', encode({ v, l, f, t: '1000000-01-01T00:00:00.000000Z', i })],
+      ['hour 24', encode({ v, l, f, t: '2026-10-11T24:00:00.000000Z', i })],
+      ['a leap second', encode({ v, l, f, t: '2026-12-31T23:59:60.000000Z', i })],
+      ['month 13', encode({ v, l, f, t: '2026-13-01T08:00:00.123456Z', i })],
+      ['day 00', encode({ v, l, f, t: '2026-10-00T08:00:00.123456Z', i })],
       ['an upper-case id', encode({ v, l, f, t, i: String(i).toUpperCase() })],
       ['another version', encode({ v: 2, l, f, t, i })],
       ['an extra field', encode({ v, l, f, t, i, x: 1 })],
@@ -128,6 +143,17 @@ describe('timeline cursors', () => {
       ['null', encode(null)],
     ];
     for (const [label, value] of variants) expect([label, refused(value)]).toEqual([label, [400, 'INVALID_CURSOR']]);
+  });
+
+  it('keeps the named fields of a pg row type on the returned items', () => {
+    // pg's QueryResultRow has an index signature; the items must still type
+    // their named columns, not fall back to any.
+    interface NoteRow extends QueryResultRow { id: string; createdAt: Date }
+    const rows: Array<NoteRow & { cursorAt: string }> = [row(1, '2026-10-11T08:00:00.123456Z')];
+    const [item] = timelinePage(rows, 1, notes).items;
+    // @ts-expect-error createdAt is a Date
+    const createdAt: number = item?.createdAt;
+    expect(createdAt).toEqual(new Date('2026-10-11T08:00:00.123Z'));
   });
 
   it('never issues a cursor that would lose precision', () => {
