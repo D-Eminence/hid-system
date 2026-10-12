@@ -76,6 +76,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0077_fail_closed_session_guards_and_ocr_worker_leases.sql` | The remaining session guards fail closed (ADR-040): the Lab, Pharmacy and Outreach triggers refuse a missing session account, membership or facility (and, for Outreach, a purpose other than direct care) with their existing codes and messages and compare with `IS DISTINCT FROM`. Before, `<>` with a NULL side let the row through, so a session that bypasses row-level security could record Lab, Pharmacy or Outreach rows attributed to any member with no request context. The Lab OCR-import guard also refuses another facility's OCR evidence when its owner cannot read it (P8). OCR: `complete_worker_job` and `fail_worker_job` refuse a NULL claim token (before, any replica of the shared worker subject could complete or fail a job another replica held) and `fail_worker_job` refuses an expired lease; lease renewal works for an active lease, at most an hour ahead (the job trigger refused every `renew_worker_claim`, so a job that outlived its lease could not complete); a new job, or one moved to another source or started, needs an exact clean scan of its document, while jobs created earlier without a scan event can still be failed, retried and validated; failing, cancelling or requeueing a job no longer re-reads its evidence, so a document withdrawn during OCR no longer stops every claim of its provider; a publication must name the session's own account and membership. `CREATE OR REPLACE` keeps owners, ACLs and triggers; no table lock. The role bootstrap grants `auth.account_id_for_subject(text)` to the Outreach runtime: without it every Outreach write failed with `42501`. Before applying, run the read-only OCR scan check (`PHASE_4_STAGE_5_RELEASE_READINESS.md` P9) and apply 0077 and the bootstrap together (§2, §5, §9) |
 | `database/migrations/0078_runtime_command_repairs.sql` | Two defects behind the runtime-role locks that Stage 9 removed. The `patient_identifiers_self_nin_insert` policy (0058) applies to every role and read `identity.verification_evidence`, which the Identity runtime cannot read; PostgreSQL checks the privileges of every applicable policy, so every Identity runtime insert of a patient identifier, including both NIN registration reviews, failed with `42501`. The policy is dropped: the only writer of self-NIN identifiers, `identity.bind_my_verified_nin`, is a definer function owned by the table's owner on a table without forced row-level security, so it never used the policy, which only let another role insert self-NIN identifiers without the function's checks. `lab.validate_work_item_child` (0018) read `NEW.ordinal` on `lab.work_item_events` (`42703`), so every Lab acceptance of an EHR order failed; the requested-test check is now reached only for `lab.work_item_requested_tests`, unchanged. Dropping the policy takes a brief `ACCESS EXCLUSIVE` lock on `identity.patient_identifiers` for the catalog change only. No grant change, but the Stage 9 role assertions require the policy to be gone, so run `db:bootstrap` and `db:verify-roles` after 0078 (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, §9) |
 | `database/migrations/0079_patient_access_pin_actor_window.sql` | Replaces `identity.access_patient_with_pin` (same signature, result, `SECURITY DEFINER` attribute and `search_path`) so that a correct PIN clears only the failure window of the patient it verified. Before, any success also cleared the staff member's actor window, so a clinician who knew one patient's PIN could keep guessing other patients' PINs without reaching the five-failure actor lock. Function replacement only; no table, grant or data change |
+| `database/migrations/0080_purpose_of_use_vocabulary.sql` | Seeds `identity.purpose_of_use_codes` with `direct-care` ("Direct patient care", active, source `hid`), `ON CONFLICT (code) DO NOTHING`, so a row already inserted or deactivated by an operator is kept as it is. 0003 created the table empty and nothing inserted a row, while every consent decision requires an active code, so on a database built only from migrations every staff consent check, access request, grant close, PIN and break-glass failed closed. `emergency` and `healthcare-operations` are not seeded: each waits for a product decision (§5). `ROW EXCLUSIVE` lock on that table only; no grant or service change |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
@@ -206,7 +207,14 @@ Before a real source read:
   deletion controls;
 - verify no runtime LOGIN owns schemas or has superuser, `CREATEROLE`,
   `BYPASSRLS`, or migration inheritance;
-- approve purpose-of-use vocabulary, consent/deny precedence and RLS tests;
+- approve the purpose-of-use vocabulary, consent/deny precedence and RLS
+  tests. Migration `0080` seeds only `direct-care` (active), and keeps any
+  row already present as it is; list the codes before and after it (release
+  checklist P10). Operators still approve, and insert by a reviewed change,
+  `emergency` (only once `break_glass_enabled` is set to its intended launch
+  state, because the code makes break-glass usable at once) and
+  `healthcare-operations` (with the OCR purpose-of-use decision). Retire a
+  code with `active = false`, never by deleting it;
 - establish private object export/import paths and checksum inventory; and
 - select a final-write strategy: bounded maintenance window, or separately
   reviewed CDC into restricted staging with a known final LSN.
@@ -226,7 +234,7 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0079`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0080`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
@@ -314,7 +322,8 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0079`, runtime grants, RLS and purpose/deny behavior.
+6. Verify `0080`, runtime grants, RLS and purpose/deny behavior, and list the
+   purpose-of-use codes (release checklist P10).
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.

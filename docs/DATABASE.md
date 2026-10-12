@@ -1866,3 +1866,88 @@ microseconds:
   suites (`TUF-STAGING-MIGRATION.md`), and
   `scripts/run-container-database-acceptance.sh` runs it after
   `staff-access-request-outcome.integration.sql`.
+
+## Purpose-of-use vocabulary (0080)
+
+`0080_purpose_of_use_vocabulary.sql` inserts one row into
+`identity.purpose_of_use_codes`: `direct-care` ("Direct patient care",
+active, `source_system` `hid`), with `ON CONFLICT (code) DO NOTHING`
+(branch `fix/purpose-of-use-vocabulary`).
+
+0003 created the table empty, and nothing inserted a row: no migration, no
+role bootstrap (`runtime-grants.sql` gives the Identity runtime `SELECT`
+only) and no legacy importer (it holds every imported request and grant
+with `purpose_of_use` null and a migration hold). Yet every consent decision
+requires an active code:
+
+- `identity.has_active_consent_grant` (0012) returns false, so Identity's
+  authorization check, and with it patient lookup by HID and every EHR, Lab,
+  Pharmacy and OCR patient access, is denied;
+- `identity.create_access_request` and `identity.close_own_consent_grant`
+  (0010) and `identity.activate_break_glass` (0031) raise `22023`, which
+  Identity answers `400 INVALID_CONSENT_COMMAND`;
+- `identity.access_patient_with_pin` (0033, 0079) raises `22023`, answered
+  `403 PATIENT_PIN_ACCESS_DENIED`;
+- the `purpose_of_use` foreign keys of `identity.access_requests` and
+  `identity.consent_grants` (0008) refuse the row, and the consent directive
+  trigger (0008) refuses an unknown or inactive purpose (`23514`).
+
+On a database built only from migrations every staff consent check therefore
+failed closed. The rollback-only suites and the runtime verifiers insert the
+codes they need themselves, so none of them showed it. Whether staging or
+production already hold rows inserted by hand cannot be told from the
+repository; the release checklist's P10 records them before and after 0080.
+
+**Current default, pending product decisions:** only `direct-care` is seeded.
+
+- `emergency` is not seeded. Break-glass needs it (0010, 0031), and
+  `has_active_consent_grant` honours an emergency read only while it is
+  active. Seeding it would make break-glass usable at once wherever
+  `platform.control_settings` `break_glass_enabled` is on, which is its 0039
+  default. Until it is approved and inserted, break-glass answers `423
+  BREAK_GLASS_DISABLED` when the control is off and `400
+  INVALID_CONSENT_COMMAND` when it is on.
+- `healthcare-operations` is not seeded. Identity access requests
+  (`consent.controller.ts`), Lab and Pharmacy reads and the OCR commands
+  accept it as a purpose, and it belongs to the open OCR purpose-of-use
+  decision (which purpose and scope OCR create, retry, validate and confirm
+  need); a patient also approves a request without seeing its purpose. Until
+  it is decided, requests, grants and reads for that purpose are refused.
+  Enrollment, onboarding and registration commands compare the session
+  purpose with the text `healthcare-operations` and never read the table, so
+  they are unaffected.
+
+The `active` flag is the switch. An operator retires a code by setting
+`active = false`, never by deleting it (grants and requests reference it
+`ON DELETE RESTRICT`); deactivating `direct-care` refuses every direct-care
+grant, request, close and PIN at once. `ON CONFLICT DO NOTHING` keeps a row
+inserted or deactivated before 0080 exactly as it is, display and source
+included. The service runtime roles only read the table
+(`hid_schema_test_runtime` may also insert and update, for the suites), so a
+new code is a reviewed change by the migration administrator or a later
+migration. The insert takes a `ROW EXCLUSIVE` lock on
+`identity.purpose_of_use_codes`; no table is scanned and no grant or service
+changes.
+
+Tests:
+
+- `purpose-of-use-vocabulary.integration.sql` (rollback-only; it inserts no
+  purpose code) requires an active `direct-care` row. Then, as
+  `hid_identity_api_runtime`: the runtime can read the vocabulary but not
+  insert, update or delete it; a direct-care `write_records` grant is
+  honoured for reads and writes; a direct-care access request is accepted
+  (`pending`). After the owner deactivates `direct-care` in the transaction,
+  the grant is refused for both actions and a new request is refused with
+  `22023 Invalid purpose for a standard access request`. Without 0080 it
+  fails at its first assertion ("the migrated purpose-of-use vocabulary has
+  no active direct-care code"). The rehearsal runs it with the additional
+  suites, under the migration owner, the non-superuser owner and on the
+  restored database, and `scripts/run-container-database-acceptance.sh` runs
+  it after `runtime-command-privileges.integration.sql`.
+- The rehearsal's 0028 upgrade check counts `identity.purpose_of_use_codes`
+  among the tables the upgrade may change, and requires exactly one row after
+  the upgrade: `direct-care`, active, `source_system` `hid`.
+- `schema.integration.sql` and `emergency.integration.sql` insert their three
+  codes with `ON CONFLICT (code) DO NOTHING`, as every other suite and
+  verifier already did, so they pass on a database where 0080 seeded
+  `direct-care`.
