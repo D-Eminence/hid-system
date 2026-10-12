@@ -1764,6 +1764,38 @@ Checks:
   `pg_stat_database` to report no deadlock for its database, read after the
   service's connections closed, so a deadlock the retry hid still fails it.
 
+## Patient access PIN actor window (0079)
+
+`0079_patient_access_pin_actor_window.sql` replaces
+`identity.access_patient_with_pin(text, text, integer)` with `CREATE OR
+REPLACE`. The signature, result, `SECURITY DEFINER` attribute, `search_path`,
+owner and ACL are unchanged, and so is every statement but one.
+
+The command keeps two failure windows (0033): one per staff member at a
+facility (`identity.patient_access_pin_actor_limits`) and one per staff
+member, facility and patient (`identity.patient_access_pin_target_limits`).
+Five failures within 15 minutes lock a window for 15 minutes. Before 0079 a
+correct PIN cleared both the verified patient's window and the actor window.
+So a clinician who knew one patient's PIN could enter four wrong PINs for
+another patient, enter the known PIN, and repeat without ever reaching the
+actor lock; only the per-patient window of each target slowed the guessing.
+Since 0079 a success clears only the window of the patient it verified. The
+actor window runs out after 15 minutes or locks at five failures, as before.
+
+An honest clinician who mistypes PINs for several patients within 15 minutes
+now reaches the actor lock even if some PINs were right in between; the lock
+lasts 15 minutes. A limit across all staff for one patient is not added here.
+
+Tests: `services/ehr-api/database/tests/patient-access-pin.integration.sql`
+(rollback-only, run by the migration rehearsal as `hid_identity_api_runtime`)
+enters three wrong PINs for one patient, one wrong PIN and then the right PIN
+for a second patient, and one more wrong PIN for the first. After the right
+PIN it requires the second patient's window at 0, the first patient's still
+at 3 and the actor's still at 4; at the end, the actor locked at 5, the first
+patient's window at 4 and the known PIN refused. It fails without 0079 (the
+success reset the actor window), and also if the success leaves its own
+patient's window uncleared or clears another patient's.
+
 ## EHR clinical list paging precision (no migration)
 
 The EHR API's six newest-first clinical lists page with a keyset on (sort key,
