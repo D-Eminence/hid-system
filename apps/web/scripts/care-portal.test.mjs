@@ -66,7 +66,7 @@ test('missing reason, unknown identifiers and out-of-policy duration stop before
   assert.equal(requests, 0)
 })
 test('active patient and emergency components cannot import legacy helpers or clinical writes', async () => {
-  for (const file of ['components/AccountAccess.tsx', 'components/CarePortal.tsx', 'pages/patient/PatientSelfPortal.tsx', 'pages/doctor/DoctorEmergency.tsx']) {
+  for (const file of ['components/AccountAccess.tsx', 'pages/doctor/DoctorRecover.tsx', 'components/CarePortal.tsx', 'pages/patient/PatientSelfPortal.tsx', 'pages/doctor/DoctorEmergency.tsx']) {
     const source = await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8')
     assert.doesNotMatch(source, /hidApi|functions\.invoke|edgeRequest|token-exchange|createMedicalRecord|WithUploads|experienceWarmup/)
   }

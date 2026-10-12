@@ -151,6 +151,11 @@ try{
   await pasteOtp('000000');await waitText('Code expired or invalid')
   await pasteOtp('123456');await waitText('Confirm password');await fill('#account-patient-password','synthetic-new-password');await fill('#account-patient-confirm-password','synthetic-new-password')
   await click('Save password');await waitText('Password saved. Sign in using your new password.');assert.equal(await session.evaluate('window.__careFixture.mode'),null);await noLegacy();checks.push('OTP partial/full paste, auto verify, invalid code and password completion require fresh sign-in')
+  await visit('/provider/recover');await waitText('Recover or activate your account');assert.equal(await session.evaluate("document.querySelector('h1').textContent"),'Clinical account')
+  assert.equal(await session.evaluate("location.pathname+location.search"),'/provider/recover')
+  await fill('input[autocomplete=username]','clinician@example.invalid');await click('Send recovery code');await waitText('Verify your recovery code')
+  assert.deepEqual(await session.evaluate("(()=>{const c=window.__careFixture.calls.filter(x=>x.path.endsWith('/auth/otp/start')).at(-1).body;return [c.identifier,c.purpose,c.turnstileAction]})()"),['clinician@example.invalid','PASSWORD_RESET','staff-reset'])
+  await click('Back to sign in');await waitText('Forgot password or activate an issued account');assert.equal(await session.evaluate("location.pathname"),'/provider/recover');checks.push('/provider/recover opens clinical account recovery (staff-reset) at a fixed route')
   await visit('/hospital/auth');await waitText('Clinical account');await fill('input[type=email]','clinician@example.invalid');await fill('input[type=password]','synthetic-password');await click('Sign in');await waitText('Activate emergency read access')
   const activate=async()=>{await fill('input[placeholder="HID-ABCDEFGH"]','HID-ABCDEFGH');await fill('textarea','Urgent synthetic clinical care');await click('Activate emergency read access')}
   await activate();await waitText('Synthetic released note');assert.equal(await session.evaluate(`window.__careFixture.calls.find(x=>x.path.endsWith('/emergency-records')).headers['x-purpose-of-use']`),'emergency')
