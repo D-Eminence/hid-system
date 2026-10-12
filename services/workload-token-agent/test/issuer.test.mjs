@@ -111,8 +111,8 @@ test('production issues tokens only for its own stage, issuer and subjects', asy
 });
 test('a request context from another stage is denied before any KMS signing', async () => {
   for (const stage of ['staging', 'Production', '', undefined]) {
-    const { handler, signed } = productionSetup();
-    assert.equal((await handler(productionEvent(stage))).statusCode, 403); assert.equal(signed(), 0);
+    const { handler, signed } = productionSetup(); const event = productionEvent(); event.requestContext.stage = stage;
+    assert.equal((await handler(event)).statusCode, 403); assert.equal(signed(), 0);
   }
   const { handler, signed } = setup(); const event = makeEvent(); event.requestContext.stage = 'production';
   assert.equal((await handler(event)).statusCode, 403); assert.equal(signed(), 0);
