@@ -99,4 +99,80 @@ describe('PharmacyService', () => {
       effectiveStatus: 'dispensed' });
     expect(query.mock.calls.every(([sql]) => !/^update pharmacy\.work_items/i.test(String(sql).trim()))).toBe(true);
   });
+
+  // The database guards bind Pharmacy work to the EHR prescription (0080):
+  // pharmacy.validate_work_item refuses an acceptance that is not the exact
+  // active prescription version, and pharmacy.validate_dispensing refuses a
+  // dispensing once the prescription is no longer active at that version. Each
+  // raises 23514 naming its own constraint, which the service answers with 409.
+  const guardRefusal = (constraint?: string) => Object.assign(
+    new Error('Synthetic guard refusal'), { code: '23514', ...(constraint ? { constraint } : {}) });
+  const dispenseInput = { expectedWorkItemVersion: 1, quantityDispensed: 21, quantityUnit: 'tablet',
+    reason: 'Medicine handed to patient' };
+  const dispensingDatabase = (insert: Error) => {
+    const query = jest.fn(async (sql: string) => {
+      if (/^insert into pharmacy\.dispensings/i.test(sql.trim())) throw insert;
+      return { rows: /from pharmacy\.work_items/i.test(sql) ? [workRow] : [] };
+    });
+    return { query, database: { withTransaction: jest.fn(async (_context, operation) => operation({ query })) } };
+  };
+
+  it('refuses a dispensing whose EHR prescription is no longer active at the accepted version with 409', async () => {
+    const { query, database } = dispensingDatabase(guardRefusal('pharmacy_dispensing_source_prescription'));
+    const service = new PharmacyService(database as never, identity as never, audit as never);
+    await expect(service.dispense(context, ids.work, dispenseInput, 'dispensing-key-1234'))
+      .rejects.toMatchObject({ status: 409, code: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('pharmacy.outbox_events'))).toBe(false);
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it('passes every other check violation of a dispensing through unchanged', async () => {
+    for (const refusal of [guardRefusal(), guardRefusal('pharmacy_work_item_source_prescription'),
+      guardRefusal('dispensings_quantity_dispensed_check')]) {
+      const { database } = dispensingDatabase(refusal);
+      const service = new PharmacyService(database as never, identity as never, audit as never);
+      await expect(service.dispense(context, ids.work, dispenseInput, 'dispensing-key-1234')).rejects.toBe(refusal);
+    }
+  });
+
+  it('replays an identical earlier dispensing without inserting', async () => {
+    const existing = { id: ids.dispensing, work_item_id: ids.work, work_item_version: '1', patient_id: ids.patient,
+      facility_id: ids.facility, medication_code_system: null, medication_code: null,
+      medication_display: command.medicationDisplay, quantity_dispensed: '21', quantity_unit: 'tablet',
+      status: 'dispensed', dispensed_by: ids.account, dispensed_at: new Date(), row_version: '1',
+      created_at: new Date(), reversal_id: null,
+      request_sha256: requestDigest('pharmacy.dispensing.create', { workItemId: ids.work, ...dispenseInput }) };
+    const query = jest.fn().mockResolvedValueOnce({ rows: [workRow] }).mockResolvedValueOnce({ rows: [existing] });
+    const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
+    const service = new PharmacyService(database as never, identity as never, audit as never);
+    await expect(service.dispense(context, ids.work, dispenseInput, 'dispensing-key-1234'))
+      .resolves.toMatchObject({ id: ids.dispensing, status: 'dispensed' });
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls.some(([sql]) => /insert into/i.test(String(sql)))).toBe(false);
+  });
+
+  const acceptanceDatabase = (insert: Error) => {
+    const query = jest.fn(async (sql: string) => {
+      if (/^insert into pharmacy\.work_items/i.test(sql.trim())) throw insert;
+      return { rows: [] };
+    });
+    return { query, database: { withTransaction: jest.fn(async (_context, operation) => operation({ query })) } };
+  };
+
+  it('refuses an acceptance that is not the exact active EHR prescription version with 409', async () => {
+    const { query, database } = acceptanceDatabase(guardRefusal('pharmacy_work_item_source_prescription'));
+    const service = new PharmacyService(database as never, identity as never, audit as never);
+    await expect(service.acceptPrescription(context, command, 'acceptance-key-1234'))
+      .rejects.toMatchObject({ status: 409, code: 'PHARMACY_PRESCRIPTION_NOT_ELIGIBLE' });
+    expect(query.mock.calls.some(([sql]) => /pharmacy\.(work_item_events|outbox_events)/.test(String(sql)))).toBe(false);
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it('passes every other check violation of an acceptance through unchanged', async () => {
+    for (const refusal of [guardRefusal(), guardRefusal('pharmacy_dispensing_source_prescription')]) {
+      const { database } = acceptanceDatabase(refusal);
+      const service = new PharmacyService(database as never, identity as never, audit as never);
+      await expect(service.acceptPrescription(context, command, 'acceptance-key-1234')).rejects.toBe(refusal);
+    }
+  });
 });

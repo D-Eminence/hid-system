@@ -22,10 +22,11 @@ python3 scripts/staging-external-preflight.py --cloud-read-only --output release
 
 The output file must not already exist; choose a new receipt filename on later
 runs. Exit zero means the receipt was collected, not that every check passed.
-Inspect each status and field-presence boolean. Every receipt explicitly states
-`deployment_authorized: false` and `staging_accepted: false`. Presence is not a
-provider credential validity or delivery check. No secret values, raw API error
-bodies, contacts, DNS contents or widget keys are serialized.
+Inspect each status, field-presence and key-format boolean. Every receipt
+explicitly states `deployment_authorized: false` and `staging_accepted: false`.
+Presence is not a provider credential validity or delivery check. No secret
+values, raw API error bodies, contacts, DNS contents or widget keys are
+serialized.
 
 The AWS profile is the existing `hid-admin`, with fixed account `659225405023`
 and region `eu-west-1`. A different STS account stops all subsequent AWS reads.
@@ -33,6 +34,23 @@ Only the three existing `/hid/staging/auth`, `/hid/staging/identity-sensitive`
 and `/hid/staging/notification-provider` secret names are read, plus SES account
 status. No production secret or resource is requested. Optional Termii, Meta and
 Brevo fields are not required by this email-only staging check.
+For `/hid/staging/identity-sensitive` it reports `otpHmacKeyB64`,
+`contactLookupHmacKeyB64`, `turnstileSecretKey`, `googleOidcClientIds` and
+`mfaSecretKeyB64`, every field the ordinary staging Identity task reads (it
+reads `MFA_SECRET_KEY_B64` from the last since D-Eminence/hid-system#49).
+ECS starts no Identity task while a referenced field is missing; add each
+before deploying that task definition (deployment runbook §1).
+
+Presence does not prove a key is usable. Identity exits at start-up unless
+each of `otpHmacKeyB64`, `contactLookupHmacKeyB64` and `mfaSecretKeyB64` is
+exactly 32 bytes in canonical padded base64, as `openssl rand -base64 32`
+prints it; hex, unpadded or URL-safe base64 is refused. For those three the
+receipt also has `canonical_32_byte_base64`, one boolean per key, true only
+for that format after trimming surrounding ASCII whitespace as Identity does.
+It is false for anything else, including a value Identity would accept only
+after trimming non-ASCII whitespace. No value, length or encoding is
+serialized. A QoreID staging task also reads the two NIN keys (below), which
+this check does not report.
 
 The Cloudflare account/zone are pinned to `20c809ffe35ccb2c240d19a664dff97a` /
 `69d385b9f6a3233a7113c525524f14fe`. Zone/account mismatch stops further reads.
@@ -66,7 +84,11 @@ flow and requires no QoreID credential. The current route, data-minimization,
 and activation requirements are in the [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
 The preflight does not read a QoreID secret or require legacy NIN
 HMAC/encryption fields. Existing NIN material remains preserved. An HTTP
-acknowledgment is not identity verification.
+acknowledgment is not identity verification. A QoreID-enabled staging task
+definition does read `ninLookupHmacKeyB64` and `ninEncryptionKeyB64` from
+`/hid/staging/identity-sensitive`, and no Identity task starts without them:
+add both, each 32 bytes in canonical padded base64, before that deployment and
+confirm them separately (deployment runbook §1).
 
 Do not put API keys, tokens, raw NINs or identity documents into the intake. A
 staging secret reference identifies secure storage; its value is not an intake

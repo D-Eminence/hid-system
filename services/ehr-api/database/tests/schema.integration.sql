@@ -1694,27 +1694,29 @@ begin
     raise exception 'Pharmacy acceptance incorrectly implied dispensing';
   end if;
 
+  -- The exact snapshot again under another key: one work item per
+  -- prescription. Since 0080 pharmacy.validate_work_item refuses a snapshot
+  -- that differs from the prescription (check_violation) before the unique key
+  -- is reached, so the duplicate must match it exactly.
   begin
     insert into pharmacy.work_items (
       patient_id, facility_id, ordering_facility_id,
       source_ehr_prescription_id, source_ehr_prescription_version,
-      source_encounter_id, source_status, medication_display, frequency,
-      instructions, prescribed_by, prescribed_at, accepted_by,
+      source_encounter_id, source_status, medication_code_system, medication_code,
+      medication_display, dose_quantity, dose_unit, route_code, frequency,
+      instructions, starts_on, prescribed_by, prescribed_at, accepted_by,
       accepted_by_membership_id, acceptance_reason, idempotency_key,
       request_sha256, correlation_id
-    ) values (
-      '50000000-0000-4000-8000-000000000001',
-      '10000000-0000-4000-8000-000000000002',
-      '10000000-0000-4000-8000-000000000002',
-      'f3000000-0000-4000-8000-000000000001', 2,
-      '80000000-0000-4000-8000-000000000001', 'active',
-      'Amoxicillin 500 mg', 'Every 8 hours', 'Take after food',
-      '20000000-0000-4000-8000-000000000001', clock_timestamp(),
+    ) select
+      patient_id, facility_id, facility_id, id, row_version,
+      encounter_id, status, medication_code_system, medication_code,
+      medication_display, dose_quantity, dose_unit, route_code, frequency,
+      instructions, starts_on, created_by, created_at,
       '20000000-0000-4000-8000-000000000001',
       '40000000-0000-4000-8000-000000000001',
       'Duplicate prescription acceptance', 'schema-pharmacy-accept-0002',
       repeat('7', 64), 'schema-test-pharmacy-0002'
-    );
+    from ehr.prescriptions where id = 'f3000000-0000-4000-8000-000000000001';
     raise exception 'Duplicate active Pharmacy work was created';
   exception when unique_violation then null;
   end;

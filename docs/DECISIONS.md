@@ -1942,6 +1942,61 @@ Consequences:
   repairs the Lab work-item child guard. One lock-order cycle between OCR
   publication requests and publication completion was fixed by decision 2.
 
+## ADR-042 addendum: a definer guard share-locks another domain's source row (0080)
+
+Date: 2026-10-12
+
+Change: D-Eminence/hid-system#48.
+
+Pharmacy acceptance and dispensing depend on a mutable row of another domain,
+the EHR prescription, which the EHR may cancel, hold, complete or edit at any
+time. Decision 1 still holds for the runtime roles: `hid_pharmacy_runtime` has
+no privilege on `ehr` and takes no lock there. The database guards
+`pharmacy.validate_work_item` and `pharmacy.validate_dispensing`, which run as
+their owner (`SECURITY DEFINER`), read the prescription with
+`SELECT ... FOR SHARE`. The owner holds the `UPDATE` privilege the lock needs;
+no grant or policy is added.
+
+- The share lock, not a plain read, is what makes the check hold: in the
+  `SERIALIZABLE` Pharmacy transaction a cancel committed after the snapshot
+  fails the lock with `40001`, which decision 3 retries, and the retry reads
+  the cancel. A plain read would check the stale active version. `FOR KEY
+  SHARE` would see this cancel only because the EHR locks the row `FOR
+  UPDATE` before its update; `FOR SHARE` conflicts with any update of the row.
+  A committed lock-only mark, such as the EHR handoff's `FOR UPDATE` or
+  another request's share lock on the same prescription, does not raise
+  `40001`, so acceptances right after the EHR's eligibility check and
+  concurrent identical requests do not fail.
+- An EHR update waits for a Pharmacy command that has taken the lock, for the
+  milliseconds until it commits, and then applies after it. The EHR takes the
+  prescription and then its own rows and never a Pharmacy row, so there is no
+  lock cycle. The EHR must not call Pharmacy while it holds the prescription
+  lock: its eligibility check commits before the HTTP call.
+- Pharmacy can now delay an EHR write, which it could not before: a Pharmacy
+  transaction that stalls after the guard keeps the share lock, and a
+  prescriber's cancel or hold waits until the EHR's 15 s `statement_timeout`
+  and fails with `500`. Pharmacy's 15 s `statement_timeout` bounds a slow
+  statement but not an idle transaction; no
+  `idle_in_transaction_session_timeout` is set (a possible mitigation).
+- Under an owner subject to row-level security (release checklist P8) the
+  lock applies the EHR select and update policies with the pharmacist's
+  session; a prescription the owner cannot lock reads as missing and is
+  refused. A dedicated technical owner for these guards (ADR-041) would need
+  `USAGE` on `ehr`, `EXECUTE` on `ehr.context_allows` (the prescription
+  policies call it), column `SELECT` on `id` and the compared columns, an
+  `UPDATE` privilege for the lock and the matching policies.
+- The acceptance guard compares every snapshot field except the prescription
+  time and the start and end dates: migrations run before the EHR API is
+  deployed and the EHR may be rolled back, and earlier EHR builds send the
+  time at the millisecond and the dates as local-midnight `Date` values, a
+  day early in a process east of UTC. Comparing the exact time and dates is a
+  follow-up for a later release, once the EHR rollback floor sends their
+  exact texts.
+- The guards require the accepted version, not only an active status: the
+  fail-closed default while the lifecycle of accepted work after an EHR
+  change is undecided (`DATABASE.md`, "Pharmacy source prescription guards
+  (0080)").
+
 # ADR-043: Identity Trusts a Workload-Reported Method for Delegated Cookie Reads
 
 Status: Accepted for source implementation (D-Eminence/hid-system#38). Not
