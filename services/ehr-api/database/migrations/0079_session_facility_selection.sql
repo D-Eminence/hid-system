@@ -12,9 +12,9 @@
 -- guard checks against the actor's active memberships, and the Identity API
 -- re-checks the stored facility against those memberships whenever it reads it.
 --
--- Applied migrations 0001 through 0077 are immutable; 0078 is reserved by the
--- Stage 9 runtime command repairs. This migration only adds a table, its guard
--- and its trigger: no existing row, function, policy or grant changes.
+-- Applied migrations 0001 through 0078 (0078: the Stage 9 runtime command
+-- repairs) are immutable. This migration only adds a table, its guard and its
+-- trigger: no existing row, function, policy or grant changes.
 
 create table auth.session_facility_selection (
   family_id uuid primary key references auth.sessions(id) on delete restrict,
@@ -31,13 +31,16 @@ comment on table auth.session_facility_selection is
   'Facility a staff sign-in (session family) explicitly selected. A default for GET /auth/session only, never an authorization: each request still carries X-Facility-ID, checked against active memberships.';
 
 -- Admits a row only for the root session of a live staff sign-in of the same
--- account, and an active membership of that account at an active facility, as
--- CurrentStaffContextService decides it (active membership without a migration
+-- account, and an active membership of that account at an active facility. The
+-- membership, migration-hold, staff, organization and facility conditions
+-- mirror CurrentStaffContextService (active membership without a migration
 -- hold, active and verified staff record of the account, active organization,
--- active facility of that organization). An update is checked the same way and
--- cannot move the row to another sign-in or account. Sign-out and revocation
--- leave the row in place, as they leave auth.session_assurance; nothing
--- deletes it, and a signed-out sign-in can never change it again.
+-- active facility of that organization). Account status and disabled_until are
+-- not repeated: TokenService.verify() refuses an inactive or disabled account
+-- before the API writes. An update is checked the same way and cannot move the
+-- row to another sign-in or account. Sign-out and revocation leave the row in
+-- place, as they leave auth.session_assurance; nothing deletes it, and a
+-- signed-out sign-in can never change it again.
 create function auth.guard_session_facility_selection_change()
 returns trigger
 language plpgsql
@@ -74,6 +77,8 @@ begin
        and membership.active
        and membership.migration_hold_reason is null
        and staff_row.active
+       -- ACTIVE_STAFF_VERIFICATION_STATUSES in services/identity-api/src/auth/
+       -- auth-policy.ts; identity.has_active_membership (0008) repeats it too.
        and lower(btrim(staff_row.verification_status)) in ('verified', 'approved', 'active')
        and organization_row.active
        and facility.active

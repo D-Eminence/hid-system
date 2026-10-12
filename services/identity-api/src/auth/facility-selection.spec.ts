@@ -28,6 +28,7 @@ import { WorkloadAuthService } from './workload-auth.service';
 // an active membership, read back only through a live session of the family.
 
 const ORIGIN = 'https://staging.healthidentitydirectory.com';
+const OIDC_BEARER = 'external-oidc-access-token';
 const facility = (name: string, primary: boolean, role: string): FacilityAssignment => ({
   id: randomUUID(), membershipId: randomUUID(), organizationId: randomUUID(), name,
   roles: [role], permissions: [`${role}.permission`], isPrimary: primary,
@@ -109,6 +110,11 @@ describe('staff facility selection per sign-in', () => {
     store.memberships.set('other-account', [elsewhere]);
     tokens = {
       verify: jest.fn(async (token: string) => {
+        if (token === OIDC_BEARER) {
+          // As TokenService.verifyOidc resolves it (AUTH_MODE=oidc): no Identity sign-in, no session id.
+          const { sessionId: _none, ...actor } = store.actor(store.signIn(accountId).sessionId);
+          return { actor: { ...actor, authenticationMethod: 'oidc' }, claims: {} };
+        }
         const sessionId = store.access.get(token);
         if (!sessionId || !store.sessions.get(sessionId)?.live) throw new UnauthorizedException('Session is no longer active');
         return { actor: store.actor(sessionId), claims: {} };
@@ -362,6 +368,69 @@ describe('staff facility selection per sign-in', () => {
       .send({ email: 'patient@example.test', password: 'synthetic-password', turnstileAction: 'patient-login' });
     expect(patient.status).toBe(200);
     expect(patient.body).not.toHaveProperty('facilitySelection');
+    expect(tokens.selectedFacilityId).not.toHaveBeenCalled();
+  });
+
+  it('keeps the browser on the rotated session when the selection cannot be read after rotation: 503, new cookies, nothing cleared', async () => {
+    const signIn = store.signIn(accountId);
+    expect((await select(signIn.accessToken, secondary.id)).status).toBe(200);
+    tokens.selectedFacilityId.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: '08006' }));
+
+    const refreshed = await refresh(signIn);
+
+    expect(refreshed.status).toBe(503);
+    expect(refreshed.body.code).toBe('DEPENDENCY_UNAVAILABLE');
+    // No actor at all: neither a facility the user did not choose nor the old session.
+    expect(refreshed.body).not.toHaveProperty('actor');
+    expect(refreshed.body).not.toHaveProperty('facilitySelection');
+    const setCookies: string[] = refreshed.headers['set-cookie'] as unknown as string[];
+    expect(setCookies.filter((cookie) => /Expires=Thu, 01 Jan 1970/i.test(cookie))).toEqual([]);
+    const issued = Object.fromEntries(setCookies.map((cookie) => cookie.split(';')[0]!.split('=') as [string, string]));
+    const rotatedSession = issued.hid_access!.slice('access-'.length);
+    expect(rotatedSession).not.toBe(signIn.sessionId);
+    expect(issued).toEqual({ hid_access: `access-${rotatedSession}`, hid_access_refresh: `refresh-${rotatedSession}`,
+      hid_access_csrf: `csrf-refresh-${rotatedSession}` });
+    expect(refreshed.headers['x-csrf-token']).toBe(`csrf-refresh-${rotatedSession}`);
+    // The rotation committed: the old session is not live, the rotated one is,
+    // and it still reports the sign-in's selection once the read succeeds.
+    expect(store.sessions.get(signIn.sessionId)?.live).toBe(false);
+    expect((await session(signIn.accessToken)).status).toBe(401);
+    const reloaded = await session(issued.hid_access!);
+    expect(reloaded.body).toMatchObject({ facilitySelection: 'selected', actor: { sessionId: rotatedSession,
+      facility: { id: secondary.id } } });
+    expect(audit.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.refresh' }));
+  });
+
+  it('answers GET /auth/session with 503 and keeps the cookies when the selection cannot be read', async () => {
+    const signIn = store.signIn(accountId);
+    tokens.selectedFacilityId.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: '08006' }));
+
+    const read = await http().get('/api/v1/auth/session')
+      .set('Cookie', `hid_access=${signIn.accessToken}; hid_access_refresh=${signIn.refreshToken}; hid_access_csrf=${signIn.csrfToken}`);
+
+    expect(read.status).toBe(503);
+    expect(read.body.code).toBe('DEPENDENCY_UNAVAILABLE');
+    expect(read.body).not.toHaveProperty('actor');
+    expect(read.headers['set-cookie']).toBeUndefined();
+    expect(store.sessions.get(signIn.sessionId)?.live).toBe(true);
+  });
+
+  it('answers a selection without an Identity sign-in (AUTH_MODE=oidc bearer) as before: audited, nothing stored, no field', async () => {
+    const selected = await select(OIDC_BEARER, secondary.id);
+
+    expect(selected.status).toBe(200);
+    expect(selected.body).not.toHaveProperty('facilitySelection');
+    expect(selected.body.actor).toMatchObject({ facility: { id: secondary.id }, roles: ['nurse'] });
+    expect(selected.body.actor).not.toHaveProperty('sessionId');
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.facility.select', outcome: 'success',
+      actorAccountId: accountId, facilityId: secondary.id, actorMembershipId: secondary.membershipId }));
+    expect(tokens.recordFacilitySelection).not.toHaveBeenCalled();
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+    expect(store.selections.size).toBe(0);
+
+    const read = await session(OIDC_BEARER);
+    expect(read.status).toBe(200);
+    expect(read.body).not.toHaveProperty('facilitySelection');
     expect(tokens.selectedFacilityId).not.toHaveBeenCalled();
   });
 

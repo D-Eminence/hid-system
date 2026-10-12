@@ -1,3 +1,5 @@
+// The database repeats this list: identity.has_active_membership (0008) and the
+// staff facility selection guard (0079). Change them together.
 export const ACTIVE_STAFF_VERIFICATION_STATUSES = ['verified', 'approved', 'active'] as const;
 
 const ACTIVE_STAFF_STATUS_SET = new Set<string>(ACTIVE_STAFF_VERIFICATION_STATUSES);

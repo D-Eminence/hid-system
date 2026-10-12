@@ -1837,9 +1837,13 @@ microseconds:
 
 ## Session facility selection (0079)
 
-`0079_session_facility_selection.sql` (ADR-045). Migrations `0001`–`0077` are
-unchanged and `0078` is reserved for the Stage 9 runtime command repairs
-(PR #34); no existing row, function, policy or grant changes.
+`0079_session_facility_selection.sql` (ADR-045) follows `0078` (the Stage 9
+runtime command repairs, D-Eminence/hid-system#34). Migrations `0001`–`0078`
+are unchanged; no existing row, function, policy or grant changes. Creating
+the table's four foreign keys takes `SHARE ROW EXCLUSIVE` on `auth.sessions`,
+`auth.accounts`, `identity.facilities` and
+`identity.staff_facility_memberships` until the migration commits, within the
+runner's 5 s lock timeout (`MIGRATION_RUNBOOK.md`).
 
 - `auth.session_facility_selection` holds the facility a staff sign-in
   explicitly selected with `POST /auth/facility`: `family_id` (primary key,
@@ -1854,7 +1858,10 @@ unchanged and `0078` is reserved for the Stage 9 runtime command repairs
   authorizes nothing: facility-scoped requests still carry `X-Facility-ID`,
   checked against the actor's active memberships, and the Identity API checks
   the stored facility against them on every read (`reselect` when it is no
-  longer active).
+  longer active). It compares facility ids, so a membership replaced by another
+  active one at the same facility is still reported `selected`, with the new
+  membership's roles; `membership_id` records the membership the choice was
+  made under.
 - `auth.guard_session_facility_selection_change()` (invoker, fixed
   `search_path`, revoked from `PUBLIC`) fires before every row insert, update
   and delete. An insert or update must name the root session of a staff
@@ -1864,7 +1871,13 @@ unchanged and `0078` is reserved for the Stage 9 runtime command repairs
   facility, without a migration hold, with an active staff record of the
   account whose trimmed, lower-cased verification status is `verified`,
   `approved` or `active`, in an active organization, at an active facility of
-  that organization, as `CurrentStaffContextService` decides it. Otherwise
+  that organization. These membership, hold, staff, organization and facility
+  conditions mirror `CurrentStaffContextService`; the account's status and
+  `disabled_until` are not repeated, since `TokenService.verify()` refuses an
+  inactive or disabled account before the API writes. The status list
+  duplicates `ACTIVE_STAFF_VERIFICATION_STATUSES` (`auth-policy.ts`), as
+  `identity.has_active_membership` (0008) does; comments at each place name the
+  others. Otherwise
   `23514 SESSION_FACILITY_SELECTION_INVALID`. An update cannot change
   `family_id` or `account_id`, and DELETE is refused, both with
   `55000 SESSION_FACILITY_SELECTION_IMMUTABLE`. Sign-out and revocation leave
@@ -1875,7 +1888,8 @@ unchanged and `0078` is reserved for the Stage 9 runtime command repairs
   session of the account, `ON CONFLICT (family_id) DO UPDATE` (a new choice
   replaces the old and increments `row_version`), then the
   `auth.facility.select` audit row on the same transaction. It reads the row
-  only through a live staff session of the family.
+  only through a live staff session of the family. A read that fails is
+  answered `503 DEPENDENCY_UNAVAILABLE`, never with the default facility.
 - `runtime-grants.sql` grants `SELECT`, `INSERT` and `UPDATE` to
   `hid_identity_runtime` (so `hid_identity_api_runtime`), and no `DELETE`;
   no other role, `hid_schema_test_runtime` included, gets any privilege. The

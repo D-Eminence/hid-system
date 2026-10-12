@@ -2115,14 +2115,25 @@ Decision:
   for the presented session while it is a live staff session of the account,
   under the account row lock that sign-out and revocation take (0073), and
   writes the existing `auth.facility.select` audit on the same transaction.
-  A refusal writes nothing.
+  A refusal writes no selection row and no `auth.facility.select` audit (the
+  global `AuditInterceptor` still records its generic failure row). A
+  presented session that another tab's refresh rotated after the request was
+  authorized is no longer live, so that selection is `401` and the client
+  refreshes and retries.
 - Staff responses carry `facilitySelection`: `selected` (the stored facility,
   still one of the actor's active facilities, is reported), `default` (none
   stored; every new sign-in), or `reselect` (the stored facility is no longer
   one of the actor's active facilities: the default is reported and the client
   asks the user to choose again rather than working elsewhere silently).
   Patient and platform sessions, and `/auth/service-session`, are unchanged
-  and carry no field.
+  and carry no field. Facilities are compared by id, so a membership replaced
+  by another active one at the same facility keeps the choice `selected`, with
+  the new membership's roles.
+- A stored choice that cannot be read is never replaced by the default:
+  `GET /auth/session` answers `503 DEPENDENCY_UNAVAILABLE` with the cookies
+  untouched, and refresh, whose rotation has already committed, sets the
+  rotated session's cookies and CSRF token and answers
+  `503 DEPENDENCY_UNAVAILABLE` with no actor, so the user stays signed in.
 - The stored choice is only the default the session reports. It authorizes
   nothing: every facility-scoped request still carries `X-Facility-ID`, which
   the guard checks against the actor's active memberships, and the stored
@@ -2132,8 +2143,14 @@ Decision:
   protected routes make no extra query.
 - The 0079 guard admits a row only for the root session of a staff sign-in of
   the same account that still has a live session, and an active membership of
-  that account at that facility, decided as `CurrentStaffContextService`
-  decides it. It refuses moving a row to another sign-in or account, and
+  that account at that facility. Its membership, migration-hold, staff,
+  organization and facility conditions mirror `CurrentStaffContextService`;
+  the account's status and `disabled_until` are not repeated, because
+  `TokenService.verify()` refuses an inactive or disabled account before the
+  API writes. The verified staff statuses are hard-coded in SQL, duplicating
+  `ACTIVE_STAFF_VERIFICATION_STATUSES` (`auth-policy.ts`) as
+  `identity.has_active_membership` already does; a comment at each place names
+  the others. It refuses moving a row to another sign-in or account, and
   refuses DELETE. The Identity runtime gets select, insert and update; no
   other service gets any privilege.
 
@@ -2141,7 +2158,10 @@ Consequences:
 
 - A reload or refresh keeps the user at the facility they chose.
 - The choice belongs to the sign-in, not the tab: every tab holding the same
-  cookies reads the same choice, and the last choice made in any tab wins.
+  cookies reads the same choice, and the last choice made in any tab wins. A
+  client keeps the facility it is working at in memory across a refresh while
+  it is still in `actor.facilities`, because the refresh response reports the
+  sign-in's last choice, which may come from another tab.
 - Sign-out and revocation leave the row, as with `auth.session_assurance`; a
   signed-out or revoked sign-in never reads it again (reads go through a live
   session of the family) and can never change it (the guard requires a live
@@ -2151,13 +2171,15 @@ Consequences:
   active again before the user chooses, the choice is reported as `selected`
   again.
 - Deployment order: apply 0079 and the role bootstrap before this Identity API
-  serves traffic. Without the table, `GET /auth/session` and refresh fail for
-  every staff sign-in, and a failed refresh clears the cookies. The previous
-  Identity API ignores the table, so rolling the API back needs no schema
-  change.
-- Numbering: 0078 is PR #34's (Stage 9). `release/config/components.json`
-  lists migrations contiguously, so its contract check passes only once 0078
-  is present; it lists 0079 with the count and last number it will have then.
+  serves traffic. Without the table, every staff `GET /auth/session` and
+  refresh answers `503` (refresh keeps the rotated cookies), so no staff page
+  loads, and `POST /auth/facility` fails. The previous Identity API ignores the
+  table, so rolling the API back needs no schema change.
+- Numbering: 0079 follows 0078 (the Stage 9 runtime command repairs,
+  D-Eminence/hid-system#34), and `release/config/components.json` lists both.
+- Creating the table's four foreign keys briefly takes `SHARE ROW EXCLUSIVE`
+  on `auth.sessions`, `auth.accounts`, `identity.facilities` and
+  `identity.staff_facility_memberships` (`MIGRATION_RUNBOOK.md`).
 - An actor without an Identity sign-in (`AUTH_MODE=oidc` bearer tokens, no
   session id) has nowhere to keep a choice: `POST /auth/facility` answers as
   before without storing it, and no field is reported.

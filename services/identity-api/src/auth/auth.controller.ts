@@ -19,6 +19,12 @@ import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
 
+/** The actor a session response reports and, for a staff sign-in, where its facility comes from. */
+interface SessionReport {
+  actor: ActorContext;
+  facilitySelection?: FacilitySelectionState;
+}
+
 @Controller('auth')
 @AuditFailuresOnly()
 export class AuthController {
@@ -231,10 +237,28 @@ export class AuthController {
       const kind = await this.tokens.refreshSessionKind(refreshToken);
       if (kind && kind !== expectedKind) throw this.clientMismatch(kind, request);
     }
+    let result: LoginResult;
     try {
-      const result = await this.auth.refresh(refreshToken, this.event(request));
-      // The rotated session keeps the sign-in's family, and so its facility selection.
-      const reported = await this.withFacilitySelection(result.actor);
+      result = await this.auth.refresh(refreshToken, this.event(request));
+    } catch (error) {
+      this.clearCookies(response);
+      throw error;
+    }
+    // The rotation has committed: the presented refresh token is spent and only
+    // the rotated session is live. The rotated session keeps the sign-in's
+    // family, and so its facility selection. If that cannot be read, the
+    // browser is kept on the rotated session (its cookies and CSRF token) and
+    // answered 503: clearing the cookies would sign the user out, and
+    // answering without the selection would report a facility they did not choose.
+    let reported: SessionReport;
+    try {
+      reported = await this.withFacilitySelection(result.actor);
+    } catch (error) {
+      this.setCookies(response, result);
+      response.setHeader('x-csrf-token', result.csrfToken);
+      throw error;
+    }
+    try {
       await this.recordSuccess('auth.refresh', reported.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
@@ -445,8 +469,7 @@ export class AuthController {
   }
 
   /** Records the session read and answers with the actor and facility it reports. */
-  private async readSession(request: HidRequest, response: Response,
-    reported: { actor: ActorContext; facilitySelection?: FacilitySelectionState }) {
+  private async readSession(request: HidRequest, response: Response, reported: SessionReport) {
     const actor = reported.actor;
     await this.audit.record({
       correlationId: request.correlationId,
@@ -482,11 +505,16 @@ export class AuthController {
    * The actor at the facility its sign-in selected (0079), re-checked against
    * the actor's current active facilities. `boundFacilityId` is the facility a
    * valid X-Facility-ID bound to this request, which keeps the actor at it.
+   * A failed read is 503 DEPENDENCY_UNAVAILABLE, never the default facility.
    */
-  private async withFacilitySelection(actor: ActorContext, boundFacilityId?: string):
-    Promise<{ actor: ActorContext; facilitySelection?: FacilitySelectionState }> {
+  private async withFacilitySelection(actor: ActorContext, boundFacilityId?: string): Promise<SessionReport> {
     if (!this.staffSignIn(actor)) return { actor };
-    const selectedId = await this.tokens.selectedFacilityId(actor.sessionId, actor.accountId);
+    let selectedId: string | undefined;
+    try {
+      selectedId = await this.tokens.selectedFacilityId(actor.sessionId, actor.accountId);
+    } catch {
+      throw new ServiceUnavailableException('The facility selection is unavailable');
+    }
     if (!selectedId) return { actor, facilitySelection: 'default' };
     const selected = actor.facilities.find((candidate) => candidate.id === selectedId);
     if (!selected) return { actor, facilitySelection: 'reselect' };

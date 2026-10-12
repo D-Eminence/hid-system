@@ -43,7 +43,8 @@ The executable covers:
    follow, recorded under `evidence.checks` in run order: `patient_runtime`,
    `patient_enrollment_runtime`, `patient_safety_runtime`,
    `delegated_cookie_read_runtime`, `provider_enrollment_runtime`,
-   `platform_admin_runtime`, `session_sign_out_runtime` and
+   `platform_admin_runtime`, `session_sign_out_runtime`,
+   `facility_selection_runtime` and
    `platform_security_runtime` (the patient enrollment, patient safety,
    delegated cookie-read, provider enrollment, platform admin and platform
    security verifiers on a disposable copy of the rehearsal database). Each is
@@ -66,6 +67,12 @@ The executable covers:
    application. It also covers an older rotated token, which ends its sign-in
    whichever application signs out; a sign-out during a timed account
    suspension; and two concurrent sign-outs with one cookie, recorded once.
+   `facility_selection_runtime` (`verify-facility-selection-runtime.mjs`,
+   migration 0079, ADR-045) covers a staff member's selected facility kept for
+   the sign-in across a session read and refresh, `reselect` once the selected
+   membership ends, another sign-in of the account unaffected, refused
+   selections writing nothing, the 0079 guard as the runtime, and a selection
+   waiting at the account lock while a sign-out ends the sign-in.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

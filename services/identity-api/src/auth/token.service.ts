@@ -8,6 +8,7 @@ import type { ActorContext } from '../common/request-context';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
 import { CurrentStaffContextService } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
+import { databaseMessage, isDatabaseError } from '../patient-safety/database-error';
 import { classifyPlatformSessionEnd, platformSessionEnded, type StoredPlatformSessionState } from './platform-session-end';
 
 type SessionKind = 'staff' | 'patient' | 'platform';
@@ -593,7 +594,8 @@ export class TokenService {
         return 'selected' as const;
       });
     } catch (error) {
-      if (isDatabaseError(error) && error.code === '23514' && error.message === 'SESSION_FACILITY_SELECTION_INVALID') {
+      if (isDatabaseError(error) && error.code === '23514'
+        && databaseMessage(error) === 'SESSION_FACILITY_SELECTION_INVALID') {
         return 'refused';
       }
       throw error;
@@ -971,10 +973,4 @@ export class TokenService {
     const secondBuffer = Buffer.from(second);
     return firstBuffer.length === secondBuffer.length && timingSafeEqual(firstBuffer, secondBuffer);
   }
-}
-
-function isDatabaseError(value: unknown): value is { code: string; message: string } {
-  return typeof value === 'object' && value !== null
-    && typeof (value as { code?: unknown }).code === 'string'
-    && typeof (value as { message?: unknown }).message === 'string';
 }
