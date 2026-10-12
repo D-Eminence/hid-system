@@ -1933,7 +1933,10 @@ Consequences:
 - A conflict that a retry cannot resolve (a row hidden by row-level security
   in another facility, two members verifying one Lab result version) still
   answers `500`, after one retry; mapping those constraints to `409` is a
-  follow-up.
+  follow-up. Since fix/ehr-lab-handoff-resend Lab's EHR-order acceptance
+  maps its own (`409 LAB_ORDER_ALREADY_ACCEPTED` for a work-item key left
+  after the retry); every other Lab command still answers `500`, which OCR
+  stores for its Lab import as retryable.
 - Removing a lock made reachable code that had always failed before it. 0078
   fixed two defects behind the locks: it drops the self-NIN identifier insert
   policy, whose sub-select the Identity runtime cannot read and which no
