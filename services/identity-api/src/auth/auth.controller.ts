@@ -6,6 +6,7 @@ import { AuditFailuresOnly, AuditSessionEvent, FacilityOptional, PatientAllowed,
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
+import { clearEnrollmentCookie } from '../identity/enrollment-cookie';
 import { AuthService } from './auth.service';
 import { AuthSessionAuditService } from './auth-session-audit.service';
 import { GoogleLinkDto, GoogleLoginDto } from './dto/google-login.dto';
@@ -317,10 +318,12 @@ export class AuthController {
    * renew it: that is refused with 403 SESSION_CLIENT_MISMATCH after the
    * Origin and CSRF checks, nothing ends and its cookies are kept. A sign-in
    * of the other kind that refresh could not renew now (an older rotated
-   * token, an expired sign-in, a suspended account) is ended without naming
-   * its kind (TokenService.revokeByRefreshToken). A bearer sign-out names its
+   * token, an expired sign-in, a suspended account, a staff membership or a
+   * patient that refresh can no longer resolve) is ended without naming its
+   * kind (TokenService.revokeByRefreshToken). A bearer sign-out names its
    * sign-in explicitly and ignores the header; an unnamed app signs out as
-   * before. Every other outcome clears the cookies.
+   * before. Every other outcome clears the cookies, the public patient
+   * enrollment cookie included.
    */
   @Post('logout')
   @AuditSessionEvent('auth.logout')
@@ -489,6 +492,11 @@ export class AuthController {
     });
   }
 
+  /**
+   * Sets the session cookies of a sign-in or refresh, and expires the public
+   * patient enrollment cookie: once a sign-in exists on this device, its HID
+   * comes from the session, not from whichever enrollment the device last made.
+   */
   private setCookies(response: Response, result: LoginResult): void {
     const common = {
       secure: this.environment.AUTH_COOKIE_SECURE,
@@ -503,8 +511,10 @@ export class AuthController {
     response.cookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, result.csrfToken, {
       ...common, httpOnly: false, path: '/', expires: result.refreshExpiresAt,
     });
+    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
   }
 
+  /** Clears the session cookies and the public patient enrollment cookie. */
   private clearCookies(response: Response): void {
     const common = {
       secure: this.environment.AUTH_COOKIE_SECURE,
@@ -513,6 +523,7 @@ export class AuthController {
     response.clearCookie(this.environment.AUTH_COOKIE_NAME, { ...common, httpOnly: true, path: '/' });
     response.clearCookie(`${this.environment.AUTH_COOKIE_NAME}_refresh`, { ...common, httpOnly: true, path: '/api/v1/auth' });
     response.clearCookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, { ...common, httpOnly: false, path: '/' });
+    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
   }
 
   private googleNonceCookieName(): string {

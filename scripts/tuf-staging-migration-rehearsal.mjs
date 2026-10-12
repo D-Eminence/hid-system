@@ -273,6 +273,12 @@ try {
       { role_code:'doctor', permission_code:'identity.patient-access-pin.verify' },
       { role_code:'nurse', permission_code:'identity.patient-access-pin.verify' },
     ]);
+    // The 0028 baseline holds no purpose-of-use code; 0082 seeds only
+    // direct-care (emergency and healthcare-operations await product decisions).
+    assert.deepEqual((await client.query(`select code, display, active, source_system
+      from identity.purpose_of_use_codes order by code`)).rows,
+    [{ code:'direct-care', display:'Direct patient care', active:true, source_system:'hid' }],
+    'Upgrade must seed exactly the active direct-care purpose of use');
     await client.query('begin');
     try {
       await client.query('set local role hid_identity_api_runtime');
@@ -285,9 +291,10 @@ try {
     } finally { await client.query('rollback'); }
   });
   const upgradeAfter = await snapshot('hid_upgrade');
+  // identity.purpose_of_use_codes gains 0082's seed, checked exactly above.
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
-    'auth.permissions', 'auth.role_permissions',
+    'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes',
   ]);
   // 0067 and 0068 add nullable columns to historical audit and account rows.
   const addedHistoricalColumns = { 'audit.events': ['access_scope'], 'auth.accounts': ['disabled_from_status'] };
@@ -301,6 +308,7 @@ try {
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
+    purpose_of_use_seeded:['direct-care'],
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);
@@ -366,6 +374,7 @@ try {
     workflowEnvironment));
   for (const [name, script] of [['pharmacy_runtime', 'services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs'],
     ['lab_runtime', 'services/lab-api/scripts/verify-lab-runtime.mjs'],
+    ['ehr_lab_handoff_runtime', 'services/ehr-api/scripts/verify-ehr-lab-handoff-runtime.mjs'],
     ['ocr_runtime', 'services/ocr-api/scripts/verify-ocr-runtime.mjs'],
     ['outreach_runtime', 'services/outreach-api/scripts/verify-outreach-runtime.mjs']]) {
     evidence.checks[name] = JSON.parse(command(`exact-role ${name.replace('_runtime', '')} HTTP write commands`,
