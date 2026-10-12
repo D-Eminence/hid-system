@@ -17,8 +17,8 @@
 -- unknown identifier has none), so there is no foreign key. As for
 -- auth.otp_challenges and auth.otp_rate_limits, there is no row-level
 -- security and no retention job: the role bootstrap grants SELECT, INSERT and
--- UPDATE to the Identity runtime only, and each identifier keeps one row per
--- purpose, overwritten by its next start.
+-- UPDATE to the Identity runtime and the schema-test runtime, no DELETE, and
+-- each identifier keeps one row per purpose, overwritten by its next start.
 
 create table auth.otp_start_cooldowns (
   purpose text not null check (purpose in (

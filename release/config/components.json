@@ -416,7 +416,7 @@
       },
       {
         "name": "0080_uniform_recovery_start_cooldown.sql",
-        "sha256": "c03a8550025735f3f4e7cb35495513bf52572eb19ceccbf27298cc2865d36aca"
+        "sha256": "c02e6e52f6ff23aaf4d577eb03372751fe52c338a08759526362d48eff15a6da"
       }
     ]
   },
