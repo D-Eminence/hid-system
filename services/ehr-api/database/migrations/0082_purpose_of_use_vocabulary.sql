@@ -8,7 +8,7 @@
 -- consent directive trigger (0008) refuses with 23514. So on a database built
 -- only from migrations every staff consent check failed closed; the
 -- rollback-only suites and the runtime verifiers hid this by inserting the
--- codes themselves. Applied migrations 0001 through 0079 are immutable.
+-- codes themselves. Applied migrations 0001 through 0081 are immutable.
 --
 -- Only direct-care is seeded, as governed reference data in the way 0006
 -- seeds auth.roles and 0039 platform.control_settings. Two codes the services

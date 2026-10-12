@@ -101,7 +101,7 @@ insert into identity.patients (
   'Schema', 'Patient', 'Schema Patient', 'active'
 );
 
--- 0080 seeds direct-care, so that row is kept as migrated; emergency and
+-- 0082 seeds direct-care, so that row is kept as migrated; emergency and
 -- healthcare-operations are not seeded (pending product decisions).
 insert into identity.purpose_of_use_codes (code, display, source_system) values
   ('direct-care', 'Direct patient care', 'schema-test'),

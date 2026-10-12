@@ -118,7 +118,7 @@ verified. Review that synthetic facility-scoped assignment explicitly.
    required reason and emergency purpose. Read through the owning EHR route, then
    revoke/expire the grant and confirm further reads are denied. Review the
    recorded patient access history, audit and notification outcomes.
-   Break-glass needs an active `emergency` purpose-of-use code. Migration 0080
+   Break-glass needs an active `emergency` purpose-of-use code. Migration 0082
    seeds only `direct-care`; `emergency` waits for its product decision and is
    inserted by a reviewed operator change once `break_glass_enabled` is in its
    intended launch state (release checklist P10). Until then, with the control

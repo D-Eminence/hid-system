@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- The purpose-of-use vocabulary the migrations leave (0080). Every consent
+-- The purpose-of-use vocabulary the migrations leave (0082). Every consent
 -- decision needs an active identity.purpose_of_use_codes row, and 0003 created
 -- the table empty. This suite inserts no purpose code: it requires the
 -- migrated direct-care row, then, as the exact Identity API runtime role,

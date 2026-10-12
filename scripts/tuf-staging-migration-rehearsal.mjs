@@ -273,7 +273,7 @@ try {
       { role_code:'doctor', permission_code:'identity.patient-access-pin.verify' },
       { role_code:'nurse', permission_code:'identity.patient-access-pin.verify' },
     ]);
-    // The 0028 baseline holds no purpose-of-use code; 0080 seeds only
+    // The 0028 baseline holds no purpose-of-use code; 0082 seeds only
     // direct-care (emergency and healthcare-operations await product decisions).
     assert.deepEqual((await client.query(`select code, display, active, source_system
       from identity.purpose_of_use_codes order by code`)).rows,
@@ -291,7 +291,7 @@ try {
     } finally { await client.query('rollback'); }
   });
   const upgradeAfter = await snapshot('hid_upgrade');
-  // identity.purpose_of_use_codes gains 0080's seed, checked exactly above.
+  // identity.purpose_of_use_codes gains 0082's seed, checked exactly above.
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
     'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes',

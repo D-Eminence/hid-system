@@ -2113,9 +2113,9 @@ microseconds:
   `scripts/run-container-database-acceptance.sh` runs it after
   `staff-access-request-outcome.integration.sql`.
 
-## Purpose-of-use vocabulary (0080)
+## Purpose-of-use vocabulary (0082)
 
-`0080_purpose_of_use_vocabulary.sql` inserts one row into
+`0082_purpose_of_use_vocabulary.sql` inserts one row into
 `identity.purpose_of_use_codes`: `direct-care` ("Direct patient care",
 active, `source_system` `hid`), with `ON CONFLICT (code) DO NOTHING`
 (branch `fix/purpose-of-use-vocabulary`).
@@ -2143,7 +2143,7 @@ On a database built only from migrations every staff consent check therefore
 failed closed. The rollback-only suites and the runtime verifiers insert the
 codes they need themselves, so none of them showed it. Whether staging or
 production already hold rows inserted by hand cannot be told from the
-repository; the release checklist's P10 records them before and after 0080.
+repository; the release checklist's P10 records them before and after 0082.
 
 **Current default, pending product decisions:** only `direct-care` is seeded.
 
@@ -2168,7 +2168,7 @@ The `active` flag is the switch. An operator retires a code by setting
 `active = false`, never by deleting it (grants and requests reference it
 `ON DELETE RESTRICT`); deactivating `direct-care` refuses every direct-care
 grant, request, close and PIN at once. `ON CONFLICT DO NOTHING` keeps a row
-inserted or deactivated before 0080 exactly as it is, display and source
+inserted or deactivated before 0082 exactly as it is, display and source
 included. The service runtime roles only read the table
 (`hid_schema_test_runtime` may also insert and update, for the suites), so a
 new code is a reviewed change by the migration administrator or a later
@@ -2185,7 +2185,7 @@ Tests:
   honoured for reads and writes; a direct-care access request is accepted
   (`pending`). After the owner deactivates `direct-care` in the transaction,
   the grant is refused for both actions and a new request is refused with
-  `22023 Invalid purpose for a standard access request`. Without 0080 it
+  `22023 Invalid purpose for a standard access request`. Without 0082 it
   fails at its first assertion ("the migrated purpose-of-use vocabulary has
   no active direct-care code"). The rehearsal runs it with the additional
   suites, under the migration owner, the non-superuser owner and on the
@@ -2196,5 +2196,5 @@ Tests:
   the upgrade: `direct-care`, active, `source_system` `hid`.
 - `schema.integration.sql` and `emergency.integration.sql` insert their three
   codes with `ON CONFLICT (code) DO NOTHING`, as every other suite and
-  verifier already did, so they pass on a database where 0080 seeded
+  verifier already did, so they pass on a database where 0082 seeded
   `direct-care`.
