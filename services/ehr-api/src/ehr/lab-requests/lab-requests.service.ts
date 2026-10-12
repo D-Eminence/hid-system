@@ -35,6 +35,16 @@ const COLUMNS = `
   external_order_reference as "externalOrderReference", row_version as "rowVersion",
   created_at as "createdAt", updated_at as "updatedAt"`;
 
+/**
+ * created_at as microsecond UTC text. Lab accepts an order only when its
+ * requested time equals the EHR row's created_at exactly, and node-postgres
+ * returns created_at as a Date, which keeps only milliseconds.
+ */
+const EXACT_CREATED_AT = `${timelineCursorSql('created_at')} as "createdAtExact"`;
+
+/** A row as created or replayed, carrying the exact created_at for Lab. */
+type CreatedLabRequestRow = LabRequestRow & { createdAtExact: string };
+
 const TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
   [OrderStatus.Draft]: [OrderStatus.Active, OrderStatus.Cancelled, OrderStatus.EnteredInError],
   [OrderStatus.Active]: [OrderStatus.OnHold, OrderStatus.Completed, OrderStatus.Cancelled, OrderStatus.EnteredInError],
@@ -90,13 +100,13 @@ export class LabRequestsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'lab-request',
         async () => {
-          const result = await client.query<LabRequestRow>(
+          const result = await client.query<CreatedLabRequestRow>(
             `insert into ehr.lab_requests (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
                test_code_system, test_code, test_display, priority, status,
                specimen_type_code, clinical_information, external_order_reference
              ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-             returning ${COLUMNS}`,
+             returning ${COLUMNS}, ${EXACT_CREATED_AT}`,
             [
               encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
               input.testCodeSystem, input.testCode, input.testDisplay, input.priority, input.status,
@@ -114,10 +124,11 @@ export class LabRequestsService {
     const labWorkItem = row.status === OrderStatus.Active
       ? await this.accept(context, row)
       : null;
-    return { ...row, labWorkItem };
+    const { createdAtExact: _exact, ...created } = row;
+    return { ...created, labWorkItem };
   }
 
-  private accept(context: DataAccessContext, row: LabRequestRow) {
+  private accept(context: DataAccessContext, row: CreatedLabRequestRow) {
     return this.labApi.acceptEhrOrder(context, {
       sourceEhrOrderId: row.id,
       sourceEhrOrderVersion: Number(row.rowVersion),
@@ -130,7 +141,7 @@ export class LabRequestsService {
       priority: row.priority as 'routine' | 'urgent' | 'asap' | 'stat',
       clinicalIndication: row.clinicalInformation ?? undefined,
       requestedBy: row.createdBy,
-      requestedAt: row.createdAt.toISOString(),
+      requestedAt: row.createdAtExact,
     }, `ehr-order:${row.id}:${row.rowVersion}`);
   }
 
@@ -182,8 +193,8 @@ export class LabRequestsService {
   }
 
   private async findById(client: PoolClient, context: DataAccessContext, patientId: string, id: string) {
-    const result = await client.query<LabRequestRow>(
-      `select ${COLUMNS} from ehr.lab_requests where id = $1 and patient_id = $2 and facility_id = $3`,
+    const result = await client.query<CreatedLabRequestRow>(
+      `select ${COLUMNS}, ${EXACT_CREATED_AT} from ehr.lab_requests where id = $1 and patient_id = $2 and facility_id = $3`,
       [id, patientId, context.facilityId],
     );
     return result.rows[0];
@@ -198,7 +209,7 @@ export class LabRequestsService {
     return this.single(result.rows[0]);
   }
 
-  private single(row: LabRequestRow | undefined): LabRequestRow {
+  private single<Row extends LabRequestRow>(row: Row | undefined): Row {
     if (!row) throw new DomainProblem(404, 'LAB_REQUEST_NOT_FOUND', 'Lab request was not found');
     return row;
   }
