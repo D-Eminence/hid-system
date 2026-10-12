@@ -678,13 +678,19 @@ Authorization should include:
 
 Do not authorize based only on UI-selected roles.
 
-The OCR, Lab and Pharmacy APIs take the purpose of a write from its validated
-body where the body has one, and otherwise from `X-Purpose-Of-Use`, which must
-be `direct-care`, `emergency` or `healthcare-operations` exactly. A missing or
-unknown header value is `400 PURPOSE_OF_USE_REQUIRED` before any read, as in
-EHR and Identity; before fix/ocr-purpose-400-and-publication-auth it was
-`500 INTERNAL_ERROR`. Whether a route then accepts that purpose is its own
-authorization.
+The Identity, EHR, OCR, Lab and Pharmacy APIs take the purpose of a write from
+its validated body where the body has one, and otherwise from
+`X-Purpose-Of-Use`, which must be `direct-care`, `emergency` or
+`healthcare-operations` exactly. A missing or unknown header value is
+`400 PURPOSE_OF_USE_REQUIRED` before any read. Identity's consent and audit
+routes and EHR's clinical, consent and audit routes already checked the header
+against their own narrower list first, with that code (EHR's emergency record
+answers `400 EMERGENCY_PURPOSE_REQUIRED`). Every other route that reads the
+header answered `500 INTERNAL_ERROR` before
+fix/ocr-purpose-400-and-publication-auth: EHR's document routes and its internal
+OCR routes, Identity's registration-case read, OCR's reads, and every Lab and
+Pharmacy route without a body purpose. Whether a route then accepts that
+purpose is its own authorization.
 
 ## 11. EHR
 
