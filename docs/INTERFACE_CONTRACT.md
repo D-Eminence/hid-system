@@ -101,7 +101,23 @@ family, with revocation reason `logout` (a rotated presented session keeps
 `logout` event (marked `presented: refresh_token` on the refresh-cookie path)
 and audits `auth.logout`. Two sign-outs at once with one browser's cookies
 (two tabs), by either path, therefore record one sign-out. A refused sign-out
-made with a live access token is audited against that actor.
+made with a live access token is audited against that actor, as an
+`auth.logout` failure on resource type `session` naming its session, with no
+facility, membership or organization. Refusals on the other session routes
+raised after the `SecurityGuard` (by validation or the handler) are audited the
+same way, as their `auth.*` session events (`AuditSessionEvent` in
+`common/decorators.ts`): `POST /auth/facility` as `auth.facility.select`,
+`GET /auth/session` as `auth.session.read`, `GET` and `POST
+/auth/service-session` as `auth.service-session.read` and
+`auth.service-session.validate`, and `POST /auth/google/link` as
+`auth.google.link`. The guard's own refusals never reach the interceptor and keep
+their own audit rows. No facility is bound to sign-out. The other session routes
+bind one only when the request names one of the actor's facilities in
+`X-Facility-ID`; the refusal row then carries that facility, membership and
+organization, and otherwise none. A staff audit row without a facility is
+accepted only as an `auth.*` session event; recorded as a generic `api.*`
+request, a staff refusal failed its own audit and answered
+`503 DEPENDENCY_UNAVAILABLE`.
 
 The refresh-token lookups are in `refreshSessionKind` and
 `revokeByRefreshToken` (`services/identity-api/src/auth/token.service.ts`).
@@ -406,12 +422,15 @@ browser call that is the browser's method. For a service hop that forwards the
 user's cookie, such as OCR's
 `GET /api/v1/ehr/internal/ocr/documents/:documentId/source` during job
 creation, it is that hop's method (EHR reports `GET`); the originating browser
-write was already revalidated by the first service. On a cookie request,
-Identity's `SecurityGuard` skips its browser-write `Origin` and CSRF check only
-when all of these hold:
+write was already revalidated by the first service. Outreach authorizes every
+request with `POST /api/v1/identity/outreach/authorize`, forwarding the user's
+cookie or bearer token, and its guard reports the browser's method on that call
+the same way (ADR-045). On a cookie request, Identity's `SecurityGuard` skips its
+browser-write `Origin` and CSRF check only when all of these hold:
 
 * the route is marked `@DelegatedBrowserRequest()`; only
-  `POST /api/v1/identity/service/authorization/check` is;
+  `POST /api/v1/identity/service/authorization/check` and
+  `POST /api/v1/identity/outreach/authorize` are;
 * the reported method is exactly `GET`, `HEAD` or `OPTIONS` (the guard's
   existing safe-method set; case-sensitive);
 * the same request authenticates through
@@ -426,16 +445,56 @@ gains nothing. Every other route keeps the check, including
 `POST /api/v1/auth/service-session`, through which EHR, Lab, OCR and Pharmacy
 still revalidate a cookie write's `Origin` and CSRF before they act. Bearer
 requests are unchanged. Skipping the check changes nothing else: the session,
-runtime controls, exact facility, `identity.authorization.check` permission,
-the handler's own workload authentication and the patient authorization
-decision still apply. Outreach reports no method. Its own Identity routes
-(`POST /api/v1/identity/outreach/authorize` and
-`POST /api/v1/identity/outreach/patient-authorization`) are not marked; its
-link-existing patient authorization reaches the marked route without a method,
-so the check still applies; and its own guard requires `Origin` and CSRF on
-every cookie request (Outreach registration boundary below). Before this rule,
-every delegated patient-scoped read from a same-origin cookie session was
-refused `403 ORIGIN_DENIED` at the decision call.
+runtime controls, exact facility and the handler's own workload authentication
+still apply, and on the patient authorization check so do the
+`identity.authorization.check` permission and the patient authorization
+decision. A skip is recorded as the reported method in
+`request.delegatedBrowserMethod`. On `POST /api/v1/identity/outreach/authorize`
+the handler still requires the `outreach-api` workload (`authenticateOutreach`,
+so another approved caller is refused `401`), and after a skip it authorizes
+only a permission ending in `.read`, refusing a write permission with
+`403 CSRF_VALIDATION_FAILED`. An Outreach write therefore still needs the
+cookie's `Origin` and CSRF token, which Outreach's guard requires and Identity
+verifies against the session on this call. Outreach's other Identity route,
+`POST /api/v1/identity/outreach/patient-authorization`, is not marked, and its
+link-existing patient authorization reaches
+`POST /api/v1/identity/service/authorization/check` without a method, so the
+check still applies there. Before this rule, every delegated patient-scoped
+read from a same-origin cookie session was refused `403 ORIGIN_DENIED` at the
+decision call, and every same-origin Outreach cookie read was refused
+`403 CSRF_VALIDATION_FAILED` by Outreach's own guard (Outreach registration
+boundary below).
+
+EHR and OCR authenticate every request through that service session, then
+their guards (`RemoteSecurityGuard`) bind the facility named by
+`X-Facility-ID` on every route that is not marked facility-optional (only
+EHR's `GET /api/v1/ehr/me/records` is). A missing or malformed header is
+`400 FACILITY_REQUIRED`. A facility where the actor has no active membership,
+such as a stale tab after the membership ended, is
+`403 FACILITY_ACCESS_DENIED`. Before binding, EHR also applies the runtime
+controls (`503 PLATFORM_MAINTENANCE`, `423 PLATFORM_PORTAL_DISABLED`, and
+`503 PLATFORM_CONTROL_UNAVAILABLE` when the control cannot be read, a database
+fault included) and refuses a patient on a workforce route
+(`403 PATIENT_SCOPE_DENIED`). A permission missing from the bound membership is
+`403 PERMISSION_DENIED`. Each guard refusal is audited before it is answered:
+
+* refused before a facility is bound, with an actor: `auth.authorization.denied`
+  on resource type `authentication`, as the `staff` or `patient` actor with
+  subject and account, and no facility, membership or organization. This is how
+  Identity's own `SecurityGuard` records it;
+* refused after a facility is bound: `security.authorization.denied` on
+  `http-request`, with the bound facility, its membership and organization;
+* refused without an actor: a `system` `security.authorization.denied` on
+  `authentication`.
+
+A refusal keeps its own status and code. If its audit row cannot be written,
+the request fails closed with `503 DEPENDENCY_UNAVAILABLE`. Before
+D-Eminence/hid-system#46, every refusal of a staff actor before a facility was
+bound answered that `503` and was not audited, `PLATFORM_CONTROL_UNAVAILABLE`
+included: its row carried the default membership but no facility, and a staff
+row without a facility is accepted only as an `auth.*` event on
+`authentication` or `session` (migration 0067). A database fault in EHR's
+runtime-control check answered a patient `401 AUTHENTICATION_REQUIRED`.
 
 ## 8. Identity Resolution
 
@@ -570,26 +629,49 @@ verified evidence.
 ### Outreach registration boundary
 
 ```text
-GET  /api/v1/outreach/registration-cases
-GET  /api/v1/outreach/registration-cases/:caseId
-POST /api/v1/outreach/registration-cases
-POST /api/v1/outreach/registration-cases/:caseId/link-existing
+GET  /api/v1/outreach/registration-cases                                # outreach.registration.read
+GET  /api/v1/outreach/registration-cases/:caseId                        # outreach.registration.read
+POST /api/v1/outreach/registration-cases                                # outreach.registration.write
+POST /api/v1/outreach/registration-cases/:caseId/link-existing          # outreach.registration.write
+GET  /api/v1/outreach/registration-cases/campaigns                      # outreach.campaign.read
+POST /api/v1/outreach/registration-cases/campaigns                      # outreach.campaign.write (refused by Identity: 400)
+POST /api/v1/outreach/registration-cases/campaigns/:campaignId/status   # outreach.campaign.write (refused by Identity: 400)
+GET  /api/v1/outreach/registration-cases/campaigns/:campaignId/members  # outreach.campaign.read
+POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members  # outreach.campaign.write (refused by Identity: 400)
 ```
 
 All requests require authenticated Identity user context, an authorized exact
-`X-Facility-ID`, `X-Purpose-Of-Use: direct-care`, and a correlation ID. Cookie
-requests also require the same-origin `Origin` and CSRF token. Writes require a
-stable `Idempotency-Key`. Creation accepts a UUID-v4 local command ID and only a
-`tmp_<uuid-v4>` temporary patient reference; it always returns
-`identity_resolution_pending` initially.
+`X-Facility-ID`, `X-Purpose-Of-Use: direct-care`, and a correlation ID. Each
+route requires exactly the one permission shown, which Outreach asks Identity
+to authorize through `POST /api/v1/identity/outreach/authorize`; a `GET` or
+`HEAD` route mapped to anything but a `.read` permission fails closed with
+`500 OUTREACH_POLICY_INVALID`. A cookie read (`GET` or `HEAD`) needs no
+`Origin` or CSRF token, as a same-origin browser read sends neither; one that
+names a disallowed `Origin` is refused `403 ORIGIN_DENIED`. A cookie write
+requires an allowed `Origin` and an `X-CSRF-Token`, else
+`403 CSRF_VALIDATION_FAILED`, and Identity verifies the token against the
+session (Extracted Identity boundary above; ADR-045). Registration-case writes
+require a stable `Idempotency-Key`; a campaign status change requires
+`If-Match` with the campaign's expected version. Registration-case creation
+accepts a UUID-v4 local command ID and only a `tmp_<uuid-v4>` temporary patient
+reference; it always returns `identity_resolution_pending` initially.
+
+Identity does not authorize `outreach.campaign.write`: its validation refuses
+it `400 VALIDATION_FAILED`, which Outreach relays. The three campaign write
+routes marked above (create, status change, member add) therefore answer
+`400 VALIDATION_FAILED`, as on `main`, for cookie requests with an allowed
+`Origin` and the session's CSRF token and for bearer requests alike, and
+change nothing. No campaign can be created through the API. They stay closed
+pending campaign governance: who may create campaigns, change their status and
+add members is an open product decision (ADR-045). Campaign reads are served.
 
 `link-existing` requires a canonical Identity patient UUID, a reason, and the
 exact expected Outreach row version. Outreach calls the Identity authorization
 boundary with separate `outreach-api` workload evidence before opening the
 mutation transaction. Stale versions return 412; a reused idempotency key with
 different content returns 409; Identity/dependency failure never returns
-success. There is no Outreach create-patient, HID, NIN, campaign, encounter,
-screening, document, OCR, or EHR-ingestion endpoint in this slice.
+success. There is no Outreach create-patient, HID, NIN, encounter, screening,
+document, OCR, or EHR-ingestion endpoint in this slice.
 
 ## 9. Patient Identifier Contract
 
@@ -982,7 +1064,7 @@ returns that 404; the 403 applies when the row is visible but Identity refuses.
 
 ### Extracted Lab transport
 
-Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
+Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused with SQLSTATE `23514` for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets `409 IDEMPOTENCY_CONFLICT` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
 
 ### Extracted Pharmacy transport
 

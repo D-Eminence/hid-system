@@ -37,6 +37,7 @@ const { AuthController } = load('auth/auth.controller.ts');
 const { GoogleAuthenticationService } = load('auth/google-authentication.service.ts');
 const { AuthSessionAuditService } = load('auth/auth-session-audit.service.ts');
 const { AuditService } = load('audit/audit.service.ts');
+const { AuditInterceptor } = load('audit/audit.interceptor.ts');
 const { SecurityGuard } = load('auth/security.guard.ts');
 const { WorkloadAuthService } = load('auth/workload-auth.service.ts');
 const { TurnstileService } = load('auth/turnstile.service.ts');
@@ -72,6 +73,9 @@ try {
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }));
   app.useGlobalFilters(new ProblemDetailsFilter());
   app.useGlobalGuards(new SecurityGuard(module.get(Reflector), module.get(TokenService), module.get(AuditService), module.get(DatabaseService)));
+  // As AppModule registers it (APP_INTERCEPTOR): every refusal is audited, and a
+  // failed audit write answers 503. Without it a refusal's audit is never tried.
+  app.useGlobalInterceptors(new AuditInterceptor(module.get(Reflector), module.get(AuditService)));
   await app.init();
   const http = request(app.getHttpServer());
   const origin = process.env.CORS_ORIGINS.split(',')[0];
@@ -259,6 +263,11 @@ try {
   const logoutAs = (cookies, client) => logout(cookies, cookies[`${name}_csrf`], { Origin: origin, 'x-hid-client': client });
   const logoutEvents = async (id) => Number((await pool.query(`select count(*) from auth.session_events
     where session_id = $1 and event_type = 'logout'`, [id])).rows[0].count);
+  // The refusal of a live access cookie's sign-out, audited against its actor as an
+  // auth.logout session event with no facility (none is bound to sign-out).
+  const refusedSignOuts = async (id, actorType) => Number((await pool.query(`select count(*) from audit.events
+    where action = 'auth.logout' and outcome = 'failure' and resource_type = 'session' and resource_id = $1
+      and actor_type = $2 and facility_id is null and actor_membership_id is null`, [id, actorType])).rows[0].count);
   const heldStaff = await signIn(doctor, 'staff');
   const heldPatient = await signIn(bola, 'patient');
   for (const [label, held, cookies, client, kind] of [
@@ -274,7 +283,14 @@ try {
     assert.equal(refused.headers['set-cookie'], undefined, `${label} must keep the other app's cookies`);
     assert.equal(await live(held.sessionId), true, `${label} must not end the other app's sign-in`);
     assert.equal(await logoutEvents(held.sessionId), 0, `${label} records no sign-out`);
+    if (cookies[name]) assert.equal(await refusedSignOuts(held.sessionId, kind), 1, `${label} records its refusal`);
   }
+  // A live staff access cookie with the wrong CSRF token is refused as such, audited, and ends nothing.
+  const csrfRefused = await logout(heldStaff.cookies, 'not-the-csrf-token', { Origin: origin, 'x-hid-client': 'staff-web' });
+  assert.equal(csrfRefused.status, 403, JSON.stringify(csrfRefused.body));
+  assert.equal(csrfRefused.body.code, 'CSRF_VALIDATION_FAILED');
+  assert.equal(await live(heldStaff.sessionId), true, 'a CSRF refusal ends nothing');
+  assert.equal(await refusedSignOuts(heldStaff.sessionId, 'staff'), 2, 'the CSRF refusal is audited');
   const ownStaff = await logoutAs(heldStaff.cookies, 'staff-web');
   assert.equal(ownStaff.status, 204, JSON.stringify(ownStaff.body)); clearsAll(ownStaff);
   assert.equal(await live(heldStaff.sessionId), false);
@@ -282,6 +298,7 @@ try {
   assert.equal(ownPatient.status, 204, JSON.stringify(ownPatient.body)); clearsAll(ownPatient);
   assert.equal(await live(heldPatient.sessionId), false);
   checks.push('a cookie sign-out naming the other app (patient-web with a staff sign-in, staff-web with a patient one), by refresh cookie or by live access cookie, is 403 SESSION_CLIENT_MISMATCH with no cookie set, the sign-in live and no sign-out recorded; naming its own app, each ends its sign-in and clears the cookies');
+  checks.push('with the audit interceptor registered as in AppModule, a refused sign-out of a live staff or patient access cookie (mismatch, or a wrong CSRF token) answers its 403, not 503, and is audited as an auth.logout failure of that session with no facility or membership');
 
   // 8. A rotated cookie whose sign-in has ended finds nothing more to end.
   const before = await signIn(ada, 'patient');
@@ -398,7 +415,24 @@ try {
   }
   checks.push('two sign-outs at once with one browser\'s cookies, held at the account lock until both wait there, by refresh cookie and by live access cookie: both answer 204 and clear the cookies; the sign-in ends once, with one sign-out event and one audit');
 
-  // 14. A sign-in whose actor refresh() can no longer resolve is not one refresh
+  // 14. Facility selection is a session route: a refusal answers as such and is
+  // audited as an auth.facility.select session event, though no facility is bound.
+  const selecting = await signIn(doctor, 'staff');
+  const select = (facilityId) => http.post('/api/v1/auth/facility').set('Cookie', cookie(selecting.cookies)).set('Origin', origin)
+    .set('x-csrf-token', selecting.cookies[`${name}_csrf`]).send({ facilityId });
+  const foreign = await select(randomUUID());
+  assert.equal(foreign.status, 403, JSON.stringify(foreign.body)); assert.equal(foreign.body.code, 'FACILITY_ACCESS_DENIED');
+  const malformed = await select('not-a-uuid');
+  assert.equal(malformed.status, 400, JSON.stringify(malformed.body));
+  assert.equal(Number((await pool.query(`select count(*) from audit.events where action = 'auth.facility.select'
+    and outcome = 'failure' and resource_type = 'session' and resource_id = $1 and actor_type = 'staff'
+    and facility_id is null and actor_membership_id is null`, [selecting.sessionId])).rows[0].count), 2,
+  'both refused selections are audited');
+  const own = await select(ids.facility);
+  assert.equal(own.status, 200, JSON.stringify(own.body)); assert.equal(own.body.actor.facility.id, ids.facility);
+  checks.push('a facility selection refused for a facility the staff member has no membership at (403 FACILITY_ACCESS_DENIED) or for a malformed id (400) answers its refusal, not 503, and is audited as an auth.facility.select failure of that session with no facility; selecting their own facility still succeeds');
+
+  // 15. A sign-in whose actor refresh() can no longer resolve is not one refresh
   // could renew (SES-4): a staff sign-in whose facility membership was
   // deactivated, a patient sign-in whose patient is inactive. The app that
   // names the other kind gets refresh's own answer (401, cookies cleared) and
