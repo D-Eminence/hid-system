@@ -25,7 +25,18 @@ The executable covers:
    schema dry run and assert its objects rolled back; apply the real schema,
    bootstrap runtime roles, assert zero pending on rerun, and run the real
    rollback-only schema/RLS, OTP, patient self-service, enrollment, emergency,
-   patient-PIN, cutover-staging-integrity, and QoreID-evidence integration suites. Execute the real OTP service against the exact Identity
+   patient-PIN, cutover-staging-integrity, and QoreID-evidence integration suites.
+   After `schema.integration.sql`, the script runs every other
+   `*.integration.sql` in `services/ehr-api/database/tests` except
+   `runtime-roles.integration.sql`, in name order, and records their names in
+   `checks.additional_schema_suites`; it runs them again on the
+   non-superuser-owner copy below and on the restored database (item 5). They
+   include `ehr-timeline-cursor.integration.sql`, which checks that the
+   microsecond text form the EHR list cursors carry casts back to the same
+   instant under four session time zones, and that the clinical-notes list
+   predicate and order with that bound return the rows sharing the last row's
+   millisecond that a millisecond bound leaves out
+   ([DATABASE.md](DATABASE.md)). Execute the real OTP service against the exact Identity
    role, including concurrent completion/rate-limit and account-disable tests;
    notification delivery uses an in-process test double. Its result is recorded
    under `evidence.checks` as `otp_runtime`. The exact-role HTTP verifiers

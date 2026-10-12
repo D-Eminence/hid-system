@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
-import { decodeTimelineCursor, requestDigest, timelinePage } from '../shared/clinical-context';
+import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
 import {
   CreateVitalCorrectionDto,
   CreateVitalDto,
@@ -70,19 +70,20 @@ export class VitalsService {
   constructor(private readonly repository: ClinicalRepository) {}
 
   list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
-    const cursor = decodeTimelineCursor(query.cursor);
+    const scope = { list: 'ehr.vitals', patientId, encounterId };
+    const cursor = decodeTimelineCursor(query.cursor, scope);
     return this.repository.run(
       context, patientId, 'read_records',
       { action: 'ehr.vital.list', resourceType: 'vital', resourceId: encounterId },
       async (client) => {
-        const result = await client.query<VitalRow>(
-          `select ${VITAL_COLUMNS} from ehr.vitals
+        const result = await client.query<VitalRow & { cursorAt: string }>(
+          `select ${VITAL_COLUMNS}, ${timelineCursorSql('recorded_at')} as "cursorAt" from ehr.vitals
            where encounter_id = $1 and patient_id = $2 and facility_id = $3
              and ($4::timestamptz is null or (recorded_at, id) < ($4::timestamptz, $5::uuid))
            order by recorded_at desc, id desc limit $6`,
           [encounterId, patientId, context.facilityId, cursor?.sortAt ?? null, cursor?.id ?? null, query.limit + 1],
         );
-        const page = timelinePage(result.rows, query.limit, (row) => row.recordedAt);
+        const page = timelinePage(result.rows, query.limit, scope);
         return { value: page, details: { resultCount: page.items.length } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
