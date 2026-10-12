@@ -957,16 +957,23 @@ owning service's `5xx` or outage, an error inside the attempt, and a refusal of
 OCR's workload identity by EHR, Lab or Pharmacy (`503
 <SERVICE>_SERVICE_AUTH_UNAVAILABLE` above) are stored as
 `OWNING_SERVICE_UNAVAILABLE`, and the owning service's `409
-REQUEST_IN_PROGRESS` under its own code; both are retryable. The same request
-with the same `Idempotency-Key` claims a retryable failure again 15 seconds
+REQUEST_IN_PROGRESS` under its own code; both are retryable. OCR finds an
+earlier publication by facility, requesting account and `Idempotency-Key`, so a
+retry is the original request resent by the same account in the same facility
+with the same key and an identical body (the same key with another body answers
+`409 IDEMPOTENCY_CONFLICT`). It claims a retryable failure again 15 seconds
 after it, up to three attempts, and after the last one answers `409
 OCR_PUBLICATION_IN_PROGRESS`. Any other `4xx`, including a refusal of the
 user's credential, facility or permission and an authorization that has lapsed
 since the request (`404 OCR_JOB_NOT_FOUND`), is terminal under its own code,
 and every later request for that publication answers `409
-OCR_PUBLICATION_TERMINAL`. A request with a new key for a validation that
-already has a publication answers `409 OCR_ALREADY_PUBLISHED`, so only a
-client that keeps the original key can retry.
+OCR_PUBLICATION_TERMINAL`. Any other request to publish a validation that
+already has a publication answers `409 OCR_ALREADY_PUBLISHED`: a new key, or the
+original key sent by another account, another member of the same facility
+included. The validation is not visible from another facility (`404
+OCR_VALIDATION_NOT_FOUND`). Only the original requester, keeping the original
+key, can retry, so a client keeps the key per validation and per requester and
+offers a retry only to that requester.
 
 ## 16. Storage
 
