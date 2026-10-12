@@ -99,7 +99,7 @@ or CSRF are refused, and that Identity's check refuses a forged or missing
 workload token, a reported write without CSRF and an unreported method. It
 cannot run against staging or production.
 
-`scripts/verify-ehr-lab-handoff-runtime.mjs` (fix/ehr-lab-handoff-resend) is
+`scripts/verify-ehr-lab-handoff-runtime.mjs` (D-Eminence/hid-system#56) is
 run the same way. It starts EHR (as `hid_ehr_api_runtime`) and Lab (as
 `hid_lab_api_runtime`, in a child process) with a fake Identity, and checks
 that an active lab request Lab refuses is saved and answered

@@ -14,7 +14,7 @@
 // released version. Only the Identity API is replaced, by a local fake; every
 // database check (row-level security, the 0077 guards, immutability triggers,
 // unique constraints) is real. Only EHR-order acceptance maps its own database
-// refusals (lab-work-items.service.ts, fix/ehr-lab-handoff-resend): its guard's
+// refusals (lab-work-items.service.ts, D-Eminence/hid-system#56): its guard's
 // refusal of a stale or changed order 409 LAB_ORDER_NOT_CURRENT and row-level
 // security 403 LAB_ACCESS_DENIED, where both were 500; it answers a later
 // version of an order Lab already holds 409 LAB_ORDER_ALREADY_ACCEPTED and an

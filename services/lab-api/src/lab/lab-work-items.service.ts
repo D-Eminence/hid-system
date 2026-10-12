@@ -166,7 +166,7 @@ export class LabWorkItemsService {
 
 /*
  * The database refusals of EHR-order acceptance that Lab answers with its own
- * problem (fix/ehr-lab-handoff-resend). Lab maps them here, for this command
+ * problem (D-Eminence/hid-system#56). Lab maps them here, for this command
  * only: every other Lab command answers a database error 500, which OCR stores
  * for its Lab import as the retryable OWNING_SERVICE_UNAVAILABLE. Each detail
  * is fixed; the error, whose message can name rows, values and constraints, is

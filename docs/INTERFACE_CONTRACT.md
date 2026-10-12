@@ -766,7 +766,7 @@ The save commits first, because Lab's guard reads the committed request; a Lab
 answer cannot undo it. Lab holds one work item per request, at the version it
 accepted. Paths are under
 `/api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests`
-(fix/ehr-lab-handoff-resend):
+(D-Eminence/hid-system#56):
 
 - `POST` (create). An active request answers `201` with the request,
   `labWorkItem` (Lab's work item) and `labHandoff: { state: 'accepted' }`; any
@@ -1295,7 +1295,7 @@ full history read records `lab.result.history.read`.
 
 Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused by the guard (SQLSTATE `23514`, `409 LAB_ORDER_NOT_CURRENT`) for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets Lab's `409 IDEMPOTENCY_CONFLICT`, which the EHR create reports as `409 LAB_HANDOFF_REFUSED` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
 
-Lab answers EHR order acceptance (fix/ehr-lab-handoff-resend):
+Lab answers EHR order acceptance (D-Eminence/hid-system#56):
 
 | Request | Answer |
 | --- | --- |
@@ -1321,7 +1321,7 @@ row, value or constraint; Lab logs the SQLSTATE and route. Any other database
 error of acceptance (a `23514` of a child guard, a missing grant on another
 table, a data error) answers `500`. Every other Lab command answers a database
 refusal `500 INTERNAL_ERROR` with a fixed detail, as before
-fix/ehr-lab-handoff-resend: a guard (`23514`), a unique key after the retry
+D-Eminence/hid-system#56: a guard (`23514`), a unique key after the retry
 (`23505`), row-level security (`42501`) or a data error. For
 `POST /api/v1/lab/imports/from-ocr` OCR keeps storing that `500` as the
 retryable `OWNING_SERVICE_UNAVAILABLE` and retries the publication up to

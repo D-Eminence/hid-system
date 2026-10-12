@@ -101,7 +101,7 @@ describe('LabImportsService', () => {
  * OWNING_SERVICE_UNAVAILABLE and a Lab 4xx as a terminal refusal of the
  * reviewed publication (ocr-api, ocr.service.ts). Lab maps no database refusal
  * of an import: only EHR-order acceptance maps its own
- * (fix/ehr-lab-handoff-resend). Each reaches the problem filter unchanged and
+ * (D-Eminence/hid-system#56). Each reaches the problem filter unchanged and
  * answers 500, as before.
  */
 describe('LabImportsService database refusals', () => {

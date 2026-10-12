@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The EHR to Lab handoff of an active lab request (fix/ehr-lab-handoff-resend),
+// The EHR to Lab handoff of an active lab request (D-Eminence/hid-system#56),
 // through the real EHR API (AppModule, as hid_ehr_api_runtime, in this
 // process) and the real Lab API (AppModule, as hid_lab_api_runtime, in a child
 // process, so its environment is its own), on a disposable copy of the owned

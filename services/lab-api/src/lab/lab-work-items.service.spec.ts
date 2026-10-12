@@ -130,7 +130,7 @@ describe('LabWorkItemsService.acceptEhrOrder', () => {
 });
 
 /**
- * Lab maps no SQLSTATE in its problem filter (fix/ehr-lab-handoff-resend):
+ * Lab maps no SQLSTATE in its problem filter (D-Eminence/hid-system#56):
  * acceptance maps its own three database refusals, those of the work-item
  * insert and its unique keys, with fixed details. Any other database error
  * reaches the filter unchanged and answers 500, as for every other Lab command.
