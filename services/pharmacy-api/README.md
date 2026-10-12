@@ -20,7 +20,12 @@ including a rotating Identity-audience token at
 
 Acceptance binds one exact active, same-facility EHR prescription snapshot but
 does not imply dispensing. Dispensing is a separate immutable event, and a
-reversal appends evidence without erasing the original. Imported medication
+reversal appends evidence without erasing the original. The database guards
+read the EHR prescription as their owner (0080; the runtime role still has no
+EHR privilege): an acceptance that is not the exact active prescription version
+answers `409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE`, and a dispensing whose
+prescription is no longer active at the accepted version answers
+`409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE`. Imported medication
 evidence always has unknown activity status and is neither a prescription nor
 proof of dispensing or administration. Inventory, refills, substitutions,
 partial fills, and medication administration are outside this slice.

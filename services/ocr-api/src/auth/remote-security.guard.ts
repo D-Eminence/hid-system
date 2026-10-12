@@ -49,9 +49,32 @@ export class RemoteSecurityGuard implements CanActivate {
   }
 
   private async recordDenied(request: HidRequest): Promise<void> {
+    const details = { method: request.method, route: typeof request.route?.path === 'string' ? request.route.path : 'unresolved' };
+    if (request.actor && !request.facilityId) {
+      // Refused before a facility was bound (no or malformed X-Facility-ID, a
+      // facility the actor is not active at). Recorded as Identity's
+      // SecurityGuard records it: an auth event with no membership or
+      // organization. A staff row without a facility is accepted only as an
+      // auth event (AuditService, the 0067 CHECKs); an http-request row
+      // carrying the default membership was refused, and the refusal then
+      // answered 503 instead of its own status.
+      await this.audit.record({
+        correlationId: request.correlationId,
+        actorType: request.actor.kind === 'patient' ? 'patient' : 'staff',
+        actorSubject: request.actor.subject,
+        actorAccountId: request.actor.accountId,
+        action: 'auth.authorization.denied',
+        resourceType: 'authentication',
+        outcome: 'denied',
+        sourceIp: request.ip,
+        userAgent: request.header('user-agent'),
+        details,
+      });
+      return;
+    }
     await this.audit.record({
       correlationId: request.correlationId,
-      actorType: request.actor ? 'staff' : 'system',
+      actorType: request.actor?.kind === 'patient' ? 'patient' : request.actor ? 'staff' : 'system',
       actorSubject: request.actor?.subject,
       actorAccountId: request.actor?.accountId,
       actorMembershipId: request.actor?.facility?.membershipId,
@@ -62,7 +85,7 @@ export class RemoteSecurityGuard implements CanActivate {
       outcome: 'denied',
       sourceIp: request.ip,
       userAgent: request.header('user-agent'),
-      details: { method: request.method, route: typeof request.route?.path === 'string' ? request.route.path : 'unresolved' },
+      details,
       provenance: request.actor ? 'application' : 'system',
     });
   }

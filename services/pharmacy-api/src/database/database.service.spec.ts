@@ -109,6 +109,22 @@ describe('Pharmacy DatabaseService transaction retry', () => {
     }
   });
 
+  // The dispensing guard takes a share lock on the EHR prescription (0080). In
+  // a SERIALIZABLE transaction that lock fails with 40001 when the prescription
+  // changed after the transaction's snapshot; the next attempt reads the change
+  // and the service refuses the dispensing with a domain problem, which is final.
+  it('retries the serialization failure of a changed prescription, then returns the refusal', async () => {
+    const { database, transactions } = service();
+    const refusal = new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE', 'Not dispensable');
+    let calls = 0;
+    await expect(database.withTransaction(context, async () => {
+      calls += 1;
+      throw calls === 1 ? sqlError('40001') : refusal;
+    }, { isolationLevel: 'SERIALIZABLE' })).rejects.toBe(refusal);
+    expect(calls).toBe(2);
+    expect(transactions.map((statements) => statements.at(-1))).toEqual(['ROLLBACK', 'ROLLBACK']);
+  });
+
   it('recognises only the conflicts PostgreSQL resolves by cancelling a transaction', () => {
     expect(['40001', '40P01', '23505'].map((code) => isRetryableConflict({ code }))).toEqual([true, true, true]);
     expect([{ code: '42501' }, { code: '0A000' }, { code: 'PHARMACY_ACCESS_DENIED' }, null, 'error']

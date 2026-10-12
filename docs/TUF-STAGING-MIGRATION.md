@@ -12,7 +12,7 @@ node scripts/tuf-staging-migration-rehearsal.mjs --evidence-dir /tmp/NEW_HID_REH
 ```
 
 Prerequisites: non-root Linux user, PostgreSQL 16 server/client tools on the
-same host (`pg_config --bindir`), installed `services/ehr-api` and `services/identity-api` dependencies,
+same host (`pg_config --bindir`), installed `services/ehr-api`, `services/identity-api` and `services/outreach-api` dependencies,
 and the checked-in migration ledger. The command accepts no database URL or
 cloud mode. It creates a private temporary Unix-socket-only PostgreSQL cluster
 with host connections rejected, uses public synthetic fixture vectors, and
@@ -37,24 +37,37 @@ The executable covers:
    predicate and order with that bound return the rows sharing the last row's
    millisecond that a millisecond bound leaves out
    ([DATABASE.md](DATABASE.md)). Execute the real OTP service against the exact Identity
-   role, including concurrent completion/rate-limit and account-disable tests;
-   notification delivery uses an in-process test double. Its result is recorded
+   role, including concurrent completion/rate-limit and account-disable tests,
+   the uniform recovery start cooldown (0081) and the per-account recovery code
+   budget; notification delivery uses an in-process test double. Its result is recorded
    under `evidence.checks` as `otp_runtime`. The exact-role HTTP verifiers
    follow, recorded under `evidence.checks` in run order: `patient_runtime`,
    `patient_enrollment_runtime`, `patient_safety_runtime`,
-   `delegated_cookie_read_runtime`, `provider_enrollment_runtime`,
-   `platform_admin_runtime`, `session_sign_out_runtime` and
-   `platform_security_runtime` (the patient enrollment, patient safety,
-   delegated cookie-read, provider enrollment, platform admin and platform
-   security verifiers on a disposable copy of the rehearsal database). Each is
-   in `services/identity-api/scripts/` and runs Identity as
+   `delegated_cookie_read_runtime`, `outreach_cookie_read_runtime`,
+   `provider_enrollment_runtime`, `platform_admin_runtime`,
+   `session_sign_out_runtime` and `platform_security_runtime` (the patient
+   enrollment, patient safety, delegated cookie-read, Outreach cookie-read,
+   provider enrollment, platform admin and platform security verifiers on a
+   disposable copy of the rehearsal database). Each is in
+   `services/identity-api/scripts/` and runs Identity as
    `hid_identity_api_runtime`, except `delegated_cookie_read_runtime`
    (`services/ehr-api/scripts/verify-delegated-cookie-read-runtime.mjs`,
    D-Eminence/hid-system#38), which runs EHR as `hid_ehr_api_runtime` and
    Identity as `hid_identity_api_runtime`: a doctor's same-origin cookie read
    of a patient's encounters through EHR, with no Origin or CSRF token, is
    authorized by Identity, and EHR cookie writes without Origin or CSRF are
-   refused. `patient_enrollment_runtime`
+   refused (with D-Eminence/hid-system#52 it also reads the
+   patient's record summary and two break-glass emergency summaries, a reader
+   lacking four category read permissions and the doctor, with their audit
+   events); and `outreach_cookie_read_runtime`
+   (`services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs`,
+   D-Eminence/hid-system#43), which runs Outreach as
+   `hid_outreach_api_runtime` and Identity as `hid_identity_api_runtime`: a
+   doctor's same-origin cookie reads of registration cases and campaigns, with
+   no Origin or CSRF token, are authorized through Identity, cookie writes need
+   Origin and CSRF, campaign writes are refused `400 VALIDATION_FAILED` even
+   with both (the campaign is seeded with SQL), and Identity authorizes only a
+   read permission for a read that the Outreach workload reports. `patient_enrollment_runtime`
    (`verify-patient-enrollment-runtime.mjs`) runs public NIN enrollment through
    activation, sign-in, refresh, recovery and sign-out, with QoreID (behind the
    real adapter), Siteverify and delivery stubbed (see
