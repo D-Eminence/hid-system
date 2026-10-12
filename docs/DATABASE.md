@@ -1838,8 +1838,10 @@ of one identifier):
 5. otherwise replaces the open challenge and sends a code, after the response.
 
 A challenge whose delivery failed definitively keeps its id until the cooldown
-ends. No lock is added: the table is read without a row lock, and the start
-transaction's lock order is unchanged.
+ends. The cooldown read takes no row lock. The upsert locks only that
+identifier's cooldown row until commit, after the three rate-limit transaction
+locks and before the challenge row lock; the recipient bucket's lock already
+serializes the starts of one identifier, so no new cycle forms.
 
 The recovery code budget needs no schema change. Each wrong code also counts
 in `auth.otp_rate_limits`, scope `account`, bucket
@@ -1854,6 +1856,17 @@ bucket's transaction lock (`otp-rate:account:<bucket>`), and locks no other
 challenge: start never takes that lock and `auth.complete_recovery_otp` never
 touches the bucket, so no cycle forms. An unknown challenge id counts nothing.
 No bucket is keyed by client IP.
+
+Residual: verification work still differs. A wrong code for a live challenge
+runs seven statements in its transaction (the challenge row lock, the bucket's
+lock, the blocked read, the attempt count, and the bucket count's lock, read
+and upsert), four once the budget blocks; a `challengeId` that names no live
+challenge, as an unknown identifier's does, runs one. Before this change it was
+two against one. Response time can therefore still suggest whether a start's
+identifier has an account, as the start's few extra statements for a known
+account can (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, "Residual"). Decoy
+locks and reads would only narrow the gap; closing it would need decoy writes
+for ids an attacker chooses.
 
 Tests:
 - `otp-recovery.integration.sql` (rollback-only) requires the table and its
