@@ -42,3 +42,13 @@ export interface CredentialIdentity {
     expectedRowVersion: number;
   };
 }
+
+/**
+ * Where the facility a staff session response reports comes from (0079):
+ * 'selected', the facility this sign-in chose with POST /auth/facility;
+ * 'default', none chosen, so the primary facility (else the first by name);
+ * 'reselect', the chosen facility is no longer one of the actor's active
+ * facilities, so the default is reported and the user must choose again.
+ * Staff sign-ins only; patient and platform sessions carry no such field.
+ */
+export type FacilitySelectionState = 'selected' | 'default' | 'reselect';

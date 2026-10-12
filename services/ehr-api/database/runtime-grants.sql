@@ -1016,3 +1016,14 @@ revoke all on function auth.lock_account_sessions(uuid) from public;
 -- transactions of the account. It only locks.
 grant execute on function auth.lock_account_for_mfa(uuid) to hid_identity_runtime;
 revoke all on function auth.lock_account_for_mfa(uuid) from public;
+
+-- Staff working facility per sign-in (0079, ADR-045). The Identity runtime
+-- reads, records and replaces a sign-in's selection, as it does
+-- auth.session_assurance; the 0079 guard admits only the root session of a
+-- live staff sign-in of the same account and an active membership, and refuses
+-- deletes, so DELETE is not granted. No other service reads it: the selection
+-- authorizes nothing, and every service authorizes a request by its
+-- X-Facility-ID. The guard runs as the invoker and reads only tables this
+-- runtime already reads (auth.sessions and the identity workforce tables).
+grant select, insert, update on auth.session_facility_selection to hid_identity_runtime;
+revoke all on function auth.guard_session_facility_selection_change() from public;

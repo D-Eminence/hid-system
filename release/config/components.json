@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0078",
-    "count": 78,
+    "last": "0079",
+    "count": 79,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -409,6 +409,10 @@
       {
         "name": "0078_runtime_command_repairs.sql",
         "sha256": "00b869c0e49522096bcfdf9dbc721c20fba8aad4447c01803b05ef0f04f73598"
+      },
+      {
+        "name": "0079_session_facility_selection.sql",
+        "sha256": "e757aaa20af80726ff08af9af82bd1ccb74e64e5932bf3ed75982f39d825fe13"
       }
     ]
   },

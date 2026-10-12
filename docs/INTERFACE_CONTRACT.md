@@ -48,7 +48,7 @@ this order:
 | `403 CSRF_VALIDATION_FAILED` | The refresh cookie is missing, or `X-CSRF-Token` and the CSRF cookie are missing, differ, or are not the value derived from the refresh token | Untouched |
 | `403 SESSION_CLIENT_MISMATCH` | `X-HID-Client` names the other kind of sign-in (below). Nothing is rotated | Kept |
 | `401 AUTHENTICATION_REQUIRED` | Rotation refuses the token: unknown, ended, expired, reused (reuse ends the whole sign-in), a platform token, or an account that is no longer active, is disabled or has a new token version. Any other failure during rotation also clears the cookies | Cleared |
-| `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header | The refresh token is rotated into a new session of the same sign-in | Replaced |
+| `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header, plus `facilitySelection` for a staff sign-in (below) | The refresh token is rotated into a new session of the same sign-in | Replaced |
 
 `POST /api/v1/auth/logout` takes no body and answers `204` with no content
 when it does not refuse. It is public at the guard and authenticates the
@@ -141,6 +141,70 @@ cookie mode, which omits it), and `packages/identity-browser-client` sends
 none, so for both the check is inert until they send it. Until then, a cookie
 sign-out without a live access cookie ends whichever staff or patient sign-in
 the refresh cookie holds.
+
+#### Working facility per sign-in
+
+Not yet deployed (ADR-045, migration 0079). A staff member who works at more
+than one facility chooses one with `POST /api/v1/auth/facility`
+`{ "facilityId": "<uuid>" }`. Identity keeps the choice for the sign-in in
+`auth.session_facility_selection`, keyed by the session family: refresh
+rotates the session but keeps the family, so it keeps the choice, and another
+sign-in of the same account has its own. A reload therefore reports the chosen
+facility instead of moving the user back to the primary one.
+
+Staff session responses carry `facilitySelection`:
+
+| `facilitySelection` | When | `actor.facility` |
+|---|---|---|
+| `selected` | The sign-in chose a facility that is still one of the actor's active facilities | The chosen facility, with that membership's `roles`, `role` and `permissions`: the actor `POST /auth/facility` returns |
+| `default` | The sign-in has not chosen one; every new sign-in | The default, as before: the primary facility, else the first by name |
+| `reselect` | The chosen facility is no longer one of the actor's active facilities: the membership ended, or the staff record, facility or organization is no longer active | The default, as before. The client asks the user to choose again instead of working elsewhere silently |
+
+| Route | `facilitySelection` |
+|---|---|
+| `POST /auth/login`, `POST /auth/oidc/exchange` (a session) | `default` for a staff sign-in |
+| `GET /auth/session`, `POST /auth/refresh` | Read for the sign-in, as above |
+| `POST /auth/facility` | `selected` |
+| Patient and platform sessions, `GET` and `POST /auth/service-session` | Absent; nothing is read |
+
+`POST /auth/facility` (cookie mutations need Origin and CSRF as any other):
+
+| Outcome | When |
+|---|---|
+| `400 VALIDATION_FAILED` | `facilityId` is missing or not a UUID, or another field is sent |
+| `403 PATIENT_SCOPE_DENIED` | A patient session |
+| `403 FACILITY_ACCESS_DENIED` | The facility is not one of the actor's active facilities when the request is authorized, or its membership is no longer active when the choice is written (the database guard checks it again) |
+| `401 AUTHENTICATION_REQUIRED` | The sign-in was signed out or revoked before the choice was written |
+| `503` | The audit could not be written |
+| `200` `{ actor, facilitySelection: "selected" }` | Stored for the sign-in, replacing any earlier choice, and audited as `auth.facility.select` in the same transaction |
+
+Every refusal writes nothing. The write takes the account lock first, as
+sign-out and revocation do, and is made only while the presented session is a
+live staff session of the account.
+
+The choice is only the facility the session reports by default; it authorizes
+nothing. Every facility-scoped request still carries `X-Facility-ID`, which
+Identity checks against the actor's active memberships on each request, and
+services authorize a delegated request by it (`/auth/service-session` ignores
+the choice). The stored facility is checked against the actor's active
+facilities each time it is read. A valid `X-Facility-ID` on
+`GET /auth/session` itself still binds the facility it names, as before;
+`facilitySelection` then still describes the stored choice. The choice belongs
+to the sign-in, not to a tab: every tab holding the sign-in's cookies reads the
+same choice, and the last choice made wins. `reselect` keeps the stored choice
+until the user chooses again, so if the membership becomes active again first,
+the choice is reported as `selected` again. Sign-out and revocation leave the
+stored row, but a signed-out or revoked sign-in never reads or changes it
+again. An actor without an Identity sign-in (an `AUTH_MODE=oidc` bearer token)
+has nothing to keep the choice on: `POST /auth/facility` answers as before
+without `facilitySelection`, and nothing is stored.
+
+Release note: apply migration 0079 and the role bootstrap before deploying this
+Identity API. Without the table, `GET /auth/session` and refresh fail for every
+staff sign-in, and a failed refresh clears the cookies. Clients that ignore the
+new field keep working as before; to keep the user at their facility after a
+reload they use `actor.facility` from `GET /auth/session`, and on `reselect`
+ask the user to choose again.
 
 ### Patient sessions and self service
 
