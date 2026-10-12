@@ -25,8 +25,10 @@ const identity = {
 };
 
 type RecordedQuery = { sql: string; values: readonly unknown[] };
+/** `auth.otp_rate_limits` rows by `scope:bucket`; fixtures given one map share the table. */
+type OtpRateRow = { request_count: number; window_started_at: Date; blocked_until: Date | null };
 
-function fixture() {
+function fixture(otpRates = new Map<string, OtpRateRow>()) {
   let enrollment: Record<string, unknown> | undefined;
   const challenges: Record<string, unknown>[] = [];
   let bound = false;
@@ -41,6 +43,24 @@ function fixture() {
     if (sql.includes('public_patient_contact_already_bound')) return { rows: [{ bound: contactBound }] };
     if (sql.includes('from identity.public_patient_enrollment_rates')) return { rows: rateCount
       ? [{ request_count: rateCount, window_started_at: new Date() }] : [] };
+    // The shared keyed windows of rate-limit.ts, as its statements read and write them.
+    if (sql.includes('coalesce(blocked_until > clock_timestamp(), false)')) {
+      const row = otpRates.get(`${values[0]}:${values[1]}`);
+      return { rows: row ? [{ blocked: row.blocked_until !== null && row.blocked_until > new Date() }] : [] };
+    }
+    if (sql.includes('from auth.otp_rate_limits') && sql.includes('for update')) {
+      const row = otpRates.get(`${values[0]}:${values[1]}`);
+      return { rows: row ? [{ ...row }] : [] };
+    }
+    if (sql.includes('insert into auth.otp_rate_limits')) {
+      const key = `${values[0]}:${values[1]}`;
+      const row = otpRates.get(key);
+      otpRates.set(key, row ? { request_count: Number(values[3]),
+        window_started_at: values[2] ? new Date() : row.window_started_at,
+        blocked_until: values[4] ? new Date(Date.now() + Number(values[5]) * 1000) : null }
+        : { request_count: 1, window_started_at: new Date(), blocked_until: null });
+      return { rows: [], rowCount: 1 };
+    }
     if (sql.includes('from identity.public_patient_enrollments where nin_lookup_hmac')) {
       return { rows: enrollment && values[0] === enrollment.nin_lookup_hmac ? [enrollment] : [] };
     }
@@ -129,7 +149,7 @@ function fixture() {
   const service = new PatientEnrollmentService(database, protector as unknown as NinIdentifierProtector,
     provider as PublicPatientIdentityProvider, notification as unknown as NotificationOtpClient,
     hidCodes as unknown as HidCodeGenerator, google as unknown as GoogleAuthenticationService);
-  return { service, client, queries, provider, notification, protector, google,
+  return { service, client, queries, provider, notification, protector, google, otpRates,
     get enrollment() { return enrollment; }, get challenge() { return challenges.at(-1); },
     challenges,
     set bound(value: boolean) { bound = value; },
@@ -418,6 +438,175 @@ describe('PatientEnrollmentService', () => {
       .rejects.toMatchObject({ code: 'OTP_INVALID' });
     expect(f.enrollment?.state).toBe('verify_contact');
     expect(f.challenge?.consumed_at).toBeUndefined();
+  });
+
+  describe('contact code failure budget per recipient (ENR-6)', () => {
+    type Fixture = ReturnType<typeof fixture>;
+    const wrong = (code: string) => (code === '000000' ? '000001' : '000000');
+    const lastCode = (f: Fixture) => f.notification.deliver.mock.calls.at(-1)?.[0].code as string;
+    const refusesCode = (f: Fixture, cookie: string, challengeId: string, code: string) =>
+      expect(f.service.verifyContact(cookie, challengeId, code, correlationId))
+        .rejects.toMatchObject({ status: 422, code: 'OTP_INVALID' });
+    const budgetStatements = (queries: RecordedQuery[]) => queries.filter(({ sql, values }) =>
+      sql.includes('auth.otp_rate_limits') || String(values[0]).startsWith('otp-rate:'));
+
+    it('refuses even the correct code once five wrong codes across its challenges spend the recipient budget', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const first = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      const firstCode = lastCode(f);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await refusesCode(f, started.cookie, first.challengeId, wrong(firstCode));
+      }
+      // A resend opens a challenge with five attempts of its own; the recipient's budget carries over.
+      const second = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+        '198.51.100.7', correlationId);
+      const secondCode = lastCode(f);
+      expect(f.challenges[0]?.invalidated_at).toBeInstanceOf(Date);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await refusesCode(f, started.cookie, second.challengeId, wrong(secondCode));
+      }
+      expect(f.challenge?.failed_attempts).toBe(2);
+
+      await refusesCode(f, started.cookie, second.challengeId, secondCode);
+      expect(f.enrollment?.state).toBe('verify_contact');
+      // Refused before the comparison: the challenge stays open and the attempt is not counted.
+      expect(f.challenge?.failed_attempts).toBe(2);
+      expect(f.challenge?.consumed_at).toBeUndefined();
+      expect(f.challenge?.invalidated_at).toBeUndefined();
+      expect(f.queries.some(({ sql }) => sql.includes("set state='set_password'"))).toBe(false);
+
+      // The block lasts one window; once it has passed, the same challenge's code verifies.
+      for (const row of f.otpRates.values()) row.blocked_until = new Date(Date.now() - 1000);
+      await expect(f.service.verifyContact(started.cookie, second.challengeId, secondCode, correlationId))
+        .resolves.toEqual({ stage: 'set_password' });
+    });
+
+    it('keys one budget on the recipient alone, across enrollments and networks, never on the client IP', async () => {
+      const otpRates = new Map<string, OtpRateRow>();
+      const [a, b, other] = [fixture(otpRates), fixture(otpRates), fixture(otpRates)];
+      const startedA = await a.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const contactA = await a.service.startContact(startedA.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await refusesCode(a, startedA.cookie, contactA.challengeId, wrong(lastCode(a)));
+      }
+      // Another enrollment, from another network, with the same contact written differently.
+      const startedB = await b.service.start(nin, requestKey, '198.51.100.7', correlationId);
+      const contactB = await b.service.startContact(startedB.cookie, 'email', '  Patient@Example.TEST ',
+        '198.51.100.7', correlationId);
+      expect(b.challenge?.recipient_hmac).toBe(a.challenge?.recipient_hmac);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await refusesCode(b, startedB.cookie, contactB.challengeId, wrong(lastCode(b)));
+      }
+      await refusesCode(b, startedB.cookie, contactB.challengeId, lastCode(b));
+      expect(b.enrollment?.state).toBe('verify_contact');
+
+      // Another recipient keeps its own budget.
+      const startedOther = await other.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const contactOther = await other.service.startContact(startedOther.cookie, 'email',
+        'someone-else@example.test', '203.0.113.10', correlationId);
+      await expect(other.service.verifyContact(startedOther.cookie, contactOther.challengeId,
+        lastCode(other), correlationId)).resolves.toEqual({ stage: 'set_password' });
+
+      const rows = [...a.queries, ...b.queries].filter(({ sql }) => sql.includes('auth.otp_rate_limits'));
+      expect(new Set(rows.map(({ values }) => `${values[0]}:${values[1]}`)).size).toBe(1);
+      expect(rows[0]?.values[0]).toBe('recipient');
+      const bucket = rows[0]?.values[1] as string;
+      expect(bucket).toMatch(/^[0-9a-f]{64}$/);
+      // Its own HMAC domain: not the stored recipient HMAC, which also keys the contact start bucket.
+      expect(bucket).not.toBe(a.challenge?.recipient_hmac);
+      expect([...otpRates.keys()]).toEqual([`recipient:${bucket}`]);
+    });
+
+    it('sends no new code to a recipient whose budget is spent, and leaves other recipients alone', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      const code = lastCode(f);
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await refusesCode(f, started.cookie, contact.challengeId, wrong(code));
+      }
+      expect(f.notification.deliver).toHaveBeenCalledTimes(1);
+
+      await expect(f.service.startContact(started.cookie, 'email', 'Patient@Example.test',
+        '198.51.100.7', correlationId)).rejects.toMatchObject({ status: 429, code: 'ENROLLMENT_RATE_LIMITED' });
+      expect(f.notification.deliver).toHaveBeenCalledTimes(1);
+      expect(f.challenges).toHaveLength(1);
+      await expect(f.service.startContact(started.cookie, 'phone', '08012345678',
+        '203.0.113.10', correlationId)).resolves.toMatchObject({ challengeId: expect.any(String) });
+      expect(f.notification.deliver).toHaveBeenCalledTimes(2);
+    });
+
+    it('touches no budget for an unknown or expired challenge', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      const code = lastCode(f);
+      f.queries.length = 0;
+      await refusesCode(f, started.cookie, '7d5e8a52-4c0e-4b5f-9a43-2f8f6f1f3c11', wrong(code));
+      f.challenge!.expires_at = new Date(Date.now() - 1000);
+      await refusesCode(f, started.cookie, contact.challengeId, wrong(code));
+      expect(budgetStatements(f.queries)).toEqual([]);
+      expect(f.otpRates.size).toBe(0);
+    });
+
+    it('reads, compares and counts under the bucket lock taken after the challenge lock, writing no other challenge', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      const code = lastCode(f);
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await refusesCode(f, started.cookie, contact.challengeId, wrong(code));
+      }
+      f.queries.length = 0;
+      // The fifth wrong code spends the budget.
+      await refusesCode(f, started.cookie, contact.challengeId, wrong(code));
+
+      const position = (predicate: (query: RecordedQuery) => boolean) => f.queries.findIndex(predicate);
+      const challengeLock = position(({ sql }) => sql.includes('from identity.public_patient_enrollment_otps where id=$1')
+        && sql.includes('for update'));
+      const bucketLocks = f.queries.filter(({ sql, values }) => sql.includes('pg_advisory_xact_lock')
+        && String(values[0]).startsWith('otp-rate:'));
+      const firstBucketLock = bucketLocks[0] ? f.queries.indexOf(bucketLocks[0]) : -1;
+      const blockedRead = position(({ sql }) => sql.includes('coalesce(blocked_until > clock_timestamp(), false)'));
+      const counted = position(({ sql }) => sql.includes('insert into auth.otp_rate_limits'));
+      expect(challengeLock).toBeGreaterThanOrEqual(0);
+      expect(firstBucketLock).toBeGreaterThan(challengeLock);
+      expect(blockedRead).toBeGreaterThan(firstBucketLock);
+      expect(counted).toBeGreaterThan(blockedRead);
+      // One lock key throughout: the one consumeRateLimit takes for this bucket.
+      const bucket = f.queries[counted]?.values[1];
+      expect(new Set(bucketLocks.map(({ values }) => values[0]))).toEqual(new Set([`otp-rate:recipient:${bucket}`]));
+      // Only this challenge is written; no other challenge is invalidated under these locks.
+      expect(f.queries.filter(({ sql }) => sql.includes('update identity.public_patient_enrollment_otps'))
+        .map(({ values }) => values[0])).toEqual([contact.challengeId]);
+      expect(f.otpRates.get(`recipient:${bucket}`)?.blocked_until).toBeInstanceOf(Date);
+    });
+
+    it('applies a configured budget and window', async () => {
+      Object.assign(process.env, { PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX: '3',
+        PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: '1800' });
+      resetEnvironmentForTests();
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      const code = lastCode(f);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await refusesCode(f, started.cookie, contact.challengeId, wrong(code));
+      }
+      await refusesCode(f, started.cookie, contact.challengeId, code);
+      const [row] = [...f.otpRates.values()];
+      expect(row?.request_count).toBe(3);
+      const remaining = (row?.blocked_until?.getTime() ?? 0) - Date.now();
+      expect(remaining).toBeGreaterThan(1_790_000);
+      expect(remaining).toBeLessThanOrEqual(1_800_000);
+    });
   });
 
   it('invalidates the old challenge when the applicant changes the selected account contact', async () => {
