@@ -1941,8 +1941,8 @@ runner's 5 s lock timeout (`MIGRATION_RUNBOOK.md`).
   guard). It then checks that the rotated session reads the selection while
   the replaced session and another sign-in of the account do not, and that
   after sign-out the row stays but is neither read nor changeable.
-  `scripts/run-container-database-acceptance.sh` runs it after
-  `outreach-session-guards.integration.sql`.
+  `scripts/run-container-database-acceptance.sh` runs it last, after
+  `runtime-command-privileges.integration.sql`.
   `services/identity-api/scripts/verify-facility-selection-runtime.mjs`
   exercises the HTTP contract against a migrated database as
   `hid_identity_api_runtime`.
