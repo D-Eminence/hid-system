@@ -19,8 +19,7 @@ Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
 This is the browser contract of staff and patient sessions. Sign-out without
 a live access token, the `X-HID-Client` check and the refresh-token lookup
-rules below come from D-Eminence/hid-system#39, which is not merged or
-deployed. Platform administration sessions use their own cookies and
+rules below come from D-Eminence/hid-system#39, which is not yet deployed. Platform administration sessions use their own cookies and
 `/auth/admin/*` routes (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1).
 
 Identity sets three cookies at sign-in and on every refresh (`setCookies` in

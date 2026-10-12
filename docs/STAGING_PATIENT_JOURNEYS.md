@@ -146,7 +146,7 @@ contacts, `pending_reset` accounts, no patient workforce authority, and the exac
 synthetic clinician facility role. Pending recovery remains denied by the patient
 runtime. The existing patient HTTP checks also run with NIN explicitly deferred
 and its credentials absent; local-only Turnstile and notification test doubles
-remain local-only. With D-Eminence/hid-system#39 (not merged), the rehearsal
+remain local-only. With D-Eminence/hid-system#39, the rehearsal
 also runs `services/identity-api/scripts/verify-session-sign-out-runtime.mjs` as
 the Identity runtime (`session_sign_out_runtime`): sign-out by refresh cookie
 for a patient and a staff sign-in, and refresh and sign-out refused with

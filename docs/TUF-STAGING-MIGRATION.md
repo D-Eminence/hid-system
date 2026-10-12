@@ -36,9 +36,8 @@ The executable covers:
    `session_sign_out_runtime` and `platform_security_runtime` (the patient
    safety, provider enrollment, platform admin and platform security verifiers
    on a disposable copy of the rehearsal database). `session_sign_out_runtime`
-   (`verify-session-sign-out-runtime.mjs`, D-Eminence/hid-system#39, not
-   merged) covers sign-out by refresh cookie after the access cookie has
-   expired, and refresh and sign-out refused with
+   (`verify-session-sign-out-runtime.mjs`, D-Eminence/hid-system#39) covers
+   sign-out by refresh cookie after the access cookie has expired, and refresh and sign-out refused with
    `403 SESSION_CLIENT_MISMATCH` when `X-HID-Client` names the other
    application. It also covers an older rotated token, which ends its sign-in
    whichever application signs out; a sign-out during a timed account

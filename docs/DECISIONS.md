@@ -1840,8 +1840,8 @@ Related: ADR-028, ADR-039, ADR-040; release checklist P8 and §4.1.
 
 # ADR-044: Sign-Out Authenticates Itself; Browser Apps Name Their Kind of Sign-In
 
-Status: Proposed with D-Eminence/hid-system#39 (implemented on its branch; not
-merged or deployed).
+Status: Accepted for source implementation (D-Eminence/hid-system#39). Not
+deployed.
 
 Date: 2026-10-11
 

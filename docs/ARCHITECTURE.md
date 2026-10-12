@@ -1232,7 +1232,7 @@ Shared build and development configuration where appropriate.
 
 Identity-owned cookie, CSRF, session, actor, and sign-out browser transport.
 It does not send `X-HID-Client`, so its applications refresh and sign out as
-unnamed clients; that header (D-Eminence/hid-system#39, not merged) keeps a
+unnamed clients; that header (D-Eminence/hid-system#39) keeps a
 named staff or patient application from refreshing or ending the other's
 sign-in while refresh could renew it (`INTERFACE_CONTRACT.md`, "Auth session
 contract"; ADR-044). Its `signOut`

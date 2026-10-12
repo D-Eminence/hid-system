@@ -28,7 +28,7 @@ Staff and patient browser sessions use host-only cookies with Origin and CSRF
 checks. Their cookie names and paths, the refresh and sign-out outcomes, and
 the `X-HID-Client` header that keeps a cookie refresh or sign-out from acting
 on the other application's sign-in while refresh could renew it
-(D-Eminence/hid-system#39, not merged) are specified in `../../docs/INTERFACE_CONTRACT.md` ("Auth session
+(D-Eminence/hid-system#39) are specified in `../../docs/INTERFACE_CONTRACT.md` ("Auth session
 contract"). `scripts/verify-session-sign-out-runtime.mjs` exercises them
 through the controller as `hid_identity_api_runtime`. It runs only inside the
 synthetic migration rehearsal (`scripts/tuf-staging-migration-rehearsal.mjs`

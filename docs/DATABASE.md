@@ -1240,7 +1240,7 @@ a reachable Super Admin to be suspendable.
   reuse, an administrator revoking their own session, sign-out and expiry. A
   sign-out revokes the presented session's family, so it also ends a session
   that a refresh in another tab created while it waited. With
-  D-Eminence/hid-system#39 (not merged; no migration or grant change), a
+  D-Eminence/hid-system#39 (no migration or grant change), a
   sign-out by refresh cookie, once the access token has expired, takes the
   same path. It locks the account by the session that `refresh_token_sha256`
   finds, then reads that session and ends the sign-in if anything of it is
