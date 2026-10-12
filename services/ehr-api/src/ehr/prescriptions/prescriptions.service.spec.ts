@@ -85,8 +85,8 @@ describe('PrescriptionsService Pharmacy handoff', () => {
   });
 
   // Pharmacy accepts a prescription only when its snapshot equals the EHR row
-  // (pharmacy.validate_work_item, 0080): the dates as dates now, prescribed_at
-  // against created_at at the microsecond in a later release.
+  // (pharmacy.validate_work_item, 0080); it compares prescribed_at with
+  // created_at at the microsecond, and the dates, in a later release.
   it('sends Pharmacy the prescription time at the microsecond and the dates as written', async () => {
     const { query, service } = serviceFor(prescription(OrderStatus.Active));
     await service.acceptForPharmacy(context, patientId, encounterId, prescriptionId,

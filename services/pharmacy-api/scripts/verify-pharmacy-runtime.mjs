@@ -14,8 +14,9 @@
 // not the exact active prescription version, and a dispensing whose
 // prescription is no longer active at the accepted version, are refused with
 // 409, including when the EHR cancels the prescription while the dispensing
-// runs. The acceptance does not compare the prescription time in this release,
-// so the millisecond an earlier EHR build sends is still accepted. The EHR's
+// runs. The acceptance does not compare the prescription time or dates in this
+// release, so the millisecond, and the day-early dates of a process east of
+// UTC, that an earlier EHR build sends are still accepted. The EHR's
 // cancel is played by the database owner: it locks the row and sets status and
 // row_version as the EHR's update does, with triggers off.
 import assert from 'node:assert/strict';
@@ -80,9 +81,9 @@ try {
     // Work items whose prescription the EHR cancels around a dispense.
     source: { cancelled: workItem(), racing: workItem(), waiting: workItem(), rolledBack: workItem(), holding: workItem() },
     // Prescriptions not accepted yet: the exact snapshot is accepted; one is
-    // cancelled after the EHR's eligibility check, one is offered with a
-    // shifted start date and then with its time truncated to the millisecond.
-    accept: { exact: id(), fresh: id(), cancelled: id(), millisecond: id() } };
+    // cancelled after the EHR's eligibility check, one is offered with its time
+    // truncated to the millisecond and one with its start date a day early.
+    accept: { exact: id(), fresh: id(), cancelled: id(), millisecond: id(), dayEarly: id() } };
   f.a.subject = `synthetic:pharmacy-verifier-a:${f.a.account}`;
   f.b.subject = `synthetic:pharmacy-verifier-b:${f.b.account}`;
   // The acceptance snapshot of every unaccepted prescription: what the EHR sends
@@ -152,6 +153,7 @@ try {
     await insertPrescription(client, f.accept.exact, { accepted: false });
     await insertPrescription(client, f.accept.fresh, { accepted: false });
     await insertPrescription(client, f.accept.millisecond, { accepted: false });
+    await insertPrescription(client, f.accept.dayEarly, { accepted: false });
     // Cancelled after the EHR checked it at version 1: the EHR's update moved it to version 2.
     await insertPrescription(client, f.accept.cancelled, { accepted: false, status: 'cancelled', version: 2 });
     await client.query(`insert into pharmacy.dispensings (id,work_item_id,work_item_version,patient_id,facility_id,
@@ -227,8 +229,7 @@ try {
   };
   await ineligible(acceptBody(id()), 'accept a prescription that does not exist');
   await ineligible(acceptBody(f.accept.cancelled), 'accept a prescription cancelled after the EHR checked it');
-  await ineligible({ ...acceptBody(f.accept.millisecond), startsOn: '2026-09-30' }, 'accept with the start date a day early');
-  check('accept: a prescription that does not exist, one cancelled after the EHR checked it and a start date a day early are each refused 409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE; nothing written');
+  check('accept: a prescription that does not exist and one cancelled after the EHR checked it are each refused 409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE; nothing written');
   // An EHR build before this change sends created_at through a JavaScript Date,
   // which keeps the millisecond. The acceptance does not compare the time in
   // this release, so such a build can still hand off (deployed after 0080, or
@@ -239,6 +240,15 @@ try {
   assert.equal(millisecondAccepted.status, 'accepted');
   assert.equal(await workItemsOf(f.accept.millisecond), 1);
   check('accept: the exact snapshot with the prescription time truncated to the millisecond, as an earlier EHR build sends it, is accepted (201)');
+  // Such a build also sends the dates as node-postgres local-midnight Dates,
+  // which a process east of UTC renders a day early. The acceptance does not
+  // compare the dates in this release either.
+  const dayEarly = { ...acceptBody(f.accept.dayEarly), startsOn: '2026-09-30' };
+  const dayEarlyAccepted = expectStatus(await send('/work-items/accept-ehr-prescription', dayEarly,
+    { key: key('accept-day-early'), internal: 'ehr-api' }), 201, 'accept with the start date a day early');
+  assert.equal(dayEarlyAccepted.status, 'accepted');
+  assert.equal(await workItemsOf(f.accept.dayEarly), 1);
+  check('accept: the exact snapshot with the start date a day early, as an earlier EHR build east of UTC sends it, is accepted (201)');
   const acceptKey = key('accept');
   const accepted = sameResult(await together(4, () => send('/work-items/accept-ehr-prescription', prescription,
     { key: acceptKey, internal: 'ehr-api' })), 'four concurrent identical accepts');

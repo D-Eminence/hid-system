@@ -1986,9 +1986,12 @@ no grant or policy is added.
   policies call it), column `SELECT` on `id` and the compared columns, an
   `UPDATE` privilege for the lock and the matching policies.
 - The acceptance guard compares every snapshot field except the prescription
-  time: migrations run before the EHR API is deployed and the EHR may be
-  rolled back, and earlier EHR builds send the time at the millisecond. The
-  exact time is a follow-up for a later release.
+  time and the start and end dates: migrations run before the EHR API is
+  deployed and the EHR may be rolled back, and earlier EHR builds send the
+  time at the millisecond and the dates as local-midnight `Date` values, a
+  day early in a process east of UTC. Comparing the exact time and dates is a
+  follow-up for a later release, once the EHR rollback floor sends their
+  exact texts.
 - The guards require the accepted version, not only an active status: the
   fail-closed default while the lifecycle of accepted work after an EHR
   change is undecided (`DATABASE.md`, "Pharmacy source prescription guards

@@ -12,19 +12,21 @@
 --
 --   pharmacy_work_item_source_prescription: an acceptance unless the snapshot
 --   is the exact active prescription version (patient, facility, encounter,
---   version, status, medication, dose, route, frequency, instructions, start
---   and end dates and prescriber), as Lab accepts an EHR order
---   (lab.validate_work_item, 0077);
+--   version, status, medication, dose, route, frequency, instructions and
+--   prescriber), as Lab accepts an EHR order (lab.validate_work_item, 0077);
 --   pharmacy_dispensing_source_prescription: a dispensing unless the
 --   prescription of its work item is still active at the version Pharmacy
 --   accepted.
 --
--- The acceptance does not compare prescribed_at with created_at yet. The
--- migrations run before the EHR API is deployed, and the EHR API may be rolled
--- back; every EHR build before this release sends created_at truncated to the
--- millisecond, so an exact comparison would refuse nearly every acceptance it
--- sends. The exact time term is left to a later migration, once every EHR
--- build that can be deployed sends created_at at the microsecond.
+-- The acceptance does not compare prescribed_at with created_at, or starts_on
+-- and ends_on with the prescription's dates, yet. The migrations run before
+-- the EHR API is deployed, and the EHR API may be rolled back; every EHR build
+-- before this release sends created_at truncated to the millisecond, and sends
+-- the dates as node-postgres local-midnight Dates, which a process east of UTC
+-- renders a day early. Exact comparisons would refuse nearly every acceptance
+-- such a build sends, so Pharmacy stores those three fields as it did before.
+-- The three terms are left to a later migration, once every EHR build that
+-- can be deployed or rolled back to sends the exact time and date texts.
 --
 -- Requiring the accepted version, not only an active status, is the
 -- fail-closed default while the lifecycle of accepted work after an EHR
@@ -67,8 +69,6 @@ declare
   rx_route_code text;
   rx_frequency text;
   rx_instructions text;
-  rx_starts_on date;
-  rx_ends_on date;
   rx_created_by uuid;
 begin
   if session_facility_id is null
@@ -84,10 +84,10 @@ begin
   end if;
   select p.patient_id, p.facility_id, p.encounter_id, p.row_version, p.status, p.medication_code_system,
          p.medication_code, p.medication_display, p.dose_quantity, p.dose_unit, p.route_code, p.frequency,
-         p.instructions, p.starts_on, p.ends_on, p.created_by
+         p.instructions, p.created_by
     into rx_patient_id, rx_facility_id, rx_encounter_id, rx_version, rx_status, rx_medication_code_system,
          rx_medication_code, rx_medication_display, rx_dose_quantity, rx_dose_unit, rx_route_code, rx_frequency,
-         rx_instructions, rx_starts_on, rx_ends_on, rx_created_by
+         rx_instructions, rx_created_by
     from ehr.prescriptions p
    where p.id = new.source_ehr_prescription_id
      for share;
@@ -105,8 +105,6 @@ begin
      or rx_route_code is distinct from new.route_code
      or rx_frequency is distinct from new.frequency
      or rx_instructions is distinct from new.instructions
-     or rx_starts_on is distinct from new.starts_on
-     or rx_ends_on is distinct from new.ends_on
      or rx_created_by is distinct from new.prescribed_by then
     raise exception using errcode = '23514', constraint = 'pharmacy_work_item_source_prescription',
       message = 'Pharmacy acceptance does not match the exact active EHR prescription version';

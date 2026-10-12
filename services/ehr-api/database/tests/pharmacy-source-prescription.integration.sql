@@ -11,14 +11,15 @@
 -- prescription as its owner, with a share lock, and refuses with SQLSTATE 23514
 -- naming its own constraint: an acceptance unless the snapshot is the exact
 -- active prescription version (patient, facility, encounter, version, status,
--- medication, dose, route, frequency, instructions, dates and prescriber), a
+-- medication, dose, route, frequency, instructions and prescriber), a
 -- dispensing unless the prescription is still active at the version Pharmacy
 -- accepted. A reversal does not read the prescription, so a dispensing can
 -- still be corrected after a cancel. The acceptance does not compare
--- prescribed_at with created_at in this release: EHR builds before it send the
--- time truncated to the millisecond, and they may still run, before the EHR
--- API is deployed or after it is rolled back, so such an acceptance is
--- accepted.
+-- prescribed_at, starts_on or ends_on with the prescription in this release:
+-- EHR builds before it send the time truncated to the millisecond and the
+-- dates as local-midnight Dates (a day early east of UTC), and they may still
+-- run, before the EHR API is deployed or after it is rolled back, so such an
+-- acceptance is accepted.
 --
 -- Runtime cases run as hid_pharmacy_api_runtime with the session the Pharmacy
 -- API sets and the API's own INSERT statements; the prescriber's cancel runs as
@@ -435,10 +436,13 @@ select pg_temp.source_case('runtime', 'accept: the current version of that presc
 select pg_temp.source_case('runtime', 'accept: another encounter', pg_temp.source_refusal('work item'), 'A',
   pg_temp.accept_insert('e9a70000-0000-4000-8000-000000000108', 'e9a50000-0000-4000-8000-000000000011', 'A',
     encounter => 'e9a60000-0000-4000-8000-000000000002'));
-select pg_temp.source_case('runtime', 'accept: a start date one day early', pg_temp.source_refusal('work item'), 'A',
+-- An EHR build before this release, in a process east of UTC, sends the
+-- dates a day early; the dates are not compared yet either, so it is accepted.
+select pg_temp.source_case('runtime',
+  'accept: a start date one day early, as an earlier EHR build east of UTC sends it', 'ok', 'A',
   pg_temp.accept_insert('e9a70000-0000-4000-8000-000000000109', 'e9a50000-0000-4000-8000-000000000011', 'A',
     starts => '2026-09-30'));
-select pg_temp.source_case('runtime', 'accept: the end date left out', pg_temp.source_refusal('work item'), 'A',
+select pg_temp.source_case('runtime', 'accept: the end date left out, as the dates are not compared yet', 'ok', 'A',
   pg_temp.accept_insert('e9a70000-0000-4000-8000-00000000010a', 'e9a50000-0000-4000-8000-000000000011', 'A',
     ends => null));
 select pg_temp.source_case('runtime', 'accept: another prescriber', pg_temp.source_refusal('work item'), 'A',

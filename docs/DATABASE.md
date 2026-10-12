@@ -1829,15 +1829,19 @@ name the Pharmacy API maps to `409` (`INTERFACE_CONTRACT.md` §13):
   exist and equal the snapshot exactly: patient, facility (the ordering
   facility), encounter, `row_version`, status `active`, medication code
   system, code and display, dose quantity and unit, route, frequency,
-  instructions, `starts_on`, `ends_on` and `created_by` (`prescribed_by`), as
-  Lab binds an EHR order (`lab.validate_work_item`, 0077). Message: `Pharmacy
-  acceptance does not match the exact active EHR prescription version`.
-- The acceptance does not compare `prescribed_at` with `created_at` yet. The
-  migrations run before the EHR API is deployed and the EHR API may be rolled
-  back (release checklist §6, §9), and every EHR build before
-  `fix/pharmacy-source-prescription` sends `created_at` truncated to the
-  millisecond, so an exact term would refuse nearly every acceptance it sends.
-  Follow-up: add the exact term in a later migration, once the EHR rollback
+  instructions and `created_by` (`prescribed_by`), as Lab binds an EHR order
+  (`lab.validate_work_item`, 0077). Message: `Pharmacy acceptance does not
+  match the exact active EHR prescription version`.
+- The acceptance does not compare `prescribed_at` with `created_at`, or
+  `starts_on` and `ends_on` with the prescription's dates, yet; Pharmacy
+  stores those three as sent, as before 0080. The migrations run before the
+  EHR API is deployed and the EHR API may be rolled back (release checklist
+  §6, §9). Every EHR build before `fix/pharmacy-source-prescription` sends
+  `created_at` truncated to the millisecond, and the dates as node-postgres
+  local-midnight `Date` values, a day early in a process east of UTC; an
+  exact time term would refuse nearly every acceptance such a build sends,
+  and exact date terms every dated one sent from a process east of UTC.
+  Follow-up: add the three terms in a later migration, once the EHR rollback
   floor includes the exact handoff text below.
 - `pharmacy_dispensing_source_prescription` (dispensing): the work item's
   prescription must exist, belong to the work item's patient, facility and
@@ -1898,24 +1902,25 @@ dates as dates: `PrescriptionsService.acceptForPharmacy` reads
 `to_char(created_at at time zone 'UTC', ...)` (`timelineCursorSql`) and
 `to_char(starts_on|ends_on, 'YYYY-MM-DD')` in its locking query instead of
 sending node-postgres `Date` values (milliseconds; a date at local midnight,
-the day before in a process east of UTC). The guard compares the dates now
-and the time in the follow-up. An earlier EHR build in a process east of UTC
-sends a day-early date, which 0080 refuses (fail closed; before, Pharmacy
-stored the wrong day). No service image or deployment sets `TZ`, so the
-processes run in the container default, UTC. No EHR schema change.
+the day before in a process east of UTC). The guard compares neither yet
+(follow-up above). An earlier EHR build in a process east of UTC sends a
+day-early date, which Pharmacy stores as it did before 0080. No service image
+or deployment sets `TZ`, so the processes run in the container default, UTC.
+No EHR schema change.
 
 Tests (rollback-only, synthetic fixtures):
 
 - `services/ehr-api/database/tests/pharmacy-source-prescription.integration.sql`:
   42 cases. As `hid_pharmacy_api_runtime` with the Pharmacy API's session and
   INSERT statements: the exact snapshot (prescribed at the microsecond), the
-  same snapshot with the time truncated to the millisecond (as earlier EHR
-  builds send it) and the current version of an edited prescription are
-  accepted; a cancelled, missing or superseded prescription, another display,
-  encounter, start date, end date or prescriber are refused; a dispensing is
-  accepted for an active prescription and refused for one entered in error,
-  on hold, completed, draft, at a later version, missing, of another patient,
-  encounter or clinic, and after the prescriber's cancel, which runs as
+  same snapshot with the time truncated to the millisecond or the start date
+  a day early (as earlier EHR builds send them) or the end date left out, and
+  the current version of an edited prescription are accepted; a cancelled,
+  missing or superseded prescription, another display, encounter or
+  prescriber are refused; a dispensing is accepted for an active
+  prescription and refused for one entered in error, on hold, completed,
+  draft, at a later version, missing, of another patient, encounter or
+  clinic, and after the prescriber's cancel, which runs as
   `hid_ehr_api_runtime` through `ehr.capture_record_version` (version 2);
   both refusals report their constraint names; a dispensing made before a
   cancel can still be reversed. Isolated cases (`session_replication_role =
@@ -1933,10 +1938,10 @@ Tests (rollback-only, synthetic fixtures):
   snapshot under another key, so it still reaches `unique_violation`).
 - `services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs` (HTTP, as
   `hid_pharmacy_api_runtime`): acceptances use real prescriptions with their
-  microsecond time; a missing prescription, one cancelled after the EHR's
-  check and a shifted start date answer
-  `409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE`, and the millisecond time of an
-  earlier EHR build is accepted (`201`); a dispense after a cancel, racing
+  microsecond time; a missing prescription and one cancelled after the
+  EHR's check answer `409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE`, and the
+  millisecond time and the day-early start date of an earlier EHR build are
+  accepted (`201`); a dispense after a cancel, racing
   a cancel that commits after its snapshot (one retry), or waiting on a
   cancel in progress that commits answers
   `409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` with nothing written; a cancel

@@ -718,16 +718,17 @@ That result never means `dispensed`.
 The database binds the acceptance to the EHR row (`pharmacy.validate_work_item`,
 0080): the snapshot must equal the prescription exactly (patient, facility,
 encounter, version, `active` status, medication, dose, route, frequency,
-instructions, `startsOn`, `endsOn` and prescriber). Otherwise Pharmacy answers
+instructions and prescriber). Otherwise Pharmacy answers
 `409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE` (`application/problem+json`) and
 writes no work item, event, outbox or audit row; this covers a prescription
 cancelled, put on hold or edited after EHR's eligibility check, which commits
 before EHR calls Pharmacy. EHR passes the status and code through, so its
 handoff command answers the same `409`. An identical replay is answered before
 the check and returns the accepted work item, even after a cancel.
-`prescribedAt` is stored as sent and not compared in this release, so EHR
-builds that send it at the millisecond still hand off; comparing it at the
-microsecond is a follow-up for a later release.
+`prescribedAt`, `startsOn` and `endsOn` are stored as sent and not compared
+in this release, so EHR builds that send the time at the millisecond, or the
+dates a day early from a process east of UTC, still hand off; comparing them
+exactly is a follow-up for a later release.
 
 Dispensing is a separate Pharmacy command requiring an accepted work item,
 expected work-item version, positive quantity/unit, reason, pharmacist
@@ -1001,18 +1002,18 @@ verification. The Lab client follows the same bounded retry and per-attempt
 credential-refresh policy.
 
 Pharmacy accepts an EHR prescription only when the snapshot equals the EHR row
-(`pharmacy.validate_work_item`, 0080), so EHR sends `prescribedAt` as the
-prescription's `created_at` rendered by PostgreSQL at the microsecond
-(`YYYY-MM-DDTHH:MM:SS.ffffffZ`) and `startsOn` and `endsOn` as `YYYY-MM-DD`,
-never through a JavaScript `Date`, which keeps only milliseconds and turns a
-date into local midnight (the day before in a process east of UTC). The guard
-compares the dates now; it will compare `prescribedAt` exactly once no EHR
-build that sends milliseconds can still be deployed or rolled back to. Pharmacy's
-idempotency digest covers the text of the request, so an acceptance sent by an
-earlier EHR build and sent again with the same `Idempotency-Key`, or for the
-same prescription, after the upgrade gets `409 IDEMPOTENCY_CONFLICT`; the
-reverse holds during a rolling deploy or after a rollback. Pharmacy still has
-its work item.
+(`pharmacy.validate_work_item`, 0080), and a later release will also compare
+`prescribedAt`, `startsOn` and `endsOn` exactly, once no EHR build that sends
+them through a JavaScript `Date` can still be deployed or rolled back to. EHR
+therefore sends `prescribedAt` as the prescription's `created_at` rendered by
+PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`) and `startsOn`
+and `endsOn` as `YYYY-MM-DD`, never through a `Date`, which keeps only
+milliseconds and turns a date into local midnight (the day before in a process
+east of UTC). Pharmacy's idempotency digest covers the text of the request, so
+an acceptance sent by an earlier EHR build and sent again with the same
+`Idempotency-Key`, or for the same prescription, after the upgrade gets
+`409 IDEMPOTENCY_CONFLICT`; the reverse holds during a rolling deploy or after
+a rollback. Pharmacy still has its work item.
 
 ## 19. Platform Administration API
 
