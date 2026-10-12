@@ -37,7 +37,7 @@ Brevo fields are not required by this email-only staging check.
 For `/hid/staging/identity-sensitive` it reports `otpHmacKeyB64`,
 `contactLookupHmacKeyB64`, `turnstileSecretKey`, `googleOidcClientIds` and
 `mfaSecretKeyB64`, every field the ordinary staging Identity task reads (it
-reads `MFA_SECRET_KEY_B64` from the last since `fix/cdk-identity-mfa-secret`).
+reads `MFA_SECRET_KEY_B64` from the last since D-Eminence/hid-system#49).
 ECS starts no Identity task while a referenced field is missing; add each
 before deploying that task definition (deployment runbook §1).
 

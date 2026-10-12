@@ -76,7 +76,7 @@ external owners before cutover.
 
 The Identity task reads `MFA_SECRET_KEY_B64` from the `mfaSecretKeyB64` field of
 the `IdentitySensitiveSecretArn` secret and runs with `MFA_KEY_VERSION=aws-v1`
-in every environment (`fix/cdk-identity-mfa-secret`). Before deploying that task
+in every environment (D-Eminence/hid-system#49). Before deploying that task
 definition, add `mfaSecretKeyB64` to the environment's secret: 32 bytes from a
 cryptographically secure generator in canonical padded base64 (44 characters),
 written without printing it and keeping every other field. Generate it
@@ -120,7 +120,7 @@ record tokens. All staging modes retain the same issuer and P-256 key. Confirm
 the production template still matches its recorded baseline (below) byte for
 byte; production and development keep their external workload-identity inputs.
 
-**Recorded template baseline.** Offline synthesis of `fix/cdk-identity-mfa-secret`
+**Recorded template baseline.** Offline synthesis of D-Eminence/hid-system#49
 (with `main` at `6b49a06` merged, which changes nothing under `infra/aws`)
 with `npm --prefix infra/aws run synth:prod` (and `synth:dev`), no
 `HID_AWS_ACCOUNT`/`HID_AWS_REGION`, no AWS credentials, `aws-cdk-lib` 2.273.0 and
