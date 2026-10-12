@@ -320,4 +320,79 @@ begin
 end
 $$;
 
+-- A correct PIN for one patient must not reset the actor's failure window.
+-- Before 0079 any success cleared the actor's count, so a clinician who knew
+-- one patient's PIN could guess another patient's PIN four times, enter the
+-- known PIN, and repeat without ever being locked. The success still clears
+-- the window of the patient it verified, and only that one.
+delete from identity.patient_access_pin_target_limits;
+delete from identity.patient_access_pin_actor_limits;
+insert into identity.patient_access_pins (
+  patient_id, pin_hash, source_system, source_record_id, source_created_at, source_updated_at
+) values ('b5000000-0000-4000-8000-000000000002', crypt('1357', gen_salt('bf', 12)),
+   'supabase', 'legacy-pin-known', clock_timestamp() - interval '2 days', clock_timestamp() - interval '1 day');
+set local role hid_identity_api_runtime;
+select set_config('app.correlation_id', 'pin-integration-actor-window', true);
+do $$
+declare result record; attempt integer;
+begin
+  -- Four failures in the actor's window: three at the guessed patient, one at
+  -- the patient whose PIN the actor knows.
+  for attempt in 1..3 loop
+    select * into result from identity.access_patient_with_pin('HID-PNACCE55', '9999', 15);
+    if result.verified then raise exception 'Invalid PIN unexpectedly verified during actor-window test'; end if;
+  end loop;
+  select * into result from identity.access_patient_with_pin('HID-PNABCD66', '2468', 15);
+  if result.verified then raise exception 'Invalid PIN unexpectedly verified during actor-window test'; end if;
+  select * into result from identity.access_patient_with_pin('HID-PNABCD66', '1357', 15);
+  if not result.verified then raise exception 'Known PIN did not verify after four failures under the limit'; end if;
+end
+$$;
+reset role;
+do $$
+begin
+  if (select array_agg(patient_id::text || ':' || failure_count order by patient_id)
+        from identity.patient_access_pin_target_limits
+       where actor_account_id = 'b2000000-0000-4000-8000-000000000001'
+         and facility_id = 'b1000000-0000-4000-8000-000000000002')
+     is distinct from array['b5000000-0000-4000-8000-000000000001:3', 'b5000000-0000-4000-8000-000000000002:0'] then
+    raise exception 'A success must clear the verified patient''s window and leave the other patient''s window alone';
+  end if;
+  if (select failure_count from identity.patient_access_pin_actor_limits
+       where actor_account_id = 'b2000000-0000-4000-8000-000000000001'
+         and facility_id = 'b1000000-0000-4000-8000-000000000002') is distinct from 4 then
+    raise exception 'A correct PIN for another patient reset the actor failure window';
+  end if;
+end
+$$;
+set local role hid_identity_api_runtime;
+do $$
+declare result record;
+begin
+  select * into result from identity.access_patient_with_pin('HID-PNACCE55', '9999', 15);
+  if result.verified then raise exception 'Invalid PIN unexpectedly verified during actor-window test'; end if;
+  -- The fifth failure in the window locks the actor; even the known PIN is refused.
+  select * into result from identity.access_patient_with_pin('HID-PNABCD66', '1357', 15);
+  if result.verified then raise exception 'A success reset the actor window: the known PIN still verified after five failures'; end if;
+end
+$$;
+reset role;
+do $$
+begin
+  if not exists (
+      select 1 from identity.patient_access_pin_actor_limits
+       where actor_account_id = 'b2000000-0000-4000-8000-000000000001'
+         and facility_id = 'b1000000-0000-4000-8000-000000000002'
+         and failure_count = 5 and locked_until > clock_timestamp()
+    ) then
+    raise exception 'A correct PIN for another patient reset the actor failure window';
+  end if;
+  if (select failure_count from identity.patient_access_pin_target_limits
+       where actor_account_id = 'b2000000-0000-4000-8000-000000000001'
+         and patient_id = 'b5000000-0000-4000-8000-000000000001') is distinct from 4 then
+    raise exception 'The guessed patient''s failure window lost failures';
+  end if;
+end
+$$;
+
 rollback;
