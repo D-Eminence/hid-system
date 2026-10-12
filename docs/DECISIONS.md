@@ -2089,7 +2089,7 @@ Related: ADR-038 (platform sessions keep their own cookies and routes);
 
 # ADR-045: Outreach Cookie Reads Are Delegated; a Reported Read Authorizes Only a Read Permission
 
-Status: Proposed for source implementation (branch `fix/outreach-cookie-reads`).
+Status: Proposed for source implementation (D-Eminence/hid-system#43).
 Not merged or deployed.
 
 Date: 2026-10-12

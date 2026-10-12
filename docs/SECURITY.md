@@ -30,9 +30,8 @@ authenticates as an approved workload and reports the request it serves as
 `GET`, `HEAD` or `OPTIONS` in `X-HID-Original-Method` (ADR-043). The Outreach
 authorization accepts only the `outreach-api` workload and, after such a skip,
 authorizes only a permission ending in `.read`, so an Outreach write still
-needs the allowed Origin and CSRF token (ADR-045, branch
-`fix/outreach-cookie-reads`, not merged). It does not authorize
-`outreach.campaign.write` at all, as on `main`: who may create campaigns,
+needs the allowed Origin and CSRF token (ADR-045, D-Eminence/hid-system#43).
+It does not authorize `outreach.campaign.write` at all, as on `main`: who may create campaigns,
 change their status and add members, and so who enters a campaign's linked
 registrations, is an open product decision (ADR-045). Sign-out must still work once the
 short-lived access token has expired: with D-Eminence/hid-system#39, Identity

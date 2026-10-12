@@ -57,7 +57,7 @@ The executable covers:
    authorized by Identity, and EHR cookie writes without Origin or CSRF are
    refused; and `outreach_cookie_read_runtime`
    (`services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs`,
-   branch `fix/outreach-cookie-reads`), which runs Outreach as
+   D-Eminence/hid-system#43), which runs Outreach as
    `hid_outreach_api_runtime` and Identity as `hid_identity_api_runtime`: a
    doctor's same-origin cookie reads of registration cases and campaigns, with
    no Origin or CSRF token, are authorized through Identity, cookie writes need
