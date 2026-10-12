@@ -61,8 +61,9 @@ export function requireRequestContext(request: HidRequest, suppliedPurpose?: str
   if (!request.header('authorization') && !request.header('cookie')) {
     throw new Error('Validated authorization is required for Lab data access');
   }
-  // A write's purpose comes from its validated body; a read's from the header,
-  // which the guard does not check, so a missing or unknown one is the client's.
+  // A body purpose (the external import) is validated before this; the header,
+  // which every other route uses, is not checked by the guard, so a missing or
+  // unknown purpose is the client's error.
   const candidate = suppliedPurpose ?? request.header('x-purpose-of-use');
   if (!candidate || !PURPOSES.has(candidate as PurposeOfUse)) {
     throw new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED',
