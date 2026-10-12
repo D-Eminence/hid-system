@@ -39,6 +39,11 @@ Separation:
 
 `requireAdminContext` also refuses any non-platform actor. A platform refresh
 token is refused by `/auth/refresh`, and a staff token by `/auth/admin/refresh`.
+With D-Eminence/hid-system#39 (not merged), `POST /auth/logout` is public at
+the guard and authenticates the request itself. It still answers a platform
+access token with `403 PLATFORM_SESSION_SCOPE_DENIED` and ends nothing, and
+its refresh-cookie path never matches a platform refresh token
+(`INTERFACE_CONTRACT.md`, "Auth session contract").
 
 ## 2. MFA
 

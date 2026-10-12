@@ -24,6 +24,17 @@ routes while separately propagating the user credential. Production accepts
 only asymmetric issuer/JWKS workload evidence; local tokens are development
 only.
 
+Staff and patient browser sessions use host-only cookies with Origin and CSRF
+checks. Their cookie names and paths, the refresh and sign-out outcomes, and
+the `X-HID-Client` header that limits a cookie refresh or sign-out to the
+calling application's own kind of sign-in (D-Eminence/hid-system#39, not
+merged) are specified in `../../docs/INTERFACE_CONTRACT.md` ("Auth session
+contract"). `scripts/verify-session-sign-out-runtime.mjs` exercises them
+through the controller as `hid_identity_api_runtime`. It runs only inside the
+synthetic migration rehearsal (`scripts/tuf-staging-migration-rehearsal.mjs`
+at the repository root, also run by `release/scripts/run-workspace-gates.mjs`),
+never against a deployed environment.
+
 The service uses `DATABASE_URL` through a login that inherits
 `hid_identity_api_runtime` (Identity/authentication persistence plus
 append-only audit), never an EHR, Lab, Pharmacy, OCR, or Outreach role.

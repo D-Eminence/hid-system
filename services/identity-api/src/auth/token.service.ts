@@ -89,6 +89,20 @@ export class TokenService {
    */
   private static readonly ROTATED_KIND_GRACE_SECONDS = 60;
 
+  /**
+   * The presented session's sign-in is one refresh() could renew now, so the
+   * app that holds it may be named: its account is live, it has not reached
+   * its absolute end, and its own session is live or was rotated within the
+   * last $2 (ROTATED_KIND_GRACE_SECONDS) seconds into a sign-in that is (the
+   * other app's tab refreshed first). An older rotated token is reuse.
+   */
+  private static readonly RENEWABLE = `${TokenService.ACCOUNT_LIVE}
+          and session.absolute_expires_at > clock_timestamp()
+          and ((session.revoked_at is null and session.expires_at > clock_timestamp())
+            or (session.revocation_reason = 'rotated'
+              and session.revoked_at > clock_timestamp() - make_interval(secs => $2)
+              and ${TokenService.FAMILY_LIVE}))`;
+
   private readonly environment = getEnvironment();
   private readonly signingKey = this.environment.AUTH_SIGNING_SECRET
     ? new TextEncoder().encode(this.environment.AUTH_SIGNING_SECRET)
@@ -399,7 +413,6 @@ export class TokenService {
     sessionId: string | undefined,
     actorSubject: string | undefined,
     event: SessionEventMetadata,
-    presented: 'access_token' | 'refresh_token' = 'access_token',
   ): Promise<void> {
     if (!sessionId) return;
     await this.database.withSystemTransaction(event.correlationId, async (client) => {
@@ -409,28 +422,40 @@ export class TokenService {
         'select auth.lock_account_sessions(session_row.account_id) from auth.sessions session_row where session_row.id = $1',
         [sessionId],
       );
-      // Sign-out ends the sign-in: the presented session and whatever its
-      // family rotated into, such as the session a refresh in another tab just
-      // created while this sign-out waited for it.
-      const result = await client.query<{ account_id: string }>(
-        `update auth.sessions
-            set revoked_at = coalesce(revoked_at, clock_timestamp()),
-                revocation_reason = coalesce(revocation_reason, 'logout'),
-                row_version = row_version + 1
-          where family_id = (select presented.family_id from auth.sessions presented where presented.id = $1)
-            and (id = $1 or revoked_at is null)
-          returning account_id::text`,
-        [sessionId],
-      );
-      const accountId = result.rows[0]?.account_id;
-      if (accountId) {
-        await this.insertSessionEvent(client, {
-          eventType: 'logout', outcome: 'success', accountId, sessionId, event,
-          details: { ...(actorSubject ? { actor_subject: actorSubject } : {}),
-            ...(presented === 'refresh_token' ? { presented: 'refresh_token' } : {}) },
-        });
-      }
+      await this.endSignIn(client, sessionId, actorSubject, event, 'access_token');
     });
+  }
+
+  /**
+   * Sign-out ends the sign-in: the presented session and whatever its family
+   * rotated into, such as the session a refresh in another tab just created
+   * while this sign-out waited for it. The caller holds the account lock.
+   */
+  private async endSignIn(
+    client: PoolClient,
+    sessionId: string,
+    actorSubject: string | undefined,
+    event: SessionEventMetadata,
+    presented: 'access_token' | 'refresh_token',
+  ): Promise<void> {
+    const result = await client.query<{ account_id: string }>(
+      `update auth.sessions
+          set revoked_at = coalesce(revoked_at, clock_timestamp()),
+              revocation_reason = coalesce(revocation_reason, 'logout'),
+              row_version = row_version + 1
+        where family_id = (select presented.family_id from auth.sessions presented where presented.id = $1)
+          and (id = $1 or revoked_at is null)
+        returning account_id::text`,
+      [sessionId],
+    );
+    const accountId = result.rows[0]?.account_id;
+    if (accountId) {
+      await this.insertSessionEvent(client, {
+        eventType: 'logout', outcome: 'success', accountId, sessionId, event,
+        details: { ...(actorSubject ? { actor_subject: actorSubject } : {}),
+          ...(presented === 'refresh_token' ? { presented: 'refresh_token' } : {}) },
+      });
+    }
   }
 
   /**
@@ -439,49 +464,63 @@ export class TokenService {
    * the CSRF token derived from this refresh token. The sign-in ends as
    * revoke() ends it; a platform refresh token is never accepted here.
    *
-   * Only a sign-in that is still live is ended: the token's own session is
-   * live, or it was rotated into a session that still is. A sign-in already
-   * ended, or one refresh() would refuse for its account, has nothing left to
-   * end, so a replayed cookie records no second sign-out.
+   * The sign-in is read under its account lock, after any sign-out or
+   * revocation that got there first, and ended if anything of it is left: its
+   * own session is unrevoked, or it was rotated into a session that is.
+   * Expiry and the account's state do not matter: a sign-in refresh() cannot
+   * renew now may become renewable again (a timed account suspension lapses),
+   * and ending one that cannot is harmless. One already ended, by this
+   * sign-out or any other, is not recorded again.
    *
    * When the calling app names the kind of sign-in it holds (X-HID-Client), a
-   * sign-in of the other kind is refused before anything ends: the staff and
-   * patient apps share these cookies, and one app's sign-out must not end the
-   * other's sign-in. The kind is read from the same row that would be ended,
-   * and it never changes for the life of a sign-in.
+   * sign-in of the other kind that refresh() could renew now (RENEWABLE) is
+   * refused before anything ends: the staff and patient apps share these
+   * cookies, and one app's sign-out must not end the other's sign-in. Any
+   * other sign-in is ended whichever app asks, without naming its kind, as
+   * refresh() ends a sign-in whose rotated token is presented again: so an
+   * old rotated token tells nobody whether, or as which app, its sign-in is
+   * still live. The kind never changes for the life of a sign-in.
    */
   async revokeByRefreshToken(refreshToken: string, event: SessionEventMetadata,
     expectedKind?: 'staff' | 'patient'): Promise<RefreshSignOut | { refusedKind: 'staff' | 'patient' } | undefined> {
-    const presented = await this.database.query<{ id: string; account_id: string; actor_subject: string;
-      session_kind: 'staff' | 'patient' }>(
-      `select session.id::text, session.account_id::text, account.subject as actor_subject, session.session_kind
-         from auth.sessions session
-         join auth.accounts account on account.id = session.account_id
-        where session.refresh_token_sha256 = $1
-          and session.session_kind in ('staff', 'patient')
-          and ${TokenService.ACCOUNT_LIVE}
-          and session.absolute_expires_at > clock_timestamp()
-          and ((session.revoked_at is null and session.expires_at > clock_timestamp())
-            or (session.revocation_reason = 'rotated' and ${TokenService.FAMILY_LIVE}))`,
-      [this.sha256(refreshToken)],
-    );
-    const session = presented.rows[0];
-    if (!session) return undefined;
-    if (expectedKind && session.session_kind !== expectedKind) return { refusedKind: session.session_kind };
-    await this.revoke(session.id, session.actor_subject, event, 'refresh_token');
-    return { sessionId: session.id, accountId: session.account_id, actorSubject: session.actor_subject,
-      kind: session.session_kind };
+    const refreshHash = this.sha256(refreshToken);
+    return this.database.withSystemTransaction(event.correlationId, async (client) => {
+      // Account row first, then the session (0073), as revoke().
+      await client.query(
+        `select auth.lock_account_sessions(session_row.account_id) from auth.sessions session_row
+          where session_row.refresh_token_sha256 = $1`,
+        [refreshHash],
+      );
+      const presented = await client.query<{ id: string; account_id: string; actor_subject: string;
+        session_kind: 'staff' | 'patient'; renewable: boolean }>(
+        `select session.id::text, session.account_id::text, account.subject as actor_subject, session.session_kind,
+                coalesce(${TokenService.RENEWABLE}, false) as renewable
+           from auth.sessions session
+           join auth.accounts account on account.id = session.account_id
+          where session.refresh_token_sha256 = $1
+            and session.session_kind in ('staff', 'patient')
+            and (session.revoked_at is null
+              or (session.revocation_reason = 'rotated' and exists (select 1 from auth.sessions unended
+                    where unended.family_id = session.family_id and unended.revoked_at is null)))`,
+        [refreshHash, TokenService.ROTATED_KIND_GRACE_SECONDS],
+      );
+      const session = presented.rows[0];
+      if (!session) return undefined;
+      if (expectedKind && session.session_kind !== expectedKind && session.renewable) {
+        return { refusedKind: session.session_kind };
+      }
+      await this.endSignIn(client, session.id, session.actor_subject, event, 'refresh_token');
+      return { sessionId: session.id, accountId: session.account_id, actorSubject: session.actor_subject,
+        kind: session.session_kind };
+    });
   }
 
   /**
    * The kind of the staff or patient sign-in a refresh token belongs to, read
-   * without rotating it, for a sign-in refresh() could still renew: its own
-   * session is live, or the token was rotated within the last
-   * ROTATED_KIND_GRACE_SECONDS into a sign-in that is still live (the other
-   * app's tab refreshed first). Any other token has no kind here and is left
-   * to refresh(), which refuses it, records the refusal and clears its cookies;
-   * an older rotated token is reuse, which refresh() answers by ending the
-   * whole sign-in.
+   * without rotating it, for a sign-in refresh() could renew now (RENEWABLE).
+   * Any other token has no kind here and is left to refresh(), which refuses
+   * it, records the refusal and clears its cookies; an older rotated token is
+   * reuse, which refresh() answers by ending the whole sign-in.
    */
   async refreshSessionKind(refreshToken: string): Promise<'staff' | 'patient' | undefined> {
     const result = await this.database.query<{ session_kind: 'staff' | 'patient' }>(
@@ -490,12 +529,7 @@ export class TokenService {
          join auth.accounts account on account.id = session.account_id
         where session.refresh_token_sha256 = $1
           and session.session_kind in ('staff', 'patient')
-          and ${TokenService.ACCOUNT_LIVE}
-          and session.absolute_expires_at > clock_timestamp()
-          and ((session.revoked_at is null and session.expires_at > clock_timestamp())
-            or (session.revocation_reason = 'rotated'
-              and session.revoked_at > clock_timestamp() - make_interval(secs => $2)
-              and ${TokenService.FAMILY_LIVE}))`,
+          and ${TokenService.RENEWABLE}`,
       [this.sha256(refreshToken), TokenService.ROTATED_KIND_GRACE_SECONDS],
     );
     return result.rows[0]?.session_kind;

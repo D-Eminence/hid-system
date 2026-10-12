@@ -313,5 +313,44 @@ try {
   assert.equal(lockedRefresh.status, 401, JSON.stringify(lockedRefresh.body)); clearsAll(lockedRefresh);
   checks.push('a refresh of a temporarily disabled account\'s sign-in sent with the other app\'s name gets refresh\'s 401 with its cookies cleared, not SESSION_CLIENT_MISMATCH');
 
+  // 11. Sign-out names the other app only where refresh would: moments after
+  // rotation. An older rotated token is reuse, so the sign-in ends whichever
+  // app sends it, and the answer does not say whose it was or that it was live.
+  const probed = await signIn(doctor, 'staff');
+  const probedNext = await refresh(probed.cookies, 'staff-web');
+  assert.equal(probedNext.status, 200, JSON.stringify(probedNext.body));
+  const inGrace = await logoutAs(refreshOnly(probed.cookies), 'patient-web');
+  assert.equal(inGrace.status, 403, JSON.stringify(inGrace.body));
+  assert.equal(inGrace.body.code, 'SESSION_CLIENT_MISMATCH'); assert.equal(inGrace.headers['set-cookie'], undefined);
+  assert.equal(await live(probedNext.body.actor.sessionId), true, 'a sign-out that raced the other app leaves its sign-in live');
+  await pool.query(`update auth.sessions set revoked_at = revoked_at - interval '2 minutes' where id = $1`, [probed.sessionId]);
+  const pastGrace = await logoutAs(refreshOnly(probed.cookies), 'patient-web');
+  assert.equal(pastGrace.status, 204, JSON.stringify(pastGrace.body)); clearsAll(pastGrace);
+  assert.equal(await live(probedNext.body.actor.sessionId), false, 'an older rotated token ends the sign-in it rotated into');
+  assert.equal(await logoutEvents(probed.sessionId), 1);
+  checks.push('a sign-out by a refresh token rotated moments ago, sent with the other app\'s name, is 403 SESSION_CLIENT_MISMATCH and its sign-in stays live; rotated more than a minute ago it is 204 with the cookies cleared and the whole sign-in ended, whichever app sends it');
+
+  // 12. A sign-in refresh() cannot renew now is ended all the same: once the
+  // account's timed suspension (section 10) lapses, nothing is left to renew.
+  assert.equal(await live(lockedSignIn.sessionId), true, 'refresh() refused the suspended sign-in without ending it');
+  const lockedOut = await logoutAs(refreshOnly(lockedSignIn.cookies), 'patient-web');
+  assert.equal(lockedOut.status, 204, JSON.stringify(lockedOut.body)); clearsAll(lockedOut);
+  assert.equal(await live(lockedSignIn.sessionId), false, 'a sign-out during a timed suspension ends the sign-in');
+  await pool.query('update auth.accounts set disabled_until = null where id = $1', [locked.id]);
+  const unlocked = await refresh(lockedSignIn.cookies, 'staff-web');
+  assert.equal(unlocked.status, 401, JSON.stringify(unlocked.body)); clearsAll(unlocked);
+  checks.push('a sign-out by refresh cookie while the account is suspended for a time is 204 and ends the sign-in, sent with either app\'s name; once the suspension lapses its refresh token is refused (401)');
+
+  // 13. Two sign-outs at once with one refresh cookie (two tabs) end the
+  // sign-in once: the second reads it under the account lock, after the first.
+  const twoTabs = await signIn(bola, 'patient');
+  const both = await Promise.all([0, 1].map(() => logout(refreshOnly(twoTabs.cookies), twoTabs.cookies[`${name}_csrf`])));
+  for (const response of both) { assert.equal(response.status, 204, JSON.stringify(response.body)); clearsAll(response); }
+  assert.equal(await live(twoTabs.sessionId), false);
+  assert.equal(await logoutEvents(twoTabs.sessionId), 1, 'concurrent sign-outs record one sign-out');
+  assert.equal(Number((await pool.query(`select count(*) from audit.events where action = 'auth.logout'
+    and outcome = 'success' and resource_id = $1`, [twoTabs.sessionId])).rows[0].count), 1, 'and one sign-out audit');
+  checks.push('two concurrent sign-outs with the same refresh cookie both answer 204 and clear the cookies; the sign-in ends once, with one sign-out event and one audit');
+
   process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: 'hid_identity_api_runtime', checks })}\n`);
 } finally { if (app) await app.close(); await pool.end(); }

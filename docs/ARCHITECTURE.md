@@ -1231,6 +1231,15 @@ Shared build and development configuration where appropriate.
 ### `packages/identity-browser-client`
 
 Identity-owned cookie, CSRF, session, actor, and sign-out browser transport.
+It does not send `X-HID-Client`, so its applications refresh and sign out as
+unnamed clients; that header (D-Eminence/hid-system#39, not merged) only lets
+a named staff or patient application act on its own kind of sign-in
+(`INTERFACE_CONTRACT.md`, "Auth session contract"; ADR-044). Its `signOut`
+treats a `401` from `POST /auth/logout` as signed out (`allowUnauthorized`).
+Without #39, a sign-out after the access cookie has expired gets that `401`
+and leaves the server sign-in live and refreshable; with #39 the same call
+ends the sign-in by its refresh cookie, provided the CSRF token the client
+holds is the one derived from that refresh token.
 
 ### `packages/offline`
 

@@ -23,12 +23,16 @@ const flat = (sql = '') => sql.replace(/\s+/g, ' ');
 const ACCOUNT_LIVE = "account.status = 'active' and (account.disabled_until is null or account.disabled_until <= clock_timestamp()) and account.token_version = session.account_token_version";
 /** The sign-in a rotated token was exchanged into is still live. */
 const FAMILY_LIVE = 'exists (select 1 from auth.sessions live where live.family_id = session.family_id and live.revoked_at is null and live.expires_at > clock_timestamp())';
+/** A sign-in refresh() could renew now: live, or rotated moments ago (the other app's tab) into one that is. */
+const RENEWABLE = `${ACCOUNT_LIVE} and session.absolute_expires_at > clock_timestamp() and ((session.revoked_at is null and session.expires_at > clock_timestamp()) or (session.revocation_reason = 'rotated' and session.revoked_at > clock_timestamp() - make_interval(secs => $2) and ${FAMILY_LIVE}))`;
 
-function harness(stored?: { session_kind: 'staff' | 'patient' }) {
+type Stored = { session_kind: 'staff' | 'patient'; renewable?: boolean };
+
+function harness(stored?: Stored) {
   const lookups: Statement[] = [];
+  const row = stored && { id: SESSION, account_id: ACCOUNT, actor_subject: 'synthetic:sign-out', renewable: true, ...stored };
   const query = jest.fn(async (sql: string, values: unknown[] = []) => {
     lookups.push({ sql, values });
-    const row = stored && { id: SESSION, account_id: ACCOUNT, actor_subject: 'synthetic:sign-out', ...stored };
     return row ? { rowCount: 1, rows: [row] } : { rowCount: 0, rows: [] };
   });
   const transactions: Statement[][] = [];
@@ -37,7 +41,9 @@ function harness(stored?: { session_kind: 'staff' | 'patient' }) {
     transactions.push(statements);
     return work({ query: jest.fn(async (sql: string, values: unknown[] = []) => {
       statements.push({ sql: String(sql), values });
-      return sql.includes('update auth.sessions') ? { rowCount: 1, rows: [{ account_id: ACCOUNT }] } : { rowCount: 0, rows: [] };
+      if (sql.includes('update auth.sessions')) return { rowCount: 1, rows: [{ account_id: ACCOUNT }] };
+      if (sql.includes('as renewable')) return row ? { rowCount: 1, rows: [row] } : { rowCount: 0, rows: [] };
+      return { rowCount: 0, rows: [] };
     }) } as unknown as PoolClient);
   }) };
   const service = new TokenService(database as unknown as DatabaseService, {} as CurrentStaffContextService,
@@ -45,69 +51,100 @@ function harness(stored?: { session_kind: 'staff' | 'patient' }) {
   return { service, lookups, transactions };
 }
 
+const position = (statements: Statement[], test: (statement: Statement) => boolean) => statements.findIndex(test);
+const isLock = ({ sql, values }: Statement) => sql.includes('auth.lock_account_sessions(session_row.account_id)')
+  && sql.includes('session_row.refresh_token_sha256 = $1') && /^[0-9a-f]{64}$/.test(String(values[0]));
+const isLookup = ({ sql }: Statement) => sql.includes('as renewable');
+const isEnd = ({ sql, values }: Statement) => sql.includes('update auth.sessions') && sql.includes("'logout'")
+  && /and \(id = \$1 or revoked_at is null\)/.test(sql) && values[0] === SESSION;
+const isEvent = ({ sql }: Statement) => sql.includes('insert into auth.session_events');
+
 describe('sign-out by refresh token', () => {
   useTestEnvironment();
 
-  it('finds only a sign-in that is still live, by the token\'s hash', async () => {
-    const { service, lookups } = harness();
+  it('reads the sign-in under its account lock, by the token\'s hash, and finds any sign-in with something left to end', async () => {
+    const { service, lookups, transactions } = harness();
     await expect(service.revokeByRefreshToken(refreshToken, event)).resolves.toBeUndefined();
-    expect(lookups).toHaveLength(1);
-    const [lookup] = lookups;
+    // Read in the transaction, after the account lock: a sign-out or
+    // revocation that committed first is seen, and not recorded again.
+    expect(lookups).toHaveLength(0);
+    const statements = transactions[0] ?? [];
+    expect(position(statements, isLock)).toBe(0);
+    expect(position(statements, isLookup)).toBe(1);
+    const lookup = statements[1];
     const sql = flat(lookup?.sql);
     expect(sql).toContain('session.refresh_token_sha256 = $1');
     expect(sql).toContain("session.session_kind in ('staff', 'patient')");
-    expect(sql).toContain(ACCOUNT_LIVE);
-    expect(sql).toContain('session.absolute_expires_at > clock_timestamp()');
-    // Its own session is live, or it was rotated into a session that still is:
-    // a cookie of a sign-in already ended, replayed, finds nothing to end again.
-    expect(sql).toContain(`((session.revoked_at is null and session.expires_at > clock_timestamp()) or (session.revocation_reason = 'rotated' and ${FAMILY_LIVE}))`);
-    expect(lookup?.values).toHaveLength(1);
-    expect(lookup?.values[0]).toMatch(/^[0-9a-f]{64}$/);
+    // Its own session is unrevoked, or it was rotated into one that is.
+    // Neither expiry nor the account's state keeps a sign-in from ending: a
+    // timed suspension lapses, and refresh() would renew the sign-in again.
+    expect(sql).toContain("and (session.revoked_at is null or (session.revocation_reason = 'rotated' and exists (select 1 from auth.sessions unended where unended.family_id = session.family_id and unended.revoked_at is null)))");
+    expect(sql.split(' where ')[1]).not.toContain('account.status');
+    // Whether the app may be named is read from the same row.
+    expect(sql).toContain(`coalesce(${RENEWABLE}, false) as renewable`);
+    expect(lookup?.values).toHaveLength(2);
+    expect(lookup?.values[0]).toBe(statements[0]?.values[0]);
     expect(lookup?.values[0]).not.toBe(refreshToken);
+    expect(lookup?.values[1]).toBe(60);
   });
 
-  it('changes nothing when no such session exists: a platform, ended or unknown token', async () => {
+  it('changes nothing when nothing of the sign-in is left: a platform, ended or unknown token', async () => {
     const { service, transactions } = harness();
-    await expect(service.revokeByRefreshToken(refreshToken, event)).resolves.toBeUndefined();
-    expect(transactions).toHaveLength(0);
+    await expect(service.revokeByRefreshToken(refreshToken, event, 'patient')).resolves.toBeUndefined();
+    const statements = transactions[0] ?? [];
+    expect(position(statements, ({ sql }) => sql.includes('update auth.sessions'))).toBe(-1);
+    expect(position(statements, isEvent)).toBe(-1);
   });
 
-  it('ends the whole sign-in as a sign-out does: account lock first, then the family, then the event', async () => {
+  it('ends the whole sign-in as a sign-out does: account lock first, then the read, the family and the event', async () => {
     const { service, transactions } = harness({ session_kind: 'patient' });
     await expect(service.revokeByRefreshToken(refreshToken, event)).resolves.toEqual({ sessionId: SESSION,
       accountId: ACCOUNT, actorSubject: 'synthetic:sign-out', kind: 'patient' });
     expect(transactions).toHaveLength(1);
     const statements = transactions[0] ?? [];
-    const lock = statements.findIndex(({ sql, values }) => sql.includes('auth.lock_account_sessions(session_row.account_id)')
-      && values[0] === SESSION);
-    const end = statements.findIndex(({ sql, values }) => sql.includes('update auth.sessions') && sql.includes("'logout'")
-      && /and \(id = \$1 or revoked_at is null\)/.test(sql) && values[0] === SESSION);
-    const recorded = statements.findIndex(({ sql }) => sql.includes('insert into auth.session_events'));
-    expect(lock).toBeGreaterThanOrEqual(0);
-    expect(lock).toBeLessThan(end);
+    const lock = position(statements, isLock), lookup = position(statements, isLookup);
+    const end = position(statements, isEnd), recorded = position(statements, isEvent);
+    expect([lock, lookup]).toEqual([0, 1]);
+    expect(lookup).toBeLessThan(end);
     expect(end).toBeLessThan(recorded);
     const sessionEvent = statements[recorded];
     expect(sessionEvent?.values.slice(0, 4)).toEqual([SESSION, ACCOUNT, 'logout', 'success']);
     expect(JSON.parse(String(sessionEvent?.values[7]))).toEqual({ actor_subject: 'synthetic:sign-out', presented: 'refresh_token' });
   });
 
-  it('refuses a sign-in of another kind than the calling app names, before ending anything', async () => {
-    const { service, transactions } = harness({ session_kind: 'staff' });
+  it('refuses a sign-in of another kind than the calling app names, that refresh() could renew, before ending anything', async () => {
+    const { service, transactions } = harness({ session_kind: 'staff', renewable: true });
     await expect(service.revokeByRefreshToken(refreshToken, event, 'patient')).resolves.toEqual({ refusedKind: 'staff' });
-    expect(transactions).toHaveLength(0);
+    const statements = transactions[0] ?? [];
+    expect(position(statements, ({ sql }) => sql.includes('update auth.sessions'))).toBe(-1);
+    expect(position(statements, isEvent)).toBe(-1);
+  });
+
+  it('ends, without naming its kind, a sign-in of the other kind that refresh() could not renew now', async () => {
+    // An older rotated token (reuse), an idle-expired sign-in, or one whose
+    // account is suspended for now: the answer is the same as for the app's
+    // own sign-in, so it tells nobody whether, or as which app, it is live.
+    const { service, transactions } = harness({ session_kind: 'staff', renewable: false });
+    await expect(service.revokeByRefreshToken(refreshToken, event, 'patient')).resolves.toEqual({ sessionId: SESSION,
+      accountId: ACCOUNT, actorSubject: 'synthetic:sign-out', kind: 'staff' });
+    const statements = transactions[0] ?? [];
+    expect(position(statements, isEnd)).toBeGreaterThan(position(statements, isLookup));
+    expect(position(statements, isEvent)).toBeGreaterThan(position(statements, isEnd));
   });
 
   it('ends a sign-in of the kind the calling app names', async () => {
     const { service, transactions } = harness({ session_kind: 'staff' });
     await expect(service.revokeByRefreshToken(refreshToken, event, 'staff')).resolves.toEqual(expect.objectContaining({
       sessionId: SESSION, kind: 'staff' }));
-    expect(transactions).toHaveLength(1);
+    expect(position(transactions[0] ?? [], isEnd)).toBeGreaterThan(-1);
   });
 
   it('records an access-token sign-out without the refresh marker', async () => {
     const { service, transactions } = harness();
     await service.revoke(SESSION, 'synthetic:sign-out', event);
-    const sessionEvent = (transactions[0] ?? []).find(({ sql }) => sql.includes('insert into auth.session_events'));
+    const statements = transactions[0] ?? [];
+    expect(statements[0]?.sql).toContain('auth.lock_account_sessions(session_row.account_id) from auth.sessions session_row where session_row.id = $1');
+    const sessionEvent = statements.find(isEvent);
     expect(JSON.parse(String(sessionEvent?.values[7]))).toEqual({ actor_subject: 'synthetic:sign-out' });
   });
 });
@@ -121,12 +158,10 @@ describe('refresh session kind', () => {
     expect(transactions).toHaveLength(0);
     const sql = flat(lookups[0]?.sql);
     expect(sql).toContain("session.session_kind in ('staff', 'patient')");
-    expect(sql).toContain(ACCOUNT_LIVE);
-    expect(sql).toContain('session.absolute_expires_at > clock_timestamp()');
     // Only a token rotated moments ago, by the other app's tab, into a sign-in
     // that is still live: an older rotated token is reuse, which refresh()
     // detects and answers by ending the whole sign-in.
-    expect(sql).toContain(`((session.revoked_at is null and session.expires_at > clock_timestamp()) or (session.revocation_reason = 'rotated' and session.revoked_at > clock_timestamp() - make_interval(secs => $2) and ${FAMILY_LIVE}))`);
+    expect(sql).toContain(`and ${RENEWABLE}`);
     expect(lookups[0]?.values[0]).toMatch(/^[0-9a-f]{64}$/);
     expect(lookups[0]?.values[1]).toBe(60);
   });

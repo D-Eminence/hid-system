@@ -27,7 +27,23 @@ The executable covers:
    rollback-only schema/RLS, OTP, patient self-service, enrollment, emergency,
    patient-PIN, cutover-staging-integrity, and QoreID-evidence integration suites. Execute the real OTP service against the exact Identity
    role, including concurrent completion/rate-limit and account-disable tests;
-   notification delivery uses an in-process test double.
+   notification delivery uses an in-process test double. Its result is recorded
+   under `evidence.checks` as `otp_runtime`. The exact-role Identity HTTP
+   verifiers in `services/identity-api/scripts/` follow, each running as
+   `hid_identity_api_runtime` and recorded under `evidence.checks` in run
+   order: `patient_runtime`, `patient_safety_runtime`,
+   `provider_enrollment_runtime`, `platform_admin_runtime`,
+   `session_sign_out_runtime` and `platform_security_runtime` (the patient
+   safety, provider enrollment, platform admin and platform security verifiers
+   on a disposable copy of the rehearsal database). `session_sign_out_runtime`
+   (`verify-session-sign-out-runtime.mjs`, D-Eminence/hid-system#39, not
+   merged) covers sign-out by refresh cookie after the access cookie has
+   expired, and refresh and sign-out refused with
+   `403 SESSION_CLIENT_MISMATCH` when `X-HID-Client` names the other
+   application. It also covers an older rotated token, which ends its sign-in
+   whichever application signs out; a sign-out during a timed account
+   suspension; and two concurrent sign-outs with one cookie, recorded once. These results are local synthetic evidence, not deployed
+   application validation.
    Separately build a synthetic `0028` database with historical staff sessions,
    verified OTP challenges and registration outbox records; back it up, dry-run
    and apply `0029`–`0034`, verify preservation, fail-closed old OTP behavior,

@@ -15,6 +15,132 @@ credentials never use the ordinary-notification event path. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
 Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
+### Auth session contract
+
+This is the browser contract of staff and patient sessions. Sign-out without
+a live access token, the `X-HID-Client` check and the refresh-token lookup
+rules below come from D-Eminence/hid-system#39, which is not merged or
+deployed. Platform administration sessions use their own cookies and
+`/auth/admin/*` routes (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1).
+
+Identity sets three cookies at sign-in and on every refresh (`setCookies` in
+`services/identity-api/src/auth/auth.controller.ts`). Their names derive from
+`AUTH_COOKIE_NAME` (default `hid_access`). All three are `SameSite=Strict`,
+carry no `Domain` attribute (host-only), and are `Secure` when
+`AUTH_COOKIE_SECURE` is set, which production requires.
+
+| Cookie | HttpOnly | Path | Expires |
+|---|---|---|---|
+| `hid_access` (access token) | Yes | `/` | With the access token: `AUTH_ACCESS_TTL_SECONDS`, 15 minutes by default, never past the sign-in's absolute end |
+| `hid_access_refresh` (refresh token) | Yes | `/api/v1/auth` | End of the refresh window: `AUTH_REFRESH_TTL_SECONDS`, 8 hours by default after sign-in or the last refresh. A refresh never extends it past the sign-in's absolute end (`AUTH_ABSOLUTE_TTL_SECONDS`, 24 hours by default) |
+| `hid_access_csrf` (CSRF token) | No | `/` | Same as the refresh cookie |
+
+The CSRF token is derived from the refresh token. Sign-in and refresh also
+return it in the `X-CSRF-Token` response header, and cookie mutations send it
+back in the `X-CSRF-Token` request header.
+
+`POST /api/v1/auth/refresh` takes no body. It reads the refresh and CSRF
+cookies, `X-CSRF-Token` and, optionally, `X-HID-Client`, and checks them in
+this order:
+
+| Outcome | When | Cookies |
+|---|---|---|
+| `403 ORIGIN_DENIED` | `Origin` is missing or not in `CORS_ORIGINS` | Untouched |
+| `403 CSRF_VALIDATION_FAILED` | The refresh cookie is missing, or `X-CSRF-Token` and the CSRF cookie are missing, differ, or are not the value derived from the refresh token | Untouched |
+| `403 SESSION_CLIENT_MISMATCH` | `X-HID-Client` names the other kind of sign-in (below). Nothing is rotated | Kept |
+| `401 AUTHENTICATION_REQUIRED` | Rotation refuses the token: unknown, ended, expired, reused (reuse ends the whole sign-in), a platform token, or an account that is no longer active, is disabled or has a new token version. Any other failure during rotation also clears the cookies | Cleared |
+| `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header | The refresh token is rotated into a new session of the same sign-in | Replaced |
+
+`POST /api/v1/auth/logout` takes no body and answers `204` with no content
+when it does not refuse. It is public at the guard and authenticates the
+request itself, so platform maintenance (`503 PLATFORM_MAINTENANCE`) and a
+disabled portal (`423 PLATFORM_PORTAL_DISABLED`) no longer block sign-out.
+
+- **Bearer** (`Authorization: Bearer <access token>`). No Origin, CSRF or
+  `X-HID-Client` check. A live staff or patient token ends its own sign-in. A
+  token that is no longer live is `401 AUTHENTICATION_REQUIRED`; a platform
+  token is `403 PLATFORM_SESSION_SCOPE_DENIED`.
+- **Cookie** (no bearer token). `Origin` must be in `CORS_ORIGINS`; otherwise
+  the answer is `403 ORIGIN_DENIED` and nothing changes, cookies included.
+  Then:
+  - A live access cookie decides. It needs its own CSRF token, else
+    `403 CSRF_VALIDATION_FAILED` and nothing ends. When it passes, its sign-in
+    ends; a platform token is `403 PLATFORM_SESSION_SCOPE_DENIED`. A refresh
+    cookie sent with it is not used, so a request carrying one account's access
+    cookie and another account's refresh cookie ends only the first.
+  - Without a live access cookie (it expired, or the sign-in rotated in another
+    tab), the refresh cookie ends its sign-in. The CSRF cookie and
+    `X-CSRF-Token` must both equal the value derived from that refresh token,
+    else `403 CSRF_VALIDATION_FAILED` and nothing ends. Another account's
+    refresh cookie therefore cannot be ended with this session's CSRF token.
+    A refresh token whose sign-in has nothing left to end (below) still
+    answers `204`.
+  - With neither cookie, `204`.
+
+Every sign-out outcome clears the three cookies except `ORIGIN_DENIED` and
+`SESSION_CLIENT_MISMATCH`. A CSRF refusal therefore clears the browser's
+cookies without ending the sign-in, which stays live on the server until it is
+signed out with valid evidence or lapses. Ending a sign-in revokes the
+presented session and every unrevoked session of its family, with revocation
+reason `logout` (a rotated presented session keeps `rotated`), records an
+`auth.session_events` `logout` event (marked `presented: refresh_token` on the
+refresh-cookie path) and audits `auth.logout`. A refused sign-out made with a
+live access token is audited against that actor.
+
+The refresh-token lookups are in `refreshSessionKind` and
+`revokeByRefreshToken` (`services/identity-api/src/auth/token.service.ts`).
+A staff or patient sign-in is one refresh could renew now when:
+
+- the account is `active`, not disabled (`disabled_until` empty or past) and
+  on the session's token version;
+- the sign-in's absolute end has not passed; and
+- the token's own session is live (unrevoked and within its idle window), or
+  the token was rotated within the last 60 seconds into a session of its
+  family that is live. The 60 seconds cover one app's refresh racing the
+  other app's tab. An older rotated token is reuse.
+
+On refresh, the kind lookup answers only for such a sign-in. Any other token
+gets no kind and goes on to rotation, which refuses it with `401`; for an
+older rotated token that is reuse, which ends the whole sign-in.
+
+Sign-out by refresh cookie reads the sign-in under its account's lock, after
+any sign-out or revocation that got there first. It ends the sign-in if
+anything of it is left: the token's own session is unrevoked, or the token was
+rotated into a session of its family that is unrevoked. Neither expiry nor
+the account's state matters, so a sign-out during a timed account suspension
+leaves nothing to renew once the suspension lapses. A sign-in with nothing
+left, including one a concurrent sign-out with the same cookie has just
+ended, records no second sign-out and answers `204`.
+
+`X-HID-Client` names the browser application on a cookie `POST /auth/refresh`
+or `POST /auth/logout`. The staff and patient applications can share these
+cookies on one origin, and the header keeps one from refreshing (rotating) or
+ending the other's sign-in:
+
+| `X-HID-Client` | Sign-in it may refresh or end |
+|---|---|
+| `staff-web` | Staff. Identity's resolved staff actor carries no kind, so on the access-cookie path any live sign-in that is neither patient nor platform counts as staff |
+| `patient-web` | Patient |
+| Absent or any other value | Either, as before the header existed |
+
+The check runs after the Origin and CSRF checks. A sign-in of the other kind is
+refused when refresh could renew it now (above): on refresh, any other token
+goes on to rotation; a live access cookie's sign-in always can be renewed. On a
+sign-out by refresh cookie, the kind and whether refresh could renew the
+sign-in are read from the same session row that would be ended. Any other
+sign-in that has something left is ended whichever application asks, with
+`204`, the cookies cleared and its kind not named, as refresh ends a sign-in
+whose older rotated token comes back. So an old rotated token tells nobody
+whether, or as which application, its sign-in is still live. A bearer sign-out
+ignores the header. The header is a self-declaration of the calling
+application, not authentication, and grants nothing. Identity's CORS allow-list
+(`services/identity-api/src/config/cors.ts`) admits `x-hid-client` on every
+route. Health-id `main` sends no `X-HID-Client` (all its hid-system clients use
+cookie mode, which omits it), and `packages/identity-browser-client` sends
+none, so for both the check is inert until they send it. Until then, a cookie
+sign-out without a live access cookie ends whichever staff or patient sign-in
+the refresh cookie holds.
+
 ### Patient sessions and self service
 
 `POST /api/v1/auth/patient/login` accepts email/password and the `patient-login`
@@ -165,8 +291,14 @@ If-Match
 X-Correlation-ID
 X-CSRF-Token
 X-Facility-ID
+X-HID-Client
 X-Purpose-Of-Use
 ```
+
+`X-HID-Client` (`staff-web` or `patient-web`) names the browser application on
+cookie `POST /api/v1/auth/refresh` and `POST /api/v1/auth/logout`, so each acts
+only on its own kind of sign-in (see "Auth session contract" above). Identity
+ignores other values and the header on other routes.
 
 Do not expose secrets or raw sensitive identifiers through headers unnecessarily.
 

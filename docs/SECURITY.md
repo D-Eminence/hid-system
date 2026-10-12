@@ -19,6 +19,15 @@ Do not trust:
 
 Authentication implementation must support future evolution without rewriting domain controllers.
 
+Browser sessions use host-only `SameSite=Strict` cookies, and cookie
+mutations require an approved Origin and a CSRF token (`INTERFACE_CONTRACT.md`,
+"Auth session contract"). Sign-out must still work once the short-lived access
+token has expired: with D-Eminence/hid-system#39 (not merged), Identity ends
+the sign-in by its refresh cookie and the CSRF token derived from that refresh
+token. A client's declaration of which application it is (`X-HID-Client`) may
+only narrow what a request acts on; it never authenticates or authorizes
+(ADR-044).
+
 ## 3. Authorization
 
 Use RBAC and domain permissions.

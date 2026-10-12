@@ -270,6 +270,19 @@ describe('POST /auth/logout with X-HID-Client', () => {
     expect(auth.revokeByRefreshToken).not.toHaveBeenCalled();
   });
 
+  it('checks the CSRF token before naming the kind of a live access token', async () => {
+    // The other app's live access cookie with a forged CSRF header: the
+    // refusal must not say whose sign-in it is.
+    const { controller, auth } = harness(liveAccess);
+    const res = response();
+    const problem = await refusal(controller.logout(request({ origin: ORIGIN, 'x-csrf-token': 'forged', 'x-hid-client': 'staff-web' },
+      { hid_access: 'access-A', hid_access_refresh: 'refresh-A', hid_access_csrf: 'csrf-A' }), res as unknown as Response));
+    expect([problem.getStatus(), problem.code]).toEqual([403, 'CSRF_VALIDATION_FAILED']);
+    expect(problem.message).not.toContain('patient');
+    expect(auth.revoke).not.toHaveBeenCalled();
+    expect(auth.revokeByRefreshToken).not.toHaveBeenCalled();
+  });
+
   it('ignores the header on a bearer sign-out, which names its sign-in explicitly', async () => {
     const { controller, auth } = harness(liveAccess);
     await controller.logout(request({ authorization: 'Bearer access-S', 'x-hid-client': 'patient-web' }, {}),
