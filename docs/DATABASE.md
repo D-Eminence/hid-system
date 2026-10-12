@@ -82,6 +82,15 @@ enrollment path. It keeps provider identity evidence encrypted in a pending,
 unique-NIN record; a single selected contact OTP must be consumed before a
 password-backed account, canonical patient, NIN binding, and HIDCode can be
 created atomically. Its rate counters and OTPs are scoped to the enrollment.
+The private synthetic rehearsal runs
+`services/identity-api/scripts/verify-patient-enrollment-runtime.mjs`, which
+exercises this path over HTTP under the exact Identity runtime role on a
+disposable copy of the rehearsal database: start, contact OTP and activation,
+then sign-in for both new patients (by email and by HIDCode, one phone-only),
+and refresh, recovery and sign-out for the first. QoreID (behind
+the real adapter), Siteverify and OTP delivery are local stubs; see the
+[QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md). This is not
+staging acceptance.
 Migration `0052_authoritative_cac_identity.sql` makes the registration
 identifier the public organization lookup key and introduced a complete-QoreID-
 profile guard for review and legal-entity binding. Migration `0056` revises
