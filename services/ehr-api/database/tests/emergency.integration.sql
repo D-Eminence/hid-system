@@ -208,4 +208,132 @@ do $$ begin
     raise exception 'Emergency intents are not available to the established dispatcher';
   end if;
 end $$;
+
+-- Emergency record summary reads (GET /ehr/patients/:id/emergency-records,
+-- PatientRecordsService). The summary applies a vital's current correction by
+-- joining ehr.vital_corrections on correction_no = current_correction_no, and
+-- lists documents from ehr.documents_effective where status = 'available'.
+-- Both depend on what a break-glass emergency context may read as
+-- hid_ehr_api_runtime: every correction of a vital it can read, and the scan
+-- events behind each document's effective status. Clinical fixtures are
+-- inserted with session_replication_role = replica (no triggers or foreign-key
+-- checks; CHECK constraints still apply); the break-glass grant is inserted
+-- directly, with its foreign keys checked.
+set local session_replication_role = replica;
+insert into ehr.encounters (id, patient_id, facility_id, created_by, created_by_membership_id,
+  encounter_type, status, started_at, ended_at)
+values ('e1000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001',
+  '10000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000001',
+  '40000000-0000-4000-8000-000000000001', 'ambulatory', 'completed',
+  clock_timestamp() - interval '2 hours', clock_timestamp() - interval '1 hour');
+-- Vital A has two corrections and names the second current; vital B names a
+-- correction that does not exist; vital C was never corrected.
+insert into ehr.vitals (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  recorded_at, systolic_mmhg, diastolic_mmhg, pulse_bpm, temperature_c, current_correction_no)
+select vital.id::uuid, 'e1000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001',
+       '10000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000001',
+       '40000000-0000-4000-8000-000000000001', clock_timestamp() - vital.age, vital.systolic, vital.diastolic,
+       vital.pulse, vital.temperature, vital.correction_no
+  from (values ('e2000000-0000-4000-8000-00000000000a', interval '90 minutes', 200, 100, 90, 37.0, 2),
+               ('e2000000-0000-4000-8000-00000000000b', interval '80 minutes', 118, 76, 64, 36.4, 1),
+               ('e2000000-0000-4000-8000-00000000000c', interval '70 minutes', 110, 70, 60, 36.6, 0))
+    as vital(id, age, systolic, diastolic, pulse, temperature, correction_no);
+insert into ehr.vital_corrections (id, vital_id, patient_id, facility_id, correction_no, replacement_values,
+  reason, created_by, created_by_membership_id)
+values
+  ('e3000000-0000-4000-8000-000000000001', 'e2000000-0000-4000-8000-00000000000a',
+   '50000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002', 1,
+   '{"systolic_mmhg": 120, "diastolic_mmhg": 80, "pulse_bpm": 90, "temperature_c": 37.0}',
+   'First synthetic correction', '20000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001'),
+  ('e3000000-0000-4000-8000-000000000002', 'e2000000-0000-4000-8000-00000000000a',
+   '50000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002', 2,
+   '{"systolic_mmhg": 125, "diastolic_mmhg": 85, "temperature_c": 37.2}',
+   'Second synthetic correction', '20000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001');
+-- Three uploaded documents: D1 scanned clean, D2 rejected by the scanner, D3
+-- never scanned. Each scan names the exact object version and SHA-256.
+insert into ehr.documents (id, patient_id, facility_id, created_by, created_by_membership_id, original_file_name,
+  storage_bucket, storage_key, object_version_id, declared_media_type, size_bytes, sha256_hex, status,
+  retention_class)
+select ('e4000000-0000-4000-8000-00000000000' || n)::uuid, '50000000-0000-4000-8000-000000000001',
+       '10000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000001',
+       '40000000-0000-4000-8000-000000000001', 'emergency-summary-' || n || '.pdf', 'synthetic-bucket',
+       'synthetic/emergency-summary-' || n || '.pdf', 'summary-v' || n, 'application/pdf', 1024,
+       repeat(n::text, 64), 'uploaded', 'clinical_record'
+  from generate_series(1, 3) n;
+insert into ehr.document_scan_events (document_id, patient_id, facility_id, created_by, event_type,
+  detected_media_type, reason_code, scanner_engine, scanner_version, idempotency_key, correlation_id,
+  object_version_id, object_sha256_hex, created_at)
+select ('e4000000-0000-4000-8000-00000000000' || scan.n)::uuid, '50000000-0000-4000-8000-000000000001',
+       '10000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000003', scan.event_type,
+       case when scan.event_type = 'clean' then 'application/pdf' end, scan.reason_code, 'synthetic-scanner',
+       '1.0', 'emergency-summary-scan-' || scan.n, 'emergency-summary-scan', 'summary-v' || scan.n,
+       repeat(scan.n::text, 64), clock_timestamp() - interval '3 minutes'
+  from (values (1, 'clean', null), (2, 'rejected', 'MALWARE_DETECTED')) as scan(n, event_type, reason_code);
+set local session_replication_role = origin;
+insert into identity.consent_grants (
+  id, patient_id, staff_id, account_id, membership_id, facility_id,
+  scope, purpose_of_use, status, reason, starts_at, expires_at, break_glass
+) values (
+  'e6000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001',
+  '30000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001',
+  '40000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002',
+  'break_glass', 'emergency', 'active', 'Synthetic emergency summary read',
+  current_timestamp - interval '1 minute', clock_timestamp() + interval '15 minutes', true
+);
+
+set local role hid_ehr_api_runtime;
+select set_config('app.actor_subject', 'staff:test-clinician', true),
+       set_config('app.membership_id', '40000000-0000-4000-8000-000000000001', true),
+       set_config('app.facility_id', '10000000-0000-4000-8000-000000000002', true),
+       set_config('app.correlation_id', 'emergency-summary-integration-0001', true),
+       set_config('app.purpose_of_use', 'emergency', true);
+do $$ begin
+  if (select count(*) from ehr.vitals where encounter_id = 'e1000000-0000-4000-8000-000000000001') <> 3 then
+    raise exception 'Break-glass emergency context did not read the three summary vitals';
+  end if;
+  if (select count(*) from ehr.vital_corrections where vital_id = 'e2000000-0000-4000-8000-00000000000a') <> 2 then
+    raise exception 'Break-glass emergency context did not read both corrections of the corrected vital';
+  end if;
+  -- The summary's current-correction join, in vital order A, B, C.
+  if (select array_agg(coalesce(c.correction_no, 0) order by v.id)
+        from ehr.vitals v
+        left join ehr.vital_corrections c on c.vital_id = v.id and c.patient_id = v.patient_id
+         and c.facility_id = v.facility_id and c.correction_no = v.current_correction_no
+         and v.current_correction_no > 0
+       where v.encounter_id = 'e1000000-0000-4000-8000-000000000001') is distinct from array[2, 0, 0] then
+    raise exception 'Current-correction join did not match exactly correction 2 of vital A';
+  end if;
+  if (select array_agg((v.current_correction_no > 0 and c.id is null) order by v.id)
+        from ehr.vitals v
+        left join ehr.vital_corrections c on c.vital_id = v.id and c.patient_id = v.patient_id
+         and c.facility_id = v.facility_id and c.correction_no = v.current_correction_no
+         and v.current_correction_no > 0
+       where v.encounter_id = 'e1000000-0000-4000-8000-000000000001') is distinct from array[false, true, false] then
+    raise exception 'Current-correction join did not flag only vital B as correction unavailable';
+  end if;
+  -- The summary's document read: only the clean exact-object scan is available.
+  if (select array_agg(id order by id) from ehr.documents_effective
+       where patient_id = '50000000-0000-4000-8000-000000000001'
+         and facility_id = '10000000-0000-4000-8000-000000000002' and status = 'available')
+     is distinct from array['e4000000-0000-4000-8000-000000000001']::uuid[] then
+    raise exception 'Emergency summary document read listed a document that is not available';
+  end if;
+  if (select array_agg(status || ':' || scan_status order by id) from ehr.documents_effective
+       where id::text like 'e4000000-%') is distinct from array['available:clean', 'rejected:rejected', 'uploaded:pending'] then
+    raise exception 'Effective document status did not follow the latest exact-object scan';
+  end if;
+  -- The raw upload status the summary used to filter on lists all three.
+  if (select count(*) from ehr.documents where id::text like 'e4000000-%' and status = 'uploaded') <> 3 then
+    raise exception 'Raw uploaded-status filter no longer lists the rejected and unscanned documents';
+  end if;
+end $$;
+select set_config('app.purpose_of_use', 'direct-care', true);
+do $$ begin
+  if exists (select 1 from ehr.vitals where encounter_id = 'e1000000-0000-4000-8000-000000000001')
+     or exists (select 1 from ehr.vital_corrections where vital_id = 'e2000000-0000-4000-8000-00000000000a')
+     or exists (select 1 from ehr.documents_effective where id::text like 'e4000000-%') then
+    raise exception 'Direct-care context without consent read the emergency summary fixtures';
+  end if;
+end $$;
+reset role;
 rollback;

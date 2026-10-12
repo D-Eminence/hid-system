@@ -5,7 +5,10 @@
 // over HTTP, forwarding the browser's cookie. A same-origin GET carries no
 // Origin and no X-CSRF-Token, so Identity must not demand them when EHR,
 // authenticated as a workload, reports that the browser request was a GET;
-// a browser write must still prove Origin and CSRF. Disposable copy of the
+// a browser write must still prove Origin and CSRF. It also reads the two
+// record summaries over cookies: the patient's own (released and withheld
+// categories, limits) and the doctor's break-glass emergency summary (current
+// vital values, available documents, audit counts). Disposable copy of the
 // owned synthetic rehearsal database; synthetic accounts only.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -139,6 +142,54 @@ if (process.argv[2] === '--identity-child') {
       values($1,$2,$3,$4,$5,'ambulatory','in_progress',clock_timestamp()-interval '1 hour','Synthetic follow-up')`,
     [ids.encounter, ids.patient, ids.facility, ids.doctorAccount, ids.membership]));
 
+    // Record summaries (steps 4 and 5): 51 completed encounters, one more than
+    // a summary shows; vital A corrected twice (the second current), vital B
+    // naming a correction that does not exist, vital C never corrected; three
+    // uploaded documents, scanned clean, rejected and not scanned; and the
+    // doctor's break-glass grant for an emergency read.
+    const summary = { vitalA: randomUUID(), vitalB: randomUUID(), vitalC: randomUUID(),
+      clean: randomUUID(), rejected: randomUUID(), unscanned: randomUUID(), emergencyGrant: randomUUID() };
+    await database.fixture(async (client) => {
+      await client.query(`insert into ehr.encounters(patient_id,facility_id,created_by,created_by_membership_id,
+        encounter_type,status,started_at,ended_at)
+        select $1::uuid,$2::uuid,$3::uuid,$4::uuid,'ambulatory','completed',clock_timestamp()-interval '3 hours'-n*interval '1 minute',
+          clock_timestamp()-interval '2 hours'-n*interval '1 minute' from generate_series(1,51) n`,
+      [ids.patient, ids.facility, ids.doctorAccount, ids.membership]);
+      await client.query(`insert into ehr.vitals(id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,
+        recorded_at,systolic_mmhg,diastolic_mmhg,pulse_bpm,temperature_c,current_correction_no)
+        values($1,$4,$5,$6,$7,$8,clock_timestamp()-interval '50 minutes',200,100,90,37.0,2),
+          ($2,$4,$5,$6,$7,$8,clock_timestamp()-interval '40 minutes',118,76,64,36.4,1),
+          ($3,$4,$5,$6,$7,$8,clock_timestamp()-interval '30 minutes',110,70,60,36.6,0)`,
+      [summary.vitalA, summary.vitalB, summary.vitalC, ids.encounter, ids.patient, ids.facility, ids.doctorAccount, ids.membership]);
+      await client.query(`insert into ehr.vital_corrections(vital_id,patient_id,facility_id,correction_no,replacement_values,
+        reason,created_by,created_by_membership_id)
+        values($1,$2,$3,1,'{"systolic_mmhg":120,"diastolic_mmhg":80,"pulse_bpm":90,"temperature_c":37.0}','First synthetic correction',$4,$5),
+          ($1,$2,$3,2,'{"systolic_mmhg":125,"diastolic_mmhg":85,"temperature_c":37.2}','Second synthetic correction',$4,$5)`,
+      [summary.vitalA, ids.patient, ids.facility, ids.doctorAccount, ids.membership]);
+      for (const [index, id] of [summary.clean, summary.rejected, summary.unscanned].entries()) {
+        await client.query(`insert into ehr.documents(id,patient_id,facility_id,created_by,created_by_membership_id,
+          original_file_name,storage_bucket,storage_key,object_version_id,declared_media_type,size_bytes,sha256_hex,status,
+          retention_class) values($1,$2,$3,$4,$5,$6,'synthetic-bucket',$7,$8,'application/pdf',1024,repeat($9,64),'uploaded',
+          'clinical_record')`, [id, ids.patient, ids.facility, ids.doctorAccount, ids.membership, `summary-${index}.pdf`,
+          `synthetic/summary-${id}.pdf`, `summary-v-${id}`, String(index + 1)]);
+      }
+      await client.query(`insert into ehr.document_scan_events(document_id,patient_id,facility_id,created_by,event_type,
+        detected_media_type,reason_code,scanner_engine,scanner_version,idempotency_key,correlation_id,object_version_id,
+        object_sha256_hex,created_at)
+        values($1,$3,$4,$5,'clean','application/pdf',null,'synthetic-scanner','1.0',$6,'delegation-summary-scan',$8,
+          repeat('1',64),clock_timestamp()-interval '5 minutes'),
+          ($2,$3,$4,$5,'rejected',null,'MALWARE_DETECTED','synthetic-scanner','1.0',$7,'delegation-summary-scan',$9,
+          repeat('2',64),clock_timestamp()-interval '5 minutes')`,
+      [summary.clean, summary.rejected, ids.patient, ids.facility, ids.doctorAccount, `summary-scan-${summary.clean}`,
+        `summary-scan-${summary.rejected}`, `summary-v-${summary.clean}`, `summary-v-${summary.rejected}`]);
+    });
+    await owner.query("insert into identity.purpose_of_use_codes(code,display,source_system) values('emergency','Emergency treatment','delegation-rehearsal') on conflict(code) do nothing");
+    await owner.query(`insert into identity.consent_grants(id,patient_id,staff_id,account_id,membership_id,facility_id,scope,
+      purpose_of_use,status,reason,starts_at,expires_at,break_glass)
+      values($1,$2,$3,$4,$5,$6,'break_glass','emergency','active','Synthetic emergency summary read',
+        clock_timestamp()-interval '1 minute',clock_timestamp()+interval '30 minutes',true)`,
+    [summary.emergencyGrant, ids.patient, ids.doctor, ids.doctorAccount, ids.membership, ids.facility]);
+
     // Identity in its own process, as its runtime role.
     const shared = { NODE_ENV: 'test', PATH: process.env.PATH, HOME: process.env.HOME ?? '/tmp', LANG: 'C.UTF-8', TZ: 'UTC',
       // database.url() names the socket directory but not the port.
@@ -227,10 +278,67 @@ if (process.argv[2] === '--identity-child') {
     assert.equal(unreported.status, 403, JSON.stringify(unreported.body)); assert.equal(unreported.body.code, 'ORIGIN_DENIED');
     checks.push('Identity skips the cookie-write check only for a workload-authenticated caller reporting GET; a wrong or missing workload token, a reported POST and no reported method are still refused');
 
-    // 4. The patient's own records still read through the self path.
+    // 4. The patient's own records still read through the self path, and say
+    //    what is released and what is withheld, with the real limits.
     const own = await call(ehrBase, 'GET', '/ehr/me/records', { cookie: patient.cookie });
     assert.equal(own.status, 200, JSON.stringify(own.body));
     checks.push('the patient\'s own records read through the self-authorization path');
+    const withheld = ['vitals', 'diagnoses', 'prescriptions', 'labRequests', 'documents'];
+    assert.deepEqual({ released: own.body.released, withheld: own.body.withheld },
+      { released: ['encounters', 'notes'], withheld },
+      'GET /ehr/me/records does not report the released and the withheld record categories');
+    for (const category of withheld) {
+      assert.deepEqual(own.body[category], [], `GET /ehr/me/records returned withheld ${category}`);
+    }
+    assert.deepEqual({ count: own.body.encounters.length, limits: own.body.limits, truncated: own.body.truncated,
+      limit: own.body.limit }, { count: 50, limits: { encounters: 50, notes: 50 },
+      truncated: { encounters: true, notes: false }, limit: 50 },
+    'GET /ehr/me/records does not report its per-section limits and truncation');
+    const selfAudit = await owner.query(`select details from audit.events
+      where action='ehr.patient.self.records.read' and outcome='success' and patient_id=$1`, [ids.patient]);
+    assert.deepEqual(selfAudit.rows.map((row) => row.details), [{ encounterCount: 50, noteCount: 0,
+      withheldCategories: withheld }], 'The patient records audit does not record the withheld categories');
+    checks.push('GET /ehr/me/records releases completed encounters and current signed notes, lists the other five categories as withheld (empty), reports 50 of 51 encounters as truncated, and audits the withheld categories');
+
+    // 5. The break-glass emergency summary: vitals with the current correction
+    //    applied as the whole current set, only available documents, per-section
+    //    limits, and each category's count in the audit.
+    const emergency = await call(ehrBase, 'GET', `/ehr/patients/${ids.patient}/emergency-records`,
+      { cookie: doctor.cookie, 'x-facility-id': ids.facility, 'x-purpose-of-use': 'emergency' });
+    assert.equal(emergency.status, 200, `emergency summary: ${emergency.status} ${JSON.stringify(emergency.body)}`);
+    const measurements = ['heightCm', 'weightKg', 'temperatureC', 'pulseBpm', 'respiratoryRate', 'systolicMmhg',
+      'diastolicMmhg', 'oxygenSaturationPercent'];
+    const vitalState = (id) => {
+      const item = emergency.body.vitals?.find((vital) => vital.id === id);
+      assert(item, `The emergency summary does not list vital ${id}`);
+      return Object.fromEntries([...measurements, 'currentCorrectionNo', 'correctionUnavailable', 'correctionReason',
+        'recordedValues'].map((key) => [key, item[key]]));
+    };
+    const recorded = (values) => Object.fromEntries(measurements.map((key) => [key, values[key] ?? null]));
+    const none = Object.fromEntries(measurements.map((key) => [key, null]));
+    assert.deepEqual(vitalState(summary.vitalA), { ...none, systolicMmhg: 125, diastolicMmhg: 85, temperatureC: '37.2',
+      currentCorrectionNo: 2, correctionUnavailable: false, correctionReason: 'Second synthetic correction',
+      recordedValues: recorded({ systolicMmhg: 200, diastolicMmhg: 100, pulseBpm: 90, temperatureC: 37 }) },
+    'The emergency summary does not apply the current vital correction as the whole current set');
+    assert.deepEqual(vitalState(summary.vitalB), { ...none, currentCorrectionNo: 1, correctionUnavailable: true,
+      correctionReason: null, recordedValues: recorded({ systolicMmhg: 118, diastolicMmhg: 76, pulseBpm: 64, temperatureC: 36.4 }) },
+    'The emergency summary does not fail closed when the current vital correction is unreadable');
+    assert.deepEqual(vitalState(summary.vitalC), { ...none, systolicMmhg: 110, diastolicMmhg: 70, pulseBpm: 60,
+      temperatureC: '36.6', currentCorrectionNo: 0, correctionUnavailable: false, correctionReason: null, recordedValues: null },
+    'The emergency summary does not return an uncorrected vital as recorded');
+    assert.deepEqual(emergency.body.documents?.map((item) => [item.id, item.status, item.scanStatus]),
+      [[summary.clean, 'available', 'clean']], 'The emergency summary lists a document whose effective status is not available');
+    assert.deepEqual({ count: emergency.body.encounters?.length, limits: emergency.body.limits,
+      truncated: emergency.body.truncated, limit: emergency.body.limit }, { count: 50,
+      limits: { encounters: 50, notes: 50, vitals: 100, diagnoses: 100, prescriptions: 100, labRequests: 100, documents: 100 },
+      truncated: { encounters: true, notes: false, vitals: false, diagnoses: false, prescriptions: false, labRequests: false,
+        documents: false }, limit: 50 }, 'The emergency summary does not report its per-section limits and truncation');
+    const emergencyAudit = await owner.query(`select details from audit.events
+      where action='ehr.emergency.records.read' and outcome='success' and patient_id=$1`, [ids.patient]);
+    assert.deepEqual(emergencyAudit.rows.map((row) => row.details), [{ encounterCount: 50, noteCount: 0, vitalCount: 3,
+      correctedVitalCount: 2, diagnosisCount: 0, prescriptionCount: 0, labRequestCount: 0, documentCount: 1 }],
+    'The emergency summary audit does not record the count of each disclosed category');
+    checks.push('the break-glass emergency summary returns a corrected vital as its current correction alone (omitted measurements null, recorded values apart), all-null with correctionUnavailable when that correction is unreadable, lists only the clean-scanned document, reports 50 of 51 encounters as truncated, and audits each category\'s count');
 
     process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only',
       roles: ['hid_ehr_api_runtime', 'hid_identity_api_runtime'], checks })}\n`);
