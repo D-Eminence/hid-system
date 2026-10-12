@@ -8,9 +8,13 @@ import { GoogleIdentityButton } from './GoogleIdentityButton'
 import { useCaptchaGate } from '../hooks/useCaptchaGate'
 
 type Challenge = { challengeId: string; expiresAt: number; resendAt: number }
-export function AccountAccess({ patient }: { patient: boolean }) {
+/**
+ * `recover` opens a clinical account at its recovery step, for the fixed
+ * /provider/recover link that sign-in pages on product hosts point to.
+ */
+export function AccountAccess({ patient, recover = false }: { patient: boolean; recover?: boolean }) {
   const navigate = useNavigate()
-  const [step, setStep] = useState<'login' | 'start' | 'verify' | 'complete'>('login')
+  const [step, setStep] = useState<'login' | 'start' | 'verify' | 'complete'>(recover && !patient ? 'start' : 'login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmation, setConfirmation] = useState('')

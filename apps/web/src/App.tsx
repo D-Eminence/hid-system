@@ -13,6 +13,7 @@ import {
   AdminLoginPage,
   DoctorAccessPage,
   DoctorAuthPage,
+  DoctorRecoverPage,
   DoctorDashboardPage,
   DoctorEmergencyPage,
   PatientRegistrationPage,
@@ -217,6 +218,7 @@ export default function App() {
             <Route path="/pricing" element={<PricingPage />} />
             <Route path="/provider/apply" element={<ProviderApplicationPage />} />
             <Route path="/provider/complete" element={<ProviderCompletionPage />} />
+            <Route path="/provider/recover" element={<DoctorRecoverPage />} />
             <Route path="/configure-ehr" element={<EhrConfiguratorPage />} />
             <Route path="/signup" element={<Navigate to="/patient/enroll" replace />} />
             <Route path="/login" element={<Navigate to="/patient" replace />} />

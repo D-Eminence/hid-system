@@ -9,6 +9,8 @@ import { WorkloadCredentialsService } from './workload-credentials.service';
 import { DatabaseService } from '../database/database.service';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Browser reads. A request with any other method, or none, is treated as a write.
+const READ_METHODS = new Set(['GET', 'HEAD']);
 
 @Injectable()
 export class OutreachSecurityGuard implements CanActivate {
@@ -26,6 +28,11 @@ export class OutreachSecurityGuard implements CanActivate {
       [execution.getHandler(), execution.getClass()]) ?? [];
     if (required.length !== 1) throw new DomainProblem(500, 'OUTREACH_POLICY_INVALID',
       'The Outreach authorization policy is invalid');
+    const read = READ_METHODS.has(request.method);
+    // A read is exempt from the write evidence below, so it may only ever
+    // authorize a read permission.
+    if (read && !required[0]?.endsWith('.read')) throw new DomainProblem(500, 'OUTREACH_POLICY_INVALID',
+      'The Outreach authorization policy is invalid');
     const facilityId = request.header('x-facility-id');
     if (!facilityId || !UUID.test(facilityId)) throw new DomainProblem(400, 'FACILITY_REQUIRED',
       'A valid X-Facility-ID header is required');
@@ -35,13 +42,22 @@ export class OutreachSecurityGuard implements CanActivate {
       'AUTHENTICATION_REQUIRED', 'Valid Identity authentication is required');
     const origin = request.header('origin');
     const csrf = request.header('x-csrf-token');
-    if (cookie && (!origin || !csrf || !this.allowedOrigins().has(origin))) {
-      throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED',
-        'Cookie-authenticated Outreach access requires a valid origin and CSRF token');
+    // A same-origin browser GET carries the cookie but neither Origin nor a
+    // CSRF token, so a cookie read needs neither; one that names a disallowed
+    // Origin is refused. A cookie write must present both, and Identity checks
+    // the CSRF token against the session (ADR-043).
+    if (cookie && read && origin && !this.allowedOrigins().has(origin)) {
+      throw new DomainProblem(403, 'ORIGIN_DENIED', 'Request origin is not allowed');
     }
+    if (cookie && !read && (!origin || !csrf || !this.allowedOrigins().has(origin))) {
+      throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED',
+        'Cookie-authenticated Outreach writes require a valid origin and CSRF token');
+    }
+    // Identity relaxes its own browser-write check only for a read this
+    // workload reports, and only for a read permission.
     const actor = await this.identityClient().authorizeOutreachPermission(required[0] ?? '', {
       correlationId: request.correlationId, facilityId, authorization, cookie,
-      origin, csrfToken: csrf, purposeOfUse: 'direct-care',
+      origin, csrfToken: csrf, purposeOfUse: 'direct-care', requestMethod: request.method,
     }).catch((error) => { if (error instanceof IdentityApiProblem) throw new DomainProblem(error.status,
       error.code ?? 'IDENTITY_AUTHORIZATION_DENIED', error.message); throw new DomainProblem(503,
       'IDENTITY_SERVICE_UNAVAILABLE', 'Identity authorization service is unavailable'); }) as ActorContext;
