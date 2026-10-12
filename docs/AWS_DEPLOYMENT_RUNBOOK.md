@@ -87,8 +87,19 @@ every patient, staff and platform sign-in is down, and an update fails and is
 rolled back by the deployment circuit breaker. A malformed value stops Identity
 at start-up. The key and version are fixed at the first authenticator
 enrolment; changing either invalidates every enrolled authenticator (release
-checklist P3). For staging, the [external preflight](STAGING_EXTERNAL_PREFLIGHT.md)
-reports whether the field is present.
+checklist P3).
+
+The same applies to every other field the Identity task reads from that
+secret. The `IdentitySensitiveSecretArn` parameter description names exactly
+those fields for the environment being deployed, from the same list the task
+definition is built from; read it from the synthesized template rather than
+from memory. Staging reads `ninLookupHmacKeyB64` and `ninEncryptionKeyB64` only
+when QoreID is enabled (`HID_QOREID_ENABLED=true`), so a QoreID activation must
+add both, each 32 bytes in canonical padded base64, before its first deployment.
+For staging, the [external preflight](STAGING_EXTERNAL_PREFLIGHT.md) reports
+whether `otpHmacKeyB64`, `contactLookupHmacKeyB64` and `mfaSecretKeyB64` are
+present and whether each has the format Identity accepts
+(`canonical_32_byte_base64`); it does not check the NIN keys.
 
 For staging, `RdsCaBundleBase64` accepts at most 4096 base64 characters, the
 CloudFormation parameter-value limit. Independently verify the staging region
@@ -110,20 +121,22 @@ the production template still matches its recorded baseline (below) byte for
 byte; production and development keep their external workload-identity inputs.
 
 **Recorded template baseline.** Offline synthesis of `fix/cdk-identity-mfa-secret`
+(with `main` at `6b49a06` merged, which changes nothing under `infra/aws`)
 with `npm --prefix infra/aws run synth:prod` (and `synth:dev`), no
 `HID_AWS_ACCOUNT`/`HID_AWS_REGION`, no AWS credentials, `aws-cdk-lib` 2.273.0 and
 CDK CLI 2.1144.0:
 
 | Profile | Template SHA-256 | Bytes |
 | --- | --- | --- |
-| Production | `c2480c333764c9abedaac7ca16b253f76c585eccf0e0909cc7211c9f3a00c3e9` | 523,822 |
-| Development | `c4c4b2891251d4c988191484c89a3e6adf88e30ef8dc35523ca77a5c76842dc3` | 523,392 |
+| Production | `b4cdde915ac7e4775fba43a477f4870ccae7130f24c6180625cc409a510218bb` | 524,141 |
+| Development | `20f16446bca81a8e601c76fa2fd072b5d40c8466448e2a7bdc8ddee751a603c7` | 523,711 |
 
 Why it changed: this branch gives the Identity task its MFA key secret
-reference and `MFA_KEY_VERSION` and rewords the `IdentitySensitiveSecretArn`
-description (release checklist P3). A structural comparison with its base
-`05df685` finds exactly those three differences in production, development and
-each staging mode. The earlier record, the September 14 synthesis in the
+reference and `MFA_KEY_VERSION`, and rewrites the `IdentitySensitiveSecretArn`
+description to name every field the task reads from that secret (release
+checklist P3). A structural comparison with its base `05df685` finds exactly
+those three differences in production, development and each staging mode. The
+earlier record, the September 14 synthesis in the
 [staging execution report](TUF-STAGING-EXECUTION.md) (production
 `f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6`, 464,453
 bytes; development
