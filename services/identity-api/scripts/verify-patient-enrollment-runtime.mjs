@@ -414,10 +414,30 @@ try {
     .send({ identifier, purpose: 'PASSWORD_RESET', turnstileAction: 'patient-reset-start',
       turnstileToken: turnstile('patient-reset-start') });
   const knownStart = await resetStart(emailA);
-  const unknownStart = await resetStart(`nobody-${randomUUID().slice(0, 8)}@example.invalid`, '198.51.100.41');
+  const unknownIdentifier = `nobody-${randomUUID().slice(0, 8)}@example.invalid`;
+  const unknownStart = await resetStart(unknownIdentifier, '198.51.100.41');
   expectProblem(knownStart, 202); expectProblem(unknownStart, 202);
   assert.deepEqual(Object.keys(knownStart.body).sort(), Object.keys(unknownStart.body).sort(),
     'recovery must answer an unknown account in the same shape');
+  // Within the resend cooldown a repeat answers the same challengeId whether or
+  // not the account exists, from another network too, and sends nothing; the
+  // account's other identifier (its HID) gets an id of its own and no code.
+  const resetCodes = () => deliveries.filter(item => item.purpose === 'PASSWORD_RESET').length;
+  const resetCodesSent = resetCodes();
+  const unknownRepeat = await resetStart(unknownIdentifier, '198.51.100.42');
+  const knownRepeat = await resetStart(emailA.toUpperCase(), '198.51.100.43');
+  const otherIdentifier = await resetStart(hidA.toLowerCase(), '198.51.100.44');
+  for (const response of [unknownRepeat, knownRepeat, otherIdentifier]) {
+    expectProblem(response, 202);
+    assert.deepEqual(Object.keys(response.body).sort(), Object.keys(knownStart.body).sort());
+  }
+  assert.equal(unknownRepeat.body.challengeId, unknownStart.body.challengeId,
+    'A repeated recovery start for an unknown identifier must answer the same challengeId within the cooldown');
+  assert.equal(knownRepeat.body.challengeId, knownStart.body.challengeId,
+    'A repeated recovery start for a known identifier must answer the same challengeId within the cooldown');
+  assert.notEqual(otherIdentifier.body.challengeId, knownStart.body.challengeId,
+    'Another identifier of an account in its cooldown must not be answered with the live challengeId');
+  assert.equal(resetCodes(), resetCodesSent, 'A recovery start inside the cooldown must send no code');
   const resetCode = lastCode('PASSWORD_RESET', emailA);
   assert.equal(resetCode.challengeId, knownStart.body.challengeId);
   const verified = await http.post('/api/v1/auth/otp/verify').set('Origin', origin)
@@ -436,7 +456,7 @@ try {
   expectProblem(await login(emailA, passwordA), 401);
   const recoveredA = await login(emailA, newPassword);
   expectProblem(recoveredA, 200); assert.equal(recoveredA.body.actor.patientId, patientA);
-  check('password recovery answers known and unknown accounts alike, uses a single-use code, ends existing sessions and replaces the password');
+  check('password recovery answers known and unknown accounts alike, including a repeat within the cooldown (the same challengeId for both, no code sent) and the account\'s other identifier (a new id, no code), uses a single-use code, ends existing sessions and replaces the password');
 
   // 12. Sign-out needs the CSRF token and ends only its own sign-in: the same
   // patient's other sign-in (another device) and the other patient stay signed in.

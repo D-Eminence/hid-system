@@ -130,4 +130,77 @@ begin
     raise exception 'Recovery audit failure did not roll back authoritative mutation';
   end if;
 end $$;
+
+-- Recovery start cooldown (0080): one row per purpose and keyed identifier,
+-- whether or not the identifier has an account, so a repeat start inside the
+-- cooldown is answered alike. Its challenge id may name no challenge.
+do $$
+begin
+  if to_regclass('auth.otp_start_cooldowns') is null then
+    raise exception 'Recovery start cooldown table auth.otp_start_cooldowns is missing';
+  end if;
+  if (select array_agg(attribute.attname::text order by key_column.seq)
+        from pg_constraint key_constraint
+        cross join lateral unnest(key_constraint.conkey) with ordinality key_column(attnum, seq)
+        join pg_attribute attribute
+          on attribute.attrelid = key_constraint.conrelid and attribute.attnum = key_column.attnum
+       where key_constraint.conrelid = 'auth.otp_start_cooldowns'::regclass and key_constraint.contype = 'p')
+     is distinct from array['purpose', 'identifier_hmac'] then
+    raise exception 'Recovery start cooldown is not keyed by purpose and identifier HMAC';
+  end if;
+  if exists (select 1 from pg_constraint where conrelid = 'auth.otp_start_cooldowns'::regclass and contype = 'f') then
+    raise exception 'Recovery start cooldown must not reference a challenge or an account';
+  end if;
+end $$;
+
+set local role hid_identity_api_runtime;
+do $$
+declare
+  marker_hmac constant char(64) := repeat('ab', 32);
+  stored_challenge uuid;
+begin
+  insert into auth.otp_start_cooldowns(purpose, identifier_hmac, challenge_id)
+  values ('PASSWORD_RESET', marker_hmac, '96000000-0000-4000-8000-000000000001'),
+         ('LEGACY_ACCOUNT_RECOVERY', marker_hmac, '96000000-0000-4000-8000-000000000002');
+  insert into auth.otp_start_cooldowns(purpose, identifier_hmac, challenge_id, started_at)
+  values ('PASSWORD_RESET', marker_hmac, '96000000-0000-4000-8000-000000000003', clock_timestamp())
+  on conflict (purpose, identifier_hmac) do update
+    set challenge_id = excluded.challenge_id, started_at = excluded.started_at;
+  select challenge_id into stored_challenge from auth.otp_start_cooldowns
+   where purpose = 'PASSWORD_RESET' and identifier_hmac = marker_hmac;
+  if stored_challenge is distinct from '96000000-0000-4000-8000-000000000003'
+     or (select count(*) from auth.otp_start_cooldowns where identifier_hmac = marker_hmac) <> 2
+     or exists (select 1 from auth.otp_start_cooldowns where identifier_hmac = marker_hmac and started_at is null) then
+    raise exception 'Recovery start cooldown upsert did not replace the one row of its purpose and identifier';
+  end if;
+  begin
+    insert into auth.otp_start_cooldowns(purpose, identifier_hmac, challenge_id)
+    values ('PASSWORD_RESET', repeat('AB', 32), '96000000-0000-4000-8000-000000000004');
+    raise exception 'Recovery start cooldown accepted an identifier HMAC that is not lower-case hex';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into auth.otp_start_cooldowns(purpose, identifier_hmac, challenge_id)
+    values ('SIGNUP_VERIFY', repeat('cd', 32), '96000000-0000-4000-8000-000000000004');
+    raise exception 'Recovery start cooldown accepted a purpose other than account recovery';
+  exception when check_violation then null;
+  end;
+  begin
+    delete from auth.otp_start_cooldowns where identifier_hmac = marker_hmac;
+    raise exception 'Identity runtime may delete recovery start cooldowns';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+reset role;
+
+set local role hid_ehr_api_runtime;
+do $$
+begin
+  begin
+    perform 1 from auth.otp_start_cooldowns limit 1;
+    raise exception 'EHR runtime can read recovery start cooldowns';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+reset role;
 rollback;
