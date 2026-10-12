@@ -2130,8 +2130,9 @@ Consequences:
   and `services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs`,
   which the migration rehearsal runs as `outreach_cookie_read_runtime`
   (release checklist §8). The verifier now seeds its campaign with SQL and
-  checks that each campaign write is refused; its re-run after the narrowing
-  is pending. Nothing has been run on staging or production.
+  checks that each campaign write is refused; it passed in the rehearsal on
+  `a1a164b` (release checklist §8). Nothing has been run on staging or
+  production.
 
 Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity
 boundary; Outreach registration boundary); release checklist §2, §3, §7, §8

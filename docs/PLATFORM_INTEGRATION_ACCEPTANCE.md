@@ -214,7 +214,7 @@ branch `fix/outreach-cookie-reads`, not merged) also marks
 `POST /identity/outreach/authorize`, where a reported read authorizes only a
 `.read` permission, and `outreach.campaign.write` stays refused, as on `main`,
 until campaign governance is decided; its HTTP evidence is local and synthetic
-too (`outreach_cookie_read_runtime`, re-run pending after that narrowing).
+too (`outreach_cookie_read_runtime`, passed after that narrowing on `a1a164b`).
 
 ## 8. Idempotency matrix
 
