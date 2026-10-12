@@ -12,9 +12,10 @@
 -- guard checks against the actor's active memberships, and the Identity API
 -- re-checks the stored facility against those memberships whenever it reads it.
 --
--- Applied migrations 0001 through 0078 (0078: the Stage 9 runtime command
--- repairs) are immutable. This migration only adds a table, its guard and its
--- trigger: no existing row, function, policy or grant changes.
+-- Applied migrations 0001 through 0079 (0079: the patient access PIN actor
+-- window, D-Eminence/hid-system#45) are immutable. This migration only adds a
+-- table, its guard and its trigger: no existing row, function, policy or grant
+-- changes.
 
 create table auth.session_facility_selection (
   family_id uuid primary key references auth.sessions(id) on delete restrict,

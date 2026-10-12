@@ -5,7 +5,7 @@ import type { DatabaseService } from '../database/database.service';
 import type { CurrentStaffContextService } from './current-staff-context.service';
 import { TokenService } from './token.service';
 
-// How TokenService reads and writes a sign-in's facility selection (0079). The
+// How TokenService reads and writes a sign-in's facility selection (0080). The
 // database guard (auth.guard_session_facility_selection_change) and the real
 // transaction are exercised by session-facility-selection.integration.sql and
 // scripts/verify-facility-selection-runtime.mjs.

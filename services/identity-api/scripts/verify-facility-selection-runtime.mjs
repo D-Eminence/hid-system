@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// A staff member's chosen working facility, kept per sign-in (0079), over HTTP
+// A staff member's chosen working facility, kept per sign-in (0080), over HTTP
 // with every query as hid_identity_api_runtime. Selecting a facility stores it
 // for the sign-in family, so a reload (GET /auth/session) or a refresh reports
 // it instead of the primary facility; a membership that has since ended asks

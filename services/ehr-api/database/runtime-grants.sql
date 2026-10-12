@@ -1017,9 +1017,9 @@ revoke all on function auth.lock_account_sessions(uuid) from public;
 grant execute on function auth.lock_account_for_mfa(uuid) to hid_identity_runtime;
 revoke all on function auth.lock_account_for_mfa(uuid) from public;
 
--- Staff working facility per sign-in (0079, ADR-046). The Identity runtime
+-- Staff working facility per sign-in (0080, ADR-046). The Identity runtime
 -- reads, records and replaces a sign-in's selection, as it does
--- auth.session_assurance; the 0079 guard admits only the root session of a
+-- auth.session_assurance; the 0080 guard admits only the root session of a
 -- live staff sign-in of the same account and an active membership, and refuses
 -- deletes, so DELETE is not granted. No other service reads it: the selection
 -- authorizes nothing, and every service authorizes a request by its

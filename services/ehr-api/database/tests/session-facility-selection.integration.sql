@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Staff working facility per sign-in (0079, ADR-046). The Identity API keeps a
+-- Staff working facility per sign-in (0080, ADR-046). The Identity API keeps a
 -- staff member's explicitly selected facility in
 -- auth.session_facility_selection, one row per sign-in family, so a reload
 -- does not silently move them back to their primary facility. The row is only
@@ -113,7 +113,7 @@ begin
          and not attribute.attisdropped)
      <> array['family_id:uuid:true', 'account_id:uuid:true', 'facility_id:uuid:true', 'membership_id:uuid:true',
        'selected_at:timestamp with time zone:true', 'row_version:bigint:true'] then
-    raise exception 'auth.session_facility_selection columns are not the 0079 contract';
+    raise exception 'auth.session_facility_selection columns are not the 0080 contract';
   end if;
   if (select pg_get_constraintdef(constraint_row.oid) from pg_constraint constraint_row
        where constraint_row.conrelid = 'auth.session_facility_selection'::regclass and constraint_row.contype = 'p')
@@ -129,7 +129,7 @@ begin
        'FOREIGN KEY (family_id) REFERENCES auth.sessions(id) ON DELETE RESTRICT',
        'FOREIGN KEY (membership_id, facility_id, account_id) REFERENCES identity.staff_facility_memberships(id, facility_id, account_id) ON DELETE RESTRICT'
      ] then
-    raise exception 'auth.session_facility_selection foreign keys are not the 0079 contract';
+    raise exception 'auth.session_facility_selection foreign keys are not the 0080 contract';
   end if;
   if not exists (
     select 1 from pg_proc function_row

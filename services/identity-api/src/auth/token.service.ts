@@ -70,7 +70,7 @@ export interface RefreshSignOut {
   kind: 'staff' | 'patient';
 }
 
-/** A staff sign-in's choice of working facility (0079), and the membership it was made under. */
+/** A staff sign-in's choice of working facility (0080), and the membership it was made under. */
 export interface FacilitySelectionInput {
   sessionId: string;
   accountId: string;
@@ -556,7 +556,7 @@ export class TokenService {
   }
 
   /**
-   * Stores a staff sign-in's choice of working facility (0079), keyed by its
+   * Stores a staff sign-in's choice of working facility (0080), keyed by its
    * session family, so refresh (which keeps the family) keeps it and another
    * sign-in of the account does not see it. A new choice replaces the old.
    *
@@ -603,7 +603,7 @@ export class TokenService {
   }
 
   /**
-   * The facility a staff sign-in selected (0079), read through the presented
+   * The facility a staff sign-in selected (0080), read through the presented
    * session: only while it is a live staff session of the account, so a
    * signed-out or revoked sign-in never reads its selection again. The caller
    * re-checks it against the actor's current facilities; it authorizes nothing.

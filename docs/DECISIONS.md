@@ -2247,7 +2247,7 @@ and §9.
 # ADR-046: A Staff Sign-In Keeps Its Selected Facility; X-Facility-ID Still Authorizes
 
 Status: Accepted for source implementation (branch
-`claude/facility-selection-persistence`, migration 0079). Not deployed.
+`claude/facility-selection-persistence`, migration 0080). Not deployed.
 
 Date: 2026-10-12
 
@@ -2264,7 +2264,7 @@ next clinical action would have been taken.
 Decision:
 
 - Identity keeps the choice per sign-in in `auth.session_facility_selection`
-  (0079), keyed by the session family as `auth.session_assurance` is (0069):
+  (0080), keyed by the session family as `auth.session_assurance` is (0069):
   refresh rotates the session row but keeps the family, so the choice survives
   rotation, and another sign-in of the same account has its own. A new choice
   replaces the old one (`row_version` increments).
@@ -2298,7 +2298,7 @@ Decision:
   valid `X-Facility-ID` on `GET /auth/session` itself still binds the
   facility it names. `verify()` and the per-request guard are unchanged, so
   protected routes make no extra query.
-- The 0079 guard admits a row only for the root session of a staff sign-in of
+- The 0080 guard admits a row only for the root session of a staff sign-in of
   the same account that still has a live session, and an active membership of
   that account at that facility. Its membership, migration-hold, staff,
   organization and facility conditions mirror `CurrentStaffContextService`;
@@ -2327,13 +2327,15 @@ Consequences:
 - `reselect` does not clear the stored choice. If the membership becomes
   active again before the user chooses, the choice is reported as `selected`
   again.
-- Deployment order: apply 0079 and the role bootstrap before this Identity API
+- Deployment order: apply 0080 and the role bootstrap before this Identity API
   serves traffic. Without the table, every staff `GET /auth/session` and
   refresh answers `503` (refresh keeps the rotated cookies), so no staff page
   loads, and `POST /auth/facility` fails. The previous Identity API ignores the
   table, so rolling the API back needs no schema change.
-- Numbering: 0079 follows 0078 (the Stage 9 runtime command repairs,
-  D-Eminence/hid-system#34), and `release/config/components.json` lists both.
+- Numbering: 0080 follows 0079 (the patient access PIN actor window,
+  D-Eminence/hid-system#45), which followed 0078 (the Stage 9 runtime command
+  repairs, D-Eminence/hid-system#34), and `release/config/components.json`
+  lists all three.
 - Creating the table's four foreign keys briefly takes `SHARE ROW EXCLUSIVE`
   on `auth.sessions`, `auth.accounts`, `identity.facilities` and
   `identity.staff_facility_memberships` (`MIGRATION_RUNBOOK.md`).
@@ -2343,4 +2345,4 @@ Consequences:
 
 Related: ADR-038 (session assurance per family), ADR-044 (sign-out under the
 account lock); `INTERFACE_CONTRACT.md`, "Working facility per sign-in";
-`DATABASE.md`, "Session facility selection (0079)".
+`DATABASE.md`, "Session facility selection (0080)".

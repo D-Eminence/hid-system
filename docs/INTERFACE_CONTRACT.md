@@ -145,7 +145,7 @@ the refresh cookie holds.
 
 #### Working facility per sign-in
 
-Not yet deployed (ADR-046, migration 0079). A staff member who works at more
+Not yet deployed (ADR-046, migration 0080). A staff member who works at more
 than one facility chooses one with `POST /api/v1/auth/facility`
 `{ "facilityId": "<uuid>" }`. Identity keeps the choice for the sign-in in
 `auth.session_facility_selection`, keyed by the session family: refresh
@@ -220,7 +220,7 @@ sign-in never reads or changes it again. An actor without an Identity sign-in
 `POST /auth/facility` answers as before, audited and without
 `facilitySelection`, and nothing is stored.
 
-Release note: apply migration 0079 and the role bootstrap before deploying this
+Release note: apply migration 0080 and the role bootstrap before deploying this
 Identity API. Without the table every staff `GET /auth/session` and refresh
 answers `503` (refresh keeps the rotated cookies), so no staff page can load,
 and `POST /auth/facility` fails. The previous Identity API ignores the table.

@@ -21,7 +21,7 @@ import { TurnstileService } from './turnstile.service';
 import { WorkloadAuthService } from './workload-auth.service';
 
 // A staff member's explicitly chosen working facility is kept per sign-in
-// (0079, auth.session_facility_selection): a page reload, which reads
+// (0080, auth.session_facility_selection): a page reload, which reads
 // GET /auth/session or refreshes, used to report the primary facility again.
 // The stand-in below models only what the database guarantees: one selection
 // per sign-in family, written for a live staff session of the same account and

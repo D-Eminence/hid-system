@@ -446,7 +446,7 @@ export class AuthController {
       if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
       return this.sessionResponse(selectedActor);
     }
-    // Stored for this sign-in with its audit, in one transaction (0079).
+    // Stored for this sign-in with its audit, in one transaction (0080).
     const outcome = await this.tokens.recordFacilitySelection({
       sessionId: actor.sessionId, accountId: actor.accountId, facilityId: facility.id, membershipId: facility.membershipId,
     }, this.event(request), (client) => this.auditOnTransaction(client, selectionAudit));
@@ -502,7 +502,7 @@ export class AuthController {
   }
 
   /**
-   * The actor at the facility its sign-in selected (0079), re-checked against
+   * The actor at the facility its sign-in selected (0080), re-checked against
    * the actor's current active facilities. `boundFacilityId` is the facility a
    * valid X-Facility-ID bound to this request, which keeps the actor at it.
    * A failed read is 503 DEPENDENCY_UNAVAILABLE, never the default facility.

@@ -356,7 +356,7 @@ try {
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-session-sign-out-runtime.mjs')],
     workflowEnvironment));
   evidence.checks.facility_selection_runtime = JSON.parse(command(
-    'exact-role staff facility selection kept per sign-in across reload and refresh (0079)', process.execPath,
+    'exact-role staff facility selection kept per sign-in across reload and refresh (0080)', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-facility-selection-runtime.mjs')], workflowEnvironment));
   evidence.checks.platform_security_runtime = JSON.parse(command(
     'exact-role platform MFA, step-up, approval and export HTTP workflow', process.execPath,

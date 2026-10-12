@@ -1867,10 +1867,10 @@ microseconds:
   `scripts/run-container-database-acceptance.sh` runs it after
   `staff-access-request-outcome.integration.sql`.
 
-## Session facility selection (0079)
+## Session facility selection (0080)
 
-`0079_session_facility_selection.sql` (ADR-046) follows `0078` (the Stage 9
-runtime command repairs, D-Eminence/hid-system#34). Migrations `0001`–`0078`
+`0080_session_facility_selection.sql` (ADR-046) follows `0079` (the patient
+access PIN actor window, D-Eminence/hid-system#45). Migrations `0001`–`0079`
 are unchanged; no existing row, function, policy or grant changes. Creating
 the table's four foreign keys takes `SHARE ROW EXCLUSIVE` on `auth.sessions`,
 `auth.accounts`, `identity.facilities` and

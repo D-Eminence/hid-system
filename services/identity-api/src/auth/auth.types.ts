@@ -44,7 +44,7 @@ export interface CredentialIdentity {
 }
 
 /**
- * Where the facility a staff session response reports comes from (0079):
+ * Where the facility a staff session response reports comes from (0080):
  * 'selected', the facility this sign-in chose with POST /auth/facility;
  * 'default', none chosen, so the primary facility (else the first by name);
  * 'reselect', the chosen facility is no longer one of the actor's active

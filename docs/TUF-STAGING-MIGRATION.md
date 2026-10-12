@@ -77,10 +77,10 @@ The executable covers:
    whichever application signs out; a sign-out during a timed account
    suspension; and two concurrent sign-outs with one cookie, recorded once.
    `facility_selection_runtime` (`verify-facility-selection-runtime.mjs`,
-   migration 0079, ADR-046) covers a staff member's selected facility kept for
+   migration 0080, ADR-046) covers a staff member's selected facility kept for
    the sign-in across a session read and refresh, `reselect` once the selected
    membership ends, another sign-in of the account unaffected, refused
-   selections writing nothing, the 0079 guard as the runtime, and a selection
+   selections writing nothing, the 0080 guard as the runtime, and a selection
    waiting at the account lock while a sign-out ends the sign-in.
    These results are local synthetic evidence, not deployed application
    validation.
