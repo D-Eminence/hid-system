@@ -1883,4 +1883,4 @@ the schema, policies or grants changes.
   all three; and with `direct-care` and no consent nothing is visible. These
   cases pass before and after the service change: they guard the database
   behaviour the summary relies on. The service's own SQL is exercised against
-  the database by `verify-delegated-cookie-read-runtime.mjs` (steps 4 and 5).
+  the database by `verify-delegated-cookie-read-runtime.mjs` (steps 4 to 6).

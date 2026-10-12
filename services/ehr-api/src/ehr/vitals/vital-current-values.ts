@@ -5,7 +5,8 @@ import { VITAL_STORAGE_KEYS } from './vitals.service';
  *
  * A correction appends a replacement set to ehr.vital_corrections and moves
  * ehr.vitals.current_correction_no to it; the recorded columns never change.
- * Current default semantics, the same as the Health-id provider chart:
+ * Current default semantics, pending the product decision on correction semantics; the same rule
+ * as the Health-id provider chart:
  * - with no correction (current_correction_no = 0), the current values are the recorded ones;
  * - otherwise they are exactly the replacement set of the correction numbered current_correction_no:
  *   a measurement that correction omits is not current (null). Corrections are not merged with each

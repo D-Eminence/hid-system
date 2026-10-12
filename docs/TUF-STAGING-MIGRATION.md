@@ -55,8 +55,9 @@ The executable covers:
    of a patient's encounters through EHR, with no Origin or CSRF token, is
    authorized by Identity, and EHR cookie writes without Origin or CSRF are
    refused; with fix/patient-records-release-honesty it also reads the
-   patient's record summary and a break-glass emergency summary, with their
-   audit events. `patient_enrollment_runtime`
+   patient's record summary and two break-glass emergency summaries (a reader
+   lacking four category read permissions, and the doctor), with their audit
+   events. `patient_enrollment_runtime`
    (`verify-patient-enrollment-runtime.mjs`) runs public NIN enrollment through
    activation, sign-in, refresh, recovery and sign-out, with QoreID (behind the
    real adapter), Siteverify and delivery stubbed (see

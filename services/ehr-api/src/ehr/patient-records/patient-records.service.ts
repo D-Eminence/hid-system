@@ -26,6 +26,26 @@ type Section = keyof typeof SECTION_LIMITS;
 /** The single `limit` existing clients read: the smallest section cap, the one encounters and notes have. */
 const SUMMARY_LIMIT = 50;
 
+/**
+ * The read permission each further emergency category needs: the one its own routes require (vitals,
+ * diagnoses, prescriptions, lab-requests and document controllers). The summary route itself requires
+ * the encounter and note reads, so those two are always read.
+ */
+export const EMERGENCY_CATEGORY_PERMISSIONS = {
+  vitals: 'ehr.vital.read',
+  diagnoses: 'ehr.diagnosis.read',
+  prescriptions: 'ehr.prescription.read',
+  labRequests: 'ehr.lab-request.read',
+  documents: 'ehr.document.read',
+} as const;
+type EmergencyCategory = keyof typeof EMERGENCY_CATEGORY_PERMISSIONS;
+const EMERGENCY_CATEGORIES = Object.keys(EMERGENCY_CATEGORY_PERMISSIONS) as EmergencyCategory[];
+/** The audit count each further emergency category records when it is read. */
+const EMERGENCY_COUNT_KEYS: Readonly<Record<EmergencyCategory, string>> = {
+  vitals: 'vitalCount', diagnoses: 'diagnosisCount', prescriptions: 'prescriptionCount',
+  labRequests: 'labRequestCount', documents: 'documentCount',
+};
+
 interface SectionRows { rows: QueryResultRow[]; truncated: boolean }
 
 @Injectable()
@@ -60,24 +80,30 @@ export class PatientRecordsService {
   }
 
   emergency(patientId: string, context: DataAccessContext) {
+    // A category the reader lacks the read permission for is not read: its own routes would refuse the
+    // reader, and break-glass is not an authorization bypass. Unknown permissions withhold every one.
+    const permissions: readonly string[] = context.actor?.permissions ?? [];
+    const withheld = EMERGENCY_CATEGORIES.filter((category) =>
+      !permissions.includes(EMERGENCY_CATEGORY_PERMISSIONS[category]));
     return this.clinical.run(context, patientId, 'read_records', {
       action: 'ehr.emergency.records.read', resourceType: 'patient-record-summary', breakGlassOnly: true,
     }, async (client) => {
-      const value = await this.readEmergency(client, patientId, context.facilityId);
+      const value = await this.readEmergency(client, patientId, context.facilityId, withheld);
       // Counts only: what this read disclosed, recorded with the success audit in the same transaction.
-      return {
-        value,
-        details: {
-          encounterCount: value.encounters.length,
-          noteCount: value.notes.length,
-          vitalCount: value.vitals.length,
-          correctedVitalCount: value.vitals.filter((vital) => Number(vital.currentCorrectionNo) > 0).length,
-          diagnosisCount: value.diagnoses.length,
-          prescriptionCount: value.prescriptions.length,
-          labRequestCount: value.labRequests.length,
-          documentCount: value.documents.length,
-        },
+      // A withheld category has no count, since it was never read; it is named instead.
+      const details: Record<string, unknown> = {
+        encounterCount: value.encounters.length,
+        noteCount: value.notes.length,
       };
+      for (const category of EMERGENCY_CATEGORIES) {
+        if (withheld.includes(category)) continue;
+        details[EMERGENCY_COUNT_KEYS[category]] = value[category].length;
+        if (category === 'vitals') {
+          details.correctedVitalCount = value.vitals.filter((vital) => Number(vital.currentCorrectionNo) > 0).length;
+        }
+      }
+      details.withheldCategories = value.withheld;
+      return { value, details };
     });
   }
 
@@ -102,67 +128,71 @@ export class PatientRecordsService {
     };
   }
 
-  /** The break-glass summary of one facility. Which categories it returns is unchanged pending a decision. */
-  private async readEmergency(client: PoolClient, patientId: string, facilityId: string) {
+  /**
+   * The break-glass summary of one facility: every category the reader holds the read permission for.
+   * Which categories it may contain at all is unchanged (all seven) pending a decision.
+   */
+  private async readEmergency(client: PoolClient, patientId: string, facilityId: string,
+    withheld: readonly EmergencyCategory[]) {
     const values = [patientId, facilityId];
+    const read = async (name: EmergencyCategory, sql: string): Promise<SectionRows | undefined> =>
+      withheld.includes(name) ? undefined : this.section(client, name, sql, values);
     const encounters = await this.section(client, 'encounters', encountersSql(' and facility_id=$2'), values);
     const notes = await this.section(client, 'notes', notesSql(' and n.facility_id=$2'), values);
 
-    const vitals = await this.section(client, 'vitals', `select v.id,v.encounter_id as "encounterId",
+    const vitals = await read('vitals', `select v.id,v.encounter_id as "encounterId",
       v.facility_id as "facilityId",v.recorded_at as "recordedAt",v.source,
       ${currentVitalProjection('v', 'c')},
       ${recordedVitalProjection('v')},c.reason as "correctionReason"
       from ehr.vitals v ${currentVitalJoin('v', 'c')}
-      where v.patient_id=$1 and v.facility_id=$2 order by v.recorded_at desc,v.id desc`, values);
+      where v.patient_id=$1 and v.facility_id=$2 order by v.recorded_at desc,v.id desc`);
 
-    const diagnoses = await this.section(client, 'diagnoses', `select id,encounter_id as "encounterId",
+    const diagnoses = await read('diagnoses', `select id,encounter_id as "encounterId",
       facility_id as "facilityId",code_system as "codeSystem",code,display,clinical_status as "clinicalStatus",
       verification_status as "verificationStatus",onset_at as "onsetAt",abatement_at as "abatementAt",notes
       from ehr.diagnoses where patient_id=$1 and facility_id=$2
-      order by created_at desc,id desc`, values);
+      order by created_at desc,id desc`);
 
-    const prescriptions = await this.section(client, 'prescriptions', `select id,encounter_id as "encounterId",
+    const prescriptions = await read('prescriptions', `select id,encounter_id as "encounterId",
       facility_id as "facilityId",medication_code_system as "medicationCodeSystem",medication_code as "medicationCode",
       medication_display as "medicationDisplay",dose_quantity as "doseQuantity",dose_unit as "doseUnit",
       route_code as "routeCode",frequency,instructions,starts_on as "startsOn",ends_on as "endsOn",status
       from ehr.prescriptions where patient_id=$1 and facility_id=$2
-      order by created_at desc,id desc`, values);
+      order by created_at desc,id desc`);
 
-    const labRequests = await this.section(client, 'labRequests', `select id,encounter_id as "encounterId",
+    const labRequests = await read('labRequests', `select id,encounter_id as "encounterId",
       facility_id as "facilityId",test_code_system as "testCodeSystem",test_code as "testCode",
       test_display as "testDisplay",priority,status,specimen_type_code as "specimenTypeCode",
       clinical_information as "clinicalInformation",external_order_reference as "externalOrderReference",
       created_at as "createdAt"
       from ehr.lab_requests where patient_id=$1 and facility_id=$2
-      order by created_at desc,id desc`, values);
+      order by created_at desc,id desc`);
 
     // The effective status the staff list and download use: available only when the latest scan of the
     // exact stored object is clean (ehr.documents_effective, migration 0009).
-    const documents = await this.section(client, 'documents', `select id,encounter_id as "encounterId",
+    const documents = await read('documents', `select id,encounter_id as "encounterId",
       facility_id as "facilityId",original_file_name as "fileName",
       coalesce(detected_media_type,declared_media_type) as "mediaType",size_bytes as "sizeBytes",
       classification,status,scan_status as "scanStatus",created_at as "createdAt"
       from ehr.documents_effective where patient_id=$1 and facility_id=$2 and status='available'
-      order by created_at desc,id desc`, values);
+      order by created_at desc,id desc`);
 
+    const sections: Readonly<Record<Section, SectionRows | undefined>> = {
+      encounters, notes, vitals, diagnoses, prescriptions, labRequests, documents,
+    };
+    const released = (Object.keys(SECTION_LIMITS) as Section[]).filter((name) => sections[name]);
     return {
       encounters: encounters.rows,
       notes: notes.rows,
-      vitals: vitals.rows,
-      diagnoses: diagnoses.rows,
-      prescriptions: prescriptions.rows,
-      labRequests: labRequests.rows,
-      documents: documents.rows,
-      limits: { ...SECTION_LIMITS },
-      truncated: {
-        encounters: encounters.truncated,
-        notes: notes.truncated,
-        vitals: vitals.truncated,
-        diagnoses: diagnoses.truncated,
-        prescriptions: prescriptions.truncated,
-        labRequests: labRequests.truncated,
-        documents: documents.truncated,
-      },
+      vitals: vitals?.rows ?? [],
+      diagnoses: diagnoses?.rows ?? [],
+      prescriptions: prescriptions?.rows ?? [],
+      labRequests: labRequests?.rows ?? [],
+      documents: documents?.rows ?? [],
+      released,
+      withheld: [...withheld],
+      limits: Object.fromEntries(released.map((name) => [name, SECTION_LIMITS[name]])),
+      truncated: Object.fromEntries(released.map((name) => [name, sections[name]?.truncated ?? false])),
       limit: SUMMARY_LIMIT,
     };
   }

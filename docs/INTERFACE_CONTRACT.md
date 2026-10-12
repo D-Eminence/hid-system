@@ -182,8 +182,8 @@ notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
 Activation also requires the platform `break_glass_enabled` control inside the
 activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
-The summary's sections, limits, vital values and audit counts are in §11,
-"Record summaries".
+The summary's sections, the read permission each needs, its limits, vital
+values and audit counts are in §11, "Record summaries".
 
 Patient access-request decisions are session-bound patient commands:
 `GET /api/v1/identity/me/access-requests`,
@@ -682,22 +682,28 @@ Both also return:
 
 | Field | Meaning |
 |---|---|
-| `limits` | the most rows each section shows: 50 encounters, 50 notes and 100 of each other section |
-| `truncated` | per section, `true` when more rows exist than its limit; the section then holds the newest `limits[section]` rows |
+| `released` | the categories read for this caller, in the order above |
+| `withheld` | the other categories. A withheld category is not read; its array is always empty and means "not released to this caller", never "no records" |
+| `limits` | per released section, the most rows it shows: 50 encounters, 50 notes and 100 of each other section |
+| `truncated` | per released section, `true` when more rows exist than its limit; the section then holds the newest `limits[section]` rows |
 | `limit` | `50`, the smallest section limit, kept for existing clients; read `limits` and `truncated` instead |
 
-**Patient summary.** Only encounters and notes are released to the patient.
-The response says so: `released` is `["encounters","notes"]` and `withheld` is
-`["vitals","diagnoses","prescriptions","labRequests","documents"]`. A withheld
-category is not read; its array is always empty and means "not released to the
-patient portal", never "no records". `limits` and `truncated` name the released
-sections only. Which other categories are released, and on which conditions,
-is an open product decision; this is the current default. The audit event
-`ehr.patient.self.records.read` records `encounterCount`, `noteCount` and
-`withheldCategories`.
+**Patient summary.** Only encounters and notes are released to the patient:
+`released` is `["encounters","notes"]` and `withheld` is
+`["vitals","diagnoses","prescriptions","labRequests","documents"]`. Which other
+categories are released, and on which conditions, is an open product decision;
+this is the current default. The audit event `ehr.patient.self.records.read`
+records `encounterCount`, `noteCount` and `withheldCategories`.
 
-**Emergency summary.** It returns all seven categories, pending a decision on
-the break-glass scope.
+**Emergency summary.** Of the seven categories it returns those the reader
+holds the read permission for, pending a decision on the break-glass scope.
+The route requires `ehr.encounter.read` and `ehr.note.read`, so encounters and
+notes are always read. Each other category needs the permission its own routes
+require: vitals `ehr.vital.read`, diagnoses `ehr.diagnosis.read`, prescriptions
+`ehr.prescription.read`, lab requests `ehr.lab-request.read` and documents
+`ehr.document.read`, at the active facility. Break-glass is not an
+authorization bypass: a category the reader lacks the permission for is
+withheld. The seeded doctor, clinician and nurse roles hold all seven.
 
 - `documents` lists only documents whose effective status is `available`: the
   latest scan of the exact stored object version and SHA-256 is clean, the rule
@@ -709,9 +715,11 @@ the break-glass scope.
   or `null`, for a corrected vital; otherwise `null`) and `correctionReason`
   (the current correction's).
 - The audit event `ehr.emergency.records.read` records the count of each
-  category, and nothing else: `encounterCount`, `noteCount`, `vitalCount`,
-  `correctedVitalCount` (vitals with `currentCorrectionNo` above 0),
-  `diagnosisCount`, `prescriptionCount`, `labRequestCount` and `documentCount`.
+  category read, and the categories withheld, and nothing else:
+  `encounterCount`, `noteCount`, `vitalCount`, `correctedVitalCount` (vitals
+  with `currentCorrectionNo` above 0), `diagnosisCount`, `prescriptionCount`,
+  `labRequestCount`, `documentCount` (a withheld category has no count) and
+  `withheldCategories`.
 
 ### Vital corrections
 
@@ -722,9 +730,7 @@ change, and `GET .../vitals` and `GET .../vitals/:vitalId` still return them,
 with `currentCorrectionNo`; `GET .../vitals/:vitalId/corrections` lists the
 corrections, newest first.
 
-A vital's current values, as the emergency summary returns them (the current
-default; the backend had not defined them before, and this is the rule the
-Health-id provider chart applies):
+A vital's current values, as the emergency summary returns them, are:
 
 - with no correction (`currentCorrectionNo` 0), the values first recorded;
 - otherwise exactly the `replacementValues` of the correction numbered
@@ -735,6 +741,10 @@ Health-id provider chart applies):
 - if that correction cannot be read, every measurement is `null` and
   `correctionUnavailable` is `true`. Values first recorded are returned only as
   `recordedValues`, never as current.
+
+This is the current default, pending the product decision on correction
+semantics: the backend had not defined them before, and it is the rule the
+Health-id provider chart applies.
 
 Current values have the recorded columns' types: `heightCm`, `weightKg`,
 `temperatureC` and `oxygenSaturationPercent` are decimal strings,
