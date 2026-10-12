@@ -226,7 +226,9 @@ audience; IAM request context supplies its identity. In the template only the
 issuer Lambda's role may sign with the exact KMS key, using `ECDSA_SHA_256`;
 the key keeps the CDK default key policy, which delegates key use to account
 IAM (ADR-047 risks, DEP-4-KEY). Tasks receive no KMS signing authority. The issuer signs ES256 JWTs with a 300-second lifetime, and receivers
-enforce the configured issuer, JWKS, subject, and audience. The issuer and the
+enforce the configured issuer, JWKS, subject, and audience. Each receiver
+process keeps one remote JWKS set (jose's 10-minute cache, refetched early only
+for an unknown `kid`); it does not fetch the JWKS per request. The issuer and the
 agent accept only `staging` and `production` and bind that one value to the
 issuer path, the subject prefix and the API Gateway stage, so a token of one
 environment fails every check of the other.

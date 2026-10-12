@@ -2167,6 +2167,10 @@ Proposed default (implemented on the draft branch):
   other's issuer, subject and stage checks.
 - Synthesis fails for staging or production if a token task lacks exactly one
   rw `workload-token-agent` mount next to a read-only application mount.
+- Lab, Pharmacy and the EHR's OCR caller guard keep one remote JWKS set per
+  process, as Identity and Notification already do, instead of building one
+  for every verification. This is independent of the decision and can be
+  released on its own (release checklist §2).
 - Unchanged: `jwt` mode outside development, receiver issuer, JWKS, audience
   and exact-subject validation, the ban on local tokens in production, the
   token (ES256, 300-second lifetime, `token_use: workload`) and the agent's
@@ -2196,9 +2200,16 @@ Risks of the proposed default:
   so an issuer outage longer than a token's lifetime takes those services out
   of service, Identity sign-in included.
 - Public regional endpoint. The JWKS `GET` is unauthenticated and shares the
-  stage throttle with `POST /token`. Agents fetch the JWKS on every renewal and
-  receivers at least every 10 minutes, so a flood of JWKS requests can starve
-  renewal.
+  stage throttle (30 requests per second, burst 60) with `POST /token`, so a
+  flood of JWKS requests can starve renewal. Agents fetch the JWKS on every
+  renewal. Before this branch, Lab, Pharmacy and the EHR's OCR caller guard
+  built a new remote key set for every verification, so every EHR-to-Lab,
+  EHR-to-Pharmacy, OCR-to-Lab, OCR-to-Pharmacy and OCR-to-EHR call fetched the
+  JWKS: above about 30 such calls per second, legitimate load alone would get
+  `429`, fail those calls with `401 INVALID_WORKLOAD_IDENTITY` and fail agent
+  renewals until tokens expired. Every receiver now keeps one key set per
+  process and fetches the JWKS at most every 10 minutes (jose's default cache),
+  and for an unknown `kid` at most every 30 seconds.
 - Never run live: staging is not deployed, so no token has been minted against
   real IAM, KMS or API Gateway.
 - The issuer code is a CDK file asset, not a TUF-admitted image digest
@@ -2228,7 +2239,9 @@ Follow-ups, not implemented by the draft:
   `DIGEST` rule must not be copied). Staging and production alike.
 - DEP-4-DOS, the public endpoint: the agent caches the verified JWKS by `kid`
   and refetches only at start and for an unknown `kid`; `POST /token` gets its
-  own method throttle, and the JWKS limit is never below it; a REGIONAL WAF
+  own method throttle, and the JWKS limit is never below it and is sized for
+  the agents' fetches plus the receivers' (one per receiver process every 10
+  minutes, and at most one every 30 seconds for an unknown `kid`); a REGIONAL WAF
   rate rule or a PRIVATE API behind an `execute-api` interface endpoint is
   chosen by decision (cost, and private DNS changes every `execute-api` name
   in the VPC).

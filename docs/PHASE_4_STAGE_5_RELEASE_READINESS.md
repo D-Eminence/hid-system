@@ -9,8 +9,10 @@ leases), Stage 9 (runtime command locking), the delegated cookie-read fix
 (D-Eminence/hid-system#39) and the EHR clinical list paging fix
 (D-Eminence/hid-system#40), and lists as a draft the production workload issuer
 (`draft/production-workload-identity`, ADR-047, proposed and not for release
-until it is accepted). It covers Identity, the EHR, Lab, Pharmacy, OCR and
-Outreach APIs, the OCR worker, and the database in this repository, and in
+until it is accepted) with the workload receivers' JWKS reuse on the same
+branch, which does not depend on ADR-047. It covers Identity, the EHR, Lab,
+Pharmacy, OCR and Outreach APIs, the OCR worker, and the database in this
+repository, and in
 Health-id the admin console (`apps/patient-web/src/admin`) and the provider
 portal's governed-access pages
 (`apps/patient-web/src/staff`). It records what was
@@ -32,6 +34,7 @@ deployed, and no staging or production database has been migrated.** Every
 | OCR API | `services/ocr-api` (Stage 6 and 9), and D-Eminence/hid-system#38 | Patient-linked audit events for OCR evidence reads; Stage 9 runtime locking, publication lock order and transaction retry; #38 reports the method of the request it serves (§2). |
 | Outreach API | `services/outreach-api` (Stage 9) | Campaign registration lock and transaction retry (§2). |
 | OCR worker | `services/ocr-worker` (Stage 6) | Queue depth and age through the new aggregate command (§2). |
+| EHR, Lab and Pharmacy APIs | `services/ehr-api`, `services/lab-api` and `services/pharmacy-api` (workload receiver JWKS reuse, `draft/production-workload-identity`; independent of ADR-047) | Keep one remote JWKS set per process for workload-token verification instead of fetching the JWKS per request (§2). |
 | Workload identity (draft, ADR-047 pending) | `infra/aws` and `services/workload-token-agent` (`draft/production-workload-identity`); the agent ships in the Identity API image | Production gets its own workload issuer and token agents; the issuer and agent bind each environment to its stage and subjects (§2). Not for release until ADR-047 is accepted. |
 | Admin console | Health-id `main` (Stage 4B and the Stage 5 fix) | The console for the contracts above. |
 | Provider portal | Health-id `main` (governed access, D-Eminence/Health-id#18 and D-Eminence/Health-id#19) | The clinician's access requests with their outcomes, closing a grant, and write gating on the clinical page. |
@@ -102,7 +105,8 @@ deployed, and no staging or production database has been migrated.** Every
   - **Infrastructure:** `staging-workload-identity.ts` becomes `workload-identity.ts`, a `WorkloadIdentity` bound to `staging` or `production`. Production gets its own retained P-256 key, issuer function, REST API with stage `production`, log group (365 days) and `hid:production:<service>` subjects, the six token agents, and receivers wired to them; it loses the eight external `WorkloadIssuerUrl`, `WorkloadJwksUrl` and `*WorkloadSubject` parameters (62 to 54) and gains a fourth KMS key (cost inventory). Synthesis fails for staging or production if a token task lacks exactly one rw `workload-token-agent` mount. Development is unchanged.
   - **Issuer and agent:** both accept only `staging` and `production` and bind that one value to the issuer path, every subject prefix, the API Gateway request stage (issuer) and the signed `/<stage>/token` path (agent). Error texts no longer name staging.
   - **Staging:** the sleep, economy and fidelity templates are unchanged apart from the issuer Lambda asset key (synthesized before and after and compared). The retained key keeps logical ID `StagingWorkloadIdentitySigningKey53DFD52F`.
-  - **Not included (ADR-047 follow-ups):** key-policy isolation (DEP-4-KEY), JWKS caching and per-method throttles (DEP-4-DOS), issuer-outage behaviour (DEP-4-RES) and alarms with routing.
+  - **Not included (ADR-047 follow-ups):** key-policy isolation (DEP-4-KEY), the agent's JWKS caching and per-method throttles (DEP-4-DOS), issuer-outage behaviour (DEP-4-RES) and alarms with routing.
+- **Workload receivers keep one JWKS set per process (`draft/production-workload-identity`; EHR, Lab and Pharmacy APIs only; no migration or grant change; independent of ADR-047 and releasable on its own)**. Lab (`lab-workload-identity.service.ts`), Pharmacy (`pharmacy-workload-identity.service.ts`) and the EHR's OCR caller guard (`ocr-internal-caller.guard.ts`) built a new jose remote key set inside every verification, so every verified EHR-to-Lab, EHR-to-Pharmacy, OCR-to-Lab, OCR-to-Pharmacy and OCR-to-EHR call fetched the issuer's JWKS. With the staging issuer, and the production issuer of ADR-047, that `GET` shares the stage throttle of 30 requests per second (burst 60) with `POST /token`: above about 30 such calls per second, legitimate load alone gets `429`, those calls fail with `401 INVALID_WORKLOAD_IDENTITY`, and agent renewals fail on the same throttle until tokens expire. Each now keeps one key set per service or guard instance (one per process), as Identity and Notification already do: jose fetches the JWKS on first use, again after 10 minutes, and early for an unknown `kid` at most every 30 seconds. Issuer, audience, subject and algorithm checks are unchanged.
 
 ## 3. Compatibility
 
@@ -157,6 +161,9 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 - It needs no migration or grant beyond what Stage 5B already needs (0073 and the bootstrap's `auth.lock_account_sessions` grant): the new lookups read `auth.sessions` and `auth.accounts`, which the Identity runtime already reads.
 - Health-id `main` sends no `X-HID-Client`. All its hid-system clients use cookie mode, where `packages/http/src/client.ts` omits the header. Its portals already handle the idle `401`: the patient portal refreshes and signs out again only for the same patient (`apps/patient-web/src/session.tsx`, `signOut`), and the provider portal restores its session and retries (`apps/patient-web/src/staff/api.ts`, `signOutStaffSession`). With #39 the first sign-out ends the sign-in by refresh cookie, without that refresh. Because no header is sent, it ends whichever staff or patient sign-in the refresh cookie holds, including the other portal's or another account's. The patient portal's same-patient check does not apply on that path. The kind check stays inert until a portal sends the header (D-Eminence/Health-id#35, which did, was closed unmerged). `packages/identity-browser-client` sends none either.
 - A portal that sends `X-HID-Client` works with earlier Identity builds on the same origin, which ignore the header. Their CORS allow-list lacks it, so a cross-origin request carrying it would fail its preflight.
+
+**Workload receivers' JWKS reuse (`draft/production-workload-identity`, if released):**
+- No request, response or token contract changes, and no order with other services. Lab, Pharmacy and the EHR's OCR guard now behave as Identity and Notification already do: a key added to the JWKS is fetched when the first token with its `kid` arrives, except that within 30 seconds of the previous fetch such a token is refused (`401`) rather than fetched for; a key removed from the JWKS is still trusted until the cached copy is 10 minutes old.
 
 **Production workload identity (`draft/production-workload-identity`, only if ADR-047 is accepted):**
 - An Identity API image from before the change carries an agent that refuses `production`; a production token task with it never starts its application. Staging works with either image.
@@ -643,6 +650,7 @@ To reproduce, run as the owner of a local cluster migrated to 0073 and role-boot
 - **EHR clinical list paging:** code only, no persisted state. Rolling the EHR API back brings back the rows skipped within a millisecond. Cursors issued by either build are refused by the other with `400 INVALID_CURSOR`, after which Health-id reloads the first page (§3).
 - **Refresh-event change:** this is code only. Rolling back Identity brings back the old misclassification and nothing else. Existing `refresh`/`denied` events remain valid rows.
 - **Sign-out and client kind (#39):** code only. Rolling Identity back brings back the idle sign-out that answers `401` and leaves the sign-in live, and removes the client-kind check and the `x-hid-client` CORS entry. `logout` events marked `presented: refresh_token` remain valid rows.
+- **Workload receivers' JWKS reuse:** code only, no persisted state. Rolling the EHR, Lab or Pharmacy API back brings back that service's JWKS fetch for every verified service call and nothing else.
 - **Production workload identity (draft, ADR-047):** no persisted application state. Before any production task runs, leave the issuer in place; from then on, scale the token-bearing services to zero and never switch a service to `local-secret`. Minting stops at once with the issuer's reserved concurrency at `0`; issued tokens expire within 300 seconds. The signing key and issuer log group are retained. `AWS_DEPLOYMENT_RUNBOOK.md` §12 has the steps.
 - **MFA key:** if `MFA_SECRET_KEY_B64` is lost, every enrolled authenticator must be re-enrolled. Store it with the same care as the field-encryption keys.
 - **Lockout:** if every Super Admin is locked out (lost authenticators and recovery codes), recovery needs the documented break-glass procedure. That procedure is not built yet; see the product decisions in `PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §9. Keep two independent Super Admins with stored recovery codes.

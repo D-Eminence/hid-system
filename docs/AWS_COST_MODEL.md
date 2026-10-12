@@ -80,8 +80,13 @@ Six caller task definitions in staging, and in production under ADR-047
 (pending), include token agents, each with a 64 MiB
 memory reservation inside its existing Fargate task allocation. At one running
 replica per caller, a successful renewal cycle makes eleven audience-specific
-token requests and six JWKS requests about every 90 seconds. Starts, retries,
-replica counts, and receiver JWKS retrieval affect actual request volume. Count
+token requests and six JWKS requests about every 90 seconds. Each receiver
+process (Identity, Notification, EHR, Lab and Pharmacy APIs) keeps one cached
+JWKS and fetches it at most every 10 minutes, or every 30 seconds while tokens
+with an unknown `kid` arrive; before `draft/production-workload-identity` Lab,
+Pharmacy and the EHR's OCR caller guard fetched it for every service call they
+verified. Starts, retries, replica counts, and receiver JWKS retrieval affect
+actual request volume. Count
 API Gateway requests, Lambda execution, KMS signing, logs, and applicable NAT
 traffic in the dated estimate; the inventory supplies quantities, not prices.
 
