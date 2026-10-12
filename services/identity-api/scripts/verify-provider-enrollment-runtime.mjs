@@ -472,6 +472,10 @@ try {
     reviewerPath: 'account_quota_unchanged', siteverifyCalls: siteverifyRequests.length }) + '\n');
 } finally {
   await app?.close();
+  // owner.end() resolves before its connections finish closing, so the forced
+  // drop below can terminate one of them (57P01) once the checks are over.
+  // Only that is expected here; any other pool error still fails the run.
+  owner.on('error', (error) => { if (error.code !== '57P01') throw error; });
   await owner.end();
   await maintenance.query(`drop database if exists ${isolated} with (force)`);
   await maintenance.end();

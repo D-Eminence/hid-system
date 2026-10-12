@@ -78,19 +78,23 @@ function JobLookup({ api, online }: { api: OcrApi; online: boolean }) {
   return <Card><h2>Exact job lookup</h2><p>No global processing queue endpoint exists. Use an exact non-PHI document or job UUID.</p><div className="ocr-form"><Input label="Document identifier" value={documentId} onChange={event => setDocumentId(event.target.value)} /><Button disabled={!documentId.trim() || !online} onClick={() => void find()}>Find by document</Button><Input label="Job identifier" value={jobId} onChange={event => setJobId(event.target.value)} /><Button disabled={!jobId.trim()} onClick={() => navigate(`/jobs/${jobId.trim()}`)}>Open job</Button></div>{error && <p role="alert" style={{ color: 'var(--color-error)' }}>{error}</p>}</Card>
 }
 
+// The OCR worker claims only jobs for its own provider, and production runs
+// Textract alone (services/ocr-worker config), so a job for any other provider
+// would stay queued for good.
+const OCR_PROVIDER = 'textract'
+
 function DocumentProcessing({ api, online, permissions }: { api: OcrApi; online: boolean; permissions: string[] }) {
   const [documentId, setDocumentId] = useState('')
-  const [provider, setProvider] = useState('provider-neutral')
   const [message, setMessage] = useState('')
   const navigate = useNavigate()
   const create = async () => {
     if (!online) return setMessage('Document capture metadata is not queued by this API. Reconnect before creating the server OCR job.')
     setMessage('')
-    try { const job = await api.createJob({ documentId: documentId.trim(), provider: provider.trim(), purpose: 'healthcare-operations' }, crypto.randomUUID()); captureProductEvent('ocr_job_created', { workspace: 'ocr', result: 'server_confirmed', offline: false }); navigate(`/jobs/${job.id}`) }
+    try { const job = await api.createJob({ documentId: documentId.trim(), provider: OCR_PROVIDER, purpose: 'healthcare-operations' }, crypto.randomUUID()); captureProductEvent('ocr_job_created', { workspace: 'ocr', result: 'server_confirmed', offline: false }); navigate(`/jobs/${job.id}`) }
     catch (caught) { setMessage(caught instanceof Error ? caught.message : 'OCR job could not be created.') }
   }
   const authorized = permissions.includes('ocr.job.write')
-  return <Card><h2>Document processing</h2><p>Creates a real OCR job for an existing secured document reference. It does not upload a file, create a patient, or simulate provider success.</p><div className="ocr-form"><Input label="Clean document identifier" value={documentId} onChange={event => setDocumentId(event.target.value)} /><Input label="Configured provider" value={provider} onChange={event => setProvider(event.target.value)} /><Button disabled={!authorized || !online || !documentId.trim() || !provider.trim()} onClick={() => void create()}>Create OCR job</Button></div>{!authorized && <p role="alert">Your facility role can read OCR jobs but cannot create them.</p>}{message && <p role="status">{message}</p>}</Card>
+  return <Card><h2>Document processing</h2><p>Creates a real OCR job for an existing secured document reference. It does not upload a file, create a patient, or simulate provider success.</p><div className="ocr-form"><Input label="Clean document identifier" value={documentId} onChange={event => setDocumentId(event.target.value)} /><p>OCR provider: Amazon Textract</p><Button disabled={!authorized || !online || !documentId.trim()} onClick={() => void create()}>Create OCR job</Button></div>{!authorized && <p role="alert">Your facility role can read OCR jobs but cannot create them.</p>}{message && <p role="status">{message}</p>}</Card>
 }
 
 function JobDetail({ api, online, permissions }: { api: OcrApi; online: boolean; permissions: string[] }) {
