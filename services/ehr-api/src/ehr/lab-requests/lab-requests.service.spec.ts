@@ -1,4 +1,5 @@
 import type { DataAccessContext } from '../../common/request-context';
+import { timelineCursorSql } from '../shared/clinical-context';
 import { OrderStatus } from '../shared/clinical.dto';
 import { LabRequestsService, type LabRequestRow } from './lab-requests.service';
 
@@ -19,6 +20,9 @@ const context = { correlationId: 'correlation-123456', facilityId, membershipId,
 // ehr.lab_requests.created_at defaults to clock_timestamp(), which keeps
 // microseconds. node-postgres returns it as a Date, which keeps milliseconds.
 const createdAtExact = '2026-10-01T09:00:00.123456Z';
+// The microsecond text of created_at, as lab-session-guards.integration.sql
+// proves Lab's acceptance guard needs it.
+const exactColumn = `${timelineCursorSql('created_at')} as "createdAtExact"`;
 const row = (status: OrderStatus): LabRequestRow => ({
   id: requestId, encounterId, patientId, facilityId, createdBy: accountId, createdByMembershipId: membershipId,
   testCodeSystem: 'loinc', testCode: '718-7', testDisplay: 'Hemoglobin', priority: 'routine', status,
@@ -50,8 +54,11 @@ describe('LabRequestsService handoff to Lab', () => {
   });
 
   it('sends Lab the order time at the microsecond, as the database stores it', async () => {
-    const { service } = serviceFor(row(OrderStatus.Active));
+    const { query, service } = serviceFor(row(OrderStatus.Active));
     await service.create(context, patientId, encounterId, input as never, 'lab-request-key-1234');
+    expect(timelineCursorSql('created_at')).toBe(`to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`);
+    expect(query.mock.calls.map(([sql]) => sql).filter((sql) => /insert into ehr\.lab_requests/i.test(sql)))
+      .toEqual([expect.stringContaining(exactColumn)]);
     expect(labApi.acceptEhrOrder).toHaveBeenCalledTimes(1);
     expect(labApi.acceptEhrOrder.mock.calls[0]?.[1]).toMatchObject({ sourceEhrOrderId: requestId,
       sourceEhrOrderVersion: 1, requestedAt: createdAtExact });
@@ -66,10 +73,12 @@ describe('LabRequestsService handoff to Lab', () => {
   });
 
   it('reads the exact time on an idempotent replay too', async () => {
-    const { service } = serviceFor(row(OrderStatus.Active));
+    const { query, service } = serviceFor(row(OrderStatus.Active));
     repository.executeCreate.mockImplementation(async (_client, _context, _patientId, _key, _operation, _digest,
       _type, _create, load) => ({ value: await load(requestId), id: requestId }));
     await service.create(context, patientId, encounterId, input as never, 'lab-request-key-1234');
+    expect(query.mock.calls.map(([sql]) => sql).filter((sql) => /from ehr\.lab_requests/i.test(sql)))
+      .toEqual([expect.stringContaining(exactColumn)]);
     expect(labApi.acceptEhrOrder.mock.calls[0]?.[1]).toMatchObject({ requestedAt: createdAtExact });
   });
 

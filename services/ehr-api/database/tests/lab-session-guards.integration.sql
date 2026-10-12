@@ -611,4 +611,47 @@ begin
     (select count(*) from lab_guard_cases), owner_view;
 end $$;
 
+-- Lab acceptance compares the work item's requested_at with the EHR order's created_at exactly (0077), and
+-- created_at keeps microseconds. The EHR API sends that time as timelineCursorSql renders it
+-- (services/ehr-api/src/ehr/shared/clinical-context.ts, lab-requests.service.ts); the millisecond text of a
+-- JavaScript Date is refused. Order LR4 is created at a time with microseconds, as clock_timestamp() gives.
+set local session_replication_role = replica;
+insert into ehr.lab_requests (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  test_code_system, test_code, test_display, priority, status, clinical_information, created_at) values
+  ('e8c80000-0000-4000-8000-000000000004', 'e8c60000-0000-4000-8000-000000000001',
+   'e8c40000-0000-4000-8000-000000000001', 'e8c00000-0000-4000-8000-000000000002',
+   'e8c10000-0000-4000-8000-000000000001', 'e8c30000-0000-4000-8000-000000000001', 'http://loinc.org', '718-7',
+   'Haemoglobin', 'routine', 'active', 'Synthetic Lab guard order', '2026-10-01 09:00:00.123456+00');
+select set_config('lab_guard.requested_at', to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+         true)
+  from ehr.lab_requests where id = 'e8c80000-0000-4000-8000-000000000004';
+set local session_replication_role = origin;
+set local role hid_lab_api_runtime;
+select pg_temp.lab_session('A');
+do $$
+declare
+  accept constant text := $i$insert into lab.work_items(id,patient_id,facility_id,ordering_facility_id,
+      source_ehr_order_id,source_ehr_order_version,source_encounter_id,status,priority,test_code_system,test_code,
+      test_name,clinical_indication,requested_by,requested_at,accepted_by,accepted_by_membership_id,idempotency_key,
+      request_sha256,correlation_id)
+    values (gen_random_uuid(),'e8c40000-0000-4000-8000-000000000001','e8c00000-0000-4000-8000-000000000002',
+      'e8c00000-0000-4000-8000-000000000002','e8c80000-0000-4000-8000-000000000004',1,
+      'e8c60000-0000-4000-8000-000000000001','accepted','routine','http://loinc.org','718-7','Haemoglobin',
+      'Synthetic Lab guard order','e8c10000-0000-4000-8000-000000000001',%L,'e8c10000-0000-4000-8000-000000000001',
+      'e8c30000-0000-4000-8000-000000000001',%L,repeat('b',64),'lab-guard-suite')$i$;
+  exact text := current_setting('lab_guard.requested_at');
+begin
+  if exact <> '2026-10-01T09:00:00.123456Z' then
+    raise exception 'EHR''s rendering of created_at changed: %', exact;
+  end if;
+  begin
+    execute format(accept, '2026-10-01T09:00:00.123Z', 'ehr-lab-order:e8c80000-0000-4000-8000-000000000004:ms');
+    raise exception 'Lab accepted an order time truncated to the millisecond';
+  exception when check_violation then
+    if sqlerrm <> 'Lab work item does not match the exact active EHR order version and actor context' then raise; end if;
+  end;
+  execute format(accept, exact, 'ehr-lab-order:e8c80000-0000-4000-8000-000000000004:v1');
+end $$;
+reset role;
+
 rollback;
