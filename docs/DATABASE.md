@@ -699,6 +699,12 @@ records and execute only the required context/authorization functions;
 Pharmacy table, and Pharmacy cannot create Identity patients or mutate EHR,
 Lab, or OCR persistence.
 
+Since 0080 the database binds Pharmacy work to the EHR prescription: the
+work-item guard accepts only the exact active prescription version, and the
+dispensing guard dispenses only while that version is still active. Both read
+the prescription as their owner with a share lock ("Pharmacy source
+prescription guards (0080)").
+
 ## 10. Audit data
 
 The logical `audit_logs` requirement maps to a controlled audit subsystem.
@@ -1523,6 +1529,9 @@ Lab, Pharmacy and Outreach guards:
   resolution message. Where a guard did not compare a value, it still does
   not: the Pharmacy work-item event guard has no facility term and the
   Outreach campaign update compares only the facility.
+- 0080 adds an EHR prescription check after the 0077 checks of
+  `pharmacy.validate_work_item` and `pharmacy.validate_dispensing` ("Pharmacy
+  source prescription guards (0080)"); the 0077 checks and messages are kept.
 - The guards read the session values when they start. A malformed
   `app.membership_id` or `app.facility_id` (not a UUID) therefore raises
   `22023` before a guard's own refusal, also on the Outreach campaign update,
@@ -1584,7 +1593,8 @@ Tests (rollback-only, synthetic fixtures):
     (six missing-session variants for each of the seven guarded tables) and 18
     runtime cases were refused only by row-level security.
   - Pharmacy: 84 cases. On 0076 it fails with 58: 29 isolated cases accepted,
-    29 runtime cases refused only by row-level security.
+    29 runtime cases refused only by row-level security. Since 0080 its
+    fixture holds the active EHR prescriptions its work items accept.
   - Outreach: 121 cases (51 isolated, 50 runtime, 20 for the API's create,
     link, campaign and status commands). On 0076 it fails with 67: 45 change
     with 0077 alone, 33 with the grant alone, and 11 need both.
@@ -1795,6 +1805,124 @@ at 3 and the actor's still at 4; at the end, the actor locked at 5, the first
 patient's window at 4 and the known PIN refused. It fails without 0079 (the
 success reset the actor window), and also if the success leaves its own
 patient's window uncleared or clears another patient's.
+
+## Pharmacy source prescription guards (0080)
+
+`0080_pharmacy_source_prescription_guards.sql` replaces
+`pharmacy.validate_work_item()` and `pharmacy.validate_dispensing()` with
+`CREATE OR REPLACE`. The signature, `SECURITY DEFINER` attribute,
+`search_path` (`pharmacy, platform, pg_temp`; `ehr.prescriptions` is
+schema-qualified), volatility, owner, ACL, triggers and the 0077 checks and
+messages are unchanged. Change name: `fix/pharmacy-source-prescription`.
+
+Before 0080 neither guard read `ehr.prescriptions`, and
+`pharmacy.work_items.source_ehr_prescription_id` has no foreign key. The EHR
+checks eligibility in its own transaction, which commits before it calls
+Pharmacy over HTTP, so a prescription cancelled in between was accepted; and
+a work item stayed dispensable after the prescriber cancelled, marked entered
+in error, put on hold, completed or edited its prescription. Each guard now
+also reads the prescription as its owner, after the 0077 checks, with
+`SELECT ... FOR SHARE`, and refuses with SQLSTATE `23514` and a constraint
+name the Pharmacy API maps to `409` (`INTERFACE_CONTRACT.md` §13):
+
+- `pharmacy_work_item_source_prescription` (acceptance): the prescription must
+  exist and equal the snapshot exactly: patient, facility (the ordering
+  facility), encounter, `row_version`, status `active`, medication code
+  system, code and display, dose quantity and unit, route, frequency,
+  instructions, `starts_on`, `ends_on`, `created_by` (`prescribed_by`) and
+  `created_at` (`prescribed_at`, at the microsecond), as Lab binds an EHR
+  order (`lab.validate_work_item`, 0077). Message: `Pharmacy acceptance does
+  not match the exact active EHR prescription version`.
+- `pharmacy_dispensing_source_prescription` (dispensing): the work item's
+  prescription must exist, belong to the work item's patient, facility and
+  encounter, and be `active` at `source_ehr_prescription_version`. Message:
+  `The EHR prescription of this Pharmacy work item is not active at the
+  accepted version`.
+- The exact version is the current, fail-closed default: every EHR update
+  moves `row_version` (0004), so a hold then resume, or an edit of
+  frequency, instructions or end date, also makes the work item
+  undispensable, and `unique(source_ehr_prescription_id)` stops a second
+  acceptance. The lifecycle of accepted work after an EHR change is an open
+  product question (release checklist §2).
+- Reversals do not read the prescription: a dispensing can be reversed after
+  a cancel.
+
+Locks and races. The Pharmacy commands run `SERIALIZABLE` and take no other
+row lock (ADR-042); the EHR's update locks the prescription (`FOR UPDATE`,
+READ COMMITTED) and then writes `ehr.record_versions` and audit, never a
+Pharmacy table. A cancel committed before the command's snapshot is read and
+refused. A cancel in progress is waited for: if it commits, the share lock
+fails with `40001` and the retried command reads it and is refused; if it
+rolls back, the command proceeds. A cancel committed after the snapshot but
+before the guard also fails the share lock with `40001` (a plain read would
+have used the stale active version, and `FOR KEY SHARE` would not conflict
+with the update). A command that passed the guard first holds its share lock
+until it commits, so the EHR's cancel waits for it (milliseconds) and applies
+after the dispensing. Lock order is prescription then Pharmacy rows on one
+side and prescription then EHR rows on the other, so there is no cycle. The
+EHR must not call Pharmacy while it holds the prescription lock: its
+eligibility transaction commits before the HTTP call
+(`prescriptions.service.spec.ts` asserts the order); otherwise the share lock
+would wait for the call until a statement or client timeout.
+
+Ownership. The guards read and lock the prescription as their owner; no
+runtime role gains a privilege (`hid_pharmacy_runtime` still has none on
+`ehr`). The owner of `ehr.prescriptions` has the `UPDATE` privilege a share
+lock needs. Under an owner subject to row-level security (release checklist
+P8) the lock applies the `prescriptions_read` and `prescriptions_update`
+policies with the session's context, so the pharmacist needs a write consent
+for the patient, which `pharmacy_dispensings_insert` and
+`pharmacy_work_items_insert` already require; a prescription the owner cannot
+lock reads as missing and is refused. A dedicated technical owner (ADR-041)
+would need `USAGE` on `ehr`, column `SELECT` on the compared columns, an
+`UPDATE` privilege for the lock, a `TO`-role select policy and an `UPDATE`
+policy with a restrictive `WITH CHECK (false)`.
+
+EHR handoff text. Exact comparison needs the EHR to send `created_at` at the
+microsecond and the dates as dates: `PrescriptionsService.acceptForPharmacy`
+reads `to_char(created_at at time zone 'UTC', ...)` (`timelineCursorSql`) and
+`to_char(starts_on|ends_on, 'YYYY-MM-DD')` in its locking query instead of
+sending node-postgres `Date` values (milliseconds; a date at local midnight,
+the day before in a process east of UTC). No EHR schema change.
+
+Tests (rollback-only, synthetic fixtures):
+
+- `services/ehr-api/database/tests/pharmacy-source-prescription.integration.sql`:
+  42 cases. As `hid_pharmacy_api_runtime` with the Pharmacy API's session and
+  INSERT statements: the exact snapshot (prescribed at the microsecond) and
+  the current version of an edited prescription are accepted; the time
+  truncated to the millisecond, a cancelled, missing or superseded
+  prescription, another display, encounter, start date, end date or
+  prescriber are refused; a dispensing is accepted for an active
+  prescription and refused for one entered in error, on hold, completed,
+  draft, at a later version, missing, of another patient, encounter or
+  clinic, and after the prescriber's cancel, which runs as
+  `hid_ehr_api_runtime` through `ehr.capture_record_version` (version 2);
+  both refusals report their constraint names; a dispensing made before a
+  cancel can still be reversed. Isolated cases (`session_replication_role =
+  replica`, one guard `ENABLE ALWAYS`) show each guard refuses alone. It
+  checks both guards' security properties and that each share-locks
+  `ehr.prescriptions`, and probes whether the guards' owner can lock the
+  prescriptions under pharmacist A's session (write consent; required) and
+  pharmacist R's (read consent only): R's cases expect the guard's refusal
+  under a P8 owner and the insert policy's `42501` under an owner that
+  bypasses row-level security. Without 0080 its refusal cases are accepted
+  and its two lock checks fail.
+- `pharmacy-session-guards.integration.sql` and `schema.integration.sql`
+  now accept and dispense real, exact prescriptions (the session-guard
+  fixture had none; the schema suite's duplicate acceptance repeats the exact
+  snapshot under another key, so it still reaches `unique_violation`).
+- `services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs` (HTTP, as
+  `hid_pharmacy_api_runtime`): acceptances use real prescriptions with their
+  microsecond time; a missing prescription, one cancelled after the EHR's
+  check, the millisecond time and a shifted start date answer
+  `409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE`; a dispense after a cancel, racing
+  a cancel that commits after its snapshot (one retry), or waiting on a
+  cancel in progress that commits answers
+  `409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` with nothing written; a cancel
+  that rolls back lets it through; a dispense in progress makes the EHR's row
+  lock fail with `55P03`; replays and reversals of earlier dispensings still
+  answer `201`.
 
 ## EHR clinical list paging precision (no migration)
 
