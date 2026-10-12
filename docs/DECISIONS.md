@@ -2162,7 +2162,7 @@ sign-out that names the other application ends it. It is refused, not ended,
 by refresh, so it is renewable again once its membership or patient is
 active. The Origin and CSRF checks still come first, and nothing is granted:
 the change only stops naming the kind of a sign-in that refresh would refuse
-(fix/identity-enrollment-session-hardening).
+(D-Eminence/hid-system#50).
 
 Health-id `main` names its portal in `X-HID-Client` on cookie refresh and
 sign-out since `22e8664` (D-Eminence/Health-id#40), so the kind check, and

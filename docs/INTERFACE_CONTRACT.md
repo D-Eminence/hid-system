@@ -22,7 +22,7 @@ a live access token, the `X-HID-Client` check and the refresh-token lookup
 rules below come from D-Eminence/hid-system#39, which is not yet deployed. Platform administration sessions use their own cookies and
 `/auth/admin/*` routes (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1). The
 enrollment cookie rule and the lookups' actor condition come from
-fix/identity-enrollment-session-hardening, also not deployed.
+D-Eminence/hid-system#50, also not deployed.
 
 Identity sets three cookies at sign-in and on every refresh (`setCookies` in
 `services/identity-api/src/auth/auth.controller.ts`). Their names derive from
