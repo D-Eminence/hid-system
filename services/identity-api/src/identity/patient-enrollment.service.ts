@@ -295,10 +295,13 @@ export class PatientEnrollmentService {
       'Contact verification is required');
     // Activations and replays share one budget per enrollment, charged only
     // after the cookie has proved the enrollment, so a guessed enrollment id
-    // cannot spend another browser's. Its own bucket: not the contact step's.
+    // cannot spend another browser's. Every attempt from here counts, whatever
+    // its outcome (one that fails later may already have hashed), so the budget
+    // is the contact step's per-enrollment size, leaving room for transient
+    // failures. Its own bucket: not the contact step's.
     const limited = await this.database.withSystemTransaction(correlationId, (client) =>
       this.consumeRate(client, 'enrollment', this.hmac('patient-enrollment-activate', row.id),
-        this.env.OTP_RATE_MAX_REQUESTS));
+        this.env.OTP_RATE_MAX_REQUESTS * 3));
     if (limited) throw this.rateLimited();
     const profileJson = this.decrypt(row.id, 'profile', row.profile_ciphertext);
     const contact = this.decrypt(row.id, 'contact', row.contact_ciphertext);

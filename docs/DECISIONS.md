@@ -2109,6 +2109,12 @@ active. The Origin and CSRF checks still come first, and nothing is granted:
 the change only stops naming the kind of a sign-in that refresh would refuse
 (fix/identity-enrollment-session-hardening).
 
+Health-id `main` names its portal in `X-HID-Client` on cookie refresh and
+sign-out since `22e8664` (D-Eminence/Health-id#40), so the kind check, and
+this change, apply as soon as Identity is deployed with it. ADR-044's
+consequence that the check protects nothing until a frontend sends the header
+holds only for earlier Health-id builds and `packages/identity-browser-client`.
+
 # ADR-045: Outreach Cookie Reads Are Delegated; a Reported Read Authorizes Only a Read Permission
 
 Status: Proposed for source implementation (D-Eminence/hid-system#43).

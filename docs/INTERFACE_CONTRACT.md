@@ -176,11 +176,11 @@ whether, or as which application, its sign-in is still live. A bearer sign-out
 ignores the header. The header is a self-declaration of the calling
 application, not authentication, and grants nothing. Identity's CORS allow-list
 (`services/identity-api/src/config/cors.ts`) admits `x-hid-client` on every
-route. Health-id `main` sends no `X-HID-Client` (all its hid-system clients use
-cookie mode, which omits it), and `packages/identity-browser-client` sends
-none, so for both the check is inert until they send it. Until then, a cookie
-sign-out without a live access cookie ends whichever staff or patient sign-in
-the refresh cookie holds.
+route. Health-id `main` names its portal in `X-HID-Client` on cookie refresh
+and sign-out (since `22e8664`). Earlier Health-id builds and
+`packages/identity-browser-client` send none; for them the check is inert, and
+a cookie sign-out without a live access cookie ends whichever staff or patient
+sign-in the refresh cookie holds.
 
 ### Patient sessions and self service
 
@@ -537,11 +537,14 @@ diagnostic text are excluded. Full configuration and activation controls are in
 
 Public patient enrollment (`/api/v1/identity/patient-enrollments`) is also
 specified there. `POST /api/v1/identity/patient-enrollments/activate` answers
-`429 ENROLLMENT_RATE_LIMITED` once one enrollment has been activated or
-replayed `OTP_RATE_MAX_REQUESTS` times (default 5) within
-`OTP_RATE_WINDOW_SECONDS` (default 900); a missing or forged enrollment cookie
-(`404`) or an enrollment not yet at the password step (`409`) is refused
-first and not counted. Success bodies are unchanged.
+`429 ENROLLMENT_RATE_LIMITED` once one enrollment has had
+`OTP_RATE_MAX_REQUESTS * 3` activation attempts (default 15) within
+`OTP_RATE_WINDOW_SECONDS` (default 900). Every attempt that passes the cookie
+and stage checks counts, whatever its outcome: first activations, replays and
+attempts that then fail (for example `503 ENROLLMENT_RECONCILIATION_REQUIRED`
+or `409 CONTACT_ALREADY_REGISTERED`). A malformed password (`400`), a missing
+or forged enrollment cookie (`404`) or an enrollment not yet at the password
+step (`409`) is refused first and not counted. Success bodies are unchanged.
 
 ### HID Resolution
 
