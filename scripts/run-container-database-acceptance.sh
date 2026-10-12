@@ -152,6 +152,9 @@ PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/pharmacy-session-guards.integration.sql" >/dev/null
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/pharmacy-source-prescription.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/outreach-session-guards.integration.sql" >/dev/null
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \

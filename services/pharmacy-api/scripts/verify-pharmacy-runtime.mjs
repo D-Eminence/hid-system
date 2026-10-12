@@ -7,6 +7,15 @@
 // the Identity API is replaced, by a local fake that answers its service
 // session and authorization calls; every database check (row-level security,
 // the 0077 guards, the immutability triggers, unique constraints) is real.
+//
+// Pharmacy work is bound to its EHR prescription (0080): the fixture holds a
+// real ehr.prescriptions row for every work item and acceptance, accepted with
+// its created_at at the microsecond as the EHR sends it. An acceptance that is
+// not the exact active prescription version, and a dispensing whose
+// prescription is no longer active at the accepted version, are refused with
+// 409, including when the EHR cancels the prescription while the dispensing
+// runs. The EHR's cancel is played by the database owner: it locks the row and
+// sets status and row_version as the EHR's update does, with triggers off.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
@@ -29,6 +38,9 @@ const decisions = new Map();
 // Identity API does; dispense and reverse make that call inside their
 // SERIALIZABLE transaction.
 let authorizationLatency = () => 0;
+// Runs before each authorization answer: a dispense has taken its snapshot by
+// then and has not yet inserted, so a step run here lands between the two.
+let beforeAuthorization = async () => undefined;
 const identity = await fakeService(async ({ path, headers, body }) => {
   if (headers['x-hid-internal-caller'] !== 'pharmacy-api' || headers['x-hid-service-token'] !== IDENTITY_TOKEN) {
     return [401, { code: 'WORKLOAD_AUTHENTICATION_REQUIRED', detail: 'Synthetic Identity refused the workload' }];
@@ -38,6 +50,7 @@ const identity = await fakeService(async ({ path, headers, body }) => {
   if (path === '/api/v1/auth/service-session') return [200, { actor }];
   if (path === '/api/v1/identity/service/authorization/check') {
     await new Promise((resolve) => setTimeout(resolve, authorizationLatency()));
+    await beforeAuthorization(body);
     const facilityId = headers['x-facility-id'];
     const rule = decisions.get(`${actor.accountId}:${body.patientId}:${body.scope}`) ?? { allowed: false, breakGlass: false };
     return [200, { allowed: rule.allowed, patientId: body.patientId, facilityId,
@@ -56,12 +69,34 @@ Object.assign(process.env, { DATABASE_URL: database.url(RUNTIME_ROLE), DATABASE_
 let pharmacy;
 try {
   const id = () => randomUUID();
-  const f = { org: id(), facility: id(), patient: id(), encounter: id(), prescriber: id(),
+  const workItem = () => ({ id: id(), prescription: id() });
+  const f = { org: id(), facility: id(), patient: id(), encounter: id(),
+    prescriber: { account: id(), staff: id(), membership: id() },
     a: { account: id(), staff: id(), membership: id() }, b: { account: id(), staff: id(), membership: id() },
-    work: Array.from({ length: 5 }, () => ({ id: id(), prescription: id() })), dispensing: id(),
-    parallel: Array.from({ length: 8 }, () => ({ id: id(), prescription: id() })) };
+    work: Array.from({ length: 5 }, workItem), dispensing: id(),
+    parallel: Array.from({ length: 8 }, workItem),
+    // Work items whose prescription the EHR cancels around a dispense.
+    source: { cancelled: workItem(), racing: workItem(), waiting: workItem(), rolledBack: workItem(), holding: workItem() },
+    // Prescriptions not accepted yet: the exact snapshot is accepted; one is
+    // cancelled after the EHR's eligibility check, one is offered with its time
+    // truncated to the millisecond.
+    accept: { exact: id(), fresh: id(), cancelled: id(), millisecond: id() } };
   f.a.subject = `synthetic:pharmacy-verifier-a:${f.a.account}`;
   f.b.subject = `synthetic:pharmacy-verifier-b:${f.b.account}`;
+  // The acceptance snapshot of every unaccepted prescription: what the EHR sends
+  // (prescriptions.service.ts), created_at at the microsecond and dates as text.
+  const snapshot = { medicationCodeSystem: 'urn:synthetic:medication', medicationCode: 'amoxicillin-500mg',
+    medicationDisplay: 'Amoxicillin 500 mg', doseQuantity: 1, doseUnit: 'tablet', routeCode: 'oral',
+    frequency: 'Every 8 hours', instructions: 'Take after food', startsOn: '2026-10-01', endsOn: '2026-10-08',
+    prescribedAt: '2026-10-01T09:30:00.654321Z' };
+  const insertPrescription = (client, prescription, { status = 'active', version = 1, accepted = true } = {}) => client.query(
+    `insert into ehr.prescriptions (id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,
+      medication_code_system,medication_code,medication_display,dose_quantity,dose_unit,route_code,frequency,instructions,
+      starts_on,ends_on,status,row_version,created_at) values ($1,$2,$3,$4,$5,$6,'urn:synthetic:medication','amoxicillin-500mg',
+      'Amoxicillin 500 mg',1,'tablet','oral','Every 8 hours','Take after food',$7,$8,$9,$10,$11)`,
+    [prescription, f.encounter, f.patient, f.facility, f.prescriber.account, f.prescriber.membership,
+      accepted ? null : snapshot.startsOn, accepted ? null : snapshot.endsOn, status, version,
+      accepted ? '2026-10-01 08:00:00+00' : snapshot.prescribedAt]);
   const insertWorkItem = (client, work) => client.query(`insert into pharmacy.work_items (id,patient_id,facility_id,
       ordering_facility_id,source_ehr_prescription_id,source_ehr_prescription_version,source_encounter_id,source_status,
       medication_code_system,medication_code,medication_display,dose_quantity,dose_unit,route_code,frequency,instructions,
@@ -69,7 +104,7 @@ try {
       correlation_id) values ($1,$2,$3,$3,$4,1,$5,'active','urn:synthetic:medication','amoxicillin-500mg','Amoxicillin 500 mg',
       1,'tablet','oral','Every 8 hours','Take after food',$6,'2026-10-01 08:00:00+00',$7,$8,'Synthetic prescription accepted',
       $9,repeat('a',64),'pharmacy-verifier-fixture')`,
-  [work.id, f.patient, f.facility, work.prescription, f.encounter, f.prescriber, f.a.account, f.a.membership,
+  [work.id, f.patient, f.facility, work.prescription, f.encounter, f.prescriber.account, f.a.account, f.a.membership,
     `verifier-accept-${work.id}`]);
   await database.fixture(async (client) => {
     await client.query('insert into identity.organizations (id,name,slug) values ($1,$2,$3)',
@@ -87,9 +122,19 @@ try {
       [member.membership, member.staff, member.account, f.org, f.facility]);
     }
     await client.query(`insert into auth.accounts (id,subject,email,display_name,status) values ($1,$2,$3,'Verifier prescriber','active')`,
-      [f.prescriber, `synthetic:pharmacy-verifier-prescriber:${f.prescriber}`, `prescriber-${f.prescriber}@example.invalid`]);
+      [f.prescriber.account, `synthetic:pharmacy-verifier-prescriber:${f.prescriber.account}`,
+        `prescriber-${f.prescriber.account}@example.invalid`]);
+    await client.query(`insert into identity.staff (id,account_id,full_name,email,verification_status,default_role)
+      values ($1,$2,'Verifier prescriber',$3,'verified','doctor')`, [f.prescriber.staff, f.prescriber.account,
+      `prescriber-${f.prescriber.account}@example.invalid`]);
+    await client.query(`insert into identity.staff_facility_memberships (id,staff_id,account_id,organization_id,facility_id,
+      membership_role,app_role) values ($1,$2,$3,$4,$5,'doctor','doctor')`,
+    [f.prescriber.membership, f.prescriber.staff, f.prescriber.account, f.org, f.facility]);
     await client.query(`insert into identity.patients (id,hid_code,first_name,last_name,full_name,status)
       values ($1,'HID-PHVRFYAA','Verifier','Patient','Verifier Patient','active')`, [f.patient]);
+    await client.query(`insert into ehr.encounters (id,patient_id,facility_id,created_by,created_by_membership_id,
+      encounter_type,status,started_at) values ($1,$2,$3,$4,$5,'ambulatory','in_progress','2026-10-01 07:30:00+00')`,
+    [f.encounter, f.patient, f.facility, f.prescriber.account, f.prescriber.membership]);
     await client.query(`insert into identity.purpose_of_use_codes (code,display,source_system)
       values ('direct-care','Direct patient care','pharmacy-verifier') on conflict (code) do nothing`);
     // Only A holds a database consent grant. B is allowed by the fake Identity
@@ -98,7 +143,15 @@ try {
       purpose_of_use,status,reason,starts_at,expires_at) values ($1,$2,$3,$4,$5,$6,'write_records','direct-care','active',
       'Synthetic Pharmacy verifier consent',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '30 days')`,
     [id(), f.patient, f.a.staff, f.a.account, f.a.membership, f.facility]);
-    for (const work of [...f.work, ...f.parallel]) await insertWorkItem(client, work);
+    // Each accepted work item's prescription, active at the version it accepted.
+    const accepted = [...f.work, ...f.parallel, ...Object.values(f.source)];
+    for (const work of accepted) await insertPrescription(client, work.prescription);
+    for (const work of accepted) await insertWorkItem(client, work);
+    await insertPrescription(client, f.accept.exact, { accepted: false });
+    await insertPrescription(client, f.accept.fresh, { accepted: false });
+    await insertPrescription(client, f.accept.millisecond, { accepted: false });
+    // Cancelled after the EHR checked it at version 1: the EHR's update moved it to version 2.
+    await insertPrescription(client, f.accept.cancelled, { accepted: false, status: 'cancelled', version: 2 });
     await client.query(`insert into pharmacy.dispensings (id,work_item_id,work_item_version,patient_id,facility_id,
       medication_code_system,medication_code,medication_display,quantity_dispensed,quantity_unit,dispensed_by,
       dispensed_by_membership_id,reason,idempotency_key,request_sha256,correlation_id) values ($1,$2,1,$3,$4,
@@ -136,12 +189,22 @@ try {
     return responses[0].body;
   };
 
-  // Accept an EHR prescription (internal caller ehr-api).
-  const acceptBody = (prescription = id()) => ({ sourceEhrPrescriptionId: prescription, sourceEhrPrescriptionVersion: 1,
+  // The EHR's cancel of a prescription, played by the owner: the EHR locks the
+  // row and its update moves the prescription to its next version.
+  const cancelPrescription = (prescription) => database.fixture(async (client) => {
+    await client.query('select id from ehr.prescriptions where id=$1 for update', [prescription]);
+    await client.query(`update ehr.prescriptions set status='cancelled',row_version=row_version+1,updated_at=clock_timestamp()
+      where id=$1`, [prescription]);
+  });
+  const workItemsOf = (prescription) => count('select count(*) from pharmacy.work_items where source_ehr_prescription_id=$1',
+    [prescription]);
+
+  // Accept an EHR prescription (internal caller ehr-api): the exact snapshot the
+  // EHR sends at the version it checked.
+  const acceptBody = (prescription) => ({ sourceEhrPrescriptionId: prescription, sourceEhrPrescriptionVersion: 1,
     sourceEncounterId: f.encounter, patientId: f.patient, orderingFacilityId: f.facility, sourceStatus: 'active',
-    medicationDisplay: 'Amoxicillin 500 mg', frequency: 'Every 8 hours', instructions: 'Take after food',
-    prescribedBy: f.prescriber, prescribedAt: '2026-10-01T08:00:00.000Z', acceptanceReason: 'Synthetic prescription accepted' });
-  const prescription = acceptBody();
+    ...snapshot, prescribedBy: f.prescriber.account, acceptanceReason: 'Synthetic prescription accepted' });
+  const prescription = acceptBody(f.accept.exact);
   expectStatus(await send('/work-items/accept-ehr-prescription', prescription, { key: key('accept') }), 401, 'accept without the EHR caller');
   decide(f.a, 'write_records', { allowed: false, breakGlass: false });
   assert.equal(expectStatus(await send('/work-items/accept-ehr-prescription', prescription, { key: key('accept'), internal: 'ehr-api' }),
@@ -149,6 +212,24 @@ try {
   decide(f.a, 'write_records', { allowed: true, breakGlass: false });
   assert.equal(await count('select count(*) from pharmacy.work_items where source_ehr_prescription_id=$1', [prescription.sourceEhrPrescriptionId]), 0);
   check('accept: no EHR caller 401, Identity denial 403, nothing written');
+  // Pharmacy accepts only the exact active EHR prescription version (0080).
+  // Before 0080 each of these created a work item (201).
+  const ineligible = async (body, label) => {
+    const correlationId = `verifier-ineligible-${id()}`;
+    assert.equal(expectStatus(await send('/work-items/accept-ehr-prescription', body,
+      { key: key('accept-ineligible'), internal: 'ehr-api', correlationId }), 409, label).code,
+    'PHARMACY_PRESCRIPTION_NOT_ELIGIBLE', label);
+    assert.deepEqual(await Promise.all([workItemsOf(body.sourceEhrPrescriptionId),
+      count('select count(*) from pharmacy.outbox_events where correlation_id=$1', [correlationId]),
+      count('select count(*) from audit.events where correlation_id=$1', [correlationId])]), [0, 0, 0], `${label}: nothing written`);
+  };
+  await ineligible(acceptBody(id()), 'accept a prescription that does not exist');
+  await ineligible(acceptBody(f.accept.cancelled), 'accept a prescription cancelled after the EHR checked it');
+  // The EHR sends created_at at the microsecond; the millisecond of a JavaScript Date is refused.
+  await ineligible({ ...acceptBody(f.accept.millisecond), prescribedAt: '2026-10-01T09:30:00.654Z' },
+    'accept with the prescription time truncated to the millisecond');
+  await ineligible({ ...acceptBody(f.accept.millisecond), startsOn: '2026-09-30' }, 'accept with the start date a day early');
+  check('accept: a prescription that does not exist, one cancelled after the EHR checked it, a time truncated to the millisecond and a start date a day early are each refused 409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE; nothing written');
   const acceptKey = key('accept');
   const accepted = sameResult(await together(4, () => send('/work-items/accept-ehr-prescription', prescription,
     { key: acceptKey, internal: 'ehr-api' })), 'four concurrent identical accepts');
@@ -160,11 +241,18 @@ try {
     201, 'accept replay').id, accepted.id);
   assert.equal(expectStatus(await send('/work-items/accept-ehr-prescription', { ...prescription, instructions: 'Take before food' },
     { key: acceptKey, internal: 'ehr-api' }), 409, 'accept key reuse').code, 'IDEMPOTENCY_CONFLICT');
-  const fresh = acceptBody();
+  const fresh = acceptBody(f.accept.fresh);
   sameResult(await Promise.all(['one', 'two', 'three'].map((label) => send('/work-items/accept-ehr-prescription', fresh,
     { key: key(`accept-${label}`), internal: 'ehr-api' }))), 'three concurrent accepts of one prescription with different keys');
   assert.equal(await count('select count(*) from pharmacy.work_items where source_ehr_prescription_id=$1', [fresh.sourceEhrPrescriptionId]), 1);
   check('accept: four concurrent identical and three concurrent different-key accepts each create one work item; replay 201; key reuse 409');
+  // An acceptance replayed after the EHR cancelled its prescription returns the
+  // work item Pharmacy already holds: the replay is answered before the insert.
+  await cancelPrescription(f.accept.exact);
+  assert.equal(expectStatus(await send('/work-items/accept-ehr-prescription', prescription, { key: acceptKey, internal: 'ehr-api' }),
+    201, 'accept replay after the EHR cancelled the prescription').id, accepted.id);
+  assert.equal(await workItemsOf(f.accept.exact), 1);
+  check('accept: an identical replay after the EHR cancelled the prescription returns the accepted work item (201)');
 
   // Dispense a work item.
   const [w1, w2, w3] = f.work.map((work) => work.id);
@@ -252,6 +340,95 @@ try {
     count('select count(*) from pharmacy.dispensing_reversals where dispensing_id = any($1::uuid[])',
       [parallelDispensed.map((response) => response.body.id)])]), [8, 8]);
   check('dispense and reverse: eight concurrent requests on different work items, with 20-40 ms Identity latency inside the transaction, all succeed once');
+
+  // Pharmacy dispenses only while the EHR prescription is active at the version
+  // it accepted (0080): pharmacy.validate_dispensing reads the prescription with
+  // a share lock. Before 0080 each of these dispensings was recorded (201).
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const dispensingsOf = (work) => count('select count(*) from pharmacy.dispensings where work_item_id=$1', [work.id]);
+  const notDispensable = (response, label) => assert.equal(expectStatus(response, 409, label).code,
+    'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE', label);
+  // Waits until the request's statement waits as named in pg_stat_activity,
+  // failing if the request answers first.
+  const untilWaiting = async (pending, waitEventType, statement, label) => {
+    let answered = false;
+    pending.then(() => { answered = true; }, () => { answered = true; });
+    for (let waited = 0; ; waited += 20) {
+      if (await count(`select count(*) from pg_stat_activity where datname = current_database()
+        and wait_event_type = $1 and query ilike $2`, [waitEventType, `%${statement}%`]) > 0) return;
+      assert(!answered, `${label}: the request answered before it waited (${waitEventType})`);
+      assert(waited < 10_000, `${label}: the request never waited (${waitEventType})`);
+      await sleep(20);
+    }
+  };
+  // The EHR cancelled the prescription before the dispense.
+  const { cancelled, racing, waiting, rolledBack, holding } = f.source;
+  await cancelPrescription(cancelled.prescription);
+  const cancelledCorrelation = `verifier-cancelled-${id()}`;
+  notDispensable(await send(`/work-items/${cancelled.id}/dispensings`, dispenseBody,
+    { key: key('dispense-cancelled'), correlationId: cancelledCorrelation }), 'dispense after the EHR cancelled the prescription');
+  assert.deepEqual(await Promise.all([dispensingsOf(cancelled),
+    count('select count(*) from pharmacy.outbox_events where correlation_id=$1', [cancelledCorrelation]),
+    count('select count(*) from audit.events where correlation_id=$1', [cancelledCorrelation])]), [0, 0, 0]);
+  check('dispense: after the EHR cancelled the prescription, 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE; no dispensing, outbox or audit row');
+  // A dispensing recorded before the cancel is still replayed, and can still be reversed.
+  await cancelPrescription(f.work[0].prescription);
+  assert.equal(expectStatus(await send(`/work-items/${w1}/dispensings`, dispenseBody, { key: dispenseKey }), 201,
+    'dispense replay after the EHR cancelled the prescription').id, dispensed.id);
+  assert.equal(expectStatus(await send(`/dispensings/${dispensed.id}/reversals`, reverseBody, { key: key('reverse-cancelled') }),
+    201, 'reverse a dispensing whose prescription the EHR cancelled since').status, 'reversed');
+  check('dispense: a dispensing recorded before the EHR cancel is replayed (201) and can be reversed (201)');
+  // The EHR cancel commits after the dispense took its snapshot and before its
+  // insert: the share lock finds the row changed (40001), and the retry reads
+  // the cancel. A plain read would dispense against the snapshot.
+  let racingAuthorizations = 0;
+  beforeAuthorization = async () => {
+    racingAuthorizations += 1;
+    if (racingAuthorizations === 1) await cancelPrescription(racing.prescription);
+  };
+  try {
+    notDispensable(await send(`/work-items/${racing.id}/dispensings`, dispenseBody, { key: key('dispense-racing') }),
+      'dispense while the EHR cancel commits');
+  } finally { beforeAuthorization = async () => undefined; }
+  assert.equal(racingAuthorizations, 2, 'the dispense ran a second time after the serialization failure');
+  assert.equal(await dispensingsOf(racing), 0);
+  check('dispense: an EHR cancel committed after the dispense took its snapshot is refused 409 on the retry after 40001; no dispensing');
+  // The EHR's cancel is in progress and holds the row lock: the dispense waits
+  // for it, then is refused once it commits, or goes through if it rolls back.
+  for (const [work, outcome] of [[waiting, 'commit'], [rolledBack, 'rollback']]) {
+    const ehr = await database.owner.connect();
+    try {
+      await ehr.query('begin');
+      await ehr.query('set local session_replication_role = replica');
+      await ehr.query('select id from ehr.prescriptions where id=$1 for update', [work.prescription]);
+      await ehr.query(`update ehr.prescriptions set status='cancelled',row_version=row_version+1,updated_at=clock_timestamp()
+        where id=$1`, [work.prescription]);
+      const pending = send(`/work-items/${work.id}/dispensings`, dispenseBody, { key: key(`dispense-${outcome}`) });
+      await untilWaiting(pending, 'Lock', 'insert into pharmacy.dispensings', `dispense during an EHR cancel that ends in ${outcome}`);
+      await ehr.query(outcome);
+      const response = await pending;
+      if (outcome === 'commit') notDispensable(response, 'dispense during an EHR cancel that commits');
+      else expectStatus(response, 201, 'dispense during an EHR cancel that rolls back');
+    } finally { ehr.release(); }
+  }
+  assert.deepEqual(await Promise.all([dispensingsOf(waiting), dispensingsOf(rolledBack)]), [0, 1]);
+  check('dispense: waits for an EHR cancel in progress; refused 409 when it commits, recorded (201) when it rolls back');
+  // A dispensing in progress holds its share lock until it commits: the EHR
+  // cannot lock the prescription meanwhile, and its cancel goes through after.
+  await database.owner.query(`create function public.verifier_pause_outbox() returns trigger language plpgsql security definer as $f$
+    begin if new.correlation_id = 'verifier-pause-pharmacy-0001' then perform pg_sleep(2); end if; return new; end $f$`);
+  await database.owner.query(`create trigger verifier_pause_outbox before insert on pharmacy.outbox_events
+    for each row execute function public.verifier_pause_outbox()`);
+  const paused = send(`/work-items/${holding.id}/dispensings`, dispenseBody,
+    { key: key('dispense-holding'), correlationId: 'verifier-pause-pharmacy-0001' });
+  await untilWaiting(paused, 'Timeout', 'insert into pharmacy.outbox_events', 'dispense paused after its dispensing insert');
+  await assert.rejects(database.owner.query('select id from ehr.prescriptions where id=$1 for update nowait', [holding.prescription]),
+    (error) => error.code === '55P03', 'the EHR locked a prescription that a dispense in progress had share-locked');
+  expectStatus(await paused, 201, 'dispense paused after its dispensing insert');
+  await cancelPrescription(holding.prescription);
+  assert.equal(await count(`select count(*) from ehr.prescriptions where id=$1 and status='cancelled' and row_version=2`,
+    [holding.prescription]), 1);
+  check('dispense: an EHR row lock on the prescription is refused (55P03) while a dispense holds its share lock; the cancel goes through after the commit');
 
   // Import OCR medication evidence (internal caller ocr-api).
   const importBody = { patientId: f.patient, sourceDocumentId: id(), ocrJobId: id(), extractionId: id(), validationId: id(),
