@@ -552,7 +552,21 @@ export class NinRegistrationService {
     return row;
   }
 
+  /**
+   * Locks the case row, then reads it. PostgreSQL refuses FOR UPDATE on the
+   * nullable side of the patient join, and the patient row is not changed
+   * here, so only the case is locked. The read is a separate statement: under
+   * READ COMMITTED it sees a review that committed while this one waited for
+   * the lock, including the patient that review created.
+   */
   private async loadCaseForUpdate(client: PoolClient, caseId: string): Promise<CaseDataRow> {
+    const locked = await client.query(
+      `select registration.id from identity.registration_cases registration
+        where registration.id = $1 and registration.facility_id = platform.current_facility_id()
+        for update`,
+      [caseId],
+    );
+    if (!locked.rows[0]) throw new DomainProblem(404, 'REGISTRATION_CASE_NOT_FOUND', 'The registration case was not found');
     const result = await client.query<CaseDataRow>(
       `select registration.id::text, registration.status, registration.row_version::text,
               registration.resolved_patient_id::text, patient.hid_code as resolved_hid_code,
@@ -565,8 +579,7 @@ export class NinRegistrationService {
               (select count(*)::text from identity.registration_case_candidates candidate where candidate.case_id = registration.id) as candidate_count
          from identity.registration_cases registration
          left join identity.patients patient on patient.id = registration.resolved_patient_id
-        where registration.id = $1 and registration.facility_id = platform.current_facility_id()
-        for update`,
+        where registration.id = $1 and registration.facility_id = platform.current_facility_id()`,
       [caseId],
     );
     const row = result.rows[0];
