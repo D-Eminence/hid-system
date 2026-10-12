@@ -159,6 +159,8 @@ patient mapping on use.
 grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
 returns at most 50 completed encounters and 50 current signed/amended note
 revisions, after fresh Identity authorization through the EHR workload caller.
+It names the other five record categories as withheld from the patient, not as
+absent (§11, "Record summaries").
 These routes accept no browser-selected patient identity. Patient record access
 is read-only and owning-service disclosure/audit is atomic. The internal
 `GET /api/v1/identity/service/patient-self-authorization` requires both the
@@ -180,6 +182,8 @@ notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
 Activation also requires the platform `break_glass_enabled` control inside the
 activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
+The summary's sections, limits, vital values and audit counts are in §11,
+"Record summaries".
 
 Patient access-request decisions are session-bound patient commands:
 `GET /api/v1/identity/me/access-requests`,
@@ -662,6 +666,79 @@ only if it sorts after the last row shown; reload the first page to see newer
 rows. Before the microsecond cursor, rows that sort after the last row shown
 within its millisecond (earlier in that millisecond, or tied with a lower
 `id`) were skipped.
+
+### Record summaries
+
+Two read-only summaries return the same seven arrays, each newest first:
+`encounters` (completed), `notes` (signed or amended, with the current
+revision's content), `vitals`, `diagnoses`, `prescriptions`, `labRequests` and
+`documents`.
+
+- `GET /api/v1/ehr/me/records`: the patient's own records, from every facility.
+- `GET /api/v1/ehr/patients/:patientId/emergency-records`: the break-glass
+  summary of the active facility (`X-Facility-ID`, `X-Purpose-Of-Use: emergency`).
+
+Both also return:
+
+| Field | Meaning |
+|---|---|
+| `limits` | the most rows each section shows: 50 encounters, 50 notes and 100 of each other section |
+| `truncated` | per section, `true` when more rows exist than its limit; the section then holds the newest `limits[section]` rows |
+| `limit` | `50`, the smallest section limit, kept for existing clients; read `limits` and `truncated` instead |
+
+**Patient summary.** Only encounters and notes are released to the patient.
+The response says so: `released` is `["encounters","notes"]` and `withheld` is
+`["vitals","diagnoses","prescriptions","labRequests","documents"]`. A withheld
+category is not read; its array is always empty and means "not released to the
+patient portal", never "no records". `limits` and `truncated` name the released
+sections only. Which other categories are released, and on which conditions,
+is an open product decision; this is the current default. The audit event
+`ehr.patient.self.records.read` records `encounterCount`, `noteCount` and
+`withheldCategories`.
+
+**Emergency summary.** It returns all seven categories, pending a decision on
+the break-glass scope.
+
+- `documents` lists only documents whose effective status is `available`: the
+  latest scan of the exact stored object version and SHA-256 is clean, the rule
+  the download applies. Each has `status` `available`, `scanStatus` `clean`,
+  and `mediaType` as the scan detected it (as declared if the scan named none).
+- Each vital's eight measurements are its current values ("Vital corrections"
+  below), with `currentCorrectionNo`, `correctedAt`, `correctionUnavailable`,
+  `recordedValues` (the eight measurements as first recorded, as JSON numbers
+  or `null`, for a corrected vital; otherwise `null`) and `correctionReason`
+  (the current correction's).
+- The audit event `ehr.emergency.records.read` records the count of each
+  category, and nothing else: `encounterCount`, `noteCount`, `vitalCount`,
+  `correctedVitalCount` (vitals with `currentCorrectionNo` above 0),
+  `diagnosisCount`, `prescriptionCount`, `labRequestCount` and `documentCount`.
+
+### Vital corrections
+
+`POST .../vitals/:vitalId/corrections` appends a correction with a
+`replacementValues` set and makes it current: the vital's
+`currentCorrectionNo` becomes its number. The values first recorded never
+change, and `GET .../vitals` and `GET .../vitals/:vitalId` still return them,
+with `currentCorrectionNo`; `GET .../vitals/:vitalId/corrections` lists the
+corrections, newest first.
+
+A vital's current values, as the emergency summary returns them (the current
+default; the backend had not defined them before, and this is the rule the
+Health-id provider chart applies):
+
+- with no correction (`currentCorrectionNo` 0), the values first recorded;
+- otherwise exactly the `replacementValues` of the correction numbered
+  `currentCorrectionNo`. A measurement that correction omits has no current
+  value (`null`), even if it was recorded or named by an earlier correction.
+  Corrections are not merged with each other or with the values first recorded,
+  so send every measurement that is still current;
+- if that correction cannot be read, every measurement is `null` and
+  `correctionUnavailable` is `true`. Values first recorded are returned only as
+  `recordedValues`, never as current.
+
+Current values have the recorded columns' types: `heightCm`, `weightKg`,
+`temperatureC` and `oxygenSaturationPercent` are decimal strings,
+`pulseBpm`, `respiratoryRate`, `systolicMmhg` and `diastolicMmhg` integers.
 
 ## 12. Lab
 

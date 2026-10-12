@@ -165,8 +165,12 @@ disposable copy of its synthetic `hid_rehearsal` database: after the synthetic
 patient approves a synthetic doctor's access request, the doctor's same-origin
 cookie read of the patient's encounters through EHR, with no Origin or CSRF
 token, is authorized by Identity, and EHR cookie writes without Origin or CSRF
-are refused. That check is local and synthetic; it does not exercise the
-staging fixture or break-glass access. With D-Eminence/hid-system#39, the
+are refused. With fix/patient-records-release-honesty it also reads the
+patient's own record summary (released and withheld categories, limits) and
+the doctor's break-glass emergency summary (corrected vitals, available
+documents, audit counts); its break-glass grant is inserted directly, not
+activated. That check is local and synthetic; it does not exercise the staging
+fixture or break-glass activation. With D-Eminence/hid-system#39, the
 rehearsal also runs
 `services/identity-api/scripts/verify-session-sign-out-runtime.mjs` as the
 Identity runtime (`session_sign_out_runtime`): sign-out by refresh cookie for a
