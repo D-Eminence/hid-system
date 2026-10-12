@@ -57,7 +57,7 @@ try {
   const f = { org: id(), facility: id(), patient: id(), encounter: id(), document: id(),
     a: { account: id(), staff: id(), membership: id() }, b: { account: id(), staff: id(), membership: id() },
     c: { account: id(), staff: id(), membership: id() }, d: { account: id(), staff: id(), membership: id() },
-    orders: [id(), id(), id()], work: [id(), id(), id()],
+    orders: [id(), id(), id()], work: [id(), id(), id()], microOrder: id(),
     ocr: { job: id(), extraction: id(), validation: id(), confirmation: id(), publication: id() } };
   const members = [['a', f.a], ['b', f.b], ['c', f.c], ['d', f.d]];
   for (const [name, member] of members) member.subject = `synthetic:lab-verifier-${name}:${member.account}`;
@@ -102,6 +102,11 @@ try {
         'http://loinc.org','718-7','Haemoglobin','routine','active','Synthetic Lab verifier order',$7)`,
       [order, f.encounter, f.patient, f.facility, f.a.account, f.a.membership, requestedAt]);
     }
+    // An order whose created_at has microseconds, as clock_timestamp() gives (ehr.lab_requests, 0004).
+    await client.query(`insert into ehr.lab_requests (id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,
+      test_code_system,test_code,test_display,priority,status,clinical_information,created_at) values ($1,$2,$3,$4,$5,$6,
+      'http://loinc.org','718-7','Haemoglobin','routine','active','Synthetic Lab verifier order',$7)`,
+    [f.microOrder, f.encounter, f.patient, f.facility, f.a.account, f.a.membership, '2026-10-01T09:00:00.123456Z']);
     // Work items accepted earlier by A, without accessions, each with the one
     // requested test acceptance records (execution start requires exactly one).
     for (const [index, work] of f.work.entries()) {
@@ -210,6 +215,19 @@ try {
     'three concurrent accepts of a second order');
   assert.equal(await workItemsOf(order2), 1);
   check('accept: concurrent accepts of one order create one work item, test, event and outbox row; replay 201; a different body 409');
+  // Lab accepts an EHR order only when requested_at equals the order's created_at exactly (0077). EHR sends the
+  // database's microsecond text (lab-requests.service.ts); the millisecond text of a JavaScript Date is refused.
+  const truncated = await send('/work-items/accept-ehr-order', { ...orderBody(f.microOrder), requestedAt: '2026-10-01T09:00:00.123Z' },
+    { key: key('accept'), internal: 'ehr-api' });
+  // lab.validate_work_item refuses it (23514); Lab answers an unmapped guard refusal with 500 (release checklist §9).
+  expectStatus(truncated, 500, 'accept with the millisecond requestedAt');
+  assert.equal(truncated.sqlstate, '23514', 'millisecond requestedAt: refused by lab.validate_work_item');
+  assert.equal(truncated.message, 'Lab work item does not match the exact active EHR order version and actor context');
+  assert.equal(await workItemsOf(f.microOrder), 0);
+  expectStatus(await send('/work-items/accept-ehr-order', { ...orderBody(f.microOrder), requestedAt: '2026-10-01T09:00:00.123456Z' },
+    { key: key('accept'), internal: 'ehr-api' }), 201, 'accept with the microsecond requestedAt');
+  assert.equal(await workItemsOf(f.microOrder), 1);
+  check('accept: an order created at .123456 is refused for requestedAt .123Z by the database guard (23514) and creates no work item; .123456Z is accepted (201)');
 
   // Accession a work item.
   const [w1, w2, w3] = f.work;
