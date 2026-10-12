@@ -26,7 +26,7 @@ fifth wrong code within 15 minutes blocks the recipient for 15 minutes
 answers `422 OTP_INVALID` for every code, a correct one too, and `/contact`
 answers `429 ENROLLMENT_RATE_LIMITED` and sends no code. Both responses are
 the existing ones, unchanged in shape. This comes from
-fix/enrollment-contact-code-budget, not yet deployed; the threshold is an
+D-Eminence/hid-system#61, not yet deployed; the threshold is an
 open product decision.
 
 ### Auth session contract

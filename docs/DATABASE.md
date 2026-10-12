@@ -85,7 +85,7 @@ created atomically. Its rate counters and OTPs are scoped to the enrollment.
 Wrong contact codes also count against one failure budget per recipient,
 across its challenges and enrollments, in `auth.otp_rate_limits` (scope
 `recipient`, a keyed HMAC of the recipient HMAC; no schema change;
-fix/enrollment-contact-code-budget, release checklist §2). Unlike the
+D-Eminence/hid-system#61, release checklist §2). Unlike the
 enrollment counters, which `identity.prune_expired_public_patient_enrollments`
 deletes once their window started more than 48 hours ago, these rows are never
 deleted: a contact that ever got a wrong enrollment code keeps one, even if it
