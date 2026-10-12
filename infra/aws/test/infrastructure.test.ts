@@ -502,6 +502,50 @@ test('an explicit QoreID staging synth injects its distinct server-only secret i
   }
 });
 
+test('Identity receives the platform MFA key from its sensitive secret and a fixed key version in every environment', () => {
+  const developmentRegional = Template.fromStack(new HidRegionalStack(new App(), 'DevelopmentRegionalTest', {
+    configuration: environmentConfig('development'),
+  })).toJSON() as typeof regional;
+  const profiles: Array<[string, typeof regional]> = [
+    ['production', regional], ['development', developmentRegional], ['staging economy', stagingRegional],
+    ['staging fidelity', fidelityRegional], ['staging sleep', sleepRegional], ['staging QoreID', qoreIdStagingRegional],
+  ];
+  for (const [label, template] of profiles) {
+    const tasks = resources(template, 'AWS::ECS::TaskDefinition');
+    const identity = tasks.find(([, task]) => JSON.stringify(task.Properties?.Family).includes('identity-api'));
+    assert.ok(identity, `${label}: missing Identity task definition`);
+    const containers = identity[1].Properties!.ContainerDefinitions as Array<{
+      Name: string; Environment?: Array<{ Name: string; Value: unknown }>; Secrets?: Array<{ Name: string; ValueFrom: unknown }>;
+    }>;
+    const api = containers.find(container => container.Name === 'identity-api');
+    assert.ok(api, `${label}: missing identity-api container`);
+    const keys = (api.Secrets ?? []).filter(item => item.Name === 'MFA_SECRET_KEY_B64');
+    assert.equal(keys.length, 1, `${label}: Identity has no MFA_SECRET_KEY_B64 secret reference`);
+    assert.deepEqual(keys[0]!.ValueFrom, { 'Fn::Join': ['', [{ Ref: 'IdentitySensitiveSecretArn' }, ':mfaSecretKeyB64::']] },
+      `${label}: MFA_SECRET_KEY_B64 must come from the mfaSecretKeyB64 field of the Identity sensitive secret`);
+    const environment = api.Environment ?? [];
+    assert.equal(environment.some(item => item.Name === 'MFA_SECRET_KEY_B64'), false,
+      `${label}: MFA_SECRET_KEY_B64 must never be a plaintext environment value`);
+    assert.deepEqual(environment.filter(item => item.Name === 'MFA_KEY_VERSION').map(item => item.Value), ['aws-v1'],
+      `${label}: Identity must run with MFA_KEY_VERSION aws-v1, not the local-v1 default`);
+    for (const container of containers.filter(item => item !== api)) {
+      assert.doesNotMatch(JSON.stringify(container), /MFA_SECRET_KEY_B64|mfaSecretKeyB64|MFA_KEY_VERSION/,
+        `${label}: only the identity-api container may receive the MFA key`);
+    }
+    for (const [, task] of tasks.filter(([id]) => id !== identity[0])) {
+      assert.doesNotMatch(JSON.stringify(task), /MFA_SECRET_KEY_B64|mfaSecretKeyB64|MFA_KEY_VERSION/,
+        `${label}: only the Identity task definition may receive the MFA key`);
+    }
+    const executionPolicy = resources(template, 'AWS::IAM::Policy')
+      .find(([id]) => id.startsWith('IdentityApiExecutionRoleDefaultPolicy'));
+    assert.ok(executionPolicy, `${label}: missing Identity execution-role policy`);
+    assert.match(JSON.stringify(executionPolicy[1].Properties), /"Ref":"IdentitySensitiveSecretArn"/,
+      `${label}: the Identity execution role must be able to resolve the sensitive secret`);
+    assert.match(String(template.Parameters.IdentitySensitiveSecretArn!.Description), /mfaSecretKeyB64/,
+      `${label}: the IdentitySensitiveSecretArn description must name the mfaSecretKeyB64 field`);
+  }
+});
+
 test('staging email OTP injects only its SES sender while ordinary delivery retains Novu', () => {
   function container(template: typeof regional, name: string) {
     const task = properties(template, 'AWS::ECS::TaskDefinition')

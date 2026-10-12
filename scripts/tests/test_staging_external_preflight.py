@@ -12,11 +12,22 @@ class StagingPreflightTests(unittest.TestCase):
     def test_deferred_nin_credentials_are_not_staging_requirements(self):
         name = "/hid/staging/identity-sensitive"
         response = {"ARN": f"arn:aws:secretsmanager:eu-west-1:659225405023:secret:{name}-example",
-                    "SecretString": json.dumps({"otpHmacKeyB64": "fixture", "turnstileSecretKey": "fixture", "googleOidcClientIds": "fixture"})}
+                    "SecretString": json.dumps({"otpHmacKeyB64": "fixture", "turnstileSecretKey": "fixture", "googleOidcClientIds": "fixture", "mfaSecretKeyB64": "fixture"})}
         self.assertEqual(preflight.secret_summary(name, response)["required_fields_present"], {
-            "otpHmacKeyB64": True, "turnstileSecretKey": True, "googleOidcClientIds": True})
+            "otpHmacKeyB64": True, "turnstileSecretKey": True, "googleOidcClientIds": True, "mfaSecretKeyB64": True})
         self.assertNotIn("/hid/staging/nin-metamap", preflight.SECRET_FIELDS)
         self.assertNotIn("/hid/staging/nin-qoreid", preflight.SECRET_FIELDS)
+
+    def test_identity_secret_requires_the_platform_mfa_key(self):
+        name = "/hid/staging/identity-sensitive"
+        self.assertIn("mfaSecretKeyB64", preflight.SECRET_FIELDS[name])
+        arn = f"arn:aws:secretsmanager:eu-west-1:659225405023:secret:{name}-example"
+        present = {field: "fixture" for field in preflight.SECRET_FIELDS[name]}
+        self.assertTrue(preflight.secret_summary(name, {"ARN": arn, "SecretString": json.dumps(present)})["required_fields_present"]["mfaSecretKeyB64"])
+        for missing in [{}, {"mfaSecretKeyB64": ""}, {"mfaSecretKeyB64": None}]:
+            value = {**{field: "fixture" for field in preflight.SECRET_FIELDS[name] if field != "mfaSecretKeyB64"}, **missing}
+            result = preflight.secret_summary(name, {"ARN": arn, "SecretString": json.dumps(value)})
+            self.assertFalse(result["required_fields_present"]["mfaSecretKeyB64"])
 
     def test_wrong_aws_account_stops_before_secret_reads(self):
         calls = []

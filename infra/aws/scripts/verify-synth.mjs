@@ -61,6 +61,16 @@ for (const service of services) {
   if (profile === 'sleep') assert.equal(service.Properties.DesiredCount, 0)
 }
 assert.equal(resources('AWS::ECS::TaskDefinition').length, 12)
+const identityApis = resources('AWS::ECS::TaskDefinition')
+  .filter(task => String(task.Properties.Family).endsWith('-identity-api'))
+  .flatMap(task => task.Properties.ContainerDefinitions).filter(container => container.Name === 'identity-api')
+assert.equal(identityApis.length, 1)
+assert.deepEqual(identityApis[0].Secrets.filter(secret => secret.Name === 'MFA_SECRET_KEY_B64').map(secret => secret.ValueFrom),
+  [{ 'Fn::Join': ['', [{ Ref: 'IdentitySensitiveSecretArn' }, ':mfaSecretKeyB64::']] }],
+  'Identity must read MFA_SECRET_KEY_B64 from the mfaSecretKeyB64 field of its sensitive secret')
+assert.deepEqual(identityApis[0].Environment.filter(entry => entry.Name === 'MFA_KEY_VERSION').map(entry => entry.Value),
+  ['aws-v1'], 'Identity must run with MFA_KEY_VERSION aws-v1')
+assert.equal(text.split('mfaSecretKeyB64::').length, 2, 'only Identity may reference the MFA key')
 assert.equal(resources('AWS::EC2::NatGateway').length, contract.nat)
 assert.equal(resources('AWS::EC2::VPCEndpoint')
   .filter(resource => resource.Properties.VpcEndpointType === 'Interface').length, contract.endpoints)
