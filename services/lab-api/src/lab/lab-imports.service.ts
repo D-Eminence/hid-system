@@ -62,13 +62,16 @@ export class LabImportsService {
       validationId: ocr?.validationId ?? null, validationVersion: ocr?.validationVersion ?? null,
     });
     return this.database.withTransaction(context, async (client) => {
+      // Imported evidence is insert-only (0017 trigger; no UPDATE for the runtime
+      // role, so no row lock). Unique keys allow one import per idempotency key and
+      // publication; DatabaseService reruns the SERIALIZABLE loser of a race (Stage 9).
       const existingResult = await client.query<ImportRow & { request_sha256: string }>(
         `select id::text,patient_id::text,facility_id::text,source_type,status,
           external_lab_name,external_reference,collected_at,reported_at,received_at,
           source_document_id::text,ocr_job_id::text,extraction_id::text,validation_id::text,
           validation_version,publication_id::text,row_version::text,created_at,request_sha256
          from lab.imported_evidence where (facility_id=$1 and created_by=$2 and idempotency_key=$3)
-          or ($4::uuid is not null and publication_id=$4) for update`,
+          or ($4::uuid is not null and publication_id=$4)`,
         [context.facilityId, context.actor.accountId, key, ocr?.publicationId ?? null]);
       const existing = existingResult.rows[0];
       if (existing) {

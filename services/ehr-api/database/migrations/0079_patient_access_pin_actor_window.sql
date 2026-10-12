@@ -6,7 +6,7 @@
 -- without ever reaching the five-failure actor lock, limited only by the
 -- per-patient window of each target. A success now clears only the window of
 -- the patient it verified; the actor window ends when its 15 minutes run out
--- or locks at five failures, as before. Applied migrations 0001 through 0077
+-- or locks at five failures, as before. Applied migrations 0001 through 0078
 -- are immutable.
 --
 -- The function is replaced with CREATE OR REPLACE, which keeps its owner and
@@ -270,7 +270,7 @@ begin
 
   -- Only the verified patient's window is cleared. The actor's window is
   -- left to run out: a success for one patient must not forgive failed
-  -- guesses at another (0078).
+  -- guesses at another (0079).
   update identity.patient_access_pin_target_limits as limit_row
      set failure_count = 0, window_started_at = clock_timestamp(), locked_until = null, updated_at = clock_timestamp()
    where limit_row.actor_account_id = actor_account_id_value

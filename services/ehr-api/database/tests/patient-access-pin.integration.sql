@@ -321,7 +321,7 @@ end
 $$;
 
 -- A correct PIN for one patient must not reset the actor's failure window.
--- Before 0078 any success cleared the actor's count, so a clinician who knew
+-- Before 0079 any success cleared the actor's count, so a clinician who knew
 -- one patient's PIN could guess another patient's PIN four times, enter the
 -- known PIN, and repeat without ever being locked. The success still clears
 -- the window of the patient it verified, and only that one.

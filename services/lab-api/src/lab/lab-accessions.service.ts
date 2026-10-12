@@ -38,8 +38,11 @@ export class LabAccessionsService {
       if(!work) throw new DomainProblem(404,'LAB_WORK_ITEM_NOT_FOUND','Lab work item was not found');
       if(work.facility_id!==context.facilityId||work.status!=='accepted') throw new DomainProblem(409,'LAB_WORK_ITEM_NOT_ACCESSIONABLE','Lab work item is not accessionable at this facility');
       await this.authorize(work.patient_id,context,'write_records');
+      // Accessions are insert-only (0019 trigger; no UPDATE for the runtime role, so
+      // no row lock). Unique keys allow one accession per work item and idempotency
+      // key; DatabaseService reruns the SERIALIZABLE loser of a race (Stage 9).
       const replay = await client.query<AccessionRow>(`select ${ACCESSION_COLUMNS} from lab.accessions
-        where work_item_id=$1 or (facility_id=$2 and created_by=$3 and idempotency_key=$4) for update`,
+        where work_item_id=$1 or (facility_id=$2 and created_by=$3 and idempotency_key=$4)`,
       [workItemId,context.facilityId,context.actor.accountId,key]);
       if (replay.rows[0]) {
         if (replay.rows[0].request_sha256!==digest) throw new DomainProblem(409,'IDEMPOTENCY_CONFLICT','Accession request conflicts with existing work');
