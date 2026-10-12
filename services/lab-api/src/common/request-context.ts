@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import { DomainProblem } from './problem';
 
 export interface FacilityAssignment {
   id: string;
@@ -56,10 +57,16 @@ export function requireRequestContext(request: HidRequest, suppliedPurpose?: str
   if (!request.actor || !request.facilityId || !request.correlationId) {
     throw new Error('Request context was not established by security guards');
   }
+  // The guard requires a bearer token or a cookie, so their absence is a bug.
+  if (!request.header('authorization') && !request.header('cookie')) {
+    throw new Error('Validated authorization is required for Lab data access');
+  }
+  // A write's purpose comes from its validated body; a read's from the header,
+  // which the guard does not check, so a missing or unknown one is the client's.
   const candidate = suppliedPurpose ?? request.header('x-purpose-of-use');
-  if (!candidate || !PURPOSES.has(candidate as PurposeOfUse)
-      || (!request.header('authorization') && !request.header('cookie'))) {
-    throw new Error('Validated authorization and purpose of use are required for Lab data access');
+  if (!candidate || !PURPOSES.has(candidate as PurposeOfUse)) {
+    throw new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED',
+      'X-Purpose-Of-Use must be direct-care, emergency or healthcare-operations');
   }
   const purposeOfUse = candidate as PurposeOfUse;
   request.purposeOfUse = purposeOfUse;

@@ -678,6 +678,14 @@ Authorization should include:
 
 Do not authorize based only on UI-selected roles.
 
+The OCR, Lab and Pharmacy APIs take the purpose of a write from its validated
+body where the body has one, and otherwise from `X-Purpose-Of-Use`, which must
+be `direct-care`, `emergency` or `healthcare-operations` exactly. A missing or
+unknown header value is `400 PURPOSE_OF_USE_REQUIRED` before any read, as in
+EHR and Identity; before fix/ocr-purpose-400-and-publication-auth it was
+`500 INTERNAL_ERROR`. Whether a route then accepts that purpose is its own
+authorization.
+
 ## 11. EHR
 
 EHR endpoints operate on canonical Identity patient IDs.
@@ -863,7 +871,16 @@ POST /api/v1/ehr/internal/ocr/patients/:patientId/clinical-notes
 ```
 
 These routes require propagated human authentication plus an independent exact
-`ocr-api` workload identity. The source read returns only the document,
+`ocr-api` workload identity. When EHR, Lab or Pharmacy refuses OCR's workload
+identity with `401` or `403` and `INTERNAL_SERVICE_AUTH_REQUIRED`,
+`INVALID_WORKLOAD_IDENTITY` (every JWT failure, a JWKS fetch failure
+included), `WORKLOAD_CALLER_DENIED` or `WORKLOAD_IDENTITY_UNAVAILABLE`, OCR
+answers `503 EHR_SERVICE_AUTH_UNAVAILABLE`, `LAB_SERVICE_AUTH_UNAVAILABLE` or
+`PHARMACY_SERVICE_AUTH_UNAVAILABLE`, so a browser does not sign in again for a
+fault between services. A refusal of the propagated user credential, facility
+or permission keeps the owning service's status and code. Identity answers its
+own workload refusals as `401 AUTHENTICATION_REQUIRED` or `403 ACCESS_DENIED`,
+which OCR cannot tell apart from a user refusal and passes through. The source read returns only the document,
 patient, facility, object-version, SHA-256, status, and scan status required by
 OCR. The clinical-note command requires `ocr-publication:<publicationId>`
 idempotency and preserves the existing immutable provenance contract. They are
@@ -928,6 +945,22 @@ applicable, and idempotency are propagated separately from workload identity.
 Calls are bounded; idempotent publication calls retry only transient transport
 or 502/503/504 failures. OCR never reports `published` until the owning service
 returns its durable resource reference.
+
+A failed attempt leaves the publication `failed` with a `failureCode`. An
+owning service's `5xx` or outage, an error inside the attempt, and a refusal of
+OCR's workload identity by EHR, Lab or Pharmacy (`503
+<SERVICE>_SERVICE_AUTH_UNAVAILABLE` above) are stored as
+`OWNING_SERVICE_UNAVAILABLE`, and the owning service's `409
+REQUEST_IN_PROGRESS` under its own code; both are retryable. The same request
+with the same `Idempotency-Key` claims a retryable failure again 15 seconds
+after it, up to three attempts, and after the last one answers `409
+OCR_PUBLICATION_IN_PROGRESS`. Any other `4xx`, including a refusal of the
+user's credential, facility or permission and an authorization that has lapsed
+since the request (`404 OCR_JOB_NOT_FOUND`), is terminal under its own code,
+and every later request for that publication answers `409
+OCR_PUBLICATION_TERMINAL`. A request with a new key for a validation that
+already has a publication answers `409 OCR_ALREADY_PUBLISHED`, so only a
+client that keeps the original key can retry.
 
 ## 16. Storage
 
