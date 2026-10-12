@@ -99,6 +99,16 @@ or CSRF are refused, and that Identity's check refuses a forged or missing
 workload token, a reported write without CSRF and an unreported method. It
 cannot run against staging or production.
 
+`scripts/verify-ehr-lab-handoff-runtime.mjs` (fix/ehr-lab-handoff-resend) is
+run the same way. It starts EHR (as `hid_ehr_api_runtime`) and Lab (as
+`hid_lab_api_runtime`, in a child process) with a fake Identity, and checks
+that an active lab request Lab refuses is saved and answered
+`409 LAB_HANDOFF_REFUSED`, that `POST .../lab-work-item` sends it once Lab
+allows it, and again with the same work item, that activating a draft and
+resuming a held request send the current version, and that an edit of an
+accepted request is reported `already_accepted` while Lab keeps its one work
+item.
+
 ## Database deployment
 
 The `database/` and `scripts/` directories are platform-owned migration,

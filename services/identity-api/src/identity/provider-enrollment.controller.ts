@@ -9,6 +9,7 @@ import { getEnvironment } from '../config/environment';
 import type { LoginDto } from '../auth/dto/login.dto';
 import { ActivateProviderEnrollmentDto, StartProviderEnrollmentDto,
   VerifyProviderEnrollmentDto } from './dto/provider-enrollment.dto';
+import { clearEnrollmentCookie } from './enrollment-cookie';
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
 import { ProviderEnrollmentService } from './provider-enrollment.service';
 import type { LoginResult } from '../auth/auth.types';
@@ -140,5 +141,8 @@ export class ProviderEnrollmentController {
     response.cookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, result.csrfToken, {
       ...common, httpOnly: false, path: '/', expires: result.refreshExpiresAt,
     });
+    // A sign-in, as AuthController's: the device's public patient enrollment
+    // cookie is expired with it.
+    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
   }
 }

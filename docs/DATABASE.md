@@ -1761,6 +1761,11 @@ Checks:
   `services/ocr-api/scripts/verify-ocr-runtime.mjs` and
   `services/outreach-api/scripts/verify-outreach-runtime.mjs` run the
   service's real `AppModule` through `scripts/service-runtime-harness.mjs`;
+  `services/ehr-api/scripts/verify-ehr-lab-handoff-runtime.mjs`
+  (fix/ehr-lab-handoff-resend) runs EHR's and, in a child process, Lab's
+  through it, each as its runtime role, and checks that an active lab request
+  Lab refuses stays saved, is sent again on request, on activation and on
+  resume, and that Lab keeps one work item per request;
   `services/identity-api/scripts/verify-registration-review-runtime.mjs`
   composes the authentication and NIN registration controllers with their
   real providers, the global security guard and audit interceptor, and the
@@ -1773,6 +1778,15 @@ Checks:
   the other row below the deadlock timeout. Each verifier ends by requiring
   `pg_stat_database` to report no deadlock for its database, read after the
   service's connections closed, so a deadlock the retry hid still fails it.
+  `verify-lab-runtime.mjs` also pins which database refusals Lab maps: only
+  EHR-order acceptance maps its own (fix/ehr-lab-handoff-resend), the
+  `lab.validate_work_item` refusal (`23514`) to `409 LAB_ORDER_NOT_CURRENT`
+  and the row-level security refusal of the work-item insert (`42501`) to
+  `403 LAB_ACCESS_DENIED`; a member verifying a result they entered (`23514`),
+  the loser of two verifications of one result version (`23505`) and an
+  external or OCR import without a database consent (`42501`) still answer
+  `500`, which OCR stores for its Lab import as the retryable
+  `OWNING_SERVICE_UNAVAILABLE`.
 
 ## Patient access PIN actor window (0079)
 
@@ -1949,6 +1963,99 @@ Tests (rollback-only, synthetic fixtures):
   lock fail with `55P03`; replays and reversals of earlier dispensings still
   answer `201`.
 
+## Uniform recovery start cooldown (0081) and recovery code budget
+
+`0081_uniform_recovery_start_cooldown.sql` adds `auth.otp_start_cooldowns`:
+one row per recovery purpose (`PASSWORD_RESET`, `LEGACY_ACCOUNT_RECOVERY`,
+`LEGACY_SESSION_FALLBACK`) and `identifier_hmac`, a keyed HMAC of the purpose
+and the case-folded email address or HID (lower-case hex, 64 characters), with
+the `challenge_id` the last start answered and its `started_at`. The key is
+`(purpose, identifier_hmac)`. There is no foreign key: the row exists whether
+or not the identifier has an account, and its challenge id may name no
+challenge. It holds no identifier, authorizes nothing and has no row-level
+security, as `auth.otp_challenges` and `auth.otp_rate_limits` have none. The
+role bootstrap grants `SELECT`, `INSERT` and `UPDATE` to `hid_identity_runtime`
+and `hid_schema_test_runtime`; no runtime may delete rows. There is no
+retention job: each identifier keeps one row per purpose, overwritten by its
+next start, so the table grows with the number of distinct identifiers ever
+started, as `auth.otp_rate_limits` grows with its buckets.
+
+Before 0081 the resend cooldown of `POST /auth/otp/start` was read only from
+the account's open row in `auth.otp_challenges`. Within
+`OTP_RESEND_COOLDOWN_SECONDS` a repeat for a real account was answered with
+the live challenge id and one for an unknown identifier with a new random id,
+so two requests told whether an address or HID had an account. The marker
+cannot live in `auth.otp_challenges`: `otp_challenges_active_recipient_purpose_uq`
+(0028) would refuse a later real challenge for the same address.
+
+The Identity API (`otp.service.ts`), in the start transaction, after the three
+rate-limit counts (whose recipient bucket lock already serializes the starts
+of one identifier):
+
+1. reads the row; if `started_at` is within the cooldown by
+   `clock_timestamp()`, answers its `challenge_id` and sends nothing;
+2. otherwise upserts the row with the new candidate id;
+3. reads the account's open challenge of the purpose `FOR UPDATE`, as before,
+   with its cooldown also computed by `clock_timestamp()`;
+4. answers an unknown identifier, an account without a usable recipient, an
+   account whose code budget is spent, or an open challenge still cooling that
+   this identifier did not start (the account's other identifier did) with the
+   new id, sending nothing. The identifier's own challenge, written just after
+   its row, does not hold back its retry once its own cooldown has ended;
+5. otherwise replaces the open challenge and sends a code, after the response.
+
+A challenge whose delivery failed definitively keeps its id until the cooldown
+ends. The cooldown read takes no row lock. The upsert locks only that
+identifier's cooldown row until commit, after the three rate-limit transaction
+locks and before the challenge row lock; the recipient bucket's lock already
+serializes the starts of one identifier, so no new cycle forms.
+
+The recovery code budget needs no schema change. Each wrong code also counts
+in `auth.otp_rate_limits`, scope `account`, bucket
+`hmac('otp-verify-failure', account_id)`, apart from the start bucket
+`hmac('account', account_id)`. The `OTP_VERIFY_FAILURE_MAX`-th wrong code (5
+by default) within `OTP_VERIFY_FAILURE_WINDOW_SECONDS` (900) sets
+`blocked_until` one window ahead, as the platform MFA budget does. While it is
+set, verification refuses every code of the account, a correct one too, and
+invalidates that challenge (`attempts_exhausted`); a start reads it without a
+lock and sends nothing. Verification locks its challenge row, then takes the
+bucket's transaction lock (`otp-rate:account:<bucket>`), and locks no other
+challenge: start never takes that lock and `auth.complete_recovery_otp` never
+touches the bucket, so no cycle forms. An unknown challenge id counts nothing.
+No bucket is keyed by client IP.
+
+Residual: verification work still differs. A wrong code for a live challenge
+runs seven statements in its transaction (the challenge row lock, the bucket's
+lock, the blocked read, the attempt count, and the bucket count's lock, read
+and upsert), four once the budget blocks; a `challengeId` that names no live
+challenge, as an unknown identifier's does, runs one. Before this change it was
+two against one. Response time can therefore still suggest whether a start's
+identifier has an account, as the start's few extra statements for a known
+account can (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, "Residual"). Decoy
+locks and reads would only narrow the gap; closing it would need decoy writes
+for ids an attacker chooses.
+
+Tests:
+- `otp-recovery.integration.sql` (rollback-only) requires the table and its
+  key, no foreign key, the upsert of one row per purpose and identifier and the
+  refusal of an upper-case HMAC and of a non-recovery purpose (`23514`) as
+  `hid_identity_api_runtime`, which may not delete (`42501`), and refuses
+  `hid_ehr_api_runtime` any read. `runtime-roles.integration.sql` requires
+  exactly those privileges for the Identity runtime, no `DELETE` or `TRUNCATE`
+  through it, and no privilege at all for the twenty other runtime roles it
+  requires (all but the schema-test runtime and the migration
+  administrator).
+- `verify-otp-recovery-runtime.mjs` runs the real service as
+  `hid_identity_api_runtime`: five accepted concurrent starts for one unknown
+  identifier answer one challenge id; four wrong codes on one challenge, then
+  two wrong codes on two purposes of the account at once, both refused with
+  `403`; a correct code of a third purpose refused; a start for the suspended
+  account sends nothing; after the owner clears the block a new start sends a
+  code that verifies. It waits for deliveries before ending its pool.
+- `verify-patient-enrollment-runtime.mjs` repeats a start over HTTP for an
+  unknown and a known identifier (same challenge id, no code) and starts the
+  account's HID (a new id, no code).
+
 ## EHR clinical list paging precision (no migration)
 
 The EHR API's six newest-first clinical lists page with a keyset on (sort key,
@@ -2019,3 +2126,57 @@ microseconds:
   suites (`TUF-STAGING-MIGRATION.md`), and
   `scripts/run-container-database-acceptance.sh` runs it after
   `staff-access-request-outcome.integration.sql`.
+
+## Record summary reads (no migration)
+
+The EHR API's two record summaries (`INTERFACE_CONTRACT.md` §11, "Record
+summaries") read under row-level security as `hid_ehr_api_runtime`. Nothing in
+the schema, policies or grants changes.
+
+- **Patient summary** (`GET /ehr/me/records`). The patient transaction sets
+  `app.purpose_of_use = 'patient-self'` and empty facility and membership, so
+  the staff policies (`ehr.context_allows`) never pass, and only the 0030
+  patient-self policies release rows: completed encounters, signed or amended
+  notes and their current revisions. The other clinical tables have `SELECT`
+  but no patient-self policy, so a patient read of them returns no rows and no
+  error. The service now reads only the two released categories and names the
+  other five as withheld; before, it read all seven and returned five arrays
+  that were always empty.
+- **Emergency summary** (`GET /ehr/patients/:id/emergency-records`). A
+  break-glass emergency context passes `ehr.context_allows` for `read_records`
+  at its facility (0012), so every clinical table is readable there.
+  - Vitals: read from `ehr.vitals` alone, as first recorded (the row's eight
+    measurement columns), the same columns as before; corrections are not
+    applied. Applying them is pending the product decision on correction
+    semantics (proposed default: the current correction's replacement set is
+    the whole current set, as Health-id's clinician chart applies it); the
+    implementation is preserved in commit `7401193` for when the decision
+    lands. No EHR API route updates the measurement columns (a correction
+    updates only `current_correction_no`), but the database does not refuse
+    it: `hid_ehr_runtime` holds `UPDATE` on `ehr.vitals` (`runtime-grants.sql`),
+    `vitals_update` allows it under `write_records` (0005), and
+    `ehr.capture_record_version` (0004) guards only the ownership and
+    attribution columns and requires a change reason, recording the prior row
+    in `ehr.record_versions`. A guard refusing changes to the measurement
+    columns (a trigger, or column-level `UPDATE` limited to
+    `current_correction_no`) is a follow-up migration.
+  - Documents: read from `ehr.documents_effective` (0009, `security_invoker`,
+    `security_barrier`) where `status = 'available'`, so `documents_read` and
+    `document_scan_events_staff_read` apply to the view's reads. The raw
+    `ehr.documents.status = 'uploaded'` filter used before also listed
+    documents never scanned and those the scanner rejected.
+  - Each section reads one row more than it shows, to report truncation.
+- `emergency.integration.sql` (rollback-only) adds, after its activation cases,
+  a break-glass grant inserted directly and document fixtures inserted with
+  `session_replication_role = replica`, then checks as `hid_ehr_api_runtime`
+  with the emergency context: `documents_effective` reports `available:clean`,
+  `rejected:rejected` and `uploaded:pending` for a clean, a rejected and an
+  unscanned upload, and lists only the clean one as available, while the raw
+  `uploaded` filter lists all three; and with `direct-care` and no consent
+  nothing is visible. These
+  cases pass before and after the service change: they guard the database
+  behaviour the summary relies on. The rehearsal runs the suite with its
+  additional suites, and `scripts/run-container-database-acceptance.sh` now
+  runs it after `emergency-contacts.integration.sql` (before, only the
+  rehearsal did). The service's own SQL is exercised against the database by
+  `verify-delegated-cookie-read-runtime.mjs` (steps 4 to 6).

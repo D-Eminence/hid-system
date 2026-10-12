@@ -13,6 +13,7 @@ jest.mock('jose', () => ({
   },
 }));
 
+import { UnauthorizedException } from '@nestjs/common';
 import type { Response } from 'express';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
@@ -21,6 +22,8 @@ import type { AuditService } from '../audit/audit.service';
 import { AuthController } from './auth.controller';
 import type { AuthService } from './auth.service';
 import type { AuthSessionAuditService } from './auth-session-audit.service';
+import type { LoginDto } from './dto/login.dto';
+import type { PatientLoginDto } from './dto/patient-login.dto';
 import type { GoogleAuthenticationService } from './google-authentication.service';
 import type { TokenService } from './token.service';
 import type { TurnstileService } from './turnstile.service';
@@ -333,6 +336,81 @@ describe('AuthController Google exchange', () => {
     expect(JSON.stringify(sessionAudit.record.mock.calls)).not.toContain('g'.repeat(64));
     expect(JSON.stringify(sessionAudit.record.mock.calls)).not.toContain(challenge.nonce);
     expect(response.clearCookie).toHaveBeenCalledWith(nonceCookie, expect.any(Object));
+  });
+
+  describe('the public patient enrollment cookie (ENR-3)', () => {
+    // A sign-in sets the session cookies (setCookies); it also expires the
+    // enrollment capability, which would otherwise show this device's last
+    // enrollment HID to whoever uses it next. The enrollment routes refuse
+    // while session cookies exist, so no enrollment in progress needs it.
+    const enrollmentCleared = ['hid_enrollment', { secure: false, sameSite: 'strict', httpOnly: true,
+      path: '/api/v1/identity/patient-enrollments' }];
+    const enrollmentClears = (response: ReturnType<typeof responseFor>) =>
+      response.clearCookie.mock.calls.filter(([name]) => name === 'hid_enrollment');
+    const issued = () => ({ actor, accessToken: 'access-token', refreshToken: 'refresh-token',
+      csrfToken: 'csrf-token', expiresAt: new Date('2030-01-01T00:00:00.000Z'),
+      refreshExpiresAt: new Date('2030-01-02T00:00:00.000Z') });
+    const credentials = (turnstileAction: 'patient-login' | 'staff-login') => ({ email: 'person@example.test',
+      password: 'a-strong-test-password', turnstileToken: 'turnstile-token', turnstileAction });
+    const withPasswordLogin = (login: jest.Mock) => new AuthController(
+      { login } as unknown as AuthService, {} as TokenService,
+      { record: jest.fn(), recordLoginFailure: jest.fn() } as unknown as AuthSessionAuditService,
+      audit as unknown as AuditService, {} as WorkloadAuthService,
+      turnstile as unknown as TurnstileService, google as unknown as GoogleAuthenticationService);
+
+    it('is retired by a patient password sign-in', async () => {
+      const login = jest.fn().mockResolvedValue(issued());
+      const response = responseFor();
+      await withPasswordLogin(login).patientLogin(credentials('patient-login') as PatientLoginDto,
+        requestFor(), response);
+      expect(login).toHaveBeenCalledWith(expect.objectContaining({ email: 'person@example.test' }),
+        expect.any(Object), 'patient');
+      expect(response.cookie).toHaveBeenCalledWith('hid_access', 'access-token', expect.any(Object));
+      expect(enrollmentClears(response)).toEqual([enrollmentCleared]);
+    });
+
+    it('is retired by a staff password sign-in', async () => {
+      const login = jest.fn().mockResolvedValue(issued());
+      const response = responseFor();
+      await withPasswordLogin(login).login(credentials('staff-login') as LoginDto, requestFor(), response);
+      expect(login).toHaveBeenCalledWith(expect.anything(), expect.any(Object), 'staff');
+      expect(enrollmentClears(response)).toEqual([enrollmentCleared]);
+    });
+
+    it('is kept when a password sign-in fails', async () => {
+      const login = jest.fn().mockRejectedValue(new UnauthorizedException('Invalid credentials'));
+      const response = responseFor();
+      await expect(withPasswordLogin(login).patientLogin(credentials('patient-login') as PatientLoginDto,
+        requestFor(), response)).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(response.cookie).not.toHaveBeenCalled();
+      expect(response.clearCookie).not.toHaveBeenCalled();
+    });
+
+    it('is retired by a Google sign-in that sets the session cookies', async () => {
+      google.login.mockResolvedValue(issued());
+      const response = responseFor();
+      await controller.exchangeGoogleIdToken(googleInput('patient-login'),
+        requestFor({ cookies: { [nonceCookie]: issueNonce(controller).cookie } }), response);
+      expect(enrollmentClears(response)).toEqual([enrollmentCleared]);
+    });
+
+    it('is kept for a pending Google enrollee and for a refused Google sign-in', async () => {
+      const expiresAt = new Date(Date.now() + 30 * 60_000);
+      google.exchange.mockResolvedValue({ kind: 'pending', cookie: 'pending-id.pending-token', expiresAt,
+        progress: { stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY', expiresAt: expiresAt.toISOString() } });
+      const pending = responseFor();
+      await controller.exchangeGoogleIdToken({ ...googleInput('patient-login'), intent: 'enroll' },
+        requestFor({ cookies: { [nonceCookie]: issueNonce(controller).cookie } }), pending);
+      expect(pending.status).toHaveBeenCalledWith(202);
+      expect(enrollmentClears(pending)).toEqual([]);
+
+      google.login.mockRejectedValue(new DomainProblem(401, 'GOOGLE_SIGN_IN_DENIED', 'Google sign-in could not be completed'));
+      const refused = responseFor();
+      await expect(controller.exchangeGoogleIdToken(googleInput('patient-login'),
+        requestFor({ cookies: { [nonceCookie]: issueNonce(controller).cookie } }), refused))
+        .rejects.toMatchObject({ code: 'GOOGLE_SIGN_IN_DENIED' });
+      expect(enrollmentClears(refused)).toEqual([]);
+    });
   });
 
   it('rejects a forged raw nonce cookie with the same generic denial before token verification', async () => {

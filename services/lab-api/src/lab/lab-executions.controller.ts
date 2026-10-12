@@ -31,4 +31,6 @@ export class LabExecutionsController {
  release(@Param('resultId',new ParseUUIDPipe({version:'4'})) resultId:string,@Body() input:GovernResultDto,@Headers('idempotency-key') key:string|undefined,@Req() request:HidRequest){return this.executions.releaseResult(requireRequestContext(request),resultId,input,requireIdempotencyKey(key));}
  @Get('results/:resultId/history') @RequirePermissions('lab.result.released.read')
  history(@Param('resultId',new ParseUUIDPipe({version:'4'})) resultId:string,@Req() request:HidRequest){return this.executions.getResultHistory(requireRequestContext(request),resultId);}
+ @Get('ehr-orders/:sourceEhrOrderId/released-results') @RequirePermissions('lab.result.released.read') @AuditAction('lab.result.released.list.request')
+ releasedForEhrOrder(@Param('sourceEhrOrderId',new ParseUUIDPipe({version:'4'})) sourceEhrOrderId:string,@Req() request:HidRequest){return this.executions.listReleasedForEhrOrder(requireRequestContext(request),sourceEhrOrderId);}
 }

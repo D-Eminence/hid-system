@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { readFile, stat } from 'node:fs/promises';
+import type { JWTVerifyGetKey } from 'jose';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 
@@ -8,6 +9,8 @@ const MAX_WORKLOAD_TOKEN_LENGTH = 16_384;
 @Injectable()
 export class LabWorkloadIdentityService {
  private readonly environment=getEnvironment();
+ // One key set per process, not per request: jose caches the JWKS for 10 minutes and refetches it early only for an unknown kid.
+ private jwks?:JWTVerifyGetKey;
  async authenticate(caller:'ehr-api'|'ocr-api',authorization:string|undefined):Promise<void>{
   if(this.environment.LAB_SERVICE_IDENTITY_MODE==='local-secret')return;
   if(!this.environment.LAB_WORKLOAD_JWKS_URL||!this.environment.LAB_WORKLOAD_ISSUER_URL||!this.environment.LAB_WORKLOAD_AUDIENCE)throw new DomainProblem(503,'WORKLOAD_IDENTITY_UNAVAILABLE','Lab workload verification is unavailable');
@@ -15,7 +18,7 @@ export class LabWorkloadIdentityService {
   const token=authorization.slice(7).trim();
   if(!token||token.length>MAX_WORKLOAD_TOKEN_LENGTH||/\s/.test(token))throw new DomainProblem(401,'INVALID_WORKLOAD_IDENTITY','Workload identity is invalid or expired');
   const {createRemoteJWKSet,jwtVerify}=await import('jose');
-  const jwks=createRemoteJWKSet(new URL(this.environment.LAB_WORKLOAD_JWKS_URL));
+  const jwks=this.jwks??=createRemoteJWKSet(new URL(this.environment.LAB_WORKLOAD_JWKS_URL));
   const expectedSubject=caller==='ehr-api'?this.environment.LAB_EHR_CALLER_SUBJECT:this.environment.LAB_OCR_CALLER_SUBJECT;
   const {payload}=await jwtVerify(token,jwks,{issuer:this.environment.LAB_WORKLOAD_ISSUER_URL,audience:this.environment.LAB_WORKLOAD_AUDIENCE,algorithms:['RS256','ES256']})
     .catch(()=>{throw new DomainProblem(401,'INVALID_WORKLOAD_IDENTITY','Workload identity is invalid or expired');});

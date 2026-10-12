@@ -37,8 +37,9 @@ The executable covers:
    predicate and order with that bound return the rows sharing the last row's
    millisecond that a millisecond bound leaves out
    ([DATABASE.md](DATABASE.md)). Execute the real OTP service against the exact Identity
-   role, including concurrent completion/rate-limit and account-disable tests;
-   notification delivery uses an in-process test double. Its result is recorded
+   role, including concurrent completion/rate-limit and account-disable tests,
+   the uniform recovery start cooldown (0081) and the per-account recovery code
+   budget; notification delivery uses an in-process test double. Its result is recorded
    under `evidence.checks` as `otp_runtime`. The exact-role HTTP verifiers
    follow, recorded under `evidence.checks` in run order: `patient_runtime`,
    `patient_enrollment_runtime`, `patient_safety_runtime`,
@@ -55,7 +56,10 @@ The executable covers:
    Identity as `hid_identity_api_runtime`: a doctor's same-origin cookie read
    of a patient's encounters through EHR, with no Origin or CSRF token, is
    authorized by Identity, and EHR cookie writes without Origin or CSRF are
-   refused; and `outreach_cookie_read_runtime`
+   refused (with D-Eminence/hid-system#52 it also reads the
+   patient's record summary and two break-glass emergency summaries, a reader
+   lacking four category read permissions and the doctor, with their audit
+   events); and `outreach_cookie_read_runtime`
    (`services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs`,
    D-Eminence/hid-system#43), which runs Outreach as
    `hid_outreach_api_runtime` and Identity as `hid_identity_api_runtime`: a

@@ -371,6 +371,9 @@ grant select on auth.accounts, auth.roles, auth.permissions,
 grant select, insert, update on auth.sessions to hid_identity_runtime;
 grant select, insert, update, delete on auth.login_attempts to hid_identity_runtime;
 grant select, insert, update on auth.otp_challenges, auth.otp_rate_limits to hid_identity_runtime;
+-- Recovery start cooldowns (0081): no DELETE; each row is overwritten by the
+-- identifier's next start.
+grant select, insert, update on auth.otp_start_cooldowns to hid_identity_runtime;
 grant insert on auth.session_events to hid_identity_runtime;
 grant select on identity.organizations, identity.facilities, identity.staff,
   identity.staff_facility_memberships, identity.purpose_of_use_codes,
@@ -635,6 +638,7 @@ grant select, insert, update on auth.accounts, auth.account_roles to hid_schema_
 grant select on auth.roles, auth.permissions, auth.role_permissions to hid_schema_test_runtime;
 grant select, insert, update on auth.sessions to hid_schema_test_runtime;
 grant select, insert, update on auth.otp_challenges, auth.otp_rate_limits to hid_schema_test_runtime;
+grant select, insert, update on auth.otp_start_cooldowns to hid_schema_test_runtime;
 grant select, insert on auth.admin_command_idempotency to hid_schema_test_runtime;
 grant select, insert, update on identity.organizations, identity.facilities,
   identity.staff, identity.staff_facility_memberships, identity.patients,
