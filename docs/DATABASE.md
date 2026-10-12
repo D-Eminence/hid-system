@@ -1861,8 +1861,10 @@ Tests:
   refusal of an upper-case HMAC and of a non-recovery purpose (`23514`) as
   `hid_identity_api_runtime`, which may not delete (`42501`), and refuses
   `hid_ehr_api_runtime` any read. `runtime-roles.integration.sql` requires
-  exactly those privileges for the Identity runtime and none for the other
-  runtime roles.
+  exactly those privileges for the Identity runtime, no `DELETE` or `TRUNCATE`
+  through it, and no privilege at all for the twenty other runtime roles it
+  requires (all but the schema-test runtime and the migration
+  administrator).
 - `verify-otp-recovery-runtime.mjs` runs the real service as
   `hid_identity_api_runtime`: five accepted concurrent starts for one unknown
   identifier answer one challenge id; four wrong codes on one challenge, then
