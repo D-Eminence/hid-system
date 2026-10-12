@@ -25,9 +25,49 @@ The executable covers:
    schema dry run and assert its objects rolled back; apply the real schema,
    bootstrap runtime roles, assert zero pending on rerun, and run the real
    rollback-only schema/RLS, OTP, patient self-service, enrollment, emergency,
-   patient-PIN, cutover-staging-integrity, and QoreID-evidence integration suites. Execute the real OTP service against the exact Identity
+   patient-PIN, cutover-staging-integrity, and QoreID-evidence integration suites.
+   After `schema.integration.sql`, the script runs every other
+   `*.integration.sql` in `services/ehr-api/database/tests` except
+   `runtime-roles.integration.sql`, in name order, and records their names in
+   `checks.additional_schema_suites`; it runs them again on the
+   non-superuser-owner copy below and on the restored database (item 5). They
+   include `ehr-timeline-cursor.integration.sql`, which checks that the
+   microsecond text form the EHR list cursors carry casts back to the same
+   instant under four session time zones, and that the clinical-notes list
+   predicate and order with that bound return the rows sharing the last row's
+   millisecond that a millisecond bound leaves out
+   ([DATABASE.md](DATABASE.md)). Execute the real OTP service against the exact Identity
    role, including concurrent completion/rate-limit and account-disable tests;
-   notification delivery uses an in-process test double.
+   notification delivery uses an in-process test double. Its result is recorded
+   under `evidence.checks` as `otp_runtime`. The exact-role HTTP verifiers
+   follow, recorded under `evidence.checks` in run order: `patient_runtime`,
+   `patient_enrollment_runtime`, `patient_safety_runtime`,
+   `delegated_cookie_read_runtime`, `provider_enrollment_runtime`,
+   `platform_admin_runtime`, `session_sign_out_runtime` and
+   `platform_security_runtime` (the patient enrollment, patient safety,
+   delegated cookie-read, provider enrollment, platform admin and platform
+   security verifiers on a disposable copy of the rehearsal database). Each is
+   in `services/identity-api/scripts/` and runs Identity as
+   `hid_identity_api_runtime`, except `delegated_cookie_read_runtime`
+   (`services/ehr-api/scripts/verify-delegated-cookie-read-runtime.mjs`,
+   D-Eminence/hid-system#38), which runs EHR as `hid_ehr_api_runtime` and
+   Identity as `hid_identity_api_runtime`: a doctor's same-origin cookie read
+   of a patient's encounters through EHR, with no Origin or CSRF token, is
+   authorized by Identity, and EHR cookie writes without Origin or CSRF are
+   refused. `patient_enrollment_runtime`
+   (`verify-patient-enrollment-runtime.mjs`) runs public NIN enrollment through
+   activation, sign-in, refresh, recovery and sign-out, with QoreID (behind the
+   real adapter), Siteverify and delivery stubbed (see
+   [QoreID verification](QOREID_VERIFICATION_CONTRACT.md)).
+   `session_sign_out_runtime` (`verify-session-sign-out-runtime.mjs`,
+   D-Eminence/hid-system#39) covers sign-out by refresh cookie after the access
+   cookie has expired, and refresh and sign-out refused with
+   `403 SESSION_CLIENT_MISMATCH` when `X-HID-Client` names the other
+   application. It also covers an older rotated token, which ends its sign-in
+   whichever application signs out; a sign-out during a timed account
+   suspension; and two concurrent sign-outs with one cookie, recorded once.
+   These results are local synthetic evidence, not deployed application
+   validation.
    Separately build a synthetic `0028` database with historical staff sessions,
    verified OTP challenges and registration outbox records; back it up, dry-run
    and apply `0029`–`0034`, verify preservation, fail-closed old OTP behavior,

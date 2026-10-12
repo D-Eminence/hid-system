@@ -335,13 +335,22 @@ try {
     [join(repository, 'services/identity-api/scripts/verify-otp-recovery-runtime.mjs')], workflowEnvironment));
   evidence.checks.patient_runtime = JSON.parse(command('exact-role patient HTTP workflow and sessions', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-patient-runtime.mjs')], workflowEnvironment));
+  evidence.checks.patient_enrollment_runtime = JSON.parse(command(
+    'exact-role patient enrollment to sign-in HTTP lifecycle', process.execPath,
+    [join(repository, 'services/identity-api/scripts/verify-patient-enrollment-runtime.mjs')], workflowEnvironment));
   evidence.checks.patient_safety_runtime = JSON.parse(command('exact-role patient safety HTTP workflow', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-patient-safety-runtime.mjs')], workflowEnvironment));
+  evidence.checks.delegated_cookie_read_runtime = JSON.parse(command(
+    'exact-role EHR read delegated to Identity with a browser cookie session', process.execPath,
+    [join(repository, 'services/ehr-api/scripts/verify-delegated-cookie-read-runtime.mjs')], workflowEnvironment));
   evidence.checks.provider_enrollment_runtime = JSON.parse(command('exact-role provider self-enrollment HTTP workflow',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs')],
     workflowEnvironment));
   evidence.checks.platform_admin_runtime = JSON.parse(command('exact-role platform admin HTTP boundaries',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-platform-admin-runtime.mjs')],
+    workflowEnvironment));
+  evidence.checks.session_sign_out_runtime = JSON.parse(command('exact-role sign-out by refresh cookie and client-kind refresh',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-session-sign-out-runtime.mjs')],
     workflowEnvironment));
   evidence.checks.platform_security_runtime = JSON.parse(command(
     'exact-role platform MFA, step-up, approval and export HTTP workflow', process.execPath,
