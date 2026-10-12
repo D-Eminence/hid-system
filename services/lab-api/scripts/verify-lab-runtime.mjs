@@ -11,7 +11,12 @@
 // fall on lab.specimens, lab.test_executions and lab.results, rows the role may
 // update. Only the Identity API is replaced, by a local fake; every database
 // check (row-level security, the 0077 guards, immutability triggers, unique
-// constraints) is real.
+// constraints) is real. A database refusal answers a fixed 4xx (row-level
+// security 403 LAB_ACCESS_DENIED, a guard 409 LAB_STATE_CONFLICT, a unique key
+// left after the retry 409 LAB_CONFLICT; problem.ts), and EHR-order acceptance
+// answers a stale or changed order 409 LAB_ORDER_NOT_CURRENT and another version
+// of an order Lab already holds 409 LAB_ORDER_ALREADY_ACCEPTED; each used to be
+// 500. The harness still records the SQLSTATE behind each refusal.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
@@ -178,7 +183,7 @@ try {
     return responses[0].body;
   };
   const refusedByDatabase = (response, label) => {
-    expectStatus(response, 500, label);
+    assert.equal(expectStatus(response, 403, label).code, 'LAB_ACCESS_DENIED', `${label}: code`);
     assert.equal(response.sqlstate, '42501', `${label}: refused by row-level security`);
   };
 
@@ -199,7 +204,7 @@ try {
   refusedByDatabase(await send('/work-items/accept-ehr-order', orderBody(order3), { token: 'token-b', key: key('accept'), internal: 'ehr-api' }),
     'accept without a database consent');
   assert.deepEqual(await Promise.all([workItemsOf(order1), workItemsOf(order3)]), [0, 0]);
-  check('accept: no EHR caller 401, Identity denial 403, missing permission 403, no database consent refused by row-level security (42501), nothing written');
+  check('accept: no EHR caller 401, Identity denial 403, missing permission 403, no database consent refused by row-level security (42501) with 403 LAB_ACCESS_DENIED, nothing written');
   const workItem = sameResult(await together(4, () => send('/work-items/accept-ehr-order', orderBody(order1),
     { key: key('accept'), internal: 'ehr-api' })), 'four concurrent accepts of one EHR order');
   assert.deepEqual(await Promise.all([workItemsOf(order1),
@@ -215,19 +220,41 @@ try {
     'three concurrent accepts of a second order');
   assert.equal(await workItemsOf(order2), 1);
   check('accept: concurrent accepts of one order create one work item, test, event and outbox row; replay 201; a different body 409');
+  // Lab holds one work item per EHR order, ever (unique source_ehr_order_id, 0018). EHR changes the order (every
+  // change takes the next row_version) and sends the new version: Lab refuses it, naming the version it holds.
+  await database.fixture((client) => client.query(
+    "update ehr.lab_requests set row_version = 2, priority = 'stat' where id = $1", [order1]));
+  const reaccepted = await send('/work-items/accept-ehr-order', { ...orderBody(order1), sourceEhrOrderVersion: 2, priority: 'stat' },
+    { key: key('accept'), internal: 'ehr-api' });
+  assert.equal(expectStatus(reaccepted, 409, 'accept of the next version of an accepted order').code, 'LAB_ORDER_ALREADY_ACCEPTED',
+    JSON.stringify([reaccepted.body?.code, reaccepted.sqlstate]));
+  assert.deepEqual(await Promise.all([workItemsOf(order1),
+    count('select count(*) from lab.work_items where source_ehr_order_id=$1 and source_ehr_order_version=1', [order1])]), [1, 1]);
+  check('accept: version 2 of an order Lab accepted at version 1 is 409 LAB_ORDER_ALREADY_ACCEPTED; the version 1 work item stays the only one');
   // Lab accepts an EHR order only when requested_at equals the order's created_at exactly (0077). EHR sends the
   // database's microsecond text (lab-requests.service.ts); the millisecond text of a JavaScript Date is refused.
   const truncated = await send('/work-items/accept-ehr-order', { ...orderBody(f.microOrder), requestedAt: '2026-10-01T09:00:00.123Z' },
     { key: key('accept'), internal: 'ehr-api' });
-  // lab.validate_work_item refuses it (23514); Lab answers an unmapped guard refusal with 500 (release checklist §9).
-  expectStatus(truncated, 500, 'accept with the millisecond requestedAt');
+  // lab.validate_work_item refuses it (23514), and Lab answers 409 LAB_ORDER_NOT_CURRENT.
+  assert.equal(expectStatus(truncated, 409, 'accept with the millisecond requestedAt').code, 'LAB_ORDER_NOT_CURRENT');
   assert.equal(truncated.sqlstate, '23514', 'millisecond requestedAt: refused by lab.validate_work_item');
   assert.equal(truncated.message, 'Lab work item does not match the exact active EHR order version and actor context');
   assert.equal(await workItemsOf(f.microOrder), 0);
   expectStatus(await send('/work-items/accept-ehr-order', { ...orderBody(f.microOrder), requestedAt: '2026-10-01T09:00:00.123456Z' },
     { key: key('accept'), internal: 'ehr-api' }), 201, 'accept with the microsecond requestedAt');
   assert.equal(await workItemsOf(f.microOrder), 1);
-  check('accept: an order created at .123456 is refused for requestedAt .123Z by the database guard (23514) and creates no work item; .123456Z is accepted (201)');
+  check('accept: an order created at .123456 is refused for requestedAt .123Z by the database guard (23514) with 409 LAB_ORDER_NOT_CURRENT and creates no work item; .123456Z is accepted (201)');
+  // An EHR order changed after the version EHR sends (row_version 2, version 1 sent) is not the current order.
+  await database.fixture((client) => client.query('update ehr.lab_requests set row_version = 2 where id = $1', [order3]));
+  const stale = await send('/work-items/accept-ehr-order', orderBody(order3), { key: key('accept'), internal: 'ehr-api' });
+  assert.equal(expectStatus(stale, 409, 'accept of a stale order version').code, 'LAB_ORDER_NOT_CURRENT');
+  assert.equal(stale.sqlstate, '23514', 'stale version: refused by lab.validate_work_item');
+  assert.equal(stale.message, 'Lab work item does not match the exact active EHR order version and actor context');
+  assert.equal(await workItemsOf(order3), 0);
+  expectStatus(await send('/work-items/accept-ehr-order', { ...orderBody(order3), sourceEhrOrderVersion: 2 },
+    { key: key('accept'), internal: 'ehr-api' }), 201, 'accept of the current order version');
+  assert.equal(await workItemsOf(order3), 1);
+  check('accept: version 1 of an order now at version 2 is refused by the database guard (23514) with 409 LAB_ORDER_NOT_CURRENT and creates no work item; version 2 is accepted (201)');
 
   // Accession a work item.
   const [w1, w2, w3] = f.work;
@@ -358,12 +385,12 @@ try {
   const selfCorrelation = 'verifier-self-verification-lab-0001';
   const selfVerified = await send(`/results/${result.id}/verify`, governBody('2026-10-02T12:00:00.000Z', 'Synthetic self verification'),
     { key: key('verify'), correlationId: selfCorrelation });
-  expectStatus(selfVerified, 500, 'verification by the member who entered the result');
+  assert.equal(expectStatus(selfVerified, 409, 'verification by the member who entered the result').code, 'LAB_STATE_CONFLICT');
   assert.equal(selfVerified.sqlstate, '23514', 'the database guard refuses the verification');
   assert.match(selfVerified.message, /^Result verifier must be independent/);
   assert.deepEqual(await Promise.all([verificationsOf(), outboxOf(result.id, 'LabResultVerified'),
     count("select count(*) from audit.events where correlation_id=$1 and action='lab.result.verify'", [selfCorrelation])]), [0, 0, 0]);
-  check('result verify by the member who entered the result: the database guard refuses it (23514, Result verifier must be independent), no verification, outbox or audit row is written; the API answers 500 because the service has no mapping for it (a known limit)');
+  check('result verify by the member who entered the result: the database guard refuses it (23514, Result verifier must be independent) and the API answers 409 LAB_STATE_CONFLICT; no verification, outbox or audit row is written');
 
   // Two independent members, C and D, verify the same result version at once.
   assert.equal(expectStatus(await send(`/results/${result.id}/verify`,
@@ -375,12 +402,13 @@ try {
   const verifications = await Promise.all(verifiers.map(({ token, key: verifyKey, body }) =>
     send(`/results/${result.id}/verify`, body, { token, key: verifyKey })));
   const outcome = JSON.stringify(verifications.map((response) => [response.status, response.body?.code, response.sqlstate]));
-  assert.deepEqual(verifications.map((response) => response.status).sort(), [201, 500], outcome);
+  assert.deepEqual(verifications.map((response) => response.status).sort(), [201, 409], outcome);
   const winner = verifiers[verifications.findIndex((response) => response.status === 201)];
   const verified = verifications.find((response) => response.status === 201).body;
   // The loser's insert meets unique(result_id,result_version); DatabaseService
-  // reruns it once and the second unique violation is not mapped to a 4xx.
-  assert.equal(verifications.find((response) => response.status === 500).sqlstate, '23505', outcome);
+  // reruns it once and the second unique violation answers 409 LAB_CONFLICT.
+  const loser = verifications.find((response) => response.status === 409);
+  assert.deepEqual([loser.body?.code, loser.sqlstate], ['LAB_CONFLICT', '23505'], outcome);
   assert.deepEqual([verified.id, verified.status, verified.verificationStatus], [result.id, 'verified_not_released', 'verified']);
   assert.deepEqual(await Promise.all([verificationsOf(),
     count('select count(*) from lab.result_verifications where result_id=$1 and result_version=1 and verified_by=$2', [result.id, winner.member.account]),
@@ -390,7 +418,7 @@ try {
   assert.equal(expectStatus(await send(`/results/${result.id}/verify`, { ...winner.body, reason: 'A different synthetic verification' },
     { token: winner.token, key: winner.key }), 409, 'verification key reuse').code, 'IDEMPOTENCY_CONFLICT');
   assert.equal(await verificationsOf(), 1);
-  check('result verify by independent members (FOR UPDATE on results): a version that is not current 412, nothing written; two concurrent verifications of version 1 by C and D: one 201 writes one verification and outbox row, the other is refused by unique(result_id,result_version) and the API answers 500 (23505, no mapping; a known limit); the winner\'s replay 201 and key reuse 409');
+  check('result verify by independent members (FOR UPDATE on results): a version that is not current 412, nothing written; two concurrent verifications of version 1 by C and D: one 201 writes one verification and outbox row, the other is refused by unique(result_id,result_version) (23505) and the API answers 409 LAB_CONFLICT; the winner\'s replay 201 and key reuse 409');
 
   // Release the verified result (FOR UPDATE on lab.results).
   const releaseKey = key('release');
@@ -433,7 +461,7 @@ try {
     fromOcr.id);
   assert.equal(expectStatus(await send('/imports/from-ocr', { ...ocrBody, observations: [{ ...observations[0], value: '13.1' }] },
     { key: key('ocr'), internal: 'ocr-api' }), 409, 'a different OCR import of one publication').code, 'IDEMPOTENCY_CONFLICT');
-  check('import: Identity denial 403, no database consent refused by row-level security (42501, nothing written); four concurrent identical external imports and four concurrent imports of one OCR publication each import once; replay 201; conflicting requests 409');
+  check('import: Identity denial 403, no database consent refused by row-level security (42501, 403 LAB_ACCESS_DENIED, nothing written); four concurrent identical external imports and four concurrent imports of one OCR publication each import once; replay 201; conflicting requests 409');
   await lab.close();
   lab = undefined;
   assert.equal(await database.deadlocks(), 0, 'PostgreSQL detected a deadlock during the run');

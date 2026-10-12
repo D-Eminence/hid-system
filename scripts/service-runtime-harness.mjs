@@ -106,8 +106,9 @@ export async function fakeService(route) {
  * with its main.ts request pipeline (global prefix, cookie and JSON body
  * parsers, validation pipe, problem filter). CORS and helmet only set response
  * headers for browsers and are left out. The problem filter is wrapped to
- * record the exception behind each 5xx, matched by correlation id, so the
- * verifier can name the SQLSTATE.
+ * record the exception behind each answer that is not a domain problem, and
+ * the database error a domain problem names as its cause, matched by
+ * correlation id, so the verifier can name the SQLSTATE.
  */
 export async function startService({ require, service, bodyLimit = 512 * 1024 }) {
   require('ts-node').register({ project: join(service, 'tsconfig.json'), transpileOnly: true });
@@ -125,6 +126,8 @@ export async function startService({ require, service, bodyLimit = 512 * 1024 })
       const request = host.switchToHttp().getRequest();
       if (!(exception instanceof DomainProblem)) {
         failures.set(request.correlationId, { sqlstate: exception?.code, message: exception?.message });
+      } else if (typeof exception.cause?.code === 'string') {
+        failures.set(request.correlationId, { sqlstate: exception.cause.code, message: exception.cause.message });
       }
       return super.catch(exception, host);
     }
@@ -143,7 +146,7 @@ export async function startService({ require, service, bodyLimit = 512 * 1024 })
   await app.listen(0, '127.0.0.1');
   const database = module.get(DatabaseService);
   const base = `http://127.0.0.1:${app.getHttpServer().address().port}/api/v1`;
-  /** One HTTP request; returns status, body and, for a 5xx, the SQLSTATE behind it. */
+  /** One HTTP request; returns status, body and the SQLSTATE behind a database refusal or 5xx. */
   const request = async (method, path, { headers = {}, body, correlationId = `verifier-${randomUUID()}` } = {}) => {
     const response = await fetch(`${base}${path}`, { method,
       headers: { 'content-type': 'application/json', 'x-correlation-id': correlationId, ...headers },
