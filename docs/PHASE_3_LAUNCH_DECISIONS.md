@@ -230,10 +230,12 @@ for each merged change and its evidence. Pull requests from this review:
 
 | Finding | Change | State |
 | --- | --- | --- |
-| CLIN-2, CLIN-2-TIME (Pharmacy dispenses cancelled prescriptions) | D-Eminence/hid-system#48, migration 0080 | merged |
-| MFA-INFRA-P3 (Identity MFA key missing from the task definition) | D-Eminence/hid-system#49 | open |
-| LAB5-A, LAB5-RELEASED-LEAK (released Lab results) | D-Eminence/hid-system#51 | open |
-| ENR-5, ENR-3 Part A, SES-4 (enrollment and session hardening) | D-Eminence/hid-system#50 | open |
-| DEP-4 throttle exposure (per-request JWKS fetch) | D-Eminence/hid-system#53 | open |
+| CLIN-2, CLIN-2-TIME (Pharmacy accepts and dispenses cancelled or changed prescriptions) | D-Eminence/hid-system#48, migration 0080 | merged |
+| MFA-INFRA-P3 (Identity MFA key missing from the task definition) | D-Eminence/hid-system#49 | merged; operator plan I1 not run |
+| LAB5-A, LAB5-RELEASED-LEAK (released Lab results) | D-Eminence/hid-system#51 | merged |
+| ENR-5, ENR-3 Part A, SES-4 (enrollment and session hardening) | D-Eminence/hid-system#50 | merged |
+| DEP-4 throttle exposure (per-request JWKS fetch) | D-Eminence/hid-system#53 | merged |
+| REC-1, REC-3, REC-4 (recovery enumeration and code budget) | D-Eminence/hid-system#55, migration 0081 | merged |
+| PREC-1 Phase A, PREC-2, PREC-3, PREC-4 (record summaries) | D-Eminence/hid-system#52 | merged; CLIN-1 held (D8) |
+| LAB-3, CLIN-3a, LAB-REACCEPT, LAB5-23514, LAB5-DTO (EHR to Lab handoff) | D-Eminence/hid-system#56 | open |
 | DEP-4, DEP-4-RT (production workload tokens) | D-Eminence/hid-system#54, draft, ADR-047 Proposed | waits on D1 |
-| PREC-1 Phase A, PREC-2, PREC-3, PREC-4 (record summaries) | D-Eminence/hid-system#52 | open |
