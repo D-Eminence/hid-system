@@ -1009,11 +1009,10 @@ date into local midnight (the day before in a process east of UTC). The guard
 compares the dates now; it will compare `prescribedAt` exactly once no EHR
 build that sends milliseconds can still be deployed or rolled back to. Pharmacy's
 idempotency digest covers the text of the request, so an acceptance sent by an
-earlier EHR build (unless its stored time was a whole millisecond and it had no
-dates) and sent again with the same `Idempotency-Key`, or for the same
-prescription, after the upgrade gets `409 IDEMPOTENCY_CONFLICT`; the reverse
-holds during a rolling deploy or after a rollback. Pharmacy still has its work
-item.
+earlier EHR build and sent again with the same `Idempotency-Key`, or for the
+same prescription, after the upgrade gets `409 IDEMPOTENCY_CONFLICT`; the
+reverse holds during a rolling deploy or after a rollback. Pharmacy still has
+its work item.
 
 ## 19. Platform Administration API
 

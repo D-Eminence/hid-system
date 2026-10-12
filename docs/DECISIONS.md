@@ -1963,8 +1963,10 @@ no grant or policy is added.
   the cancel. A plain read would check the stale active version. `FOR KEY
   SHARE` would see this cancel only because the EHR locks the row `FOR
   UPDATE` before its update; `FOR SHARE` conflicts with any update of the row.
-  A lock-only mark left by another share lock does not fail, so concurrent
-  dispensings of other work items do not conflict.
+  A committed lock-only mark, such as the EHR handoff's `FOR UPDATE` or
+  another request's share lock on the same prescription, does not raise
+  `40001`, so acceptances right after the EHR's eligibility check and
+  concurrent identical requests do not fail.
 - An EHR update waits for a Pharmacy command that has taken the lock, for the
   milliseconds until it commits, and then applies after it. The EHR takes the
   prescription and then its own rows and never a Pharmacy row, so there is no
