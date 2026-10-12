@@ -4,7 +4,9 @@ import { VITAL_STORAGE_KEYS } from './vitals.service';
  * SQL for a vital's current values (INTERFACE_CONTRACT.md §11, "Vital corrections").
  *
  * A correction appends a replacement set to ehr.vital_corrections and moves
- * ehr.vitals.current_correction_no to it; the recorded columns never change.
+ * ehr.vitals.current_correction_no to it. No API route changes the recorded columns; the database
+ * does not yet refuse such an update by the EHR runtime (it is versioned with its change reason), so
+ * the recorded values are whatever the row holds (DATABASE.md, "Record summary reads").
  * Current default semantics, pending the product decision on correction semantics; the same rule
  * as the Health-id provider chart:
  * - with no correction (current_correction_no = 0), the current values are the recorded ones;
@@ -56,7 +58,7 @@ export function currentVitalProjection(vital: string, correction: string): strin
   ].join(',');
 }
 
-/** The measurements as first recorded, as a JSON object, for a corrected vital only (null otherwise). */
+/** The recorded measurements the vital row holds, as a JSON object, for a corrected vital only (null otherwise). */
 export function recordedVitalProjection(vital: string): string {
   const v = alias(vital);
   const pairs = VITAL_MEASUREMENTS.map(([key, column]) => `'${key}',${v}.${column}`).join(',');

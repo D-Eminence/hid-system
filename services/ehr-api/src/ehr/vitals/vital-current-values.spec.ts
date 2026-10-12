@@ -39,7 +39,7 @@ describe('vital current values', () => {
     expect(projection).toContain('(v.current_correction_no>0 and c.id is null) as "correctionUnavailable"');
   });
 
-  it('returns the values as first recorded apart, and only for a corrected vital', () => {
+  it('returns the recorded values apart, and only for a corrected vital', () => {
     const recorded = recordedVitalProjection('v');
     const pairs = VITAL_MEASUREMENTS.map(([key, column]) => `'${key}',v.${column}`).join(',');
     expect(recorded).toBe(`case when v.current_correction_no>0 then jsonb_build_object(${pairs}) end as "recordedValues"`);

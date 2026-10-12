@@ -1864,6 +1864,18 @@ the schema, policies or grants changes.
     (`22P02`) fails the whole summary rather than showing a wrong value. The EHR
     API writes only values its DTO validated, with the same bounds and
     precision as the columns.
+  - Recorded values: `recordedValues` and an uncorrected vital's values are
+    read from the `ehr.vitals` row's eight measurement columns. No EHR API
+    route updates them (a correction updates only `current_correction_no`),
+    but the database does not refuse it: `hid_ehr_runtime` holds `UPDATE` on
+    `ehr.vitals` (`runtime-grants.sql`), `vitals_update` allows it under
+    `write_records` (0005), and `ehr.capture_record_version` (0004) guards
+    only the ownership and attribution columns and requires a change reason,
+    recording the prior row in `ehr.record_versions`. An update by another
+    code path, a script or an operator would be returned as the recorded
+    values. A guard refusing changes to the measurement columns (a trigger, or
+    column-level `UPDATE` limited to `current_correction_no`) is a follow-up
+    migration.
   - Documents: read from `ehr.documents_effective` (0009, `security_invoker`,
     `security_barrier`) where `status = 'available'`, so `documents_read` and
     `document_scan_events_staff_read` apply to the view's reads. The raw
@@ -1882,5 +1894,8 @@ the schema, policies or grants changes.
   lists only the clean one as available, while the raw `uploaded` filter lists
   all three; and with `direct-care` and no consent nothing is visible. These
   cases pass before and after the service change: they guard the database
-  behaviour the summary relies on. The service's own SQL is exercised against
-  the database by `verify-delegated-cookie-read-runtime.mjs` (steps 4 to 6).
+  behaviour the summary relies on. The rehearsal runs the suite with its
+  additional suites, and `scripts/run-container-database-acceptance.sh` now
+  runs it after `emergency-contacts.integration.sql` (before, only the
+  rehearsal did). The service's own SQL is exercised against the database by
+  `verify-delegated-cookie-read-runtime.mjs` (steps 4 to 6).

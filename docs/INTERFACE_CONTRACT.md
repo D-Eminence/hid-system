@@ -711,9 +711,9 @@ withheld. The seeded doctor, clinician and nurse roles hold all seven.
   and `mediaType` as the scan detected it (as declared if the scan named none).
 - Each vital's eight measurements are its current values ("Vital corrections"
   below), with `currentCorrectionNo`, `correctedAt`, `correctionUnavailable`,
-  `recordedValues` (the eight measurements as first recorded, as JSON numbers
-  or `null`, for a corrected vital; otherwise `null`) and `correctionReason`
-  (the current correction's).
+  `recordedValues` (the eight recorded measurements the vital row holds, as
+  JSON numbers or `null`, for a corrected vital; otherwise `null`) and
+  `correctionReason` (the current correction's).
 - The audit event `ehr.emergency.records.read` records the count of each
   category read, and the categories withheld, and nothing else:
   `encounterCount`, `noteCount`, `vitalCount`, `correctedVitalCount` (vitals
@@ -725,21 +725,25 @@ withheld. The seeded doctor, clinician and nurse roles hold all seven.
 
 `POST .../vitals/:vitalId/corrections` appends a correction with a
 `replacementValues` set and makes it current: the vital's
-`currentCorrectionNo` becomes its number. The values first recorded never
-change, and `GET .../vitals` and `GET .../vitals/:vitalId` still return them,
-with `currentCorrectionNo`; `GET .../vitals/:vitalId/corrections` lists the
-corrections, newest first.
+`currentCorrectionNo` becomes its number. No API route changes the recorded
+values (the vital row's eight measurement columns): a correction moves only
+`currentCorrectionNo`, and `GET .../vitals` and `GET .../vitals/:vitalId` still
+return the recorded values, with `currentCorrectionNo`;
+`GET .../vitals/:vitalId/corrections` lists the corrections, newest first. The
+database does not yet refuse other updates of those columns by the EHR
+runtime; each would be versioned in `ehr.record_versions` with its change
+reason (`DATABASE.md`, "Record summary reads").
 
 A vital's current values, as the emergency summary returns them, are:
 
-- with no correction (`currentCorrectionNo` 0), the values first recorded;
+- with no correction (`currentCorrectionNo` 0), the recorded values;
 - otherwise exactly the `replacementValues` of the correction numbered
   `currentCorrectionNo`. A measurement that correction omits has no current
   value (`null`), even if it was recorded or named by an earlier correction.
-  Corrections are not merged with each other or with the values first recorded,
-  so send every measurement that is still current;
+  Corrections are not merged with each other or with the recorded values, so
+  send every measurement that is still current;
 - if that correction cannot be read, every measurement is `null` and
-  `correctionUnavailable` is `true`. Values first recorded are returned only as
+  `correctionUnavailable` is `true`. Recorded values are returned only as
   `recordedValues`, never as current.
 
 This is the current default, pending the product decision on correction
