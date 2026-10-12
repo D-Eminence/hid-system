@@ -50,6 +50,15 @@ function resolveRouteMeta(pathname: string): RouteMeta {
     }
   }
 
+  if (pathname === '/provider/recover') {
+    return {
+      canonical: `${SITE_ORIGIN}/provider/recover`,
+      description: 'Recover or activate a clinical account issued by an authorized facility.',
+      robots: 'noindex,nofollow',
+      title: 'Recover your clinical account | HID - Health Identity Directory',
+    }
+  }
+
   if (pathname.startsWith('/eminence') || pathname.startsWith('/admin')) {
     return {
       canonical: `${SITE_ORIGIN}${pathname}`,
