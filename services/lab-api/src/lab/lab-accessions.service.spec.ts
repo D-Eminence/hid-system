@@ -32,7 +32,7 @@ describe('LabAccessionsService',()=>{
     const queries:string[]=[];
     const {service,audit}=harness(async(sql)=>{queries.push(sql);
       if(sql.includes('from lab.work_items')) return {rows:[{id:workItemId,patient_id:patientId,facility_id:context.facilityId,priority:'routine',status:'accepted'}]};
-      if(sql.includes('from lab.accessions')&&sql.includes('for update')) return {rows:[]};
+      if(sql.includes('from lab.accessions')&&sql.includes('idempotency_key')) return {rows:[]};
       if(sql.includes('insert into lab.accessions')) return {rows:[accession]};
       if(sql.includes('insert into lab.specimens')) return {rows:[specimen]};
       if(sql.includes('from lab.specimens')) return {rows:[specimen]};
@@ -44,6 +44,9 @@ describe('LabAccessionsService',()=>{
     expect(queries.some((q)=>q.includes('insert into lab.specimen_events'))).toBe(true);
     expect(queries.some((q)=>q.includes('insert into lab.outbox_events'))).toBe(true);
     expect(queries.join('\n')).not.toMatch(/insert into (identity\.patients|ehr\.)|result|execution|instrument|qc/i);
+    // Work items and accessions are insert-only and the Lab runtime cannot lock
+    // them (Phase 4 Stage 9): the parent and replay reads take no row lock.
+    expect(queries.filter((q)=>/from lab\.(work_items|accessions)\b/.test(q)&&/\bfor\s+(update|share|no key update|key share)\b/i.test(q))).toEqual([]);
     expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
   });
 
