@@ -1624,9 +1624,13 @@ lasts 15 minutes. A limit across all staff for one patient is not added here.
 
 Tests: `services/ehr-api/database/tests/patient-access-pin.integration.sql`
 (rollback-only, run by the migration rehearsal as `hid_identity_api_runtime`)
-enters four wrong PINs for one patient, the right PIN for a second patient
-and one more wrong PIN, and requires the actor lock and the second patient's
-cleared window. It fails on 0077.
+enters three wrong PINs for one patient, one wrong PIN and then the right PIN
+for a second patient, and one more wrong PIN for the first. After the right
+PIN it requires the second patient's window at 0, the first patient's still
+at 3 and the actor's still at 4; at the end, the actor locked at 5, the first
+patient's window at 4 and the known PIN refused. It fails on 0077 (the success
+reset the actor window), and also if the success leaves its own patient's
+window uncleared or clears another patient's.
 
 ## EHR clinical list paging precision (no migration)
 
