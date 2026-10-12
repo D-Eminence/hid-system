@@ -209,7 +209,11 @@ OCR and Pharmacy also send the method of the request they serve as
 `GET`, `HEAD` or `OPTIONS` from a caller that passes workload authentication;
 every other case, and `POST /auth/service-session`, keeps the check. See the
 Extracted Identity boundary in `INTERFACE_CONTRACT.md`. Its HTTP evidence is
-local and synthetic, for EHR only.
+local and synthetic, for EHR only. The Outreach cookie-read fix (ADR-045,
+branch `fix/outreach-cookie-reads`, not merged) also marks
+`POST /identity/outreach/authorize`, where a reported read authorizes only a
+`.read` permission; its HTTP evidence is local and synthetic too
+(`outreach_cookie_read_runtime`).
 
 ## 8. Idempotency matrix
 

@@ -23,12 +23,14 @@ service consumers use workload-authenticated internal actor/authorization
 routes while separately propagating the user credential. Production accepts
 only asymmetric issuer/JWKS workload evidence; local tokens are development
 only. A cookie-authenticated request with an unsafe method needs Origin and
-CSRF evidence, with one exception for delegated reads: on
-`POST /api/v1/identity/service/authorization/check`, the only route marked
-`@DelegatedBrowserRequest()`, `SecurityGuard` skips that check when the request
-authenticates as an approved workload and reports the method of the request
-that workload is serving as `GET`, `HEAD` or `OPTIONS` in
-`X-HID-Original-Method`. See the Extracted
+CSRF evidence, with one exception for delegated reads: on the two routes
+marked `@DelegatedBrowserRequest()`,
+`POST /api/v1/identity/service/authorization/check` and
+`POST /api/v1/identity/outreach/authorize`, `SecurityGuard` skips that check
+when the request authenticates as an approved workload and reports the method
+of the request that workload is serving as `GET`, `HEAD` or `OPTIONS` in
+`X-HID-Original-Method`. After such a skip the Outreach route authorizes only
+a permission ending in `.read` (ADR-045). See the Extracted
 Identity boundary in `../../docs/INTERFACE_CONTRACT.md`.
 
 Staff and patient browser sessions use host-only cookies with Origin and CSRF
