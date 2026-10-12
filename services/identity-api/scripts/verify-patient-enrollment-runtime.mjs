@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Patient signup-to-sign-in lifecycle over HTTP, as hid_identity_api_runtime,
 // on a disposable copy of the owned synthetic rehearsal database: public NIN
-// enrollment (QoreID adapter, contact OTP, activation), then password sign-in,
-// session, refresh rotation, self profile, OTP password recovery and sign-out.
+// enrollment (QoreID adapter, contact OTP, activation and its replay budget),
+// then password sign-in, session, refresh rotation, self profile, OTP password
+// recovery and sign-out, each of which expires the enrollment cookie.
 // External services are replaced, never called: QoreID behind the real adapter
 // by a local HTTP stub, Cloudflare Siteverify by a stub that encodes the
 // outcome in the token, and Notification delivery by a stub that captures the
@@ -306,6 +307,24 @@ try {
   const replayActivation = await post('/identity/patient-enrollments/activate',
     { password: 'A-Different-Password-02' }, { cookie: cookieA });
   expectProblem(replayActivation, 200); assert.equal(replayActivation.body.hidCode, hidA);
+  // Activations and replays share one budget per enrollment: OTP_RATE_MAX_REQUESTS
+  // per window, counted after the cookie and stage checks. Then 429, without
+  // another argon2id run or activation command.
+  const activationBudget = getEnvironment().OTP_RATE_MAX_REQUESTS;
+  for (let call = 3; call <= activationBudget; call += 1) {
+    const withinBudget = await post('/identity/patient-enrollments/activate',
+      { password: `A-Different-Password-0${call}` }, { cookie: cookieA });
+    expectProblem(withinBudget, 200); assert.equal(withinBudget.body.hidCode, hidA);
+  }
+  const overBudget = await post('/identity/patient-enrollments/activate',
+    { password: 'A-Different-Password-99' }, { cookie: cookieA });
+  assert.equal(overBudget.status, 429,
+    `Activation ${activationBudget + 1} of one enrollment must be refused 429 ENROLLMENT_RATE_LIMITED, got ${overBudget.status} ${JSON.stringify(overBudget.body)}`);
+  expectProblem(overBudget, 429, 'ENROLLMENT_RATE_LIMITED');
+  assert(!('hidCode' in overBudget.body), 'a refused activation must not return the HID');
+  assert.equal(await count(`select count(*) from identity.public_patient_enrollment_rates
+    where scope = 'enrollment' and request_count = $1`, [activationBudget + 1]), 1,
+  'the activation budget is one enrollment-scope bucket that counted every activation');
   const accountA = (await owner.query(`select account.id, account.status, account.email,
       account.email_verified_at is not null as email_verified, patient.id as patient_id, patient.hid_code,
       patient.first_name, patient.last_name, patient.dob::text as dob, patient.source_system
@@ -318,7 +337,7 @@ try {
   const patientA = accountA[0].patient_id;
   assert.equal(await count(`select count(*) from identity.patients where hid_code = $1`, [hidA]), 1);
   assert.equal((await owner.query('select state, patient_id from identity.public_patient_enrollments')).rows[0].patient_id, patientA);
-  check('activation creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID; a replay returns the same HID and ignores the second password');
+  check('activation creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID; a replay returns the same HID and ignores the second password; activations and replays of one enrollment beyond OTP_RATE_MAX_REQUESTS per window are 429 ENROLLMENT_RATE_LIMITED without the HID');
 
   // 6. The same identity or contact cannot enroll twice.
   expectProblem(await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID(),
@@ -373,11 +392,21 @@ try {
     assert(!/;\s*Domain=/i.test(value)); assert.match(value, /; Secure/i); assert.match(value, /; SameSite=Strict/i);
     if (!value.startsWith(`${cookieName}_csrf=`)) assert.match(value, /; HttpOnly/i);
   }
+  // Signing in on the device that enrolled expires its enrollment cookie, on
+  // the path it was set on: the HID is read from the session from now on.
+  const retiresEnrollment = (response, label) => {
+    const enrollment = (response.headers['set-cookie'] ?? []).filter(value => value.startsWith('hid_enrollment='));
+    assert.equal(enrollment.length, 1, `${label} must expire the hid_enrollment cookie: ${response.headers['set-cookie']}`);
+    assert.match(enrollment[0], /^hid_enrollment=;/);
+    assert.match(enrollment[0], /; Expires=Thu, 01 Jan 1970 00:00:00 GMT/i);
+    assert.match(enrollment[0], /; Path=\/api\/v1\/identity\/patient-enrollments(;|$)/i);
+  };
+  retiresEnrollment(firstA, 'patient sign-in');
   const byHid = await login(hidA.toLowerCase(), passwordA);
   expectProblem(byHid, 200); assert.equal(byHid.body.actor.patientId, patientA);
   const firstB = await login(hidB, 'Synthetic-Patient-Pass-B2');
   expectProblem(firstB, 200); assert.equal(firstB.body.actor.patientId, accountB[0].patient_id);
-  check('sign-in refuses a wrong password and an unknown account identically (401), refuses another Turnstile action, and signs the patient in by email (any case) or HID with host-only Secure Strict cookies and no workforce authority');
+  check('sign-in refuses a wrong password and an unknown account identically (401), refuses another Turnstile action, and signs the patient in by email (any case) or HID with host-only Secure Strict cookies and no workforce authority, expiring the enrollment cookie on its path');
 
   // 9. Session, self profile and isolation between the two new patients.
   const cookieSessionA = sessionCookies(firstA);
@@ -402,11 +431,12 @@ try {
   const refreshedA = await http.post('/api/v1/auth/refresh').set('Cookie', cookieSessionA).set('Origin', origin)
     .set('x-csrf-token', csrf(firstA));
   expectProblem(refreshedA, 200);
+  retiresEnrollment(refreshedA, 'refresh');
   assert.equal(refreshedA.body.actor.patientId, patientA);
   assert.notEqual(refreshedA.body.actor.sessionId, firstA.body.actor.sessionId);
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(refreshedA)), 200);
   expectProblem(await http.get('/api/v1/auth/session').set('Cookie', cookieSessionA), 401);
-  check('refresh with the CSRF token rotates the session for the same patient; the previous session is refused');
+  check('refresh with the CSRF token rotates the session for the same patient and expires the enrollment cookie; the previous session is refused');
 
   // 11. OTP password recovery: no account disclosure, single-use code, old password and sessions end.
   const resetStart = (identifier, network = '198.51.100.40') => http.post('/api/v1/auth/otp/start')
@@ -444,20 +474,24 @@ try {
   expectProblem(otherDeviceA, 200); assert.equal(otherDeviceA.body.actor.patientId, patientA);
   expectProblem(await http.post('/api/v1/auth/logout').set('Cookie', sessionCookies(recoveredA)).set('Origin', origin), 403);
   expectProblem(await http.get('/api/v1/auth/session').set('Cookie', sessionCookies(recoveredA)), 200);
-  expectProblem(await http.post('/api/v1/auth/logout').set('Cookie', sessionCookies(recoveredA)).set('Origin', origin)
-    .set('x-csrf-token', csrf(recoveredA)), 204);
+  const signedOutA = await http.post('/api/v1/auth/logout').set('Cookie', sessionCookies(recoveredA)).set('Origin', origin)
+    .set('x-csrf-token', csrf(recoveredA));
+  expectProblem(signedOutA, 204);
+  retiresEnrollment(signedOutA, 'sign-out');
   expectProblem(await http.get('/api/v1/auth/session').set('Cookie', sessionCookies(recoveredA)), 401);
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(otherDeviceA)), 200);
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(firstB)), 200);
-  check('sign-out without the CSRF token is refused and ends nothing; with it, it ends only that sign-in: the same patient\'s other sign-in and the other patient stay signed in');
+  check('sign-out without the CSRF token is refused and ends nothing; with it, it ends only that sign-in and expires the enrollment cookie: the same patient\'s other sign-in and the other patient stay signed in');
 
   // 13. Durable evidence. Every successful start (A, its replay, B) and
-  // activation (A, its replay, B) is audited as a success, refusals as
-  // failures, and the database records each new patient's activation once.
+  // activation (A and its replays within the budget, B) is audited as a
+  // success, refusals as failures, and the database records each new
+  // patient's activation once.
   const audited = (action, outcome) => count(`select count(*) from audit.events
     where action = $1 and outcome = $2 and ($2 <> 'success' or details->>'status' = '200')`, [action, outcome]);
-  for (const action of ['api.identity.patient-enrollment.start', 'api.identity.patient-enrollment.activate']) {
-    assert.equal(await audited(action, 'success'), 3, `${action}: every successful call is audited`);
+  for (const [action, successes] of [['api.identity.patient-enrollment.start', 3],
+    ['api.identity.patient-enrollment.activate', activationBudget + 1]]) {
+    assert.equal(await audited(action, 'success'), successes, `${action}: every successful call is audited`);
     assert(await audited(action, 'failure') >= 1, `${action}: refusals are audited`);
   }
   assert.equal(await count(`select count(*) from audit.events
@@ -468,7 +502,7 @@ try {
   }
   assert.equal(await count('select count(*) from identity.patients where source_system = $1',
     ['hid-public-qoreid-enrollment']), 2);
-  check('every successful enrollment start and activation is audited as a success (three each, replays included) and refusals as failures, each new patient\'s activation is recorded once, and no audit detail contains a NIN, password or code');
+  check('every successful enrollment start (three) and activation (one per patient and each replay within the budget) is audited as a success and refusals as failures, each new patient\'s activation is recorded once, and no audit detail contains a NIN, password or code');
 
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: runtimeRole,
     qoreid: 'local stub behind the real adapter; no QoreID call', turnstile: 'local Siteverify stub',

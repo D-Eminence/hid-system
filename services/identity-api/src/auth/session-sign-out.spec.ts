@@ -83,7 +83,11 @@ function response() {
 }
 
 const cleared = (res: ReturnType<typeof response>) => res.clearCookie.mock.calls.map(([name]) => name).sort();
-const ALL_COOKIES = ['hid_access', 'hid_access_csrf', 'hid_access_refresh'];
+// The three session cookies, and the public patient enrollment cookie, which
+// a sign-in, a refresh and a sign-out retire (ENR-3).
+const ALL_COOKIES = ['hid_access', 'hid_access_csrf', 'hid_access_refresh', 'hid_enrollment'];
+const ENROLLMENT_COOKIE_CLEARED = ['hid_enrollment', { secure: false, sameSite: 'strict', httpOnly: true,
+  path: '/api/v1/identity/patient-enrollments' }];
 
 async function refusal(promise: Promise<unknown>): Promise<DomainProblem> {
   const error = await promise.then(() => undefined, (failure: unknown) => failure);
@@ -184,6 +188,15 @@ describe('POST /auth/logout', () => {
     expect(auth.revoke).not.toHaveBeenCalled();
     expect(auth.revokeByRefreshToken).not.toHaveBeenCalled();
     expect(cleared(res)).toEqual(ALL_COOKIES);
+  });
+
+  it('expires the enrollment cookie on its own path, as the enrollment controller set it', async () => {
+    const { controller } = harness();
+    const res = response();
+    await controller.logout(request({ origin: ORIGIN, 'x-csrf-token': 'csrf-A' },
+      { hid_access_refresh: 'refresh-A', hid_access_csrf: 'csrf-A' }), res as unknown as Response);
+    expect(res.clearCookie).toHaveBeenCalledWith(...ENROLLMENT_COOKIE_CLEARED);
+    expect(res.clearCookie.mock.calls.filter(([name]) => name === 'hid_enrollment')).toHaveLength(1);
   });
 
   it('ends a bearer sign-in without Origin or CSRF, and refuses a dead or platform bearer token', async () => {
@@ -346,6 +359,22 @@ describe('POST /auth/refresh with X-HID-Client', () => {
     await controller.refresh(refreshing(client, refresh), response() as unknown as Response);
     expect(auth.refresh).toHaveBeenCalledWith(refresh, expect.anything());
     expect(tokens.refreshSessionKind).toHaveBeenCalledTimes(client === 'patient-web' || client === 'staff-web' ? 1 : 0);
+  });
+
+  it('retires the enrollment cookie with a successful refresh, and with one rotation refuses', async () => {
+    const { controller, auth } = harness();
+    const renewed = response();
+    await controller.refresh(refreshing('patient-web', 'refresh-A'), renewed as unknown as Response);
+    expect(renewed.cookie.mock.calls.map(([name]) => name).sort())
+      .toEqual(['hid_access', 'hid_access_csrf', 'hid_access_refresh']);
+    expect(renewed.clearCookie.mock.calls).toEqual([ENROLLMENT_COOKIE_CLEARED]);
+
+    auth.refresh.mockRejectedValueOnce(new UnauthorizedException('Refresh session ended'));
+    const refused = response();
+    await expect(controller.refresh(refreshing('patient-web', 'refresh-A'), refused as unknown as Response))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+    expect(cleared(refused)).toEqual(ALL_COOKIES);
+    expect(refused.cookie).not.toHaveBeenCalled();
   });
 
   it('checks the refresh CSRF token before revealing the sign-in kind', async () => {

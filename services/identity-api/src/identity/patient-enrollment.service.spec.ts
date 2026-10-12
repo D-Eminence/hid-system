@@ -1,5 +1,11 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
+// Counted argon2: a password hashes to PASSWORD_HASH, random bytes (the replay
+// placeholder) to PLACEHOLDER_HASH. Both have the form activation requires.
+const PASSWORD_HASH = `$argon2id$v=19$m=65536,t=3,p=1$${'c'.repeat(22)}$${'d'.repeat(43)}`;
+const PLACEHOLDER_HASH = `$argon2id$v=19$m=65536,t=3,p=1$${'e'.repeat(22)}$${'f'.repeat(43)}`;
+jest.mock('argon2', () => ({ argon2id: 2, hash: jest.fn() }));
 
+import * as argon2 from 'argon2';
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import { resetEnvironmentForTests } from '../config/environment';
@@ -113,6 +119,9 @@ function fixture() {
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes('identity.activate_public_patient_enrollment')) {
+      // An active enrollment replays: the stored HID, the password ignored (0058).
+      if (enrollment?.state === 'active') return { rows: [{ patient_id: 'patient-7',
+        account_id: 'account-7', hid_code: 'HID-TEST-00000001', replayed: true }] };
       return { rows: [{ patient_id: 'patient-7', account_id: 'account-7',
         hid_code: values[4], replayed: false }] };
     }
@@ -138,6 +147,22 @@ function fixture() {
     set rateCount(value: number) { rateCount = value; } };
 }
 
+function passwordHash(): jest.Mock { return argon2.hash as unknown as jest.Mock; }
+
+/** An enrollment whose contact is verified, ready for its password. */
+async function verifiedEnrollment(f: ReturnType<typeof fixture>) {
+  const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+  const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+    '203.0.113.10', correlationId);
+  const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
+  await f.service.verifyContact(started.cookie, contact.challengeId, deliveredCode, correlationId);
+  return started.cookie;
+}
+
+const rateLookups = (queries: RecordedQuery[]) => queries
+  .filter(({ sql }) => sql.includes('from identity.public_patient_enrollment_rates'))
+  .map(({ values }) => ({ scope: values[0], bucket: values[1] }));
+
 describe('PatientEnrollmentService', () => {
   beforeEach(() => {
     Object.assign(process.env, {
@@ -151,6 +176,9 @@ describe('PatientEnrollmentService', () => {
       OTP_HMAC_KEY_B64: Buffer.alloc(32, 3).toString('base64'),
     });
     resetEnvironmentForTests();
+    passwordHash().mockReset();
+    passwordHash().mockImplementation(async (value: unknown) =>
+      Buffer.isBuffer(value) ? PLACEHOLDER_HASH : PASSWORD_HASH);
   });
 
   afterEach(() => {
@@ -458,5 +486,98 @@ describe('PatientEnrollmentService', () => {
       .rejects.toMatchObject({ code: 'OTP_INVALID' });
     expect(f.challenge?.consumed_at).toBeInstanceOf(Date);
     expect(f.queries.filter(({ sql }) => sql.includes("set state='set_password'"))).toHaveLength(1);
+  });
+
+  describe('activation cost and budget (ENR-5)', () => {
+    const activation = (queries: RecordedQuery[]) => queries
+      .filter(({ sql }) => sql.includes('identity.activate_public_patient_enrollment'));
+
+    it('hashes the password once for a first activation', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      const before = passwordHash().mock.calls.length;
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      expect(passwordHash().mock.calls.slice(before)).toEqual([['a-strong-test-password',
+        { type: 2, memoryCost: 65_536, timeCost: 3, parallelism: 1 }]]);
+      expect(activation(f.queries).at(-1)?.values[5]).toBe(PASSWORD_HASH);
+    });
+
+    it('replays an active enrollment without hashing the presented password', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      await f.service.activate(cookie, 'a-strong-test-password', correlationId);
+      Object.assign(f.enrollment!, { state: 'active', patient_id: 'patient-7' });
+      const before = passwordHash().mock.calls.length;
+
+      await expect(f.service.activate(cookie, 'a-different-test-password', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+
+      // A replay sets no credential (0058 returns the HID first), so it costs
+      // no argon2id run. The command still receives a well-formed hash: one
+      // computed once per process from random bytes, never stored.
+      expect(passwordHash().mock.calls.slice(before)).toEqual([]);
+      expect(passwordHash().mock.calls.some(([value]) => value === 'a-different-test-password')).toBe(false);
+      expect(passwordHash()).toHaveBeenCalledWith(expect.any(Buffer),
+        { type: 2, memoryCost: 65_536, timeCost: 3, parallelism: 1 });
+      const replay = activation(f.queries).at(-1);
+      expect(replay?.values[5]).toBe(PLACEHOLDER_HASH);
+      expect(replay?.values).not.toContain('a-different-test-password');
+    });
+
+    it('charges each activation to the enrollment, after the cookie and stage checks', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      const contactBuckets = rateLookups(f.queries).filter(({ scope }) => scope === 'enrollment');
+      expect(contactBuckets).toHaveLength(1);
+      f.queries.length = 0;
+
+      await f.service.activate(cookie, 'a-strong-test-password', correlationId);
+
+      const charged = rateLookups(f.queries);
+      expect(charged).toEqual([{ scope: 'enrollment', bucket: expect.stringMatching(/^[0-9a-f]{64}$/) }]);
+      // Its own budget: not the contact step's enrollment bucket, and not the enrollment id in clear.
+      expect(charged[0]?.bucket).not.toBe(contactBuckets[0]?.bucket);
+      expect(charged[0]?.bucket).not.toContain(String(f.enrollment?.id));
+      const rate = f.queries.findIndex(({ sql }) => sql.includes('from identity.public_patient_enrollment_rates'));
+      const command = f.queries.findIndex(({ sql }) => sql.includes('identity.activate_public_patient_enrollment'));
+      expect(rate).toBeGreaterThan(-1);
+      expect(rate).toBeLessThan(command);
+    });
+
+    it('refuses an activation over the budget with 429, before argon2id or the activation command', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      f.rateCount = 4;
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      f.queries.length = 0;
+      const before = passwordHash().mock.calls.length;
+      // OTP_RATE_MAX_REQUESTS (5) activations or replays per enrollment per window; this is the sixth.
+      f.rateCount = 5;
+
+      const refused = await f.service.activate(cookie, 'a-strong-test-password', correlationId)
+        .then(() => undefined, (error: unknown) => error);
+
+      expect(refused).toBeInstanceOf(DomainProblem);
+      expect([(refused as DomainProblem).getStatus(), (refused as DomainProblem).code])
+        .toEqual([429, 'ENROLLMENT_RATE_LIMITED']);
+      expect(passwordHash().mock.calls.length).toBe(before);
+      expect(activation(f.queries)).toHaveLength(0);
+      expect(rateLookups(f.queries)).toEqual([{ scope: 'enrollment', bucket: expect.any(String) }]);
+    });
+
+    it('refuses a forged cookie or an unverified contact before charging the budget', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      f.queries.length = 0;
+      const forged = started.cookie.replace(/.$/, (last) => (last === 'A' ? 'B' : 'A'));
+      await expect(f.service.activate(forged, 'a-strong-test-password', correlationId))
+        .rejects.toMatchObject({ code: 'ENROLLMENT_NOT_FOUND' });
+      await expect(f.service.activate(started.cookie, 'a-strong-test-password', correlationId))
+        .rejects.toMatchObject({ code: 'ENROLLMENT_STAGE_INVALID' });
+      expect(rateLookups(f.queries)).toEqual([]);
+      expect(passwordHash().mock.calls.some(([value]) => value === 'a-strong-test-password')).toBe(false);
+    });
   });
 });
