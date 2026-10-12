@@ -7,7 +7,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import type { Response } from 'express';
 import { catchError, from, mergeMap, type Observable, throwError } from 'rxjs';
-import { AUDIT_ACTION, AUDIT_FAILURES_ONLY, NO_AUDIT } from '../common/decorators';
+import { AUDIT_ACTION, AUDIT_FAILURES_ONLY, AUDIT_SESSION_EVENT, NO_AUDIT } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import { AuditService } from './audit.service';
 
@@ -35,16 +35,24 @@ export class AuditInterceptor implements NestInterceptor {
       context.getHandler(),
       context.getClass(),
     ]) ?? `${request.method.toLowerCase()}.${request.route?.path ?? 'unresolved'}`;
+    const sessionEvent = this.reflector.getAllAndOverride<string>(AUDIT_SESSION_EVENT, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    // A session route is recorded as its auth.* session event, on the session it
+    // acts on. Read when the request ends: sign-out resolves its actor itself.
+    const recorded = () => sessionEvent
+      ? { action: sessionEvent, resourceType: 'session', resourceId: request.actor?.sessionId }
+      : { action: `api.${action}`, resourceType: 'http-request' };
     const startedAt = Date.now();
 
     const responseStream = next.handle();
     const successAudited = failuresOnly ? responseStream : responseStream.pipe(
       mergeMap((result) => from(this.audit.record({
         correlationId: request.correlationId,
-        ...this.actorFields(request),
+        ...this.actorFields(request, Boolean(sessionEvent)),
         patientId: this.patientId(request),
-        action: `api.${action}`,
-        resourceType: 'http-request',
+        ...recorded(),
         outcome: 'success',
         purposeOfUse: this.purpose(request),
         sourceIp: request.ip,
@@ -55,10 +63,9 @@ export class AuditInterceptor implements NestInterceptor {
     return successAudited.pipe(
       catchError((error: unknown) => from(this.audit.record({
         correlationId: request.correlationId,
-        ...this.actorFields(request),
+        ...this.actorFields(request, Boolean(sessionEvent)),
         patientId: this.patientId(request),
-        action: `api.${action}`,
-        resourceType: 'http-request',
+        ...recorded(),
         outcome: 'failure',
         purposeOfUse: this.purpose(request),
         sourceIp: request.ip,
@@ -69,14 +76,30 @@ export class AuditInterceptor implements NestInterceptor {
   }
 
   // Platform administration is recorded as platform scope with no facility;
-  // every other request keeps the facility the guard bound to it.
-  private actorFields(request: HidRequest) {
+  // every other request keeps the facility the guard bound to it. A session
+  // event names its actor's kind, as AuthController's own session events do, and
+  // records a membership and organization only with the facility bound to the
+  // request. Sign-out binds none; the other session routes bind one only when
+  // the request names one of the actor's facilities in X-Facility-ID. Otherwise
+  // the row carries no facility, membership or organization.
+  private actorFields(request: HidRequest, sessionEvent = false) {
     if (request.accessScope === 'platform' && request.actor && request.actor.kind !== 'patient') {
       return {
         actorType: 'staff' as const,
         actorSubject: request.actor.subject,
         actorAccountId: request.actor.accountId,
         accessScope: 'platform' as const,
+      };
+    }
+    if (sessionEvent && request.actor) {
+      const bound = request.facilityId !== undefined && request.actor.facility?.id === request.facilityId;
+      return {
+        actorType: request.actor.kind === 'patient' ? 'patient' as const : 'staff' as const,
+        actorSubject: request.actor.subject,
+        actorAccountId: request.actor.accountId,
+        actorMembershipId: bound ? request.actor.facility?.membershipId : undefined,
+        organizationId: bound ? request.actor.facility?.organizationId : undefined,
+        facilityId: bound ? request.facilityId : undefined,
       };
     }
     return {
