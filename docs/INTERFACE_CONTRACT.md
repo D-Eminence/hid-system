@@ -238,6 +238,47 @@ Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 never database rows. Problem Details status/code, correlation, bounded timeout,
 and safe JSON request bodies are preserved by the typed client.
 
+The patient decision is a `POST` from the service even when the request it
+serves is a read, and a same-origin browser `GET` carries neither `Origin` nor
+`X-CSRF-Token`. EHR, Lab, OCR and Pharmacy therefore also report the method of
+the request they are serving: each `requireRequestContext` records
+`request.method` as `requestMethod`, and the typed Identity client sends it as
+`X-HID-Original-Method`, upper-cased, and only when it is 1–16 letters. For a
+browser call that is the browser's method. For a service hop that forwards the
+user's cookie, such as OCR's
+`GET /api/v1/ehr/internal/ocr/documents/:documentId/source` during job
+creation, it is that hop's method (EHR reports `GET`); the originating browser
+write was already revalidated by the first service. On a cookie request,
+Identity's `SecurityGuard` skips its browser-write `Origin` and CSRF check only
+when all of these hold:
+
+* the route is marked `@DelegatedBrowserRequest()`; only
+  `POST /api/v1/identity/service/authorization/check` is;
+* the reported method is exactly `GET`, `HEAD` or `OPTIONS` (the guard's
+  existing safe-method set; case-sensitive);
+* the same request authenticates through
+  `WorkloadAuthService.authenticateService` as one of the approved callers
+  (`ehr-api`, `lab-api`, `pharmacy-api`, `ocr-api`, `outreach-api`), with the
+  workload JWT or, outside production, the caller's local secret.
+
+Anything else keeps the check: a reported write, a missing, lower-case or
+unknown method, missing or wrong workload credentials, or an unapproved caller
+name. The header carries no authority by itself, so a browser that sends it
+gains nothing. Every other route keeps the check, including
+`POST /api/v1/auth/service-session`, through which EHR, Lab, OCR and Pharmacy
+still revalidate a cookie write's `Origin` and CSRF before they act. Bearer
+requests are unchanged. Skipping the check changes nothing else: the session,
+runtime controls, exact facility, `identity.authorization.check` permission,
+the handler's own workload authentication and the patient authorization
+decision still apply. Outreach reports no method. Its own Identity routes
+(`POST /api/v1/identity/outreach/authorize` and
+`POST /api/v1/identity/outreach/patient-authorization`) are not marked; its
+link-existing patient authorization reaches the marked route without a method,
+so the check still applies; and its own guard requires `Origin` and CSRF on
+every cookie request (Outreach registration boundary below). Before this rule,
+every delegated patient-scoped read from a same-origin cookie session was
+refused `403 ORIGIN_DENIED` at the decision call.
+
 ## 8. Identity Resolution
 
 HID lookup uses the existing versioned Identity resolution interface. Sensitive

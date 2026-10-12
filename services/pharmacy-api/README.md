@@ -10,9 +10,12 @@ The service uses `PHARMACY_DATABASE_URL` through the least-privilege
 OCR, or Identity tables directly. Actor authentication and patient
 authorization are resolved through the shared typed client over
 `IDENTITY_API_URL` (port 3001 locally), with separate propagated-user and
-Pharmacy workload credentials. EHR- and OCR-only commands also require
-independent service identity. Production requires asymmetric JWT workload
-identity in both directions, including a rotating Identity-audience token at
+Pharmacy workload credentials. The patient authorization also reports the
+method of the request the service is serving (`X-HID-Original-Method`), so
+Identity applies its cookie Origin and CSRF check there only to a write.
+EHR- and OCR-only commands also require independent service identity.
+Production requires asymmetric JWT workload identity in both directions,
+including a rotating Identity-audience token at
 `IDENTITY_PHARMACY_WORKLOAD_TOKEN_FILE`, and rejects local-secret mode.
 
 Acceptance binds one exact active, same-facility EHR prescription snapshot but

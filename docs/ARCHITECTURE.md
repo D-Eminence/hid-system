@@ -1263,7 +1263,12 @@ or Identity session-cookie user evidence, facility, purpose, correlation and
 idempotency context while keeping internal workload authorization separate.
 Cookie mutations preserve Origin and CSRF evidence. The clients use a
 10-second timeout, retry an idempotent network/502/503/504 failure at most once,
-and obtain a fresh rotating workload credential for each attempt.
+and obtain a fresh rotating workload credential for each attempt. Its Identity
+client also reports the method of the request a service is serving
+(`X-HID-Original-Method`) on the patient authorization check. Identity trusts
+that report only from an authenticated workload, and uses it only to decide
+whether a forwarded cookie needs the browser-write Origin and CSRF check
+(`INTERFACE_CONTRACT.md`, Extracted Identity boundary).
 
 `packages/offline` and `packages/telemetry` are consumed by every active
 browser application. Only Outreach currently persists an offline mutation
