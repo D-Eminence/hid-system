@@ -2057,9 +2057,10 @@ Decision:
   authentication and grants nothing. Origin, CSRF and the session checks
   remain the security boundary.
 - The kind is answered only for a sign-in refresh could renew now: account
-  live, absolute end not passed, and the token's session live or rotated
-  within the last 60 seconds into one that is, so a refresh or sign-out that
-  raced the other application's tab is answered with the kind. An older
+  live, absolute end not passed, the token's session live or rotated within
+  the last 60 seconds into one that is, so a refresh or sign-out that raced
+  the other application's tab is answered with the kind, and its actor
+  resolvable as refresh resolves it (addendum below). An older
   rotated token is reuse: refresh rotates nothing and ends the whole sign-in,
   and a sign-out ends the sign-in whichever application asks, without naming
   its kind. So an old rotated token tells nobody whether, or as which
@@ -2086,3 +2087,24 @@ Consequences:
 
 Related: ADR-038 (platform sessions keep their own cookies and routes);
 `INTERFACE_CONTRACT.md`, "Auth session contract"; release checklist §2.
+
+## ADR-044 addendum: renewable means refresh could resolve the actor
+
+Date: 2026-10-12
+
+The lookup behind "refresh could renew now" checked the account and the
+session but not what refresh checks next: it resolves the staff actor (an
+active facility membership without a migration hold, an active staff record
+with an accepted verification status, an active organization and facility)
+or the patient (still the account's active patient, through
+`identity.current_patient_account`). A staff sign-in whose membership lapsed
+was therefore refused `403 SESSION_CLIENT_MISMATCH` with its cookies kept
+when the patient application refreshed or signed it out, although refresh
+would only have answered `401`. The lookup now includes that condition, built
+from the same join chain as staff resolution (`eligibleStaffMembershipJoins`),
+so such a sign-in gets refresh's `401` with the cookies cleared, and a
+sign-out that names the other application ends it. It is refused, not ended,
+by refresh, so it is renewable again once its membership or patient is
+active. The Origin and CSRF checks still come first, and nothing is granted:
+the change only stops naming the kind of a sign-in that refresh would refuse
+(fix/identity-enrollment-session-hardening).

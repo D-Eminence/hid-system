@@ -20,7 +20,9 @@ Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 This is the browser contract of staff and patient sessions. Sign-out without
 a live access token, the `X-HID-Client` check and the refresh-token lookup
 rules below come from D-Eminence/hid-system#39, which is not yet deployed. Platform administration sessions use their own cookies and
-`/auth/admin/*` routes (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1).
+`/auth/admin/*` routes (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1). The
+enrollment cookie rule and the lookups' actor condition come from
+fix/identity-enrollment-session-hardening, also not deployed.
 
 Identity sets three cookies at sign-in and on every refresh (`setCookies` in
 `services/identity-api/src/auth/auth.controller.ts`). Their names derive from
@@ -37,6 +39,19 @@ carry no `Domain` attribute (host-only), and are `Secure` when
 The CSRF token is derived from the refresh token. Sign-in and refresh also
 return it in the `X-CSRF-Token` response header, and cookie mutations send it
 back in the `X-CSRF-Token` request header.
+
+Every response that sets these cookies (a staff or patient sign-in by
+password or Google, provider enrollment activation, and a refresh) or clears
+them also expires the public patient enrollment cookie `hid_enrollment` on its
+path, `/api/v1/identity/patient-enrollments` (HttpOnly, `SameSite=Strict`,
+`Secure` as above). That cookie lets `GET /identity/patient-enrollments/current`
+and an activation replay show the enrollment's HID on the enrolling device for
+up to 24 hours ([QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md));
+a signed-in patient reads the HID from `GET /identity/me`, and the enrollment
+routes refuse while session cookies are present. Every other response leaves
+it: a refused sign-in, a pending Google enrollee (`202`), and each refresh or
+sign-out refusal that leaves the session cookies untouched or kept (below).
+Activation itself keeps it. Platform administration sign-in does not touch it.
 
 `POST /api/v1/auth/refresh` takes no body. It reads the refresh and CSRF
 cookies, `X-CSRF-Token` and, optionally, `X-HID-Client`, and checks them in
@@ -76,8 +91,8 @@ disabled portal (`423 PLATFORM_PORTAL_DISABLED`) no longer block sign-out.
     answers `204`.
   - With neither cookie, `204`.
 
-Every sign-out outcome clears the three cookies except `ORIGIN_DENIED` and
-`SESSION_CLIENT_MISMATCH`. A CSRF refusal therefore clears the browser's
+Every sign-out outcome clears the three cookies, and expires the enrollment
+cookie, except `ORIGIN_DENIED` and `SESSION_CLIENT_MISMATCH`. A CSRF refusal therefore clears the browser's
 cookies without ending the sign-in, which stays live on the server until it is
 signed out with valid evidence or lapses. Ending a sign-in takes the
 account's lock and revokes every unrevoked session of the presented session's
@@ -94,15 +109,24 @@ A staff or patient sign-in is one refresh could renew now when:
 
 - the account is `active`, not disabled (`disabled_until` empty or past) and
   on the session's token version;
-- the sign-in's absolute end has not passed; and
+- the sign-in's absolute end has not passed;
 - the token's own session is live (unrevoked and within its idle window), or
   the token was rotated within the last 60 seconds into a session of its
   family that is live. The 60 seconds cover one app's refresh racing the
-  other app's tab. An older rotated token is reuse.
+  other app's tab. An older rotated token is reuse; and
+- refresh could resolve its actor: a staff sign-in's account has an active
+  facility membership without a migration hold, with an active staff record
+  whose verification status is accepted and an active organization and
+  facility (`eligibleStaffMembershipJoins` in
+  `current-staff-context.service.ts`, the joins staff resolution uses); a
+  patient sign-in's patient is still the account's active patient
+  (`identity.current_patient_account`).
 
 On refresh, the kind lookup answers only for such a sign-in. Any other token
 gets no kind and goes on to rotation, which refuses it with `401`; for an
-older rotated token that is reuse, which ends the whole sign-in.
+older rotated token that is reuse, which ends the whole sign-in. A sign-in
+whose actor does not resolve is refused without being ended, so it is
+renewable again once its membership or patient is active again.
 
 Sign-out by refresh cookie reads the sign-in under its account's lock, after
 any sign-out or revocation that got there first. It ends the sign-in if
@@ -451,6 +475,14 @@ safe HID result state (`verified`, `not_verified`, `incomplete`) or static
 Problem Details; raw QoreID payloads, NIN/CAC inputs, OAuth tokens, and
 diagnostic text are excluded. Full configuration and activation controls are in
 [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
+
+Public patient enrollment (`/api/v1/identity/patient-enrollments`) is also
+specified there. `POST /api/v1/identity/patient-enrollments/activate` answers
+`429 ENROLLMENT_RATE_LIMITED` once one enrollment has been activated or
+replayed `OTP_RATE_MAX_REQUESTS` times (default 5) within
+`OTP_RATE_WINDOW_SECONDS` (default 900); a missing or forged enrollment cookie
+(`404`) or an enrollment not yet at the password step (`409`) is refused
+first and not counted. Success bodies are unchanged.
 
 ### HID Resolution
 
