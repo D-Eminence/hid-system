@@ -69,14 +69,17 @@ separate deployment authorization. None of them has been run.
   `healthcare-operations`; creating a job needs `write_records` (so a
   read-only PIN cannot start paid Textract work); break-glass keeps today's
   reads until EHR documents and OCR reads are decided together.
-- **Engineering in progress (follow-up pull requests).** Seed the
-  purpose-of-use vocabulary with `direct-care` only: no migration inserts any
-  code today, so `has_active_consent_grant` fails closed in every environment
+- **Implemented now, independent of this decision.**
+  D-Eminence/hid-system#58 (migration 0082) seeds the purpose-of-use
+  vocabulary with `direct-care` only: before it, no migration inserted any
+  code, so `has_active_consent_grant` failed closed in every environment
   without hand-inserted rows. `healthcare-operations` and `emergency` are not
   seeded: seeding `emergency` would make break-glass live at once
   (`break_glass_enabled` defaults on), and `healthcare-operations` belongs to
-  this decision. Separately, a missing purpose header should answer
-  `400 PURPOSE_OF_USE_REQUIRED` instead of `500`.
+  this decision. D-Eminence/hid-system#60 answers a missing or unknown
+  `X-Purpose-Of-Use` with `400 PURPOSE_OF_USE_REQUIRED` instead of `500`; its
+  allow-list is unchanged. The OCR DTOs still accept only the purposes above,
+  and break-glass reads are unchanged, until this is decided.
 - **Risks.** Accepting `direct-care` for OCR blurs the separation between
   operations and clinical authority. Refusing break-glass reads of documents
   removes the source scan from emergency care.
@@ -109,10 +112,11 @@ separate deployment authorization. None of them has been run.
   pick deterministically (oldest active membership) and record which.
 - **Blocker on #47.** It adds `0080_session_facility_selection.sql`, and 0080
   is now `0080_pharmacy_source_prescription_guards.sql` on `main`
-  (D-Eminence/hid-system#48). #47 must be renumbered to the next free number
-  before it can merge. It also overlaps #50 on `auth.controller.ts` and
-  `token.service.ts`.
-- **Data check.** Run I5 (§3) before deciding: whether such memberships exist.
+  (D-Eminence/hid-system#48), and 0081 and 0082 are taken too
+  (D-Eminence/hid-system#55, D-Eminence/hid-system#58). #47 must be renumbered
+  to the next free number, 0083 today, before it can merge. It also overlaps
+  #50 on `auth.controller.ts` and `token.service.ts`.
+- **Data check.** Run I4 (§3) before deciding: whether such memberships exist.
 
 ## 2. Other open decisions
 
@@ -123,16 +127,16 @@ separate deployment authorization. None of them has been run.
 | D3 | Edge protection for the issuer | A separate `POST /token` throttle and a WAF rate rule or private API, by ADR | — | DEP-4 rollout |
 | D4 | Alert routing | Dashboards only until an alerting workflow exists (ADR-032 forbids an SNS topic without one) | Nothing pages anyone | Every mitigation that relies on an alarm |
 | D5 | Malware scanner engine and credential (DOC-3, DEP-4-SCAN) | An in-account scanner role as a seventh issuer rule with subject `hid:<env>:document-scanner`, and a governed provisioning step for the `document_scanner` account | Until decided, no document becomes downloadable and no OCR job can start | Documents, OCR |
-| D6 | Recovery and enrollment code guess budgets (REC-4, ENR-6) | 5 failures per 15 minutes per account or recipient, never per IP (the edge discards client IPs); no daily cap | A daily cap makes denial of recovery cheap | Implemented as the default in the recovery and ENR-6 branches; thresholds are environment values |
+| D6 | Recovery and enrollment code guess budgets (REC-4, ENR-6) | 5 failures per 15 minutes per account or recipient, never per IP (the edge discards client IPs); no daily cap | A daily cap makes denial of recovery cheap | Implemented as the default in D-Eminence/hid-system#55 (recovery codes) and D-Eminence/hid-system#61 (enrollment contact codes); thresholds are environment values |
 | D7 | Patient record release categories (PREC-1 Phase B) | Completed-encounter items only; never draft or entered in error; confirmed diagnoses only; documents only once a patient download route exists | Docs are silent | Phase B of the record summaries |
 | D8 | Vital correction semantics (CLIN-1, VIT-1) | The current correction is the whole current set, as Health-id renders it | API clients that send partial corrections lose omitted values | Held out of D-Eminence/hid-system#52 |
 | D9 | Break-glass detailed reads (PREC-4 scope, OCR-READ-PURPOSE) | The emergency summary returns only categories the reader may read (D-Eminence/hid-system#52); EHR document and OCR reads unchanged until decided together | The seeded clinical roles hold every read permission, so the summary stays wide in practice | Emergency summary narrowing |
 | D10 | Pharmacy and Lab lifecycle after acceptance (CLIN-2-POLICY, CLIN-3b) | Strict version equality for dispensing (D-Eminence/hid-system#48); Lab refuses new accession and execution for cancelled or entered-in-error orders; released results stay | Stranded queue items: a changed prescription leaves its work item `accepted` and undispensable | Queue cleanup, re-acceptance |
 | D11 | Lab result detail for clinicians | No "unreleased correction pending" flag (D-Eminence/hid-system#51) | Clinicians cannot see that a correction is coming | Result retraction API |
 | D12 | OCR publication after an authorization lapse | Terminal, as today | — | — |
-| D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (follow-up pull request) | No delegated completion | — |
+| D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (implemented in D-Eminence/hid-system#59) | No delegated completion | — |
 | D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decide which roles hold `workforce.manage` (legacy `admin` holds it), how existing staff are attached, whether pending access requests close when a membership ends, and whether staff MFA is a launch gate, by ADR before WF-1 | Invites and offboarding stay manual | Workforce management |
-| D15 | Launch scope of EHR-to-Lab ordering and in-system result return | In scope (the EHR already sends orders) | If in scope, the Lab handoff branch is launch-blocking | Lab handoff |
+| D15 | Launch scope of EHR-to-Lab ordering and in-system result return | In scope (the EHR already sends orders) | If in scope, the Lab handoff is launch-blocking; it merged as D-Eminence/hid-system#56 | Lab handoff |
 | D16 | Health-id OCR publication retry | Persist the publication key per validation; offer Retry for retryable failures | Frontend change | OCR publication retry |
 
 ## 3. Operator plans (prepared, not executed)
@@ -163,11 +167,13 @@ Cloudflare, DNS, IAM, secrets or live data until an operator runs it.
   state.
 - **Apply in order:** 0080 (Pharmacy guards, `CREATE OR REPLACE` of two
   functions, no table lock), 0081 (recovery start cooldown table, no lock on
-  existing tables), then the purpose-of-use seed (an insert under
-  `ROW EXCLUSIVE`) at its number. Then `db:bootstrap` and `db:verify-roles`.
+  existing tables), then 0082 (the purpose-of-use seed, one insert under
+  `ROW EXCLUSIVE` that keeps an existing `direct-care` row as it is). Then
+  `db:bootstrap` and `db:verify-roles`.
 - **Deploy order:** the Pharmacy API at or before 0080; the Identity image
   after 0081 and the bootstrap (otherwise every recovery start fails).
-- **After:** rerun the purpose-code check; expect `direct-care` active.
+- **After:** rerun the purpose-code check; expect `direct-care` active (or
+  as an operator left it before the window) and no other new row.
 
 ### I3. RDS owner attributes (OCR-P8, release checklist P8, ADR-041)
 
@@ -237,5 +243,10 @@ for each merged change and its evidence. Pull requests from this review:
 | DEP-4 throttle exposure (per-request JWKS fetch) | D-Eminence/hid-system#53 | merged |
 | REC-1, REC-3, REC-4 (recovery enumeration and code budget) | D-Eminence/hid-system#55, migration 0081 | merged |
 | PREC-1 Phase A, PREC-2, PREC-3, PREC-4 (record summaries) | D-Eminence/hid-system#52 | merged; CLIN-1 held (D8) |
-| LAB-3, CLIN-3a, LAB-REACCEPT, LAB5-23514, LAB5-DTO (EHR to Lab handoff) | D-Eminence/hid-system#56 | open |
+| LAB-3, CLIN-3a, LAB-REACCEPT, LAB5-23514, LAB5-DTO (EHR to Lab handoff) | D-Eminence/hid-system#56 | merged |
+| This document | D-Eminence/hid-system#57 | merged |
+| PURPOSE-SEED (no purpose-of-use code seeded; every consent check fails closed) | D-Eminence/hid-system#58, migration 0082 | merged; `emergency` and `healthcare-operations` held (N3) |
+| DOC-1 (any facility member could complete a colleague's upload) | D-Eminence/hid-system#59 | merged (D13) |
+| Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
+| ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
 | DEP-4, DEP-4-RT (production workload tokens) | D-Eminence/hid-system#54, draft, ADR-047 Proposed | waits on D1 |
