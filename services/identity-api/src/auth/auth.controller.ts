@@ -2,7 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Body, Controller, Get, HttpCode, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuditService } from '../audit/audit.service';
-import { AuditFailuresOnly, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
+import { AuditFailuresOnly, AuditSessionEvent, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -144,6 +144,7 @@ export class AuthController {
   }
 
   @Post('google/link')
+  @AuditSessionEvent('auth.google.link')
   @FacilityOptional()
   @PatientAllowed()
   @HttpCode(200)
@@ -243,6 +244,7 @@ export class AuthController {
   }
 
   @Get('session')
+  @AuditSessionEvent('auth.session.read')
   @FacilityOptional()
   @PatientAllowed()
   async session(
@@ -272,6 +274,7 @@ export class AuthController {
   }
 
   @Get('service-session')
+  @AuditSessionEvent('auth.service-session.read')
   @FacilityOptional()
   @PatientAllowed()
   async serviceSession(
@@ -287,6 +290,7 @@ export class AuthController {
   }
 
   @Post('service-session')
+  @AuditSessionEvent('auth.service-session.validate')
   @FacilityOptional()
   @PatientAllowed()
   @HttpCode(200)
@@ -319,6 +323,7 @@ export class AuthController {
    * before. Every other outcome clears the cookies.
    */
   @Post('logout')
+  @AuditSessionEvent('auth.logout')
   @Public()
   @HttpCode(204)
   async logout(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response): Promise<void> {
@@ -388,6 +393,7 @@ export class AuthController {
   }
 
   @Post('facility')
+  @AuditSessionEvent('auth.facility.select')
   @FacilityOptional()
   @HttpCode(200)
   async selectFacility(

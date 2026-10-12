@@ -42,6 +42,12 @@ export interface HidRequest extends Request {
   accessScope?: 'facility' | 'platform';
   /** High-risk platform action the guard authorized for this request (see high-risk-policy.ts). */
   highRiskAction?: string;
+  /**
+   * The browser read (GET, HEAD or OPTIONS) an authenticated workload reported
+   * on a @DelegatedBrowserRequest route. Set only when the guard skipped the
+   * cookie-write Origin and CSRF check for that reason.
+   */
+  delegatedBrowserMethod?: string;
 }
 
 export type PurposeOfUse = 'direct-care' | 'emergency' | 'healthcare-operations';
