@@ -118,6 +118,12 @@ verified. Review that synthetic facility-scoped assignment explicitly.
    required reason and emergency purpose. Read through the owning EHR route, then
    revoke/expire the grant and confirm further reads are denied. Review the
    recorded patient access history, audit and notification outcomes.
+   Break-glass needs an active `emergency` purpose-of-use code. Migration 0082
+   seeds only `direct-care`; `emergency` waits for its product decision and is
+   inserted by a reviewed operator change once `break_glass_enabled` is in its
+   intended launch state (release checklist P10). Until then, with the control
+   on, the command answers `400 INVALID_CONSENT_COMMAND`; never insert the
+   code from a test fixture.
    From a same-origin browser cookie session that read reaches Identity's
    patient authorization check with no Origin or CSRF token. It succeeds only when both
    EHR and Identity include D-Eminence/hid-system#38; otherwise it is refused

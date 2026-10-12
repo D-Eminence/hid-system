@@ -101,10 +101,13 @@ insert into identity.patients (
   'Schema', 'Patient', 'Schema Patient', 'active'
 );
 
+-- 0082 seeds direct-care, so that row is kept as migrated; emergency and
+-- healthcare-operations are not seeded (pending product decisions).
 insert into identity.purpose_of_use_codes (code, display, source_system) values
   ('direct-care', 'Direct patient care', 'schema-test'),
   ('emergency', 'Emergency treatment', 'schema-test'),
-  ('healthcare-operations', 'Healthcare operations', 'schema-test');
+  ('healthcare-operations', 'Healthcare operations', 'schema-test')
+on conflict (code) do nothing;
 
 insert into migration.runs (
   id, source_system, source_snapshot, mode, status, started_by
