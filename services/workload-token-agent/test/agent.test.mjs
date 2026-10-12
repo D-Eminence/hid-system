@@ -34,8 +34,15 @@ test('SigV4 matches the AWS Smithy signer reference with temporary ECS credentia
   assert.equal(result.redirect, 'error'); assert.equal(result.body, '{"audience":"hid-identity-api"}');
   assert.throws(() => signTokenRequest(configuration, { ...credentials, Expiration: new Date(now).toISOString() }, 'hid-identity-api', new Date(now)));
 });
-test('configuration permits only staging, the exact HTTPS issuer/JWKS and fixed audience filenames', () => {
-  for (const changed of [{ HID_DEPLOYMENT_ENV: 'production' }, { WORKLOAD_JWKS_URL: 'https://attacker.invalid/jwks' },
+test('configuration permits only staging or production, the exact HTTPS issuer/JWKS and fixed audience filenames', () => {
+  // Another environment is refused by the allowlist itself, even with an issuer path and subject of its own name.
+  const development = { HID_DEPLOYMENT_ENV: 'development',
+    WORKLOAD_ISSUER_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/development',
+    WORKLOAD_JWKS_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/development/.well-known/jwks.json',
+    WORKLOAD_SUBJECT: 'hid:development:ehr-api' };
+  assert.throws(() => agentConfiguration({ ...environment, ...development }), /^Error: Workload token agent environment is not allowed$/);
+  assert.throws(() => agentConfiguration({ ...environment, HID_DEPLOYMENT_ENV: 'production' }), /^Error: Invalid workload issuer URL$/);
+  for (const changed of [development, { WORKLOAD_JWKS_URL: 'https://attacker.invalid/jwks' },
     { WORKLOAD_ISSUER_URL: 'http://abc123.execute-api.eu-west-2.amazonaws.com/staging' },
     { WORKLOAD_TOKEN_FILES_JSON: '[{"audience":"hid-identity-api","file":"../../outside"}]' },
     { AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: '//attacker.invalid/' }, { WORKLOAD_TOKEN_DIRECTORY: '/tmp/arbitrary' }]) {

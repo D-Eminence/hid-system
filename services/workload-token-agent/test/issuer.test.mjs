@@ -67,8 +67,14 @@ test('fails closed on unavailable or mismatched KMS key without leaking error or
   const response = await handler(makeEvent()); assert.equal(response.statusCode, 503);
   assert.deepEqual(JSON.parse(response.body), { code: 'WORKLOAD_ISSUER_UNAVAILABLE' });
 });
-test('configuration rejects production, ambiguous roles, shared subjects, and foreign signing regions', () => {
-  assert.throws(() => issuerConfiguration({ ...env, HID_DEPLOYMENT_ENV: 'production' }));
+test('configuration rejects an environment other than staging or production, an environment/path mismatch, ambiguous roles, shared subjects, and foreign signing regions', () => {
+  // Another environment is refused by the allowlist itself, even with an issuer path and subjects of its own name.
+  const development = { ...env, HID_DEPLOYMENT_ENV: 'development',
+    WORKLOAD_ISSUER_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/development',
+    WORKLOAD_CALLER_POLICY_JSON: JSON.stringify([{ roleArn: 'arn:aws:iam::123456789012:role/service/hid-development-ehr',
+      subject: 'hid:development:ehr-api', audiences: ['hid-identity-api'] }]) };
+  assert.throws(() => issuerConfiguration(development), /^Error: Workload issuer environment is not allowed$/);
+  assert.throws(() => issuerConfiguration({ ...env, HID_DEPLOYMENT_ENV: 'production' }), /^Error: Invalid workload issuer URL$/);
   const policy = JSON.parse(env.WORKLOAD_CALLER_POLICY_JSON);
   assert.throws(() => issuerConfiguration({ ...env, WORKLOAD_CALLER_POLICY_JSON: JSON.stringify([...policy, ...policy]) }));
   assert.throws(() => issuerConfiguration({ ...env, WORKLOAD_SIGNING_KEY_ID: keyArn.replace('eu-west-2', 'us-east-1') }));
