@@ -23,8 +23,19 @@ const flat = (sql = '') => sql.replace(/\s+/g, ' ');
 const ACCOUNT_LIVE = "account.status = 'active' and (account.disabled_until is null or account.disabled_until <= clock_timestamp()) and account.token_version = session.account_token_version";
 /** The sign-in a rotated token was exchanged into is still live. */
 const FAMILY_LIVE = 'exists (select 1 from auth.sessions live where live.family_id = session.family_id and live.revoked_at is null and live.expires_at > clock_timestamp())';
-/** A sign-in refresh() could renew now: live, or rotated moments ago (the other app's tab) into one that is. */
-const RENEWABLE = `${ACCOUNT_LIVE} and session.absolute_expires_at > clock_timestamp() and ((session.revoked_at is null and session.expires_at > clock_timestamp()) or (session.revocation_reason = 'rotated' and session.revoked_at > clock_timestamp() - make_interval(secs => $2) and ${FAMILY_LIVE}))`;
+/**
+ * refresh() also resolves the actor (SES-4): a staff sign-in needs what
+ * CurrentStaffContextService requires, an active membership without a
+ * migration hold, an active verified staff record, and an active organization
+ * and facility; a patient sign-in needs its patient to be still the account's
+ * active patient (identity.current_patient_account).
+ */
+const STAFF_ELIGIBLE = "join identity.staff_facility_memberships membership on membership.account_id = eligible.id and membership.active and membership.migration_hold_reason is null join identity.staff staff on staff.id = membership.staff_id and staff.account_id = eligible.id and staff.active and lower(btrim(staff.verification_status)) = any($3::text[]) join identity.organizations organization on organization.id = membership.organization_id and organization.active join identity.facilities facility on facility.id = membership.facility_id and facility.organization_id = membership.organization_id and facility.active";
+const ACTOR_RESOLVES = `case session.session_kind when 'staff' then exists (select 1 from auth.accounts eligible ${STAFF_ELIGIBLE} where eligible.id = account.id) when 'patient' then exists (select 1 from identity.current_patient_account(account.subject) current_patient where current_patient.patient_id = session.patient_id) else false end`;
+/** A sign-in refresh() could renew now: live, or rotated moments ago (the other app's tab) into one that is, and its actor resolves. */
+const RENEWABLE = `${ACCOUNT_LIVE} and session.absolute_expires_at > clock_timestamp() and ((session.revoked_at is null and session.expires_at > clock_timestamp()) or (session.revocation_reason = 'rotated' and session.revoked_at > clock_timestamp() - make_interval(secs => $2) and ${FAMILY_LIVE})) and ${ACTOR_RESOLVES}`;
+/** The staff verification statuses refresh() accepts (auth-policy.ts), the lookups' $3. */
+const STAFF_STATUSES = ['verified', 'approved', 'active'];
 
 type Stored = { session_kind: 'staff' | 'patient'; renewable?: boolean };
 
@@ -86,10 +97,11 @@ describe('sign-out by refresh token', () => {
     for (const condition of ['account.', 'expires_at', 'absolute_expires_at', 'make_interval']) expect(where).not.toContain(condition);
     // Whether the app may be named is read from the same row.
     expect(sql).toContain(`coalesce(${RENEWABLE}, false) as renewable`);
-    expect(lookup?.values).toHaveLength(2);
+    expect(lookup?.values).toHaveLength(3);
     expect(lookup?.values[0]).toBe(statements[0]?.values[0]);
     expect(lookup?.values[0]).not.toBe(refreshToken);
     expect(lookup?.values[1]).toBe(60);
+    expect(lookup?.values[2]).toEqual(STAFF_STATUSES);
   });
 
   it('changes nothing when nothing of the sign-in is left: a platform, ended or unknown token', async () => {
@@ -177,6 +189,19 @@ describe('refresh session kind', () => {
     expect(sql).toContain(`and ${RENEWABLE}`);
     expect(lookups[0]?.values[0]).toMatch(/^[0-9a-f]{64}$/);
     expect(lookups[0]?.values[1]).toBe(60);
+    expect(lookups[0]?.values[2]).toEqual(STAFF_STATUSES);
+    expect(lookups[0]?.values).toHaveLength(3);
+  });
+
+  it('has no kind for a sign-in whose actor refresh() could not resolve, which refresh() then refuses', async () => {
+    // A staff sign-in whose membership, staff record, organization or
+    // facility lapsed, or a patient sign-in whose patient is no longer the
+    // account's active patient: the lookup's actor condition is false, so
+    // the token goes on to rotation, which refuses it (401, cookies cleared),
+    // and a sign-out ends it without naming its kind.
+    const { service, lookups } = harness();
+    await expect(service.refreshSessionKind(refreshToken)).resolves.toBeUndefined();
+    expect(flat(lookups[0]?.sql)).toContain(ACTOR_RESOLVES);
   });
 
   it('has no kind for any other token, which refresh() then refuses', async () => {

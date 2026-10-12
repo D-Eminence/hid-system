@@ -5,8 +5,9 @@ import type { PoolClient } from 'pg';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import type { ActorContext } from '../common/request-context';
+import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
-import { CurrentStaffContextService } from './current-staff-context.service';
+import { CurrentStaffContextService, eligibleStaffMembershipJoins } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
 import { classifyPlatformSessionEnd, platformSessionEnded, type StoredPlatformSessionState } from './platform-session-end';
 
@@ -90,18 +91,37 @@ export class TokenService {
   private static readonly ROTATED_KIND_GRACE_SECONDS = 60;
 
   /**
+   * refresh() resolves the actor before it rotates: a staff sign-in needs an
+   * eligible facility membership (CurrentStaffContextService, the same joins,
+   * with the verification statuses as $3), and a patient sign-in needs its
+   * patient to be still the account's active patient. The staff tables have no
+   * row-level security and identity.current_patient_account is a definer
+   * function, so this reads on the caller's connection, under its locks.
+   */
+  private static readonly ACTOR_RESOLVES = `case session.session_kind
+            when 'staff' then exists (select 1 from auth.accounts eligible
+              ${eligibleStaffMembershipJoins('eligible', '$3')}
+              where eligible.id = account.id)
+            when 'patient' then exists (select 1
+              from identity.current_patient_account(account.subject) current_patient
+              where current_patient.patient_id = session.patient_id)
+            else false end`;
+
+  /**
    * The presented session's sign-in is one refresh() could renew now, so the
    * app that holds it may be named: its account is live, it has not reached
-   * its absolute end, and its own session is live or was rotated within the
-   * last $2 (ROTATED_KIND_GRACE_SECONDS) seconds into a sign-in that is (the
-   * other app's tab refreshed first). An older rotated token is reuse.
+   * its absolute end, its own session is live or was rotated within the last
+   * $2 (ROTATED_KIND_GRACE_SECONDS) seconds into a sign-in that is (the other
+   * app's tab refreshed first), and refresh() could resolve its actor
+   * (ACTOR_RESOLVES). An older rotated token is reuse.
    */
   private static readonly RENEWABLE = `${TokenService.ACCOUNT_LIVE}
           and session.absolute_expires_at > clock_timestamp()
           and ((session.revoked_at is null and session.expires_at > clock_timestamp())
             or (session.revocation_reason = 'rotated'
               and session.revoked_at > clock_timestamp() - make_interval(secs => $2)
-              and ${TokenService.FAMILY_LIVE}))`;
+              and ${TokenService.FAMILY_LIVE}))
+          and ${TokenService.ACTOR_RESOLVES}`;
 
   private readonly environment = getEnvironment();
   private readonly signingKey = this.environment.AUTH_SIGNING_SECRET
@@ -470,10 +490,11 @@ export class TokenService {
    * The sign-in is read under its account lock, after any sign-out or
    * revocation that got there first, and ended if anything of it is left: its
    * own session is unrevoked, or it was rotated into a session that is.
-   * Expiry and the account's state do not matter: a sign-in refresh() cannot
-   * renew now may become renewable again (a timed account suspension lapses),
-   * and ending one that cannot is harmless. One already ended, by this
-   * sign-out or any other, is not recorded again.
+   * Expiry, the account's state and whether its actor resolves do not
+   * matter: a sign-in refresh() cannot renew now may become renewable again (a
+   * timed account suspension lapses, a membership is restored), and ending one
+   * that cannot is harmless. One already ended, by this sign-out or any other,
+   * is not recorded again.
    *
    * When the calling app names the kind of sign-in it holds (X-HID-Client), a
    * sign-in of the other kind that refresh() could renew now (RENEWABLE) is
@@ -505,7 +526,7 @@ export class TokenService {
             and (session.revoked_at is null
               or (session.revocation_reason = 'rotated' and exists (select 1 from auth.sessions unended
                     where unended.family_id = session.family_id and unended.revoked_at is null)))`,
-        [refreshHash, TokenService.ROTATED_KIND_GRACE_SECONDS],
+        [refreshHash, TokenService.ROTATED_KIND_GRACE_SECONDS, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
       );
       const session = presented.rows[0];
       if (!session) return undefined;
@@ -522,8 +543,10 @@ export class TokenService {
    * The kind of the staff or patient sign-in a refresh token belongs to, read
    * without rotating it, for a sign-in refresh() could renew now (RENEWABLE).
    * Any other token has no kind here and is left to refresh(), which refuses
-   * it, records the refusal and clears its cookies; an older rotated token is
-   * reuse, which refresh() answers by ending the whole sign-in.
+   * it and clears its cookies (an ended, expired or reused token is also
+   * recorded); an older rotated token is reuse, which refresh() answers by
+   * ending the whole sign-in. A sign-in whose actor no longer resolves is
+   * refused without being ended, and is renewable again once it resolves.
    */
   async refreshSessionKind(refreshToken: string): Promise<'staff' | 'patient' | undefined> {
     const result = await this.database.query<{ session_kind: 'staff' | 'patient' }>(
@@ -533,7 +556,7 @@ export class TokenService {
         where session.refresh_token_sha256 = $1
           and session.session_kind in ('staff', 'patient')
           and ${TokenService.RENEWABLE}`,
-      [this.sha256(refreshToken), TokenService.ROTATED_KIND_GRACE_SECONDS],
+      [this.sha256(refreshToken), TokenService.ROTATED_KIND_GRACE_SECONDS, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
     );
     return result.rows[0]?.session_kind;
   }
