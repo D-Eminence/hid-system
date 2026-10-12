@@ -27,7 +27,7 @@ const check = (name) => evidence.checks.push(name);
 const id = () => randomUUID();
 const f = { org: id(), facility: id(), otherFacility: id(), patient: id(), otherPatient: id(), document: id(),
   a: { account: id(), staff: id(), membership: id() }, c: { account: id(), staff: id(), membership: id() },
-  jobs: Array.from({ length: 6 }, () => ({ job: id(), extraction: id() })) };
+  jobs: Array.from({ length: 7 }, () => ({ job: id(), extraction: id() })) };
 f.a.subject = `synthetic:ocr-verifier-a:${f.a.account}`;
 f.c.subject = `synthetic:ocr-verifier-c:${f.c.account}`;
 
@@ -38,6 +38,13 @@ const labImports = [];
 const labRejections = [];
 let labUnavailable = false;
 let labRejects = false;
+// Settles as `promise` does, or rejects with `message` after `ms`. The timer is
+// cleared once the race settles, so none outlives it.
+const within = (promise, message, ms = 10_000) => {
+  let timer;
+  const timeout = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
 // Holds the next upstream call that `matches` until released, so a race can
 // start while the OCR API has no transaction open.
 let pause;
@@ -46,8 +53,25 @@ const pauseAt = (matches) => {
   let release;
   const reached = new Promise((resolve) => { arrived = resolve; });
   const gate = new Promise((resolve) => { release = resolve; });
-  pause = { matches, arrived, gate };
-  return { reached, release };
+  const held = { matches, arrived, gate };
+  pause = held;
+  // Waits for the held call. The call arrives within milliseconds; if `request`
+  // answers or fails first, or the call does not come within `ms`, the run
+  // fails, and the pause is cleared and the gate opened so that a late call
+  // passes and the cleanup can finish.
+  const arrival = async (label, request, ms = 30_000) => {
+    const answered = request.then(
+      (response) => { throw new Error(`${label}: the request answered ${response.status} ${response.body?.code ?? ''} before the held call`); },
+      (error) => { throw new Error(`${label}: the request failed before the held call: ${error?.message}`); });
+    try {
+      await within(Promise.race([reached, answered]), `${label}: the held call did not come within ${ms / 1000} s`, ms);
+    } catch (error) {
+      if (pause === held) pause = undefined;
+      release();
+      throw error;
+    }
+  };
+  return { release, arrival };
 };
 const upstream = await fakeService(async (call) => {
   const { method, path, headers, body } = call;
@@ -327,7 +351,7 @@ try {
   const atEvidence = pauseAt(({ method, path }) => method === 'GET' && path.endsWith('/source') && ++sourceReads === 2);
   const publishing = send(`/validations/${raceValidation}/publications`, { ...publicationBody, patientConfirmationId: raceConfirmed.id },
     { key: key('race-publish'), purpose: 'direct-care' });
-  await atEvidence.reached;
+  await atEvidence.arrival('the publish race', publishing);
   const { pending: pendingPublish } = await holdingRow('select id from ocr.jobs where id=$1 for update', [j2.job],
     async ({ waitedFor, probe }) => {
       atEvidence.release();
@@ -347,9 +371,10 @@ try {
     201, 'confirm the failure race job');
   labUnavailable = true;
   const atLab = pauseAt(({ method, path }) => method === 'POST' && path === '/api/v1/lab/imports/from-ocr');
-  const failing = send(`/validations/${failValidated.validationId}/publications`, { ...publicationBody,
-    patientConfirmationId: failConfirmed.id, targetOperation: 'create_imported_lab_evidence' }, { key: key('race-fail'), purpose: 'direct-care' });
-  await atLab.reached;
+  const failRequest = [`/validations/${failValidated.validationId}/publications`, { ...publicationBody,
+    patientConfirmationId: failConfirmed.id, targetOperation: 'create_imported_lab_evidence' }, { key: key('race-fail'), purpose: 'direct-care' }];
+  const failing = send(...failRequest);
+  await atLab.arrival('the failure race', failing);
   const { pending: pendingFailure } = await holdingRow('select id from ocr.jobs where id=$1 for update', [j5.job],
     async ({ waitedFor, probe }) => {
       atLab.release();
@@ -361,16 +386,77 @@ try {
   labUnavailable = false;
   assert.equal(expectStatus(await pendingFailure, 503, 'a publication the Lab API refused').code, 'LAB_IMPORT_UNAVAILABLE');
   assert.deepEqual((await database.owner.query('select status, failure_code from ocr.publications where validation_id=$1',
-    [failValidated.validationId])).rows, [{ status: 'failed', failure_code: 'LAB_IMPORT_UNAVAILABLE' }]);
+    [failValidated.validationId])).rows, [{ status: 'failed', failure_code: 'OWNING_SERVICE_UNAVAILABLE' }]);
   check('publish: while another request holds the job, the failure transaction waits for it before taking the publication row (no deadlock), then records the retryable failure');
+
+  // Every Lab import request the fake received, held and refused calls
+  // included, and those of one publication.
+  const labCalls = () => upstream.calls.filter(({ method, path }) => method === 'POST' && path === '/api/v1/lab/imports/from-ocr');
+  const labCallsFor = (publicationId) => labCalls().filter(({ body }) => body?.publicationId === publicationId);
+  const failedRow = async () => (await database.owner.query(`select id::text, status, failure_code, failure_summary, attempt_count,
+      row_version::text, failed_at::text, next_attempt_at::text, processing_token::text
+    from ocr.publications where validation_id=$1`, [failValidated.validationId])).rows;
+  const [failedBefore] = await failedRow();
+  // Two today: the Lab client asks once more after a 503 when it sends a key.
+  const outageCalls = labCallsFor(failedBefore.id).length;
+  assert(outageCalls >= 1, 'the failed attempt did not reach the Lab API');
+
+  // Before its retry time the same request answers 409 in progress: the stored
+  // failure is retryable, so not terminal, and the claim requires
+  // next_attempt_at <= clock_timestamp(). The request asks the Lab API nothing,
+  // changes neither the publication nor the job, and writes only its request
+  // audit. The failure transaction set next_attempt_at 15 s after failed_at;
+  // the check requires more than 5 s of it left, so the resend cannot cross it.
+  const [{ backoff, remaining }] = (await database.owner.query(`select
+      extract(epoch from next_attempt_at - failed_at)::float8 as backoff,
+      extract(epoch from next_attempt_at - clock_timestamp())::float8 as remaining
+    from ocr.publications where validation_id=$1`, [failValidated.validationId])).rows;
+  assert(Math.abs(backoff - 15) < 0.5, `the retry backoff is ${backoff} s, not 15 s`);
+  assert(remaining > 5, `only ${remaining} s of the retry backoff were left for the early resend`);
+  const [callsBeforeEarly, importsBeforeEarly, jobBeforeEarly] = [labCalls().length, labImports.length, await job(j5.job)];
+  const early = `verifier-early-retry-${id()}`;
+  assert.equal(expectStatus(await send(failRequest[0], failRequest[1], { ...failRequest[2], correlationId: early }),
+    409, 'a resent publication before its retry time').code, 'OCR_PUBLICATION_IN_PROGRESS');
+  assert.deepEqual([labCalls().length, labImports.length], [callsBeforeEarly, importsBeforeEarly],
+    'the Lab API was asked before the retry time');
+  assert.deepEqual(await failedRow(), [failedBefore], 'the early resend changed the publication');
+  assert.deepEqual(await job(j5.job), jobBeforeEarly, 'the early resend changed the job');
+  assert.deepEqual((await database.owner.query('select action, outcome from audit.events where correlation_id=$1', [early])).rows,
+    [{ action: 'api.ocr.publication.create.request', outcome: 'failure' }]);
+  assert.equal(await count('select count(*) from ocr.outbox_events where correlation_id=$1', [early]), 0);
+  check('publish: before its retry time the same request answers 409 in progress, asks the Lab API nothing and changes neither the publication nor the job');
+
+  // The Lab API is back. Once the retry time has come (moved forward here, with
+  // triggers off as for fixtures), the same request claims the publication
+  // again and publishes it; a replay of the published publication does not ask
+  // the Lab API again (Phase 4 Stage 9 review).
+  await database.fixture((client) => client.query(
+    'update ocr.publications set next_attempt_at = clock_timestamp() where validation_id=$1', [failValidated.validationId]));
+  const importsBeforeRetry = labImports.length;
+  assert.equal(expectStatus(await send(...failRequest), 201, 'the resent publication after the Lab outage').status, 'published');
+  assert.equal(labCallsFor(failedBefore.id).length, outageCalls + 1, 'the retry did not ask the Lab API exactly once');
+  assert.equal(expectStatus(await send(...failRequest), 201, 'a replay of the published publication').status, 'published');
+  assert.equal(labCallsFor(failedBefore.id).length, outageCalls + 1, 'the replay asked the Lab API');
+  const retriedPublication = (await database.owner.query(
+    'select id::text, status, failure_code, attempt_count from ocr.publications where validation_id=$1',
+    [failValidated.validationId])).rows;
+  assert.deepEqual(retriedPublication.map(({ id: publicationId, status, failure_code, attempt_count }) =>
+    ({ publicationId, status, failure_code, attempt_count })),
+  [{ publicationId: failedBefore.id, status: 'published', failure_code: null, attempt_count: 2 }]);
+  assert.equal(labImports.length, importsBeforeRetry + 1, 'the Lab API imported the retried publication once');
+  assert.equal(labImports.at(-1)?.publicationId, retriedPublication[0].id, 'the Lab API imported another publication');
+  // Every Lab call of the publication, refused or not, sent its own key and the same body.
+  const sentToLab = labCallsFor(failedBefore.id);
+  assert.deepEqual([...new Set(sentToLab.map(({ headers }) => headers['idempotency-key']))],
+    [`ocr-publication:${failedBefore.id}`], 'a Lab call of the publication sent another idempotency key');
+  for (const call of sentToLab) assert.deepEqual(call.body, sentToLab[0].body, 'a Lab call of the publication sent another body');
+  check('publish: after a Lab outage the same request publishes on retry, once, every Lab call with the publication\'s own key and body, and a replay does not ask the Lab API again');
 
   // A resent request whose snapshot predates a terminal failure. It waits for
   // the job, here behind a key share like the failure transaction's own, while
   // the Lab API rejects the first request; its replay read then still shows the
   // publication processing, and the claim must refuse the terminal failure.
   const [, , , , , j6] = f.jobs;
-  const within = (promise, message) => Promise.race([promise,
-    new Promise((resolve, reject) => setTimeout(() => reject(new Error(message)), 10_000).unref())]);
   const terminalValidated = expectStatus(await send(`/jobs/${j6.job}/validation`, validationBody(j6.extraction, { targetDomain: 'LAB',
     candidateType: 'lab_document', acceptedFields: { observations: [{ testName: 'Glucose', value: '5.4', unit: 'mmol/L' }] } }),
   { key: key('terminal-validate') }), 201, 'validate the terminal race job');
@@ -382,7 +468,7 @@ try {
   labRejects = true;
   const atRejection = pauseAt(({ method, path }) => method === 'POST' && path === '/api/v1/lab/imports/from-ocr');
   const rejected = send(...terminalRequest);
-  await atRejection.reached;
+  await atRejection.arrival('the terminal race', rejected);
   let resentSettled = false;
   const { resent } = await holdingRow('select id from ocr.jobs where id=$1 for key share', [j6.job],
     async ({ waitedFor }) => {
@@ -401,18 +487,94 @@ try {
     [terminalValidated.validationId])).rows, [{ status: 'failed', failure_code: 'LAB_IMPORT_REJECTED', attempt_count: 1 }]);
   check('publish: a resent request that waited for the job while the Lab API rejected the first one answers 409 terminal and is not sent to the Lab API again');
 
+  // A stale attempt after its claim expired. The first request's Lab call is
+  // held while its claim is moved into the past (triggers off, as for
+  // fixtures); a resend then claims the publication again with a new token,
+  // and its own Lab call is held. The stale attempt gets its Lab answer first:
+  // its publish update and its failure update each require its own processing
+  // token, so it answers 409 OCR_PUBLICATION_CLAIM_LOST and changes nothing.
+  // The resend then publishes once. Without the token in the failure update the
+  // stale attempt would mark the resend's claim failed and emit
+  // OcrPublicationFailed; without it in the publish update it would publish
+  // under the resend's claim. The fake Lab API does not deduplicate, so it
+  // records both imports; the Lab API replays a publication's import by its key.
+  const [, , , , , , j7] = f.jobs;
+  const staleValidated = expectStatus(await send(`/jobs/${j7.job}/validation`, validationBody(j7.extraction, { targetDomain: 'LAB',
+    candidateType: 'lab_document', acceptedFields: { observations: [{ testName: 'Sodium', value: '140', unit: 'mmol/L' }] } }),
+  { key: key('stale-validate') }), 201, 'validate the stale claim job');
+  const staleConfirmed = expectStatus(await send(`/jobs/${j7.job}/patient-confirmation`, confirmBody(), { key: key('stale-confirm') }),
+    201, 'confirm the stale claim job');
+  const staleRequest = [`/validations/${staleValidated.validationId}/publications`, { ...publicationBody,
+    patientConfirmationId: staleConfirmed.id, targetOperation: 'create_imported_lab_evidence' },
+  { key: key('stale-publish'), purpose: 'direct-care' }];
+  const staleCorrelation = `verifier-stale-first-${id()}`;
+  const freshCorrelation = `verifier-stale-second-${id()}`;
+  const labCallOf = (correlationId) => ({ method, path, headers }) => method === 'POST'
+    && path === '/api/v1/lab/imports/from-ocr' && headers['x-correlation-id'] === correlationId;
+  const staleRow = async () => (await database.owner.query(`select id::text, status, attempt_count, row_version::text,
+      processing_token::text, processing_expires_at::text, failure_code, target_resource_id::text
+    from ocr.publications where validation_id=$1`, [staleValidated.validationId])).rows;
+  const atStale = pauseAt(labCallOf(staleCorrelation));
+  let atFresh;
+  try {
+    const stale = send(staleRequest[0], staleRequest[1], { ...staleRequest[2], correlationId: staleCorrelation });
+    await atStale.arrival('the stale attempt', stale);
+    const [claimedByStale] = await staleRow();
+    assert.deepEqual([claimedByStale.status, claimedByStale.attempt_count], ['processing', 1]);
+    assert.equal((await database.fixture((client) => client.query(`update ocr.publications
+      set processing_expires_at = clock_timestamp() - interval '1 second' where id=$1 and status='processing'`,
+    [claimedByStale.id]))).rowCount, 1);
+    atFresh = pauseAt(labCallOf(freshCorrelation));
+    const fresh = send(staleRequest[0], staleRequest[1], { ...staleRequest[2], correlationId: freshCorrelation });
+    await atFresh.arrival('the resend of the expired attempt', fresh);
+    const [claimedByFresh] = await staleRow();
+    assert.deepEqual([claimedByFresh.status, claimedByFresh.attempt_count], ['processing', 2],
+      'the resend did not claim the expired attempt');
+    assert.notEqual(claimedByFresh.processing_token, claimedByStale.processing_token);
+
+    atStale.release();
+    assert.equal(expectStatus(await within(stale, 'the stale attempt did not answer'), 409,
+      'the stale attempt after the resend claimed the publication').code, 'OCR_PUBLICATION_CLAIM_LOST');
+    assert.deepEqual(await staleRow(), [claimedByFresh], 'the stale attempt changed the publication the resend owns');
+
+    atFresh.release();
+    const published = expectStatus(await within(fresh, 'the resend did not answer'), 201, 'the resend of the expired attempt');
+    assert.deepEqual([published.status, published.attemptCount], ['published', 2]);
+    const [final] = await staleRow();
+    assert.deepEqual([final.status, final.attempt_count, final.processing_token, final.failure_code, final.target_resource_id],
+      ['published', 2, null, null, published.targetResourceId]);
+    assert.deepEqual((await database.owner.query(`select event_type, count(*)::int as count from ocr.outbox_events
+      where aggregate_id=$1 and event_type like 'OcrPublication%' group by event_type order by event_type`, [j7.job])).rows,
+    [{ event_type: 'OcrPublicationRequested', count: 1 }, { event_type: 'OcrPublicationSucceeded', count: 1 }]);
+    assert.deepEqual((await database.owner.query(`select action, correlation_id from audit.events
+      where correlation_id = any($1::text[]) and action like 'ocr.publication.%' order by action`,
+    [[staleCorrelation, freshCorrelation]])).rows,
+    [{ action: 'ocr.publication.request', correlation_id: staleCorrelation },
+      { action: 'ocr.publication.succeed', correlation_id: freshCorrelation }]);
+    const sentToLabForStale = labCallsFor(final.id);
+    assert.deepEqual(sentToLabForStale.map(({ headers }) => [headers['x-correlation-id'], headers['idempotency-key']]),
+      [[staleCorrelation, `ocr-publication:${final.id}`], [freshCorrelation, `ocr-publication:${final.id}`]]);
+  } finally {
+    // A held call is let through, so the API can close, whatever failed above.
+    pause = undefined;
+    atStale.release();
+    atFresh?.release();
+  }
+  check('publish: a stale attempt whose claim expired and was claimed again answers 409 claim lost, changes nothing and emits no failure; the resend publishes once');
+
   // A Lab publication through the fake Lab API: concurrent requests import once.
   const labValidation = validationBody(j4.extraction, { targetDomain: 'LAB', candidateType: 'lab_document',
     acceptedFields: { observations: [{ testName: 'Haemoglobin', value: '12.5', unit: 'g/dL' }] } });
   const labValidated = expectStatus(await send(`/jobs/${j4.job}/validation`, labValidation, { key: key('lab-validate') }), 201, 'validate a Lab report');
   const labConfirmed = expectStatus(await send(`/jobs/${j4.job}/patient-confirmation`, confirmBody(), { key: key('lab-confirm') }), 201, 'confirm the Lab report');
   const labKey = key('lab-publish');
+  const importsBeforeConcurrent = labImports.length;
   const labPublications = await together(3, () => send(`/validations/${labValidated.validationId}/publications`,
     { ...publicationBody, patientConfirmationId: labConfirmed.id, targetOperation: 'create_imported_lab_evidence' },
     { key: labKey, purpose: 'direct-care' }));
   assert(labPublications.some((response) => response.status === 201) && labPublications.every((response) => response.status === 201
     || response.body?.code === 'OCR_PUBLICATION_IN_PROGRESS'), JSON.stringify(labPublications.map((r) => [r.status, r.body?.code, r.sqlstate])));
-  assert.equal(labImports.length, 1, 'the Lab import is requested once');
+  assert.equal(labImports.length - importsBeforeConcurrent, 1, 'the Lab import is requested once');
   assert.equal(await count("select count(*) from ocr.publications where validation_id=$1 and status='published'", [labValidated.validationId]), 1);
   check('publish to Lab: three concurrent identical requests publish once and call the Lab API once');
   await ocr.close();

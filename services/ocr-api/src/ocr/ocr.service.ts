@@ -551,8 +551,15 @@ export class OcrService {
     } catch (error) {
       const terminal = error instanceof DomainProblem && error.getStatus() >= 400 && error.getStatus() < 500
         && error.code !== 'REQUEST_IN_PROGRESS';
-      const code = error instanceof DomainProblem ? error.code : 'OWNING_SERVICE_UNAVAILABLE';
-      const summary = terminal ? 'Publication was rejected by the owning domain' : 'Owning clinical service is temporarily unavailable';
+      const ownerCode = (error instanceof DomainProblem ? error.code : 'OWNING_SERVICE_UNAVAILABLE')
+        .replace(/[^A-Z0-9_]/g, '_').slice(0, 80);
+      // A later request and the claim retry only RETRYABLE_PUBLICATION_FAILURES,
+      // and the integrations turn every outage or timeout into their own 503
+      // code, so a failure that is not terminal is stored as a retryable code.
+      // The owning domain's code stays in the summary and the audit event.
+      const code = terminal || ownerCode === 'REQUEST_IN_PROGRESS' ? ownerCode : 'OWNING_SERVICE_UNAVAILABLE';
+      const summary = terminal ? 'Publication was rejected by the owning domain'
+        : `Owning clinical service is temporarily unavailable (${ownerCode})`;
       await this.database.withTransaction(context, async (client) => {
         await this.lockJobKey(client, claimed.job_id);
         const result = await client.query<PublicationRow>(
@@ -561,13 +568,14 @@ export class OcrService {
             next_attempt_at=case when $5 and attempt_count < max_attempts
               then clock_timestamp()+interval '15 seconds' else clock_timestamp() end,
             row_version=row_version+1 where id=$1 and processing_token=$2 returning *`,
-          [claimed.id, token, code.replace(/[^A-Z0-9_]/g, '_').slice(0, 80), summary, !terminal]);
+          [claimed.id, token, code, summary, !terminal]);
         const failed = result.rows[0];
         if (failed) {
           const job = await this.findJob(client, failed.job_id);
           await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.fail', job,
             failed.patient_id,
-            { publicationId: failed.id, failureCode: failed.failure_code, retryable: !terminal }));
+            { publicationId: failed.id, failureCode: failed.failure_code, ownerFailureCode: ownerCode,
+              retryable: !terminal }));
           await this.appendOutbox(client, job, 'OcrPublicationFailed', Number(failed.row_version),
             { publicationId: failed.id, failureCode: failed.failure_code, retryable: !terminal });
         }

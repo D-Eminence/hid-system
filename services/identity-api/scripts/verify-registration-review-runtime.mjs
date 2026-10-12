@@ -276,6 +276,10 @@ try {
   process.stdout.write(`${JSON.stringify({ status: 'passed', ...evidence })}\n`);
 } finally {
   await app?.close();
+  // pool.end() resolves before its connections finish closing, so the forced
+  // drop below can terminate one of them (57P01) once the checks are over.
+  // Only that is expected here; any other pool error still fails the run.
+  pool.on('error', (error) => { if (error.code !== '57P01') throw error; });
   await pool.end();
   await maintenance.query(`drop database if exists ${isolated} with (force)`);
   await maintenance.end();
