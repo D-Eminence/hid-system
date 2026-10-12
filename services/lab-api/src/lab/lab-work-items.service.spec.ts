@@ -1,6 +1,11 @@
+import { Logger } from '@nestjs/common';
+import type { ArgumentsHost } from '@nestjs/common';
+import type { Response } from 'express';
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
+import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
+import type { HidRequest } from '../common/request-context';
 import type { DataAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import type { IdentityService } from '../identity/identity.service';
@@ -29,15 +34,22 @@ const stored = { id: workItemId, patient_id: patientId, facility_id: facilityId,
   row_version: '1', created_at: new Date('2026-10-01T09:00:01Z'),
   request_sha256: requestDigest('lab.work-item.accept-ehr-order', command(1)) };
 
+/** A database error as node-postgres reports it; the message can name rows, values and constraints. */
+const databaseError = (code: string, message: string, fields: Record<string, string> = {}) =>
+  Object.assign(new Error(message), { code, ...fields });
+const uniqueViolation = (table: string, constraint: string) => databaseError('23505',
+  `duplicate key value violates unique constraint "${constraint}"`, { schema: 'lab', table, constraint });
+
 /**
  * A fake database holding `rows`. The replay lookup returns the stored work
  * item when its predicate would select it: the same idempotency key, or the
  * same EHR order (and, if the statement also binds the version, that version).
- * An insert behaves as the database does: `insertError` if given (a guard
- * refusal), else the unique violation on source_ehr_order_id when a work item
- * of the order exists.
+ * An insert behaves as the database does: `insertError` if given (a refusal of
+ * the work-item insert), else the unique violation on source_ehr_order_id when
+ * a work item of the order exists. `later` fails a later statement of the
+ * transaction instead.
  */
-const harness = (rows: (typeof stored)[], insertError?: Error) => {
+const harness = (rows: (typeof stored)[], insertError?: Error, later?: { statement: RegExp; error: Error }) => {
   const queries: string[] = [];
   const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
     queries.push(sql);
@@ -49,11 +61,11 @@ const harness = (rows: (typeof stored)[], insertError?: Error) => {
     if (/insert into lab\.work_items\b/.test(sql)) {
       if (insertError) throw insertError;
       if (rows.some((row) => row.source_ehr_order_id === values[4])) {
-        throw Object.assign(new Error('duplicate key value violates unique constraint "work_items_source_ehr_order_id_key"'),
-          { code: '23505' });
+        throw uniqueViolation('work_items', 'work_items_source_ehr_order_id_key');
       }
       return { rows: [{ ...stored, source_ehr_order_version: String(values[5]), priority: values[7] }] };
     }
+    if (later?.statement.test(sql)) throw later.error;
     return { rows: [], rowCount: 1 };
   }) } as unknown as PoolClient;
   const database = { withTransaction: async <T>(_context: DataAccessContext, operation: (c: PoolClient) => Promise<T>) =>
@@ -115,4 +127,79 @@ describe('LabWorkItemsService.acceptEhrOrder', () => {
     expect((refusal as { getResponse?: () => unknown }).getResponse?.()).not.toMatch(/does not match/);
     expect((refusal as { cause?: unknown }).cause).toBe(guard);
   });
+});
+
+/**
+ * Lab maps no SQLSTATE in its problem filter (fix/ehr-lab-handoff-resend):
+ * acceptance maps its own three database refusals, those of the work-item
+ * insert and its unique keys, with fixed details. Any other database error
+ * reaches the filter unchanged and answers 500, as for every other Lab command.
+ */
+describe('LabWorkItemsService.acceptEhrOrder database refusals', () => {
+  const secret = 'Key (source_ehr_order_id)=(30000000-0000-4000-8000-000000000001) for patient 50000000';
+  const answer = (exception: unknown) => {
+    const request = { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ', method: 'POST',
+      route: { path: '/lab/work-items/accept-ehr-order' } } as unknown as HidRequest;
+    const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(),
+      json: jest.fn().mockReturnThis() } as unknown as Response;
+    const host = { switchToHttp: () => ({ getRequest: () => request, getResponse: () => response }) } as unknown as ArgumentsHost;
+    new ProblemDetailsFilter().catch(exception, host);
+    return (response.json as jest.Mock).mock.calls[0]?.[0] as { status: number; code: string; detail: string };
+  };
+
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it.each([
+    // lab.validate_work_item (0077) refuses the work item.
+    ['the guard refusal (23514)', 409, 'LAB_ORDER_NOT_CURRENT',
+      databaseError('23514', `Lab work item does not match the exact active EHR order version (${secret})`)],
+    // Left after DatabaseService's one retry: Lab holds a work item for the order that the replay read cannot return.
+    ['the unique conflict on the EHR order (23505)', 409, 'LAB_ORDER_ALREADY_ACCEPTED',
+      uniqueViolation('work_items', 'work_items_source_ehr_order_id_key')],
+    ['the unique conflict on the order\'s key (23505)', 409, 'LAB_ORDER_ALREADY_ACCEPTED',
+      uniqueViolation('work_items', 'work_items_facility_id_accepted_by_idempotency_key_key')],
+    // Row-level security refuses the insert: the actor has no database consent.
+    ['the row-level security refusal (42501)', 403, 'LAB_ACCESS_DENIED',
+      databaseError('42501', `new row violates row-level security policy (${secret})`)],
+  ])('answers %s of the work-item insert with a fixed %i %s, keeping the error as its cause', async (_label, status, code, refusal) => {
+    const { service, queries } = harness([], refusal);
+    const problem = await service.acceptEhrOrder(context, command(1)).catch((error: unknown) => error);
+    expect(problem).toBeInstanceOf(DomainProblem);
+    expect(problem).toMatchObject({ status, code });
+    expect((problem as DomainProblem).cause).toBe(refusal);
+    expect(queries.filter((sql) => /insert into lab\.(work_item_requested_tests|work_item_events|outbox_events)\b/.test(sql)))
+      .toEqual([]);
+    const answered = answer(problem);
+    expect(answered).toMatchObject({ status, code });
+    expect(answered.detail).toBe((problem as DomainProblem).message);
+    for (const text of [secret, refusal.message, (refusal as { code: string }).code, 'work_items']) {
+      expect(JSON.stringify(answered)).not.toContain(text);
+    }
+  });
+
+  it.each([
+    // A refusal of a later statement is a defect of the command, not a verdict on the order: it stays 500.
+    ['23514 of the requested-test insert (lab.validate_work_item_child)', /insert into lab\.work_item_requested_tests\b/,
+      databaseError('23514', 'Lab work item child does not match its parent')],
+    ['42501 of the outbox insert', /insert into lab\.outbox_events\b/,
+      databaseError('42501', 'permission denied for table outbox_events')],
+    ['23505 of another table', /insert into lab\.work_item_events\b/,
+      uniqueViolation('work_item_events', 'work_item_events_work_item_id_event_version_key')],
+  ])('passes %s on unchanged, so it answers 500', async (_label, statement, error) => {
+    const { service } = harness([], undefined, { statement, error });
+    await expect(service.acceptEhrOrder(context, command(1))).rejects.toBe(error);
+    expect(answer(error)).toMatchObject({ status: 500, code: 'INTERNAL_ERROR' });
+  });
+
+  it.each(['23503', '23502', '22001', '22P02', '40001', '40P01', 'XX000', 'P0001'])(
+    'passes database error %s of the work-item insert on unchanged, so it answers 500', async (code) => {
+      const error = databaseError(code, `${secret} failed`);
+      const { service } = harness([], error);
+      await expect(service.acceptEhrOrder(context, command(1))).rejects.toBe(error);
+      expect(answer(error)).toMatchObject({ status: 500, code: 'INTERNAL_ERROR' });
+    });
 });

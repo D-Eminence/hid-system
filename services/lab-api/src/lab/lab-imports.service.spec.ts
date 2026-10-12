@@ -1,7 +1,11 @@
+import { Logger } from '@nestjs/common';
+import type { ArgumentsHost } from '@nestjs/common';
+import type { Response } from 'express';
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
-import type { DataAccessContext } from '../common/request-context';
+import { ProblemDetailsFilter } from '../common/problem';
+import type { DataAccessContext, HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import type { IdentityService } from '../identity/identity.service';
 import { LabImportsService } from './lab-imports.service';
@@ -89,5 +93,65 @@ describe('LabImportsService', () => {
     await expect(service.createFromOcr(context, command)).resolves.toMatchObject({ id: row.id });
     client.query = jest.fn().mockResolvedValue({ rows: [{ ...row, request_sha256: 'f'.repeat(64) }], rowCount: 1 });
     await expect(service.createFromOcr(context, command)).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  });
+});
+
+/**
+ * OCR stores a Lab 5xx from POST /lab/imports/from-ocr as the retryable
+ * OWNING_SERVICE_UNAVAILABLE and a Lab 4xx as a terminal refusal of the
+ * reviewed publication (ocr-api, ocr.service.ts). Lab maps no database refusal
+ * of an import: only EHR-order acceptance maps its own
+ * (fix/ehr-lab-handoff-resend). Each reaches the problem filter unchanged and
+ * answers 500, as before.
+ */
+describe('LabImportsService database refusals', () => {
+  const answer = (exception: unknown, route: string) => {
+    const request = { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ', method: 'POST', route: { path: route } } as unknown as HidRequest;
+    const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(),
+      json: jest.fn().mockReturnThis() } as unknown as Response;
+    const host = { switchToHttp: () => ({ getRequest: () => request, getResponse: () => response }) } as unknown as ArgumentsHost;
+    new ProblemDetailsFilter().catch(exception, host);
+    return (response.json as jest.Mock).mock.calls[0]?.[0] as { status: number; code: string; detail: string };
+  };
+  const serviceRefusing = (refusal: Error) => {
+    const client = { query: jest.fn(async (sql: string) => {
+      if (sql.includes('from lab.imported_evidence where')) return { rows: [], rowCount: 0 };
+      if (sql.includes('insert into lab.imported_evidence')) throw refusal;
+      return { rows: [], rowCount: 1 };
+    }) } as unknown as PoolClient;
+    const database = { withTransaction: async <T>(_context: DataAccessContext,
+      operation: (db: PoolClient) => Promise<T>) => operation(client) } as unknown as DatabaseService;
+    const identity = { authorize: jest.fn().mockResolvedValue({ allowed: true, breakGlass: false }) } as unknown as IdentityService;
+    return new LabImportsService(database, identity, { recordWithClient: jest.fn() } as unknown as AuditService);
+  };
+  const refusals = [
+    // lab.validate_imported_evidence (0077).
+    ['23514', 'Lab import is not bound to exact governed OCR publication evidence'],
+    // unique(publication_id) left after DatabaseService's one retry, for example an import hidden by row-level security.
+    ['23505', 'duplicate key value violates unique constraint "imported_evidence_publication_id_key"'],
+    // Row-level security refuses the insert.
+    ['42501', 'new row violates row-level security policy for table "imported_evidence"'],
+  ] as const;
+
+  beforeEach(() => jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined));
+  afterEach(() => jest.restoreAllMocks());
+
+  it.each(refusals)('passes refusal %s of an OCR import on unchanged, and it answers 500 INTERNAL_ERROR', async (code, message) => {
+    const refusal = Object.assign(new Error(message), { code });
+    const error = await serviceRefusing(refusal).createFromOcr(context, command).catch((caught: unknown) => caught);
+    expect(error).toBe(refusal);
+    const problem = answer(error, '/lab/imports/from-ocr');
+    expect(problem).toMatchObject({ status: 500, code: 'INTERNAL_ERROR', detail: 'The service could not complete the request.' });
+    expect(JSON.stringify(problem)).not.toContain(message);
+  });
+
+  it.each(refusals)('passes refusal %s of an external import on unchanged, and it answers 500 INTERNAL_ERROR', async (code, message) => {
+    const refusal = Object.assign(new Error(message), { code });
+    const { patientId, sourceDocumentId, externalLabName, observations } = command;
+    const error = await serviceRefusing(refusal).createExternal(context,
+      { patientId, sourceDocumentId, externalLabName, observations, reason: 'Synthetic external report', purpose: 'direct-care' },
+      'external-import-key-0000000001').catch((caught: unknown) => caught);
+    expect(error).toBe(refusal);
+    expect(answer(error, '/lab/imports')).toMatchObject({ status: 500, code: 'INTERNAL_ERROR' });
   });
 });
