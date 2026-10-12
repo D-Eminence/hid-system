@@ -4,7 +4,7 @@ jest.mock('jose', () => ({
 }));
 
 import type { ExecutionContext } from '@nestjs/common';
-import { jwtVerify } from 'jose';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { resetEnvironmentForTests } from '../config/environment';
 import { OcrInternalCallerGuard } from './ocr-internal-caller.guard';
 
@@ -39,6 +39,7 @@ describe('OcrInternalCallerGuard', () => {
   });
 
   afterEach(() => {
+    jest.mocked(createRemoteJWKSet).mockImplementation(() => 'jwks' as never);
     process.env.EHR_SERVICE_IDENTITY_MODE = 'local-secret';
     process.env.EHR_INTERNAL_SERVICE_TOKEN = localToken;
     resetEnvironmentForTests();
@@ -99,5 +100,34 @@ describe('OcrInternalCallerGuard', () => {
       'x-hid-service-authorization': `Bearer ${'x'.repeat(16_385)}`,
     }))).rejects.toMatchObject({ status: 401, code: 'INVALID_WORKLOAD_IDENTITY' });
     expect(jwtVerify).not.toHaveBeenCalled();
+  });
+
+  it('reuses one remote JWKS set for every verification instead of fetching it per request', async () => {
+    configure({
+      EHR_SERVICE_IDENTITY_MODE: 'jwt',
+      EHR_INTERNAL_SERVICE_TOKEN: '',
+      EHR_WORKLOAD_ISSUER_URL: 'https://issuer.example.test',
+      EHR_WORKLOAD_AUDIENCE: 'hid-ehr-api',
+      EHR_WORKLOAD_JWKS_URL: 'https://issuer.example.test/.well-known/jwks.json',
+      EHR_OCR_CALLER_SUBJECT: 'workload:ocr-api',
+    });
+    let created = 0;
+    jest.mocked(createRemoteJWKSet).mockImplementation(() => `jwks-${++created}` as never);
+    jest.mocked(jwtVerify).mockResolvedValue({
+      payload: { sub: 'workload:ocr-api' },
+      protectedHeader: { alg: 'ES256' },
+    } as never);
+    const guard = new OcrInternalCallerGuard();
+    for (const token of ['first-signed-workload-token', 'second-signed-workload-token']) {
+      await expect(guard.canActivate(context({
+        'x-hid-internal-caller': 'ocr-api',
+        'x-hid-service-authorization': `Bearer ${token}`,
+      }))).resolves.toBe(true);
+    }
+    expect(createRemoteJWKSet).toHaveBeenCalledTimes(1);
+    expect(String(jest.mocked(createRemoteJWKSet).mock.calls[0]?.[0]))
+      .toBe('https://issuer.example.test/.well-known/jwks.json');
+    expect(jwtVerify).toHaveBeenNthCalledWith(1, 'first-signed-workload-token', 'jwks-1', expect.anything());
+    expect(jwtVerify).toHaveBeenNthCalledWith(2, 'second-signed-workload-token', 'jwks-1', expect.anything());
   });
 });

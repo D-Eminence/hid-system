@@ -1,5 +1,5 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(() => jest.fn()), jwtVerify: jest.fn() }));
-import { jwtVerify } from 'jose';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { resetEnvironmentForTests } from '../config/environment';
 import { PharmacyWorkloadIdentityService } from './pharmacy-workload-identity.service';
 
@@ -13,6 +13,7 @@ describe('PharmacyWorkloadIdentityService', () => {
       PHARMACY_EHR_CALLER_SUBJECT: 'workload:ehr', PHARMACY_OCR_CALLER_SUBJECT: 'workload:ocr' });
     delete process.env.PHARMACY_INTERNAL_SERVICE_TOKEN;
     resetEnvironmentForTests(); jest.mocked(jwtVerify).mockReset();
+    jest.mocked(createRemoteJWKSet).mockClear();
   });
 
   it('accepts the exact EHR subject, issuer, and audience', async () => {
@@ -41,5 +42,18 @@ describe('PharmacyWorkloadIdentityService', () => {
       'ehr-api', `Bearer ${'x'.repeat(16_385)}`,
     )).rejects.toMatchObject({ status: 401, code: 'INVALID_WORKLOAD_IDENTITY' });
     expect(jwtVerify).not.toHaveBeenCalled();
+  });
+
+  it('reuses one remote JWKS set for every verification instead of fetching it per request', async () => {
+    jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:ehr' },
+      protectedHeader: { alg: 'ES256' } } as never);
+    const service = new PharmacyWorkloadIdentityService();
+    await service.authenticate('ehr-api', 'Bearer first-signed-token');
+    await service.authenticate('ehr-api', 'Bearer second-signed-token');
+    expect(createRemoteJWKSet).toHaveBeenCalledTimes(1);
+    expect(String(jest.mocked(createRemoteJWKSet).mock.calls[0]?.[0])).toBe('https://issuer.test/jwks');
+    const calls = jest.mocked(jwtVerify).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.[1]).toBe(calls[0]?.[1]);
   });
 });

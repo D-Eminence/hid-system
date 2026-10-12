@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
+import type { JWTVerifyGetKey } from 'jose';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -7,6 +8,9 @@ import { getEnvironment } from '../config/environment';
 @Injectable()
 export class OcrInternalCallerGuard implements CanActivate {
   private readonly environment = getEnvironment();
+  // One key set per process, not per request: jose caches the JWKS for 10 minutes and refetches it
+  // early only for an unknown kid.
+  private jwks?: JWTVerifyGetKey;
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<HidRequest>();
@@ -41,7 +45,7 @@ export class OcrInternalCallerGuard implements CanActivate {
       throw new DomainProblem(401, 'INVALID_WORKLOAD_IDENTITY', 'Workload identity is invalid or expired');
     }
     const { createRemoteJWKSet, jwtVerify } = await import('jose');
-    const jwks = createRemoteJWKSet(new URL(jwksUrl));
+    const jwks = this.jwks ??= createRemoteJWKSet(new URL(jwksUrl));
     const { payload } = await jwtVerify(token, jwks, {
       issuer, audience, algorithms: ['RS256', 'ES256'],
     }).catch(() => { throw new DomainProblem(401, 'INVALID_WORKLOAD_IDENTITY',

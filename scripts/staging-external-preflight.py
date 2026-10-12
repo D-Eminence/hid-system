@@ -5,6 +5,8 @@ No login, provisioning, delivery, signing, deployment, or secret mutation occurs
 Run without --cloud-read-only for an entirely local configuration inventory.
 """
 import argparse
+import base64
+import binascii
 import datetime
 import json
 import os
@@ -23,9 +25,12 @@ HOSTS = ["staging." + DOMAIN] + [f"{app}.staging.{DOMAIN}" for app in
     ["ehr", "lab", "pharmacy", "ocr", "outreach", "admin", "updates", "api"]]
 SECRET_FIELDS = {
     "/hid/staging/auth": ["authSigningSecret", "authLoginPepper"],
-    "/hid/staging/identity-sensitive": ["otpHmacKeyB64", "turnstileSecretKey", "googleOidcClientIds"],
+    "/hid/staging/identity-sensitive": ["otpHmacKeyB64", "contactLookupHmacKeyB64", "turnstileSecretKey",
+        "googleOidcClientIds", "mfaSecretKeyB64"],
     "/hid/staging/notification-provider": ["sesFromAddress", "novuApiKey"],
 }
+# Identity refuses to start unless each of these is exactly 32 bytes in canonical padded base64.
+KEY_FIELDS = {"otpHmacKeyB64", "contactLookupHmacKeyB64", "mfaSecretKeyB64"}
 
 
 def aws_json(arguments, run=subprocess.run):
@@ -41,6 +46,22 @@ def aws_json(arguments, run=subprocess.run):
         return None, "unavailable_or_invalid_response"
 
 
+def canonical_32_byte_base64(value):
+    """Identity's start-up check (identity-api src/config/environment.ts, isBase64Key after its trim).
+
+    Only ASCII whitespace is trimmed: a value that Identity accepts only after trimming
+    other whitespace reports False, the fail-closed direction.
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip(" \t\n\r\f\v")
+    try:
+        decoded = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(decoded) == 32 and base64.b64encode(decoded).decode("ascii") == text
+
+
 def secret_summary(name, response):
     expected = f"arn:aws:secretsmanager:{AWS_REGION}:{AWS_ACCOUNT}:secret:{name}-"
     if not isinstance(response, dict) or not str(response.get("ARN", "")).startswith(expected):
@@ -51,9 +72,14 @@ def secret_summary(name, response):
         return {"status": "missing_or_invalid_json"}
     if not isinstance(value, dict):
         return {"status": "missing_or_invalid_json"}
-    return {"status": "read", "required_fields_present": {
+    summary = {"status": "read", "required_fields_present": {
         field: isinstance(value.get(field), str) and bool(value[field].strip())
         for field in SECRET_FIELDS[name]}}
+    keys = [field for field in SECRET_FIELDS[name] if field in KEY_FIELDS]
+    if keys:
+        # Value-free: one boolean per key, never the value, its length or its encoding.
+        summary["canonical_32_byte_base64"] = {field: canonical_32_byte_base64(value.get(field)) for field in keys}
+    return summary
 
 
 def aws_checks(call=aws_json):
@@ -153,7 +179,7 @@ def main():
         "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "local": local,
         "deployment_authorized": False, "staging_accepted": False,
         "nin": {"state": "deferred", "required_for_staging": False, "provider_secret_required": False},
-        "scope": "read-only presence checks, not provider delivery or release acceptance"}
+        "scope": "read-only presence and key-format checks, not provider delivery or release acceptance"}
     if args.cloud_read_only:
         report["aws"] = aws_checks()
         report["cloudflare"] = cloudflare_checks(token)

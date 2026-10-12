@@ -1,10 +1,14 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { IdentityActorContext } from '@hid/identity-browser-client'
 import App from './App'
 
 const testState = vi.hoisted(() => ({ actor: null as IdentityActorContext | null, online: true }))
+const ocrApi = vi.hoisted(() => ({
+  findJob: vi.fn(), createJob: vi.fn(), getJob: vi.fn(), retryJob: vi.fn(),
+  listExtractions: vi.fn(), listValidations: vi.fn(), listPublications: vi.fn(),
+}))
 
 vi.mock('@hid/identity-browser-client', () => ({
   getIdentityActorContext: () => Promise.resolve(testState.actor),
@@ -15,10 +19,7 @@ vi.mock('@hid/offline', () => ({ useConnectivity: () => ({ online: testState.onl
 vi.mock('@hid/telemetry', () => ({ captureProductEvent: vi.fn(), captureSafeException: vi.fn() }))
 vi.mock('./lib/ocrApi', () => ({
   OcrBrowserProblem: class OcrBrowserProblem extends Error { code = null; correlationId = null },
-  createOcrApi: () => ({
-    findJob: vi.fn(), createJob: vi.fn(), getJob: vi.fn(), retryJob: vi.fn(),
-    listExtractions: vi.fn(), listValidations: vi.fn(), listPublications: vi.fn(),
-  }),
+  createOcrApi: () => ocrApi,
 }))
 
 const actor = (permissions: string[]): IdentityActorContext => ({
@@ -30,6 +31,7 @@ const actor = (permissions: string[]): IdentityActorContext => ({
 beforeEach(() => {
   testState.actor = null
   testState.online = true
+  vi.clearAllMocks()
   window.history.replaceState({}, '', '/')
 })
 afterEach(cleanup)
@@ -61,6 +63,21 @@ describe('Migrate route acceptance', () => {
     expect(await screen.findByRole('heading', { name: 'Document processing' })).toBeInTheDocument()
     expect(screen.getByText(/cannot create them/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Create OCR job' })).toBeDisabled()
+  })
+
+  it('creates every OCR job for Textract, the only provider the worker claims, with no provider to edit', async () => {
+    testState.actor = actor(['ocr.job.read', 'ocr.job.write'])
+    ocrApi.createJob.mockResolvedValue({ id: 'job-1' })
+    window.history.replaceState({}, '', '/document-processing')
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Document processing' })).toBeInTheDocument()
+    const fields = screen.getAllByRole('textbox')
+    expect(fields).toHaveLength(1)
+    fireEvent.change(fields[0]!, { target: { value: ' 60000000-0000-4000-8000-000000000001 ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create OCR job' }))
+    await waitFor(() => expect(ocrApi.createJob).toHaveBeenCalledTimes(1))
+    expect(ocrApi.createJob.mock.calls[0]?.[0]).toEqual({ documentId: '60000000-0000-4000-8000-000000000001',
+      provider: 'textract', purpose: 'healthcare-operations' })
   })
 
   it('shows the offline shell and never claims OCR execution or publication success', async () => {

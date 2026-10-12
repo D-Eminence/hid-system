@@ -96,10 +96,15 @@ describe('PatientEnrollmentController', () => {
   it('rejects duplicate enrollment cookies and retains replay recovery after activation', async () => {
     await controller.current(request('hid_enrollment=first; hid_enrollment=second'));
     expect(service.current).toHaveBeenCalledWith(undefined, correlationId);
+    const response = { clearCookie: jest.fn() };
     await controller.activate({ password: 'a-strong-test-password' },
-      request('hid_enrollment=opaque-value'), { clearCookie: jest.fn() } as unknown as Response);
+      request('hid_enrollment=opaque-value'), response as unknown as Response);
     expect(service.activate).toHaveBeenCalledWith('opaque-value', 'a-strong-test-password',
       correlationId, undefined);
+    // Activation keeps the enrollment cookie, so a lost response can be
+    // replayed; whether to retire it at activation waits on a product decision.
+    // Sign-in, refresh and sign-out retire it (AuthController).
+    expect(response.clearCookie).not.toHaveBeenCalled();
   });
 
   it('binds pending Google proof to enrollment and clears it only after successful activation', async () => {
