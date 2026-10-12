@@ -470,12 +470,14 @@ Steps:
      - additions: the `ProductionWorkloadIdentity` key (`Retain`), alias, log
        group (`Retain`), issuer role and policy, function, REST API, three
        resources, two methods, deployment, stage `production`, two Lambda
-       permissions, the three `ProductionWorkloadIdentity*` outputs, and six
-       task-role policies granting `execute-api:Invoke` on
-       `/production/POST/token`;
+       permissions, the three `ProductionWorkloadIdentity*` outputs, and five
+       task-role default policies (Identity, Lab, Pharmacy, OCR API and
+       Outreach) granting `execute-api:Invoke` on `/production/POST/token`;
+     - a modification of the EHR task role's existing default policy, which
+       gains the same `execute-api:Invoke` statement and nothing else;
      - new revisions of the six token task definitions (the agent added) and of
        the Notification API and OCR worker task definitions (issuer, JWKS and
-       subject values now from the stack);
+       subject values now from the stack), eight in all;
      - `DependsOn` changes on services, scaling targets and policies and
        service-discovery services;
      - removal of the eight workload parameters.
@@ -519,9 +521,17 @@ Rollback:
 - To stop minting at once, set the issuer function's reserved concurrency to
   `0` or remove a caller's `execute-api:Invoke`. Issued tokens stay valid until
   they expire, at most 300 seconds later.
-- On suspected key misuse, disable the key (`aws kms disable-key`): minting and
-  JWKS answer `503`, and receivers refuse new tokens once their cached JWKS
-  expires, at most 10 minutes later. Do not schedule key deletion without a
+- On suspected key misuse, set the issuer function's reserved concurrency to
+  `0`, which stops both `POST /token` and the JWKS `GET`, and disable the key
+  (`aws kms disable-key`) so that no principal can sign with it. Disabling the
+  key alone is not enough: a warm issuer container keeps the public key it read
+  and goes on serving the JWKS, so receivers keep trusting the key; only new
+  containers fail to read it and answer `503`. Receivers refuse tokens only
+  once the JWKS is no longer served and their cached copy has expired, at most
+  10 minutes later. Until then they accept a token signed with the key
+  whatever its `exp`, because they check no maximum token age (ADR-047
+  follow-up). Afterwards every service-to-service call fails closed until a new
+  key is approved and deployed. Do not schedule key deletion without a
   separate approval; it is irreversible after its waiting period.
 - The key and the issuer log group are retained if the construct or stack is
   removed. Deleting them is a separate, approved action.

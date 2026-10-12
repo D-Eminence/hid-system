@@ -2186,7 +2186,9 @@ publishes a JWKS. The stack keeps `WorkloadIssuerUrl` and `WorkloadJwksUrl`,
 runs the same agent pointed at it, and exports the six task-role ARNs for the
 issuer's caller policy. It needs cross-account `execute-api:Invoke` and issuer
 IaC that this repository does not have. It keeps signing-key custody out of
-the workload account.
+the workload account. Because Identity verifies the document scanner's token
+against the same issuer and JWKS, such an issuer could also mint a scanner
+subject, which the in-stack issuer cannot (Risks).
 
 Risks of the proposed default:
 
@@ -2194,7 +2196,11 @@ Risks of the proposed default:
   delegates `kms:*` to IAM: any principal an administrator grants `kms:Sign`
   can mint any production subject. In the template only the issuer role holds
   it. A minted token also passes Identity's Origin and CSRF exemption for
-  delegated cookie reads (ADR-043, ADR-045).
+  delegated cookie reads (ADR-043, ADR-045). Such a principal signs the claims
+  itself, so its token can carry any `exp`: receivers check `exp` but no
+  maximum token age, and accept it for as long as the JWKS publishes the key.
+  Disabling the key does not stop that at once: each warm issuer container
+  keeps the public key it read and goes on serving the JWKS from it.
 - Single point of failure. All six token-bearing services depend on one
   issuer. The agent is essential and its health check tracks a usable token,
   so an issuer outage longer than a token's lifetime takes those services out
@@ -2210,6 +2216,17 @@ Risks of the proposed default:
   renewals until tokens expired. Every receiver now keeps one key set per
   process and fetches the JWKS at most every 10 minutes (jose's default cache),
   and for an unknown `kid` at most every 30 seconds.
+- No document-scanner token. Identity authorizes the malware-scan callback
+  (`POST /ehr/documents/scan-events`, through
+  `service/workloads/document-scanner/authorize`) with a JWT from the same
+  issuer and JWKS whose subject must belong to an active `document_scanner`
+  account. The in-stack issuer mints only the six service subjects: the
+  issuer accepts at most six caller rules and `bindCallers` requires exactly
+  six `hid:<env>:` service subjects. Production also loses
+  `WorkloadIssuerUrl` and `WorkloadJwksUrl`, the only way it could use an
+  issuer that mints a scanner subject. So, as in staging today, no scan
+  callback can authenticate: no document becomes `available` and `clean`,
+  every download is refused and OCR cannot claim a job (DEP-4-SCAN, DOC-3).
 - Never run live: staging is not deployed, so no token has been minted against
   real IAM, KMS or API Gateway.
 - The issuer code is a CDK file asset, not a TUF-admitted image digest
@@ -2237,6 +2254,17 @@ Follow-ups, not implemented by the draft:
   (`aws:PrincipalArn`), and deny any algorithm other than `ECDSA_SHA_256` and
   any message type other than `RAW` (the issuer signs `RAW`; the broker's
   `DIGEST` rule must not be copied). Staging and production alike.
+- Token age at receivers, with DEP-4-KEY: every receiver (Identity,
+  Notification, EHR, Lab, Pharmacy) verifies with `maxTokenAge` of 300 seconds
+  or bounds `exp - iat`, so a token signed outside the issuer cannot outlive an
+  issued one.
+- DEP-4-SCAN (DOC-3), scanner callbacks: which malware scanner runs at launch
+  and how it authenticates is the documents owner's decision. With this
+  issuer, it needs a seventh caller rule (`hid:<env>:document-scanner` for the
+  scanner's own IAM role), a change to the issuer's six-rule cap and to
+  `bindCallers`, and a provisioned `auth.accounts` row holding
+  `document_scanner`; or a separate scanner issuer. No service subject is
+  reused.
 - DEP-4-DOS, the public endpoint: the agent caches the verified JWKS by `kid`
   and refetches only at start and for an unknown `kid`; `POST /token` gets its
   own method throttle, and the JWKS limit is never below it and is sized for
@@ -2260,7 +2288,11 @@ Consequences if accepted:
 
 - The production template grows from 414 to 435 resources and from 523,299 to
   567,737 bytes, falls from 62 to 54 parameters, and gains a fourth KMS key
-  (cost inventory `kmsKeys: 4`). The six token tasks get new revisions.
+  (cost inventory `kmsKeys: 4`). Eight task definitions get new revisions:
+  the six token tasks (the agent added) and the Notification API and OCR
+  worker (issuer, JWKS and subject values from the stack). Five task roles
+  get a new default policy and the EHR's existing one gains the
+  `execute-api:Invoke` statement.
 - The staging issuer Lambda changes code only; staging must be redeployed and
   re-accepted.
 - The agent ships in the Identity API image, so a new image digest must be
