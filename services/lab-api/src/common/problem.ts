@@ -23,7 +23,8 @@ export interface ProblemDetails {
 export class DomainProblem extends HttpException {
   /**
    * `options.cause` keeps the error a problem stands for (for example the
-   * database refusal) for logs and tests; it is never sent to the client.
+   * database refusal a service maps) for logs and tests; it is never sent to
+   * the client, and the filter logs only its SQLSTATE.
    */
   constructor(
     status: number,
@@ -36,28 +37,16 @@ export class DomainProblem extends HttpException {
   }
 }
 
-/**
- * PostgreSQL refusals with a fixed answer. A service maps a refusal whose
- * meaning it knows to its own problem; any other that reaches the filter gets
- * one of these, with a fixed detail, never the driver's message, which can name
- * rows, values and constraints. Guards raise 23514 when a command does not
- * match the state of the rows it depends on; a unique violation reaches the
- * filter only after DatabaseService has retried it once (Stage 9); 42501 is a
- * row-level security or guard refusal of the actor. Every other error is 500.
- */
-const DATABASE_REFUSALS: Readonly<Record<string, { status: number; code: string; detail: string }>> = {
-  '23514': { status: HttpStatus.CONFLICT, code: 'LAB_STATE_CONFLICT',
-    detail: 'The Lab command does not match the current state of its records.' },
-  '23505': { status: HttpStatus.CONFLICT, code: 'LAB_CONFLICT',
-    detail: 'A conflicting Lab record already exists.' },
-  '23503': { status: HttpStatus.CONFLICT, code: 'LAB_INVALID_REFERENCE',
-    detail: 'A record the Lab command refers to is not available.' },
-  '42501': { status: HttpStatus.FORBIDDEN, code: 'LAB_ACCESS_DENIED',
-    detail: 'The Lab record is not accessible to this actor.' },
-  ...Object.fromEntries(['22001', '22003', '22007', '22008', '22P02', '23502'].map((sqlState) => [sqlState,
-    { status: HttpStatus.BAD_REQUEST, code: 'INVALID_LAB_DATA', detail: 'The Lab data failed integrity validation.' }])),
-};
+/** A PostgreSQL SQLSTATE: five digits or upper-case letters. */
+const SQLSTATE = /^[0-9A-Z]{5}$/;
 
+/**
+ * The filter maps no database error: one that reaches it is `500` with a fixed
+ * detail. A command that knows what one of its own refusals means maps it to
+ * its own problem (only EHR-order acceptance does, lab-work-items.service.ts),
+ * so every other command keeps answering `500`, which OCR stores for its Lab
+ * import as retryable.
+ */
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
   private readonly logger = new Logger(ProblemDetailsFilter.name);
@@ -67,20 +56,20 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     const request = context.getRequest<HidRequest>();
     const response = context.getResponse<Response>();
     const isHttpException = exception instanceof HttpException;
-    const refusal = isHttpException ? undefined : this.databaseRefusal(exception);
     const status = isHttpException
       ? exception.getStatus()
-      : refusal?.status ?? this.bodyParserStatus(exception) ?? HttpStatus.INTERNAL_SERVER_ERROR;
+      : this.bodyParserStatus(exception) ?? HttpStatus.INTERNAL_SERVER_ERROR;
     const domainProblem = exception instanceof DomainProblem ? exception : undefined;
     const detail = status >= 500
       ? 'The service could not complete the request.'
-      : refusal?.detail ?? this.safeMessage(exception);
-    const code = domainProblem?.code ?? refusal?.code ?? this.defaultCode(status);
+      : this.safeMessage(exception);
+    const code = domainProblem?.code ?? this.defaultCode(status);
+    const refusedBy = domainProblem ? this.databaseCause(domainProblem) : undefined;
 
-    if (refusal) {
+    if (refusedBy) {
       this.logger.warn({
-        message: 'Database refusal answered with a fixed problem',
-        sqlState: refusal.sqlState,
+        message: 'Database refusal answered with a domain problem',
+        sqlState: refusedBy,
         correlationId: request.correlationId,
         status,
         code,
@@ -147,11 +136,12 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     return byStatus[status] ?? 'INTERNAL_ERROR';
   }
 
-  private databaseRefusal(exception: unknown) {
-    if (typeof exception !== 'object' || exception === null) return undefined;
-    const sqlState = (exception as { code?: unknown }).code;
-    if (typeof sqlState !== 'string' || !Object.hasOwn(DATABASE_REFUSALS, sqlState)) return undefined;
-    return { sqlState, ...DATABASE_REFUSALS[sqlState]! };
+  /** The SQLSTATE of the database error a domain problem stands for, never its message. */
+  private databaseCause(problem: DomainProblem): string | undefined {
+    const cause: unknown = problem.cause;
+    if (typeof cause !== 'object' || cause === null) return undefined;
+    const sqlState = (cause as { code?: unknown }).code;
+    return typeof sqlState === 'string' && SQLSTATE.test(sqlState) ? sqlState : undefined;
   }
 
   private bodyParserStatus(exception: unknown): number | undefined {

@@ -1768,6 +1768,15 @@ Checks:
   the other row below the deadlock timeout. Each verifier ends by requiring
   `pg_stat_database` to report no deadlock for its database, read after the
   service's connections closed, so a deadlock the retry hid still fails it.
+  `verify-lab-runtime.mjs` also pins which database refusals Lab maps: only
+  EHR-order acceptance maps its own (fix/ehr-lab-handoff-resend), the
+  `lab.validate_work_item` refusal (`23514`) to `409 LAB_ORDER_NOT_CURRENT`
+  and the row-level security refusal of the work-item insert (`42501`) to
+  `403 LAB_ACCESS_DENIED`; a member verifying a result they entered (`23514`),
+  the loser of two verifications of one result version (`23505`) and an
+  external or OCR import without a database consent (`42501`) still answer
+  `500`, which OCR stores for its Lab import as the retryable
+  `OWNING_SERVICE_UNAVAILABLE`.
 
 ## EHR clinical list paging precision (no migration)
 

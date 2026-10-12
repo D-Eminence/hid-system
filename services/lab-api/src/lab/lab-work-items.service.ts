@@ -39,15 +39,8 @@ export class LabWorkItemsService {
       return await this.database.withTransaction(context, (client) => this.accept(context, command, key, digest, client),
         { isolationLevel: 'SERIALIZABLE' });
     } catch (error) {
-      // lab.validate_work_item (0077) refuses a work item that is not the EHR
-      // order's current active version exactly as EHR holds it (a changed or
-      // no longer active order, another time or field): 23514, never retried.
-      if (sqlState(error) === '23514') {
-        throw new DomainProblem(409, 'LAB_ORDER_NOT_CURRENT',
-          'Lab accepts only the current version of an active EHR order, exactly as the EHR holds it', undefined,
-          { cause: error });
-      }
-      throw error;
+      // Only after DatabaseService's one retry of a unique violation.
+      throw heldOrderConflict(error) ?? error;
     }
   }
 
@@ -95,7 +88,8 @@ export class LabWorkItemsService {
         command.sourceEhrOrderId,command.sourceEhrOrderVersion,command.sourceEncounterId,
         command.priority,command.testCodeSystem,command.testCode,command.testName,
         command.clinicalIndication ?? null,command.requestedBy,command.requestedAt,
-        context.actor.accountId,context.membershipId,key,digest,context.correlationId]);
+        context.actor.accountId,context.membershipId,key,digest,context.correlationId])
+      .catch((error: unknown) => { throw workItemInsertRefusal(error) ?? error; });
     const row = result.rows[0];
     if (!row) throw new DomainProblem(503, 'LAB_WORK_ITEM_NOT_CREATED', 'Lab could not accept the EHR order');
     await client.query(
@@ -168,6 +162,59 @@ export class LabWorkItemsService {
       patientId: row.patient_id,action,resourceType: 'lab-work-item',resourceId: row.id,
       outcome: 'success' as const,purposeOfUse: context.purposeOfUse,details,sourceSystem: 'lab-api' };
   }
+}
+
+/*
+ * The database refusals of EHR-order acceptance that Lab answers with its own
+ * problem (fix/ehr-lab-handoff-resend). Lab maps them here, for this command
+ * only: every other Lab command answers a database error 500, which OCR stores
+ * for its Lab import as the retryable OWNING_SERVICE_UNAVAILABLE. Each detail
+ * is fixed; the error, whose message can name rows, values and constraints, is
+ * the problem's cause, which is never sent (the problem filter logs its
+ * SQLSTATE). Every other error is passed on unchanged and answers 500.
+ */
+
+/**
+ * A refusal of the work-item insert, the statement that lab.validate_work_item
+ * and row-level security check. A 23514 or 42501 of any other statement (the
+ * child guards, a missing grant on a child table or the outbox) is a defect of
+ * the command, not a verdict on the order, and stays 500.
+ */
+function workItemInsertRefusal(error: unknown): DomainProblem | undefined {
+  switch (sqlState(error)) {
+    // lab.validate_work_item (0077): not the EHR order's current active version
+    // exactly as EHR holds it (a changed or no longer active order, another time
+    // or field). Never retried.
+    case '23514':
+      return new DomainProblem(409, 'LAB_ORDER_NOT_CURRENT',
+        'Lab accepts only the current version of an active EHR order, exactly as the EHR holds it', undefined,
+        { cause: error });
+    // Row-level security refuses the insert (lab.context_allows): the actor has
+    // no database consent to write the patient's records at this facility. A
+    // runtime role without INSERT on lab.work_items (a deployment fault) raises
+    // the same SQLSTATE here and gets the same answer; the filter's log line
+    // names the SQLSTATE and route.
+    case '42501':
+      return new DomainProblem(403, 'LAB_ACCESS_DENIED', 'Lab does not allow this actor to accept the EHR order',
+        undefined, { cause: error });
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * A unique violation of lab.work_items left after DatabaseService's one retry:
+ * unique(source_ehr_order_id), or the idempotency key, which names the order
+ * and version. Lab holds a work item for this EHR order that the replay read
+ * cannot return (row-level security hides it from this actor), so it cannot
+ * name the version it holds. A unique violation of any other table stays 500.
+ */
+function heldOrderConflict(error: unknown): DomainProblem | undefined {
+  if (sqlState(error) !== '23505') return undefined;
+  const { schema, table } = error as { schema?: unknown; table?: unknown };
+  if (schema !== 'lab' || table !== 'work_items') return undefined;
+  return new DomainProblem(409, 'LAB_ORDER_ALREADY_ACCEPTED', 'Lab already holds a work item for this EHR order',
+    undefined, { cause: error });
 }
 
 function sqlState(error: unknown): unknown {

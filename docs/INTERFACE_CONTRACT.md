@@ -650,7 +650,9 @@ accepted. Paths are under
   answers `200` with the request, `labWorkItem` and `labHandoff`: `null` when
   the request is not active; `{ state: 'accepted' }`;
   `{ state: 'already_accepted', code: 'LAB_ORDER_ALREADY_ACCEPTED' }` when Lab
-  holds an earlier version, so the change is not in Lab;
+  holds an earlier version, so the change is not in Lab (or a version that
+  row-level security hides from the actor, which Lab cannot name: "Extracted
+  Lab transport");
   `{ state: 'failed', status, code }` with Lab's answer, when the update stands
   and the request can be sent again with `.../lab-work-item` (`409
   LAB_ORDER_NOT_CURRENT` means the request changed again after this update, and
@@ -1022,19 +1024,28 @@ Lab answers EHR order acceptance (fix/ehr-lab-handoff-resend):
 | A later version of an order Lab accepted | `409 LAB_ORDER_ALREADY_ACCEPTED`, naming the version Lab holds; Lab holds one work item per EHR order, ever, and writes nothing |
 | An earlier version than the one Lab accepted | `409 LAB_ORDER_NOT_CURRENT`: the EHR order changed since, and Lab may hold that change; Lab writes nothing and does not reach the guard |
 | An order that is not the current active version exactly as EHR holds it (changed, not active, another field or `requestedAt`) | `409 LAB_ORDER_NOT_CURRENT` (`lab.validate_work_item`, `23514`) |
+| An actor without a database consent to write the patient's records at the facility | `403 LAB_ACCESS_DENIED` (row-level security on the work-item insert, `42501`); Lab writes nothing |
+| An order whose work item Lab holds but row-level security hides from the actor (for example under a consent directive that denies reading) | `409 LAB_ORDER_ALREADY_ACCEPTED`, naming no version (a `lab.work_items` unique key, `23505`, after the one retry); Lab writes nothing |
 
 Its body takes the EHR lab-request limits: `testCodeSystem` 1–255,
 `testCode` 1–100 and `testName` 1–500 characters, `clinicalIndication` up to
 4000. Its ids (`sourceEhrOrderId`, `sourceEncounterId`, `patientId`,
 `orderingFacilityId`, `requestedBy`) are UUIDs of any version (1–8, nil, max),
-since a patient or account migrated from the legacy system keeps its source id. A database refusal that no Lab service maps to its own problem answers a
-fixed problem whose detail never carries the driver's message: `23514` (a
-guard) `409 LAB_STATE_CONFLICT`, `23505` (a unique key, after the one retry)
-`409 LAB_CONFLICT`, `23503` `409 LAB_INVALID_REFERENCE`, `42501` (row-level
-security or an actor guard) `403 LAB_ACCESS_DENIED`, and `22001`, `22003`,
-`22007`, `22008`, `22P02` and `23502` `400 INVALID_LAB_DATA`. Every other error
-is `500`. The codes and details are fixed: they name no row, value or
-constraint.
+since a patient or account migrated from the legacy system keeps its source id.
+
+Only this command maps database refusals, and only its own three above: the
+`23514` and `42501` of its work-item insert and a `lab.work_items` unique
+conflict left after the retry. Their codes and details are fixed and name no
+row, value or constraint; Lab logs the SQLSTATE and route. Any other database
+error of acceptance (a `23514` of a child guard, a missing grant on another
+table, a data error) answers `500`. Every other Lab command answers a database
+refusal `500 INTERNAL_ERROR` with a fixed detail, as before
+fix/ehr-lab-handoff-resend: a guard (`23514`), a unique key after the retry
+(`23505`), row-level security (`42501`) or a data error. For
+`POST /api/v1/lab/imports/from-ocr` OCR keeps storing that `500` as the
+retryable `OWNING_SERVICE_UNAVAILABLE` and retries the publication up to
+`max_attempts`, where a Lab `4xx` would end the reviewed publication as
+terminal.
 
 ### Extracted Pharmacy transport
 
