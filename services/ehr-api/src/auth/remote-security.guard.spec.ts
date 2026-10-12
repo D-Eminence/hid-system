@@ -44,7 +44,13 @@ const patient: IdentityActorContext = { kind: 'patient', patientId: '60000000-00
 
 /** The audit row as AuditService writes it, by column. */
 interface Row { actorType: string; actorSubject: string | null; actorAccountId: string | null; actorMembershipId: string | null;
-  organizationId: string | null; facilityId: string | null; action: string; resourceType: string | null; outcome: string }
+  organizationId: string | null; facilityId: string | null; action: string; resourceType: string | null; outcome: string;
+  sourceIp: string | null; userAgent: string | null; details: Record<string, unknown>; provenance: string }
+
+/** Faults to inject: each is thrown by the query it names instead of answering it. */
+interface Faults { control?: unknown; audit?: unknown }
+
+const USER_AGENT = 'hid-guard-spec/1.0';
 
 /**
  * A database that answers the guard's runtime controls from `controls`, keeps
@@ -52,13 +58,18 @@ interface Row { actorType: string; actorSubject: string | null; actorAccountId: 
  * 0067's events_staff_facility_scope_check and
  * events_staff_membership_scope_check refuse.
  */
-function auditDatabase(rows: Row[], controls: Record<string, boolean>) {
+function auditDatabase(rows: Row[], controls: Record<string, boolean>, faults: Faults) {
   return {
     query: jest.fn(async (sql: string, values: unknown[]) => {
-      if (sql.includes('platform.control_enabled')) return { rows: [{ enabled: controls[values[0] as string] === true }], rowCount: 1 };
+      if (sql.includes('platform.control_enabled')) {
+        if (faults.control) throw faults.control;
+        return { rows: [{ enabled: controls[values[0] as string] === true }], rowCount: 1 };
+      }
       if (!sql.includes('insert into audit.events')) throw new Error(`unexpected query: ${sql}`);
+      if (faults.audit) throw faults.audit;
       const row = { actorType: values[1], actorSubject: values[2], actorAccountId: values[3], actorMembershipId: values[4],
-        organizationId: values[5], facilityId: values[6], action: values[8], resourceType: values[9], outcome: values[11] } as Row;
+        organizationId: values[5], facilityId: values[6], action: values[8], resourceType: values[9], outcome: values[11],
+        sourceIp: values[13], userAgent: values[14], details: JSON.parse(values[15] as string), provenance: values[16] } as Row;
       const facilityScope = row.facilityId !== null || row.actorType !== 'staff'
         || (row.action.startsWith('auth.') && ['authentication', 'session'].includes(row.resourceType ?? ''));
       const membershipScope = row.actorType !== 'staff' || row.action.startsWith('auth.')
@@ -81,11 +92,13 @@ let app: INestApplication;
 let baseUrl: string;
 let rows: Row[];
 let controls: Record<string, boolean>;
+let faults: Faults;
 let liveActor: IdentityActorContext | undefined;
 
 beforeEach(async () => {
   rows = [];
   controls = { maintenance_mode: false, provider_portal_enabled: true, patient_portal_enabled: true };
+  faults = {};
   liveActor = staff;
   const identity = {
     authenticateRequest: jest.fn(async () => {
@@ -93,7 +106,7 @@ beforeEach(async () => {
       return liveActor;
     }),
   };
-  const database = auditDatabase(rows, controls);
+  const database = auditDatabase(rows, controls, faults);
 
   @Module({
     controllers: [ProbeController],
@@ -123,7 +136,7 @@ afterEach(async () => { await app.close(); });
 
 function probe(headers: Record<string, string> = {}): Promise<{ status: number; code?: string }> {
   return new Promise((resolve, reject) => {
-    const outgoing = httpRequest(`${baseUrl}/api/v1/probe`, { headers }, (response) => {
+    const outgoing = httpRequest(`${baseUrl}/api/v1/probe`, { headers: { 'User-Agent': USER_AGENT, ...headers } }, (response) => {
       let text = '';
       response.setEncoding('utf8');
       response.on('data', (chunk: string) => { text += chunk; });
@@ -134,10 +147,14 @@ function probe(headers: Record<string, string> = {}): Promise<{ status: number; 
   });
 }
 
+/** The request evidence every guard refusal row carries. */
+const requestEvidence = { sourceIp: '127.0.0.1', userAgent: USER_AGENT, details: { method: 'GET', route: '/api/v1/probe' } };
+
 /** Identity's SecurityGuard records a refusal with no bound facility this way. */
 const refusedBeforeFacility = (actor: IdentityActorContext, actorType: 'staff' | 'patient') => expect.objectContaining({
   actorType, actorSubject: actor.subject, actorAccountId: actor.accountId, action: 'auth.authorization.denied',
-  resourceType: 'authentication', outcome: 'denied', facilityId: null, actorMembershipId: null, organizationId: null });
+  resourceType: 'authentication', outcome: 'denied', facilityId: null, actorMembershipId: null, organizationId: null,
+  provenance: 'application', ...requestEvidence });
 
 describe('RemoteSecurityGuard refusals before a facility is bound', () => {
   it.each([
@@ -175,6 +192,44 @@ describe('RemoteSecurityGuard refusals before a facility is bound', () => {
     expect(response).toEqual({ status: 403, code: 'PATIENT_SCOPE_DENIED' });
     expect(rows).toEqual([refusedBeforeFacility(patient, 'patient')]);
   });
+
+  it.each([
+    ['the patient portal disabled', { patient_portal_enabled: false }, 423, 'PLATFORM_PORTAL_DISABLED'],
+    ['maintenance mode', { maintenance_mode: true }, 503, 'PLATFORM_MAINTENANCE'],
+  ])('records a patient refused by the runtime controls (%s) as the patient', async (_case, changed, status, code) => {
+    liveActor = patient;
+    Object.assign(controls, changed);
+    const response = await probe();
+    expect(response).toEqual({ status, code });
+    expect(rows).toEqual([refusedBeforeFacility(patient, 'patient')]);
+  });
+
+  it.each([
+    ['a statement timeout (57014)', Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })],
+    ['a lost connection (no code)', new Error('Connection terminated unexpectedly')],
+    ['a missing grant (42501)', Object.assign(new Error('permission denied for function control_enabled'), { code: '42501' })],
+    ['an unavailable control (55000)', Object.assign(new Error('PLATFORM_CONTROL_UNAVAILABLE'), { code: '55000' })],
+  ])('answers 503 PLATFORM_CONTROL_UNAVAILABLE when the control check fails with %s and records the refusal', async (_case, fault) => {
+    faults.control = fault;
+    const response = await probe({ 'X-Facility-ID': DEFAULT_FACILITY.id });
+    expect(response).toEqual({ status: 503, code: 'PLATFORM_CONTROL_UNAVAILABLE' });
+    expect(rows).toEqual([refusedBeforeFacility(staff, 'staff')]);
+  });
+
+  it('answers a patient 503 PLATFORM_CONTROL_UNAVAILABLE, not 401, when the control check fails', async () => {
+    liveActor = patient;
+    faults.control = Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+    const response = await probe();
+    expect(response).toEqual({ status: 503, code: 'PLATFORM_CONTROL_UNAVAILABLE' });
+    expect(rows).toEqual([refusedBeforeFacility(patient, 'patient')]);
+  });
+
+  it('fails closed with 503 DEPENDENCY_UNAVAILABLE and no row when the refusal cannot be audited', async () => {
+    faults.audit = new Error('Connection terminated unexpectedly');
+    const response = await probe();
+    expect(response).toEqual({ status: 503, code: 'DEPENDENCY_UNAVAILABLE' });
+    expect(rows).toEqual([]);
+  });
 });
 
 describe('RemoteSecurityGuard requests that bind a facility, or have no actor', () => {
@@ -191,7 +246,8 @@ describe('RemoteSecurityGuard requests that bind a facility, or have no actor', 
     expect(response).toEqual({ status: 403, code: 'PERMISSION_DENIED' });
     expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', actorSubject: staff.subject,
       action: 'security.authorization.denied', resourceType: 'http-request', outcome: 'denied', facilityId: SECOND_FACILITY.id,
-      actorMembershipId: SECOND_FACILITY.membershipId, organizationId: SECOND_FACILITY.organizationId })]);
+      actorMembershipId: SECOND_FACILITY.membershipId, organizationId: SECOND_FACILITY.organizationId, provenance: 'application',
+      ...requestEvidence })]);
   });
 
   it('records an unauthenticated request as a system refusal', async () => {
@@ -199,6 +255,7 @@ describe('RemoteSecurityGuard requests that bind a facility, or have no actor', 
     const response = await probe({ 'X-Facility-ID': DEFAULT_FACILITY.id });
     expect(response).toEqual({ status: 401, code: 'AUTHENTICATION_REQUIRED' });
     expect(rows).toEqual([expect.objectContaining({ actorType: 'system', actorSubject: null,
-      action: 'security.authorization.denied', resourceType: 'authentication', outcome: 'denied', facilityId: null })]);
+      action: 'security.authorization.denied', resourceType: 'authentication', outcome: 'denied', facilityId: null,
+      provenance: 'system', ...requestEvidence })]);
   });
 });

@@ -12,7 +12,11 @@ export interface FacilityAssignment {
 }
 
 export interface ActorContext {
-  /** Identity sends 'patient' for a patient sign-in; OCR serves staff only and refuses a patient before binding a facility. */
+  /**
+   * Identity sends 'patient' for a patient sign-in. A patient has no facility
+   * and OCR has no facility-optional route, so OCR refuses every patient
+   * request before binding a facility.
+   */
   kind?: 'staff' | 'patient';
   id: string;
   subject: string;

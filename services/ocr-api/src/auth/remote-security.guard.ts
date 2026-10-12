@@ -74,7 +74,7 @@ export class RemoteSecurityGuard implements CanActivate {
     }
     await this.audit.record({
       correlationId: request.correlationId,
-      actorType: request.actor ? 'staff' : 'system',
+      actorType: request.actor?.kind === 'patient' ? 'patient' : request.actor ? 'staff' : 'system',
       actorSubject: request.actor?.subject,
       actorAccountId: request.actor?.accountId,
       actorMembershipId: request.actor?.facility?.membershipId,

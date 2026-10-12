@@ -44,19 +44,27 @@ const patient: IdentityActorContext = { kind: 'patient', patientId: '60000000-00
 
 /** The audit row as AuditService writes it, by column. */
 interface Row { actorType: string; actorSubject: string | null; actorAccountId: string | null; actorMembershipId: string | null;
-  organizationId: string | null; facilityId: string | null; action: string; resourceType: string | null; outcome: string }
+  organizationId: string | null; facilityId: string | null; action: string; resourceType: string | null; outcome: string;
+  sourceIp: string | null; userAgent: string | null; details: Record<string, unknown>; provenance: string }
+
+/** Faults to inject: each is thrown by the query it names instead of answering it. */
+interface Faults { audit?: unknown }
+
+const USER_AGENT = 'hid-guard-spec/1.0';
 
 /**
  * A database that keeps the audit rows written and, like audit.events,
  * refuses a staff row that 0067's events_staff_facility_scope_check and
  * events_staff_membership_scope_check refuse.
  */
-function auditDatabase(rows: Row[]) {
+function auditDatabase(rows: Row[], faults: Faults) {
   return {
     query: jest.fn(async (sql: string, values: unknown[]) => {
       if (!sql.includes('insert into audit.events')) throw new Error(`unexpected query: ${sql}`);
+      if (faults.audit) throw faults.audit;
       const row = { actorType: values[1], actorSubject: values[2], actorAccountId: values[3], actorMembershipId: values[4],
-        organizationId: values[5], facilityId: values[6], action: values[8], resourceType: values[9], outcome: values[11] } as Row;
+        organizationId: values[5], facilityId: values[6], action: values[8], resourceType: values[9], outcome: values[11],
+        sourceIp: values[13], userAgent: values[14], details: JSON.parse(values[15] as string), provenance: values[16] } as Row;
       const facilityScope = row.facilityId !== null || row.actorType !== 'staff'
         || (row.action.startsWith('auth.') && ['authentication', 'session'].includes(row.resourceType ?? ''));
       const membershipScope = row.actorType !== 'staff' || row.action.startsWith('auth.')
@@ -78,10 +86,12 @@ class ProbeController {
 let app: INestApplication;
 let baseUrl: string;
 let rows: Row[];
+let faults: Faults;
 let liveActor: IdentityActorContext | undefined;
 
 beforeEach(async () => {
   rows = [];
+  faults = {};
   liveActor = staff;
   const identity = {
     authenticateRequest: jest.fn(async () => {
@@ -89,7 +99,7 @@ beforeEach(async () => {
       return liveActor;
     }),
   };
-  const database = auditDatabase(rows);
+  const database = auditDatabase(rows, faults);
 
   @Module({
     controllers: [ProbeController],
@@ -119,7 +129,7 @@ afterEach(async () => { await app.close(); });
 
 function probe(headers: Record<string, string> = {}): Promise<{ status: number; code?: string }> {
   return new Promise((resolve, reject) => {
-    const outgoing = httpRequest(`${baseUrl}/api/v1/probe`, { headers }, (response) => {
+    const outgoing = httpRequest(`${baseUrl}/api/v1/probe`, { headers: { 'User-Agent': USER_AGENT, ...headers } }, (response) => {
       let text = '';
       response.setEncoding('utf8');
       response.on('data', (chunk: string) => { text += chunk; });
@@ -130,10 +140,14 @@ function probe(headers: Record<string, string> = {}): Promise<{ status: number; 
   });
 }
 
+/** The request evidence every guard refusal row carries. */
+const requestEvidence = { sourceIp: '127.0.0.1', userAgent: USER_AGENT, details: { method: 'GET', route: '/api/v1/probe' } };
+
 /** Identity's SecurityGuard records a refusal with no bound facility this way. */
 const refusedBeforeFacility = (actor: IdentityActorContext, actorType: 'staff' | 'patient') => expect.objectContaining({
   actorType, actorSubject: actor.subject, actorAccountId: actor.accountId, action: 'auth.authorization.denied',
-  resourceType: 'authentication', outcome: 'denied', facilityId: null, actorMembershipId: null, organizationId: null });
+  resourceType: 'authentication', outcome: 'denied', facilityId: null, actorMembershipId: null, organizationId: null,
+  provenance: 'application', ...requestEvidence });
 
 describe('RemoteSecurityGuard refusals before a facility is bound', () => {
   it.each([
@@ -157,6 +171,13 @@ describe('RemoteSecurityGuard refusals before a facility is bound', () => {
     expect(response).toEqual({ status: 403, code: 'FACILITY_ACCESS_DENIED' });
     expect(rows).toEqual([refusedBeforeFacility(patient, 'patient')]);
   });
+
+  it('fails closed with 503 DEPENDENCY_UNAVAILABLE and no row when the refusal cannot be audited', async () => {
+    faults.audit = new Error('Connection terminated unexpectedly');
+    const response = await probe();
+    expect(response).toEqual({ status: 503, code: 'DEPENDENCY_UNAVAILABLE' });
+    expect(rows).toEqual([]);
+  });
 });
 
 describe('RemoteSecurityGuard requests that bind a facility, or have no actor', () => {
@@ -173,7 +194,8 @@ describe('RemoteSecurityGuard requests that bind a facility, or have no actor', 
     expect(response).toEqual({ status: 403, code: 'PERMISSION_DENIED' });
     expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', actorSubject: staff.subject,
       action: 'security.authorization.denied', resourceType: 'http-request', outcome: 'denied', facilityId: SECOND_FACILITY.id,
-      actorMembershipId: SECOND_FACILITY.membershipId, organizationId: SECOND_FACILITY.organizationId })]);
+      actorMembershipId: SECOND_FACILITY.membershipId, organizationId: SECOND_FACILITY.organizationId, provenance: 'application',
+      ...requestEvidence })]);
   });
 
   it('records an unauthenticated request as a system refusal', async () => {
@@ -181,6 +203,7 @@ describe('RemoteSecurityGuard requests that bind a facility, or have no actor', 
     const response = await probe({ 'X-Facility-ID': DEFAULT_FACILITY.id });
     expect(response).toEqual({ status: 401, code: 'AUTHENTICATION_REQUIRED' });
     expect(rows).toEqual([expect.objectContaining({ actorType: 'system', actorSubject: null,
-      action: 'security.authorization.denied', resourceType: 'authentication', outcome: 'denied', facilityId: null })]);
+      action: 'security.authorization.denied', resourceType: 'authentication', outcome: 'denied', facilityId: null,
+      provenance: 'system', ...requestEvidence })]);
   });
 });

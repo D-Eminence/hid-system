@@ -81,11 +81,11 @@ export class RemoteSecurityGuard implements CanActivate {
       );
       return result.rows[0]?.enabled === true;
     } catch (error) {
-      if (isDatabaseError(error) && error.code === '55000') {
-        if (String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) return false;
-        throw new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
-      }
-      throw error;
+      if (isDatabaseError(error) && error.code === '55000'
+        && String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) return false;
+      // Any other fault (a timeout, a lost connection, a missing grant) leaves
+      // the control unknown. Answer it as such, not as the caller's 401.
+      throw new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
     }
   }
 
