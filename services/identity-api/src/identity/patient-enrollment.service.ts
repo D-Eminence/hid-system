@@ -6,6 +6,7 @@ import * as argon2 from 'argon2';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
+import { consumeRateLimit, rateLimitBlocked, type RateLimitWindow } from '../auth/rate-limit';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
@@ -190,12 +191,16 @@ export class PatientEnrollmentService {
       const enrollmentLimited = await this.consumeRate(client, 'enrollment',
         this.hmac('patient-enrollment-id', enrollment.id),
         this.env.OTP_RATE_MAX_REQUESTS * 3);
+      // A recipient whose code failure budget is spent gets no code: none
+      // could be verified before the block ends. A read; it takes no lock.
+      const failureBlocked = await rateLimitBlocked(client, 'recipient',
+        this.contactFailureBucket(recipientHmac));
       const readiness = await client.query<{ ready: boolean }>(
         'select identity.public_patient_enrollment_ready() as ready');
       const contactBound = await client.query<{ bound: boolean }>(
         'select identity.public_patient_contact_already_bound($1,$2) as bound',
         [channel, lookupHmac]);
-      return { limited: ipLimited || recipientLimited || enrollmentLimited,
+      return { limited: ipLimited || recipientLimited || enrollmentLimited || failureBlocked,
         ready: readiness.rows[0]?.ready === true, contactBound: contactBound.rows[0]?.bound === true };
     });
     if (preflight.limited) throw this.rateLimited();
@@ -259,6 +264,16 @@ export class PatientEnrollmentService {
         || challenge.delivery_outcome === 'definitive_failure'
         || challenge.channel !== row.contact_channel
         || challenge.recipient_hmac !== row.contact_hmac) throw this.invalidCode();
+      // One failure budget per recipient, across its challenges and
+      // enrollments, so that a resend or a new enrollment naming the same
+      // contact does not bring five more guesses. Keyed by the recipient HMAC,
+      // never by client IP. Once spent it refuses every code, a correct one
+      // too, for one window, before the comparison and without counting.
+      // Read, comparison and count run under the bucket's lock, taken after
+      // the enrollment and challenge locks; no other challenge is written.
+      const failureBucket = this.contactFailureBucket(challenge.recipient_hmac);
+      await this.lockContactFailureBucket(client, failureBucket);
+      if (await rateLimitBlocked(client, 'recipient', failureBucket)) return false;
       const supplied = this.hmac('patient-enrollment-otp', row.id, challengeId, challenge.recipient_hmac, code);
       if (!this.equalHex(challenge.verifier_hmac, supplied)) {
         await client.query(
@@ -266,6 +281,7 @@ export class PatientEnrollmentService {
              invalidated_at=case when failed_attempts+1>=max_attempts then clock_timestamp() else null end,
              invalidation_reason=case when failed_attempts+1>=max_attempts then 'attempts_exhausted' else null end
            where id=$1`, [challenge.id]);
+        await consumeRateLimit(client, 'recipient', failureBucket, this.contactFailureWindow());
         return false;
       }
       await client.query(
@@ -482,6 +498,32 @@ export class PatientEnrollmentService {
          else identity.public_patient_enrollment_rates.window_started_at end,
        request_count=$3`, [scope, bucket, next, expired]);
     return next > limit;
+  }
+
+  /**
+   * The contact-code failure bucket in `auth.otp_rate_limits` (scope
+   * `recipient`): its own HMAC domain over the recipient HMAC, so it matches
+   * neither the stored recipient HMAC nor any OTP recovery bucket. Unlike
+   * enrollment's own rate rows (pruned after 48 hours), nothing deletes these
+   * rows yet; the prune is a follow-up (DATABASE.md, the 0051 paragraph).
+   */
+  private contactFailureBucket(recipientHmac: string) {
+    return this.hmac('patient-enrollment-contact-failure', recipientHmac);
+  }
+
+  /** The MAX-th failure within the window blocks the recipient for one window. */
+  private contactFailureWindow(): RateLimitWindow {
+    return { windowSeconds: this.env.PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS,
+      maxRequests: this.env.PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX - 1 };
+  }
+
+  /**
+   * The transaction lock consumeRateLimit takes for the bucket (rate-limit.ts),
+   * taken before the blocked read so that concurrent verifications for one
+   * recipient cannot all read "not blocked" before any of them has counted.
+   */
+  private async lockContactFailureBucket(client: PoolClient, bucket: string) {
+    await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))', [`otp-rate:recipient:${bucket}`]);
   }
 
   private networkHmac(remoteIp: string | undefined) {

@@ -82,6 +82,18 @@ enrollment path. It keeps provider identity evidence encrypted in a pending,
 unique-NIN record; a single selected contact OTP must be consumed before a
 password-backed account, canonical patient, NIN binding, and HIDCode can be
 created atomically. Its rate counters and OTPs are scoped to the enrollment.
+Wrong contact codes also count against one failure budget per recipient,
+across its challenges and enrollments, in `auth.otp_rate_limits` (scope
+`recipient`, a keyed HMAC of the recipient HMAC; no schema change;
+D-Eminence/hid-system#61, release checklist §2). Unlike the
+enrollment counters, which `identity.prune_expired_public_patient_enrollments`
+deletes once their window started more than 48 hours ago, these rows are never
+deleted: a contact that ever got a wrong enrollment code keeps one, even if it
+never enrolls. Follow-up for the next migration that changes
+`auth.otp_rate_limits`: prune stale `recipient` rows (window started more than
+48 hours ago, `blocked_until` passed) through a `SECURITY DEFINER` function,
+with no runtime `DELETE` grant; that also covers OTP recovery's `recipient`
+buckets.
 The private synthetic rehearsal runs
 `services/identity-api/scripts/verify-patient-enrollment-runtime.mjs`, which
 exercises this path over HTTP under the exact Identity runtime role on a

@@ -10,7 +10,7 @@
 // code. Every NIN, name, contact and password here is invented.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
@@ -527,6 +527,73 @@ try {
     ['hid-public-qoreid-enrollment']), 2);
   check('every successful enrollment start (three) and activation (one per patient and each replay within the budget) is audited as a success and refusals as failures, each new patient\'s activation is recorded once, and no audit detail contains a NIN, password or code');
 
+  // 14. One contact-code failure budget per recipient, across its challenges
+  // and whatever network each guess comes from (in production every client
+  // address is the load balancer's). With the default budget the fifth wrong
+  // code within 15 minutes refuses every code for that recipient, the correct
+  // one too, and the contact step sends it none, for 15 minutes.
+  const networkC = '198.51.100.50';
+  const startedC = await post('/identity/patient-enrollments', startBody('90000000003'),
+    { key: randomUUID(), network: networkC });
+  expectProblem(startedC, 200);
+  const cookieC = enrollmentCookie(startedC);
+  const emailC = `patient-c-${randomUUID().slice(0, 8)}@example.invalid`;
+  const contactC = () => post('/identity/patient-enrollments/contact', { channel: 'email', contact: emailC },
+    { cookie: cookieC, network: networkC });
+  const verifyC = (challengeId, code, network) => post('/identity/patient-enrollments/contact/verify',
+    { challengeId, code }, { cookie: cookieC, network });
+  // Fixture, as the owner: ends a challenge's resend cooldown (not under test here); its expiry is unchanged.
+  const endCooldown = async challengeId => assert.equal((await owner.query(`update identity.public_patient_enrollment_otps
+    set created_at = created_at - interval '2 minutes' where id = $1`, [challengeId])).rowCount, 1);
+  const otherCode = code => (code === '000000' ? '000001' : '000000');
+  const rateRowsBefore = await count('select count(*) from auth.otp_rate_limits');
+  const firstC = await contactC();
+  expectProblem(firstC, 200);
+  const firstCodeC = lastCode('SIGNUP_VERIFY', emailC);
+  assert.equal(firstCodeC.challengeId, firstC.body.challengeId);
+  for (const host of [51, 52, 53]) {
+    expectProblem(await verifyC(firstC.body.challengeId, otherCode(firstCodeC.code), `198.51.100.${host}`),
+      422, 'OTP_INVALID');
+  }
+  await endCooldown(firstC.body.challengeId);
+  const secondC = await contactC();
+  expectProblem(secondC, 200);
+  const secondCodeC = lastCode('SIGNUP_VERIFY', emailC);
+  assert.equal(secondCodeC.challengeId, secondC.body.challengeId);
+  for (const host of [54, 55]) {
+    expectProblem(await verifyC(secondC.body.challengeId, otherCode(secondCodeC.code), `198.51.100.${host}`),
+      422, 'OTP_INVALID');
+  }
+  const refusedCorrect = await verifyC(secondC.body.challengeId, secondCodeC.code, '198.51.100.56');
+  assert.equal(refusedCorrect.status, 422,
+    `A correct contact code was accepted after its recipient spent the failure budget: ${refusedCorrect.status} ${JSON.stringify(refusedCorrect.body)}`);
+  expectProblem(refusedCorrect, 422, 'OTP_INVALID');
+  const challengeC = (await owner.query(`select failed_attempts, consumed_at, invalidated_at, recipient_hmac
+    from identity.public_patient_enrollment_otps where id = $1`, [secondC.body.challengeId])).rows[0];
+  assert.deepEqual({ ...challengeC, recipient_hmac: undefined },
+    { failed_attempts: 2, consumed_at: null, invalidated_at: null, recipient_hmac: undefined },
+    'A correct contact code refused for the recipient budget must leave its challenge open and uncounted');
+  assert.equal((await owner.query("select state from identity.public_patient_enrollments where nin_last4 = '0003'"))
+    .rows[0].state, 'verify_contact');
+  // The budget is one row, keyed by the recipient's HMAC in its own HMAC
+  // domain; six networks' guesses wrote no other row.
+  const budgetBucket = createHmac('sha256', Buffer.from(process.env.OTP_HMAC_KEY_B64, 'base64'))
+    .update(`patient-enrollment-contact-failure\u001f${challengeC.recipient_hmac}`, 'utf8').digest('hex');
+  assert.equal(await count('select count(*) from auth.otp_rate_limits'), rateRowsBefore + 1,
+    'The wrong contact codes must write exactly one rate-limit row, the recipient failure budget');
+  assert.deepEqual((await owner.query(`select request_count, blocked_until > clock_timestamp() as blocked
+    from auth.otp_rate_limits where scope = 'recipient' and bucket_hmac = $1`, [budgetBucket])).rows,
+  [{ request_count: 5, blocked: true }], 'The recipient failure budget must have counted five wrong codes and be blocked');
+  const deliveriesBefore = deliveries.length;
+  await endCooldown(secondC.body.challengeId);
+  expectProblem(await contactC(), 429, 'ENROLLMENT_RATE_LIMITED');
+  assert.equal(deliveries.length, deliveriesBefore, 'The contact step must send no code to a recipient whose failure budget is spent');
+  // As the owner, end the block early: the same open challenge's code now verifies.
+  assert.equal((await owner.query(`update auth.otp_rate_limits set blocked_until = null
+    where scope = 'recipient' and bucket_hmac = $1 and blocked_until > clock_timestamp()`, [budgetBucket])).rowCount, 1);
+  const verifiedC = await verifyC(secondC.body.challengeId, secondCodeC.code, networkC);
+  expectProblem(verifiedC, 200); assert.equal(verifiedC.body.stage, 'set_password');
+  check('the contact code has one failure budget per recipient across its challenges and networks: after five wrong codes (three on a challenge, two on its resend, each from another network) the correct code is refused 422 OTP_INVALID with its challenge left open, the contact step sends that recipient no code (429 ENROLLMENT_RATE_LIMITED), the budget is one recipient-keyed rate row, and once the block is lifted the same code verifies');
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: runtimeRole,
     qoreid: 'local stub behind the real adapter; no QoreID call', turnstile: 'local Siteverify stub',
     notification: 'local stub; no delivery', nin_lookups: ninLookups.length, deliveries: deliveries.length,
