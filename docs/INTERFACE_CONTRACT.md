@@ -372,6 +372,33 @@ Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 never database rows. Problem Details status/code, correlation, bounded timeout,
 and safe JSON request bodies are preserved by the typed client.
 
+After that validation, the EHR and OCR guards (`RemoteSecurityGuard`) bind the
+facility named by `X-Facility-ID` on every route that is not marked
+facility-optional (only EHR's `GET /api/v1/ehr/me/records` is). A missing or
+malformed header is `400 FACILITY_REQUIRED`. A facility where the actor has no
+active membership, such as a stale tab after the membership ended, is
+`403 FACILITY_ACCESS_DENIED`. Before binding, EHR also applies the runtime
+controls (`503 PLATFORM_MAINTENANCE`, `423 PLATFORM_PORTAL_DISABLED`) and
+refuses a patient on a workforce route (`403 PATIENT_SCOPE_DENIED`). A
+permission missing from the bound membership is `403 PERMISSION_DENIED`. Each
+guard refusal is audited before it is answered:
+
+* refused before a facility is bound, with an actor: `auth.authorization.denied`
+  on resource type `authentication`, as the `staff` or `patient` actor with
+  subject and account, and no facility, membership or organization. This is how
+  Identity's own `SecurityGuard` records it;
+* refused after a facility is bound: `security.authorization.denied` on
+  `http-request`, with the bound facility, its membership and organization;
+* refused without an actor: a `system` `security.authorization.denied` on
+  `authentication`.
+
+A refusal keeps its own status and code. If its audit row cannot be written,
+the request fails closed with `503 DEPENDENCY_UNAVAILABLE`. Until the first
+rule above, every refusal of a staff actor before a facility was bound answered
+that `503` and was not audited. Its row carried the default membership but no
+facility, and a staff row without a facility is accepted only as an `auth.*`
+event on `authentication` or `session` (migration 0067).
+
 The patient decision is a `POST` from the service even when the request it
 serves is a read, and a same-origin browser `GET` carries neither `Origin` nor
 `X-CSRF-Token`. EHR, Lab, OCR and Pharmacy therefore also report the method of

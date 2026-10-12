@@ -1,0 +1,186 @@
+import { Controller, Get, type INestApplication, Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { Test } from '@nestjs/testing';
+import type { IdentityActorContext } from '@hid/api-client';
+import { request as httpRequest } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { AuditInterceptor } from '../audit/audit.interceptor';
+import { AuditService } from '../audit/audit.service';
+import { RequirePermissions } from '../common/decorators';
+import { CorrelationMiddleware } from '../common/correlation.middleware';
+import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
+import { DatabaseService } from '../database/database.service';
+import { IdentityApiService } from '../integrations/identity-api.service';
+import { RemoteSecurityGuard } from './remote-security.guard';
+
+// A staff request the guard refused before it bound a facility (no or
+// malformed X-Facility-ID, a facility the actor is no longer active at)
+// answered 503 DEPENDENCY_UNAVAILABLE instead of its refusal. The guard
+// recorded it as a `security.authorization.denied` http-request with the
+// membership and organization of the actor's default facility but no facility,
+// and a staff row without a facility is accepted only as an `auth.*` event on
+// authentication or session (AuditService.assertActorFacility; CHECK
+// constraints from migration 0067). The audit write failed closed, so the
+// refusal was neither answered nor recorded. These tests run the real guard,
+// audit interceptor, audit service and problem filter, as AppModule and
+// main.ts register them, over a database that refuses what 0067 refuses.
+
+const DEFAULT_FACILITY = { id: '30000000-0000-4000-8000-000000000001', membershipId: '40000000-0000-4000-8000-000000000001',
+  organizationId: '50000000-0000-4000-8000-000000000001', name: 'Lagos General', roles: ['records-officer'],
+  permissions: ['ocr.job.read'], isPrimary: true };
+const SECOND_FACILITY = { id: '30000000-0000-4000-8000-000000000002', membershipId: '40000000-0000-4000-8000-000000000002',
+  organizationId: '50000000-0000-4000-8000-000000000002', name: 'Ikeja Clinic', roles: ['receptionist'], permissions: [],
+  isPrimary: false };
+const OTHER_FACILITY = '30000000-0000-4000-8000-000000000099';
+
+/** A staff actor as Identity's service session returns it: its default facility attached, none bound. */
+const staff: IdentityActorContext = { kind: 'staff', id: 'staff:s', subject: 'staff:s', accountId: '20000000-0000-4000-8000-0000000000b1',
+  roles: ['records-officer'], permissions: ['ocr.job.read'], platformRoles: [], platformPermissions: [],
+  facilityIds: [DEFAULT_FACILITY.id, SECOND_FACILITY.id], facilities: [DEFAULT_FACILITY, SECOND_FACILITY],
+  facility: DEFAULT_FACILITY, role: 'records-officer', authenticationMethod: 'local' };
+const patient: IdentityActorContext = { kind: 'patient', patientId: '60000000-0000-4000-8000-000000000001', id: 'patient:p',
+  subject: 'patient:p', accountId: '20000000-0000-4000-8000-0000000000c1', roles: [], permissions: [], facilityIds: [],
+  facilities: [], authenticationMethod: 'local' };
+
+/** The audit row as AuditService writes it, by column. */
+interface Row { actorType: string; actorSubject: string | null; actorAccountId: string | null; actorMembershipId: string | null;
+  organizationId: string | null; facilityId: string | null; action: string; resourceType: string | null; outcome: string }
+
+/**
+ * A database that keeps the audit rows written and, like audit.events,
+ * refuses a staff row that 0067's events_staff_facility_scope_check and
+ * events_staff_membership_scope_check refuse.
+ */
+function auditDatabase(rows: Row[]) {
+  return {
+    query: jest.fn(async (sql: string, values: unknown[]) => {
+      if (!sql.includes('insert into audit.events')) throw new Error(`unexpected query: ${sql}`);
+      const row = { actorType: values[1], actorSubject: values[2], actorAccountId: values[3], actorMembershipId: values[4],
+        organizationId: values[5], facilityId: values[6], action: values[8], resourceType: values[9], outcome: values[11] } as Row;
+      const facilityScope = row.facilityId !== null || row.actorType !== 'staff'
+        || (row.action.startsWith('auth.') && ['authentication', 'session'].includes(row.resourceType ?? ''));
+      const membershipScope = row.actorType !== 'staff' || row.action.startsWith('auth.')
+        || (row.actorAccountId !== null && row.actorMembershipId !== null && row.facilityId !== null);
+      if (!facilityScope || !membershipScope) throw Object.assign(new Error('audit.events check violation'), { code: '23514' });
+      rows.push(row);
+      return { rows: [], rowCount: 1 };
+    }),
+  } as unknown as DatabaseService;
+}
+
+@Controller('probe')
+class ProbeController {
+  @Get()
+  @RequirePermissions('ocr.job.read')
+  read() { return { ok: true }; }
+}
+
+let app: INestApplication;
+let baseUrl: string;
+let rows: Row[];
+let liveActor: IdentityActorContext | undefined;
+
+beforeEach(async () => {
+  rows = [];
+  liveActor = staff;
+  const identity = {
+    authenticateRequest: jest.fn(async () => {
+      if (!liveActor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+      return liveActor;
+    }),
+  };
+  const database = auditDatabase(rows);
+
+  @Module({
+    controllers: [ProbeController],
+    providers: [
+      AuditService,
+      { provide: DatabaseService, useValue: database },
+      { provide: IdentityApiService, useValue: identity },
+      { provide: APP_GUARD, useClass: RemoteSecurityGuard },
+      { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+    ],
+  })
+  class ProbeModule implements NestModule {
+    configure(consumer: MiddlewareConsumer): void {
+      consumer.apply(CorrelationMiddleware).forRoutes('{*path}');
+    }
+  }
+
+  const module = await Test.createTestingModule({ imports: [ProbeModule] }).compile();
+  app = module.createNestApplication({ logger: false });
+  app.setGlobalPrefix('api/v1');
+  app.useGlobalFilters(new ProblemDetailsFilter());
+  await app.listen(0, '127.0.0.1');
+  baseUrl = `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
+});
+
+afterEach(async () => { await app.close(); });
+
+function probe(headers: Record<string, string> = {}): Promise<{ status: number; code?: string }> {
+  return new Promise((resolve, reject) => {
+    const outgoing = httpRequest(`${baseUrl}/api/v1/probe`, { headers }, (response) => {
+      let text = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk: string) => { text += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode ?? 0, code: (JSON.parse(text) as { code?: string }).code }));
+    });
+    outgoing.on('error', reject);
+    outgoing.end();
+  });
+}
+
+/** Identity's SecurityGuard records a refusal with no bound facility this way. */
+const refusedBeforeFacility = (actor: IdentityActorContext, actorType: 'staff' | 'patient') => expect.objectContaining({
+  actorType, actorSubject: actor.subject, actorAccountId: actor.accountId, action: 'auth.authorization.denied',
+  resourceType: 'authentication', outcome: 'denied', facilityId: null, actorMembershipId: null, organizationId: null });
+
+describe('RemoteSecurityGuard refusals before a facility is bound', () => {
+  it.each([
+    ['no X-Facility-ID', {}],
+    ['a malformed X-Facility-ID', { 'X-Facility-ID': 'not-a-uuid' }],
+  ])('answers 400 FACILITY_REQUIRED for %s and records an auth.authorization.denied row', async (_case, headers) => {
+    const response = await probe(headers);
+    expect(response).toEqual({ status: 400, code: 'FACILITY_REQUIRED' });
+    expect(rows).toEqual([refusedBeforeFacility(staff, 'staff')]);
+  });
+
+  it('answers 403 FACILITY_ACCESS_DENIED for a facility the actor is not active at and records the refusal', async () => {
+    const response = await probe({ 'X-Facility-ID': OTHER_FACILITY });
+    expect(response).toEqual({ status: 403, code: 'FACILITY_ACCESS_DENIED' });
+    expect(rows).toEqual([refusedBeforeFacility(staff, 'staff')]);
+  });
+
+  it('records a patient refused at a facility as the patient', async () => {
+    liveActor = patient;
+    const response = await probe({ 'X-Facility-ID': DEFAULT_FACILITY.id });
+    expect(response).toEqual({ status: 403, code: 'FACILITY_ACCESS_DENIED' });
+    expect(rows).toEqual([refusedBeforeFacility(patient, 'patient')]);
+  });
+});
+
+describe('RemoteSecurityGuard requests that bind a facility, or have no actor', () => {
+  it('passes a request for the actor\'s own facility, audited with that facility\'s membership', async () => {
+    const response = await probe({ 'X-Facility-ID': DEFAULT_FACILITY.id });
+    expect(response.status).toBe(200);
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'api.get./api/v1/probe', outcome: 'success',
+      facilityId: DEFAULT_FACILITY.id, actorMembershipId: DEFAULT_FACILITY.membershipId,
+      organizationId: DEFAULT_FACILITY.organizationId })]);
+  });
+
+  it('records a refusal after a facility is bound with that facility, its membership and organization', async () => {
+    const response = await probe({ 'X-Facility-ID': SECOND_FACILITY.id });
+    expect(response).toEqual({ status: 403, code: 'PERMISSION_DENIED' });
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', actorSubject: staff.subject,
+      action: 'security.authorization.denied', resourceType: 'http-request', outcome: 'denied', facilityId: SECOND_FACILITY.id,
+      actorMembershipId: SECOND_FACILITY.membershipId, organizationId: SECOND_FACILITY.organizationId })]);
+  });
+
+  it('records an unauthenticated request as a system refusal', async () => {
+    liveActor = undefined;
+    const response = await probe({ 'X-Facility-ID': DEFAULT_FACILITY.id });
+    expect(response).toEqual({ status: 401, code: 'AUTHENTICATION_REQUIRED' });
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'system', actorSubject: null,
+      action: 'security.authorization.denied', resourceType: 'authentication', outcome: 'denied', facilityId: null })]);
+  });
+});
