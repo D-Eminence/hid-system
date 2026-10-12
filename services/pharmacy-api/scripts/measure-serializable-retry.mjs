@@ -7,7 +7,9 @@
 // rehearsal database, with an Identity fake that answers each authorization
 // after LATENCY milliseconds (inside the transaction, as in production).
 // SERIALIZABLE tracks reads by index page, so on these small tables such writes
-// cancel each other (40001) even though they touch different rows.
+// cancel each other (40001) even though they touch different rows. Each work
+// item has its active EHR prescription, which the dispensing guard reads and
+// share-locks (0080).
 //
 // Run as the rehearsal runs the runtime verifiers (non-root, PGHOST pointing at
 // the owned /tmp/hid-tuf-migration.* cluster, PGDATABASE=hid_rehearsal,
@@ -47,6 +49,8 @@ try {
   const f = { org: id(), facility: id(), patient: id(), encounter: id(), prescriber: id(),
     members: Array.from({ length: 4 }, () => ({ account: id(), staff: id(), membership: id() })),
     work: Array.from({ length: ROUNDS * WIDTH }, () => id()) };
+  const prescriptions = new Map(f.work.map((w) => [w, id()]));
+  const prescriberMembership = id(), prescriberStaff = id();
   await database.fixture(async (client) => {
     await client.query('insert into identity.organizations (id,name,slug) values ($1,$2,$3)', [f.org, 'Stress Org', `stress-${f.org.slice(0, 8)}`]);
     await client.query(`insert into identity.facilities (id,organization_id,name,code,timezone,active,lifecycle_status)
@@ -64,8 +68,18 @@ try {
     }
     await client.query(`insert into auth.accounts (id,subject,email,display_name,status) values ($1,$2,$3,'Prescriber','active')`,
       [f.prescriber, `synthetic:stress-prescriber:${f.prescriber}`, `prescriber-${f.prescriber}@example.invalid`]);
+    await client.query(`insert into identity.staff (id,account_id,full_name,email,verification_status,default_role)
+      values ($1,$2,'Prescriber',$3,'verified','doctor')`, [prescriberStaff, f.prescriber, `prescriber-${f.prescriber}@example.invalid`]);
+    await client.query(`insert into identity.staff_facility_memberships (id,staff_id,account_id,organization_id,facility_id,
+      membership_role,app_role) values ($1,$2,$3,$4,$5,'doctor','doctor')`, [prescriberMembership, prescriberStaff, f.prescriber, f.org, f.facility]);
     await client.query(`insert into identity.patients (id,hid_code,first_name,last_name,full_name,status)
       values ($1,'HID-STRSSAAA','Stress','Patient','Stress Patient','active')`, [f.patient]);
+    await client.query(`insert into ehr.encounters (id,patient_id,facility_id,created_by,created_by_membership_id,encounter_type,status,started_at)
+      values ($1,$2,$3,$4,$5,'ambulatory','in_progress','2026-10-01 07:30:00+00')`, [f.encounter, f.patient, f.facility, f.prescriber, prescriberMembership]);
+    for (const w of f.work) await client.query(`insert into ehr.prescriptions (id,encounter_id,patient_id,facility_id,created_by,
+      created_by_membership_id,medication_display,frequency,instructions,status,row_version,created_at)
+      values ($1,$2,$3,$4,$5,$6,'Amoxicillin 500 mg','Every 8 hours','Take after food','active',1,'2026-10-01 08:00:00+00')`,
+    [prescriptions.get(w), f.encounter, f.patient, f.facility, f.prescriber, prescriberMembership]);
     await client.query(`insert into identity.purpose_of_use_codes (code,display,source_system) values ('direct-care','Direct patient care','stress') on conflict (code) do nothing`);
     for (const m of f.members) await client.query(`insert into identity.consent_grants (id,patient_id,staff_id,account_id,membership_id,facility_id,scope,
       purpose_of_use,status,reason,starts_at,expires_at) values ($1,$2,$3,$4,$5,$6,'write_records','direct-care','active','Stress consent',
@@ -74,7 +88,7 @@ try {
       source_ehr_prescription_id,source_ehr_prescription_version,source_encounter_id,source_status,medication_display,frequency,instructions,
       prescribed_by,prescribed_at,accepted_by,accepted_by_membership_id,acceptance_reason,idempotency_key,request_sha256,correlation_id)
       values ($1,$2,$3,$3,$4,1,$5,'active','Amoxicillin 500 mg','Every 8 hours','Take after food',$6,'2026-10-01 08:00:00+00',$7,$8,
-      'Stress accepted',$9,repeat('a',64),'pharmacy-stress-probe')`, [w, f.patient, f.facility, id(), f.encounter, f.prescriber, f.members[0].account,
+      'Stress accepted',$9,repeat('a',64),'pharmacy-stress-probe')`, [w, f.patient, f.facility, prescriptions.get(w), f.encounter, f.prescriber, f.members[0].account,
       f.members[0].membership, `stress-accept-${w}`]);
   });
   pharmacy = await startService({ require, service });

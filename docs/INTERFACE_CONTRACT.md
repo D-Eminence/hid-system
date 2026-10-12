@@ -797,12 +797,45 @@ prescriber, and timestamp snapshot. Pharmacy reauthorizes the actor and
 patient, enforces same-facility processing, and returns an `accepted` work item.
 That result never means `dispensed`.
 
+The database binds the acceptance to the EHR row (`pharmacy.validate_work_item`,
+0080): the snapshot must equal the prescription exactly (patient, facility,
+encounter, version, `active` status, medication, dose, route, frequency,
+instructions and prescriber). Otherwise Pharmacy answers
+`409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE` (`application/problem+json`) and
+writes no work item, event, outbox or audit row; this covers a prescription
+cancelled, put on hold or edited after EHR's eligibility check, which commits
+before EHR calls Pharmacy. EHR passes the status and code through, so its
+handoff command answers the same `409`. An identical replay is answered before
+the check and returns the accepted work item, even after a cancel.
+`prescribedAt`, `startsOn` and `endsOn` are stored as sent and not compared
+in this release, so EHR builds that send the time at the millisecond, or the
+dates a day early from a process east of UTC, still hand off; comparing them
+exactly is a follow-up for a later release.
+
 Dispensing is a separate Pharmacy command requiring an accepted work item,
 expected work-item version, positive quantity/unit, reason, pharmacist
 permission, non-break-glass write authorization, and idempotency. This slice
 allows one full dispensing per work item; partial fills and refills are not
 modeled. Reversal requires the exact dispensing version and appends a preserved
 relationship rather than updating or deleting the original event.
+
+Dispensing also requires the work item's EHR prescription to be `active` at the
+version Pharmacy accepted (`pharmacy.validate_dispensing`, 0080). `POST
+/api/v1/pharmacy/work-items/:workItemId/dispensings` answers, in order:
+`404 PHARMACY_WORK_ITEM_NOT_FOUND`, `403 PHARMACY_ACCESS_DENIED`,
+`412 PHARMACY_WORK_ITEM_VERSION_CONFLICT`, the replay of an identical earlier
+dispensing (`201`, also after the prescription was cancelled: that dispensing
+happened), `409 PHARMACY_WORK_ITEM_ALREADY_DISPENSED`, then
+`409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` when the prescription was cancelled,
+marked entered in error, put on hold, completed or changed to a later version
+(any EHR edit, or a hold and resume), or cannot be read; nothing is written. A
+cancel committed while the dispensing runs is read on the transaction's retry
+and refused the same way. A cancel committed after the dispensing does not undo
+it and is reported to neither side. Reversal does not read the prescription.
+Current default: work whose prescription changed after acceptance stays listed
+as `accepted` but cannot be dispensed or accepted again (one work item per
+prescription); the remedy is a new EHR prescription and handoff. Other database
+refusals keep their earlier answers.
 
 The OCR import command accepts only the exact reviewed document/job/extraction/
 validation/version/publication provenance and bounded medication text. Its
@@ -1049,6 +1082,20 @@ workload header is mandatory. Production rejects shared-secret mode and
 requires rotating Pharmacy-audience JWT files plus exact EHR/OCR subject
 verification. The Lab client follows the same bounded retry and per-attempt
 credential-refresh policy.
+
+Pharmacy accepts an EHR prescription only when the snapshot equals the EHR row
+(`pharmacy.validate_work_item`, 0080), and a later release will also compare
+`prescribedAt`, `startsOn` and `endsOn` exactly, once no EHR build that sends
+them through a JavaScript `Date` can still be deployed or rolled back to. EHR
+therefore sends `prescribedAt` as the prescription's `created_at` rendered by
+PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`) and `startsOn`
+and `endsOn` as `YYYY-MM-DD`, never through a `Date`, which keeps only
+milliseconds and turns a date into local midnight (the day before in a process
+east of UTC). Pharmacy's idempotency digest covers the text of the request, so
+an acceptance sent by an earlier EHR build and sent again with the same
+`Idempotency-Key`, or for the same prescription, after the upgrade gets
+`409 IDEMPOTENCY_CONFLICT`; the reverse holds during a rolling deploy or after
+a rollback. Pharmacy still has its work item.
 
 ## 19. Platform Administration API
 
