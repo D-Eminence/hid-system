@@ -199,6 +199,8 @@ patient mapping on use.
 grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
 returns at most 50 completed encounters and 50 current signed/amended note
 revisions, after fresh Identity authorization through the EHR workload caller.
+It names the other five record categories as withheld from the patient, not as
+absent (§11, "Record summaries").
 These routes accept no browser-selected patient identity. Patient record access
 is read-only and owning-service disclosure/audit is atomic. The internal
 `GET /api/v1/identity/service/patient-self-authorization` requires both the
@@ -220,6 +222,8 @@ notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
 Activation also requires the platform `break_glass_enabled` control inside the
 activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
+The summary's sections, the read permission each needs, its limits and audit
+counts are in §11, "Record summaries".
 
 Patient access-request decisions are session-bound patient commands:
 `GET /api/v1/identity/me/access-requests`,
@@ -794,6 +798,60 @@ only if it sorts after the last row shown; reload the first page to see newer
 rows. Before the microsecond cursor, rows that sort after the last row shown
 within its millisecond (earlier in that millisecond, or tied with a lower
 `id`) were skipped.
+
+### Record summaries
+
+Two read-only summaries return the same seven arrays, each newest first:
+`encounters` (completed), `notes` (signed or amended, with the current
+revision's content), `vitals`, `diagnoses`, `prescriptions`, `labRequests` and
+`documents`.
+
+- `GET /api/v1/ehr/me/records`: the patient's own records, from every facility.
+- `GET /api/v1/ehr/patients/:patientId/emergency-records`: the break-glass
+  summary of the active facility (`X-Facility-ID`, `X-Purpose-Of-Use: emergency`).
+
+Both also return:
+
+| Field | Meaning |
+|---|---|
+| `released` | the categories read for this caller, in the order above |
+| `withheld` | the other categories. A withheld category is not read; its array is always empty and means "not released to this caller", never "no records" |
+| `limits` | per released section, the most rows it shows: 50 encounters, 50 notes and 100 of each other section |
+| `truncated` | per released section, `true` when more rows exist than its limit; the section then holds the newest `limits[section]` rows |
+| `limit` | `50`, the smallest section limit, kept for existing clients; read `limits` and `truncated` instead |
+
+**Patient summary.** Only encounters and notes are released to the patient:
+`released` is `["encounters","notes"]` and `withheld` is
+`["vitals","diagnoses","prescriptions","labRequests","documents"]`. Which other
+categories are released, and on which conditions, is an open product decision;
+this is the current default. The audit event `ehr.patient.self.records.read`
+records `encounterCount`, `noteCount` and `withheldCategories`.
+
+**Emergency summary.** Of the seven categories it returns those the reader
+holds the read permission for, pending a decision on the break-glass scope.
+The route requires `ehr.encounter.read` and `ehr.note.read`, so encounters and
+notes are always read. Each other category needs the permission its own routes
+require: vitals `ehr.vital.read`, diagnoses `ehr.diagnosis.read`, prescriptions
+`ehr.prescription.read`, lab requests `ehr.lab-request.read` and documents
+`ehr.document.read`, at the active facility. Break-glass is not an
+authorization bypass: a category the reader lacks the permission for is
+withheld. The seeded doctor, clinician and nurse roles hold all seven.
+
+- `documents` lists only documents whose effective status is `available`: the
+  latest scan of the exact stored object version and SHA-256 is clean, the rule
+  the download applies. Each has `status` `available`, `scanStatus` `clean`,
+  and `mediaType` as the scan detected it (as declared if the scan named none).
+- `vitals` are returned as first recorded (the vital row's eight measurement
+  columns, which no API route changes), with the same fields as before; a
+  vital's corrections are not applied. Applying them is pending the product
+  decision on correction semantics (proposed default: the current correction
+  is the whole current set, as Health-id's clinician chart applies it); the
+  implementation is preserved in commit `7401193` for when the decision lands.
+- The audit event `ehr.emergency.records.read` records the count of each
+  category read, and the categories withheld, and nothing else:
+  `encounterCount`, `noteCount`, `vitalCount`, `diagnosisCount`,
+  `prescriptionCount`, `labRequestCount`, `documentCount` (a withheld category
+  has no count) and `withheldCategories`.
 
 ## 12. Lab
 

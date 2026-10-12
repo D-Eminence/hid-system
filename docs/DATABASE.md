@@ -2112,3 +2112,57 @@ microseconds:
   suites (`TUF-STAGING-MIGRATION.md`), and
   `scripts/run-container-database-acceptance.sh` runs it after
   `staff-access-request-outcome.integration.sql`.
+
+## Record summary reads (no migration)
+
+The EHR API's two record summaries (`INTERFACE_CONTRACT.md` §11, "Record
+summaries") read under row-level security as `hid_ehr_api_runtime`. Nothing in
+the schema, policies or grants changes.
+
+- **Patient summary** (`GET /ehr/me/records`). The patient transaction sets
+  `app.purpose_of_use = 'patient-self'` and empty facility and membership, so
+  the staff policies (`ehr.context_allows`) never pass, and only the 0030
+  patient-self policies release rows: completed encounters, signed or amended
+  notes and their current revisions. The other clinical tables have `SELECT`
+  but no patient-self policy, so a patient read of them returns no rows and no
+  error. The service now reads only the two released categories and names the
+  other five as withheld; before, it read all seven and returned five arrays
+  that were always empty.
+- **Emergency summary** (`GET /ehr/patients/:id/emergency-records`). A
+  break-glass emergency context passes `ehr.context_allows` for `read_records`
+  at its facility (0012), so every clinical table is readable there.
+  - Vitals: read from `ehr.vitals` alone, as first recorded (the row's eight
+    measurement columns), the same columns as before; corrections are not
+    applied. Applying them is pending the product decision on correction
+    semantics (proposed default: the current correction's replacement set is
+    the whole current set, as Health-id's clinician chart applies it); the
+    implementation is preserved in commit `7401193` for when the decision
+    lands. No EHR API route updates the measurement columns (a correction
+    updates only `current_correction_no`), but the database does not refuse
+    it: `hid_ehr_runtime` holds `UPDATE` on `ehr.vitals` (`runtime-grants.sql`),
+    `vitals_update` allows it under `write_records` (0005), and
+    `ehr.capture_record_version` (0004) guards only the ownership and
+    attribution columns and requires a change reason, recording the prior row
+    in `ehr.record_versions`. A guard refusing changes to the measurement
+    columns (a trigger, or column-level `UPDATE` limited to
+    `current_correction_no`) is a follow-up migration.
+  - Documents: read from `ehr.documents_effective` (0009, `security_invoker`,
+    `security_barrier`) where `status = 'available'`, so `documents_read` and
+    `document_scan_events_staff_read` apply to the view's reads. The raw
+    `ehr.documents.status = 'uploaded'` filter used before also listed
+    documents never scanned and those the scanner rejected.
+  - Each section reads one row more than it shows, to report truncation.
+- `emergency.integration.sql` (rollback-only) adds, after its activation cases,
+  a break-glass grant inserted directly and document fixtures inserted with
+  `session_replication_role = replica`, then checks as `hid_ehr_api_runtime`
+  with the emergency context: `documents_effective` reports `available:clean`,
+  `rejected:rejected` and `uploaded:pending` for a clean, a rejected and an
+  unscanned upload, and lists only the clean one as available, while the raw
+  `uploaded` filter lists all three; and with `direct-care` and no consent
+  nothing is visible. These
+  cases pass before and after the service change: they guard the database
+  behaviour the summary relies on. The rehearsal runs the suite with its
+  additional suites, and `scripts/run-container-database-acceptance.sh` now
+  runs it after `emergency-contacts.integration.sql` (before, only the
+  rehearsal did). The service's own SQL is exercised against the database by
+  `verify-delegated-cookie-read-runtime.mjs` (steps 4 to 6).
