@@ -12,8 +12,9 @@ leases), Stage 9 (runtime command locking), the delegated cookie-read fix
 (D-Eminence/hid-system#44), the patient PIN actor-window fix
 (D-Eminence/hid-system#45, migration 0079), the EHR and OCR guard refusal
 audit fix (D-Eminence/hid-system#46), the Pharmacy source prescription fix
-(D-Eminence/hid-system#48, migration 0080) and the Identity MFA key in the AWS
-task definition (D-Eminence/hid-system#49). It covers Identity, the EHR, Lab,
+(D-Eminence/hid-system#48, migration 0080), the Identity MFA key in the AWS
+task definition (D-Eminence/hid-system#49) and the released Lab results change
+(D-Eminence/hid-system#51). It covers Identity, the EHR, Lab,
 Pharmacy, OCR and Outreach APIs, the OCR worker, the database and the AWS
 regional stack in this repository, and in Health-id the admin console
 (`apps/patient-web/src/admin`) and the provider
@@ -34,7 +35,7 @@ deployed, and no staging or production database has been migrated.** Every
 | EHR API | `services/ehr-api` (EHR clinical list paging, D-Eminence/hid-system#40; D-Eminence/hid-system#48) | The six newest-first clinical lists page at the sort key's microsecond precision; cursors from earlier builds are refused. The Pharmacy handoff sends the prescription time at the microsecond and its dates as `YYYY-MM-DD` (§2). |
 | EHR and OCR APIs | `services/ehr-api`, `services/ocr-api` (guard refusal audit, D-Eminence/hid-system#46) | A guard refusal before a facility is bound is audited as `auth.authorization.denied` and answers its own status instead of `503 DEPENDENCY_UNAVAILABLE`; a database fault in EHR's runtime-control check answers `503 PLATFORM_CONTROL_UNAVAILABLE` (§2). |
 | Pharmacy API | `services/pharmacy-api`, D-Eminence/hid-system#38 and D-Eminence/hid-system#48 | Stage 5 CORS header fix; Stage 9 runtime locking and transaction retry; #38 reports the method of the request it serves; the two 0080 guard refusals answer `409` (§2). |
-| Lab API | `services/lab-api` (Stage 9) | Runtime locking and transaction retry (§2). |
+| Lab API | `services/lab-api` (Stage 9 and D-Eminence/hid-system#51) | Runtime locking and transaction retry; released-only result reads and the released results of an EHR order (§2). |
 | OCR API | `services/ocr-api` (Stage 6 and 9), and D-Eminence/hid-system#38 | Patient-linked audit events for OCR evidence reads; Stage 9 runtime locking, publication lock order and transaction retry; #38 reports the method of the request it serves (§2). |
 | Outreach API | `services/outreach-api` (Stage 9) | Campaign registration lock and transaction retry (§2). |
 | OCR worker | `services/ocr-worker` (Stage 6) | Queue depth and age through the new aggregate command (§2). |
@@ -133,6 +134,12 @@ deployed, and no staging or production database has been migrated.** Every
   - `infrastructure.test.ts` asserts this for production, development and every staging mode, QoreID included; `verify-synth.mjs` asserts it on each synthesized profile. Both also require the description to name every field the task reads from the secret (the unit test: exactly those fields, in every profile including QoreID staging).
   - The staging external preflight (`scripts/staging-external-preflight.py`) reports whether `/hid/staging/identity-sensitive` holds `mfaSecretKeyB64` and `contactLookupHmacKeyB64` (which the staging task already reads), and adds `canonical_32_byte_base64`: for `otpHmacKeyB64`, `contactLookupHmacKeyB64` and `mfaSecretKeyB64`, whether the value is exactly 32 bytes in canonical padded base64, the only format Identity starts with. Presence alone passed a hex or unpadded key that then stops every Identity task at start-up. The receipt stays value-free.
   - The synthesized templates change in exactly three places: that secret, that environment value and that description. The recorded production template baseline is replaced in `AWS_DEPLOYMENT_RUNBOOK.md` §1, which also says why the earlier record was already stale.
+- **Released Lab results for clinicians** (D-Eminence/hid-system#51; Lab API only, no migration or grant change). The contract is in `INTERFACE_CONTRACT.md` ("Lab execution and governed-result API").
+  - **Unreleased values:** `GET /lab/results/:resultId/history` (`lab.result.released.read`) refused only a result with no released revision. Once one version was released it returned every revision, so a reader without `lab.execution.read` (doctor, clinician, nurse) received the value and reason of a correction that was neither verified nor released. It now returns them the released view: released revisions only (one later marked entered in error stays, so marked), with `currentVersion`, `status` and `verificationStatus` taken from the latest of them, and nothing that shows a newer revision exists. Readers with `lab.execution.read` (Lab staff, admin) keep the full history.
+  - **Read by order:** a clinician knows the EHR lab request, not the Lab result, and holds no execution or accession read, so no route returned a released result to the clinician who ordered it. `GET /lab/ehr-orders/:sourceEhrOrderId/released-results` (`lab.result.released.read`) returns the work item accepted from that order and the released view of each of its results, leaving out a result with none (`200` with `results: []` until one is released). The work item is read by order and session facility under row-level security (`404 LAB_WORK_ITEM_NOT_FOUND` when none is visible), Identity then authorizes the patient for `read_records` (`403 LAB_EXECUTION_ACCESS_DENIED`) before any result is read, and every reader, Lab staff included, gets the released view.
+  - **Read audit:** both reads now write a patient-linked audit event in the read transaction: `lab.result.released.read` (resource `lab-work-item` or `lab-result`, with the versions returned), or `lab.result.history.read` for a full history read. A failed audit write fails the read. Before, these reads were recorded only by the HTTP audit event, which names no patient.
+  - **Also:** every Lab result revision in every response now carries `releasedAt` (`null` until released).
+  - **Unchanged:** permissions, grants, row-level security and the break-glass behaviour of Lab reads (an emergency read under an active break-glass grant is allowed). No migration.
 
 ## 3. Compatibility
 
@@ -224,6 +231,11 @@ and Stage 5 consoles both work with Stage 4A and Stage 5 Identity.
 - The two variables do not constrain the Identity build: Stage 2A and later builds use them; earlier builds do not read them.
 - No platform authenticator can have been enrolled in an AWS environment deployed from this stack, because enrolment needs the key. `aws-v1` is therefore the first version there: every factor and recovery code enrolled from now on records it, and changing the version or the key later invalidates them (P3).
 - The staging preflight receipt keeps schema `hid.staging-external-preflight/v1`: `required_fields_present` for `/hid/staging/identity-sensitive` gains `contactLookupHmacKeyB64`, and that secret's entry gains `canonical_32_byte_base64`. Both are additive. A secret that held a hex or unpadded key and passed the old presence check now reports `false` there. Identity cannot have started with such a key, so nothing was ever keyed by it; replace it before deploying.
+
+**Released Lab results (D-Eminence/hid-system#51):**
+- No schema, grant or permission change; deploy the Lab API alone, in any order with the other services.
+- A reader without `lab.execution.read` now gets fewer history revisions once a released result is corrected, and `currentVersion` and `status` refer to the latest released revision. Lab staff responses are unchanged apart from the additive `releasedAt`.
+- Health-id `main` needs no change: its only Lab result view (`ResultHistory` in `apps/patient-web/src/staff/routes/Operations.tsx`) shows results listed by the specimen execution read, which needs `lab.execution.read`, so its readers keep the full history. Showing results to clinicians needs a Health-id change that calls the order route; an earlier Lab API answers that route `404`.
 
 ## 4. Prerequisites and pre-release checks
 
@@ -701,6 +713,10 @@ No other local cluster was touched. Later stages say which cluster they used.
   - **Failing first:** with `main` `6b49a06`'s regional stack and preflight under this change's tests, `infra/aws` `npm test` fails 2 of 100 (the Identity container has no `MFA_SECRET_KEY_B64` secret reference or `MFA_KEY_VERSION`; the `IdentitySensitiveSecretArn` description does not name exactly the fields the task reads), and the preflight unit tests fail in 37 subtests and error in one (no `mfaSecretKeyB64` or `contactLookupHmacKeyB64` requirement, no `canonical_32_byte_base64` report). With the regional stack fixed and the earlier preflight, the description test and the preflight tests still fail.
   - **With the change:** `infra/aws` 100/100 and the preflight 10/10 pass. The eight workspace gates run in CI on the PR head.
   - Not run: `cdk diff` or `cdk deploy` against an account, the preflight against a real secret, and anything on staging (§7).
+- **Released Lab results for clinicians (D-Eminence/hid-system#51; Lab API only, no migration or grant change)**, local and synthetic only:
+  - **Failing first:** on the tests-only commit `93b5887`, 19 Lab unit tests fail (a released-only reader gets the full history, no read audit, no read by EHR order), and the rehearsal fails at "released-only history after an unreleased correction returns version 1 only" (it got the `entered_unverified` version 2 and versions 1 and 2; evidence sha256 `80d279951376c2a143c6b1aba3fbdb7873fea0fd9491bf6d7aaaf76034d99d1e`).
+  - **Gates and rehearsal on `15096fc`** (the branch merged with `main` `6b49a06`): the eight workspace gates, run directly as `postgres` on a clean tree, all passed; Lab unit tests 78/78. In the rehearsal `lab_runtime` (as `hid_lab_api_runtime`) passed 21 checks, including released-only history after an unreleased correction (version 1 only), the released results of an EHR order for the ordering doctor, and the refusals without `lab.result.released.read`, without facility membership and for another facility's doctor (evidence sha256 `ae6835a6fc1508b249c4dd9ba5bd55ff7b700a5fac62c8250054179b92e8105e`). CI runs the same gates on the PR head.
+  - Not run: a Health-id caller of the new order route (none exists yet), a browser, and anything on staging (§7).
 - **Not run:** staging or production anything (§7). The browser run uses the backend's own TOTP clock seam to issue codes, not a real authenticator app.
 
 To reproduce, run as the owner of a local cluster migrated to 0073 and role-bootstrapped (Stage 5B Identity calls `auth.lock_account_sessions` on sign-out and expiry; a cluster left at 0072 needs `db:migrate` and `db:bootstrap` again) (`services/ehr-api` `db:migrate` and `db:bootstrap`). The harness defaults to the database `hid_rehearsal`, the superuser `hid_rehearsal_admin` and ports 4010 and 4011. Change them with `HID_E2E_TEMPLATE_DB`, `HID_E2E_DB_SUPERUSER`, `HID_E2E_API_PORT` and `HID_E2E_CONTROL_PORT`; see the script headers. Stop `server.mjs` with Ctrl-C or SIGTERM, which drops its database copy.
@@ -757,6 +773,7 @@ To reproduce, run as the owner of a local cluster migrated to 0073 and role-boot
 - **Session-route refusal audits:** code only. Rolling Identity back brings back the `503` for a staff refusal on a session route, and returns patient and anonymous sign-out refusals there to `api.*` rows. The `auth.*` failure rows it wrote remain valid rows.
 - **Sign-out and client kind (#39):** code only. Rolling Identity back brings back the idle sign-out that answers `401` and leaves the sign-in live, and removes the client-kind check and the `x-hid-client` CORS entry. `logout` events marked `presented: refresh_token` remain valid rows.
 - **EHR and OCR guard refusals before a facility is bound (#46):** code only, no persisted state. Rolling the EHR or OCR API back brings back the `503 DEPENDENCY_UNAVAILABLE` answer, with no audit row, for those refusals, and in EHR the `401 AUTHENTICATION_REQUIRED` answer to a patient whose control check hits a database fault. `auth.authorization.denied` rows already written stay valid.
+- **Released Lab results:** code only. Rolling the Lab API back returns unreleased correction values to released-only history readers again, removes the order route (`404`) and stops the read audit events. Audit rows already written remain valid.
 - **MFA key:** if `MFA_SECRET_KEY_B64` is lost, every enrolled authenticator must be re-enrolled. Store it with the same care as the field-encryption keys.
 - **Identity MFA key in the task definition (D-Eminence/hid-system#49):** infrastructure only. Rolling the regional stack back to a task definition without the reference brings back `503 MFA_UNAVAILABLE` for every platform sign-in and changes nothing else; enrolled authenticators work again once the same key and `aws-v1` return. Keep the `mfaSecretKeyB64` field for as long as any deployed task definition references it: ECS resolves it whenever it starts an Identity task (deployment, scaling, replacement). Never change the key or the version to roll back.
 - **Lockout:** if every Super Admin is locked out (lost authenticators and recovery codes), recovery needs the documented break-glass procedure. That procedure is not built yet; see the product decisions in `PHASE_4_STAGE_4A_ADMIN_CONTRACTS.md` §9. Keep two independent Super Admins with stored recovery codes.
@@ -814,6 +831,12 @@ Each is a follow-up.
 - Campaign writes stay closed: Identity refuses `outreach.campaign.write` with `400 VALIDATION_FAILED`, as on `main`, so no campaign can be created through the API and S4c's campaign create cannot pass (§7). Who may create campaigns, change their status and add members is an open product decision (§2, ADR-045). Health-id's Outreach page can list campaigns and members, but its campaign create, status and member actions get `400`; Health-id should hide or handle them.
 - Campaign-linked registration works as the runtime role since D-Eminence/hid-system#34, but only for a campaign that already exists, and none can be created through the API while campaign writes stay refused.
 - The evidence is local and synthetic: the HTTP verifier and the unit specs (§8). No browser run covers Outreach cookie reads.
+
+**Known limits of the released Lab results change:**
+- Any member holding `lab.result.released.read` with a `read_records` consent grant for the patient at the facility reads an order's released results, not only the clinician who placed the order; this is the same patient-level authorization as every other clinical read.
+- A clinician is not told that a correction is pending release, and is not notified of a release: nothing in the EHR consumes `LabResultReleased`, so the result appears only when the order route is read.
+- Released revisions keep their stored version numbers, so a gap (versions 1 and 3) shows that an intermediate revision was never released; its value and reason are not returned.
+- Break-glass reads are allowed, as for every Lab read, until the break-glass scope of Lab and Pharmacy reads is decided.
 
 ## 10. Operator actions, not performed here
 

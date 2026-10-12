@@ -1063,6 +1063,64 @@ returns `404 LAB_SPECIMEN_NOT_FOUND`. Lab row-level security applies the same
 consent check, so an absent or revoked grant normally hides the specimen and
 returns that 404; the 403 applies when the row is visible but Identity refuses.
 
+Released results are read with `lab.result.released.read` (granted to doctor,
+clinician, nurse, lab and admin by 0021), active facility context and an
+Identity `read_records` decision for the patient, through two routes:
+
+```text
+GET /api/v1/lab/results/:resultId/history
+GET /api/v1/lab/ehr-orders/:sourceEhrOrderId/released-results
+```
+
+A reader who also holds `lab.execution.read` (Lab staff, admin) gets every
+revision from the history read. Every other reader of the history, and every
+reader of the order route, gets the released view: the released revisions only,
+in version order, including one later marked entered in error
+(`verificationStatus: entered_in_error`). `currentVersion` and
+`currentReleasedVersion` name the latest released revision, and `status` is
+`released`, or `entered_in_error` when that revision is. Nothing of a revision
+newer than the latest released one is returned. Versions keep their stored
+numbers, so a gap shows that an intermediate revision was never released; its
+value and reason are never returned. A history with no released revision answers
+`404 LAB_RESULT_NOT_FOUND`.
+Every revision, in every Lab result response, also carries `releasedAt`
+(`null` until released).
+
+The order route takes the EHR lab request ID (UUID v4) the clinician ordered and
+returns the Lab work item accepted from it, with the released view of each of
+its results, in execution start order:
+
+```json
+{
+  "workItemId": "…", "sourceEhrOrderId": "…", "sourceEhrOrderVersion": 1, "patientId": "…", "acceptedAt": "…",
+  "test": { "codeSystem": "http://loinc.org", "code": "718-7", "name": "Haemoglobin" },
+  "results": [{
+    "id": "…", "executionId": "…", "status": "released", "verificationStatus": "verified",
+    "currentVersion": 1, "currentReleasedVersion": 1,
+    "revisions": [{ "version": 1, "resultType": "numeric", "numericValue": 13.4, "textValue": null, "unit": "g/dL",
+      "referenceRange": "12.0-15.5", "abnormalFlag": "normal", "entrySource": "manual", "verificationStatus": "verified",
+      "releaseStatus": "released", "enteredAt": "…", "releasedAt": "…", "correctionReason": null }]
+  }]
+}
+```
+
+A result with no released revision is left out, so an accepted order with
+nothing released answers `200` with `results: []`. Refusals: without the
+permission `403 PERMISSION_DENIED`; at a facility the actor has no membership of
+`403 FACILITY_ACCESS_DENIED`; an order with no work item the caller can see (not
+accepted by Lab, accepted at another facility, or no consent grant; row-level
+security) `404 LAB_WORK_ITEM_NOT_FOUND`, before Identity is asked; an Identity
+refusal `403 LAB_EXECUTION_ACCESS_DENIED` (an Identity problem is returned as
+is). An emergency read under an active break-glass grant is allowed, as for the
+other Lab reads; this is the current default.
+
+Each released-result read writes one patient-linked audit event in its read
+transaction, and a failed audit write fails the read: `lab.result.released.read`
+on resource `lab-work-item` with details `{ sourceEhrOrderId, results: [{
+resultId, versionsReturned }] }` for the order route, and on resource
+`lab-result` with `{ versionsReturned }` for a released-view history read; a
+full history read records `lab.result.history.read`.
+
 ### Extracted Lab transport
 
 Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused with SQLSTATE `23514` for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets `409 IDEMPOTENCY_CONFLICT` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
