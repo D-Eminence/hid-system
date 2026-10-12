@@ -69,14 +69,14 @@ separate deployment authorization. None of them has been run.
   `healthcare-operations`; creating a job needs `write_records` (so a
   read-only PIN cannot start paid Textract work); break-glass keeps today's
   reads until EHR documents and OCR reads are decided together.
-- **Implemented now.** Purpose-of-use vocabulary seeded with `direct-care`
-  only (`fix/purpose-of-use-vocabulary`): no environment has active codes from
-  a migration today, so `has_active_consent_grant` fails closed everywhere.
-  `healthcare-operations` and `emergency` are not seeded: seeding `emergency`
-  would make break-glass live at once (`break_glass_enabled` defaults on), and
-  `healthcare-operations` belongs to this decision. A missing purpose header
-  answers `400 PURPOSE_OF_USE_REQUIRED` instead of `500`
-  (`fix/ocr-purpose-400-and-publication-auth`).
+- **Engineering in progress (follow-up pull requests).** Seed the
+  purpose-of-use vocabulary with `direct-care` only: no migration inserts any
+  code today, so `has_active_consent_grant` fails closed in every environment
+  without hand-inserted rows. `healthcare-operations` and `emergency` are not
+  seeded: seeding `emergency` would make break-glass live at once
+  (`break_glass_enabled` defaults on), and `healthcare-operations` belongs to
+  this decision. Separately, a missing purpose header should answer
+  `400 PURPOSE_OF_USE_REQUIRED` instead of `500`.
 - **Risks.** Accepting `direct-care` for OCR blurs the separation between
   operations and clinical authority. Refusing break-glass reads of documents
   removes the source scan from emergency care.
@@ -130,7 +130,7 @@ separate deployment authorization. None of them has been run.
 | D10 | Pharmacy and Lab lifecycle after acceptance (CLIN-2-POLICY, CLIN-3b) | Strict version equality for dispensing (D-Eminence/hid-system#48); Lab refuses new accession and execution for cancelled or entered-in-error orders; released results stay | Stranded queue items: a changed prescription leaves its work item `accepted` and undispensable | Queue cleanup, re-acceptance |
 | D11 | Lab result detail for clinicians | No "unreleased correction pending" flag (D-Eminence/hid-system#51) | Clinicians cannot see that a correction is coming | Result retraction API |
 | D12 | OCR publication after an authorization lapse | Terminal, as today | — | — |
-| D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (`fix/document-completion-uploader`) | No delegated completion | — |
+| D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (follow-up pull request) | No delegated completion | — |
 | D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decide which roles hold `workforce.manage` (legacy `admin` holds it), how existing staff are attached, whether pending access requests close when a membership ends, and whether staff MFA is a launch gate, by ADR before WF-1 | Invites and offboarding stay manual | Workforce management |
 | D15 | Launch scope of EHR-to-Lab ordering and in-system result return | In scope (the EHR already sends orders) | If in scope, the Lab handoff branch is launch-blocking | Lab handoff |
 | D16 | Health-id OCR publication retry | Persist the publication key per validation; offer Retry for retryable failures | Frontend change | OCR publication retry |
