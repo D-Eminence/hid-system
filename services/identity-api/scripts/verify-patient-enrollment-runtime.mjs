@@ -438,26 +438,37 @@ try {
   expectProblem(recoveredA, 200); assert.equal(recoveredA.body.actor.patientId, patientA);
   check('password recovery answers known and unknown accounts alike, uses a single-use code, ends existing sessions and replaces the password');
 
-  // 12. Sign-out needs the CSRF token and ends the session.
+  // 12. Sign-out needs the CSRF token and ends only its own sign-in: the same
+  // patient's other sign-in (another device) and the other patient stay signed in.
+  const otherDeviceA = await login(emailA, newPassword);
+  expectProblem(otherDeviceA, 200); assert.equal(otherDeviceA.body.actor.patientId, patientA);
   expectProblem(await http.post('/api/v1/auth/logout').set('Cookie', sessionCookies(recoveredA)).set('Origin', origin), 403);
+  expectProblem(await http.get('/api/v1/auth/session').set('Cookie', sessionCookies(recoveredA)), 200);
   expectProblem(await http.post('/api/v1/auth/logout').set('Cookie', sessionCookies(recoveredA)).set('Origin', origin)
     .set('x-csrf-token', csrf(recoveredA)), 204);
   expectProblem(await http.get('/api/v1/auth/session').set('Cookie', sessionCookies(recoveredA)), 401);
+  expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(otherDeviceA)), 200);
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(firstB)), 200);
-  check('sign-out requires the CSRF token, ends only that session, and leaves the other patient signed in');
+  check('sign-out without the CSRF token is refused and ends nothing; with it, it ends only that sign-in: the same patient\'s other sign-in and the other patient stay signed in');
 
-  // 13. Durable evidence.
-  const audited = async action => count('select count(*) from audit.events where action = $1', [action]);
+  // 13. Durable evidence. Every successful start (A, its replay, B) and
+  // activation (A, its replay, B) is audited as a success, refusals as
+  // failures, and the database records each new patient's activation once.
+  const audited = (action, outcome) => count(`select count(*) from audit.events
+    where action = $1 and outcome = $2 and ($2 <> 'success' or details->>'status' = '200')`, [action, outcome]);
   for (const action of ['api.identity.patient-enrollment.start', 'api.identity.patient-enrollment.activate']) {
-    assert((await audited(action)) >= 1, `${action} must be audited`);
+    assert.equal(await audited(action, 'success'), 3, `${action}: every successful call is audited`);
+    assert(await audited(action, 'failure') >= 1, `${action}: refusals are audited`);
   }
+  assert.equal(await count(`select count(*) from audit.events
+    where action = 'identity.public-patient-enrollment.activated' and outcome = 'success'`), 2);
   const auditText = (await owner.query(`select coalesce(string_agg(details::text, ' '), '') as text from audit.events`)).rows[0].text;
   for (const secret of [ninA, '90000000002', passwordA, newPassword, deliveredA.code]) {
     assert(!auditText.includes(secret), 'audit details must not contain a NIN, password or code');
   }
   assert.equal(await count('select count(*) from identity.patients where source_system = $1',
     ['hid-public-qoreid-enrollment']), 2);
-  check('enrollment start and activation are audited, and no audit detail contains a NIN, password or code');
+  check('every successful enrollment start and activation is audited as a success (three each, replays included) and refusals as failures, each new patient\'s activation is recorded once, and no audit detail contains a NIN, password or code');
 
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: runtimeRole,
     qoreid: 'local stub behind the real adapter; no QoreID call', turnstile: 'local Siteverify stub',
