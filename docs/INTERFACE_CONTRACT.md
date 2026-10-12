@@ -943,6 +943,34 @@ Use:
 * authorized download
 * short-lived signed access where appropriate
 
+### Document upload completion
+
+`POST /api/v1/ehr/documents/:id/complete` confirms an upload. Only the
+account that created the upload intent (`created_by`) may complete it, at the
+facility it was created for (`X-Facility-ID`). This is the current default,
+pending a product decision. There is no delegated completion: an intent its
+uploader cannot complete stays `initiated`, and the remedy is a new upload.
+The membership is not compared: an account with two memberships at one
+facility may be bound to either.
+
+- The uploader also still needs `ehr.document.write`, a `write_records` grant
+  for the document's patient, and a stored object whose size, SHA-256 and
+  media type match the intent.
+- Any other caller, including a member of the same facility with the same
+  permission and grant, gets `404 NOT_FOUND` ("Document not found"), the same
+  answer as for an unknown document, one at another facility, or one the
+  caller cannot read. It is refused before the patient authorization check
+  and the storage read, and nothing is written. After the uploader has
+  completed, another caller still gets `404`, not the idempotent `200`.
+- `GET /api/v1/ehr/documents` still lists an `initiated` document to every
+  holder of a read grant, so a member can see an upload they cannot complete.
+- The uploader's answers are unchanged: `200` with the document view (also
+  for a repeat after completion), `403` without a write grant, `409` when the
+  stored object does not match or the document is no longer completable.
+- A refusal is recorded only by the request audit
+  (`api.ehr.document.upload-complete.request`, outcome `failure`, without the
+  document id); no `ehr.document.upload.complete` event is written.
+
 ## 17. Event Contracts
 
 Events must contain:
