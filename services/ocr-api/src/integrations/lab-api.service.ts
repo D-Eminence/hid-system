@@ -3,6 +3,7 @@ import { LabApiClient,LabApiProblem } from '@hid/api-client';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
+import { workloadAuthenticationRefusal } from './owning-service-auth';
 import { ServiceWorkloadIdentityService } from './service-workload-identity.service';
 
 @Injectable()
@@ -17,5 +18,5 @@ export class LabApiService {
       origin:context.origin,correlationId:context.correlationId,facilityId:context.facilityId,
       purposeOfUse:context.purposeOfUse};
   }
-  private async translate<T>(operation:Promise<T>):Promise<T>{try{return await operation;}catch(error){if(error instanceof LabApiProblem){const payload=error.payload as {code?:unknown;detail?:unknown};throw new DomainProblem(error.status,typeof payload?.code==='string'?payload.code:'LAB_SERVICE_ERROR',typeof payload?.detail==='string'?payload.detail:'Lab service request failed');}throw new DomainProblem(503,'LAB_SERVICE_UNAVAILABLE','Lab service is unavailable');}}
+  private async translate<T>(operation:Promise<T>):Promise<T>{try{return await operation;}catch(error){if(error instanceof LabApiProblem){const payload=error.payload as {code?:unknown;detail?:unknown};throw workloadAuthenticationRefusal('LAB',error.status,payload?.code)??new DomainProblem(error.status,typeof payload?.code==='string'?payload.code:'LAB_SERVICE_ERROR',typeof payload?.detail==='string'?payload.detail:'Lab service request failed');}throw new DomainProblem(503,'LAB_SERVICE_UNAVAILABLE','Lab service is unavailable');}}
 }

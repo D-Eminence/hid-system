@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import { DomainProblem } from './problem';
 
 export interface FacilityAssignment {
   id: string;
@@ -56,10 +57,17 @@ export function requireRequestContext(request: HidRequest, suppliedPurpose?: str
   if (!request.actor || !request.facilityId || !request.correlationId) {
     throw new Error('Request context was not established by security guards');
   }
+  // The guard requires a bearer token or a cookie, so their absence is a bug.
+  if (!request.header('authorization') && !request.header('cookie')) {
+    throw new Error('Validated authorization is required for Lab data access');
+  }
+  // A body purpose (the external import) is validated before this; the header,
+  // which every other route uses, is not checked by the guard, so a missing or
+  // unknown purpose is the client's error.
   const candidate = suppliedPurpose ?? request.header('x-purpose-of-use');
-  if (!candidate || !PURPOSES.has(candidate as PurposeOfUse)
-      || (!request.header('authorization') && !request.header('cookie'))) {
-    throw new Error('Validated authorization and purpose of use are required for Lab data access');
+  if (!candidate || !PURPOSES.has(candidate as PurposeOfUse)) {
+    throw new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED',
+      'X-Purpose-Of-Use must be direct-care, emergency or healthcare-operations');
   }
   const purposeOfUse = candidate as PurposeOfUse;
   request.purposeOfUse = purposeOfUse;

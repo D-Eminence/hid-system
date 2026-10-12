@@ -27,7 +27,7 @@ const check = (name) => evidence.checks.push(name);
 const id = () => randomUUID();
 const f = { org: id(), facility: id(), otherFacility: id(), patient: id(), otherPatient: id(), document: id(),
   a: { account: id(), staff: id(), membership: id() }, c: { account: id(), staff: id(), membership: id() },
-  jobs: Array.from({ length: 8 }, () => ({ job: id(), extraction: id() })) };
+  jobs: Array.from({ length: 9 }, () => ({ job: id(), extraction: id() })) };
 f.a.subject = `synthetic:ocr-verifier-a:${f.a.account}`;
 f.c.subject = `synthetic:ocr-verifier-c:${f.c.account}`;
 
@@ -38,6 +38,9 @@ const labImports = [];
 const labRejections = [];
 let labUnavailable = false;
 let labRejects = false;
+// The next Lab import calls refused as an owning service refuses OCR's workload
+// credential (every JWT failure, a JWKS fetch failure included).
+let labWorkloadRefusals = 0;
 // Settles as `promise` does, or rejects with `message` after `ms`. The timer is
 // cleared once the race settles, so none outlives it.
 const within = (promise, message, ms = 10_000) => {
@@ -103,6 +106,10 @@ const upstream = await fakeService(async (call) => {
   }
   if (method === 'POST' && path === '/api/v1/lab/imports/from-ocr') {
     if (headers['x-hid-service-token'] !== TOKENS.lab) return [401, { code: 'INTERNAL_SERVICE_AUTH_REQUIRED' }];
+    if (labWorkloadRefusals > 0) {
+      labWorkloadRefusals -= 1;
+      return [401, { code: 'INVALID_WORKLOAD_IDENTITY', detail: 'Synthetic workload refusal' }];
+    }
     if (labUnavailable) return [503, { code: 'LAB_IMPORT_UNAVAILABLE', detail: 'Synthetic Lab outage' }];
     if (labRejects) {
       labRejections.push(body);
@@ -191,6 +198,16 @@ try {
     disposition: 'validated', targetDomain: 'DOCUMENT_ONLY', candidateType: 'document_only', acceptedFields: {},
     rejectedFields: [], corrections: [], reason: 'Synthetic reviewer validated the document', purpose: 'healthcare-operations', ...overrides });
   const [j1, j2, j3, j4] = f.jobs;
+
+  // A read takes its purpose from X-Purpose-Of-Use, which the guard does not
+  // check: a missing or unknown purpose is the client's error, not a 500.
+  for (const [purpose, label] of [[undefined, 'without X-Purpose-Of-Use'], ['treatment', 'with an unknown purpose']]) {
+    const read = await ocr.request('GET', `/ocr/jobs/${j1.job}`, { headers: { authorization: 'Bearer token-a',
+      'x-facility-id': f.facility, ...(purpose ? { 'x-purpose-of-use': purpose } : {}) } });
+    assert.equal(expectStatus(read, 400, `a job read ${label}`).code, 'PURPOSE_OF_USE_REQUIRED');
+  }
+  assert.deepEqual(await job(j1.job), { status: 'awaiting_validation', version: 1 });
+  check('read: a job read without X-Purpose-Of-Use or with an unknown purpose answers 400 PURPOSE_OF_USE_REQUIRED, not 500');
 
   // Validate an extraction.
   assert.equal(expectStatus(await send(`/jobs/${j1.job}/validation`, validationBody(j1.extraction), { token: 'token-a-read-only', key: key('validate') }),
@@ -654,6 +671,54 @@ try {
     [{ action: 'api.ocr.publication.create.request', outcome: 'failure' }]);
   assert.equal(await count('select count(*) from ocr.outbox_events where correlation_id=$1', [exhaustedResend]), 0);
   check('publish: during a Lab outage the failure events of every attempt but the last say retryable: true and the last one\'s say retryable: false, with no backoff; a later resend answers 409 in progress, asks the Lab API nothing and changes nothing');
+
+  // A Lab refusal of OCR's workload credential is a fault between services, not
+  // a rejection of the publication: OCR answers 503 LAB_SERVICE_AUTH_UNAVAILABLE
+  // (not the 401 that makes a browser refresh its session) and stores the
+  // failure as retryable, so the same request publishes once the Lab API
+  // accepts the workload again.
+  const [, , , , , , , , j9] = f.jobs;
+  const workloadValidated = expectStatus(await send(`/jobs/${j9.job}/validation`, validationBody(j9.extraction, { targetDomain: 'LAB',
+    candidateType: 'lab_document', acceptedFields: { observations: [{ testName: 'Chloride', value: '101', unit: 'mmol/L' }] } }),
+  { key: key('workload-validate') }), 201, 'validate the workload refusal job');
+  const workloadConfirmed = expectStatus(await send(`/jobs/${j9.job}/patient-confirmation`, confirmBody(), { key: key('workload-confirm') }),
+    201, 'confirm the workload refusal job');
+  const workloadRequest = [`/validations/${workloadValidated.validationId}/publications`, { ...publicationBody,
+    patientConfirmationId: workloadConfirmed.id, targetOperation: 'create_imported_lab_evidence' },
+  { key: key('workload-publish'), purpose: 'direct-care' }];
+  const workloadCorrelation = `verifier-workload-refusal-${id()}`;
+  labWorkloadRefusals = 1;
+  try {
+    assert.equal(expectStatus(await send(workloadRequest[0], workloadRequest[1], { ...workloadRequest[2], correlationId: workloadCorrelation }),
+      503, 'a publication whose OCR workload the Lab API refused').code, 'LAB_SERVICE_AUTH_UNAVAILABLE');
+  } finally {
+    labWorkloadRefusals = 0;
+  }
+  const [workloadFailed] = (await database.owner.query(`select id::text, status, failure_code, attempt_count,
+      extract(epoch from next_attempt_at - failed_at)::float8 as backoff
+    from ocr.publications where validation_id=$1`, [workloadValidated.validationId])).rows;
+  assert.deepEqual([workloadFailed.status, workloadFailed.failure_code, workloadFailed.attempt_count],
+    ['failed', 'OWNING_SERVICE_UNAVAILABLE', 1], 'the Lab workload refusal was not stored as a retryable failure');
+  assert(Math.abs(workloadFailed.backoff - 15) < 0.5, `the Lab workload refusal set a retry backoff of ${workloadFailed.backoff} s, not 15 s`);
+  assert.deepEqual(await failureEvents(workloadCorrelation), {
+    audit: [{ publicationId: workloadFailed.id, failureCode: 'OWNING_SERVICE_UNAVAILABLE',
+      ownerFailureCode: 'LAB_SERVICE_AUTH_UNAVAILABLE', retryable: true,
+      keys: ['failureCode', 'ownerFailureCode', 'publicationId', 'retryable'] }],
+    outbox: [{ jobId: j9.job, publicationId: workloadFailed.id, failureCode: 'OWNING_SERVICE_UNAVAILABLE', retryable: true }],
+  }, 'the failure events of the Lab workload refusal');
+  assert.equal(labCallsFor(workloadFailed.id).length, 1, 'the refused attempt did not ask the Lab API exactly once');
+  await database.fixture((client) => client.query(
+    'update ocr.publications set next_attempt_at = clock_timestamp() where id=$1', [workloadFailed.id]));
+  const importsBeforeWorkloadRetry = labImports.length;
+  assert.equal(expectStatus(await send(...workloadRequest), 201, 'the resent publication after the Lab workload refusal').status,
+    'published');
+  assert.equal(labImports.length, importsBeforeWorkloadRetry + 1, 'the Lab API did not import the retried publication once');
+  assert.deepEqual((await database.owner.query('select status, failure_code, attempt_count from ocr.publications where id=$1',
+    [workloadFailed.id])).rows, [{ status: 'published', failure_code: null, attempt_count: 2 }]);
+  assert.deepEqual(labCallsFor(workloadFailed.id).map(({ headers }) => headers['idempotency-key']),
+    [`ocr-publication:${workloadFailed.id}`, `ocr-publication:${workloadFailed.id}`],
+    'a Lab call of the publication sent another idempotency key');
+  check('publish: a Lab refusal of the OCR workload credential answers 503 LAB_SERVICE_AUTH_UNAVAILABLE and is stored as retryable; the same request then publishes once with the publication\'s own key');
 
   // A Lab publication through the fake Lab API: concurrent requests import once.
   const labValidation = validationBody(j4.extraction, { targetDomain: 'LAB', candidateType: 'lab_document',

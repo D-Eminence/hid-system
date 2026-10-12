@@ -3,11 +3,13 @@ import type { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
+import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
-import type { EhrApiService } from '../integrations/ehr-api.service';
+import { EhrApiService } from '../integrations/ehr-api.service';
 import type { IdentityApiService } from '../integrations/identity-api.service';
-import type { LabApiService } from '../integrations/lab-api.service';
-import type { PharmacyApiService } from '../integrations/pharmacy-api.service';
+import { LabApiService } from '../integrations/lab-api.service';
+import { PharmacyApiService } from '../integrations/pharmacy-api.service';
+import type { ServiceWorkloadIdentityService } from '../integrations/service-workload-identity.service';
 import type { CreateOcrPublicationDto } from './dto/create-ocr-publication.dto';
 import type { ValidateOcrJobDto } from './dto/validate-ocr-job.dto';
 import { OcrService } from './ocr.service';
@@ -63,6 +65,7 @@ interface Options {
   validationRow?: Record<string, unknown>;
   publicationRow?: Record<string, unknown>;
   labApi?: Partial<LabApiService>;
+  pharmacyApi?: Partial<PharmacyApiService>;
   ehrNote?: jest.Mock;
   /** Thrown by the validation read of the claimed attempt (the second one). */
   attemptReadError?: Error;
@@ -153,7 +156,7 @@ function harness(options: Options = {}) {
     if (options.auditFails) throw new Error('audit insert failed');
   }) } as unknown as AuditService;
   const service = new OcrService(database, identity, audit, ehrApi,
-    (options.labApi ?? {}) as LabApiService, {} as PharmacyApiService);
+    (options.labApi ?? {}) as LabApiService, (options.pharmacyApi ?? {}) as PharmacyApiService);
   return { service, clients, database, audit, identity, ehrApi, order };
 }
 
@@ -562,6 +565,93 @@ describe('OCR publication failure classification', () => {
     expect(calls(clients).some(([sql]) => sql.includes("update ocr.publications set status='failed'"))).toBe(false);
     expect(calls(clients).some(([sql]) => sql.includes('insert into ocr.outbox_events'))).toBe(false);
     expect(auditEvents(audit).some(([, item]) => item.action === 'ocr.publication.fail')).toBe(false);
+  });
+
+  // EHR, Lab and Pharmacy refuse OCR's own workload credential with these codes
+  // (every JWT failure, a JWKS fetch failure included, is 401
+  // INVALID_WORKLOAD_IDENTITY). Through the real integration client the
+  // publication stores such a refusal as retryable; a refusal of the user's own
+  // credential keeps the owner code and stays terminal, as before.
+  describe('through the real owning-service clients', () => {
+    const environment = { NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost:5432/hid',
+      DATABASE_SSL: 'false', CORS_ORIGINS: 'https://app.example', IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret',
+      IDENTITY_OCR_INTERNAL_SERVICE_TOKEN: 'w'.repeat(32), EHR_API_URL: 'https://ehr.example',
+      LAB_API_URL: 'https://lab.example', PHARMACY_API_URL: 'https://pharmacy.example',
+      EHR_SERVICE_IDENTITY_MODE: 'local-secret', EHR_INTERNAL_SERVICE_TOKEN: 'e'.repeat(32),
+      LAB_SERVICE_IDENTITY_MODE: 'local-secret', LAB_INTERNAL_SERVICE_TOKEN: 'l'.repeat(32),
+      PHARMACY_SERVICE_IDENTITY_MODE: 'local-secret', PHARMACY_INTERNAL_SERVICE_TOKEN: 'p'.repeat(32) };
+    const workloadIdentity = {} as ServiceWorkloadIdentityService;
+    const medicationValidation = { ...validation, target_domain: 'PHARMACY', candidate_type: 'historical_medication_evidence',
+      accepted_fields: { medicationText: 'Metformin', strengthText: '500 mg' } };
+    const medicationPublication = { ...publication, target_domain: 'PHARMACY',
+      target_operation: 'create_imported_medication_evidence' };
+    const originalFetch = global.fetch;
+    let fetchMock: jest.Mock;
+    beforeEach(() => {
+      Object.assign(process.env, environment);
+      resetEnvironmentForTests();
+      fetchMock = jest.fn();
+      global.fetch = fetchMock;
+    });
+    afterEach(() => { global.fetch = originalFetch; });
+
+    const owners = {
+      EHR: () => {
+        const ehr = new EhrApiService(workloadIdentity);
+        const ehrNote = jest.fn((...args: Parameters<EhrApiService['createOcrClinicalNote']>) => ehr.createOcrClinicalNote(...args));
+        return { built: harness({ jobRow: validatedJob, validationRow: noteValidation, publicationRow: notePublication, ehrNote }),
+          operation: 'create_imported_clinical_note' as const };
+      },
+      LAB: () => ({ built: harness({ jobRow: validatedJob, validationRow: labValidation, publicationRow: labPublication,
+        labApi: new LabApiService(workloadIdentity) }), operation: 'create_imported_lab_evidence' as const }),
+      PHARMACY: () => ({ built: harness({ jobRow: validatedJob, validationRow: medicationValidation,
+        publicationRow: medicationPublication, pharmacyApi: new PharmacyApiService(workloadIdentity) }),
+      operation: 'create_imported_medication_evidence' as const }),
+    };
+    const ownerAnswers = (status: number, code: string) => fetchMock.mockImplementation(async () =>
+      new Response(JSON.stringify({ code, detail: 'Synthetic owner refusal' }),
+        { status, headers: { 'content-type': 'application/problem+json' } }));
+    const refusal = async (publishing: Promise<unknown>) => {
+      const error = await publishing.then(() => undefined, (caught: unknown) => caught);
+      expect(error).toBeInstanceOf(DomainProblem);
+      return error as DomainProblem;
+    };
+
+    it.each((['EHR', 'LAB', 'PHARMACY'] as const).flatMap((owner) => [
+      { owner, status: 401, code: 'INVALID_WORKLOAD_IDENTITY' },
+      { owner, status: 401, code: 'INTERNAL_SERVICE_AUTH_REQUIRED' },
+      { owner, status: 403, code: 'WORKLOAD_CALLER_DENIED' },
+    ]))('stores $owner $status $code as a retryable failure and answers 503', async ({ owner, status, code }) => {
+      ownerAnswers(status, code);
+      const { built: { service, clients, audit }, operation } = owners[owner]();
+      const problem = await refusal(publishTo(service, operation));
+      expect(failureUpdate(clients)).toEqual({ code: 'OWNING_SERVICE_UNAVAILABLE',
+        summary: `Owning clinical service is temporarily unavailable (${owner}_SERVICE_AUTH_UNAVAILABLE)`, retryable: true });
+      expect([problem.getStatus(), problem.code]).toEqual([503, `${owner}_SERVICE_AUTH_UNAVAILABLE`]);
+      // The owner was asked once, with the publication's own key.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject({ 'idempotency-key': ownerKey });
+      const event = auditEvents(audit).find(([, item]) => item.action === 'ocr.publication.fail')?.[1];
+      expect(event?.details).toEqual({ publicationId, failureCode: 'OWNING_SERVICE_UNAVAILABLE',
+        ownerFailureCode: `${owner}_SERVICE_AUTH_UNAVAILABLE`, retryable: true });
+      expect(failedEvent(clients)).toEqual({ jobId, publicationId, failureCode: 'OWNING_SERVICE_UNAVAILABLE',
+        retryable: true });
+    });
+
+    it.each((['EHR', 'LAB', 'PHARMACY'] as const).flatMap((owner) => [
+      { owner, status: 401, code: 'AUTHENTICATION_REQUIRED' },
+      { owner, status: 403, code: 'FACILITY_ACCESS_DENIED' },
+      { owner, status: 403, code: 'PERMISSION_DENIED' },
+    ]))('keeps $owner $status $code a terminal failure under the owner code', async ({ owner, status, code }) => {
+      ownerAnswers(status, code);
+      const { built: { service, clients, audit }, operation } = owners[owner]();
+      const problem = await refusal(publishTo(service, operation));
+      expect([problem.getStatus(), problem.code]).toEqual([status, code]);
+      expect(failureUpdate(clients)).toEqual({ code, summary: 'Publication was rejected by the owning domain',
+        retryable: false });
+      const event = auditEvents(audit).find(([, item]) => item.action === 'ocr.publication.fail')?.[1];
+      expect(event?.details).toEqual({ publicationId, failureCode: code, ownerFailureCode: code, retryable: false });
+    });
   });
 });
 
