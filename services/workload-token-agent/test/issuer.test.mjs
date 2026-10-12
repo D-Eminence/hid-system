@@ -76,3 +76,62 @@ test('configuration rejects production, ambiguous roles, shared subjects, and fo
 test('DER conversion rejects malformed or non-minimal integers', () => {
   for (const bytes of [[], [0x30, 0], [0x30, 6, 2, 1, 0, 2, 1, 1], [0x30, 7, 2, 2, 0, 1, 2, 1, 1]]) assert.throws(() => derToJose(bytes));
 });
+
+const productionEnv = { ...env, HID_DEPLOYMENT_ENV: 'production',
+  WORKLOAD_ISSUER_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/production',
+  WORKLOAD_CALLER_POLICY_JSON: JSON.stringify([{ roleArn: 'arn:aws:iam::123456789012:role/service/hid-production-ehr',
+    subject: 'hid:production:ehr-api', audiences: ['hid-identity-api', 'hid-lab-api', 'hid-pharmacy-api'] }]) };
+const productionEvent = (stage = 'production') => {
+  const event = makeEvent();
+  event.requestContext.stage = stage;
+  event.requestContext.identity.userArn = 'arn:aws:sts::123456789012:assumed-role/hid-production-ehr/task123';
+  return event;
+};
+function productionSetup() {
+  let signed = 0;
+  const handler = createIssuer(issuerConfiguration(productionEnv), { now: () => 2_000_000_000_000,
+    getPublicKey: async () => publicResult,
+    sign: async (key, message) => { signed++; return { KeyId: keyArn, SigningAlgorithm: 'ECDSA_SHA_256', Signature: sign('sha256', message, privateKey) }; } });
+  return { handler, signed: () => signed };
+}
+test('production issues tokens only for its own stage, issuer and subjects', async () => {
+  const configuration = issuerConfiguration(productionEnv);
+  assert.equal(configuration.stage, 'production');
+  assert.equal(issuerConfiguration(env).stage, 'staging');
+  const { handler, signed } = productionSetup();
+  const response = await handler(productionEvent()); assert.equal(response.statusCode, 200); assert.equal(signed(), 1);
+  const claims = JSON.parse(Buffer.from(JSON.parse(response.body).token.split('.')[1], 'base64url'));
+  assert.equal(claims.iss, 'https://abc123.execute-api.eu-west-2.amazonaws.com/production');
+  assert.equal(claims.sub, 'hid:production:ehr-api');
+  const jwksEvent = productionEvent();
+  jwksEvent.httpMethod = jwksEvent.requestContext.httpMethod = 'GET';
+  jwksEvent.resource = jwksEvent.requestContext.resourcePath = '/.well-known/jwks.json';
+  delete jwksEvent.requestContext.identity;
+  assert.equal((await handler(jwksEvent)).statusCode, 200);
+});
+test('a request context from another stage is denied before any KMS signing', async () => {
+  for (const stage of ['staging', 'Production', '', undefined]) {
+    const { handler, signed } = productionSetup();
+    assert.equal((await handler(productionEvent(stage))).statusCode, 403); assert.equal(signed(), 0);
+  }
+  const { handler, signed } = setup(); const event = makeEvent(); event.requestContext.stage = 'production';
+  assert.equal((await handler(event)).statusCode, 403); assert.equal(signed(), 0);
+});
+test('the deployment environment, issuer path and every subject must name the same stage', () => {
+  const stagingRule = JSON.parse(env.WORKLOAD_CALLER_POLICY_JSON);
+  const productionRule = JSON.parse(productionEnv.WORKLOAD_CALLER_POLICY_JSON);
+  for (const changed of [
+    { ...productionEnv, WORKLOAD_CALLER_POLICY_JSON: JSON.stringify(stagingRule) },
+    { ...productionEnv, WORKLOAD_CALLER_POLICY_JSON: JSON.stringify([...productionRule,
+      { ...stagingRule[0], roleArn: 'arn:aws:iam::123456789012:role/service/hid-production-lab', subject: 'hid:staging:lab-api' }]) },
+    { ...productionEnv, WORKLOAD_ISSUER_URL: env.WORKLOAD_ISSUER_URL },
+    { ...env, WORKLOAD_ISSUER_URL: productionEnv.WORKLOAD_ISSUER_URL },
+    { ...env, WORKLOAD_CALLER_POLICY_JSON: JSON.stringify(productionRule) },
+    { ...productionEnv, HID_DEPLOYMENT_ENV: 'development' },
+    { ...productionEnv, HID_DEPLOYMENT_ENV: 'Production' },
+    { ...productionEnv, HID_DEPLOYMENT_ENV: '' },
+    { ...productionEnv, HID_DEPLOYMENT_ENV: undefined },
+  ]) assert.throws(() => issuerConfiguration(changed));
+  assert.throws(() => issuerConfiguration({ ...productionEnv, WORKLOAD_ISSUER_URL: env.WORKLOAD_ISSUER_URL }), /^Error: Invalid workload issuer URL$/);
+  assert.throws(() => issuerConfiguration({ ...env, WORKLOAD_ISSUER_URL: productionEnv.WORKLOAD_ISSUER_URL }), /^Error: Invalid workload issuer URL$/);
+});

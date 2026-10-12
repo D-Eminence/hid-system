@@ -32,6 +32,11 @@ if (environment === 'staging') {
   assert.equal(regional.Parameters.RdsCaBundleBase64.MaxLength, 4096,
     'staging public CA parameter must enforce the CloudFormation value limit')
 }
+const templateBytes = (await readFile(resolve(output, names[0]))).byteLength
+assert.ok(templateBytes <= 1024 * 1024, `${profile} template exceeds the CloudFormation S3 object quota`)
+assert.ok(Object.keys(regional.Parameters ?? {}).length <= 200, `${profile} template exceeds the parameter quota`)
+assert.ok(Object.keys(regional.Resources ?? {}).length <= 500, `${profile} template exceeds the resource quota`)
+assert.ok(Object.keys(regional.Outputs ?? {}).length <= 200, `${profile} template exceeds the output quota`)
 assert.ok(names[0].includes('Regional'), 'regional template is missing')
 const resources = (type) => Object.values(regional.Resources ?? {}).filter(resource => resource.Type === type)
 const text = JSON.stringify(regional)
@@ -107,13 +112,45 @@ assert.doesNotMatch(text, /(?:AKIA|ASIA)[0-9A-Z]{16}/)
 assert.doesNotMatch(text, /CloudFront/i)
 assert.equal(resources('AWS::SQS::Queue').length, 2)
 assert.equal(resources('AWS::Events::Rule').length, 1)
-assert.equal(resources('AWS::Lambda::Function').length, environment === 'staging' ? 1 : 0)
-if (environment === 'staging') {
+
+// Staging and production carry their own in-stack workload issuer; development
+// deliberately keeps the external issuer, JWKS and subject inputs.
+const issuerEnvironment = ['staging', 'production'].includes(environment) ? environment : undefined
+const workloadParameters = ['WorkloadIssuerUrl', 'WorkloadJwksUrl', 'EhrWorkloadSubject', 'LabWorkloadSubject',
+  'PharmacyWorkloadSubject', 'OcrWorkloadSubject', 'OutreachWorkloadSubject', 'IdentityWorkloadSubject']
+const tokenMounts = container => (container.MountPoints ?? []).filter(mount => mount.SourceVolume === 'workload-tokens')
+const tokenTasks = resources('AWS::ECS::TaskDefinition')
+  .filter(task => (task.Properties.Volumes ?? []).some(volume => volume.Name === 'workload-tokens'))
+assert.equal(tokenTasks.length, 6, 'six token-bearing tasks must have a workload token volume')
+for (const task of tokenTasks) {
+  const containers = task.Properties.ContainerDefinitions
+  const app = containers.find(container => container.Name !== 'workload-token-agent')
+  const writers = containers.filter(container => tokenMounts(container).some(mount => mount.ReadOnly === false))
+  assert.deepEqual(tokenMounts(app).map(mount => mount.ReadOnly), [true], `${app.Name} must mount its token volume read-only`)
+  if (issuerEnvironment) {
+    assert.deepEqual(writers.map(container => container.Name), ['workload-token-agent'],
+      `${app.Name} token volume must have exactly one workload-token-agent writer`)
+    assert.deepEqual(tokenMounts(writers[0]).map(mount => mount.ReadOnly), [false])
+    assert.deepEqual(app.DependsOn, [{ ContainerName: 'workload-token-agent', Condition: 'HEALTHY' }],
+      `${app.Name} must wait for its token agent to be healthy`)
+    const agentEnvironment = Object.fromEntries(writers[0].Environment.map(item => [item.Name, item.Value]))
+    assert.equal(agentEnvironment.HID_DEPLOYMENT_ENV, issuerEnvironment)
+    assert.equal(agentEnvironment.WORKLOAD_SUBJECT, `hid:${issuerEnvironment}:${app.Name}`)
+  } else {
+    assert.equal(writers.length, 0, 'development token delivery remains an external prerequisite')
+  }
+}
+assert.equal(resources('AWS::Lambda::Function').length, issuerEnvironment ? 1 : 0)
+if (issuerEnvironment) {
   const methods = resources('AWS::ApiGateway::Method')
   assert.equal(methods.length, 2)
   assert.equal(methods.find(method => method.Properties.HttpMethod === 'POST').Properties.AuthorizationType, 'AWS_IAM')
   assert.equal(methods.find(method => method.Properties.HttpMethod === 'GET').Properties.AuthorizationType, 'NONE')
-  assert.equal(regional.Parameters.WorkloadIssuerUrl, undefined)
+  assert.deepEqual(resources('AWS::ApiGateway::Stage').map(stage => stage.Properties.StageName), [issuerEnvironment])
+  assert.equal(resources('AWS::Lambda::Function')[0].Properties.FunctionName, `hid-${issuerEnvironment}-workload-issuer`)
+  assert.equal(resources('AWS::KMS::Key').filter(key => key.Properties.KeyUsage === 'SIGN_VERIFY').length, 1)
+  for (const name of workloadParameters) assert.equal(regional.Parameters[name], undefined, `${name} must not be an input`)
+  assert.doesNotMatch(text, issuerEnvironment === 'production' ? /hid:staging:|hid-staging-workload/ : /hid:production:|hid-production-workload/)
   const tokenAgents = resources('AWS::ECS::TaskDefinition').flatMap(task => task.Properties.ContainerDefinitions)
     .filter(container => container.Name === 'workload-token-agent')
   assert.equal(tokenAgents.length, 6)
@@ -122,6 +159,13 @@ if (environment === 'staging') {
     assert.equal(agent.User, '65532:65532')
     assert.equal(agent.ReadonlyRootFilesystem, true)
   }
+} else {
+  for (const name of workloadParameters) {
+    assert.ok(regional.Parameters[name], `development must still require ${name}`)
+    assert.equal(regional.Parameters[name].Default, undefined)
+  }
+  assert.equal(resources('AWS::ApiGateway::RestApi').length, 0)
+  assert.doesNotMatch(text, /workload-token-agent/)
 }
 assert.equal(regional.Parameters.OriginDomainName, undefined)
 if (asleep) {

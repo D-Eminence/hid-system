@@ -100,3 +100,52 @@ test('startup removes stale files, renewal verifies before writing, outages reta
     await assert.rejects(readFile(join(directory, 'ready.json')), { code: 'ENOENT' });
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+const productionEnvironment = { ...environment, HID_DEPLOYMENT_ENV: 'production',
+  WORKLOAD_ISSUER_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/production',
+  WORKLOAD_JWKS_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/production/.well-known/jwks.json',
+  WORKLOAD_SUBJECT: 'hid:production:ehr-api' };
+test('production binds its own issuer stage path and subject prefix', () => {
+  const production = agentConfiguration(productionEnvironment);
+  assert.equal(production.stage, 'production');
+  assert.equal(production.issuer, 'https://abc123.execute-api.eu-west-2.amazonaws.com/production');
+  assert.equal(production.subject, 'hid:production:ehr-api');
+  assert.equal(configuration.stage, 'staging');
+});
+test('the deployment environment, issuer path and subject prefix must name the same stage', () => {
+  const stagingIssuer = { WORKLOAD_ISSUER_URL: environment.WORKLOAD_ISSUER_URL, WORKLOAD_JWKS_URL: environment.WORKLOAD_JWKS_URL };
+  const productionIssuer = { WORKLOAD_ISSUER_URL: productionEnvironment.WORKLOAD_ISSUER_URL, WORKLOAD_JWKS_URL: productionEnvironment.WORKLOAD_JWKS_URL };
+  for (const changed of [
+    { ...productionEnvironment, ...stagingIssuer },
+    { ...productionEnvironment, WORKLOAD_SUBJECT: 'hid:staging:ehr-api' },
+    { ...environment, ...productionIssuer },
+    { ...environment, WORKLOAD_SUBJECT: 'hid:production:ehr-api' },
+    { ...productionEnvironment, HID_DEPLOYMENT_ENV: 'development' },
+    { ...productionEnvironment, HID_DEPLOYMENT_ENV: 'Production' },
+    { ...productionEnvironment, HID_DEPLOYMENT_ENV: '' },
+    { ...productionEnvironment, HID_DEPLOYMENT_ENV: undefined },
+  ]) assert.throws(() => agentConfiguration(changed));
+  assert.throws(() => agentConfiguration({ ...productionEnvironment, ...stagingIssuer }), /^Error: Invalid workload issuer URL$/);
+  assert.throws(() => agentConfiguration({ ...environment, ...productionIssuer }), /^Error: Invalid workload issuer URL$/);
+});
+test('production SigV4 matches the AWS Smithy signer reference for /production/token', () => {
+  // Reference independently generated with @smithy/signature-v4 5.6.12, applyChecksum:false,
+  // the same inputs as the staging vector and path /production/token.
+  const production = agentConfiguration(productionEnvironment);
+  const result = signTokenRequest(production, credentials, 'hid-identity-api', new Date(now));
+  assert.equal(result.url, 'https://abc123.execute-api.eu-west-2.amazonaws.com/production/token');
+  assert.equal(result.headers.authorization, `AWS4-HMAC-SHA256 Credential=${syntheticAccessKey}/20260910/eu-west-2/execute-api/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token, Signature=2b1187afe0227a0328262b1c17f8c1544663d9b758f4d72693da3547458e5abd`);
+  for (const mixed of [{ ...production, issuer: configuration.issuer }, { ...configuration, issuer: production.issuer },
+    { ...production, stage: undefined }]) {
+    assert.throws(() => signTokenRequest(mixed, credentials, 'hid-identity-api', new Date(now)), /Invalid token endpoint/);
+  }
+});
+test('a production agent rejects a staging-issued or staging-subject token', () => {
+  const production = agentConfiguration(productionEnvironment);
+  const productionToken = minted({ iss: production.issuer, sub: production.subject });
+  assert.equal(verifyMintedToken(productionToken, jwks, production, 'hid-identity-api', now).expiresAt, now + 300_000);
+  for (const claims of [{ iss: configuration.issuer, sub: production.subject }, { iss: production.issuer, sub: 'hid:staging:ehr-api' }]) {
+    assert.throws(() => verifyMintedToken(minted(claims), jwks, production, 'hid-identity-api', now), /claims are invalid/);
+  }
+  assert.throws(() => verifyMintedToken(productionToken, jwks, configuration, 'hid-identity-api', now), /claims are invalid/);
+});
