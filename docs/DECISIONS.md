@@ -1840,8 +1840,8 @@ Related: ADR-028, ADR-039, ADR-040; release checklist P8 and §4.1.
 
 # ADR-043: Identity Trusts a Workload-Reported Method for Delegated Cookie Reads
 
-Status: Proposed (D-Eminence/hid-system#38, an open pull request that is not
-merged).
+Status: Accepted for source implementation (D-Eminence/hid-system#38). Not
+deployed.
 
 Date: 2026-10-11
 
@@ -1852,12 +1852,12 @@ EHR, Lab, OCR and Pharmacy authorize each patient-scoped request with
 cookie and authenticating separately as approved workloads (ADR-025).
 Identity's `SecurityGuard` requires an allowed `Origin` and a valid
 `X-CSRF-Token` on every cookie request with an unsafe method, and the decision
-call is always a `POST`. A same-origin browser `GET` carries neither, so on
-`main` every delegated patient-scoped read from a same-origin cookie session is
-refused `403 ORIGIN_DENIED` at the decision call. This was reproduced locally
+call is always a `POST`. A same-origin browser `GET` carries neither, so before
+this change every delegated patient-scoped read from a same-origin cookie
+session was refused `403 ORIGIN_DENIED` at the decision call. This was reproduced locally
 over HTTP for a doctor's cookie-only read of encounters through EHR.
 
-Decision (proposed):
+Decision:
 
 - The calling services report the method of the request they are serving in
   `X-HID-Original-Method`. The typed Identity client sends it upper-cased, and
@@ -1879,7 +1879,10 @@ Consequences:
 
 - same-origin cookie reads through EHR, Lab, OCR and Pharmacy are authorized
   once both the service and Identity include the change; either side alone
-  behaves as before;
+  behaves as before. OCR's cookie reads also need EHR with the change: OCR
+  reads each job's source document through EHR
+  (`GET /ehr/internal/ocr/documents/:id/source`), which authorizes it with the
+  forwarded cookie;
 - Identity cannot verify the reported method. It relies on any approved
   workload with valid credentials to report it truthfully, so such a workload
   can have the Origin and CSRF check skipped on the patient decision. A browser

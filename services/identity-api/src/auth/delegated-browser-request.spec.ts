@@ -1,5 +1,7 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn(), SignJWT: jest.fn() }));
 import type { ExecutionContext } from '@nestjs/common';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Reflector } from '@nestjs/core';
 import type { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
@@ -78,7 +80,7 @@ beforeEach(() => {
 });
 
 describe('delegated browser requests through the Identity guard', () => {
-  it.each(['GET', 'HEAD'])('allows a forwarded cookie with no Origin or CSRF when the authenticated workload reports %s',
+  it.each(['GET', 'HEAD', 'OPTIONS'])('allows a forwarded cookie with no Origin or CSRF when the authenticated workload reports %s',
     async (method) => {
       const { guard: subject, workloadAuth } = guard();
       await expect(subject.canActivate(context(delegated({ ...workload, 'x-hid-original-method': method }),
@@ -128,6 +130,14 @@ describe('delegated browser requests through the Identity guard', () => {
     const { guard: subject } = guard(null);
     expect((await refusal(subject.canActivate(context(delegated({ ...workload, 'x-hid-original-method': 'GET' }),
       authorizationCheck, IdentityController)))).code).toBe('ORIGIN_DENIED');
+  });
+
+  it('marks only the patient authorization check as a delegated browser request', () => {
+    const files = (directory: string): string[] => readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
+      entry.isDirectory() ? files(join(directory, entry.name)) : entry.name.endsWith('.ts') ? [join(directory, entry.name)] : []);
+    const marked = files(join(__dirname, '..')).filter((file) => !file.endsWith('.spec.ts'))
+      .flatMap((file) => (readFileSync(file, 'utf8').match(/@DelegatedBrowserRequest\(\)/g) ?? []).map(() => file));
+    expect(marked.map((file) => file.slice(file.indexOf('src/')))).toEqual(['src/identity/identity.controller.ts']);
   });
 
   it('leaves bearer delegation unchanged', async () => {
