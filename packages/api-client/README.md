@@ -14,5 +14,6 @@ sends the delegated user context of `IdentityDelegatedContext` separately from
 the caller's workload headers. When the calling service sets `requestMethod`,
 the method of the request it is serving, the client sends it upper-cased as
 `X-HID-Original-Method`, and only when it is 1–16 letters. Identity honours it
-only on the patient authorization check and only from an authenticated
+only on the patient authorization check and, with the Outreach cookie-read fix
+(ADR-045), on the Outreach authorization, and only from an authenticated
 workload; see the Extracted Identity boundary in `docs/INTERFACE_CONTRACT.md`.

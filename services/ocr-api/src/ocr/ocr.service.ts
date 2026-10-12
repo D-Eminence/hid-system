@@ -13,7 +13,7 @@ import type { CreateOcrPublicationDto } from './dto/create-ocr-publication.dto';
 import type { CreateOcrJobDto } from './dto/create-ocr-job.dto';
 import type { RetryOcrJobDto } from './dto/retry-ocr-job.dto';
 import type { ValidateOcrJobDto } from './dto/validate-ocr-job.dto';
-import { assertCandidateClassification, clinicalNoteCandidate,
+import { assertCandidateClassification, assertPublishableCandidate, clinicalNoteCandidate,
   expectedPublicationOperation, importedLabCandidate,
   importedMedicationCandidate } from './ocr-publication-policy';
 import { LabApiService } from '../integrations/lab-api.service';
@@ -277,6 +277,11 @@ export class OcrService {
         if (replay.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT', 'Idempotency-Key was used for a different validation');
         return this.projectValidation(replay);
       }
+      // Publication refuses an incomplete candidate as terminal and the job
+      // cannot leave 'validated', so a validation it would refuse is refused
+      // here, before anything is written. After the replay, which answers what
+      // was stored.
+      if (input.disposition === 'validated') assertPublishableCandidate(input.targetDomain, input.acceptedFields);
       if (job.status !== 'awaiting_validation' || Number(job.row_version) !== input.expectedVersion) {
         throw new DomainProblem(412, 'OCR_VERSION_CONFLICT', 'OCR job is not awaiting validation at the expected version');
       }
@@ -571,13 +576,17 @@ export class OcrService {
           [claimed.id, token, code, summary, !terminal]);
         const failed = result.rows[0];
         if (failed) {
+          // The claim takes the publication again only while attempt_count <
+          // max_attempts (the count this attempt's claim raised), so after the
+          // last permitted attempt no further attempt follows, whatever the code.
+          const retryable = !terminal && failed.attempt_count < failed.max_attempts;
           const job = await this.findJob(client, failed.job_id);
           await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.fail', job,
             failed.patient_id,
             { publicationId: failed.id, failureCode: failed.failure_code, ownerFailureCode: ownerCode,
-              retryable: !terminal }));
+              retryable }));
           await this.appendOutbox(client, job, 'OcrPublicationFailed', Number(failed.row_version),
-            { publicationId: failed.id, failureCode: failed.failure_code, retryable: !terminal });
+            { publicationId: failed.id, failureCode: failed.failure_code, retryable });
         }
       });
       throw error;
