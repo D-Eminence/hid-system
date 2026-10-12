@@ -18,6 +18,18 @@ export const RequirePermissions = (...permissions: string[]): MethodDecorator & 
 export const AuditAction = (action: string): MethodDecorator & ClassDecorator => SetMetadata(AUDIT_ACTION, action);
 export const NoAudit = (): MethodDecorator & ClassDecorator => SetMetadata(NO_AUDIT, true);
 export const AuditFailuresOnly = (): MethodDecorator & ClassDecorator => SetMetadata(AUDIT_FAILURES_ONLY, true);
+export const AUDIT_SESSION_EVENT = Symbol('AUDIT_SESSION_EVENT');
+/**
+ * A session route (sign-out, facility selection, session reads) whose requests
+ * the AuditInterceptor records as this `auth.*` session event, not as a generic
+ * `api.*` HTTP request. No facility is bound to these routes unless the request
+ * names one of the actor's facilities in X-Facility-ID (sign-out binds none),
+ * and a staff audit row without a facility is accepted only as an `auth.*` session event
+ * (AuditService.assertActorFacility and the 0067 CHECK constraints). Recorded
+ * as `api.*`, a staff refusal failed its own audit, so the request answered 503
+ * and the refusal went unrecorded.
+ */
+export const AuditSessionEvent = (action: `auth.${string}`): MethodDecorator => SetMetadata(AUDIT_SESSION_EVENT, action);
 /**
  * Platform administration routes act on the whole platform, not on a facility.
  * The guard binds no facility context to them, accepts only platform

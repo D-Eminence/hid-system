@@ -2272,8 +2272,10 @@ Decision:
   for the presented session while it is a live staff session of the account,
   under the account row lock that sign-out and revocation take (0073), and
   writes the existing `auth.facility.select` audit on the same transaction.
-  A refusal writes no selection row and no `auth.facility.select` audit (the
-  global `AuditInterceptor` still records its generic failure row). A
+  A refusal writes no selection row and no successful `auth.facility.select`
+  audit; the global `AuditInterceptor` records it as a failed
+  `auth.facility.select` session event with no facility
+  (D-Eminence/hid-system#42). A
   presented session that another tab's refresh rotated after the request was
   authorized is no longer live, so that selection is `401` and the client
   refreshes and retries.

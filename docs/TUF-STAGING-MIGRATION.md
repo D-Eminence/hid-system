@@ -80,7 +80,9 @@ The executable covers:
    migration 0080, ADR-046) covers a staff member's selected facility kept for
    the sign-in across a session read and refresh, `reselect` once the selected
    membership ends, another sign-in of the account unaffected, refused
-   selections writing nothing, the 0080 guard as the runtime, and a selection
+   selections writing no selection and only their failed
+   `auth.facility.select` audit row (the global `AuditInterceptor` registered
+   as `AppModule` registers it), the 0080 guard as the runtime, and a selection
    waiting at the account lock while a sign-out ends the sign-in.
    These results are local synthetic evidence, not deployed application
    validation.

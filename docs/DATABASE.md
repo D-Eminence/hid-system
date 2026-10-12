@@ -1945,4 +1945,6 @@ runner's 5 s lock timeout (`MIGRATION_RUNBOOK.md`).
   `runtime-command-privileges.integration.sql`.
   `services/identity-api/scripts/verify-facility-selection-runtime.mjs`
   exercises the HTTP contract against a migrated database as
-  `hid_identity_api_runtime`.
+  `hid_identity_api_runtime`, with the global `AuditInterceptor` registered as
+  `AppModule` registers it, so each refused selection must also write its
+  failed `auth.facility.select` row past 0067's staff CHECKs.

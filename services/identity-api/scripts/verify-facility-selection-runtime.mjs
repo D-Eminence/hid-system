@@ -36,6 +36,7 @@ const { AuthController } = load('auth/auth.controller.ts');
 const { GoogleAuthenticationService } = load('auth/google-authentication.service.ts');
 const { AuthSessionAuditService } = load('auth/auth-session-audit.service.ts');
 const { AuditService } = load('audit/audit.service.ts');
+const { AuditInterceptor } = load('audit/audit.interceptor.ts');
 const { SecurityGuard } = load('auth/security.guard.ts');
 const { WorkloadAuthService } = load('auth/workload-auth.service.ts');
 const { TurnstileService } = load('auth/turnstile.service.ts');
@@ -71,6 +72,9 @@ try {
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }));
   app.useGlobalFilters(new ProblemDetailsFilter());
   app.useGlobalGuards(new SecurityGuard(module.get(Reflector), module.get(TokenService), module.get(AuditService), module.get(DatabaseService)));
+  // As AppModule registers it (APP_INTERCEPTOR): a refused selection is audited
+  // as a failed auth.facility.select session event (D-Eminence/hid-system#42).
+  app.useGlobalInterceptors(new AuditInterceptor(module.get(Reflector), module.get(AuditService)));
   await app.init();
   const http = request(app.getHttpServer());
   const origin = process.env.CORS_ORIGINS.split(',')[0];
@@ -142,6 +146,11 @@ try {
       row_version::int from auth.session_facility_selection where account_id = $1 order by selected_at`, [accountId])).rows;
   const selectionAudits = async (sessionId) => (await pool.query(`select facility_id::text, actor_membership_id::text
       from audit.events where action = 'auth.facility.select' and outcome = 'success' and resource_id = $1`, [sessionId])).rows;
+  const refusalAudits = async (sessionId) => (await pool.query(`select actor_type, resource_type, facility_id::text,
+      actor_membership_id::text, organization_id::text from audit.events
+      where action = 'auth.facility.select' and outcome = 'failure' and resource_id = $1`, [sessionId])).rows;
+  const unscopedStaffRefusals = (audits) => audits.every(row => row.actor_type === 'staff' && row.resource_type === 'session'
+    && row.facility_id === null && row.actor_membership_id === null && row.organization_id === null);
   const reports = (response, facilityId, state) => {
     assert.equal(response.status, 200, JSON.stringify(response.body));
     assert.equal(response.body.facilitySelection, state, JSON.stringify(response.body));
@@ -187,6 +196,7 @@ try {
 
   // 5. An invalid selection is refused and writes nothing, nor does a malformed one.
   const auditsBefore = (await selectionAudits(secondRotated.held.sessionId)).length;
+  const refusalsBefore = (await refusalAudits(secondRotated.held.sessionId)).length;
   for (const [label, body, status, code] of [
     ['another account\'s facility', gamma, 403, 'FACILITY_ACCESS_DENIED'],
     ['an unknown facility', randomUUID(), 403, 'FACILITY_ACCESS_DENIED'],
@@ -198,9 +208,12 @@ try {
   }
   assert.equal((await rows(doctor.id)).length, 1, 'a refused selection writes no row');
   assert.equal((await selectionAudits(secondRotated.held.sessionId)).length, auditsBefore, 'nor a selection audit');
+  const refusals = await refusalAudits(secondRotated.held.sessionId);
+  assert.equal(refusals.length, refusalsBefore + 3, 'each refusal is audited once');
+  assert.ok(unscopedStaffRefusals(refusals), `refusal rows carry no facility: ${JSON.stringify(refusals)}`);
   assert.equal((await rows(colleague.id)).length, 0);
   reports(await session(secondRotated.held), alpha, 'default');
-  checks.push('selecting another account\'s or an unknown facility is 403 FACILITY_ACCESS_DENIED and a malformed id 400, each writing no row and no selection audit');
+  checks.push('selecting another account\'s or an unknown facility is 403 FACILITY_ACCESS_DENIED and a malformed id 400, each writing no row and no selection audit, and each recorded once as a failed auth.facility.select staff session event with no facility, membership or organization');
 
   // 6. X-Facility-ID still authorizes each request, whatever is selected.
   const header = await session(rotated.held).set('X-Facility-ID', alpha);
@@ -281,7 +294,10 @@ try {
   assert.equal(raced.status, 401, JSON.stringify(raced.body));
   assert.equal((await rows(doctor.id)).filter(row => row.family_id === racing.sessionId).length, 0);
   assert.equal((await selectionAudits(racing.sessionId)).length, 0);
-  checks.push('a selection waiting at the account lock while a sign-out ends the sign-in answers 401 and writes neither a row nor an audit');
+  const racedRefusals = await refusalAudits(racing.sessionId);
+  assert.equal(racedRefusals.length, 1, JSON.stringify(racedRefusals));
+  assert.ok(unscopedStaffRefusals(racedRefusals), JSON.stringify(racedRefusals));
+  checks.push('a selection waiting at the account lock while a sign-out ends the sign-in answers 401 and writes neither a row nor a selection audit, only its failure row');
 
   // 11. Sign-out leaves the row; the signed-out sign-in never reads or writes it again.
   const signOut = await http.post('/api/v1/auth/logout').set('Cookie', cookie(endedRefresh.held.cookies)).set('Origin', origin)
