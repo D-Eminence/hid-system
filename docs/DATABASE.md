@@ -1885,7 +1885,8 @@ requires an active code:
   Pharmacy and OCR patient access, is denied;
 - `identity.create_access_request` and `identity.close_own_consent_grant`
   (0010) and `identity.activate_break_glass` (0031) raise `22023`, which
-  Identity answers `400 INVALID_CONSENT_COMMAND`;
+  Identity answers `400 INVALID_CONSENT_COMMAND` (break-glass only while
+  `break_glass_enabled` is on; Identity checks the control first);
 - `identity.access_patient_with_pin` (0033, 0079) raises `22023`, answered
   `403 PATIENT_PIN_ACCESS_DENIED`;
 - the `purpose_of_use` foreign keys of `identity.access_requests` and
