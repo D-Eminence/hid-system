@@ -1813,7 +1813,7 @@ patient's window uncleared or clears another patient's.
 `CREATE OR REPLACE`. The signature, `SECURITY DEFINER` attribute,
 `search_path` (`pharmacy, platform, pg_temp`; `ehr.prescriptions` is
 schema-qualified), volatility, owner, ACL, triggers and the 0077 checks and
-messages are unchanged. Change name: `fix/pharmacy-source-prescription`.
+messages are unchanged. Change: D-Eminence/hid-system#48.
 
 Before 0080 neither guard read `ehr.prescriptions`, and
 `pharmacy.work_items.source_ehr_prescription_id` has no foreign key. The EHR
@@ -1836,7 +1836,7 @@ name the Pharmacy API maps to `409` (`INTERFACE_CONTRACT.md` §13):
   `starts_on` and `ends_on` with the prescription's dates, yet; Pharmacy
   stores those three as sent, as before 0080. The migrations run before the
   EHR API is deployed and the EHR API may be rolled back (release checklist
-  §6, §9). Every EHR build before `fix/pharmacy-source-prescription` sends
+  §6, §9). Every EHR build before D-Eminence/hid-system#48 sends
   `created_at` truncated to the millisecond, and the dates as node-postgres
   local-midnight `Date` values, a day early in a process east of UTC; an
   exact time term would refuse nearly every acceptance such a build sends,

@@ -1946,7 +1946,7 @@ Consequences:
 
 Date: 2026-10-12
 
-Change name: `fix/pharmacy-source-prescription`.
+Change: D-Eminence/hid-system#48.
 
 Pharmacy acceptance and dispensing depend on a mutable row of another domain,
 the EHR prescription, which the EHR may cancel, hold, complete or edit at any
