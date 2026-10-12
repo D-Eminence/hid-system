@@ -13,7 +13,7 @@ exact-resource permission to request their own workload tokens.
 
 | Runtime | Execution-role secret scope | Task-role allows | Explicit non-authority |
 |---|---|---|---|
-| Identity API | its DB; auth; NIN/OTP/Turnstile | staging issuer `POST /token` only | no SES, provider secret API, S3, Textract, queue, EventBridge, or other DB secret |
+| Identity API | its DB; auth; NIN/OTP/Turnstile/platform MFA key | staging issuer `POST /token` only | no SES, provider secret API, S3, Textract, queue, EventBridge, or other DB secret |
 | EHR API | its DB/scanner URL | exact document bucket metadata/read/write and exact document KMS use via S3; staging issuer `POST /token` | no auth signing/pepper, Textract, queue, EventBridge, delete, or bucket administration |
 | Lab API | its DB | staging issuer `POST /token` only | no document/provider/event/queue authority |
 | Pharmacy API | its DB | staging issuer `POST /token` only | no document/provider/event/queue authority |
@@ -31,6 +31,10 @@ exact-resource permission to request their own workload tokens.
 
 Only Identity receives `AUTH_SIGNING_SECRET` and `AUTH_LOGIN_PEPPER`. This
 negative boundary is asserted so EHR and every other task cannot receive them.
+Likewise only the `identity-api` container receives `MFA_SECRET_KEY_B64`, from
+the `mfaSecretKeyB64` field of the Identity sensitive secret, and
+`MFA_KEY_VERSION`; this is asserted for every profile. The Identity execution
+role already resolves that secret, so the key adds no IAM statement.
 Provider fields are injected only into Notification API/Worker as required.
 
 ## Resource-wildcard exceptions
@@ -125,7 +129,7 @@ receiver rejection still require staging evidence before raising task counts.
 Staging must record that:
 
 1. every task fails to resolve another task's secret;
-2. only Identity can receive auth/NIN/OTP/Turnstile material;
+2. only Identity can receive auth/NIN/OTP/Turnstile/platform MFA key material;
 3. Notification API can send SES mail but cannot consume the queue;
 4. Notification Worker can consume only the exact queue and cannot call SES by IAM;
 5. OCR Worker succeeds on exact S3/KMS/Textract actions and fails unrelated actions;
