@@ -7,6 +7,7 @@ import { getEnvironment } from '../../config/environment';
 import { DatabaseService } from '../../database/database.service';
 import { BedrockAiService } from './bedrock-ai.service';
 import { PatientRecordsService } from './patient-records.service';
+import { PatientChatHistoryService, type ChatReply } from './patient-chat-history.service';
 
 interface NoteRow extends QueryResultRow {
   noteId: string;
@@ -29,7 +30,7 @@ interface SourceRow extends QueryResultRow {
   signedAt: Date;
 }
 
-const NO_RECORDS = 'I could not find released clinical notes in your authorized records.';
+const NO_RECORDS = 'I cannot find released clinical notes available to this account yet. Check the Records page for your available records. Archived imports, attachments, lab results and prescriptions are not included in record chat.';
 const NO_GROUNDED_ANSWER = 'I could not verify an answer from the available records.';
 
 @Injectable()
@@ -43,6 +44,7 @@ export class PatientChatService {
     private readonly records: PatientRecordsService,
     private readonly bedrock: BedrockAiService,
     private readonly audit: AuditService,
+    private readonly history: PatientChatHistoryService,
   ) {}
 
   async answer(request: HidRequest, rawQuestion: string) {
@@ -55,7 +57,13 @@ export class PatientChatService {
     const authorization = await this.records.authorizeSelf(request);
     const release = this.admit(authorization.patientId);
     try {
-      return await this.answerAuthorized(request, question, authorization, environment, AbortSignal.timeout(35_000));
+      const generation = await this.history.start(request, authorization);
+      const introduction = /^(hi|hello|hey|good (morning|afternoon|evening)|who are you|what are you|what (can|do) you (do|help with)|how can you help( me)?|can you help( me)?|what can you help me with|is there anything you can help me with)[.!?]*$/i.test(question);
+      const reply: ChatReply = introduction ? { status: 'ready', sources: [],
+        answer: 'I am the Health ID record assistant. I can explain and summarise your released clinical notes and help you find follow-up steps recorded by your care team. Try “Summarise my latest note.” For questions about using Health ID, open Support chat. I cannot diagnose, prescribe treatment, or read archived imports, attachments, lab results or prescriptions.' }
+        : await this.answerAuthorized(request, question, authorization, environment, AbortSignal.timeout(35_000));
+      await this.history.save(request, generation, question, reply);
+      return reply;
     } catch (error) {
       if (error instanceof DomainProblem) throw error;
       throw new DomainProblem(503, 'PATIENT_CHAT_UNAVAILABLE', 'Patient chat is temporarily unavailable');
@@ -80,7 +88,7 @@ export class PatientChatService {
 
   private async answerAuthorized(request: HidRequest, question: string,
     authorization: Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>,
-    environment: ReturnType<typeof getEnvironment>, signal: AbortSignal) {
+    environment: ReturnType<typeof getEnvironment>, signal: AbortSignal): Promise<ChatReply> {
     const notes = await this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
       const result = await client.query<NoteRow>(
         `select note.id as "noteId", note.current_revision_no as "revisionNo", note.title,

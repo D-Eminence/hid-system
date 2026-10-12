@@ -13,6 +13,7 @@ import { StorageModule } from '../storage/storage.module';
 import { ImportedAttachmentService } from './patient-records/imported-attachment.service';
 import { BedrockAiService } from './patient-records/bedrock-ai.service';
 import { PatientChatService } from './patient-records/patient-chat.service';
+import { PatientChatHistoryService } from './patient-records/patient-chat-history.service';
 
 @Module({
   imports: [
@@ -27,6 +28,6 @@ import { PatientChatService } from './patient-records/patient-chat.service';
     LabRequestsModule,
   ],
   controllers: [PatientRecordsController],
-  providers: [PatientRecordsService, ImportedAttachmentService, BedrockAiService, PatientChatService],
+  providers: [PatientRecordsService, ImportedAttachmentService, BedrockAiService, PatientChatService, PatientChatHistoryService],
 })
 export class EhrModule {}

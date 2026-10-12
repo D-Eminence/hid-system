@@ -4,6 +4,7 @@ import type { HidRequest } from '../../common/request-context';
 import type { DatabaseService } from '../../database/database.service';
 import type { BedrockAiService } from './bedrock-ai.service';
 import { PatientChatService } from './patient-chat.service';
+import type { PatientChatHistoryService } from './patient-chat-history.service';
 import type { PatientRecordsService } from './patient-records.service';
 
 jest.mock('../../config/environment', () => ({
@@ -36,16 +37,36 @@ function setup(initialNotes: typeof note[] = [note]) {
   const embed = jest.fn().mockResolvedValue(Array(1024).fill(0));
   const answer = jest.fn().mockResolvedValue('Your note records blood pressure [1].');
   const audit = jest.fn().mockResolvedValue(undefined);
+  const start = jest.fn().mockResolvedValue('generation-a');
+  const save = jest.fn().mockResolvedValue(undefined);
   const service = new PatientChatService(
     { withPatientTransaction: transaction } as unknown as DatabaseService,
     { authorizeSelf } as unknown as PatientRecordsService,
     { embed, answer } as unknown as BedrockAiService,
     { recordWithClient: audit } as unknown as AuditService,
+    { start, save } as unknown as PatientChatHistoryService,
   );
-  return { service, query, transaction, authorizeSelf, embed, answer, audit };
+  return { service, query, transaction, authorizeSelf, embed, answer, audit, start, save };
 }
 
 describe('Patient chat authorization and grounding', () => {
+  it.each(['hello', 'what are you?', 'is there anything you can help me with?', 'how can you help me?'])('answers capability question %s without searching notes or calling Bedrock', async question => {
+    const { service, transaction, embed, answer, save } = setup([]);
+    const reply = await service.answer(request, question);
+    expect(reply.answer).toContain('Health ID record assistant');
+    expect(reply.sources).toEqual([]);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(embed).not.toHaveBeenCalled();
+    expect(answer).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledWith(request, 'generation-a', question, reply);
+  });
+
+  it('keeps medical questions containing greeting words on the record path', async () => {
+    const { service, transaction, answer } = setup();
+    await service.answer(request, 'Hello, what does my note say?');
+    expect(transaction).toHaveBeenCalled();
+    expect(answer).toHaveBeenCalled();
+  });
   it('queries and indexes only the freshly authorized patient, then returns source references', async () => {
     const { service, query, authorizeSelf, answer } = setup();
     const result = await service.answer(request, 'What does my note say?');

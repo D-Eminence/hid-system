@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Header, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import { AuditFailuresOnly, FacilityOptional, PatientAllowed, RequirePermissions } from '../../common/decorators';
 import { DomainProblem } from '../../common/problem';
 import { requireRequestContext, type HidRequest } from '../../common/request-context';
@@ -6,12 +6,25 @@ import { PatientRecordsService } from './patient-records.service';
 import { ImportedAttachmentService } from './imported-attachment.service';
 import { PatientChatService } from './patient-chat.service';
 import { PatientChatDto } from './patient-chat.dto';
+import { PatientChatHistoryService } from './patient-chat-history.service';
 
 @Controller('ehr')
 @AuditFailuresOnly()
 export class PatientRecordsController {
   constructor(private readonly records: PatientRecordsService, private readonly attachments: ImportedAttachmentService,
-    private readonly chat: PatientChatService) {}
+    private readonly chat: PatientChatService, private readonly history: PatientChatHistoryService) {}
+
+  @Get('me/chat/history')
+  @Header('Cache-Control', 'no-store')
+  @FacilityOptional()
+  @PatientAllowed()
+  chatHistory(@Req() request: HidRequest) { return this.history.read(request); }
+
+  @Delete('me/chat/history')
+  @Header('Cache-Control', 'no-store')
+  @FacilityOptional()
+  @PatientAllowed()
+  clearChatHistory(@Req() request: HidRequest) { return this.history.clear(request); }
 
   @Post('me/chat')
   @FacilityOptional()

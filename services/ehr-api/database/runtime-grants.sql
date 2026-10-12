@@ -906,3 +906,6 @@ grant select on ehr.imported_patient_health_profiles, ehr.imported_attachment_bi
 grant execute on function identity.list_my_imported_notifications(integer,integer),
   identity.mark_my_imported_notification_read(uuid), platform.admin_imported_customer_configuration()
   to hid_identity_runtime, hid_schema_test_runtime;
+-- Saved chat text is accessible only through EHR's patient self context.
+grant select, insert, update on ehr.patient_chat_state to hid_ehr_runtime;
+grant select, insert, delete on ehr.patient_chat_messages to hid_ehr_runtime;
