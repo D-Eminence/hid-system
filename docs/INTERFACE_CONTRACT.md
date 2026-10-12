@@ -964,8 +964,10 @@ in version order, including one later marked entered in error
 (`verificationStatus: entered_in_error`). `currentVersion` and
 `currentReleasedVersion` name the latest released revision, and `status` is
 `released`, or `entered_in_error` when that revision is. Nothing of a revision
-that is not released is returned: not its value, reason or version, nor that one
-exists. A history with no released revision answers `404 LAB_RESULT_NOT_FOUND`.
+newer than the latest released one is returned. Versions keep their stored
+numbers, so a gap shows that an intermediate revision was never released; its
+value and reason are never returned. A history with no released revision answers
+`404 LAB_RESULT_NOT_FOUND`.
 Every revision, in every Lab result response, also carries `releasedAt`
 (`null` until released).
 

@@ -115,6 +115,16 @@ describe('LabExecutionsService.getResultHistory for released-only readers',()=>{
    verificationStatus:'entered_in_error',currentVersion:1,currentReleasedVersion:1,revisions:[released(1,12.5,'entered_in_error')]});
  });
 
+ it('keeps stored version numbers, so a revision never released leaves a gap and nothing else',async()=>{
+  // Version 2 (7.1) was corrected again before verification; version 3 (13.4) was verified and released.
+  const {service}=harness({results:{[resultId]:{executionId,currentVersion:3,revisions:[{version:1,value:12.5,verified:true,released:true},
+   {version:2,value:7.1},{version:3,value:13.4,verified:true,released:true}]}}});
+  const history=await service.getResultHistory(doctor,resultId);
+  expect(history).toEqual({id:resultId,executionId,status:'released',verificationStatus:'verified',currentVersion:3,
+   currentReleasedVersion:3,revisions:[released(1,12.5),released(3,13.4)]});
+  expect(JSON.stringify(history)).not.toContain('7.1');
+ });
+
  it('keeps the full history for Lab staff who hold lab.execution.read',async()=>{
   const {service}=harness();
   const history=await service.getResultHistory(labStaff,resultId);

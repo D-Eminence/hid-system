@@ -695,6 +695,7 @@ Each is a follow-up.
 **Known limits of the released Lab results change:**
 - Any member holding `lab.result.released.read` with a `read_records` consent grant for the patient at the facility reads an order's released results, not only the clinician who placed the order; this is the same patient-level authorization as every other clinical read.
 - A clinician is not told that a correction is pending release, and is not notified of a release: nothing in the EHR consumes `LabResultReleased`, so the result appears only when the order route is read.
+- Released revisions keep their stored version numbers, so a gap (versions 1 and 3) shows that an intermediate revision was never released; its value and reason are not returned.
 - Break-glass reads are allowed, as for every Lab read, until the break-glass scope of Lab and Pharmacy reads is decided.
 
 ## 10. Operator actions, not performed here
