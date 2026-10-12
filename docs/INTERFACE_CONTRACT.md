@@ -1146,6 +1146,42 @@ Use:
 * authorized download
 * short-lived signed access where appropriate
 
+### Document upload completion
+
+`POST /api/v1/ehr/documents/:id/complete` confirms an upload. Only the
+account that created the upload intent (`created_by`) may complete it, at the
+facility it was created for (`X-Facility-ID`). This is the current default,
+pending a product decision. There is no delegated completion: an intent its
+uploader cannot complete stays `initiated`, and the remedy is a new upload.
+The membership is not compared: an account with two memberships at one
+facility may be bound to either.
+
+- The uploader also still needs `ehr.document.write`, a `write_records` grant
+  for the document's patient, and a stored object whose size, SHA-256 and
+  media type match the intent.
+- Any other caller that passes the route checks (active at the
+  `X-Facility-ID` facility, with `ehr.document.write`), including a member
+  with the same permission and grant, gets `404 NOT_FOUND` ("Document not
+  found"), the same answer as for an unknown document, one at another
+  facility, or one the caller cannot read. It is refused before the patient
+  authorization check and the storage read, and nothing is written. After the
+  uploader has completed, another caller still gets `404`, not the idempotent
+  `200`.
+- A caller that fails the route checks, uploader or not, gets their answer
+  first, as on every route: `400 FACILITY_REQUIRED` without a valid
+  `X-Facility-ID`, `403 FACILITY_ACCESS_DENIED` when not active at that
+  facility, `403 PERMISSION_DENIED` without `ehr.document.write`.
+- `GET /api/v1/ehr/documents` still lists an `initiated` document to every
+  holder of a read grant, so a member can see an upload they cannot complete.
+- The uploader's answers are unchanged: `200` with the document view, `403`
+  without a write grant, `409` when the stored object does not match or the
+  document is no longer completable. A repeat after completion answers `200`
+  with the current view while the status is `uploaded`, and `409` once the
+  scan is clean or rejected (status `available` or `rejected`).
+- A refusal is recorded only by the request audit
+  (`api.ehr.document.upload-complete.request`, outcome `failure`, without the
+  document id); no `ehr.document.upload.complete` event is written.
+
 ## 17. Event Contracts
 
 Events must contain:
