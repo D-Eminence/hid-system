@@ -131,6 +131,30 @@ begin
      or has_table_privilege('hid_identity_runtime', 'notification.device_registrations', 'SELECT') then
     raise exception 'Identity OTP or evidence-bound progressive-assurance boundary is inconsistent';
   end if;
+  -- Recovery start cooldowns (0081): the Identity runtime reads and writes
+  -- them but never deletes them. Every other required runtime role has no
+  -- privilege on them; the schema-test runtime is granted as the Identity
+  -- runtime is, and the migration administrator is not checked here.
+  if not has_table_privilege('hid_identity_runtime', 'auth.otp_start_cooldowns', 'SELECT')
+     or not has_table_privilege('hid_identity_runtime', 'auth.otp_start_cooldowns', 'INSERT')
+     or not has_table_privilege('hid_identity_runtime', 'auth.otp_start_cooldowns', 'UPDATE')
+     or has_table_privilege('hid_identity_runtime', 'auth.otp_start_cooldowns', 'DELETE,TRUNCATE')
+     or has_table_privilege('hid_identity_api_runtime', 'auth.otp_start_cooldowns', 'DELETE,TRUNCATE') then
+    raise exception 'Identity recovery start cooldown privileges are inconsistent';
+  end if;
+  foreach role_name in array array[
+    'hid_ehr_runtime', 'hid_api_runtime', 'hid_ehr_api_runtime', 'hid_ocr_api_runtime',
+    'hid_audit_writer', 'hid_document_scanner', 'hid_ocr_runtime', 'hid_ocr_worker',
+    'hid_lab_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_runtime',
+    'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
+    'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
+    'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics'
+  ] loop
+    if has_table_privilege(role_name, 'auth.otp_start_cooldowns',
+         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+      raise exception 'Runtime role % can access recovery start cooldowns', role_name;
+    end if;
+  end loop;
   if not has_table_privilege('hid_notification_runtime', 'notification.device_registrations', 'SELECT,INSERT,UPDATE')
      or not has_table_privilege('hid_notification_runtime', 'notification.delivery_attempts', 'SELECT,INSERT')
      or has_table_privilege('hid_notification_runtime', 'auth.otp_challenges', 'SELECT')
