@@ -14,9 +14,10 @@
 // constraints) is real. A database refusal answers a fixed 4xx (row-level
 // security 403 LAB_ACCESS_DENIED, a guard 409 LAB_STATE_CONFLICT, a unique key
 // left after the retry 409 LAB_CONFLICT; problem.ts), and EHR-order acceptance
-// answers a stale or changed order 409 LAB_ORDER_NOT_CURRENT and another version
-// of an order Lab already holds 409 LAB_ORDER_ALREADY_ACCEPTED; each used to be
-// 500. The harness still records the SQLSTATE behind each refusal.
+// answers a stale or changed order, and a version earlier than the one Lab
+// holds, 409 LAB_ORDER_NOT_CURRENT and a later version of an order Lab already
+// holds 409 LAB_ORDER_ALREADY_ACCEPTED; each used to be 500. The harness still
+// records the SQLSTATE behind each refusal.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
@@ -255,6 +256,16 @@ try {
     { key: key('accept'), internal: 'ehr-api' }), 201, 'accept of the current order version');
   assert.equal(await workItemsOf(order3), 1);
   check('accept: version 1 of an order now at version 2 is refused by the database guard (23514) with 409 LAB_ORDER_NOT_CURRENT and creates no work item; version 2 is accepted (201)');
+  // A call for version 1 arriving after Lab accepted version 2 (two EHR updates, the later call first) is stale:
+  // Lab answers it from the work item it holds, without reaching the guard, and never says it holds an earlier version.
+  const late = await send('/work-items/accept-ehr-order', orderBody(order3), { key: key('accept'), internal: 'ehr-api' });
+  assert.equal(expectStatus(late, 409, 'accept of version 1 when Lab holds version 2').code, 'LAB_ORDER_NOT_CURRENT',
+    'accept of version 1 when Lab holds version 2 is not answered LAB_ORDER_NOT_CURRENT');
+  assert.equal(late.sqlstate, undefined, 'accept of version 1 when Lab holds version 2 reached the database guard');
+  assert.deepEqual(await Promise.all([workItemsOf(order3),
+    count('select count(*) from lab.work_items where source_ehr_order_id=$1 and source_ehr_order_version=2', [order3])]), [1, 1],
+  'accept of version 1 when Lab holds version 2 changed the work items');
+  check('accept: version 1 of an order Lab holds at version 2 is 409 LAB_ORDER_NOT_CURRENT from the work item Lab holds, not the guard; the version 2 work item stays the only one');
 
   // Accession a work item.
   const [w1, w2, w3] = f.work;

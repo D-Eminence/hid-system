@@ -150,6 +150,20 @@ describe('LabRequestsService create when Lab does not accept the saved order', (
       expect((refusal as DomainProblem).getResponse()).toEqual(expect.stringContaining(code));
     });
 
+  // A Lab 401 means Lab could not verify the EHR's workload identity (or its
+  // JWKS), a 429 that Lab is shedding load: neither is Lab's verdict on the
+  // request, which can be sent again as it is.
+  it.each([[401, 'INTERNAL_SERVICE_AUTH_REQUIRED'], [407, 'PROXY_AUTHENTICATION_REQUIRED'], [429, 'RATE_LIMITED']])(
+    'reports a Lab %i %s, which is no refusal of the request, as 502 LAB_HANDOFF_UNCONFIRMED', async (status, code) => {
+      const { labApi, service } = fakeDatabase(row(OrderStatus.Active));
+      labApi.acceptEhrOrder.mockRejectedValue(labProblem(status, code));
+      const refusal = await service.create(context, patientId, encounterId, input as never, 'lab-request-key-1234')
+        .catch((error: unknown) => error);
+      expect(refusal).toMatchObject({ code: 'LAB_HANDOFF_UNCONFIRMED', status: 502 });
+      expect((refusal as DomainProblem).getResponse()).toEqual(expect.stringContaining(requestId));
+      expect((refusal as DomainProblem).getResponse()).toEqual(expect.stringContaining(code));
+    });
+
   it('reports the work item Lab accepted', async () => {
     const { service } = fakeDatabase(row(OrderStatus.Active));
     await expect(service.create(context, patientId, encounterId, input as never, 'lab-request-key-1234'))
@@ -210,12 +224,32 @@ describe('LabRequestsService sendToLab', () => {
       expect(labApi.acceptEhrOrder).not.toHaveBeenCalled();
     });
 
-  it('passes Lab\'s refusal through unchanged, since the EHR wrote nothing', async () => {
-    const { labApi, service } = fakeDatabase(at(OrderStatus.Active, '2'));
-    labApi.acceptEhrOrder.mockRejectedValue(labProblem(409, 'LAB_ORDER_ALREADY_ACCEPTED'));
-    await expect(sendToLab(service)(withLabPermission, patientId, encounterId, requestId, { expectedRowVersion: 2 }))
-      .rejects.toMatchObject({ code: 'LAB_ORDER_ALREADY_ACCEPTED', status: 409 });
-  });
+  it.each([[409, 'LAB_ORDER_ALREADY_ACCEPTED'], [409, 'LAB_ORDER_NOT_CURRENT'], [403, 'LAB_WORK_ITEM_ACCESS_DENIED'],
+    [400, 'VALIDATION_FAILED']])('passes Lab\'s refusal %i %s through unchanged, since the EHR wrote nothing',
+    async (status, code) => {
+      const { labApi, service } = fakeDatabase(at(OrderStatus.Active, '2'));
+      const refusal = labProblem(status, code);
+      labApi.acceptEhrOrder.mockRejectedValue(refusal);
+      await expect(sendToLab(service)(withLabPermission, patientId, encounterId, requestId, { expectedRowVersion: 2 }))
+        .rejects.toBe(refusal);
+    });
+
+  // Health-id takes any 401 on a cookie request for its own expired session: it
+  // refreshes, repeats the request and, on a second 401, signs the clinician
+  // out. Lab answers 401 when it cannot verify the EHR's workload identity, a
+  // fault of the services, not of the clinician's session.
+  it.each([[401, 'INTERNAL_SERVICE_AUTH_REQUIRED'], [407, 'PROXY_AUTHENTICATION_REQUIRED'], [429, 'RATE_LIMITED'],
+    [500, 'INTERNAL_ERROR'], [503, 'LAB_SERVICE_UNAVAILABLE']])(
+    'answers a Lab %i %s as 502 LAB_HANDOFF_UNCONFIRMED, never with Lab\'s status', async (status, code) => {
+      const { labApi, service } = fakeDatabase(at(OrderStatus.Active, '2'));
+      labApi.acceptEhrOrder.mockRejectedValue(labProblem(status, code));
+      const refusal = await sendToLab(service)(withLabPermission, patientId, encounterId, requestId, { expectedRowVersion: 2 })
+        .catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(DomainProblem);
+      expect(refusal).toMatchObject({ code: 'LAB_HANDOFF_UNCONFIRMED', status: 502 });
+      expect((refusal as DomainProblem).getResponse()).toEqual(expect.stringContaining(requestId));
+      expect((refusal as DomainProblem).getResponse()).toEqual(expect.stringContaining(code));
+    });
 });
 
 describe('LabRequestsService update sends the active version to Lab', () => {

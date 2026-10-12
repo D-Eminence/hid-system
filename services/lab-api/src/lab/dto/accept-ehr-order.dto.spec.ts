@@ -29,4 +29,18 @@ describe('AcceptEhrOrderDto', () => {
   it.each(['testCodeSystem', 'testCode', 'testName'])('refuses an empty %s, which EHR never creates', async (field) => {
     expect(await failed({ ...valid, [field]: '' })).toEqual([field]);
   });
+
+  // EHR sends the ids it holds. A patient or account migrated from the legacy
+  // system keeps its source id, of any UUID version from 1 to 8
+  // (promote-legacy-identity.mjs), and EHR's ParseUUIDPipe takes any version;
+  // lab.validate_work_item (0077) still binds each id to the EHR order.
+  const ids = ['sourceEhrOrderId', 'sourceEncounterId', 'patientId', 'orderingFacilityId', 'requestedBy'];
+  it.each([['1', '6fa459ea-ee8a-11ea-9f1b-0242ac130003'], ['7', '01890a5d-ac96-774b-bcce-b302099a8057']])(
+    'accepts a version %s UUID in every id EHR sends', async (_version, uuid) => {
+      expect(await failed({ ...valid, ...Object.fromEntries(ids.map((field) => [field, uuid])) })).toEqual([]);
+    });
+
+  it.each(ids)('refuses a %s that is not a UUID', async (field) => {
+    expect(await failed({ ...valid, [field]: '6fa459ea-ee8a-11ea-9f1b' })).toEqual([field]);
+  });
 });

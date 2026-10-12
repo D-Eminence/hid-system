@@ -65,10 +65,23 @@ const harness = (rows: (typeof stored)[], insertError?: Error) => {
 const inserts = (queries: string[]) => queries.filter((sql) => /insert into lab\./.test(sql));
 
 describe('LabWorkItemsService.acceptEhrOrder', () => {
-  it('refuses another version of an EHR order it already accepted with 409 LAB_ORDER_ALREADY_ACCEPTED, writing nothing', async () => {
+  it('refuses a later version of an EHR order it accepted with 409 LAB_ORDER_ALREADY_ACCEPTED, writing nothing', async () => {
     const { service, queries } = harness([stored]);
     await expect(service.acceptEhrOrder(context, command(2, 'stat'))).rejects.toMatchObject({
       code: 'LAB_ORDER_ALREADY_ACCEPTED', status: 409 });
+    expect(inserts(queries)).toEqual([]);
+  });
+
+  // Two EHR updates commit v2 and then v3 and each sends its version after its
+  // commit; the v3 call reaches Lab first. The late v2 is not the current EHR
+  // order (EHR is at v3 or later), and Lab holds a version that already carries
+  // its change, so ALREADY_ACCEPTED ("Lab holds an earlier version, the change
+  // is not in Lab") would be false.
+  it('refuses an earlier version of an EHR order than the one it holds with 409 LAB_ORDER_NOT_CURRENT, writing nothing', async () => {
+    const later = { ...stored, source_ehr_order_version: '3', request_sha256: requestDigest('lab.work-item.accept-ehr-order', command(3)) };
+    const { service, queries } = harness([later]);
+    await expect(service.acceptEhrOrder(context, command(2))).rejects.toMatchObject({
+      code: 'LAB_ORDER_NOT_CURRENT', status: 409 });
     expect(inserts(queries)).toEqual([]);
   });
 
