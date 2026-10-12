@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
+import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
@@ -54,6 +55,9 @@ interface Options {
   reusable?: boolean;
   outboxError?: Error;
   publishLost?: boolean;
+  replayed?: Record<string, unknown>;
+  claimRefused?: boolean;
+  current?: Record<string, unknown>;
 }
 
 type Rows = { rows: unknown[]; rowCount: number };
@@ -66,6 +70,7 @@ function harness(options: Options = {}) {
     if (sql.includes("operation = 'ocr.extract' and idempotency_key = $3")) return rows([]);
     if (sql.includes('ocr.extractions extraction')) return rows(options.reusable ? [job] : []);
     if (sql.includes('insert into ocr.jobs')) return rows([{ ...job, status: 'queued', row_version: '1' }]);
+    if (sql.includes('for key share')) return rows(jobRow ? [{ id: jobId }] : []);
     if (sql.includes('where document_id=$1')) { order.push('select job'); return rows(jobRow ? [jobRow] : []); }
     if (/from ocr\.jobs\s+where id = \$1/.test(sql)) { order.push('select job'); return rows(jobRow ? [jobRow] : []); }
     if (sql.includes("update ocr.jobs set status = 'queued'")) return rows([{ ...job, status: 'queued', row_version: '5' }]);
@@ -84,12 +89,13 @@ function harness(options: Options = {}) {
       if (options.outboxError) throw options.outboxError;
       return rows([]);
     }
-    if (sql.includes('from ocr.publications where facility_id=$1')) return rows([]);
+    if (sql.includes('from ocr.publications where facility_id=$1')) return rows(options.replayed ? [options.replayed] : []);
     if (sql.includes('select id::text from ocr.publications where validation_id=$1')) return rows([]);
     if (sql.includes('insert into ocr.publications')) return rows([publication]);
     if (sql.includes("update ocr.publications set status='processing'")) {
-      return rows([{ ...publication, status: 'processing', attempt_count: 1, row_version: '2' }]);
+      return rows(options.claimRefused ? [] : [{ ...publication, status: 'processing', attempt_count: 1, row_version: '2' }]);
     }
+    if (sql === 'select * from ocr.publications where id=$1') return rows(options.current ? [options.current] : []);
     if (sql.includes("update ocr.publications set status='published'")) {
       return rows(options.publishLost ? [] : [{ ...publication, status: 'published', row_version: '3' }]);
     }
@@ -262,5 +268,58 @@ describe('OCR patient confirmation outbox', () => {
     const { service } = harness({ jobRow: validatedJob, outboxError: other });
 
     await expect(confirm(service)).rejects.toBe(other);
+  });
+});
+
+// Phase 4 Stage 9: every publication transaction reaches the job row before the
+// publication row. verify-ocr-runtime.mjs races both against PostgreSQL.
+describe('OCR publication lock order', () => {
+  const validatedJob = { ...job, status: 'validated', row_version: '5' };
+  const publish = (service: OcrService) => service.createPublication(validationId, { validationVersion: 1,
+    patientConfirmationId: confirmationId, targetOperation: 'retain_validated_document',
+    purpose: 'direct-care' }, 'ocr-publish-key-000003', context);
+  const statements = (client: PoolClient) => (client.query as unknown as jest.Mock).mock.calls
+    .map(([sql]) => String(sql).replace(/\s+/g, ' ').trim());
+  const transactionWith = (clients: PoolClient[], fragment: string) => {
+    const found = clients.map(statements).find((list) => list.some((sql) => sql.includes(fragment)));
+    if (!found) throw new Error(`No transaction ran ${fragment}`);
+    return found;
+  };
+
+  it('locks the job, then reads a replayed publication without locking it', async () => {
+    const { service, clients } = harness({ jobRow: validatedJob });
+    await publish(service);
+    const request = transactionWith(clients, 'insert into ocr.publications');
+    const jobLock = request.findIndex((sql) => /from ocr\.jobs where id = \$1 for update$/.test(sql));
+    const replay = request.findIndex((sql) => sql.includes('from ocr.publications where facility_id=$1'));
+    expect(jobLock).toBeGreaterThanOrEqual(0);
+    expect(replay).toBeGreaterThan(jobLock);
+    expect(request[replay]).not.toMatch(/ for (update|no key update|share|key share)/);
+  });
+
+  it.each([
+    { name: 'publish', options: {}, update: "update ocr.publications set status='published'" },
+    { name: 'failure', options: { publishLost: true }, update: "update ocr.publications set status='failed'" },
+  ])('the $name transaction takes the job key share before the publication row', async ({ options, update }) => {
+    const { service, clients } = harness({ jobRow: validatedJob, ...options });
+    await publish(service).catch(() => undefined);
+    const [first, second] = transactionWith(clients, update);
+    expect(first).toBe('select id from ocr.jobs where id = $1 for key share');
+    expect(second).toContain(update);
+  });
+
+  it('refuses at the claim a terminal failure that committed after the replay read', async () => {
+    // The replay waited for the job while the failure transaction recorded the
+    // terminal failure, so its snapshot still shows the publication processing.
+    const digest = requestDigest('ocr.publication.create', { validationId, validationVersion: 1,
+      patientConfirmationId: confirmationId, targetOperation: 'retain_validated_document', purpose: 'direct-care' });
+    const { service, clients } = harness({ jobRow: validatedJob, claimRefused: true,
+      replayed: { ...publication, status: 'processing', attempt_count: 1, request_sha256: digest },
+      current: { ...publication, status: 'failed', attempt_count: 1, failure_code: 'LAB_IMPORT_REJECTED' } });
+    await expect(publish(service)).rejects.toMatchObject({ code: 'OCR_PUBLICATION_TERMINAL' });
+    const claim = clients.flatMap((client) => (client.query as unknown as jest.Mock).mock.calls)
+      .find(([sql]) => String(sql).includes("update ocr.publications set status='processing'"));
+    expect(String(claim?.[0])).toContain("status='failed' and failure_code = any($4::text[])");
+    expect(claim?.[1]?.[3]).toEqual(['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS']);
   });
 });

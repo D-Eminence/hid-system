@@ -80,6 +80,14 @@ const JOB_SELECT = `
 
 const OCR_PROCESSING_CONTRACT = 'hid-textract-v1';
 
+/** Publication failure codes a later request may retry; any other failure is terminal. */
+const RETRYABLE_PUBLICATION_FAILURES = ['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS'];
+
+function isTerminalFailure(publication: PublicationRow): boolean {
+  return publication.status === 'failed' && publication.failure_code !== null
+    && !RETRYABLE_PUBLICATION_FAILURES.includes(publication.failure_code);
+}
+
 @Injectable()
 export class OcrService {
   private readonly logger = new Logger(OcrService.name);
@@ -248,6 +256,12 @@ export class OcrService {
     assertCandidateClassification(input);
     const digest = requestDigest('ocr.validation.create', { jobId, ...input });
     return this.database.withTransaction(context, async (client) => {
+      // Every command of the job locks the job row first, so they queue in one
+      // order. Validations and confirmations are insert-only (0013, 0016
+      // triggers) and the runtime role cannot lock them, so their replay
+      // lookups take no lock; a request that waited here is cancelled when the
+      // one before it changed the job or inserted the row it would insert, and
+      // the retry sees that row (Phase 4 Stage 9).
       const job = await this.findJob(client, jobId, true);
       const source = await this.authorizeJob(job, context, 'write_records');
       const replayResult = await client.query<ValidationRow>(
@@ -255,7 +269,7 @@ export class OcrService {
                 job.status as job_status
            from ocr.validations validation join ocr.jobs job on job.id = validation.job_id
           where validation.facility_id = $1 and validation.validated_by = $2
-            and validation.idempotency_key = $3 for update`,
+            and validation.idempotency_key = $3`,
         [context.facilityId, context.actor.accountId, idempotencyKey],
       );
       const replay = replayResult.rows[0];
@@ -343,7 +357,7 @@ export class OcrService {
         `select id::text, job_id::text, patient_id::text, confirmation_version,
                 method, created_at, request_sha256
            from ocr.patient_confirmations where facility_id = $1 and confirmed_by = $2
-            and idempotency_key = $3 for update`,
+            and idempotency_key = $3`,
         [context.facilityId, context.actor.accountId, idempotencyKey]);
       const replay = replayResult.rows[0];
       if (replay) {
@@ -383,13 +397,21 @@ export class OcrService {
     const idempotencyKey = requireIdempotencyKey(idempotencyHeader);
     const digest = requestDigest('ocr.publication.create', { validationId, ...input });
     const publication = await this.database.withTransaction(context, async (client) => {
-      const validation = await this.findValidation(client, validationId, true);
+      // The validation is insert-only; the job row lock, taken first in every
+      // command of the job, serializes publication requests (Phase 4 Stage 9).
+      const validation = await this.findValidation(client, validationId);
       const job = await this.findJob(client, validation.job_id, true);
       const source = await this.authorizeJob(job, context, 'write_records');
       this.assertPublicationRequest(validation, input);
       const confirmation = await this.findConfirmation(client, input.patientConfirmationId, validation.job_id);
+      // A replay only reads its publication; executePublication's conditional
+      // update claims it. Locking the row here, while holding the job, waited
+      // for a publish or failure transaction that holds the row and needs the
+      // job for its outbox insert: a deadlock (Phase 4 Stage 9). The read can
+      // be older than a failure that committed while this request waited for
+      // the job, so the claim refuses a terminal failure again.
       const replayResult = await client.query<PublicationRow>(
-        `select * from ocr.publications where facility_id=$1 and requested_by=$2 and idempotency_key=$3 for update`,
+        `select * from ocr.publications where facility_id=$1 and requested_by=$2 and idempotency_key=$3`,
         [context.facilityId, context.actor.accountId, idempotencyKey]);
       const replay = replayResult.rows[0];
       if (replay) {
@@ -419,10 +441,7 @@ export class OcrService {
       return created;
     }, { isolationLevel: 'SERIALIZABLE' });
     if (publication.status === 'published') return this.projectPublication(publication);
-    if (publication.status === 'failed' && publication.failure_code
-      && !['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS'].includes(publication.failure_code)) {
-      throw new DomainProblem(409, 'OCR_PUBLICATION_TERMINAL', 'Publication failed terminally and requires corrected validation evidence');
-    }
+    if (isTerminalFailure(publication)) throw this.terminalPublication();
     return this.executePublication(publication.id, context);
   }
 
@@ -448,8 +467,9 @@ export class OcrService {
           attempt_count=attempt_count+1, failure_code=null, failure_summary=null,
           row_version=row_version+1, correlation_id=$3
          where id=$1 and attempt_count < max_attempts and next_attempt_at <= clock_timestamp()
-           and (status in ('pending','failed') or (status='processing' and processing_expires_at <= clock_timestamp()))
-         returning *`, [publicationId, token, context.correlationId]);
+           and (status='pending' or (status='failed' and failure_code = any($4::text[]))
+             or (status='processing' and processing_expires_at <= clock_timestamp()))
+         returning *`, [publicationId, token, context.correlationId, RETRYABLE_PUBLICATION_FAILURES]);
       return result.rows[0];
     });
     if (!claimed) {
@@ -458,6 +478,7 @@ export class OcrService {
         return result.rows[0];
       });
       if (current?.status === 'published') return this.projectPublication(current);
+      if (current && isTerminalFailure(current)) throw this.terminalPublication();
       throw new DomainProblem(409, 'OCR_PUBLICATION_IN_PROGRESS', 'Publication is already processing or is not retryable');
     }
 
@@ -511,6 +532,7 @@ export class OcrService {
         throw new DomainProblem(409, 'OCR_TARGET_UNAVAILABLE', 'The owning domain does not support this publication operation');
       }
       return await this.database.withTransaction(context, async (client) => {
+        await this.lockJobKey(client, claimed.job_id);
         const result = await client.query<PublicationRow>(
           `update ocr.publications set status='published', completed_at=clock_timestamp(),
             failed_at=null, processing_token=null, processing_expires_at=null,
@@ -532,6 +554,7 @@ export class OcrService {
       const code = error instanceof DomainProblem ? error.code : 'OWNING_SERVICE_UNAVAILABLE';
       const summary = terminal ? 'Publication was rejected by the owning domain' : 'Owning clinical service is temporarily unavailable';
       await this.database.withTransaction(context, async (client) => {
+        await this.lockJobKey(client, claimed.job_id);
         const result = await client.query<PublicationRow>(
           `update ocr.publications set status='failed', failed_at=clock_timestamp(),
             processing_token=null,processing_expires_at=null,failure_code=$3,failure_summary=$4,
@@ -553,12 +576,27 @@ export class OcrService {
     }
   }
 
-  private async findValidation(client: PoolClient, validationId: string, lock = false): Promise<ValidationRow> {
+  /**
+   * Takes the key share on a publication's job that the outbox insert's foreign
+   * key takes anyway, but before the publication row. createPublication holds
+   * the job while it reaches that row (its replay read, or the unique index of
+   * its insert), so a publish or failure transaction that held the row first
+   * and then waited for the job deadlocked with it (Phase 4 Stage 9).
+   */
+  private async lockJobKey(client: PoolClient, jobId: string) {
+    await client.query('select id from ocr.jobs where id = $1 for key share', [jobId]);
+  }
+
+  private terminalPublication() {
+    return new DomainProblem(409, 'OCR_PUBLICATION_TERMINAL', 'Publication failed terminally and requires corrected validation evidence');
+  }
+
+  private async findValidation(client: PoolClient, validationId: string): Promise<ValidationRow> {
     const result = await client.query<ValidationRow>(
       `select validation.*, job.document_id::text, job.patient_id::text,
               job.status as job_status
          from ocr.validations validation join ocr.jobs job on job.id=validation.job_id
-        where validation.id=$1${lock ? ' for update of validation' : ''}`, [validationId]);
+        where validation.id=$1`, [validationId]);
     const row = result.rows[0];
     if (!row) throw new DomainProblem(404, 'OCR_VALIDATION_NOT_FOUND', 'OCR validation was not found');
     return row;
