@@ -33,12 +33,14 @@ const ORIGIN = 'https://www.healthidentitydirectory.com';
 const SESSION = '90000000-0000-4000-8000-0000000000b1';
 const DEFAULT_FACILITY = { id: '30000000-0000-4000-8000-000000000001', membershipId: '40000000-0000-4000-8000-000000000001',
   organizationId: '50000000-0000-4000-8000-000000000001', name: 'Lagos General', roles: ['clinician'], permissions: [], isPrimary: true };
+const SECOND_FACILITY = { id: '30000000-0000-4000-8000-000000000002', membershipId: '40000000-0000-4000-8000-000000000002',
+  organizationId: '50000000-0000-4000-8000-000000000002', name: 'Ikeja Clinic', roles: ['clinician'], permissions: [], isPrimary: false };
 const OTHER_FACILITY = '30000000-0000-4000-8000-000000000099';
 
 /** A staff actor as CurrentStaffContextService builds it: no `kind`, its default facility attached. */
 const staff = { id: 'staff:s', subject: 'staff:s', accountId: '20000000-0000-4000-8000-0000000000b1', sessionId: SESSION,
-  roles: ['clinician'], permissions: [], platformRoles: [], platformPermissions: [], facilityIds: [DEFAULT_FACILITY.id],
-  facilities: [DEFAULT_FACILITY], facility: DEFAULT_FACILITY, authenticationMethod: 'local' } as unknown as ActorContext;
+  roles: ['clinician'], permissions: [], platformRoles: [], platformPermissions: [], facilityIds: [DEFAULT_FACILITY.id, SECOND_FACILITY.id],
+  facilities: [DEFAULT_FACILITY, SECOND_FACILITY], facility: DEFAULT_FACILITY, authenticationMethod: 'local' } as unknown as ActorContext;
 const patient = { ...staff, id: 'patient:p', subject: 'patient:p', kind: 'patient', facility: undefined, facilities: [],
   facilityIds: [] } as unknown as ActorContext;
 
@@ -70,7 +72,8 @@ function auditDatabase(rows: Row[]) {
 /**
  * The SecurityGuard's effect, as far as these routes need it: public routes pass
  * untouched; a facility-optional route with no X-Facility-ID gets the verified
- * actor (with its default facility) and no bound facility.
+ * actor (with its default facility) and no bound facility; one with the
+ * X-Facility-ID of one of the actor's facilities gets that facility bound.
  */
 class GuardAsDeployed implements CanActivate {
   constructor(private readonly reflector: Reflector, private readonly signedIn: () => ActorContext) {}
@@ -79,7 +82,14 @@ class GuardAsDeployed implements CanActivate {
     if (this.reflector.getAllAndOverride<boolean>(PUBLIC_ROUTE, targets)) return true
     if (!this.reflector.getAllAndOverride<boolean>(FACILITY_OPTIONAL, targets)) throw new Error('not exercised here')
     const request = context.switchToHttp().getRequest<HidRequest>()
-    request.actor = this.signedIn()
+    const actor = this.signedIn()
+    request.actor = actor
+    const facilityId = request.header('x-facility-id')
+    const assignment = actor.facilities.find(candidate => candidate.id === facilityId)
+    if (facilityId && assignment) {
+      request.facilityId = facilityId
+      request.actor = { ...actor, facility: assignment, roles: assignment.roles, permissions: assignment.permissions }
+    }
     request.accessScope = 'facility'
     return true
   }
@@ -109,6 +119,8 @@ beforeEach(async () => {
     refreshSessionKind: jest.fn(async () => undefined),
   }
   const auth = { revoke: jest.fn().mockResolvedValue(true), revokeByRefreshToken: jest.fn() }
+  // A workload caller that fails its own authentication, as WorkloadAuthService refuses one.
+  const workloads = { authenticateService: jest.fn().mockRejectedValue(new UnauthorizedException('Invalid workload token')) }
   const module = await Test.createTestingModule({
     controllers: [AuthController],
     providers: [
@@ -116,7 +128,7 @@ beforeEach(async () => {
       { provide: TokenService, useValue: tokens },
       { provide: AuthSessionAuditService, useValue: { record: jest.fn() } },
       { provide: AuditService, useFactory: () => new AuditService(auditDatabase(rows)) },
-      { provide: WorkloadAuthService, useValue: {} },
+      { provide: WorkloadAuthService, useValue: workloads },
       { provide: TurnstileService, useValue: {} },
       { provide: GoogleAuthenticationService, useValue: {} },
     ],
@@ -161,7 +173,7 @@ describe('a refused sign-out made with a live staff access cookie', () => {
       facilityId: DEFAULT_FACILITY.id })])
   })
 
-  it('records a patient\'s refused sign-out as before, as the patient', async () => {
+  it('records a patient\'s refused sign-out as an auth.logout session event, as the patient', async () => {
     liveActor = patient
     const response = await signOut({ 'X-CSRF-Token': 'csrf-live', 'X-HID-Client': 'staff-web' })
     expect(response.status).toBe(403)
@@ -185,5 +197,44 @@ describe('a refused facility selection made with a staff session', () => {
     const response = await select({ facilityId: 'not-a-uuid' })
     expect(response.status).toBe(400)
     expect(rows).toEqual([expect.objectContaining({ action: 'auth.facility.select', outcome: 'failure' })])
+  })
+})
+
+describe('refusals on the other session routes, made with a staff session', () => {
+  const GOOGLE_LINK = { idToken: 'x'.repeat(40), turnstileAction: 'patient-login', principal: 'HID-ABCDEF23', password: 'a-password' }
+  const link = (body: unknown) => request(app.getHttpServer()).post('/api/v1/auth/google/link').set('Origin', ORIGIN).send(body as object)
+
+  it('POST /auth/google/link answers 403 PATIENT_SCOPE_DENIED and records an auth.google.link refusal', async () => {
+    const response = await link(GOOGLE_LINK)
+    expect(response.status).toBe(403)
+    expect(response.body.code).toBe('PATIENT_SCOPE_DENIED')
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'auth.google.link', resourceType: 'session',
+      resourceId: SESSION, outcome: 'failure', facilityId: null, actorMembershipId: null, organizationId: null })])
+  })
+
+  it('POST /auth/google/link with a malformed body answers 400 and records the refusal', async () => {
+    const response = await link({})
+    expect(response.status).toBe(400)
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'auth.google.link', outcome: 'failure' })])
+  })
+
+  it.each([
+    ['GET', 'auth.service-session.read'],
+    ['POST', 'auth.service-session.validate'],
+  ])('%s /auth/service-session with a refused workload answers 401 and records %s', async (method, action) => {
+    const call = method === 'GET' ? request(app.getHttpServer()).get('/api/v1/auth/service-session')
+      : request(app.getHttpServer()).post('/api/v1/auth/service-session').send({})
+    const response = await call.set('X-HID-Internal-Caller', 'ehr-api').set('X-HID-Service-Token', 'not-a-token')
+    expect(response.status).toBe(401)
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action, resourceType: 'session', resourceId: SESSION,
+      outcome: 'failure', facilityId: null, actorMembershipId: null })])
+  })
+
+  it('records the facility the guard bound from X-Facility-ID, with its membership and organization', async () => {
+    const response = await request(app.getHttpServer()).post('/api/v1/auth/facility').set('Origin', ORIGIN)
+      .set('X-Facility-ID', SECOND_FACILITY.id).send({ facilityId: OTHER_FACILITY })
+    expect(response.status).toBe(403)
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'auth.facility.select', outcome: 'failure',
+      facilityId: SECOND_FACILITY.id, actorMembershipId: SECOND_FACILITY.membershipId, organizationId: SECOND_FACILITY.organizationId })])
   })
 })

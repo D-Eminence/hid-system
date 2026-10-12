@@ -22,8 +22,9 @@ export const AUDIT_SESSION_EVENT = Symbol('AUDIT_SESSION_EVENT');
 /**
  * A session route (sign-out, facility selection, session reads) whose requests
  * the AuditInterceptor records as this `auth.*` session event, not as a generic
- * `api.*` HTTP request. No facility is bound to these routes, and a staff audit
- * row without a facility is accepted only as an `auth.*` session event
+ * `api.*` HTTP request. No facility is bound to these routes unless the request
+ * names one of the actor's facilities in X-Facility-ID (sign-out binds none),
+ * and a staff audit row without a facility is accepted only as an `auth.*` session event
  * (AuditService.assertActorFacility and the 0067 CHECK constraints). Recorded
  * as `api.*`, a staff refusal failed its own audit, so the request answered 503
  * and the refusal went unrecorded.

@@ -79,7 +79,9 @@ export class AuditInterceptor implements NestInterceptor {
   // every other request keeps the facility the guard bound to it. A session
   // event names its actor's kind, as AuthController's own session events do, and
   // records a membership and organization only with the facility bound to the
-  // request: none is bound to a session route, so its row carries none.
+  // request. Sign-out binds none; the other session routes bind one only when
+  // the request names one of the actor's facilities in X-Facility-ID. Otherwise
+  // the row carries no facility, membership or organization.
   private actorFields(request: HidRequest, sessionEvent = false) {
     if (request.accessScope === 'platform' && request.actor && request.actor.kind !== 'patient') {
       return {
