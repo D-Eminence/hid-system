@@ -1853,29 +1853,21 @@ the schema, policies or grants changes.
 - **Emergency summary** (`GET /ehr/patients/:id/emergency-records`). A
   break-glass emergency context passes `ehr.context_allows` for `read_records`
   at its facility (0012), so every clinical table is readable there.
-  - Vitals: the current correction is joined from `ehr.vital_corrections` on
-    `correction_no = current_correction_no` at the same vital, patient and
-    facility (`services/ehr-api/src/ehr/vitals/vital-current-values.ts`).
-    `vital_corrections_read` is the same predicate as `vitals_read`, so the
-    join sees the correction whenever it sees the vital. Each replacement value
-    is cast to its column's type (`numeric(6,2)`, `numeric(7,3)`,
-    `numeric(4,1)`, `smallint`, `numeric(5,2)`); `0004` checks only the keys of
-    `replacement_values`, not their values, so a value that does not cast
-    (`22P02`) fails the whole summary rather than showing a wrong value. The EHR
-    API writes only values its DTO validated, with the same bounds and
-    precision as the columns.
-  - Recorded values: `recordedValues` and an uncorrected vital's values are
-    read from the `ehr.vitals` row's eight measurement columns. No EHR API
-    route updates them (a correction updates only `current_correction_no`),
-    but the database does not refuse it: `hid_ehr_runtime` holds `UPDATE` on
-    `ehr.vitals` (`runtime-grants.sql`), `vitals_update` allows it under
-    `write_records` (0005), and `ehr.capture_record_version` (0004) guards
-    only the ownership and attribution columns and requires a change reason,
-    recording the prior row in `ehr.record_versions`. An update by another
-    code path, a script or an operator would be returned as the recorded
-    values. A guard refusing changes to the measurement columns (a trigger, or
-    column-level `UPDATE` limited to `current_correction_no`) is a follow-up
-    migration.
+  - Vitals: read from `ehr.vitals` alone, as first recorded (the row's eight
+    measurement columns), the same columns as before; corrections are not
+    applied. Applying them is pending the product decision on correction
+    semantics (proposed default: the current correction's replacement set is
+    the whole current set, as Health-id's clinician chart applies it); the
+    implementation is preserved in commit `7401193` for when the decision
+    lands. No EHR API route updates the measurement columns (a correction
+    updates only `current_correction_no`), but the database does not refuse
+    it: `hid_ehr_runtime` holds `UPDATE` on `ehr.vitals` (`runtime-grants.sql`),
+    `vitals_update` allows it under `write_records` (0005), and
+    `ehr.capture_record_version` (0004) guards only the ownership and
+    attribution columns and requires a change reason, recording the prior row
+    in `ehr.record_versions`. A guard refusing changes to the measurement
+    columns (a trigger, or column-level `UPDATE` limited to
+    `current_correction_no`) is a follow-up migration.
   - Documents: read from `ehr.documents_effective` (0009, `security_invoker`,
     `security_barrier`) where `status = 'available'`, so `documents_read` and
     `document_scan_events_staff_read` apply to the view's reads. The raw
@@ -1883,16 +1875,13 @@ the schema, policies or grants changes.
     documents never scanned and those the scanner rejected.
   - Each section reads one row more than it shows, to report truncation.
 - `emergency.integration.sql` (rollback-only) adds, after its activation cases,
-  a break-glass grant inserted directly and clinical fixtures inserted with
+  a break-glass grant inserted directly and document fixtures inserted with
   `session_replication_role = replica`, then checks as `hid_ehr_api_runtime`
-  with the emergency context: the three vitals and both corrections of the
-  corrected one are visible; the current-correction join matches correction 2
-  of vital A, nothing for vital B (which names a correction that does not
-  exist, flagged unavailable) and nothing for the uncorrected vital C;
-  `documents_effective` reports `available:clean`, `rejected:rejected` and
-  `uploaded:pending` for a clean, a rejected and an unscanned upload, and
-  lists only the clean one as available, while the raw `uploaded` filter lists
-  all three; and with `direct-care` and no consent nothing is visible. These
+  with the emergency context: `documents_effective` reports `available:clean`,
+  `rejected:rejected` and `uploaded:pending` for a clean, a rejected and an
+  unscanned upload, and lists only the clean one as available, while the raw
+  `uploaded` filter lists all three; and with `direct-care` and no consent
+  nothing is visible. These
   cases pass before and after the service change: they guard the database
   behaviour the summary relies on. The rehearsal runs the suite with its
   additional suites, and `scripts/run-container-database-acceptance.sh` now

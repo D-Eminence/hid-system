@@ -168,27 +168,26 @@ describe('Emergency record summary', () => {
     expect(summary.limit).toBe(50);
   });
 
-  it('returns vitals with the current correction applied, the recorded values apart, and fails closed', async () => {
-    const { service, query } = setup();
-    await service.emergency('patient-id', emergencyContext);
-    const vitals = sqlFor(query, 'vitals');
-    // The current correction (correction_no = current_correction_no) is joined at the same patient and facility.
-    expect(vitals).toContain('left join ehr.vital_corrections c on c.vital_id=v.id and c.patient_id=v.patient_id'
-      + ' and c.facility_id=v.facility_id and c.correction_no=v.current_correction_no and v.current_correction_no>0');
-    // Its replacement set is the whole current set: an omitted measurement is null, never the recorded value.
-    expect(vitals).toContain('case when v.current_correction_no=0 then v.systolic_mmhg'
-      + " when c.id is not null then (c.replacement_values->>'systolic_mmhg')::smallint end as \"systolicMmhg\"");
-    expect(vitals).toContain('case when v.current_correction_no=0 then v.temperature_c'
-      + " when c.id is not null then (c.replacement_values->>'temperature_c')::numeric(4,1) end as \"temperatureC\"");
-    expect(vitals).toContain('v.current_correction_no as "currentCorrectionNo"');
-    expect(vitals).toContain('c.created_at as "correctedAt"');
-    expect(vitals).toContain('(v.current_correction_no>0 and c.id is null) as "correctionUnavailable"');
-    expect(vitals).toContain('case when v.current_correction_no>0 then jsonb_build_object(');
-    expect(vitals).toContain('as "recordedValues"');
-    expect(vitals).toContain('c.reason as "correctionReason"');
-    expect(vitals).toContain('where v.patient_id=$1 and v.facility_id=$2 order by v.recorded_at desc,v.id desc limit 101');
-    // No measurement is read from the recorded row once a vital has a correction.
-    expect(vitals).not.toMatch(/(^|[ ,])v\.systolic_mmhg as "systolicMmhg"/);
+  it('returns vitals as first recorded, with no correction applied and no correction field', async () => {
+    const recorded = { id: 'vital', encounterId: 'encounter', facilityId: 'facility', recordedAt: '2026-10-12T09:00:00.000Z',
+      heightCm: null, weightKg: null, temperatureC: '37.0', pulseBpm: 90, respiratoryRate: null, systolicMmhg: 200,
+      diastolicMmhg: 100, oxygenSaturationPercent: null, source: 'manual' };
+    const { service, query } = setup({ vitals: [recorded] });
+    const summary = await service.emergency('patient-id', emergencyContext) as unknown as Summary;
+    // The columns the summary has always returned, from the vital row alone, with the section's own limit.
+    expect(sqlFor(query, 'vitals')).toBe('select id,encounter_id as "encounterId",facility_id as "facilityId",'
+      + ' recorded_at as "recordedAt",height_cm as "heightCm",weight_kg as "weightKg",'
+      + ' temperature_c as "temperatureC",pulse_bpm as "pulseBpm",respiratory_rate as "respiratoryRate",'
+      + ' systolic_mmhg as "systolicMmhg",diastolic_mmhg as "diastolicMmhg",'
+      + ' oxygen_saturation_percent as "oxygenSaturationPercent",source'
+      + ' from ehr.vitals where patient_id=$1 and facility_id=$2 order by recorded_at desc,id desc limit 101');
+    // No correction is read: applying corrections waits for the correction-semantics decision.
+    expect(query.mock.calls.some(([sql]) => /vital_corrections|current_correction_no|replacement_values/.test(String(sql))))
+      .toBe(false);
+    expect(summary.vitals).toEqual([recorded]);
+    for (const field of ['currentCorrectionNo', 'correctedAt', 'correctionUnavailable', 'recordedValues', 'correctionReason']) {
+      expect(summary.vitals?.[0]).not.toHaveProperty(field);
+    }
   });
 
   it('lists only documents whose effective status is available, as the download rule requires', async () => {
@@ -206,14 +205,13 @@ describe('Emergency record summary', () => {
   it('records the disclosed count of each category in the emergency audit, counts only', async () => {
     const { service, operations } = setup({
       encounters: rows(4), notes: rows(3),
-      vitals: rows(5, (index) => ({ currentCorrectionNo: index < 2 ? index + 1 : 0 })),
-      diagnoses: rows(2), prescriptions: rows(1), labRequests: rows(6), documents: rows(7),
+      vitals: rows(5), diagnoses: rows(2), prescriptions: rows(1), labRequests: rows(6), documents: rows(7),
     });
     await service.emergency('patient-id', emergencyContext);
     expect(operations).toHaveLength(1);
     expect(operations[0]?.details).toEqual({
-      encounterCount: 4, noteCount: 3, vitalCount: 5, correctedVitalCount: 2, diagnosisCount: 2,
-      prescriptionCount: 1, labRequestCount: 6, documentCount: 7, withheldCategories: [],
+      encounterCount: 4, noteCount: 3, vitalCount: 5, diagnosisCount: 2, prescriptionCount: 1, labRequestCount: 6,
+      documentCount: 7, withheldCategories: [],
     });
   });
 
@@ -233,13 +231,13 @@ describe('Emergency record summary: each category needs its own read permission'
   // The read permission each category's own routes require (vitals, diagnoses, prescriptions,
   // lab-requests and document controllers); the summary route itself requires only encounter and note reads.
   const OPTIONAL: ReadonlyArray<readonly [Section, string, readonly string[]]> = [
-    ['vitals', 'ehr.vital.read', ['vitalCount', 'correctedVitalCount']],
+    ['vitals', 'ehr.vital.read', ['vitalCount']],
     ['diagnoses', 'ehr.diagnosis.read', ['diagnosisCount']],
     ['prescriptions', 'ehr.prescription.read', ['prescriptionCount']],
     ['labRequests', 'ehr.lab-request.read', ['labRequestCount']],
     ['documents', 'ehr.document.read', ['documentCount']],
   ];
-  const everyRow: Fixture = { encounters: rows(2), notes: rows(1), vitals: rows(3, () => ({ currentCorrectionNo: 1 })),
+  const everyRow: Fixture = { encounters: rows(2), notes: rows(1), vitals: rows(3),
     diagnoses: rows(4), prescriptions: rows(5), labRequests: rows(6), documents: rows(7) };
 
   it.each(OPTIONAL)('withholds %s from a reader without %s: not read, returned empty, named and audited as withheld',

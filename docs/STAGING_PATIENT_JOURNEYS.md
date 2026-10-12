@@ -168,8 +168,8 @@ token, is authorized by Identity, and EHR cookie writes without Origin or CSRF
 are refused. With fix/patient-records-release-honesty it also reads the
 patient's own record summary (released and withheld categories, limits), the
 break-glass emergency summary of a reader whose role lacks four category read
-permissions (those categories withheld), and the doctor's (corrected vitals,
-available documents, audit counts); its break-glass grants are inserted
+permissions (those categories withheld), and the doctor's (vitals as first
+recorded, available documents, audit counts); its break-glass grants are inserted
 directly, not activated. That check is local and synthetic; it does not exercise the staging
 fixture or break-glass activation. With D-Eminence/hid-system#39, the
 rehearsal also runs

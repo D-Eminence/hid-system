@@ -9,7 +9,7 @@
 // record summaries over cookies: the patient's own (released and withheld
 // categories, limits), a break-glass emergency summary for a reader whose role
 // lacks most category read permissions (those categories withheld), and the
-// doctor's (current vital values, available documents, audit counts).
+// doctor's (vitals as first recorded, available documents, audit counts).
 // Disposable copy of the owned synthetic rehearsal database; synthetic
 // accounts only.
 import assert from 'node:assert/strict';
@@ -146,9 +146,10 @@ if (process.argv[2] === '--identity-child') {
 
     // Record summaries (steps 4 to 6): 51 completed encounters, one more than
     // a summary shows; vital A corrected twice (the second current), vital B
-    // naming a correction that does not exist, vital C never corrected; three
-    // uploaded documents, scanned clean, rejected and not scanned; and the
-    // doctor's break-glass grant for an emergency read.
+    // naming a correction that does not exist, vital C never corrected, all
+    // three returned as first recorded until the correction rule is decided;
+    // three uploaded documents, scanned clean, rejected and not scanned; and
+    // the doctor's break-glass grant for an emergency read.
     const summary = { vitalA: randomUUID(), vitalB: randomUUID(), vitalC: randomUUID(),
       clean: randomUUID(), rejected: randomUUID(), unscanned: randomUUID(), emergencyGrant: randomUUID() };
     await database.fixture(async (client) => {
@@ -356,9 +357,9 @@ if (process.argv[2] === '--identity-child') {
     checks.push('a break-glass reader whose role lacks the vital, prescription, lab-request and document read permissions gets those four categories empty and named as withheld, with encounters, notes and diagnoses still read, and the audit records the withheld categories and only the counts of what was read');
 
     // 6. The doctor's break-glass emergency summary: every category the doctor
-    //    may read, vitals with the current correction applied as the whole
-    //    current set, only available documents, per-section limits, and each
-    //    category's count in the audit.
+    //    may read, vitals as first recorded (corrections are not applied until
+    //    the correction rule is decided), only available documents,
+    //    per-section limits, and each category's count in the audit.
     const emergency = await call(ehrBase, 'GET', `/ehr/patients/${ids.patient}/emergency-records`,
       { cookie: doctor.cookie, 'x-facility-id': ids.facility, 'x-purpose-of-use': 'emergency' });
     assert.equal(emergency.status, 200, `emergency summary: ${emergency.status} ${JSON.stringify(emergency.body)}`);
@@ -367,24 +368,21 @@ if (process.argv[2] === '--identity-child') {
       'The emergency summary withholds a category from a reader holding every read permission');
     const measurements = ['heightCm', 'weightKg', 'temperatureC', 'pulseBpm', 'respiratoryRate', 'systolicMmhg',
       'diastolicMmhg', 'oxygenSaturationPercent'];
+    const vitalFields = ['diastolicMmhg', 'encounterId', 'facilityId', 'heightCm', 'id', 'oxygenSaturationPercent',
+      'pulseBpm', 'recordedAt', 'respiratoryRate', 'source', 'systolicMmhg', 'temperatureC', 'weightKg'];
     const vitalState = (id) => {
       const item = emergency.body.vitals?.find((vital) => vital.id === id);
       assert(item, `The emergency summary does not list vital ${id}`);
-      return Object.fromEntries([...measurements, 'currentCorrectionNo', 'correctionUnavailable', 'correctionReason',
-        'recordedValues'].map((key) => [key, item[key]]));
+      assert.deepEqual(Object.keys(item).sort(), vitalFields,
+        'The emergency summary returns vital fields other than the recorded ones (a correction field)');
+      return Object.fromEntries(measurements.map((key) => [key, item[key]]));
     };
-    const recorded = (values) => Object.fromEntries(measurements.map((key) => [key, values[key] ?? null]));
     const none = Object.fromEntries(measurements.map((key) => [key, null]));
-    assert.deepEqual(vitalState(summary.vitalA), { ...none, systolicMmhg: 125, diastolicMmhg: 85, temperatureC: '37.2',
-      currentCorrectionNo: 2, correctionUnavailable: false, correctionReason: 'Second synthetic correction',
-      recordedValues: recorded({ systolicMmhg: 200, diastolicMmhg: 100, pulseBpm: 90, temperatureC: 37 }) },
-    'The emergency summary does not apply the current vital correction as the whole current set');
-    assert.deepEqual(vitalState(summary.vitalB), { ...none, currentCorrectionNo: 1, correctionUnavailable: true,
-      correctionReason: null, recordedValues: recorded({ systolicMmhg: 118, diastolicMmhg: 76, pulseBpm: 64, temperatureC: 36.4 }) },
-    'The emergency summary does not fail closed when the current vital correction is unreadable');
-    assert.deepEqual(vitalState(summary.vitalC), { ...none, systolicMmhg: 110, diastolicMmhg: 70, pulseBpm: 60,
-      temperatureC: '36.6', currentCorrectionNo: 0, correctionUnavailable: false, correctionReason: null, recordedValues: null },
-    'The emergency summary does not return an uncorrected vital as recorded');
+    assert.deepEqual([vitalState(summary.vitalA), vitalState(summary.vitalB), vitalState(summary.vitalC)], [
+      { ...none, systolicMmhg: 200, diastolicMmhg: 100, pulseBpm: 90, temperatureC: '37.0' },
+      { ...none, systolicMmhg: 118, diastolicMmhg: 76, pulseBpm: 64, temperatureC: '36.4' },
+      { ...none, systolicMmhg: 110, diastolicMmhg: 70, pulseBpm: 60, temperatureC: '36.6' },
+    ], 'The emergency summary does not return each vital as first recorded');
     assert.deepEqual(emergency.body.documents?.map((item) => [item.id, item.status, item.scanStatus]),
       [[summary.clean, 'available', 'clean']], 'The emergency summary lists a document whose effective status is not available');
     assert.deepEqual({ count: emergency.body.encounters?.length, limits: emergency.body.limits,
@@ -396,10 +394,9 @@ if (process.argv[2] === '--identity-child') {
       where action='ehr.emergency.records.read' and outcome='success' and patient_id=$1 and actor_account_id=$2`,
     [ids.patient, ids.doctorAccount]);
     assert.deepEqual(emergencyAudit.rows.map((row) => row.details), [{ encounterCount: 50, noteCount: 0, vitalCount: 3,
-      correctedVitalCount: 2, diagnosisCount: 0, prescriptionCount: 0, labRequestCount: 0, documentCount: 1,
-      withheldCategories: [] }],
+      diagnosisCount: 0, prescriptionCount: 0, labRequestCount: 0, documentCount: 1, withheldCategories: [] }],
     'The emergency summary audit does not record the count of each disclosed category');
-    checks.push('the break-glass emergency summary returns a corrected vital as its current correction alone (omitted measurements null, recorded values apart), all-null with correctionUnavailable when that correction is unreadable, lists only the clean-scanned document, reports 50 of 51 encounters as truncated, and audits each category\'s count');
+    checks.push('the break-glass emergency summary returns every vital as first recorded, corrected or not, with no correction field, lists only the clean-scanned document, reports 50 of 51 encounters as truncated, and audits each category\'s count');
 
     process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only',
       roles: ['hid_ehr_api_runtime', 'hid_identity_api_runtime'], checks })}\n`);

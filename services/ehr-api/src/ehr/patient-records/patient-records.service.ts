@@ -6,7 +6,6 @@ import type { DataAccessContext, HidRequest } from '../../common/request-context
 import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
-import { currentVitalJoin, currentVitalProjection, recordedVitalProjection } from '../vitals/vital-current-values';
 
 /**
  * Categories released to the patient (INTERFACE_CONTRACT.md, "Patient sessions and self service"):
@@ -98,9 +97,6 @@ export class PatientRecordsService {
       for (const category of EMERGENCY_CATEGORIES) {
         if (withheld.includes(category)) continue;
         details[EMERGENCY_COUNT_KEYS[category]] = value[category].length;
-        if (category === 'vitals') {
-          details.correctedVitalCount = value.vitals.filter((vital) => Number(vital.currentCorrectionNo) > 0).length;
-        }
       }
       details.withheldCategories = value.withheld;
       return { value, details };
@@ -140,12 +136,14 @@ export class PatientRecordsService {
     const encounters = await this.section(client, 'encounters', encountersSql(' and facility_id=$2'), values);
     const notes = await this.section(client, 'notes', notesSql(' and n.facility_id=$2'), values);
 
-    const vitals = await read('vitals', `select v.id,v.encounter_id as "encounterId",
-      v.facility_id as "facilityId",v.recorded_at as "recordedAt",v.source,
-      ${currentVitalProjection('v', 'c')},
-      ${recordedVitalProjection('v')},c.reason as "correctionReason"
-      from ehr.vitals v ${currentVitalJoin('v', 'c')}
-      where v.patient_id=$1 and v.facility_id=$2 order by v.recorded_at desc,v.id desc`);
+    // Vitals as first recorded; corrections are not applied, pending the decision on correction semantics.
+    const vitals = await read('vitals', `select id,encounter_id as "encounterId",facility_id as "facilityId",
+      recorded_at as "recordedAt",height_cm as "heightCm",weight_kg as "weightKg",
+      temperature_c as "temperatureC",pulse_bpm as "pulseBpm",respiratory_rate as "respiratoryRate",
+      systolic_mmhg as "systolicMmhg",diastolic_mmhg as "diastolicMmhg",
+      oxygen_saturation_percent as "oxygenSaturationPercent",source
+      from ehr.vitals where patient_id=$1 and facility_id=$2
+      order by recorded_at desc,id desc`);
 
     const diagnoses = await read('diagnoses', `select id,encounter_id as "encounterId",
       facility_id as "facilityId",code_system as "codeSystem",code,display,clinical_status as "clinicalStatus",

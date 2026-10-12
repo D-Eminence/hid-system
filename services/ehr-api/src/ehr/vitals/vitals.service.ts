@@ -252,8 +252,7 @@ export class VitalsService {
   }
 }
 
-/** The API key of each vital measurement and the column (and correction key) that stores it. */
-export const VITAL_STORAGE_KEYS = {
+const VITAL_STORAGE_KEYS = {
   heightCm: 'height_cm',
   weightKg: 'weight_kg',
   temperatureC: 'temperature_c',

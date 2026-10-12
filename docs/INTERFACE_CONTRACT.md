@@ -182,8 +182,8 @@ notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
 Activation also requires the platform `break_glass_enabled` control inside the
 activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
-The summary's sections, the read permission each needs, its limits, vital
-values and audit counts are in §11, "Record summaries".
+The summary's sections, the read permission each needs, its limits and audit
+counts are in §11, "Record summaries".
 
 Patient access-request decisions are session-bound patient commands:
 `GET /api/v1/identity/me/access-requests`,
@@ -709,50 +709,17 @@ withheld. The seeded doctor, clinician and nurse roles hold all seven.
   latest scan of the exact stored object version and SHA-256 is clean, the rule
   the download applies. Each has `status` `available`, `scanStatus` `clean`,
   and `mediaType` as the scan detected it (as declared if the scan named none).
-- Each vital's eight measurements are its current values ("Vital corrections"
-  below), with `currentCorrectionNo`, `correctedAt`, `correctionUnavailable`,
-  `recordedValues` (the eight recorded measurements the vital row holds, as
-  JSON numbers or `null`, for a corrected vital; otherwise `null`) and
-  `correctionReason` (the current correction's).
+- `vitals` are returned as first recorded (the vital row's eight measurement
+  columns, which no API route changes), with the same fields as before; a
+  vital's corrections are not applied. Applying them is pending the product
+  decision on correction semantics (proposed default: the current correction
+  is the whole current set, as Health-id's clinician chart applies it); the
+  implementation is preserved in commit `7401193` for when the decision lands.
 - The audit event `ehr.emergency.records.read` records the count of each
   category read, and the categories withheld, and nothing else:
-  `encounterCount`, `noteCount`, `vitalCount`, `correctedVitalCount` (vitals
-  with `currentCorrectionNo` above 0), `diagnosisCount`, `prescriptionCount`,
-  `labRequestCount`, `documentCount` (a withheld category has no count) and
-  `withheldCategories`.
-
-### Vital corrections
-
-`POST .../vitals/:vitalId/corrections` appends a correction with a
-`replacementValues` set and makes it current: the vital's
-`currentCorrectionNo` becomes its number. No API route changes the recorded
-values (the vital row's eight measurement columns): a correction moves only
-`currentCorrectionNo`, and `GET .../vitals` and `GET .../vitals/:vitalId` still
-return the recorded values, with `currentCorrectionNo`;
-`GET .../vitals/:vitalId/corrections` lists the corrections, newest first. The
-database does not yet refuse other updates of those columns by the EHR
-runtime; each would be versioned in `ehr.record_versions` with its change
-reason (`DATABASE.md`, "Record summary reads").
-
-A vital's current values, as the emergency summary returns them, are:
-
-- with no correction (`currentCorrectionNo` 0), the recorded values;
-- otherwise exactly the `replacementValues` of the correction numbered
-  `currentCorrectionNo`. A measurement that correction omits has no current
-  value (`null`), even if it was recorded or named by an earlier correction.
-  Corrections are not merged with each other or with the recorded values, so
-  send every measurement that is still current;
-- if that correction cannot be read, every measurement is `null` and
-  `correctionUnavailable` is `true`. Recorded values are returned only as
-  `recordedValues`, never as current.
-
-This is the current default, pending the product decision on correction
-semantics: the backend had not defined them before, and it is the rule the
-Health-id provider chart applies.
-
-Current values have the recorded columns' types: `heightCm`, `weightKg`,
-`temperatureC` and `oxygenSaturationPercent` are decimal strings,
-`pulseBpm`, `respiratoryRate`, `systolicMmhg` and `diastolicMmhg` integers.
+  `encounterCount`, `noteCount`, `vitalCount`, `diagnosisCount`,
+  `prescriptionCount`, `labRequestCount`, `documentCount` (a withheld category
+  has no count) and `withheldCategories`.
 
 ## 12. Lab
 
