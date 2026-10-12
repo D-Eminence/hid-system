@@ -442,9 +442,12 @@ export class HidRegionalStack extends Stack {
     this.requiredParameter('IdentityWorkloadSubject', 'Exact deployment subject for Identity API');
     }
     this.requiredParameter('AuthSecretArn', 'Secrets Manager JSON secret containing authSigningSecret and authLoginPepper');
+    // ECS resolves every referenced JSON field before an Identity task starts:
+    // a missing field (mfaSecretKeyB64 included) stops every Identity task.
+    const platformMfaKey = 'mfaSecretKeyB64 (platform MFA key: 32 random bytes, base64, never reused across environments)';
     this.requiredParameter('IdentitySensitiveSecretArn', this.configuration.name === 'staging'
-      ? 'Secrets Manager JSON secret containing OTP HMAC key, Turnstile secret, and Google OIDC client-ID allowlist; NIN is deferred'
-      : 'Secrets Manager JSON secret containing NIN keys, OTP HMAC key, Turnstile secret, and Google OIDC client-ID allowlist');
+      ? `Secrets Manager JSON secret containing OTP HMAC key, contact lookup HMAC key, Turnstile secret, Google OIDC client-ID allowlist, and ${platformMfaKey}; NIN is deferred; Identity tasks cannot start until every field exists`
+      : `Secrets Manager JSON secret containing NIN keys, OTP HMAC key, contact lookup HMAC key, Turnstile secret, Google OIDC client-ID allowlist, and ${platformMfaKey}; Identity tasks cannot start until every field exists`);
     if (this.configuration.qoreIdEnabled) {
       this.requiredParameter('QoreIdCredentialsSecretArn',
         'Secrets Manager JSON secret containing clientId and secret for the server-only QoreID OAuth client');
@@ -764,6 +767,9 @@ export class HidRegionalStack extends Stack {
         return { ...commonApi, ...base, PORT: '3001', AUTH_MODE: 'local', AUTH_COOKIE_SECURE: 'true',
           AUTH_ISSUER: 'hid-identity', AUTH_AUDIENCE: 'hid-api',
           TURNSTILE_MODE: 'required', OTP_HMAC_KEY_VERSION: 'aws-v1',
+          // Fixed at the first authenticator enrolment: changing it, or the key,
+          // invalidates every enrolled platform authenticator.
+          MFA_KEY_VERSION: 'aws-v1',
           NOTIFICATION_API_URL: urls['notification-api']!, NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
           NIN_PROVIDER_MODE: this.configuration.name === 'staging' ? 'deferred' : 'unavailable', NIN_KEY_VERSION: 'aws-v1', IDENTITY_SERVICE_IDENTITY_MODE: 'jwt',
           QOREID_ENABLED: this.configuration.qoreIdEnabled ? 'true' : 'false',
@@ -865,6 +871,9 @@ export class HidRegionalStack extends Stack {
       // secure envelope so task definitions cannot silently drift from the
       // approved backend audience policy.
       output.GOOGLE_OIDC_CLIENT_IDS = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'googleOidcClientIds');
+      // Master key for platform administrator TOTP secrets and recovery-code
+      // digests. Without it platform sign-in fails closed (503 MFA_UNAVAILABLE).
+      output.MFA_SECRET_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'mfaSecretKeyB64');
       if (this.configuration.qoreIdEnabled) {
         output.QOREID_CLIENT_ID = ecs.Secret.fromSecretsManager(secrets.qoreid!, 'clientId');
         output.QOREID_CLIENT_SECRET = ecs.Secret.fromSecretsManager(secrets.qoreid!, 'secret');

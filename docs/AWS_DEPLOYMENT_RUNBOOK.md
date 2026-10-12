@@ -59,7 +59,8 @@ Record and approve:
   development and production, the external issuer/JWKS/subjects and token
   delivery mechanism;
 - nine non-owner database secrets plus a separate migration administrator;
-- Identity auth/OTP/Turnstile secret material; legacy NIN material remains
+- Identity auth/OTP/Turnstile secret material and the platform MFA key
+  `mfaSecretKeyB64` (below); legacy NIN material remains
   excluded from current staging requirements. If QoreID staging activation is
   separately approved, add its distinct `clientId`/`secret` envelope only;
 - for staging email acceptance, SES sender and Novu secret material only; the
@@ -72,6 +73,22 @@ Record and approve:
 Do not reuse local, historical Vercel, Supabase, or Brevo credentials. Any
 previously exposed live-looking credentials must be rotated/revoked by their
 external owners before cutover.
+
+The Identity task reads `MFA_SECRET_KEY_B64` from the `mfaSecretKeyB64` field of
+the `IdentitySensitiveSecretArn` secret and runs with `MFA_KEY_VERSION=aws-v1`
+in every environment (`fix/cdk-identity-mfa-secret`). Before deploying that task
+definition, add `mfaSecretKeyB64` to the environment's secret: 32 bytes from a
+cryptographically secure generator in canonical padded base64 (44 characters),
+written without printing it and keeping every other field. Generate it
+separately for each environment; never copy it from staging or any other
+environment. ECS resolves every referenced JSON field before it starts a task:
+while the field is missing no Identity task starts, so on a first deployment
+every patient, staff and platform sign-in is down, and an update fails and is
+rolled back by the deployment circuit breaker. A malformed value stops Identity
+at start-up. The key and version are fixed at the first authenticator
+enrolment; changing either invalidates every enrolled authenticator (release
+checklist P3). For staging, the [external preflight](STAGING_EXTERNAL_PREFLIGHT.md)
+reports whether the field is present.
 
 For staging, `RdsCaBundleBase64` accepts at most 4096 base64 characters, the
 CloudFormation parameter-value limit. Independently verify the staging region
@@ -89,8 +106,36 @@ service-subject parameters. Its regional stack supplies the issuer and JWKS
 URLs and binds six exact task roles to eleven allowed caller/audience pairs.
 Record the output URLs and signing-key ARN with the release evidence; do not
 record tokens. All staging modes retain the same issuer and P-256 key. Confirm
-the production template still matches its recorded baseline byte for byte;
-production and development keep their external workload-identity inputs.
+the production template still matches its recorded baseline (below) byte for
+byte; production and development keep their external workload-identity inputs.
+
+**Recorded template baseline.** Offline synthesis of `fix/cdk-identity-mfa-secret`
+with `npm --prefix infra/aws run synth:prod` (and `synth:dev`), no
+`HID_AWS_ACCOUNT`/`HID_AWS_REGION`, no AWS credentials, `aws-cdk-lib` 2.273.0 and
+CDK CLI 2.1144.0:
+
+| Profile | Template SHA-256 | Bytes |
+| --- | --- | --- |
+| Production | `c2480c333764c9abedaac7ca16b253f76c585eccf0e0909cc7211c9f3a00c3e9` | 523,822 |
+| Development | `c4c4b2891251d4c988191484c89a3e6adf88e30ef8dc35523ca77a5c76842dc3` | 523,392 |
+
+Why it changed: this branch gives the Identity task its MFA key secret
+reference and `MFA_KEY_VERSION` and rewords the `IdentitySensitiveSecretArn`
+description (release checklist P3). A structural comparison with its base
+`05df685` finds exactly those three differences in production, development and
+each staging mode. The earlier record, the September 14 synthesis in the
+[staging execution report](TUF-STAGING-EXECUTION.md) (production
+`f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6`, 464,453
+bytes; development
+`42cadadc0cda9ef7f13c86f27937b066662f417e5e5925fc2a46a1bb708db73c`, 517,254
+bytes), was already stale: `05df685` synthesizes to
+`3c69a5b608eae12f0617822c0225eeec1c7c3058eace9fe257dc5c6854dc9c4a` (523,299
+bytes) and `a0709512071047ffca3cfd41f88fc2718334565ac61723b4a17e1a98a2b4cf1b`
+(522,869 bytes). Nine later commits touch `infra/aws/src` or its CDK
+dependencies, among them the QoreID and enrolment changes and the
+`aws-cdk-lib` 2.273.0 upgrade; together they changed both templates without
+updating the record. Every later change to a template replaces its row here,
+with the reason.
 
 ## 2. Local source gates
 

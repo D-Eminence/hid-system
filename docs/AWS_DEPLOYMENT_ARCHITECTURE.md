@@ -210,9 +210,9 @@ proxies are migration sources/history only, never production runtime paths.
 
 Nine non-owner PostgreSQL LOGIN secrets are isolated by service. The migration
 administrator is separate. Only Identity receives auth signing/login-pepper,
-NIN, OTP-HMAC, and Turnstile material. Notification provider configuration is
-injected only into Notification API/Worker as required. Gateway receives no
-application secrets.
+NIN, OTP-HMAC, Turnstile and platform MFA key material. Notification provider
+configuration is injected only into Notification API/Worker as required. Gateway
+receives no application secrets.
 
 Staging workload identity is implemented by the regional stack and token agent.
 The issuer maps exactly six IAM task roles to fixed `hid:staging:<service>`
@@ -232,8 +232,10 @@ This renews tokens; it does not rotate the retained KMS signing key.
 
 Staging has no external issuer/JWKS/subject parameters. Development and
 production retain those external inputs and delivery requirements; the staging
-implementation preserves the production template byte for byte against the
-recorded baseline. Local tests do not establish deployed token delivery.
+implementation preserved the production template byte for byte against the
+baseline recorded then. The current baseline is in the
+[deployment runbook](AWS_DEPLOYMENT_RUNBOOK.md#1-freeze-the-release-inputs) §1.
+Local tests do not establish deployed token delivery.
 Live profiles encode their reviewed recommended defaults, but the guarded
 staging operations require readiness, migration, queue/outbox, billing, diff,
 account/region and exact-SHA

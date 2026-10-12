@@ -33,6 +33,13 @@ Only the three existing `/hid/staging/auth`, `/hid/staging/identity-sensitive`
 and `/hid/staging/notification-provider` secret names are read, plus SES account
 status. No production secret or resource is requested. Optional Termii, Meta and
 Brevo fields are not required by this email-only staging check.
+For `/hid/staging/identity-sensitive` it reports `otpHmacKeyB64`,
+`turnstileSecretKey`, `googleOidcClientIds` and `mfaSecretKeyB64`. The Identity
+task reads `MFA_SECRET_KEY_B64` from the last (`fix/cdk-identity-mfa-secret`),
+and ECS starts no Identity task while a referenced field is missing; add it
+before deploying that task definition (deployment runbook §1). The task also
+references `contactLookupHmacKeyB64`, which this check does not report yet;
+confirm it separately.
 
 The Cloudflare account/zone are pinned to `20c809ffe35ccb2c240d19a664dff97a` /
 `69d385b9f6a3233a7113c525524f14fe`. Zone/account mismatch stops further reads.
