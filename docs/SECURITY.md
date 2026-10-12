@@ -21,10 +21,15 @@ Authentication implementation must support future evolution without rewriting do
 
 Browser sessions use host-only `SameSite=Strict` cookies, and cookie
 mutations require an approved Origin and a CSRF token (`INTERFACE_CONTRACT.md`,
-"Auth session contract"). Sign-out must still work once the short-lived access
-token has expired: with D-Eminence/hid-system#39, Identity ends
-the sign-in by its refresh cookie and the CSRF token derived from that refresh
-token. A client's declaration of which application it is (`X-HID-Client`) may
+"Auth session contract"). The one exception is Identity's patient
+authorization check (`POST /api/v1/identity/service/authorization/check`),
+which EHR, Lab, OCR and Pharmacy call with the user's cookie: Identity skips
+that check there only when the caller authenticates as an approved workload
+and reports the request it serves as `GET`, `HEAD` or `OPTIONS` in
+`X-HID-Original-Method` (ADR-043). Sign-out must still work once the
+short-lived access token has expired: with D-Eminence/hid-system#39, Identity
+ends the sign-in by its refresh cookie and the CSRF token derived from that
+refresh token. A client's declaration of which application it is (`X-HID-Client`) may
 only narrow what a request acts on; it never authenticates or authorizes
 (ADR-044).
 

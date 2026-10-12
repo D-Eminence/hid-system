@@ -2,6 +2,7 @@ import {
   CanActivate,
   ExecutionContext,
   Injectable,
+  Optional,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
@@ -10,6 +11,7 @@ import { DatabaseService } from '../database/database.service';
 import { getEnvironment } from '../config/environment';
 import { platformActionPolicy } from '../admin/high-risk-policy';
 import {
+  DELEGATED_BROWSER_REQUEST,
   FACILITY_OPTIONAL,
   HIGH_RISK_ACTION,
   PLATFORM_SCOPE,
@@ -22,6 +24,7 @@ import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { readPlatformAssurance, stepUpProblem } from './platform-assurance';
 import { TokenService } from './token.service';
+import { WorkloadAuthService } from './workload-auth.service';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -35,6 +38,9 @@ export class SecurityGuard implements CanActivate {
     private readonly tokens: TokenService,
     private readonly audit: AuditService,
     private readonly database: DatabaseService,
+    // Optional so a guard built without it (older test harnesses) keeps the
+    // strict behaviour: every cookie POST must prove Origin and CSRF.
+    @Optional() private readonly workloadAuth?: WorkloadAuthService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -64,7 +70,8 @@ export class SecurityGuard implements CanActivate {
         throw new DomainProblem(403, 'PLATFORM_SESSION_SCOPE_DENIED',
           'A platform administration session cannot be used for this operation');
       }
-      if (transport === 'cookie' && !SAFE_METHODS.has(request.method)) {
+      if (transport === 'cookie' && !SAFE_METHODS.has(request.method)
+        && !(await this.delegatedSafeBrowserRequest(request, context))) {
         this.assertCookieMutationSecurity(request, verified.claims, platformScope);
       }
 
@@ -281,6 +288,29 @@ export class SecurityGuard implements CanActivate {
       if (typeof token === 'string' && token) return { token, transport: 'cookie' };
     }
     throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+  }
+
+  /**
+   * EHR, OCR, Lab and Pharmacy authorize the browser request they
+   * serve by POSTing to Identity with the browser's cookie. Origin and CSRF
+   * protect browser writes, but a same-origin browser GET carries neither, so
+   * on a delegation route the browser method the service reports decides
+   * whether the write check applies. The report counts only on a route marked
+   * for delegation and only once the calling workload has authenticated here;
+   * an unauthenticated caller, an unsafe or missing method, or any failure
+   * leaves the write check in force.
+   */
+  private async delegatedSafeBrowserRequest(request: HidRequest, context: ExecutionContext): Promise<boolean> {
+    const reported = request.header('x-hid-original-method');
+    if (this.metadata<boolean>(DELEGATED_BROWSER_REQUEST, context) !== true || !this.workloadAuth
+      || !reported || !SAFE_METHODS.has(reported)) return false;
+    try {
+      await this.workloadAuth.authenticateService(request.header('x-hid-internal-caller'),
+        request.header('x-hid-service-authorization'), request.header('x-hid-service-token'));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private assertCookieMutationSecurity(request: HidRequest, claims: Parameters<TokenService['verifyCsrf']>[0],

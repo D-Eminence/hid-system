@@ -43,6 +43,8 @@ export interface DataAccessContext {
   purposeOfUse: PurposeOfUse;
   authorization?: string;
   userCookie?: string;
+  /** The browser request's method; Identity applies its browser-write check to a forwarded cookie only for a write. */
+  requestMethod?: string;
   csrfToken?: string;
   origin?: string;
 }
@@ -70,5 +72,6 @@ export function requireRequestContext(request: HidRequest): DataAccessContext {
     userCookie,
     csrfToken: request.header('x-csrf-token'),
     origin: request.header('origin'),
+    requestMethod: request.method,
   };
 }
