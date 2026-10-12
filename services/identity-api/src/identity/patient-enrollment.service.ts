@@ -480,7 +480,9 @@ export class PatientEnrollmentService {
   /**
    * The contact-code failure bucket in `auth.otp_rate_limits` (scope
    * `recipient`): its own HMAC domain over the recipient HMAC, so it matches
-   * neither the stored recipient HMAC nor any OTP recovery bucket.
+   * neither the stored recipient HMAC nor any OTP recovery bucket. Unlike
+   * enrollment's own rate rows (pruned after 48 hours), nothing deletes these
+   * rows yet; the prune is a follow-up (DATABASE.md, the 0051 paragraph).
    */
   private contactFailureBucket(recipientHmac: string) {
     return this.hmac('patient-enrollment-contact-failure', recipientHmac);
