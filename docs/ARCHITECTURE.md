@@ -395,8 +395,13 @@ The physically extracted `services/outreach-api` runs on port 3006. It asks
 Identity to authorize the user, facility, permission, purpose, and any existing
 canonical patient link. It has no Identity or EHR mutation privilege and never
 mints patient UUIDs or HIDs. `identity_resolution_pending` is not a canonical
-registration. Campaigns, visits, screenings, documents/OCR, NIN, and clinical
-publication are outside the implemented boundary until separately governed.
+registration. Reads of facility-scoped campaigns and their staff membership
+(0038) are served under the same prefix (`INTERFACE_CONTRACT.md`, Outreach
+registration boundary). Campaign writes (create, status change, member add)
+stay outside the implemented boundary until separately governed: Identity
+refuses `outreach.campaign.write` (ADR-045). Visits, screenings,
+documents/OCR, NIN, and clinical publication are outside the implemented
+boundary until separately governed.
 
 ### 6.6 OCR API
 
@@ -1275,7 +1280,8 @@ Cookie mutations preserve Origin and CSRF evidence. The clients use a
 10-second timeout, retry an idempotent network/502/503/504 failure at most once,
 and obtain a fresh rotating workload credential for each attempt. Its Identity
 client also reports the method of the request a service is serving
-(`X-HID-Original-Method`) on the patient authorization check. Identity trusts
+(`X-HID-Original-Method`) on the patient authorization check and, with the
+Outreach cookie-read fix (ADR-045), on Outreach's authorization. Identity trusts
 that report only from an authenticated workload, and uses it only to decide
 whether a forwarded cookie needs the browser-write Origin and CSRF check
 (`INTERFACE_CONTRACT.md`, Extracted Identity boundary).
