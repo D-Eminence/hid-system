@@ -14,8 +14,10 @@
 // not the exact active prescription version, and a dispensing whose
 // prescription is no longer active at the accepted version, are refused with
 // 409, including when the EHR cancels the prescription while the dispensing
-// runs. The EHR's cancel is played by the database owner: it locks the row and
-// sets status and row_version as the EHR's update does, with triggers off.
+// runs. The acceptance does not compare the prescription time in this release,
+// so the millisecond an earlier EHR build sends is still accepted. The EHR's
+// cancel is played by the database owner: it locks the row and sets status and
+// row_version as the EHR's update does, with triggers off.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
@@ -78,8 +80,8 @@ try {
     // Work items whose prescription the EHR cancels around a dispense.
     source: { cancelled: workItem(), racing: workItem(), waiting: workItem(), rolledBack: workItem(), holding: workItem() },
     // Prescriptions not accepted yet: the exact snapshot is accepted; one is
-    // cancelled after the EHR's eligibility check, one is offered with its time
-    // truncated to the millisecond.
+    // cancelled after the EHR's eligibility check, one is offered with a
+    // shifted start date and then with its time truncated to the millisecond.
     accept: { exact: id(), fresh: id(), cancelled: id(), millisecond: id() } };
   f.a.subject = `synthetic:pharmacy-verifier-a:${f.a.account}`;
   f.b.subject = `synthetic:pharmacy-verifier-b:${f.b.account}`;
@@ -225,11 +227,18 @@ try {
   };
   await ineligible(acceptBody(id()), 'accept a prescription that does not exist');
   await ineligible(acceptBody(f.accept.cancelled), 'accept a prescription cancelled after the EHR checked it');
-  // The EHR sends created_at at the microsecond; the millisecond of a JavaScript Date is refused.
-  await ineligible({ ...acceptBody(f.accept.millisecond), prescribedAt: '2026-10-01T09:30:00.654Z' },
-    'accept with the prescription time truncated to the millisecond');
   await ineligible({ ...acceptBody(f.accept.millisecond), startsOn: '2026-09-30' }, 'accept with the start date a day early');
-  check('accept: a prescription that does not exist, one cancelled after the EHR checked it, a time truncated to the millisecond and a start date a day early are each refused 409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE; nothing written');
+  check('accept: a prescription that does not exist, one cancelled after the EHR checked it and a start date a day early are each refused 409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE; nothing written');
+  // An EHR build before this change sends created_at through a JavaScript Date,
+  // which keeps the millisecond. The acceptance does not compare the time in
+  // this release, so such a build can still hand off (deployed after 0080, or
+  // rolled back to).
+  const millisecond = { ...acceptBody(f.accept.millisecond), prescribedAt: '2026-10-01T09:30:00.654Z' };
+  const millisecondAccepted = expectStatus(await send('/work-items/accept-ehr-prescription', millisecond,
+    { key: key('accept-millisecond'), internal: 'ehr-api' }), 201, 'accept with the prescription time truncated to the millisecond');
+  assert.equal(millisecondAccepted.status, 'accepted');
+  assert.equal(await workItemsOf(f.accept.millisecond), 1);
+  check('accept: the exact snapshot with the prescription time truncated to the millisecond, as an earlier EHR build sends it, is accepted (201)');
   const acceptKey = key('accept');
   const accepted = sameResult(await together(4, () => send('/work-items/accept-ehr-prescription', prescription,
     { key: acceptKey, internal: 'ehr-api' })), 'four concurrent identical accepts');

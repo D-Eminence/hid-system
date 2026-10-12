@@ -1829,10 +1829,16 @@ name the Pharmacy API maps to `409` (`INTERFACE_CONTRACT.md` §13):
   exist and equal the snapshot exactly: patient, facility (the ordering
   facility), encounter, `row_version`, status `active`, medication code
   system, code and display, dose quantity and unit, route, frequency,
-  instructions, `starts_on`, `ends_on`, `created_by` (`prescribed_by`) and
-  `created_at` (`prescribed_at`, at the microsecond), as Lab binds an EHR
-  order (`lab.validate_work_item`, 0077). Message: `Pharmacy acceptance does
-  not match the exact active EHR prescription version`.
+  instructions, `starts_on`, `ends_on` and `created_by` (`prescribed_by`), as
+  Lab binds an EHR order (`lab.validate_work_item`, 0077). Message: `Pharmacy
+  acceptance does not match the exact active EHR prescription version`.
+- The acceptance does not compare `prescribed_at` with `created_at` yet. The
+  migrations run before the EHR API is deployed and the EHR API may be rolled
+  back (release checklist §6, §9), and every EHR build before
+  `fix/pharmacy-source-prescription` sends `created_at` truncated to the
+  millisecond, so an exact term would refuse nearly every acceptance it sends.
+  Follow-up: add the exact term in a later migration, once the EHR rollback
+  floor includes the exact handoff text below.
 - `pharmacy_dispensing_source_prescription` (dispensing): the work item's
   prescription must exist, belong to the work item's patient, facility and
   encounter, and be `active` at `source_ehr_prescription_version`. Message:
@@ -1855,10 +1861,16 @@ refused. A cancel in progress is waited for: if it commits, the share lock
 fails with `40001` and the retried command reads it and is refused; if it
 rolls back, the command proceeds. A cancel committed after the snapshot but
 before the guard also fails the share lock with `40001` (a plain read would
-have used the stale active version, and `FOR KEY SHARE` would not conflict
-with the update). A command that passed the guard first holds its share lock
-until it commits, so the EHR's cancel waits for it (milliseconds) and applies
-after the dispensing. Lock order is prescription then Pharmacy rows on one
+have used the stale active version). `FOR KEY SHARE` would also conflict here,
+but only because the EHR's update locks the row `FOR UPDATE` first; `FOR SHARE`
+conflicts with any update of the row. A command that passed the guard first
+holds its share lock until it commits, so the EHR's cancel waits for it
+(milliseconds) and applies after the dispensing. Pharmacy can therefore delay
+an EHR write: a Pharmacy transaction that stalls after the guard holds the
+lock (its 15 s `statement_timeout` bounds a slow statement, not an idle
+transaction, and no `idle_in_transaction_session_timeout` is set), and the
+prescriber's cancel or hold waits up to the EHR's 15 s `statement_timeout` and
+then fails with `500`. Lock order is prescription then Pharmacy rows on one
 side and prescription then EHR rows on the other, so there is no cycle. The
 EHR must not call Pharmacy while it holds the prescription lock: its
 eligibility transaction commits before the HTTP call
@@ -1873,30 +1885,37 @@ P8) the lock applies the `prescriptions_read` and `prescriptions_update`
 policies with the session's context, so the pharmacist needs a write consent
 for the patient, which `pharmacy_dispensings_insert` and
 `pharmacy_work_items_insert` already require; a prescription the owner cannot
-lock reads as missing and is refused. A dedicated technical owner (ADR-041)
-would need `USAGE` on `ehr`, column `SELECT` on the compared columns, an
-`UPDATE` privilege for the lock, a `TO`-role select policy and an `UPDATE`
-policy with a restrictive `WITH CHECK (false)`.
+lock reads as missing and is refused. The policies call `ehr.context_allows`,
+which the single owner owns; the rehearsal's non-superuser owner owns it too,
+so the owner probe needs no grant. A dedicated technical owner (ADR-041) would
+need `USAGE` on `ehr`, `EXECUTE` on `ehr.context_allows`, column `SELECT` on
+`id` and the compared columns, an `UPDATE` privilege for the lock, a
+`TO`-role select policy and an `UPDATE` policy with a restrictive
+`WITH CHECK (false)`.
 
-EHR handoff text. Exact comparison needs the EHR to send `created_at` at the
-microsecond and the dates as dates: `PrescriptionsService.acceptForPharmacy`
-reads `to_char(created_at at time zone 'UTC', ...)` (`timelineCursorSql`) and
+EHR handoff text. The EHR now sends `created_at` at the microsecond and the
+dates as dates: `PrescriptionsService.acceptForPharmacy` reads
+`to_char(created_at at time zone 'UTC', ...)` (`timelineCursorSql`) and
 `to_char(starts_on|ends_on, 'YYYY-MM-DD')` in its locking query instead of
 sending node-postgres `Date` values (milliseconds; a date at local midnight,
-the day before in a process east of UTC). No EHR schema change.
+the day before in a process east of UTC). The guard compares the dates now
+and the time in the follow-up. An earlier EHR build in a process east of UTC
+sends a day-early date, which 0080 refuses (fail closed; before, Pharmacy
+stored the wrong day). No service image or deployment sets `TZ`, so the
+processes run in the container default, UTC. No EHR schema change.
 
 Tests (rollback-only, synthetic fixtures):
 
 - `services/ehr-api/database/tests/pharmacy-source-prescription.integration.sql`:
   42 cases. As `hid_pharmacy_api_runtime` with the Pharmacy API's session and
-  INSERT statements: the exact snapshot (prescribed at the microsecond) and
-  the current version of an edited prescription are accepted; the time
-  truncated to the millisecond, a cancelled, missing or superseded
-  prescription, another display, encounter, start date, end date or
-  prescriber are refused; a dispensing is accepted for an active
-  prescription and refused for one entered in error, on hold, completed,
-  draft, at a later version, missing, of another patient, encounter or
-  clinic, and after the prescriber's cancel, which runs as
+  INSERT statements: the exact snapshot (prescribed at the microsecond), the
+  same snapshot with the time truncated to the millisecond (as earlier EHR
+  builds send it) and the current version of an edited prescription are
+  accepted; a cancelled, missing or superseded prescription, another display,
+  encounter, start date, end date or prescriber are refused; a dispensing is
+  accepted for an active prescription and refused for one entered in error,
+  on hold, completed, draft, at a later version, missing, of another patient,
+  encounter or clinic, and after the prescriber's cancel, which runs as
   `hid_ehr_api_runtime` through `ehr.capture_record_version` (version 2);
   both refusals report their constraint names; a dispensing made before a
   cancel can still be reversed. Isolated cases (`session_replication_role =
@@ -1915,8 +1934,9 @@ Tests (rollback-only, synthetic fixtures):
 - `services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs` (HTTP, as
   `hid_pharmacy_api_runtime`): acceptances use real prescriptions with their
   microsecond time; a missing prescription, one cancelled after the EHR's
-  check, the millisecond time and a shifted start date answer
-  `409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE`; a dispense after a cancel, racing
+  check and a shifted start date answer
+  `409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE`, and the millisecond time of an
+  earlier EHR build is accepted (`201`); a dispense after a cancel, racing
   a cancel that commits after its snapshot (one retry), or waiting on a
   cancel in progress that commits answers
   `409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` with nothing written; a cancel

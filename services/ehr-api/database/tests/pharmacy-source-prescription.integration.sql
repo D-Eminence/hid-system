@@ -11,10 +11,14 @@
 -- prescription as its owner, with a share lock, and refuses with SQLSTATE 23514
 -- naming its own constraint: an acceptance unless the snapshot is the exact
 -- active prescription version (patient, facility, encounter, version, status,
--- medication, dose, route, frequency, instructions, dates, prescriber and
--- created_at at the microsecond), a dispensing unless the prescription is
--- still active at the version Pharmacy accepted. A reversal does not read the
--- prescription, so a dispensing can still be corrected after a cancel.
+-- medication, dose, route, frequency, instructions, dates and prescriber), a
+-- dispensing unless the prescription is still active at the version Pharmacy
+-- accepted. A reversal does not read the prescription, so a dispensing can
+-- still be corrected after a cancel. The acceptance does not compare
+-- prescribed_at with created_at in this release: EHR builds before it send the
+-- time truncated to the millisecond, and they may still run, before the EHR
+-- API is deployed or after it is rolled back, so such an acceptance is
+-- accepted.
 --
 -- Runtime cases run as hid_pharmacy_api_runtime with the session the Pharmacy
 -- API sets and the API's own INSERT statements; the prescriber's cancel runs as
@@ -409,8 +413,10 @@ set local role hid_pharmacy_api_runtime;
 -- Acceptance: only the exact active version is accepted.
 select pg_temp.source_case('runtime', 'accept: the exact active snapshot, prescribed at the microsecond', 'ok', 'A',
   pg_temp.accept_insert('e9a70000-0000-4000-8000-000000000101', 'e9a50000-0000-4000-8000-000000000011', 'A'));
-select pg_temp.source_case('runtime', 'accept: the time truncated to the millisecond',
-  pg_temp.source_refusal('work item'), 'A',
+-- An EHR build before this release sends the time truncated to the
+-- millisecond; it is still accepted (the time is not compared yet).
+select pg_temp.source_case('runtime', 'accept: the time truncated to the millisecond, as earlier EHR builds send it',
+  'ok', 'A',
   pg_temp.accept_insert('e9a70000-0000-4000-8000-000000000102', 'e9a50000-0000-4000-8000-000000000011', 'A',
     prescribed => '2026-10-01T09:30:00.654Z'));
 select pg_temp.source_case('runtime', 'accept: a cancelled prescription', pg_temp.source_refusal('work item'), 'A',

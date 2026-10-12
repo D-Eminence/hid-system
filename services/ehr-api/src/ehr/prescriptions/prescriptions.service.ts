@@ -43,10 +43,12 @@ const COLUMNS = `
 /**
  * The prescription as Pharmacy accepts it: created_at as microsecond UTC text
  * and the dates as YYYY-MM-DD, rendered by PostgreSQL. Pharmacy accepts a
- * prescription only when its snapshot equals the EHR row exactly
- * (pharmacy.validate_work_item, 0080). node-postgres returns created_at as a
- * Date, which keeps only milliseconds, and a date as a Date at local midnight,
- * which a process outside UTC sends as the day before.
+ * prescription only when its snapshot equals the EHR row
+ * (pharmacy.validate_work_item, 0080): the dates now, created_at in a later
+ * release, once no EHR build that sends milliseconds can still be deployed.
+ * node-postgres returns created_at as a Date, which keeps only milliseconds,
+ * and a date as a Date at local midnight, which a process east of UTC sends as
+ * the day before.
  */
 const PHARMACY_HANDOFF_COLUMNS = `${COLUMNS}, ${timelineCursorSql('created_at')} as "createdAtExact",
   to_char(starts_on, 'YYYY-MM-DD') as "startsOnText", to_char(ends_on, 'YYYY-MM-DD') as "endsOnText"`;

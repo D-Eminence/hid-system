@@ -1961,20 +1961,32 @@ no grant or policy is added.
   `SERIALIZABLE` Pharmacy transaction a cancel committed after the snapshot
   fails the lock with `40001`, which decision 3 retries, and the retry reads
   the cancel. A plain read would check the stale active version. `FOR KEY
-  SHARE` does not conflict with the EHR's status update, so it would not see
-  the cancel either. A lock-only mark left by another share lock does not fail,
-  so concurrent dispensings of other work items do not conflict.
+  SHARE` would see this cancel only because the EHR locks the row `FOR
+  UPDATE` before its update; `FOR SHARE` conflicts with any update of the row.
+  A lock-only mark left by another share lock does not fail, so concurrent
+  dispensings of other work items do not conflict.
 - An EHR update waits for a Pharmacy command that has taken the lock, for the
   milliseconds until it commits, and then applies after it. The EHR takes the
   prescription and then its own rows and never a Pharmacy row, so there is no
   lock cycle. The EHR must not call Pharmacy while it holds the prescription
   lock: its eligibility check commits before the HTTP call.
+- Pharmacy can now delay an EHR write, which it could not before: a Pharmacy
+  transaction that stalls after the guard keeps the share lock, and a
+  prescriber's cancel or hold waits until the EHR's 15 s `statement_timeout`
+  and fails with `500`. Pharmacy's 15 s `statement_timeout` bounds a slow
+  statement but not an idle transaction; no
+  `idle_in_transaction_session_timeout` is set (a possible mitigation).
 - Under an owner subject to row-level security (release checklist P8) the
   lock applies the EHR select and update policies with the pharmacist's
   session; a prescription the owner cannot lock reads as missing and is
   refused. A dedicated technical owner for these guards (ADR-041) would need
-  `USAGE` on `ehr`, column `SELECT` on the compared columns, an `UPDATE`
-  privilege for the lock and the matching policies.
+  `USAGE` on `ehr`, `EXECUTE` on `ehr.context_allows` (the prescription
+  policies call it), column `SELECT` on `id` and the compared columns, an
+  `UPDATE` privilege for the lock and the matching policies.
+- The acceptance guard compares every snapshot field except the prescription
+  time: migrations run before the EHR API is deployed and the EHR may be
+  rolled back, and earlier EHR builds send the time at the millisecond. The
+  exact time is a follow-up for a later release.
 - The guards require the accepted version, not only an active status: the
   fail-closed default while the lifecycle of accepted work after an EHR
   change is undecided (`DATABASE.md`, "Pharmacy source prescription guards
