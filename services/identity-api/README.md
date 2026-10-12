@@ -31,6 +31,17 @@ that workload is serving as `GET`, `HEAD` or `OPTIONS` in
 `X-HID-Original-Method`. See the Extracted
 Identity boundary in `../../docs/INTERFACE_CONTRACT.md`.
 
+Staff and patient browser sessions use host-only cookies with Origin and CSRF
+checks. Their cookie names and paths, the refresh and sign-out outcomes, and
+the `X-HID-Client` header that keeps a cookie refresh or sign-out from acting
+on the other application's sign-in while refresh could renew it
+(D-Eminence/hid-system#39) are specified in `../../docs/INTERFACE_CONTRACT.md` ("Auth session
+contract"). `scripts/verify-session-sign-out-runtime.mjs` exercises them
+through the controller as `hid_identity_api_runtime`. It runs only inside the
+synthetic migration rehearsal (`scripts/tuf-staging-migration-rehearsal.mjs`
+at the repository root, also run by `release/scripts/run-workspace-gates.mjs`),
+never against a deployed environment.
+
 The service uses `DATABASE_URL` through a login that inherits
 `hid_identity_api_runtime` (Identity/authentication persistence plus
 append-only audit), never an EHR, Lab, Pharmacy, OCR, or Outreach role.

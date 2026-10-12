@@ -222,6 +222,14 @@ export class AuthController {
     if (!refreshToken || !this.tokens.verifyRefreshCsrf(refreshToken, csrfCookie, csrfHeader)) {
       throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'Refresh CSRF validation failed');
     }
+    // The staff and patient apps share the session cookies on one origin. A
+    // client that names itself refreshes only its own kind of sign-in; the
+    // other app's sign-in is refused before rotation and its cookies kept.
+    const expectedKind = this.namedClientKind(request);
+    if (expectedKind) {
+      const kind = await this.tokens.refreshSessionKind(refreshToken);
+      if (kind && kind !== expectedKind) throw this.clientMismatch(kind, request);
+    }
     try {
       const result = await this.auth.refresh(refreshToken, this.event(request));
       await this.recordSuccess('auth.refresh', result.actor, request);
@@ -289,14 +297,94 @@ export class AuthController {
     return this.serviceSession(request, response);
   }
 
+  /**
+   * Ends the sign-in and clears the session cookies. A live access token ends
+   * its own sign-in, as a bearer token or as the cookie with an allowed Origin
+   * and its CSRF token. A browser whose access token has already expired signs
+   * out with its refresh cookie instead: the CSRF token is derived from that
+   * refresh token, so a request ends only the sign-in whose refresh cookie and
+   * CSRF token it carries together. A live access token always decides, so a
+   * request carrying one sign-in's access token and another's refresh cookie
+   * ends only the first.
+   *
+   * The staff and patient apps share the session cookies on one origin. A
+   * cookie sign-out from an app that names itself in X-HID-Client ('staff-web'
+   * or 'patient-web') does not end the other app's sign-in while refresh could
+   * renew it: that is refused with 403 SESSION_CLIENT_MISMATCH after the
+   * Origin and CSRF checks, nothing ends and its cookies are kept. A sign-in
+   * of the other kind that refresh could not renew now (an older rotated
+   * token, an expired sign-in, a suspended account) is ended without naming
+   * its kind (TokenService.revokeByRefreshToken). A bearer sign-out names its
+   * sign-in explicitly and ignores the header; an unnamed app signs out as
+   * before. Every other outcome clears the cookies.
+   */
   @Post('logout')
-  @FacilityOptional()
-  @PatientAllowed()
+  @Public()
   @HttpCode(204)
   async logout(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response): Promise<void> {
-    await this.auth.revoke(request.actor?.sessionId, request.actor?.subject, this.event(request));
-    if (request.actor) await this.recordSuccess('auth.logout', request.actor, request);
-    this.clearCookies(response);
+    const authorization = request.header('authorization');
+    const bearer = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
+    // A cookie sign-out from an unapproved origin changes nothing, cookies included.
+    if (!bearer) this.assertAllowedOrigin(request);
+    const expectedKind = this.namedClientKind(request);
+    // Set only when the other app's sign-in is refused: its cookies stay.
+    let keepCookies = false;
+    try {
+      if (bearer) {
+        const verified = await this.liveSession(bearer);
+        if (!verified) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+        request.actor = verified.actor;
+        await this.endSignIn(verified.actor, request);
+        return;
+      }
+      const cookies = this.cookies(request);
+      const csrfCookie = cookies[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
+      const csrfHeader = request.header('x-csrf-token');
+      const access = cookies[this.environment.AUTH_COOKIE_NAME];
+      const verified = access ? await this.liveSession(access) : undefined;
+      if (verified) {
+        // A refusal from here on is audited against the signed-in actor.
+        request.actor = verified.actor;
+        if (!this.tokens.verifyCsrf(verified.claims, csrfCookie, csrfHeader)) {
+          throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'CSRF validation failed');
+        }
+        // A staff actor carries no kind; a platform token is refused by endSignIn.
+        const kind = verified.actor.kind === 'patient' ? 'patient' : verified.actor.kind === 'platform' ? undefined : 'staff';
+        if (expectedKind && kind && kind !== expectedKind) {
+          keepCookies = true;
+          throw this.clientMismatch(kind, request);
+        }
+        await this.endSignIn(verified.actor, request);
+        return;
+      }
+      const refreshToken = cookies[`${this.environment.AUTH_COOKIE_NAME}_refresh`];
+      // No sign-in left to end: the cookies are cleared all the same.
+      if (!refreshToken) return;
+      if (!this.tokens.verifyRefreshCsrf(refreshToken, csrfCookie, csrfHeader)) {
+        throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'CSRF validation failed');
+      }
+      const ended = await this.auth.revokeByRefreshToken(refreshToken, this.event(request), expectedKind);
+      if (ended && 'refusedKind' in ended) {
+        keepCookies = true;
+        throw this.clientMismatch(ended.refusedKind, request);
+      }
+      if (ended) {
+        await this.audit.record({
+          correlationId: request.correlationId,
+          actorType: ended.kind,
+          actorSubject: ended.actorSubject,
+          actorAccountId: ended.accountId,
+          action: 'auth.logout',
+          resourceType: 'session',
+          resourceId: ended.sessionId,
+          outcome: 'success',
+          sourceIp: request.ip,
+          userAgent: request.header('user-agent'),
+        });
+      }
+    } finally {
+      if (!keepCookies) this.clearCookies(response);
+    }
   }
 
   @Post('facility')
@@ -343,6 +431,38 @@ export class AuthController {
       actor,
       ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
     };
+  }
+
+  /** The kind of sign-in the calling app holds, when it names itself in X-HID-Client. */
+  private namedClientKind(request: HidRequest): 'staff' | 'patient' | undefined {
+    const client = request.header('x-hid-client');
+    return client === 'staff-web' ? 'staff' : client === 'patient-web' ? 'patient' : undefined;
+  }
+
+  private clientMismatch(kind: 'staff' | 'patient', request: HidRequest): DomainProblem {
+    return new DomainProblem(403, 'SESSION_CLIENT_MISMATCH',
+      `This sign-in belongs to the ${kind} application, not ${request.header('x-hid-client')}`);
+  }
+
+  /** The verified access token, or undefined when it is no longer a live staff or patient session. */
+  private async liveSession(token: string): Promise<Awaited<ReturnType<TokenService['verify']>> | undefined> {
+    try {
+      return await this.tokens.verify(token);
+    } catch (error) {
+      if (error instanceof UnauthorizedException) return undefined;
+      throw error;
+    }
+  }
+
+  private async endSignIn(actor: ActorContext, request: HidRequest): Promise<void> {
+    if (actor.kind === 'platform') {
+      throw new DomainProblem(403, 'PLATFORM_SESSION_SCOPE_DENIED',
+        'A platform administration session cannot be used for this operation');
+    }
+    // A concurrent sign-out (another tab) may have ended it first: audited once.
+    if (await this.auth.revoke(actor.sessionId, actor.subject, this.event(request))) {
+      await this.recordSuccess('auth.logout', actor, request);
+    }
   }
 
   private recordSuccess(action: string, actor: ActorContext, request: HidRequest): Promise<void> {

@@ -26,7 +26,10 @@ export function corsOptions(corsOrigins: string): CorsOptions {
     // PATCH: organization profile completion (/identity/organization-applications/completion/profile).
     // DELETE: patient access PIN removal (/identity/me/access-pin).
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'if-match', 'x-correlation-id', 'x-csrf-token', 'x-facility-id', 'x-purpose-of-use', 'x-hid-internal-caller', 'x-hid-service-authorization', 'x-hid-service-token', 'x-hid-scanner-authorization'],
+    allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'if-match', 'x-correlation-id', 'x-csrf-token', 'x-facility-id', 'x-purpose-of-use', 'x-hid-internal-caller', 'x-hid-service-authorization', 'x-hid-service-token', 'x-hid-scanner-authorization',
+      // X-HID-Client: staff-web or patient-web names the app refreshing or signing out a cookie sign-in
+      // (POST /auth/refresh, POST /auth/logout), so it acts only on its own kind of sign-in.
+      'x-hid-client'],
     exposedHeaders: [...CORS_EXPOSED_HEADERS],
     maxAge: 600,
   };

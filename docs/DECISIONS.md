@@ -1903,3 +1903,82 @@ Consequences:
 
 Related: ADR-025; `INTERFACE_CONTRACT.md` (Extracted Identity boundary);
 release checklist §2, §3 and §9.
+
+# ADR-044: Sign-Out Authenticates Itself; Browser Apps Name Their Kind of Sign-In
+
+Status: Accepted for source implementation (D-Eminence/hid-system#39). Not
+deployed.
+
+Date: 2026-10-11
+
+Context:
+
+Staff and patient browser sessions use the same three host-only cookies
+(`hid_access`, `hid_access_refresh`, `hid_access_csrf`). By default the access
+cookie lasts 15 minutes and the refresh cookie 8 hours. `POST /auth/logout`
+sat behind the guard and needed a live access token, so a browser left idle
+for more than 15 minutes could not sign out: the guard answered `401`, the
+cookies stayed, and the sign-in stayed refreshable until its refresh window
+ended. Health-id works around that `401` in the browser: its patient portal
+refreshes once and signs out again only if the refreshed sign-in is the same
+patient's, and its provider portal restores the session and retries.
+Health-id serves its staff and patient portals from one application on one
+origin, so both portals see the same cookies, and a stale tab of one portal
+could refresh (rotate) or end a sign-in of the other kind.
+
+Decision:
+
+- `POST /auth/logout` is public at the guard and authenticates the request
+  itself. A live access token decides: a bearer token, or the access cookie
+  with an allowed Origin and its CSRF token. Without one, the refresh cookie
+  ends its sign-in when the request carries the CSRF token derived from that
+  refresh token. It reads the sign-in under the account lock, after any
+  sign-out or revocation that got there first, and ends whatever is left of
+  it, whatever its expiry or the account's state: a sign-in refresh cannot
+  renew now may become renewable again when a timed suspension lapses. A
+  cookie sign-out from a missing or unapproved Origin changes nothing; every
+  other outcome except a client mismatch clears the cookies. A sign-out ends
+  only sessions that are still unrevoked, under the account lock, and records
+  and audits only when it ended one, so two tabs signing out at once record
+  one sign-out.
+- A browser application may name itself in `X-HID-Client` (`staff-web` or
+  `patient-web`) on a cookie refresh or sign-out. A sign-in of the other kind
+  that refresh could renew now is then refused with
+  `403 SESSION_CLIENT_MISMATCH` after the Origin and CSRF checks; nothing is
+  rotated or ended and the cookies are kept. Any other sign-in is handled as
+  for an unnamed application (below). An absent or other value keeps the
+  earlier behaviour, and a bearer sign-out ignores the header.
+- The header is the calling application's own declaration. It keeps one
+  application's tab from acting on the other's sign-in; it is not
+  authentication and grants nothing. Origin, CSRF and the session checks
+  remain the security boundary.
+- The kind is answered only for a sign-in refresh could renew now: account
+  live, absolute end not passed, and the token's session live or rotated
+  within the last 60 seconds into one that is, so a refresh or sign-out that
+  raced the other application's tab is answered with the kind. An older
+  rotated token is reuse: refresh rotates nothing and ends the whole sign-in,
+  and a sign-out ends the sign-in whichever application asks, without naming
+  its kind. So an old rotated token tells nobody whether, or as which
+  application, its sign-in is still live.
+
+Consequences:
+
+- An idle browser can end its sign-in, and the sign-in no longer outlives a
+  successful sign-out by its refresh cookie.
+- Platform maintenance and a disabled portal no longer block sign-out.
+- A CSRF refusal on sign-out clears the browser's cookies without ending the
+  sign-in, which stays live on the server until it is signed out with valid
+  evidence or lapses.
+- The kind check protects nothing until a frontend sends the header. Health-id
+  `main` does not (all its hid-system clients use cookie mode, which omits
+  it), and `packages/identity-browser-client` does not. Until then, a cookie
+  sign-out without a live access cookie ends whichever sign-in the refresh
+  cookie holds, including the other portal's or another account's, without
+  the refresh that Health-id's patient portal uses to check that the sign-in
+  is the same patient's.
+- No migration or grant changes. The lookups read tables the Identity runtime
+  already reads, and sign-out by refresh cookie reuses the 0073 account lock
+  and family revocation.
+
+Related: ADR-038 (platform sessions keep their own cookies and routes);
+`INTERFACE_CONTRACT.md`, "Auth session contract"; release checklist §2.

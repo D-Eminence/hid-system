@@ -109,6 +109,10 @@ verified. Review that synthetic facility-scoped assignment explicitly.
    HID, profile, history, refresh and logout. Confirm host-only cookies, CSRF
    checks, account-disable/session-revocation behavior and empty workforce roles.
    NIN-disabled status must not become a login or self-read readiness gate.
+   If the Identity build includes D-Eminence/hid-system#39, also sign out after
+   the access cookie has expired (15 minutes idle by default): sign-out answers
+   `204`, clears the cookies, and the old refresh cookie no longer refreshes
+   (see "Auth session contract" in [INTERFACE_CONTRACT.md](INTERFACE_CONTRACT.md)).
 3. Log in as the separate synthetic doctor and select the exact synthetic facility.
    Activate emergency access through the governed break-glass command with its
    required reason and emergency purpose. Read through the owning EHR route, then
@@ -162,8 +166,14 @@ patient approves a synthetic doctor's access request, the doctor's same-origin
 cookie read of the patient's encounters through EHR, with no Origin or CSRF
 token, is authorized by Identity, and EHR cookie writes without Origin or CSRF
 are refused. That check is local and synthetic; it does not exercise the
-staging fixture or break-glass access. The rehearsal removes its cluster after
-completion and retains its result in the printed evidence directory.
+staging fixture or break-glass access. With D-Eminence/hid-system#39, the
+rehearsal also runs
+`services/identity-api/scripts/verify-session-sign-out-runtime.mjs` as the
+Identity runtime (`session_sign_out_runtime`): sign-out by refresh cookie for a
+patient and a staff sign-in, and refresh and sign-out refused with
+`403 SESSION_CLIENT_MISMATCH` when `X-HID-Client` names the other
+application. The rehearsal removes its cluster after completion and retains
+its result in the printed evidence directory.
 
 Local fixture validation does not prove staging import, OTP delivery, emergency
 notification, application deployment or acceptance; record those only when their

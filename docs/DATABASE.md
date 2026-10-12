@@ -1248,7 +1248,15 @@ a reachable Super Admin to be suspendable.
 - The Identity API calls the helper before its own revocations: refresh-token
   reuse, an administrator revoking their own session, sign-out and expiry. A
   sign-out revokes the presented session's family, so it also ends a session
-  that a refresh in another tab created while it waited.
+  that a refresh in another tab created while it waited. With
+  D-Eminence/hid-system#39 (no migration or grant change), a
+  sign-out by refresh cookie, once the access token has expired, takes the
+  same path. It locks the account by the session that `refresh_token_sha256`
+  finds, then reads that session and ends the sign-in if anything of it is
+  left (the session unrevoked, or rotated into a family session that is),
+  whatever its expiry or the account's state; a sign-in a concurrent sign-out
+  has just ended is not recorded again. Its `logout` event carries
+  `presented: refresh_token` in `details`.
   Every path that revokes sessions therefore locks the account row before any
   session row. The account actions that change the token version already did.
 - Platform MFA transactions do not use this helper: since Phase 4 Stage 7A they
