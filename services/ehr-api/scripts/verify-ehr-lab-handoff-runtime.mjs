@@ -85,7 +85,7 @@ if (process.argv[2] === '--lab-child') {
         membership_role,app_role,active) values ($1,$2,$3,$4,$5,'doctor','doctor',true)`,
       [f.doctor.membership, f.doctor.staff, f.doctor.account, f.org, f.facility]);
       await client.query(`insert into identity.patients (id,hid_code,first_name,last_name,full_name,status)
-        values ($1,'HID-EHRLABHO','Handoff','Patient','Handoff Patient','active')`, [f.patient]);
+        values ($1,'HID-EHRLABHD','Handoff','Patient','Handoff Patient','active')`, [f.patient]);
       await client.query(`insert into identity.purpose_of_use_codes (code,display,source_system)
         values ('direct-care','Direct patient care','ehr-lab-handoff-verifier') on conflict (code) do nothing`);
       await client.query(`insert into identity.consent_grants (id,patient_id,staff_id,account_id,membership_id,facility_id,scope,
