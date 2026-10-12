@@ -8,7 +8,7 @@ jest.mock('argon2', () => ({ argon2id: 2, hash: jest.fn() }));
 import * as argon2 from 'argon2';
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
-import { resetEnvironmentForTests } from '../config/environment';
+import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { NotificationOtpClient } from '../auth/notification-otp.client';
 import type { GoogleAuthenticationService } from '../auth/google-authentication.service';
@@ -548,13 +548,17 @@ describe('PatientEnrollmentService', () => {
     it('refuses an activation over the budget with 429, before argon2id or the activation command', async () => {
       const f = fixture();
       const cookie = await verifiedEnrollment(f);
-      f.rateCount = 4;
+      // OTP_RATE_MAX_REQUESTS * 3 (15) attempts per enrollment per window, as
+      // the contact step's enrollment bucket allows: the fifteenth still runs.
+      const budget = getEnvironment().OTP_RATE_MAX_REQUESTS * 3;
+      expect(budget).toBe(15);
+      f.rateCount = budget - 1;
       await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
         .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
       f.queries.length = 0;
       const before = passwordHash().mock.calls.length;
-      // OTP_RATE_MAX_REQUESTS (5) activations or replays per enrollment per window; this is the sixth.
-      f.rateCount = 5;
+      // The sixteenth is refused.
+      f.rateCount = budget;
 
       const refused = await f.service.activate(cookie, 'a-strong-test-password', correlationId)
         .then(() => undefined, (error: unknown) => error);
@@ -565,6 +569,24 @@ describe('PatientEnrollmentService', () => {
       expect(passwordHash().mock.calls.length).toBe(before);
       expect(activation(f.queries)).toHaveLength(0);
       expect(rateLookups(f.queries)).toEqual([{ scope: 'enrollment', bucket: expect.any(String) }]);
+    });
+
+    it('charges an attempt that fails after the stage check, a transient 503 included', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      f.queries.length = 0;
+      const before = passwordHash().mock.calls.length;
+      f.google.consumePendingInTransaction.mockRejectedValueOnce(
+        new DomainProblem(503, 'GOOGLE_SIGN_IN_UNAVAILABLE', 'Google sign-in is unavailable'));
+
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .rejects.toMatchObject({ code: 'GOOGLE_SIGN_IN_UNAVAILABLE' });
+
+      // Every attempt past the cookie and stage checks counts, whatever its
+      // outcome: this one ran argon2id and the activation command.
+      expect(rateLookups(f.queries)).toEqual([{ scope: 'enrollment', bucket: expect.any(String) }]);
+      expect(passwordHash().mock.calls.length).toBe(before + 1);
+      expect(activation(f.queries)).toHaveLength(1);
     });
 
     it('refuses a forged cookie or an unverified contact before charging the budget', async () => {

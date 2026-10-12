@@ -307,14 +307,17 @@ try {
   const replayActivation = await post('/identity/patient-enrollments/activate',
     { password: 'A-Different-Password-02' }, { cookie: cookieA });
   expectProblem(replayActivation, 200); assert.equal(replayActivation.body.hidCode, hidA);
-  // Activations and replays share one budget per enrollment: OTP_RATE_MAX_REQUESTS
-  // per window, counted after the cookie and stage checks. Then 429, without
-  // another argon2id run or activation command.
-  const activationBudget = getEnvironment().OTP_RATE_MAX_REQUESTS;
+  // Activations and replays share one budget per enrollment: every attempt
+  // after the cookie and stage checks counts, whatever its outcome, up to
+  // OTP_RATE_MAX_REQUESTS * 3 per window (the contact step's enrollment
+  // budget). Then 429, without another argon2id run or activation command.
+  const activationBudget = getEnvironment().OTP_RATE_MAX_REQUESTS * 3;
   for (let call = 3; call <= activationBudget; call += 1) {
     const withinBudget = await post('/identity/patient-enrollments/activate',
       { password: `A-Different-Password-0${call}` }, { cookie: cookieA });
-    expectProblem(withinBudget, 200); assert.equal(withinBudget.body.hidCode, hidA);
+    assert.equal(withinBudget.status, 200,
+      `Activation ${call} of one enrollment is within OTP_RATE_MAX_REQUESTS * 3 and must replay the HID, got ${withinBudget.status} ${JSON.stringify(withinBudget.body)}`);
+    assert.equal(withinBudget.body.hidCode, hidA);
   }
   const overBudget = await post('/identity/patient-enrollments/activate',
     { password: 'A-Different-Password-99' }, { cookie: cookieA });
@@ -337,7 +340,7 @@ try {
   const patientA = accountA[0].patient_id;
   assert.equal(await count(`select count(*) from identity.patients where hid_code = $1`, [hidA]), 1);
   assert.equal((await owner.query('select state, patient_id from identity.public_patient_enrollments')).rows[0].patient_id, patientA);
-  check('activation creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID; a replay returns the same HID and ignores the second password; activations and replays of one enrollment beyond OTP_RATE_MAX_REQUESTS per window are 429 ENROLLMENT_RATE_LIMITED without the HID');
+  check('activation creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID; a replay returns the same HID and ignores the second password; activation attempts of one enrollment beyond OTP_RATE_MAX_REQUESTS * 3 per window are 429 ENROLLMENT_RATE_LIMITED without the HID');
 
   // 6. The same identity or contact cannot enroll twice.
   expectProblem(await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID(),
