@@ -309,11 +309,14 @@ export class AuthController {
    *
    * The staff and patient apps share the session cookies on one origin. A
    * cookie sign-out from an app that names itself in X-HID-Client ('staff-web'
-   * or 'patient-web') ends only its own kind of sign-in: the other app's is
-   * refused with 403 SESSION_CLIENT_MISMATCH after the Origin and CSRF checks,
-   * nothing ends and its cookies are kept. A bearer sign-out names its sign-in
-   * explicitly and ignores the header; an unnamed app signs out as before.
-   * Every other outcome clears the cookies.
+   * or 'patient-web') does not end the other app's sign-in while refresh could
+   * renew it: that is refused with 403 SESSION_CLIENT_MISMATCH after the
+   * Origin and CSRF checks, nothing ends and its cookies are kept. A sign-in
+   * of the other kind that refresh could not renew now (an older rotated
+   * token, an expired sign-in, a suspended account) is ended without naming
+   * its kind (TokenService.revokeByRefreshToken). A bearer sign-out names its
+   * sign-in explicitly and ignores the header; an unnamed app signs out as
+   * before. Every other outcome clears the cookies.
    */
   @Post('logout')
   @Public()
@@ -456,8 +459,10 @@ export class AuthController {
       throw new DomainProblem(403, 'PLATFORM_SESSION_SCOPE_DENIED',
         'A platform administration session cannot be used for this operation');
     }
-    await this.auth.revoke(actor.sessionId, actor.subject, this.event(request));
-    await this.recordSuccess('auth.logout', actor, request);
+    // A concurrent sign-out (another tab) may have ended it first: audited once.
+    if (await this.auth.revoke(actor.sessionId, actor.subject, this.event(request))) {
+      await this.recordSuccess('auth.logout', actor, request);
+    }
   }
 
   private recordSuccess(action: string, actor: ActorContext, request: HidRequest): Promise<void> {

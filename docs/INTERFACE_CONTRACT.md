@@ -80,12 +80,14 @@ disabled portal (`423 PLATFORM_PORTAL_DISABLED`) no longer block sign-out.
 Every sign-out outcome clears the three cookies except `ORIGIN_DENIED` and
 `SESSION_CLIENT_MISMATCH`. A CSRF refusal therefore clears the browser's
 cookies without ending the sign-in, which stays live on the server until it is
-signed out with valid evidence or lapses. Ending a sign-in revokes the
-presented session and every unrevoked session of its family, with revocation
-reason `logout` (a rotated presented session keeps `rotated`), records an
-`auth.session_events` `logout` event (marked `presented: refresh_token` on the
-refresh-cookie path) and audits `auth.logout`. A refused sign-out made with a
-live access token is audited against that actor.
+signed out with valid evidence or lapses. Ending a sign-in takes the
+account's lock and revokes every unrevoked session of the presented session's
+family, with revocation reason `logout` (a rotated presented session keeps
+`rotated`). When that revoked anything, it records an `auth.session_events`
+`logout` event (marked `presented: refresh_token` on the refresh-cookie path)
+and audits `auth.logout`. Two sign-outs at once with one browser's cookies
+(two tabs), by either path, therefore record one sign-out. A refused sign-out
+made with a live access token is audited against that actor.
 
 The refresh-token lookups are in `refreshSessionKind` and
 `revokeByRefreshToken` (`services/identity-api/src/auth/token.service.ts`).
@@ -109,15 +111,15 @@ anything of it is left: the token's own session is unrevoked, or the token was
 rotated into a session of its family that is unrevoked. Neither expiry nor
 the account's state matters, so a sign-out during a timed account suspension
 leaves nothing to renew once the suspension lapses. A sign-in with nothing
-left, including one a concurrent sign-out with the same cookie has just
-ended, records no second sign-out and answers `204`.
+left, including one a concurrent sign-out has just ended, records no second
+sign-out and answers `204`.
 
 `X-HID-Client` names the browser application on a cookie `POST /auth/refresh`
 or `POST /auth/logout`. The staff and patient applications can share these
 cookies on one origin, and the header keeps one from refreshing (rotating) or
 ending the other's sign-in:
 
-| `X-HID-Client` | Sign-in it may refresh or end |
+| `X-HID-Client` | Its own kind: the other kind is refused while refresh could renew it |
 |---|---|
 | `staff-web` | Staff. Identity's resolved staff actor carries no kind, so on the access-cookie path any live sign-in that is neither patient nor platform counts as staff |
 | `patient-web` | Patient |
@@ -296,9 +298,10 @@ X-Purpose-Of-Use
 ```
 
 `X-HID-Client` (`staff-web` or `patient-web`) names the browser application on
-cookie `POST /api/v1/auth/refresh` and `POST /api/v1/auth/logout`, so each acts
-only on its own kind of sign-in (see "Auth session contract" above). Identity
-ignores other values and the header on other routes.
+cookie `POST /api/v1/auth/refresh` and `POST /api/v1/auth/logout`, so neither
+refreshes nor ends the other's sign-in while refresh could renew it (see "Auth
+session contract" above). Identity ignores other values and the header on
+other routes.
 
 Do not expose secrets or raw sensitive identifiers through headers unnecessarily.
 

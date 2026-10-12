@@ -28,7 +28,8 @@ const RENEWABLE = `${ACCOUNT_LIVE} and session.absolute_expires_at > clock_times
 
 type Stored = { session_kind: 'staff' | 'patient'; renewable?: boolean };
 
-function harness(stored?: Stored) {
+/** `left`: whether the family still has an unrevoked session when the sign-out ends it, under the account lock. */
+function harness(stored?: Stored, left = true) {
   const lookups: Statement[] = [];
   const row = stored && { id: SESSION, account_id: ACCOUNT, actor_subject: 'synthetic:sign-out', renewable: true, ...stored };
   const query = jest.fn(async (sql: string, values: unknown[] = []) => {
@@ -41,7 +42,7 @@ function harness(stored?: Stored) {
     transactions.push(statements);
     return work({ query: jest.fn(async (sql: string, values: unknown[] = []) => {
       statements.push({ sql: String(sql), values });
-      if (sql.includes('update auth.sessions')) return { rowCount: 1, rows: [{ account_id: ACCOUNT }] };
+      if (sql.includes('update auth.sessions')) return left ? { rowCount: 1, rows: [{ account_id: ACCOUNT }] } : { rowCount: 0, rows: [] };
       if (sql.includes('as renewable')) return row ? { rowCount: 1, rows: [row] } : { rowCount: 0, rows: [] };
       return { rowCount: 0, rows: [] };
     }) } as unknown as PoolClient);
@@ -53,10 +54,11 @@ function harness(stored?: Stored) {
 
 const position = (statements: Statement[], test: (statement: Statement) => boolean) => statements.findIndex(test);
 const isLock = ({ sql, values }: Statement) => sql.includes('auth.lock_account_sessions(session_row.account_id)')
-  && sql.includes('session_row.refresh_token_sha256 = $1') && /^[0-9a-f]{64}$/.test(String(values[0]));
+  && flat(sql).includes("session_row.refresh_token_sha256 = $1 and session_row.session_kind in ('staff', 'patient')")
+  && /^[0-9a-f]{64}$/.test(String(values[0]));
 const isLookup = ({ sql }: Statement) => sql.includes('as renewable');
 const isEnd = ({ sql, values }: Statement) => sql.includes('update auth.sessions') && sql.includes("'logout'")
-  && /and \(id = \$1 or revoked_at is null\)/.test(sql) && values[0] === SESSION;
+  && flat(sql).includes('where presented.id = $1) and revoked_at is null returning') && values[0] === SESSION;
 const isEvent = ({ sql }: Statement) => sql.includes('insert into auth.session_events');
 
 describe('sign-out by refresh token', () => {
@@ -79,7 +81,9 @@ describe('sign-out by refresh token', () => {
     // Neither expiry nor the account's state keeps a sign-in from ending: a
     // timed suspension lapses, and refresh() would renew the sign-in again.
     expect(sql).toContain("and (session.revoked_at is null or (session.revocation_reason = 'rotated' and exists (select 1 from auth.sessions unended where unended.family_id = session.family_id and unended.revoked_at is null)))");
-    expect(sql.split(' where ')[1]).not.toContain('account.status');
+    const where = sql.split(' on account.id = session.account_id where ')[1] ?? '';
+    expect(where).toMatch(/^session\.refresh_token_sha256 = \$1 /);
+    for (const condition of ['account.', 'expires_at', 'absolute_expires_at', 'make_interval']) expect(where).not.toContain(condition);
     // Whether the app may be named is read from the same row.
     expect(sql).toContain(`coalesce(${RENEWABLE}, false) as renewable`);
     expect(lookup?.values).toHaveLength(2);
@@ -139,9 +143,18 @@ describe('sign-out by refresh token', () => {
     expect(position(transactions[0] ?? [], isEnd)).toBeGreaterThan(-1);
   });
 
+  it('records nothing and ends nothing more when a concurrent sign-out ended the sign-in first', async () => {
+    const byRefresh = harness({ session_kind: 'patient' }, false);
+    await expect(byRefresh.service.revokeByRefreshToken(refreshToken, event)).resolves.toBeUndefined();
+    expect(position(byRefresh.transactions[0] ?? [], isEvent)).toBe(-1);
+    const byAccess = harness(undefined, false);
+    await expect(byAccess.service.revoke(SESSION, 'synthetic:sign-out', event)).resolves.toBe(false);
+    expect(position(byAccess.transactions[0] ?? [], isEvent)).toBe(-1);
+  });
+
   it('records an access-token sign-out without the refresh marker', async () => {
     const { service, transactions } = harness();
-    await service.revoke(SESSION, 'synthetic:sign-out', event);
+    await expect(service.revoke(SESSION, 'synthetic:sign-out', event)).resolves.toBe(true);
     const statements = transactions[0] ?? [];
     expect(statements[0]?.sql).toContain('auth.lock_account_sessions(session_row.account_id) from auth.sessions session_row where session_row.id = $1');
     const sessionEvent = statements.find(isEvent);

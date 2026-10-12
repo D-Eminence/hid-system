@@ -413,23 +413,26 @@ export class TokenService {
     sessionId: string | undefined,
     actorSubject: string | undefined,
     event: SessionEventMetadata,
-  ): Promise<void> {
-    if (!sessionId) return;
-    await this.database.withSystemTransaction(event.correlationId, async (client) => {
+  ): Promise<boolean> {
+    if (!sessionId) return false;
+    return this.database.withSystemTransaction(event.correlationId, async (client) => {
       // Account row first, then the session (0073): the order every revocation
       // uses, so a sign-out cannot deadlock with an administrator's revocation.
       await client.query(
         'select auth.lock_account_sessions(session_row.account_id) from auth.sessions session_row where session_row.id = $1',
         [sessionId],
       );
-      await this.endSignIn(client, sessionId, actorSubject, event, 'access_token');
+      return this.endSignIn(client, sessionId, actorSubject, event, 'access_token');
     });
   }
 
   /**
-   * Sign-out ends the sign-in: the presented session and whatever its family
-   * rotated into, such as the session a refresh in another tab just created
-   * while this sign-out waited for it. The caller holds the account lock.
+   * Sign-out ends the sign-in: every unrevoked session of the presented
+   * session's family, the presented one included, such as the session a
+   * refresh in another tab just created while this sign-out waited for it.
+   * The caller holds the account lock, so a sign-out or revocation that got
+   * there first has ended them already; then nothing is recorded and the
+   * answer is false.
    */
   private async endSignIn(
     client: PoolClient,
@@ -437,25 +440,25 @@ export class TokenService {
     actorSubject: string | undefined,
     event: SessionEventMetadata,
     presented: 'access_token' | 'refresh_token',
-  ): Promise<void> {
+  ): Promise<boolean> {
     const result = await client.query<{ account_id: string }>(
       `update auth.sessions
-          set revoked_at = coalesce(revoked_at, clock_timestamp()),
-              revocation_reason = coalesce(revocation_reason, 'logout'),
+          set revoked_at = clock_timestamp(),
+              revocation_reason = 'logout',
               row_version = row_version + 1
         where family_id = (select presented.family_id from auth.sessions presented where presented.id = $1)
-          and (id = $1 or revoked_at is null)
+          and revoked_at is null
         returning account_id::text`,
       [sessionId],
     );
     const accountId = result.rows[0]?.account_id;
-    if (accountId) {
-      await this.insertSessionEvent(client, {
-        eventType: 'logout', outcome: 'success', accountId, sessionId, event,
-        details: { ...(actorSubject ? { actor_subject: actorSubject } : {}),
-          ...(presented === 'refresh_token' ? { presented: 'refresh_token' } : {}) },
-      });
-    }
+    if (!accountId) return false;
+    await this.insertSessionEvent(client, {
+      eventType: 'logout', outcome: 'success', accountId, sessionId, event,
+      details: { ...(actorSubject ? { actor_subject: actorSubject } : {}),
+        ...(presented === 'refresh_token' ? { presented: 'refresh_token' } : {}) },
+    });
+    return true;
   }
 
   /**
@@ -488,7 +491,7 @@ export class TokenService {
       // Account row first, then the session (0073), as revoke().
       await client.query(
         `select auth.lock_account_sessions(session_row.account_id) from auth.sessions session_row
-          where session_row.refresh_token_sha256 = $1`,
+          where session_row.refresh_token_sha256 = $1 and session_row.session_kind in ('staff', 'patient')`,
         [refreshHash],
       );
       const presented = await client.query<{ id: string; account_id: string; actor_subject: string;
@@ -509,7 +512,7 @@ export class TokenService {
       if (expectedKind && session.session_kind !== expectedKind && session.renewable) {
         return { refusedKind: session.session_kind };
       }
-      await this.endSignIn(client, session.id, session.actor_subject, event, 'refresh_token');
+      if (!await this.endSignIn(client, session.id, session.actor_subject, event, 'refresh_token')) return undefined;
       return { sessionId: session.id, accountId: session.account_id, actorSubject: session.actor_subject,
         kind: session.session_kind };
     });

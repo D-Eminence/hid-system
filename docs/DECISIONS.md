@@ -1871,12 +1871,16 @@ Decision:
   it, whatever its expiry or the account's state: a sign-in refresh cannot
   renew now may become renewable again when a timed suspension lapses. A
   cookie sign-out from a missing or unapproved Origin changes nothing; every
-  other outcome except a client mismatch clears the cookies.
+  other outcome except a client mismatch clears the cookies. A sign-out ends
+  only sessions that are still unrevoked, under the account lock, and records
+  and audits only when it ended one, so two tabs signing out at once record
+  one sign-out.
 - A browser application may name itself in `X-HID-Client` (`staff-web` or
-  `patient-web`) on a cookie refresh or sign-out. Identity then refreshes or
-  ends only a sign-in of that kind. The other kind is refused with
+  `patient-web`) on a cookie refresh or sign-out. A sign-in of the other kind
+  that refresh could renew now is then refused with
   `403 SESSION_CLIENT_MISMATCH` after the Origin and CSRF checks; nothing is
-  rotated or ended and the cookies are kept. An absent or other value keeps the
+  rotated or ended and the cookies are kept. Any other sign-in is handled as
+  for an unnamed application (below). An absent or other value keeps the
   earlier behaviour, and a bearer sign-out ignores the header.
 - The header is the calling application's own declaration. It keeps one
   application's tab from acting on the other's sign-in; it is not

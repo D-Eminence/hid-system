@@ -4,7 +4,9 @@
 // holds its refresh cookie, so sign-out must end that sign-in by its refresh
 // token, and only that one. The staff and patient apps share the cookies, so
 // a client that names itself must not refresh, and so rotate, or sign out the
-// other's sign-in. Executes only against the owned disposable synthetic rehearsal.
+// other's sign-in while refresh could renew it; any other sign-in a sign-out
+// ends without naming its kind. Executes only against the owned disposable
+// synthetic rehearsal.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -339,18 +341,46 @@ try {
   await pool.query('update auth.accounts set disabled_until = null where id = $1', [locked.id]);
   const unlocked = await refresh(lockedSignIn.cookies, 'staff-web');
   assert.equal(unlocked.status, 401, JSON.stringify(unlocked.body)); clearsAll(unlocked);
-  checks.push('a sign-out by refresh cookie while the account is suspended for a time is 204 and ends the sign-in, sent with either app\'s name; once the suspension lapses its refresh token is refused (401)');
+  checks.push('a sign-out by refresh cookie while the account is suspended for a time, sent with the other app\'s name, is 204 and ends the sign-in; once the suspension lapses its refresh token is refused (401)');
 
-  // 13. Two sign-outs at once with one refresh cookie (two tabs) end the
-  // sign-in once: the second reads it under the account lock, after the first.
-  const twoTabs = await signIn(bola, 'patient');
-  const both = await Promise.all([0, 1].map(() => logout(refreshOnly(twoTabs.cookies), twoTabs.cookies[`${name}_csrf`])));
-  for (const response of both) { assert.equal(response.status, 204, JSON.stringify(response.body)); clearsAll(response); }
-  assert.equal(await live(twoTabs.sessionId), false);
-  assert.equal(await logoutEvents(twoTabs.sessionId), 1, 'concurrent sign-outs record one sign-out');
-  assert.equal(Number((await pool.query(`select count(*) from audit.events where action = 'auth.logout'
-    and outcome = 'success' and resource_id = $1`, [twoTabs.sessionId])).rows[0].count), 1, 'and one sign-out audit');
-  checks.push('two concurrent sign-outs with the same refresh cookie both answer 204 and clear the cookies; the sign-in ends once, with one sign-out event and one audit');
+  // 13. Two sign-outs at once with one browser's cookies (two tabs) end the
+  // sign-in once, on either path. The account row is held locked until both
+  // requests wait for it, so both have passed every check made before the
+  // lock; the second then finds the sign-in ended and records nothing.
+  const lockWaiters = async (count) => {
+    let most = 0;
+    for (const deadline = Date.now() + 10_000; most < count && Date.now() < deadline;) {
+      const { rows } = await pool.query(`select count(*)::int as n from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()`);
+      most = Math.max(most, rows[0].n);
+      if (most < count) await new Promise(done => setTimeout(done, 20));
+    }
+    return most;
+  };
+  const whileAccountLocked = async (accountId, requests) => {
+    const holder = await pool.connect();
+    try {
+      await holder.query('begin');
+      await holder.query('select auth.lock_account_sessions($1)', [accountId]);
+      const pending = requests.map(send => Promise.resolve(send()));
+      const waiting = await lockWaiters(requests.length);
+      await holder.query('commit');
+      return { waiting, responses: await Promise.all(pending) };
+    } finally { holder.release(); }
+  };
+  const signOutAudits = async (id) => Number((await pool.query(`select count(*) from audit.events where action = 'auth.logout'
+    and outcome = 'success' and resource_id = $1`, [id])).rows[0].count);
+  for (const [label, cookiesOf] of [['by refresh cookie', refreshOnly], ['by live access cookie', cookies => cookies]]) {
+    const twoTabs = await signIn(bola, 'patient');
+    const raced = await whileAccountLocked(bola.id, [0, 1].map(() => () =>
+      logout(cookiesOf(twoTabs.cookies), twoTabs.cookies[`${name}_csrf`])));
+    assert.equal(raced.waiting, 2, `${label}: both sign-outs waited at the account lock`);
+    for (const response of raced.responses) { assert.equal(response.status, 204, `${label}: ${JSON.stringify(response.body)}`); clearsAll(response); }
+    assert.equal(await live(twoTabs.sessionId), false, label);
+    assert.equal(await logoutEvents(twoTabs.sessionId), 1, `${label}: concurrent sign-outs record one sign-out`);
+    assert.equal(await signOutAudits(twoTabs.sessionId), 1, `${label}: and one sign-out audit`);
+  }
+  checks.push('two sign-outs at once with one browser\'s cookies, held at the account lock until both wait there, by refresh cookie and by live access cookie: both answer 204 and clear the cookies; the sign-in ends once, with one sign-out event and one audit');
 
   process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: 'hid_identity_api_runtime', checks })}\n`);
 } finally { if (app) await app.close(); await pool.end(); }

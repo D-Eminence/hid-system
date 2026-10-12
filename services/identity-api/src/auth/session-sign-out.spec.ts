@@ -51,13 +51,15 @@ function harness(liveAccess: Record<string, ActorContext> = { 'access-A': actor(
     refreshSessionKind: jest.fn(async (refresh: string) => refreshKinds[refresh]),
   };
   const auth = {
-    revoke: jest.fn().mockResolvedValue(undefined),
+    revoke: jest.fn().mockResolvedValue(true),
     // As TokenService decides it: a sign-in of another kind than the one the
-    // calling app names is refused before anything is ended.
+    // calling app names is refused before anything is ended while refresh
+    // could renew it ('refresh-old' stands for one it could not: an older
+    // rotated token, an expired sign-in or a suspended account).
     revokeByRefreshToken: jest.fn(async (refresh: string, _event: unknown, expectedKind?: 'staff' | 'patient') => {
-      const kind = refreshKinds[refresh];
+      const kind = refresh === 'refresh-old' ? 'staff' : refreshKinds[refresh];
       if (!kind) return undefined;
-      if (expectedKind && kind !== expectedKind) return { refusedKind: kind };
+      if (expectedKind && kind !== expectedKind && refresh !== 'refresh-old') return { refusedKind: kind };
       return { sessionId: refresh === 'refresh-A' ? sessionA : sessionB, accountId: 'account', actorSubject: 'subject', kind };
     }),
     refresh: jest.fn(async () => ({ actor: actor('patient', 'rotated'), accessToken: 'new-access', refreshToken: 'new-refresh',
@@ -196,6 +198,19 @@ describe('POST /auth/logout', () => {
   });
 });
 
+describe('POST /auth/logout, concurrent', () => {
+  it('audits a live access token\'s sign-out only when it ended the sign-in, not when another tab got there first', async () => {
+    const { controller, auth, audit } = harness({ 'access-A': actor('patient') });
+    auth.revoke.mockResolvedValueOnce(false);
+    const res = response();
+    await controller.logout(request({ origin: ORIGIN, 'x-csrf-token': 'csrf-A' }, { hid_access: 'access-A', hid_access_csrf: 'csrf-A' }),
+      res as unknown as Response);
+    expect(auth.revoke).toHaveBeenCalledWith(sessionA, expect.anything(), expect.anything());
+    expect(audit.record).not.toHaveBeenCalled();
+    expect(cleared(res)).toEqual(ALL_COOKIES);
+  });
+});
+
 describe('POST /auth/logout with X-HID-Client', () => {
   // The staff and patient apps share the session cookies on one origin. An app
   // that names itself signs out only its own kind of sign-in: the other app's
@@ -259,6 +274,16 @@ describe('POST /auth/logout with X-HID-Client', () => {
     const res = response();
     await controller.logout(signingOut(client, { hid_access_refresh: 'refresh-B' }, 'csrf-B'), res as unknown as Response);
     expect(auth.revokeByRefreshToken).toHaveBeenCalledWith('refresh-B', expect.anything(), undefined);
+    expect(cleared(res)).toEqual(ALL_COOKIES);
+  });
+
+  it('ends, audited as its own kind, a sign-in of the other kind that refresh could not renew, and clears the cookies', async () => {
+    const { controller, auth, audit } = harness(liveAccess);
+    const res = response();
+    await controller.logout(signingOut('patient-web', { hid_access_refresh: 'refresh-old' }, 'csrf-old'), res as unknown as Response);
+    expect(auth.revokeByRefreshToken).toHaveBeenCalledWith('refresh-old', expect.anything(), 'patient');
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.logout', actorType: 'staff',
+      outcome: 'success' }));
     expect(cleared(res)).toEqual(ALL_COOKIES);
   });
 
