@@ -8,7 +8,14 @@ import { PatientRecordsService } from './patient-records.service';
 
 const actor = { kind: 'patient', patientId: 'patient-id', accountId: 'account-id', subject: 'subject', sessionId: 'session-id' };
 const request = { actor, correlationId: 'patient-record-test', header: () => undefined } as unknown as HidRequest;
-const emergencyContext = { purposeOfUse: 'emergency', facilityId: 'facility' } as DataAccessContext;
+/** Every read permission the summary's categories need: the route's two, and each optional category's own. */
+const EMERGENCY_READS = ['ehr.encounter.read', 'ehr.note.read', 'ehr.vital.read', 'ehr.diagnosis.read',
+  'ehr.prescription.read', 'ehr.lab-request.read', 'ehr.document.read'];
+function emergencyContextWith(permissions?: readonly string[]): DataAccessContext {
+  return { purposeOfUse: 'emergency', facilityId: 'facility',
+    actor: { subject: 'doctor', accountId: 'account', ...(permissions ? { permissions } : {}) } } as unknown as DataAccessContext;
+}
+const emergencyContext = emergencyContextWith(EMERGENCY_READS);
 
 const WITHHELD = ['vitals', 'diagnoses', 'prescriptions', 'labRequests', 'documents'];
 const SECTIONS = ['encounters', 'notes', 'vitals', 'diagnoses', 'prescriptions', 'labRequests', 'documents'] as const;
@@ -206,18 +213,78 @@ describe('Emergency record summary', () => {
     expect(operations).toHaveLength(1);
     expect(operations[0]?.details).toEqual({
       encounterCount: 4, noteCount: 3, vitalCount: 5, correctedVitalCount: 2, diagnosisCount: 2,
-      prescriptionCount: 1, labRequestCount: 6, documentCount: 7,
+      prescriptionCount: 1, labRequestCount: 6, documentCount: 7, withheldCategories: [],
     });
   });
 
-  it('keeps returning all seven categories until the emergency scope is decided', async () => {
+  it('keeps returning all seven categories to a reader holding every read permission until the scope is decided', async () => {
     const { service } = setup({ diagnoses: rows(1), prescriptions: rows(1), labRequests: rows(1) });
     const summary = await service.emergency('patient-id', emergencyContext) as unknown as Summary;
     for (const section of SECTIONS) expect(Array.isArray(summary[section])).toBe(true);
     expect(summary.diagnoses).toHaveLength(1);
     expect(summary.prescriptions).toHaveLength(1);
     expect(summary.labRequests).toHaveLength(1);
-    expect(summary).not.toHaveProperty('withheld');
+    expect(summary.released).toEqual([...SECTIONS]);
+    expect(summary.withheld).toEqual([]);
+  });
+});
+
+describe('Emergency record summary: each category needs its own read permission', () => {
+  // The read permission each category's own routes require (vitals, diagnoses, prescriptions,
+  // lab-requests and document controllers); the summary route itself requires only encounter and note reads.
+  const OPTIONAL: ReadonlyArray<readonly [Section, string, readonly string[]]> = [
+    ['vitals', 'ehr.vital.read', ['vitalCount', 'correctedVitalCount']],
+    ['diagnoses', 'ehr.diagnosis.read', ['diagnosisCount']],
+    ['prescriptions', 'ehr.prescription.read', ['prescriptionCount']],
+    ['labRequests', 'ehr.lab-request.read', ['labRequestCount']],
+    ['documents', 'ehr.document.read', ['documentCount']],
+  ];
+  const everyRow: Fixture = { encounters: rows(2), notes: rows(1), vitals: rows(3, () => ({ currentCorrectionNo: 1 })),
+    diagnoses: rows(4), prescriptions: rows(5), labRequests: rows(6), documents: rows(7) };
+
+  it.each(OPTIONAL)('withholds %s from a reader without %s: not read, returned empty, named and audited as withheld',
+    async (section, permission, countKeys) => {
+      const { service, query, operations } = setup(everyRow);
+      const context = emergencyContextWith(EMERGENCY_READS.filter((read) => read !== permission));
+      const summary = await service.emergency('patient-id', context) as unknown as Summary;
+      const read = query.mock.calls.map(([sql]) => sectionOf(String(sql)));
+      expect(read).not.toContain(section);
+      expect(read).toHaveLength(6);
+      expect(summary[section]).toEqual([]);
+      expect(summary.withheld).toEqual([section]);
+      expect(summary.released).toEqual(SECTIONS.filter((name) => name !== section));
+      expect(summary.limits).not.toHaveProperty(section);
+      expect(summary.truncated).not.toHaveProperty(section);
+      const details: Readonly<Record<string, unknown>> = operations[0]?.details ?? {};
+      for (const key of countKeys) expect(details).not.toHaveProperty(key);
+      expect(details.withheldCategories).toEqual([section]);
+      // The categories it may read are still returned and counted.
+      for (const [other] of OPTIONAL.filter(([name]) => name !== section)) {
+        expect(summary[other]).toHaveLength(everyRow[other]?.length ?? -1);
+      }
+      expect(details.encounterCount).toBe(2);
+    });
+
+  it('returns only encounters and notes to a reader holding only the route permissions', async () => {
+    const { service, query, operations } = setup(everyRow);
+    const summary = await service.emergency('patient-id', emergencyContextWith(['ehr.encounter.read', 'ehr.note.read'])) as
+      unknown as Summary;
+    expect(query.mock.calls.map(([sql]) => sectionOf(String(sql)))).toEqual(['encounters', 'notes']);
+    expect(summary.released).toEqual(['encounters', 'notes']);
+    expect(summary.withheld).toEqual(WITHHELD);
+    for (const section of WITHHELD) expect(summary[section]).toEqual([]);
+    expect(summary.limits).toEqual({ encounters: 50, notes: 50 });
+    expect(summary.truncated).toEqual({ encounters: false, notes: false });
+    expect(summary.limit).toBe(50);
+    expect(operations[0]?.details).toEqual({ encounterCount: 2, noteCount: 1, withheldCategories: WITHHELD });
+  });
+
+  it('fails closed, withholding every optional category, when the reader\'s permissions are not known', async () => {
+    const { service, query } = setup(everyRow);
+    const summary = await service.emergency('patient-id', emergencyContextWith()) as unknown as Summary;
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(summary.withheld).toEqual(WITHHELD);
+    for (const section of WITHHELD) expect(summary[section]).toEqual([]);
   });
 });
 

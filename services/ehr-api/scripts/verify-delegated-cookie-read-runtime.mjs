@@ -7,9 +7,11 @@
 // authenticated as a workload, reports that the browser request was a GET;
 // a browser write must still prove Origin and CSRF. It also reads the two
 // record summaries over cookies: the patient's own (released and withheld
-// categories, limits) and the doctor's break-glass emergency summary (current
-// vital values, available documents, audit counts). Disposable copy of the
-// owned synthetic rehearsal database; synthetic accounts only.
+// categories, limits), a break-glass emergency summary for a reader whose role
+// lacks most category read permissions (those categories withheld), and the
+// doctor's (current vital values, available documents, audit counts).
+// Disposable copy of the owned synthetic rehearsal database; synthetic
+// accounts only.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -142,7 +144,7 @@ if (process.argv[2] === '--identity-child') {
       values($1,$2,$3,$4,$5,'ambulatory','in_progress',clock_timestamp()-interval '1 hour','Synthetic follow-up')`,
     [ids.encounter, ids.patient, ids.facility, ids.doctorAccount, ids.membership]));
 
-    // Record summaries (steps 4 and 5): 51 completed encounters, one more than
+    // Record summaries (steps 4 to 6): 51 completed encounters, one more than
     // a summary shows; vital A corrected twice (the second current), vital B
     // naming a correction that does not exist, vital C never corrected; three
     // uploaded documents, scanned clean, rejected and not scanned; and the
@@ -189,6 +191,33 @@ if (process.argv[2] === '--identity-child') {
       values($1,$2,$3,$4,$5,$6,'break_glass','emergency','active','Synthetic emergency summary read',
         clock_timestamp()-interval '1 minute',clock_timestamp()+interval '30 minutes',true)`,
     [summary.emergencyGrant, ids.patient, ids.doctor, ids.doctorAccount, ids.membership, ids.facility]);
+    // A second reader at the facility (step 5), with its own break-glass grant.
+    // Its synthetic role holds the summary route's two permissions, diagnosis
+    // reads and the Identity authorization check, but not the vital,
+    // prescription, lab-request or document read permissions.
+    const limited = { account: randomUUID(), staff: randomUUID(), membership: randomUUID(), grant: randomUUID(),
+      role: 'synthetic-emergency-limited-reader' };
+    const limitedEmail = `limited-${limited.account}@example.invalid`;
+    await owner.query("insert into auth.roles(code,description) values($1,'Synthetic reader without vital, prescription, lab-request or document reads')",
+      [limited.role]);
+    await owner.query(`insert into auth.role_permissions(role_code,permission_code)
+      select $1,code from unnest($2::text[]) code`,
+    [limited.role, ['identity.authorization.check', 'ehr.encounter.read', 'ehr.note.read', 'ehr.diagnosis.read']]);
+    await owner.query(`insert into auth.accounts(id,subject,email,display_name,status,password_hash,password_algorithm)
+      values($1,$2,$3,'Synthetic limited reader','active',$4,'argon2id')`,
+    [limited.account, `synthetic:limited:${limited.account}`, limitedEmail, passwordHash]);
+    await owner.query(`insert into identity.staff(id,account_id,full_name,email,verification_status,default_role)
+      values($1,$2,'Synthetic limited reader',$3,'verified','nurse')`, [limited.staff, limited.account, limitedEmail]);
+    await owner.query(`insert into identity.staff_facility_memberships(id,staff_id,account_id,organization_id,facility_id,membership_role,app_role,is_primary,active)
+      values($1,$2,$3,$4,$5,'nurse','nurse',true,true)`, [limited.membership, limited.staff, limited.account, ids.org, ids.facility]);
+    await owner.query(`insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason)
+      values($1,$2,$3,'facility',$4,$5,'Synthetic rehearsal role')`,
+    [randomUUID(), limited.account, limited.role, limited.membership, ids.facility]);
+    await owner.query(`insert into identity.consent_grants(id,patient_id,staff_id,account_id,membership_id,facility_id,scope,
+      purpose_of_use,status,reason,starts_at,expires_at,break_glass)
+      values($1,$2,$3,$4,$5,$6,'break_glass','emergency','active','Synthetic limited emergency summary read',
+        clock_timestamp()-interval '1 minute',clock_timestamp()+interval '30 minutes',true)`,
+    [limited.grant, ids.patient, limited.staff, limited.account, limited.membership, ids.facility]);
 
     // Identity in its own process, as its runtime role.
     const shared = { NODE_ENV: 'test', PATH: process.env.PATH, HOME: process.env.HOME ?? '/tmp', LANG: 'C.UTF-8', TZ: 'UTC',
@@ -300,12 +329,42 @@ if (process.argv[2] === '--identity-child') {
       withheldCategories: withheld }], 'The patient records audit does not record the withheld categories');
     checks.push('GET /ehr/me/records releases completed encounters and current signed notes, lists the other five categories as withheld (empty), reports 50 of 51 encounters as truncated, and audits the withheld categories');
 
-    // 5. The break-glass emergency summary: vitals with the current correction
-    //    applied as the whole current set, only available documents, per-section
-    //    limits, and each category's count in the audit.
+    // 5. A break-glass reader without a category's read permission is not
+    //    given that category: it is withheld (empty, named, audited), as that
+    //    category's own routes would refuse the reader.
+    const reader = await signIn('/auth/login', limitedEmail, 'staff-login');
+    const partial = await call(ehrBase, 'GET', `/ehr/patients/${ids.patient}/emergency-records`,
+      { cookie: reader.cookie, 'x-facility-id': ids.facility, 'x-purpose-of-use': 'emergency' });
+    assert.equal(partial.status, 200, `limited emergency summary: ${partial.status} ${JSON.stringify(partial.body)}`);
+    const unpermitted = ['vitals', 'prescriptions', 'labRequests', 'documents'];
+    assert.deepEqual(Object.fromEntries(unpermitted.map((category) => [category, partial.body[category]])),
+      Object.fromEntries(unpermitted.map((category) => [category, []])),
+    'The emergency summary disclosed a category the reader has no read permission for');
+    assert.deepEqual({ released: partial.body.released, withheld: partial.body.withheld },
+      { released: ['encounters', 'notes', 'diagnoses'], withheld: unpermitted },
+      'The emergency summary does not name the categories withheld for lack of a read permission');
+    assert.deepEqual({ count: partial.body.encounters?.length, limits: partial.body.limits, truncated: partial.body.truncated },
+      { count: 50, limits: { encounters: 50, notes: 50, diagnoses: 100 },
+        truncated: { encounters: true, notes: false, diagnoses: false } },
+      'The permission-limited emergency summary does not report limits for exactly the sections it read');
+    const partialAudit = await owner.query(`select details from audit.events
+      where action='ehr.emergency.records.read' and outcome='success' and patient_id=$1 and actor_account_id=$2`,
+    [ids.patient, limited.account]);
+    assert.deepEqual(partialAudit.rows.map((row) => row.details), [{ encounterCount: 50, noteCount: 0, diagnosisCount: 0,
+      withheldCategories: unpermitted }],
+    'The emergency summary audit does not record the categories withheld for lack of a read permission');
+    checks.push('a break-glass reader whose role lacks the vital, prescription, lab-request and document read permissions gets those four categories empty and named as withheld, with encounters, notes and diagnoses still read, and the audit records the withheld categories and only the counts of what was read');
+
+    // 6. The doctor's break-glass emergency summary: every category the doctor
+    //    may read, vitals with the current correction applied as the whole
+    //    current set, only available documents, per-section limits, and each
+    //    category's count in the audit.
     const emergency = await call(ehrBase, 'GET', `/ehr/patients/${ids.patient}/emergency-records`,
       { cookie: doctor.cookie, 'x-facility-id': ids.facility, 'x-purpose-of-use': 'emergency' });
     assert.equal(emergency.status, 200, `emergency summary: ${emergency.status} ${JSON.stringify(emergency.body)}`);
+    assert.deepEqual({ released: emergency.body.released, withheld: emergency.body.withheld },
+      { released: ['encounters', 'notes', 'vitals', 'diagnoses', 'prescriptions', 'labRequests', 'documents'], withheld: [] },
+      'The emergency summary withholds a category from a reader holding every read permission');
     const measurements = ['heightCm', 'weightKg', 'temperatureC', 'pulseBpm', 'respiratoryRate', 'systolicMmhg',
       'diastolicMmhg', 'oxygenSaturationPercent'];
     const vitalState = (id) => {
@@ -334,9 +393,11 @@ if (process.argv[2] === '--identity-child') {
       truncated: { encounters: true, notes: false, vitals: false, diagnoses: false, prescriptions: false, labRequests: false,
         documents: false }, limit: 50 }, 'The emergency summary does not report its per-section limits and truncation');
     const emergencyAudit = await owner.query(`select details from audit.events
-      where action='ehr.emergency.records.read' and outcome='success' and patient_id=$1`, [ids.patient]);
+      where action='ehr.emergency.records.read' and outcome='success' and patient_id=$1 and actor_account_id=$2`,
+    [ids.patient, ids.doctorAccount]);
     assert.deepEqual(emergencyAudit.rows.map((row) => row.details), [{ encounterCount: 50, noteCount: 0, vitalCount: 3,
-      correctedVitalCount: 2, diagnosisCount: 0, prescriptionCount: 0, labRequestCount: 0, documentCount: 1 }],
+      correctedVitalCount: 2, diagnosisCount: 0, prescriptionCount: 0, labRequestCount: 0, documentCount: 1,
+      withheldCategories: [] }],
     'The emergency summary audit does not record the count of each disclosed category');
     checks.push('the break-glass emergency summary returns a corrected vital as its current correction alone (omitted measurements null, recorded values apart), all-null with correctionUnavailable when that correction is unreadable, lists only the clean-scanned document, reports 50 of 51 encounters as truncated, and audits each category\'s count');
 
