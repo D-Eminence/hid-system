@@ -2186,7 +2186,7 @@ the schema, policies or grants changes.
 `0082_purpose_of_use_vocabulary.sql` inserts one row into
 `identity.purpose_of_use_codes`: `direct-care` ("Direct patient care",
 active, `source_system` `hid`), with `ON CONFLICT (code) DO NOTHING`
-(branch `fix/purpose-of-use-vocabulary`).
+(D-Eminence/hid-system#58).
 
 0003 created the table empty, and nothing inserted a row: no migration, no
 role bootstrap (`runtime-grants.sql` gives the Identity runtime `SELECT`
