@@ -86,7 +86,23 @@ family, with revocation reason `logout` (a rotated presented session keeps
 `logout` event (marked `presented: refresh_token` on the refresh-cookie path)
 and audits `auth.logout`. Two sign-outs at once with one browser's cookies
 (two tabs), by either path, therefore record one sign-out. A refused sign-out
-made with a live access token is audited against that actor.
+made with a live access token is audited against that actor, as an
+`auth.logout` failure on resource type `session` naming its session, with no
+facility, membership or organization. Refusals on the other session routes
+raised after the `SecurityGuard` (by validation or the handler) are audited the
+same way, as their `auth.*` session events (`AuditSessionEvent` in
+`common/decorators.ts`): `POST /auth/facility` as `auth.facility.select`,
+`GET /auth/session` as `auth.session.read`, `GET` and `POST
+/auth/service-session` as `auth.service-session.read` and
+`auth.service-session.validate`, and `POST /auth/google/link` as
+`auth.google.link`. The guard's own refusals never reach the interceptor and keep
+their own audit rows. No facility is bound to sign-out. The other session routes
+bind one only when the request names one of the actor's facilities in
+`X-Facility-ID`; the refusal row then carries that facility, membership and
+organization, and otherwise none. A staff audit row without a facility is
+accepted only as an `auth.*` session event; recorded as a generic `api.*`
+request, a staff refusal failed its own audit and answered
+`503 DEPENDENCY_UNAVAILABLE`.
 
 The refresh-token lookups are in `refreshSessionKind` and
 `revokeByRefreshToken` (`services/identity-api/src/auth/token.service.ts`).
