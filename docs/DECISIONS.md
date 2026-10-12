@@ -2086,3 +2086,186 @@ Consequences:
 
 Related: ADR-038 (platform sessions keep their own cookies and routes);
 `INTERFACE_CONTRACT.md`, "Auth session contract"; release checklist §2.
+
+# ADR-047: One Environment-Bound Workload Issuer for Staging and Production
+
+Status: Proposed. Draft for architecture review
+(`draft/production-workload-identity`); not accepted, merged or deployed. The
+security owner and the infrastructure owner must decide it.
+
+Date: 2026-10-12
+
+If accepted, supersedes for production ADR-032's external HTTPS workload
+issuer/JWKS/subjects and rotating mounted token delivery, and records the
+workload issuer as an implemented workflow under ADR-032's rule that no Lambda
+or API Gateway exists without one. Development is unchanged.
+
+Context:
+
+- Each token-bearing task (Identity, EHR, Lab, Pharmacy, OCR API, Outreach)
+  mounts a task-local `workload-tokens` volume read-only. Only a container of
+  the same task can write it, and only staging adds one, the
+  `workload-token-agent` sidecar. The production and development templates
+  have no writer and no input through which an external mechanism could
+  deliver tokens, so production cannot obtain a token from any issuer. Every
+  service-to-service call then fails closed: Identity cannot send an OTP
+  (`503 OTP_DELIVERY_UNAVAILABLE`), the EHR cannot authenticate any request
+  through Identity (`503 SERVICE_WORKLOAD_IDENTITY_UNAVAILABLE`), and Lab,
+  Pharmacy, OCR and Outreach calls fail the same way. Production correctly
+  forces `jwt` workload mode and refuses local secrets.
+- Production `*DesiredCount` parameters default to 2. ADR-032's rule that
+  counts stay zero until staging proves an approved issuer and delivery
+  mechanism is not enforced by the template.
+- The issuer Lambda (`infra/aws/runtime/workload-issuer/issuer.mjs`) and the
+  agent (`services/workload-token-agent/src/agent.mjs`) accepted only
+  `HID_DEPLOYMENT_ENV=staging`, the `/staging` stage and `hid:staging:`
+  subjects, so reusing the staging construct in CDK alone fails at run time.
+- The staging issuer (P-256 KMS key, Lambda, regional REST API with an
+  IAM-authenticated `POST /token` and a public JWKS) was added without an ADR.
+  This ADR records it.
+- Staging is not deployed (`STAGING_AWS_CHECKPOINT.md`), so the mechanism has
+  never minted a token live. Production is locked
+  (`TUF-STAGING-EXECUTION.md`).
+
+Question:
+
+Is the production workload issuer the in-account, CDK-managed KMS, Lambda and
+API Gateway issuer (the staging mechanism with production names), or an
+external issuer, for example in a separate security account? Secondary: does
+development get an issuer too, or stay non-functional for service-to-service
+calls?
+
+Proposed default (implemented on the draft branch):
+
+- `WorkloadIdentity` (`infra/aws/src/workload-identity.ts`, renamed from
+  `staging-workload-identity.ts`) is bound to one environment, `staging` or
+  `production`. Each has its own retained P-256 `SIGN_VERIFY` key
+  (`alias/hid-<env>-workload-signing`), log group `/hid/<env>/workload-issuer`
+  (staging 14 days, production the production retention of one year), function
+  `hid-<env>-workload-issuer`, REST API `hid-<env>-workload-identity` with stage
+  `<env>`, issuer `https://<api>.execute-api.<region>.<suffix>/<env>` and
+  subjects `hid:<env>:<service>`.
+- Staging keeps construct ID `StagingWorkloadIdentity`, so its retained key
+  keeps logical ID `StagingWorkloadIdentitySigningKey53DFD52F`. Its sleep,
+  economy and fidelity templates change only in the issuer Lambda asset key.
+- Both environments keep the six caller task roles and eleven caller/audience
+  bindings, `execute-api:Invoke` on the exact `/<env>/POST/token` ARN, IAM-only
+  `POST /token`, an unauthenticated `GET /.well-known/jwks.json`, the stage
+  throttle of 30 requests per second (burst 60), no test invoke, and data
+  trace and logging off.
+- Production token tasks get the `workload-token-agent` sidecar from the
+  admitted Identity API image, exactly as staging: UID/GID 65532, read-only
+  root, essential, health check, the agent's rw mount, the application's
+  read-only mount, and the application waits for the agent to be `HEALTHY`.
+  Receivers take the in-stack issuer, JWKS and exact caller subjects.
+  Production loses the eight `WorkloadIssuerUrl`, `WorkloadJwksUrl` and
+  `*WorkloadSubject` parameters.
+- The issuer and the agent accept only `staging` and `production` and derive
+  one stage from it. The issuer URL path, every subject prefix, the API
+  Gateway `requestContext.stage` (issuer) and the signed `/<stage>/token` path
+  (agent) must all name that stage. A token of one environment fails the
+  other's issuer, subject and stage checks.
+- Synthesis fails for staging or production if a token task lacks exactly one
+  rw `workload-token-agent` mount next to a read-only application mount.
+- Unchanged: `jwt` mode outside development, receiver issuer, JWKS, audience
+  and exact-subject validation, the ban on local tokens in production, the
+  token (ES256, 300-second lifetime, `token_use: workload`) and the agent's
+  timing (renewal about every 90 seconds, 10-second retry, removal before
+  expiry). Development keeps the external issuer, JWKS and subject parameters
+  and has no writer.
+
+Alternative:
+
+An external issuer that implements the same SigV4 `POST /token` contract (the
+IAM caller names only an audience; the issuer returns an ES256 JWT) and
+publishes a JWKS. The stack keeps `WorkloadIssuerUrl` and `WorkloadJwksUrl`,
+runs the same agent pointed at it, and exports the six task-role ARNs for the
+issuer's caller policy. It needs cross-account `execute-api:Invoke` and issuer
+IaC that this repository does not have. It keeps signing-key custody out of
+the workload account.
+
+Risks of the proposed default:
+
+- Key custody. The key has the CDK default key policy, whose root statement
+  delegates `kms:*` to IAM: any principal an administrator grants `kms:Sign`
+  can mint any production subject. In the template only the issuer role holds
+  it. A minted token also passes Identity's Origin and CSRF exemption for
+  delegated cookie reads (ADR-043, ADR-045).
+- Single point of failure. All six token-bearing services depend on one
+  issuer. The agent is essential and its health check tracks a usable token,
+  so an issuer outage longer than a token's lifetime takes those services out
+  of service, Identity sign-in included.
+- Public regional endpoint. The JWKS `GET` is unauthenticated and shares the
+  stage throttle with `POST /token`. Agents fetch the JWKS on every renewal and
+  receivers at least every 10 minutes, so a flood of JWKS requests can starve
+  renewal.
+- Never run live: staging is not deployed, so no token has been minted against
+  real IAM, KMS or API Gateway.
+- The issuer code is a CDK file asset, not a TUF-admitted image digest
+  (ADR-035); deployment evidence must bind its asset hash to the approved Git
+  SHA.
+- The regional alarms have no actions, so an issuer alarm would reach nobody;
+  ADR-032 forbids an SNS topic without a workflow. The draft adds no alarm.
+
+Preconditions for acceptance:
+
+1. Staging redeployed with this change's issuer Lambda and Identity API image,
+   and the live proof of `AWS_DEPLOYMENT_RUNBOOK.md` §7 recorded: minting,
+   renewal, expiry, removal before expiry, failed readiness, rejection of the
+   wrong audience, subject and signature, and no direct KMS signing by a
+   caller.
+2. The production unlock approval (production is locked until staging is
+   accepted, `TUF-STAGING-EXECUTION.md`).
+3. A decision on each follow-up below, or its explicit acceptance as a risk.
+
+Follow-ups, not implemented by the draft:
+
+- DEP-4-KEY, key custody: keep the default root statement and add Deny
+  statements to the key policy, as `tuf-signing-broker.ts` does: deny
+  `kms:Sign` to every principal other than the issuer role
+  (`aws:PrincipalArn`), and deny any algorithm other than `ECDSA_SHA_256` and
+  any message type other than `RAW` (the issuer signs `RAW`; the broker's
+  `DIGEST` rule must not be copied). Staging and production alike.
+- DEP-4-DOS, the public endpoint: the agent caches the verified JWKS by `kid`
+  and refetches only at start and for an unknown `kid`; `POST /token` gets its
+  own method throttle, and the JWKS limit is never below it; a REGIONAL WAF
+  rate rule or a PRIVATE API behind an `execute-api` interface endpoint is
+  chosen by decision (cost, and private DNS changes every `execute-api` name
+  in the VPC).
+- DEP-4-RES, issuer outage: decide whether an outage stops the services or only
+  their service-to-service calls. The infrastructure-only option is
+  `essential: false` with a container restart policy for the agent, keeping
+  the `HEALTHY` start gate. The architecture doc and runbook describe the
+  check as one-shot while the template runs it continuously.
+- Alert routing for issuer errors and for the agent's `Workload token renewal
+  unavailable` log line.
+- Release checklist P10 and `RELEASE_ARTIFACT_GATE.md` item 13 bound to the
+  chosen mechanism.
+- Optional: receivers accept only ES256 and require `token_use: workload`.
+
+Consequences if accepted:
+
+- The production template grows from 414 to 435 resources and from 523,299 to
+  567,737 bytes, falls from 62 to 54 parameters, and gains a fourth KMS key
+  (cost inventory `kmsKeys: 4`). The six token tasks get new revisions.
+- The staging issuer Lambda changes code only; staging must be redeployed and
+  re-accepted.
+- The agent ships in the Identity API image, so a new image digest must be
+  admitted and run in staging and production.
+- Development stays unchanged and non-functional for service-to-service calls
+  until it gets an issuer and a writer.
+- The production execution plan is `AWS_DEPLOYMENT_RUNBOOK.md` §12, not
+  approved.
+
+Migration Impact: none.
+
+Security Impact: as Risks. No task role gains more than `execute-api:Invoke`
+on its own environment's `POST /token`, and in the template the issuer role is
+the only holder of `kms:Sign` on the key.
+
+Compatibility Impact: an agent or issuer from before this change refuses
+`production` and still accepts the unchanged staging configuration, so a
+production task with an older Identity API image never starts its
+application.
+
+Related ADRs: ADR-025, ADR-032, ADR-033, ADR-034, ADR-035, ADR-043, ADR-045.

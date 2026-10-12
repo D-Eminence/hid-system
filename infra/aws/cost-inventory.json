@@ -520,7 +520,7 @@
       },
       "logRetentionDays": 365,
       "ecrImagesPerRepository": 100,
-      "kmsKeys": 3,
+      "kmsKeys": 4,
       "secretInterfaces": 14,
       "wafs": 1,
       "sqsQueuesAndDlqs": 2,

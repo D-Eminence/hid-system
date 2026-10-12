@@ -31,7 +31,11 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
-import { StagingWorkloadIdentity } from './staging-workload-identity.js';
+import {
+  WorkloadIdentity,
+  workloadIdentityConstructId,
+  workloadIssuerEnvironment,
+} from './workload-identity.js';
 import type { HidEnvironmentConfig } from './config.js';
 import {
   serviceHostLabels,
@@ -83,7 +87,7 @@ export class HidRegionalStack extends Stack {
 
   private readonly configuration: HidEnvironmentConfig;
   private readonly parameters: ParameterMap = {};
-  private readonly stagingWorkloadIdentity?: StagingWorkloadIdentity;
+  private readonly workloadIdentity?: WorkloadIdentity;
 
   public constructor(scope: Construct, id: string, props: HidRegionalStackProps) {
     super(scope, id, props);
@@ -343,8 +347,14 @@ export class HidRegionalStack extends Stack {
       `https://${label}.${privateZone.zoneName}`,
     ])) as Partial<Record<WorkloadName, string>>;
 
-    if (this.configuration.name === 'staging') {
-      this.stagingWorkloadIdentity = new StagingWorkloadIdentity(this, 'StagingWorkloadIdentity');
+    // Staging and production (proposed in ADR-047) carry their own issuer;
+    // development keeps the external issuer, JWKS and subject inputs.
+    const issuerEnvironment = workloadIssuerEnvironment(this.configuration.name);
+    if (issuerEnvironment) {
+      this.workloadIdentity = new WorkloadIdentity(this, workloadIdentityConstructId(issuerEnvironment), {
+        environment: issuerEnvironment,
+        logRetention: issuerEnvironment === 'staging' ? logs.RetentionDays.TWO_WEEKS : this.configuration.logRetention,
+      });
     }
     const resources = new Map<WorkloadName, RuntimeResource>();
     for (const name of workloadNames) {
@@ -366,11 +376,13 @@ export class HidRegionalStack extends Stack {
       }
     }
 
-    if (this.stagingWorkloadIdentity) {
-      this.stagingWorkloadIdentity.bindCallers(workloadNames.filter(name => Object.keys(workloads[name].tokenFiles).length > 0)
-        .map(name => ({ role: resources.get(name)!.taskDefinition.taskRole, subject: `hid:staging:${name}`,
+    if (this.workloadIdentity) {
+      const identity = this.workloadIdentity;
+      identity.bindCallers(workloadNames.filter(name => Object.keys(workloads[name].tokenFiles).length > 0)
+        .map(name => ({ role: resources.get(name)!.taskDefinition.taskRole, subject: identity.subject(name),
           audiences: this.workloadTokenFiles(name).map(item => item.audience) })));
     }
+    this.assertTokenWriters(resources);
     this.attachBusinessIam(resources, documentKey);
     this.connectRuntimeNetwork(resources, endpointSecurityGroup, internalLoadBalancerSecurityGroup);
     const internalTargetGroups = internalLoadBalancer && internalListener
@@ -431,15 +443,15 @@ export class HidRegionalStack extends Stack {
       ? 'Base64-encoded public root certificate matching the verified staging region and RDS CA; maximum 4096 characters, not the global bundle'
       : 'Base64-encoded current AWS RDS trust bundle; public certificate material, not a secret');
     if (this.configuration.name === 'staging') rdsCa.maxLength = 4096;
-    if (this.configuration.name !== 'staging') {
-    this.requiredParameter('WorkloadIssuerUrl', 'Approved HTTPS workload issuer; external prerequisite', '^https://');
-    this.requiredParameter('WorkloadJwksUrl', 'Approved HTTPS workload JWKS endpoint; external prerequisite', '^https://');
-    this.requiredParameter('EhrWorkloadSubject', 'Exact deployment subject for EHR API');
-    this.requiredParameter('LabWorkloadSubject', 'Exact deployment subject for Lab API');
-    this.requiredParameter('PharmacyWorkloadSubject', 'Exact deployment subject for Pharmacy API');
-    this.requiredParameter('OcrWorkloadSubject', 'Exact deployment subject for OCR API');
-    this.requiredParameter('OutreachWorkloadSubject', 'Exact deployment subject for Outreach API');
-    this.requiredParameter('IdentityWorkloadSubject', 'Exact deployment subject for Identity API');
+    if (!workloadIssuerEnvironment(this.configuration.name)) {
+      this.requiredParameter('WorkloadIssuerUrl', 'Approved HTTPS workload issuer; external prerequisite', '^https://');
+      this.requiredParameter('WorkloadJwksUrl', 'Approved HTTPS workload JWKS endpoint; external prerequisite', '^https://');
+      this.requiredParameter('EhrWorkloadSubject', 'Exact deployment subject for EHR API');
+      this.requiredParameter('LabWorkloadSubject', 'Exact deployment subject for Lab API');
+      this.requiredParameter('PharmacyWorkloadSubject', 'Exact deployment subject for Pharmacy API');
+      this.requiredParameter('OcrWorkloadSubject', 'Exact deployment subject for OCR API');
+      this.requiredParameter('OutreachWorkloadSubject', 'Exact deployment subject for Outreach API');
+      this.requiredParameter('IdentityWorkloadSubject', 'Exact deployment subject for Identity API');
     }
     this.requiredParameter('AuthSecretArn', 'Secrets Manager JSON secret containing authSigningSecret and authLoginPepper');
     this.requiredParameter('IdentitySensitiveSecretArn', this.configuration.name === 'staging'
@@ -666,17 +678,17 @@ export class HidRegionalStack extends Stack {
     if (Object.keys(definition.tokenFiles).length > 0) {
       taskDefinition.addVolume({ name: 'workload-tokens' });
       container.addMountPoints({ containerPath: tokenRoot, sourceVolume: 'workload-tokens', readOnly: true });
-      if (this.stagingWorkloadIdentity) {
+      if (this.workloadIdentity) {
         const agent = taskDefinition.addContainer('WorkloadTokenAgent', {
           containerName: 'workload-token-agent',
           image: ecs.ContainerImage.fromRegistry(this.parameter('IdentityApiImageUri').valueAsString),
           command: ['/app/services/workload-token-agent/src/main.mjs'],
           user: '65532:65532', readonlyRootFilesystem: true, essential: true, memoryReservationMiB: 64,
           environment: {
-            HID_DEPLOYMENT_ENV: 'staging', AWS_REGION: Aws.REGION,
-            WORKLOAD_ISSUER_URL: this.stagingWorkloadIdentity.issuerUrl,
-            WORKLOAD_JWKS_URL: this.stagingWorkloadIdentity.jwksUrl,
-            WORKLOAD_SUBJECT: `hid:staging:${definition.name}`,
+            HID_DEPLOYMENT_ENV: this.workloadIdentity.environment, AWS_REGION: Aws.REGION,
+            WORKLOAD_ISSUER_URL: this.workloadIdentity.issuerUrl,
+            WORKLOAD_JWKS_URL: this.workloadIdentity.jwksUrl,
+            WORKLOAD_SUBJECT: this.workloadIdentity.subject(definition.name),
             WORKLOAD_TOKEN_DIRECTORY: tokenRoot,
             WORKLOAD_TOKEN_FILES_JSON: JSON.stringify(this.workloadTokenFiles(definition.name)),
           },
@@ -727,6 +739,24 @@ export class HidRegionalStack extends Stack {
     return { definition, taskDefinition, service, container, logGroup, securityGroup: input.securityGroup };
   }
 
+  /**
+   * A token volume is task-local, so only a container of the same task can
+   * write it. Outside development each one needs exactly one writer, the token
+   * agent, or every service-to-service call of that task fails closed.
+   */
+  private assertTokenWriters(resources: Map<WorkloadName, RuntimeResource>): void {
+    if (this.configuration.name === 'development') return;
+    for (const [name, resource] of resources) {
+      if (Object.keys(workloads[name].tokenFiles).length === 0) continue;
+      const agent = resource.taskDefinition.findContainer('workload-token-agent');
+      const mounts = (container?: ecs.ContainerDefinition) => (container?.mountPoints ?? [])
+        .filter(mount => mount.sourceVolume === 'workload-tokens').map(mount => mount.readOnly);
+      if (JSON.stringify(mounts(resource.container)) !== '[true]' || JSON.stringify(mounts(agent)) !== '[false]') {
+        throw new Error(`${name} must have exactly one workload-token-agent writer for its read-only token volume`);
+      }
+    }
+  }
+
   private workloadTokenFiles(name: WorkloadName): Array<{ audience: string; file: string }> {
     return Object.values(workloads[name].tokenFiles).map(path => {
       const file = path.slice(path.lastIndexOf('/') + 1);
@@ -749,14 +779,14 @@ export class HidRegionalStack extends Stack {
         .map((subdomain) => `https://${subdomain}.${this.parameter('RootDomainName').valueAsString}`).join(','),
       TRUST_PROXY_CIDRS: this.configuration.vpcCidr,
     };
-    const issuer = this.stagingWorkloadIdentity?.issuerUrl ?? this.parameter('WorkloadIssuerUrl').valueAsString;
-    const jwks = this.stagingWorkloadIdentity?.jwksUrl ?? this.parameter('WorkloadJwksUrl').valueAsString;
-    const subject = (name: string, parameter: string) => this.stagingWorkloadIdentity
-      ? `hid:staging:${name}-api` : this.parameter(parameter).valueAsString;
+    const issuer = this.workloadIdentity?.issuerUrl ?? this.parameter('WorkloadIssuerUrl').valueAsString;
+    const jwks = this.workloadIdentity?.jwksUrl ?? this.parameter('WorkloadJwksUrl').valueAsString;
+    const subject = (caller: WorkloadName, parameter: string) => this.workloadIdentity?.subject(caller)
+      ?? this.parameter(parameter).valueAsString;
     const subjects = {
-      identity: subject('identity', 'IdentityWorkloadSubject'), ehr: subject('ehr', 'EhrWorkloadSubject'),
-      lab: subject('lab', 'LabWorkloadSubject'), pharmacy: subject('pharmacy', 'PharmacyWorkloadSubject'),
-      ocr: subject('ocr', 'OcrWorkloadSubject'), outreach: subject('outreach', 'OutreachWorkloadSubject'),
+      identity: subject('identity-api', 'IdentityWorkloadSubject'), ehr: subject('ehr-api', 'EhrWorkloadSubject'),
+      lab: subject('lab-api', 'LabWorkloadSubject'), pharmacy: subject('pharmacy-api', 'PharmacyWorkloadSubject'),
+      ocr: subject('ocr-api', 'OcrWorkloadSubject'), outreach: subject('outreach-api', 'OutreachWorkloadSubject'),
     };
     const base = { ...workloads[name].tokenFiles };
     switch (name) {

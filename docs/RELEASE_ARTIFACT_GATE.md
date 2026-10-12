@@ -103,7 +103,9 @@ The future authorized pipeline stages are:
 10. staging approval;
 11. foundation deploy with desired counts zero;
 12. migration plan, snapshot/PITR check, dry run, apply and zero-pending verification;
-13. token delivery/issuer, secret, TLS and provider preflight;
+13. token delivery/issuer (the in-stack issuer and token agents,
+   `AWS_DEPLOYMENT_RUNBOOK.md` §7; for production, §12 if ADR-047 is accepted),
+   secret, TLS and provider preflight;
 14. staging service/frontend rollout, attack tests, restore, rollback, monitoring,
    and acceptance;
 15. exact-artifact production promotion, offline threshold, explicit production

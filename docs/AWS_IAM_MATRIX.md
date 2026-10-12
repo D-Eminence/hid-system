@@ -6,28 +6,34 @@ allow/deny behavior remains external staging acceptance.
 Every ECS task definition has a distinct execution role and task role. The
 execution role pulls its image, writes its log stream, and resolves only the
 secrets referenced by that task. The application task role contains only its
-business AWS API authority plus, for the six staging workload callers, an
-exact-resource permission to request their own workload tokens.
+business AWS API authority plus, for the six workload callers in staging and
+(pending ADR-047) production, an exact-resource permission to request their
+own workload tokens from their own environment's issuer.
 
 ## Runtime matrix
 
 | Runtime | Execution-role secret scope | Task-role allows | Explicit non-authority |
 |---|---|---|---|
-| Identity API | its DB; auth; NIN/OTP/Turnstile | staging issuer `POST /token` only | no SES, provider secret API, S3, Textract, queue, EventBridge, or other DB secret |
-| EHR API | its DB/scanner URL | exact document bucket metadata/read/write and exact document KMS use via S3; staging issuer `POST /token` | no auth signing/pepper, Textract, queue, EventBridge, delete, or bucket administration |
-| Lab API | its DB | staging issuer `POST /token` only | no document/provider/event/queue authority |
-| Pharmacy API | its DB | staging issuer `POST /token` only | no document/provider/event/queue authority |
-| OCR API | its DB | staging issuer `POST /token` only | no S3/KMS/Textract/EventBridge/queue authority |
+| Identity API | its DB; auth; NIN/OTP/Turnstile | workload issuer `POST /token` only | no SES, provider secret API, S3, Textract, queue, EventBridge, or other DB secret |
+| EHR API | its DB/scanner URL | exact document bucket metadata/read/write and exact document KMS use via S3; workload issuer `POST /token` | no auth signing/pepper, Textract, queue, EventBridge, delete, or bucket administration |
+| Lab API | its DB | workload issuer `POST /token` only | no document/provider/event/queue authority |
+| Pharmacy API | its DB | workload issuer `POST /token` only | no document/provider/event/queue authority |
+| OCR API | its DB | workload issuer `POST /token` only | no S3/KMS/Textract/EventBridge/queue authority |
 | OCR Worker | its DB | exact document read/decrypt and three regional Textract calls | no write/delete, KMS encrypt, EventBridge, queue, or clinical API IAM authority |
-| Outreach API | its DB | staging issuer `POST /token` only | no provider/document/event/queue authority |
+| Outreach API | its DB | workload issuer `POST /token` only | no provider/document/event/queue authority |
 | Notification API | notification provider fields only | regional `ses:SendEmail` | no DB, Novu worker, queue consumption, EventBridge, document, or auth-signing secret |
 | Notification Worker | its DB and Novu key | consume/delete/change visibility on the exact encrypted notification queue | no OTP providers, EventBridge management, document, or auth authority |
 | Event Dispatcher | its DB | `events:PutEvents` on the exact HID bus | no rule/target management, queue consumption, archive/replay, or provider authority |
 | Gateway | none beyond ECS execution/logging | none | no frontend secrets, DB, application secret, S3/KMS, provider, or administrative credential |
 | Migration task | deployment-only migration DB | none | no service, runtime DB secret, master-secret read, or business AWS API |
-| Staging workload issuer Lambda | no application secrets | `kms:GetPublicKey` and `kms:Sign` on its exact retained P-256 key; signing restricted to `ECDSA_SHA_256`; own logs | no database, provider, document, queue, or arbitrary-key authority |
+| Workload issuer Lambda (staging; production pending ADR-047) | no application secrets | `kms:GetPublicKey` and `kms:Sign` on its exact retained P-256 key; signing restricted to `ECDSA_SHA_256`; own logs | no database, provider, document, queue, or arbitrary-key authority |
 | Staging RDS re-stop scheduler | none | `rds:StopDBInstance` on the exact staging DB ARN, sleep profile only | no production ARN, start/modify/delete/snapshot authority, wildcard resource, or retry loop |
 | Cost governance stack | notification destinations only | none | no Budget Action, IAM execution role, ECS/RDS mutation, or shutdown authority |
+
+The workload issuer exists in staging and, as proposed by ADR-047 and pending
+that decision, production; each caller may invoke only its own environment's
+`/<environment>/POST/token`. Development has no issuer, so its task roles have
+no `execute-api:Invoke`.
 
 Only Identity receives `AUTH_SIGNING_SECRET` and `AUTH_LOGIN_PEPPER`. This
 negative boundary is asserted so EHR and every other task cannot receive them.
@@ -103,8 +109,10 @@ These are six subjects and eleven caller/audience bindings. Only API Gateway's
 IAM request context identifies the caller; the token request contains an
 audience and cannot select a subject or role. The issuer rejects unmapped IAM
 roles, foreign account/API/stage context, and unauthorized audiences. Its
-Lambda role alone can sign with the dedicated P-256 key. No ECS task role has
-`kms:Sign` authority.
+Lambda role alone is granted signing with the dedicated P-256 key in the
+template; the key keeps the CDK default key policy, which delegates key use to
+account IAM (ADR-047 risks, DEP-4-KEY). No ECS task role has `kms:Sign`
+authority.
 
 The issuer returns ES256 JWTs with a 300-second lifetime. Each caller's sidecar
 uses the same admitted Identity API image, runs as UID/GID 65532 with a read-only
@@ -116,8 +124,20 @@ rotate the retained signing key.
 
 All staging modes retain the same issuer, public JWKS endpoint, and key; sleep
 has no running ECS tasks or token agents. There are no external staging issuer,
-JWKS, or subject parameters. Production and development retain their external
-issuer and token-delivery contract. Deployed minting, renewal, expiration, and
+JWKS, or subject parameters.
+
+Production, as proposed by ADR-047 and pending that decision, has its own
+issuer with the same six roles and eleven bindings: its own retained key
+(`alias/hid-production-workload-signing`), API (`hid-production-workload-identity`),
+stage `/production`, function `hid-production-workload-issuer`, and subjects
+`hid:production:identity-api`, `hid:production:ehr-api`,
+`hid:production:lab-api`, `hid:production:pharmacy-api`,
+`hid:production:ocr-api` and `hid:production:outreach-api`, with the audiences
+above. It has no external issuer, JWKS, or subject parameters. The issuer and
+the agent bind the environment to the issuer path, the subject prefix and the
+API Gateway stage, so a staging token or caller is refused in production and
+the reverse. Development retains its external issuer and token-delivery
+contract and has no token writer. Deployed minting, renewal, expiration, and
 receiver rejection still require staging evidence before raising task counts.
 
 ## Required live negative tests

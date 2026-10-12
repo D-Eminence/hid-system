@@ -54,10 +54,11 @@ Record and approve:
 - regional ACM certificate covering that API origin and the internal wildcard
   certificate;
 - RDS CA bundle and regional S3 managed prefix-list ID;
-- staging workload issuer/JWKS stack outputs, the admitted Identity API image
-  used by all six token agents, and the fixed IAM caller/audience map; for
-  development and production, the external issuer/JWKS/subjects and token
-  delivery mechanism;
+- staging workload issuer/JWKS stack outputs and signing-key ARN, the admitted
+  Identity API image used by all six token agents, and the fixed IAM
+  caller/audience map; the same production outputs if ADR-047 is accepted
+  (§12); for development, the external issuer/JWKS/subjects and token delivery
+  mechanism;
 - nine non-owner database secrets plus a separate migration administrator;
 - Identity auth/OTP/Turnstile secret material; legacy NIN material remains
   excluded from current staging requirements. If QoreID staging activation is
@@ -88,9 +89,13 @@ Staging no longer accepts external `WorkloadIssuerUrl`, `WorkloadJwksUrl`, or
 service-subject parameters. Its regional stack supplies the issuer and JWKS
 URLs and binds six exact task roles to eleven allowed caller/audience pairs.
 Record the output URLs and signing-key ARN with the release evidence; do not
-record tokens. All staging modes retain the same issuer and P-256 key. Confirm
-the production template still matches its recorded baseline byte for byte;
-production and development keep their external workload-identity inputs.
+record tokens. All staging modes retain the same issuer and P-256 key.
+Under ADR-047 (proposed, pending its decision) production takes its own issuer
+from its own stack in the same way, with its own key, API, `/production` stage
+and `hid:production:<service>` subjects, and no longer accepts these
+parameters. That changes the production template: record a new production
+template baseline (§12) instead of comparing with an earlier one. Development
+keeps its external workload-identity inputs.
 
 ## 2. Local source gates
 
@@ -127,8 +132,9 @@ Expected topology is one regional stack, eleven ECS services, eleven ECR
 repositories, twelve task definitions/image inputs including migration, the
 notification queue/DLQ/rule, and zero CloudFront distributions.
 Every staging mode additionally has the stable workload issuer API Gateway,
-Lambda, and fourth KMS key. Six API task definitions include token agents from
-the Identity API image; they add no new image identity or ECS service.
+Lambda, and fourth KMS key, and so does production under ADR-047 (pending),
+with its own. Six API task definitions include token agents from the Identity
+API image; they add no new image identity or ECS service.
 
 ## 3. Container and release gate
 
@@ -321,6 +327,9 @@ or the six-digit contact-OTP fallback mapped to the existing patient.
 
 ## 7. Provider and workload preflight
 
+This staging proof is also a precondition of the production issuer proposed in
+ADR-047; production's own checks are in §12.
+
 Verify all six staging token agents use the admitted Identity API digest and
 the exact role/subject/audience bindings in the
 [IAM matrix](AWS_IAM_MATRIX.md#workload-identity). Each agent must run as
@@ -416,6 +425,103 @@ rollback is not a down migration: use additive correction or the approved
 PITR/incident path. Preserve deployment parameters, manifest, approvals,
 redacted test evidence, reconciliation totals, and rollback decision.
 
-Local implementation leaves every operation in sections 3–11 externally
+Local implementation leaves every operation in sections 3–12 externally
 pending; no account, DNS, provider, database, or production state is mutated by
 repository acceptance.
+
+## 12. Production workload issuer (ADR-047): operator plan, not approved
+
+**NOT APPROVED. Do not execute.** This plan applies only if ADR-047 is
+accepted. It has not been run: no account was read and nothing was deployed or
+applied. It adds no authority to the production lock.
+
+Preconditions:
+
+- ADR-047 accepted, with a decision on DEP-4-KEY, DEP-4-DOS and DEP-4-RES or
+  their explicit acceptance as risks.
+- Staging redeployed from the same approved SHA, with this change's issuer
+  Lambda and Identity API image, and its §7 live proof recorded.
+- The production unlock approval and a production change approval.
+- Sections 1–4 complete for the release, with every image admitted.
+
+Steps:
+
+1. Build and admit (§3, ADR-035) the Identity API image that contains this
+   change's `services/workload-token-agent`; every production token agent runs
+   from `IdentityApiImageUri`. Record its digest. An earlier image's agent
+   refuses `production`, so a token task with it never starts its application.
+2. From the approved SHA, run the §2 gates, including
+   `npm --prefix infra/aws run synth:prod`,
+   `HID_INFRA_ENV=production npm --prefix infra/aws run verify:synth`,
+   `npm --prefix infra/aws run verify:policy` and
+   `npm --prefix infra/aws run cost:inventory:check`. Record as a new evidence
+   entry, without replacing any earlier baseline:
+   - the production template's SHA-256, size, resource and parameter counts;
+   - the issuer asset hash (the `S3Key` of `ProductionWorkloadIdentityIssuer*`
+     and its `cdk.out/asset.<hash>` directory) and the Git SHA it was built
+     from; the issuer code is a CDK file asset, not an admitted image;
+   - the staging template diff against the staging template last deployed,
+     which must be the issuer asset key only.
+3. In the production account and region, read-only:
+   - confirm the CDK bootstrap version (`/cdk-bootstrap/hnb659fds/version`)
+     and its asset bucket; the deploy publishes the issuer asset there;
+   - run `cdk diff Hid-production-Regional --no-lookups` with the reviewed
+     parameter file. Expect exactly:
+     - additions: the `ProductionWorkloadIdentity` key (`Retain`), alias, log
+       group (`Retain`), issuer role and policy, function, REST API, three
+       resources, two methods, deployment, stage `production`, two Lambda
+       permissions, the three `ProductionWorkloadIdentity*` outputs, and six
+       task-role policies granting `execute-api:Invoke` on
+       `/production/POST/token`;
+     - new revisions of the six token task definitions (the agent added) and of
+       the Notification API and OCR worker task definitions (issuer, JWKS and
+       subject values now from the stack);
+     - `DependsOn` changes on services, scaling targets and policies and
+       service-discovery services;
+     - removal of the eight workload parameters.
+   - Stop on any replacement or deletion of RDS, S3, the data KMS keys, ECR
+     repositories or log groups, or on any other change.
+4. Deploy with every `*DesiredCount` at `0` and the eight workload parameters
+   removed from the parameter file. Record the `IssuerUrl` and `JwksUrl`
+   outputs and the signing key ARN. Never record a token.
+5. With no task running, verify the issuer:
+   - `GET <JwksUrl>` answers `200` with exactly one `EC` `P-256` key, `alg`
+     `ES256`, `use` `sig`, whose `kid` is the key ID;
+   - an unsigned `POST <IssuerUrl>/token` answers `403`;
+   - a SigV4 `POST` signed by an operator role outside the caller map answers
+     `403 WORKLOAD_CALLER_DENIED`;
+   - the function's environment has `HID_DEPLOYMENT_ENV=production`, six role
+     ARNs, eleven bindings and only `hid:production:` subjects;
+   - CloudTrail shows `kms:Sign` on the key only from the issuer role;
+   - the staging issuer still answers, and its `kid` differs from production's.
+6. Scale the Notification API, then the Identity API, to their minimum. Each
+   task's `workload-token-agent` must be `HEALTHY` before its application
+   starts; no `Workload token renewal unavailable` line may appear; an OTP
+   start for a synthetic account must not end with `safeCode` `http_401`.
+7. Scale the EHR, Lab, Pharmacy, OCR and Outreach APIs. On synthetic data: an
+   EHR request authenticates through Identity's service session, Lab accepts
+   an EHR order, and OCR publishes to EHR, Lab and Pharmacy.
+8. Watch renewals (about every 90 seconds), task health, issuer Lambda errors
+   and API `5XX` for at least 15 minutes before continuing with §9.
+
+Record commands, outputs, the template SHA-256, the asset hash, the image
+digest, the key ARN and the time window. Record no token, credential or
+patient data.
+
+Rollback:
+
+- Before step 6 nothing depends on the issuer; leave it in place. The previous
+  template needs real external issuer, JWKS and subject values, which do not
+  exist; never supply placeholders.
+- From step 6: set the token-bearing services' `*DesiredCount` back to `0`.
+  Without tokens their service-to-service calls fail closed. Never set a
+  `*_IDENTITY_MODE` to `local-secret`; production configuration refuses it.
+- To stop minting at once, set the issuer function's reserved concurrency to
+  `0` or remove a caller's `execute-api:Invoke`. Issued tokens stay valid until
+  they expire, at most 300 seconds later.
+- On suspected key misuse, disable the key (`aws kms disable-key`): minting and
+  JWKS answer `503`, and receivers refuse new tokens once their cached JWKS
+  expires, at most 10 minutes later. Do not schedule key deletion without a
+  separate approval; it is irreversible after its waiting period.
+- The key and the issuer log group are retained if the construct or stack is
+  removed. Deleting them is a separate, approved action.

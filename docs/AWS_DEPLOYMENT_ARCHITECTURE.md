@@ -100,10 +100,13 @@ The CDK v2 application under `infra/aws` synthesizes:
 Staging additionally has a regional API Gateway and Lambda workload-token
 issuer backed by a retained P-256 KMS signing key. `POST /token` requires AWS
 IAM authentication; `GET /.well-known/jwks.json` publishes only the public key.
-This issuer is present in every staging mode, including sleep. Development and
-production retain their external workload-identity contract and have no issuer
-API Gateway or Lambda. There is no SNS, Redis, search cluster, Bedrock resource,
-CloudFront distribution, or duplicate frontend host in the regional design.
+This issuer is present in every staging mode, including sleep. Production has
+its own issuer of the same design, with its own key, API, `/production` stage
+and `hid:production:<service>` subjects; this is proposed in ADR-047 and
+pending that decision. Development retains its external workload-identity
+contract and has no issuer API Gateway or Lambda. There is no SNS, Redis,
+search cluster, Bedrock resource, CloudFront distribution, or duplicate
+frontend host in the regional design.
 
 ## Cost-safe staging modes
 
@@ -214,14 +217,19 @@ NIN, OTP-HMAC, and Turnstile material. Notification provider configuration is
 injected only into Notification API/Worker as required. Gateway receives no
 application secrets.
 
-Staging workload identity is implemented by the regional stack and token agent.
-The issuer maps exactly six IAM task roles to fixed `hid:staging:<service>`
-subjects and eleven allowed caller/audience bindings, listed in the
+Workload identity is implemented by the regional stack and token agent, for
+staging and, pending ADR-047, production. Each environment's issuer maps
+exactly six IAM task roles to fixed `hid:<environment>:<service>` subjects and
+eleven allowed caller/audience bindings, listed in the
 [IAM matrix](AWS_IAM_MATRIX.md#workload-identity). A caller can request only an
-audience; IAM request context supplies its identity. Only the issuer Lambda can
-sign with the exact KMS key, using `ECDSA_SHA_256`. Tasks receive no KMS signing
-authority. The issuer signs ES256 JWTs with a 300-second lifetime, and receivers
-enforce the configured issuer, JWKS, subject, and audience.
+audience; IAM request context supplies its identity. In the template only the
+issuer Lambda's role may sign with the exact KMS key, using `ECDSA_SHA_256`;
+the key keeps the CDK default key policy, which delegates key use to account
+IAM (ADR-047 risks, DEP-4-KEY). Tasks receive no KMS signing authority. The issuer signs ES256 JWTs with a 300-second lifetime, and receivers
+enforce the configured issuer, JWKS, subject, and audience. The issuer and the
+agent accept only `staging` and `production` and bind that one value to the
+issuer path, the subject prefix and the API Gateway stage, so a token of one
+environment fails every check of the other.
 
 The six agents run as UID/GID 65532 with read-only root filesystems, validate
 the returned JWT signature and claims, and atomically replace mode-0600 files
@@ -230,10 +238,13 @@ and waits for the agent's one-shot readiness check to pass. Agents renew about
 every 90 seconds, retry failures after 10 seconds, and remove expiring files.
 This renews tokens; it does not rotate the retained KMS signing key.
 
-Staging has no external issuer/JWKS/subject parameters. Development and
-production retain those external inputs and delivery requirements; the staging
-implementation preserves the production template byte for byte against the
-recorded baseline. Local tests do not establish deployed token delivery.
+Staging has no external issuer/JWKS/subject parameters, and neither does
+production under ADR-047 (pending). Development retains those external inputs
+and delivery requirements and has no token writer. The ADR-047 draft changes
+the production template (its issuer, six agents and eight fewer parameters) and
+changes the staging templates only in the issuer Lambda asset key; its
+production execution plan ([runbook](AWS_DEPLOYMENT_RUNBOOK.md) §12) is not
+approved. Local tests do not establish deployed token delivery.
 Live profiles encode their reviewed recommended defaults, but the guarded
 staging operations require readiness, migration, queue/outbox, billing, diff,
 account/region and exact-SHA

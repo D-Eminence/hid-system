@@ -63,18 +63,21 @@ monthly gross = Fargate task-hours and scale-out
               + Textract pages and bounded attempts
               + NAT/endpoints/ALB/WAF/public IPv4
               + EventBridge/SQS and providers
-              + staging workload signing key, KMS signing, API Gateway and Lambda requests
+              + workload signing key, KMS signing, API Gateway and Lambda requests
               + logs, metrics, Insights scans and retained evidence
               + ECR storage/scanning and Cloudflare delivery
 ```
 
-Every staging mode has **four customer-managed KMS keys**; development and
-production retain three. Sleep still incurs the signing key's fixed charge and
-any metered issuer traffic, although zero ECS tasks means no token-agent calls.
-The issuer is not a provisioned ECS service and has no provisioned Lambda
-concurrency. Its log group retains logs for 14 days.
+Every staging mode has **four customer-managed KMS keys**, and so does
+production with its own workload signing key, as proposed by ADR-047 and
+pending that decision; development retains three. Sleep still incurs the
+signing key's fixed charge and any metered issuer traffic, although zero ECS
+tasks means no token-agent calls. The issuer is not a provisioned ECS service
+and has no provisioned Lambda concurrency. The staging issuer's log group
+retains logs for 14 days; production's (ADR-047, pending) for 365 days.
 
-Six staging caller task definitions include token agents, each with a 64 MiB
+Six caller task definitions in staging, and in production under ADR-047
+(pending), include token agents, each with a 64 MiB
 memory reservation inside its existing Fargate task allocation. At one running
 replica per caller, a successful renewal cycle makes eleven audience-specific
 token requests and six JWKS requests about every 90 seconds. Starts, retries,
