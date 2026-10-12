@@ -397,8 +397,10 @@ try {
   // for it, then is refused once it commits, or goes through if it rolls back.
   for (const [work, outcome] of [[waiting, 'commit'], [rolledBack, 'rollback']]) {
     const ehr = await database.owner.connect();
+    let open = false;
     try {
       await ehr.query('begin');
+      open = true;
       await ehr.query('set local session_replication_role = replica');
       await ehr.query('select id from ehr.prescriptions where id=$1 for update', [work.prescription]);
       await ehr.query(`update ehr.prescriptions set status='cancelled',row_version=row_version+1,updated_at=clock_timestamp()
@@ -406,10 +408,14 @@ try {
       const pending = send(`/work-items/${work.id}/dispensings`, dispenseBody, { key: key(`dispense-${outcome}`) });
       await untilWaiting(pending, 'Lock', 'insert into pharmacy.dispensings', `dispense during an EHR cancel that ends in ${outcome}`);
       await ehr.query(outcome);
+      open = false;
       const response = await pending;
       if (outcome === 'commit') notDispensable(response, 'dispense during an EHR cancel that commits');
       else expectStatus(response, 201, 'dispense during an EHR cancel that rolls back');
-    } finally { ehr.release(); }
+    } finally {
+      if (open) await ehr.query('rollback').catch(() => undefined);
+      ehr.release();
+    }
   }
   assert.deepEqual(await Promise.all([dispensingsOf(waiting), dispensingsOf(rolledBack)]), [0, 1]);
   check('dispense: waits for an EHR cancel in progress; refused 409 when it commits, recorded (201) when it rolls back');
