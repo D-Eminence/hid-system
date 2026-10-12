@@ -27,7 +27,12 @@ The executable covers:
    rollback-only schema/RLS, OTP, patient self-service, enrollment, emergency,
    patient-PIN, cutover-staging-integrity, and QoreID-evidence integration suites. Execute the real OTP service against the exact Identity
    role, including concurrent completion/rate-limit and account-disable tests;
-   notification delivery uses an in-process test double.
+   notification delivery uses an in-process test double. The exact-role Identity
+   HTTP verifiers in `services/identity-api/scripts/` follow;
+   `verify-patient-enrollment-runtime.mjs` runs public NIN enrollment through
+   activation, sign-in, refresh, recovery and sign-out on a disposable database
+   copy, with QoreID (behind the real adapter), Siteverify and delivery stubbed
+   (see [QoreID verification](QOREID_VERIFICATION_CONTRACT.md)).
    Separately build a synthetic `0028` database with historical staff sessions,
    verified OTP challenges and registration outbox records; back it up, dry-run
    and apply `0029`–`0034`, verify preservation, fail-closed old OTP behavior,

@@ -146,15 +146,24 @@ contacts, `pending_reset` accounts, no patient workforce authority, and the exac
 synthetic clinician facility role. Pending recovery remains denied by the patient
 runtime. The existing patient HTTP checks also run with NIN explicitly deferred
 and its credentials absent; local-only Turnstile and notification test doubles
-remain local-only. With D-Eminence/hid-system#38 the rehearsal also runs
+remain local-only. The rehearsal also runs
+`services/identity-api/scripts/verify-patient-enrollment-runtime.mjs`, which
+exercises public QoreID NIN enrollment through activation and the two new
+patients' sign-in on a disposable copy of the rehearsal's `hid_rehearsal`
+database. It sets `QOREID_ENABLED`, the NIN-only gate and invented credentials
+only in its own process, enables QoreID only in its disposable database copy's
+integration settings, and calls an in-process QoreID stub behind the real
+adapter. It changes no staging setting and is not staging evidence; see the
+[QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md). With
+D-Eminence/hid-system#38 the rehearsal also runs
 `services/ehr-api/scripts/verify-delegated-cookie-read-runtime.mjs` on a
 disposable copy of its synthetic `hid_rehearsal` database: after the synthetic
 patient approves a synthetic doctor's access request, the doctor's same-origin
 cookie read of the patient's encounters through EHR, with no Origin or CSRF
 token, is authorized by Identity, and EHR cookie writes without Origin or CSRF
 are refused. That check is local and synthetic; it does not exercise the
-staging fixture or break-glass access. The rehearsal removes its cluster after completion and retains
-its result in the printed evidence directory.
+staging fixture or break-glass access. The rehearsal removes its cluster after
+completion and retains its result in the printed evidence directory.
 
 Local fixture validation does not prove staging import, OTP delivery, emergency
 notification, application deployment or acceptance; record those only when their

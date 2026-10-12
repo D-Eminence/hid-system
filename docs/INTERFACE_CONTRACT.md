@@ -17,10 +17,12 @@ Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
 ### Patient sessions and self service
 
-`POST /api/v1/auth/patient/login` accepts email/password and the `patient-login`
-Turnstile action. It binds a separate patient session to the existing canonical
-Identity patient; its actor has no staff roles, facility memberships or platform
-permissions. Existing session, refresh and logout routes retain that binding,
+`POST /api/v1/auth/patient/login` accepts an email address or the issued HIDCode
+(sent in the `email` field; both are matched case-insensitively) with a
+password, and the `patient-login` Turnstile action. It binds a separate
+patient session to the existing canonical Identity patient; its actor has no
+staff roles, facility memberships or platform permissions. Existing session,
+refresh and logout routes retain that binding,
 host-only Secure/HttpOnly cookies, Origin/CSRF checks and refresh-family reuse
 revocation. The server rechecks account eligibility, token version, session and
 patient mapping on use.
