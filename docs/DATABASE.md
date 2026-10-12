@@ -1762,7 +1762,7 @@ Checks:
   `services/outreach-api/scripts/verify-outreach-runtime.mjs` run the
   service's real `AppModule` through `scripts/service-runtime-harness.mjs`;
   `services/ehr-api/scripts/verify-ehr-lab-handoff-runtime.mjs`
-  (fix/ehr-lab-handoff-resend) runs EHR's and, in a child process, Lab's
+  (D-Eminence/hid-system#56) runs EHR's and, in a child process, Lab's
   through it, each as its runtime role, and checks that an active lab request
   Lab refuses stays saved, is sent again on request, on activation and on
   resume, and that Lab keeps one work item per request;
@@ -1779,7 +1779,7 @@ Checks:
   `pg_stat_database` to report no deadlock for its database, read after the
   service's connections closed, so a deadlock the retry hid still fails it.
   `verify-lab-runtime.mjs` also pins which database refusals Lab maps: only
-  EHR-order acceptance maps its own (fix/ehr-lab-handoff-resend), the
+  EHR-order acceptance maps its own (D-Eminence/hid-system#56), the
   `lab.validate_work_item` refusal (`23514`) to `409 LAB_ORDER_NOT_CURRENT`
   and the row-level security refusal of the work-item insert (`42501`) to
   `403 LAB_ACCESS_DENIED`; a member verifying a result they entered (`23514`),

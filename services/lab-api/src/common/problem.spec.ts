@@ -72,7 +72,7 @@ describe('ProblemDetailsFilter PHI safety', () => {
 
 // Lab maps no SQLSTATE in its problem filter: only EHR-order acceptance maps its
 // own database refusals, in lab-work-items.service.ts. Every other command
-// answers a database error 500, as before fix/ehr-lab-handoff-resend. OCR
+// answers a database error 500, as before D-Eminence/hid-system#56. OCR
 // stores a Lab 500 from POST /lab/imports/from-ocr as the retryable
 // OWNING_SERVICE_UNAVAILABLE, and a Lab 4xx as a terminal refusal of the
 // reviewed publication.
