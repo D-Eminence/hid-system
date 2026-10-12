@@ -164,6 +164,40 @@ for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
   }
 }
 
+// Identity reads X-HID-Client on the session refresh and sign-out to act only
+// on the calling app's kind of sign-in, after the CSRF check. If the edge
+// dropped either header, the kind check would be skipped or every request
+// refused, so both must reach the API unchanged on every host.
+for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
+  for (const [app, host] of Object.entries(profile.hosts)) {
+    for (const path of ['/api/v1/auth/refresh', '/api/v1/auth/logout']) {
+      test(`${deployment} ${app} forwards X-HID-Client and X-CSRF-Token on ${path}`, async () => {
+        let received
+        globalThis.fetch = async (url, init) => {
+          received = { url: String(url), init }
+          return new Response('{"code":"SESSION_CLIENT_MISMATCH"}', {
+            status: 403, headers: { 'content-type': 'application/problem+json' },
+          })
+        }
+        const response = await worker.fetch(new Request(`https://${host}${path}`, {
+          method: 'POST',
+          headers: {
+            origin: `https://${host}`, cookie: 'hid_access_refresh=r; hid_access_csrf=c',
+            'x-csrf-token': 'c', 'x-hid-client': 'staff-web',
+          },
+        }), environment({ DEPLOYMENT_ENV: deployment, APP_NAME: app }))
+        assert.equal(received.url, `${profile.apiOrigin}${path}`)
+        assert.equal(received.init.method, 'POST')
+        assert.equal(received.init.headers.get('x-hid-client'), 'staff-web')
+        assert.equal(received.init.headers.get('x-csrf-token'), 'c')
+        assert.equal(received.init.headers.get('cookie'), 'hid_access_refresh=r; hid_access_csrf=c')
+        assert.equal(response.status, 403)
+        assert.equal(JSON.parse(await response.text()).code, 'SESSION_CLIENT_MISMATCH')
+      })
+    }
+  }
+}
+
 test('preserves mutation bodies and methods', async () => {
   globalThis.fetch = async (_url, init) => new Response(await new Response(init.body).text(), { status: 202 })
   const response = await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/auth/login', {

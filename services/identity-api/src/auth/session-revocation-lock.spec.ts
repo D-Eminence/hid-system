@@ -119,11 +119,13 @@ describe('session revocation serialization (Stage 5B)', () => {
     expect(lock).toBeLessThan(end);
   });
 
-  it('a sign-out ends the whole sign-in: the presented session and any session its family rotated into', async () => {
+  it('a sign-out ends the whole sign-in: every unrevoked session of the presented session\'s family', async () => {
     const { service, transactions } = refreshHarness('staff', {});
     await service.revoke(SESSION, 'synthetic:lock', event);
     const signOut = (transactions[0] ?? []).find(({ sql }) => sql.includes('update auth.sessions') && sql.includes("'logout'"));
-    expect(signOut?.sql).toMatch(/where family_id = \(select presented\.family_id from auth\.sessions presented where presented\.id = \$1\)\s+and \(id = \$1 or revoked_at is null\)/);
+    // Only unrevoked sessions: one a concurrent sign-out or revocation ended
+    // while this one waited for the account lock is not ended or recorded again.
+    expect(signOut?.sql).toMatch(/where family_id = \(select presented\.family_id from auth\.sessions presented where presented\.id = \$1\)\s+and revoked_at is null\s/);
     expect(signOut?.values).toEqual([SESSION]);
   });
 

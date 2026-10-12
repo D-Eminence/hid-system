@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
-import { decodeTimelineCursor, requestDigest, timelinePage } from '../shared/clinical-context';
+import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
 import {
   CreateClinicalNoteDto,
   CreateClinicalNoteRevisionDto,
@@ -83,21 +83,22 @@ export class ClinicalNotesService {
     encounterId: string,
     query: TimelineQueryDto,
   ) {
-    const cursor = decodeTimelineCursor(query.cursor);
+    const scope = { list: 'ehr.clinical-notes', patientId, encounterId };
+    const cursor = decodeTimelineCursor(query.cursor, scope);
     return this.repository.run(
       context,
       patientId,
       'read_records',
       { action: 'ehr.note.list', resourceType: 'clinical-note', resourceId: encounterId },
       async (client) => {
-        const result = await client.query<ClinicalNoteRow>(
-          `select ${NOTE_COLUMNS} from ehr.clinical_notes
+        const result = await client.query<ClinicalNoteRow & { cursorAt: string }>(
+          `select ${NOTE_COLUMNS}, ${timelineCursorSql('created_at')} as "cursorAt" from ehr.clinical_notes
            where encounter_id = $1 and patient_id = $2 and facility_id = $3
              and ($4::timestamptz is null or (created_at, id) < ($4::timestamptz, $5::uuid))
            order by created_at desc, id desc limit $6`,
           [encounterId, patientId, context.facilityId, cursor?.sortAt ?? null, cursor?.id ?? null, query.limit + 1],
         );
-        const page = timelinePage(result.rows, query.limit, (row) => row.createdAt);
+        const page = timelinePage(result.rows, query.limit, scope);
         return { value: page, details: { resultCount: page.items.length } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
