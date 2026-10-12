@@ -13,7 +13,15 @@
 // result while a correction awaits verification, and receives only the
 // released version. Only the Identity API is replaced, by a local fake; every
 // database check (row-level security, the 0077 guards, immutability triggers,
-// unique constraints) is real.
+// unique constraints) is real. Only EHR-order acceptance maps its own database
+// refusals (lab-work-items.service.ts, D-Eminence/hid-system#56): its guard's
+// refusal of a stale or changed order 409 LAB_ORDER_NOT_CURRENT and row-level
+// security 403 LAB_ACCESS_DENIED, where both were 500; it answers a later
+// version of an order Lab already holds 409 LAB_ORDER_ALREADY_ACCEPTED and an
+// earlier one 409 LAB_ORDER_NOT_CURRENT without reaching the database guard.
+// Every other command still answers a database refusal 500 (a known limit);
+// for the OCR import that 500 is what OCR stores as the retryable
+// OWNING_SERVICE_UNAVAILABLE. The harness records the SQLSTATE behind each.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
@@ -211,8 +219,10 @@ try {
     assert.equal(new Set(responses.map((response) => response.body.id)).size, 1, `${label}: one result`);
     return responses[0].body;
   };
-  const refusedByDatabase = (response, label) => {
-    expectStatus(response, 500, label);
+  // Row-level security refuses an actor without a database consent (42501). Lab answers it 500, as any database
+  // refusal, except EHR-order acceptance, which answers its own 403 LAB_ACCESS_DENIED.
+  const refusedByDatabase = (response, label, { status = 500, code = 'INTERNAL_ERROR' } = {}) => {
+    assert.equal(expectStatus(response, status, label).code, code, `${label}: code`);
     assert.equal(response.sqlstate, '42501', `${label}: refused by row-level security`);
   };
 
@@ -231,9 +241,9 @@ try {
   expectStatus(await send('/work-items/accept-ehr-order', orderBody(order1), { token: 'token-a-read-only', key: key('accept'), internal: 'ehr-api' }),
     403, 'accept without the permission');
   refusedByDatabase(await send('/work-items/accept-ehr-order', orderBody(order3), { token: 'token-b', key: key('accept'), internal: 'ehr-api' }),
-    'accept without a database consent');
+    'accept without a database consent', { status: 403, code: 'LAB_ACCESS_DENIED' });
   assert.deepEqual(await Promise.all([workItemsOf(order1), workItemsOf(order3)]), [0, 0]);
-  check('accept: no EHR caller 401, Identity denial 403, missing permission 403, no database consent refused by row-level security (42501), nothing written');
+  check('accept: no EHR caller 401, Identity denial 403, missing permission 403, no database consent refused by row-level security (42501) with 403 LAB_ACCESS_DENIED, nothing written');
   const workItem = sameResult(await together(4, () => send('/work-items/accept-ehr-order', orderBody(order1),
     { key: key('accept'), internal: 'ehr-api' })), 'four concurrent accepts of one EHR order');
   assert.deepEqual(await Promise.all([workItemsOf(order1),
@@ -249,19 +259,51 @@ try {
     'three concurrent accepts of a second order');
   assert.equal(await workItemsOf(order2), 1);
   check('accept: concurrent accepts of one order create one work item, test, event and outbox row; replay 201; a different body 409');
+  // Lab holds one work item per EHR order, ever (unique source_ehr_order_id, 0018). EHR changes the order (every
+  // change takes the next row_version) and sends the new version: Lab refuses it, naming the version it holds.
+  await database.fixture((client) => client.query(
+    "update ehr.lab_requests set row_version = 2, priority = 'stat' where id = $1", [order1]));
+  const reaccepted = await send('/work-items/accept-ehr-order', { ...orderBody(order1), sourceEhrOrderVersion: 2, priority: 'stat' },
+    { key: key('accept'), internal: 'ehr-api' });
+  assert.equal(expectStatus(reaccepted, 409, 'accept of the next version of an accepted order').code, 'LAB_ORDER_ALREADY_ACCEPTED',
+    JSON.stringify([reaccepted.body?.code, reaccepted.sqlstate]));
+  assert.deepEqual(await Promise.all([workItemsOf(order1),
+    count('select count(*) from lab.work_items where source_ehr_order_id=$1 and source_ehr_order_version=1', [order1])]), [1, 1]);
+  check('accept: version 2 of an order Lab accepted at version 1 is 409 LAB_ORDER_ALREADY_ACCEPTED; the version 1 work item stays the only one');
   // Lab accepts an EHR order only when requested_at equals the order's created_at exactly (0077). EHR sends the
   // database's microsecond text (lab-requests.service.ts); the millisecond text of a JavaScript Date is refused.
   const truncated = await send('/work-items/accept-ehr-order', { ...orderBody(f.microOrder), requestedAt: '2026-10-01T09:00:00.123Z' },
     { key: key('accept'), internal: 'ehr-api' });
-  // lab.validate_work_item refuses it (23514); Lab answers an unmapped guard refusal with 500 (release checklist §9).
-  expectStatus(truncated, 500, 'accept with the millisecond requestedAt');
+  // lab.validate_work_item refuses it (23514), and Lab answers 409 LAB_ORDER_NOT_CURRENT.
+  assert.equal(expectStatus(truncated, 409, 'accept with the millisecond requestedAt').code, 'LAB_ORDER_NOT_CURRENT');
   assert.equal(truncated.sqlstate, '23514', 'millisecond requestedAt: refused by lab.validate_work_item');
   assert.equal(truncated.message, 'Lab work item does not match the exact active EHR order version and actor context');
   assert.equal(await workItemsOf(f.microOrder), 0);
   expectStatus(await send('/work-items/accept-ehr-order', { ...orderBody(f.microOrder), requestedAt: '2026-10-01T09:00:00.123456Z' },
     { key: key('accept'), internal: 'ehr-api' }), 201, 'accept with the microsecond requestedAt');
   assert.equal(await workItemsOf(f.microOrder), 1);
-  check('accept: an order created at .123456 is refused for requestedAt .123Z by the database guard (23514) and creates no work item; .123456Z is accepted (201)');
+  check('accept: an order created at .123456 is refused for requestedAt .123Z by the database guard (23514) with 409 LAB_ORDER_NOT_CURRENT and creates no work item; .123456Z is accepted (201)');
+  // An EHR order changed after the version EHR sends (row_version 2, version 1 sent) is not the current order.
+  await database.fixture((client) => client.query('update ehr.lab_requests set row_version = 2 where id = $1', [order3]));
+  const stale = await send('/work-items/accept-ehr-order', orderBody(order3), { key: key('accept'), internal: 'ehr-api' });
+  assert.equal(expectStatus(stale, 409, 'accept of a stale order version').code, 'LAB_ORDER_NOT_CURRENT');
+  assert.equal(stale.sqlstate, '23514', 'stale version: refused by lab.validate_work_item');
+  assert.equal(stale.message, 'Lab work item does not match the exact active EHR order version and actor context');
+  assert.equal(await workItemsOf(order3), 0);
+  expectStatus(await send('/work-items/accept-ehr-order', { ...orderBody(order3), sourceEhrOrderVersion: 2 },
+    { key: key('accept'), internal: 'ehr-api' }), 201, 'accept of the current order version');
+  assert.equal(await workItemsOf(order3), 1);
+  check('accept: version 1 of an order now at version 2 is refused by the database guard (23514) with 409 LAB_ORDER_NOT_CURRENT and creates no work item; version 2 is accepted (201)');
+  // A call for version 1 arriving after Lab accepted version 2 (two EHR updates, the later call first) is stale:
+  // Lab answers it from the work item it holds, without reaching the guard, and never says it holds an earlier version.
+  const late = await send('/work-items/accept-ehr-order', orderBody(order3), { key: key('accept'), internal: 'ehr-api' });
+  assert.equal(expectStatus(late, 409, 'accept of version 1 when Lab holds version 2').code, 'LAB_ORDER_NOT_CURRENT',
+    'accept of version 1 when Lab holds version 2 is not answered LAB_ORDER_NOT_CURRENT');
+  assert.equal(late.sqlstate, undefined, 'accept of version 1 when Lab holds version 2 reached the database guard');
+  assert.deepEqual(await Promise.all([workItemsOf(order3),
+    count('select count(*) from lab.work_items where source_ehr_order_id=$1 and source_ehr_order_version=2', [order3])]), [1, 1],
+  'accept of version 1 when Lab holds version 2 changed the work items');
+  check('accept: version 1 of an order Lab holds at version 2 is 409 LAB_ORDER_NOT_CURRENT from the work item Lab holds, not the guard; the version 2 work item stays the only one');
 
   // Accession a work item.
   const [w1, w2, w3] = f.work;
@@ -535,6 +577,15 @@ try {
   const ocrBody = { patientId: f.patient, sourceDocumentId: f.document, ocrJobId: f.ocr.job, extractionId: f.ocr.extraction,
     validationId: f.ocr.validation, validationVersion: 1, publicationId: f.ocr.publication, reviewedBy: f.a.account, observations };
   expectStatus(await send('/imports/from-ocr', ocrBody, { key: key('ocr') }), 401, 'OCR import without the OCR caller');
+  // OCR stores a Lab 5xx as the retryable OWNING_SERVICE_UNAVAILABLE and a Lab 4xx as a terminal refusal of the reviewed
+  // publication (ocr-api ocr.service.ts), so the OCR import keeps answering a database refusal 500.
+  const ocrCorrelation = 'verifier-ocr-import-without-consent-0001';
+  refusedByDatabase(await send('/imports/from-ocr', ocrBody, { token: 'token-b', key: key('ocr'), internal: 'ocr-api',
+    correlationId: ocrCorrelation }), 'OCR import without a database consent');
+  assert.deepEqual(await Promise.all([count('select count(*) from lab.imported_evidence where publication_id=$1', [f.ocr.publication]),
+    count("select count(*) from audit.events where correlation_id=$1 and action='lab.import.create'", [ocrCorrelation])]), [0, 0],
+  'OCR import without a database consent wrote imported evidence or its audit event');
+  check('import from OCR: no database consent refused by row-level security (42501) still answers 500 INTERNAL_ERROR, which OCR stores as the retryable OWNING_SERVICE_UNAVAILABLE, not a terminal 4xx; nothing written');
   const fromOcr = sameResult(await together(4, () => send('/imports/from-ocr', ocrBody, { key: key('ocr'), internal: 'ocr-api' })),
     'four concurrent imports of one OCR publication');
   assert.equal(await count('select count(*) from lab.imported_evidence where publication_id=$1', [f.ocr.publication]), 1);

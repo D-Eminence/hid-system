@@ -199,6 +199,8 @@ patient mapping on use.
 grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
 returns at most 50 completed encounters and 50 current signed/amended note
 revisions, after fresh Identity authorization through the EHR workload caller.
+It names the other five record categories as withheld from the patient, not as
+absent (§11, "Record summaries").
 These routes accept no browser-selected patient identity. Patient record access
 is read-only and owning-service disclosure/audit is atomic. The internal
 `GET /api/v1/identity/service/patient-self-authorization` requires both the
@@ -220,6 +222,8 @@ notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
 Activation also requires the platform `break_glass_enabled` control inside the
 activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
+The summary's sections, the read permission each needs, its limits and audit
+counts are in §11, "Record summaries".
 
 Patient access-request decisions are session-bound patient commands:
 `GET /api/v1/identity/me/access-requests`,
@@ -741,6 +745,8 @@ Representative resources:
 /api/v1/ehr/patients/:patientId/encounters/:encounterId/diagnoses
 /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions
 /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/pharmacy-work-item
+/api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests
+/api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests/:requestId/lab-work-item
 ```
 
 All writes require:
@@ -751,6 +757,66 @@ All writes require:
 * validation
 * audit
 * appropriate concurrency protection
+
+### EHR lab requests sent to Lab
+
+EHR saves a lab request, then, when it is active, asks Lab to accept it
+(`POST /api/v1/lab/work-items/accept-ehr-order`, "Extracted Lab transport").
+The save commits first, because Lab's guard reads the committed request; a Lab
+answer cannot undo it. Lab holds one work item per request, at the version it
+accepted. Paths are under
+`/api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests`
+(D-Eminence/hid-system#56):
+
+- `POST` (create). An active request answers `201` with the request,
+  `labWorkItem` (Lab's work item) and `labHandoff: { state: 'accepted' }`; any
+  other status answers both `null`. When Lab refuses the request (`400`, `403`
+  or `409`), the request stays saved and active and the create answers
+  `409 LAB_HANDOFF_REFUSED`; when Lab answers anything else (`401` when it
+  cannot verify the EHR's workload identity, another `4xx`, `5xx`) or cannot be
+  reached, `502 LAB_HANDOFF_UNCONFIRMED`. Each detail names the saved request
+  and Lab's code; a `5xx` detail is hidden from users, its code is not. Send the request with `.../lab-work-item` below, or replay the
+  create with the same `Idempotency-Key` and body, which loads the saved
+  request and sends it again. A replay of a request Lab holds at an earlier
+  version answers `201` with `labWorkItem: null` and
+  `labHandoff: { state: 'already_accepted', code: 'LAB_ORDER_ALREADY_ACCEPTED' }`.
+- `PATCH /:requestId` (update). After the update commits, a request that is
+  active is sent to Lab at its new version: activating a draft, resuming a held
+  request, and an edit (priority, clinical information) of an active one. It
+  answers `200` with the request, `labWorkItem` and `labHandoff`: `null` when
+  the request is not active; `{ state: 'accepted' }`;
+  `{ state: 'already_accepted', code: 'LAB_ORDER_ALREADY_ACCEPTED' }` when Lab
+  holds an earlier version, so the change is not in Lab (or a version that
+  row-level security hides from the actor, which Lab cannot name: "Extracted
+  Lab transport");
+  `{ state: 'failed', status, code }` with Lab's answer, when the update stands
+  and the request can be sent again with `.../lab-work-item` (`409
+  LAB_ORDER_NOT_CURRENT` means the request changed again after this update, and
+  Lab may hold that later version: reload it); and
+  `{ state: 'not_sent', code: 'LAB_PERMISSION_ABSENT' }` when the actor lacks
+  `lab.work-item.accept`.
+- `POST /:requestId/lab-work-item` sends, or sends again, an active request.
+  It needs `ehr.lab-request.write` and `lab.work-item.accept`, an
+  `Idempotency-Key` (16–128 URL-safe characters) and the body
+  `{ expectedRowVersion }` (an integer, at least 1, and nothing else). It reads
+  the request without a lock and writes only its audit event
+  (`ehr.lab-request.lab-handoff.eligibility-checked`), then calls Lab: a version
+  that is not the stored one is `412 LAB_REQUEST_VERSION_CONFLICT` and a request
+  that is not active `409 LAB_REQUEST_NOT_ELIGIBLE`, without calling Lab. Lab's
+  work item and Lab's refusal of the request are returned as they are, since
+  the EHR changed nothing: `201` with the work item (the same one again for a
+  version Lab accepted), or Lab's `400`, `403` or `409`, such as
+  `409 LAB_ORDER_ALREADY_ACCEPTED` (Lab holds an earlier version) or
+  `409 LAB_ORDER_NOT_CURRENT` (the request changed after it was read). Any
+  other Lab answer, and Lab unreachable, is `502 LAB_HANDOFF_UNCONFIRMED`,
+  naming the request and Lab's code; send it again. Lab's `401` (it cannot
+  verify the EHR's workload identity, for example while its JWKS is
+  unreachable) is never passed on, since a browser takes a `401` for its own
+  expired session. Lab keys its acceptance by request and version, whatever the
+  key.
+- Cancelling, holding, completing or marking a request entered in error after
+  Lab accepted it is not sent to Lab, and Lab keeps working on the version it
+  accepted. What Lab must do then is an open clinical workflow decision.
 
 ### EHR clinical list paging
 
@@ -794,6 +860,60 @@ only if it sorts after the last row shown; reload the first page to see newer
 rows. Before the microsecond cursor, rows that sort after the last row shown
 within its millisecond (earlier in that millisecond, or tied with a lower
 `id`) were skipped.
+
+### Record summaries
+
+Two read-only summaries return the same seven arrays, each newest first:
+`encounters` (completed), `notes` (signed or amended, with the current
+revision's content), `vitals`, `diagnoses`, `prescriptions`, `labRequests` and
+`documents`.
+
+- `GET /api/v1/ehr/me/records`: the patient's own records, from every facility.
+- `GET /api/v1/ehr/patients/:patientId/emergency-records`: the break-glass
+  summary of the active facility (`X-Facility-ID`, `X-Purpose-Of-Use: emergency`).
+
+Both also return:
+
+| Field | Meaning |
+|---|---|
+| `released` | the categories read for this caller, in the order above |
+| `withheld` | the other categories. A withheld category is not read; its array is always empty and means "not released to this caller", never "no records" |
+| `limits` | per released section, the most rows it shows: 50 encounters, 50 notes and 100 of each other section |
+| `truncated` | per released section, `true` when more rows exist than its limit; the section then holds the newest `limits[section]` rows |
+| `limit` | `50`, the smallest section limit, kept for existing clients; read `limits` and `truncated` instead |
+
+**Patient summary.** Only encounters and notes are released to the patient:
+`released` is `["encounters","notes"]` and `withheld` is
+`["vitals","diagnoses","prescriptions","labRequests","documents"]`. Which other
+categories are released, and on which conditions, is an open product decision;
+this is the current default. The audit event `ehr.patient.self.records.read`
+records `encounterCount`, `noteCount` and `withheldCategories`.
+
+**Emergency summary.** Of the seven categories it returns those the reader
+holds the read permission for, pending a decision on the break-glass scope.
+The route requires `ehr.encounter.read` and `ehr.note.read`, so encounters and
+notes are always read. Each other category needs the permission its own routes
+require: vitals `ehr.vital.read`, diagnoses `ehr.diagnosis.read`, prescriptions
+`ehr.prescription.read`, lab requests `ehr.lab-request.read` and documents
+`ehr.document.read`, at the active facility. Break-glass is not an
+authorization bypass: a category the reader lacks the permission for is
+withheld. The seeded doctor, clinician and nurse roles hold all seven.
+
+- `documents` lists only documents whose effective status is `available`: the
+  latest scan of the exact stored object version and SHA-256 is clean, the rule
+  the download applies. Each has `status` `available`, `scanStatus` `clean`,
+  and `mediaType` as the scan detected it (as declared if the scan named none).
+- `vitals` are returned as first recorded (the vital row's eight measurement
+  columns, which no API route changes), with the same fields as before; a
+  vital's corrections are not applied. Applying them is pending the product
+  decision on correction semantics (proposed default: the current correction
+  is the whole current set, as Health-id's clinician chart applies it); the
+  implementation is preserved in commit `7401193` for when the decision lands.
+- The audit event `ehr.emergency.records.read` records the count of each
+  category read, and the categories withheld, and nothing else:
+  `encounterCount`, `noteCount`, `vitalCount`, `diagnosisCount`,
+  `prescriptionCount`, `labRequestCount`, `documentCount` (a withheld category
+  has no count) and `withheldCategories`.
 
 ## 12. Lab
 
@@ -1173,7 +1293,40 @@ full history read records `lab.result.history.read`.
 
 ### Extracted Lab transport
 
-Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused with SQLSTATE `23514` for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets `409 IDEMPOTENCY_CONFLICT` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
+Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused by the guard (SQLSTATE `23514`, `409 LAB_ORDER_NOT_CURRENT`) for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets Lab's `409 IDEMPOTENCY_CONFLICT`, which the EHR create reports as `409 LAB_HANDOFF_REFUSED` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
+
+Lab answers EHR order acceptance (D-Eminence/hid-system#56):
+
+| Request | Answer |
+| --- | --- |
+| A version of an order Lab has not accepted, matching the EHR order | `201` with the new work item |
+| The version Lab accepted, same body | `201` with the same work item (replay) |
+| The version Lab accepted, another body | `409 IDEMPOTENCY_CONFLICT` |
+| A later version of an order Lab accepted | `409 LAB_ORDER_ALREADY_ACCEPTED`, naming the version Lab holds; Lab holds one work item per EHR order, ever, and writes nothing |
+| An earlier version than the one Lab accepted | `409 LAB_ORDER_NOT_CURRENT`: the EHR order changed since, and Lab may hold that change; Lab writes nothing and does not reach the guard |
+| An order that is not the current active version exactly as EHR holds it (changed, not active, another field or `requestedAt`) | `409 LAB_ORDER_NOT_CURRENT` (`lab.validate_work_item`, `23514`) |
+| An actor without a database consent to write the patient's records at the facility | `403 LAB_ACCESS_DENIED` (row-level security on the work-item insert, `42501`); Lab writes nothing |
+| An order whose work item Lab holds but row-level security hides from the actor (for example under a consent directive that denies reading) | `409 LAB_ORDER_ALREADY_ACCEPTED`, naming no version (a `lab.work_items` unique key, `23505`, after the one retry); Lab writes nothing |
+
+Its body takes the EHR lab-request limits: `testCodeSystem` 1–255,
+`testCode` 1–100 and `testName` 1–500 characters, `clinicalIndication` up to
+4000. Its ids (`sourceEhrOrderId`, `sourceEncounterId`, `patientId`,
+`orderingFacilityId`, `requestedBy`) are UUIDs of any version (1–8, nil, max),
+since a patient or account migrated from the legacy system keeps its source id.
+
+Only this command maps database refusals, and only its own three above: the
+`23514` and `42501` of its work-item insert and a `lab.work_items` unique
+conflict left after the retry. Their codes and details are fixed and name no
+row, value or constraint; Lab logs the SQLSTATE and route. Any other database
+error of acceptance (a `23514` of a child guard, a missing grant on another
+table, a data error) answers `500`. Every other Lab command answers a database
+refusal `500 INTERNAL_ERROR` with a fixed detail, as before
+D-Eminence/hid-system#56: a guard (`23514`), a unique key after the retry
+(`23505`), row-level security (`42501`) or a data error. For
+`POST /api/v1/lab/imports/from-ocr` OCR keeps storing that `500` as the
+retryable `OWNING_SERVICE_UNAVAILABLE` and retries the publication up to
+`max_attempts`, where a Lab `4xx` would end the reviewed publication as
+terminal.
 
 ### Extracted Pharmacy transport
 

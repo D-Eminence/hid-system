@@ -26,7 +26,20 @@ validation preserves the exact requested-test snapshot and provenance. Lab
 owns the acceptance event, semantic audit, and `LabWorkItemCreated` outbox
 record; EHR calls the typed Lab service and does not write Lab tables. The
 `accepted` state implies no accession, specimen collection, execution, QC, or
-result.
+result. Lab holds one work item per EHR request, at the version it accepted:
+the same version again is a replay, a later version is refused with
+`409 LAB_ORDER_ALREADY_ACCEPTED`, and an earlier version, or a request that is
+not the current active version exactly as EHR holds it, with
+`409 LAB_ORDER_NOT_CURRENT`. Its ids may be UUIDs of any version, as migrated
+legacy ids are. Later EHR changes (cancellation, hold, edits) are not
+propagated to Lab. Acceptance alone maps its own database refusals, with fixed
+details: the guard's `23514` `409 LAB_ORDER_NOT_CURRENT` and row-level
+security's `42501` `403 LAB_ACCESS_DENIED` on the work-item insert, and a
+`lab.work_items` unique conflict left after the retry `409
+LAB_ORDER_ALREADY_ACCEPTED`. The problem filter maps no SQLSTATE, so every
+other Lab command, and any other database error of acceptance, answers `500`;
+OCR keeps storing that `500` from its Lab import as the retryable
+`OWNING_SERVICE_UNAVAILABLE`.
 
 Migration `0020` permits execution only from a received specimen and its exact
 requested-test snapshot. Manual numeric/text results are immutable revisions
