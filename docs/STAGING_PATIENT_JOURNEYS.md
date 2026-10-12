@@ -165,7 +165,7 @@ disposable copy of its synthetic `hid_rehearsal` database: after the synthetic
 patient approves a synthetic doctor's access request, the doctor's same-origin
 cookie read of the patient's encounters through EHR, with no Origin or CSRF
 token, is authorized by Identity, and EHR cookie writes without Origin or CSRF
-are refused. With fix/patient-records-release-honesty it also reads the
+are refused. With D-Eminence/hid-system#52 it also reads the
 patient's own record summary (released and withheld categories, limits), the
 break-glass emergency summary of a reader whose role lacks four category read
 permissions (those categories withheld), and the doctor's (vitals as first

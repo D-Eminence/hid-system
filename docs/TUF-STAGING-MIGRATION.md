@@ -56,7 +56,7 @@ The executable covers:
    Identity as `hid_identity_api_runtime`: a doctor's same-origin cookie read
    of a patient's encounters through EHR, with no Origin or CSRF token, is
    authorized by Identity, and EHR cookie writes without Origin or CSRF are
-   refused (with fix/patient-records-release-honesty it also reads the
+   refused (with D-Eminence/hid-system#52 it also reads the
    patient's record summary and two break-glass emergency summaries, a reader
    lacking four category read permissions and the doctor, with their audit
    events); and `outreach_cookie_read_runtime`
