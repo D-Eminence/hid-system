@@ -93,7 +93,6 @@ const routeLoaders = {
   adminDashboard: AdminDashboardPage.preload,
   adminAiProcessing: AdminAiProcessingPage.preload,
   doctorAuth: DoctorAuthPage.preload,
-  doctorRecover: DoctorRecoverPage.preload,
   doctorDashboard: DoctorDashboardPage.preload,
   doctorAccess: DoctorAccessPage.preload,
   doctorHistory: DoctorHistoryPage.preload,
