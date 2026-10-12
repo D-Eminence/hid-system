@@ -237,6 +237,21 @@ Recovery completion atomically consumes the account/token-bound OTP credential,
 sets an Argon2 password and revokes sessions. Disabled, stale, expired and replayed
 credentials fail closed. Completion returns to login rather than opening a session.
 
+Recovery start (`POST /api/v1/auth/otp/start`, every purpose) answers every
+identifier alike: `202 { accepted, challengeId, deliveryChannels: ['email', 'sms'],
+expiresInSeconds, resendAfterSeconds }`, before any code is delivered. Within
+`resendAfterSeconds` a repeat for the same purpose and identifier (email or HID,
+any case) answers the same `challengeId` whether or not an account exists, and
+sends nothing. A start for the account's other identifier in that window, or for
+an account whose code budget is spent, gets a new `challengeId` and no code, as
+an unknown identifier does. Clients keep the `challengeId` of their latest start.
+Verification (`POST /api/v1/auth/otp/verify`) counts wrong codes against one
+budget per account across its challenges and purposes: by default the fifth wrong
+code within 15 minutes (`OTP_VERIFY_FAILURE_MAX`,
+`OTP_VERIFY_FAILURE_WINDOW_SECONDS`) refuses every code of that account, a correct
+one too, for 15 minutes. Every refusal is `403 OTP_INVALID_OR_EXPIRED`; start
+limits are `429 OTP_RATE_LIMITED`, unchanged.
+
 ## 1. Purpose
 
 This document defines communication rules between HID clients and services.

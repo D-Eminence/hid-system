@@ -131,6 +131,24 @@ begin
      or has_table_privilege('hid_identity_runtime', 'notification.device_registrations', 'SELECT') then
     raise exception 'Identity OTP or evidence-bound progressive-assurance boundary is inconsistent';
   end if;
+  -- Recovery start cooldowns (0080): the Identity runtime reads and writes
+  -- them but never deletes them; no other runtime touches them.
+  if not has_table_privilege('hid_identity_runtime', 'auth.otp_start_cooldowns', 'SELECT')
+     or not has_table_privilege('hid_identity_runtime', 'auth.otp_start_cooldowns', 'INSERT')
+     or not has_table_privilege('hid_identity_runtime', 'auth.otp_start_cooldowns', 'UPDATE')
+     or has_table_privilege('hid_identity_runtime', 'auth.otp_start_cooldowns', 'DELETE')
+     or has_table_privilege('hid_identity_api_runtime', 'auth.otp_start_cooldowns', 'DELETE') then
+    raise exception 'Identity recovery start cooldown privileges are inconsistent';
+  end if;
+  foreach role_name in array array[
+    'hid_ehr_runtime', 'hid_api_runtime', 'hid_ehr_api_runtime', 'hid_ocr_api_runtime',
+    'hid_lab_api_runtime', 'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime',
+    'hid_notification_runtime', 'hid_notification_api_runtime', 'hid_notification_worker'
+  ] loop
+    if has_table_privilege(role_name, 'auth.otp_start_cooldowns', 'SELECT,INSERT,UPDATE,DELETE') then
+      raise exception 'Runtime role % can access recovery start cooldowns', role_name;
+    end if;
+  end loop;
   if not has_table_privilege('hid_notification_runtime', 'notification.device_registrations', 'SELECT,INSERT,UPDATE')
      or not has_table_privilege('hid_notification_runtime', 'notification.delivery_attempts', 'SELECT,INSERT')
      or has_table_privilege('hid_notification_runtime', 'auth.otp_challenges', 'SELECT')

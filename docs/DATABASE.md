@@ -1796,6 +1796,84 @@ patient's window at 4 and the known PIN refused. It fails without 0079 (the
 success reset the actor window), and also if the success leaves its own
 patient's window uncleared or clears another patient's.
 
+## Uniform recovery start cooldown (0080) and recovery code budget
+
+`0080_uniform_recovery_start_cooldown.sql` adds `auth.otp_start_cooldowns`:
+one row per recovery purpose (`PASSWORD_RESET`, `LEGACY_ACCOUNT_RECOVERY`,
+`LEGACY_SESSION_FALLBACK`) and `identifier_hmac`, a keyed HMAC of the purpose
+and the case-folded email address or HID (lower-case hex, 64 characters), with
+the `challenge_id` the last start answered and its `started_at`. The key is
+`(purpose, identifier_hmac)`. There is no foreign key: the row exists whether
+or not the identifier has an account, and its challenge id may name no
+challenge. It holds no identifier, authorizes nothing and has no row-level
+security, as `auth.otp_challenges` and `auth.otp_rate_limits` have none. The
+role bootstrap grants `SELECT`, `INSERT` and `UPDATE` to `hid_identity_runtime`
+and `hid_schema_test_runtime`; no runtime may delete rows. There is no
+retention job: each identifier keeps one row per purpose, overwritten by its
+next start, so the table grows with the number of distinct identifiers ever
+started, as `auth.otp_rate_limits` grows with its buckets.
+
+Before 0080 the resend cooldown of `POST /auth/otp/start` was read only from
+the account's open row in `auth.otp_challenges`. Within
+`OTP_RESEND_COOLDOWN_SECONDS` a repeat for a real account was answered with
+the live challenge id and one for an unknown identifier with a new random id,
+so two requests told whether an address or HID had an account. The marker
+cannot live in `auth.otp_challenges`: `otp_challenges_active_recipient_purpose_uq`
+(0028) would refuse a later real challenge for the same address.
+
+The Identity API (`otp.service.ts`), in the start transaction, after the three
+rate-limit counts (whose recipient bucket lock already serializes the starts
+of one identifier):
+
+1. reads the row; if `started_at` is within the cooldown by
+   `clock_timestamp()`, answers its `challenge_id` and sends nothing;
+2. otherwise upserts the row with the new candidate id;
+3. reads the account's open challenge of the purpose `FOR UPDATE`, as before,
+   with its cooldown also computed by `clock_timestamp()`;
+4. answers an unknown identifier, an account without a usable recipient, an
+   account whose code budget is spent, or an open challenge still cooling that
+   this identifier did not start (the account's other identifier did) with the
+   new id, sending nothing. The identifier's own challenge, written just after
+   its row, does not hold back its retry once its own cooldown has ended;
+5. otherwise replaces the open challenge and sends a code, after the response.
+
+A challenge whose delivery failed definitively keeps its id until the cooldown
+ends. No lock is added: the table is read without a row lock, and the start
+transaction's lock order is unchanged.
+
+The recovery code budget needs no schema change. Each wrong code also counts
+in `auth.otp_rate_limits`, scope `account`, bucket
+`hmac('otp-verify-failure', account_id)`, apart from the start bucket
+`hmac('account', account_id)`. The `OTP_VERIFY_FAILURE_MAX`-th wrong code (5
+by default) within `OTP_VERIFY_FAILURE_WINDOW_SECONDS` (900) sets
+`blocked_until` one window ahead, as the platform MFA budget does. While it is
+set, verification refuses every code of the account, a correct one too, and
+invalidates that challenge (`attempts_exhausted`); a start reads it without a
+lock and sends nothing. Verification locks its challenge row, then takes the
+bucket's transaction lock (`otp-rate:account:<bucket>`), and locks no other
+challenge: start never takes that lock and `auth.complete_recovery_otp` never
+touches the bucket, so no cycle forms. An unknown challenge id counts nothing.
+No bucket is keyed by client IP.
+
+Tests:
+- `otp-recovery.integration.sql` (rollback-only) requires the table and its
+  key, no foreign key, the upsert of one row per purpose and identifier and the
+  refusal of an upper-case HMAC and of a non-recovery purpose (`23514`) as
+  `hid_identity_api_runtime`, which may not delete (`42501`), and refuses
+  `hid_ehr_api_runtime` any read. `runtime-roles.integration.sql` requires
+  exactly those privileges for the Identity runtime and none for the other
+  runtime roles.
+- `verify-otp-recovery-runtime.mjs` runs the real service as
+  `hid_identity_api_runtime`: five accepted concurrent starts for one unknown
+  identifier answer one challenge id; four wrong codes on one challenge, then
+  two wrong codes on two purposes of the account at once, both refused with
+  `403`; a correct code of a third purpose refused; a start for the suspended
+  account sends nothing; after the owner clears the block a new start sends a
+  code that verifies. It waits for deliveries before ending its pool.
+- `verify-patient-enrollment-runtime.mjs` repeats a start over HTTP for an
+  unknown and a known identifier (same challenge id, no code) and starts the
+  account's HID (a new id, no code).
+
 ## EHR clinical list paging precision (no migration)
 
 The EHR API's six newest-first clinical lists page with a keyset on (sort key,
