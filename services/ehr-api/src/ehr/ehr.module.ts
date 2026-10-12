@@ -12,6 +12,7 @@ import { ClinicalInfrastructureModule } from './shared/clinical-infrastructure.m
 import { StorageModule } from '../storage/storage.module';
 import { ImportedAttachmentService } from './patient-records/imported-attachment.service';
 import { BedrockAiService } from './patient-records/bedrock-ai.service';
+import { ClaudeAiService } from './patient-records/claude-ai.service';
 import { PatientChatService } from './patient-records/patient-chat.service';
 import { PatientChatHistoryService } from './patient-records/patient-chat-history.service';
 
@@ -28,6 +29,6 @@ import { PatientChatHistoryService } from './patient-records/patient-chat-histor
     LabRequestsModule,
   ],
   controllers: [PatientRecordsController],
-  providers: [PatientRecordsService, ImportedAttachmentService, BedrockAiService, PatientChatService, PatientChatHistoryService],
+  providers: [PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientChatService, PatientChatHistoryService],
 })
 export class EhrModule {}

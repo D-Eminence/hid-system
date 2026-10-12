@@ -36,4 +36,19 @@ describe('EHR production database transport', () => {
     production(); process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; resetEnvironmentForTests();
     expect(() => getEnvironment()).toThrow(/cannot be disabled globally/);
   });
+  it('requires the direct credential, first-party model and explicit US processing when chat is enabled', () => {
+    Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://synthetic:test@localhost/hid',
+      CORS_ORIGINS: 'https://app.example', STORAGE_MODE: 'disabled', AI_ENABLED: 'true',
+      AI_GENERATION_MODEL_ID: 'claude-sonnet-4-6', ANTHROPIC_PROCESSING_APPROVED: 'false' });
+    delete process.env.ANTHROPIC_API_KEY; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/server-side API key/);
+    process.env.ANTHROPIC_API_KEY = 'synthetic-key-never-a-real-credential'; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/approved US processing/);
+    process.env.ANTHROPIC_PROCESSING_APPROVED = 'true'; resetEnvironmentForTests();
+    expect(getEnvironment().AI_GENERATION_MODEL_ID).toBe('claude-sonnet-4-6');
+    process.env.AI_GENERATION_MODEL_ID = 'eu.anthropic.claude-sonnet-4-6'; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/first-party Claude model/);
+    process.env.AI_ENABLED = 'false'; delete process.env.ANTHROPIC_API_KEY; resetEnvironmentForTests();
+    expect(getEnvironment().AI_ENABLED).toBe(false);
+  });
 });

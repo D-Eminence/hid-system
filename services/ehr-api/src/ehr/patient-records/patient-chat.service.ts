@@ -6,6 +6,7 @@ import type { HidRequest } from '../../common/request-context';
 import { getEnvironment } from '../../config/environment';
 import { DatabaseService } from '../../database/database.service';
 import { BedrockAiService } from './bedrock-ai.service';
+import { ClaudeAiService, type ConversationExchange } from './claude-ai.service';
 import { PatientRecordsService } from './patient-records.service';
 import { PatientChatHistoryService, type ChatReply } from './patient-chat-history.service';
 
@@ -30,7 +31,6 @@ interface SourceRow extends QueryResultRow {
   signedAt: Date;
 }
 
-const NO_RECORDS = 'I cannot find released clinical notes available to this account yet. Check the Records page for your available records. Archived imports, attachments, lab results and prescriptions are not included in record chat.';
 const NO_GROUNDED_ANSWER = 'I could not verify an answer from the available records.';
 
 @Injectable()
@@ -43,6 +43,7 @@ export class PatientChatService {
     private readonly database: DatabaseService,
     private readonly records: PatientRecordsService,
     private readonly bedrock: BedrockAiService,
+    private readonly claude: ClaudeAiService,
     private readonly audit: AuditService,
     private readonly history: PatientChatHistoryService,
   ) {}
@@ -58,11 +59,13 @@ export class PatientChatService {
     const release = this.admit(authorization.patientId);
     try {
       const generation = await this.history.start(request, authorization);
-      const introduction = /^(hi|hello|hey|good (morning|afternoon|evening)|who are you|what are you|what (can|do) you (do|help with)|how can you help( me)?|can you help( me)?|what can you help me with|is there anything you can help me with)[.!?]*$/i.test(question);
-      const reply: ChatReply = introduction ? { status: 'ready', sources: [],
-        answer: 'I am the Health ID record assistant. I can explain and summarise your released clinical notes and help you find follow-up steps recorded by your care team. Try “Summarise my latest note.” For questions about using Health ID, open Support chat. I cannot diagnose, prescribe treatment, or read archived imports, attachments, lab results or prescriptions.' }
-        : await this.answerAuthorized(request, question, authorization, environment, AbortSignal.timeout(35_000));
-      await this.history.save(request, generation, question, reply);
+      const context = await this.history.context(request, generation);
+      const signal = AbortSignal.timeout(35_000);
+      const plan = await this.claude.plan(question, context.exchanges, signal);
+      const reply: ChatReply = plan.intent === 'conversation'
+        ? { status: 'ready', answer: plan.answer, sources: [] }
+        : await this.answerAuthorized(request, question, plan.query, context.exchanges, authorization, environment, signal);
+      await this.history.save(request, generation, question, reply, context.bindings);
       return reply;
     } catch (error) {
       if (error instanceof DomainProblem) throw error;
@@ -86,7 +89,8 @@ export class PatientChatService {
     return () => { value.busy = false; this.globalWindow.busy -= 1; };
   }
 
-  private async answerAuthorized(request: HidRequest, question: string,
+  private async answerAuthorized(request: HidRequest, question: string, searchQuestion: string,
+    history: readonly ConversationExchange[],
     authorization: Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>,
     environment: ReturnType<typeof getEnvironment>, signal: AbortSignal): Promise<ChatReply> {
     const notes = await this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
@@ -115,7 +119,7 @@ export class PatientChatService {
       });
       return result.rows;
     });
-    if (notes.length === 0) return { status: 'ready', answer: NO_RECORDS, sources: [] };
+    if (notes.length === 0) return this.answerWithoutSources(question, history, signal);
     if (notes.length > 50 || notes.some((note) => note.contentLength > 6000)) {
       throw new DomainProblem(409, 'CHAT_RECORD_SCOPE_EXCEEDED', 'These records need preparation before chat can answer safely');
     }
@@ -145,7 +149,7 @@ export class PatientChatService {
     }
 
     signal.throwIfAborted();
-    const questionVector = await this.bedrock.embed(question, signal);
+    const questionVector = await this.bedrock.embed(searchQuestion, signal);
     const current = await this.records.authorizeSelf(request);
     const sources = await this.database.withPatientTransaction(current, request.correlationId, async (client) => {
       const result = await client.query<SourceRow>(
@@ -167,10 +171,10 @@ export class PatientChatService {
       );
       return result.rows;
     });
-    if (!sources.length) return { status: 'ready', answer: NO_RECORDS, sources: [] };
+    if (!sources.length) return this.answerWithoutSources(question, history, signal);
 
     signal.throwIfAborted();
-    const generated = await this.bedrock.answer(question, sources, signal);
+    const generated = await this.claude.answer(question, sources, history, signal);
     const citations = [...generated.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
     // This validates citation references, not the factual support of a claim.
     // Real answer evaluation remains an activation gate for the selected model.
@@ -194,6 +198,13 @@ export class PatientChatService {
         title: source.title, signedAt: source.signedAt,
       })) : [],
     };
+  }
+
+  private async answerWithoutSources(question: string, history: readonly ConversationExchange[], signal: AbortSignal): Promise<ChatReply> {
+    const answer = await this.claude.answer(question, [], history, signal);
+    // No-record replies can explain availability and capabilities but cannot
+    // pretend to cite record evidence. Semantic behaviour is evaluated separately.
+    return { status: 'ready', answer: /\[\d+\]/.test(answer) ? NO_GROUNDED_ANSWER : answer, sources: [] };
   }
 
   private async assertSourcesCurrent(client: PoolClient, patientId: string, sources: readonly SourceRow[]) {

@@ -12,6 +12,8 @@ export interface ChatReply {
   status: 'ready' | 'preparing'; answer: string;
   sources: Array<{ number: number; noteId: string; revisionNo: number; title: string; signedAt: Date | string }>;
 }
+export interface ContextBinding { noteId: string; revisionNo: number; hash: string }
+interface HistoryRow { id: string; question: string; reply: ChatReply; createdAt: Date; sourceBindings: ContextBinding[] }
 @Injectable()
 export class PatientChatHistoryService {
   constructor(private readonly database: DatabaseService, private readonly records: PatientRecordsService,
@@ -32,7 +34,8 @@ export class PatientChatHistoryService {
     return this.database.withPatientTransaction(authorization, request.correlationId,
       client => this.lock(client, authorization.patientId));
   }
-  async save(request: HidRequest, generation: string, question: string, reply: ChatReply) {
+  async save(request: HidRequest, generation: string, question: string, reply: ChatReply,
+    contextBindings: readonly ContextBinding[] = []) {
     if (!reply.answer.trim() || reply.answer.length > 4000) {
       throw new DomainProblem(503, 'PATIENT_CHAT_UNAVAILABLE', 'Patient chat is temporarily unavailable');
     }
@@ -42,6 +45,19 @@ export class PatientChatHistoryService {
         throw new DomainProblem(409, 'CHAT_CONVERSATION_CHANGED', 'The conversation was cleared. Please ask again.');
       }
       const bindings: Array<{ noteId: string; revisionNo: number; hash: string }> = [];
+      // A follow-up can depend on prior evidence even if it has no new citations.
+      // Recheck hashes before saving/returning and inherit bindings for later reads.
+      for (const binding of contextBindings) {
+        const found = await client.query<{ hash: string }>(`select r.content_sha256 as hash from ehr.clinical_notes n
+          join ehr.clinical_note_revisions r on r.clinical_note_id=n.id and r.revision_no=n.current_revision_no
+          and r.patient_id=n.patient_id and r.facility_id=n.facility_id
+          where n.id=$1 and n.patient_id=$2 and n.current_revision_no=$3 and n.status in ('signed','amended')`,
+        [binding.noteId, auth.patientId, binding.revisionNo]);
+        if (found.rows[0]?.hash !== binding.hash) {
+          throw new DomainProblem(409, 'CHAT_SOURCES_CHANGED', 'The source records changed during this request');
+        }
+        if (!bindings.some(value => value.noteId === binding.noteId)) bindings.push(binding);
+      }
       for (const source of reply.sources) {
         const found = await client.query<{ hash: string }>(`select r.content_sha256 as hash from ehr.clinical_notes n
           join ehr.clinical_note_revisions r on r.clinical_note_id=n.id and r.revision_no=n.current_revision_no
@@ -49,7 +65,13 @@ export class PatientChatHistoryService {
           where n.id=$1 and n.patient_id=$2 and n.current_revision_no=$3 and n.status in ('signed','amended')`,
         [source.noteId, auth.patientId, source.revisionNo]);
         if (!found.rows[0]) throw new DomainProblem(409, 'CHAT_SOURCES_CHANGED', 'The source records changed during this request');
-        bindings.push({ noteId: source.noteId, revisionNo: source.revisionNo, hash: found.rows[0].hash });
+        const inherited = bindings.find(value => value.noteId === source.noteId);
+        if (inherited && (inherited.revisionNo !== source.revisionNo || inherited.hash !== found.rows[0].hash)) {
+          throw new DomainProblem(409, 'CHAT_SOURCES_CHANGED', 'The source records changed during this request');
+        }
+        if (!inherited) {
+          bindings.push({ noteId: source.noteId, revisionNo: source.revisionNo, hash: found.rows[0].hash });
+        }
       }
       await client.query(`insert into ehr.patient_chat_messages(patient_id,generation,question,reply,source_bindings)
         values ($1,$2,$3,$4::jsonb,$5::jsonb)`, [auth.patientId, generation, question, JSON.stringify(reply), JSON.stringify(bindings)]);
@@ -65,8 +87,17 @@ export class PatientChatHistoryService {
     return this.database.withPatientTransaction(auth, request.correlationId, async client => {
       await this.lock(client, auth.patientId);
       await this.prune(client, auth.patientId);
-      const result = await client.query<{ id: string; question: string; reply: ChatReply; createdAt: Date }>(
-        `select h.id,h.question,h.reply,h.created_at as "createdAt" from ehr.patient_chat_messages h
+      const exchanges = await this.readCurrent(client, auth.patientId);
+      await this.audit.recordWithClient(client, { correlationId: request.correlationId, actorType: 'patient',
+        actorSubject: auth.subject, actorAccountId: auth.accountId, patientId: auth.patientId,
+        action: 'ehr.patient.chat.history.read', resourceType: 'patient-chat-history', outcome: 'success',
+        purposeOfUse: 'patient-self', details: { exchangeCount: exchanges.length } });
+      return { exchanges: exchanges.map(({ sourceBindings: _bindings, ...exchange }) => exchange), retentionDays: 30, limit: 10 };
+    });
+  }
+  private async readCurrent(client: PoolClient, patientId: string): Promise<HistoryRow[]> {
+    const result = await client.query<HistoryRow>(
+        `select h.id,h.question,h.reply,h.created_at as "createdAt",h.source_bindings as "sourceBindings" from ehr.patient_chat_messages h
          where h.patient_id=$1 and h.created_at > statement_timestamp()-interval '30 days'
          and not exists (
            select 1 from jsonb_array_elements(h.source_bindings) b where not exists (
@@ -76,12 +107,25 @@ export class PatientChatHistoryService {
              where n.patient_id=h.patient_id and n.id::text=b->>'noteId'
                and n.current_revision_no=(b->>'revisionNo')::integer
                and r.content_sha256=b->>'hash' and n.status in ('signed','amended')))
-         order by h.created_at desc,h.id desc limit 10`, [auth.patientId]);
+         order by h.created_at desc,h.id desc limit 10`, [patientId]);
+    return result.rows.reverse();
+  }
+  async context(request: HidRequest, generation: string) {
+    const auth = await this.records.authorizeSelf(request);
+    return this.database.withPatientTransaction(auth, request.correlationId, async client => {
+      if (await this.lock(client, auth.patientId) !== generation) {
+        throw new DomainProblem(409, 'CHAT_CONVERSATION_CHANGED', 'The conversation was cleared. Please ask again.');
+      }
+      await this.prune(client, auth.patientId);
+      const exchanges = (await this.readCurrent(client, auth.patientId)).filter(exchange => exchange.reply.status === 'ready').slice(-4);
+      const bindings = new Map<string, ContextBinding>();
+      for (const exchange of exchanges) for (const binding of exchange.sourceBindings) bindings.set(binding.noteId, binding);
       await this.audit.recordWithClient(client, { correlationId: request.correlationId, actorType: 'patient',
         actorSubject: auth.subject, actorAccountId: auth.accountId, patientId: auth.patientId,
-        action: 'ehr.patient.chat.history.read', resourceType: 'patient-chat-history', outcome: 'success',
-        purposeOfUse: 'patient-self', details: { exchangeCount: result.rows.length } });
-      return { exchanges: result.rows.reverse(), retentionDays: 30, limit: 10 };
+        action: 'ehr.patient.chat.context.read', resourceType: 'patient-chat-history', outcome: 'success',
+        purposeOfUse: 'patient-self', details: { exchangeCount: exchanges.length } });
+      return { exchanges: exchanges.map(exchange => ({ question: exchange.question, answer: exchange.reply.answer })),
+        bindings: [...bindings.values()] };
     });
   }
   async clear(request: HidRequest) {

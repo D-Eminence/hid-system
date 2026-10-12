@@ -39,7 +39,9 @@ const environmentSchema = z
     NODE_TLS_REJECT_UNAUTHORIZED: optionalString,
     PORT: z.coerce.number().int().min(1).max(65_535).default(3002),
     AI_ENABLED: booleanString,
-    AI_GENERATION_MODEL_ID: z.string().trim().min(1).default('eu.anthropic.claude-sonnet-4-6'),
+    AI_GENERATION_MODEL_ID: z.string().trim().min(1).default('claude-sonnet-4-6'),
+    ANTHROPIC_API_KEY: z.preprocess(emptyToUndefined, z.string().min(20).regex(/^\S+$/).optional()),
+    ANTHROPIC_PROCESSING_APPROVED: booleanString,
     AI_EMBEDDING_MODEL_ID: z.string().trim().min(1).default('amazon.titan-embed-text-v2:0'),
     AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(20_000),
     DATABASE_URL: z.string().url().startsWith('postgresql://'),
@@ -81,6 +83,14 @@ const environmentSchema = z
     S3_KMS_KEY_ID: optionalString,
   })
   .superRefine((environment, context) => {
+    if (environment.AI_ENABLED) {
+      if (!/^claude-[a-z0-9-]+$/.test(environment.AI_GENERATION_MODEL_ID)) context.addIssue({ code: 'custom', path: ['AI_GENERATION_MODEL_ID'],
+        message: 'Direct Claude generation requires a first-party Claude model ID' });
+      if (!environment.ANTHROPIC_API_KEY) context.addIssue({ code: 'custom', path: ['ANTHROPIC_API_KEY'],
+        message: 'Direct Claude generation requires a server-side API key' });
+      if (!environment.ANTHROPIC_PROCESSING_APPROVED) context.addIssue({ code: 'custom', path: ['ANTHROPIC_PROCESSING_APPROVED'],
+        message: 'Direct Claude generation requires approved US processing' });
+    }
     if (environment.EHR_SERVICE_IDENTITY_MODE === 'local-secret'
         && !environment.EHR_INTERNAL_SERVICE_TOKEN && environment.NODE_ENV !== 'test') {
       context.addIssue({ code: 'custom', path: ['EHR_INTERNAL_SERVICE_TOKEN'],

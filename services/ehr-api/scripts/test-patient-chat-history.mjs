@@ -8,6 +8,7 @@ import path from 'node:path';
 import pg from 'pg';
 const require = createRequire(import.meta.url);
 const { PatientChatHistoryService } = require('../dist/ehr/patient-records/patient-chat-history.service.js');
+const { AuditService } = require('../dist/audit/audit.service.js');
 const container = `hid-chat-history-test-${randomUUID()}`;
 const password = randomBytes(24).toString('hex');
 const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', timeout: 180000, stdio: ['ignore','pipe','pipe'] });
@@ -40,18 +41,23 @@ try {
       const value=await operation(runtime);await runtime.query('commit');return value;
     } catch(error) {await runtime.query('rollback');throw error;}
   }};
-  const history=new PatientChatHistoryService(database,{authorizeSelf:async()=>authorization},{recordWithClient:async()=>{}});
+  const history=new PatientChatHistoryService(database,{authorizeSelf:async()=>authorization},new AuditService(database));
   const request={correlationId:'synthetic-history-test'};
   const reply={status:'ready',answer:'Synthetic capability answer.',sources:[]};
   assert.equal((await history.read(request)).exchanges.length,0);
   const generation=await history.start(request,authorization);
+  assert.equal((await history.context(request,generation)).exchanges.length,0);
   await history.save(request,generation,'Synthetic private question',reply);
   assert.equal((await history.read(request)).exchanges[0].question,'Synthetic private question');
+  assert.equal((await history.context(request,generation)).exchanges[0].question,'Synthetic private question');
   for(let i=0;i<11;i++) await history.save(request,generation,'Question '+i,reply);
   assert.equal((await history.read(request)).exchanges.length,10);
   assert.equal((await admin.query('select count(*)::int as count from ehr.patient_chat_messages where patient_id=$1',[a])).rows[0].count,10);
+  assert.equal((await history.context(request,generation)).exchanges.length,4);
   authorization={...authorization,patientId:b,accountId:accountB,subject:'chat-synthetic-b'};
   assert.equal((await history.read(request)).exchanges.length,0);
+  const bGeneration=await history.start(request,authorization);
+  assert.equal((await history.context(request,bGeneration)).exchanges.length,0);
   await database.withPatientTransaction(authorization,'cross-patient',async client=>{
     assert.equal((await client.query('select * from ehr.patient_chat_messages where patient_id=$1',[a])).rows.length,0);
     assert.equal((await client.query('delete from ehr.patient_chat_messages where patient_id=$1',[a])).rowCount,0);
@@ -63,6 +69,7 @@ try {
   await history.clear(request);
   assert.equal((await history.read(request)).exchanges.length,0);
   await assert.rejects(history.save(request,generation,'Late result',reply),/conversation was cleared/);
+  await assert.rejects(history.context(request,generation),/conversation was cleared/);
   const fresh=await history.start(request,authorization);
   await history.save(request,fresh,'Expired synthetic message',reply);
   await admin.query("update ehr.patient_chat_messages set created_at=now()-interval '31 days' where patient_id=$1",[a]);
@@ -74,7 +81,45 @@ try {
   assert.equal((await history.read(request)).exchanges.length,0);
   assert.equal((await runtime.query('select count(*)::int as count from ehr.patient_chat_messages')).rows[0].count,0);
   assert.equal((await runtime.query('select rolsuper,rolbypassrls from pg_roles where rolname=current_user')).rows[0].rolbypassrls,false);
-  console.log(JSON.stringify({passed:true,restricted_login:true,checks:15,customer_data:false}));
+  assert.equal((await history.context(request,fresh)).exchanges.length,0);
+  // Actual current clinical sources in a disposable synthetic database only.
+  const staffAccount=randomUUID();
+  await admin.query("insert into auth.accounts(id,subject,email) values ($1,'synthetic:self:3','doctor@example.test')",[staffAccount]);
+  const fixture=await readFile(path.join(import.meta.dirname,'../database/tests/patient-self.integration.sql'),'utf8');
+  let seed=fixture.split('-- Clinical fixture attribution uses a separate real workforce principal.')[1].split('-- Seed a different patient')[0];
+  for(const [from,to] of [['a1000000-0000-4000-8000-000000000001',accountA],['a1000000-0000-4000-8000-000000000002',accountB],
+    ['a1000000-0000-4000-8000-000000000003',staffAccount],['a2000000-0000-4000-8000-000000000001',a],['a2000000-0000-4000-8000-000000000002',b]]) {
+    seed=seed.replaceAll(from,to);
+  }
+  // The fixture constructs patient UUIDs in SELECTs, so substitute those expressions too.
+  seed=seed.replaceAll("('a2000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid",`(case when n=1 then '${a}' else '${b}' end)::uuid`);
+  seed=seed.replaceAll("('a2000000-0000-4000-8000-'||lpad((case when n=3 then 2 else 1 end)::text,12,'0'))::uuid",`(case when n=3 then '${b}' else '${a}' end)::uuid`);
+  await admin.query("select set_config('app.correlation_id','synthetic-clinical-context',true);\n"+seed);
+  await history.clear(request);
+  const noteGeneration=await history.start(request,authorization);
+  const noteId='a8000000-0000-4000-8000-000000000001';
+  const evidenceReply={status:'ready',answer:'Synthetic clinical content [1].',sources:[{number:1,noteId,revisionNo:1,title:'Synthetic note',signedAt:new Date().toISOString()}]};
+  await history.save(request,noteGeneration,'Explain the synthetic note',evidenceReply);
+  const context=await history.context(request,noteGeneration);
+  assert.equal(context.bindings[0].noteId,noteId);
+  await history.save(request,noteGeneration,'A follow-up',reply,context.bindings);
+  assert.equal((await history.read(request)).exchanges.length,2);
+  await assert.rejects(history.save(request,noteGeneration,'Stale follow-up',reply,[{...context.bindings[0],hash:'f'.repeat(64)}]),/source records changed/);
+  const inherited=(await admin.query('select source_bindings from ehr.patient_chat_messages where question=$1',['A follow-up'])).rows[0].source_bindings;
+  assert.deepEqual(inherited,context.bindings);
+  // Old evidence is no longer current: both the original and inherited reply must disappear.
+  await admin.query(`begin;
+    select set_config('app.change_reason','Synthetic context amendment',true),set_config('app.correlation_id','synthetic-context-amendment',true),set_config('app.actor_subject','synthetic:self:3',true),set_config('app.membership_id','a6000000-0000-4000-8000-000000000001',true),
+      set_config('app.facility_id','a4000000-0000-4000-8000-000000000002',true),set_config('app.purpose_of_use','direct-care',true);
+    insert into ehr.clinical_note_revisions(clinical_note_id,patient_id,facility_id,revision_no,content,change_reason,created_by,created_by_membership_id)
+      select id,patient_id,facility_id,2,'Updated synthetic clinical content','Synthetic amendment',created_by,created_by_membership_id
+      from ehr.clinical_notes where id='${noteId}';
+    update ehr.clinical_notes set current_revision_no=2,status='amended' where id='${noteId}';
+    commit;`);
+  assert.equal((await history.read(request)).exchanges.length,0);
+  assert.equal((await history.context(request,noteGeneration)).exchanges.length,0);
+  console.log(JSON.stringify({passed:true,restricted_login:true,legacy_checks:15,
+    conversation_checks:['bounded context','patient isolation','clear generation','current source bindings','stale inherited reply withheld'],customer_data:false}));
 } finally {
   await runtime?.end().catch(()=>{}); await admin?.end().catch(()=>{});
   if(started) docker('rm','-f',container);
