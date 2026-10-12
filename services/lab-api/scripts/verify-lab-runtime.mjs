@@ -9,9 +9,19 @@
 // follows one specimen through receipt, execution start and completion, and
 // one result through entry, verification and release, whose FOR UPDATE locks
 // fall on lab.specimens, lab.test_executions and lab.results, rows the role may
-// update. Only the Identity API is replaced, by a local fake; every database
-// check (row-level security, the 0077 guards, immutability triggers, unique
-// constraints) is real.
+// update. A doctor then reads the released result by the EHR order and by
+// result while a correction awaits verification, and receives only the
+// released version. Only the Identity API is replaced, by a local fake; every
+// database check (row-level security, the 0077 guards, immutability triggers,
+// unique constraints) is real. Only EHR-order acceptance maps its own database
+// refusals (lab-work-items.service.ts, D-Eminence/hid-system#56): its guard's
+// refusal of a stale or changed order 409 LAB_ORDER_NOT_CURRENT and row-level
+// security 403 LAB_ACCESS_DENIED, where both were 500; it answers a later
+// version of an order Lab already holds 409 LAB_ORDER_ALREADY_ACCEPTED and an
+// earlier one 409 LAB_ORDER_NOT_CURRENT without reaching the database guard.
+// Every other command still answers a database refusal 500 (a known limit);
+// for the OCR import that 500 is what OCR stores as the retryable
+// OWNING_SERVICE_UNAVAILABLE. The harness records the SQLSTATE behind each.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
@@ -57,16 +67,21 @@ try {
   const f = { org: id(), facility: id(), patient: id(), encounter: id(), document: id(),
     a: { account: id(), staff: id(), membership: id() }, b: { account: id(), staff: id(), membership: id() },
     c: { account: id(), staff: id(), membership: id() }, d: { account: id(), staff: id(), membership: id() },
-    orders: [id(), id(), id()], work: [id(), id(), id()], microOrder: id(),
+    // E, a doctor of the facility; X, a doctor of another facility of the organization.
+    e: { account: id(), staff: id(), membership: id() }, x: { account: id(), staff: id(), membership: id() },
+    otherFacility: id(), orders: [id(), id(), id()], work: [id(), id(), id()], workOrders: [id(), id(), id()], microOrder: id(),
     ocr: { job: id(), extraction: id(), validation: id(), confirmation: id(), publication: id() } };
   const members = [['a', f.a], ['b', f.b], ['c', f.c], ['d', f.d]];
-  for (const [name, member] of members) member.subject = `synthetic:lab-verifier-${name}:${member.account}`;
+  const doctors = [['e', f.e, f.facility], ['x', f.x, f.otherFacility]];
+  for (const [name, member] of [...members, ...doctors]) member.subject = `synthetic:lab-verifier-${name}:${member.account}`;
   const requestedAt = '2026-10-01T09:00:00.000Z';
   await database.fixture(async (client) => {
     await client.query('insert into identity.organizations (id,name,slug) values ($1,$2,$3)',
       [f.org, 'Lab Verifier Org', `lab-verifier-${f.org.slice(0, 8)}`]);
     await client.query(`insert into identity.facilities (id,organization_id,name,code,timezone,active,lifecycle_status)
       values ($1,$2,'Lab Verifier Clinic',$3,'Africa/Lagos',true,'verified')`, [f.facility, f.org, `LV-${f.facility.slice(0, 8)}`]);
+    await client.query(`insert into identity.facilities (id,organization_id,name,code,timezone,active,lifecycle_status)
+      values ($1,$2,'Lab Verifier Annex',$3,'Africa/Lagos',true,'verified')`, [f.otherFacility, f.org, `LV-${f.otherFacility.slice(0, 8)}`]);
     for (const [name, member] of members) {
       await client.query(`insert into auth.accounts (id,subject,email,display_name,status) values ($1,$2,$3,$4,'active')`,
         [member.account, member.subject, `lab-verifier-${name}-${member.account}@example.invalid`, `Lab Verifier ${name}`]);
@@ -76,6 +91,17 @@ try {
       await client.query(`insert into identity.staff_facility_memberships (id,staff_id,account_id,organization_id,facility_id,
         membership_role,app_role,active) values ($1,$2,$3,$4,$5,'lab','lab',true)`,
       [member.membership, member.staff, member.account, f.org, f.facility]);
+    }
+    // The doctors hold a database read consent at their own facility.
+    for (const [name, member, facility] of doctors) {
+      await client.query(`insert into auth.accounts (id,subject,email,display_name,status) values ($1,$2,$3,$4,'active')`,
+        [member.account, member.subject, `lab-verifier-${name}-${member.account}@example.invalid`, `Lab Verifier ${name}`]);
+      await client.query(`insert into identity.staff (id,account_id,full_name,email,verification_status,default_role)
+        values ($1,$2,$3,$4,'verified','doctor')`, [member.staff, member.account, `Lab Verifier ${name}`,
+        `lab-verifier-${name}-${member.account}@example.invalid`]);
+      await client.query(`insert into identity.staff_facility_memberships (id,staff_id,account_id,organization_id,facility_id,
+        membership_role,app_role,active) values ($1,$2,$3,$4,$5,'doctor','doctor',true)`,
+      [member.membership, member.staff, member.account, f.org, facility]);
     }
     await client.query(`insert into identity.patients (id,hid_code,first_name,last_name,full_name,status)
       values ($1,'HID-LBVRFYAA','Verifier','Patient','Verifier Patient','active')`, [f.patient]);
@@ -88,6 +114,12 @@ try {
         purpose_of_use,status,reason,starts_at,expires_at) values ($1,$2,$3,$4,$5,$6,'write_records','direct-care','active',
         'Synthetic Lab verifier consent',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '30 days')`,
       [id(), f.patient, member.staff, member.account, member.membership, f.facility]);
+    }
+    for (const [, member, facility] of doctors) {
+      await client.query(`insert into identity.consent_grants (id,patient_id,staff_id,account_id,membership_id,facility_id,scope,
+        purpose_of_use,status,reason,starts_at,expires_at) values ($1,$2,$3,$4,$5,$6,'read_records','direct-care','active',
+        'Synthetic Lab verifier read consent',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '30 days')`,
+      [id(), f.patient, member.staff, member.account, member.membership, facility]);
     }
     await client.query(`insert into ehr.encounters (id,patient_id,facility_id,created_by,created_by_membership_id,encounter_type,
       status,started_at) values ($1,$2,$3,$4,$5,'ambulatory','in_progress',clock_timestamp())`,
@@ -110,7 +142,7 @@ try {
     // Work items accepted earlier by A, without accessions, each with the one
     // requested test acceptance records (execution start requires exactly one).
     for (const [index, work] of f.work.entries()) {
-      const order = id();
+      const order = f.workOrders[index];
       await client.query(`insert into lab.work_items (id,patient_id,facility_id,ordering_facility_id,source_ehr_order_id,
         source_ehr_order_version,source_encounter_id,priority,test_code_system,test_code,test_name,clinical_indication,
         requested_by,requested_at,accepted_by,accepted_by_membership_id,idempotency_key,request_sha256,correlation_id)
@@ -150,17 +182,27 @@ try {
   const permissions = ['lab.work-item.accept', 'lab.work-item.read', 'lab.accession.create', 'lab.accession.read',
     'lab.specimen.collect', 'lab.specimen.receive', 'lab.execution.start', 'lab.execution.complete', 'lab.result.enter',
     'lab.result.verify', 'lab.result.release', 'lab.import.write', 'lab.import.read'];
-  const actor = (member, granted) => ({ id: member.account, subject: member.subject, accountId: member.account,
-    sessionId: id(), roles: [], permissions: [], facilityIds: [f.facility], authenticationMethod: 'local',
-    facilities: [{ id: f.facility, membershipId: member.membership, organizationId: f.org, name: 'Lab Verifier Clinic',
-      roles: ['lab'], permissions: granted, isPrimary: true }] });
+  const actor = (member, granted, facility = f.facility, role = 'lab') => ({ id: member.account, subject: member.subject,
+    accountId: member.account, sessionId: id(), roles: [], permissions: [], facilityIds: [facility], authenticationMethod: 'local',
+    facilities: [{ id: facility, membershipId: member.membership, organizationId: f.org, name: 'Lab Verifier Clinic',
+      roles: [role], permissions: granted, isPrimary: true }] });
   actors.set('token-a', actor(f.a, permissions));
   actors.set('token-b', actor(f.b, permissions));
   actors.set('token-c', actor(f.c, permissions));
   actors.set('token-d', actor(f.d, permissions));
   actors.set('token-a-read-only', actor(f.a, ['lab.work-item.read', 'lab.accession.read', 'lab.import.read']));
+  // A corrects a released result and reads its full history, as Lab staff.
+  actors.set('token-a-corrector', actor(f.a, [...permissions, 'lab.result.correct', 'lab.result.revise-released',
+    'lab.execution.read', 'lab.result.released.read']));
+  // The doctor role's Lab permissions (0017, 0018, 0021): no execution or accession read.
+  const doctorPermissions = ['lab.import.read', 'lab.import.write', 'lab.work-item.read', 'lab.work-item.accept', 'lab.result.released.read'];
+  actors.set('token-e', actor(f.e, doctorPermissions, f.facility, 'doctor'));
+  actors.set('token-e-without-results', actor(f.e, doctorPermissions.filter((permission) => permission !== 'lab.result.released.read'),
+    f.facility, 'doctor'));
+  actors.set('token-x', actor(f.x, doctorPermissions, f.otherFacility, 'doctor'));
   const decide = (member, scope, rule) => decisions.set(`${member.account}:${f.patient}:${scope}`, rule);
   for (const member of [f.a, f.b, f.c, f.d]) for (const scope of ['read_records', 'write_records']) decide(member, scope, { allowed: true, breakGlass: false });
+  for (const member of [f.e, f.x]) decide(member, 'read_records', { allowed: true, breakGlass: false });
 
   lab = await startService({ require, service });
   assert.deepEqual((await lab.database.query('select current_user as role')).rows[0], { role: RUNTIME_ROLE });
@@ -177,8 +219,10 @@ try {
     assert.equal(new Set(responses.map((response) => response.body.id)).size, 1, `${label}: one result`);
     return responses[0].body;
   };
-  const refusedByDatabase = (response, label) => {
-    expectStatus(response, 500, label);
+  // Row-level security refuses an actor without a database consent (42501). Lab answers it 500, as any database
+  // refusal, except EHR-order acceptance, which answers its own 403 LAB_ACCESS_DENIED.
+  const refusedByDatabase = (response, label, { status = 500, code = 'INTERNAL_ERROR' } = {}) => {
+    assert.equal(expectStatus(response, status, label).code, code, `${label}: code`);
     assert.equal(response.sqlstate, '42501', `${label}: refused by row-level security`);
   };
 
@@ -197,9 +241,9 @@ try {
   expectStatus(await send('/work-items/accept-ehr-order', orderBody(order1), { token: 'token-a-read-only', key: key('accept'), internal: 'ehr-api' }),
     403, 'accept without the permission');
   refusedByDatabase(await send('/work-items/accept-ehr-order', orderBody(order3), { token: 'token-b', key: key('accept'), internal: 'ehr-api' }),
-    'accept without a database consent');
+    'accept without a database consent', { status: 403, code: 'LAB_ACCESS_DENIED' });
   assert.deepEqual(await Promise.all([workItemsOf(order1), workItemsOf(order3)]), [0, 0]);
-  check('accept: no EHR caller 401, Identity denial 403, missing permission 403, no database consent refused by row-level security (42501), nothing written');
+  check('accept: no EHR caller 401, Identity denial 403, missing permission 403, no database consent refused by row-level security (42501) with 403 LAB_ACCESS_DENIED, nothing written');
   const workItem = sameResult(await together(4, () => send('/work-items/accept-ehr-order', orderBody(order1),
     { key: key('accept'), internal: 'ehr-api' })), 'four concurrent accepts of one EHR order');
   assert.deepEqual(await Promise.all([workItemsOf(order1),
@@ -215,19 +259,51 @@ try {
     'three concurrent accepts of a second order');
   assert.equal(await workItemsOf(order2), 1);
   check('accept: concurrent accepts of one order create one work item, test, event and outbox row; replay 201; a different body 409');
+  // Lab holds one work item per EHR order, ever (unique source_ehr_order_id, 0018). EHR changes the order (every
+  // change takes the next row_version) and sends the new version: Lab refuses it, naming the version it holds.
+  await database.fixture((client) => client.query(
+    "update ehr.lab_requests set row_version = 2, priority = 'stat' where id = $1", [order1]));
+  const reaccepted = await send('/work-items/accept-ehr-order', { ...orderBody(order1), sourceEhrOrderVersion: 2, priority: 'stat' },
+    { key: key('accept'), internal: 'ehr-api' });
+  assert.equal(expectStatus(reaccepted, 409, 'accept of the next version of an accepted order').code, 'LAB_ORDER_ALREADY_ACCEPTED',
+    JSON.stringify([reaccepted.body?.code, reaccepted.sqlstate]));
+  assert.deepEqual(await Promise.all([workItemsOf(order1),
+    count('select count(*) from lab.work_items where source_ehr_order_id=$1 and source_ehr_order_version=1', [order1])]), [1, 1]);
+  check('accept: version 2 of an order Lab accepted at version 1 is 409 LAB_ORDER_ALREADY_ACCEPTED; the version 1 work item stays the only one');
   // Lab accepts an EHR order only when requested_at equals the order's created_at exactly (0077). EHR sends the
   // database's microsecond text (lab-requests.service.ts); the millisecond text of a JavaScript Date is refused.
   const truncated = await send('/work-items/accept-ehr-order', { ...orderBody(f.microOrder), requestedAt: '2026-10-01T09:00:00.123Z' },
     { key: key('accept'), internal: 'ehr-api' });
-  // lab.validate_work_item refuses it (23514); Lab answers an unmapped guard refusal with 500 (release checklist §9).
-  expectStatus(truncated, 500, 'accept with the millisecond requestedAt');
+  // lab.validate_work_item refuses it (23514), and Lab answers 409 LAB_ORDER_NOT_CURRENT.
+  assert.equal(expectStatus(truncated, 409, 'accept with the millisecond requestedAt').code, 'LAB_ORDER_NOT_CURRENT');
   assert.equal(truncated.sqlstate, '23514', 'millisecond requestedAt: refused by lab.validate_work_item');
   assert.equal(truncated.message, 'Lab work item does not match the exact active EHR order version and actor context');
   assert.equal(await workItemsOf(f.microOrder), 0);
   expectStatus(await send('/work-items/accept-ehr-order', { ...orderBody(f.microOrder), requestedAt: '2026-10-01T09:00:00.123456Z' },
     { key: key('accept'), internal: 'ehr-api' }), 201, 'accept with the microsecond requestedAt');
   assert.equal(await workItemsOf(f.microOrder), 1);
-  check('accept: an order created at .123456 is refused for requestedAt .123Z by the database guard (23514) and creates no work item; .123456Z is accepted (201)');
+  check('accept: an order created at .123456 is refused for requestedAt .123Z by the database guard (23514) with 409 LAB_ORDER_NOT_CURRENT and creates no work item; .123456Z is accepted (201)');
+  // An EHR order changed after the version EHR sends (row_version 2, version 1 sent) is not the current order.
+  await database.fixture((client) => client.query('update ehr.lab_requests set row_version = 2 where id = $1', [order3]));
+  const stale = await send('/work-items/accept-ehr-order', orderBody(order3), { key: key('accept'), internal: 'ehr-api' });
+  assert.equal(expectStatus(stale, 409, 'accept of a stale order version').code, 'LAB_ORDER_NOT_CURRENT');
+  assert.equal(stale.sqlstate, '23514', 'stale version: refused by lab.validate_work_item');
+  assert.equal(stale.message, 'Lab work item does not match the exact active EHR order version and actor context');
+  assert.equal(await workItemsOf(order3), 0);
+  expectStatus(await send('/work-items/accept-ehr-order', { ...orderBody(order3), sourceEhrOrderVersion: 2 },
+    { key: key('accept'), internal: 'ehr-api' }), 201, 'accept of the current order version');
+  assert.equal(await workItemsOf(order3), 1);
+  check('accept: version 1 of an order now at version 2 is refused by the database guard (23514) with 409 LAB_ORDER_NOT_CURRENT and creates no work item; version 2 is accepted (201)');
+  // A call for version 1 arriving after Lab accepted version 2 (two EHR updates, the later call first) is stale:
+  // Lab answers it from the work item it holds, without reaching the guard, and never says it holds an earlier version.
+  const late = await send('/work-items/accept-ehr-order', orderBody(order3), { key: key('accept'), internal: 'ehr-api' });
+  assert.equal(expectStatus(late, 409, 'accept of version 1 when Lab holds version 2').code, 'LAB_ORDER_NOT_CURRENT',
+    'accept of version 1 when Lab holds version 2 is not answered LAB_ORDER_NOT_CURRENT');
+  assert.equal(late.sqlstate, undefined, 'accept of version 1 when Lab holds version 2 reached the database guard');
+  assert.deepEqual(await Promise.all([workItemsOf(order3),
+    count('select count(*) from lab.work_items where source_ehr_order_id=$1 and source_ehr_order_version=2', [order3])]), [1, 1],
+  'accept of version 1 when Lab holds version 2 changed the work items');
+  check('accept: version 1 of an order Lab holds at version 2 is 409 LAB_ORDER_NOT_CURRENT from the work item Lab holds, not the guard; the version 2 work item stays the only one');
 
   // Accession a work item.
   const [w1, w2, w3] = f.work;
@@ -406,6 +482,81 @@ try {
   assert.equal(await count('select count(*) from lab.result_releases where result_id=$1', [result.id]), 1);
   check('result release (FOR UPDATE on results): four concurrent identical releases of the verified version release it once (one release and outbox row) and all return it released; replay 201; key reuse with a different body 409');
 
+  // Released results for clinicians. Lab staff (A) correct the released result;
+  // version 2 is entered and neither verified nor released. The doctor E holds
+  // the doctor role's Lab permissions, which include no execution or accession
+  // read, and reads the result by the EHR order of its work item and by result.
+  const read = (path, { token = 'token-e', facility = f.facility, correlationId } = {}) => lab.request('GET', `/lab${path}`,
+    { correlationId, headers: { authorization: `Bearer ${token}`, 'x-facility-id': facility, 'x-purpose-of-use': 'direct-care' } });
+  const releasedResultsOf = (order) => `/ehr-orders/${order}/released-results`;
+  const historyOf = `/results/${result.id}/history`;
+  const [w1Order] = f.workOrders;
+  const CORRECTION_REASON = 'Synthetic transcription correction';
+  const numericValuesIn = (node) => (Array.isArray(node) ? node.flatMap(numericValuesIn)
+    : node && typeof node === 'object' ? Object.entries(node).flatMap(([name, value]) => (name === 'numericValue' ? [value] : numericValuesIn(value))) : []);
+  const releasedReadAudits = (correlationId, resourceType, resourceId) => count(`select count(*) from audit.events where correlation_id=$1
+    and action='lab.result.released.read' and resource_type=$2 and resource_id=$3 and patient_id=$4 and actor_account_id=$5`,
+  [correlationId, resourceType, resourceId, f.patient, f.e.account]);
+  const corrected = expectStatus(await send(`/executions/${execution.id}/results/${result.id}/corrections`, {
+    expectedExecutionVersion: completed.version, expectedResultVersion: 1, resultType: 'numeric', numericValue: 7.1, unit: 'g/dL',
+    referenceRange: '12.0-15.5', abnormalFlag: 'low', reason: CORRECTION_REASON, revisionKind: 'correction' },
+  { token: 'token-a-corrector', key: key('correct') }), 201, 'correct the released result');
+  assert.deepEqual([corrected.currentVersion, corrected.currentReleasedVersion, corrected.revisions.map((revision) => revision.releaseStatus)],
+    [2, 1, ['released', 'not_released']]);
+  const staffHistory = expectStatus(await read(historyOf, { token: 'token-a-corrector' }), 200, 'Lab staff read the full history');
+  assert.deepEqual(staffHistory.revisions.map((revision) => [revision.version, revision.numericValue, revision.releaseStatus]),
+    [[1, 13.4, 'released'], [2, 7.1, 'not_released']]);
+  check('result correct after release (lab.result.revise-released): 201 appends version 2, entered and unreleased; Lab staff holding lab.execution.read still read both versions in the history');
+
+  // The released-only history returns the released version alone.
+  const historyCorrelation = 'verifier-released-history-lab-0001';
+  const history = expectStatus(await read(historyOf, { correlationId: historyCorrelation }), 200, 'the doctor reads the released history');
+  assert.deepEqual([history.status, history.currentVersion, history.currentReleasedVersion, history.revisions.map((revision) => revision.version)],
+    ['released', 1, 1, [1]], 'released-only history after an unreleased correction returns version 1 only');
+  assert.deepEqual(numericValuesIn(history), [13.4], 'the released-only history returns no value of the unreleased correction');
+  assert(!JSON.stringify(history).includes(CORRECTION_REASON) && !/unreleased/i.test(JSON.stringify(history)),
+    'the released-only history gives no sign of the unreleased correction');
+  assert.equal(await releasedReadAudits(historyCorrelation, 'lab-result', result.id), 1, 'the released history read is audited with its patient');
+  check('released-only history (doctor role, no lab.execution.read) after an unreleased correction: 200 with version 1 only, current version 1, no value, reason or flag of version 2; one patient-linked lab.result.released.read audit row');
+
+  // The doctor reads the released results of the EHR order.
+  const orderCorrelation = 'verifier-released-order-lab-0001';
+  const byOrder = expectStatus(await read(releasedResultsOf(w1Order), { correlationId: orderCorrelation }), 200,
+    'the doctor reads the released results of the EHR order');
+  assert.deepEqual([byOrder.workItemId, byOrder.sourceEhrOrderId, byOrder.patientId, byOrder.results.map((item) => item.id)],
+    [w1, w1Order, f.patient, [result.id]]);
+  assert.deepEqual([byOrder.results[0].status, byOrder.results[0].currentVersion, byOrder.results[0].revisions.map((revision) =>
+    [revision.version, revision.numericValue, revision.releaseStatus])], ['released', 1, [[1, 13.4, 'released']]],
+  'released results by order after an unreleased correction return version 1 only');
+  assert.deepEqual(numericValuesIn(byOrder), [13.4], 'the released results by order return no value of the unreleased correction');
+  assert(!JSON.stringify(byOrder).includes(CORRECTION_REASON) && !/unreleased/i.test(JSON.stringify(byOrder)),
+    'the released results by order give no sign of the unreleased correction');
+  assert.equal(await releasedReadAudits(orderCorrelation, 'lab-work-item', w1), 1, 'the released results read is audited with its patient');
+  assert.deepEqual(expectStatus(await read(releasedResultsOf(order1)), 200, 'released results of an order with nothing released').results, []);
+  check('released results by EHR order (doctor role): 200 with the released version 1 of the order\'s result only, no value, reason or flag of the unreleased version 2; one patient-linked lab.result.released.read audit row; an accepted order with nothing released answers 200 with no results');
+
+  // Refusals: no permission, a facility the doctor does not belong to, a doctor
+  // of another facility (row-level security), Identity, and an unknown order.
+  const refused = [];
+  const refuse = async (path, options, status, code, label) => {
+    const correlationId = `verifier-released-refusal-${refused.length}-${id()}`;
+    refused.push(correlationId);
+    assert.equal(expectStatus(await read(path, { ...options, correlationId }), status, label).code, code, label);
+  };
+  await refuse(releasedResultsOf(w1Order), { token: 'token-e-without-results' }, 403, 'PERMISSION_DENIED', 'released results without lab.result.released.read');
+  await refuse(releasedResultsOf(w1Order), { facility: f.otherFacility }, 403, 'FACILITY_ACCESS_DENIED', 'released results at a facility of no membership');
+  await refuse(releasedResultsOf(w1Order), { token: 'token-x', facility: f.otherFacility }, 404, 'LAB_WORK_ITEM_NOT_FOUND',
+    'released results for a doctor of another facility');
+  await refuse(historyOf, { token: 'token-x', facility: f.otherFacility }, 404, 'LAB_RESULT_NOT_FOUND', 'released history for a doctor of another facility');
+  decide(f.e, 'read_records', { allowed: false, breakGlass: false });
+  await refuse(releasedResultsOf(w1Order), {}, 403, 'LAB_EXECUTION_ACCESS_DENIED', 'released results refused by Identity');
+  await refuse(historyOf, {}, 403, 'LAB_EXECUTION_ACCESS_DENIED', 'released history refused by Identity');
+  decide(f.e, 'read_records', { allowed: true, breakGlass: false });
+  await refuse(releasedResultsOf(id()), {}, 404, 'LAB_WORK_ITEM_NOT_FOUND', 'released results of an order with no work item');
+  assert.equal(await count(`select count(*) from audit.events where correlation_id = any($1::text[]) and action like 'lab.result.%'`, [refused]), 0,
+    'a refused released-result read writes no read audit');
+  check('released results refused: no lab.result.released.read 403 PERMISSION_DENIED; a facility without membership 403 FACILITY_ACCESS_DENIED; a doctor of another facility 404 by row-level security (by order and by result); Identity denial 403 LAB_EXECUTION_ACCESS_DENIED (by order and by result); an order without a work item 404; no read audit row for any refusal');
+
   // Import external Lab evidence, and Lab evidence published by OCR.
   const observations = [{ testName: 'Haemoglobin', value: '12.5', unit: 'g/dL', abnormalFlag: 'normal' }];
   const externalBody = { patientId: f.patient, sourceDocumentId: f.document, externalLabName: 'Synthetic Reference Lab',
@@ -426,6 +577,15 @@ try {
   const ocrBody = { patientId: f.patient, sourceDocumentId: f.document, ocrJobId: f.ocr.job, extractionId: f.ocr.extraction,
     validationId: f.ocr.validation, validationVersion: 1, publicationId: f.ocr.publication, reviewedBy: f.a.account, observations };
   expectStatus(await send('/imports/from-ocr', ocrBody, { key: key('ocr') }), 401, 'OCR import without the OCR caller');
+  // OCR stores a Lab 5xx as the retryable OWNING_SERVICE_UNAVAILABLE and a Lab 4xx as a terminal refusal of the reviewed
+  // publication (ocr-api ocr.service.ts), so the OCR import keeps answering a database refusal 500.
+  const ocrCorrelation = 'verifier-ocr-import-without-consent-0001';
+  refusedByDatabase(await send('/imports/from-ocr', ocrBody, { token: 'token-b', key: key('ocr'), internal: 'ocr-api',
+    correlationId: ocrCorrelation }), 'OCR import without a database consent');
+  assert.deepEqual(await Promise.all([count('select count(*) from lab.imported_evidence where publication_id=$1', [f.ocr.publication]),
+    count("select count(*) from audit.events where correlation_id=$1 and action='lab.import.create'", [ocrCorrelation])]), [0, 0],
+  'OCR import without a database consent wrote imported evidence or its audit event');
+  check('import from OCR: no database consent refused by row-level security (42501) still answers 500 INTERNAL_ERROR, which OCR stores as the retryable OWNING_SERVICE_UNAVAILABLE, not a terminal 4xx; nothing written');
   const fromOcr = sameResult(await together(4, () => send('/imports/from-ocr', ocrBody, { key: key('ocr'), internal: 'ocr-api' })),
     'four concurrent imports of one OCR publication');
   assert.equal(await count('select count(*) from lab.imported_evidence where publication_id=$1', [f.ocr.publication]), 1);

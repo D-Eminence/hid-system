@@ -5,8 +5,13 @@
 // over HTTP, forwarding the browser's cookie. A same-origin GET carries no
 // Origin and no X-CSRF-Token, so Identity must not demand them when EHR,
 // authenticated as a workload, reports that the browser request was a GET;
-// a browser write must still prove Origin and CSRF. Disposable copy of the
-// owned synthetic rehearsal database; synthetic accounts only.
+// a browser write must still prove Origin and CSRF. It also reads the two
+// record summaries over cookies: the patient's own (released and withheld
+// categories, limits), a break-glass emergency summary for a reader whose role
+// lacks most category read permissions (those categories withheld), and the
+// doctor's (vitals as first recorded, available documents, audit counts).
+// Disposable copy of the owned synthetic rehearsal database; synthetic
+// accounts only.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -139,6 +144,82 @@ if (process.argv[2] === '--identity-child') {
       values($1,$2,$3,$4,$5,'ambulatory','in_progress',clock_timestamp()-interval '1 hour','Synthetic follow-up')`,
     [ids.encounter, ids.patient, ids.facility, ids.doctorAccount, ids.membership]));
 
+    // Record summaries (steps 4 to 6): 51 completed encounters, one more than
+    // a summary shows; vital A corrected twice (the second current), vital B
+    // naming a correction that does not exist, vital C never corrected, all
+    // three returned as first recorded until the correction rule is decided;
+    // three uploaded documents, scanned clean, rejected and not scanned; and
+    // the doctor's break-glass grant for an emergency read.
+    const summary = { vitalA: randomUUID(), vitalB: randomUUID(), vitalC: randomUUID(),
+      clean: randomUUID(), rejected: randomUUID(), unscanned: randomUUID(), emergencyGrant: randomUUID() };
+    await database.fixture(async (client) => {
+      await client.query(`insert into ehr.encounters(patient_id,facility_id,created_by,created_by_membership_id,
+        encounter_type,status,started_at,ended_at)
+        select $1::uuid,$2::uuid,$3::uuid,$4::uuid,'ambulatory','completed',clock_timestamp()-interval '3 hours'-n*interval '1 minute',
+          clock_timestamp()-interval '2 hours'-n*interval '1 minute' from generate_series(1,51) n`,
+      [ids.patient, ids.facility, ids.doctorAccount, ids.membership]);
+      await client.query(`insert into ehr.vitals(id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,
+        recorded_at,systolic_mmhg,diastolic_mmhg,pulse_bpm,temperature_c,current_correction_no)
+        values($1,$4,$5,$6,$7,$8,clock_timestamp()-interval '50 minutes',200,100,90,37.0,2),
+          ($2,$4,$5,$6,$7,$8,clock_timestamp()-interval '40 minutes',118,76,64,36.4,1),
+          ($3,$4,$5,$6,$7,$8,clock_timestamp()-interval '30 minutes',110,70,60,36.6,0)`,
+      [summary.vitalA, summary.vitalB, summary.vitalC, ids.encounter, ids.patient, ids.facility, ids.doctorAccount, ids.membership]);
+      await client.query(`insert into ehr.vital_corrections(vital_id,patient_id,facility_id,correction_no,replacement_values,
+        reason,created_by,created_by_membership_id)
+        values($1,$2,$3,1,'{"systolic_mmhg":120,"diastolic_mmhg":80,"pulse_bpm":90,"temperature_c":37.0}','First synthetic correction',$4,$5),
+          ($1,$2,$3,2,'{"systolic_mmhg":125,"diastolic_mmhg":85,"temperature_c":37.2}','Second synthetic correction',$4,$5)`,
+      [summary.vitalA, ids.patient, ids.facility, ids.doctorAccount, ids.membership]);
+      for (const [index, id] of [summary.clean, summary.rejected, summary.unscanned].entries()) {
+        await client.query(`insert into ehr.documents(id,patient_id,facility_id,created_by,created_by_membership_id,
+          original_file_name,storage_bucket,storage_key,object_version_id,declared_media_type,size_bytes,sha256_hex,status,
+          retention_class) values($1,$2,$3,$4,$5,$6,'synthetic-bucket',$7,$8,'application/pdf',1024,repeat($9,64),'uploaded',
+          'clinical_record')`, [id, ids.patient, ids.facility, ids.doctorAccount, ids.membership, `summary-${index}.pdf`,
+          `synthetic/summary-${id}.pdf`, `summary-v-${id}`, String(index + 1)]);
+      }
+      await client.query(`insert into ehr.document_scan_events(document_id,patient_id,facility_id,created_by,event_type,
+        detected_media_type,reason_code,scanner_engine,scanner_version,idempotency_key,correlation_id,object_version_id,
+        object_sha256_hex,created_at)
+        values($1,$3,$4,$5,'clean','application/pdf',null,'synthetic-scanner','1.0',$6,'delegation-summary-scan',$8,
+          repeat('1',64),clock_timestamp()-interval '5 minutes'),
+          ($2,$3,$4,$5,'rejected',null,'MALWARE_DETECTED','synthetic-scanner','1.0',$7,'delegation-summary-scan',$9,
+          repeat('2',64),clock_timestamp()-interval '5 minutes')`,
+      [summary.clean, summary.rejected, ids.patient, ids.facility, ids.doctorAccount, `summary-scan-${summary.clean}`,
+        `summary-scan-${summary.rejected}`, `summary-v-${summary.clean}`, `summary-v-${summary.rejected}`]);
+    });
+    await owner.query("insert into identity.purpose_of_use_codes(code,display,source_system) values('emergency','Emergency treatment','delegation-rehearsal') on conflict(code) do nothing");
+    await owner.query(`insert into identity.consent_grants(id,patient_id,staff_id,account_id,membership_id,facility_id,scope,
+      purpose_of_use,status,reason,starts_at,expires_at,break_glass)
+      values($1,$2,$3,$4,$5,$6,'break_glass','emergency','active','Synthetic emergency summary read',
+        clock_timestamp()-interval '1 minute',clock_timestamp()+interval '30 minutes',true)`,
+    [summary.emergencyGrant, ids.patient, ids.doctor, ids.doctorAccount, ids.membership, ids.facility]);
+    // A second reader at the facility (step 5), with its own break-glass grant.
+    // Its synthetic role holds the summary route's two permissions, diagnosis
+    // reads and the Identity authorization check, but not the vital,
+    // prescription, lab-request or document read permissions.
+    const limited = { account: randomUUID(), staff: randomUUID(), membership: randomUUID(), grant: randomUUID(),
+      role: 'synthetic-emergency-limited-reader' };
+    const limitedEmail = `limited-${limited.account}@example.invalid`;
+    await owner.query("insert into auth.roles(code,description) values($1,'Synthetic reader without vital, prescription, lab-request or document reads')",
+      [limited.role]);
+    await owner.query(`insert into auth.role_permissions(role_code,permission_code)
+      select $1,code from unnest($2::text[]) code`,
+    [limited.role, ['identity.authorization.check', 'ehr.encounter.read', 'ehr.note.read', 'ehr.diagnosis.read']]);
+    await owner.query(`insert into auth.accounts(id,subject,email,display_name,status,password_hash,password_algorithm)
+      values($1,$2,$3,'Synthetic limited reader','active',$4,'argon2id')`,
+    [limited.account, `synthetic:limited:${limited.account}`, limitedEmail, passwordHash]);
+    await owner.query(`insert into identity.staff(id,account_id,full_name,email,verification_status,default_role)
+      values($1,$2,'Synthetic limited reader',$3,'verified','nurse')`, [limited.staff, limited.account, limitedEmail]);
+    await owner.query(`insert into identity.staff_facility_memberships(id,staff_id,account_id,organization_id,facility_id,membership_role,app_role,is_primary,active)
+      values($1,$2,$3,$4,$5,'nurse','nurse',true,true)`, [limited.membership, limited.staff, limited.account, ids.org, ids.facility]);
+    await owner.query(`insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason)
+      values($1,$2,$3,'facility',$4,$5,'Synthetic rehearsal role')`,
+    [randomUUID(), limited.account, limited.role, limited.membership, ids.facility]);
+    await owner.query(`insert into identity.consent_grants(id,patient_id,staff_id,account_id,membership_id,facility_id,scope,
+      purpose_of_use,status,reason,starts_at,expires_at,break_glass)
+      values($1,$2,$3,$4,$5,$6,'break_glass','emergency','active','Synthetic limited emergency summary read',
+        clock_timestamp()-interval '1 minute',clock_timestamp()+interval '30 minutes',true)`,
+    [limited.grant, ids.patient, limited.staff, limited.account, limited.membership, ids.facility]);
+
     // Identity in its own process, as its runtime role.
     const shared = { NODE_ENV: 'test', PATH: process.env.PATH, HOME: process.env.HOME ?? '/tmp', LANG: 'C.UTF-8', TZ: 'UTC',
       // database.url() names the socket directory but not the port.
@@ -227,10 +308,95 @@ if (process.argv[2] === '--identity-child') {
     assert.equal(unreported.status, 403, JSON.stringify(unreported.body)); assert.equal(unreported.body.code, 'ORIGIN_DENIED');
     checks.push('Identity skips the cookie-write check only for a workload-authenticated caller reporting GET; a wrong or missing workload token, a reported POST and no reported method are still refused');
 
-    // 4. The patient's own records still read through the self path.
+    // 4. The patient's own records still read through the self path, and say
+    //    what is released and what is withheld, with the real limits.
     const own = await call(ehrBase, 'GET', '/ehr/me/records', { cookie: patient.cookie });
     assert.equal(own.status, 200, JSON.stringify(own.body));
     checks.push('the patient\'s own records read through the self-authorization path');
+    const withheld = ['vitals', 'diagnoses', 'prescriptions', 'labRequests', 'documents'];
+    assert.deepEqual({ released: own.body.released, withheld: own.body.withheld },
+      { released: ['encounters', 'notes'], withheld },
+      'GET /ehr/me/records does not report the released and the withheld record categories');
+    for (const category of withheld) {
+      assert.deepEqual(own.body[category], [], `GET /ehr/me/records returned withheld ${category}`);
+    }
+    assert.deepEqual({ count: own.body.encounters.length, limits: own.body.limits, truncated: own.body.truncated,
+      limit: own.body.limit }, { count: 50, limits: { encounters: 50, notes: 50 },
+      truncated: { encounters: true, notes: false }, limit: 50 },
+    'GET /ehr/me/records does not report its per-section limits and truncation');
+    const selfAudit = await owner.query(`select details from audit.events
+      where action='ehr.patient.self.records.read' and outcome='success' and patient_id=$1`, [ids.patient]);
+    assert.deepEqual(selfAudit.rows.map((row) => row.details), [{ encounterCount: 50, noteCount: 0,
+      withheldCategories: withheld }], 'The patient records audit does not record the withheld categories');
+    checks.push('GET /ehr/me/records releases completed encounters and current signed notes, lists the other five categories as withheld (empty), reports 50 of 51 encounters as truncated, and audits the withheld categories');
+
+    // 5. A break-glass reader without a category's read permission is not
+    //    given that category: it is withheld (empty, named, audited), as that
+    //    category's own routes would refuse the reader.
+    const reader = await signIn('/auth/login', limitedEmail, 'staff-login');
+    const partial = await call(ehrBase, 'GET', `/ehr/patients/${ids.patient}/emergency-records`,
+      { cookie: reader.cookie, 'x-facility-id': ids.facility, 'x-purpose-of-use': 'emergency' });
+    assert.equal(partial.status, 200, `limited emergency summary: ${partial.status} ${JSON.stringify(partial.body)}`);
+    const unpermitted = ['vitals', 'prescriptions', 'labRequests', 'documents'];
+    assert.deepEqual(Object.fromEntries(unpermitted.map((category) => [category, partial.body[category]])),
+      Object.fromEntries(unpermitted.map((category) => [category, []])),
+    'The emergency summary disclosed a category the reader has no read permission for');
+    assert.deepEqual({ released: partial.body.released, withheld: partial.body.withheld },
+      { released: ['encounters', 'notes', 'diagnoses'], withheld: unpermitted },
+      'The emergency summary does not name the categories withheld for lack of a read permission');
+    assert.deepEqual({ count: partial.body.encounters?.length, limits: partial.body.limits, truncated: partial.body.truncated },
+      { count: 50, limits: { encounters: 50, notes: 50, diagnoses: 100 },
+        truncated: { encounters: true, notes: false, diagnoses: false } },
+      'The permission-limited emergency summary does not report limits for exactly the sections it read');
+    const partialAudit = await owner.query(`select details from audit.events
+      where action='ehr.emergency.records.read' and outcome='success' and patient_id=$1 and actor_account_id=$2`,
+    [ids.patient, limited.account]);
+    assert.deepEqual(partialAudit.rows.map((row) => row.details), [{ encounterCount: 50, noteCount: 0, diagnosisCount: 0,
+      withheldCategories: unpermitted }],
+    'The emergency summary audit does not record the categories withheld for lack of a read permission');
+    checks.push('a break-glass reader whose role lacks the vital, prescription, lab-request and document read permissions gets those four categories empty and named as withheld, with encounters, notes and diagnoses still read, and the audit records the withheld categories and only the counts of what was read');
+
+    // 6. The doctor's break-glass emergency summary: every category the doctor
+    //    may read, vitals as first recorded (corrections are not applied until
+    //    the correction rule is decided), only available documents,
+    //    per-section limits, and each category's count in the audit.
+    const emergency = await call(ehrBase, 'GET', `/ehr/patients/${ids.patient}/emergency-records`,
+      { cookie: doctor.cookie, 'x-facility-id': ids.facility, 'x-purpose-of-use': 'emergency' });
+    assert.equal(emergency.status, 200, `emergency summary: ${emergency.status} ${JSON.stringify(emergency.body)}`);
+    assert.deepEqual({ released: emergency.body.released, withheld: emergency.body.withheld },
+      { released: ['encounters', 'notes', 'vitals', 'diagnoses', 'prescriptions', 'labRequests', 'documents'], withheld: [] },
+      'The emergency summary withholds a category from a reader holding every read permission');
+    const measurements = ['heightCm', 'weightKg', 'temperatureC', 'pulseBpm', 'respiratoryRate', 'systolicMmhg',
+      'diastolicMmhg', 'oxygenSaturationPercent'];
+    const vitalFields = ['diastolicMmhg', 'encounterId', 'facilityId', 'heightCm', 'id', 'oxygenSaturationPercent',
+      'pulseBpm', 'recordedAt', 'respiratoryRate', 'source', 'systolicMmhg', 'temperatureC', 'weightKg'];
+    const vitalState = (id) => {
+      const item = emergency.body.vitals?.find((vital) => vital.id === id);
+      assert(item, `The emergency summary does not list vital ${id}`);
+      assert.deepEqual(Object.keys(item).sort(), vitalFields,
+        'The emergency summary returns vital fields other than the recorded ones (a correction field)');
+      return Object.fromEntries(measurements.map((key) => [key, item[key]]));
+    };
+    const none = Object.fromEntries(measurements.map((key) => [key, null]));
+    assert.deepEqual([vitalState(summary.vitalA), vitalState(summary.vitalB), vitalState(summary.vitalC)], [
+      { ...none, systolicMmhg: 200, diastolicMmhg: 100, pulseBpm: 90, temperatureC: '37.0' },
+      { ...none, systolicMmhg: 118, diastolicMmhg: 76, pulseBpm: 64, temperatureC: '36.4' },
+      { ...none, systolicMmhg: 110, diastolicMmhg: 70, pulseBpm: 60, temperatureC: '36.6' },
+    ], 'The emergency summary does not return each vital as first recorded');
+    assert.deepEqual(emergency.body.documents?.map((item) => [item.id, item.status, item.scanStatus]),
+      [[summary.clean, 'available', 'clean']], 'The emergency summary lists a document whose effective status is not available');
+    assert.deepEqual({ count: emergency.body.encounters?.length, limits: emergency.body.limits,
+      truncated: emergency.body.truncated, limit: emergency.body.limit }, { count: 50,
+      limits: { encounters: 50, notes: 50, vitals: 100, diagnoses: 100, prescriptions: 100, labRequests: 100, documents: 100 },
+      truncated: { encounters: true, notes: false, vitals: false, diagnoses: false, prescriptions: false, labRequests: false,
+        documents: false }, limit: 50 }, 'The emergency summary does not report its per-section limits and truncation');
+    const emergencyAudit = await owner.query(`select details from audit.events
+      where action='ehr.emergency.records.read' and outcome='success' and patient_id=$1 and actor_account_id=$2`,
+    [ids.patient, ids.doctorAccount]);
+    assert.deepEqual(emergencyAudit.rows.map((row) => row.details), [{ encounterCount: 50, noteCount: 0, vitalCount: 3,
+      diagnosisCount: 0, prescriptionCount: 0, labRequestCount: 0, documentCount: 1, withheldCategories: [] }],
+    'The emergency summary audit does not record the count of each disclosed category');
+    checks.push('the break-glass emergency summary returns every vital as first recorded, corrected or not, with no correction field, lists only the clean-scanned document, reports 50 of 51 encounters as truncated, and audits each category\'s count');
 
     process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only',
       roles: ['hid_ehr_api_runtime', 'hid_identity_api_runtime'], checks })}\n`);

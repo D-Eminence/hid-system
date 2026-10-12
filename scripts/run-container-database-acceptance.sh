@@ -107,6 +107,9 @@ PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/emergency-contacts.integration.sql" >/dev/null
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/emergency.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/patient-access-safety.integration.sql" >/dev/null
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
@@ -152,10 +155,16 @@ PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/pharmacy-session-guards.integration.sql" >/dev/null
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/pharmacy-source-prescription.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/outreach-session-guards.integration.sql" >/dev/null
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/runtime-command-privileges.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/purpose-of-use-vocabulary.integration.sql" >/dev/null
 env NODE_ENV=test DATABASE_URL="$acceptance_admin_url" DATABASE_SSL=true \
   DATABASE_SSL_ROOT_CERT_BASE64="$acceptance_ca_base64" \
   npm --prefix "$acceptance_repository/services/ehr-api" run db:plan
@@ -395,4 +404,4 @@ acceptance_postgresql_version="$(PGSSLMODE=verify-full PGSSLROOTCERT="$acceptanc
 acceptance_started=false
 rm -rf -- "$acceptance_root"
 trap - EXIT INT TERM
-printf '{"status":"passed","postgresql":"%s","migrations":"0001-0079","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}\n' "$acceptance_postgresql_version"
+printf '{"status":"passed","postgresql":"%s","migrations":"0001-0082","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}\n' "$acceptance_postgresql_version"

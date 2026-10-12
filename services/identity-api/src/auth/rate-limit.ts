@@ -21,8 +21,7 @@ export interface RateLimitWindow {
 export async function consumeRateLimit(client: PoolClient, scope: RateLimitScope, bucket: string,
   window: RateLimitWindow): Promise<boolean> {
   // Serialize even an absent bucket: row locks alone lose concurrent first attempts.
-  await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',
-    [`otp-rate:${scope}:${bucket}`]);
+  await lockRateLimitBucket(client, scope, bucket);
   const result = await client.query<{ request_count: number; window_started_at: Date; blocked_until: Date | null }>(
     `select request_count, window_started_at, blocked_until
        from auth.otp_rate_limits where scope = $1 and bucket_hmac = $2 for update`,
@@ -49,6 +48,15 @@ export async function consumeRateLimit(client: PoolClient, scope: RateLimitScope
     [scope, bucket, windowExpired, nextCount, blocked, window.windowSeconds],
   );
   return blocked;
+}
+
+/**
+ * Takes the transaction lock `consumeRateLimit` takes for the bucket, so that a
+ * read with `rateLimitBlocked` and a later count in the same transaction see
+ * no other transaction's count in between.
+ */
+export async function lockRateLimitBucket(client: PoolClient, scope: RateLimitScope, bucket: string): Promise<void> {
+  await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))', [`otp-rate:${scope}:${bucket}`]);
 }
 
 /** True while a bucket is blocked. Reads only; it does not count a request. */
