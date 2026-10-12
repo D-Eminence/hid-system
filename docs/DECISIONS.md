@@ -2156,14 +2156,14 @@ A security review of that earlier version found that the campaign write routes
 have no campaign-level governance:
 
 - `OutreachService.addCampaignMember`
-  (`services/outreach-api/src/outreach/outreach.service.ts:224-232`) checks
+  (`services/outreach-api/src/outreach/outreach.service.ts:226-234`) checks
   only that the campaign belongs to the facility, then inserts the
   caller-supplied `membershipId` and `role`, `admin` included. The RLS insert
   policy `outreach_campaign_members_create`
   (`0038_outreach_campaign_workspaces.sql:99-104`) requires only
   `outreach.campaign.write` at the facility and `added_by` equal to the
   current account and membership;
-- `updateCampaignStatus` (`outreach.service.ts:193`) closes or activates any
+- `updateCampaignStatus` (`outreach.service.ts:195`) closes or activates any
   campaign of the facility, with no member or role check; and
 - the restrictive policies of `0045_outreach_campaign_registration_binding.sql`
   (55-64) gate a campaign-linked registration case only on a
@@ -2236,7 +2236,8 @@ Consequences:
   which the migration rehearsal runs as `outreach_cookie_read_runtime`
   (release checklist §8). The verifier now seeds its campaign with SQL and
   checks that each campaign write is refused; it passed in the rehearsal on
-  `a1a164b` (release checklist §8). Nothing has been run on staging or
+  the tree merged with `main` after #34 to #36 (`f64aa01`, release checklist
+  §8). Nothing has been run on staging or
   production.
 
 Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity

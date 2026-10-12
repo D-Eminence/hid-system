@@ -214,7 +214,7 @@ D-Eminence/hid-system#43) also marks
 `POST /identity/outreach/authorize`, where a reported read authorizes only a
 `.read` permission, and `outreach.campaign.write` stays refused, as on `main`,
 until campaign governance is decided; its HTTP evidence is local and synthetic
-too (`outreach_cookie_read_runtime`, passed after that narrowing on `a1a164b`).
+too (`outreach_cookie_read_runtime`, passed after that narrowing, on the tree merged with `main` at `f64aa01`).
 
 ## 8. Idempotency matrix
 
