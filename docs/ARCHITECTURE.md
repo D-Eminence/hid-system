@@ -395,10 +395,13 @@ The physically extracted `services/outreach-api` runs on port 3006. It asks
 Identity to authorize the user, facility, permission, purpose, and any existing
 canonical patient link. It has no Identity or EHR mutation privilege and never
 mints patient UUIDs or HIDs. `identity_resolution_pending` is not a canonical
-registration. Facility-scoped campaigns and their staff membership (0038) are
-served under the same prefix (`INTERFACE_CONTRACT.md`, Outreach registration
-boundary). Visits, screenings, documents/OCR, NIN, and clinical publication are
-outside the implemented boundary until separately governed.
+registration. Reads of facility-scoped campaigns and their staff membership
+(0038) are served under the same prefix (`INTERFACE_CONTRACT.md`, Outreach
+registration boundary). Campaign writes (create, status change, member add)
+stay outside the implemented boundary until separately governed: Identity
+refuses `outreach.campaign.write` (ADR-045). Visits, screenings,
+documents/OCR, NIN, and clinical publication are outside the implemented
+boundary until separately governed.
 
 ### 6.6 OCR API
 

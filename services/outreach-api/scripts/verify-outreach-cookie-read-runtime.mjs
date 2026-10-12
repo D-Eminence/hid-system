@@ -5,7 +5,8 @@
 // forwarding the browser's cookie. A same-origin GET carries no Origin and no
 // X-CSRF-Token, so neither Outreach nor Identity may demand them for a read
 // that Outreach, authenticated as a workload, reports; a browser write must
-// still prove Origin and CSRF, and campaign routes must be authorizable.
+// still prove Origin and CSRF. Campaign reads are authorized; campaign writes
+// stay refused until campaigns have their own governance (ADR-045).
 // Disposable copy of the owned synthetic rehearsal database; synthetic
 // accounts only.
 import assert from 'node:assert/strict';
@@ -193,19 +194,56 @@ if (process.argv[2] === '--identity-child') {
     assert.equal(fetched.body.temporaryPatientId, caseInput.temporaryPatientId);
     const withOrigin = await call(base, 'GET', '', { ...browser, origin: ORIGIN });
     assert.equal(withOrigin.status, 200, JSON.stringify(withOrigin.body));
-    const campaign = await call(base, 'POST', '/campaigns', write,
-      { name: 'Synthetic outreach campaign', services: ['registration'], startsAt: new Date().toISOString() });
-    assert.equal(campaign.status, 201, `campaign create with Origin and CSRF: ${JSON.stringify(campaign.body)}`);
+    checks.push('a cookie write with Origin and CSRF creates a registration case, which the cookie alone then lists and reads');
+
+    // 3. Campaigns. No campaign route can write one, so the doctor's campaign
+    //    is seeded in the doctor's own database context, as createCampaign
+    //    writes it: the campaign, with its creator as its admin member.
+    const seeded = await owner.connect();
+    let campaignId;
+    try {
+      await seeded.query('begin');
+      await seeded.query(`select set_config('app.actor_subject',$1,true),set_config('app.facility_id',$2,true),
+        set_config('app.correlation_id',$3,true),set_config('app.membership_id',$4,true),
+        set_config('app.purpose_of_use','direct-care',true)`,
+      [`synthetic:doctor:${ids.doctorAccount}`, ids.facility, `outreach-${randomUUID()}`, ids.membership]);
+      campaignId = (await seeded.query(`insert into outreach.campaigns
+        (facility_id,created_by_account_id,created_by_membership_id,name,services,starts_at)
+        values ($1,$2,$3,'Synthetic outreach campaign',array['registration'],clock_timestamp()) returning id`,
+      [ids.facility, ids.doctorAccount, ids.membership])).rows[0].id;
+      await seeded.query(`insert into outreach.campaign_members
+        (campaign_id,facility_id,membership_id,role,added_by_account_id,added_by_membership_id)
+        values ($1,$2,$3,'admin',$4,$3)`, [campaignId, ids.facility, ids.membership, ids.doctorAccount]);
+      await seeded.query('commit');
+    } catch (error) {
+      await seeded.query('rollback');
+      throw error;
+    } finally { seeded.release(); }
     const campaigns = await call(base, 'GET', '/campaigns', browser);
     assert.equal(campaigns.status, 200, JSON.stringify(campaigns.body));
-    assert(campaigns.body.some((item) => item.id === campaign.body.id), JSON.stringify(campaigns.body));
-    const members = await call(base, 'GET', `/campaigns/${campaign.body.id}/members`, browser);
+    assert(campaigns.body.some((item) => item.id === campaignId), JSON.stringify(campaigns.body));
+    const members = await call(base, 'GET', `/campaigns/${campaignId}/members`, browser);
     assert.equal(members.status, 200, JSON.stringify(members.body));
+    assert.deepEqual(members.body.map((item) => [item.membershipId, item.role]), [[ids.membership, 'admin']]);
     const bearer = await call(base, 'GET', '/campaigns', { authorization: `Bearer ${doctor.access}`, 'x-facility-id': ids.facility });
     assert.equal(bearer.status, 200, `bearer GET of campaigns: ${JSON.stringify(bearer.body)}`);
-    checks.push('a cookie write with Origin and CSRF creates a registration case and a campaign, which the cookie alone then lists and reads; a bearer read of campaigns is authorized');
+    // Every campaign write is refused, even with Origin and the session's CSRF
+    // token: Identity does not authorize outreach.campaign.write.
+    const closedWrite = async (path, body, headers = {}) => {
+      const response = await call(base, 'POST', path, { ...write, ...headers }, body);
+      assert.equal(response.status, 400, `${path}: ${JSON.stringify(response.body)}`);
+      assert.equal(response.body.code, 'VALIDATION_FAILED', path);
+    };
+    await closedWrite('/campaigns', { name: 'Synthetic outreach campaign 2', services: ['registration'],
+      startsAt: new Date().toISOString() });
+    await closedWrite(`/campaigns/${campaignId}/status`, { status: 'closed', reason: 'Synthetic campaign closure' },
+      { 'if-match': '"1"' });
+    await closedWrite(`/campaigns/${campaignId}/members`, { membershipId: ids.membership, role: 'admin' });
+    const unchanged = await call(base, 'GET', '/campaigns', browser);
+    assert.deepEqual(unchanged.body.map((item) => [item.id, item.status, item.rowVersion]), [[campaignId, 'planned', 1]]);
+    checks.push('the cookie alone lists a campaign and its members, and a bearer read of campaigns is authorized; a campaign create, status change or member add is refused with Origin and CSRF (400 VALIDATION_FAILED) and changes nothing');
 
-    // 3. Refusals: a disallowed Origin, and writes without their evidence.
+    // 4. Refusals: a disallowed Origin, and writes without their evidence.
     const crossOrigin = await call(base, 'GET', '', { ...browser, origin: 'https://attacker.example' });
     assert.equal(crossOrigin.status, 403, JSON.stringify(crossOrigin.body)); assert.equal(crossOrigin.body.code, 'ORIGIN_DENIED');
     const refusedWrite = async (headers, label) => {
@@ -219,7 +257,7 @@ if (process.argv[2] === '--identity-child') {
     await refusedWrite({ origin: ORIGIN, 'x-csrf-token': 'not-the-session-csrf-token' }, 'write with a wrong CSRF token (refused by Identity)');
     checks.push('a cookie read naming a disallowed Origin is 403 ORIGIN_DENIED; a cookie write without CSRF, without Origin, or with a wrong CSRF token is 403 CSRF_VALIDATION_FAILED');
 
-    // 4. Authentication and scope are unchanged.
+    // 5. Authentication and scope are unchanged.
     const anonymous = await call(base, 'GET', '', { 'x-facility-id': ids.facility });
     assert.equal(anonymous.status, 401, JSON.stringify(anonymous.body)); assert.equal(anonymous.body.code, 'AUTHENTICATION_REQUIRED');
     const forged = await call(base, 'GET', '', { cookie: 'hid_access=forged-session-token', 'x-facility-id': ids.facility });
@@ -228,7 +266,7 @@ if (process.argv[2] === '--identity-child') {
     assert.equal(asPatient.status, 403, JSON.stringify(asPatient.body)); assert.equal(asPatient.body.code, 'PATIENT_SCOPE_DENIED');
     checks.push('a read with no session is 401, with a forged cookie 401 from Identity, and with a patient session 403 PATIENT_SCOPE_DENIED');
 
-    // 5. Identity trusts a reported read only from the authenticated Outreach
+    // 6. Identity trusts a reported read only from the authenticated Outreach
     //    workload, and then authorizes only a read permission.
     const authorize = (headers, permission = 'outreach.registration.read') => call(identityUrl, 'POST',
       '/identity/outreach/authorize', { cookie: doctor.cookie, 'x-facility-id': ids.facility,

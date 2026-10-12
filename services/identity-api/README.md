@@ -30,8 +30,11 @@ marked `@DelegatedBrowserRequest()`,
 when the request authenticates as an approved workload and reports the method
 of the request that workload is serving as `GET`, `HEAD` or `OPTIONS` in
 `X-HID-Original-Method`. After such a skip the Outreach route authorizes only
-a permission ending in `.read` (ADR-045). See the Extracted
-Identity boundary in `../../docs/INTERFACE_CONTRACT.md`.
+a permission ending in `.read` (ADR-045). The Outreach route accepts
+`outreach.registration.read`, `outreach.registration.write` and
+`outreach.campaign.read`; `outreach.campaign.write` is refused
+`400 VALIDATION_FAILED` until campaign governance is decided (ADR-045). See
+the Extracted Identity boundary in `../../docs/INTERFACE_CONTRACT.md`.
 
 Staff and patient browser sessions use host-only cookies with Origin and CSRF
 checks. Their cookie names and paths, the refresh and sign-out outcomes, and

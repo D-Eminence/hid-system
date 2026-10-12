@@ -149,14 +149,18 @@ describe('Outreach route permissions', () => {
     }
   });
 
-  it('requires only permissions that Identity\'s Outreach authorization accepts', () => {
+  it('requires only permissions that Identity\'s Outreach authorization accepts, except the closed campaign writes', () => {
     const dto = readFileSync(join(__dirname, '../../../identity-api/src/identity/dto/authorize-outreach.dto.ts'), 'utf8');
     const accepted = new Set([...(dto.match(/OUTREACH_PERMISSIONS = \[([^\]]*)\]/)?.[1] ?? '').matchAll(/'([^']+)'/g)]
       .map((match) => match[1]));
     expect(dto).toContain('@IsIn(OUTREACH_PERMISSIONS)');
-    for (const { name, handler } of handlers) {
-      const permission = reflector.get<string[]>(REQUIRED_PERMISSIONS, handler)[0];
-      expect({ name, accepted: accepted.has(permission ?? '') }).toEqual({ name, accepted: true });
+    // Identity refuses outreach.campaign.write until campaigns have their own
+    // governance (ADR-045), so exactly these routes stay closed.
+    const refused = handlers.filter(({ handler }) =>
+      !accepted.has(reflector.get<string[]>(REQUIRED_PERMISSIONS, handler)[0] ?? ''));
+    expect(refused.map(({ name }) => name).sort()).toEqual(['addCampaignMember', 'createCampaign', 'updateCampaignStatus']);
+    for (const { handler } of refused) {
+      expect(reflector.get<string[]>(REQUIRED_PERMISSIONS, handler)).toEqual(['outreach.campaign.write']);
     }
   });
 });

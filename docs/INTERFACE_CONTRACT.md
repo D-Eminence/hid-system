@@ -555,10 +555,10 @@ GET  /api/v1/outreach/registration-cases/:caseId                        # outrea
 POST /api/v1/outreach/registration-cases                                # outreach.registration.write
 POST /api/v1/outreach/registration-cases/:caseId/link-existing          # outreach.registration.write
 GET  /api/v1/outreach/registration-cases/campaigns                      # outreach.campaign.read
-POST /api/v1/outreach/registration-cases/campaigns                      # outreach.campaign.write
-POST /api/v1/outreach/registration-cases/campaigns/:campaignId/status   # outreach.campaign.write
+POST /api/v1/outreach/registration-cases/campaigns                      # outreach.campaign.write (refused by Identity: 400)
+POST /api/v1/outreach/registration-cases/campaigns/:campaignId/status   # outreach.campaign.write (refused by Identity: 400)
 GET  /api/v1/outreach/registration-cases/campaigns/:campaignId/members  # outreach.campaign.read
-POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members  # outreach.campaign.write
+POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members  # outreach.campaign.write (refused by Identity: 400)
 ```
 
 All requests require authenticated Identity user context, an authorized exact
@@ -576,6 +576,15 @@ require a stable `Idempotency-Key`; a campaign status change requires
 `If-Match` with the campaign's expected version. Registration-case creation
 accepts a UUID-v4 local command ID and only a `tmp_<uuid-v4>` temporary patient
 reference; it always returns `identity_resolution_pending` initially.
+
+Identity does not authorize `outreach.campaign.write`: its validation refuses
+it `400 VALIDATION_FAILED`, which Outreach relays. The three campaign write
+routes marked above (create, status change, member add) therefore answer
+`400 VALIDATION_FAILED`, as on `main`, for cookie requests with an allowed
+`Origin` and the session's CSRF token and for bearer requests alike, and
+change nothing. No campaign can be created through the API. They stay closed
+pending campaign governance: who may create campaigns, change their status and
+add members is an open product decision (ADR-045). Campaign reads are served.
 
 `link-existing` requires a canonical Identity patient UUID, a reason, and the
 exact expected Outreach row version. Outreach calls the Identity authorization

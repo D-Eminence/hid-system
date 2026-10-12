@@ -61,8 +61,9 @@ The executable covers:
    `hid_outreach_api_runtime` and Identity as `hid_identity_api_runtime`: a
    doctor's same-origin cookie reads of registration cases and campaigns, with
    no Origin or CSRF token, are authorized through Identity, cookie writes need
-   Origin and CSRF, and Identity authorizes only a read permission for a read
-   that the Outreach workload reports. `patient_enrollment_runtime`
+   Origin and CSRF, campaign writes are refused `400 VALIDATION_FAILED` even
+   with both (the campaign is seeded with SQL), and Identity authorizes only a
+   read permission for a read that the Outreach workload reports. `patient_enrollment_runtime`
    (`verify-patient-enrollment-runtime.mjs`) runs public NIN enrollment through
    activation, sign-in, refresh, recovery and sign-out, with QoreID (behind the
    real adapter), Siteverify and delivery stubbed (see

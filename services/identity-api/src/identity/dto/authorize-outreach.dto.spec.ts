@@ -15,14 +15,15 @@ async function accepts(permission: unknown): Promise<boolean> {
 }
 
 describe('AuthorizeOutreachDto', () => {
-  it('accepts every Outreach permission the database defines', async () => {
+  it('accepts every Outreach permission the database defines except campaign writes', async () => {
     expect(outreachPermissions).toEqual(['outreach.campaign.read', 'outreach.campaign.write',
       'outreach.registration.read', 'outreach.registration.write']);
     for (const permission of outreachPermissions) expect({ permission, accepted: await accepts(permission) })
-      .toEqual({ permission, accepted: true });
+      .toEqual({ permission, accepted: permission !== 'outreach.campaign.write' });
   });
 
-  it.each(['outreach.campaign.admin', 'identity.patient.read', 'outreach.registration', '', undefined])(
+  it.each(['outreach.campaign.write', 'outreach.campaign.admin', 'identity.patient.read', 'outreach.registration', '',
+    undefined])(
     'refuses %p', async (permission) => {
       expect(await accepts(permission)).toBe(false);
     });

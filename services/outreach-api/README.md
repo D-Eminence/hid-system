@@ -9,10 +9,12 @@ Outreach assigns only opaque `tmp_<uuid-v4>` identifiers. They are not HIDs,
 patient UUIDs, or canonical identity. A registration begins in
 `identity_resolution_pending`; a separate command may append an authorized link
 to an existing Identity patient. Ambiguous and unresolved cases remain pending.
-Facility campaigns and their members are served under the same prefix
-(`/campaigns`). The service never creates canonical patients and owns no
-clinical encounter, vaccination, specimen, document, OCR, EHR, or public
-onboarding API.
+Facility campaigns and their members can be read under the same prefix
+(`/campaigns`). Campaign create, status and member writes answer
+`400 VALIDATION_FAILED`, because Identity does not authorize
+`outreach.campaign.write` until campaign governance is decided (ADR-045). The
+service never creates canonical patients and owns no clinical encounter,
+vaccination, specimen, document, OCR, EHR, or public onboarding API.
 
 Use the least-privilege `hid_outreach_api_runtime` database aggregate role.
 User/facility authorization and patient authorization are resolved through the

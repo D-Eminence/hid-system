@@ -212,8 +212,9 @@ Extracted Identity boundary in `INTERFACE_CONTRACT.md`. Its HTTP evidence is
 local and synthetic, for EHR only. The Outreach cookie-read fix (ADR-045,
 branch `fix/outreach-cookie-reads`, not merged) also marks
 `POST /identity/outreach/authorize`, where a reported read authorizes only a
-`.read` permission; its HTTP evidence is local and synthetic too
-(`outreach_cookie_read_runtime`).
+`.read` permission, and `outreach.campaign.write` stays refused, as on `main`,
+until campaign governance is decided; its HTTP evidence is local and synthetic
+too (`outreach_cookie_read_runtime`, re-run pending after that narrowing).
 
 ## 8. Idempotency matrix
 

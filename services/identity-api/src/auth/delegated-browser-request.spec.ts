@@ -219,15 +219,13 @@ describe('IdentityController.authorizeOutreach', () => {
 
   it('refuses a write permission when the browser-write check was skipped for a reported read', async () => {
     const { subject } = controller();
-    for (const permission of ['outreach.registration.write', 'outreach.campaign.write'] as const) {
-      expect((await refusal(subject.authorizeOutreach({ permission }, handlerRequest('GET')))).code)
-        .toBe('CSRF_VALIDATION_FAILED');
-    }
+    expect((await refusal(subject.authorizeOutreach({ permission: 'outreach.registration.write' },
+      handlerRequest('GET')))).code).toBe('CSRF_VALIDATION_FAILED');
   });
 
   it('authorizes a write permission when the request passed the browser-write check (or used a bearer token)', async () => {
     const { subject } = controller();
-    await expect(subject.authorizeOutreach({ permission: 'outreach.campaign.write' }, handlerRequest()))
+    await expect(subject.authorizeOutreach({ permission: 'outreach.registration.write' }, handlerRequest()))
       .resolves.toMatchObject({ authorized: true });
   });
 });

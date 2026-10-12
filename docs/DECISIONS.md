@@ -2034,10 +2034,75 @@ Decision:
   authorizes only a permission ending in `.read`; a write permission is
   refused `403 CSRF_VALIDATION_FAILED`.
   `POST /api/v1/identity/outreach/patient-authorization` is not marked.
-- `AuthorizeOutreachDto` accepts exactly `OUTREACH_PERMISSIONS`, the four
-  Outreach permissions that migrations 0024 and 0038 define:
-  `outreach.registration.read`, `outreach.registration.write`,
-  `outreach.campaign.read` and `outreach.campaign.write`.
+- `AuthorizeOutreachDto` accepts exactly `OUTREACH_PERMISSIONS`, three of the
+  four Outreach permissions that migrations 0024 and 0038 define:
+  `outreach.registration.read`, `outreach.registration.write` and
+  `outreach.campaign.read`. It does not accept `outreach.campaign.write`:
+  Identity's validation refuses it `400 VALIDATION_FAILED`, as on `main`, and
+  Outreach relays that status and code. Campaign reads
+  (`GET .../campaigns` and `GET .../campaigns/:campaignId/members`) are
+  authorized; the three campaign writes (create, status change, member add)
+  answer `400 VALIDATION_FAILED` and change nothing, as on `main`. An earlier
+  version of this branch also accepted `outreach.campaign.write`; that is
+  withdrawn (next section).
+
+Campaign writes (not decided here):
+
+A security review of that earlier version found that the campaign write routes
+have no campaign-level governance:
+
+- `OutreachService.addCampaignMember`
+  (`services/outreach-api/src/outreach/outreach.service.ts:224-232`) checks
+  only that the campaign belongs to the facility, then inserts the
+  caller-supplied `membershipId` and `role`, `admin` included. The RLS insert
+  policy `outreach_campaign_members_create`
+  (`0038_outreach_campaign_workspaces.sql:99-104`) requires only
+  `outreach.campaign.write` at the facility and `added_by` equal to the
+  current account and membership;
+- `updateCampaignStatus` (`outreach.service.ts:193`) closes or activates any
+  campaign of the facility, with no member or role check; and
+- the restrictive policies of `0045_outreach_campaign_registration_binding.sql`
+  (55-64) gate a campaign-linked registration case only on a
+  `campaign_members` row existing.
+
+So, with `outreach.campaign.write` authorized, any holder of it at the
+facility could add themselves to any campaign as `admin` and then read its
+campaign-linked registration cases (name, phone, sex, age, notes), and could
+close or activate any campaign. On `main` these routes were unreachable (`400`).
+
+A second, independent review found that this is how 0038 is designed, not a
+defect in it: 0038 describes `outreach.campaign.write` as "Create and govern
+facility-scoped Outreach campaigns and workspace membership"
+(`0038_outreach_campaign_workspaces.sql:6`); the schema suite has a removed
+member add itself back as `admin` and expects success
+(`services/ehr-api/database/tests/schema.integration.sql:2096-2130`); 0045
+lets "an authorized campaign manager" change status, with no creator check
+(`0045_outreach_campaign_registration_binding.sql:116-118`); and the DTO's
+two-permission limit predates the campaign routes (added in `a8b3889`), so it
+was an oversight, not a gate. No campaign-linked registration can be created
+at runtime yet (the `FOR SHARE` defect, release checklist §4.2, open
+D-Eminence/hid-system#34), so no linked case is exposed today.
+
+Who may create campaigns, change their status and add members is a
+governance and product decision. The campaign-linked registration compartment
+(0045) is only as strong as who may add campaign members. The options:
+
+- A: authorize `outreach.campaign.write` as 0038 designs it, for
+  facility-level campaign managers. Every role that reads registrations
+  (doctor, clinician, nurse, receptionist, admin and org_admin) could create
+  campaigns, change their status and add any facility member, themselves
+  included, which also admits them to the campaign's linked registrations.
+  This is a one-line change to `OUTREACH_PERMISSIONS`; its tests were written
+  once on this branch.
+- B: per-campaign governance first, for example only the campaign's own
+  `admin` members (`createCampaign` seeds the creator as one) manage it,
+  enforced in `OutreachService` and in an RLS `WITH CHECK`/`USING` clause by
+  a new migration, with failing-first SQL and HTTP tests in which a
+  non-member holding `outreach.campaign.write` is refused.
+
+This branch does not decide it. Until the product owner chooses, it keeps
+`outreach.campaign.write` refused exactly as on `main` and authorizes only
+campaign reads, so no write behaviour changes and the choice stays open.
 
 Consequences:
 
@@ -2050,16 +2115,24 @@ Consequences:
   read permissions keeps that check for every write, so a misreported method
   can authorize a read but never a write;
 - no migration or grant change. Bearer requests are checked as before, and
-  campaign routes become authorizable for bearer and cookie requests alike.
-  Health-id needs no change: it already sends cookies with credentials and
-  `X-CSRF-Token` only on writes;
+  campaign reads become authorizable for bearer and cookie requests alike.
+  Campaign writes are not: no campaign can be created through the API until
+  the decision above, so release checklist step S4c's campaign create cannot
+  pass. Health-id needs no change for the reads: it already sends cookies with
+  credentials and `X-CSRF-Token` only on writes. Its Outreach page can list
+  campaigns and members, but its campaign create, status and member actions
+  get `400 VALIDATION_FAILED`, as on `main`; Health-id should hide or handle
+  them;
 - campaign-linked registration still fails as the runtime role, a separate
   defect (`FOR SHARE` on `outreach.campaign_members`, release checklist §4.2)
   fixed by the open D-Eminence/hid-system#34; and
 - the evidence is local and synthetic: the Outreach guard and Identity specs,
   and `services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs`,
   which the migration rehearsal runs as `outreach_cookie_read_runtime`
-  (release checklist §8). Nothing has been run on staging or production.
+  (release checklist §8). The verifier now seeds its campaign with SQL and
+  checks that each campaign write is refused; its re-run after the narrowing
+  is pending. Nothing has been run on staging or production.
 
 Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity
-boundary; Outreach registration boundary); release checklist §2, §3, §8 and §9.
+boundary; Outreach registration boundary); release checklist §2, §3, §7, §8
+and §9.
