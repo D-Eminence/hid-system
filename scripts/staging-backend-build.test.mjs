@@ -1,6 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath} from './staging-backend-build.mjs';
+test('EHR uses its own exact native inventory assessment without changing migration policy',()=>{
+  assert.equal(runtimePolicyPath('ehr-api'),'security/staging-ehr-runtime-assessment.json');
+  assert.equal(runtimePolicyPath('database-migration'),'security/staging-novu-runtime-assessment.json');
+});
 test('Identity has its own assessed image policy; old Novu evidence remains bound to its original policy',()=>{
   assert.equal(runtimePolicyPath('identity-api'),'security/staging-identity-runtime-assessment.json');
   assert.equal(runtimePolicyPath('notification-worker'),'security/staging-novu-runtime-assessment.json');
