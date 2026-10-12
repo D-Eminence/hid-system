@@ -196,7 +196,7 @@ Evidence root (private logs and synthetic artifacts excluded from Git):
 | Release validation | 44 release tests, including 11 public-custody intake checks, plus the existing edge regression passed; signed fixtures are synthetic |
 | Staging profile checks | Earlier sleep/economy/fidelity synth/policy receipts remain retained. Current deferred-NIN/email-profile infrastructure tests cover all three modes; the September 11 account-bound economy CLI synth has 434 resources, 54 parameters and 545,312 bytes, with no missing context. The ignored deployment plan matches its SHA-256 `56141dc6e28585b8d1b0dcd7570fbed2797cd332a71b13912c446eab3d999122` and all 54 parameter names. Twelve admitted image digests and the generated origin secret remain unresolved. |
 | Cloudflare packaging | Seven staging frontend Wrangler dry runs passed; no publication |
-| Production comparison | PASS: fresh September 14 offline synthesis using the same baseline context is byte-for-byte equal, 464,453 bytes; SHA-256 `f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6`. No production API was used. |
+| Production comparison | PASS: fresh September 14 offline synthesis using the same baseline context is byte-for-byte equal, 464,453 bytes; SHA-256 `f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6`. No production API was used. Superseded: the current baseline and the reason for each change are in the [deployment runbook](AWS_DEPLOYMENT_RUNBOOK.md#1-freeze-the-release-inputs) §1. |
 | Built Identity image | PASS: local amd64 build; UID 65532, volume directory 0700, token file 0600, read-only consumer cannot write, other UID cannot read, fresh/expired health behaves correctly. Live ARM64 ECS execution remains unverified. |
 
 The final migration receipt SHA-256 is
@@ -528,6 +528,8 @@ before/after: production SHA-256
 development SHA-256
 `42cadadc0cda9ef7f13c86f27937b066662f417e5e5925fc2a46a1bb708db73c`.
 This used local synthesis only; it did not query or modify production.
+Both hashes are superseded; the current baseline and the reason for each change
+are in the [deployment runbook](AWS_DEPLOYMENT_RUNBOOK.md#1-freeze-the-release-inputs) §1.
 Production's analogous pre-existing issues remain a future separately scoped
 prerequisite, not silently repaired here.
 

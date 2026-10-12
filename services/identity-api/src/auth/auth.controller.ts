@@ -2,10 +2,11 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Body, Controller, Get, HttpCode, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuditService } from '../audit/audit.service';
-import { AuditFailuresOnly, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
+import { AuditFailuresOnly, AuditSessionEvent, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
+import { clearEnrollmentCookie } from '../identity/enrollment-cookie';
 import { AuthService } from './auth.service';
 import { AuthSessionAuditService } from './auth-session-audit.service';
 import { GoogleLinkDto, GoogleLoginDto } from './dto/google-login.dto';
@@ -144,6 +145,7 @@ export class AuthController {
   }
 
   @Post('google/link')
+  @AuditSessionEvent('auth.google.link')
   @FacilityOptional()
   @PatientAllowed()
   @HttpCode(200)
@@ -243,6 +245,7 @@ export class AuthController {
   }
 
   @Get('session')
+  @AuditSessionEvent('auth.session.read')
   @FacilityOptional()
   @PatientAllowed()
   async session(
@@ -272,6 +275,7 @@ export class AuthController {
   }
 
   @Get('service-session')
+  @AuditSessionEvent('auth.service-session.read')
   @FacilityOptional()
   @PatientAllowed()
   async serviceSession(
@@ -287,6 +291,7 @@ export class AuthController {
   }
 
   @Post('service-session')
+  @AuditSessionEvent('auth.service-session.validate')
   @FacilityOptional()
   @PatientAllowed()
   @HttpCode(200)
@@ -313,12 +318,15 @@ export class AuthController {
    * renew it: that is refused with 403 SESSION_CLIENT_MISMATCH after the
    * Origin and CSRF checks, nothing ends and its cookies are kept. A sign-in
    * of the other kind that refresh could not renew now (an older rotated
-   * token, an expired sign-in, a suspended account) is ended without naming
-   * its kind (TokenService.revokeByRefreshToken). A bearer sign-out names its
+   * token, an expired sign-in, a suspended account, a staff membership or a
+   * patient that refresh can no longer resolve) is ended without naming its
+   * kind (TokenService.revokeByRefreshToken). A bearer sign-out names its
    * sign-in explicitly and ignores the header; an unnamed app signs out as
-   * before. Every other outcome clears the cookies.
+   * before. Every other outcome clears the cookies, the public patient
+   * enrollment cookie included.
    */
   @Post('logout')
+  @AuditSessionEvent('auth.logout')
   @Public()
   @HttpCode(204)
   async logout(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response): Promise<void> {
@@ -388,6 +396,7 @@ export class AuthController {
   }
 
   @Post('facility')
+  @AuditSessionEvent('auth.facility.select')
   @FacilityOptional()
   @HttpCode(200)
   async selectFacility(
@@ -483,6 +492,11 @@ export class AuthController {
     });
   }
 
+  /**
+   * Sets the session cookies of a sign-in or refresh, and expires the public
+   * patient enrollment cookie: once a sign-in exists on this device, its HID
+   * comes from the session, not from whichever enrollment the device last made.
+   */
   private setCookies(response: Response, result: LoginResult): void {
     const common = {
       secure: this.environment.AUTH_COOKIE_SECURE,
@@ -497,8 +511,10 @@ export class AuthController {
     response.cookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, result.csrfToken, {
       ...common, httpOnly: false, path: '/', expires: result.refreshExpiresAt,
     });
+    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
   }
 
+  /** Clears the session cookies and the public patient enrollment cookie. */
   private clearCookies(response: Response): void {
     const common = {
       secure: this.environment.AUTH_COOKIE_SECURE,
@@ -507,6 +523,7 @@ export class AuthController {
     response.clearCookie(this.environment.AUTH_COOKIE_NAME, { ...common, httpOnly: true, path: '/' });
     response.clearCookie(`${this.environment.AUTH_COOKIE_NAME}_refresh`, { ...common, httpOnly: true, path: '/api/v1/auth' });
     response.clearCookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, { ...common, httpOnly: false, path: '/' });
+    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
   }
 
   private googleNonceCookieName(): string {

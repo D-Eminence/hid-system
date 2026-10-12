@@ -8,9 +8,8 @@ import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { ActivatePatientEnrollmentDto, PatientEnrollmentContactDto,
   StartPatientEnrollmentDto, VerifyPatientEnrollmentContactDto } from './dto/patient-enrollment.dto';
+import { ENROLLMENT_COOKIE_NAME, enrollmentCookieOptions } from './enrollment-cookie';
 import { PatientEnrollmentService } from './patient-enrollment.service';
-
-const COOKIE_NAME = 'hid_enrollment';
 
 @Controller('identity/patient-enrollments')
 @Public()
@@ -37,7 +36,8 @@ export class PatientEnrollmentController {
     if (googleCookie) await this.google.onboardingStatus(googleCookie);
     const result = await this.enrollments.start(input.nin, idempotencyKey ?? '', request.ip,
       request.correlationId, googleCookie);
-    response.cookie(COOKIE_NAME, result.cookie, this.cookieOptions());
+    response.cookie(ENROLLMENT_COOKIE_NAME, result.cookie,
+      enrollmentCookieOptions(this.environment.AUTH_COOKIE_SECURE));
     return result.progress;
   }
 
@@ -93,6 +93,8 @@ export class PatientEnrollmentController {
     this.assertAccountlessEnrollment(request, googleCookie);
     const result = await this.enrollments.activate(this.cookie(request), input.password,
       request.correlationId, googleCookie);
+    // The enrollment cookie is kept, so a lost response can be replayed; a
+    // sign-in, refresh or sign-out on this device expires it (AuthController).
     if (googleCookie) response.clearCookie(this.google.onboardingCookieName, {
       secure: this.environment.AUTH_COOKIE_SECURE,
       sameSite: 'strict', httpOnly: true, path: '/api/v1',
@@ -108,7 +110,7 @@ export class PatientEnrollmentController {
   }
 
   private cookie(request: HidRequest): string | undefined {
-    return this.namedCookie(request, COOKIE_NAME);
+    return this.namedCookie(request, ENROLLMENT_COOKIE_NAME);
   }
 
   private namedCookie(request: HidRequest, name: string): string | undefined {
@@ -138,11 +140,5 @@ export class PatientEnrollmentController {
         googleCookie ? 'GOOGLE_ONBOARDING_REQUIRES_SIGN_OUT' : 'PATIENT_ENROLLMENT_REQUIRES_SIGN_OUT',
         'Sign out before starting or continuing a new Health ID enrollment');
     }
-  }
-
-  private cookieOptions() {
-    return { httpOnly: true, sameSite: 'strict' as const,
-      secure: this.environment.AUTH_COOKIE_SECURE,
-      path: '/api/v1/identity/patient-enrollments', maxAge: 24 * 60 * 60 * 1000 };
   }
 }

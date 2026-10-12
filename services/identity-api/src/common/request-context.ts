@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import { DomainProblem } from './problem';
 
 export interface FacilityAssignment {
   id: string;
@@ -42,6 +43,12 @@ export interface HidRequest extends Request {
   accessScope?: 'facility' | 'platform';
   /** High-risk platform action the guard authorized for this request (see high-risk-policy.ts). */
   highRiskAction?: string;
+  /**
+   * The browser read (GET, HEAD or OPTIONS) an authenticated workload reported
+   * on a @DelegatedBrowserRequest route. Set only when the guard skipped the
+   * cookie-write Origin and CSRF check for that reason.
+   */
+  delegatedBrowserMethod?: string;
 }
 
 export type PurposeOfUse = 'direct-care' | 'emergency' | 'healthcare-operations';
@@ -78,9 +85,14 @@ export function requireRequestContext(request: HidRequest, suppliedPurpose?: str
   if (!request.actor || !request.facilityId || !request.correlationId) {
     throw new Error('Request context was not established by security guards');
   }
+  // Consent and audit routes check their purpose first and most routes supply a
+  // validated body purpose; the registration-case read takes it from the
+  // header, which the guard does not check, so a missing or unknown one is the
+  // client's.
   const candidate = suppliedPurpose ?? request.header('x-purpose-of-use');
   if (!candidate || !PURPOSES.has(candidate as PurposeOfUse)) {
-    throw new Error('A validated purpose of use is required for health-data access');
+    throw new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED',
+      'X-Purpose-Of-Use must be direct-care, emergency or healthcare-operations');
   }
   const purposeOfUse = candidate as PurposeOfUse;
   request.purposeOfUse = purposeOfUse;

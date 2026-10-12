@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // Patient signup-to-sign-in lifecycle over HTTP, as hid_identity_api_runtime,
 // on a disposable copy of the owned synthetic rehearsal database: public NIN
-// enrollment (QoreID adapter, contact OTP, activation), then password sign-in,
-// session, refresh rotation, self profile, OTP password recovery and sign-out.
+// enrollment (QoreID adapter, contact OTP, activation and its replay budget),
+// then password sign-in, session, refresh rotation, self profile, OTP password
+// recovery and sign-out, each of which expires the enrollment cookie.
 // External services are replaced, never called: QoreID behind the real adapter
 // by a local HTTP stub, Cloudflare Siteverify by a stub that encodes the
 // outcome in the token, and Notification delivery by a stub that captures the
 // code. Every NIN, name, contact and password here is invented.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
@@ -306,6 +307,27 @@ try {
   const replayActivation = await post('/identity/patient-enrollments/activate',
     { password: 'A-Different-Password-02' }, { cookie: cookieA });
   expectProblem(replayActivation, 200); assert.equal(replayActivation.body.hidCode, hidA);
+  // Activations and replays share one budget per enrollment: every attempt
+  // after the cookie and stage checks counts, whatever its outcome, up to
+  // OTP_RATE_MAX_REQUESTS * 3 per window (the contact step's enrollment
+  // budget). Then 429, without another argon2id run or activation command.
+  const activationBudget = getEnvironment().OTP_RATE_MAX_REQUESTS * 3;
+  for (let call = 3; call <= activationBudget; call += 1) {
+    const withinBudget = await post('/identity/patient-enrollments/activate',
+      { password: `A-Different-Password-0${call}` }, { cookie: cookieA });
+    assert.equal(withinBudget.status, 200,
+      `Activation ${call} of one enrollment is within OTP_RATE_MAX_REQUESTS * 3 and must replay the HID, got ${withinBudget.status} ${JSON.stringify(withinBudget.body)}`);
+    assert.equal(withinBudget.body.hidCode, hidA);
+  }
+  const overBudget = await post('/identity/patient-enrollments/activate',
+    { password: 'A-Different-Password-99' }, { cookie: cookieA });
+  assert.equal(overBudget.status, 429,
+    `Activation ${activationBudget + 1} of one enrollment must be refused 429 ENROLLMENT_RATE_LIMITED, got ${overBudget.status} ${JSON.stringify(overBudget.body)}`);
+  expectProblem(overBudget, 429, 'ENROLLMENT_RATE_LIMITED');
+  assert(!('hidCode' in overBudget.body), 'a refused activation must not return the HID');
+  assert.equal(await count(`select count(*) from identity.public_patient_enrollment_rates
+    where scope = 'enrollment' and request_count = $1`, [activationBudget + 1]), 1,
+  'the activation budget is one enrollment-scope bucket that counted every activation');
   const accountA = (await owner.query(`select account.id, account.status, account.email,
       account.email_verified_at is not null as email_verified, patient.id as patient_id, patient.hid_code,
       patient.first_name, patient.last_name, patient.dob::text as dob, patient.source_system
@@ -318,7 +340,7 @@ try {
   const patientA = accountA[0].patient_id;
   assert.equal(await count(`select count(*) from identity.patients where hid_code = $1`, [hidA]), 1);
   assert.equal((await owner.query('select state, patient_id from identity.public_patient_enrollments')).rows[0].patient_id, patientA);
-  check('activation creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID; a replay returns the same HID and ignores the second password');
+  check('activation creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID; a replay returns the same HID and ignores the second password; activation attempts of one enrollment beyond OTP_RATE_MAX_REQUESTS * 3 per window are 429 ENROLLMENT_RATE_LIMITED without the HID');
 
   // 6. The same identity or contact cannot enroll twice.
   expectProblem(await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID(),
@@ -373,11 +395,21 @@ try {
     assert(!/;\s*Domain=/i.test(value)); assert.match(value, /; Secure/i); assert.match(value, /; SameSite=Strict/i);
     if (!value.startsWith(`${cookieName}_csrf=`)) assert.match(value, /; HttpOnly/i);
   }
+  // Signing in on the device that enrolled expires its enrollment cookie, on
+  // the path it was set on: the HID is read from the session from now on.
+  const retiresEnrollment = (response, label) => {
+    const enrollment = (response.headers['set-cookie'] ?? []).filter(value => value.startsWith('hid_enrollment='));
+    assert.equal(enrollment.length, 1, `${label} must expire the hid_enrollment cookie: ${response.headers['set-cookie']}`);
+    assert.match(enrollment[0], /^hid_enrollment=;/);
+    assert.match(enrollment[0], /; Expires=Thu, 01 Jan 1970 00:00:00 GMT/i);
+    assert.match(enrollment[0], /; Path=\/api\/v1\/identity\/patient-enrollments(;|$)/i);
+  };
+  retiresEnrollment(firstA, 'patient sign-in');
   const byHid = await login(hidA.toLowerCase(), passwordA);
   expectProblem(byHid, 200); assert.equal(byHid.body.actor.patientId, patientA);
   const firstB = await login(hidB, 'Synthetic-Patient-Pass-B2');
   expectProblem(firstB, 200); assert.equal(firstB.body.actor.patientId, accountB[0].patient_id);
-  check('sign-in refuses a wrong password and an unknown account identically (401), refuses another Turnstile action, and signs the patient in by email (any case) or HID with host-only Secure Strict cookies and no workforce authority');
+  check('sign-in refuses a wrong password and an unknown account identically (401), refuses another Turnstile action, and signs the patient in by email (any case) or HID with host-only Secure Strict cookies and no workforce authority, expiring the enrollment cookie on its path');
 
   // 9. Session, self profile and isolation between the two new patients.
   const cookieSessionA = sessionCookies(firstA);
@@ -402,11 +434,12 @@ try {
   const refreshedA = await http.post('/api/v1/auth/refresh').set('Cookie', cookieSessionA).set('Origin', origin)
     .set('x-csrf-token', csrf(firstA));
   expectProblem(refreshedA, 200);
+  retiresEnrollment(refreshedA, 'refresh');
   assert.equal(refreshedA.body.actor.patientId, patientA);
   assert.notEqual(refreshedA.body.actor.sessionId, firstA.body.actor.sessionId);
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(refreshedA)), 200);
   expectProblem(await http.get('/api/v1/auth/session').set('Cookie', cookieSessionA), 401);
-  check('refresh with the CSRF token rotates the session for the same patient; the previous session is refused');
+  check('refresh with the CSRF token rotates the session for the same patient and expires the enrollment cookie; the previous session is refused');
 
   // 11. OTP password recovery: no account disclosure, single-use code, old password and sessions end.
   const resetStart = (identifier, network = '198.51.100.40') => http.post('/api/v1/auth/otp/start')
@@ -414,10 +447,30 @@ try {
     .send({ identifier, purpose: 'PASSWORD_RESET', turnstileAction: 'patient-reset-start',
       turnstileToken: turnstile('patient-reset-start') });
   const knownStart = await resetStart(emailA);
-  const unknownStart = await resetStart(`nobody-${randomUUID().slice(0, 8)}@example.invalid`, '198.51.100.41');
+  const unknownIdentifier = `nobody-${randomUUID().slice(0, 8)}@example.invalid`;
+  const unknownStart = await resetStart(unknownIdentifier, '198.51.100.41');
   expectProblem(knownStart, 202); expectProblem(unknownStart, 202);
   assert.deepEqual(Object.keys(knownStart.body).sort(), Object.keys(unknownStart.body).sort(),
     'recovery must answer an unknown account in the same shape');
+  // Within the resend cooldown a repeat answers the same challengeId whether or
+  // not the account exists, from another network too, and sends nothing; the
+  // account's other identifier (its HID) gets an id of its own and no code.
+  const resetCodes = () => deliveries.filter(item => item.purpose === 'PASSWORD_RESET').length;
+  const resetCodesSent = resetCodes();
+  const unknownRepeat = await resetStart(unknownIdentifier, '198.51.100.42');
+  const knownRepeat = await resetStart(emailA.toUpperCase(), '198.51.100.43');
+  const otherIdentifier = await resetStart(hidA.toLowerCase(), '198.51.100.44');
+  for (const response of [unknownRepeat, knownRepeat, otherIdentifier]) {
+    expectProblem(response, 202);
+    assert.deepEqual(Object.keys(response.body).sort(), Object.keys(knownStart.body).sort());
+  }
+  assert.equal(unknownRepeat.body.challengeId, unknownStart.body.challengeId,
+    'A repeated recovery start for an unknown identifier must answer the same challengeId within the cooldown');
+  assert.equal(knownRepeat.body.challengeId, knownStart.body.challengeId,
+    'A repeated recovery start for a known identifier must answer the same challengeId within the cooldown');
+  assert.notEqual(otherIdentifier.body.challengeId, knownStart.body.challengeId,
+    'Another identifier of an account in its cooldown must not be answered with the live challengeId');
+  assert.equal(resetCodes(), resetCodesSent, 'A recovery start inside the cooldown must send no code');
   const resetCode = lastCode('PASSWORD_RESET', emailA);
   assert.equal(resetCode.challengeId, knownStart.body.challengeId);
   const verified = await http.post('/api/v1/auth/otp/verify').set('Origin', origin)
@@ -436,7 +489,7 @@ try {
   expectProblem(await login(emailA, passwordA), 401);
   const recoveredA = await login(emailA, newPassword);
   expectProblem(recoveredA, 200); assert.equal(recoveredA.body.actor.patientId, patientA);
-  check('password recovery answers known and unknown accounts alike, uses a single-use code, ends existing sessions and replaces the password');
+  check('password recovery answers known and unknown accounts alike, including a repeat within the cooldown (the same challengeId for both, no code sent) and the account\'s other identifier (a new id, no code), uses a single-use code, ends existing sessions and replaces the password');
 
   // 12. Sign-out needs the CSRF token and ends only its own sign-in: the same
   // patient's other sign-in (another device) and the other patient stay signed in.
@@ -444,20 +497,24 @@ try {
   expectProblem(otherDeviceA, 200); assert.equal(otherDeviceA.body.actor.patientId, patientA);
   expectProblem(await http.post('/api/v1/auth/logout').set('Cookie', sessionCookies(recoveredA)).set('Origin', origin), 403);
   expectProblem(await http.get('/api/v1/auth/session').set('Cookie', sessionCookies(recoveredA)), 200);
-  expectProblem(await http.post('/api/v1/auth/logout').set('Cookie', sessionCookies(recoveredA)).set('Origin', origin)
-    .set('x-csrf-token', csrf(recoveredA)), 204);
+  const signedOutA = await http.post('/api/v1/auth/logout').set('Cookie', sessionCookies(recoveredA)).set('Origin', origin)
+    .set('x-csrf-token', csrf(recoveredA));
+  expectProblem(signedOutA, 204);
+  retiresEnrollment(signedOutA, 'sign-out');
   expectProblem(await http.get('/api/v1/auth/session').set('Cookie', sessionCookies(recoveredA)), 401);
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(otherDeviceA)), 200);
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(firstB)), 200);
-  check('sign-out without the CSRF token is refused and ends nothing; with it, it ends only that sign-in: the same patient\'s other sign-in and the other patient stay signed in');
+  check('sign-out without the CSRF token is refused and ends nothing; with it, it ends only that sign-in and expires the enrollment cookie: the same patient\'s other sign-in and the other patient stay signed in');
 
   // 13. Durable evidence. Every successful start (A, its replay, B) and
-  // activation (A, its replay, B) is audited as a success, refusals as
-  // failures, and the database records each new patient's activation once.
+  // activation (A and its replays within the budget, B) is audited as a
+  // success, refusals as failures, and the database records each new
+  // patient's activation once.
   const audited = (action, outcome) => count(`select count(*) from audit.events
     where action = $1 and outcome = $2 and ($2 <> 'success' or details->>'status' = '200')`, [action, outcome]);
-  for (const action of ['api.identity.patient-enrollment.start', 'api.identity.patient-enrollment.activate']) {
-    assert.equal(await audited(action, 'success'), 3, `${action}: every successful call is audited`);
+  for (const [action, successes] of [['api.identity.patient-enrollment.start', 3],
+    ['api.identity.patient-enrollment.activate', activationBudget + 1]]) {
+    assert.equal(await audited(action, 'success'), successes, `${action}: every successful call is audited`);
     assert(await audited(action, 'failure') >= 1, `${action}: refusals are audited`);
   }
   assert.equal(await count(`select count(*) from audit.events
@@ -468,8 +525,75 @@ try {
   }
   assert.equal(await count('select count(*) from identity.patients where source_system = $1',
     ['hid-public-qoreid-enrollment']), 2);
-  check('every successful enrollment start and activation is audited as a success (three each, replays included) and refusals as failures, each new patient\'s activation is recorded once, and no audit detail contains a NIN, password or code');
+  check('every successful enrollment start (three) and activation (one per patient and each replay within the budget) is audited as a success and refusals as failures, each new patient\'s activation is recorded once, and no audit detail contains a NIN, password or code');
 
+  // 14. One contact-code failure budget per recipient, across its challenges
+  // and whatever network each guess comes from (in production every client
+  // address is the load balancer's). With the default budget the fifth wrong
+  // code within 15 minutes refuses every code for that recipient, the correct
+  // one too, and the contact step sends it none, for 15 minutes.
+  const networkC = '198.51.100.50';
+  const startedC = await post('/identity/patient-enrollments', startBody('90000000003'),
+    { key: randomUUID(), network: networkC });
+  expectProblem(startedC, 200);
+  const cookieC = enrollmentCookie(startedC);
+  const emailC = `patient-c-${randomUUID().slice(0, 8)}@example.invalid`;
+  const contactC = () => post('/identity/patient-enrollments/contact', { channel: 'email', contact: emailC },
+    { cookie: cookieC, network: networkC });
+  const verifyC = (challengeId, code, network) => post('/identity/patient-enrollments/contact/verify',
+    { challengeId, code }, { cookie: cookieC, network });
+  // Fixture, as the owner: ends a challenge's resend cooldown (not under test here); its expiry is unchanged.
+  const endCooldown = async challengeId => assert.equal((await owner.query(`update identity.public_patient_enrollment_otps
+    set created_at = created_at - interval '2 minutes' where id = $1`, [challengeId])).rowCount, 1);
+  const otherCode = code => (code === '000000' ? '000001' : '000000');
+  const rateRowsBefore = await count('select count(*) from auth.otp_rate_limits');
+  const firstC = await contactC();
+  expectProblem(firstC, 200);
+  const firstCodeC = lastCode('SIGNUP_VERIFY', emailC);
+  assert.equal(firstCodeC.challengeId, firstC.body.challengeId);
+  for (const host of [51, 52, 53]) {
+    expectProblem(await verifyC(firstC.body.challengeId, otherCode(firstCodeC.code), `198.51.100.${host}`),
+      422, 'OTP_INVALID');
+  }
+  await endCooldown(firstC.body.challengeId);
+  const secondC = await contactC();
+  expectProblem(secondC, 200);
+  const secondCodeC = lastCode('SIGNUP_VERIFY', emailC);
+  assert.equal(secondCodeC.challengeId, secondC.body.challengeId);
+  for (const host of [54, 55]) {
+    expectProblem(await verifyC(secondC.body.challengeId, otherCode(secondCodeC.code), `198.51.100.${host}`),
+      422, 'OTP_INVALID');
+  }
+  const refusedCorrect = await verifyC(secondC.body.challengeId, secondCodeC.code, '198.51.100.56');
+  assert.equal(refusedCorrect.status, 422,
+    `A correct contact code was accepted after its recipient spent the failure budget: ${refusedCorrect.status} ${JSON.stringify(refusedCorrect.body)}`);
+  expectProblem(refusedCorrect, 422, 'OTP_INVALID');
+  const challengeC = (await owner.query(`select failed_attempts, consumed_at, invalidated_at, recipient_hmac
+    from identity.public_patient_enrollment_otps where id = $1`, [secondC.body.challengeId])).rows[0];
+  assert.deepEqual({ ...challengeC, recipient_hmac: undefined },
+    { failed_attempts: 2, consumed_at: null, invalidated_at: null, recipient_hmac: undefined },
+    'A correct contact code refused for the recipient budget must leave its challenge open and uncounted');
+  assert.equal((await owner.query("select state from identity.public_patient_enrollments where nin_last4 = '0003'"))
+    .rows[0].state, 'verify_contact');
+  // The budget is one row, keyed by the recipient's HMAC in its own HMAC
+  // domain; six networks' guesses wrote no other row.
+  const budgetBucket = createHmac('sha256', Buffer.from(process.env.OTP_HMAC_KEY_B64, 'base64'))
+    .update(`patient-enrollment-contact-failure\u001f${challengeC.recipient_hmac}`, 'utf8').digest('hex');
+  assert.equal(await count('select count(*) from auth.otp_rate_limits'), rateRowsBefore + 1,
+    'The wrong contact codes must write exactly one rate-limit row, the recipient failure budget');
+  assert.deepEqual((await owner.query(`select request_count, blocked_until > clock_timestamp() as blocked
+    from auth.otp_rate_limits where scope = 'recipient' and bucket_hmac = $1`, [budgetBucket])).rows,
+  [{ request_count: 5, blocked: true }], 'The recipient failure budget must have counted five wrong codes and be blocked');
+  const deliveriesBefore = deliveries.length;
+  await endCooldown(secondC.body.challengeId);
+  expectProblem(await contactC(), 429, 'ENROLLMENT_RATE_LIMITED');
+  assert.equal(deliveries.length, deliveriesBefore, 'The contact step must send no code to a recipient whose failure budget is spent');
+  // As the owner, end the block early: the same open challenge's code now verifies.
+  assert.equal((await owner.query(`update auth.otp_rate_limits set blocked_until = null
+    where scope = 'recipient' and bucket_hmac = $1 and blocked_until > clock_timestamp()`, [budgetBucket])).rowCount, 1);
+  const verifiedC = await verifyC(secondC.body.challengeId, secondCodeC.code, networkC);
+  expectProblem(verifiedC, 200); assert.equal(verifiedC.body.stage, 'set_password');
+  check('the contact code has one failure budget per recipient across its challenges and networks: after five wrong codes (three on a challenge, two on its resend, each from another network) the correct code is refused 422 OTP_INVALID with its challenge left open, the contact step sends that recipient no code (429 ENROLLMENT_RATE_LIMITED), the budget is one recipient-keyed rate row, and once the block is lifted the same code verifies');
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: runtimeRole,
     qoreid: 'local stub behind the real adapter; no QoreID call', turnstile: 'local Siteverify stub',
     notification: 'local stub; no delivery', nin_lookups: ninLookups.length, deliveries: deliveries.length,

@@ -61,6 +61,15 @@ Cloudflare publishes seven independent static applications:
 | `outreach.healthidentitydirectory.com` | Outreach | `/` |
 | `admin.healthidentitydirectory.com` | Admin | `/` |
 
+Clinical account recovery and activation has one fixed public route on the
+Web/patient application: `/provider/recover` on `www` (and on `staging`), which
+opens the clinical account form at its recovery step. Health-id's provider
+sign-in pages on the product hosts and on the admin host link there rather than
+recovering in place (this repository's own product apps have no such link), because the identity API
+accepts the `staff-reset` Turnstile action only from the `www` and `staging`
+hostnames. The route takes no return destination; after recovery the person
+signs in on that page or returns to their product host themselves.
+
 The apex host performs an originless redirect to `www`. The old OCR hostname
 uses a separate originless 308 redirect to the paired Migrate hostname, retaining
 the root-equivalent request path and query. Migrate's legacy `/migrate/*` and
@@ -213,9 +222,9 @@ proxies are migration sources/history only, never production runtime paths.
 
 Nine non-owner PostgreSQL LOGIN secrets are isolated by service. The migration
 administrator is separate. Only Identity receives auth signing/login-pepper,
-NIN, OTP-HMAC, and Turnstile material. Notification provider configuration is
-injected only into Notification API/Worker as required. Gateway receives no
-application secrets.
+NIN, OTP-HMAC, Turnstile and platform MFA key material. Notification provider
+configuration is injected only into Notification API/Worker as required. Gateway
+receives no application secrets.
 
 Workload identity is implemented by the regional stack and token agent, for
 staging and, pending ADR-047, production. Each environment's issuer maps
@@ -246,7 +255,9 @@ and delivery requirements and has no token writer. The ADR-047 draft changes
 the production template (its issuer, six agents and eight fewer parameters) and
 changes the staging templates only in the issuer Lambda asset key; its
 production execution plan ([runbook](AWS_DEPLOYMENT_RUNBOOK.md) §12) is not
-approved. Local tests do not establish deployed token delivery.
+approved. The template baseline recorded for `main` is in the
+[deployment runbook](AWS_DEPLOYMENT_RUNBOOK.md#1-freeze-the-release-inputs) §1.
+Local tests do not establish deployed token delivery.
 Live profiles encode their reviewed recommended defaults, but the guarded
 staging operations require readiness, migration, queue/outbox, billing, diff,
 account/region and exact-SHA

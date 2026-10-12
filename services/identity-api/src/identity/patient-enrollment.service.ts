@@ -6,6 +6,7 @@ import * as argon2 from 'argon2';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
+import { consumeRateLimit, rateLimitBlocked, type RateLimitWindow } from '../auth/rate-limit';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
@@ -32,12 +33,23 @@ interface ChallengeRow extends QueryResultRow {
 type ContactChannel = 'phone' | 'email';
 const localOtpKey = randomBytes(32);
 const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
+/** The account password hash activation stores; the database command checks this form. */
+const PASSWORD_HASH_OPTIONS = { type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1 };
 
 @Injectable()
 export class PatientEnrollmentService {
   private readonly env = getEnvironment();
   private readonly otpKey = this.env.OTP_HMAC_KEY_B64
     ? Buffer.from(this.env.OTP_HMAC_KEY_B64, 'base64') : localOtpKey;
+  /**
+   * What a replay of an active enrollment passes as its password hash. The
+   * activation command returns the stored HID before it reads the hash and
+   * sets no credential (0058), so a replay costs no argon2id run. A real
+   * argon2id hash of random bytes, computed once per process and never
+   * stored, keeps the argument well formed whatever the command's branch
+   * order.
+   */
+  private readonly replayPlaceholderHash = argon2.hash(randomBytes(32), PASSWORD_HASH_OPTIONS);
 
   constructor(private readonly database: DatabaseService,
     private readonly ninProtector: NinIdentifierProtector,
@@ -179,12 +191,16 @@ export class PatientEnrollmentService {
       const enrollmentLimited = await this.consumeRate(client, 'enrollment',
         this.hmac('patient-enrollment-id', enrollment.id),
         this.env.OTP_RATE_MAX_REQUESTS * 3);
+      // A recipient whose code failure budget is spent gets no code: none
+      // could be verified before the block ends. A read; it takes no lock.
+      const failureBlocked = await rateLimitBlocked(client, 'recipient',
+        this.contactFailureBucket(recipientHmac));
       const readiness = await client.query<{ ready: boolean }>(
         'select identity.public_patient_enrollment_ready() as ready');
       const contactBound = await client.query<{ bound: boolean }>(
         'select identity.public_patient_contact_already_bound($1,$2) as bound',
         [channel, lookupHmac]);
-      return { limited: ipLimited || recipientLimited || enrollmentLimited,
+      return { limited: ipLimited || recipientLimited || enrollmentLimited || failureBlocked,
         ready: readiness.rows[0]?.ready === true, contactBound: contactBound.rows[0]?.bound === true };
     });
     if (preflight.limited) throw this.rateLimited();
@@ -248,6 +264,16 @@ export class PatientEnrollmentService {
         || challenge.delivery_outcome === 'definitive_failure'
         || challenge.channel !== row.contact_channel
         || challenge.recipient_hmac !== row.contact_hmac) throw this.invalidCode();
+      // One failure budget per recipient, across its challenges and
+      // enrollments, so that a resend or a new enrollment naming the same
+      // contact does not bring five more guesses. Keyed by the recipient HMAC,
+      // never by client IP. Once spent it refuses every code, a correct one
+      // too, for one window, before the comparison and without counting.
+      // Read, comparison and count run under the bucket's lock, taken after
+      // the enrollment and challenge locks; no other challenge is written.
+      const failureBucket = this.contactFailureBucket(challenge.recipient_hmac);
+      await this.lockContactFailureBucket(client, failureBucket);
+      if (await rateLimitBlocked(client, 'recipient', failureBucket)) return false;
       const supplied = this.hmac('patient-enrollment-otp', row.id, challengeId, challenge.recipient_hmac, code);
       if (!this.equalHex(challenge.verifier_hmac, supplied)) {
         await client.query(
@@ -255,6 +281,7 @@ export class PatientEnrollmentService {
              invalidated_at=case when failed_attempts+1>=max_attempts then clock_timestamp() else null end,
              invalidation_reason=case when failed_attempts+1>=max_attempts then 'attempts_exhausted' else null end
            where id=$1`, [challenge.id]);
+        await consumeRateLimit(client, 'recipient', failureBucket, this.contactFailureWindow());
         return false;
       }
       await client.query(
@@ -282,11 +309,23 @@ export class PatientEnrollmentService {
     }
     if (!row.contact_ciphertext) throw new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
       'Contact verification is required');
+    // Activations and replays share one budget per enrollment, charged only
+    // after the cookie has proved the enrollment, so a guessed enrollment id
+    // cannot spend another browser's. Every attempt from here counts, whatever
+    // its outcome (one that fails later may already have hashed), so the budget
+    // is the contact step's per-enrollment size, leaving room for transient
+    // failures. Its own bucket: not the contact step's.
+    const limited = await this.database.withSystemTransaction(correlationId, (client) =>
+      this.consumeRate(client, 'enrollment', this.hmac('patient-enrollment-activate', row.id),
+        this.env.OTP_RATE_MAX_REQUESTS * 3));
+    if (limited) throw this.rateLimited();
     const profileJson = this.decrypt(row.id, 'profile', row.profile_ciphertext);
     const contact = this.decrypt(row.id, 'contact', row.contact_ciphertext);
     const contactLookupHmac = createContactLookupHmac(row.contact_channel!, contact);
-    const hash = await argon2.hash(password, { type: argon2.argon2id,
-      memoryCost: 65_536, timeCost: 3, parallelism: 1 });
+    // Two first activations that race still hash twice; the command lets one
+    // activate and replays the other.
+    const hash = row.state === 'active' ? await this.replayPlaceholderHash
+      : await argon2.hash(password, PASSWORD_HASH_OPTIONS);
     const tokenHmac = this.cookieTokenHmac(cookie);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
@@ -459,6 +498,32 @@ export class PatientEnrollmentService {
          else identity.public_patient_enrollment_rates.window_started_at end,
        request_count=$3`, [scope, bucket, next, expired]);
     return next > limit;
+  }
+
+  /**
+   * The contact-code failure bucket in `auth.otp_rate_limits` (scope
+   * `recipient`): its own HMAC domain over the recipient HMAC, so it matches
+   * neither the stored recipient HMAC nor any OTP recovery bucket. Unlike
+   * enrollment's own rate rows (pruned after 48 hours), nothing deletes these
+   * rows yet; the prune is a follow-up (DATABASE.md, the 0051 paragraph).
+   */
+  private contactFailureBucket(recipientHmac: string) {
+    return this.hmac('patient-enrollment-contact-failure', recipientHmac);
+  }
+
+  /** The MAX-th failure within the window blocks the recipient for one window. */
+  private contactFailureWindow(): RateLimitWindow {
+    return { windowSeconds: this.env.PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS,
+      maxRequests: this.env.PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX - 1 };
+  }
+
+  /**
+   * The transaction lock consumeRateLimit takes for the bucket (rate-limit.ts),
+   * taken before the blocked read so that concurrent verifications for one
+   * recipient cannot all read "not blocked" before any of them has counted.
+   */
+  private async lockContactFailureBucket(client: PoolClient, bucket: string) {
+    await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))', [`otp-rate:recipient:${bucket}`]);
   }
 
   private networkHmac(remoteIp: string | undefined) {

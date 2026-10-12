@@ -82,3 +82,48 @@ describe('Identity production database transport', () => {
     expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(true);
   });
 });
+
+describe('Public patient enrollment contact-code failure budget', () => {
+  const original = { ...process.env };
+  const keys = ['PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX', 'PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS'];
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
+    Object.assign(process.env, original);
+    resetEnvironmentForTests();
+  });
+
+  function local(values: Record<string, string> = {}): void {
+    for (const key of keys) delete process.env[key];
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+    }, values);
+    resetEnvironmentForTests();
+  }
+
+  function budget(): { max: unknown; windowSeconds: unknown } {
+    const environment: Record<string, unknown> = getEnvironment();
+    return { max: environment.PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX,
+      windowSeconds: environment.PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS };
+  }
+
+  it('defaults to the documented six-digit-code budget: the fifth wrong code in 15 minutes blocks for 15 minutes', () => {
+    local();
+    expect(budget()).toEqual({ max: 5, windowSeconds: 900 });
+  });
+
+  it('accepts a budget within its bounds and refuses one outside them', () => {
+    for (const [max, windowSeconds] of [[2, 900], [10, 86_400]] as const) {
+      local({ PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX: String(max),
+        PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: String(windowSeconds) });
+      expect(budget()).toEqual({ max, windowSeconds });
+    }
+    const outside: Array<[string, string]> = [[keys[0]!, '1'], [keys[0]!, '11'], [keys[1]!, '899'], [keys[1]!, '86401']];
+    for (const [key, value] of outside) {
+      local({ [key]: value });
+      expect(() => getEnvironment()).toThrow(new RegExp(`${key}: `));
+    }
+  });
+});

@@ -83,7 +83,7 @@ replica per caller, a successful renewal cycle makes eleven audience-specific
 token requests and six JWKS requests about every 90 seconds. Each receiver
 process (Identity, Notification, EHR, Lab and Pharmacy APIs) keeps one cached
 JWKS and fetches it at most every 10 minutes, or every 30 seconds while tokens
-with an unknown `kid` arrive; before `draft/production-workload-identity` Lab,
+with an unknown `kid` arrive; before D-Eminence/hid-system#53 Lab,
 Pharmacy and the EHR's OCR caller guard fetched it for every service call they
 verified. Starts, retries, replica counts, and receiver JWKS retrieval affect
 actual request volume. Count

@@ -406,6 +406,13 @@ export class AcceptPrescriptionForPharmacyDto {
   reason!: string;
 }
 
+/** Sends an active lab request, at the version the client last read, to Lab. */
+export class SendLabRequestToLabDto {
+  @IsInt()
+  @Min(1)
+  expectedRowVersion!: number;
+}
+
 export class CreateLabRequestDto {
   @Transform(trim)
   @IsString()

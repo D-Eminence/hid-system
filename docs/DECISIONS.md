@@ -1933,7 +1933,10 @@ Consequences:
 - A conflict that a retry cannot resolve (a row hidden by row-level security
   in another facility, two members verifying one Lab result version) still
   answers `500`, after one retry; mapping those constraints to `409` is a
-  follow-up.
+  follow-up. Since D-Eminence/hid-system#56 Lab's EHR-order acceptance
+  maps its own (`409 LAB_ORDER_ALREADY_ACCEPTED` for a work-item key left
+  after the retry); every other Lab command still answers `500`, which OCR
+  stores for its Lab import as retryable.
 - Removing a lock made reachable code that had always failed before it. 0078
   fixed two defects behind the locks: it drops the self-NIN identifier insert
   policy, whose sub-select the Identity runtime cannot read and which no
@@ -1941,6 +1944,61 @@ Consequences:
   runtime insert self-NIN identifiers without `bind_my_verified_nin`), and it
   repairs the Lab work-item child guard. One lock-order cycle between OCR
   publication requests and publication completion was fixed by decision 2.
+
+## ADR-042 addendum: a definer guard share-locks another domain's source row (0080)
+
+Date: 2026-10-12
+
+Change: D-Eminence/hid-system#48.
+
+Pharmacy acceptance and dispensing depend on a mutable row of another domain,
+the EHR prescription, which the EHR may cancel, hold, complete or edit at any
+time. Decision 1 still holds for the runtime roles: `hid_pharmacy_runtime` has
+no privilege on `ehr` and takes no lock there. The database guards
+`pharmacy.validate_work_item` and `pharmacy.validate_dispensing`, which run as
+their owner (`SECURITY DEFINER`), read the prescription with
+`SELECT ... FOR SHARE`. The owner holds the `UPDATE` privilege the lock needs;
+no grant or policy is added.
+
+- The share lock, not a plain read, is what makes the check hold: in the
+  `SERIALIZABLE` Pharmacy transaction a cancel committed after the snapshot
+  fails the lock with `40001`, which decision 3 retries, and the retry reads
+  the cancel. A plain read would check the stale active version. `FOR KEY
+  SHARE` would see this cancel only because the EHR locks the row `FOR
+  UPDATE` before its update; `FOR SHARE` conflicts with any update of the row.
+  A committed lock-only mark, such as the EHR handoff's `FOR UPDATE` or
+  another request's share lock on the same prescription, does not raise
+  `40001`, so acceptances right after the EHR's eligibility check and
+  concurrent identical requests do not fail.
+- An EHR update waits for a Pharmacy command that has taken the lock, for the
+  milliseconds until it commits, and then applies after it. The EHR takes the
+  prescription and then its own rows and never a Pharmacy row, so there is no
+  lock cycle. The EHR must not call Pharmacy while it holds the prescription
+  lock: its eligibility check commits before the HTTP call.
+- Pharmacy can now delay an EHR write, which it could not before: a Pharmacy
+  transaction that stalls after the guard keeps the share lock, and a
+  prescriber's cancel or hold waits until the EHR's 15 s `statement_timeout`
+  and fails with `500`. Pharmacy's 15 s `statement_timeout` bounds a slow
+  statement but not an idle transaction; no
+  `idle_in_transaction_session_timeout` is set (a possible mitigation).
+- Under an owner subject to row-level security (release checklist P8) the
+  lock applies the EHR select and update policies with the pharmacist's
+  session; a prescription the owner cannot lock reads as missing and is
+  refused. A dedicated technical owner for these guards (ADR-041) would need
+  `USAGE` on `ehr`, `EXECUTE` on `ehr.context_allows` (the prescription
+  policies call it), column `SELECT` on `id` and the compared columns, an
+  `UPDATE` privilege for the lock and the matching policies.
+- The acceptance guard compares every snapshot field except the prescription
+  time and the start and end dates: migrations run before the EHR API is
+  deployed and the EHR may be rolled back, and earlier EHR builds send the
+  time at the millisecond and the dates as local-midnight `Date` values, a
+  day early in a process east of UTC. Comparing the exact time and dates is a
+  follow-up for a later release, once the EHR rollback floor sends their
+  exact texts.
+- The guards require the accepted version, not only an active status: the
+  fail-closed default while the lifecycle of accepted work after an EHR
+  change is undecided (`DATABASE.md`, "Pharmacy source prescription guards
+  (0080)").
 
 # ADR-043: Identity Trusts a Workload-Reported Method for Delegated Cookie Reads
 
@@ -2001,7 +2059,7 @@ Consequences:
 - Outreach reports no method, and its own Identity routes are not marked. Its
   guard still requires Origin and CSRF on every cookie request, so same-origin
   cookie reads from Outreach are likely refused (from reading the code, not
-  reproduced; a follow-up); and
+  reproduced; a follow-up; superseded for Outreach by ADR-045); and
 - the HTTP evidence is local and synthetic and covers EHR only; Lab, OCR and
   Pharmacy have unit coverage only (release checklist §8).
 
@@ -2057,9 +2115,10 @@ Decision:
   authentication and grants nothing. Origin, CSRF and the session checks
   remain the security boundary.
 - The kind is answered only for a sign-in refresh could renew now: account
-  live, absolute end not passed, and the token's session live or rotated
-  within the last 60 seconds into one that is, so a refresh or sign-out that
-  raced the other application's tab is answered with the kind. An older
+  live, absolute end not passed, the token's session live or rotated within
+  the last 60 seconds into one that is, so a refresh or sign-out that raced
+  the other application's tab is answered with the kind, and its actor
+  resolvable as refresh resolves it (addendum below). An older
   rotated token is reuse: refresh rotates nothing and ends the whole sign-in,
   and a sign-out ends the sign-in whichever application asks, without naming
   its kind. So an old rotated token tells nobody whether, or as which
@@ -2086,6 +2145,190 @@ Consequences:
 
 Related: ADR-038 (platform sessions keep their own cookies and routes);
 `INTERFACE_CONTRACT.md`, "Auth session contract"; release checklist §2.
+
+## ADR-044 addendum: renewable means refresh could resolve the actor
+
+Date: 2026-10-12
+
+The lookup behind "refresh could renew now" checked the account and the
+session but not what refresh checks next: it resolves the staff actor (an
+active facility membership without a migration hold, an active staff record
+with an accepted verification status, an active organization and facility)
+or the patient (still the account's active patient, through
+`identity.current_patient_account`). A staff sign-in whose membership lapsed
+was therefore refused `403 SESSION_CLIENT_MISMATCH` with its cookies kept
+when the patient application refreshed or signed it out, although refresh
+would only have answered `401`. The lookup now includes that condition, built
+from the same join chain as staff resolution (`eligibleStaffMembershipJoins`),
+so such a sign-in gets refresh's `401` with the cookies cleared, and a
+sign-out that names the other application ends it. It is refused, not ended,
+by refresh, so it is renewable again once its membership or patient is
+active. The Origin and CSRF checks still come first, and nothing is granted:
+the change only stops naming the kind of a sign-in that refresh would refuse
+(D-Eminence/hid-system#50).
+
+Health-id `main` names its portal in `X-HID-Client` on cookie refresh and
+sign-out since `22e8664` (D-Eminence/Health-id#40), so the kind check, and
+this change, apply as soon as Identity is deployed with it. ADR-044's
+consequence that the check protects nothing until a frontend sends the header
+holds only for earlier Health-id builds and `packages/identity-browser-client`.
+
+# ADR-045: Outreach Cookie Reads Are Delegated; a Reported Read Authorizes Only a Read Permission
+
+Status: Proposed for source implementation (D-Eminence/hid-system#43).
+Not merged or deployed.
+
+Date: 2026-10-12
+
+Context:
+
+Outreach authorizes every request with
+`POST /api/v1/identity/outreach/authorize`, forwarding the user's cookie and
+authenticating separately as the `outreach-api` workload. ADR-043 left
+Outreach out. Reproduced locally over HTTP in the migration rehearsal on
+`main` (`522fb2e`), with Outreach as `hid_outreach_api_runtime` and Identity as
+`hid_identity_api_runtime`, every same-origin cookie read from Outreach was
+refused, at three layers in turn:
+
+- Outreach's guard required an allowed `Origin` and an `X-CSRF-Token` on every
+  cookie request, `GET` included, so every cookie read
+  (`GET /api/v1/outreach/registration-cases`, `/:caseId`, `/campaigns` and
+  `/campaigns/:campaignId/members`) was refused
+  `403 CSRF_VALIDATION_FAILED`;
+- with only that fixed, Identity refused the forwarded cookie on the authorize
+  call with `403 ORIGIN_DENIED`: the route was not marked
+  `@DelegatedBrowserRequest()`, and Outreach reported no method;
+- with both fixed, every campaign route answered `400 VALIDATION_FAILED`,
+  because `AuthorizeOutreachDto` accepted only `outreach.registration.read`
+  and `outreach.registration.write`, not the campaign permissions of
+  migration 0038.
+
+Decision:
+
+- Outreach treats `GET` and `HEAD` as reads. A cookie read needs no `Origin`
+  or CSRF token; one that names a disallowed `Origin` is refused
+  `403 ORIGIN_DENIED` (in production Outreach's CORS layer refuses a
+  disallowed Origin even earlier). A cookie write keeps the presence check: an
+  allowed `Origin` and an `X-CSRF-Token`, else `403 CSRF_VALIDATION_FAILED`. A
+  read route mapped to a permission that is not a `.read` fails closed with
+  `500 OUTREACH_POLICY_INVALID`.
+- Outreach reports the method of the request it is authorizing in
+  `X-HID-Original-Method` on its authorize call, through the typed Identity
+  client as in ADR-043.
+- Identity marks `POST /api/v1/identity/outreach/authorize` with
+  `@DelegatedBrowserRequest()`, under ADR-043's conditions. When
+  `SecurityGuard` skips the cookie-write Origin and CSRF check for a read
+  reported by an authenticated workload, it records the reported method in
+  `request.delegatedBrowserMethod`. `authorizeOutreach` still requires the
+  `outreach-api` workload (`authenticateOutreach`), and after such a skip
+  authorizes only a permission ending in `.read`; a write permission is
+  refused `403 CSRF_VALIDATION_FAILED`.
+  `POST /api/v1/identity/outreach/patient-authorization` is not marked.
+- `AuthorizeOutreachDto` accepts exactly `OUTREACH_PERMISSIONS`, three of the
+  four Outreach permissions that migrations 0024 and 0038 define:
+  `outreach.registration.read`, `outreach.registration.write` and
+  `outreach.campaign.read`. It does not accept `outreach.campaign.write`:
+  Identity's validation refuses it `400 VALIDATION_FAILED`, as on `main`, and
+  Outreach relays that status and code. Campaign reads
+  (`GET .../campaigns` and `GET .../campaigns/:campaignId/members`) are
+  authorized; the three campaign writes (create, status change, member add)
+  answer `400 VALIDATION_FAILED` and change nothing, as on `main`. An earlier
+  version of this branch also accepted `outreach.campaign.write`; that is
+  withdrawn (next section).
+
+Campaign writes (not decided here):
+
+A security review of that earlier version found that the campaign write routes
+have no campaign-level governance:
+
+- `OutreachService.addCampaignMember`
+  (`services/outreach-api/src/outreach/outreach.service.ts:226-234`) checks
+  only that the campaign belongs to the facility, then inserts the
+  caller-supplied `membershipId` and `role`, `admin` included. The RLS insert
+  policy `outreach_campaign_members_create`
+  (`0038_outreach_campaign_workspaces.sql:99-104`) requires only
+  `outreach.campaign.write` at the facility and `added_by` equal to the
+  current account and membership;
+- `updateCampaignStatus` (`outreach.service.ts:195`) closes or activates any
+  campaign of the facility, with no member or role check; and
+- the restrictive policies of `0045_outreach_campaign_registration_binding.sql`
+  (55-64) gate a campaign-linked registration case only on a
+  `campaign_members` row existing.
+
+So, with `outreach.campaign.write` authorized, any holder of it at the
+facility could add themselves to any campaign as `admin` and then read its
+campaign-linked registration cases (name, phone, sex, age, notes), and could
+close or activate any campaign. On `main` these routes were unreachable (`400`).
+
+A second, independent review found that this is how 0038 is designed, not a
+defect in it: 0038 describes `outreach.campaign.write` as "Create and govern
+facility-scoped Outreach campaigns and workspace membership"
+(`0038_outreach_campaign_workspaces.sql:6`); the schema suite has a removed
+member add itself back as `admin` and expects success
+(`services/ehr-api/database/tests/schema.integration.sql:2096-2130`); 0045
+lets "an authorized campaign manager" change status, with no creator check
+(`0045_outreach_campaign_registration_binding.sql:116-118`); and the DTO's
+two-permission limit predates the campaign routes (added in `a8b3889`), so it
+was an oversight, not a gate. Since D-Eminence/hid-system#34 a campaign
+member can record a campaign-linked registration, but no campaign can be
+created through the API while `outreach.campaign.write` stays refused, so no
+linked case exists unless a campaign is created outside the API.
+
+Who may create campaigns, change their status and add members is a
+governance and product decision. The campaign-linked registration compartment
+(0045) is only as strong as who may add campaign members. The options:
+
+- A: authorize `outreach.campaign.write` as 0038 designs it, for
+  facility-level campaign managers. Every role that reads registrations
+  (doctor, clinician, nurse, receptionist, admin and org_admin) could create
+  campaigns, change their status and add any facility member, themselves
+  included, which also admits them to the campaign's linked registrations.
+  This is a one-line change to `OUTREACH_PERMISSIONS`; its tests were written
+  once on this branch.
+- B: per-campaign governance first, for example only the campaign's own
+  `admin` members (`createCampaign` seeds the creator as one) manage it,
+  enforced in `OutreachService` and in an RLS `WITH CHECK`/`USING` clause by
+  a new migration, with failing-first SQL and HTTP tests in which a
+  non-member holding `outreach.campaign.write` is refused.
+
+This branch does not decide it. Until the product owner chooses, it keeps
+`outreach.campaign.write` refused exactly as on `main` and authorizes only
+campaign reads, so no write behaviour changes and the choice stays open.
+
+Consequences:
+
+- same-origin cookie reads of Outreach registration cases and campaigns are
+  authorized once both Outreach and Identity include the change; either alone
+  behaves as before, and the reads are refused;
+- Identity cannot verify the reported method, as in ADR-043. Outreach has no
+  separate session revalidation: Identity checks an Outreach browser write's
+  Origin and CSRF token only on the authorize call. Limiting a reported read to
+  read permissions keeps that check for every write, so a misreported method
+  can authorize a read but never a write;
+- no migration or grant change. Bearer requests are checked as before, and
+  campaign reads become authorizable for bearer and cookie requests alike.
+  Campaign writes are not: no campaign can be created through the API until
+  the decision above, so release checklist step S4c's campaign create cannot
+  pass. Health-id needs no change for the reads: it already sends cookies with
+  credentials and `X-CSRF-Token` only on writes. Its Outreach page can list
+  campaigns and members, but its campaign create, status and member actions
+  get `400 VALIDATION_FAILED`, as on `main`; Health-id should hide or handle
+  them;
+- campaign-linked registration works as the runtime role since
+  D-Eminence/hid-system#34 (`FOR SHARE OF campaign`, release checklist §4.2),
+  for a campaign that already exists; and
+- the evidence is local and synthetic: the Outreach guard and Identity specs,
+  and `services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs`,
+  which the migration rehearsal runs as `outreach_cookie_read_runtime`
+  (release checklist §8). The verifier now seeds its campaign with SQL and
+  checks that each campaign write is refused; it passed in the rehearsal on
+  the tree merged with `main` after #34 to #36 (`f64aa01`, release checklist
+  §8). Nothing has been run on staging or
+  production.
+
+Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity
+boundary; Outreach registration boundary); release checklist §2, §3, §7, §8
+and §9.
 
 # ADR-047: One Environment-Bound Workload Issuer for Staging and Production
 
@@ -2280,7 +2523,7 @@ Follow-ups, not implemented by the draft:
   check as one-shot while the template runs it continuously.
 - Alert routing for issuer errors and for the agent's `Workload token renewal
   unavailable` log line.
-- Release checklist P10 and `RELEASE_ARTIFACT_GATE.md` item 13 bound to the
+- Release checklist P11 and `RELEASE_ARTIFACT_GATE.md` item 13 bound to the
   chosen mechanism.
 - Optional: receivers accept only ES256 and require `token_use: workload`.
 

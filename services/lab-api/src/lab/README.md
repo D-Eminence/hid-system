@@ -26,7 +26,20 @@ validation preserves the exact requested-test snapshot and provenance. Lab
 owns the acceptance event, semantic audit, and `LabWorkItemCreated` outbox
 record; EHR calls the typed Lab service and does not write Lab tables. The
 `accepted` state implies no accession, specimen collection, execution, QC, or
-result.
+result. Lab holds one work item per EHR request, at the version it accepted:
+the same version again is a replay, a later version is refused with
+`409 LAB_ORDER_ALREADY_ACCEPTED`, and an earlier version, or a request that is
+not the current active version exactly as EHR holds it, with
+`409 LAB_ORDER_NOT_CURRENT`. Its ids may be UUIDs of any version, as migrated
+legacy ids are. Later EHR changes (cancellation, hold, edits) are not
+propagated to Lab. Acceptance alone maps its own database refusals, with fixed
+details: the guard's `23514` `409 LAB_ORDER_NOT_CURRENT` and row-level
+security's `42501` `403 LAB_ACCESS_DENIED` on the work-item insert, and a
+`lab.work_items` unique conflict left after the retry `409
+LAB_ORDER_ALREADY_ACCEPTED`. The problem filter maps no SQLSTATE, so every
+other Lab command, and any other database error of acceptance, answers `500`;
+OCR keeps storing that `500` from its Lab import as the retryable
+`OWNING_SERVICE_UNAVAILABLE`.
 
 Migration `0020` permits execution only from a received specimen and its exact
 requested-test snapshot. Manual numeric/text results are immutable revisions
@@ -38,5 +51,7 @@ QC evidence is fabricated.
 Manual result entry creates an immutable, unverified revision. Verification is an independent exact-version action (the entry actor cannot verify their own revision); release is a separate authenticated manual approval of that verified version. Neither action represents analyzer integration, calibration, QC, a cryptographic signature, or critical-result acknowledgement.
 
 Corrections and amendments append a new unverified revision. A previously released revision remains immutable history, while the new head must be verified and released independently. Non-Lab EHR readers use the released-result history permission and do not receive an unreleased-only result.
+
+Released-result reads (`lab.result.released.read`) return the released view: the released revisions only, with the head, status and verification of the latest of them, and nothing of a revision newer than the latest released one. Versions keep their stored numbers, so a gap shows that an intermediate revision was never released; its value and reason are never returned. The history read returns the released view unless the reader also holds `lab.execution.read`; the order route returns it to every reader, Lab staff included. A clinician finds results by the EHR lab request they ordered: `GET /api/v1/lab/ehr-orders/:sourceEhrOrderId/released-results` returns the work item accepted from that order and the released view of each of its results, leaving out a result with none. Row-level security binds the work item to the session facility and consent, Identity authorizes the patient (`read_records`) before any result is read, and each read writes a patient-linked `lab.result.released.read` audit event in its transaction (`lab.result.history.read` for a full history read).
 
 Execution reads return result revisions, including unreleased values, so both the single execution read and the specimen execution list authorize the patient with Identity (`read_records`) before reading them. The list resolves the patient from the specimen, refuses with `403 LAB_EXECUTION_ACCESS_DENIED` when the decision is not allowed, fails closed when Identity is unavailable, and reads only that patient's executions. Break-glass reads behave as they do for the single read; writes still refuse break-glass. Lab row-level security applies the same consent check, so an absent or revoked grant normally hides the specimen first and the list returns `404 LAB_SPECIMEN_NOT_FOUND`.

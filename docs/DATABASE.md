@@ -82,6 +82,18 @@ enrollment path. It keeps provider identity evidence encrypted in a pending,
 unique-NIN record; a single selected contact OTP must be consumed before a
 password-backed account, canonical patient, NIN binding, and HIDCode can be
 created atomically. Its rate counters and OTPs are scoped to the enrollment.
+Wrong contact codes also count against one failure budget per recipient,
+across its challenges and enrollments, in `auth.otp_rate_limits` (scope
+`recipient`, a keyed HMAC of the recipient HMAC; no schema change;
+D-Eminence/hid-system#61, release checklist §2). Unlike the
+enrollment counters, which `identity.prune_expired_public_patient_enrollments`
+deletes once their window started more than 48 hours ago, these rows are never
+deleted: a contact that ever got a wrong enrollment code keeps one, even if it
+never enrolls. Follow-up for the next migration that changes
+`auth.otp_rate_limits`: prune stale `recipient` rows (window started more than
+48 hours ago, `blocked_until` passed) through a `SECURITY DEFINER` function,
+with no runtime `DELETE` grant; that also covers OTP recovery's `recipient`
+buckets.
 The private synthetic rehearsal runs
 `services/identity-api/scripts/verify-patient-enrollment-runtime.mjs`, which
 exercises this path over HTTP under the exact Identity runtime role on a
@@ -698,6 +710,12 @@ records and execute only the required context/authorization functions;
 `hid_pharmacy_api_runtime` adds append-only audit. EHR/OCR cannot mutate any
 Pharmacy table, and Pharmacy cannot create Identity patients or mutate EHR,
 Lab, or OCR persistence.
+
+Since 0080 the database binds Pharmacy work to the EHR prescription: the
+work-item guard accepts only the exact active prescription version, and the
+dispensing guard dispenses only while that version is still active. Both read
+the prescription as their owner with a share lock ("Pharmacy source
+prescription guards (0080)").
 
 ## 10. Audit data
 
@@ -1523,6 +1541,9 @@ Lab, Pharmacy and Outreach guards:
   resolution message. Where a guard did not compare a value, it still does
   not: the Pharmacy work-item event guard has no facility term and the
   Outreach campaign update compares only the facility.
+- 0080 adds an EHR prescription check after the 0077 checks of
+  `pharmacy.validate_work_item` and `pharmacy.validate_dispensing` ("Pharmacy
+  source prescription guards (0080)"); the 0077 checks and messages are kept.
 - The guards read the session values when they start. A malformed
   `app.membership_id` or `app.facility_id` (not a UUID) therefore raises
   `22023` before a guard's own refusal, also on the Outreach campaign update,
@@ -1584,7 +1605,8 @@ Tests (rollback-only, synthetic fixtures):
     (six missing-session variants for each of the seven guarded tables) and 18
     runtime cases were refused only by row-level security.
   - Pharmacy: 84 cases. On 0076 it fails with 58: 29 isolated cases accepted,
-    29 runtime cases refused only by row-level security.
+    29 runtime cases refused only by row-level security. Since 0080 its
+    fixture holds the active EHR prescriptions its work items accept.
   - Outreach: 121 cases (51 isolated, 50 runtime, 20 for the API's create,
     link, campaign and status commands). On 0076 it fails with 67: 45 change
     with 0077 alone, 33 with the grant alone, and 11 need both.
@@ -1751,6 +1773,11 @@ Checks:
   `services/ocr-api/scripts/verify-ocr-runtime.mjs` and
   `services/outreach-api/scripts/verify-outreach-runtime.mjs` run the
   service's real `AppModule` through `scripts/service-runtime-harness.mjs`;
+  `services/ehr-api/scripts/verify-ehr-lab-handoff-runtime.mjs`
+  (D-Eminence/hid-system#56) runs EHR's and, in a child process, Lab's
+  through it, each as its runtime role, and checks that an active lab request
+  Lab refuses stays saved, is sent again on request, on activation and on
+  resume, and that Lab keeps one work item per request;
   `services/identity-api/scripts/verify-registration-review-runtime.mjs`
   composes the authentication and NIN registration controllers with their
   real providers, the global security guard and audit interceptor, and the
@@ -1763,6 +1790,283 @@ Checks:
   the other row below the deadlock timeout. Each verifier ends by requiring
   `pg_stat_database` to report no deadlock for its database, read after the
   service's connections closed, so a deadlock the retry hid still fails it.
+  `verify-lab-runtime.mjs` also pins which database refusals Lab maps: only
+  EHR-order acceptance maps its own (D-Eminence/hid-system#56), the
+  `lab.validate_work_item` refusal (`23514`) to `409 LAB_ORDER_NOT_CURRENT`
+  and the row-level security refusal of the work-item insert (`42501`) to
+  `403 LAB_ACCESS_DENIED`; a member verifying a result they entered (`23514`),
+  the loser of two verifications of one result version (`23505`) and an
+  external or OCR import without a database consent (`42501`) still answer
+  `500`, which OCR stores for its Lab import as the retryable
+  `OWNING_SERVICE_UNAVAILABLE`.
+
+## Patient access PIN actor window (0079)
+
+`0079_patient_access_pin_actor_window.sql` replaces
+`identity.access_patient_with_pin(text, text, integer)` with `CREATE OR
+REPLACE`. The signature, result, `SECURITY DEFINER` attribute, `search_path`,
+owner and ACL are unchanged, and so is every statement but one.
+
+The command keeps two failure windows (0033): one per staff member at a
+facility (`identity.patient_access_pin_actor_limits`) and one per staff
+member, facility and patient (`identity.patient_access_pin_target_limits`).
+Five failures within 15 minutes lock a window for 15 minutes. Before 0079 a
+correct PIN cleared both the verified patient's window and the actor window.
+So a clinician who knew one patient's PIN could enter four wrong PINs for
+another patient, enter the known PIN, and repeat without ever reaching the
+actor lock; only the per-patient window of each target slowed the guessing.
+Since 0079 a success clears only the window of the patient it verified. The
+actor window runs out after 15 minutes or locks at five failures, as before.
+
+An honest clinician who mistypes PINs for several patients within 15 minutes
+now reaches the actor lock even if some PINs were right in between; the lock
+lasts 15 minutes. A limit across all staff for one patient is not added here.
+
+Tests: `services/ehr-api/database/tests/patient-access-pin.integration.sql`
+(rollback-only, run by the migration rehearsal as `hid_identity_api_runtime`)
+enters three wrong PINs for one patient, one wrong PIN and then the right PIN
+for a second patient, and one more wrong PIN for the first. After the right
+PIN it requires the second patient's window at 0, the first patient's still
+at 3 and the actor's still at 4; at the end, the actor locked at 5, the first
+patient's window at 4 and the known PIN refused. It fails without 0079 (the
+success reset the actor window), and also if the success leaves its own
+patient's window uncleared or clears another patient's.
+
+## Pharmacy source prescription guards (0080)
+
+`0080_pharmacy_source_prescription_guards.sql` replaces
+`pharmacy.validate_work_item()` and `pharmacy.validate_dispensing()` with
+`CREATE OR REPLACE`. The signature, `SECURITY DEFINER` attribute,
+`search_path` (`pharmacy, platform, pg_temp`; `ehr.prescriptions` is
+schema-qualified), volatility, owner, ACL, triggers and the 0077 checks and
+messages are unchanged. Change: D-Eminence/hid-system#48.
+
+Before 0080 neither guard read `ehr.prescriptions`, and
+`pharmacy.work_items.source_ehr_prescription_id` has no foreign key. The EHR
+checks eligibility in its own transaction, which commits before it calls
+Pharmacy over HTTP, so a prescription cancelled in between was accepted; and
+a work item stayed dispensable after the prescriber cancelled, marked entered
+in error, put on hold, completed or edited its prescription. Each guard now
+also reads the prescription as its owner, after the 0077 checks, with
+`SELECT ... FOR SHARE`, and refuses with SQLSTATE `23514` and a constraint
+name the Pharmacy API maps to `409` (`INTERFACE_CONTRACT.md` §13):
+
+- `pharmacy_work_item_source_prescription` (acceptance): the prescription must
+  exist and equal the snapshot exactly: patient, facility (the ordering
+  facility), encounter, `row_version`, status `active`, medication code
+  system, code and display, dose quantity and unit, route, frequency,
+  instructions and `created_by` (`prescribed_by`), as Lab binds an EHR order
+  (`lab.validate_work_item`, 0077). Message: `Pharmacy acceptance does not
+  match the exact active EHR prescription version`.
+- The acceptance does not compare `prescribed_at` with `created_at`, or
+  `starts_on` and `ends_on` with the prescription's dates, yet; Pharmacy
+  stores those three as sent, as before 0080. The migrations run before the
+  EHR API is deployed and the EHR API may be rolled back (release checklist
+  §6, §9). Every EHR build before D-Eminence/hid-system#48 sends
+  `created_at` truncated to the millisecond, and the dates as node-postgres
+  local-midnight `Date` values, a day early in a process east of UTC; an
+  exact time term would refuse nearly every acceptance such a build sends,
+  and exact date terms every dated one sent from a process east of UTC.
+  Follow-up: add the three terms in a later migration, once the EHR rollback
+  floor includes the exact handoff text below.
+- `pharmacy_dispensing_source_prescription` (dispensing): the work item's
+  prescription must exist, belong to the work item's patient, facility and
+  encounter, and be `active` at `source_ehr_prescription_version`. Message:
+  `The EHR prescription of this Pharmacy work item is not active at the
+  accepted version`.
+- The exact version is the current, fail-closed default: every EHR update
+  moves `row_version` (0004), so a hold then resume, or an edit of
+  frequency, instructions or end date, also makes the work item
+  undispensable, and `unique(source_ehr_prescription_id)` stops a second
+  acceptance. The lifecycle of accepted work after an EHR change is an open
+  product question (release checklist §2).
+- Reversals do not read the prescription: a dispensing can be reversed after
+  a cancel.
+
+Locks and races. The Pharmacy commands run `SERIALIZABLE` and take no other
+row lock (ADR-042); the EHR's update locks the prescription (`FOR UPDATE`,
+READ COMMITTED) and then writes `ehr.record_versions` and audit, never a
+Pharmacy table. A cancel committed before the command's snapshot is read and
+refused. A cancel in progress is waited for: if it commits, the share lock
+fails with `40001` and the retried command reads it and is refused; if it
+rolls back, the command proceeds. A cancel committed after the snapshot but
+before the guard also fails the share lock with `40001` (a plain read would
+have used the stale active version). `FOR KEY SHARE` would also conflict here,
+but only because the EHR's update locks the row `FOR UPDATE` first; `FOR SHARE`
+conflicts with any update of the row. A command that passed the guard first
+holds its share lock until it commits, so the EHR's cancel waits for it
+(milliseconds) and applies after the dispensing. Pharmacy can therefore delay
+an EHR write: a Pharmacy transaction that stalls after the guard holds the
+lock (its 15 s `statement_timeout` bounds a slow statement, not an idle
+transaction, and no `idle_in_transaction_session_timeout` is set), and the
+prescriber's cancel or hold waits up to the EHR's 15 s `statement_timeout` and
+then fails with `500`. Lock order is prescription then Pharmacy rows on one
+side and prescription then EHR rows on the other, so there is no cycle. The
+EHR must not call Pharmacy while it holds the prescription lock: its
+eligibility transaction commits before the HTTP call
+(`prescriptions.service.spec.ts` asserts the order); otherwise the share lock
+would wait for the call until a statement or client timeout.
+
+Ownership. The guards read and lock the prescription as their owner; no
+runtime role gains a privilege (`hid_pharmacy_runtime` still has none on
+`ehr`). The owner of `ehr.prescriptions` has the `UPDATE` privilege a share
+lock needs. Under an owner subject to row-level security (release checklist
+P8) the lock applies the `prescriptions_read` and `prescriptions_update`
+policies with the session's context, so the pharmacist needs a write consent
+for the patient, which `pharmacy_dispensings_insert` and
+`pharmacy_work_items_insert` already require; a prescription the owner cannot
+lock reads as missing and is refused. The policies call `ehr.context_allows`,
+which the single owner owns; the rehearsal's non-superuser owner owns it too,
+so the owner probe needs no grant. A dedicated technical owner (ADR-041) would
+need `USAGE` on `ehr`, `EXECUTE` on `ehr.context_allows`, column `SELECT` on
+`id` and the compared columns, an `UPDATE` privilege for the lock, a
+`TO`-role select policy and an `UPDATE` policy with a restrictive
+`WITH CHECK (false)`.
+
+EHR handoff text. The EHR now sends `created_at` at the microsecond and the
+dates as dates: `PrescriptionsService.acceptForPharmacy` reads
+`to_char(created_at at time zone 'UTC', ...)` (`timelineCursorSql`) and
+`to_char(starts_on|ends_on, 'YYYY-MM-DD')` in its locking query instead of
+sending node-postgres `Date` values (milliseconds; a date at local midnight,
+the day before in a process east of UTC). The guard compares neither yet
+(follow-up above). An earlier EHR build in a process east of UTC sends a
+day-early date, which Pharmacy stores as it did before 0080. No service image
+or deployment sets `TZ`, so the processes run in the container default, UTC.
+No EHR schema change.
+
+Tests (rollback-only, synthetic fixtures):
+
+- `services/ehr-api/database/tests/pharmacy-source-prescription.integration.sql`:
+  42 cases. As `hid_pharmacy_api_runtime` with the Pharmacy API's session and
+  INSERT statements: the exact snapshot (prescribed at the microsecond), the
+  same snapshot with the time truncated to the millisecond or the start date
+  a day early (as earlier EHR builds send them) or the end date left out, and
+  the current version of an edited prescription are accepted; a cancelled,
+  missing or superseded prescription, another display, encounter or
+  prescriber are refused; a dispensing is accepted for an active
+  prescription and refused for one entered in error, on hold, completed,
+  draft, at a later version, missing, of another patient, encounter or
+  clinic, and after the prescriber's cancel, which runs as
+  `hid_ehr_api_runtime` through `ehr.capture_record_version` (version 2);
+  both refusals report their constraint names; a dispensing made before a
+  cancel can still be reversed. Isolated cases (`session_replication_role =
+  replica`, one guard `ENABLE ALWAYS`) show each guard refuses alone. It
+  checks both guards' security properties and that each share-locks
+  `ehr.prescriptions`, and probes whether the guards' owner can lock the
+  prescriptions under pharmacist A's session (write consent; required) and
+  pharmacist R's (read consent only): R's cases expect the guard's refusal
+  under a P8 owner and the insert policy's `42501` under an owner that
+  bypasses row-level security. Without 0080 its refusal cases are accepted
+  and its two lock checks fail.
+- `pharmacy-session-guards.integration.sql` and `schema.integration.sql`
+  now accept and dispense real, exact prescriptions (the session-guard
+  fixture had none; the schema suite's duplicate acceptance repeats the exact
+  snapshot under another key, so it still reaches `unique_violation`).
+- `services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs` (HTTP, as
+  `hid_pharmacy_api_runtime`): acceptances use real prescriptions with their
+  microsecond time; a missing prescription and one cancelled after the
+  EHR's check answer `409 PHARMACY_PRESCRIPTION_NOT_ELIGIBLE`, and the
+  millisecond time and the day-early start date of an earlier EHR build are
+  accepted (`201`); a dispense after a cancel, racing
+  a cancel that commits after its snapshot (one retry), or waiting on a
+  cancel in progress that commits answers
+  `409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` with nothing written; a cancel
+  that rolls back lets it through; a dispense in progress makes the EHR's row
+  lock fail with `55P03`; replays and reversals of earlier dispensings still
+  answer `201`.
+
+## Uniform recovery start cooldown (0081) and recovery code budget
+
+`0081_uniform_recovery_start_cooldown.sql` adds `auth.otp_start_cooldowns`:
+one row per recovery purpose (`PASSWORD_RESET`, `LEGACY_ACCOUNT_RECOVERY`,
+`LEGACY_SESSION_FALLBACK`) and `identifier_hmac`, a keyed HMAC of the purpose
+and the case-folded email address or HID (lower-case hex, 64 characters), with
+the `challenge_id` the last start answered and its `started_at`. The key is
+`(purpose, identifier_hmac)`. There is no foreign key: the row exists whether
+or not the identifier has an account, and its challenge id may name no
+challenge. It holds no identifier, authorizes nothing and has no row-level
+security, as `auth.otp_challenges` and `auth.otp_rate_limits` have none. The
+role bootstrap grants `SELECT`, `INSERT` and `UPDATE` to `hid_identity_runtime`
+and `hid_schema_test_runtime`; no runtime may delete rows. There is no
+retention job: each identifier keeps one row per purpose, overwritten by its
+next start, so the table grows with the number of distinct identifiers ever
+started, as `auth.otp_rate_limits` grows with its buckets.
+
+Before 0081 the resend cooldown of `POST /auth/otp/start` was read only from
+the account's open row in `auth.otp_challenges`. Within
+`OTP_RESEND_COOLDOWN_SECONDS` a repeat for a real account was answered with
+the live challenge id and one for an unknown identifier with a new random id,
+so two requests told whether an address or HID had an account. The marker
+cannot live in `auth.otp_challenges`: `otp_challenges_active_recipient_purpose_uq`
+(0028) would refuse a later real challenge for the same address.
+
+The Identity API (`otp.service.ts`), in the start transaction, after the three
+rate-limit counts (whose recipient bucket lock already serializes the starts
+of one identifier):
+
+1. reads the row; if `started_at` is within the cooldown by
+   `clock_timestamp()`, answers its `challenge_id` and sends nothing;
+2. otherwise upserts the row with the new candidate id;
+3. reads the account's open challenge of the purpose `FOR UPDATE`, as before,
+   with its cooldown also computed by `clock_timestamp()`;
+4. answers an unknown identifier, an account without a usable recipient, an
+   account whose code budget is spent, or an open challenge still cooling that
+   this identifier did not start (the account's other identifier did) with the
+   new id, sending nothing. The identifier's own challenge, written just after
+   its row, does not hold back its retry once its own cooldown has ended;
+5. otherwise replaces the open challenge and sends a code, after the response.
+
+A challenge whose delivery failed definitively keeps its id until the cooldown
+ends. The cooldown read takes no row lock. The upsert locks only that
+identifier's cooldown row until commit, after the three rate-limit transaction
+locks and before the challenge row lock; the recipient bucket's lock already
+serializes the starts of one identifier, so no new cycle forms.
+
+The recovery code budget needs no schema change. Each wrong code also counts
+in `auth.otp_rate_limits`, scope `account`, bucket
+`hmac('otp-verify-failure', account_id)`, apart from the start bucket
+`hmac('account', account_id)`. The `OTP_VERIFY_FAILURE_MAX`-th wrong code (5
+by default) within `OTP_VERIFY_FAILURE_WINDOW_SECONDS` (900) sets
+`blocked_until` one window ahead, as the platform MFA budget does. While it is
+set, verification refuses every code of the account, a correct one too, and
+invalidates that challenge (`attempts_exhausted`); a start reads it without a
+lock and sends nothing. Verification locks its challenge row, then takes the
+bucket's transaction lock (`otp-rate:account:<bucket>`), and locks no other
+challenge: start never takes that lock and `auth.complete_recovery_otp` never
+touches the bucket, so no cycle forms. An unknown challenge id counts nothing.
+No bucket is keyed by client IP.
+
+Residual: verification work still differs. A wrong code for a live challenge
+runs seven statements in its transaction (the challenge row lock, the bucket's
+lock, the blocked read, the attempt count, and the bucket count's lock, read
+and upsert), four once the budget blocks; a `challengeId` that names no live
+challenge, as an unknown identifier's does, runs one. Before this change it was
+two against one. Response time can therefore still suggest whether a start's
+identifier has an account, as the start's few extra statements for a known
+account can (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, "Residual"). Decoy
+locks and reads would only narrow the gap; closing it would need decoy writes
+for ids an attacker chooses.
+
+Tests:
+- `otp-recovery.integration.sql` (rollback-only) requires the table and its
+  key, no foreign key, the upsert of one row per purpose and identifier and the
+  refusal of an upper-case HMAC and of a non-recovery purpose (`23514`) as
+  `hid_identity_api_runtime`, which may not delete (`42501`), and refuses
+  `hid_ehr_api_runtime` any read. `runtime-roles.integration.sql` requires
+  exactly those privileges for the Identity runtime, no `DELETE` or `TRUNCATE`
+  through it, and no privilege at all for the twenty other runtime roles it
+  requires (all but the schema-test runtime and the migration
+  administrator).
+- `verify-otp-recovery-runtime.mjs` runs the real service as
+  `hid_identity_api_runtime`: five accepted concurrent starts for one unknown
+  identifier answer one challenge id; four wrong codes on one challenge, then
+  two wrong codes on two purposes of the account at once, both refused with
+  `403`; a correct code of a third purpose refused; a start for the suspended
+  account sends nothing; after the owner clears the block a new start sends a
+  code that verifies. It waits for deliveries before ending its pool.
+- `verify-patient-enrollment-runtime.mjs` repeats a start over HTTP for an
+  unknown and a known identifier (same challenge id, no code) and starts the
+  account's HID (a new id, no code).
 
 ## EHR clinical list paging precision (no migration)
 
@@ -1834,3 +2138,143 @@ microseconds:
   suites (`TUF-STAGING-MIGRATION.md`), and
   `scripts/run-container-database-acceptance.sh` runs it after
   `staff-access-request-outcome.integration.sql`.
+
+## Record summary reads (no migration)
+
+The EHR API's two record summaries (`INTERFACE_CONTRACT.md` §11, "Record
+summaries") read under row-level security as `hid_ehr_api_runtime`. Nothing in
+the schema, policies or grants changes.
+
+- **Patient summary** (`GET /ehr/me/records`). The patient transaction sets
+  `app.purpose_of_use = 'patient-self'` and empty facility and membership, so
+  the staff policies (`ehr.context_allows`) never pass, and only the 0030
+  patient-self policies release rows: completed encounters, signed or amended
+  notes and their current revisions. The other clinical tables have `SELECT`
+  but no patient-self policy, so a patient read of them returns no rows and no
+  error. The service now reads only the two released categories and names the
+  other five as withheld; before, it read all seven and returned five arrays
+  that were always empty.
+- **Emergency summary** (`GET /ehr/patients/:id/emergency-records`). A
+  break-glass emergency context passes `ehr.context_allows` for `read_records`
+  at its facility (0012), so every clinical table is readable there.
+  - Vitals: read from `ehr.vitals` alone, as first recorded (the row's eight
+    measurement columns), the same columns as before; corrections are not
+    applied. Applying them is pending the product decision on correction
+    semantics (proposed default: the current correction's replacement set is
+    the whole current set, as Health-id's clinician chart applies it); the
+    implementation is preserved in commit `7401193` for when the decision
+    lands. No EHR API route updates the measurement columns (a correction
+    updates only `current_correction_no`), but the database does not refuse
+    it: `hid_ehr_runtime` holds `UPDATE` on `ehr.vitals` (`runtime-grants.sql`),
+    `vitals_update` allows it under `write_records` (0005), and
+    `ehr.capture_record_version` (0004) guards only the ownership and
+    attribution columns and requires a change reason, recording the prior row
+    in `ehr.record_versions`. A guard refusing changes to the measurement
+    columns (a trigger, or column-level `UPDATE` limited to
+    `current_correction_no`) is a follow-up migration.
+  - Documents: read from `ehr.documents_effective` (0009, `security_invoker`,
+    `security_barrier`) where `status = 'available'`, so `documents_read` and
+    `document_scan_events_staff_read` apply to the view's reads. The raw
+    `ehr.documents.status = 'uploaded'` filter used before also listed
+    documents never scanned and those the scanner rejected.
+  - Each section reads one row more than it shows, to report truncation.
+- `emergency.integration.sql` (rollback-only) adds, after its activation cases,
+  a break-glass grant inserted directly and document fixtures inserted with
+  `session_replication_role = replica`, then checks as `hid_ehr_api_runtime`
+  with the emergency context: `documents_effective` reports `available:clean`,
+  `rejected:rejected` and `uploaded:pending` for a clean, a rejected and an
+  unscanned upload, and lists only the clean one as available, while the raw
+  `uploaded` filter lists all three; and with `direct-care` and no consent
+  nothing is visible. These
+  cases pass before and after the service change: they guard the database
+  behaviour the summary relies on. The rehearsal runs the suite with its
+  additional suites, and `scripts/run-container-database-acceptance.sh` now
+  runs it after `emergency-contacts.integration.sql` (before, only the
+  rehearsal did). The service's own SQL is exercised against the database by
+  `verify-delegated-cookie-read-runtime.mjs` (steps 4 to 6).
+
+## Purpose-of-use vocabulary (0082)
+
+`0082_purpose_of_use_vocabulary.sql` inserts one row into
+`identity.purpose_of_use_codes`: `direct-care` ("Direct patient care",
+active, `source_system` `hid`), with `ON CONFLICT (code) DO NOTHING`
+(D-Eminence/hid-system#58).
+
+0003 created the table empty, and nothing inserted a row: no migration, no
+role bootstrap (`runtime-grants.sql` gives the Identity runtime `SELECT`
+only) and no legacy importer (it holds every imported request and grant
+with `purpose_of_use` null and a migration hold). Yet every consent decision
+requires an active code:
+
+- `identity.has_active_consent_grant` (0012) returns false, so Identity's
+  authorization check, and with it patient lookup by HID and every EHR, Lab,
+  Pharmacy and OCR patient access, is denied;
+- `identity.create_access_request` and `identity.close_own_consent_grant`
+  (0010) and `identity.activate_break_glass` (0031) raise `22023`, which
+  Identity answers `400 INVALID_CONSENT_COMMAND` (break-glass only while
+  `break_glass_enabled` is on; Identity checks the control first);
+- `identity.access_patient_with_pin` (0033, 0079) raises `22023`, answered
+  `403 PATIENT_PIN_ACCESS_DENIED`;
+- the `purpose_of_use` foreign keys of `identity.access_requests` and
+  `identity.consent_grants` (0008) refuse the row, and the consent directive
+  trigger (0008) refuses an unknown or inactive purpose (`23514`).
+
+On a database built only from migrations every staff consent check therefore
+failed closed. The rollback-only suites and the runtime verifiers insert the
+codes they need themselves, so none of them showed it. Whether staging or
+production already hold rows inserted by hand cannot be told from the
+repository; the release checklist's P10 records them before and after 0082.
+
+**Current default, pending product decisions:** only `direct-care` is seeded.
+
+- `emergency` is not seeded. Break-glass needs it (0010, 0031), and
+  `has_active_consent_grant` honours an emergency read only while it is
+  active. Seeding it would make break-glass usable at once wherever
+  `platform.control_settings` `break_glass_enabled` is on, which is its 0039
+  default. Until it is approved and inserted, break-glass answers `423
+  BREAK_GLASS_DISABLED` when the control is off and `400
+  INVALID_CONSENT_COMMAND` when it is on.
+- `healthcare-operations` is not seeded. Identity access requests
+  (`consent.controller.ts`), Lab and Pharmacy reads and the OCR commands
+  accept it as a purpose, and it belongs to the open OCR purpose-of-use
+  decision (which purpose and scope OCR create, retry, validate and confirm
+  need); a patient also approves a request without seeing its purpose. Until
+  it is decided, requests, grants and reads for that purpose are refused.
+  Enrollment, onboarding and registration commands compare the session
+  purpose with the text `healthcare-operations` and never read the table, so
+  they are unaffected.
+
+The `active` flag is the switch. An operator retires a code by setting
+`active = false`, never by deleting it (grants and requests reference it
+`ON DELETE RESTRICT`); deactivating `direct-care` refuses every direct-care
+grant, request, close and PIN at once. `ON CONFLICT DO NOTHING` keeps a row
+inserted or deactivated before 0082 exactly as it is, display and source
+included. The service runtime roles only read the table
+(`hid_schema_test_runtime` may also insert and update, for the suites), so a
+new code is a reviewed change by the migration administrator or a later
+migration. The insert takes a `ROW EXCLUSIVE` lock on
+`identity.purpose_of_use_codes`; no table is scanned and no grant or service
+changes.
+
+Tests:
+
+- `purpose-of-use-vocabulary.integration.sql` (rollback-only; it inserts no
+  purpose code) requires an active `direct-care` row. Then, as
+  `hid_identity_api_runtime`: the runtime can read the vocabulary but not
+  insert, update or delete it; a direct-care `write_records` grant is
+  honoured for reads and writes; a direct-care access request is accepted
+  (`pending`). After the owner deactivates `direct-care` in the transaction,
+  the grant is refused for both actions and a new request is refused with
+  `22023 Invalid purpose for a standard access request`. Without 0082 it
+  fails at its first assertion ("the migrated purpose-of-use vocabulary has
+  no active direct-care code"). The rehearsal runs it with the additional
+  suites, under the migration owner, the non-superuser owner and on the
+  restored database, and `scripts/run-container-database-acceptance.sh` runs
+  it after `runtime-command-privileges.integration.sql`.
+- The rehearsal's 0028 upgrade check counts `identity.purpose_of_use_codes`
+  among the tables the upgrade may change, and requires exactly one row after
+  the upgrade: `direct-care`, active, `source_system` `hid`.
+- `schema.integration.sql` and `emergency.integration.sql` insert their three
+  codes with `ON CONFLICT (code) DO NOTHING`, as every other suite and
+  verifier already did, so they pass on a database where 0082 seeded
+  `direct-care`.

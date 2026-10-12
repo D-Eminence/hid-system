@@ -60,7 +60,8 @@ Record and approve:
   (§12); for development, the external issuer/JWKS/subjects and token delivery
   mechanism;
 - nine non-owner database secrets plus a separate migration administrator;
-- Identity auth/OTP/Turnstile secret material; legacy NIN material remains
+- Identity auth/OTP/Turnstile secret material and the platform MFA key
+  `mfaSecretKeyB64` (below); legacy NIN material remains
   excluded from current staging requirements. If QoreID staging activation is
   separately approved, add its distinct `clientId`/`secret` envelope only;
 - for staging email acceptance, SES sender and Novu secret material only; the
@@ -73,6 +74,33 @@ Record and approve:
 Do not reuse local, historical Vercel, Supabase, or Brevo credentials. Any
 previously exposed live-looking credentials must be rotated/revoked by their
 external owners before cutover.
+
+The Identity task reads `MFA_SECRET_KEY_B64` from the `mfaSecretKeyB64` field of
+the `IdentitySensitiveSecretArn` secret and runs with `MFA_KEY_VERSION=aws-v1`
+in every environment (D-Eminence/hid-system#49). Before deploying that task
+definition, add `mfaSecretKeyB64` to the environment's secret: 32 bytes from a
+cryptographically secure generator in canonical padded base64 (44 characters),
+written without printing it and keeping every other field. Generate it
+separately for each environment; never copy it from staging or any other
+environment. ECS resolves every referenced JSON field before it starts a task:
+while the field is missing no Identity task starts, so on a first deployment
+every patient, staff and platform sign-in is down, and an update fails and is
+rolled back by the deployment circuit breaker. A malformed value stops Identity
+at start-up. The key and version are fixed at the first authenticator
+enrolment; changing either invalidates every enrolled authenticator (release
+checklist P3).
+
+The same applies to every other field the Identity task reads from that
+secret. The `IdentitySensitiveSecretArn` parameter description names exactly
+those fields for the environment being deployed, from the same list the task
+definition is built from; read it from the synthesized template rather than
+from memory. Staging reads `ninLookupHmacKeyB64` and `ninEncryptionKeyB64` only
+when QoreID is enabled (`HID_QOREID_ENABLED=true`), so a QoreID activation must
+add both, each 32 bytes in canonical padded base64, before its first deployment.
+For staging, the [external preflight](STAGING_EXTERNAL_PREFLIGHT.md) reports
+whether `otpHmacKeyB64`, `contactLookupHmacKeyB64` and `mfaSecretKeyB64` are
+present and whether each has the format Identity accepts
+(`canonical_32_byte_base64`); it does not check the NIN keys.
 
 For staging, `RdsCaBundleBase64` accepts at most 4096 base64 characters, the
 CloudFormation parameter-value limit. Independently verify the staging region
@@ -96,6 +124,45 @@ and `hid:production:<service>` subjects, and no longer accepts these
 parameters. That changes the production template: record a new production
 template baseline (§12) instead of comparing with an earlier one. Development
 keeps its external workload-identity inputs.
+
+**Recorded template baseline.** Offline synthesis of D-Eminence/hid-system#49
+(with `main` at `6b49a06` merged, which changes nothing under `infra/aws`)
+with `npm --prefix infra/aws run synth:prod` (and `synth:dev`), no
+`HID_AWS_ACCOUNT`/`HID_AWS_REGION`, no AWS credentials, `aws-cdk-lib` 2.273.0 and
+CDK CLI 2.1144.0:
+
+| Profile | Template SHA-256 | Bytes |
+| --- | --- | --- |
+| Production | `b4cdde915ac7e4775fba43a477f4870ccae7130f24c6180625cc409a510218bb` | 524,141 |
+| Development | `20f16446bca81a8e601c76fa2fd072b5d40c8466448e2a7bdc8ddee751a603c7` | 523,711 |
+
+Why it changed: this branch gives the Identity task its MFA key secret
+reference and `MFA_KEY_VERSION`, and rewrites the `IdentitySensitiveSecretArn`
+description to name every field the task reads from that secret (release
+checklist P3). A structural comparison with its base `05df685` finds exactly
+those three differences in production, development and each staging mode. The
+earlier record, the September 14 synthesis in the
+[staging execution report](TUF-STAGING-EXECUTION.md) (production
+`f05320072901de1b34d0004a3d9b95f6b16a88b31bff0c6682bf2d7cb1d6b2b6`, 464,453
+bytes; development
+`42cadadc0cda9ef7f13c86f27937b066662f417e5e5925fc2a46a1bb708db73c`, 517,254
+bytes), was already stale: `05df685` synthesizes to
+`3c69a5b608eae12f0617822c0225eeec1c7c3058eace9fe257dc5c6854dc9c4a` (523,299
+bytes) and `a0709512071047ffca3cfd41f88fc2718334565ac61723b4a17e1a98a2b4cf1b`
+(522,869 bytes). Nine later commits touch `infra/aws/src` or its CDK
+dependencies, among them the QoreID and enrolment changes and the
+`aws-cdk-lib` 2.273.0 upgrade; together they changed both templates without
+updating the record. Every later change to a template replaces its row here,
+with the reason.
+
+**Under ADR-047 (D-Eminence/hid-system#54, draft).** The same offline
+synthesis of this draft, with `main` at `d0d8a91` merged, gives production
+`030830a5a6b6018eb349fb606a547eaf98c5a4b3255386f52cb751895b64d960` (568,579
+bytes): its own issuer, six token agents and eight fewer parameters (§12).
+Development is unchanged
+(`20f16446bca81a8e601c76fa2fd072b5d40c8466448e2a7bdc8ddee751a603c7`, 523,711
+bytes). The production row above stays `main`'s until ADR-047 is accepted and
+this draft merges; then this hash replaces it.
 
 ## 2. Local source gates
 

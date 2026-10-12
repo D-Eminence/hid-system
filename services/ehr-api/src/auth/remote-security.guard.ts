@@ -81,15 +81,38 @@ export class RemoteSecurityGuard implements CanActivate {
       );
       return result.rows[0]?.enabled === true;
     } catch (error) {
-      if (isDatabaseError(error) && error.code === '55000') {
-        if (String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) return false;
-        throw new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
-      }
-      throw error;
+      if (isDatabaseError(error) && error.code === '55000'
+        && String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) return false;
+      // Any other fault (a timeout, a lost connection, a missing grant) leaves
+      // the control unknown. Answer it as such, not as the caller's 401.
+      throw new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
     }
   }
 
   private async recordDenied(request: HidRequest): Promise<void> {
+    const details = { method: request.method, route: typeof request.route?.path === 'string' ? request.route.path : 'unresolved' };
+    if (request.actor && !request.facilityId) {
+      // Refused before a facility was bound (no or malformed X-Facility-ID, a
+      // facility the actor is not active at, a runtime control). Recorded as
+      // Identity's SecurityGuard records it: an auth event with no membership
+      // or organization. A staff row without a facility is accepted only as
+      // an auth event (AuditService, the 0067 CHECKs); an http-request row
+      // carrying the default membership was refused, and the refusal then
+      // answered 503 instead of its own status.
+      await this.audit.record({
+        correlationId: request.correlationId,
+        actorType: request.actor.kind === 'patient' ? 'patient' : 'staff',
+        actorSubject: request.actor.subject,
+        actorAccountId: request.actor.accountId,
+        action: 'auth.authorization.denied',
+        resourceType: 'authentication',
+        outcome: 'denied',
+        sourceIp: request.ip,
+        userAgent: request.header('user-agent'),
+        details,
+      });
+      return;
+    }
     await this.audit.record({
       correlationId: request.correlationId,
       actorType: request.actor?.kind === 'patient' ? 'patient' : request.actor ? 'staff' : 'system',
@@ -103,7 +126,7 @@ export class RemoteSecurityGuard implements CanActivate {
       outcome: 'denied',
       sourceIp: request.ip,
       userAgent: request.header('user-agent'),
-      details: { method: request.method, route: typeof request.route?.path === 'string' ? request.route.path : 'unresolved' },
+      details,
       provenance: request.actor ? 'application' : 'system',
     });
   }

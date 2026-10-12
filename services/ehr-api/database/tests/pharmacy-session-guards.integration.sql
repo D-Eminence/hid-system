@@ -119,6 +119,25 @@ select ('e8d80000-0000-4000-8000-00000000000' || n)::uuid, 'e8d40000-0000-4000-8
        'write_records', 'direct-care', 'active', 'Synthetic Pharmacy guard consent',
        clock_timestamp() - interval '1 hour', clock_timestamp() + interval '30 days'
   from generate_series(1, 4) n;
+-- The EHR prescriptions the work items accept: since 0080 the work-item and
+-- dispensing guards read and lock the prescription, and accept or dispense only
+-- the exact active version. Encounter e8dc...01 and prescriptions e8d6...01-05
+-- (W1-W5), ...10 (W10) and ...20 (W20) by member B, active at version 1, with
+-- the snapshot the work items carry.
+insert into ehr.encounters (id, patient_id, facility_id, created_by, created_by_membership_id, encounter_type,
+  status, started_at) values
+  ('e8dc0000-0000-4000-8000-000000000001', 'e8d40000-0000-4000-8000-000000000001',
+   'e8d00000-0000-4000-8000-000000000002', 'e8d10000-0000-4000-8000-000000000002',
+   'e8d30000-0000-4000-8000-000000000002', 'ambulatory', 'in_progress', '2026-10-01 07:30:00+00');
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_code_system, medication_code, medication_display, dose_quantity, dose_unit, route_code, frequency,
+  instructions, status, row_version, created_at)
+select ('e8d60000-0000-4000-8000-0000000000' || suffix)::uuid, 'e8dc0000-0000-4000-8000-000000000001',
+       'e8d40000-0000-4000-8000-000000000001', 'e8d00000-0000-4000-8000-000000000002',
+       'e8d10000-0000-4000-8000-000000000002', 'e8d30000-0000-4000-8000-000000000002', 'urn:synthetic:medication',
+       'amoxicillin-500mg', 'Amoxicillin 500 mg', 1, 'tablet', 'oral', 'Every 8 hours', 'Take after food', 'active',
+       1, '2026-10-01 08:00:00+00'
+  from unnest(array['01', '02', '03', '04', '05', '10', '20']) suffix;
 -- Work items W1-W4 (e8d5...0n, prescriptions e8d6...0n) were accepted by
 -- members 1-4 and have no event or dispensing yet. W5 was accepted by A and
 -- dispensed by A as S5 (e8d7...05), which has no reversal yet.
