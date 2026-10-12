@@ -82,6 +82,15 @@ enrollment path. It keeps provider identity evidence encrypted in a pending,
 unique-NIN record; a single selected contact OTP must be consumed before a
 password-backed account, canonical patient, NIN binding, and HIDCode can be
 created atomically. Its rate counters and OTPs are scoped to the enrollment.
+The private synthetic rehearsal runs
+`services/identity-api/scripts/verify-patient-enrollment-runtime.mjs`, which
+exercises this path over HTTP under the exact Identity runtime role on a
+disposable copy of the rehearsal database: start, contact OTP and activation,
+then sign-in for both new patients (by email and by HIDCode, one phone-only),
+and refresh, recovery and sign-out for the first. QoreID (behind
+the real adapter), Siteverify and OTP delivery are local stubs; see the
+[QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md). This is not
+staging acceptance.
 Migration `0052_authoritative_cac_identity.sql` makes the registration
 identifier the public organization lookup key and introduced a complete-QoreID-
 profile guard for review and legal-entity binding. Migration `0056` revises
@@ -1239,7 +1248,15 @@ a reachable Super Admin to be suspendable.
 - The Identity API calls the helper before its own revocations: refresh-token
   reuse, an administrator revoking their own session, sign-out and expiry. A
   sign-out revokes the presented session's family, so it also ends a session
-  that a refresh in another tab created while it waited.
+  that a refresh in another tab created while it waited. With
+  D-Eminence/hid-system#39 (no migration or grant change), a
+  sign-out by refresh cookie, once the access token has expired, takes the
+  same path. It locks the account by the session that `refresh_token_sha256`
+  finds, then reads that session and ends the sign-in if anything of it is
+  left (the session unrevoked, or rotated into a family session that is),
+  whatever its expiry or the account's state; a sign-in a concurrent sign-out
+  has just ended is not recorded again. Its `logout` event carries
+  `presented: refresh_token` in `details`.
   Every path that revokes sessions therefore locks the account row before any
   session row. The account actions that change the token version already did.
 - Platform MFA transactions do not use this helper: since Phase 4 Stage 7A they
@@ -1746,3 +1763,74 @@ Checks:
   the other row below the deadlock timeout. Each verifier ends by requiring
   `pg_stat_database` to report no deadlock for its database, read after the
   service's connections closed, so a deadlock the retry hid still fails it.
+
+## EHR clinical list paging precision (no migration)
+
+The EHR API's six newest-first clinical lists page with a keyset on (sort key,
+`id`) (`INTERFACE_CONTRACT.md` §11, "EHR clinical list paging"). The sort keys
+are `timestamptz` columns from `0004_ehr_clinical_records.sql`, which keep
+microseconds:
+
+| Table | Sort key | Rows per list |
+|---|---|---|
+| `ehr.encounters` | `started_at`, as the client sends it (no default) | one patient, one facility |
+| `ehr.clinical_notes`, `ehr.diagnoses`, `ehr.lab_requests`, `ehr.prescriptions` | `created_at`, `default clock_timestamp()` | one encounter, patient and facility |
+| `ehr.vitals` | `recorded_at`, as the client sends it (no default) | one encounter, patient and facility |
+
+- Each list reads `limit + 1` rows ordered by the key and `id`, both
+  descending, with the predicate
+  `($n::timestamptz is null or (key, id) < ($n::timestamptz, $m::uuid))`.
+  The first page binds both parameters to null; later pages bind them from
+  the cursor.
+- node-postgres returns a `timestamptz` as a JavaScript `Date`, which keeps
+  only milliseconds, and the cursor was built from that `Date`. The bound
+  therefore fell to the start of the last row's millisecond, and the next
+  page left out the rows that sort after the last row within that
+  millisecond: those earlier in it, and those at the same instant with a
+  lower `id` (for example, `.123400` after a last row at `.123456`). Only a
+  row exactly at the start of the millisecond with a lower `id` than the last
+  row still passed. The rows left out were never listed; rows created in bulk
+  or by import are the likely case.
+- Each list now also selects
+  `to_char(key at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "cursorAt"`,
+  and the cursor carries that text, never the `Date`
+  (`services/ehr-api/src/ehr/shared/clinical-context.ts`). `timestamptz` has
+  microsecond resolution, so the text is exact. It is rendered in UTC and ends
+  in `Z`, so neither the rendering nor the cast back to `timestamptz` for the
+  next page depends on the session time zone. `YYYY` has four digits up to
+  year 9999 and five or six after it, up to 294276, the last year a
+  `timestamptz` holds. `started_at` and `recorded_at` take any instant the
+  client sends, so the cursor accepts those years too: a list whose page ends
+  on such a row still issues its next cursor.
+- The predicates, order, parameters, tables, indexes and grants are
+  unchanged; there is no migration. Of the 0004 indexes,
+  `encounters_patient_timeline_idx (patient_id, started_at desc)`,
+  `clinical_notes_encounter_idx (encounter_id, created_at desc)` and
+  `vitals_encounter_time_idx (encounter_id, recorded_at desc)` follow their
+  list's scope and sort key, without `id`. Diagnoses, lab requests and
+  prescriptions have no index on `encounter_id`. Besides the primary key and
+  `unique (id, patient_id, facility_id)`, their indexes are
+  `diagnoses_patient_status_idx (patient_id, clinical_status, created_at desc)`,
+  `diagnoses_code_idx (code_system, code)`,
+  `lab_requests_patient_status_idx (patient_id, status, created_at desc)`,
+  `lab_requests_facility_queue_idx (facility_id, priority, created_at) where status = 'active'`
+  and `prescriptions_patient_status_idx (patient_id, status, created_at desc)`.
+- `ehr-timeline-cursor.integration.sql` (rollback-only, synthetic fixtures)
+  checks:
+  - that the text form of seven instants (including `0001-01-01`, a leap
+    day, `9999-12-31 23:00:00-05:00`, which is year 10000 in UTC, and
+    `294276-12-31 23:59:59.999999+00`) has the cursor's form, with six
+    fraction digits, and casts back to the same instant under the session
+    time zones UTC, Africa/Lagos, America/Los_Angeles and Asia/Kolkata;
+  - with five clinical notes, three of them within one millisecond, the
+    clinical-notes list predicate and order: after the microsecond cursor the
+    next page holds the two `.123400` rows (higher `id` first) and the
+    `.122999` row; after the millisecond bound the earlier cursor carried, only
+    the `.122999` row.
+- The fixtures are inserted with `session_replication_role = replica` (no
+  foreign-key checks; `CHECK` constraints still apply). The suite runs as the
+  connecting administrator, not as `hid_ehr_api_runtime`, so it does not
+  exercise row-level security. The rehearsal runs it with the other additional
+  suites (`TUF-STAGING-MIGRATION.md`), and
+  `scripts/run-container-database-acceptance.sh` runs it after
+  `staff-access-request-outcome.integration.sql`.

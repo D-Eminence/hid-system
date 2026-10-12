@@ -36,7 +36,11 @@ export class AuthService {
     sessionId: string | undefined,
     actorSubject: string | undefined,
     event: SessionEventMetadata,
-  ): Promise<void> {
+  ): Promise<boolean> {
     return this.tokens.revoke(sessionId, actorSubject, event);
+  }
+
+  revokeByRefreshToken(refreshToken: string, event: SessionEventMetadata, expectedKind?: 'staff' | 'patient') {
+    return this.tokens.revokeByRefreshToken(refreshToken, event, expectedKind);
   }
 }

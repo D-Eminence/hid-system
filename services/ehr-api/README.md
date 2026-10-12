@@ -17,7 +17,11 @@ are not registered in the active EHR application and expose no routes.
 - `authorization adapter`: resolves the actor and patient decision through the
   shared typed Identity client. Propagated user credentials remain separate
   from the EHR workload credential; facility, purpose, correlation, CSRF, and
-  Origin context survive the service boundary.
+  Origin context survive the service boundary. The patient decision also
+  carries the method of the request EHR is serving (`X-HID-Original-Method`),
+  so Identity applies its cookie Origin and CSRF check there only to a write; a
+  cookie write is still revalidated through `POST /api/v1/auth/service-session`
+  first.
 - `ehr`: encounters, clinical notes with immutable revisions, vitals with immutable corrections, diagnoses, prescriptions, and lab requests.
 - `documents`: presigned private uploads, S3 version/checksum verification, immutable malware-scan events, and clean-version-only downloads.
 - `audit writes`: EHR mutations append semantic evidence; Identity owns the
@@ -47,6 +51,22 @@ boundary without echoing submitted clinical content.
 
 Optimistic updates require `expectedRowVersion` and a non-trivial `changeReason`. Cross-facility identifiers are never sufficient to resolve a record: application predicates, RLS, membership checks, consent, and composite foreign keys all enforce the same boundary.
 
+The six clinical lists (a patient's encounters, and an encounter's clinical
+notes, diagnoses, lab requests, prescriptions and vitals) are newest first and
+keyset-paged: `limit` 1–100 (default 50), and `cursor` set to the previous
+page's `nextCursor`. `src/ehr/shared/clinical-context.ts` issues the cursor
+(version 1, following Identity's admin cursors in
+`services/identity-api/src/common/cursor.ts`). It carries the sort
+key as PostgreSQL renders it to the microsecond (`timelineCursorSql`), never
+the row's JavaScript `Date`, which node-postgres limits to milliseconds, and
+it is bound to its list, patient and, for the five encounter lists, encounter.
+A well-formed cursor (16–512 base64url characters) not in the exact form
+issued, including one from before this format, is `400 INVALID_CURSOR`; any
+other `cursor` value is `400 VALIDATION_FAILED`. See
+[EHR clinical list paging](../../docs/INTERFACE_CONTRACT.md#ehr-clinical-list-paging);
+`database/tests/ehr-timeline-cursor.integration.sql` checks the bound in
+PostgreSQL.
+
 ## Local verification
 
 Use Node.js 22 or newer and provide a development configuration based on
@@ -67,6 +87,17 @@ npm run build
 
 The OCR worker is a separate package, process, and database identity under
 `services/ocr-worker`; it is not built or started by this package.
+
+`scripts/verify-delegated-cookie-read-runtime.mjs` is an HTTP verifier run by
+the root `scripts/tuf-staging-migration-rehearsal.mjs`. It runs only inside the
+rehearsal (`NODE_ENV=test`, `PGHOST` a `/tmp/hid-tuf-migration.*` socket,
+`PGDATABASE=hid_rehearsal`) and works on a disposable copy of that database,
+which it drops. It starts Identity (as `hid_identity_api_runtime`) and EHR (as
+`hid_ehr_api_runtime`), and checks that a doctor's same-origin cookie read of
+encounters is authorized through Identity, that cookie writes without Origin
+or CSRF are refused, and that Identity's check refuses a forged or missing
+workload token, a reported write without CSRF and an unreported method. It
+cannot run against staging or production.
 
 ## Database deployment
 

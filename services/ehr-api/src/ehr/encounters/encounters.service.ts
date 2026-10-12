@@ -8,7 +8,7 @@ import {
   TimelineQueryDto,
   UpdateEncounterDto,
 } from '../shared/clinical.dto';
-import { decodeTimelineCursor, requestDigest, timelinePage } from '../shared/clinical-context';
+import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
 import { ClinicalRepository } from '../shared/clinical.repository';
 
 export interface EncounterRow extends QueryResultRow {
@@ -49,22 +49,23 @@ export class EncountersService {
   constructor(private readonly repository: ClinicalRepository) {}
 
   list(context: DataAccessContext, patientId: string, query: TimelineQueryDto) {
-    const cursor = decodeTimelineCursor(query.cursor);
+    const scope = { list: 'ehr.encounters', patientId };
+    const cursor = decodeTimelineCursor(query.cursor, scope);
     return this.repository.run(
       context,
       patientId,
       'read_records',
       { action: 'ehr.encounter.list', resourceType: 'encounter' },
       async (client) => {
-        const result = await client.query<EncounterRow>(
-          `select ${ENCOUNTER_COLUMNS}
+        const result = await client.query<EncounterRow & { cursorAt: string }>(
+          `select ${ENCOUNTER_COLUMNS}, ${timelineCursorSql('started_at')} as "cursorAt"
            from ehr.encounters
            where patient_id = $1 and facility_id = $2
              and ($3::timestamptz is null or (started_at, id) < ($3::timestamptz, $4::uuid))
            order by started_at desc, id desc limit $5`,
           [patientId, context.facilityId, cursor?.sortAt ?? null, cursor?.id ?? null, query.limit + 1],
         );
-        const page = timelinePage(result.rows, query.limit, (row) => row.startedAt);
+        const page = timelinePage(result.rows, query.limit, scope);
         return { value: page, details: { resultCount: page.items.length } };
       },
     );

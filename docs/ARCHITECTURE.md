@@ -1231,6 +1231,16 @@ Shared build and development configuration where appropriate.
 ### `packages/identity-browser-client`
 
 Identity-owned cookie, CSRF, session, actor, and sign-out browser transport.
+It does not send `X-HID-Client`, so its applications refresh and sign out as
+unnamed clients; that header (D-Eminence/hid-system#39) keeps a
+named staff or patient application from refreshing or ending the other's
+sign-in while refresh could renew it (`INTERFACE_CONTRACT.md`, "Auth session
+contract"; ADR-044). Its `signOut`
+treats a `401` from `POST /auth/logout` as signed out (`allowUnauthorized`).
+Without #39, a sign-out after the access cookie has expired gets that `401`
+and leaves the server sign-in live and refreshable; with #39 the same call
+ends the sign-in by its refresh cookie, provided the CSRF token the client
+holds is the one derived from that refresh token.
 
 ### `packages/offline`
 
@@ -1263,7 +1273,12 @@ or Identity session-cookie user evidence, facility, purpose, correlation and
 idempotency context while keeping internal workload authorization separate.
 Cookie mutations preserve Origin and CSRF evidence. The clients use a
 10-second timeout, retry an idempotent network/502/503/504 failure at most once,
-and obtain a fresh rotating workload credential for each attempt.
+and obtain a fresh rotating workload credential for each attempt. Its Identity
+client also reports the method of the request a service is serving
+(`X-HID-Original-Method`) on the patient authorization check. Identity trusts
+that report only from an authenticated workload, and uses it only to decide
+whether a forwarded cookie needs the browser-write Origin and CSRF check
+(`INTERFACE_CONTRACT.md`, Extracted Identity boundary).
 
 `packages/offline` and `packages/telemetry` are consumed by every active
 browser application. Only Outreach currently persists an offline mutation

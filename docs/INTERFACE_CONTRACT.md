@@ -15,12 +15,141 @@ credentials never use the ordinary-notification event path. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
 Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
+### Auth session contract
+
+This is the browser contract of staff and patient sessions. Sign-out without
+a live access token, the `X-HID-Client` check and the refresh-token lookup
+rules below come from D-Eminence/hid-system#39, which is not yet deployed. Platform administration sessions use their own cookies and
+`/auth/admin/*` routes (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1).
+
+Identity sets three cookies at sign-in and on every refresh (`setCookies` in
+`services/identity-api/src/auth/auth.controller.ts`). Their names derive from
+`AUTH_COOKIE_NAME` (default `hid_access`). All three are `SameSite=Strict`,
+carry no `Domain` attribute (host-only), and are `Secure` when
+`AUTH_COOKIE_SECURE` is set, which production requires.
+
+| Cookie | HttpOnly | Path | Expires |
+|---|---|---|---|
+| `hid_access` (access token) | Yes | `/` | With the access token: `AUTH_ACCESS_TTL_SECONDS`, 15 minutes by default, never past the sign-in's absolute end |
+| `hid_access_refresh` (refresh token) | Yes | `/api/v1/auth` | End of the refresh window: `AUTH_REFRESH_TTL_SECONDS`, 8 hours by default after sign-in or the last refresh. A refresh never extends it past the sign-in's absolute end (`AUTH_ABSOLUTE_TTL_SECONDS`, 24 hours by default) |
+| `hid_access_csrf` (CSRF token) | No | `/` | Same as the refresh cookie |
+
+The CSRF token is derived from the refresh token. Sign-in and refresh also
+return it in the `X-CSRF-Token` response header, and cookie mutations send it
+back in the `X-CSRF-Token` request header.
+
+`POST /api/v1/auth/refresh` takes no body. It reads the refresh and CSRF
+cookies, `X-CSRF-Token` and, optionally, `X-HID-Client`, and checks them in
+this order:
+
+| Outcome | When | Cookies |
+|---|---|---|
+| `403 ORIGIN_DENIED` | `Origin` is missing or not in `CORS_ORIGINS` | Untouched |
+| `403 CSRF_VALIDATION_FAILED` | The refresh cookie is missing, or `X-CSRF-Token` and the CSRF cookie are missing, differ, or are not the value derived from the refresh token | Untouched |
+| `403 SESSION_CLIENT_MISMATCH` | `X-HID-Client` names the other kind of sign-in (below). Nothing is rotated | Kept |
+| `401 AUTHENTICATION_REQUIRED` | Rotation refuses the token: unknown, ended, expired, reused (reuse ends the whole sign-in), a platform token, or an account that is no longer active, is disabled or has a new token version. Any other failure during rotation also clears the cookies | Cleared |
+| `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header | The refresh token is rotated into a new session of the same sign-in | Replaced |
+
+`POST /api/v1/auth/logout` takes no body and answers `204` with no content
+when it does not refuse. It is public at the guard and authenticates the
+request itself, so platform maintenance (`503 PLATFORM_MAINTENANCE`) and a
+disabled portal (`423 PLATFORM_PORTAL_DISABLED`) no longer block sign-out.
+
+- **Bearer** (`Authorization: Bearer <access token>`). No Origin, CSRF or
+  `X-HID-Client` check. A live staff or patient token ends its own sign-in. A
+  token that is no longer live is `401 AUTHENTICATION_REQUIRED`; a platform
+  token is `403 PLATFORM_SESSION_SCOPE_DENIED`.
+- **Cookie** (no bearer token). `Origin` must be in `CORS_ORIGINS`; otherwise
+  the answer is `403 ORIGIN_DENIED` and nothing changes, cookies included.
+  Then:
+  - A live access cookie decides. It needs its own CSRF token, else
+    `403 CSRF_VALIDATION_FAILED` and nothing ends. When it passes, its sign-in
+    ends; a platform token is `403 PLATFORM_SESSION_SCOPE_DENIED`. A refresh
+    cookie sent with it is not used, so a request carrying one account's access
+    cookie and another account's refresh cookie ends only the first.
+  - Without a live access cookie (it expired, or the sign-in rotated in another
+    tab), the refresh cookie ends its sign-in. The CSRF cookie and
+    `X-CSRF-Token` must both equal the value derived from that refresh token,
+    else `403 CSRF_VALIDATION_FAILED` and nothing ends. Another account's
+    refresh cookie therefore cannot be ended with this session's CSRF token.
+    A refresh token whose sign-in has nothing left to end (below) still
+    answers `204`.
+  - With neither cookie, `204`.
+
+Every sign-out outcome clears the three cookies except `ORIGIN_DENIED` and
+`SESSION_CLIENT_MISMATCH`. A CSRF refusal therefore clears the browser's
+cookies without ending the sign-in, which stays live on the server until it is
+signed out with valid evidence or lapses. Ending a sign-in takes the
+account's lock and revokes every unrevoked session of the presented session's
+family, with revocation reason `logout` (a rotated presented session keeps
+`rotated`). When that revoked anything, it records an `auth.session_events`
+`logout` event (marked `presented: refresh_token` on the refresh-cookie path)
+and audits `auth.logout`. Two sign-outs at once with one browser's cookies
+(two tabs), by either path, therefore record one sign-out. A refused sign-out
+made with a live access token is audited against that actor.
+
+The refresh-token lookups are in `refreshSessionKind` and
+`revokeByRefreshToken` (`services/identity-api/src/auth/token.service.ts`).
+A staff or patient sign-in is one refresh could renew now when:
+
+- the account is `active`, not disabled (`disabled_until` empty or past) and
+  on the session's token version;
+- the sign-in's absolute end has not passed; and
+- the token's own session is live (unrevoked and within its idle window), or
+  the token was rotated within the last 60 seconds into a session of its
+  family that is live. The 60 seconds cover one app's refresh racing the
+  other app's tab. An older rotated token is reuse.
+
+On refresh, the kind lookup answers only for such a sign-in. Any other token
+gets no kind and goes on to rotation, which refuses it with `401`; for an
+older rotated token that is reuse, which ends the whole sign-in.
+
+Sign-out by refresh cookie reads the sign-in under its account's lock, after
+any sign-out or revocation that got there first. It ends the sign-in if
+anything of it is left: the token's own session is unrevoked, or the token was
+rotated into a session of its family that is unrevoked. Neither expiry nor
+the account's state matters, so a sign-out during a timed account suspension
+leaves nothing to renew once the suspension lapses. A sign-in with nothing
+left, including one a concurrent sign-out has just ended, records no second
+sign-out and answers `204`.
+
+`X-HID-Client` names the browser application on a cookie `POST /auth/refresh`
+or `POST /auth/logout`. The staff and patient applications can share these
+cookies on one origin, and the header keeps one from refreshing (rotating) or
+ending the other's sign-in:
+
+| `X-HID-Client` | Its own kind: the other kind is refused while refresh could renew it |
+|---|---|
+| `staff-web` | Staff. Identity's resolved staff actor carries no kind, so on the access-cookie path any live sign-in that is neither patient nor platform counts as staff |
+| `patient-web` | Patient |
+| Absent or any other value | Either, as before the header existed |
+
+The check runs after the Origin and CSRF checks. A sign-in of the other kind is
+refused when refresh could renew it now (above): on refresh, any other token
+goes on to rotation; a live access cookie's sign-in always can be renewed. On a
+sign-out by refresh cookie, the kind and whether refresh could renew the
+sign-in are read from the same session row that would be ended. Any other
+sign-in that has something left is ended whichever application asks, with
+`204`, the cookies cleared and its kind not named, as refresh ends a sign-in
+whose older rotated token comes back. So an old rotated token tells nobody
+whether, or as which application, its sign-in is still live. A bearer sign-out
+ignores the header. The header is a self-declaration of the calling
+application, not authentication, and grants nothing. Identity's CORS allow-list
+(`services/identity-api/src/config/cors.ts`) admits `x-hid-client` on every
+route. Health-id `main` sends no `X-HID-Client` (all its hid-system clients use
+cookie mode, which omits it), and `packages/identity-browser-client` sends
+none, so for both the check is inert until they send it. Until then, a cookie
+sign-out without a live access cookie ends whichever staff or patient sign-in
+the refresh cookie holds.
+
 ### Patient sessions and self service
 
-`POST /api/v1/auth/patient/login` accepts email/password and the `patient-login`
-Turnstile action. It binds a separate patient session to the existing canonical
-Identity patient; its actor has no staff roles, facility memberships or platform
-permissions. Existing session, refresh and logout routes retain that binding,
+`POST /api/v1/auth/patient/login` accepts an email address or the issued HIDCode
+(sent in the `email` field; both are matched case-insensitively) with a
+password, and the `patient-login` Turnstile action. It binds a separate
+patient session to the existing canonical Identity patient; its actor has no
+staff roles, facility memberships or platform permissions. Existing session,
+refresh and logout routes retain that binding,
 host-only Secure/HttpOnly cookies, Origin/CSRF checks and refresh-family reuse
 revocation. The server rechecks account eligibility, token version, session and
 patient mapping on use.
@@ -165,8 +294,15 @@ If-Match
 X-Correlation-ID
 X-CSRF-Token
 X-Facility-ID
+X-HID-Client
 X-Purpose-Of-Use
 ```
+
+`X-HID-Client` (`staff-web` or `patient-web`) names the browser application on
+cookie `POST /api/v1/auth/refresh` and `POST /api/v1/auth/logout`, so neither
+refreshes nor ends the other's sign-in while refresh could renew it (see "Auth
+session contract" above). Identity ignores other values and the header on
+other routes.
 
 Do not expose secrets or raw sensitive identifiers through headers unnecessarily.
 
@@ -235,6 +371,47 @@ Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 `POST /api/v1/identity/service/authorization/check`. These return API DTOs,
 never database rows. Problem Details status/code, correlation, bounded timeout,
 and safe JSON request bodies are preserved by the typed client.
+
+The patient decision is a `POST` from the service even when the request it
+serves is a read, and a same-origin browser `GET` carries neither `Origin` nor
+`X-CSRF-Token`. EHR, Lab, OCR and Pharmacy therefore also report the method of
+the request they are serving: each `requireRequestContext` records
+`request.method` as `requestMethod`, and the typed Identity client sends it as
+`X-HID-Original-Method`, upper-cased, and only when it is 1–16 letters. For a
+browser call that is the browser's method. For a service hop that forwards the
+user's cookie, such as OCR's
+`GET /api/v1/ehr/internal/ocr/documents/:documentId/source` during job
+creation, it is that hop's method (EHR reports `GET`); the originating browser
+write was already revalidated by the first service. On a cookie request,
+Identity's `SecurityGuard` skips its browser-write `Origin` and CSRF check only
+when all of these hold:
+
+* the route is marked `@DelegatedBrowserRequest()`; only
+  `POST /api/v1/identity/service/authorization/check` is;
+* the reported method is exactly `GET`, `HEAD` or `OPTIONS` (the guard's
+  existing safe-method set; case-sensitive);
+* the same request authenticates through
+  `WorkloadAuthService.authenticateService` as one of the approved callers
+  (`ehr-api`, `lab-api`, `pharmacy-api`, `ocr-api`, `outreach-api`), with the
+  workload JWT or, outside production, the caller's local secret.
+
+Anything else keeps the check: a reported write, a missing, lower-case or
+unknown method, missing or wrong workload credentials, or an unapproved caller
+name. The header carries no authority by itself, so a browser that sends it
+gains nothing. Every other route keeps the check, including
+`POST /api/v1/auth/service-session`, through which EHR, Lab, OCR and Pharmacy
+still revalidate a cookie write's `Origin` and CSRF before they act. Bearer
+requests are unchanged. Skipping the check changes nothing else: the session,
+runtime controls, exact facility, `identity.authorization.check` permission,
+the handler's own workload authentication and the patient authorization
+decision still apply. Outreach reports no method. Its own Identity routes
+(`POST /api/v1/identity/outreach/authorize` and
+`POST /api/v1/identity/outreach/patient-authorization`) are not marked; its
+link-existing patient authorization reaches the marked route without a method,
+so the check still applies; and its own guard requires `Origin` and CSRF on
+every cookie request (Outreach registration boundary below). Before this rule,
+every delegated patient-scoped read from a same-origin cookie session was
+refused `403 ORIGIN_DENIED` at the decision call.
 
 ## 8. Identity Resolution
 
@@ -442,6 +619,49 @@ All writes require:
 * validation
 * audit
 * appropriate concurrency protection
+
+### EHR clinical list paging
+
+Six lists are newest first and keyset-paged. Paths are under
+`/api/v1/ehr/patients/:patientId`:
+
+| Route | Rows | Order |
+|---|---|---|
+| `GET .../encounters` | the patient's encounters | `started_at` desc, then `id` desc |
+| `GET .../encounters/:encounterId/clinical-notes` | the encounter's notes | `created_at` desc, then `id` desc |
+| `GET .../encounters/:encounterId/diagnoses` | the encounter's diagnoses | `created_at` desc, then `id` desc |
+| `GET .../encounters/:encounterId/lab-requests` | the encounter's lab requests | `created_at` desc, then `id` desc |
+| `GET .../encounters/:encounterId/prescriptions` | the encounter's prescriptions | `created_at` desc, then `id` desc |
+| `GET .../encounters/:encounterId/vitals` | the encounter's vitals | `recorded_at` desc, then `id` desc |
+
+Every list returns only rows of the active facility (`X-Facility-ID`). Each
+takes `limit` (1–100, default 50) and an optional `cursor`, and returns
+`{ items, nextCursor }`. `nextCursor` is null on the last page; otherwise pass
+it back as `cursor` to the same route. No total is returned.
+
+A cursor is opaque. It names the last row of the page, by its sort key at
+microsecond precision (as PostgreSQL stores it) and its id, and the list,
+patient and, for the five encounter lists, encounter it was issued for. It is
+a position, not a credential: every page re-applies the caller's
+authorization, the active facility and the patient decision. The facility is
+not part of the cursor.
+
+- A cursor of 16–512 base64url characters that is not in the exact form EHR
+  issues for that route, patient and encounter is `400 INVALID_CURSOR`. This
+  includes a cursor issued for another list, patient or encounter, one that
+  was altered or re-encoded, one that names an impossible time, and one in an
+  earlier format, such as the millisecond cursors EHR issued before the
+  current format (version 1). Clients reload the list from its first page.
+- A `cursor` that is shorter, longer or contains other characters, or a
+  `limit` outside 1–100, is `400 VALIDATION_FAILED`.
+
+No EHR route changes a row's sort key, and rows tied on the sort key are
+ordered by `id`, so paging neither repeats nor skips a row that existed when
+the previous page was read. A row added while paging is listed on a later page
+only if it sorts after the last row shown; reload the first page to see newer
+rows. Before the microsecond cursor, rows that sort after the last row shown
+within its millisecond (earlier in that millisecond, or tied with a lower
+`id`) were skipped.
 
 ## 12. Lab
 
