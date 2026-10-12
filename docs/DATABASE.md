@@ -1751,6 +1751,11 @@ Checks:
   `services/ocr-api/scripts/verify-ocr-runtime.mjs` and
   `services/outreach-api/scripts/verify-outreach-runtime.mjs` run the
   service's real `AppModule` through `scripts/service-runtime-harness.mjs`;
+  `services/ehr-api/scripts/verify-ehr-lab-handoff-runtime.mjs`
+  (fix/ehr-lab-handoff-resend) runs EHR's and, in a child process, Lab's
+  through it, each as its runtime role, and checks that an active lab request
+  Lab refuses stays saved, is sent again on request, on activation and on
+  resume, and that Lab keeps one work item per request;
   `services/identity-api/scripts/verify-registration-review-runtime.mjs`
   composes the authentication and NIN registration controllers with their
   real providers, the global security guard and audit interceptor, and the

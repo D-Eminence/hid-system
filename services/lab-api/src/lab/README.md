@@ -26,7 +26,11 @@ validation preserves the exact requested-test snapshot and provenance. Lab
 owns the acceptance event, semantic audit, and `LabWorkItemCreated` outbox
 record; EHR calls the typed Lab service and does not write Lab tables. The
 `accepted` state implies no accession, specimen collection, execution, QC, or
-result.
+result. Lab holds one work item per EHR request, at the version it accepted:
+the same version again is a replay, another version is refused with
+`409 LAB_ORDER_ALREADY_ACCEPTED`, and a request that is not the current active
+version exactly as EHR holds it with `409 LAB_ORDER_NOT_CURRENT`. Later EHR
+changes (cancellation, hold, edits) are not propagated to Lab.
 
 Migration `0020` permits execution only from a received specimen and its exact
 requested-test snapshot. Manual numeric/text results are immutable revisions

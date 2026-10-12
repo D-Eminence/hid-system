@@ -1933,7 +1933,9 @@ Consequences:
 - A conflict that a retry cannot resolve (a row hidden by row-level security
   in another facility, two members verifying one Lab result version) still
   answers `500`, after one retry; mapping those constraints to `409` is a
-  follow-up.
+  follow-up. Lab has done it since fix/ehr-lab-handoff-resend: its problem
+  filter answers a unique conflict left after the retry `409 LAB_CONFLICT`,
+  and its other database refusals with fixed `4xx` problems.
 - Removing a lock made reachable code that had always failed before it. 0078
   fixed two defects behind the locks: it drops the self-NIN identifier insert
   policy, whose sub-select the Identity runtime cannot read and which no

@@ -609,6 +609,8 @@ Representative resources:
 /api/v1/ehr/patients/:patientId/encounters/:encounterId/diagnoses
 /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions
 /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/pharmacy-work-item
+/api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests
+/api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests/:requestId/lab-work-item
 ```
 
 All writes require:
@@ -619,6 +621,55 @@ All writes require:
 * validation
 * audit
 * appropriate concurrency protection
+
+### EHR lab requests sent to Lab
+
+EHR saves a lab request, then, when it is active, asks Lab to accept it
+(`POST /api/v1/lab/work-items/accept-ehr-order`, "Extracted Lab transport").
+The save commits first, because Lab's guard reads the committed request; a Lab
+answer cannot undo it. Lab holds one work item per request, at the version it
+accepted. Paths are under
+`/api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests`
+(fix/ehr-lab-handoff-resend):
+
+- `POST` (create). An active request answers `201` with the request,
+  `labWorkItem` (Lab's work item) and `labHandoff: { state: 'accepted' }`; any
+  other status answers both `null`. When Lab refuses (`4xx`), the request stays
+  saved and active and the create answers `409 LAB_HANDOFF_REFUSED`; when Lab
+  answers `5xx` or cannot be reached, `502 LAB_HANDOFF_UNCONFIRMED`. The `409`
+  detail names the saved request and Lab's code; a `5xx` detail is hidden, its
+  code is not. Send the request with `.../lab-work-item` below, or replay the
+  create with the same `Idempotency-Key` and body, which loads the saved
+  request and sends it again. A replay of a request Lab holds at an earlier
+  version answers `201` with `labWorkItem: null` and
+  `labHandoff: { state: 'already_accepted', code: 'LAB_ORDER_ALREADY_ACCEPTED' }`.
+- `PATCH /:requestId` (update). After the update commits, a request that is
+  active is sent to Lab at its new version: activating a draft, resuming a held
+  request, and an edit (priority, clinical information) of an active one. It
+  answers `200` with the request, `labWorkItem` and `labHandoff`: `null` when
+  the request is not active; `{ state: 'accepted' }`;
+  `{ state: 'already_accepted', code: 'LAB_ORDER_ALREADY_ACCEPTED' }` when Lab
+  holds an earlier version, so the change is not in Lab;
+  `{ state: 'failed', status, code }` with Lab's answer, when the update stands
+  and the request can be sent again with `.../lab-work-item`; and
+  `{ state: 'not_sent', code: 'LAB_PERMISSION_ABSENT' }` when the actor lacks
+  `lab.work-item.accept`.
+- `POST /:requestId/lab-work-item` sends, or sends again, an active request.
+  It needs `ehr.lab-request.write` and `lab.work-item.accept`, an
+  `Idempotency-Key` (16–128 URL-safe characters) and the body
+  `{ expectedRowVersion }` (an integer, at least 1, and nothing else). It reads
+  the request without a lock and writes only its audit event
+  (`ehr.lab-request.lab-handoff.eligibility-checked`), then calls Lab: a version
+  that is not the stored one is `412 LAB_REQUEST_VERSION_CONFLICT` and a request
+  that is not active `409 LAB_REQUEST_NOT_ELIGIBLE`, without calling Lab. Lab's
+  answer is returned as it is, since the EHR changed nothing: `201` with Lab's
+  work item (the same one again for a version Lab accepted), or Lab's problem,
+  such as `409 LAB_ORDER_ALREADY_ACCEPTED`, `409 LAB_ORDER_NOT_CURRENT` (the
+  request changed after it was read), `403` or `503 LAB_SERVICE_UNAVAILABLE`.
+  Lab keys its acceptance by request and version, whatever the key.
+- Cancelling, holding, completing or marking a request entered in error after
+  Lab accepted it is not sent to Lab, and Lab keeps working on the version it
+  accepted. What Lab must do then is an open clinical workflow decision.
 
 ### EHR clinical list paging
 
@@ -950,7 +1001,28 @@ returns that 404; the 403 applies when the row is visible but Identity refuses.
 
 ### Extracted Lab transport
 
-Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused with SQLSTATE `23514` for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets `409 IDEMPOTENCY_CONFLICT` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
+Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused by the guard (SQLSTATE `23514`, `409 LAB_ORDER_NOT_CURRENT`) for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets Lab's `409 IDEMPOTENCY_CONFLICT`, which the EHR create reports as `409 LAB_HANDOFF_REFUSED` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
+
+Lab answers EHR order acceptance (fix/ehr-lab-handoff-resend):
+
+| Request | Answer |
+| --- | --- |
+| A version of an order Lab has not accepted, matching the EHR order | `201` with the new work item |
+| The version Lab accepted, same body | `201` with the same work item (replay) |
+| The version Lab accepted, another body | `409 IDEMPOTENCY_CONFLICT` |
+| Another version of an order Lab accepted | `409 LAB_ORDER_ALREADY_ACCEPTED`; Lab holds one work item per EHR order, ever, and writes nothing |
+| An order that is not the current active version exactly as EHR holds it (changed, not active, another field or `requestedAt`) | `409 LAB_ORDER_NOT_CURRENT` (`lab.validate_work_item`, `23514`) |
+
+Its body takes the EHR lab-request limits: `testCodeSystem` 1–255,
+`testCode` 1–100 and `testName` 1–500 characters, `clinicalIndication` up to
+4000. A database refusal that no Lab service maps to its own problem answers a
+fixed problem whose detail never carries the driver's message: `23514` (a
+guard) `409 LAB_STATE_CONFLICT`, `23505` (a unique key, after the one retry)
+`409 LAB_CONFLICT`, `23503` `409 LAB_INVALID_REFERENCE`, `42501` (row-level
+security or an actor guard) `403 LAB_ACCESS_DENIED`, and `22001`, `22003`,
+`22007`, `22008`, `22P02` and `23502` `400 INVALID_LAB_DATA`. Every other error
+is `500`. The codes and details are fixed: they name no row, value or
+constraint.
 
 ### Extracted Pharmacy transport
 
