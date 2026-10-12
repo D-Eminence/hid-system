@@ -15,6 +15,20 @@ credentials never use the ordinary-notification event path. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
 Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
+Public patient enrollment proves the chosen contact with a six-digit code
+(`POST /api/v1/identity/patient-enrollments/contact`, then `/contact/verify`;
+[QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md)). Besides each
+challenge's attempt limit, wrong codes spend one failure budget per recipient
+across its challenges and enrollments, never per client IP. By default the
+fifth wrong code within 15 minutes blocks the recipient for 15 minutes
+(`PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX`,
+`PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS`): `/contact/verify`
+answers `422 OTP_INVALID` for every code, a correct one too, and `/contact`
+answers `429 ENROLLMENT_RATE_LIMITED` and sends no code. Both responses are
+the existing ones, unchanged in shape. This comes from
+fix/enrollment-contact-code-budget, not yet deployed; the threshold is an
+open product decision.
+
 ### Auth session contract
 
 This is the browser contract of staff and patient sessions. Sign-out without
