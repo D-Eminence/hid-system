@@ -343,6 +343,9 @@ try {
   evidence.checks.delegated_cookie_read_runtime = JSON.parse(command(
     'exact-role EHR read delegated to Identity with a browser cookie session', process.execPath,
     [join(repository, 'services/ehr-api/scripts/verify-delegated-cookie-read-runtime.mjs')], workflowEnvironment));
+  evidence.checks.outreach_cookie_read_runtime = JSON.parse(command(
+    'exact-role Outreach reads and writes authorized through Identity with a browser cookie session', process.execPath,
+    [join(repository, 'services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs')], workflowEnvironment));
   evidence.checks.provider_enrollment_runtime = JSON.parse(command('exact-role provider self-enrollment HTTP workflow',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs')],
     workflowEnvironment));

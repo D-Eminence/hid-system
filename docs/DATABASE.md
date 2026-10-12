@@ -1837,7 +1837,7 @@ microseconds:
 
 ## Session facility selection (0079)
 
-`0079_session_facility_selection.sql` (ADR-045) follows `0078` (the Stage 9
+`0079_session_facility_selection.sql` (ADR-046) follows `0078` (the Stage 9
 runtime command repairs, D-Eminence/hid-system#34). Migrations `0001`–`0078`
 are unchanged; no existing row, function, policy or grant changes. Creating
 the table's four foreign keys takes `SHARE ROW EXCLUSIVE` on `auth.sessions`,

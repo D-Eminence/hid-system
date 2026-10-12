@@ -1,4 +1,4 @@
--- Staff working facility per sign-in (ADR-045). A staff member who works at
+-- Staff working facility per sign-in (ADR-046). A staff member who works at
 -- more than one facility chooses one with POST /auth/facility. The Identity API
 -- used to store nothing, so every reload (GET /auth/session) and refresh
 -- reported the primary facility again and the browser silently moved back to

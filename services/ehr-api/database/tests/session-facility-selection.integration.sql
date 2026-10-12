@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Staff working facility per sign-in (0079, ADR-045). The Identity API keeps a
+-- Staff working facility per sign-in (0079, ADR-046). The Identity API keeps a
 -- staff member's explicitly selected facility in
 -- auth.session_facility_selection, one row per sign-in family, so a reload
 -- does not silently move them back to their primary facility. The row is only
