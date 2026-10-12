@@ -42,6 +42,12 @@ export interface IdentityDelegatedContext {
   csrfToken?: string;
   origin?: string;
   validateMutation?: boolean;
+  /**
+   * The method of the browser request being served. Identity uses it, from an
+   * authenticated workload only, to apply the browser-write Origin and CSRF
+   * check to a forwarded cookie only when that request was a write.
+   */
+  requestMethod?: string;
   idempotencyKey?: string;
   signal?: AbortSignal;
 }
@@ -256,6 +262,8 @@ export class IdentityApiClient {
             ...(context.cookie ? { cookie: context.cookie } : {}),
             ...(context.csrfToken ? { 'x-csrf-token': context.csrfToken } : {}),
             ...(context.origin ? { origin: context.origin } : {}),
+            ...(context.requestMethod && /^[A-Za-z]{1,16}$/.test(context.requestMethod)
+              ? { 'x-hid-original-method': context.requestMethod.toUpperCase() } : {}),
             ...(context.idempotencyKey ? { 'idempotency-key': context.idempotencyKey } : {}),
             ...additionalHeaders,
           },

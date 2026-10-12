@@ -30,3 +30,13 @@ export const HIGH_RISK_ACTION = Symbol('HIGH_RISK_ACTION');
  * The guard refuses platform mutations without one and enforces its controls.
  */
 export const HighRiskAction = (action: PlatformAction): MethodDecorator => SetMetadata(HIGH_RISK_ACTION, action);
+export const DELEGATED_BROWSER_REQUEST = Symbol('DELEGATED_BROWSER_REQUEST');
+/**
+ * A route through which another HID service (EHR, OCR, Lab or Pharmacy) asks
+ * Identity about the browser request it is serving, forwarding
+ * the browser's cookie on its own POST. The guard trusts the browser method the
+ * service reports in X-HID-Original-Method only after that workload has
+ * authenticated, and then applies the browser-write Origin and CSRF check only
+ * when the reported method is unsafe.
+ */
+export const DelegatedBrowserRequest = (): MethodDecorator => SetMetadata(DELEGATED_BROWSER_REQUEST, true);

@@ -24,7 +24,10 @@ describe('MfaSecretProtector', () => {
         () => protector.decryptSecret('70000000-0000-4000-8000-000000000002', accountId, 'test-v1', first),
         () => protector.decryptSecret(factorId, '20000000-0000-4000-8000-000000000002', 'test-v1', first),
         () => protector.decryptSecret(factorId, accountId, 'other-version', first),
-        () => protector.decryptSecret(factorId, accountId, 'test-v1', Buffer.concat([first.subarray(0, -1), Buffer.from([0])])),
+        // Flip the tag's last byte: setting it to 0 left a ciphertext that already
+        // ended in 0x00 (1 in 256 random nonces) unchanged, so it decrypted.
+        () => protector.decryptSecret(factorId, accountId, 'test-v1',
+          Buffer.concat([first.subarray(0, -1), Buffer.from([(first.at(-1) ?? 0) ^ 0xff])])),
       ]) {
         expect(attempt).toThrow(DomainProblem);
       }

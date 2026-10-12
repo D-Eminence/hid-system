@@ -9,8 +9,11 @@ PostgreSQL-backed readiness are `/api/v1/health/live` and
 The API uses `OCR_DATABASE_URL` through a login that inherits only
 `hid_ocr_api_runtime`. It never reads or mutates EHR, Lab, Pharmacy, Outreach,
 or Identity persistence directly. Human authentication and patient
-authorization use Identity over the shared typed client. Exact source-document
-evidence and EHR clinical-note publication use the typed EHR client. Lab and
+authorization use Identity over the shared typed client; the patient
+authorization also reports the method of the request the service is serving
+(`X-HID-Original-Method`), so Identity applies its cookie Origin and CSRF check
+there only to a write. Exact source-document evidence and EHR clinical-note
+publication use the typed EHR client. Lab and
 Pharmacy publications use their owning typed clients. Each downstream call
 propagates the human credential and carries an independent `ocr-api` workload
 identity; production rejects local shared secrets and requires mounted,
