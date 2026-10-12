@@ -47,7 +47,7 @@ export function generateSixDigitOtp(draw: (minimum: number, maximum: number) => 
  * every identifier alike (CODEX.md §27): the same 202 body, before any code is
  * delivered, and within the resend cooldown the challengeId it gave the same
  * purpose and identifier before, whether or not an account exists
- * (auth.otp_start_cooldowns, 0080). Wrong codes count against one budget per
+ * (auth.otp_start_cooldowns, 0081). Wrong codes count against one budget per
  * account across all its challenges and purposes; once spent, every code is
  * refused and no code is sent until the window ends.
  */

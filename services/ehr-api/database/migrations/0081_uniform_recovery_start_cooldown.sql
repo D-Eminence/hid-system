@@ -7,7 +7,7 @@
 -- staff and administrator recovery share this start. Identity now records
 -- each start per purpose and keyed identifier, known or not, and answers a
 -- repeat inside the cooldown with the id it recorded. Applied migrations 0001
--- through 0079 are immutable.
+-- through 0080 are immutable.
 --
 -- The rows cannot live in auth.otp_challenges: its unique active index on
 -- (recipient_hmac, purpose) (0028) would refuse a later real challenge for the

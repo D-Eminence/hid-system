@@ -371,7 +371,7 @@ grant select on auth.accounts, auth.roles, auth.permissions,
 grant select, insert, update on auth.sessions to hid_identity_runtime;
 grant select, insert, update, delete on auth.login_attempts to hid_identity_runtime;
 grant select, insert, update on auth.otp_challenges, auth.otp_rate_limits to hid_identity_runtime;
--- Recovery start cooldowns (0080): no DELETE; each row is overwritten by the
+-- Recovery start cooldowns (0081): no DELETE; each row is overwritten by the
 -- identifier's next start.
 grant select, insert, update on auth.otp_start_cooldowns to hid_identity_runtime;
 grant insert on auth.session_events to hid_identity_runtime;

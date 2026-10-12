@@ -66,7 +66,7 @@ try {
   const rate=await Promise.allSettled(Array.from({length:8},()=>otp.start({identifier:unknownIdentifier,purpose:'PASSWORD_RESET',remoteIp:'192.0.2.220',correlationId:'otp-runtime-rate-001'})));
   assert.equal(rate.filter(result=>result.status==='fulfilled').length,5,'Exactly five concurrent first-bucket requests may be accepted');
   assert.equal(rate.filter(result=>result.status==='rejected'&&result.reason.code==='OTP_RATE_LIMITED').length,3);
-  // Uniform cooldown (0080): the accepted starts for one unknown identifier share one challengeId, as a known one's do.
+  // Uniform cooldown (0081): the accepted starts for one unknown identifier share one challengeId, as a known one's do.
   const rateIds=new Set(rate.filter(result=>result.status==='fulfilled').map(result=>result.value.challengeId));
   assert.equal(rateIds.size,1,'Concurrent recovery starts for one unknown identifier must answer one challengeId within the cooldown');
   // One failure budget per account across its challenges and purposes (five wrong codes in 15 minutes by default).

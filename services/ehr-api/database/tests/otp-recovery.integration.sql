@@ -131,7 +131,7 @@ begin
   end if;
 end $$;
 
--- Recovery start cooldown (0080): one row per purpose and keyed identifier,
+-- Recovery start cooldown (0081): one row per purpose and keyed identifier,
 -- whether or not the identifier has an account, so a repeat start inside the
 -- cooldown is answered alike. Its challenge id may name no challenge.
 do $$

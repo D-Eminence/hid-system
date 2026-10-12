@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0080",
-    "count": 80,
+    "last": "0081",
+    "count": 81,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -419,8 +419,8 @@
         "sha256": "b22c3e189260a5dcac9975278e7c51e4ddc8d674e5f486230bb031b202ea99c2"
       },
       {
-        "name": "0080_uniform_recovery_start_cooldown.sql",
-        "sha256": "c02e6e52f6ff23aaf4d577eb03372751fe52c338a08759526362d48eff15a6da"
+        "name": "0081_uniform_recovery_start_cooldown.sql",
+        "sha256": "a900db0fb50eead3328530a71864be795cacbf5e389506d302326d7b77ee1a45"
       }
     ]
   },

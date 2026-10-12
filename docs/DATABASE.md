@@ -1949,9 +1949,9 @@ Tests (rollback-only, synthetic fixtures):
   lock fail with `55P03`; replays and reversals of earlier dispensings still
   answer `201`.
 
-## Uniform recovery start cooldown (0080) and recovery code budget
+## Uniform recovery start cooldown (0081) and recovery code budget
 
-`0080_uniform_recovery_start_cooldown.sql` adds `auth.otp_start_cooldowns`:
+`0081_uniform_recovery_start_cooldown.sql` adds `auth.otp_start_cooldowns`:
 one row per recovery purpose (`PASSWORD_RESET`, `LEGACY_ACCOUNT_RECOVERY`,
 `LEGACY_SESSION_FALLBACK`) and `identifier_hmac`, a keyed HMAC of the purpose
 and the case-folded email address or HID (lower-case hex, 64 characters), with
@@ -1966,7 +1966,7 @@ retention job: each identifier keeps one row per purpose, overwritten by its
 next start, so the table grows with the number of distinct identifiers ever
 started, as `auth.otp_rate_limits` grows with its buckets.
 
-Before 0080 the resend cooldown of `POST /auth/otp/start` was read only from
+Before 0081 the resend cooldown of `POST /auth/otp/start` was read only from
 the account's open row in `auth.otp_challenges`. Within
 `OTP_RESEND_COOLDOWN_SECONDS` a repeat for a real account was answered with
 the live challenge id and one for an unknown identifier with a new random id,

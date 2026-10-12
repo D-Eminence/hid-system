@@ -131,7 +131,7 @@ begin
      or has_table_privilege('hid_identity_runtime', 'notification.device_registrations', 'SELECT') then
     raise exception 'Identity OTP or evidence-bound progressive-assurance boundary is inconsistent';
   end if;
-  -- Recovery start cooldowns (0080): the Identity runtime reads and writes
+  -- Recovery start cooldowns (0081): the Identity runtime reads and writes
   -- them but never deletes them. Every other required runtime role has no
   -- privilege on them; the schema-test runtime is granted as the Identity
   -- runtime is, and the migration administrator is not checked here.

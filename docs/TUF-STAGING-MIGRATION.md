@@ -38,7 +38,7 @@ The executable covers:
    millisecond that a millisecond bound leaves out
    ([DATABASE.md](DATABASE.md)). Execute the real OTP service against the exact Identity
    role, including concurrent completion/rate-limit and account-disable tests,
-   the uniform recovery start cooldown (0080) and the per-account recovery code
+   the uniform recovery start cooldown (0081) and the per-account recovery code
    budget; notification delivery uses an in-process test double. Its result is recorded
    under `evidence.checks` as `otp_runtime`. The exact-role HTTP verifiers
    follow, recorded under `evidence.checks` in run order: `patient_runtime`,
