@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Reflector } from '@nestjs/core';
 import type { AuditService } from '../audit/audit.service';
+import { DELEGATED_BROWSER_REQUEST } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
@@ -47,8 +48,9 @@ function context(target: HidRequest, handler: (...args: never[]) => unknown, own
 
 function guard(workloadAuth: Partial<WorkloadAuthService> | null = {
   authenticateService: jest.fn(async (caller?: string, _authorization?: string, token?: string) => {
-    if (caller !== 'ehr-api' || token !== 'valid-workload-token') throw new Error('workload refused');
-    return { subject: 'local:ehr-api', accountId: 'local:ehr-api' };
+    if (!(caller === 'ehr-api' && token === 'valid-workload-token')
+      && !(caller === 'outreach-api' && token === 'valid-outreach-token')) throw new Error('workload refused');
+    return { subject: `local:${caller}`, accountId: `local:${caller}` };
   }),
 }) {
   const tokens = { verify: jest.fn().mockResolvedValue({ actor: doctor, claims: {} }),
@@ -132,12 +134,16 @@ describe('delegated browser requests through the Identity guard', () => {
       authorizationCheck, IdentityController)))).code).toBe('ORIGIN_DENIED');
   });
 
-  it('marks only the patient authorization check as a delegated browser request', () => {
+  it('marks only the patient authorization check and the Outreach authorization as delegated browser requests', () => {
     const files = (directory: string): string[] => readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
       entry.isDirectory() ? files(join(directory, entry.name)) : entry.name.endsWith('.ts') ? [join(directory, entry.name)] : []);
     const marked = files(join(__dirname, '..')).filter((file) => !file.endsWith('.spec.ts'))
       .flatMap((file) => (readFileSync(file, 'utf8').match(/@DelegatedBrowserRequest\(\)/g) ?? []).map(() => file));
-    expect(marked.map((file) => file.slice(file.indexOf('src/')))).toEqual(['src/identity/identity.controller.ts']);
+    expect(marked.map((file) => file.slice(file.indexOf('src/'))))
+      .toEqual(['src/identity/identity.controller.ts', 'src/identity/identity.controller.ts']);
+    const handlers = Object.getOwnPropertyNames(IdentityController.prototype).filter((name) =>
+      Reflect.getMetadata(DELEGATED_BROWSER_REQUEST, (IdentityController.prototype as unknown as Record<string, object>)[name] as object) === true);
+    expect(handlers.sort()).toEqual(['authorizeOutreach', 'authorizeService']);
   });
 
   it('leaves bearer delegation unchanged', async () => {
@@ -145,5 +151,83 @@ describe('delegated browser requests through the Identity guard', () => {
     await expect(subject.canActivate(context(request({ authorization: 'Bearer access-token', 'x-facility-id': facilityId }, {}),
       authorizationCheck, IdentityController))).resolves.toBe(true);
     expect(workloadAuth?.authenticateService).not.toHaveBeenCalled();
+  });
+});
+
+// Outreach authorizes each browser request with POST /identity/outreach/authorize,
+// forwarding the cookie. A same-origin read carries no Origin or CSRF token.
+describe('delegated Outreach reads through the Identity guard', () => {
+  const outreachAuthorization = IdentityController.prototype.authorizeOutreach;
+  const outreach = { 'x-hid-internal-caller': 'outreach-api', 'x-hid-service-token': 'valid-outreach-token' };
+  const outreachRequest = (extra: Record<string, string>) => {
+    const target = delegated(extra);
+    Object.assign(target, { route: { path: '/identity/outreach/authorize' } });
+    return target;
+  };
+
+  it.each(['GET', 'HEAD'])('allows a forwarded cookie with no Origin or CSRF when Outreach reports %s, and records the method',
+    async (method) => {
+      const { guard: subject, workloadAuth } = guard();
+      const target = outreachRequest({ ...outreach, 'x-hid-original-method': method });
+      await expect(subject.canActivate(context(target, outreachAuthorization, IdentityController))).resolves.toBe(true);
+      expect(workloadAuth?.authenticateService).toHaveBeenCalledWith('outreach-api', undefined, 'valid-outreach-token');
+      expect(target.delegatedBrowserMethod).toBe(method);
+    });
+
+  it.each([
+    ['a wrong workload token', { 'x-hid-internal-caller': 'outreach-api', 'x-hid-service-token': 'forged-token' }],
+    ['no workload credentials', {}],
+  ])('ignores a reported GET from %s and applies the browser-write check', async (_label, credentials) => {
+    const { guard: subject } = guard();
+    expect((await refusal(subject.canActivate(context(outreachRequest({ ...credentials, 'x-hid-original-method': 'GET' }),
+      outreachAuthorization, IdentityController)))).code).toBe('ORIGIN_DENIED');
+  });
+
+  it('applies the browser-write check to a reported write and to an unreported method, and records no delegation', async () => {
+    const { guard: subject } = guard();
+    expect((await refusal(subject.canActivate(context(outreachRequest({ ...outreach }), outreachAuthorization,
+      IdentityController)))).code).toBe('ORIGIN_DENIED');
+    expect((await refusal(subject.canActivate(context(outreachRequest({ ...outreach, 'x-hid-original-method': 'POST',
+      origin: ORIGIN }), outreachAuthorization, IdentityController)))).code).toBe('CSRF_VALIDATION_FAILED');
+    const write = outreachRequest({ ...outreach, 'x-hid-original-method': 'POST', origin: ORIGIN, 'x-csrf-token': 'csrf-token' });
+    await expect(subject.canActivate(context(write, outreachAuthorization, IdentityController))).resolves.toBe(true);
+    expect(write.delegatedBrowserMethod).toBeUndefined();
+  });
+});
+
+describe('IdentityController.authorizeOutreach', () => {
+  const outreachActor = { ...doctor, permissions: ['outreach.registration.read', 'outreach.registration.write',
+    'outreach.campaign.read', 'outreach.campaign.write'] } as ActorContext;
+  function controller() {
+    const workloadAuth = { authenticateOutreach: jest.fn().mockResolvedValue({ subject: 'local:outreach-api' }) };
+    return { workloadAuth, subject: new IdentityController({} as never, workloadAuth as unknown as WorkloadAuthService) };
+  }
+  function handlerRequest(delegatedBrowserMethod?: string): HidRequest {
+    return { correlationId: 'outreach-authorize-test', actor: outreachActor, facilityId,
+      ...(delegatedBrowserMethod ? { delegatedBrowserMethod } : {}),
+      header: (name: string) => ({ 'x-hid-internal-caller': 'outreach-api' } as Record<string, string>)[name.toLowerCase()],
+    } as unknown as HidRequest;
+  }
+
+  it('authorizes a read permission for a delegated read', async () => {
+    const { subject } = controller();
+    await expect(subject.authorizeOutreach({ permission: 'outreach.registration.read' }, handlerRequest('GET')))
+      .resolves.toMatchObject({ authorized: true });
+    await expect(subject.authorizeOutreach({ permission: 'outreach.campaign.read' }, handlerRequest('HEAD')))
+      .resolves.toMatchObject({ authorized: true });
+  });
+
+  it('refuses a write permission when the browser-write check was skipped for a reported read', async () => {
+    const { subject } = controller();
+    for (const permission of ['outreach.registration.write', 'outreach.campaign.write'] as const) {
+      expect((await refusal(subject.authorizeOutreach({ permission }, handlerRequest('GET')))).code)
+        .toBe('CSRF_VALIDATION_FAILED');
+    }
+  });
+
+  it('authorizes a write permission when the request passed the browser-write check (or used a bearer token)', async () => {
+    const { subject } = controller();
+    await expect(subject.authorizeOutreach({ permission: 'outreach.campaign.write' }, handlerRequest()))
+      .resolves.toMatchObject({ authorized: true });
   });
 });
