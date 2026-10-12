@@ -1933,7 +1933,10 @@ Consequences:
 - A conflict that a retry cannot resolve (a row hidden by row-level security
   in another facility, two members verifying one Lab result version) still
   answers `500`, after one retry; mapping those constraints to `409` is a
-  follow-up.
+  follow-up. Since D-Eminence/hid-system#56 Lab's EHR-order acceptance
+  maps its own (`409 LAB_ORDER_ALREADY_ACCEPTED` for a work-item key left
+  after the retry); every other Lab command still answers `500`, which OCR
+  stores for its Lab import as retryable.
 - Removing a lock made reachable code that had always failed before it. 0078
   fixed two defects behind the locks: it drops the self-NIN identifier insert
   policy, whose sub-select the Identity runtime cannot read and which no
@@ -1941,6 +1944,61 @@ Consequences:
   runtime insert self-NIN identifiers without `bind_my_verified_nin`), and it
   repairs the Lab work-item child guard. One lock-order cycle between OCR
   publication requests and publication completion was fixed by decision 2.
+
+## ADR-042 addendum: a definer guard share-locks another domain's source row (0080)
+
+Date: 2026-10-12
+
+Change: D-Eminence/hid-system#48.
+
+Pharmacy acceptance and dispensing depend on a mutable row of another domain,
+the EHR prescription, which the EHR may cancel, hold, complete or edit at any
+time. Decision 1 still holds for the runtime roles: `hid_pharmacy_runtime` has
+no privilege on `ehr` and takes no lock there. The database guards
+`pharmacy.validate_work_item` and `pharmacy.validate_dispensing`, which run as
+their owner (`SECURITY DEFINER`), read the prescription with
+`SELECT ... FOR SHARE`. The owner holds the `UPDATE` privilege the lock needs;
+no grant or policy is added.
+
+- The share lock, not a plain read, is what makes the check hold: in the
+  `SERIALIZABLE` Pharmacy transaction a cancel committed after the snapshot
+  fails the lock with `40001`, which decision 3 retries, and the retry reads
+  the cancel. A plain read would check the stale active version. `FOR KEY
+  SHARE` would see this cancel only because the EHR locks the row `FOR
+  UPDATE` before its update; `FOR SHARE` conflicts with any update of the row.
+  A committed lock-only mark, such as the EHR handoff's `FOR UPDATE` or
+  another request's share lock on the same prescription, does not raise
+  `40001`, so acceptances right after the EHR's eligibility check and
+  concurrent identical requests do not fail.
+- An EHR update waits for a Pharmacy command that has taken the lock, for the
+  milliseconds until it commits, and then applies after it. The EHR takes the
+  prescription and then its own rows and never a Pharmacy row, so there is no
+  lock cycle. The EHR must not call Pharmacy while it holds the prescription
+  lock: its eligibility check commits before the HTTP call.
+- Pharmacy can now delay an EHR write, which it could not before: a Pharmacy
+  transaction that stalls after the guard keeps the share lock, and a
+  prescriber's cancel or hold waits until the EHR's 15 s `statement_timeout`
+  and fails with `500`. Pharmacy's 15 s `statement_timeout` bounds a slow
+  statement but not an idle transaction; no
+  `idle_in_transaction_session_timeout` is set (a possible mitigation).
+- Under an owner subject to row-level security (release checklist P8) the
+  lock applies the EHR select and update policies with the pharmacist's
+  session; a prescription the owner cannot lock reads as missing and is
+  refused. A dedicated technical owner for these guards (ADR-041) would need
+  `USAGE` on `ehr`, `EXECUTE` on `ehr.context_allows` (the prescription
+  policies call it), column `SELECT` on `id` and the compared columns, an
+  `UPDATE` privilege for the lock and the matching policies.
+- The acceptance guard compares every snapshot field except the prescription
+  time and the start and end dates: migrations run before the EHR API is
+  deployed and the EHR may be rolled back, and earlier EHR builds send the
+  time at the millisecond and the dates as local-midnight `Date` values, a
+  day early in a process east of UTC. Comparing the exact time and dates is a
+  follow-up for a later release, once the EHR rollback floor sends their
+  exact texts.
+- The guards require the accepted version, not only an active status: the
+  fail-closed default while the lifecycle of accepted work after an EHR
+  change is undecided (`DATABASE.md`, "Pharmacy source prescription guards
+  (0080)").
 
 # ADR-043: Identity Trusts a Workload-Reported Method for Delegated Cookie Reads
 
@@ -2057,9 +2115,10 @@ Decision:
   authentication and grants nothing. Origin, CSRF and the session checks
   remain the security boundary.
 - The kind is answered only for a sign-in refresh could renew now: account
-  live, absolute end not passed, and the token's session live or rotated
-  within the last 60 seconds into one that is, so a refresh or sign-out that
-  raced the other application's tab is answered with the kind. An older
+  live, absolute end not passed, the token's session live or rotated within
+  the last 60 seconds into one that is, so a refresh or sign-out that raced
+  the other application's tab is answered with the kind, and its actor
+  resolvable as refresh resolves it (addendum below). An older
   rotated token is reuse: refresh rotates nothing and ends the whole sign-in,
   and a sign-out ends the sign-in whichever application asks, without naming
   its kind. So an old rotated token tells nobody whether, or as which
@@ -2086,6 +2145,33 @@ Consequences:
 
 Related: ADR-038 (platform sessions keep their own cookies and routes);
 `INTERFACE_CONTRACT.md`, "Auth session contract"; release checklist §2.
+
+## ADR-044 addendum: renewable means refresh could resolve the actor
+
+Date: 2026-10-12
+
+The lookup behind "refresh could renew now" checked the account and the
+session but not what refresh checks next: it resolves the staff actor (an
+active facility membership without a migration hold, an active staff record
+with an accepted verification status, an active organization and facility)
+or the patient (still the account's active patient, through
+`identity.current_patient_account`). A staff sign-in whose membership lapsed
+was therefore refused `403 SESSION_CLIENT_MISMATCH` with its cookies kept
+when the patient application refreshed or signed it out, although refresh
+would only have answered `401`. The lookup now includes that condition, built
+from the same join chain as staff resolution (`eligibleStaffMembershipJoins`),
+so such a sign-in gets refresh's `401` with the cookies cleared, and a
+sign-out that names the other application ends it. It is refused, not ended,
+by refresh, so it is renewable again once its membership or patient is
+active. The Origin and CSRF checks still come first, and nothing is granted:
+the change only stops naming the kind of a sign-in that refresh would refuse
+(D-Eminence/hid-system#50).
+
+Health-id `main` names its portal in `X-HID-Client` on cookie refresh and
+sign-out since `22e8664` (D-Eminence/Health-id#40), so the kind check, and
+this change, apply as soon as Identity is deployed with it. ADR-044's
+consequence that the check protects nothing until a frontend sends the header
+holds only for earlier Health-id builds and `packages/identity-browser-client`.
 
 # ADR-045: Outreach Cookie Reads Are Delegated; a Reported Read Authorizes Only a Read Permission
 

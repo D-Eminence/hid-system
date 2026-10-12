@@ -19,6 +19,7 @@ interface DocumentRow {
   id: string;
   patient_id: string;
   facility_id: string;
+  created_by: string;
   storage_bucket: string;
   storage_key: string;
   object_version_id: string | null;
@@ -79,7 +80,7 @@ export class DocumentService {
            original_file_name, storage_bucket, storage_key, declared_media_type,
            size_bytes, sha256_hex, classification, status, retention_class
          ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'initiated', $14)
-         returning id::text, patient_id::text, facility_id::text, storage_bucket, storage_key,
+         returning id::text, patient_id::text, facility_id::text, created_by::text, storage_bucket, storage_key,
                    object_version_id, declared_media_type, null::text as detected_media_type,
                    size_bytes::text, sha256_hex, null::text as scan_status, status, row_version::text`,
         [
@@ -184,6 +185,7 @@ export class DocumentService {
       (client) => this.findById(client, documentId, context.facilityId),
       { readOnly: true },
     );
+    this.assertUploader(initial, context);
     const authorization = await this.identity.authorize(initial.patient_id, 'write_records', context.purposeOfUse, context);
     if (!authorization.allowed) throw new ForbiddenException('Patient write access is not authorized');
     const metadata = await this.storage.inspect(initial.storage_key);
@@ -199,15 +201,17 @@ export class DocumentService {
         `update ehr.documents
             set object_version_id = $3,
                 size_bytes = $4, sha256_hex = $5, status = 'uploaded'
-          where id = $1 and facility_id = $2 and status = 'initiated'
-          returning id::text, patient_id::text, facility_id::text, storage_bucket, storage_key,
+          where id = $1 and facility_id = $2 and status = 'initiated' and created_by = $6
+          returning id::text, patient_id::text, facility_id::text, created_by::text, storage_bucket, storage_key,
                     object_version_id, declared_media_type, null::text as detected_media_type,
                     size_bytes::text, sha256_hex, null::text as scan_status, status, row_version::text`,
-        [documentId, context.facilityId, metadata.versionId, metadata.sizeBytes, metadata.sha256Hex],
+        [documentId, context.facilityId, metadata.versionId, metadata.sizeBytes, metadata.sha256Hex,
+          context.actor.accountId],
       );
       const row = result.rows[0];
       if (!row) {
         const current = await this.findById(client, documentId, context.facilityId);
+        this.assertUploader(current, context);
         if (current.status === 'uploaded' && current.object_version_id === metadata.versionId) return this.view(current);
         throw new ConflictException('Document is not in an upload-completable state');
       }
@@ -308,7 +312,7 @@ export class DocumentService {
 
   private async findById(client: PoolClient, documentId: string, facilityId: string): Promise<DocumentRow> {
     const result = await client.query<DocumentRow>(
-      `select id::text, patient_id::text, facility_id::text, storage_bucket, storage_key,
+      `select id::text, patient_id::text, facility_id::text, created_by::text, storage_bucket, storage_key,
               object_version_id, declared_media_type, detected_media_type,
               size_bytes::text, sha256_hex, scan_status, status, row_version::text
          from ehr.documents_effective where id = $1 and facility_id = $2`,
@@ -317,6 +321,15 @@ export class DocumentService {
     const row = result.rows[0];
     if (!row) throw new NotFoundException('Document not found');
     return row;
+  }
+
+  /**
+   * Only the account that created the upload intent completes it (current
+   * default; INTERFACE_CONTRACT.md §16). Anyone else gets the same 404 as an
+   * unknown document, a document at another facility or one they cannot read.
+   */
+  private assertUploader(row: DocumentRow, context: DataAccessContext): void {
+    if (row.created_by !== context.actor.accountId) throw new NotFoundException('Document not found');
   }
 
   private view(row: DocumentRow) {

@@ -3,6 +3,7 @@ import { PharmacyApiClient, PharmacyApiProblem } from '@hid/api-client';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
+import { workloadAuthenticationRefusal } from './owning-service-auth';
 import { ServiceWorkloadIdentityService } from './service-workload-identity.service';
 
 @Injectable()
@@ -50,7 +51,7 @@ export class PharmacyApiService {
     } catch (error) {
       if (error instanceof PharmacyApiProblem) {
         const payload = error.payload as { code?: unknown; detail?: unknown };
-        throw new DomainProblem(
+        throw workloadAuthenticationRefusal('PHARMACY', error.status, payload?.code) ?? new DomainProblem(
           error.status,
           typeof payload?.code === 'string' ? payload.code : 'PHARMACY_SERVICE_ERROR',
           typeof payload?.detail === 'string' ? payload.detail : 'Pharmacy service request failed',

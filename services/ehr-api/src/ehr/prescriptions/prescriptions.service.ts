@@ -23,8 +23,9 @@ export interface PrescriptionRow extends QueryResultRow {
   routeCode: string | null;
   frequency: string;
   instructions: string;
-  startsOn: string | null;
-  endsOn: string | null;
+  /** A date column: node-postgres returns a Date at local midnight. */
+  startsOn: Date | null;
+  endsOn: Date | null;
   status: OrderStatus;
   rowVersion: string;
   createdAt: Date;
@@ -38,6 +39,22 @@ const COLUMNS = `
   medication_display as "medicationDisplay", dose_quantity as "doseQuantity", dose_unit as "doseUnit",
   route_code as "routeCode", frequency, instructions, starts_on as "startsOn", ends_on as "endsOn",
   status, row_version as "rowVersion", created_at as "createdAt", updated_at as "updatedAt"`;
+
+/**
+ * The prescription as Pharmacy accepts it: created_at as microsecond UTC text
+ * and the dates as YYYY-MM-DD, rendered by PostgreSQL. Pharmacy accepts a
+ * prescription only when its snapshot equals the EHR row
+ * (pharmacy.validate_work_item, 0080); it compares created_at and the dates
+ * only in a later release, once no EHR build that sends them as Dates can
+ * still be deployed or rolled back to. node-postgres returns created_at as a
+ * Date, which keeps only milliseconds, and a date as a Date at local midnight,
+ * which a process east of UTC sends as the day before.
+ */
+const PHARMACY_HANDOFF_COLUMNS = `${COLUMNS}, ${timelineCursorSql('created_at')} as "createdAtExact",
+  to_char(starts_on, 'YYYY-MM-DD') as "startsOnText", to_char(ends_on, 'YYYY-MM-DD') as "endsOnText"`;
+
+/** A prescription locked for the Pharmacy handoff, with the exact texts it sends. */
+type PharmacyHandoffRow = PrescriptionRow & { createdAtExact: string; startsOnText: string | null; endsOnText: string | null };
 
 const TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
   [OrderStatus.Draft]: [OrderStatus.Active, OrderStatus.Cancelled, OrderStatus.EnteredInError],
@@ -178,7 +195,9 @@ export class PrescriptionsService {
         details: { expectedPrescriptionVersion: input.expectedRowVersion },
       },
       async (client) => {
-        const current = await this.lock(client, context, patientId, encounterId, prescriptionId);
+        const current = await this.lock<PharmacyHandoffRow>(
+          client, context, patientId, encounterId, prescriptionId, PHARMACY_HANDOFF_COLUMNS,
+        );
         if (Number(current.rowVersion) !== input.expectedRowVersion) {
           throw new DomainProblem(
             412,
@@ -208,6 +227,9 @@ export class PrescriptionsService {
         encounterId,
       ),
     );
+    // The eligibility transaction has committed and released the row lock:
+    // Pharmacy's guard takes a share lock on this row, so a lock held across
+    // the call would make it wait for the call itself.
     return this.pharmacyApi.acceptEhrPrescription(context, {
       patientId: row.patientId,
       orderingFacilityId: row.facilityId,
@@ -223,10 +245,10 @@ export class PrescriptionsService {
       routeCode: row.routeCode ?? undefined,
       frequency: row.frequency,
       instructions: row.instructions,
-      startsOn: row.startsOn ?? undefined,
-      endsOn: row.endsOn ?? undefined,
+      startsOn: row.startsOnText ?? undefined,
+      endsOn: row.endsOnText ?? undefined,
       prescribedBy: row.createdBy,
-      prescribedAt: row.createdAt.toISOString(),
+      prescribedAt: row.createdAtExact,
       acceptanceReason: input.reason,
     }, idempotencyKey);
   }
@@ -248,16 +270,17 @@ export class PrescriptionsService {
     return result.rows[0];
   }
 
-  private async lock(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {
-    const result = await client.query<PrescriptionRow>(
-      `select ${COLUMNS} from ehr.prescriptions
+  private async lock<Row extends PrescriptionRow = PrescriptionRow>(client: PoolClient, context: DataAccessContext,
+    patientId: string, encounterId: string, id: string, columns = COLUMNS) {
+    const result = await client.query<Row>(
+      `select ${columns} from ehr.prescriptions
        where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4 for update`,
       [id, encounterId, patientId, context.facilityId],
     );
     return this.single(result.rows[0]);
   }
 
-  private single(row: PrescriptionRow | undefined): PrescriptionRow {
+  private single<Row extends PrescriptionRow>(row: Row | undefined): Row {
     if (!row) throw new DomainProblem(404, 'PRESCRIPTION_NOT_FOUND', 'Prescription was not found');
     return row;
   }

@@ -64,6 +64,35 @@ const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
 // race (40001 or 23505), and DatabaseService runs it again, when it replays
 // the winner or refuses the request (Phase 4 Stage 9).
 
+/**
+ * The constraint names the Pharmacy guards report when the EHR prescription
+ * does not allow the command (0080): pharmacy.validate_work_item refuses an
+ * acceptance that is not the exact active prescription version, and
+ * pharmacy.validate_dispensing a dispensing whose prescription is no longer
+ * active at the version Pharmacy accepted. Both raise SQLSTATE 23514.
+ */
+export const SOURCE_PRESCRIPTION_CONSTRAINTS = Object.freeze({
+  acceptance: 'pharmacy_work_item_source_prescription',
+  dispensing: 'pharmacy_dispensing_source_prescription',
+});
+
+/** Whether a database error is the named guard's refusal; every other error is not. */
+export function isSourcePrescriptionRefusal(error: unknown, constraint: string): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const { code, constraint: name } = error as { code?: unknown; constraint?: unknown };
+  return code === '23514' && name === constraint;
+}
+
+/** Runs a guarded insert, turning the named guard refusal into the given problem. */
+async function refusing<Result>(insert: Promise<Result>, constraint: string, problem: () => DomainProblem): Promise<Result> {
+  try {
+    return await insert;
+  } catch (error) {
+    if (isSourcePrescriptionRefusal(error, constraint)) throw problem();
+    throw error;
+  }
+}
+
 @Injectable()
 export class PharmacyService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
@@ -90,7 +119,7 @@ export class PharmacyService {
           'Prescription acceptance conflicts with existing Pharmacy work');
         return this.projectWorkItem(existing);
       }
-      const inserted = await client.query<WorkItemRow>(`insert into pharmacy.work_items (
+      const inserted = await refusing(client.query<WorkItemRow>(`insert into pharmacy.work_items (
         id,patient_id,facility_id,ordering_facility_id,source_ehr_prescription_id,
         source_ehr_prescription_version,source_encounter_id,source_status,medication_code_system,
         medication_code,medication_display,dose_quantity,dose_unit,route_code,frequency,instructions,
@@ -103,7 +132,9 @@ export class PharmacyService {
         input.doseQuantity ?? null, input.doseUnit ?? null, input.routeCode ?? null, input.frequency,
         input.instructions, input.startsOn ?? null, input.endsOn ?? null, input.prescribedBy,
         input.prescribedAt, context.actor.accountId, context.membershipId, input.acceptanceReason,
-        key, digest, context.correlationId]);
+        key, digest, context.correlationId]), SOURCE_PRESCRIPTION_CONSTRAINTS.acceptance,
+      () => new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_ELIGIBLE',
+        'Pharmacy acceptance must match the current active EHR prescription version'));
       const row = inserted.rows[0];
       if (!row) throw new DomainProblem(503, 'PHARMACY_WORK_ITEM_NOT_CREATED',
         'Pharmacy could not accept the prescription');
@@ -166,7 +197,7 @@ export class PharmacyService {
         throw new DomainProblem(409, 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED',
           'A full dispensing is already recorded for this work item; partial dispensing is not supported');
       }
-      const inserted = await client.query<DispensingRow>(`insert into pharmacy.dispensings (
+      const inserted = await refusing(client.query<DispensingRow>(`insert into pharmacy.dispensings (
         id,work_item_id,work_item_version,patient_id,facility_id,medication_code_system,medication_code,
         medication_display,quantity_dispensed,quantity_unit,dispensed_by,dispensed_by_membership_id,
         reason,idempotency_key,request_sha256,correlation_id
@@ -174,7 +205,9 @@ export class PharmacyService {
       [randomUUID(), work.id, input.expectedWorkItemVersion, work.patient_id, work.facility_id,
         work.medication_code_system, work.medication_code, work.medication_display,
         input.quantityDispensed, input.quantityUnit, context.actor.accountId, context.membershipId,
-        input.reason, key, digest, context.correlationId]);
+        input.reason, key, digest, context.correlationId]), SOURCE_PRESCRIPTION_CONSTRAINTS.dispensing,
+      () => new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
+        'The EHR prescription for this work item is no longer active at the version Pharmacy accepted; nothing was dispensed'));
       const row = inserted.rows[0];
       if (!row) throw new DomainProblem(503, 'PHARMACY_DISPENSING_NOT_CREATED',
         'Pharmacy could not record the dispensing');

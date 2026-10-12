@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0079",
-    "count": 79,
+    "last": "0082",
+    "count": 82,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -413,6 +413,18 @@
       {
         "name": "0079_patient_access_pin_actor_window.sql",
         "sha256": "22e1499702ab6459fc2ce230d7d1c5e51a090d6714d60f6c78055c1c0d055817"
+      },
+      {
+        "name": "0080_pharmacy_source_prescription_guards.sql",
+        "sha256": "b22c3e189260a5dcac9975278e7c51e4ddc8d674e5f486230bb031b202ea99c2"
+      },
+      {
+        "name": "0081_uniform_recovery_start_cooldown.sql",
+        "sha256": "a900db0fb50eead3328530a71864be795cacbf5e389506d302326d7b77ee1a45"
+      },
+      {
+        "name": "0082_purpose_of_use_vocabulary.sql",
+        "sha256": "bd3c730051405860fd4cb4feacb5bde259eb627b45724433e44196c9403f9351"
       }
     ]
   },

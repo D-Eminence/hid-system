@@ -72,6 +72,13 @@ const environmentSchema = z.object({
   OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(10).max(600).default(60),
   OTP_RATE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
   OTP_RATE_MAX_REQUESTS: z.coerce.number().int().min(1).max(100).default(5),
+  // One budget of wrong recovery codes per account, across its challenges and
+  // purposes: the OTP_VERIFY_FAILURE_MAX-th wrong code within the window
+  // suspends recovery for that account for one window, even for a correct
+  // code. The defaults follow the platform MFA budget (the fifth failure in
+  // 15 minutes blocks for 15 minutes). Never keyed by client IP.
+  OTP_VERIFY_FAILURE_MAX: z.coerce.number().int().min(2).max(100).default(5),
+  OTP_VERIFY_FAILURE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
   NOTIFICATION_API_URL: z.string().url().default('http://127.0.0.1:3007'),
   NOTIFICATION_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: optionalSecret,

@@ -25,6 +25,35 @@ interface PlatformAuthorityRow {
   permissions: string[];
 }
 
+/**
+ * The joins that make an account a resolvable staff actor: an active facility
+ * membership without a migration hold, an active staff record of the same
+ * account whose verification status is in `statuses` (a text[] parameter of
+ * ACTIVE_STAFF_VERIFICATION_STATUSES), and the membership's active
+ * organization and active facility. `account` is the alias of the
+ * auth.accounts row they join to. Staff resolution and TokenService's
+ * renewability lookup (RENEWABLE) both use it, so a sign-in is renewable
+ * exactly when refresh could resolve its staff actor.
+ */
+export function eligibleStaffMembershipJoins(account: string, statuses: string): string {
+  return `join identity.staff_facility_memberships membership
+           on membership.account_id = ${account}.id
+          and membership.active
+          and membership.migration_hold_reason is null
+         join identity.staff staff
+           on staff.id = membership.staff_id
+          and staff.account_id = ${account}.id
+          and staff.active
+          and lower(btrim(staff.verification_status)) = any(${statuses}::text[])
+         join identity.organizations organization
+           on organization.id = membership.organization_id
+          and organization.active
+         join identity.facilities facility
+           on facility.id = membership.facility_id
+          and facility.organization_id = membership.organization_id
+          and facility.active`;
+}
+
 @Injectable()
 export class CurrentStaffContextService {
   constructor(private readonly database: DatabaseService) {}
@@ -109,22 +138,7 @@ export class CurrentStaffContextService {
               coalesce(array_agg(distinct permission.code) filter (where permission.code is not null), array[]::text[]) as permissions,
               membership.is_primary
          from auth.accounts account
-         join identity.staff_facility_memberships membership
-           on membership.account_id = account.id
-          and membership.active
-          and membership.migration_hold_reason is null
-         join identity.staff staff
-           on staff.id = membership.staff_id
-          and staff.account_id = account.id
-          and staff.active
-          and lower(btrim(staff.verification_status)) = any($2::text[])
-         join identity.organizations organization
-           on organization.id = membership.organization_id
-          and organization.active
-         join identity.facilities facility
-           on facility.id = membership.facility_id
-          and facility.organization_id = membership.organization_id
-          and facility.active
+         ${eligibleStaffMembershipJoins('account', '$2')}
          left join auth.account_roles account_role
            on account_role.account_id = account.id
           and account_role.scope_type = 'facility'

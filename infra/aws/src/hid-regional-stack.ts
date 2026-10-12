@@ -51,6 +51,12 @@ export interface HidRegionalStackProps extends StackProps {
 type ParameterMap = Record<string, CfnParameter>;
 type SecretMap = Record<string, secretsmanager.ISecret>;
 
+interface IdentitySensitiveField {
+  readonly variable: string;
+  readonly field: string;
+  readonly purpose: string;
+}
+
 interface RuntimeResource {
   readonly definition: WorkloadDefinition;
   readonly taskDefinition: ecs.FargateTaskDefinition;
@@ -442,9 +448,16 @@ export class HidRegionalStack extends Stack {
     this.requiredParameter('IdentityWorkloadSubject', 'Exact deployment subject for Identity API');
     }
     this.requiredParameter('AuthSecretArn', 'Secrets Manager JSON secret containing authSigningSecret and authLoginPepper');
-    this.requiredParameter('IdentitySensitiveSecretArn', this.configuration.name === 'staging'
-      ? 'Secrets Manager JSON secret containing OTP HMAC key, Turnstile secret, and Google OIDC client-ID allowlist; NIN is deferred'
-      : 'Secrets Manager JSON secret containing NIN keys, OTP HMAC key, Turnstile secret, and Google OIDC client-ID allowlist');
+    // ECS resolves every referenced JSON field before an Identity task starts:
+    // a missing field stops every Identity task. The description is built from
+    // the same list secretsFor injects, so it names exactly the fields read.
+    const identitySensitiveFields = this.identitySensitiveFields();
+    const ninKeysDeferred = !identitySensitiveFields.some(({ field }) => field === 'ninLookupHmacKeyB64');
+    this.requiredParameter('IdentitySensitiveSecretArn',
+      `Secrets Manager JSON secret for Identity with the fields ${identitySensitiveFields
+        .map(({ field, purpose }) => `${field} (${purpose})`).join(', ')}`
+      + (ninKeysDeferred ? '; NIN is deferred, so the NIN keys are not read unless QoreID is enabled' : '')
+      + '; Identity tasks cannot start until every field exists');
     if (this.configuration.qoreIdEnabled) {
       this.requiredParameter('QoreIdCredentialsSecretArn',
         'Secrets Manager JSON secret containing clientId and secret for the server-only QoreID OAuth client');
@@ -764,6 +777,9 @@ export class HidRegionalStack extends Stack {
         return { ...commonApi, ...base, PORT: '3001', AUTH_MODE: 'local', AUTH_COOKIE_SECURE: 'true',
           AUTH_ISSUER: 'hid-identity', AUTH_AUDIENCE: 'hid-api',
           TURNSTILE_MODE: 'required', OTP_HMAC_KEY_VERSION: 'aws-v1',
+          // Fixed at the first authenticator enrolment: changing it, or the key,
+          // invalidates every enrolled platform authenticator.
+          MFA_KEY_VERSION: 'aws-v1',
           NOTIFICATION_API_URL: urls['notification-api']!, NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
           NIN_PROVIDER_MODE: this.configuration.name === 'staging' ? 'deferred' : 'unavailable', NIN_KEY_VERSION: 'aws-v1', IDENTITY_SERVICE_IDENTITY_MODE: 'jwt',
           QOREID_ENABLED: this.configuration.qoreIdEnabled ? 'true' : 'false',
@@ -842,6 +858,32 @@ export class HidRegionalStack extends Stack {
     }
   }
 
+  // The fields the identity-api container reads from the Identity sensitive
+  // secret, in injection order. secretsFor injects exactly these and the
+  // IdentitySensitiveSecretArn description names exactly these.
+  private identitySensitiveFields(): IdentitySensitiveField[] {
+    const key = (purpose: string) => `${purpose}: 32 random bytes in padded base64`;
+    const ninKeysRead = this.configuration.name !== 'staging' || this.configuration.qoreIdEnabled;
+    return [
+      ...(ninKeysRead ? [
+        { variable: 'NIN_LOOKUP_HMAC_KEY_B64', field: 'ninLookupHmacKeyB64', purpose: key('NIN lookup HMAC key') },
+        { variable: 'NIN_ENCRYPTION_KEY_B64', field: 'ninEncryptionKeyB64', purpose: key('NIN encryption key') },
+      ] : []),
+      { variable: 'OTP_HMAC_KEY_B64', field: 'otpHmacKeyB64', purpose: key('OTP HMAC key') },
+      { variable: 'CONTACT_LOOKUP_HMAC_KEY_B64', field: 'contactLookupHmacKeyB64', purpose: key('contact lookup HMAC key') },
+      { variable: 'TURNSTILE_SECRET_KEY', field: 'turnstileSecretKey', purpose: 'Turnstile secret' },
+      // The allowlist is configuration rather than a Google client secret,
+      // but it is an Identity-only trust decision. Keep it in the existing
+      // secure envelope so task definitions cannot silently drift from the
+      // approved backend audience policy.
+      { variable: 'GOOGLE_OIDC_CLIENT_IDS', field: 'googleOidcClientIds', purpose: 'Google OIDC client-ID allowlist' },
+      // Master key for platform administrator TOTP secrets and recovery-code
+      // digests. Without it platform sign-in fails closed (503 MFA_UNAVAILABLE).
+      { variable: 'MFA_SECRET_KEY_B64', field: 'mfaSecretKeyB64',
+        purpose: `${key('platform MFA key')}, never reused across environments` },
+    ];
+  }
+
   private secretsFor(name: WorkloadName, secrets: SecretMap): Record<string, ecs.Secret> {
     const output: Record<string, ecs.Secret> = {};
     const databaseField = databaseSecretFields[name];
@@ -851,20 +893,9 @@ export class HidRegionalStack extends Stack {
       output.AUTH_LOGIN_PEPPER = ecs.Secret.fromSecretsManager(secrets.auth!, 'authLoginPepper');
     }
     if (name === 'identity-api') {
-      if (this.configuration.name !== 'staging' || this.configuration.qoreIdEnabled) {
-        output.NIN_LOOKUP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'ninLookupHmacKeyB64');
+      for (const { variable, field } of this.identitySensitiveFields()) {
+        output[variable] = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, field);
       }
-      if (this.configuration.name !== 'staging' || this.configuration.qoreIdEnabled) {
-        output.NIN_ENCRYPTION_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'ninEncryptionKeyB64');
-      }
-      output.OTP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'otpHmacKeyB64');
-      output.CONTACT_LOOKUP_HMAC_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'contactLookupHmacKeyB64');
-      output.TURNSTILE_SECRET_KEY = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'turnstileSecretKey');
-      // The allowlist is configuration rather than a Google client secret,
-      // but it is an Identity-only trust decision. Keep it in the existing
-      // secure envelope so task definitions cannot silently drift from the
-      // approved backend audience policy.
-      output.GOOGLE_OIDC_CLIENT_IDS = ecs.Secret.fromSecretsManager(secrets.identitySensitive!, 'googleOidcClientIds');
       if (this.configuration.qoreIdEnabled) {
         output.QOREID_CLIENT_ID = ecs.Secret.fromSecretsManager(secrets.qoreid!, 'clientId');
         output.QOREID_CLIENT_SECRET = ecs.Secret.fromSecretsManager(secrets.qoreid!, 'secret');

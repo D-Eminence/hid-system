@@ -1,7 +1,7 @@
 import { UnauthorizedException } from '@nestjs/common';
 import type { DatabaseService } from '../database/database.service';
 import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
-import { CurrentStaffContextService } from './current-staff-context.service';
+import { CurrentStaffContextService, eligibleStaffMembershipJoins } from './current-staff-context.service';
 
 const STAFF_CONTEXT_ROW = {
   account_id: '20000000-0000-4000-8000-000000000001',
@@ -48,6 +48,27 @@ describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
     const platformCall = query.mock.calls[1];
     expect(String(platformCall?.[0])).toContain("assignment.scope_type = 'platform'");
     expect(platformCall?.[1]).toEqual([STAFF_CONTEXT_ROW.account_id]);
+  });
+
+  it('resolves through the one eligibility join chain that refresh renewability also reads (SES-4)', async () => {
+    // TokenService's RENEWABLE lookup asks whether this query would find a
+    // row; both build the joins from eligibleStaffMembershipJoins, so the
+    // two cannot drift apart.
+    const query = jest.fn()
+      .mockResolvedValueOnce({ rows: [STAFF_CONTEXT_ROW], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ roles: [], permissions: [] }], rowCount: 1 });
+    const service = new CurrentStaffContextService({ query } as unknown as DatabaseService);
+    await service.resolve(STAFF_CONTEXT_ROW.subject, 'local');
+    const flat = (sql: unknown) => String(sql).replace(/\s+/g, ' ').trim();
+    const joins = flat(eligibleStaffMembershipJoins('account', '$2'));
+    expect(flat(query.mock.calls[0]?.[0])).toContain(` from auth.accounts account ${joins} left join auth.account_roles`);
+    for (const condition of ['membership.account_id = account.id', 'membership.active',
+      'membership.migration_hold_reason is null', 'staff.account_id = account.id', 'staff.active',
+      'lower(btrim(staff.verification_status)) = any($2::text[])', 'organization.active',
+      'facility.organization_id = membership.organization_id', 'facility.active']) {
+      expect(joins).toContain(condition);
+    }
+    expect(flat(eligibleStaffMembershipJoins('eligible', '$3'))).toContain('staff.account_id = eligible.id');
   });
 
   it('fails closed when no complete active authorization tuple is returned', async () => {

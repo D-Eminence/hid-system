@@ -33,12 +33,23 @@ interface ChallengeRow extends QueryResultRow {
 type ContactChannel = 'phone' | 'email';
 const localOtpKey = randomBytes(32);
 const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
+/** The account password hash activation stores; the database command checks this form. */
+const PASSWORD_HASH_OPTIONS = { type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1 };
 
 @Injectable()
 export class PatientEnrollmentService {
   private readonly env = getEnvironment();
   private readonly otpKey = this.env.OTP_HMAC_KEY_B64
     ? Buffer.from(this.env.OTP_HMAC_KEY_B64, 'base64') : localOtpKey;
+  /**
+   * What a replay of an active enrollment passes as its password hash. The
+   * activation command returns the stored HID before it reads the hash and
+   * sets no credential (0058), so a replay costs no argon2id run. A real
+   * argon2id hash of random bytes, computed once per process and never
+   * stored, keeps the argument well formed whatever the command's branch
+   * order.
+   */
+  private readonly replayPlaceholderHash = argon2.hash(randomBytes(32), PASSWORD_HASH_OPTIONS);
 
   constructor(private readonly database: DatabaseService,
     private readonly ninProtector: NinIdentifierProtector,
@@ -298,11 +309,23 @@ export class PatientEnrollmentService {
     }
     if (!row.contact_ciphertext) throw new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
       'Contact verification is required');
+    // Activations and replays share one budget per enrollment, charged only
+    // after the cookie has proved the enrollment, so a guessed enrollment id
+    // cannot spend another browser's. Every attempt from here counts, whatever
+    // its outcome (one that fails later may already have hashed), so the budget
+    // is the contact step's per-enrollment size, leaving room for transient
+    // failures. Its own bucket: not the contact step's.
+    const limited = await this.database.withSystemTransaction(correlationId, (client) =>
+      this.consumeRate(client, 'enrollment', this.hmac('patient-enrollment-activate', row.id),
+        this.env.OTP_RATE_MAX_REQUESTS * 3));
+    if (limited) throw this.rateLimited();
     const profileJson = this.decrypt(row.id, 'profile', row.profile_ciphertext);
     const contact = this.decrypt(row.id, 'contact', row.contact_ciphertext);
     const contactLookupHmac = createContactLookupHmac(row.contact_channel!, contact);
-    const hash = await argon2.hash(password, { type: argon2.argon2id,
-      memoryCost: 65_536, timeCost: 3, parallelism: 1 });
+    // Two first activations that race still hash twice; the command lets one
+    // activate and replays the other.
+    const hash = row.state === 'active' ? await this.replayPlaceholderHash
+      : await argon2.hash(password, PASSWORD_HASH_OPTIONS);
     const tokenHmac = this.cookieTokenHmac(cookie);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
