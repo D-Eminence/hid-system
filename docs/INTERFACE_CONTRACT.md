@@ -741,7 +741,7 @@ routes and EHR's clinical, consent and audit routes already checked the header
 against their own narrower list first, with that code (EHR's emergency record
 answers `400 EMERGENCY_PURPOSE_REQUIRED`). Every other route that reads the
 header answered `500 INTERNAL_ERROR` before
-fix/ocr-purpose-400-and-publication-auth: EHR's document routes and its internal
+D-Eminence/hid-system#60: EHR's document routes and its internal
 OCR routes, Identity's registration-case read, OCR's reads, and every Lab and
 Pharmacy route without a body purpose. Whether a route then accepts that
 purpose is its own authorization.
