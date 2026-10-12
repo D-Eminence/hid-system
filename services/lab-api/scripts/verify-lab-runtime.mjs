@@ -219,12 +219,15 @@ try {
   // database's microsecond text (lab-requests.service.ts); the millisecond text of a JavaScript Date is refused.
   const truncated = await send('/work-items/accept-ehr-order', { ...orderBody(f.microOrder), requestedAt: '2026-10-01T09:00:00.123Z' },
     { key: key('accept'), internal: 'ehr-api' });
-  assert(truncated.status >= 400, `millisecond requestedAt must be refused: ${truncated.status} ${JSON.stringify(truncated.body ?? truncated)}`);
+  // lab.validate_work_item refuses it (23514); Lab answers an unmapped guard refusal with 500 (release checklist §9).
+  expectStatus(truncated, 500, 'accept with the millisecond requestedAt');
+  assert.equal(truncated.sqlstate, '23514', 'millisecond requestedAt: refused by lab.validate_work_item');
+  assert.equal(truncated.message, 'Lab work item does not match the exact active EHR order version and actor context');
   assert.equal(await workItemsOf(f.microOrder), 0);
   expectStatus(await send('/work-items/accept-ehr-order', { ...orderBody(f.microOrder), requestedAt: '2026-10-01T09:00:00.123456Z' },
     { key: key('accept'), internal: 'ehr-api' }), 201, 'accept with the microsecond requestedAt');
   assert.equal(await workItemsOf(f.microOrder), 1);
-  check(`accept: an order created at .123456 is refused for requestedAt .123Z (${truncated.status}) and creates no work item; .123456Z is accepted (201)`);
+  check('accept: an order created at .123456 is refused for requestedAt .123Z by the database guard (23514) and creates no work item; .123456Z is accepted (201)');
 
   // Accession a work item.
   const [w1, w2, w3] = f.work;
