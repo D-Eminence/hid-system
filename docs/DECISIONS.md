@@ -2001,7 +2001,7 @@ Consequences:
 - Outreach reports no method, and its own Identity routes are not marked. Its
   guard still requires Origin and CSRF on every cookie request, so same-origin
   cookie reads from Outreach are likely refused (from reading the code, not
-  reproduced; a follow-up); and
+  reproduced; a follow-up; superseded for Outreach by ADR-045); and
 - the HTTP evidence is local and synthetic and covers EHR only; Lab, OCR and
   Pharmacy have unit coverage only (release checklist §8).
 
@@ -2086,3 +2086,160 @@ Consequences:
 
 Related: ADR-038 (platform sessions keep their own cookies and routes);
 `INTERFACE_CONTRACT.md`, "Auth session contract"; release checklist §2.
+
+# ADR-045: Outreach Cookie Reads Are Delegated; a Reported Read Authorizes Only a Read Permission
+
+Status: Proposed for source implementation (D-Eminence/hid-system#43).
+Not merged or deployed.
+
+Date: 2026-10-12
+
+Context:
+
+Outreach authorizes every request with
+`POST /api/v1/identity/outreach/authorize`, forwarding the user's cookie and
+authenticating separately as the `outreach-api` workload. ADR-043 left
+Outreach out. Reproduced locally over HTTP in the migration rehearsal on
+`main` (`522fb2e`), with Outreach as `hid_outreach_api_runtime` and Identity as
+`hid_identity_api_runtime`, every same-origin cookie read from Outreach was
+refused, at three layers in turn:
+
+- Outreach's guard required an allowed `Origin` and an `X-CSRF-Token` on every
+  cookie request, `GET` included, so every cookie read
+  (`GET /api/v1/outreach/registration-cases`, `/:caseId`, `/campaigns` and
+  `/campaigns/:campaignId/members`) was refused
+  `403 CSRF_VALIDATION_FAILED`;
+- with only that fixed, Identity refused the forwarded cookie on the authorize
+  call with `403 ORIGIN_DENIED`: the route was not marked
+  `@DelegatedBrowserRequest()`, and Outreach reported no method;
+- with both fixed, every campaign route answered `400 VALIDATION_FAILED`,
+  because `AuthorizeOutreachDto` accepted only `outreach.registration.read`
+  and `outreach.registration.write`, not the campaign permissions of
+  migration 0038.
+
+Decision:
+
+- Outreach treats `GET` and `HEAD` as reads. A cookie read needs no `Origin`
+  or CSRF token; one that names a disallowed `Origin` is refused
+  `403 ORIGIN_DENIED` (in production Outreach's CORS layer refuses a
+  disallowed Origin even earlier). A cookie write keeps the presence check: an
+  allowed `Origin` and an `X-CSRF-Token`, else `403 CSRF_VALIDATION_FAILED`. A
+  read route mapped to a permission that is not a `.read` fails closed with
+  `500 OUTREACH_POLICY_INVALID`.
+- Outreach reports the method of the request it is authorizing in
+  `X-HID-Original-Method` on its authorize call, through the typed Identity
+  client as in ADR-043.
+- Identity marks `POST /api/v1/identity/outreach/authorize` with
+  `@DelegatedBrowserRequest()`, under ADR-043's conditions. When
+  `SecurityGuard` skips the cookie-write Origin and CSRF check for a read
+  reported by an authenticated workload, it records the reported method in
+  `request.delegatedBrowserMethod`. `authorizeOutreach` still requires the
+  `outreach-api` workload (`authenticateOutreach`), and after such a skip
+  authorizes only a permission ending in `.read`; a write permission is
+  refused `403 CSRF_VALIDATION_FAILED`.
+  `POST /api/v1/identity/outreach/patient-authorization` is not marked.
+- `AuthorizeOutreachDto` accepts exactly `OUTREACH_PERMISSIONS`, three of the
+  four Outreach permissions that migrations 0024 and 0038 define:
+  `outreach.registration.read`, `outreach.registration.write` and
+  `outreach.campaign.read`. It does not accept `outreach.campaign.write`:
+  Identity's validation refuses it `400 VALIDATION_FAILED`, as on `main`, and
+  Outreach relays that status and code. Campaign reads
+  (`GET .../campaigns` and `GET .../campaigns/:campaignId/members`) are
+  authorized; the three campaign writes (create, status change, member add)
+  answer `400 VALIDATION_FAILED` and change nothing, as on `main`. An earlier
+  version of this branch also accepted `outreach.campaign.write`; that is
+  withdrawn (next section).
+
+Campaign writes (not decided here):
+
+A security review of that earlier version found that the campaign write routes
+have no campaign-level governance:
+
+- `OutreachService.addCampaignMember`
+  (`services/outreach-api/src/outreach/outreach.service.ts:226-234`) checks
+  only that the campaign belongs to the facility, then inserts the
+  caller-supplied `membershipId` and `role`, `admin` included. The RLS insert
+  policy `outreach_campaign_members_create`
+  (`0038_outreach_campaign_workspaces.sql:99-104`) requires only
+  `outreach.campaign.write` at the facility and `added_by` equal to the
+  current account and membership;
+- `updateCampaignStatus` (`outreach.service.ts:195`) closes or activates any
+  campaign of the facility, with no member or role check; and
+- the restrictive policies of `0045_outreach_campaign_registration_binding.sql`
+  (55-64) gate a campaign-linked registration case only on a
+  `campaign_members` row existing.
+
+So, with `outreach.campaign.write` authorized, any holder of it at the
+facility could add themselves to any campaign as `admin` and then read its
+campaign-linked registration cases (name, phone, sex, age, notes), and could
+close or activate any campaign. On `main` these routes were unreachable (`400`).
+
+A second, independent review found that this is how 0038 is designed, not a
+defect in it: 0038 describes `outreach.campaign.write` as "Create and govern
+facility-scoped Outreach campaigns and workspace membership"
+(`0038_outreach_campaign_workspaces.sql:6`); the schema suite has a removed
+member add itself back as `admin` and expects success
+(`services/ehr-api/database/tests/schema.integration.sql:2096-2130`); 0045
+lets "an authorized campaign manager" change status, with no creator check
+(`0045_outreach_campaign_registration_binding.sql:116-118`); and the DTO's
+two-permission limit predates the campaign routes (added in `a8b3889`), so it
+was an oversight, not a gate. Since D-Eminence/hid-system#34 a campaign
+member can record a campaign-linked registration, but no campaign can be
+created through the API while `outreach.campaign.write` stays refused, so no
+linked case exists unless a campaign is created outside the API.
+
+Who may create campaigns, change their status and add members is a
+governance and product decision. The campaign-linked registration compartment
+(0045) is only as strong as who may add campaign members. The options:
+
+- A: authorize `outreach.campaign.write` as 0038 designs it, for
+  facility-level campaign managers. Every role that reads registrations
+  (doctor, clinician, nurse, receptionist, admin and org_admin) could create
+  campaigns, change their status and add any facility member, themselves
+  included, which also admits them to the campaign's linked registrations.
+  This is a one-line change to `OUTREACH_PERMISSIONS`; its tests were written
+  once on this branch.
+- B: per-campaign governance first, for example only the campaign's own
+  `admin` members (`createCampaign` seeds the creator as one) manage it,
+  enforced in `OutreachService` and in an RLS `WITH CHECK`/`USING` clause by
+  a new migration, with failing-first SQL and HTTP tests in which a
+  non-member holding `outreach.campaign.write` is refused.
+
+This branch does not decide it. Until the product owner chooses, it keeps
+`outreach.campaign.write` refused exactly as on `main` and authorizes only
+campaign reads, so no write behaviour changes and the choice stays open.
+
+Consequences:
+
+- same-origin cookie reads of Outreach registration cases and campaigns are
+  authorized once both Outreach and Identity include the change; either alone
+  behaves as before, and the reads are refused;
+- Identity cannot verify the reported method, as in ADR-043. Outreach has no
+  separate session revalidation: Identity checks an Outreach browser write's
+  Origin and CSRF token only on the authorize call. Limiting a reported read to
+  read permissions keeps that check for every write, so a misreported method
+  can authorize a read but never a write;
+- no migration or grant change. Bearer requests are checked as before, and
+  campaign reads become authorizable for bearer and cookie requests alike.
+  Campaign writes are not: no campaign can be created through the API until
+  the decision above, so release checklist step S4c's campaign create cannot
+  pass. Health-id needs no change for the reads: it already sends cookies with
+  credentials and `X-CSRF-Token` only on writes. Its Outreach page can list
+  campaigns and members, but its campaign create, status and member actions
+  get `400 VALIDATION_FAILED`, as on `main`; Health-id should hide or handle
+  them;
+- campaign-linked registration works as the runtime role since
+  D-Eminence/hid-system#34 (`FOR SHARE OF campaign`, release checklist §4.2),
+  for a campaign that already exists; and
+- the evidence is local and synthetic: the Outreach guard and Identity specs,
+  and `services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs`,
+  which the migration rehearsal runs as `outreach_cookie_read_runtime`
+  (release checklist §8). The verifier now seeds its campaign with SQL and
+  checks that each campaign write is refused; it passed in the rehearsal on
+  the tree merged with `main` after #34 to #36 (`f64aa01`, release checklist
+  §8). Nothing has been run on staging or
+  production.
+
+Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity
+boundary; Outreach registration boundary); release checklist §2, §3, §7, §8
+and §9.
