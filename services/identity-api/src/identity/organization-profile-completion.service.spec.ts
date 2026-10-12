@@ -23,6 +23,15 @@ const profileRow = {
   profile_registry_status: null, profile_registry_status_source: null,
 };
 
+// Deliveries run after the response. Optional here so that these specs also
+// run, and fail at their own assertions, against a service without them.
+interface AfterResponseLifecycle {
+  settleDeliveries?(): Promise<void>;
+  beforeApplicationShutdown?(): Promise<void>;
+}
+const lifecycle = (service: OrganizationProfileCompletionService): AfterResponseLifecycle =>
+  service as unknown as AfterResponseLifecycle;
+
 describe('organization applicant profile completion', () => {
   beforeEach(() => {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({
@@ -84,9 +93,47 @@ describe('organization applicant profile completion', () => {
     const service = new OrganizationProfileCompletionService(database as unknown as DatabaseService,
       notification as unknown as NotificationOtpClient);
     const result = await service.start(input, '203.0.113.44', correlationId);
+    await lifecycle(service).settleDeliveries?.();
     expect(result.accepted).toBe(true);
     expect(query.mock.calls[2]?.[0]).toContain('invalidate_organization_profile_completion_challenge');
     expect(query.mock.calls[2]?.[1]).toEqual([result.challengeId]);
+  });
+
+  it('answers an eligible application before its code is delivered, as it answers an unknown one', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ recipient_email: 'stored@example.invalid' }] })
+      .mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ recipient_email: null }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const database = { withSystemTransaction: jest.fn(async (_id, work) => work({ query })) };
+    let release: (outcome: { outcome: string }) => void = () => undefined;
+    const notification = { deliver: jest.fn(() => new Promise((resolve) => { release = resolve; })) };
+    const service = new OrganizationProfileCompletionService(database as unknown as DatabaseService,
+      notification as unknown as NotificationOtpClient);
+    const answered: string[] = [];
+    const known = service.start(input, '203.0.113.44', correlationId).then((result) => {
+      answered.push('eligible'); return result;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const unknown = service.start(input, '203.0.113.45', correlationId).then((result) => {
+      answered.push('unknown'); return result;
+    });
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      expect({ answered: answered.sort() }).toEqual({ answered: ['eligible', 'unknown'] });
+      expect(notification.deliver).toHaveBeenCalledTimes(1);
+      let closed = false;
+      const shutdown = lifecycle(service).beforeApplicationShutdown!().then(() => { closed = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(closed).toBe(false);
+      release({ outcome: 'definitive_failure' });
+      await shutdown;
+      expect(closed).toBe(true);
+      expect(query.mock.calls[4]?.[0]).toContain('invalidate_organization_profile_completion_challenge');
+      expect(query.mock.calls[4]?.[1]).toEqual([(await known).challengeId]);
+    } finally {
+      release({ outcome: 'definitive_failure' });
+      await Promise.all([known, unknown]);
+    }
   });
 
   it('requires an OTP before a sourced profile can be read or updated', async () => {
