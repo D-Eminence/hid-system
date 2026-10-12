@@ -54,8 +54,10 @@ type CreatedLabRequestRow = LabRequestRow & { createdAtExact: string };
 /**
  * What became of asking Lab to accept an active lab request, after the EHR
  * committed it. Lab holds one work item per request, at the version it
- * accepted; `already_accepted` means it holds another version (CLIN-3b: later
- * EHR changes are not propagated to Lab).
+ * accepted; `already_accepted` means it holds an earlier version, so this
+ * version's change is not in Lab (CLIN-3b: later EHR changes are not
+ * propagated to Lab). A version earlier than the one Lab holds is `failed`
+ * with Lab's `409 LAB_ORDER_NOT_CURRENT`.
  */
 export type LabHandoff =
   | { state: 'accepted' }
@@ -66,6 +68,17 @@ export type LabHandoff =
 type HandoffOutcome = { handoff: LabHandoff; workItem: unknown };
 
 const LAB_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * Lab's verdicts on the request or on the caller: invalid (400), not allowed
+ * (403), or in conflict with what Lab holds (409). Any other answer (401 when
+ * Lab cannot verify the EHR's workload identity, another 4xx, 5xx, or Lab
+ * unreachable) says nothing about the request, which can be sent again as it is.
+ */
+const LAB_REFUSALS: ReadonlySet<number> = new Set([400, 403, 409]);
+
+/** Lab's code as the EHR reports it: a well-formed code, or a fixed one. */
+const labCode = (problem: DomainProblem) => (LAB_CODE.test(problem.code) ? problem.code : 'LAB_SERVICE_ERROR');
 
 const TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
   [OrderStatus.Draft]: [OrderStatus.Active, OrderStatus.Cancelled, OrderStatus.EnteredInError],
@@ -157,9 +170,12 @@ export class LabRequestsService {
    * Sends (or sends again) an active lab request to Lab at the version the
    * client read: the counterpart of a prescription's pharmacy-work-item
    * command. The EHR transaction reads the request without a lock and writes
-   * only its audit event; Lab is called after it commits. Lab's
-   * answer is returned as it is: its work item (a replay for a version it
-   * already accepted), or its problem, since the EHR changed nothing.
+   * only its audit event; Lab is called after it commits. Lab's work item (a
+   * replay for a version it already accepted) and Lab's refusal of the request
+   * (LAB_REFUSALS) are returned as they are, since the EHR changed nothing. Any
+   * other Lab answer is 502 LAB_HANDOFF_UNCONFIRMED: Lab's 401 must never reach
+   * the browser, which would take it for its own expired session and sign the
+   * clinician out.
    */
   async sendToLab(
     context: DataAccessContext,
@@ -185,7 +201,14 @@ export class LabRequestsService {
       },
       (client) => this.repository.exists(client, 'lab_requests', requestId, patientId, context.facilityId, encounterId),
     );
-    return this.accept(context, row);
+    try {
+      return await this.accept(context, row);
+    } catch (error) {
+      if (error instanceof DomainProblem && !LAB_REFUSALS.has(error.getStatus())) {
+        throw this.handoffProblem(row.id, { state: 'failed', status: error.getStatus(), code: labCode(error) });
+      }
+      throw error;
+    }
   }
 
   /**
@@ -199,7 +222,7 @@ export class LabRequestsService {
     } catch (error) {
       if (!(error instanceof DomainProblem)) throw error;
       const status = error.getStatus();
-      const code = LAB_CODE.test(error.code) ? error.code : 'LAB_SERVICE_ERROR';
+      const code = labCode(error);
       if (status === 409 && code === 'LAB_ORDER_ALREADY_ACCEPTED') {
         return { handoff: { state: 'already_accepted', code }, workItem: null };
       }
@@ -207,9 +230,12 @@ export class LabRequestsService {
     }
   }
 
-  /** The problem a create answers when Lab did not accept the request it committed. */
+  /**
+   * The problem a create (or a send) answers when Lab did not accept the saved
+   * request: 409 when Lab refused it, else 502, never Lab's own status.
+   */
   private handoffProblem(requestId: string, failure: Extract<LabHandoff, { state: 'failed' }>) {
-    return failure.status < 500
+    return LAB_REFUSALS.has(failure.status)
       ? new DomainProblem(409, 'LAB_HANDOFF_REFUSED',
         `Lab request ${requestId} is saved and active in the EHR, but Lab refused it (${failure.code}); `
         + 'send it to Lab again once that is resolved')

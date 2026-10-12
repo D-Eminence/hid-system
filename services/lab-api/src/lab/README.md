@@ -27,10 +27,12 @@ owns the acceptance event, semantic audit, and `LabWorkItemCreated` outbox
 record; EHR calls the typed Lab service and does not write Lab tables. The
 `accepted` state implies no accession, specimen collection, execution, QC, or
 result. Lab holds one work item per EHR request, at the version it accepted:
-the same version again is a replay, another version is refused with
-`409 LAB_ORDER_ALREADY_ACCEPTED`, and a request that is not the current active
-version exactly as EHR holds it with `409 LAB_ORDER_NOT_CURRENT`. Later EHR
-changes (cancellation, hold, edits) are not propagated to Lab.
+the same version again is a replay, a later version is refused with
+`409 LAB_ORDER_ALREADY_ACCEPTED`, and an earlier version, or a request that is
+not the current active version exactly as EHR holds it, with
+`409 LAB_ORDER_NOT_CURRENT`. Its ids may be UUIDs of any version, as migrated
+legacy ids are. Later EHR changes (cancellation, hold, edits) are not
+propagated to Lab.
 
 Migration `0020` permits execution only from a received specimen and its exact
 requested-test snapshot. Manual numeric/text results are immutable revisions

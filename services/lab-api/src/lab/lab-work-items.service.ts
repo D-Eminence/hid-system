@@ -67,11 +67,19 @@ export class LabWorkItemsService {
       [context.facilityId, context.actor.accountId, key, command.sourceEhrOrderId]);
     const existing = existingResult.rows[0];
     if (existing) {
-      // Another version of the order: EHR changed it after Lab accepted it. Lab
-      // keeps the version it accepted (later changes are not propagated).
-      if (Number(existing.source_ehr_order_version) !== command.sourceEhrOrderVersion) {
+      const held = Number(existing.source_ehr_order_version);
+      // A version before the one Lab holds is stale: EHR has changed the order
+      // since, and the version Lab holds may carry that change (two EHR
+      // updates whose later call reached Lab first). It is not current.
+      if (held > command.sourceEhrOrderVersion) {
+        throw new DomainProblem(409, 'LAB_ORDER_NOT_CURRENT',
+          `Lab already holds version ${held} of this EHR order, later than the version sent, which is not current`);
+      }
+      // A later version: EHR changed the order after Lab accepted it. Lab keeps
+      // the earlier version it accepted (later changes are not propagated).
+      if (held < command.sourceEhrOrderVersion) {
         throw new DomainProblem(409, 'LAB_ORDER_ALREADY_ACCEPTED',
-          `Lab already holds version ${Number(existing.source_ehr_order_version)} of this EHR order and accepts no other version`);
+          `Lab already holds version ${held} of this EHR order and accepts no other version`);
       }
       if (existing.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT', 'Lab order acceptance conflicts with existing work');
       return this.project(existing);

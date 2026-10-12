@@ -634,11 +634,12 @@ accepted. Paths are under
 
 - `POST` (create). An active request answers `201` with the request,
   `labWorkItem` (Lab's work item) and `labHandoff: { state: 'accepted' }`; any
-  other status answers both `null`. When Lab refuses (`4xx`), the request stays
-  saved and active and the create answers `409 LAB_HANDOFF_REFUSED`; when Lab
-  answers `5xx` or cannot be reached, `502 LAB_HANDOFF_UNCONFIRMED`. The `409`
-  detail names the saved request and Lab's code; a `5xx` detail is hidden, its
-  code is not. Send the request with `.../lab-work-item` below, or replay the
+  other status answers both `null`. When Lab refuses the request (`400`, `403`
+  or `409`), the request stays saved and active and the create answers
+  `409 LAB_HANDOFF_REFUSED`; when Lab answers anything else (`401` when it
+  cannot verify the EHR's workload identity, another `4xx`, `5xx`) or cannot be
+  reached, `502 LAB_HANDOFF_UNCONFIRMED`. Each detail names the saved request
+  and Lab's code; a `5xx` detail is hidden from users, its code is not. Send the request with `.../lab-work-item` below, or replay the
   create with the same `Idempotency-Key` and body, which loads the saved
   request and sends it again. A replay of a request Lab holds at an earlier
   version answers `201` with `labWorkItem: null` and
@@ -651,7 +652,9 @@ accepted. Paths are under
   `{ state: 'already_accepted', code: 'LAB_ORDER_ALREADY_ACCEPTED' }` when Lab
   holds an earlier version, so the change is not in Lab;
   `{ state: 'failed', status, code }` with Lab's answer, when the update stands
-  and the request can be sent again with `.../lab-work-item`; and
+  and the request can be sent again with `.../lab-work-item` (`409
+  LAB_ORDER_NOT_CURRENT` means the request changed again after this update, and
+  Lab may hold that later version: reload it); and
   `{ state: 'not_sent', code: 'LAB_PERMISSION_ABSENT' }` when the actor lacks
   `lab.work-item.accept`.
 - `POST /:requestId/lab-work-item` sends, or sends again, an active request.
@@ -662,11 +665,17 @@ accepted. Paths are under
   (`ehr.lab-request.lab-handoff.eligibility-checked`), then calls Lab: a version
   that is not the stored one is `412 LAB_REQUEST_VERSION_CONFLICT` and a request
   that is not active `409 LAB_REQUEST_NOT_ELIGIBLE`, without calling Lab. Lab's
-  answer is returned as it is, since the EHR changed nothing: `201` with Lab's
-  work item (the same one again for a version Lab accepted), or Lab's problem,
-  such as `409 LAB_ORDER_ALREADY_ACCEPTED`, `409 LAB_ORDER_NOT_CURRENT` (the
-  request changed after it was read), `403` or `503 LAB_SERVICE_UNAVAILABLE`.
-  Lab keys its acceptance by request and version, whatever the key.
+  work item and Lab's refusal of the request are returned as they are, since
+  the EHR changed nothing: `201` with the work item (the same one again for a
+  version Lab accepted), or Lab's `400`, `403` or `409`, such as
+  `409 LAB_ORDER_ALREADY_ACCEPTED` (Lab holds an earlier version) or
+  `409 LAB_ORDER_NOT_CURRENT` (the request changed after it was read). Any
+  other Lab answer, and Lab unreachable, is `502 LAB_HANDOFF_UNCONFIRMED`,
+  naming the request and Lab's code; send it again. Lab's `401` (it cannot
+  verify the EHR's workload identity, for example while its JWKS is
+  unreachable) is never passed on, since a browser takes a `401` for its own
+  expired session. Lab keys its acceptance by request and version, whatever the
+  key.
 - Cancelling, holding, completing or marking a request entered in error after
   Lab accepted it is not sent to Lab, and Lab keeps working on the version it
   accepted. What Lab must do then is an open clinical workflow decision.
@@ -1010,12 +1019,15 @@ Lab answers EHR order acceptance (fix/ehr-lab-handoff-resend):
 | A version of an order Lab has not accepted, matching the EHR order | `201` with the new work item |
 | The version Lab accepted, same body | `201` with the same work item (replay) |
 | The version Lab accepted, another body | `409 IDEMPOTENCY_CONFLICT` |
-| Another version of an order Lab accepted | `409 LAB_ORDER_ALREADY_ACCEPTED`; Lab holds one work item per EHR order, ever, and writes nothing |
+| A later version of an order Lab accepted | `409 LAB_ORDER_ALREADY_ACCEPTED`, naming the version Lab holds; Lab holds one work item per EHR order, ever, and writes nothing |
+| An earlier version than the one Lab accepted | `409 LAB_ORDER_NOT_CURRENT`: the EHR order changed since, and Lab may hold that change; Lab writes nothing and does not reach the guard |
 | An order that is not the current active version exactly as EHR holds it (changed, not active, another field or `requestedAt`) | `409 LAB_ORDER_NOT_CURRENT` (`lab.validate_work_item`, `23514`) |
 
 Its body takes the EHR lab-request limits: `testCodeSystem` 1–255,
 `testCode` 1–100 and `testName` 1–500 characters, `clinicalIndication` up to
-4000. A database refusal that no Lab service maps to its own problem answers a
+4000. Its ids (`sourceEhrOrderId`, `sourceEncounterId`, `patientId`,
+`orderingFacilityId`, `requestedBy`) are UUIDs of any version (1–8, nil, max),
+since a patient or account migrated from the legacy system keeps its source id. A database refusal that no Lab service maps to its own problem answers a
 fixed problem whose detail never carries the driver's message: `23514` (a
 guard) `409 LAB_STATE_CONFLICT`, `23505` (a unique key, after the one retry)
 `409 LAB_CONFLICT`, `23503` `409 LAB_INVALID_REFERENCE`, `42501` (row-level
