@@ -61,6 +61,15 @@ Cloudflare publishes seven independent static applications:
 | `outreach.healthidentitydirectory.com` | Outreach | `/` |
 | `admin.healthidentitydirectory.com` | Admin | `/` |
 
+Clinical account recovery and activation has one fixed public route on the
+Web/patient application: `/provider/recover` on `www` (and on `staging`), which
+opens the clinical account form at its recovery step. Health-id's provider
+sign-in pages on the product hosts and on the admin host link there rather than
+recovering in place (this repository's own product apps have no such link), because the identity API
+accepts the `staff-reset` Turnstile action only from the `www` and `staging`
+hostnames. The route takes no return destination; after recovery the person
+signs in on that page or returns to their product host themselves.
+
 The apex host performs an originless redirect to `www`. The old OCR hostname
 uses a separate originless 308 redirect to the paired Migrate hostname, retaining
 the root-equivalent request path and query. Migrate's legacy `/migrate/*` and
