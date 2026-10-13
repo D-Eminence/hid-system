@@ -34,8 +34,15 @@ test('SigV4 matches the AWS Smithy signer reference with temporary ECS credentia
   assert.equal(result.redirect, 'error'); assert.equal(result.body, '{"audience":"hid-identity-api"}');
   assert.throws(() => signTokenRequest(configuration, { ...credentials, Expiration: new Date(now).toISOString() }, 'hid-identity-api', new Date(now)));
 });
-test('configuration permits only staging, the exact HTTPS issuer/JWKS and fixed audience filenames', () => {
-  for (const changed of [{ HID_DEPLOYMENT_ENV: 'production' }, { WORKLOAD_JWKS_URL: 'https://attacker.invalid/jwks' },
+test('configuration permits only staging or production, the exact HTTPS issuer/JWKS and fixed audience filenames', () => {
+  // Another environment is refused by the allowlist itself, even with an issuer path and subject of its own name.
+  const development = { HID_DEPLOYMENT_ENV: 'development',
+    WORKLOAD_ISSUER_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/development',
+    WORKLOAD_JWKS_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/development/.well-known/jwks.json',
+    WORKLOAD_SUBJECT: 'hid:development:ehr-api' };
+  assert.throws(() => agentConfiguration({ ...environment, ...development }), /^Error: Workload token agent environment is not allowed$/);
+  assert.throws(() => agentConfiguration({ ...environment, HID_DEPLOYMENT_ENV: 'production' }), /^Error: Invalid workload issuer URL$/);
+  for (const changed of [development, { WORKLOAD_JWKS_URL: 'https://attacker.invalid/jwks' },
     { WORKLOAD_ISSUER_URL: 'http://abc123.execute-api.eu-west-2.amazonaws.com/staging' },
     { WORKLOAD_TOKEN_FILES_JSON: '[{"audience":"hid-identity-api","file":"../../outside"}]' },
     { AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: '//attacker.invalid/' }, { WORKLOAD_TOKEN_DIRECTORY: '/tmp/arbitrary' }]) {
@@ -99,4 +106,201 @@ test('startup removes stale files, renewal verifies before writing, outages reta
     await assert.rejects(readFile(join(directory, 'identity.jwt')), { code: 'ENOENT' });
     await assert.rejects(readFile(join(directory, 'ready.json')), { code: 'ENOENT' });
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+const productionEnvironment = { ...environment, HID_DEPLOYMENT_ENV: 'production',
+  WORKLOAD_ISSUER_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/production',
+  WORKLOAD_JWKS_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/production/.well-known/jwks.json',
+  WORKLOAD_SUBJECT: 'hid:production:ehr-api' };
+test('production binds its own issuer stage path and subject prefix', () => {
+  const production = agentConfiguration(productionEnvironment);
+  assert.equal(production.stage, 'production');
+  assert.equal(production.issuer, 'https://abc123.execute-api.eu-west-2.amazonaws.com/production');
+  assert.equal(production.subject, 'hid:production:ehr-api');
+  assert.equal(configuration.stage, 'staging');
+});
+test('the deployment environment, issuer path and subject prefix must name the same stage', () => {
+  const stagingIssuer = { WORKLOAD_ISSUER_URL: environment.WORKLOAD_ISSUER_URL, WORKLOAD_JWKS_URL: environment.WORKLOAD_JWKS_URL };
+  const productionIssuer = { WORKLOAD_ISSUER_URL: productionEnvironment.WORKLOAD_ISSUER_URL, WORKLOAD_JWKS_URL: productionEnvironment.WORKLOAD_JWKS_URL };
+  for (const changed of [
+    { ...productionEnvironment, ...stagingIssuer },
+    { ...productionEnvironment, WORKLOAD_SUBJECT: 'hid:staging:ehr-api' },
+    { ...environment, ...productionIssuer },
+    { ...environment, WORKLOAD_SUBJECT: 'hid:production:ehr-api' },
+    { ...productionEnvironment, HID_DEPLOYMENT_ENV: 'development' },
+    { ...productionEnvironment, HID_DEPLOYMENT_ENV: 'Production' },
+    { ...productionEnvironment, HID_DEPLOYMENT_ENV: '' },
+    { ...productionEnvironment, HID_DEPLOYMENT_ENV: undefined },
+  ]) assert.throws(() => agentConfiguration(changed));
+  assert.throws(() => agentConfiguration({ ...productionEnvironment, ...stagingIssuer }), /^Error: Invalid workload issuer URL$/);
+  assert.throws(() => agentConfiguration({ ...environment, ...productionIssuer }), /^Error: Invalid workload issuer URL$/);
+});
+test('production SigV4 matches the AWS Smithy signer reference for /production/token', () => {
+  // Reference independently generated with @smithy/signature-v4 5.6.12, applyChecksum:false,
+  // the same inputs as the staging vector and path /production/token.
+  const production = agentConfiguration(productionEnvironment);
+  const result = signTokenRequest(production, credentials, 'hid-identity-api', new Date(now));
+  assert.equal(result.url, 'https://abc123.execute-api.eu-west-2.amazonaws.com/production/token');
+  assert.equal(result.headers.authorization, `AWS4-HMAC-SHA256 Credential=${syntheticAccessKey}/20260910/eu-west-2/execute-api/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token, Signature=2b1187afe0227a0328262b1c17f8c1544663d9b758f4d72693da3547458e5abd`);
+  for (const mixed of [{ ...production, issuer: configuration.issuer }, { ...configuration, issuer: production.issuer },
+    { ...production, stage: undefined }]) {
+    assert.throws(() => signTokenRequest(mixed, credentials, 'hid-identity-api', new Date(now)), /Invalid token endpoint/);
+  }
+});
+test('a production agent rejects a staging-issued or staging-subject token', () => {
+  const production = agentConfiguration(productionEnvironment);
+  const productionToken = minted({ iss: production.issuer, sub: production.subject });
+  assert.equal(verifyMintedToken(productionToken, jwks, production, 'hid-identity-api', now).expiresAt, now + 300_000);
+  for (const claims of [{ iss: configuration.issuer, sub: production.subject }, { iss: production.issuer, sub: 'hid:staging:ehr-api' }]) {
+    assert.throws(() => verifyMintedToken(minted(claims), jwks, production, 'hid-identity-api', now), /claims are invalid/);
+  }
+  assert.throws(() => verifyMintedToken(productionToken, jwks, configuration, 'hid-identity-api', now), /claims are invalid/);
+});
+
+// DEP-4-DOS: the agent keeps the verified key set by kid, so a JWKS outage or
+// flood does not stop renewal. Once a token has verified, it refetches only for
+// an unknown kid or after a cached key stops verifying, at most once every 30
+// seconds.
+function rotatingIssuer() {
+  const keys = new Map();
+  const addKey = kid => {
+    const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    keys.set(kid, { privateKey: pair.privateKey,
+      jwk: { ...pair.publicKey.export({ format: 'jwk' }), kid, alg: 'ES256', use: 'sig' } });
+  };
+  const state = { clock: now, signingKid: 'key-a', published: ['key-a'], jwksStatus: 200, jwksFetches: 0, mints: 0 };
+  addKey('key-a'); addKey('key-b'); addKey('key-c');
+  state.replaceKey = addKey;
+  const mint = () => {
+    const seconds = Math.floor(state.clock / 1000);
+    const claims = { iss: configuration.issuer, sub: configuration.subject, aud: 'hid-identity-api', iat: seconds,
+      nbf: seconds, exp: seconds + 300, token_use: 'workload', jti: `jti-${state.mints}` };
+    const message = [{ alg: 'ES256', typ: 'JWT', kid: state.signingKid }, claims]
+      .map(value => Buffer.from(JSON.stringify(value)).toString('base64url')).join('.');
+    const signature = sign('sha256', Buffer.from(message),
+      { key: keys.get(state.signingKid).privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url');
+    return { token: `${message}.${signature}`, expiresAt: new Date((seconds + 300) * 1000).toISOString() };
+  };
+  const transport = async (url) => {
+    if (url === configuration.credentialUrl) return Response.json({ ...credentials,
+      Expiration: new Date(state.clock + 3_600_000).toISOString() });
+    if (url === configuration.jwks) {
+      state.jwksFetches += 1;
+      if (state.jwksStatus !== 200) return new Response('{"message":"Too Many Requests"}', { status: state.jwksStatus });
+      return Response.json({ keys: state.published.map(kid => keys.get(kid).jwk) });
+    }
+    assert.equal(url, `${configuration.issuer}/token`);
+    state.mints += 1;
+    return Response.json(mint());
+  };
+  return { state, transport };
+}
+async function withAgent(run) {
+  const directory = await mkdtemp(join(tmpdir(), 'hid-agent-cache-'));
+  const issuer = rotatingIssuer();
+  const agent = new TokenAgent({ ...configuration, directory }, { fetch: issuer.transport, now: () => issuer.state.clock });
+  try { await agent.start(); await run(agent, issuer.state, directory); }
+  finally { await rm(directory, { recursive: true, force: true }); }
+}
+const readyAt = async directory => JSON.parse(await readFile(join(directory, 'ready.json'), 'utf8')).expiresAt;
+
+test('renewals reuse the verified key set: one JWKS fetch for many renewals', async () => {
+  await withAgent(async (agent, state, directory) => {
+    for (let renewal = 0; renewal < 4; renewal += 1) {
+      await agent.renew();
+      assert.equal(await readyAt(directory), state.clock + 300_000);
+      state.clock += 90_000;
+    }
+    assert.equal(state.mints, 4);
+    assert.equal(state.jwksFetches, 1);
+  });
+});
+
+test('renewal keeps working while the JWKS endpoint is throttled or failing', async () => {
+  await withAgent(async (agent, state, directory) => {
+    await agent.renew();
+    for (const status of [429, 503, 403]) {
+      state.jwksStatus = status; state.clock += 90_000;
+      await agent.renew();
+      assert.equal(await readyAt(directory), state.clock + 300_000);
+    }
+    assert.equal(state.jwksFetches, 1);
+  });
+});
+
+test('an unknown kid refetches the JWKS at most once every 30 seconds and drops withdrawn keys', async () => {
+  await withAgent(async (agent, state, directory) => {
+    await agent.renew();
+    assert.equal(state.jwksFetches, 1);
+    // Rotation: the issuer signs with a new key and publishes only that key.
+    state.signingKid = 'key-b'; state.published = ['key-b']; state.clock += 90_000;
+    await agent.renew();
+    assert.equal(state.jwksFetches, 2);
+    assert.equal(await readyAt(directory), state.clock + 300_000);
+    // A token under a kid the JWKS does not publish is never written, and the
+    // agent does not refetch within 30 seconds of the last fetch.
+    const before = await readFile(join(directory, 'identity.jwt'), 'utf8');
+    state.signingKid = 'key-c'; state.clock += 10_000;
+    await assert.rejects(agent.renew());
+    assert.equal(state.jwksFetches, 2);
+    state.clock += 20_000;
+    await assert.rejects(agent.renew(), /Invalid workload JWT key/);
+    assert.equal(state.jwksFetches, 3);
+    assert.equal(await readFile(join(directory, 'identity.jwt'), 'utf8'), before);
+    // The withdrawn key is no longer trusted from the cache.
+    state.signingKid = 'key-a'; state.clock += 30_000;
+    await assert.rejects(agent.renew(), /Invalid workload JWT key/);
+    assert.equal(state.jwksFetches, 4);
+  });
+});
+
+// The agent health check (start period 30 s, interval 10 s, three retries)
+// turns an agent without ready.json UNHEALTHY about 60 s after it starts, and
+// the application starts only once the agent is HEALTHY. Until its first token
+// verifies, the agent may fetch the JWKS on every 10-second renewal retry
+// (never faster), so a JWKS failure at task start leaves it about six attempts.
+test('a JWKS outage at start is retried with each 10-second renewal retry, so the agent becomes ready inside its health window', async () => {
+  await withAgent(async (agent, state, directory) => {
+    state.jwksStatus = 503;
+    await assert.rejects(agent.renew(), /rejected request/);
+    assert.equal(state.jwksFetches, 1);
+    // Never faster than the renewal retry.
+    state.clock += 5_000;
+    await assert.rejects(agent.renew(), /rate limited/);
+    assert.equal(state.jwksFetches, 1);
+    state.clock += 5_000;
+    for (const fetches of [2, 3, 4, 5]) {
+      await assert.rejects(agent.renew(), /rejected request/);
+      assert.equal(state.jwksFetches, fetches);
+      state.clock += 10_000;
+    }
+    await assert.rejects(readFile(join(directory, 'ready.json')), { code: 'ENOENT' });
+    // 50 s after start, still inside the health window, the JWKS answers.
+    state.jwksStatus = 200;
+    await agent.renew();
+    assert.equal(state.jwksFetches, 6);
+    assert.equal(await readyAt(directory), state.clock + 300_000);
+    // Once a token has verified, the 30-second limit applies again.
+    state.signingKid = 'key-b'; state.published = ['key-a', 'key-b']; state.clock += 10_000;
+    await assert.rejects(agent.renew(), /rate limited/);
+    assert.equal(state.jwksFetches, 6);
+    state.clock += 20_000;
+    await agent.renew();
+    assert.equal(state.jwksFetches, 7);
+    assert.equal(await readyAt(directory), state.clock + 300_000);
+  });
+});
+
+test('a cached key that stops verifying is dropped, so the next renewal fetches the JWKS again', async () => {
+  await withAgent(async (agent, state, directory) => {
+    await agent.renew();
+    // The same kid now carries different key material, published by the JWKS.
+    state.replaceKey('key-a'); state.clock += 90_000;
+    await assert.rejects(agent.renew(), /signature is invalid/);
+    assert.equal(state.jwksFetches, 1);
+    state.clock += 10_000;
+    await agent.renew();
+    assert.equal(state.jwksFetches, 2);
+    assert.equal(await readyAt(directory), state.clock + 300_000);
+  });
 });

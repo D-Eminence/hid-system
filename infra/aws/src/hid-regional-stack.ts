@@ -9,10 +9,12 @@ import {
   Stack,
   type StackProps,
   Tags,
+  Token,
 } from 'aws-cdk-lib';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as cloudmap from 'aws-cdk-lib/aws-servicediscovery';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
@@ -27,13 +29,26 @@ import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
-import { StagingWorkloadIdentity } from './staging-workload-identity.js';
-import type { HidEnvironmentConfig } from './config.js';
 import {
+  WorkloadIdentity,
+  workloadIdentityConstructId,
+  workloadIssuerEnvironment,
+} from './workload-identity.js';
+import {
+  type HidEnvironmentConfig,
+  operationalAlarmTopic,
+  operationalAlarmTopicName,
+  vpcDnsResolver,
+  workloadEnabled,
+} from './config.js';
+import {
+  desiredCountDefault,
+  desiredCountMaximum,
   serviceHostLabels,
   tokenRoot,
   validateDatabaseConnectionBudget,
@@ -89,11 +104,32 @@ export class HidRegionalStack extends Stack {
 
   private readonly configuration: HidEnvironmentConfig;
   private readonly parameters: ParameterMap = {};
-  private readonly stagingWorkloadIdentity?: StagingWorkloadIdentity;
+  private readonly workloadIdentity?: WorkloadIdentity;
 
   public constructor(scope: Construct, id: string, props: HidRegionalStackProps) {
     super(scope, id, props);
     this.configuration = props.configuration;
+
+    // D4 (ADR-053): production alarms must reach a person, so production
+    // refuses to synthesize without the operator-created topic's exact ARN.
+    const alarmTopic = operationalAlarmTopic(this.configuration.name, this.configuration.operationalAlarmTopicArn);
+    if (this.configuration.name === 'production' && !alarmTopic) {
+      throw new Error('HID_OPERATIONAL_ALARM_TOPIC_ARN is required in production: every production alarm notifies the '
+        + `operator-created topic ${operationalAlarmTopicName('production')} (D4, ADR-053)`);
+    }
+    if (alarmTopic && !Token.isUnresolved(this.account) && alarmTopic.account !== this.account) {
+      throw new Error(`The operational alarm topic must be in this stack's account ${this.account}; `
+        + `HID_OPERATIONAL_ALARM_TOPIC_ARN names account ${alarmTopic.account}`);
+    }
+    if (alarmTopic && !Token.isUnresolved(this.region) && alarmTopic.region !== this.region) {
+      throw new Error(`The operational alarm topic must be in this stack's region ${this.region}; `
+        + `HID_OPERATIONAL_ALARM_TOPIC_ARN names region ${alarmTopic.region}`);
+    }
+    // CFG-PROD, N1: also for a configuration not built by environmentConfig.
+    if (this.configuration.name === 'production' && this.configuration.qoreIdNinOnlyEnrollmentEnabled) {
+      throw new Error('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production until NIN-only enrollment '
+        + 'proves that the caller holds the registry phone (N1)');
+    }
 
     validateDatabaseConnectionBudget(
       this.configuration.profile,
@@ -349,8 +385,16 @@ export class HidRegionalStack extends Stack {
       `https://${label}.${privateZone.zoneName}`,
     ])) as Partial<Record<WorkloadName, string>>;
 
-    if (this.configuration.name === 'staging') {
-      this.stagingWorkloadIdentity = new StagingWorkloadIdentity(this, 'StagingWorkloadIdentity');
+    // Staging and production carry their own issuer (ADR-047); development
+    // keeps the external issuer, JWKS and subject inputs. Where tasks can run
+    // (NAT gateways exist), the issuer accepts only this VPC's NAT addresses.
+    const issuerEnvironment = workloadIssuerEnvironment(this.configuration.name);
+    if (issuerEnvironment) {
+      this.workloadIdentity = new WorkloadIdentity(this, workloadIdentityConstructId(issuerEnvironment), {
+        environment: issuerEnvironment,
+        logRetention: issuerEnvironment === 'staging' ? logs.RetentionDays.TWO_WEEKS : this.configuration.logRetention,
+        allowedSourceAddresses: this.configuration.natGateways > 0 ? this.natEgressAddresses(vpc) : undefined,
+      });
     }
     const resources = new Map<WorkloadName, RuntimeResource>();
     for (const name of workloadNames) {
@@ -372,11 +416,13 @@ export class HidRegionalStack extends Stack {
       }
     }
 
-    if (this.stagingWorkloadIdentity) {
-      this.stagingWorkloadIdentity.bindCallers(workloadNames.filter(name => Object.keys(workloads[name].tokenFiles).length > 0)
-        .map(name => ({ role: resources.get(name)!.taskDefinition.taskRole, subject: `hid:staging:${name}`,
+    if (this.workloadIdentity) {
+      const identity = this.workloadIdentity;
+      identity.bindCallers(workloadNames.filter(name => Object.keys(workloads[name].tokenFiles).length > 0)
+        .map(name => ({ role: resources.get(name)!.taskDefinition.taskRole, subject: identity.subject(name),
           audiences: this.workloadTokenFiles(name).map(item => item.audience) })));
     }
+    this.assertTokenWriters(resources);
     this.attachBusinessIam(resources, documentKey);
     this.connectRuntimeNetwork(resources, endpointSecurityGroup, internalLoadBalancerSecurityGroup);
     const internalTargetGroups = internalLoadBalancer && internalListener
@@ -419,6 +465,34 @@ export class HidRegionalStack extends Stack {
       value: Fn.join(',', vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds),
     });
 
+    if (alarmTopic) this.routeAlarmsToOperationalTopic();
+  }
+
+  /**
+   * D4 (ADR-053): every alarm in this stack, the workload issuer's included,
+   * notifies the operator-created topic on ALARM and on OK. The ARN is built
+   * from the deploying account, region and partition, so an alarm can only
+   * reach this environment's own hid-<env>-operational-alerts topic; the
+   * reviewed HID_OPERATIONAL_ALARM_TOPIC_ARN is checked against a bound
+   * account and region at synth, and the production preflight checks that the
+   * topic exists, uses a customer-managed KMS key (CloudWatch cannot publish
+   * through the AWS-managed SNS key) and has a confirmed subscription.
+   */
+  private routeAlarmsToOperationalTopic(): void {
+    const topicArn = this.formatArn({
+      service: 'sns', resource: operationalAlarmTopicName(this.configuration.name), arnFormat: ArnFormat.NO_RESOURCE_NAME,
+    });
+    const action = new cloudwatchActions.SnsAction(sns.Topic.fromTopicArn(this, 'OperationalAlarmTopic', topicArn));
+    for (const child of this.node.findAll()) {
+      if (child instanceof cloudwatch.Alarm) {
+        child.addAlarmAction(action);
+        child.addOkAction(action);
+      }
+    }
+    new CfnOutput(this, 'OperationalAlarmTopicArn', {
+      value: topicArn,
+      description: 'The SNS topic every alarm of this stack notifies; operator-created, customer-managed KMS key (ADR-053)',
+    });
   }
 
   private addParameterContract(): void {
@@ -437,15 +511,15 @@ export class HidRegionalStack extends Stack {
       ? 'Base64-encoded public root certificate matching the verified staging region and RDS CA; maximum 4096 characters, not the global bundle'
       : 'Base64-encoded current AWS RDS trust bundle; public certificate material, not a secret');
     if (this.configuration.name === 'staging') rdsCa.maxLength = 4096;
-    if (this.configuration.name !== 'staging') {
-    this.requiredParameter('WorkloadIssuerUrl', 'Approved HTTPS workload issuer; external prerequisite', '^https://');
-    this.requiredParameter('WorkloadJwksUrl', 'Approved HTTPS workload JWKS endpoint; external prerequisite', '^https://');
-    this.requiredParameter('EhrWorkloadSubject', 'Exact deployment subject for EHR API');
-    this.requiredParameter('LabWorkloadSubject', 'Exact deployment subject for Lab API');
-    this.requiredParameter('PharmacyWorkloadSubject', 'Exact deployment subject for Pharmacy API');
-    this.requiredParameter('OcrWorkloadSubject', 'Exact deployment subject for OCR API');
-    this.requiredParameter('OutreachWorkloadSubject', 'Exact deployment subject for Outreach API');
-    this.requiredParameter('IdentityWorkloadSubject', 'Exact deployment subject for Identity API');
+    if (!workloadIssuerEnvironment(this.configuration.name)) {
+      this.requiredParameter('WorkloadIssuerUrl', 'Approved HTTPS workload issuer; external prerequisite', '^https://');
+      this.requiredParameter('WorkloadJwksUrl', 'Approved HTTPS workload JWKS endpoint; external prerequisite', '^https://');
+      this.requiredParameter('EhrWorkloadSubject', 'Exact deployment subject for EHR API');
+      this.requiredParameter('LabWorkloadSubject', 'Exact deployment subject for Lab API');
+      this.requiredParameter('PharmacyWorkloadSubject', 'Exact deployment subject for Pharmacy API');
+      this.requiredParameter('OcrWorkloadSubject', 'Exact deployment subject for OCR API');
+      this.requiredParameter('OutreachWorkloadSubject', 'Exact deployment subject for Outreach API');
+      this.requiredParameter('IdentityWorkloadSubject', 'Exact deployment subject for Identity API');
     }
     this.requiredParameter('AuthSecretArn', 'Secrets Manager JSON secret containing authSigningSecret and authLoginPepper');
     // ECS resolves every referenced JSON field before an Identity task starts:
@@ -462,9 +536,12 @@ export class HidRegionalStack extends Stack {
       this.requiredParameter('QoreIdCredentialsSecretArn',
         'Secrets Manager JSON secret containing clientId and secret for the server-only QoreID OAuth client');
     }
+    const novu = this.configuration.notificationWorkerEnabled;
     this.requiredParameter('NotificationProviderSecretArn', this.configuration.name === 'staging'
-      ? 'Secrets Manager JSON secret containing sesFromAddress and novuApiKey for staging email OTP and ordinary notifications'
-      : 'Secrets Manager JSON secret containing Novu, SES sender, Termii, Meta, and Brevo configuration');
+      ? (novu ? 'Secrets Manager JSON secret containing sesFromAddress and novuApiKey for staging email OTP and ordinary notifications'
+        : 'Secrets Manager JSON secret containing sesFromAddress for staging email OTP')
+      : 'Secrets Manager JSON secret holding exactly the otp-email-sms fields sesFromAddress, termiiBaseUrl, termiiApiKey '
+        + `and termiiSenderId (email OTP through SES, SMS OTP through Termii)${novu ? ', plus novuApiKey for the notification worker' : ''}`);
     if (this.configuration.name === 'staging') {
       const novuApiUrl = this.requiredParameter('StagingNovuApiUrl',
         'API endpoint of the confirmed isolated Novu staging environment; no implicit region selection');
@@ -474,12 +551,26 @@ export class HidRegionalStack extends Stack {
       for (const name of workloadNames) {
         const id = pascal(name);
         const scale = workloadScale(this.configuration.profile, name);
-        this.numberParameter(`${id}DesiredCount`,
-          `${name} task count after prerequisites pass; live minimum ${scale.minimumLiveTasks}, recommended ${scale.recommendedTasks}`,
-          scale.recommendedTasks, scale.normalMaxTasks);
-        this.boundedNumberParameter(`${id}ScalingCeiling`,
-          `${name} autoscaling ceiling; values above ${scale.normalMaxTasks} require externally recorded emergency approval`,
-          scale.normalMaxTasks, scale.normalMaxTasks, scale.reviewedEmergencyMaxTasks);
+        const counts = `live minimum ${scale.minimumLiveTasks}, recommended ${scale.recommendedTasks}`;
+        // INFRA-COUNT: production counts default to zero and are raised only
+        // through the reviewed parameter file (I6); a disabled module cannot
+        // be scaled at all (D17).
+        this.numberParameter(`${id}DesiredCount`, !workloadEnabled(this.configuration, name)
+          ? `${name} is outside the launch module set (D17): fixed at 0 tasks with no autoscaling until a recorded `
+            + `decision enables the module; ${counts} once enabled`
+          : this.configuration.name === 'production'
+            ? `${name} task count after prerequisites pass; ${counts}; defaults to 0 and is raised only through the `
+              + 'reviewed parameter file (I6)'
+            : `${name} task count after prerequisites pass; ${counts}`,
+        desiredCountDefault(this.configuration, name), desiredCountMaximum(this.configuration, name));
+        if (workloadEnabled(this.configuration, name)) {
+          this.boundedNumberParameter(`${id}ScalingCeiling`,
+            `${name} autoscaling ceiling; values above ${scale.normalMaxTasks} require externally recorded emergency approval`,
+            scale.normalMaxTasks, scale.normalMaxTasks, scale.reviewedEmergencyMaxTasks);
+        } else {
+          this.boundedNumberParameter(`${id}ScalingCeiling`,
+            `${name} is outside the launch module set (D17): its scaling target is pinned at 0 tasks`, 0, 0, 0);
+        }
       }
     }
 
@@ -679,17 +770,23 @@ export class HidRegionalStack extends Stack {
     if (Object.keys(definition.tokenFiles).length > 0) {
       taskDefinition.addVolume({ name: 'workload-tokens' });
       container.addMountPoints({ containerPath: tokenRoot, sourceVolume: 'workload-tokens', readOnly: true });
-      if (this.stagingWorkloadIdentity) {
+      if (this.workloadIdentity) {
         const agent = taskDefinition.addContainer('WorkloadTokenAgent', {
           containerName: 'workload-token-agent',
           image: ecs.ContainerImage.fromRegistry(this.parameter('IdentityApiImageUri').valueAsString),
           command: ['/app/services/workload-token-agent/src/main.mjs'],
-          user: '65532:65532', readonlyRootFilesystem: true, essential: true, memoryReservationMiB: 64,
+          // D2 (ADR-047): not essential, so an issuer outage stops only this
+          // task's service-to-service calls, which fail closed, and not the
+          // task. ECS restarts an agent that exits after running at least
+          // 60 s; one that exits sooner is not restarted, and the task runs
+          // on without a token writer until it is replaced.
+          user: '65532:65532', readonlyRootFilesystem: true, essential: false, memoryReservationMiB: 64,
+          enableRestartPolicy: true, restartAttemptPeriod: Duration.seconds(60),
           environment: {
-            HID_DEPLOYMENT_ENV: 'staging', AWS_REGION: Aws.REGION,
-            WORKLOAD_ISSUER_URL: this.stagingWorkloadIdentity.issuerUrl,
-            WORKLOAD_JWKS_URL: this.stagingWorkloadIdentity.jwksUrl,
-            WORKLOAD_SUBJECT: `hid:staging:${definition.name}`,
+            HID_DEPLOYMENT_ENV: this.workloadIdentity.environment, AWS_REGION: Aws.REGION,
+            WORKLOAD_ISSUER_URL: this.workloadIdentity.issuerUrl,
+            WORKLOAD_JWKS_URL: this.workloadIdentity.jwksUrl,
+            WORKLOAD_SUBJECT: this.workloadIdentity.subject(definition.name),
             WORKLOAD_TOKEN_DIRECTORY: tokenRoot,
             WORKLOAD_TOKEN_FILES_JSON: JSON.stringify(this.workloadTokenFiles(definition.name)),
           },
@@ -740,6 +837,40 @@ export class HidRegionalStack extends Stack {
     return { definition, taskDefinition, service, container, logGroup, securityGroup: input.securityGroup };
   }
 
+  /**
+   * The /32 Elastic IP of each NAT gateway of this VPC. CDK's NAT gateway
+   * provider allocates one AWS::EC2::EIP per gateway; synthesis fails if any
+   * gateway uses an address this stack does not own.
+   */
+  private natEgressAddresses(vpc: ec2.Vpc): string[] {
+    const eips = vpc.node.findAll().filter((child): child is ec2.CfnEIP => child instanceof ec2.CfnEIP);
+    const gateways = vpc.node.findAll().filter((child): child is ec2.CfnNatGateway => child instanceof ec2.CfnNatGateway);
+    const used = gateways.map(gateway => eips.find(eip => gateway.allocationId === eip.attrAllocationId));
+    if (gateways.length !== this.configuration.natGateways || used.some(eip => !eip)
+        || new Set(used).size !== gateways.length) {
+      throw new Error('Every NAT gateway must use exactly one Elastic IP allocated by this VPC');
+    }
+    return used.map(eip => `${eip!.attrPublicIp}/32`);
+  }
+
+  /**
+   * A token volume is task-local, so only a container of the same task can
+   * write it. Outside development each one needs exactly one writer, the token
+   * agent, or every service-to-service call of that task fails closed.
+   */
+  private assertTokenWriters(resources: Map<WorkloadName, RuntimeResource>): void {
+    if (this.configuration.name === 'development') return;
+    for (const [name, resource] of resources) {
+      if (Object.keys(workloads[name].tokenFiles).length === 0) continue;
+      const agent = resource.taskDefinition.findContainer('workload-token-agent');
+      const mounts = (container?: ecs.ContainerDefinition) => (container?.mountPoints ?? [])
+        .filter(mount => mount.sourceVolume === 'workload-tokens').map(mount => mount.readOnly);
+      if (JSON.stringify(mounts(resource.container)) !== '[true]' || JSON.stringify(mounts(agent)) !== '[false]') {
+        throw new Error(`${name} must have exactly one workload-token-agent writer for its read-only token volume`);
+      }
+    }
+  }
+
   private workloadTokenFiles(name: WorkloadName): Array<{ audience: string; file: string }> {
     return Object.values(workloads[name].tokenFiles).map(path => {
       const file = path.slice(path.lastIndexOf('/') + 1);
@@ -762,14 +893,14 @@ export class HidRegionalStack extends Stack {
         .map((subdomain) => `https://${subdomain}.${this.parameter('RootDomainName').valueAsString}`).join(','),
       TRUST_PROXY_CIDRS: this.configuration.vpcCidr,
     };
-    const issuer = this.stagingWorkloadIdentity?.issuerUrl ?? this.parameter('WorkloadIssuerUrl').valueAsString;
-    const jwks = this.stagingWorkloadIdentity?.jwksUrl ?? this.parameter('WorkloadJwksUrl').valueAsString;
-    const subject = (name: string, parameter: string) => this.stagingWorkloadIdentity
-      ? `hid:staging:${name}-api` : this.parameter(parameter).valueAsString;
+    const issuer = this.workloadIdentity?.issuerUrl ?? this.parameter('WorkloadIssuerUrl').valueAsString;
+    const jwks = this.workloadIdentity?.jwksUrl ?? this.parameter('WorkloadJwksUrl').valueAsString;
+    const subject = (caller: WorkloadName, parameter: string) => this.workloadIdentity?.subject(caller)
+      ?? this.parameter(parameter).valueAsString;
     const subjects = {
-      identity: subject('identity', 'IdentityWorkloadSubject'), ehr: subject('ehr', 'EhrWorkloadSubject'),
-      lab: subject('lab', 'LabWorkloadSubject'), pharmacy: subject('pharmacy', 'PharmacyWorkloadSubject'),
-      ocr: subject('ocr', 'OcrWorkloadSubject'), outreach: subject('outreach', 'OutreachWorkloadSubject'),
+      identity: subject('identity-api', 'IdentityWorkloadSubject'), ehr: subject('ehr-api', 'EhrWorkloadSubject'),
+      lab: subject('lab-api', 'LabWorkloadSubject'), pharmacy: subject('pharmacy-api', 'PharmacyWorkloadSubject'),
+      ocr: subject('ocr-api', 'OcrWorkloadSubject'), outreach: subject('outreach-api', 'OutreachWorkloadSubject'),
     };
     const base = { ...workloads[name].tokenFiles };
     switch (name) {
@@ -783,6 +914,7 @@ export class HidRegionalStack extends Stack {
           NOTIFICATION_API_URL: urls['notification-api']!, NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
           NIN_PROVIDER_MODE: this.configuration.name === 'staging' ? 'deferred' : 'unavailable', NIN_KEY_VERSION: 'aws-v1', IDENTITY_SERVICE_IDENTITY_MODE: 'jwt',
           QOREID_ENABLED: this.configuration.qoreIdEnabled ? 'true' : 'false',
+          QOREID_NIN_ONLY_ENROLLMENT_ENABLED: this.configuration.qoreIdNinOnlyEnrollmentEnabled ? 'true' : 'false',
           QOREID_BASE_URL: 'https://api.qoreid.com', QOREID_TIMEOUT_MS: '5000', QOREID_MAX_RETRIES: '0',
           WORKLOAD_ISSUER_URL: issuer, WORKLOAD_JWKS_URL: jwks, WORKLOAD_AUDIENCE: 'hid-identity-api',
           IDENTITY_EHR_CALLER_SUBJECT: subjects.ehr, IDENTITY_LAB_CALLER_SUBJECT: subjects.lab,
@@ -822,9 +954,10 @@ export class HidRegionalStack extends Stack {
           OUTREACH_IDENTITY_SERVICE_IDENTITY_MODE: 'jwt' };
       case 'notification-api':
         return { NODE_ENV: 'production', PORT: '3007', NOTIFICATION_PROVIDER_MODE: 'live',
-          ...(this.configuration.name === 'staging' ? {
-            HID_DEPLOYMENT_ENV: 'staging', NOTIFICATION_DELIVERY_PROFILE: 'email-only',
-          } : {}),
+          // NOTIF-PROD: launch OTP is email through SES and SMS through
+          // Termii; WhatsApp, Meta and Brevo are not provisioned.
+          HID_DEPLOYMENT_ENV: this.configuration.name,
+          NOTIFICATION_DELIVERY_PROFILE: this.configuration.name === 'staging' ? 'email-only' : 'otp-email-sms',
           NOTIFICATION_WORKLOAD_IDENTITY_MODE: 'jwt', WORKLOAD_ISSUER_URL: issuer,
           WORKLOAD_JWKS_URL: jwks, WORKLOAD_AUDIENCE: 'hid-notification-api',
           IDENTITY_CALLER_SUBJECT: subjects.identity, AWS_REGION: Aws.REGION };
@@ -853,7 +986,16 @@ export class HidRegionalStack extends Stack {
         const namespace = `services.${this.configuration.name}.hid`;
         return { IDENTITY_API_UPSTREAM: `http://identity-api.${namespace}:3001`, EHR_API_UPSTREAM: `http://ehr-api.${namespace}:3002`,
           LAB_API_UPSTREAM: `http://lab-api.${namespace}:3003`, PHARMACY_API_UPSTREAM: `http://pharmacy-api.${namespace}:3004`,
-          OCR_API_UPSTREAM: `http://ocr-api.${namespace}:3005`, OUTREACH_API_UPSTREAM: `http://outreach-api.${namespace}:3006` };
+          OCR_API_UPSTREAM: `http://ocr-api.${namespace}:3005`, OUTREACH_API_UPSTREAM: `http://outreach-api.${namespace}:3006`,
+          // The Cloud Map names are resolved per request through the VPC resolver.
+          GATEWAY_DNS_RESOLVER: vpcDnsResolver(this.configuration.vpcCidr),
+          // X-Real-IP is trusted only from the VPC (the public ALB), the
+          // same range the backends trust for X-Forwarded-For.
+          VPC_CIDR: this.configuration.vpcCidr,
+          // Staging and production sit behind the Cloudflare Worker that sets
+          // X-Real-IP; an API request without it is refused.
+          HID_REQUIRE_CLIENT_IP: this.configuration.name === 'development' ? 'false' : 'true',
+          HID_ENABLED_API_ROUTES: this.configuration.enabledApiRoutes.join(',') };
       }
     }
   }
@@ -905,19 +1047,19 @@ export class HidRegionalStack extends Stack {
       output.WORKLOAD_DATABASE_URL = ecs.Secret.fromSecretsManager(secrets[`${name}Database`]!, 'scannerUrl');
     }
     if (name === 'notification-api') {
+      // Exactly the fields the delivery profile reads: email-only (staging)
+      // or otp-email-sms (SES and Termii). The production preflight checks the
+      // secret holds exactly these.
       const providerFields = this.configuration.name === 'staging' ? { SES_FROM_ADDRESS: 'sesFromAddress' } : {
         SES_FROM_ADDRESS: 'sesFromAddress', TERMII_BASE_URL: 'termiiBaseUrl',
         TERMII_API_KEY: 'termiiApiKey', TERMII_SENDER_ID: 'termiiSenderId',
-        META_PHONE_NUMBER_ID: 'metaPhoneNumberId', META_ACCESS_TOKEN: 'metaAccessToken',
-        META_OTP_TEMPLATE_NAME: 'metaOtpTemplateName', BREVO_API_KEY: 'brevoApiKey',
-        BREVO_EMAIL_FROM: 'brevoEmailFrom', BREVO_SMS_SENDER: 'brevoSmsSender',
-        BREVO_WHATSAPP_SENDER: 'brevoWhatsAppSender',
       };
       for (const [environmentName, field] of Object.entries(providerFields)) {
         output[environmentName] = ecs.Secret.fromSecretsManager(secrets.notificationProvider!, field);
       }
     }
-    if (name === 'notification-worker') {
+    // A disabled worker never starts and reads nothing from the provider secret.
+    if (name === 'notification-worker' && this.configuration.notificationWorkerEnabled) {
       output.NOVU_API_KEY = ecs.Secret.fromSecretsManager(secrets.notificationProvider!, 'novuApiKey');
     }
     return output;
@@ -1091,6 +1233,10 @@ export class HidRegionalStack extends Stack {
         minCapacity: desiredCount,
         maxCapacity: this.parameter(`${id}ScalingCeiling`).valueAsNumber,
       });
+      // A disabled module's target is pinned at 0..0 by its parameters and has
+      // no scaling policy, so nothing can start it, not even a queue backlog
+      // (D17).
+      if (!workloadEnabled(this.configuration, name)) continue;
       const cooldowns = {
         scaleInCooldown: Duration.seconds(definition.scaleInCooldownSeconds),
         scaleOutCooldown: Duration.seconds(definition.scaleOutCooldownSeconds),
@@ -1312,8 +1458,13 @@ export class HidRegionalStack extends Stack {
 
   private createRuntimeAlarms(resources: Map<WorkloadName, RuntimeResource>): void {
     if (this.configuration.profile === 'sleep') return;
-    for (const name of ['gateway', 'identity-api', 'ehr-api', 'ocr-worker',
-      'notification-api', 'notification-worker', 'event-dispatcher'] as const) {
+    // A disabled module's tasks never run, so none of its alarms is created
+    // (D17): a running-task alarm would otherwise stay in ALARM for good.
+    const enabled = (name: WorkloadName) => workloadEnabled(this.configuration, name);
+    const ocrEnabled = enabled('ocr-worker');
+    const notificationWorkerEnabled = enabled('notification-worker');
+    for (const name of (['gateway', 'identity-api', 'ehr-api', 'ocr-worker',
+      'notification-api', 'notification-worker', 'event-dispatcher'] as const).filter(enabled)) {
       const resource = resources.get(name)!;
       const metric = new cloudwatch.Metric({
         namespace: 'ECS/ContainerInsights',
@@ -1357,14 +1508,16 @@ export class HidRegionalStack extends Stack {
       metricValue: '1',
       defaultValue: 0,
     });
-    const ocrFailures = new cloudwatch.Alarm(this, 'OcrWorkerFailureAlarm', {
-      alarmDescription: 'OCR worker loop failures exceed the bounded threshold; no OCR text is emitted',
-      metric: ocrFailureMetric.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
-      threshold: 3,
-      evaluationPeriods: 2,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-    this.tagService(ocrFailures, 'ocr-worker');
+    if (ocrEnabled) {
+      const ocrFailures = new cloudwatch.Alarm(this, 'OcrWorkerFailureAlarm', {
+        alarmDescription: 'OCR worker loop failures exceed the bounded threshold; no OCR text is emitted',
+        metric: ocrFailureMetric.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+        threshold: 3,
+        evaluationPeriods: 2,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      this.tagService(ocrFailures, 'ocr-worker');
+    }
 
     const structuredLogMetric = (id: string, logGroup: logs.ILogGroup, event: string,
       namespace: string, metricName: string, metricValue: string): logs.MetricFilter =>
@@ -1403,6 +1556,105 @@ export class HidRegionalStack extends Stack {
     structuredLogMetric('DispatcherDrainRateMetric', dispatcherLogGroup, 'event_dispatcher.backlog',
       'HID/EventDelivery', 'DrainRate', '$.drainRate');
 
+    this.createDeliveryAlarms(resources);
+
+    if (notificationWorkerEnabled) this.createNotificationQueueAlarms();
+    for (const [id, namespace, metricName, threshold, service] of [
+      ['OcrQueueAgeAlarm', 'HID/OCR', 'OldestQueueAgeSeconds', 300, 'ocr-worker'],
+      ['OcrDrainRateAlarm', 'HID/OCR', 'ClaimThroughput', 1, 'ocr-worker'],
+      ['DispatcherOutboxAgeAlarm', 'HID/EventDelivery', 'OldestPendingAgeSeconds', 300, 'event-dispatcher'],
+      ['DispatcherDrainRateAlarm', 'HID/EventDelivery', 'DrainRate', 1, 'event-dispatcher'],
+    ] as const) {
+      if (service === 'ocr-worker' && !ocrEnabled) continue;
+      const alarm = new cloudwatch.Alarm(this, id, {
+        alarmDescription: `${service} PHI-free backlog/drain boundary requires operator review`,
+        metric: this.operationalMetric(namespace, metricName),
+        threshold,
+        comparisonOperator: metricName.includes('Age')
+          ? cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD
+          : cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        evaluationPeriods: 3,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      this.tagService(alarm, service);
+    }
+
+    for (const [name, resource] of [...resources].filter(([name]) => enabled(name))) {
+      const alarm = new cloudwatch.Alarm(this, `${pascal(name)}LogVolumeAlarm`, {
+        alarmDescription: `${name} log ingestion volume requires scan/retention review; logs must remain PHI-free`,
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Logs', metricName: 'IncomingBytes', statistic: 'Sum',
+          dimensionsMap: { LogGroupName: resource.logGroup.logGroupName }, period: Duration.minutes(5),
+        }),
+        threshold: this.configuration.name === 'production' ? 2_000_000_000 : 500_000_000,
+        evaluationPeriods: 2,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      this.tagService(alarm, name);
+    }
+  }
+
+  /**
+   * D4 and NOTIF-PROD: an alarm on token renewal failures and on definitive
+   * OTP delivery failures. Both count PHI-free log lines only.
+   */
+  private createDeliveryAlarms(resources: Map<WorkloadName, RuntimeResource>): void {
+    // The token agent writes one plain-text stderr line per failed renewal
+    // (services/workload-token-agent/src/main.mjs) and never its error. Each
+    // enabled token task's log group feeds one aggregate metric; development
+    // has no agent.
+    if (this.workloadIdentity) {
+      const renewalPhrase = 'Workload token renewal unavailable';
+      const filters = workloadNames
+        .filter(name => Object.keys(workloads[name].tokenFiles).length > 0 && workloadEnabled(this.configuration, name))
+        .map(name => new logs.MetricFilter(this, `${pascal(name)}TokenRenewalUnavailableMetric`, {
+          logGroup: resources.get(name)!.logGroup,
+          filterPattern: logs.FilterPattern.allTerms(renewalPhrase),
+          metricNamespace: 'HID/WorkloadIdentity',
+          metricName: 'TokenRenewalUnavailable',
+          metricValue: '1',
+          defaultValue: 0,
+        }));
+      if (filters.length > 0) {
+        const renewal = new cloudwatch.Alarm(this, 'WorkloadTokenRenewalAlarm', {
+          alarmDescription: 'Workload token renewal is failing; service-to-service calls fail closed once tokens expire '
+            + '(about 210 s of slack). Check the issuer alarms and the token-bearing tasks (runbook section 7)',
+          metric: filters[0]!.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+          threshold: 3,
+          comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+          evaluationPeriods: 1,
+          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        });
+        this.tagService(renewal, 'workload-token-agent');
+      }
+    }
+    // notification-api writes one notification.otp.outcome line per OTP send
+    // with channel, purpose, outcome, provider and a correlation id; never the
+    // recipient, the code or the message.
+    const otpFailures = new logs.MetricFilter(this, 'NotificationOtpDefinitiveFailureMetric', {
+      logGroup: resources.get('notification-api')!.logGroup,
+      filterPattern: logs.FilterPattern.all(
+        logs.FilterPattern.stringValue('$.event', '=', 'notification.otp.outcome'),
+        logs.FilterPattern.stringValue('$.outcome', '=', 'definitive_failure'),
+      ),
+      metricNamespace: 'HID/Notification',
+      metricName: 'OtpDefinitiveFailures',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const otp = new cloudwatch.Alarm(this, 'NotificationOtpDefinitiveFailureAlarm', {
+      alarmDescription: 'OTP deliveries are failing definitively (provider refusal or a refused send); enrollment and '
+        + 'recovery codes are not reaching people. Correlate by the logged correlation id',
+      metric: otpFailures.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    this.tagService(otp, 'notification-api');
+  }
+
+  private createNotificationQueueAlarms(): void {
     const notificationAge = new cloudwatch.Alarm(this, 'NotificationQueueAgeAlarm', {
       alarmDescription: 'Ordinary notification queue oldest message age exceeds the drain objective',
       metric: this.notificationQueue.metricApproximateAgeOfOldestMessage({ period: Duration.minutes(1) }),
@@ -1438,38 +1690,6 @@ export class HidRegionalStack extends Stack {
     });
     this.tagService(notificationBacklog, 'notification-worker');
     this.tagService(notificationDrain, 'notification-worker');
-    for (const [id, namespace, metricName, threshold, service] of [
-      ['OcrQueueAgeAlarm', 'HID/OCR', 'OldestQueueAgeSeconds', 300, 'ocr-worker'],
-      ['OcrDrainRateAlarm', 'HID/OCR', 'ClaimThroughput', 1, 'ocr-worker'],
-      ['DispatcherOutboxAgeAlarm', 'HID/EventDelivery', 'OldestPendingAgeSeconds', 300, 'event-dispatcher'],
-      ['DispatcherDrainRateAlarm', 'HID/EventDelivery', 'DrainRate', 1, 'event-dispatcher'],
-    ] as const) {
-      const alarm = new cloudwatch.Alarm(this, id, {
-        alarmDescription: `${service} PHI-free backlog/drain boundary requires operator review`,
-        metric: this.operationalMetric(namespace, metricName),
-        threshold,
-        comparisonOperator: metricName.includes('Age')
-          ? cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD
-          : cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
-        evaluationPeriods: 3,
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      });
-      this.tagService(alarm, service);
-    }
-
-    for (const [name, resource] of resources) {
-      const alarm = new cloudwatch.Alarm(this, `${pascal(name)}LogVolumeAlarm`, {
-        alarmDescription: `${name} log ingestion volume requires scan/retention review; logs must remain PHI-free`,
-        metric: new cloudwatch.Metric({
-          namespace: 'AWS/Logs', metricName: 'IncomingBytes', statistic: 'Sum',
-          dimensionsMap: { LogGroupName: resource.logGroup.logGroupName }, period: Duration.minutes(5),
-        }),
-        threshold: this.configuration.name === 'production' ? 2_000_000_000 : 500_000_000,
-        evaluationPeriods: 2,
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      });
-      this.tagService(alarm, name);
-    }
   }
 
   private tagService(resource: Construct, service: string): void {

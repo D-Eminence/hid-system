@@ -72,22 +72,26 @@ describe('OcrInternalCallerGuard', () => {
       EHR_OCR_CALLER_SUBJECT: 'workload:ocr-api',
     });
     jest.mocked(jwtVerify).mockResolvedValue({
-      payload: { sub: 'workload:ocr-api' },
-      protectedHeader: { alg: 'RS256' },
+      payload: { sub: 'workload:ocr-api', token_use: 'workload' },
+      protectedHeader: { alg: 'ES256' },
     } as never);
     const guard = new OcrInternalCallerGuard();
     await expect(guard.canActivate(context({
       'x-hid-internal-caller': 'ocr-api',
       'x-hid-service-authorization': 'Bearer signed-workload-token',
     }))).resolves.toBe(true);
-    expect(jwtVerify).toHaveBeenCalledWith('signed-workload-token', 'jwks', expect.objectContaining({
+    expect(jwtVerify).toHaveBeenCalledWith('signed-workload-token', 'jwks', {
       issuer: 'https://issuer.example.test',
       audience: 'hid-ehr-api',
-    }));
+      algorithms: ['ES256'],
+      requiredClaims: ['exp', 'iat'],
+      maxTokenAge: 300,
+      clockTolerance: 5,
+    });
 
     jest.mocked(jwtVerify).mockResolvedValueOnce({
-      payload: { sub: 'workload:lab-api' },
-      protectedHeader: { alg: 'RS256' },
+      payload: { sub: 'workload:lab-api', token_use: 'workload' },
+      protectedHeader: { alg: 'ES256' },
     } as never);
     await expect(guard.canActivate(context({
       'x-hid-internal-caller': 'ocr-api',
@@ -114,7 +118,7 @@ describe('OcrInternalCallerGuard', () => {
     let created = 0;
     jest.mocked(createRemoteJWKSet).mockImplementation(() => `jwks-${++created}` as never);
     jest.mocked(jwtVerify).mockResolvedValue({
-      payload: { sub: 'workload:ocr-api' },
+      payload: { sub: 'workload:ocr-api', token_use: 'workload' },
       protectedHeader: { alg: 'ES256' },
     } as never);
     const guard = new OcrInternalCallerGuard();

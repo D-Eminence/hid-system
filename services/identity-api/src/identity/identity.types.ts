@@ -42,7 +42,13 @@ export interface ConsentStatus {
 }
 
 export interface IdentityProvider {
+  /** The active patient with this exact HID that the caller may read (row-level security), or null. */
   lookupExactHid(hid: string, context: DataAccessContext): Promise<IdentityPatient | null>;
+  /**
+   * For the audit of a refused lookup only: the active patient this exact HID
+   * names, whether or not the caller may read it (0086). Never returned by the API.
+   */
+  lookupAuditSubject(hid: string, context: DataAccessContext): Promise<string | null>;
   authorize(request: AuthorizationRequest): Promise<AuthorizationDecision>;
   consentStatus(patientId: string, purpose: PurposeOfUse, context: DataAccessContext): Promise<ConsentStatus>;
 }

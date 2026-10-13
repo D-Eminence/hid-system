@@ -1,0 +1,55 @@
+{
+  "schema_version": "hid.cloudflare.launch-deployment/v1",
+  "decision": "ADR-052: Health-id apps/patient-web is the single launch frontend for www, staging and admin.*; product hosts for deferred modules are not deployed (launch module set D17)",
+  "frontend_artifact": {
+    "source": "health-id-patient-web",
+    "repository": "D-Eminence/Health-id",
+    "application": "apps/patient-web",
+    "build_command": "npm ci && npm run build:patient-web",
+    "build_output": "apps/patient-web/dist",
+    "stage_command": "node infra/cloudflare/scripts/stage-health-id-build.mjs --worker <worker> --environment <environment> --build <Health-id apps/patient-web/dist> --source-commit <40-hex Health-id commit>"
+  },
+  "api_route_closure": {
+    "mechanism": "gateway HID_ENABLED_API_ROUTES",
+    "launch_modules": ["identity", "ehr"],
+    "reference": "D-Eminence/hid-system#65; infra/aws/src/config.ts launchApiRoutes; ADR-033 addendum",
+    "note": "Every deployed Worker proxies all of /api/v1, so not deploying a product host does not close its API; the gateway answers 404 API_ROUTE_NOT_FOUND for a module outside the enabled list."
+  },
+  "environments": {
+    "staging": {
+      "deploy": [
+        { "worker": "hid-web", "host": "staging.healthidentitydirectory.com", "assets": "health-id-patient-web", "proxies_api": true },
+        { "worker": "hid-admin", "host": "admin.staging.healthidentitydirectory.com", "assets": "health-id-patient-web", "proxies_api": true }
+      ],
+      "not_deployed": [
+        { "worker": "hid-ehr", "reason": "Serves hid-system's legacy apps/ehr build. The EHR API is on at launch; clinicians use the Health-id provider workspace on the staging host. Serving any build on ehr.* needs its own decision." },
+        { "worker": "hid-lab", "reason": "Lab is off at launch (D17)." },
+        { "worker": "hid-pharmacy", "reason": "Pharmacy is off at launch (D17)." },
+        { "worker": "hid-ocr", "reason": "OCR (Migrate) is off at launch (D17)." },
+        { "worker": "hid-outreach", "reason": "Outreach is off at launch (D17)." },
+        { "worker": "hid-ocr-redirect", "reason": "Redirects the old OCR host to the Migrate host, which is not deployed (D17)." }
+      ],
+      "separately_governed": [
+        { "worker": "hid-tuf-staging", "reason": "TUF release repository; published only by the protected TUF publication workflow, not by a frontend deployment." }
+      ]
+    },
+    "production": {
+      "deploy": [
+        { "worker": "hid-web", "host": "www.healthidentitydirectory.com", "assets": "health-id-patient-web", "proxies_api": true },
+        { "worker": "hid-admin", "host": "admin.healthidentitydirectory.com", "assets": "health-id-patient-web", "proxies_api": true },
+        { "worker": "hid-apex-redirect", "host": "healthidentitydirectory.com", "assets": null, "proxies_api": false }
+      ],
+      "not_deployed": [
+        { "worker": "hid-ehr", "reason": "Serves hid-system's legacy apps/ehr build. The EHR API is on at launch; clinicians use the Health-id provider workspace on www. Serving any build on ehr.* needs its own decision." },
+        { "worker": "hid-lab", "reason": "Lab is off at launch (D17)." },
+        { "worker": "hid-pharmacy", "reason": "Pharmacy is off at launch (D17)." },
+        { "worker": "hid-ocr", "reason": "OCR (Migrate) is off at launch (D17)." },
+        { "worker": "hid-outreach", "reason": "Outreach is off at launch (D17)." },
+        { "worker": "hid-ocr-redirect", "reason": "Redirects the old OCR host to the Migrate host, which is not deployed (D17)." }
+      ],
+      "separately_governed": [
+        { "worker": "hid-tuf-production", "reason": "TUF release repository; published only by the protected TUF publication workflow, not by a frontend deployment." }
+      ]
+    }
+  }
+}

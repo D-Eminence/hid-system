@@ -72,6 +72,10 @@ server-observed client network (IPv4 address or IPv6 /64; 5 an hour, 15 a day)
 and the application's existing daily `application_cac` target limit (3, shared
 with the reviewer path). A refusal changes no counter; every decision is
 audited. Reviewer `application_cac` quotas are unchanged.
+Migration `0085_public_enrollment_windows_and_nin_lookup_quota.sql` does the
+same for the accountless QoreID NIN lookup of public patient enrollment
+(`platform.consume_public_patient_nin_quota`; "Public enrollment windows and
+NIN lookup quota (0085)" below).
 Migration `0050_patient_nin_evidence_binding.sql` removes the unbound
 five-argument patient evidence command. A verified result now requires the
 submitted NIN's keyed lookup HMAC to match an existing verified, unrevoked NIN
@@ -192,6 +196,7 @@ The reviewed role model is:
 | `hid_event_dispatcher` | Event transport command surface | None | No direct table access; executes only lease-bound claim/result/status functions. |
 | `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. |
 | `hid_ocr_queue_metrics` | Technical security-definer owner | None | Never inherited; owns `ocr.worker_queue_metrics()` and reads only `ocr.jobs.status` and `queued_at` through one exact RLS policy (0075). |
+| `hid_platform_control_reader` | Technical security-definer owner | None | Never inherited; owns `platform.control_enabled(text)` and reads only `platform.control_settings.control_key` and `enabled` through one exact RLS policy (launch; role bootstrap only). |
 | `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. |
 | `hid_schema_test_runtime` | Rollback-only schema/RLS acceptance | Test-only explicit grants | NOLOGIN and never used by application processes. |
 
@@ -1722,8 +1727,12 @@ Checks:
   to model each runtime role's effective privileges, following only
   memberships that pass on privileges (the `INHERIT` attribute as it is when
   each grant is made, `WITH INHERIT`, `REVOKE INHERIT OPTION`, `CREATE ROLE
-  ... IN ROLE`), row-level security and `UPDATE` policies. It fails on a lock
-  the role cannot take, and on the locks PostgreSQL refuses for every role
+  ... IN ROLE`), row-level security and `UPDATE` policies. It refuses a table
+  grant or a policy statement inside a dollar-quoted body, except a `DO`
+  block that drops and creates one policy only when `pg_policy` lacks it (the
+  bootstrap's `platform_controls_definer_read`), whose two statements it
+  replays as top-level ones. It fails on a lock the role cannot take, and on
+  the locks PostgreSQL refuses for every role
   (`0A000`): the nullable side of an outer join, `DISTINCT`, `GROUP BY`,
   `HAVING`, aggregates, window functions, set-returning functions in the
   select list and set operations. It does not follow SQL assembled by string
@@ -2149,7 +2158,8 @@ the schema, policies or grants changes.
   `app.purpose_of_use = 'patient-self'` and empty facility and membership, so
   the staff policies (`ehr.context_allows`) never pass, and only the 0030
   patient-self policies release rows: completed encounters, signed or amended
-  notes and their current revisions. The other clinical tables have `SELECT`
+  notes and their current revisions (since 0084 only those of completed
+  encounters; "EHR clinical safety and launch module set (0084)"). The other clinical tables have `SELECT`
   but no patient-self policy, so a patient read of them returns no rows and no
   error. The service now reads only the two released categories and names the
   other five as withheld; before, it read all seven and returned five arrays
@@ -2164,14 +2174,12 @@ the schema, policies or grants changes.
     the whole current set, as Health-id's clinician chart applies it); the
     implementation is preserved in commit `7401193` for when the decision
     lands. No EHR API route updates the measurement columns (a correction
-    updates only `current_correction_no`), but the database does not refuse
-    it: `hid_ehr_runtime` holds `UPDATE` on `ehr.vitals` (`runtime-grants.sql`),
-    `vitals_update` allows it under `write_records` (0005), and
-    `ehr.capture_record_version` (0004) guards only the ownership and
-    attribution columns and requires a change reason, recording the prior row
-    in `ehr.record_versions`. A guard refusing changes to the measurement
-    columns (a trigger, or column-level `UPDATE` limited to
-    `current_correction_no`) is a follow-up migration.
+    updates only `current_correction_no`). Until 0084 the database did not
+    refuse it either: `hid_ehr_runtime` holds `UPDATE` on `ehr.vitals`
+    (`runtime-grants.sql`), `vitals_update` allows it under `write_records`
+    (0005), and `ehr.capture_record_version` (0004) guards only the ownership
+    and attribution columns. Since 0084 `ehr.keep_recorded_vital()` refuses
+    every update of a vital except of `current_correction_no`.
   - Documents: read from `ehr.documents_effective` (0009, `security_invoker`,
     `security_barrier`) where `status = 'available'`, so `documents_read` and
     `document_scan_events_staff_read` apply to the view's reads. The raw
@@ -2232,8 +2240,12 @@ repository; the release checklist's P10 records them before and after 0082.
   active. Seeding it would make break-glass usable at once wherever
   `platform.control_settings` `break_glass_enabled` is on, which is its 0039
   default. Until it is approved and inserted, break-glass answers `423
-  BREAK_GLASS_DISABLED` when the control is off and `400
-  INVALID_CONSENT_COMMAND` when it is on.
+  BREAK_GLASS_DISABLED` when the control is off and, since the change that
+  added 0084, also when it is on: Identity answers the function's
+  emergency-purpose refusal (`22023`) as `423 BREAK_GLASS_DISABLED` instead of
+  `400 INVALID_CONSENT_COMMAND`. Break-glass is off at launch (owner default, deny by default): the
+  control is set false and no `emergency` row exists (release checklist P10
+  and P11).
 - `healthcare-operations` is not seeded. Identity access requests
   (`consent.controller.ts`), Lab and Pharmacy reads and the OCR commands
   accept it as a purpose, and it belongs to the open OCR purpose-of-use
@@ -2278,6 +2290,643 @@ Tests:
   codes with `ON CONFLICT (code) DO NOTHING`, as every other suite and
   verifier already did, so they pass on a database where 0082 seeded
   `direct-care`.
+
+## Non-superuser database chain on RDS (0083)
+
+On Amazon RDS for PostgreSQL 16 no role is a superuser. The migration
+administrator is a `NOSUPERUSER NOBYPASSRLS CREATEROLE` LOGIN that owns the
+schema (`MIGRATION_RUNBOOK.md` §6), and nothing relies on that owner bypassing
+row-level security (D-Eminence/hid-system#63). As such a role,
+verified locally on PostgreSQL 16.15, four things failed.
+
+**0015 and the OCR claim (0083).** 0015 gave `ocr.claim_worker_job(text,
+integer)` the clause `SET plpgsql.variable_conflict = 'use_column'`.
+`plpgsql.variable_conflict` has superuser context, so a non-superuser may set
+it, in `ALTER FUNCTION` and on every call of a function that carries it, only
+with `SET ON PARAMETER` on it. A fresh chain therefore stopped at 0015, and
+with the privilege granted every claim kept needing it, because the definer
+applies its settings as its owner on entry; after a revoke each claim failed
+with `permission denied to set parameter`.
+`0083_ocr_claim_in_body_variable_conflict.sql` replaces the function with the
+same signature, result columns, `SECURITY DEFINER`, `search_path` and body,
+and `#variable_conflict use_column` as the first line of the body. The
+compiler option resolves the same unqualified names to columns (for example
+`provider` in the stale-lease query), as 0064 to 0066 already do.
+`CREATE OR REPLACE` keeps the owner, the `EXECUTE` grants and the comment and
+leaves `proconfig` with the `search_path` alone. A catalogue scan finds no
+other application function that sets a parameter which is not user-settable
+(`audit.list_platform_events` sets `plan_cache_mode`, which any role may set).
+0015 is unchanged, so the privilege is still needed while it applies, and only
+then; the operator grants it for the migration run and revokes it after 0083.
+No table lock, grant or data change.
+
+**The role bootstrap.** `runtime-grants.sql` re-asserted `NOSUPERUSER …
+NOBYPASSRLS` with `ALTER ROLE` on every run. PostgreSQL 16 lets only a
+superuser change `SUPERUSER`, and only a role holding `BYPASSRLS` change that
+attribute, even to its current value, so the file stopped there and rolled
+back. It now:
+
+- creates each of the 25 group roles with its attributes, as before, then
+  checks them: a role with `SUPERUSER`, `BYPASSRLS` or `REPLICATION` is
+  refused, and `LOGIN`, `CREATEDB`, `CREATEROLE` and `INHERIT` are corrected
+  only when they differ, so a run that changes nothing issues no
+  `ALTER ROLE`;
+- refuses a runner that is neither a superuser nor holds `ADMIN OPTION` on
+  every role (every membership grant needs it), and empties
+  `createrole_self_grant` for its session;
+- grants the runner `INHERIT` and `SET` membership in
+  `hid_event_delivery_commands`, `hid_ocr_queue_metrics` and
+  `hid_platform_control_reader` right after the role check, because a
+  non-superuser may give a function to a role only if it may `SET ROLE` to it,
+  and may grant or revoke on a function it does not own only with the owner's
+  privileges (the `REVOKE ALL` statements of a rerun included);
+- grants each technical role `CREATE` on `integration`, `ocr` or `platform`
+  only around its `ALTER FUNCTION … OWNER TO`, which a non-superuser transfer
+  requires of the new owner;
+- revokes the memberships at its end and refuses the run if a membership or
+  `CREATE` is left. The file runs as one transaction, so neither is visible
+  to another session;
+- sets up the platform control owner below before any statement that locks
+  a table, and recreates its policy only when it is missing or differs.
+  `CREATE POLICY` locks the table `ACCESS EXCLUSIVE` until the bootstrap
+  commits, and an Identity break-glass activation reads the controls and then
+  inserts into `identity.outbox_events` in one transaction. The run that
+  creates the policy therefore locks `platform.control_settings` before the
+  `ocr.jobs` and outbox policies, in the activation's order, so the two wait
+  for each other instead of deadlocking; until it commits, the guards' control
+  reads wait behind it, within the services' 15 s statement timeout. A later
+  run takes no lock on that table.
+
+A superuser run grants exactly what it did before, plus the new role below;
+a catalogue diff of the two bootstraps on the same 0082 schema shows nothing
+else. PostgreSQL 16 records an `ADMIN OPTION`-only membership, granted by the
+bootstrap superuser, of a non-superuser creator in each role it creates. It
+carries no privilege and no `SET ROLE`, and its holder cannot revoke it.
+`runtime-roles.integration.sql` allows that row on a technical owner only
+when its member is the `CREATEROLE` role running the assertions (the
+administrator, in both `db:bootstrap` and `db:verify-roles`), and refuses any
+other member, membership or schema `CREATE`. A superuser records its grants
+with the same grantor, so without that condition an `ADMIN OPTION`-only grant
+to a runtime role would pass, and with it that role's login could grant
+itself the technical owner and `SET ROLE` to it.
+
+**Platform controls.** `platform.control_enabled(text)` (0040) is the
+`SECURITY DEFINER` read that the Identity, EHR and Outreach guards make on
+every request that is not a platform administrator's.
+`platform.control_settings` forces row-level security, and its only read
+policy requires `platform.control.read`, so under an owner without
+`BYPASSRLS` the function saw no row and raised `PLATFORM_CONTROL_UNAVAILABLE`,
+which the guards answer with `503`. The bootstrap gives it a technical owner,
+`hid_platform_control_reader` (`NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+NOINHERIT NOBYPASSRLS`, never granted to any role), following
+`hid_ocr_queue_metrics`:
+
+- `SELECT (control_key, enabled)` on `platform.control_settings`, and the
+  policy `platform_controls_definer_read`, `FOR SELECT TO
+  hid_platform_control_reader USING (true)`. The six controls are
+  platform-wide booleans with no PHI, so reading all of them is the
+  function's purpose;
+- `USAGE` on `platform` and on `auth`, and no privilege on any `auth` object.
+  The table's PUBLIC read policy applies to this role too, and PostgreSQL
+  inlines its SQL function `platform.current_account_id()` while planning, as
+  the reading role; that body names `auth`. The policies are OR-ed, so the
+  `true` policy decides the row and the PUBLIC expression is folded away
+  without running;
+- `EXECUTE` stays with PUBLIC (0040). `platform.require_control_enabled`
+  reads no table and calls `control_enabled`, so its owner is unchanged.
+
+A later migration that replaces a function owned by a technical role needs
+that owner's privileges, as the bootstrap's transfers do (`MIGRATION_RUNBOOK.md`
+§6.2). The OCR, document-scanner and Outreach definer paths of the release
+checklist's P8 still need an owner that bypasses row-level security, or the
+technical owners proposed in ADR-041.
+
+**Runtime LOGINs.** `db:verify-roles` checks only the NOLOGIN group roles.
+`npm run db:verify-logins` (`scripts/verify-runtime-logins.mjs`) connects with
+each of the ten runtime credentials' own URL and runs
+`database/runtime-login-assertions.sql` on that connection: the login runs as
+itself, is not the RDS master or the migration administrator, has no
+`SUPERUSER`, `BYPASSRLS`, `CREATEROLE`, `CREATEDB` or `REPLICATION`, is a
+direct member of its aggregate only (inherited, without `ADMIN OPTION`) and
+reaches no role its aggregate does not, has the privileges of no owner of the
+database or of an application schema, relation or function, is named by no
+direct grant and may create nothing; two credentials may not share a login.
+An owner skips the policies of every table that does not force them, among
+them `identity.patients`, `patient_identifiers` and the consent tables (0005),
+so a secret holding the migration URL would otherwise read them unfiltered.
+
+In production, each service that connects to the database (the six APIs, the
+OCR worker, the event dispatcher and the notification worker; the EHR scanner
+pool too) refuses to start when `current_user` or `session_user` is a
+superuser, bypasses row-level security or has the privileges of the owner of
+any application schema, relation or function (`runtime-role-guard.ts`).
+
+Tests:
+
+- `function-parameter-settings.integration.sql` refuses any application
+  function whose `SET` names a parameter that is not user-settable, and
+  requires the claim's signature, result, `search_path`-only settings and
+  in-body option. Without 0083 it fails: "ocr.claim_worker_job(text,integer)
+  sets plpgsql.variable_conflict".
+- `platform-control-owner.integration.sql` requires the technical owner
+  (`NOLOGIN`, no `SUPERUSER` or `BYPASSRLS`) and, as `hid_identity_api_runtime`,
+  `hid_ehr_api_runtime` and `hid_outreach_api_runtime` with no account, a
+  non-administrator and an unknown subject, every control as a platform Super
+  Admin lists it after changing one, the disabled refusal and the invalid-key
+  refusal. Under a non-bypass owner without the bootstrap change the call
+  raises `PLATFORM_CONTROL_UNAVAILABLE`.
+- `runtime-roles.integration.sql` asserts the new role's attributes, owner,
+  column grants, schema usage and single policy, no membership in the three
+  technical owners except the running administrator's own `ADMIN
+  OPTION`-only row, and no schema `CREATE` on them. The container acceptance
+  checks on its superuser database that an `ADMIN OPTION`-only grant of
+  `hid_ocr_queue_metrics` to `hid_ocr_worker` fails `db:verify-roles`.
+- `ocr-worker-lease.integration.sql`: under a non-bypass owner, the claim of a
+  provider whose only job the owner cannot see returns no row and changes
+  nothing (0015's setting refused it before 0083).
+- `scripts/verify-non-superuser-database.mjs`, run by the rehearsal, does the
+  whole chain on its own disposable cluster as a `NOSUPERUSER NOBYPASSRLS
+  CREATEROLE NOCREATEDB` administrator (`TUF-STAGING-MIGRATION.md`). Each of
+  its two bootstrap runs overlaps a transaction that holds a lock on
+  `platform.control_settings` and then locks `identity.outbox_events`: the
+  first run must wait for the control table holding no application table
+  lock, the second must not wait at all. It also requires `db:verify-roles`
+  to refuse an `ADMIN OPTION`-only grant to a runtime role.
+- The start-up check has a unit spec in each of the nine services, and
+  `scripts/tests` checks `db:verify-logins`'s credential map and that the nine
+  copies of the check are identical.
+
+## EHR clinical safety and launch module set (0084)
+
+`0084_ehr_clinical_safety_and_launch_modules.sql` (D-Eminence/hid-system#64)
+changes no table, column or grant. It deletes rows of `auth.role_permissions`,
+adds three trigger functions and eight triggers, and replaces two row-level
+security policies.
+
+**Launch module set (decision D17).** Lab, Pharmacy, OCR and Outreach are off
+at launch; EHR prescriptions and lab requests are records only. The migration
+deletes, for every role, the write permissions that EHR lab ordering, Lab and
+Pharmacy need. The seeded holders were:
+
+| Permission | Seeded holders |
+|---|---|
+| `ehr.lab-request.write` | doctor, clinician, lab (0006) |
+| `lab.work-item.accept` | doctor, clinician, nurse, lab (0018) |
+| `lab.accession.create` | lab (0019) |
+| `pharmacy.work-item.accept` | pharmacist (0023) |
+| `pharmacy.dispensing.create` | pharmacist (0023) |
+
+No SQL function or policy checks these codes: Identity derives an actor's
+permissions from `auth.role_permissions`, and the API guards refuse a route
+whose permission is missing with `403 PERMISSION_DENIED` before any write or
+call to Lab or Pharmacy. The read permissions (`ehr.lab-request.read`,
+`lab.work-item.read`, `lab.accession.read`, `pharmacy.work-item.read`,
+`pharmacy.dispensing.read` and the others) stay. `runtime-roles.integration.sql`,
+which the role bootstrap runs, now fails if any role holds one of the five, or
+if a seeded role lost one of those reads. The Lab, Pharmacy, OCR and EHR-to-Lab
+runtime verifiers supply their actors' permissions through their own fake
+Identity, so they keep exercising the module logic with these permissions.
+Re-enabling a module takes a reviewed migration that grants them again, and
+that migration must change the assertion.
+
+The platform controls `outreach_portal_enabled`, `uploads_enabled` and
+`break_glass_enabled` are not changed by the migration. A change through the
+audited structure writes a `platform.control_events` row whose
+`actor_account_id` is `NOT NULL` and references `auth.accounts`, and a
+migration has no acting account; 0041 changed `maintenance_mode` without an
+event, which this migration does not repeat. An operator sets the three to
+false with `POST /admin/controls` before ingress (release checklist P11).
+
+**Records follow their encounter (CLIN-EIE).** `ehr.require_open_encounter()`
+is a `SECURITY INVOKER` trigger function with `search_path = pg_catalog,
+pg_temp`. It fires `BEFORE INSERT` on `ehr.clinical_notes`, `ehr.vitals`,
+`ehr.diagnoses` and `ehr.documents`, and `BEFORE INSERT OR UPDATE OF status` on
+`ehr.prescriptions` and `ehr.lab_requests`. On an update it checks only an
+order's activation (`status` becoming `active` from another status). A
+document without an encounter is not checked. It reads the encounter, matched
+on `(id, patient_id, facility_id)`, with `FOR SHARE`, and refuses with SQLSTATE
+`55000` and message `ENCOUNTER_NOT_OPEN`:
+
+- any of these records, and any activation, on a `cancelled` or
+  `entered_in_error` encounter;
+- a new prescription or lab request, and the activation of a draft one, on a
+  `completed` encounter. Late notes, vitals, diagnoses and documents on a
+  completed encounter stay allowed, and so does resuming an on-hold order.
+
+An encounter the writer cannot lock reads as missing and is refused with
+`42501` (`ENCOUNTER_NOT_AVAILABLE`): under row-level security `FOR SHARE`
+needs both the encounter's `SELECT` and `UPDATE` policies, that is a
+`write_records` consent, which the child row's own insert policy requires
+anyway. `hid_ehr_runtime` already holds `UPDATE` on `ehr.encounters`; no
+other role inserts these records (`hid_schema_test_runtime` also holds it).
+
+The EHR's retraction of an encounter (`EncountersService.update`) holds the
+encounter `FOR UPDATE` while it marks its records. A child create that holds
+the share lock is waited for and then retracted with the rest; one that
+comes later waits for the retraction and then sees the closed encounter.
+Every path takes the encounter's lock before any lock on a record of it: the
+services share-lock the encounter (`ehr/shared/encounter-status.ts`) before an
+insert and before locking an order row for activation, so the trigger's own
+share lock is then already held. A writer that locked an order row first and
+then activated it would invert that order and can deadlock with a retraction
+(PostgreSQL cancels one of the two, `40P01`). With a temporary service mutant
+that locked the order row first, the lifecycle verifier's race produced
+`40P01`; the committed verifier checks that the services' order produces
+none.
+
+**Diagnoses entered in error.** `ehr.keep_entered_in_error_diagnosis()`
+(`SECURITY INVOKER`, `BEFORE UPDATE` on `ehr.diagnoses`) refuses any update of
+a diagnosis whose `verification_status` is `entered_in_error` (`55000`
+`DIAGNOSIS_ENTERED_IN_ERROR`).
+
+**Recorded vitals (D8).** `ehr.keep_recorded_vital()` (`SECURITY INVOKER`,
+`BEFORE UPDATE` on `ehr.vitals`) refuses an update that changes any column
+other than `current_correction_no` (and `row_version` and `updated_at`, which
+the version trigger maintains), with `55000` `VITAL_RECORD_IMMUTABLE`. A
+correction is a row of `ehr.vital_corrections` and the current correction
+number on the vital; the API never changed the recorded values in place. What
+the emergency summary shows of a corrected vital is unchanged (as first
+recorded, pending the correction-semantics decision).
+
+Each trigger's name sorts before the table's `*_versioned` trigger, so a
+refused write records no version. The three functions are not executable by
+`PUBLIC` and take no privilege of their own.
+
+**Patient release of notes (PREC-NOTES, D7).** The 0030 policies
+`clinical_notes_patient_self_read` and `note_revisions_patient_self_read`
+released a signed or amended note, and its current revision, whatever its
+encounter's status, while `encounters_patient_self_read` released an
+encounter only once completed; a signed note of a wrong-patient encounter
+stayed visible to that patient after the encounter was cancelled or marked
+entered in error. Both policies are dropped and recreated: each also requires
+the note's encounter, matched on encounter, patient and facility, to be
+`completed`. The subquery reads `ehr.encounters` under the patient session's
+own policies, which release only completed encounters of that patient anyway.
+The EHR service applies the same rule in its SQL (`patient-records.service.ts`).
+
+**Existing rows are not changed.** The version trigger needs an acting
+member, which a migration does not have, and open records of closed
+encounters are a clinical review. The release checklist lists them (P12) for
+review before and after the migration; until then they stay open. Open lab
+requests among them are retracted before the migration, while
+`ehr.lab-request.write` is still held: after it no role can change a lab
+request's status, and their encounter, already closed, has no transition left
+to cascade from. The guards apply from the migration's commit.
+
+**Locks.** The `DELETE` takes `ROW EXCLUSIVE` on `auth.role_permissions`.
+`CREATE TRIGGER` takes `SHARE ROW EXCLUSIVE` on each of the six clinical
+tables for the catalog change, and `DROP POLICY` and `CREATE POLICY` take
+`ACCESS EXCLUSIVE` on `ehr.clinical_notes` and `ehr.clinical_note_revisions`
+for the catalog change; none scans a table. Each waits for the transactions
+in flight on its table within the runner's 5 s `lock_timeout`.
+
+Tests:
+
+- `encounter-lifecycle.integration.sql` (rollback-only; in the rehearsal's
+  additional suites and in `scripts/run-container-database-acceptance.sh`):
+  the guards' security properties and triggers (12 cases), then 71 cases as
+  `hid_ehr_api_runtime` with the EHR session: every record kind on an encounter
+  in each of the six statuses, order activation and resumption by encounter
+  status, the diagnosis and vital updates. Before 0084 it fails, listing each
+  case whose write it expected refused but which succeeded.
+- `patient-self.integration.sql`: signed notes of encounters in progress,
+  cancelled, entered in error, and completed then entered in error are not
+  visible to the patient, nor their revisions.
+- `runtime-roles.integration.sql`: the launch module set assertions above.
+- `verify-encounter-lifecycle-runtime.mjs` (in the rehearsal): the retraction
+  cascade and cancellation over HTTP as `hid_ehr_api_runtime`, a retraction
+  waiting for a child create that holds the encounter, and eight activations
+  racing their encounter's retraction with no deadlock.
+- `verify-delegated-cookie-read-runtime.mjs` (steps 7 and 8): the two summaries'
+  note release, and `403 PERMISSION_DENIED` for the seeded doctor on the
+  withdrawn write routes, with no row written.
+
+## Public enrollment windows and NIN lookup quota (0085)
+
+`0085_public_enrollment_windows_and_nin_lookup_quota.sql`
+(BRANCH:launch/identity-enrollment-gates) implements decisions N2(b) and
+N2(c) in the activation command and caps QoreID NIN lookups of public patient
+enrollment (IP-1). It replaces two functions and adds one table and one
+function; no existing table is changed.
+
+**Activation windows.** `identity.activate_public_patient_enrollment`
+(0058) is replaced with the same signature, result columns, `SECURITY
+DEFINER` attribute, `search_path`, owner and grants. Two refusals are added;
+the rest of the body is 0058's:
+
+- a replay of an active enrollment whose `activated_at` is null or more than
+  15 minutes old raises `P0002` (`no_data_found`)
+  `PATIENT_ENROLLMENT_REPLAY_EXPIRED` and returns no HID. Identity answers it
+  `404 ENROLLMENT_NOT_FOUND`; it also refuses such an enrollment itself on
+  every enrollment route before calling the command, so the command's check
+  matters only for a request that crosses the 15 minutes in flight;
+- a first activation whose `contact_verified_at` is more than 30 minutes old
+  raises `23514` (`check_violation`) `PATIENT_CONTACT_REVERIFY_REQUIRED`
+  after the token check and before any write. Identity then clears the proof
+  and sends the enrollment back to the contact step:
+  `update identity.public_patient_enrollments set state='verify_contact'`,
+  with `contact_channel`, `contact_hmac`, `contact_lookup_hmac`,
+  `contact_ciphertext`, `contact_verified_at` and `verified_challenge_id`
+  null, only where the row is still `set_password` and the proof is more than
+  30 minutes old by `clock_timestamp()`. It does the same before calling the
+  command when its own clock already finds the proof too old, and answers
+  `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED` only when the update changed the
+  row or the command refused. The 0051 checks allow that state
+  (`set_password` exactly when `contact_verified_at` is set and
+  `activated_at` is not). No grant changes: the Identity runtime already
+  updates these rows.
+
+Both windows use `clock_timestamp()`. The replay window is shorter than the
+enrollment's `expires_at` (24 hours after start), which still bounds pending
+enrollments and the prune.
+
+**NIN lookup quota.** `platform.public_patient_nin_quota_counters` holds one
+row per `(scope, scope_key, bucket_period, bucket_start)`:
+
+- `scope` `network`: `scope_key` is a keyed HMAC of the client network
+  (lower-case hex, 64 characters) that the Identity API computes with its
+  server-only OTP HMAC key in its own domain (`patient-enrollment-qoreid-network`)
+  over an IPv4 address or the /64 prefix of an IPv6 address (IPv4-mapped IPv6
+  counts as IPv4; `quotaNetwork`, as for 0063); `bucket_period` `hour` or
+  `day`;
+- `scope` `platform`: `scope_key` `all`, `bucket_period` `day` only.
+
+No NIN, raw address or provider payload is stored. Row-level security is
+forced and its policies admit only the definer command's own reads and
+writes, as in 0049 and 0063; no runtime role has a table privilege.
+`platform.consume_public_patient_nin_quota(char, integer, integer, integer)`
+takes the network digest and the hourly network, daily network and daily
+platform limits that Identity reads from `PATIENT_ENROLLMENT_QOREID_*`
+(defaults 5, 15 and 200). It:
+
+1. refuses (`42501`) any caller but the accountless system context (actor
+   `system:auth`, a correlation id, no account) and a malformed digest, and
+   (`22023`) a missing limit or one outside its bounds: 1–100 an hour, from
+   the hourly limit to 1,000 a day per network, and 1–100,000 a day in all;
+2. deletes up to 100 counter rows whose bucket started more than 48 hours
+   ago;
+3. counts the lookup in the network's hour and day buckets and the platform's
+   day bucket, in that order, each `INSERT ... ON CONFLICT DO UPDATE` only
+   while the count is below its limit. The first bucket at its limit ends the
+   charge, and leaving its subtransaction rolls back the increments already
+   made, so a refusal changes no counter;
+4. inserts one `audit.events` row (`identity.public-patient-enrollment.nin-lookup-quota`,
+   actor `system`, resource `qoreid-lookup-quota`/`patient_nin`, outcome
+   `success` or `denied`, details `operation`, `exhaustedLimit`
+   (`network_hour`, `network_day` or `platform_day`, or null) and
+   `networkDigest`), and returns whether the lookup may proceed. A refusal
+   returns false instead of raising, so its audit event commits.
+
+Buckets are calendar hours and days by `date_trunc` in the session time zone,
+as in 0049 and 0063. The role bootstrap grants `EXECUTE` to
+`hid_identity_runtime` and `hid_schema_test_runtime` only, and
+`runtime-roles.integration.sql` asserts that no other required runtime role
+can execute it or reach the counters. `platform.prune_verification_quotas()`
+(0063) is replaced to drain these counters too, hourly, from the Identity
+runtime.
+
+Identity calls the command in `QoreIdPublicPatientIdentityProvider.verifyNin`,
+after the enrollment gate and immediately before the QoreID request, in its
+own system transaction. A resume, a duplicate and every earlier refusal of a
+start never reach it. `false` is answered `429 VERIFICATION_QUOTA_EXCEEDED`;
+any error, or no row, `503 VERIFICATION_QUOTA_UNAVAILABLE`, and QoreID is not
+called. A denial's network digest is in the audit event; the address is not.
+
+Locks: `CREATE OR REPLACE` takes no table lock; the new table and its index
+lock nothing else. At run time the command locks only the counter rows it
+increments, for the length of its own transaction; the activation command's
+locking is unchanged.
+
+Tests:
+
+- `public-patient-enrollment-windows.integration.sql` (rollback-only, as
+  `hid_identity_api_runtime`): a wrong token is still `42501`; a contact
+  proved 31 minutes earlier is refused `23514
+  PATIENT_CONTACT_REVERIFY_REQUIRED` and changes nothing; one proved 29
+  minutes earlier activates and replays; a replay 14 minutes after activation
+  returns the HID and one 16 minutes after is refused `P0002
+  PATIENT_ENROLLMENT_REPLAY_EXPIRED`; the command keeps its signature,
+  definer rights and grants. On 0082 it fails at "A contact proof 31 minutes
+  old activated a patient".
+- `public-patient-nin-quota.integration.sql` (rollback-only, as
+  `hid_identity_api_runtime`): only the Identity runtime can execute the
+  command and no runtime role can read the counters; with limits 2, 3 and 10
+  a network's third lookup in an hour and its fourth in a day are refused and
+  change no counter; with a platform cap of 5 another network is refused once
+  the platform has 5, without a network row; malformed digests, missing or
+  out-of-bounds limits, a missing correlation id and another actor are
+  refused and write nothing; five successes and three denials
+  (`network_hour`, `network_day`, `platform_day`) are audited exactly; the
+  prune drains the counters. Without 0085 it fails at its first statement
+  (the command does not exist).
+- `runtime-roles.integration.sql` asserts the grant.
+- `services/identity-api/scripts/verify-patient-enrollment-runtime.mjs`
+  checks both windows and the quota over HTTP (QoreID verification contract).
+  The container acceptance runs both new suites after
+  `purpose-of-use-vocabulary.integration.sql`, and the rehearsal runs them
+  with the additional suites.
+
+## Account recovery and patient search hardening (0086)
+
+`0086_recovery_and_patient_search_hardening.sql` closes the database part of
+launch blockers REC-GOOGLE, REC-AUDIENCE, REC-NOTIFY and PSEARCH-1 (change
+`BRANCH:launch/identity-recovery-search`). 0001 through 0085 are unchanged.
+
+**Recovery.** `auth.complete_recovery_otp` (0029) is replaced with `CREATE OR
+REPLACE`, so it keeps its owner and ACL; its signature, result, `SECURITY
+DEFINER` and `search_path` are restated as in 0029. After it revokes the
+account's sessions it now sets every external sign-in identity of the account
+(`auth.external_identities` rows whose issuer is not `legacy-identity` and
+whose status is not `revoked`, active or disabled) to `revoked`, with
+`revoked_at` kept if already set, and its `auth.otp.recovery.completed` audit
+event adds `details.external_identities_revoked`, the count. Today the only
+sign-in issuer is Google (`https://accounts.google.com`). The legacy
+importer's provenance record (issuer `legacy-identity`,
+`promote-legacy-identity.mjs`) is not a sign-in: it is kept and not counted,
+so legacy reconciliation still matches it after a recovery. Before, a Google
+link made by whoever once held the password survived the owner's reset, and
+Google sign-in issues a session at the current token version. An audit failure
+rolls the revocation back with the rest of the completion. The revoked row
+stays, and the Google link commands (0059) refuse any subject that was ever
+linked (`GOOGLE_IDENTITY_ALREADY_LINKED`), so the owner cannot link the same
+Google account again after a recovery, only a different one; re-linking needs
+a later change before Google sign-in is enabled.
+
+`auth.recovery_account_audience(account_id uuid, audience text) returns
+boolean` (stable, `SECURITY DEFINER`, pinned `search_path`) tells Identity's
+recovery start whether an account is of the kind its page reaches: `patient`
+(an active `identity.patients` row of the account), `staff` (an active
+`identity.staff` row) or `platform` (an unrevoked platform-scoped assignment
+of an active role that grants the active `platform.admin.access` permission).
+It requires the `system:auth` actor (`42501` otherwise), refuses any other
+audience (`22023`) and answers false for a null account. The start runs it in
+its system transaction with the account lookup; a mismatch, or a patient whose
+email is not verified and who has no verified enrollment phone, is answered and
+counted as an unknown identifier. Staff and platform accounts carry no
+`email_verified_at` (their email is provisioned), so the verified-contact rule
+reads it only for the patient audience.
+
+`otp_challenges_account_consumed_idx` on `auth.otp_challenges (account_id,
+consumed_at desc) where consumed_at is not null` serves the 24-hour hold
+Identity applies after any consumed recovery challenge of the account (access
+PIN set, emergency-contact add and update, new access approvals; `403
+PATIENT_RECENT_RECOVERY_HOLD`). The hold reads the table and writes nothing.
+The index is built inside the migration transaction under a `SHARE` lock on
+`auth.otp_challenges`, held to commit, which blocks recovery starts,
+verifications and completions; the table holds one row per recovery
+challenge.
+
+**Staff search budgets.** `otp_rate_limits_scope_check` is dropped and re-added
+with four more scopes: `patient_lookup_actor`, `patient_lookup_facility`,
+`access_request_actor` and `access_request_facility`. Identity counts every
+patient lookup and every access-request creation there (bucket: SHA-256 of a
+labelled actor account or facility id), before the command runs. Re-adding the
+check validates the existing rows under an `ACCESS EXCLUSIVE` lock on
+`auth.otp_rate_limits`; every existing scope stays allowed.
+
+**Registration reads (PSEARCH-1, ENUM-1, DB-RLS-PATIENTS).** Before 0086 the
+policy `patients_registration_read` (0011) admitted a membership holding
+`identity.registration.write` or `identity.registration.approve` at its
+current facility to every `identity.patients` row, of every facility. 0086
+drops the policy and creates it again in the same transaction, with the same
+name, table, command (`SELECT`) and role (`PUBLIC`), so no other session sees
+it absent. (`ALTER POLICY` would do the same, but the static privilege replay
+`scripts/verify-runtime-locking-privileges.mjs` does not follow that form.)
+The new expression keeps the permission check and adds that the row is the
+resolved patient of a registration case at the current facility, a duplicate
+candidate a case at the current facility lists, or the patient an approve-new
+review is creating in its transaction
+(`source_system` `hid-nin-registration`, no account, and a
+`pending_new_identity_approval` case at the facility with the same
+demographics and no resolved patient yet). The other `identity.patients`
+policies are unchanged. Registration reads what it no longer sees through two
+narrow `SECURITY DEFINER` functions that check the same permissions (`42501`
+otherwise):
+
+- `identity.registration_nin_holder(lookup_hmac text) returns table
+  (patient_id uuid, hid_code text, patient_status text)`: the patient holding
+  a verified, unrevoked NIN identifier with that lookup HMAC (lower-case hex,
+  64 characters, else `22023`), at most one row. Duplicate checks before
+  approve-new and link-existing, and the resolve step, use it.
+- `identity.registration_candidates(dob date, first_name text, last_name text)
+  returns table (patient_id uuid, first_name text, last_name text, full_name
+  text, dob date)`: at most 100 active patients sharing the date of birth or
+  either name (case-insensitive), oldest first; Identity scores them as
+  before.
+
+`identity.patient_lookup_audit_subject(hid text) returns uuid` (requires
+`identity.patient.read` at the current facility) names, for the audit event
+only, the active patient a refused staff lookup was about; the API answers
+every refusal `404 PATIENT_NOT_AVAILABLE`.
+
+`identity.create_access_request` (0010) is replaced with `CREATE OR REPLACE`
+(signature, result, `SECURITY DEFINER` and `search_path` restated as in 0010).
+For an HID that names no active patient it no longer raises `P0002`: it
+returns a row with a new random request id, no patient, status `pending`, the
+requested duration, the current time and `existing_request` false, persists no
+request, and appends `identity.access-request.refused` (`denied`, no patient,
+resource id the returned request id, details scope, duration and `reason`
+`patient_not_available`; the HID is not copied into the event). Every other
+check and result is as in 0010. Identity no longer returns the patient id of a
+created request.
+
+`identity.list_my_staff_access_requests` (0074) is replaced with `CREATE OR
+REPLACE` (argument, result, caller checks, filter, order and limit restated
+as in 0074; owner and ACL kept). Its `patient_id` is now the request's
+patient only while the grant made from the request is active
+(`effective_status` `active`), and NULL for every other request: pending,
+denied, expired, closed and revoked. Before, one request for a guessed HID
+and one list call gave the clinician the patient id of any active patient
+before the patient answered. Identity's projection of the list applies the
+same rule.
+
+**Locks.** In the order taken, each held to commit: `ACCESS EXCLUSIVE` on
+`identity.patients` (the policy), which holds back every HID sign-in,
+recovery start, registration read, patient lookup and access request until
+commit; `ACCESS EXCLUSIVE` on `auth.otp_rate_limits` (the check); `SHARE` on
+`auth.otp_challenges` (the index). The policy also takes `ACCESS SHARE` on
+`identity.registration_cases` and `identity.registration_case_candidates`.
+The other statements change functions only. An OTP start of the Identity
+build serving during the migration reads `identity.patients`, then writes
+`auth.otp_rate_limits` and `auth.otp_challenges`, the same order, so it and
+the migration wait for each other without a cycle. With the index first (the
+first version of this change) such a start deadlocked with the migration and
+PostgreSQL cancelled the start; reproduced locally. An OTP completion writes
+`auth.otp_challenges` and then reads `identity.patients` inside
+`auth.complete_recovery_otp`, the opposite order, so a completion caught
+between those two statements can still deadlock with the migration
+(reproduced locally with a pause inserted between them). PostgreSQL then
+cancels one of the two (`40P01`): that completion fails and the owner submits
+it again while the verification is valid, or the migration rolls back whole
+and `migrate` is run again. The runner's 5 s `lock_timeout` bounds every wait
+(`55P03` also rolls it back whole).
+
+The four new functions are revoked from `PUBLIC`; the role bootstrap
+(`runtime-grants.sql`) grants `EXECUTE` on them to `hid_identity_runtime` and
+`hid_schema_test_runtime` only. Run `db:bootstrap` and `db:verify-roles`
+immediately after the migration, then deploy the Identity build of the same
+change. An older Identity build still reads `identity.patients` directly for
+registration duplicate checks and candidates; under the narrowed policy those
+reads miss every patient not linked to a case at the facility, so the two must
+be deployed together.
+
+Rollback: the migration is forward-only. Restoring the old behaviour means a
+later migration restoring the 0011 policy expression, the 0029, 0010 and
+0074 function bodies and the old scope check (after deleting rows of the four new
+scopes); the index and the new functions may stay. Do not restore the policy
+without also returning to the previous Identity build.
+
+Tests:
+
+- `patient-search.integration.sql` (new, rollback-only) as
+  `hid_identity_api_runtime`: a registration nurse at facility A reads only
+  the patients linked to facility A's cases (resolved and candidate), not a
+  patient with a grant only, a patient of facility B or an unlinked one, nor
+  the unlinked patient's NIN identifier or that patient by exact HID; a doctor
+  with registration and clinical roles reads facility A's linked patients and
+  the one it holds a grant for, and at facility B only facility B's linked
+  patient; a pharmacist reads none; the audit-subject function names an active patient and refuses a
+  membership without `identity.patient.read`; the two registration functions
+  answer for a registration member and refuse others; `create_access_request`
+  for an unknown HID returns the uniform row and persists nothing, with one
+  refused audit event that does not contain the HID; the four scopes are
+  accepted; the EHR runtime may execute none of the new functions. Without
+  0086 it fails at its first visibility assertion (the nurse reads all five
+  fixture patients).
+- `otp-recovery.integration.sql` adds: completion revokes the account's
+  active and disabled Google links, and
+  `auth.resolve_google_identity` finds nothing for it afterwards; the
+  account's `legacy-identity` provenance record stays active; the audit
+  event counts `2` (and `0` for an account without links); an audit failure
+  rolls the revocation back; a staff reset ends staff and platform sessions;
+  the audience matrix for patient, staff, platform,
+  dual, inactive-staff and revoked-role accounts, `22023` and `42501`.
+  Without 0086 it fails with "Recovery left an external identity (Google
+  link) of the account usable"; with the first version of 0086, which
+  revoked every external identity, with "Recovery revoked the legacy
+  importer provenance record, which is not a sign-in".
+- `staff-access-request-outcome.integration.sql` adds: the list names the
+  patient for the two requests with an active grant and for no other
+  (pending, denied, expired, revoked, closed). Without the 0086 list change
+  it fails with "the list must name the patient of an active grant only".
+- `runtime-roles.integration.sql` requires `EXECUTE` on the four functions
+  for the Identity and schema-test runtimes and for no other runtime or
+  `PUBLIC`.
+- Runtime verifiers (`hid_identity_api_runtime`, real HTTP):
+  `verify-otp-recovery-runtime.mjs` (Google link revoked by recovery and
+  legacy provenance record kept,
+  audience mismatch answered alike with no code, staff reset ends staff and
+  platform sessions, unverified patient email gets no code until verified),
+  `verify-patient-enrollment-runtime.mjs` (staff and administrator pages send
+  a patient no code; five wrong passwords across the email and the HID lock
+  the account), `verify-patient-safety-runtime.mjs` (recent sign-in and the
+  recovery hold on approval, PIN and emergency contacts; the staff list
+  names the patient of the active approval only, not of the pending or the
+  revoked one),
+  `verify-patient-search-runtime.mjs` (new: lookup `200`, three identical
+  `404`s, `400`, audit reasons, uniform access-request answer, `429`s) and
+  `verify-registration-review-runtime.mjs` (registration review, unchanged,
+  passes under the narrowed policy).
 
 ## Governed workforce provisioning and one membership per facility (0087)
 

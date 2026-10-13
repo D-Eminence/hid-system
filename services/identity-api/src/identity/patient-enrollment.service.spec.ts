@@ -8,12 +8,15 @@ jest.mock('argon2', () => ({ argon2id: 2, hash: jest.fn() }));
 import * as argon2 from 'argon2';
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
+import * as environment from '../config/environment';
 import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { NotificationOtpClient } from '../auth/notification-otp.client';
 import type { GoogleAuthenticationService } from '../auth/google-authentication.service';
+import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { PatientEnrollmentService } from './patient-enrollment.service';
-import type { PublicPatientIdentityProvider } from './patient-enrollment.provider';
+import { QoreIdPublicPatientIdentityProvider, type PublicPatientIdentityProvider } from './patient-enrollment.provider';
+import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import type { NinIdentifierProtector } from './nin-identifier-protector';
 import type { HidCodeGenerator } from './hid-code-generator.service';
 import { createContactLookupHmac } from './contact-lookup';
@@ -34,8 +37,10 @@ type RecordedQuery = { sql: string; values: readonly unknown[] };
 /** `auth.otp_rate_limits` rows by `scope:bucket`; fixtures given one map share the table. */
 type OtpRateRow = { request_count: number; window_started_at: Date; blocked_until: Date | null };
 
-function fixture(otpRates = new Map<string, OtpRateRow>()) {
+function fixture(otpRates = new Map<string, OtpRateRow>(),
+  identityProvider?: PublicPatientIdentityProvider) {
   let enrollment: Record<string, unknown> | undefined;
+  let activationFailure: unknown;
   const challenges: Record<string, unknown>[] = [];
   let bound = false;
   let contactBound = false;
@@ -138,10 +143,24 @@ function fixture(otpRates = new Map<string, OtpRateRow>()) {
       Object.assign(enrollment!, { state: 'set_password', contact_verified_at: new Date() });
       return { rows: [], rowCount: 1 };
     }
+    if (sql.includes('select hid_code from identity.patients')) {
+      return { rows: enrollment?.state === 'active' ? [{ hid_code: 'HID-TEST-00000001' }] : [] };
+    }
+    // A contact proof too old for activation sends the enrollment back to the contact step.
+    if (sql.includes("set state='verify_contact'") && sql.includes("state='set_password' and contact_verified_at")) {
+      if (enrollment?.state !== 'set_password') return { rows: [], rowCount: 0 };
+      Object.assign(enrollment, { state: 'verify_contact', contact_channel: null, contact_hmac: null,
+        contact_lookup_hmac: null, contact_ciphertext: null, contact_verified_at: null,
+        verified_challenge_id: null });
+      return { rows: [], rowCount: 1 };
+    }
     if (sql.includes('identity.activate_public_patient_enrollment')) {
+      if (activationFailure) throw activationFailure;
       // An active enrollment replays: the stored HID, the password ignored (0058).
       if (enrollment?.state === 'active') return { rows: [{ patient_id: 'patient-7',
         account_id: 'account-7', hid_code: 'HID-TEST-00000001', replayed: true }] };
+      // A first activation records when it happened, as the command does.
+      Object.assign(enrollment!, { activated_at: new Date() });
       return { rows: [{ patient_id: 'patient-7', account_id: 'account-7',
         hid_code: values[4], replayed: false }] };
     }
@@ -149,14 +168,15 @@ function fixture(otpRates = new Map<string, OtpRateRow>()) {
   }) } as unknown as PoolClient;
   const database = { withSystemTransaction: jest.fn(async (_correlation: string,
     work: (client: PoolClient) => Promise<unknown>) => work(client)) } as unknown as DatabaseService;
-  const provider = { verifyNin: jest.fn().mockResolvedValue(identity) };
+  const provider = { assertAvailable: jest.fn().mockResolvedValue(undefined),
+    verifyNin: jest.fn().mockResolvedValue(identity) };
   const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
   const protector = { lookup: jest.fn().mockReturnValue('a'.repeat(64)) };
   const hidCodes = { generate: jest.fn().mockReturnValue('HID-TEST-00000001') };
   const google = { bindPendingInTransaction: jest.fn().mockResolvedValue(undefined),
     consumePendingInTransaction: jest.fn().mockResolvedValue(undefined) };
   const service = new PatientEnrollmentService(database, protector as unknown as NinIdentifierProtector,
-    provider as PublicPatientIdentityProvider, notification as unknown as NotificationOtpClient,
+    identityProvider ?? provider as PublicPatientIdentityProvider, notification as unknown as NotificationOtpClient,
     hidCodes as unknown as HidCodeGenerator, google as unknown as GoogleAuthenticationService);
   return { service, client, queries, provider, notification, protector, google, otpRates,
     get enrollment() { return enrollment; }, get challenge() { return challenges.at(-1); },
@@ -164,7 +184,8 @@ function fixture(otpRates = new Map<string, OtpRateRow>()) {
     set bound(value: boolean) { bound = value; },
     set contactBound(value: boolean) { contactBound = value; },
     set ready(value: boolean) { ready = value; },
-    set rateCount(value: number) { rateCount = value; } };
+    set rateCount(value: number) { rateCount = value; },
+    set activationFailure(value: unknown) { activationFailure = value; } };
 }
 
 function passwordHash(): jest.Mock { return argon2.hash as unknown as jest.Mock; }
@@ -212,7 +233,8 @@ describe('PatientEnrollmentService', () => {
     const f = fixture();
     const result = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
 
-    expect(f.provider.verifyNin).toHaveBeenCalledWith(nin);
+    expect(f.provider.verifyNin).toHaveBeenCalledWith(nin,
+      { correlationId, networkDigest: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect(result.progress.stage).toBe('verify_contact');
     expect(result.cookie).toMatch(/^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
     const insert = f.queries.find(({ sql }) => sql.includes('insert into identity.public_patient_enrollments'))!;
@@ -269,11 +291,15 @@ describe('PatientEnrollmentService', () => {
     expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects an already bound NIN before contacting the provider', async () => {
+  it('with the enrollment gate open, rejects an already bound NIN before contacting the provider', async () => {
     const f = fixture();
     f.bound = true;
     await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
       .rejects.toMatchObject({ code: 'NIN_ALREADY_REGISTERED' });
+    // The gate is checked first and was open; the registry lookup is never made.
+    expect(f.provider.assertAvailable).toHaveBeenCalledTimes(1);
+    expect(f.provider.assertAvailable.mock.invocationCallOrder[0])
+      .toBeLessThan((f.client.query as unknown as jest.Mock).mock.invocationCallOrder[0] ?? 0);
     expect(f.provider.verifyNin).not.toHaveBeenCalled();
   });
 
@@ -336,6 +362,7 @@ describe('PatientEnrollmentService', () => {
     [429, 'QOREID_RATE_LIMITED'],
     [503, 'QOREID_PROVIDER_UNAVAILABLE'],
     [503, 'QOREID_AUTHENTICATION_FAILED'],
+    [429, 'VERIFICATION_QUOTA_EXCEEDED'],
   ])('never creates pending identity when QoreID fails with %s %s', async (status, code) => {
     const f = fixture();
     f.provider.verifyNin.mockRejectedValue(new DomainProblem(status, code, 'External verification unavailable'));
@@ -789,6 +816,307 @@ describe('PatientEnrollmentService', () => {
         .rejects.toMatchObject({ code: 'ENROLLMENT_STAGE_INVALID' });
       expect(rateLookups(f.queries)).toEqual([]);
       expect(passwordHash().mock.calls.some(([value]) => value === 'a-strong-test-password')).toBe(false);
+    });
+  });
+
+  // IP-1: the enrollment IP limits are keyed on the client network. In AWS
+  // request.ip is the client only when the edge supplied it (the Worker's
+  // X-Real-IP, applied by the gateway's realip module); otherwise it is
+  // the load balancer, inside TRUST_PROXY_CIDRS, and shared by every client.
+  describe('client network', () => {
+    const vpc = '10.40.0.0/16';
+    function inProduction() {
+      const base = getEnvironment();
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, NODE_ENV: 'production', TRUST_PROXY_CIDRS: vpc });
+    }
+    const ipBuckets = (queries: RecordedQuery[]) => rateLookups(queries)
+      .filter(({ scope }) => scope === 'ip').map(({ bucket }) => String(bucket));
+
+    it('in production, refuses a start whose client address is missing or one of our proxies, before any database work', async () => {
+      inProduction();
+      const f = fixture();
+      for (const remoteIp of [undefined, 'not-an-address', '10.40.1.10', '::ffff:10.40.200.3']) {
+        await expect(f.service.start(nin, requestKey, remoteIp, correlationId))
+          .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_RATE_LIMIT_UNAVAILABLE' });
+      }
+      expect(f.queries).toEqual([]);
+      expect(f.provider.verifyNin).not.toHaveBeenCalled();
+    });
+
+    it('in production, refuses a contact step from one of our proxies before charging or sending', async () => {
+      inProduction();
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '198.51.100.40', correlationId);
+      f.queries.length = 0;
+      await expect(f.service.startContact(started.cookie, 'email', 'patient@example.test', '10.40.1.10', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_RATE_LIMIT_UNAVAILABLE' });
+      expect(f.queries).toEqual([]);
+      expect(f.notification.deliver).not.toHaveBeenCalled();
+    });
+
+    it('gives two clients two buckets and one IPv6 /64 one bucket', async () => {
+      inProduction();
+      const buckets: string[] = [];
+      for (const remoteIp of ['198.51.100.1', '198.51.100.2', '2001:db8:1:2::10', '2001:db8:1:2:abcd::99',
+        '2001:db8:1:3::10']) {
+        const f = fixture();
+        await f.service.start(nin, requestKey, remoteIp, correlationId);
+        buckets.push(...ipBuckets(f.queries));
+      }
+      expect(buckets).toHaveLength(5);
+      expect(buckets[0]).not.toBe(buckets[1]);
+      expect(buckets[2]).toBe(buckets[3]);
+      expect(buckets[4]).not.toBe(buckets[2]);
+      expect(new Set(buckets).size).toBe(4);
+    });
+
+    it('limits starts per network with PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS, apart from the OTP limit', async () => {
+      process.env.PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS = '2';
+      process.env.OTP_RATE_MAX_REQUESTS = '5';
+      resetEnvironmentForTests();
+      const limited = fixture();
+      limited.rateCount = 2;
+      await expect(limited.service.start(nin, requestKey, '198.51.100.7', correlationId))
+        .rejects.toMatchObject({ status: 429, code: 'ENROLLMENT_RATE_LIMITED' });
+      expect(limited.provider.verifyNin).not.toHaveBeenCalled();
+      const allowed = fixture();
+      allowed.rateCount = 1;
+      await expect(allowed.service.start(nin, requestKey, '198.51.100.7', correlationId)).resolves.toBeDefined();
+    });
+  });
+  describe('the enrollment gate comes before any registration lookup (ENR-4)', () => {
+    const credentials = { QOREID_CLIENT_ID: 'test-client', QOREID_CLIENT_SECRET: 'test-secret' };
+    const open = { QOREID_ENABLED: 'true', QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', ...credentials };
+    const ninByLookup: Record<string, string> = { [nin]: 'a'.repeat(64), '98765432109': 'b'.repeat(64),
+      '11122233344': 'c'.repeat(64) };
+
+    /** The service with the real QoreID provider; QoreID itself and the runtime pause are stubbed. */
+    function gated() {
+      let paused = false;
+      const adapter = { verifyNinEnrollment: jest.fn(async (value: string) => ({ state: 'verified',
+        providerReference: 'qoreid-transaction-7', ninEnrollmentBinding: { ...identity, nin: value,
+          providerReference: undefined } })) };
+      const integrations = {
+        assertAvailable: jest.fn(async () => {
+          if (paused) throw new DomainProblem(503, 'INTEGRATION_PAUSED', 'External verification is temporarily unavailable');
+        }),
+        consumePublicPatientNinQuota: jest.fn().mockResolvedValue(undefined),
+      };
+      const provider = new QoreIdPublicPatientIdentityProvider(adapter as unknown as QoreIdVerificationAdapter,
+        integrations as unknown as IntegrationRuntimeService);
+      const f = fixture(new Map(), provider);
+      f.protector.lookup.mockImplementation((value: string) => ninByLookup[value] ?? 'd'.repeat(64));
+      return { f, adapter, integrations, pause: () => { paused = true; } };
+    }
+
+    const closures: Array<[string, Record<string, string>, boolean, number, string]> = [
+      ['QoreID is disabled', { QOREID_ENABLED: 'false', QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false' }, false,
+        503, 'QOREID_DISABLED'],
+      ['NIN-only enrollment is disabled', { ...open, QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false' }, false,
+        503, 'QOREID_NIN_ONLY_DISABLED'],
+      ['QoreID is paused at runtime', open, true, 503, 'INTEGRATION_PAUSED'],
+    ];
+
+    it.each(closures)('answers a bound, a pending and an unbound NIN identically while %s',
+      async (_label, closed, pause, status, code) => {
+        Object.assign(process.env, open); resetEnvironmentForTests();
+        const { f, adapter, integrations, pause: pauseQoreId } = gated();
+        // A pending enrollment for `nin`, started while the gate was open.
+        const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+        expect(adapter.verifyNinEnrollment).toHaveBeenCalledTimes(1);
+        Object.assign(process.env, closed); resetEnvironmentForTests();
+        if (pause) pauseQoreId();
+        const statementsBefore = f.queries.length;
+
+        const refusal = async (value: string, key: string, bound: boolean) => {
+          f.bound = bound;
+          const error = await f.service.start(value, key, '203.0.113.10', correlationId)
+            .then(() => undefined, (failure: unknown) => failure);
+          expect(error).toBeInstanceOf(DomainProblem);
+          return { status: (error as DomainProblem).getStatus(), code: (error as DomainProblem).code,
+            body: (error as DomainProblem).getResponse() };
+        };
+        const pending = await refusal(nin, '49ebcc73-3aa3-47aa-b1e4-f8944ab6eab0', false);
+        const bound = await refusal('98765432109', '5f0bd2a4-63c4-4f43-9f6f-0b8f7f1e2a10', true);
+        const unbound = await refusal('11122233344', '6a1ce3b5-74d5-4a54-8a7a-1c9a8a2f3b21', false);
+
+        expect(pending).toMatchObject({ status, code });
+        expect(bound).toEqual(pending);
+        expect(unbound).toEqual(pending);
+        // Nothing was read or charged for them: no rate bucket, no binding or pending lookup.
+        expect(f.queries.length).toBe(statementsBefore);
+        expect(adapter.verifyNinEnrollment).toHaveBeenCalledTimes(1);
+        expect(integrations.consumePublicPatientNinQuota).toHaveBeenCalledTimes(1);
+        // The pending enrollment itself is untouched and still resumable through its cookie.
+        await expect(f.service.current(started.cookie, correlationId))
+          .resolves.toMatchObject({ stage: 'verify_contact' });
+      });
+
+    it('refuses a same-key resume while the gate is closed, and resumes once it opens again', async () => {
+      Object.assign(process.env, open); resetEnvironmentForTests();
+      const { f, adapter } = gated();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false' }); resetEnvironmentForTests();
+      await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'QOREID_NIN_ONLY_DISABLED' });
+      Object.assign(process.env, open); resetEnvironmentForTests();
+      await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+        .resolves.toMatchObject({ cookie: started.cookie });
+      expect(adapter.verifyNinEnrollment).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('QoreID lookup quota per client network (IP-1)', () => {
+    const digestFor = async (address: string) => {
+      const f = fixture();
+      await f.service.start(nin, requestKey, address, correlationId);
+      const charge = f.provider.verifyNin.mock.calls[0]?.[1] as { networkDigest: string } | undefined;
+      expect(charge?.networkDigest).toMatch(/^[0-9a-f]{64}$/);
+      return { digest: charge!.networkDigest, ipBucket: rateLookups(f.queries).find(({ scope }) => scope === 'ip')?.bucket };
+    };
+
+    it('charges the lookup only on the path that calls QoreID: never on a resume, a duplicate or a refusal', async () => {
+      const f = fixture();
+      f.protector.lookup.mockImplementation((value: string) => value === nin ? 'a'.repeat(64) : 'b'.repeat(64));
+      await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
+      expect(f.provider.verifyNin).toHaveBeenLastCalledWith(nin,
+        { correlationId, networkDigest: expect.stringMatching(/^[0-9a-f]{64}$/) });
+      // Same-key resume, another key for the pending NIN, the key reused for another NIN.
+      await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      await expect(f.service.start(nin, '49ebcc73-3aa3-47aa-b1e4-f8944ab6eab0', '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ code: 'NIN_ALREADY_REGISTERED' });
+      await expect(f.service.start('98765432109', requestKey, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+      // A bound NIN and a rate-limited client.
+      f.bound = true;
+      await expect(f.service.start('98765432109', '5f0bd2a4-63c4-4f43-9f6f-0b8f7f1e2a10', '203.0.113.10',
+        correlationId)).rejects.toMatchObject({ code: 'NIN_ALREADY_REGISTERED' });
+      f.bound = false; f.rateCount = 5;
+      await expect(f.service.start('98765432109', '5f0bd2a4-63c4-4f43-9f6f-0b8f7f1e2a10', '203.0.113.10',
+        correlationId)).rejects.toMatchObject({ code: 'ENROLLMENT_RATE_LIMITED' });
+      expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
+    });
+
+    it('keys an IPv6 client by its /64 and an IPv4 client by its address, in a keyed digest of its own', async () => {
+      const sameSlash64 = [await digestFor('2001:db8:1:2::1'), await digestFor('2001:db8:1:2:ffff:ffff:ffff:fffe')];
+      const otherSlash64 = await digestFor('2001:db8:1:3::1');
+      const ipv4 = [await digestFor('203.0.113.10'), await digestFor('::ffff:203.0.113.10')];
+      const otherIpv4 = await digestFor('203.0.113.11');
+      expect(sameSlash64[1]!.digest).toBe(sameSlash64[0]!.digest);
+      expect(otherSlash64.digest).not.toBe(sameSlash64[0]!.digest);
+      expect(ipv4[1]!.digest).toBe(ipv4[0]!.digest);
+      expect(otherIpv4.digest).not.toBe(ipv4[0]!.digest);
+      // Not the start rate bucket's HMAC of the same address, and no address in clear.
+      expect(ipv4[0]!.digest).not.toBe(ipv4[0]!.ipBucket);
+      expect(ipv4[0]!.digest).not.toContain('203.0.113.10');
+    });
+  });
+
+  describe('HID re-display after activation is limited to 15 minutes (ENR-3 Part B)', () => {
+    async function activatedMinutesAgo(f: ReturnType<typeof fixture>, minutes: number | null) {
+      const cookie = await verifiedEnrollment(f);
+      await f.service.activate(cookie, 'a-strong-test-password', correlationId);
+      Object.assign(f.enrollment!, { state: 'active', patient_id: 'patient-7', account_id: 'account-7',
+        activated_at: minutes === null ? null : new Date(Date.now() - minutes * 60_000) });
+      f.queries.length = 0;
+      return cookie;
+    }
+
+    it('shows the HID through GET /current and an activation replay within 15 minutes', async () => {
+      const f = fixture();
+      const cookie = await activatedMinutesAgo(f, 14);
+      await expect(f.service.current(cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+    });
+
+    it.each([16, null])('answers 404 ENROLLMENT_NOT_FOUND, without the HID, once activation is older (activated %s minutes ago)',
+      async (minutes) => {
+        const f = fixture();
+        const cookie = await activatedMinutesAgo(f, minutes);
+        const before = passwordHash().mock.calls.length;
+        for (const attempt of [
+          () => f.service.current(cookie, correlationId),
+          () => f.service.activate(cookie, 'a-strong-test-password', correlationId),
+          () => f.service.bindGoogle(cookie, '30000000-0000-4000-8000-000000000001.' + 'A'.repeat(43), correlationId),
+          () => f.service.verifyContact(cookie, '7d5e8a52-4c0e-4b5f-9a43-2f8f6f1f3c11', '123456', correlationId),
+        ]) {
+          const error = await attempt().then(() => undefined, (failure: unknown) => failure);
+          expect(error).toMatchObject({ status: 404, code: 'ENROLLMENT_NOT_FOUND' });
+          expect(JSON.stringify((error as DomainProblem).getResponse())).not.toContain('HID-TEST');
+        }
+        // Refused before the activation budget, argon2id, the activation command or the HID read.
+        expect(rateLookups(f.queries)).toEqual([]);
+        expect(passwordHash().mock.calls.length).toBe(before);
+        expect(f.queries.some(({ sql }) => sql.includes('identity.activate_public_patient_enrollment'))).toBe(false);
+        expect(f.queries.some(({ sql }) => sql.includes('select hid_code from identity.patients'))).toBe(false);
+      });
+  });
+
+  describe('contact proof older than 30 minutes is verified again before activation (ENR-3b)', () => {
+    const activation = (queries: RecordedQuery[]) => queries
+      .filter(({ sql }) => sql.includes('identity.activate_public_patient_enrollment'));
+
+    it('resets the enrollment to the contact step and answers 409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      f.enrollment!.contact_verified_at = new Date(Date.now() - 31 * 60_000);
+      f.queries.length = 0;
+      const before = passwordHash().mock.calls.length;
+
+      const refused = await f.service.activate(cookie, 'a-strong-test-password', correlationId)
+        .then(() => undefined, (failure: unknown) => failure);
+
+      expect(refused).toBeInstanceOf(DomainProblem);
+      expect([(refused as DomainProblem).getStatus(), (refused as DomainProblem).code])
+        .toEqual([409, 'ENROLLMENT_CONTACT_REVERIFY_REQUIRED']);
+      expect(passwordHash().mock.calls.length).toBe(before);
+      expect(activation(f.queries)).toHaveLength(0);
+      const reset = f.queries.filter(({ sql }) => sql.includes("set state='verify_contact'"));
+      expect(reset).toHaveLength(1);
+      expect(reset[0]?.sql).toContain("interval '30 minutes'");
+      expect(f.enrollment).toMatchObject({ state: 'verify_contact', contact_verified_at: null,
+        contact_channel: null, contact_ciphertext: null, verified_challenge_id: null });
+      await expect(f.service.current(cookie, correlationId)).resolves.toMatchObject({ stage: 'verify_contact' });
+
+      // Proving the contact again lets the same enrollment activate.
+      const contact = await f.service.startContact(cookie, 'email', 'patient@example.test', '203.0.113.10',
+        correlationId);
+      await f.service.verifyContact(cookie, contact.challengeId,
+        f.notification.deliver.mock.calls.at(-1)?.[0].code as string, correlationId);
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+    });
+
+    it('activates a contact verified 29 minutes earlier', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      f.enrollment!.contact_verified_at = new Date(Date.now() - 29 * 60_000);
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      expect(f.queries.some(({ sql }) => sql.includes("set state='verify_contact'"))).toBe(false);
+    });
+
+    it('resets and answers 409 when the activation command finds the proof too old', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      f.activationFailure = Object.assign(new Error('PATIENT_CONTACT_REVERIFY_REQUIRED'), { code: '23514' });
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .rejects.toMatchObject({ status: 409, code: 'ENROLLMENT_CONTACT_REVERIFY_REQUIRED' });
+      expect(f.queries.filter(({ sql }) => sql.includes("set state='verify_contact'"))).toHaveLength(1);
+    });
+
+    it('does not apply the contact age to a replay of an active enrollment within its window', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      await f.service.activate(cookie, 'a-strong-test-password', correlationId);
+      Object.assign(f.enrollment!, { state: 'active', patient_id: 'patient-7',
+        contact_verified_at: new Date(Date.now() - 2 * 60 * 60_000), activated_at: new Date(Date.now() - 60_000) });
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      expect(f.enrollment?.state).toBe('active');
     });
   });
 });

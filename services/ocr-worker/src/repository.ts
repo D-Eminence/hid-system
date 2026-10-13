@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg';
 import type { OcrWorkerConfig } from './config';
+import { assertRuntimeDatabaseRole } from './runtime-role-guard';
 import type { ClaimedOcrJob, ProviderExtraction, SafeWorkerFailure, WorkerRepository } from './types';
 
 interface ClaimRow extends QueryResultRow {
@@ -29,6 +30,17 @@ export class PostgresWorkerRepository implements WorkerRepository {
       max: config.OCR_WORKER_POOL_MAX, application_name: 'hid-ocr-worker', ssl,
       connectionTimeoutMillis: 5_000, statement_timeout: 30_000, query_timeout: 35_000 });
     this.pool.on('error', (error) => this.logDbFailure(error));
+  }
+
+  /** In production, refuse to start over a superuser, BYPASSRLS or owner connection (runtime-role-guard.ts). */
+  async verifyRuntimeRole(): Promise<void> {
+    if (this.config.NODE_ENV !== 'production') return;
+    try {
+      await assertRuntimeDatabaseRole(this.pool);
+    } catch (error) {
+      await this.pool.end().catch(() => undefined);
+      throw error;
+    }
   }
 
   async checkReadiness(): Promise<void> { await this.pool.query('select 1'); }

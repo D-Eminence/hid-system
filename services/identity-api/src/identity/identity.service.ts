@@ -1,5 +1,6 @@
-import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service';
+import { DomainProblem } from '../common/problem';
 import type { DataAccessContext, PurposeOfUse } from '../common/request-context';
 import type {
   AuthorizationDecision,
@@ -9,15 +10,32 @@ import type {
   ConsentStatus,
 } from './identity.types';
 import { IDENTITY_PROVIDER } from './identity.types';
+import { StaffSearchBudget } from './staff-search-budget';
+
+/**
+ * The one answer to every refused patient lookup (PSEARCH-1): an unknown HID,
+ * a patient without a grant for this membership, facility and purpose, and a
+ * grant held at another facility are indistinguishable to the caller. The
+ * audit event keeps the true outcome.
+ */
+export function patientNotAvailable(): DomainProblem {
+  return new DomainProblem(404, 'PATIENT_NOT_AVAILABLE', 'The patient is not available');
+}
 
 @Injectable()
 export class IdentityService {
   constructor(
     @Inject(IDENTITY_PROVIDER) private readonly provider: IdentityProvider,
     private readonly audit: AuditService,
+    private readonly budget: StaffSearchBudget,
   ) {}
 
+  /**
+   * Exact-HID lookup for staff. Counted against the actor's and facility's
+   * lookup budgets first; searching never grants access by itself.
+   */
   async lookupPatient(hid: string, purpose: PurposeOfUse, context: DataAccessContext) {
+    await this.budget.consume('patient_lookup', context);
     let patient: IdentityPatient | null;
     try {
       patient = await this.provider.lookupExactHid(hid, context);
@@ -33,8 +51,19 @@ export class IdentityService {
       throw error;
     }
     if (!patient) {
-      await this.record(context, 'identity.patient.lookup', 'denied', undefined, purpose);
-      throw new NotFoundException('Patient was not found or is not available');
+      // Row-level security hides a patient this membership may not read, so
+      // the audit subject (if any) comes from a separate audit-only command.
+      let subject: string | null;
+      try {
+        subject = await this.provider.lookupAuditSubject(hid, context);
+      } catch (error) {
+        await this.record(context, 'identity.patient.lookup', 'failure', undefined, purpose,
+          { dependency: 'identity-provider' });
+        throw error;
+      }
+      await this.record(context, 'identity.patient.lookup', 'denied', subject ?? undefined, purpose,
+        { reason: subject ? 'not_authorized' : 'not_found' });
+      throw patientNotAvailable();
     }
     const decision = await this.provider.authorize({
       patientId: patient.id,
@@ -43,8 +72,9 @@ export class IdentityService {
       context,
     });
     if (!decision.allowed) {
-      await this.record(context, 'identity.patient.lookup', 'denied', patient.id, purpose);
-      throw new ForbiddenException('Patient access is not authorized');
+      await this.record(context, 'identity.patient.lookup', 'denied', patient.id, purpose,
+        { reason: 'not_authorized' });
+      throw patientNotAvailable();
     }
     await this.record(context, 'identity.patient.lookup', 'success', patient.id, purpose, {
       consentGrantId: decision.consentGrantId,

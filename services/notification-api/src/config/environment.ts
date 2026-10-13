@@ -10,7 +10,12 @@ const schema = z.object({
   NODE_TLS_REJECT_UNAUTHORIZED: optional,
   PORT: z.coerce.number().int().min(1).max(65_535).default(3007),
   NOTIFICATION_PROVIDER_MODE: z.enum(['disabled', 'test', 'live']).default('disabled'),
-  NOTIFICATION_DELIVERY_PROFILE: z.enum(['full', 'email-only']).default('full'),
+  // full: every channel and the Brevo fallback (non-production only).
+  // email-only: staging email OTP through SES.
+  // otp-email-sms: the production launch profile (NOTIF-PROD): email OTP
+  // through SES and SMS OTP through Termii; WhatsApp is refused and Brevo is
+  // an optional fallback.
+  NOTIFICATION_DELIVERY_PROFILE: z.enum(['full', 'email-only', 'otp-email-sms']).default('full'),
   NOTIFICATION_PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(250).max(15_000).default(5_000),
   NOTIFICATION_WORKLOAD_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: optional,
@@ -48,6 +53,11 @@ const schema = z.object({
   if (value.NOTIFICATION_DELIVERY_PROFILE === 'email-only' && value.HID_DEPLOYMENT_ENV !== 'staging') {
     context.addIssue({ code: 'custom', path: ['NOTIFICATION_DELIVERY_PROFILE'], message: 'The email-only delivery profile is staging-only' });
   }
+  if (value.NOTIFICATION_DELIVERY_PROFILE === 'otp-email-sms') {
+    for (const key of ['META_PHONE_NUMBER_ID', 'META_ACCESS_TOKEN', 'META_OTP_TEMPLATE_NAME', 'BREVO_WHATSAPP_SENDER'] as const) {
+      if (value[key]) context.addIssue({ code: 'custom', path: [key], message: 'The otp-email-sms profile does not send WhatsApp; remove its configuration' });
+    }
+  }
   if (value.NOTIFICATION_PROVIDER_MODE === 'test' && value.NODE_ENV !== 'test') {
     context.addIssue({ code: 'custom', path: ['NOTIFICATION_PROVIDER_MODE'], message: 'Deterministic notification providers are test-only' });
   }
@@ -55,8 +65,17 @@ const schema = z.object({
     if (value.NODE_TLS_REJECT_UNAUTHORIZED === '0') context.addIssue({ code: 'custom', path: ['NODE_TLS_REJECT_UNAUTHORIZED'], message: 'Production TLS verification cannot be disabled' });
     if (value.NOTIFICATION_PROVIDER_MODE !== 'live') context.addIssue({ code: 'custom', path: ['NOTIFICATION_PROVIDER_MODE'], message: 'Live providers are required in production' });
     if (value.NOTIFICATION_WORKLOAD_IDENTITY_MODE !== 'jwt') context.addIssue({ code: 'custom', path: ['NOTIFICATION_WORKLOAD_IDENTITY_MODE'], message: 'JWT workload identity is required in production' });
+    if (value.NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN) context.addIssue({ code: 'custom', path: ['NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN'], message: 'Local service tokens are forbidden in production' });
+    if (value.HID_DEPLOYMENT_ENV === 'production' && value.NOTIFICATION_DELIVERY_PROFILE !== 'otp-email-sms') {
+      context.addIssue({ code: 'custom', path: ['NOTIFICATION_DELIVERY_PROFILE'], message: 'Production requires the otp-email-sms delivery profile' });
+    }
     for (const key of ['WORKLOAD_ISSUER_URL','WORKLOAD_JWKS_URL','IDENTITY_CALLER_SUBJECT','AWS_REGION','SES_FROM_ADDRESS'] as const) {
       if (!value[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
+    }
+    if (value.NOTIFICATION_DELIVERY_PROFILE === 'otp-email-sms') {
+      for (const key of ['TERMII_BASE_URL','TERMII_API_KEY','TERMII_SENDER_ID'] as const) {
+        if (!value[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
+      }
     }
     if (value.NOTIFICATION_DELIVERY_PROFILE === 'full') {
       for (const key of ['TERMII_BASE_URL','TERMII_API_KEY','TERMII_SENDER_ID','META_PHONE_NUMBER_ID','META_ACCESS_TOKEN','META_OTP_TEMPLATE_NAME','BREVO_API_KEY'] as const) {

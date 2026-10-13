@@ -65,6 +65,32 @@ describe('organization applicant profile completion', () => {
     expect(JSON.stringify(query.mock.calls[0])).not.toContain('203.0.113.44');
   });
 
+  it('keys the completion limit on the client network and, in production, refuses our own proxies (IP-1)', async () => {
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({
+      NODE_ENV: 'production', OTP_HMAC_KEY_B64: Buffer.alloc(32, 9).toString('base64'),
+      CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_COOKIE_SECURE: true,
+      TRUST_PROXY_CIDRS: '10.40.0.0/16',
+    } as environment.Environment);
+    const query = jest.fn().mockResolvedValue({ rows: [] });
+    const database = { withSystemTransaction: jest.fn(async (_id, work) => work({ query })) };
+    const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted' }) };
+    const service = new OrganizationProfileCompletionService(database as unknown as DatabaseService,
+      notification as unknown as NotificationOtpClient);
+    for (const ip of ['10.40.1.10', '::ffff:10.40.9.9']) {
+      await expect(service.start(input, ip, correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'APPLICATION_RATE_LIMIT_UNAVAILABLE' });
+    }
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    const digests: unknown[] = [];
+    for (const ip of ['2001:db8:1:2::10', '2001:db8:1:2:abcd::99', '2001:db8:1:3::10']) {
+      query.mockClear();
+      await service.start(input, ip, correlationId);
+      digests.push(query.mock.calls[0]?.[1]);
+    }
+    expect(digests[0]).toEqual(digests[1]);
+    expect(digests[2]).not.toEqual(digests[0]);
+  });
+
   it('activates through one runtime command that also returns the login email', async () => {
     const query = jest.fn().mockResolvedValueOnce({ rows: [{
       organization_id: 'org-1', facility_id: 'facility-1', account_id: 'account-1', row_version: '7',

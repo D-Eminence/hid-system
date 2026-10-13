@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { ForbiddenException, Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyOptions } from 'jose';
 import { getEnvironment, type Environment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 
@@ -12,6 +12,15 @@ export interface WorkloadActor {
 }
 
 const MAX_WORKLOAD_TOKEN_LENGTH = 16_384;
+
+// The workload token contract (ADR-047): the issuer signs ES256 tokens with
+// iat = nbf, exp = iat + 300 s and token_use 'workload'. A token without exp
+// or iat, older than 300 s, issued in the future, signed with any other
+// algorithm or meant for another use is refused. The 5 s clock tolerance
+// matches the agent's own allowance for an iat ahead of its clock.
+const WORKLOAD_TOKEN_POLICY = {
+  algorithms: ['ES256'], requiredClaims: ['exp', 'iat'], maxTokenAge: 300, clockTolerance: 5,
+} satisfies JWTVerifyOptions;
 
 const LOCAL_TOKEN_KEYS: Readonly<Record<IdentityCaller, keyof Environment>> = {
   'ehr-api': 'IDENTITY_EHR_INTERNAL_SERVICE_TOKEN',
@@ -41,12 +50,7 @@ export class WorkloadAuthService {
     if (!this.jwks || !this.environment.WORKLOAD_ISSUER_URL) {
       throw new ServiceUnavailableException('Workload authentication is not configured');
     }
-    const token = this.bearerToken(authorization);
-    const { payload } = await jwtVerify(token, this.jwks, {
-      issuer: this.environment.WORKLOAD_ISSUER_URL,
-      audience: this.environment.WORKLOAD_AUDIENCE,
-      algorithms: ['RS256', 'ES256'],
-    }).catch(() => { throw new UnauthorizedException('Invalid workload token'); });
+    const payload = await this.verify(this.bearerToken(authorization));
     if (!payload.sub) throw new UnauthorizedException('Workload token subject is missing');
     const account = await this.database.query<{ account_id: string }>(
       `select account.id::text as account_id
@@ -81,12 +85,7 @@ export class WorkloadAuthService {
     if (!this.jwks || !this.environment.WORKLOAD_ISSUER_URL) {
       throw new ServiceUnavailableException('Workload authentication is not configured');
     }
-    const token = this.bearerToken(authorization);
-    const { payload } = await jwtVerify(token, this.jwks, {
-      issuer: this.environment.WORKLOAD_ISSUER_URL,
-      audience: this.environment.WORKLOAD_AUDIENCE,
-      algorithms: ['RS256', 'ES256'],
-    }).catch(() => { throw new UnauthorizedException('Invalid workload token'); });
+    const payload = await this.verify(this.bearerToken(authorization));
     const expectedSubject = this.environment[SUBJECT_KEYS[callerValue]];
     if (typeof expectedSubject !== 'string' || payload.sub !== expectedSubject) {
       throw new ForbiddenException('Workload caller subject is not authorized');
@@ -101,6 +100,19 @@ export class WorkloadAuthService {
   ): Promise<WorkloadActor> {
     if (caller !== 'outreach-api') return Promise.reject(new UnauthorizedException('Outreach workload identity is required'));
     return this.authenticateService(caller, authorization, localToken);
+  }
+
+  private async verify(token: string): Promise<JWTPayload> {
+    if (!this.jwks || !this.environment.WORKLOAD_ISSUER_URL) {
+      throw new ServiceUnavailableException('Workload authentication is not configured');
+    }
+    const { payload } = await jwtVerify(token, this.jwks, {
+      issuer: this.environment.WORKLOAD_ISSUER_URL,
+      audience: this.environment.WORKLOAD_AUDIENCE,
+      ...WORKLOAD_TOKEN_POLICY,
+    }).catch(() => { throw new UnauthorizedException('Invalid workload token'); });
+    if (payload.token_use !== 'workload') throw new UnauthorizedException('Invalid workload token');
+    return payload;
   }
 
   private equal(candidate: string, expected: string): boolean {

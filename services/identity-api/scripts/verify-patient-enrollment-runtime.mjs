@@ -3,7 +3,9 @@
 // on a disposable copy of the owned synthetic rehearsal database: public NIN
 // enrollment (QoreID adapter, contact OTP, activation and its replay budget),
 // then password sign-in, session, refresh rotation, self profile, OTP password
-// recovery and sign-out, each of which expires the enrollment cookie.
+// recovery and sign-out, each of which expires the enrollment cookie; then the
+// enrollment gate before any registration lookup, the 15-minute HID re-display
+// window, the 30-minute contact proof and the QoreID lookup quota (0085).
 // External services are replaced, never called: QoreID behind the real adapter
 // by a local HTTP stub, Cloudflare Siteverify by a stub that encodes the
 // outcome in the token, and Notification delivery by a stub that captures the
@@ -73,7 +75,7 @@ const { HidCodeGenerator } = load('identity/hid-code-generator.service.ts');
 const { QoreIdVerificationAdapter, QOREID_ADAPTER_CONFIGURATION, QOREID_FETCH } =
   load('identity/qoreid-verification.adapter.ts');
 const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
-const { getEnvironment } = load('config/environment.ts');
+const { getEnvironment, resetEnvironmentForTests } = load('config/environment.ts');
 
 // Cloudflare Siteverify stub: a token is `ok|<action>|<hostname>` or `replayed`.
 // Any other outbound request fails the verifier.
@@ -204,6 +206,14 @@ try {
     assert(!/;\s*Domain=/i.test(value), 'the enrollment cookie must be host-only');
     return value.split(';')[0];
   };
+  // A response that carries the HID expires the enrollment cookie on its path.
+  const expiresEnrollmentCookie = (response, label) => {
+    const expired = (response.headers['set-cookie'] ?? []).filter(item => item.startsWith('hid_enrollment='));
+    assert.equal(expired.length, 1, `${label} must expire the hid_enrollment cookie: ${response.headers['set-cookie']}`);
+    assert.match(expired[0], /^hid_enrollment=;/);
+    assert.match(expired[0], /; Expires=Thu, 01 Jan 1970 00:00:00 GMT/i);
+    assert.match(expired[0], /; Path=\/api\/v1\/identity\/patient-enrollments(;|$)/i);
+  };
 
   // 1. Refusals before QoreID is asked or anything is stored.
   const ninA = '90000000001';
@@ -304,9 +314,11 @@ try {
   expectProblem(activatedA, 200);
   assert.equal(activatedA.body.stage, 'active'); assert.match(activatedA.body.hidCode, /^HID-[A-HJ-NP-Z2-9]{6,32}$/);
   const hidA = activatedA.body.hidCode;
+  expiresEnrollmentCookie(activatedA, 'the first activation');
   const replayActivation = await post('/identity/patient-enrollments/activate',
     { password: 'A-Different-Password-02' }, { cookie: cookieA });
   expectProblem(replayActivation, 200); assert.equal(replayActivation.body.hidCode, hidA);
+  expiresEnrollmentCookie(replayActivation, 'an activation replay');
   // Activations and replays share one budget per enrollment: every attempt
   // after the cookie and stage checks counts, whatever its outcome, up to
   // OTP_RATE_MAX_REQUESTS * 3 per window (the contact step's enrollment
@@ -340,7 +352,7 @@ try {
   const patientA = accountA[0].patient_id;
   assert.equal(await count(`select count(*) from identity.patients where hid_code = $1`, [hidA]), 1);
   assert.equal((await owner.query('select state, patient_id from identity.public_patient_enrollments')).rows[0].patient_id, patientA);
-  check('activation creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID; a replay returns the same HID and ignores the second password; activation attempts of one enrollment beyond OTP_RATE_MAX_REQUESTS * 3 per window are 429 ENROLLMENT_RATE_LIMITED without the HID');
+  check('activation creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID, and its response expires the enrollment cookie; a replay returns the same HID, ignores the second password and expires the cookie too; activation attempts of one enrollment beyond OTP_RATE_MAX_REQUESTS * 3 per window are 429 ENROLLMENT_RATE_LIMITED without the HID');
 
   // 6. The same identity or contact cannot enroll twice.
   expectProblem(await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID(),
@@ -491,6 +503,23 @@ try {
   expectProblem(recoveredA, 200); assert.equal(recoveredA.body.actor.patientId, patientA);
   check('password recovery answers known and unknown accounts alike, including a repeat within the cooldown (the same challengeId for both, no code sent) and the account\'s other identifier (a new id, no code), uses a single-use code, ends existing sessions and replaces the password');
 
+  // 11b. REC-AUDIENCE (0086): the staff and administrator recovery pages reach
+  // no patient account. They answer the patient's email like an unknown
+  // identifier and send it no code. As the owner, end the patient page's
+  // cooldown first, so that only the page (not the cooldown) withholds a code.
+  await owner.query("update auth.otp_start_cooldowns set started_at = started_at - interval '2 minutes'");
+  const codesBeforeOtherPages = resetCodes();
+  for (const [action, network] of [['staff-reset', '198.51.100.47'], ['admin-reset', '198.51.100.48']]) {
+    const otherPage = await http.post('/api/v1/auth/otp/start').set('Origin', origin).set('X-Forwarded-For', network)
+      .send({ identifier: emailA, purpose: 'PASSWORD_RESET', turnstileAction: action, turnstileToken: turnstile(action) });
+    expectProblem(otherPage, 202);
+    assert.deepEqual({ ...otherPage.body, challengeId: typeof otherPage.body.challengeId },
+      { ...unknownStart.body, challengeId: typeof unknownStart.body.challengeId },
+      `${action} must answer a patient account exactly like an unknown identifier`);
+  }
+  assert.equal(resetCodes(), codesBeforeOtherPages, 'A staff or administrator recovery page must send a patient no code');
+  check('the staff and administrator recovery pages answer a patient\'s email like an unknown identifier (202, same body) and send it no code');
+
   // 12. Sign-out needs the CSRF token and ends only its own sign-in: the same
   // patient's other sign-in (another device) and the other patient stay signed in.
   const otherDeviceA = await login(emailA, newPassword);
@@ -505,6 +534,33 @@ try {
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(otherDeviceA)), 200);
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(firstB)), 200);
   check('sign-out without the CSRF token is refused and ends nothing; with it, it ends only that sign-in and expires the enrollment cookie: the same patient\'s other sign-in and the other patient stay signed in');
+
+  // 12b. SIGNIN-LOCKOUT (0086): one failure budget per account across its
+  // identifiers. Five wrong passwords, three by email and two by HID (neither
+  // identifier reaches five), lock the account: the correct password is then
+  // refused by either identifier with the same 401 until the window ends, and
+  // accepted after it.
+  const wrongLockout = [];
+  for (const identifier of [emailA, emailA.toUpperCase(), emailA, hidA, hidA.toLowerCase()]) {
+    const response = await login(identifier, 'Wrong-Lockout-Password-0');
+    expectProblem(response, 401); wrongLockout.push(response);
+  }
+  assert.equal(await count('select count(*) from auth.login_attempts where locked_until > clock_timestamp()'), 1,
+    'five wrong passwords across the email and the HID must lock exactly one bucket: the account\'s');
+  const genericRefusal = response => ({ ...response.body, instance: undefined, correlationId: undefined });
+  for (const identifier of [emailA, hidA]) {
+    const refused = await login(identifier, newPassword);
+    expectProblem(refused, 401);
+    assert.deepEqual(genericRefusal(refused), genericRefusal(wrongLockout[0]),
+      'the correct password of a locked account must get the generic 401');
+  }
+  // As the owner, move every failure window 16 minutes into the past: the lock ends.
+  await owner.query(`update auth.login_attempts set window_started_at = window_started_at - interval '16 minutes',
+    last_failed_at = last_failed_at - interval '16 minutes',
+    locked_until = locked_until - interval '16 minutes'`);
+  const afterLockout = await login(emailA, newPassword);
+  expectProblem(afterLockout, 200); assert.equal(afterLockout.body.actor.patientId, patientA);
+  check('five wrong passwords across the email and the HID lock the account: the correct password is refused by either identifier with the same 401 inside the window and accepted after it');
 
   // 13. Durable evidence. Every successful start (A, its replay, B) and
   // activation (A and its replays within the budget, B) is audited as a
@@ -594,6 +650,136 @@ try {
   const verifiedC = await verifyC(secondC.body.challengeId, secondCodeC.code, networkC);
   expectProblem(verifiedC, 200); assert.equal(verifiedC.body.stage, 'set_password');
   check('the contact code has one failure budget per recipient across its challenges and networks: after five wrong codes (three on a challenge, two on its resend, each from another network) the correct code is refused 422 OTP_INVALID with its challenge left open, the contact step sends that recipient no code (429 ENROLLMENT_RATE_LIMITED), the budget is one recipient-keyed rate row, and once the block is lifted the same code verifies');
+  // 15. The enrollment gate comes before any registration lookup (ENR-4): while
+  // QoreID is paused or NIN-only enrollment is switched off, a bound NIN (A), a
+  // pending one (C, waiting for its password) and one never seen get the same
+  // 503, and nothing is looked up, charged or stored.
+  const pendingNin = '90000000003';
+  const unseenNin = '90000000004';
+  const rateTotal = async () => count('select coalesce(sum(request_count), 0) as count from identity.public_patient_enrollment_rates');
+  const comparable = response => ({ status: response.status, ...response.body, instance: undefined, correlationId: undefined });
+  const gatedStarts = async () => {
+    const answers = [];
+    for (const candidate of [ninA, pendingNin, unseenNin]) {
+      answers.push(await post('/identity/patient-enrollments', startBody(candidate), { key: randomUUID(), network: '198.51.100.70' }));
+    }
+    return answers;
+  };
+  const lookupsBeforeGate = ninLookups.length;
+  const ratesBeforeGate = await rateTotal();
+  const enrollmentsBeforeGate = await enrollmentRows();
+  assert.equal((await owner.query(`select state from identity.public_patient_enrollments where nin_last4 = '0003'`))
+    .rows[0].state, 'set_password', 'enrollment C must be pending for the gate check');
+  await owner.query("update platform.integration_providers set enabled=false, row_version=row_version+1 where provider='qoreid'");
+  const paused = await gatedStarts();
+  for (const response of paused) expectProblem(response, 503, 'INTEGRATION_PAUSED');
+  assert.deepEqual(comparable(paused[1]), comparable(paused[0]), 'a pending NIN must be answered as a bound one while QoreID is paused');
+  assert.deepEqual(comparable(paused[2]), comparable(paused[0]), 'an unseen NIN must be answered as a bound one while QoreID is paused');
+  await owner.query("update platform.integration_providers set enabled=true, row_version=row_version+1 where provider='qoreid'");
+  process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'false'; resetEnvironmentForTests();
+  const switchedOff = await gatedStarts();
+  process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true'; resetEnvironmentForTests();
+  for (const response of switchedOff) expectProblem(response, 503, 'QOREID_NIN_ONLY_DISABLED');
+  assert.deepEqual(comparable(switchedOff[1]), comparable(switchedOff[0]));
+  assert.deepEqual(comparable(switchedOff[2]), comparable(switchedOff[0]));
+  assert.equal(ninLookups.length, lookupsBeforeGate, 'a closed gate must ask QoreID nothing');
+  assert.equal(await rateTotal(), ratesBeforeGate, 'a closed gate must charge no enrollment rate bucket');
+  assert.equal(await enrollmentRows(), enrollmentsBeforeGate);
+  check('while QoreID is paused (503 INTEGRATION_PAUSED) or NIN-only enrollment is switched off (503 QOREID_NIN_ONLY_DISABLED), a bound, a pending and an unseen NIN get the same answer, and nothing is looked up, charged or stored');
+
+  // 16. The HID is shown again for 15 minutes after activation (N2(b)): then
+  // GET /current and an activation replay are 404 without it.
+  const currentA = await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieA);
+  expectProblem(currentA, 200);
+  assert.equal(currentA.body.stage, 'active'); assert.equal(currentA.body.hidCode, hidA);
+  assert.equal((await owner.query(`update identity.public_patient_enrollments
+    set activated_at = activated_at - interval '16 minutes' where patient_id = $1`, [patientA])).rowCount, 1);
+  const lateCurrent = await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieA);
+  expectProblem(lateCurrent, 404, 'ENROLLMENT_NOT_FOUND');
+  const lateReplay = await post('/identity/patient-enrollments/activate', { password: passwordA }, { cookie: cookieA });
+  expectProblem(lateReplay, 404, 'ENROLLMENT_NOT_FOUND');
+  for (const response of [lateCurrent, lateReplay]) {
+    assert(!JSON.stringify(response.body).includes(hidA), 'a late re-display must not carry the HID');
+  }
+  check('GET /current shows the HID within 15 minutes of activation; once activation is more than 15 minutes old, GET /current and an activation replay answer 404 ENROLLMENT_NOT_FOUND without it');
+
+  // 17. A contact proof more than 30 minutes old is verified again (N2(c)).
+  assert.equal((await owner.query(`update identity.public_patient_enrollments
+    set contact_verified_at = contact_verified_at - interval '31 minutes'
+    where nin_last4 = '0003' and state = 'set_password'`)).rowCount, 1);
+  const patientsBeforeC = await count('select count(*) from identity.patients where source_system = $1',
+    ['hid-public-qoreid-enrollment']);
+  const staleC = await post('/identity/patient-enrollments/activate', { password: 'Synthetic-Patient-Pass-C3' },
+    { cookie: cookieC, network: networkC });
+  expectProblem(staleC, 409, 'ENROLLMENT_CONTACT_REVERIFY_REQUIRED');
+  assert.deepEqual((await owner.query(`select state, contact_verified_at, contact_channel, contact_ciphertext,
+      verified_challenge_id from identity.public_patient_enrollments where nin_last4 = '0003'`)).rows[0],
+  { state: 'verify_contact', contact_verified_at: null, contact_channel: null, contact_ciphertext: null,
+    verified_challenge_id: null }, 'a stale contact proof must send the enrollment back to the contact step');
+  assert.equal(await count('select count(*) from identity.patients where source_system = $1',
+    ['hid-public-qoreid-enrollment']), patientsBeforeC, 'a stale contact proof must not activate');
+  const resetC = await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieC);
+  expectProblem(resetC, 200); assert.equal(resetC.body.stage, 'verify_contact');
+  const againC = await contactC();
+  expectProblem(againC, 200);
+  const againCodeC = lastCode('SIGNUP_VERIFY', emailC);
+  assert.equal(againCodeC.challengeId, againC.body.challengeId);
+  expectProblem(await verifyC(againC.body.challengeId, againCodeC.code, networkC), 200);
+  const activatedC = await post('/identity/patient-enrollments/activate', { password: 'Synthetic-Patient-Pass-C3' },
+    { cookie: cookieC, network: networkC });
+  expectProblem(activatedC, 200);
+  assert.match(activatedC.body.hidCode, /^HID-[A-HJ-NP-Z2-9]{6,32}$/);
+  expiresEnrollmentCookie(activatedC, 'activation after a new contact proof');
+  check('activation with a contact proof more than 30 minutes old answers 409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED, sends the enrollment back to the contact step and creates nothing; proving the contact again activates it');
+
+  // 18. The QoreID lookup quota (0085) is charged only when QoreID is called,
+  // per client network (an IPv6 /64) and in one platform-wide daily cap.
+  const quotaCount = async (scope, period) => count(`select coalesce(sum(attempt_count), 0) as count
+    from platform.public_patient_nin_quota_counters where scope = $1 and bucket_period = $2`, [scope, period]);
+  assert.equal(await quotaCount('platform', 'day'), ninLookups.length,
+    'the platform quota must count exactly the QoreID lookups: no replay, duplicate or refusal');
+  // The hourly network limit is lowered to 2 for this step, so that the three
+  // starts from one /64 below stay within any start rate limit of at least
+  // three per network, however that limit keys its client (an address or a
+  // /64). The quota reads its limits on every lookup.
+  const configuredHourly = process.env.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX;
+  process.env.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX = '2'; resetEnvironmentForTests();
+  const environment = getEnvironment();
+  assert.equal(environment.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX, 2);
+  const slash64 = host => `2001:db8:85:1::${host}`;
+  for (let host = 1; host <= environment.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX; host += 1) {
+    expectProblem(await post('/identity/patient-enrollments', startBody(NOT_VERIFIED), { key: randomUUID(),
+      network: slash64(host) }), 422, 'NIN_NOT_VERIFIED');
+  }
+  const lookupsAtNetworkLimit = ninLookups.length;
+  const overNetwork = await post('/identity/patient-enrollments', startBody(NOT_VERIFIED), { key: randomUUID(),
+    network: '2001:db8:85:1:ffff:ffff:ffff:fffe' });
+  expectProblem(overNetwork, 429, 'VERIFICATION_QUOTA_EXCEEDED');
+  assert.equal(ninLookups.length, lookupsAtNetworkLimit, 'a refused lookup must not reach QoreID');
+  expectProblem(await post('/identity/patient-enrollments', startBody(NOT_VERIFIED), { key: randomUUID(),
+    network: '2001:db8:85:2::1' }), 422, 'NIN_NOT_VERIFIED');
+  // Fixture, as the owner: the platform has spent its daily cap.
+  const capRow = await owner.query(`update platform.public_patient_nin_quota_counters
+    set attempt_count = $1 where scope = 'platform' and bucket_period = 'day'
+      and bucket_start = date_trunc('day', statement_timestamp()) returning attempt_count`,
+  [environment.PATIENT_ENROLLMENT_QOREID_DAILY_CAP]);
+  assert.equal(capRow.rowCount, 1);
+  const lookupsAtCap = ninLookups.length;
+  const overCap = await post('/identity/patient-enrollments', startBody(NOT_VERIFIED), { key: randomUUID(),
+    network: '198.51.100.80' });
+  expectProblem(overCap, 429, 'VERIFICATION_QUOTA_EXCEEDED');
+  assert.equal(ninLookups.length, lookupsAtCap, 'a lookup above the platform cap must not reach QoreID');
+  assert.deepEqual((await owner.query(`select details->>'exhaustedLimit' as limit from audit.events
+    where action = 'identity.public-patient-enrollment.nin-lookup-quota' and outcome = 'denied'
+    order by sequence_id`)).rows.map(row => row.limit), ['network_hour', 'platform_day'],
+  'each quota refusal must be audited with its exhausted limit');
+  assert.equal(await count(`select count(*) from audit.events
+    where action = 'identity.public-patient-enrollment.nin-lookup-quota' and outcome = 'success'`), lookupsAtCap,
+  'each charged lookup must be audited');
+  if (configuredHourly === undefined) delete process.env.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX;
+  else process.env.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX = configuredHourly;
+  resetEnvironmentForTests();
+  check('the QoreID lookup quota counts exactly the lookups made (none for a replay, duplicate or refusal), refuses the next lookup from an IPv6 /64 over its hourly limit (set to 2 for this check) and any lookup over the platform daily cap with 429 VERIFICATION_QUOTA_EXCEEDED before QoreID is called, and audits every decision');
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: runtimeRole,
     qoreid: 'local stub behind the real adapter; no QoreID call', turnstile: 'local Siteverify stub',
     notification: 'local stub; no delivery', nin_lookups: ninLookups.length, deliveries: deliveries.length,

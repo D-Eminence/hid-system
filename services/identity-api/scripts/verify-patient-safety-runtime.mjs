@@ -44,6 +44,7 @@ const { PatientSelfController } = load('auth/patient-self.controller.ts');
 const { PatientSelfService } = load('auth/patient-self.service.ts');
 const { ConsentController } = load('consent/consent.controller.ts');
 const { ConsentService } = load('consent/consent.service.ts');
+const { StaffSearchBudget } = load('identity/staff-search-budget.ts');
 const { PatientAccountDeletionController } = load('patient-safety/patient-account-deletion.controller.ts');
 const { PatientAccountDeletionService } = load('patient-safety/patient-account-deletion.service.ts');
 const { EmergencyContactController } = load('patient-safety/emergency-contact.controller.ts');
@@ -97,7 +98,7 @@ try {
     controllers: [AuthController, PatientSelfController, ConsentController, PatientAccountDeletionController, EmergencyContactController],
     providers: [{ provide: DatabaseService, useValue: database }, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
-      AuditService, WorkloadAuthService, TurnstileService, PatientSelfService, ConsentService,
+      AuditService, WorkloadAuthService, TurnstileService, PatientSelfService, ConsentService, StaffSearchBudget,
       PatientAccountDeletionService, EmergencyContactService, EmergencyContactProtector, EmergencyContactNotificationDispatcher,
       { provide: NotificationOtpClient, useValue: notification },
       { provide: GoogleAuthenticationService, useValue: {
@@ -250,8 +251,13 @@ try {
     const call = http.get(`/api/v1/identity/access-requests${query}`).set('Cookie', who.cookie).set('X-Facility-ID', ids.facility);
     return purpose ? call.set('X-Purpose-Of-Use', purpose) : call;
   };
-  assert((await staffRequests(clinician).expect(200)).body
-    .some((item) => item.accessRequestId === accessRequestId && item.status === 'pending'), 'the clinician sees their pending request');
+  const pendingListed = (await staffRequests(clinician).expect(200)).body
+    .find((item) => item.accessRequestId === accessRequestId && item.status === 'pending');
+  assert(pendingListed, 'the clinician sees their pending request');
+  // PSEARCH-1 (0086): a request names its patient only while its grant is active.
+  assert.equal(pendingListed.patientIdWithheld, true, 'a pending request in the staff list must not name the patient');
+  assert.equal(pendingListed.patientId, `withheld-${accessRequestId.slice(-4)}`,
+    'a withheld patient id is a non-identifying string, so a client that renders its last characters keeps working');
   assert.equal((await staffRequests(clinician, '', null).expect(400)).body.code, 'PURPOSE_OF_USE_REQUIRED');
   // A facility member without identity.consent.write is refused.
   const orgAdmin = { account: randomUUID(), staff: randomUUID(), membership: randomUUID() };
@@ -278,6 +284,7 @@ try {
   const activeOutcome = await ownOutcome();
   assert.deepEqual([activeOutcome.effectiveStatus, activeOutcome.consentGrantId, activeOutcome.authorizationMethod],
     ['active', approved.body.consentGrantId, 'patient_approval'], 'an approval reports its active grant');
+  assert.equal(activeOutcome.patientId, a.patientId, 'an active grant names its patient in the staff list');
   assert(Date.parse(activeOutcome.grantExpiresAt) > Date.now(), 'an active grant reports its expiry');
   assert((await staffRequests(clinician, '?status=active').expect(200)).body
     .some((item) => item.accessRequestId === accessRequestId), 'the outcome filter finds the active approval');
@@ -290,13 +297,54 @@ try {
   await post(sb, `/identity/me/consent-grants/${approved.body.consentGrantId}/revoke`, { reason: 'Not mine' }).expect(404);
   assert.equal((await post(sa, `/identity/me/consent-grants/${approved.body.consentGrantId}/revoke`, { reason: 'No longer needed' })
     .expect(200)).body.status, 'revoked');
-  assert.equal((await ownOutcome()).effectiveStatus, 'revoked', 'the clinician sees the patient revoked the approval');
+  const revokedOutcome = await ownOutcome();
+  assert.equal(revokedOutcome.effectiveStatus, 'revoked', 'the clinician sees the patient revoked the approval');
+  assert.equal(revokedOutcome.patientIdWithheld, true, 'a revoked approval no longer names the patient in the staff list');
+  assert.equal(revokedOutcome.patientId, `withheld-${accessRequestId.slice(-4)}`);
   assert((await staffRequests(clinician, '?status=revoked').expect(200)).body
     .some((item) => item.accessRequestId === accessRequestId), 'the outcome filter finds the revoked approval');
   assert(!(await staffRequests(clinician, '?status=active').expect(200)).body
     .some((item) => item.accessRequestId === accessRequestId), 'a revoked approval is no longer active');
   // Staff-only grant close is not reachable with a patient session.
   await post(sa, `/identity/consent-grants/${approved.body.consentGrantId}/close`, { reason: 'Patient attempt' }).expect(403);
+
+  // REC-NOTIFY (0086): approving needs a sign-in within ten minutes, and for 24
+  // hours after an OTP account recovery access-PIN set, emergency-contact
+  // changes and new approvals are refused; denial and revocation stay open.
+  const pendingRequest = async (scope) => {
+    const requestId = randomUUID();
+    await pool.query(`insert into identity.access_requests(id,patient_id,staff_id,membership_id,facility_id,scope,purpose_of_use,reason,status,requested_duration_minutes)
+      values($1,$2,$3,$4,$5,$6,'direct-care','Follow-up consultation','pending',60)`,
+    [requestId, a.patientId, ids.staff, ids.membership, ids.facility, scope]);
+    return requestId;
+  };
+  const toApprove = await pendingRequest('read_records');
+  const toDeny = await pendingRequest('write_records');
+  const problem = (response, status, code) => {
+    assert.equal(response.status, status, JSON.stringify(response.body)); assert.equal(response.body.code, code);
+  };
+  // As the owner, make the first sign-in of the session family eleven minutes old.
+  await pool.query("update auth.sessions set issued_at=issued_at-interval '11 minutes' where account_id=$1", [a.accountId]);
+  problem(await post(sa, `/identity/access-requests/${toApprove}/approve`), 403, 'PATIENT_RECENT_AUTH_REQUIRED');
+  const fresh = await session(a.email);
+  // As the owner, record an OTP account recovery completed a moment ago.
+  const recoveryId = randomUUID();
+  await pool.query(`insert into auth.otp_challenges(id,account_id,recipient_hmac,purpose,channel,verifier_hmac,verifier_key_version,
+      expires_at,max_attempts,verified_at,completion_token_hmac,completion_expires_at,consumed_at,account_token_version)
+    values($1,$2,repeat('a',64),'PASSWORD_RESET','email',repeat('b',64),'rehearsal',clock_timestamp()+interval '5 minutes',5,
+      clock_timestamp(),repeat('c',64),clock_timestamp()+interval '5 minutes',clock_timestamp(),1)`, [recoveryId, a.accountId]);
+  problem(await post(fresh, `/identity/access-requests/${toApprove}/approve`), 403, 'PATIENT_RECENT_RECOVERY_HOLD');
+  problem(await post(fresh, '/identity/me/access-pin', { pin: '482915' }), 403, 'PATIENT_RECENT_RECOVERY_HOLD');
+  problem(await post(fresh, '/identity/me/emergency-contacts', { name: 'Ngozi Okafor', relationship: 'sibling',
+    channel: 'email', destination: 'ngozi-hold@example.invalid' }), 403, 'PATIENT_RECENT_RECOVERY_HOLD');
+  assert.equal((await pool.query("select status from identity.access_requests where id=$1", [toApprove])).rows[0].status, 'pending');
+  assert.equal((await post(fresh, `/identity/access-requests/${toDeny}/deny`, { reason: 'Not during recovery' }).expect(200)).body.status, 'denied');
+  await http.delete('/api/v1/identity/me/access-pin').set('Cookie', fresh.cookie).set('Origin', origin)
+    .set('x-csrf-token', fresh.csrf).expect(200);
+  // As the owner, let the 24 hours pass: the same session may approve and set a PIN.
+  await pool.query("update auth.otp_challenges set consumed_at=consumed_at-interval '25 hours' where id=$1", [recoveryId]);
+  assert.equal((await post(fresh, `/identity/access-requests/${toApprove}/approve`).expect(200)).body.status, 'approved');
+  await post(fresh, '/identity/me/access-pin', { pin: '482915' }).expect(200);
 
   // Zero waiting period completes deletion; the login is then unusable.
   await pool.query("update platform.patient_account_deletion_settings set waiting_period=interval '0'");
@@ -317,7 +365,8 @@ try {
     delivery: 'local-stub-only', account_deletion: 'request-confirm-replay-cancel-complete', csrf_required: true,
     deleted_login_unusable: true, patient_identity_retained: true, emergency_contacts: 'encrypted-owned-verified-deactivated',
     break_glass_contact_alert: 'intent-created-stub-delivered-once', patient_inbox_runtime: true,
-    patient_access_requests_runtime: 'list-approve-revoke', staff_access_requests_runtime: 'own-list-status-filter-purpose-permission', staff_access_request_outcome: 'active-then-revoked', staff_close_route_denied_to_patient: true, audit_source_identity_api: true,
+    patient_access_requests_runtime: 'list-approve-revoke', staff_access_requests_runtime: 'own-list-status-filter-purpose-permission', staff_access_request_outcome: 'active-then-revoked', staff_list_patient_id: 'active-grant-only', staff_close_route_denied_to_patient: true, audit_source_identity_api: true,
+    approval_requires_recent_sign_in: true, recovery_hold: 'approve-pin-contact-refused-deny-revoke-allowed-lifted-after-24h',
     emergency_contact_delivery_enabled_for_this_rehearsal_only: getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED,
     isolated_database_dropped: true }) + '\n');
 } finally {

@@ -101,6 +101,23 @@ describe('accountless provider CAC lookup quota', () => {
     expect(query.mock.calls.some(([sql]) => String(sql).includes('public_record_organization_cac_result'))).toBe(false);
   });
 
+  it('in production, refuses a client address inside TRUST_PROXY_CIDRS before writing anything (IP-1)', async () => {
+    // Without the edge's client address, request.ip is the load balancer: one
+    // network for every client, so the quota must not be charged to it.
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({
+      NODE_ENV: 'production', QOREID_ENABLED: true, OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64'),
+      TRUST_PROXY_CIDRS: '10.40.0.0/16',
+    } as environment.Environment);
+    const { service, database, qoreid } = setup();
+    for (const ip of ['10.40.1.10', '::ffff:10.40.9.9']) {
+      await expect(service.start(input, request(ip)))
+        .rejects.toMatchObject({ status: 503, code: 'PROVIDER_ENROLLMENT_RATE_LIMIT_UNAVAILABLE' });
+    }
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    expect(qoreid.verifyCac).not.toHaveBeenCalled();
+    await expect(service.start(input, request('203.0.113.44'))).rejects.toMatchObject({ status: 422, code: 'CAC_NOT_VERIFIED' });
+  });
+
   it('fails closed before writing anything without a usable client network or production key', async () => {
     const { service, database, qoreid } = setup();
     for (const ip of [undefined, 'not-an-address']) {

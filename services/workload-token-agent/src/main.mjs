@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { agentConfiguration, TokenAgent } from './agent.mjs';
+import { agentConfiguration, renewalRetryMs, TokenAgent } from './agent.mjs';
 // Health checks must not acquire credentials, rotate, remove, or write tokens.
 if (process.argv.includes('--healthcheck')) {
   await import('./health.mjs');
@@ -18,7 +18,7 @@ while (!stopping) {
     } catch {
       // Never log token material, credentials, response bodies, or SDK errors.
       process.stderr.write('Workload token renewal unavailable\n');
-      nextRenewal = Date.now() + 10_000;
+      nextRenewal = Date.now() + renewalRetryMs;
     }
   }
   await agent.purgeExpired();

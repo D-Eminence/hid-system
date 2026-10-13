@@ -3,15 +3,22 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { requirePatient } from '../auth/patient-self.service';
+import { requireNoRecentRecoveryHold, requireRecentPatientAuthentication } from '../auth/recent-authentication';
 import { DatabaseService } from '../database/database.service';
+import { StaffSearchBudget } from '../identity/staff-search-budget';
 import type { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import type { CreateBreakGlassDto } from './dto/create-break-glass.dto';
 import type { ListStaffAccessRequestsDto } from './dto/list-staff-access-requests.dto';
 import type { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
 
+/**
+ * The answer to an access request as the requesting clinician sees it. It
+ * names no patient, and an unknown HID is answered in the same shape; the
+ * clinician's list names the patient only once a grant made from the request
+ * is active (PSEARCH-1, 0086).
+ */
 export interface AccessRequestRow extends QueryResultRow {
   accessRequestId: string;
-  patientId: string;
   status: 'pending';
   scope: 'read_records' | 'write_records';
   purpose: string;
@@ -56,17 +63,25 @@ export interface VerifiedPatientPinAccess {
   existingGrant: boolean;
 }
 
+const RECENT_APPROVAL_AUTH_DETAIL = 'Sign in again before approving access to your records';
+
 @Injectable()
 export class ConsentService {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(private readonly database: DatabaseService, private readonly budget: StaffSearchBudget) {}
 
-  async createAccessRequest(context: DataAccessContext, input: CreateAccessRequestDto) {
+  /**
+   * Records a pending request for the patient an exact HID names. The answer
+   * never names the patient: an unknown HID gets the same answer, audited as
+   * refused by the database command, so the request does not tell whether the
+   * HID exists. Counted against the actor's and facility's budgets first.
+   */
+  async createAccessRequest(context: DataAccessContext, input: CreateAccessRequestDto): Promise<AccessRequestRow> {
+    await this.budget.consume('access_request', context);
     try {
       return await this.database.withTransaction(context, async (client) => {
         const result = await client.query<AccessRequestRow>(
           `select
              access_request_id as "accessRequestId",
-             subject_patient_id as "patientId",
              request_status as status,
              request_scope as scope,
              request_purpose as purpose,
@@ -76,7 +91,12 @@ export class ConsentService {
            from identity.create_access_request($1, $2, $3, $4)`,
           [input.hid, input.scope, input.reason, input.durationMinutes],
         );
-        return this.requireRow(result.rows[0]);
+        const row = this.requireRow(result.rows[0]);
+        // Exactly these fields, whatever else a row may carry.
+        return {
+          accessRequestId: row.accessRequestId, status: row.status, scope: row.scope, purpose: row.purpose,
+          durationMinutes: row.durationMinutes, requestedAt: row.requestedAt, existingRequest: row.existingRequest,
+        };
       });
     } catch (error) {
       throw this.translate(error);
@@ -84,7 +104,15 @@ export class ConsentService {
   }
 
 
-
+  /**
+   * The clinician's own requests. A request names its patient only while the
+   * grant made from it is active (effective status 'active'): the database
+   * command returns no patient id otherwise (0086), and this projection keeps
+   * it that way, so a request for a guessed HID never yields the patient id
+   * before the patient consents (PSEARCH-1). A withheld id is answered as
+   * `withheld-<last four characters of the request id>` with
+   * `patientIdWithheld: true`, never null.
+   */
   async listMyStaffAccessRequests(context: DataAccessContext, query: ListStaffAccessRequestsDto) {
     try {
       return await this.database.withTransaction(context, async (client) => {
@@ -99,7 +127,17 @@ export class ConsentService {
            from identity.list_my_staff_access_requests($1)`,
           [query.status ?? null],
         );
-        return result.rows;
+        return result.rows.map((row): Record<string, unknown> => {
+          const named = row.effectiveStatus === 'active' && typeof row.patientId === 'string';
+          return {
+            ...row,
+            // A withheld id stays a string so that clients rendering its last
+            // characters keep working; it is derived from the request, never
+            // from the patient.
+            patientId: named ? row.patientId : `withheld-${String(row.accessRequestId).slice(-4)}`,
+            patientIdWithheld: !named,
+          };
+        });
       }, { readOnly: true });
     } catch (error) {
       throw this.translate(error);
@@ -123,15 +161,24 @@ export class ConsentService {
     }
   }
 
+  /**
+   * Approval grants a clinician access, so it needs a recent sign-in (as an
+   * access-PIN change does) and is refused for 24 hours after an OTP account
+   * recovery (REC-NOTIFY). Denial and revocation stay available.
+   */
   async approveAccessRequest(request: HidRequest, requestId: string) {
     const actor = requirePatient(request.actor);
     try {
-      return await this.asPatient(request, actor.subject, async (client) => this.requireRow((await client.query<Record<string, unknown> & QueryResultRow>(
-        `select access_request_id as "accessRequestId", consent_grant_id as "consentGrantId",
-           patient_id as "patientId", status, expires_at as "expiresAt", replayed
-         from identity.approve_my_access_request($1, $2, $3)`,
-        [actor.subject, actor.sessionId, requestId],
-      )).rows[0]));
+      return await this.asPatient(request, actor.subject, async (client) => {
+        await requireNoRecentRecoveryHold(client, actor.accountId, 'new access approvals');
+        await requireRecentPatientAuthentication(client, actor, RECENT_APPROVAL_AUTH_DETAIL);
+        return this.requireRow((await client.query<Record<string, unknown> & QueryResultRow>(
+          `select access_request_id as "accessRequestId", consent_grant_id as "consentGrantId",
+             patient_id as "patientId", status, expires_at as "expiresAt", replayed
+           from identity.approve_my_access_request($1, $2, $3)`,
+          [actor.subject, actor.sessionId, requestId],
+        )).rows[0]);
+      });
     } catch (error) {
       throw this.translate(error);
     }
@@ -186,8 +233,24 @@ export class ConsentService {
         return this.requireRow(result.rows[0]);
       });
     } catch (error) {
-      throw this.translate(error);
+      throw this.translateBreakGlass(error);
     }
+  }
+
+  /**
+   * identity.activate_break_glass (0031) refuses with 22023 and this message
+   * when no active 'emergency' purpose of use exists. The route always runs it
+   * with the emergency purpose, so here the refusal means emergency access is
+   * not enabled on the platform: 0082 seeds only direct-care, and 'emergency'
+   * is to be added only by a reviewed migration after the D9 and N3 decisions
+   * (P10). It is answered like the disabled platform control.
+   */
+  private translateBreakGlass(error: unknown): unknown {
+    if (isDatabaseError(error) && error.code === '22023'
+      && (error as unknown as { message?: unknown }).message === 'Break-glass requires the emergency purpose of use') {
+      return new DomainProblem(423, 'BREAK_GLASS_DISABLED', 'Emergency access is not enabled on this platform');
+    }
+    return this.translate(error);
   }
 
   /**

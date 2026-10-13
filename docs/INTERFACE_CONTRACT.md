@@ -7,11 +7,48 @@ hostname. The app-specific Cloudflare Worker proxies only that versioned
 namespace to the fixed AWS origin and never accepts an upstream from browser
 input. Cookie sessions are host-only; browser token storage is prohibited.
 
+The client address reaches the APIs through the edge only
+(D-Eminence/hid-system#65). The Worker replaces any caller-supplied
+`X-Real-IP` with the address Cloudflare reports, and the AWS gateway trusts
+that header only from the VPC and sends it on as `X-Forwarded-For`. In staging
+and production the gateway refuses an API request without a usable client
+address with `403 CLIENT_ADDRESS_REQUIRED`; a browser that reaches the API
+through a Worker with this change never sees it (a Worker built earlier sends
+no client address, so its API requests are refused). Every proxied API request
+whose target holds a backslash before the query or a `#` anywhere answers
+`400 INVALID_REQUEST_TARGET`; a browser's URL parser never sends either. The
+gateway proxies only the modules named in `HID_ENABLED_API_ROUTES`: at launch
+Identity (`/api/v1/auth`, `/identity`, `/audit`, `/admin`, `/commercial`) and
+EHR (`/api/v1/ehr`). Lab, Pharmacy, OCR and Outreach prefixes answer
+`404 API_ROUTE_NOT_FOUND`, as do the service-to-service routes
+(`/api/v1/auth/service-session`, `/api/v1/identity/service/*`,
+`/api/v1/identity/outreach/*`, `/api/v1/ehr/internal/*`, and the Lab and
+Pharmacy `accept-ehr-*` and `imports/from-ocr` routes) in any letter case or
+spelling nginx normalizes. Public IP-keyed limits (recovery start, patient
+enrollment start and contact, provider enrollment, organization application
+intake and profile completion) count per client network: an IPv4 address or an
+IPv6 /64. Without a usable client address, or, in production, with an address
+of one of the platform's own proxies, they answer their 503
+(`OTP_RATE_LIMIT_UNAVAILABLE` for recovery start,
+`ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
+`PROVIDER_ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
+`APPLICATION_RATE_LIMIT_UNAVAILABLE`) instead of sharing one bucket. The
+gateway passes a backend `503` to the browser as `503 UPSTREAM_UNAVAILABLE`
+(its `error_page` intercepts backend 502, 503 and 504), so clients must treat
+any 503 as unavailable rather than rely on the backend code.
+
 Authentication OTP commands are purpose-bound and use three stages: start
 returns a generic challenge, verify accepts exactly six digits and returns an
 opaque one-time completion credential, and complete consumes that credential.
 Identity calls Notification API directly over workload authentication; these
-credentials never use the ordinary-notification event path. Ordinary domain
+credentials never use the ordinary-notification event path. In production the
+Notification API runs the `otp-email-sms` profile (ADR-053,
+D-Eminence/hid-system#66): `POST /notifications/otp` delivers
+`email` through SES and `sms` through Termii and answers `400` for `whatsapp`
+without a provider attempt; Identity sends only `email` and `sms`. The `202`
+response's `requestId` is also the correlation id of the one PHI-free
+`notification.otp.outcome` log line written per send; when the fallback ran,
+that line also names the primary provider and its safe code. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
 Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
@@ -58,14 +95,18 @@ Every response that sets these cookies (a staff or patient sign-in by
 password or Google, provider enrollment activation, and a refresh) or clears
 them also expires the public patient enrollment cookie `hid_enrollment` on its
 path, `/api/v1/identity/patient-enrollments` (HttpOnly, `SameSite=Strict`,
-`Secure` as above). That cookie lets `GET /identity/patient-enrollments/current`
-and an activation replay show the enrollment's HID on the enrolling device for
-up to 24 hours ([QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md));
-a signed-in patient reads the HID from `GET /identity/me`, and the enrollment
+`Secure` as above). So does every successful public enrollment activation
+response (`200`, a replay's included; BRANCH:launch/identity-enrollment-gates,
+not deployed). If that response is lost, the cookie lets
+`GET /identity/patient-enrollments/current` and an activation replay show the
+enrollment's HID on the enrolling device for 15 minutes after activation;
+after that both answer `404 ENROLLMENT_NOT_FOUND`
+([QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md)). A
+signed-in patient reads the HID from `GET /identity/me`, and the enrollment
 routes refuse while session cookies are present. Every other response leaves
-it: a refused sign-in, a pending Google enrollee (`202`), and each refresh or
-sign-out refusal that leaves the session cookies untouched or kept (below).
-Activation itself keeps it. Platform administration sign-in does not touch it.
+it: a refused sign-in or activation, a pending Google enrollee (`202`), and
+each refresh or sign-out refusal that leaves the session cookies untouched or
+kept (below). Platform administration sign-in does not touch it.
 
 `POST /api/v1/auth/refresh` takes no body. It reads the refresh and CSRF
 cookies, `X-CSRF-Token` and, optionally, `X-HID-Client`, and checks them in
@@ -241,7 +282,8 @@ patient mapping on use.
 `GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
 grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
 returns at most 50 completed encounters and 50 current signed/amended note
-revisions, after fresh Identity authorization through the EHR workload caller.
+revisions of completed encounters (since 0084), after fresh Identity
+authorization through the EHR workload caller.
 It names the other five record categories as withheld from the patient, not as
 absent (§11, "Record summaries").
 These routes accept no browser-selected patient identity. Patient record access
@@ -265,6 +307,12 @@ notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
 Activation also requires the platform `break_glass_enabled` control inside the
 activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
+It also requires an active `emergency` purpose of use, which no migration seeds
+(0082 seeds only `direct-care`); without it activation also returns
+`423 BREAK_GLASS_DISABLED` ("Emergency access is not enabled on this
+platform"), where it returned `400 INVALID_CONSENT_COMMAND`. Break-glass is off
+at launch (owner default, deny by default; release checklist P10 and P11): `break_glass_enabled`
+is false and no `emergency` code exists.
 The summary's sections, the read permission each needs, its limits and audit
 counts are in §11, "Record summaries".
 
@@ -272,7 +320,13 @@ Patient access-request decisions are session-bound patient commands:
 `GET /api/v1/identity/me/access-requests`,
 `POST /api/v1/identity/access-requests/:requestId/approve` and
 `POST /api/v1/identity/access-requests/:requestId/deny` (`{ "reason" }`) require
-a patient session and no facility context. `POST
+a patient session and no facility context. Since 0086 an approval grants
+access only from a session family first issued within the last 10 minutes (as
+an access-PIN change does), else `403 PATIENT_RECENT_AUTH_REQUIRED`; the client
+signs the patient in again and repeats it. For 24 hours after an OTP account
+recovery of the account (any recovery purpose) an approval is `403
+PATIENT_RECENT_RECOVERY_HOLD`, checked before recent sign-in, because signing in
+again does not end it. A denial or a revocation is never held. `POST
 /api/v1/identity/me/consent-grants/:grantId/revoke` (`{ "reason" }`) revokes a
 grant the patient authorized (patient-approved or PIN-derived); break-glass and
 workforce grants return `409`. Access-history items include `breakGlass` and
@@ -292,9 +346,39 @@ approval with a grant, whichever ended it first, `active`, `expired` (also when
 it was revoked only after it lapsed), `closed` (by the requesting clinician) or
 `revoked` (by anyone else); otherwise the request `status` (0074). The `status`
 filter accepts `pending`, `approved`, `denied`, `revoked`, `expired`, `active`
-and `closed`, and matches the request status or the effective status. Until the role bootstrap of this
+and `closed`, and matches the request status or the effective status. Since
+0086 (PSEARCH-1) an item's `patientId` is the patient's id only while its
+`effectiveStatus` is `active`; for every other item (pending, denied, expired,
+closed, revoked) it is the non-identifying string
+`withheld-<last four characters of accessRequestId>`, and each item carries
+`patientIdWithheld` (`true` when withheld). The withheld value is derived from
+the request, never from the patient, and is a string rather than `null` so
+that a client rendering its last characters keeps working (Health-id
+`AccessRequests.tsx`). Before 0086, every item named its patient, so one
+request for a guessed HID and one list call disclosed the patient id before
+the patient answered. Until the role bootstrap of this
 fix, the Identity runtime could not execute `identity.list_my_staff_access_requests`,
 and every caller got `403 CONSENT_COMMAND_DENIED`.
+
+Staff patient search (0086, launch blocker PSEARCH-1). Searching by HID never
+grants access by itself, and its answers do not tell whether an HID exists:
+
+| Route | Contract |
+|---|---|
+| `POST /api/v1/identity/patient-lookup` | `identity.patient.read` at the `X-Facility-ID` facility; body `{ hid, purpose }` (`direct-care`, `emergency` or `healthcare-operations`; anything else `400`). `200 { patient: { patientId, hid, firstName, lastName, fullName, dateOfBirth, gender, version }, authorization: { decision: 'allow', facilityId, membershipId, scope, purpose, consentGrantId, expiresAt, breakGlass } }` only with an active grant for this account, membership, facility and purpose (before 0086 a success answered `201`). Every refusal, whether the HID is unknown, the patient has no grant, or the grant is held at another facility or for another purpose, is the same `404 PATIENT_NOT_AVAILABLE` ("The patient is not available"); before 0086 a patient visible to the caller without a grant (any patient, for a registration member) answered `403`, and an unknown or hidden one `404`. The audit event `identity.patient.lookup` keeps the true outcome: `success`, or `denied` with `details.reason` `not_found` or `not_authorized` and, for the latter, the patient |
+| `POST /api/v1/identity/access-requests` | `identity.consent.write` at the `X-Facility-ID` facility, `X-Purpose-Of-Use` `direct-care` or `healthcare-operations`; body `{ hid, scope: read_records\|write_records, reason (8–500), durationMinutes (5–1440) }`. `201 { accessRequestId, status: 'pending', scope, purpose, durationMinutes, requestedAt, existingRequest }`, which no longer carries `patientId`. An unknown HID gets the same `201` shape (a new `accessRequestId`, `existingRequest: false`) instead of `404 CONSENT_RESOURCE_NOT_FOUND`; nothing is persisted for it, and the audit records `identity.access-request.refused` (`denied`, no patient, `details.reason: patient_not_available`) under that `accessRequestId`. The clinician's own list (above) shows only recorded requests, and names the patient only once a grant made from the request is active |
+
+Both commands are counted in `auth.otp_rate_limits` before they run, whatever
+their outcome, per actor account (across facilities) and per facility.
+Defaults: 60 lookups per actor and 600 per facility in 5 minutes
+(`PATIENT_LOOKUP_RATE_WINDOW_SECONDS`, `PATIENT_LOOKUP_ACTOR_MAX_REQUESTS`,
+`PATIENT_LOOKUP_FACILITY_MAX_REQUESTS`); 20 access requests per actor and 200
+per facility in 15 minutes (`ACCESS_REQUEST_RATE_WINDOW_SECONDS`,
+`ACCESS_REQUEST_ACTOR_MAX_REQUESTS`, `ACCESS_REQUEST_FACILITY_MAX_REQUESTS`;
+windows 60–86400 s, actor maxima 1–10000, facility maxima 1–100000). The
+call after a maximum is `429 PATIENT_LOOKUP_RATE_LIMITED` or `429
+ACCESS_REQUEST_RATE_LIMITED` until its window ends. A call refused for the
+actor's own budget does not count against the facility's.
 
 Patient login/account deletion (Phase 3, ADR-036) closes the login only:
 
@@ -320,15 +404,44 @@ Patient emergency contacts (POST-only commands):
 | `POST /api/v1/identity/me/emergency-contacts/:contactId/verification` | Sends a six-digit code to the contact; `503 EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE` while delivery is disabled |
 | `POST /api/v1/identity/me/emergency-contacts/:contactId/verification/confirm` | `{ challengeId, code }`; single use, expiring, attempt-limited |
 
+For 24 hours after an OTP account recovery (0086, REC-NOTIFY), adding or
+changing an emergency contact and setting the access PIN
+(`POST /api/v1/identity/me/access-pin`) answer `403
+PATIENT_RECENT_RECOVERY_HOLD`, as does an access-request approval (above).
+Deactivating a contact, verifying one already added and removing the PIN
+(`DELETE /api/v1/identity/me/access-pin`) stay available.
+
 Recovery completion atomically consumes the account/token-bound OTP credential,
-sets an Argon2 password and revokes sessions. Disabled, stale, expired and replayed
-credentials fail closed. Completion returns to login rather than opening a session.
+sets an Argon2 password and revokes every session of the account (patient,
+staff and platform). Since 0086 it also revokes every external sign-in identity
+(today only Google links) of the account not already revoked, so a link another
+party made stops signing in; the audit event `auth.otp.recovery.completed`
+records how many (`details.external_identities_revoked`). The legacy importer's
+provenance record (issuer `legacy-identity`) is not a sign-in: it is kept and
+not counted. The revoked Google subject cannot be linked again (the link
+commands answer `GOOGLE_IDENTITY_ALREADY_LINKED` for any subject ever linked),
+so after a recovery the owner can link only a different Google account.
+Disabled, stale, expired and replayed credentials fail closed. Completion
+returns to login rather than opening a session.
+The owner notice of a completed recovery ("your password was changed", to every
+verified contact, with an inbox entry) is not sent yet: Identity offers each
+completion, after commit, to a bound `ACCOUNT_RECOVERY_NOTICE_SINK`, which the
+notification route will provide.
 
 Recovery start (`POST /api/v1/auth/otp/start`, every purpose) answers every
 identifier alike: `202 { accepted, challengeId, deliveryChannels: ['email', 'sms'],
-expiresInSeconds, resendAfterSeconds }`, before any code is delivered. Within
-`resendAfterSeconds` a repeat for the same purpose and identifier (email or HID,
-any case) answers the same `challengeId` whether or not an account exists, and
+expiresInSeconds, resendAfterSeconds }`, before any code is delivered. Since 0086
+(REC-AUDIENCE, REC-UNVERIFIED-CONTACT) a start reaches only the account kind of
+its page, named by `turnstileAction`: `patient-reset-start` and
+`legacy-recovery` an account with an active patient record, `staff-reset` one
+with an active staff record, `admin-reset` a platform administrator. A
+patient's code goes only to a verified contact: the account email once
+`email_verified_at` is set, else the verified phone of its public enrollment. A
+start for an account of another kind, or for a patient with no verified
+contact, is answered and counted exactly as for an unknown identifier and sends
+nothing. A staff or platform account's code goes to its provisioned work email.
+Within `resendAfterSeconds` a repeat for the same purpose, page and identifier
+(email or HID, any case) answers the same `challengeId` whether or not an account exists, and
 sends nothing. A start for the account's other identifier in that window, or for
 an account whose code budget is spent, gets a new `challengeId` and no code, as
 an unknown identifier does. Clients keep the `challengeId` of their latest start.
@@ -338,6 +451,16 @@ code within 15 minutes (`OTP_VERIFY_FAILURE_MAX`,
 `OTP_VERIFY_FAILURE_WINDOW_SECONDS`) refuses every code of that account, a correct
 one too, for 15 minutes. Every refusal is `403 OTP_INVALID_OR_EXPIRED`; start
 limits are `429 OTP_RATE_LIMITED`, unchanged.
+
+Password sign-in (`POST /api/v1/auth/login`, `POST /api/v1/auth/patient/login`,
+the platform password step and the password check of a Google link) counts a
+failure per identifier as typed (email or HID, any case) and, since 0086
+(SIGNIN-LOCKOUT), per resolved account, so the email and the HID of one account
+share a budget. The fifth failure within 15 minutes of a budget's first locks it
+for 15 minutes; a refused attempt within that window extends the lock.
+While the account's budget is locked the correct password is refused too, by
+either identifier. Every refusal is the same `401` ("Invalid credentials"); a
+correct password while the budget is open ends that budget's window.
 
 ## 1. Purpose
 
@@ -465,8 +588,11 @@ approved service workload identity + exact caller name
 
 Identity validates both. Cookie mutation validation also propagates the exact
 Origin and CSRF header/cookie evidence. Production workload evidence is an
-issuer/JWKS-validated, audience-bound, unexpired JWT with an exact configured
-caller subject; local per-caller secrets are development-only.
+issuer/JWKS-validated, audience-bound, unexpired ES256 JWT with an exact
+configured caller subject, `exp` and `iat` (at most 300 seconds old and not
+issued in the future, 5 seconds of clock tolerance) and `token_use: workload`;
+any other token is refused `401` (ADR-047). Local per-caller secrets are
+development-only.
 
 Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 `POST` for cookie mutation revalidation. Patient decisions use
@@ -607,6 +733,41 @@ attempts that then fail (for example `503 ENROLLMENT_RECONCILIATION_REQUIRED`
 or `409 CONTACT_ALREADY_REGISTERED`). A malformed password (`400`), a missing
 or forged enrollment cookie (`404`) or an enrollment not yet at the password
 step (`409`) is refused first and not counted. Success bodies are unchanged.
+
+Changes of BRANCH:launch/identity-enrollment-gates (migration 0085; not
+deployed). Request and success bodies are unchanged:
+
+- `POST /api/v1/identity/patient-enrollments` checks the QoreID gate after
+  the Origin, Turnstile, signed-in-session and input checks and before
+  anything that reads the NIN's registration: `503 QOREID_DISABLED`,
+  `503 QOREID_NIN_ONLY_DISABLED` or `503 INTEGRATION_PAUSED`, the same for a
+  bound, a pending and an unknown NIN. A same-key resume is refused the same
+  way while the gate is closed. Before, a bound or pending NIN got
+  `409 NIN_ALREADY_REGISTERED` whatever the gate's state; with the gate open
+  it still does.
+- The same route answers `429 VERIFICATION_QUOTA_EXCEEDED` ("Verification
+  request limit reached; try again later") when the QoreID lookup quota
+  refuses the lookup: per client network (an IPv4 address or an IPv6 /64)
+  `PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX` (5) an hour and
+  `PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX` (15) a day, and
+  `PATIENT_ENROLLMENT_QOREID_DAILY_CAP` (200) a day across the platform. It is
+  charged only when QoreID is called: never for a resume, a duplicate or an
+  earlier refusal. A quota fault answers `503 VERIFICATION_QUOTA_UNAVAILABLE`.
+- `POST .../activate` answers `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED`
+  ("Verify your contact again before setting a password") when the contact
+  was proved more than 30 minutes earlier. The enrollment is back at the
+  contact step (`GET .../current` answers `stage: verify_contact` without a
+  contact): choose and prove a contact again (`POST .../contact`, then
+  `/contact/verify`). Nothing is created, and the attempt is not counted
+  against the activation budget unless the activation command made the
+  decision.
+- An enrollment activated more than 15 minutes ago answers
+  `404 ENROLLMENT_NOT_FOUND` on every enrollment route (`GET .../current`,
+  `POST .../activate`, `/contact`, `/contact/verify`, `/google`), without the
+  HID, as an unknown enrollment does. Within those 15 minutes `GET .../current`
+  and a replay still answer `stage: active` with the HID.
+- A successful activation response (`200`) expires `hid_enrollment`
+  ("Auth session contract", above).
 
 ### HID Resolution
 
@@ -815,6 +976,81 @@ All writes require:
 * audit
 * appropriate concurrency protection
 
+### Launch module set
+
+Lab, Pharmacy, OCR and Outreach are off at launch (decision D17); EHR
+prescriptions and lab requests are records only. Migration 0084 withdrew
+`ehr.lab-request.write`, `lab.work-item.accept`, `lab.accession.create`,
+`pharmacy.work-item.accept` and `pharmacy.dispensing.create` from every role,
+so these routes answer `403 PERMISSION_DENIED` before any write or call to Lab
+or Pharmacy:
+
+- `POST` and `PATCH .../lab-requests` and `POST .../lab-requests/:requestId/lab-work-item`;
+- `POST .../prescriptions/:prescriptionId/pharmacy-work-item`;
+- Lab's EHR-order acceptance and accession creation, and Pharmacy's
+  acceptance and dispensing.
+
+The read permissions stay, so existing lab requests, prescriptions and Lab and
+Pharmacy records remain readable. Prescriptions are still created and changed
+in the EHR. An existing lab request changes status only through its
+encounter: cancelling the encounter cancels its open lab requests, and marking
+it entered in error marks them entered in error ("Encounter status and its
+records"). An open lab request of a completed encounter that is not
+retracted, or of an encounter that was already cancelled or entered in error,
+stays as it is. Re-enabling a module takes its own decision, its fixes, a
+staging acceptance run and a reviewed migration granting the permissions
+again; the sections on the Lab and Pharmacy handoffs below describe the routes
+as they work then.
+
+### Encounter status and its records
+
+An encounter's status decides what may still be recorded on it (CLIN-EIE,
+migration 0084). `PATCH /api/v1/ehr/patients/:patientId/encounters/:encounterId`
+moves an encounter only along these transitions; any other answers
+`409 INVALID_ENCOUNTER_TRANSITION`:
+
+| From | To |
+|---|---|
+| `planned` | `in_progress`, `cancelled`, `entered_in_error` |
+| `in_progress` | `on_hold`, `completed`, `cancelled`, `entered_in_error` |
+| `on_hold` | `in_progress`, `cancelled`, `entered_in_error` |
+| `completed` | `entered_in_error` |
+| `cancelled`, `entered_in_error` | none |
+
+Marking an encounter entered in error (a wrong-patient retraction, possible
+also after completion) marks, in the same transaction and under the
+encounter's row lock, its draft, signed and amended notes `entered_in_error`,
+its diagnoses' `verificationStatus` `entered_in_error`, and its draft, active
+and on-hold prescriptions and lab requests `entered_in_error`. Cancelling an
+encounter cancels its draft, active and on-hold prescriptions and lab
+requests, and leaves its notes and diagnoses. Completed orders and vitals keep
+their state. Each changed record gets a version carrying the request's
+`changeReason`, and the encounter's audit event (`ehr.encounter.update`)
+records `cascade`: the new status and the ids changed in each category
+(`clinicalNoteIds`, `diagnosisIds`, `prescriptionIds`, `labRequestIds`). The
+response is the encounter, as before; list the records to see the change.
+Lab and Pharmacy are not told (they are off at launch; Pharmacy refuses to
+dispense a prescription that is no longer active, 0080).
+
+Creates and order activations check the encounter, under a share lock, and
+answer `409 ENCOUNTER_NOT_OPEN` without writing anything:
+
+| Encounter | Notes (also OCR-imported), vitals, diagnoses, documents linked to it | New prescription or lab request; activating a draft one | Resuming an on-hold order |
+|---|---|---|---|
+| `planned`, `in_progress`, `on_hold` | allowed | allowed | allowed |
+| `completed` | allowed (late documentation, versioned and audited) | `409 ENCOUNTER_NOT_OPEN` | allowed |
+| `cancelled`, `entered_in_error` | `409 ENCOUNTER_NOT_OPEN` | `409 ENCOUNTER_NOT_OPEN` | `409 ENCOUNTER_NOT_OPEN` |
+
+An idempotent replay of an earlier create still returns its record. Changes
+to existing records are not checked against the encounter's status: a note
+amendment, a diagnosis update and a vital correction follow their own rules. A
+diagnosis whose `verificationStatus` is `entered_in_error` cannot be changed
+at all: `409 DIAGNOSIS_NOT_AMENDABLE`. A vital's recorded values are changed
+only by a correction (`POST .../vitals/:vitalId/corrections`); the database
+refuses any other update of them (D8). The database enforces each of these
+rules too, so a writer that bypasses the API gets the same refusal
+(`DATABASE.md`, "EHR clinical safety and launch module set (0084)").
+
 ### EHR lab requests sent to Lab
 
 EHR saves a lab request, then, when it is active, asks Lab to accept it
@@ -922,8 +1158,8 @@ within its millisecond (earlier in that millisecond, or tied with a lower
 
 Two read-only summaries return the same seven arrays, each newest first:
 `encounters` (completed), `notes` (signed or amended, with the current
-revision's content), `vitals`, `diagnoses`, `prescriptions`, `labRequests` and
-`documents`.
+revision's content; which encounters' notes depends on the summary, below),
+`vitals`, `diagnoses`, `prescriptions`, `labRequests` and `documents`.
 
 - `GET /api/v1/ehr/me/records`: the patient's own records, from every facility.
 - `GET /api/v1/ehr/patients/:patientId/emergency-records`: the break-glass
@@ -941,7 +1177,11 @@ Both also return:
 
 **Patient summary.** Only encounters and notes are released to the patient:
 `released` is `["encounters","notes"]` and `withheld` is
-`["vitals","diagnoses","prescriptions","labRequests","documents"]`. Which other
+`["vitals","diagnoses","prescriptions","labRequests","documents"]`. A note is
+released only once its encounter is completed (decision D7, since 0084): the
+notes of an encounter in progress, on hold, cancelled or entered in error are
+not returned, whatever the note's own status, and row-level security refuses
+them to the patient's session as well. Which other
 categories are released, and on which conditions, is an open product decision;
 this is the current default. The audit event `ehr.patient.self.records.read`
 records `encounterCount`, `noteCount` and `withheldCategories`.
@@ -956,12 +1196,18 @@ require: vitals `ehr.vital.read`, diagnoses `ehr.diagnosis.read`, prescriptions
 authorization bypass: a category the reader lacks the permission for is
 withheld. The seeded doctor, clinician and nurse roles hold all seven.
 
+- `notes` leaves out the notes of an encounter entered in error (since 0084).
+  Notes of open, completed and cancelled encounters are returned; whether
+  cancelled encounters' notes belong in the summary is part of the open
+  break-glass scope decision (D9).
+
 - `documents` lists only documents whose effective status is `available`: the
   latest scan of the exact stored object version and SHA-256 is clean, the rule
   the download applies. Each has `status` `available`, `scanStatus` `clean`,
   and `mediaType` as the scan detected it (as declared if the scan named none).
 - `vitals` are returned as first recorded (the vital row's eight measurement
-  columns, which no API route changes), with the same fields as before; a
+  columns, which no API route changes and, since 0084, the database refuses
+  to change), with the same fields as before; a
   vital's corrections are not applied. Applying them is pending the product
   decision on correction semantics (proposed default: the current correction
   is the whole current set, as Health-id's clinician chart applies it); the
@@ -1418,7 +1664,7 @@ full history read records `lab.result.history.read`.
 
 ### Extracted Lab transport
 
-Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused by the guard (SQLSTATE `23514`, `409 LAB_ORDER_NOT_CURRENT`) for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets Lab's `409 IDEMPOTENCY_CONFLICT`, which the EHR create reports as `409 LAB_HANDOFF_REFUSED` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
+Public Lab routes remain `/api/v1/lab/*` through the gateway when the Lab module is enabled (`HID_ENABLED_API_ROUTES`; it is not in the launch set, so the gateway answers `404 API_ROUTE_NOT_FOUND` until it is). Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused by the guard (SQLSTATE `23514`, `409 LAB_ORDER_NOT_CURRENT`) for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets Lab's `409 IDEMPOTENCY_CONFLICT`, which the EHR create reports as `409 LAB_HANDOFF_REFUSED` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
 
 Lab answers EHR order acceptance (D-Eminence/hid-system#56):
 
@@ -1456,7 +1702,9 @@ terminal.
 ### Extracted Pharmacy transport
 
 Public Pharmacy reads and pharmacist commands remain
-`/api/v1/pharmacy/*` through the gateway. EHR prescription acceptance and OCR
+`/api/v1/pharmacy/*` through the gateway when the Pharmacy module is enabled
+(`HID_ENABLED_API_ROUTES`; it is not in the launch set, so the gateway answers
+`404 API_ROUTE_NOT_FOUND` until it is). EHR prescription acceptance and OCR
 medication import use internal-only routes with exact caller metadata. The
 shared Pharmacy client propagates bearer or Identity session-cookie user
 evidence, facility, purpose, correlation ID and idempotency key. Cookie
@@ -1661,6 +1909,9 @@ These UI prefixes are distinct from API ownership:
 API-owned. Browser applications call only gateway API paths with Identity
 cookies/CSRF, exact facility and purpose context, correlation, and idempotency
 where the owning command requires it. No browser calls an internal host/port.
+The production gateway proxies only the enabled modules (see the first
+section); a browser application for a module that is not enabled receives
+`404 API_ROUTE_NOT_FOUND` for its API calls.
 
 Pharmacy reads only existing work items/evidence and sends acceptance,
 dispensing, and reversal commands through the typed Pharmacy client. A UI state

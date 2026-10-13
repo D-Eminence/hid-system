@@ -11,6 +11,21 @@ export const RECOVERY_TURNSTILE_ACTIONS = [
   'patient-reset-start', 'staff-reset', 'admin-reset', 'legacy-recovery',
 ] as const satisfies readonly TurnstileAction[];
 
+/**
+ * The kind of account each recovery start reaches (REC-AUDIENCE, 0086): the
+ * patient actions only accounts with a patient record, staff-reset only staff
+ * accounts, admin-reset only platform administrators. A start for any other
+ * account is answered like one for an unknown identifier.
+ */
+export type RecoveryAudience = 'patient' | 'staff' | 'platform';
+export const RECOVERY_AUDIENCE_BY_ACTION: Readonly<Record<typeof RECOVERY_TURNSTILE_ACTIONS[number], RecoveryAudience>> =
+  Object.freeze({
+    'patient-reset-start': 'patient',
+    'legacy-recovery': 'patient',
+    'staff-reset': 'staff',
+    'admin-reset': 'platform',
+  });
+
 export class StartOtpDto {
   @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value)
   @IsString()

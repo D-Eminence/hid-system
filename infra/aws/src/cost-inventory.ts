@@ -1,5 +1,5 @@
 import type { HidEnvironmentConfig } from './config.js';
-import { workloadNames, workloads, workloadScale } from './workloads.js';
+import { desiredCountDefault, workloadNames, workloads, workloadScale } from './workloads.js';
 
 export interface CostInventory {
   readonly environment: string;
@@ -42,7 +42,7 @@ export function costInventory(configuration: HidEnvironmentConfig): CostInventor
       ? configuration.natGateways + configuration.availabilityZones : 0,
     ecsTasks: Object.fromEntries(workloadNames.map((name) => {
       const scale = workloadScale(configuration.profile, name);
-      return [name, { cloudFormationDefault: scale.recommendedTasks, minimumLive: scale.minimumLiveTasks,
+      return [name, { cloudFormationDefault: desiredCountDefault(configuration, name), minimumLive: scale.minimumLiveTasks,
         recommended: scale.recommendedTasks, normalMax: scale.normalMaxTasks,
         reviewedEmergencyMax: scale.reviewedEmergencyMaxTasks }];
     })),
@@ -57,9 +57,12 @@ export function costInventory(configuration: HidEnvironmentConfig): CostInventor
     },
     logRetentionDays: Number(configuration.logRetention),
     ecrImagesPerRepository: configuration.repositoryImageCount,
-    kmsKeys: configuration.name === 'staging' ? 4 : 3,
+    // Staging and production add the workload signing key; development keeps the external issuer.
+    kmsKeys: configuration.name === 'development' ? 3 : 4,
     secretInterfaces: workloadNames.filter((name) => workloads[name].hasDatabase).length + 5,
-    wafs: ingress ? 1 : 0,
+    // The public API web ACL, plus the workload issuer's NAT allowlist where an
+    // in-stack issuer runs behind NAT gateways (ADR-047, D3).
+    wafs: ingress ? 1 + (configuration.name !== 'development' && configuration.natGateways > 0 ? 1 : 0) : 0,
     sqsQueuesAndDlqs: 2,
     s3Buckets: 1,
   };

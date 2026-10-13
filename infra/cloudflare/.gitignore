@@ -1,2 +1,3 @@
 /workers/hid-tuf-staging/repository/
 /workers/hid-tuf-production/repository/
+/workers/*/staged/

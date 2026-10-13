@@ -1,18 +1,21 @@
 import { createDecipheriv, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
-import { type BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
+import { type BeforeApplicationShutdown, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import * as argon2 from 'argon2';
 import type { PoolClient } from 'pg';
 import { AFTER_RESPONSE_SHUTDOWN_GRACE_MS, AfterResponseTasks } from '../common/after-response-tasks';
+import { publicClientNetwork } from '../common/client-network';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
-import type { RecoveryOtpPurpose } from './dto/otp.dto';
+import type { RecoveryAudience, RecoveryOtpPurpose } from './dto/otp.dto';
 import { NotificationOtpClient, type OtpDeliveryOutcome } from './notification-otp.client';
 import { consumeRateLimit, lockRateLimitBucket, rateLimitBlocked } from './rate-limit';
 
 interface AccountRow {
   id: string;
   email: string | null;
+  email_verified: boolean;
+  audience_matches: boolean;
   token_version: string;
   phone_enrollment_id: string | null;
   phone_ciphertext: Buffer | null;
@@ -38,6 +41,26 @@ interface VerifiedChallengeRow {
   completion_expires_at: Date;
 }
 
+/** A completed OTP account recovery, after its transaction committed. */
+export interface AccountRecoveryNotice {
+  accountId: string;
+  purpose: RecoveryOtpPurpose;
+  correlationId: string;
+}
+
+/**
+ * Where the owner notice of a completed recovery goes (REC-NOTIFY): a fixed
+ * "your password was changed" message to every verified contact of the
+ * account and an inbox entry. The sink is the notification route's to
+ * provide; while none is bound, no notice is sent and the audit event
+ * auth.otp.recovery.completed is the only record. A sink runs after the
+ * response, like code delivery, and its failure never undoes the recovery.
+ */
+export interface AccountRecoveryNoticeSink {
+  recoveryCompleted(notice: AccountRecoveryNotice): Promise<void>;
+}
+export const ACCOUNT_RECOVERY_NOTICE_SINK = Symbol('ACCOUNT_RECOVERY_NOTICE_SINK');
+
 export function generateSixDigitOtp(draw: (minimum: number, maximum: number) => number = randomInt): string {
   return draw(0, 1_000_000).toString().padStart(6, '0');
 }
@@ -50,6 +73,10 @@ export function generateSixDigitOtp(draw: (minimum: number, maximum: number) => 
  * (auth.otp_start_cooldowns, 0081). Wrong codes count against one budget per
  * account across all its challenges and purposes; once spent, every code is
  * refused and no code is sent until the window ends.
+ *
+ * A start reaches only the account kind of its page (RECOVERY_AUDIENCE_BY_ACTION)
+ * and sends a patient's code only to a verified contact. Any other account is
+ * answered and counted exactly like an unknown identifier, and sent nothing.
  */
 @Injectable()
 export class OtpService implements BeforeApplicationShutdown {
@@ -58,25 +85,29 @@ export class OtpService implements BeforeApplicationShutdown {
     ? Buffer.from(this.environment.OTP_HMAC_KEY_B64, 'base64') : undefined;
   private readonly deliveries = new AfterResponseTasks(new Logger(OtpService.name),
     'Recovery code delivery or its bookkeeping failed');
+  private readonly notices = new AfterResponseTasks(new Logger(OtpService.name), 'Recovery owner notice failed');
 
   constructor(
     private readonly database: DatabaseService,
     private readonly notification: NotificationOtpClient,
+    @Optional() @Inject(ACCOUNT_RECOVERY_NOTICE_SINK) private readonly recoveryNotices?: AccountRecoveryNoticeSink,
   ) {}
 
-  /** Waits for the deliveries started so far, and any started meanwhile. */
-  settleDeliveries(): Promise<void> {
-    return this.deliveries.settle();
+  /** Waits for the deliveries and owner notices started so far, and any started meanwhile. */
+  async settleDeliveries(): Promise<void> {
+    await Promise.all([this.deliveries.settle(), this.notices.settle()]);
   }
 
   /** Runs before DatabaseService ends the pool, so deliveries can record their outcome. */
-  beforeApplicationShutdown(): Promise<void> {
-    return this.deliveries.settle(AFTER_RESPONSE_SHUTDOWN_GRACE_MS);
+  async beforeApplicationShutdown(): Promise<void> {
+    await Promise.all([this.deliveries.settle(AFTER_RESPONSE_SHUTDOWN_GRACE_MS),
+      this.notices.settle(AFTER_RESPONSE_SHUTDOWN_GRACE_MS)]);
   }
 
   async start(input: {
     identifier: string;
     purpose: RecoveryOtpPurpose;
+    audience: RecoveryAudience;
     remoteIp?: string;
     correlationId: string;
   }): Promise<{
@@ -88,9 +119,18 @@ export class OtpService implements BeforeApplicationShutdown {
   }> {
     this.assertConfigured();
     const identifier = input.identifier.trim();
-    const ipHmac = this.hmac('ip', input.remoteIp ?? 'unavailable');
-    // Email addresses and HIDs are both matched without regard to case.
-    const identifierHmac = this.hmac('otp-start', input.purpose, identifier.toLowerCase());
+    // The client network (an IPv4 address or an IPv6 /64). Without one, or
+    // with one of our own proxies in production, every client would share one
+    // bucket, so recovery answers 503 instead, for every identifier alike (IP-1).
+    const network = publicClientNetwork(input.remoteIp, this.environment);
+    if (!network) {
+      throw new DomainProblem(503, 'OTP_RATE_LIMIT_UNAVAILABLE', 'Verification codes are temporarily unavailable');
+    }
+    const ipHmac = this.hmac('ip', network);
+    // Email addresses and HIDs are both matched without regard to case. Each
+    // recovery page keeps its own cooldown, so a start on another page (which
+    // reaches no account) never holds back the account's own page.
+    const identifierHmac = this.hmac('otp-start', input.purpose, input.audience, identifier.toLowerCase());
     const cooldownSeconds = this.environment.OTP_RESEND_COOLDOWN_SECONDS;
     const code = generateSixDigitOtp();
     const candidateChallengeId = randomUUID();
@@ -101,8 +141,11 @@ export class OtpService implements BeforeApplicationShutdown {
       | { kind: 'rate_limited' }
       | { kind: 'cooldown'; id: string }
     > => {
-      const account = (await client.query<AccountRow>(
-        `select account.id::text, lower(account.email)::text as email, account.token_version::text,
+      const found = (await client.query<AccountRow>(
+        `select account.id::text, lower(account.email)::text as email,
+                account.email_verified_at is not null as email_verified,
+                auth.recovery_account_audience(account.id, $2) as audience_matches,
+                account.token_version::text,
                 enrollment.id::text as phone_enrollment_id,
                 enrollment.contact_ciphertext as phone_ciphertext,
                 enrollment.key_version as phone_key_version
@@ -122,11 +165,13 @@ export class OtpService implements BeforeApplicationShutdown {
             and (lower(account.email) = lower($1) or upper(patient.hid_code) = upper($1))
           order by case when lower(account.email) = lower($1) then 0 else 1 end
           limit 1`,
-        [identifier],
+        [identifier, input.audience],
       )).rows[0];
-      const recipient = account?.email
-        ? { channel: 'email' as const, value: account.email }
-        : account ? this.verifiedEnrollmentPhone(account) : null;
+      // An account of another kind, or one with no contact a code may go to,
+      // is answered and counted from here on exactly like an unknown identifier.
+      const candidate = found?.audience_matches === true ? found : undefined;
+      const recipient = candidate ? this.recoveryRecipient(candidate, input.audience) : null;
+      const account = recipient ? candidate : undefined;
       const recipientHmac = this.hmac('recipient', recipient?.value ?? identifier.toLowerCase());
       const recipientLimited = await this.consumeRateLimit(client, 'recipient', recipientHmac);
       const ipLimited = await this.consumeRateLimit(client, 'ip', ipHmac);
@@ -329,7 +374,7 @@ export class OtpService implements BeforeApplicationShutdown {
         [input.challengeId, input.purpose],
       )).rows[0];
       if (!challenge || challenge.completion_expires_at.getTime() <= Date.now()
-        || !this.equalHex(challenge.completion_token_hmac, suppliedTokenHmac)) return 'invalid' as const;
+        || !this.equalHex(challenge.completion_token_hmac, suppliedTokenHmac)) return null;
 
       const passwordHash = await argon2.hash(input.newPassword, {
         type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1,
@@ -338,9 +383,15 @@ export class OtpService implements BeforeApplicationShutdown {
         'select auth.complete_recovery_otp($1, $2, $3, $4) as completed',
         [input.challengeId, input.purpose, suppliedTokenHmac, passwordHash],
       );
-      return completed.rows[0]?.completed === true ? 'completed' as const : 'invalid' as const;
+      return completed.rows[0]?.completed === true ? challenge.account_id : null;
     });
-    if (outcome !== 'completed') throw this.invalid();
+    if (!outcome) throw this.invalid();
+    const sink = this.recoveryNotices;
+    if (sink) {
+      this.notices.run(input.correlationId, () => sink.recoveryCompleted({
+        accountId: outcome, purpose: input.purpose, correlationId: input.correlationId,
+      }));
+    }
     return { completed: true };
   }
 
@@ -364,6 +415,20 @@ export class OtpService implements BeforeApplicationShutdown {
           row_version = row_version + 1 where id = $1 and consumed_at is null`,
       [challengeId, delivery.outcome, delivery.provider ?? null],
     );
+  }
+
+  /**
+   * Where a recovery code may go. A patient's code goes only to a verified
+   * contact: the account email once verified, else the verified phone of its
+   * public enrollment (REC-UNVERIFIED-CONTACT). A staff or platform account's
+   * email is the work address its provisioning set, which no flow marks
+   * verified; the code itself proves that address.
+   */
+  private recoveryRecipient(account: AccountRow, audience: RecoveryAudience): RecoveryRecipient | null {
+    if (account.email && (audience !== 'patient' || account.email_verified === true)) {
+      return { channel: 'email', value: account.email };
+    }
+    return this.verifiedEnrollmentPhone(account);
   }
 
   private verifiedEnrollmentPhone(account: AccountRow): RecoveryRecipient | null {

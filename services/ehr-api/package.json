@@ -20,6 +20,7 @@
     "db:bootstrap": "node scripts/bootstrap-database-roles.mjs",
     "db:bootstrap:local": "node scripts/bootstrap-database-roles.mjs --local-development-admin",
     "db:verify-roles": "node scripts/bootstrap-database-roles.mjs --verify-only",
+    "db:verify-logins": "node scripts/verify-runtime-logins.mjs",
     "migration:stage": "node scripts/stage-legacy-identity.mjs",
     "migration:stage:dry-run": "node scripts/stage-legacy-identity.mjs --dry-run",
     "migration:promote": "node scripts/promote-legacy-identity.mjs",

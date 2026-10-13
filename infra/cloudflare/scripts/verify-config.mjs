@@ -4,6 +4,25 @@ import { access, readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import duplicateKeyJson from 'json-dup-key-validator'
 
+import { HEALTH_ID_WORKERS, LAUNCH_DECISION, assertHealthIdWorkerConfig, verifyLaunchDeployment } from './launch-deployment.mjs'
+
+// `--launch <environment>` is the pre-deployment check: every Worker the launch
+// manifest deploys there must have a verified staged Health-id artefact.
+// Without it (repository mode, as the root `npm run verify` runs it) staged
+// artefacts are optional, but any that is present must verify. Repository mode
+// also checks the legacy apps/<app>/dist build of every other frontend Worker;
+// launch mode keeps their configuration checks but skips the builds of the
+// Workers the launch decision does not deploy in that environment, so an
+// operator needs only the Health-id builds (P14).
+const USAGE = 'Usage: node scripts/verify-config.mjs [--launch <staging|production>]'
+function parseArguments(argv) {
+  if (argv.length === 0) return null
+  if (argv.length === 2 && argv[0] === '--launch' && ['staging', 'production'].includes(argv[1])) return argv[1]
+  process.stderr.write(`${USAGE}\n`)
+  process.exit(1)
+}
+const launchEnvironment = parseArguments(process.argv.slice(2))
+
 const root = resolve(import.meta.dirname, '..', '..', '..')
 const cloudflareRoot = resolve(root, 'infra', 'cloudflare')
 const packagePins = Object.freeze({
@@ -97,6 +116,9 @@ const applications = [
   ['hid-admin', 'admin', 'admin.healthidentitydirectory.com', 'admin.staging.healthidentitydirectory.com'],
 ]
 
+const notDeployedAtLaunch = new Set(launchEnvironment === null ? [] : LAUNCH_DECISION[launchEnvironment].not_deployed)
+const skippedLegacyBuilds = []
+
 const deployments = [
   ['production', 'https://api.healthidentitydirectory.com'],
   ['staging', 'https://api.staging.healthidentitydirectory.com'],
@@ -105,12 +127,19 @@ const deployments = [
 for (const [worker, app, productionHost, stagingHost] of applications) {
   const path = resolve(cloudflareRoot, 'workers', worker, 'wrangler.json')
   const { raw, value: config } = await readStrictJson(path, `${worker} Wrangler configuration`)
+  const healthId = HEALTH_ID_WORKERS.includes(worker)
   assert.equal(config.name, worker)
   assert.equal(config.main, '../../src/frontend-worker.mjs')
-  assert.equal(config.assets.directory, `../../../../apps/${app}/dist`)
-  assert.equal(config.assets.binding, 'ASSETS')
-  assert.equal(config.assets.not_found_handling, 'single-page-application')
-  assert.equal(config.assets.run_worker_first, true)
+  if (healthId) {
+    // ADR-052: www, staging and admin.* serve the Health-id patient-web build
+    // staged for each environment (with its provenance), not apps/web or apps/admin.
+    assertHealthIdWorkerConfig(worker, config)
+  } else {
+    assert.equal(config.assets.directory, `../../../../apps/${app}/dist`)
+    assert.equal(config.assets.binding, 'ASSETS')
+    assert.equal(config.assets.not_found_handling, 'single-page-application')
+    assert.equal(config.assets.run_worker_first, true)
+  }
   assert.equal(config.routes, undefined, `${worker} must require an explicit deployment environment`)
   assert.equal(config.vars, undefined, `${worker} must not have a default API environment`)
   assert.deepEqual(Object.keys(config.env).sort(), ['production', 'staging'])
@@ -127,6 +156,17 @@ for (const [worker, app, productionHost, stagingHost] of applications) {
       EXPECTED_HOST: host,
       APP_NAME: app,
     })
+    if (!healthId) assert.equal(environment.assets, undefined, `${worker} must serve one artifact in every environment`)
+  }
+
+  // The Health-id artefact deliberately has no manifest.webmanifest or
+  // service-worker.js (Health-id registers no service worker and keeps no
+  // clinical data in browser storage); its rules and provenance are checked by
+  // verifyLaunchDeployment below. The legacy applications keep these checks.
+  if (healthId) continue
+  if (notDeployedAtLaunch.has(worker)) {
+    skippedLegacyBuilds.push(worker)
+    continue
   }
 
   const dist = resolve(root, 'apps', app, 'dist')
@@ -235,7 +275,14 @@ assert.equal(tufNames.size, 2, 'staging and production TUF Workers must remain i
 const ignore = await readFile(resolve(cloudflareRoot, '.gitignore'), 'utf8')
 assert.match(ignore, /hid-tuf-staging\/repository\//)
 assert.match(ignore, /hid-tuf-production\/repository\//)
+assert.match(ignore, /^\/workers\/\*\/staged\/$/m, 'staged Health-id artefacts must never be committed')
+
+const launch = await verifyLaunchDeployment({ cloudflareRoot, environment: launchEnvironment, requireStaged: launchEnvironment !== null })
 
 process.stdout.write(
-  'Cloudflare configuration verified: seven isolated production/staging frontend Workers, one legacy OCR-domain redirect per environment, one production apex redirect, two isolated TUF repository Workers, and the pinned local Wrangler schema/toolchain.\n',
+  'Cloudflare configuration verified: seven isolated production/staging frontend Worker configurations (hid-web and hid-admin serve the staged Health-id build), one legacy OCR-domain redirect per environment, one production apex redirect, two isolated TUF repository Workers, the launch deployment manifest, and the pinned local Wrangler schema/toolchain.\n',
 )
+process.stdout.write(launchEnvironment === null
+  ? `Staged Health-id artefacts verified: ${launch.artifacts.length === 0 ? 'none present' : launch.artifacts.map((artifact) => `${artifact.worker}/${artifact.environment} at ${artifact.source_commit}`).join(', ')}.\n`
+  : `Launch ${launchEnvironment} verified: deploy ${launch.deploy.join(', ')}; not deployed ${launch.not_deployed.join(', ')}; artefacts ${launch.artifacts.map((artifact) => `${artifact.worker} ${artifact.host} at ${artifact.source_commit} (tree ${artifact.tree_sha256})`).join(', ')}. `
+    + `The apps/*/dist builds of the Workers not deployed in ${launchEnvironment} were not required (${skippedLegacyBuilds.join(', ')}); their configurations were checked.\n`)
