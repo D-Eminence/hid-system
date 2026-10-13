@@ -1135,11 +1135,15 @@ routes from the public edge.
 Decision:
 
 - The Worker is the only source of the client address. It deletes any
-  caller-supplied `X-HID-Client-IP` and sets it from `CF-Connecting-IP` when
-  that is one valid address. The Gateway trusts the header only from the VPC
-  (realip, `VPC_CIDR`), forwards the result as `X-Forwarded-For`, and in staging
-  and production refuses an API request without it
+  caller-supplied `X-Real-IP` and sets it from `CF-Connecting-IP` when that is
+  one valid address. The Gateway trusts the header only from the VPC (realip,
+  `VPC_CIDR`), forwards the result as `X-Forwarded-For`, and in staging and
+  production refuses an API request without it
   (`403 CLIENT_ADDRESS_REQUIRED`). The APIs keep trusting only the VPC.
+  `X-Real-IP` is used because Workers built before this decision delete it:
+  behind a stale or rolled-back Worker the Gateway sees no address and fails
+  closed. A new header (an earlier draft used `X-HID-Client-IP`) would pass
+  through such a Worker with whatever value the caller chose.
 - Identity's public IP-keyed limits key on the client network (IPv4 address or
   IPv6 /64) and, in production, refuse an address inside `TRUST_PROXY_CIDRS`
   with their `503` rather than share a bucket. Guess budgets stay per account
@@ -1153,21 +1157,28 @@ Decision:
   `404 API_ROUTE_NOT_FOUND`.
 - Service-to-service routes are never reachable from the public edge: the
   Gateway answers `404` for them in any letter case, because Express routing
-  ignores case. A gateway marker header that internal routes refuse was
+  ignores case. Every proxied location refuses a request target with a
+  backslash before the query or a `#` (`400 INVALID_REQUEST_TARGET`), because
+  Express reads a target holding `#` through `url.parse`, which turns those
+  backslashes into slashes, so it could reach a route the deny expression did
+  not match. A gateway marker header that internal routes refuse was
   considered; it needs a change in every service and is left as defense in
   depth for later.
 
 Consequences:
 
-- deployment order is Worker, then Gateway with the regional stack, then
-  Identity; rollback reverses it (release checklist §6 and §9);
+- deployment order is every API-proxying Worker, then Gateway with the
+  regional stack, then Identity; rollback reverses it (release checklist §6
+  and §9), and a Worker that is not redeployed makes the Gateway refuse its
+  API requests rather than trust its caller;
 - disabling a module keeps its Identity caller subject and EHR's token files,
   which production configuration requires; its tasks may run or not;
 - the WAF rate rule still keys on Cloudflare egress addresses, and the
   accountless QoreID cost ceiling for public enrollment is separate work; and
 - the configuration is checked against a model of nginx
-  (`scripts/lib/nginx-config-model.mjs`); nginx has not run, so a running
-  gateway is staging acceptance evidence (release checklist S4j).
+  (`scripts/lib/nginx-config-model.mjs`), and was also loaded and exercised
+  locally by an nginx 1.29.8 binary (not the gateway image); the image in
+  ECS is staging acceptance evidence (release checklist S4j).
 
 Related: ADR-032; ADR-034; `AWS_DEPLOYMENT_ARCHITECTURE.md` ("Client address
 and gateway routing"); `INTERFACE_CONTRACT.md` (first section).

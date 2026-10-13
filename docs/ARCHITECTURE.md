@@ -494,7 +494,8 @@ Service identity is separate from propagated user identity. Local orchestration 
 ### Extracted Pharmacy runtime
 
 The Pharmacy API is physically runnable from `services/pharmacy-api` on local
-port 3004. The gateway routes `/api/v1/pharmacy/*` to it, while EHR retains only
+port 3004. The gateway routes `/api/v1/pharmacy/*` to it when `pharmacy` is in
+`HID_ENABLED_API_ROUTES` (not at launch), while EHR retains only
 prescription intent and calls Pharmacy through `packages/api-client`. OCR uses
 the same boundary only for governed imported medication evidence. The former
 empty Pharmacy module is no longer registered by EHR, so there is no second
@@ -516,7 +517,8 @@ audience, and caller-subject verification.
 ### Extracted OCR runtime
 
 The OCR API is physically runnable from `services/ocr-api` on local port 3005.
-The gateway routes `/api/v1/ocr/*` to that process before the EHR fallback.
+The gateway routes `/api/v1/ocr/*` to that process when `ocr` is in
+`HID_ENABLED_API_ROUTES` (not at launch).
 EHR no longer registers OCR controllers or providers, so there is one OCR API
 writer. `hid_ocr_api_runtime` composes `hid_ocr_runtime` with append-only audit
 and has no EHR, Identity, Lab, Pharmacy, or Outreach persistence membership.
@@ -1124,11 +1126,12 @@ app-specific Cloudflare Worker
   -> private owner API
 ```
 
-The Worker supplies the client address in `X-HID-Client-IP`; the Gateway
-trusts it only from the VPC, forwards it as `X-Forwarded-For`, resolves owner
-API names per request, proxies only the modules in `HID_ENABLED_API_ROUTES`
-and never proxies service-to-service routes (`AWS_DEPLOYMENT_ARCHITECTURE.md`,
-"Client address and gateway routing").
+The Worker supplies the client address in `X-Real-IP`; the Gateway trusts it
+only from the VPC, forwards it as `X-Forwarded-For`, resolves owner API names
+per request, proxies only the modules in `HID_ENABLED_API_ROUTES`, refuses a
+request target with a backslash in its path or a `#`, and never proxies
+service-to-service routes (`AWS_DEPLOYMENT_ARCHITECTURE.md`, "Client address
+and gateway routing").
 
 Server-to-server clients use the private HTTPS ALB and exact internal names.
 Fargate tasks have no public IPs; RDS is isolated. Eleven long-running services

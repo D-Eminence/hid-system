@@ -20,13 +20,15 @@ counterpart because `staging.healthidentitydirectory.com` is the staging Web
 application.
 
 Before proxying, the Worker deletes every inbound forwarding header
-(`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`, `Forwarded`, and any
-caller-supplied `X-HID-Client-IP`) and sets `X-HID-Client-IP` to the address
-Cloudflare reported in `CF-Connecting-IP`, only when that is one valid IPv4 or
-IPv6 address (IPv6 in canonical form). The AWS gateway trusts that header only
-on connections from its VPC and, in staging and production, refuses API
-requests without it, so the Worker must be deployed before a gateway that
-requires it.
+(`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP` and `Forwarded`) and sets
+`X-Real-IP` to the address Cloudflare reported in `CF-Connecting-IP`, only when
+that is one valid IPv4 or IPv6 address (IPv6 in canonical form). The AWS
+gateway trusts that header only on connections from its VPC and, in staging
+and production, refuses API requests without it. Every Worker in this
+directory that proxies `/api/v1` (all seven application hosts) must be
+deployed with this behaviour before a gateway that requires it. A Worker built
+earlier deletes the caller's `X-Real-IP` and sets none, so the gateway refuses
+its API requests rather than trusting an address the caller chose.
 
 `ORIGIN_AUTH_TOKEN` is one secret binding in each named environment, but its
 staging and production values must be generated and stored independently. It

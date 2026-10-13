@@ -39,16 +39,21 @@ checks.
 The client's address crosses the edge in one header (BRANCH:launch/edge-client-ip-gateway):
 
 - The Worker deletes every inbound forwarding header, including any
-  `X-HID-Client-IP` the caller sent, and sets `X-HID-Client-IP` from
-  Cloudflare's `CF-Connecting-IP` only when that is one valid IPv4 or IPv6
-  address.
-- The Gateway's realip module takes the client address from
-  `X-HID-Client-IP` only on connections from the VPC CIDR (`VPC_CIDR`), which
-  in AWS means the public ALB. It then sends that address as
-  `X-Forwarded-For`, and the owner APIs, which trust only the VPC
+  `X-Real-IP` the caller sent, and sets `X-Real-IP` from Cloudflare's
+  `CF-Connecting-IP` only when that is one valid IPv4 or IPv6 address.
+- The Gateway's realip module takes the client address from `X-Real-IP` only
+  on connections from the VPC CIDR (`VPC_CIDR`), which in AWS means the public
+  ALB. It then sends that address as `X-Forwarded-For` and does not pass
+  `X-Real-IP` on; the owner APIs, which trust only the VPC
   (`TRUST_PROXY_CIDRS`), see it as the request address. Per-network limits,
   Turnstile `remoteip` and audit source addresses therefore key on the client,
   not on an ALB node.
+- Workers built before this change delete a caller's `X-Real-IP` and set
+  none. Behind such a Worker (one not yet redeployed, or rolled back) the
+  Gateway finds no client address and refuses the request; it never trusts an
+  address the caller chose. Every Worker that proxies `/api/v1` (web, EHR,
+  Lab, Pharmacy, OCR, Outreach and admin hosts) must run this change before
+  the Gateway requires the header.
 - With `HID_REQUIRE_CLIENT_IP=true` (set by CDK in staging and production) an
   API request without a usable client address is refused
   `403 CLIENT_ADDRESS_REQUIRED` before any backend sees it. Identity also
@@ -71,9 +76,14 @@ launch set. Service-to-service routes (`/api/v1/auth/service-session`,
 `/api/v1/identity/service/*`, `/api/v1/identity/outreach/*`,
 `/api/v1/ehr/internal/*`, and the Lab and Pharmacy `accept-ehr-*` and
 `imports/from-ocr` routes) answer `404 API_ROUTE_NOT_FOUND` at the Gateway in
-any letter case, because callers use the private service names. Disabling a
-module's routes leaves its Identity caller subject and EHR's Lab and Pharmacy
-token files in place: production configuration validation requires them.
+any letter case, with a trailing slash, dot segments, repeated slashes or
+percent-encodings, because callers use the private service names. Every
+proxied location also refuses a request target with a backslash before the
+query or a `#` anywhere (`400 INVALID_REQUEST_TARGET`): Express would read
+such a target as a different path from the one nginx matched, and a browser
+cannot send either through the Worker. Disabling a module's routes leaves its
+Identity caller subject and EHR's Lab and Pharmacy token files in place:
+production configuration validation requires them.
 
 ## Environment isolation
 
