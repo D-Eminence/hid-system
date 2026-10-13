@@ -2412,8 +2412,24 @@ Consequences:
   one load balancer node shares one network budget, so the per-network limits
   can deny real enrollments; the platform cap bounds cost either way. A
   carrier-grade NAT address is one network too.
+- The platform cap bounds cost, not availability. Every lookup counts toward
+  it, whatever QoreID answers, so with the defaults 14 networks (IPv4
+  addresses or IPv6 /64s) passing Turnstile can spend the day's 200 lookups
+  with unregistered NINs, and 40 networks can do it within one calendar hour.
+  Every enrollment start that needs a lookup then answers
+  `429 VERIFICATION_QUOTA_EXCEEDED` until the next day bucket; resumes and
+  the later enrollment steps are unaffected. The owner sizes the cap with that
+  in mind, and operations alert on audit events
+  `identity.public-patient-enrollment.nin-lookup-quota` with outcome `denied`
+  and `exhaustedLimit` `platform_day` (release checklist §10).
 - The Identity build needs 0085 and the role bootstrap first: without the
-  command and its grant every start that reaches QoreID answers `503`.
+  command and its grant every start that reaches QoreID answers `503`. An
+  earlier Identity running with 0085 (between the migration and the Identity
+  rollout, or after an Identity rollback) cannot handle the stale-proof
+  refusal: it answers `409 ENROLLMENT_STAGE_INVALID` and has no way back to
+  the contact step, so that patient cannot activate until the enrollment
+  expires, 24 hours after its start. Identity is deployed right after 0085
+  and the bootstrap to keep that window short.
 - Evidence is local and synthetic: unit specs, the two new SQL suites,
   `runtime-roles.integration.sql` and `verify-patient-enrollment-runtime.mjs`
   (release checklist §8). Nothing has been run on staging or production.

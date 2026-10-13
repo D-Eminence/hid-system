@@ -90,7 +90,11 @@ separate deployment authorization. None of them has been run.
   to the contact step). Without (a), a phone-only patient who loses the HID
   cannot reach the account. The per-network quota counts a carrier-grade NAT
   address as one network, so a busy mobile network can reach 15 lookups a day;
-  the limits are environment values.
+  the limits are environment values. The platform cap bounds cost, not
+  availability: every lookup counts, whatever QoreID answers, so at the
+  defaults 14 networks passing Turnstile can spend it with unregistered NINs
+  and close enrollment starts that need a lookup for the rest of the day.
+  Operations alert on `platform_day` denials (release checklist §10).
 
 ### N3. OCR purpose of use (OCR-1, OCR-READ-PURPOSE)
 
