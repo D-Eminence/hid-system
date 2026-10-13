@@ -50,6 +50,21 @@ separate deployment authorization. None of them has been run.
   open the `409 NIN_ALREADY_REGISTERED` answer remains until step 2 ships;
   each probe of an unbound NIN then costs a QoreID lookup, bounded by the
   lookup quota (N2, below).
+- **Implemented now (BRANCH:launch/identity-enrollment-gates), FE-4.** While
+  the gate is closed by configuration, start answers its `503` with "New
+  Health ID registration is not open yet. If you already have a Health ID,
+  sign in." instead of the generic 5xx detail (the gateway on main still
+  replaces it with `503 UPSTREAM_UNAVAILABLE` until ADR-055), and
+  `GET /api/v1/identity/patient-enrollments/availability` answers
+  `{ "open": boolean }` from the same gate, so Health-id can say so before it
+  asks for a NIN (ADR-057; `INTERFACE_CONTRACT.md`). Health-id
+  82b474e does not read it yet (release checklist §3).
+- **Launch consequence (open for the owner to confirm).** With N1 as decided
+  and facility-assisted registration out of scope (N2(d), D17), no new
+  patient can get a Health ID in production at launch; legacy-migrated
+  patients sign in. The owner confirms launching with registration closed,
+  or prioritises ENR-4 step 2 (the registry-phone code), which needs a QoreID
+  contract that exposes the registry phone (DEP-1, unconfirmed).
 - **Risks.** Patients without a reachable registry phone cannot self-enroll
   with a NIN. A registry phone OTP depends on what the provider contract
   exposes (`QOREID_VERIFICATION_CONTRACT.md`), which nobody has confirmed;
@@ -507,7 +522,7 @@ for each merged change and its evidence. Pull requests from this review:
 | DOC-1 (any facility member could complete a colleague's upload) | D-Eminence/hid-system#59 | merged (D13) |
 | Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
-| ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota) | BRANCH:launch/identity-enrollment-gates, migration 0085 | local branch (N1, N2) |
+| ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota); FE-4 (enrollment availability read, registration-not-open answer) | BRANCH:launch/identity-enrollment-gates, migration 0085 (FE-4 adds none) | local branch (N1, N2); FE-4's Health-id follow-up open |
 | DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
 | REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | `BRANCH:launch/identity-recovery-search`, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
 | WF-1 (no governed way to provision clinicians), N5 (two memberships at one facility) | BRANCH:launch/staff-workforce-provisioning, migration 0087, ADR-049 | branch, not merged (D14 workforce part, N5) |
