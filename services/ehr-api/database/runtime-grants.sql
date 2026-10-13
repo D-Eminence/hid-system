@@ -1,6 +1,17 @@
 -- Run separately as an RDS security administrator after schema migration.
 -- This file creates NOLOGIN group roles only. Login-role membership and
 -- credentials remain environment-specific infrastructure.
+--
+-- On RDS the administrator is not a PostgreSQL superuser: it is a
+-- NOSUPERUSER NOBYPASSRLS CREATEROLE login that owns the schema and created
+-- these roles, so it holds ADMIN OPTION on each of them. The file is sent as
+-- one statement batch, which PostgreSQL runs as a single transaction, so the
+-- temporary memberships and CREATE grants below are never visible to another
+-- session and are gone when it commits.
+
+-- A CREATEROLE administrator otherwise receives the memberships named here in
+-- every role it creates, in addition to its ADMIN OPTION. Keep it to ADMIN.
+set createrole_self_grant = '';
 
 do $$
 begin
@@ -64,6 +75,9 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'hid_ocr_queue_metrics') then
     create role hid_ocr_queue_metrics nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
   end if;
+  if not exists (select 1 from pg_roles where rolname = 'hid_platform_control_reader') then
+    create role hid_platform_control_reader nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
+  end if;
   if not exists (select 1 from pg_roles where rolname = 'hid_event_dispatcher') then
     create role hid_event_dispatcher nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
   end if;
@@ -79,32 +93,86 @@ begin
 end
 $$;
 
--- Reassert safety attributes on every run so prior manual role creation cannot
--- silently retain login, ownership-escalation, or RLS-bypass capabilities.
-alter role hid_identity_runtime nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_ehr_runtime nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_api_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
-alter role hid_identity_api_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
-alter role hid_ehr_api_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
-alter role hid_ocr_api_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
-alter role hid_audit_writer nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_document_scanner nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_ocr_runtime nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_ocr_worker nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_lab_runtime nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_lab_api_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
-alter role hid_pharmacy_runtime nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_pharmacy_api_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
-alter role hid_outreach_runtime nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_outreach_api_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
-alter role hid_migration_admin nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_schema_test_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
-alter role hid_event_delivery_commands nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_ocr_queue_metrics nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_event_dispatcher nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_notification_runtime nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-alter role hid_notification_api_runtime nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
-alter role hid_notification_worker nologin nosuperuser nocreatedb nocreaterole inherit nobypassrls;
+-- Check, rather than re-assert, the attributes a non-superuser administrator
+-- may not change. PostgreSQL 16 lets only a superuser change SUPERUSER, and
+-- only a role that holds BYPASSRLS or REPLICATION change that attribute, even
+-- to the value it already has, so `ALTER ROLE ... NOSUPERUSER NOBYPASSRLS`
+-- stopped this file on RDS. A role with any of the three is refused here, and
+-- a superuser must remove the attribute before the bootstrap runs. The
+-- attributes the administrator may change are still corrected, but only when
+-- they differ, so a run that changes nothing issues no ALTER ROLE. Every
+-- later GRANT and REVOKE of membership in these roles needs ADMIN OPTION on
+-- them, which the administrator that created them holds.
+do $$
+declare
+  expected record;
+  actual record;
+  changes text;
+begin
+  for expected in select * from (values
+    ('hid_identity_runtime', false),
+    ('hid_ehr_runtime', false),
+    ('hid_api_runtime', true),
+    ('hid_identity_api_runtime', true),
+    ('hid_ehr_api_runtime', true),
+    ('hid_ocr_api_runtime', true),
+    ('hid_audit_writer', false),
+    ('hid_document_scanner', false),
+    ('hid_ocr_runtime', false),
+    ('hid_ocr_worker', false),
+    ('hid_lab_runtime', false),
+    ('hid_lab_api_runtime', true),
+    ('hid_pharmacy_runtime', false),
+    ('hid_pharmacy_api_runtime', true),
+    ('hid_outreach_runtime', false),
+    ('hid_outreach_api_runtime', true),
+    ('hid_migration_admin', false),
+    ('hid_schema_test_runtime', true),
+    ('hid_event_delivery_commands', false),
+    ('hid_ocr_queue_metrics', false),
+    ('hid_platform_control_reader', false),
+    ('hid_event_dispatcher', false),
+    ('hid_notification_runtime', false),
+    ('hid_notification_api_runtime', true),
+    ('hid_notification_worker', true)
+  ) as roles(role_name, inherit)
+  loop
+    select rolsuper, rolbypassrls, rolreplication, rolcanlogin, rolcreatedb,
+           rolcreaterole, rolinherit
+      into strict actual
+      from pg_roles where rolname = expected.role_name;
+    if actual.rolsuper or actual.rolbypassrls or actual.rolreplication then
+      raise exception using errcode = '42501', message = format(
+        'HID role %s is SUPERUSER, BYPASSRLS or REPLICATION; a superuser must remove the attribute before the role bootstrap runs',
+        expected.role_name);
+    end if;
+    if not pg_has_role(current_user, expected.role_name, 'MEMBER WITH ADMIN OPTION') then
+      raise exception using errcode = '42501', message = format(
+        'The role bootstrap must run as a superuser or as the administrator that created HID role %s',
+        expected.role_name);
+    end if;
+    changes := concat_ws(' ',
+      case when actual.rolcanlogin then 'nologin' end,
+      case when actual.rolcreatedb then 'nocreatedb' end,
+      case when actual.rolcreaterole then 'nocreaterole' end,
+      case when actual.rolinherit <> expected.inherit
+        then case when expected.inherit then 'inherit' else 'noinherit' end end);
+    if changes <> '' then
+      execute format('alter role %I %s', expected.role_name, changes);
+    end if;
+  end loop;
+end
+$$;
+
+-- The administrator transfers functions to the three technical owners below
+-- and then grants and revokes privileges on them. A non-superuser may give an
+-- object to a role only if it may SET ROLE to it, and may grant or revoke on
+-- an object it does not own only with the owner's privileges, which an
+-- INHERIT membership provides; a rerun, where the technical roles already own
+-- the functions, needs the same for the REVOKE ALL statements that follow.
+-- These memberships are revoked at the end of this file, in this transaction.
+grant hid_event_delivery_commands, hid_ocr_queue_metrics, hid_platform_control_reader
+  to current_user with inherit true, set true;
 
 comment on role hid_identity_runtime is
   'Identity and authentication persistence privileges for an Identity-owned service boundary.';
@@ -146,6 +214,8 @@ comment on role hid_event_delivery_commands is
   'Technical owner for narrowly scoped security-definer delivery and inbox commands; never granted to a runtime login.';
 comment on role hid_ocr_queue_metrics is
   'Technical owner of the aggregate-only OCR queue metrics command; reads OCR job status and queue time only; never granted to a runtime login.';
+comment on role hid_platform_control_reader is
+  'Technical owner of platform.control_enabled(text); reads only the platform control keys and their enabled flags; never granted to a runtime login.';
 comment on role hid_event_dispatcher is
   'Transport dispatcher command role with no direct domain or integration table privileges.';
 comment on role hid_notification_runtime is
@@ -251,6 +321,11 @@ revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, 
 revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_ocr_queue_metrics;
 revoke all privileges on all sequences in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_ocr_queue_metrics;
 revoke all privileges on all functions in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_ocr_queue_metrics;
+
+revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_platform_control_reader;
+revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_platform_control_reader;
+revoke all privileges on all sequences in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_platform_control_reader;
+revoke all privileges on all functions in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_platform_control_reader;
 
 revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_dispatcher;
 revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_dispatcher;
@@ -362,6 +437,14 @@ revoke hid_ocr_queue_metrics from hid_ocr_worker, hid_ocr_runtime, hid_ocr_api_r
   hid_pharmacy_api_runtime, hid_outreach_api_runtime, hid_schema_test_runtime,
   hid_migration_admin, hid_event_dispatcher, hid_event_delivery_commands,
   hid_notification_api_runtime, hid_notification_worker;
+revoke hid_platform_control_reader from hid_identity_runtime, hid_ehr_runtime,
+  hid_api_runtime, hid_identity_api_runtime, hid_ehr_api_runtime, hid_ocr_api_runtime,
+  hid_audit_writer, hid_document_scanner, hid_ocr_runtime, hid_ocr_worker,
+  hid_lab_runtime, hid_lab_api_runtime, hid_pharmacy_runtime, hid_pharmacy_api_runtime,
+  hid_outreach_runtime, hid_outreach_api_runtime, hid_schema_test_runtime,
+  hid_migration_admin, hid_event_dispatcher, hid_event_delivery_commands,
+  hid_ocr_queue_metrics, hid_notification_runtime, hid_notification_api_runtime,
+  hid_notification_worker;
 
 -- Identity owns canonical patients, registration, consent, workforce context,
 -- and the local authentication persistence used by the current Identity API.
@@ -484,7 +567,11 @@ create policy ocr_jobs_queue_metrics_read on ocr.jobs
   for select to hid_ocr_queue_metrics using (true);
 grant usage on schema ocr to hid_ocr_queue_metrics;
 grant select (status, queued_at) on ocr.jobs to hid_ocr_queue_metrics;
+-- A non-superuser may give a function only to a role that may create in its
+-- schema. CREATE is held for the transfer alone (here and below).
+grant create on schema ocr to hid_ocr_queue_metrics;
 alter function ocr.worker_queue_metrics() owner to hid_ocr_queue_metrics;
+revoke create on schema ocr from hid_ocr_queue_metrics;
 grant execute on function ocr.worker_queue_metrics() to hid_ocr_worker;
 
 grant usage on schema platform,identity,lab to hid_lab_runtime;
@@ -583,6 +670,7 @@ grant select, insert, update on integration.outbox_delivery_state,
   integration.inbox_messages to hid_event_delivery_commands;
 grant usage, select on all sequences in schema integration to hid_event_delivery_commands;
 
+grant create on schema integration to hid_event_delivery_commands;
 alter function integration.outbox_envelope_sha256(
   text,uuid,text,integer,timestamptz,text,uuid,bigint,text,uuid,uuid,uuid,jsonb
 ) owner to hid_event_delivery_commands;
@@ -607,6 +695,7 @@ alter function integration.complete_inbox_message(text,uuid,uuid)
 alter function integration.fail_inbox_message(
   text,uuid,uuid,text,boolean,timestamptz,integer
 ) owner to hid_event_delivery_commands;
+revoke create on schema integration from hid_event_delivery_commands;
 
 -- The command-owner executes these two private helpers from inside
 -- SECURITY DEFINER functions. They remain unavailable to every runtime role.
@@ -868,6 +957,33 @@ grant execute on function platform.admin_list_controls(),
   platform.admin_set_control(text, boolean, bigint, text)
   to hid_identity_runtime, hid_schema_test_runtime;
 
+-- Launch (P8-CONTROL): platform.control_enabled(text) is the SECURITY
+-- DEFINER read of platform.control_settings that the Identity, EHR and
+-- Outreach guards make on every request that is not a platform
+-- administrator's. The table forces row-level security, and its only read
+-- policy requires platform.control.read, so under a schema owner that does
+-- not bypass row-level security (RDS) the function saw no row and raised
+-- PLATFORM_CONTROL_UNAVAILABLE, which the guards answer with 503. Its
+-- technical owner reads only the key and enabled flag of the six non-PHI
+-- platform-wide controls through one exact policy, so the function no longer
+-- depends on its owner bypassing row-level security. EXECUTE stays granted to
+-- PUBLIC (0040). platform.require_control_enabled reads no table and calls
+-- this function, so its owner is unchanged.
+-- The table's PUBLIC read policy also applies to this role. PostgreSQL inlines
+-- its SQL function platform.current_account_id() while planning, as the
+-- reading role, and the body names schema auth, so the role needs USAGE on
+-- auth for the plan to be built; it receives no privilege on any auth object.
+-- The policies are OR-ed, so the `true` below decides the row and the PUBLIC
+-- expression is folded away and never executed.
+drop policy if exists platform_controls_definer_read on platform.control_settings;
+create policy platform_controls_definer_read on platform.control_settings
+  for select to hid_platform_control_reader using (true);
+grant usage on schema platform, auth to hid_platform_control_reader;
+grant select (control_key, enabled) on platform.control_settings to hid_platform_control_reader;
+grant create on schema platform to hid_platform_control_reader;
+alter function platform.control_enabled(text) owner to hid_platform_control_reader;
+revoke create on schema platform from hid_platform_control_reader;
+
 -- Runtime provider decisions and admin commands have narrow function grants.
 -- Notification API receives no direct database access or provider table grant.
 grant execute on function platform.integration_runtime_provider(text,text),
@@ -1020,3 +1136,31 @@ revoke all on function auth.lock_account_sessions(uuid) from public;
 -- transactions of the account. It only locks.
 grant execute on function auth.lock_account_for_mfa(uuid) to hid_identity_runtime;
 revoke all on function auth.lock_account_for_mfa(uuid) from public;
+
+-- End the temporary memberships granted after the role check above. A
+-- creator's ADMIN OPTION, which PostgreSQL 16 gives a CREATEROLE
+-- administrator in every role it creates, is a separate grant and stays; it
+-- carries no privilege and no SET ROLE.
+revoke hid_event_delivery_commands, hid_ocr_queue_metrics, hid_platform_control_reader
+  from current_user;
+do $$
+begin
+  if exists (
+    select 1 from pg_auth_members membership
+     where membership.member = (select oid from pg_roles where rolname = current_user)
+       and membership.roleid in (
+         'hid_event_delivery_commands'::regrole, 'hid_ocr_queue_metrics'::regrole,
+         'hid_platform_control_reader'::regrole)
+       and (membership.inherit_option or membership.set_option)
+  ) or exists (
+    select 1 from pg_namespace namespace_row
+     cross join unnest(array['hid_event_delivery_commands', 'hid_ocr_queue_metrics',
+       'hid_platform_control_reader']) technical(role_name)
+     where namespace_row.nspname in ('platform', 'auth', 'identity', 'ehr', 'audit', 'ocr', 'lab',
+         'pharmacy', 'outreach', 'integration', 'notification', 'migration')
+       and has_schema_privilege(technical.role_name, namespace_row.oid, 'CREATE')
+  ) then
+    raise exception 'the role bootstrap left a temporary membership or schema CREATE grant in place';
+  end if;
+end
+$$;
