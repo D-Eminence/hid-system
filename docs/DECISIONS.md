@@ -4151,7 +4151,7 @@ module set, patient self-service, document upload completion);
 # ADR-059: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
 
 Status: Proposed for source implementation
-(`BRANCH:launch/identity-error-hardening`, no migration). Not merged or
+(D-Eminence/hid-system#76, no migration). Not merged or
 deployed.
 
 Date: 2026-10-13

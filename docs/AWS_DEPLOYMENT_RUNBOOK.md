@@ -692,7 +692,7 @@ age/DLQ, event terminal failure, provider outcomes, OCR failures, S3/KMS denies,
 and sanitized telemetry. Stop on unexplained authentication, duplicate patient,
 OTP, notification, or migration behavior.
 
-With ADR-059 (`BRANCH:launch/identity-error-hardening`) a fault no longer
+With ADR-059 (D-Eminence/hid-system#76) a fault no longer
 signs users out: it answers `503` with a stable code and Health-id retries, so
 an outage shows up as `503` rates, not as a wave of sign-ins. Watch for
 `AUTHENTICATION_UNAVAILABLE` and `PLATFORM_CONTROL_UNAVAILABLE` from Identity

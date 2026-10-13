@@ -125,7 +125,7 @@ responses ("Working facility per sign-in", below) comes from
 D-Eminence/hid-system#73 (ADR-046, migration 0089), also not
 deployed. The refusal and fault answers of
 ADR-059 ("Refusals and faults", below) and the refresh fault row come from
-`BRANCH:launch/identity-error-hardening` (no migration), also not deployed.
+D-Eminence/hid-system#76 (no migration), also not deployed.
 
 Identity sets three cookies at sign-in and on every refresh (`setCookies` in
 `services/identity-api/src/auth/auth.controller.ts`). Their names derive from
@@ -416,7 +416,7 @@ sign-in the refresh cookie holds.
 
 #### Refusals and faults (ADR-059)
 
-From `BRANCH:launch/identity-error-hardening` (no migration, not deployed)
+From D-Eminence/hid-system#76 (no migration, not deployed)
 Identity tells a refused credential from a fault, so that a client signs a
 user out only when the credential itself was refused. Health-id signs out on
 `401` and retries a `5xx`.
@@ -2398,7 +2398,7 @@ audits the body's reason; a reason only in the query string is `400
 REASON_REQUIRED`. The `GET` forms stay, unchanged, for one release because the
 Health-id `82b474e` console calls them
 (`apps/patient-web/src/admin/api.ts:354-357` and `:374-376`), and are then removed: they put names, emails and the export
-reason in the URL (A24, ADR-059, `BRANCH:launch/identity-error-hardening`).
+reason in the URL (A24, ADR-059, D-Eminence/hid-system#76).
 The gateway's access log omits query strings (D-Eminence/hid-system#72, ADR-055).
 
 Principal search requires at least two characters. Facility, principal, and

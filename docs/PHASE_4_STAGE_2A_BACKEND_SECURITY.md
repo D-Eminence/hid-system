@@ -172,7 +172,7 @@ mutation lacks one.
 ## 6. Principal export
 
 `POST /admin/principals/export` with `{ reason, query?, status? }` in the
-body (ADR-059, `BRANCH:launch/identity-error-hardening`), or the deprecated
+body (ADR-059, D-Eminence/hid-system#76), or the deprecated
 `GET /admin/principals/export?reason=…[&query&status]`, kept for one release
 for the Health-id `82b474e` console:
 

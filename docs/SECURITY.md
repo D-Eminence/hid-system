@@ -43,7 +43,7 @@ only narrow what a request acts on; it never authenticates or authorizes
 A `401` means the credential was refused, and clients sign out on it. In
 Identity and EHR, the launch services, a fault that leaves a service unable to
 decide is a `503` with a stable code, never a `401` (ADR-059,
-`BRANCH:launch/identity-error-hardening`); that includes EHR's own workload
+D-Eminence/hid-system#76); that includes EHR's own workload
 credential refused by Identity, which EHR answers `503`. Lab, Pharmacy, OCR
 and Outreach still relay Identity's refusal of their workload credential, and
 OCR's guard still answers a fault with no status `401`: all four are off at
