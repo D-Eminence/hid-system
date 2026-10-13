@@ -1,7 +1,8 @@
 # Phase 3 launch decisions and operator plans
 
-Date: 2026-10-12. Status: open. Nothing in this document has been decided,
-deployed or executed.
+Date: 2026-10-12. Status: open. N1 and N2 were decided on 2026-10-13 with
+the owner's policy defaults (§1); nothing else in this document has been
+decided, and nothing has been deployed or executed.
 
 The Phase 3 launch review (workload tokens, identity and recovery, patient
 records, Pharmacy, Lab, OCR and purpose of use, document completion and
@@ -10,8 +11,9 @@ product or security decision, and questions it could not answer alone. The
 fixes are in pull requests (§4). This document records the open questions:
 for each, the question, the default engineering proposes, the risks of that
 default, and the work that waits on the answer. A default here is a proposal,
-not a decision. Where a pull request already implements a proposed default,
-it says so, and that pull request is the place to change it.
+not a decision, unless its entry says it was decided. Where a pull request
+already implements a proposed default, it says so, and that pull request is
+the place to change it.
 
 The infrastructure plans in §3 are written to be run by an operator after a
 separate deployment authorization. None of them has been run.
@@ -24,17 +26,32 @@ separate deployment authorization. None of them has been run.
   holder? Today anyone who knows a NIN can enroll as its holder, receive
   `NIN_VERIFIED` assurance and see the registry name. The NIN lookup proves the
   number exists, not that the caller owns it.
-- **Proposed default.** Do not enable public NIN-only enrollment
-  (`QOREID_NIN_ONLY_ENROLLMENT_ENABLED` stays unset, as in every deployment
-  today, DEP-1) until ownership is bound to something the holder controls: an
-  OTP to the phone number the NIN registry holds for that NIN, or an assisted
-  check at a facility. Enrollment that verifies only the patient's own phone or
-  email records contact assurance, never `NIN_VERIFIED`.
+- **Decided (owner defaults, 2026-10-13).** Binding a NIN requires proof that
+  the caller holds the phone the NIN registry lists for it: a code sent to
+  that registry phone, verified before the NIN is bound and before anyone is
+  told the NIN already has a Health ID (ENR-4 step 2). Enrollment that
+  verifies only the patient's own phone or email records contact assurance,
+  never `NIN_VERIFIED`. Until that holder step ships, Identity refuses
+  `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true` in production
+  (`HID_DEPLOYMENT_ENV=production`, or `NODE_ENV=production` outside the
+  staging profile): it does not start (BRANCH:launch/identity-enrollment-gates,
+  CFG-PROD). The change that adds the holder step lifts that refusal; staging
+  may run NIN-only enrollment for acceptance.
+- **Implemented now (BRANCH:launch/identity-enrollment-gates), ENR-4 step 1.**
+  Enrollment start checks the QoreID gate (`QOREID_ENABLED`,
+  `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` and the runtime pause of
+  `qoreid`/`patient_nin`) before it reads whether the NIN is bound or pending,
+  so while the gate is closed every NIN gets the same `503`. Once the gate is
+  open the `409 NIN_ALREADY_REGISTERED` answer remains until step 2 ships;
+  each probe of an unbound NIN then costs a QoreID lookup, bounded by the
+  lookup quota (N2, below).
 - **Risks.** Patients without a reachable registry phone cannot self-enroll
   with a NIN. A registry phone OTP depends on what the provider contract
-  exposes (`QOREID_VERIFICATION_CONTRACT.md`), which nobody has confirmed.
-- **Waits on it.** DEP-1 (NIN-only enrollment), ENR-4 (enrollment reveals
-  whether a NIN already has a Health ID), the registry-name display.
+  exposes (`QOREID_VERIFICATION_CONTRACT.md`), which nobody has confirmed;
+  until it is, public NIN-only enrollment stays closed in production (DEP-1).
+- **Waits on it.** DEP-1 (NIN-only enrollment in production), ENR-4 step 2
+  (existence revealed only to the proven holder) and the contact step's
+  non-disclosure, the registry-name display.
 
 ### N2. Enrollment assurance and HID recovery (ENR-2, ENR-3 Part B, ENR-3b, FAC-2/REG-1)
 
@@ -44,16 +61,36 @@ separate deployment authorization. None of them has been run.
   How long may a verified contact wait before the password step (ENR-3b)? (d)
   Is facility-assisted registration in launch scope? It is unavailable in
   every deployed environment (FAC-2, REG-1).
-- **Proposed defaults.** (a) Send the HID to the verified contact at
-  activation and offer HID lookup by verified contact plus OTP. (b) Clear the
-  cookie at activation, with a 15-minute replay window. (c) 30 minutes, then
-  verify again. (d) Out of launch scope; walk-in patients self-enroll.
-- **Implemented now (D-Eminence/hid-system#50).** The enrollment cookie is
-  expired at every sign-in, refresh and sign-out, and activation is limited
-  per enrollment. The post-activation window itself is unchanged until (b) is
-  answered.
-- **Risks.** (b) and (c) need Health-id copy for new errors. Without (a), a
-  phone-only patient who loses the HID cannot reach the account.
+- **Decided (owner defaults, 2026-10-13).**
+  - (a) The HID is sent to the verified contact after the first activation,
+    and a public HID reminder sends it again by SMS only when the phone and the
+    NIN match the same active account. It follows in a later change (ENR-2);
+    until then a phone-only patient must keep the HID shown at activation.
+  - (b) 15 minutes. Every successful activation response expires the
+    enrollment cookie; if that response is lost, the cookie can replay the
+    activation, and `GET /current` show the HID, for 15 minutes after
+    activation. After that both answer `404 ENROLLMENT_NOT_FOUND` without the
+    HID, and so does the activation command (0085).
+  - (c) 30 minutes. Activation with a contact proved more than 30 minutes
+    earlier clears the proof and the contact, sends the enrollment back to the
+    contact step and answers `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED`; the
+    activation command refuses it as well (0085).
+  - (d) Facility-assisted registration is out of launch scope (D17); walk-in
+    patients self-enroll.
+- **Implemented now.** D-Eminence/hid-system#50 expires the enrollment cookie
+  at every sign-in, refresh and sign-out, and limits activation per
+  enrollment. BRANCH:launch/identity-enrollment-gates implements (b) and (c)
+  in Identity and in migration 0085, and caps QoreID lookups: each lookup of
+  public enrollment is charged, before QoreID is called, to the client network
+  (an IPv4 address or an IPv6 /64) at 5 an hour and 15 a day, and to a
+  platform-wide cap of 200 a day (`PATIENT_ENROLLMENT_QOREID_*`); the owner
+  sets the cap from the QoreID contract. A refusal is `429
+  VERIFICATION_QUOTA_EXCEEDED` and is audited.
+- **Risks.** (b) and (c) need Health-id handling of the new `409` (route it
+  to the contact step). Without (a), a phone-only patient who loses the HID
+  cannot reach the account. The per-network quota counts a carrier-grade NAT
+  address as one network, so a busy mobile network can reach 15 lookups a day;
+  the limits are environment values.
 
 ### N3. OCR purpose of use (OCR-1, OCR-READ-PURPOSE)
 
@@ -249,4 +286,5 @@ for each merged change and its evidence. Pull requests from this review:
 | DOC-1 (any facility member could complete a colleague's upload) | D-Eminence/hid-system#59 | merged (D13) |
 | Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
+| ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota) | BRANCH:launch/identity-enrollment-gates, migration 0085 | local branch (N1, N2) |
 | DEP-4, DEP-4-RT (production workload tokens) | D-Eminence/hid-system#54, draft, ADR-047 Proposed | waits on D1 |

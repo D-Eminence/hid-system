@@ -2329,3 +2329,96 @@ Consequences:
 Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity
 boundary; Outreach registration boundary); release checklist §2, §3, §7, §8
 and §9.
+
+# ADR-048: Public Enrollment Checks Its Gate First, Bounds the HID Re-display and the Contact Proof, and Caps QoreID Lookups
+
+Status: Proposed for source implementation
+(BRANCH:launch/identity-enrollment-gates, migration 0085). Not merged or
+deployed. The number may need renumbering when the parallel launch branches
+merge.
+
+Date: 2026-10-13
+
+Context:
+
+- Public enrollment start read whether a NIN was bound or pending, and
+  answered `409 NIN_ALREADY_REGISTERED`, before it asked whether QoreID and
+  NIN-only enrollment were enabled or QoreID was paused; those checks sat
+  inside the provider's `verifyNin`. A bound or pending NIN therefore got
+  `409` and every other NIN `503`, whatever the gate's state (ENR-4). A unit
+  test pinned that order.
+- The enrollment cookie let `GET /current` and an activation replay show the
+  HID until it expired, 24 hours after start, on the enrolling device,
+  including a shared one (ENR-3 Part B). A verified contact could wait up to
+  24 hours before the password step (ENR-3b).
+- QoreID NIN lookups are paid. The account-scoped 0049 quota cannot charge an
+  enrollee with no account, and nothing else bounded them (IP-1).
+- Production accepted `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` whenever QoreID was
+  on, although decision N1 requires proof that the caller holds the NIN's
+  registry phone before a NIN is bound, and that step is not built (CFG-PROD).
+
+Decision (owner defaults: deny by default, least exposure; decisions N1 and
+N2 in `PHASE_3_LAUNCH_DECISIONS.md`):
+
+- Start asks the gate (`PublicPatientIdentityProvider.assertAvailable`: both
+  flags, then the runtime pause of `qoreid`/`patient_nin`) after the Origin,
+  Turnstile, signed-in-session and input checks and before any rate bucket or
+  registration read. The gate reads no NIN, so while it is closed every NIN,
+  and a same-key resume, gets the same `503`. `verifyNin` keeps the checks.
+  Telling only a proven holder that a NIN is registered is step 2 of ENR-4,
+  with N1.
+- The HID is re-displayed for 15 minutes after activation (N2(b)). Every
+  successful activation response expires the enrollment cookie; Identity
+  treats an active enrollment activated more than 15 minutes ago (or with no
+  activation time) as unknown (`404 ENROLLMENT_NOT_FOUND`) on every
+  enrollment route, and the activation command refuses such a replay
+  (`P0002 PATIENT_ENROLLMENT_REPLAY_EXPIRED`).
+- A contact proof is valid for 30 minutes (N2(c)). With an older one,
+  activation clears the proof and the contact by the database clock, returns
+  the enrollment to `verify_contact` and answers
+  `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED`; the activation command refuses
+  it too (`23514 PATIENT_CONTACT_REVERIFY_REQUIRED`), and Identity resets and
+  answers the same way.
+- Each QoreID NIN lookup of public enrollment is charged, after the gate and
+  immediately before the request, by `platform.consume_public_patient_nin_quota`,
+  an accountless `SECURITY DEFINER` command modelled on 0063: a keyed digest
+  of the client network (IPv4 address or IPv6 /64) per hour and per day, and
+  a platform-wide daily cap. The limits are environment values
+  (`PATIENT_ENROLLMENT_QOREID_*`, defaults 5, 15 and 200) bounded by the
+  command; the owner sets the cap from the QoreID contract. A refusal is
+  committed with its audit event and answered `429
+  VERIFICATION_QUOTA_EXCEEDED`; any fault is `503`. A resume, a duplicate and
+  any earlier refusal cost nothing.
+- Identity refuses to start with `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true`
+  in production (`HID_DEPLOYMENT_ENV=production`, or `NODE_ENV=production`
+  outside the staging profile) until the N1 holder step ships; that change
+  lifts the refusal.
+
+Consequences:
+
+- While the gate is closed the NIN oracle is closed. While it is open, a
+  bound or pending NIN is still revealed to anyone who knows it, and each
+  probe of an unbound NIN costs a QoreID lookup, bounded by the quota; this is
+  why NIN-only enrollment stays refused in production until N1.
+- A patient whose activation response is lost and who returns after 15
+  minutes cannot see the HID through the enrollment again. Until HID delivery
+  (N2(a)) ships, the HID is shown only in the activation response, and
+  Health-id must keep it on screen.
+- A patient who waits more than 30 minutes at the password step proves the
+  contact again. Health-id must route
+  `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED` to the contact step; a reload
+  already lands there, because `GET /current` answers `verify_contact`.
+- Until the edge delivers the real client address (IP-1), every client behind
+  one load balancer node shares one network budget, so the per-network limits
+  can deny real enrollments; the platform cap bounds cost either way. A
+  carrier-grade NAT address is one network too.
+- The Identity build needs 0085 and the role bootstrap first: without the
+  command and its grant every start that reaches QoreID answers `503`.
+- Evidence is local and synthetic: unit specs, the two new SQL suites,
+  `runtime-roles.integration.sql` and `verify-patient-enrollment-runtime.mjs`
+  (release checklist §8). Nothing has been run on staging or production.
+
+Related: ADR-008; ADR-023; `INTERFACE_CONTRACT.md`;
+`QOREID_VERIFICATION_CONTRACT.md`; `DATABASE.md` ("Public enrollment
+windows and NIN lookup quota (0085)"); release checklist §2, §3, §5, §6, §8
+and §9.

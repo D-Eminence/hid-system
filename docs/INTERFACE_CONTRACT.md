@@ -58,14 +58,18 @@ Every response that sets these cookies (a staff or patient sign-in by
 password or Google, provider enrollment activation, and a refresh) or clears
 them also expires the public patient enrollment cookie `hid_enrollment` on its
 path, `/api/v1/identity/patient-enrollments` (HttpOnly, `SameSite=Strict`,
-`Secure` as above). That cookie lets `GET /identity/patient-enrollments/current`
-and an activation replay show the enrollment's HID on the enrolling device for
-up to 24 hours ([QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md));
-a signed-in patient reads the HID from `GET /identity/me`, and the enrollment
+`Secure` as above). So does every successful public enrollment activation
+response (`200`, a replay's included; BRANCH:launch/identity-enrollment-gates,
+not deployed). If that response is lost, the cookie lets
+`GET /identity/patient-enrollments/current` and an activation replay show the
+enrollment's HID on the enrolling device for 15 minutes after activation;
+after that both answer `404 ENROLLMENT_NOT_FOUND`
+([QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md)). A
+signed-in patient reads the HID from `GET /identity/me`, and the enrollment
 routes refuse while session cookies are present. Every other response leaves
-it: a refused sign-in, a pending Google enrollee (`202`), and each refresh or
-sign-out refusal that leaves the session cookies untouched or kept (below).
-Activation itself keeps it. Platform administration sign-in does not touch it.
+it: a refused sign-in or activation, a pending Google enrollee (`202`), and
+each refresh or sign-out refusal that leaves the session cookies untouched or
+kept (below). Platform administration sign-in does not touch it.
 
 `POST /api/v1/auth/refresh` takes no body. It reads the refresh and CSRF
 cookies, `X-CSRF-Token` and, optionally, `X-HID-Client`, and checks them in
@@ -578,6 +582,41 @@ attempts that then fail (for example `503 ENROLLMENT_RECONCILIATION_REQUIRED`
 or `409 CONTACT_ALREADY_REGISTERED`). A malformed password (`400`), a missing
 or forged enrollment cookie (`404`) or an enrollment not yet at the password
 step (`409`) is refused first and not counted. Success bodies are unchanged.
+
+Changes of BRANCH:launch/identity-enrollment-gates (migration 0085; not
+deployed). Request and success bodies are unchanged:
+
+- `POST /api/v1/identity/patient-enrollments` checks the QoreID gate after
+  the Origin, Turnstile, signed-in-session and input checks and before
+  anything that reads the NIN's registration: `503 QOREID_DISABLED`,
+  `503 QOREID_NIN_ONLY_DISABLED` or `503 INTEGRATION_PAUSED`, the same for a
+  bound, a pending and an unknown NIN. A same-key resume is refused the same
+  way while the gate is closed. Before, a bound or pending NIN got
+  `409 NIN_ALREADY_REGISTERED` whatever the gate's state; with the gate open
+  it still does.
+- The same route answers `429 VERIFICATION_QUOTA_EXCEEDED` ("Verification
+  request limit reached; try again later") when the QoreID lookup quota
+  refuses the lookup: per client network (an IPv4 address or an IPv6 /64)
+  `PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX` (5) an hour and
+  `PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX` (15) a day, and
+  `PATIENT_ENROLLMENT_QOREID_DAILY_CAP` (200) a day across the platform. It is
+  charged only when QoreID is called: never for a resume, a duplicate or an
+  earlier refusal. A quota fault answers `503 VERIFICATION_QUOTA_UNAVAILABLE`.
+- `POST .../activate` answers `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED`
+  ("Verify your contact again before setting a password") when the contact
+  was proved more than 30 minutes earlier. The enrollment is back at the
+  contact step (`GET .../current` answers `stage: verify_contact` without a
+  contact): choose and prove a contact again (`POST .../contact`, then
+  `/contact/verify`). Nothing is created, and the attempt is not counted
+  against the activation budget unless the activation command made the
+  decision.
+- An enrollment activated more than 15 minutes ago answers
+  `404 ENROLLMENT_NOT_FOUND` on every enrollment route (`GET .../current`,
+  `POST .../activate`, `/contact`, `/contact/verify`, `/google`), without the
+  HID, as an unknown enrollment does. Within those 15 minutes `GET .../current`
+  and a replay still answer `stage: active` with the HID.
+- A successful activation response (`200`) expires `hid_enrollment`
+  ("Auth session contract", above).
 
 ### HID Resolution
 
