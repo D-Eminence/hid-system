@@ -36,7 +36,7 @@ checks.
 
 ## Client address and gateway routing
 
-The client's address crosses the edge in one header (BRANCH:launch/edge-client-ip-gateway):
+The client's address crosses the edge in one header (D-Eminence/hid-system#65):
 
 - The Worker deletes every inbound forwarding header, including any
   `X-Real-IP` the caller sent, and sets `X-Real-IP` from Cloudflare's

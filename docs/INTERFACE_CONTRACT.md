@@ -8,7 +8,7 @@ namespace to the fixed AWS origin and never accepts an upstream from browser
 input. Cookie sessions are host-only; browser token storage is prohibited.
 
 The client address reaches the APIs through the edge only
-(BRANCH:launch/edge-client-ip-gateway). The Worker replaces any caller-supplied
+(D-Eminence/hid-system#65). The Worker replaces any caller-supplied
 `X-Real-IP` with the address Cloudflare reports, and the AWS gateway trusts
 that header only from the VPC and sends it on as `X-Forwarded-For`. In staging
 and production the gateway refuses an API request without a usable client

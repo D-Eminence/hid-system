@@ -1122,7 +1122,7 @@ ADR-026, ADR-029, ADR-031, ADR-032.
 
 Date: 2026-10-13
 
-Change: BRANCH:launch/edge-client-ip-gateway (register IP-1, GW-DNS, DEP-4-KEY
+Change: D-Eminence/hid-system#65 (register IP-1, GW-DNS, DEP-4-KEY
 part d, and the gateway part of MOD-1).
 
 Context: the Worker discarded every client-address header and the Gateway
