@@ -100,7 +100,7 @@ refresh) or clears them also expires the public patient enrollment cookie
 `hid_enrollment` on its
 path, `/api/v1/identity/patient-enrollments` (HttpOnly, `SameSite=Strict`,
 `Secure` as above). So does every successful public enrollment activation
-response (`200`, a replay's included; BRANCH:launch/identity-enrollment-gates,
+response (`200`, a replay's included; D-Eminence/hid-system#68,
 not deployed). If that response is lost, the cookie lets
 `GET /identity/patient-enrollments/current` and an activation replay show the
 enrollment's HID on the enrolling device for 15 minutes after activation;
@@ -709,7 +709,7 @@ internal state. The one exception is a problem raised as `PublicDetailProblem`:
 a fixed sentence written for the person using the client, which keeps its
 `detail` whatever its status. Today only the closed public enrollment gate
 uses it (`503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED`, section 8,
-"Public patient enrollment"; BRANCH:launch/identity-enrollment-gates, FE-4).
+"Public patient enrollment"; D-Eminence/hid-system#68, FE-4).
 
 ## 7. Health Endpoints
 
@@ -887,7 +887,7 @@ or `409 CONTACT_ALREADY_REGISTERED`). A malformed password (`400`), a missing
 or forged enrollment cookie (`404`) or an enrollment not yet at the password
 step (`409`) is refused first and not counted. Success bodies are unchanged.
 
-Changes of BRANCH:launch/identity-enrollment-gates (migration 0085; not
+Changes of D-Eminence/hid-system#68 (migration 0085; not
 deployed). Request and success bodies are unchanged:
 
 - `POST /api/v1/identity/patient-enrollments` checks the QoreID gate after
@@ -923,7 +923,7 @@ deployed). Request and success bodies are unchanged:
   ("Auth session contract", above).
 
 Enrollment availability and the closed-registration answer (FE-4,
-BRANCH:launch/identity-enrollment-gates; no migration; not deployed):
+D-Eminence/hid-system#68; no migration; not deployed):
 
 - `GET /api/v1/identity/patient-enrollments/availability` (new). Public: no
   session, Origin, Turnstile token, cookie or input; a signed-in caller gets

@@ -2777,7 +2777,7 @@ Related ADRs: ADR-025, ADR-032, ADR-033, ADR-034, ADR-035, ADR-043, ADR-045.
 # ADR-048: Public Enrollment Checks Its Gate First, Bounds the HID Re-display and the Contact Proof, and Caps QoreID Lookups
 
 Status: Proposed for source implementation
-(BRANCH:launch/identity-enrollment-gates, migration 0085). Not merged or
+(D-Eminence/hid-system#68, migration 0085). Not merged or
 deployed. The number may need renumbering when the parallel launch branches
 merge.
 
@@ -2886,7 +2886,7 @@ and §9.
 # ADR-049: Clinicians Are Provisioned Only by Platform Governance; One Active Membership per Facility
 
 Status: Accepted for launch with the owner's default policy (launch decision
-D14, workforce part, and N5), in BRANCH:launch/staff-workforce-provisioning,
+D14, workforce part, and N5), in D-Eminence/hid-system#70,
 migration 0087. Not merged or deployed. The number may move when the launch
 branches merge.
 
@@ -3487,7 +3487,7 @@ release checklist §2, §3, §5, §8 and §9.
 # ADR-057: Closed Registration Says So, and a Public Read Tells Clients Before They Ask for a NIN
 
 Status: Proposed for source implementation
-(BRANCH:launch/identity-enrollment-gates, FE-4, no migration). Not merged or
+(D-Eminence/hid-system#68, FE-4, no migration). Not merged or
 deployed. It builds on ADR-048 (the enrollment gate). The number may need
 renumbering when the parallel launch branches merge (ADR-054 to ADR-056 and
 ADR-058 are taken on other launch branches).

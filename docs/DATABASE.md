@@ -2604,7 +2604,7 @@ Tests:
 ## Public enrollment windows and NIN lookup quota (0085)
 
 `0085_public_enrollment_windows_and_nin_lookup_quota.sql`
-(BRANCH:launch/identity-enrollment-gates) implements decisions N2(b) and
+(D-Eminence/hid-system#68) implements decisions N2(b) and
 N2(c) in the activation command and caps QoreID NIN lookups of public patient
 enrollment (IP-1). It replaces two functions and adds one table and one
 function; no existing table is changed.
@@ -2730,7 +2730,7 @@ Tests:
 
 `0086_recovery_and_patient_search_hardening.sql` closes the database part of
 launch blockers REC-GOOGLE, REC-AUDIENCE, REC-NOTIFY and PSEARCH-1 (change
-`BRANCH:launch/identity-recovery-search`). 0001 through 0085 are unchanged.
+D-Eminence/hid-system#69). 0001 through 0085 are unchanged.
 
 **Recovery.** `auth.complete_recovery_otp` (0029) is replaced with `CREATE OR
 REPLACE`, so it keeps its owner and ACL; its signature, result, `SECURITY
@@ -2936,7 +2936,7 @@ Tests:
 ## Governed workforce provisioning and one membership per facility (0087)
 
 `0087_governed_workforce_provisioning.sql` implements launch decision D14
-(workforce part) and N5 (ADR-049; BRANCH:launch/staff-workforce-provisioning).
+(workforce part) and N5 (ADR-049; D-Eminence/hid-system#70).
 
 **One active membership per facility (N5).** A unique partial index,
 `staff_memberships_one_active_per_facility_uq`, allows one active membership
