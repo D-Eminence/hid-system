@@ -366,6 +366,13 @@ try {
   evidence.checks.platform_security_runtime = JSON.parse(command(
     'exact-role platform MFA, step-up, approval and export HTTP workflow', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-platform-security-runtime.mjs')], workflowEnvironment));
+  // Launch blocker MFA-1 (0088): staff sign-in is password then authenticator,
+  // a first enrolment needs an emailed code, and an unassured staff session is
+  // refused everywhere and ended on refresh.
+  evidence.checks.staff_mfa_runtime = JSON.parse(command(
+    'exact-role staff MFA sign-in, enrolment proof, unassured-session refusal, recovery and reset HTTP workflow',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-staff-mfa-runtime.mjs')],
+    workflowEnvironment));
   // Phase 4 Stage 9: the commands whose row locks their runtime roles could not
   // take, each through its real API as its runtime role, with concurrency,
   // replay, denial and rollback cases.

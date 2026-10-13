@@ -18,6 +18,7 @@ import type { PoolClient } from 'pg';
 import type { ActorContext } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
+import type { CurrentPatientContextService } from './current-patient-context.service';
 import type { CurrentStaffContextService } from './current-staff-context.service';
 import { TokenService } from './token.service';
 
@@ -64,7 +65,8 @@ describe('TokenService legacy password continuity', () => {
       subject: actor.subject,
       email: actor.email ?? '',
       displayName: actor.displayName ?? '',
-      facilities: [...actor.facilities],
+      facilities: [],
+      actorKind: 'patient',
       authenticationMethod: 'local',
       passwordUpgrade: { hash: policyHash(), expectedRowVersion: 3 },
     }, { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ' });
@@ -82,7 +84,8 @@ describe('TokenService legacy password continuity', () => {
       subject: actor.subject,
       email: actor.email ?? '',
       displayName: actor.displayName ?? '',
-      facilities: [...actor.facilities],
+      facilities: [],
+      actorKind: 'patient',
       authenticationMethod: 'local',
       passwordUpgrade: { hash: policyHash(), expectedRowVersion: 3 },
     }, { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ' })).rejects.toBeInstanceOf(UnauthorizedException);
@@ -98,11 +101,25 @@ describe('TokenService legacy password continuity', () => {
       accountId: '50000000-0000-4000-8000-000000000001',
       email: actor.email ?? '',
       displayName: actor.displayName ?? '',
-      facilities: [...actor.facilities],
+      facilities: [],
+      actorKind: 'patient',
       authenticationMethod: 'oidc',
     }, { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ' })).rejects.toBeInstanceOf(UnauthorizedException);
 
     expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes('insert into auth.sessions'))).toBe(false);
+  });
+
+  it('never issues a staff session from a password or an ID token alone (MFA-1)', async () => {
+    for (const authenticationMethod of ['local', 'oidc'] as const) {
+      for (const actorKind of [undefined, 'staff'] as const) {
+        const { service, clientQuery } = serviceWithUpgradeResult(true);
+        await expect(service.issue({
+          subject: actor.subject, email: actor.email ?? '', displayName: actor.displayName ?? '',
+          facilities: [...actor.facilities], authenticationMethod, ...(actorKind ? { actorKind } : {}),
+        }, { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ' })).rejects.toBeInstanceOf(UnauthorizedException);
+        expect(clientQuery).not.toHaveBeenCalled();
+      }
+    }
   });
 
   it('only accepts refresh sessions for a currently active, unsuspended account at the current token version', async () => {
@@ -141,7 +158,11 @@ function serviceWithUpgradeResult(upgraded: boolean) {
   const currentStaff = {
     resolve: jest.fn(async () => actor),
   } as unknown as CurrentStaffContextService;
-  return { service: new TokenService(database, currentStaff), clientQuery };
+  const currentPatient = {
+    resolve: jest.fn(async () => ({ ...actor, kind: 'patient', patientId: '50000000-0000-4000-8000-0000000000aa',
+      facilityIds: [], facilities: [], roles: [], permissions: [] })),
+  } as unknown as CurrentPatientContextService;
+  return { service: new TokenService(database, currentStaff, currentPatient), clientQuery };
 }
 
 function policyHash(): string {

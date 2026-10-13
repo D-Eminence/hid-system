@@ -25,6 +25,7 @@ import type { AuthSessionAuditService } from './auth-session-audit.service';
 import type { LoginDto } from './dto/login.dto';
 import type { PatientLoginDto } from './dto/patient-login.dto';
 import type { GoogleAuthenticationService } from './google-authentication.service';
+import type { MfaService } from './mfa/mfa.service';
 import type { TokenService } from './token.service';
 import type { TurnstileService } from './turnstile.service';
 import type { WorkloadAuthService } from './workload-auth.service';
@@ -56,8 +57,10 @@ describe('AuthController Google exchange', () => {
   let google: { login: jest.Mock; exchange: jest.Mock; onboardingStatus: jest.Mock;
     linkExistingPatient: jest.Mock; onboardingCookieName: string };
   let turnstile: { verifyLogin: jest.Mock };
-  let sessionAudit: { record: jest.Mock };
+  let sessionAudit: { record: jest.Mock; recordLoginFailure: jest.Mock };
   let audit: { record: jest.Mock };
+  let mfa: { beginLogin: jest.Mock; completeLogin: jest.Mock; sendEnrollmentCode: jest.Mock;
+    startEnrollment: jest.Mock; activateEnrollment: jest.Mock };
 
   beforeEach(() => {
     restoreEnvironment();
@@ -78,8 +81,10 @@ describe('AuthController Google exchange', () => {
     google = { login: jest.fn(), exchange: jest.fn(), onboardingStatus: jest.fn(),
       linkExistingPatient: jest.fn(), onboardingCookieName: 'hid_access_google_onboarding' };
     turnstile = { verifyLogin: jest.fn().mockResolvedValue(undefined) };
-    sessionAudit = { record: jest.fn().mockResolvedValue(undefined) };
+    sessionAudit = { record: jest.fn().mockResolvedValue(undefined), recordLoginFailure: jest.fn().mockResolvedValue(undefined) };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
+    mfa = { beginLogin: jest.fn(), completeLogin: jest.fn(), sendEnrollmentCode: jest.fn(), startEnrollment: jest.fn(),
+      activateEnrollment: jest.fn() };
     controller = new AuthController(
       {} as AuthService,
       {} as TokenService,
@@ -88,6 +93,7 @@ describe('AuthController Google exchange', () => {
       {} as WorkloadAuthService,
       turnstile as unknown as TurnstileService,
       google as unknown as GoogleAuthenticationService,
+      mfa as unknown as MfaService,
     );
   });
 
@@ -205,27 +211,34 @@ describe('AuthController Google exchange', () => {
     }));
   });
 
-  it('uses the staff actor boundary for the staff Google-login action', async () => {
+  it('refuses a staff Google-login action before Turnstile or token exchange, audited (MFA-1)', async () => {
     const challenge = issueNonce(controller);
-    const staffActor = { ...actor, kind: 'staff' as const, patientId: undefined, roles: ['clinician'] };
-    google.login.mockResolvedValue({
-      actor: staffActor,
-      accessToken: 'access-token', refreshToken: 'refresh-token', csrfToken: 'csrf-token',
-      expiresAt: new Date('2030-01-01T00:00:00.000Z'), refreshExpiresAt: new Date('2030-01-02T00:00:00.000Z'),
-    });
+    const response = responseFor();
+    for (const intent of [undefined, 'enroll' as const]) {
+      await expect(controller.exchangeGoogleIdToken(
+        { ...googleInput('staff-login'), ...(intent ? { intent } : {}) },
+        requestFor({ cookies: { [nonceCookie]: challenge.cookie } }),
+        response,
+      )).rejects.toMatchObject({ status: 403, code: 'GOOGLE_STAFF_SIGN_IN_DISABLED' });
+    }
+    expect(turnstile.verifyLogin).not.toHaveBeenCalled();
+    expect(google.login).not.toHaveBeenCalled();
+    expect(google.exchange).not.toHaveBeenCalled();
+    expect(response.cookie).not.toHaveBeenCalled();
+    expect(sessionAudit.record).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'login_failed',
+      outcome: 'denied', details: { authentication_method: 'oidc', identity_provider: 'google' } }));
+    // The nonce is spent either way.
+    expect(response.clearCookie).toHaveBeenCalledWith(nonceCookie, expect.objectContaining({ path: '/api/v1/auth' }));
+  });
 
-    await controller.exchangeGoogleIdToken(
-      googleInput('staff-login'),
-      requestFor({ cookies: { [nonceCookie]: challenge.cookie } }),
-      responseFor(),
-    );
-
-    expect(google.login).toHaveBeenCalledWith(
-      'g'.repeat(64),
-      challenge.nonce,
-      'staff',
-      expect.any(Object),
-    );
+  it('exchanges a patient Google sign-in only as a patient', async () => {
+    const challenge = issueNonce(controller);
+    google.login.mockResolvedValue({ actor, accessToken: 'access-token', refreshToken: 'refresh-token',
+      csrfToken: 'csrf-token', expiresAt: new Date('2030-01-01T00:00:00.000Z'),
+      refreshExpiresAt: new Date('2030-01-02T00:00:00.000Z') });
+    await controller.exchangeGoogleIdToken(googleInput('patient-login'),
+      requestFor({ cookies: { [nonceCookie]: challenge.cookie } }), responseFor());
+    expect(google.login).toHaveBeenCalledWith('g'.repeat(64), challenge.nonce, 'patient', expect.any(Object));
   });
 
   it('keeps an unknown Google enrollee accountless and writes only a pending capability cookie', async () => {
@@ -356,7 +369,8 @@ describe('AuthController Google exchange', () => {
       { login } as unknown as AuthService, {} as TokenService,
       { record: jest.fn(), recordLoginFailure: jest.fn() } as unknown as AuthSessionAuditService,
       audit as unknown as AuditService, {} as WorkloadAuthService,
-      turnstile as unknown as TurnstileService, google as unknown as GoogleAuthenticationService);
+      turnstile as unknown as TurnstileService, google as unknown as GoogleAuthenticationService,
+      mfa as unknown as MfaService);
 
     it('is retired by a patient password sign-in', async () => {
       const login = jest.fn().mockResolvedValue(issued());
@@ -369,12 +383,18 @@ describe('AuthController Google exchange', () => {
       expect(enrollmentClears(response)).toEqual([enrollmentCleared]);
     });
 
-    it('is retired by a staff password sign-in', async () => {
-      const login = jest.fn().mockResolvedValue(issued());
-      const response = responseFor();
-      await withPasswordLogin(login).login(credentials('staff-login') as LoginDto, requestFor(), response);
-      expect(login).toHaveBeenCalledWith(expect.anything(), expect.any(Object), 'staff');
-      expect(enrollmentClears(response)).toEqual([enrollmentCleared]);
+    it('is kept by the staff password step, which sets no session cookie, and retired by its MFA step', async () => {
+      const login = jest.fn();
+      mfa.beginLogin.mockResolvedValue({ purpose: 'verify', token: 'T'.repeat(43), expiresAt: new Date(Date.now() + 300_000) });
+      const passwordStep = responseFor();
+      await withPasswordLogin(login).login(credentials('staff-login') as LoginDto, requestFor(), passwordStep);
+      expect(login).not.toHaveBeenCalled();
+      expect(enrollmentClears(passwordStep)).toEqual([]);
+      mfa.completeLogin.mockResolvedValue(issued());
+      const mfaStep = responseFor();
+      await withPasswordLogin(login).verifyStaffMfa({ code: '123456' },
+        requestFor({ cookies: { hid_access_mfa: 'T'.repeat(43) } }), mfaStep);
+      expect(enrollmentClears(mfaStep)).toEqual([enrollmentCleared]);
     });
 
     it('is kept when a password sign-in fails', async () => {
@@ -446,6 +466,132 @@ describe('AuthController Google exchange', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('AuthController staff sign-in is two-step (MFA-1)', () => {
+  const challengeCookie = 'hid_access_mfa';
+  const challengeToken = 'S'.repeat(43);
+  const expiresAt = new Date(Date.now() + 300_000);
+  let controller: AuthController;
+  let turnstile: { verifyLogin: jest.Mock };
+  let sessionAudit: { record: jest.Mock; recordLoginFailure: jest.Mock };
+  let mfa: { beginLogin: jest.Mock; completeLogin: jest.Mock; sendEnrollmentCode: jest.Mock;
+    startEnrollment: jest.Mock; activateEnrollment: jest.Mock };
+  let authService: { login: jest.Mock };
+  const staffSession = () => ({ actor: { ...actor, kind: undefined, patientId: undefined, sessionId: 'session-1' },
+    accessToken: 'access-token', refreshToken: 'refresh-token', csrfToken: 'csrf-token',
+    expiresAt: new Date('2030-01-01T00:00:00.000Z'), refreshExpiresAt: new Date('2030-01-02T00:00:00.000Z') });
+  const sessionCookies = (response: ReturnType<typeof responseFor>) => response.cookie.mock.calls
+    .map(([name]) => String(name)).filter((name) => ['hid_access', 'hid_access_refresh', 'hid_access_csrf'].includes(name));
+
+  beforeEach(() => {
+    restoreEnvironment();
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost:5432/hid', DATABASE_SSL: 'false',
+      CORS_ORIGINS: origin, AUTH_MODE: 'local', AUTH_SIGNING_SECRET: 'test-signing-secret-with-at-least-32-characters',
+      AUTH_LOGIN_PEPPER: 'test-login-pepper-with-at-least-32-characters', AUTH_COOKIE_NAME: 'hid_access',
+      AUTH_COOKIE_SECURE: 'true', TURNSTILE_MODE: 'disabled',
+    });
+    resetEnvironmentForTests();
+    turnstile = { verifyLogin: jest.fn().mockResolvedValue(undefined) };
+    sessionAudit = { record: jest.fn().mockResolvedValue(undefined), recordLoginFailure: jest.fn().mockResolvedValue(undefined) };
+    mfa = { beginLogin: jest.fn(), completeLogin: jest.fn(), sendEnrollmentCode: jest.fn(), startEnrollment: jest.fn(),
+      activateEnrollment: jest.fn() };
+    authService = { login: jest.fn() };
+    controller = new AuthController(authService as unknown as AuthService, {} as TokenService,
+      sessionAudit as unknown as AuthSessionAuditService, { record: jest.fn() } as unknown as AuditService,
+      {} as WorkloadAuthService, turnstile as unknown as TurnstileService, {} as GoogleAuthenticationService,
+      mfa as unknown as MfaService);
+  });
+
+  afterEach(() => {
+    restoreEnvironment();
+    resetEnvironmentForTests();
+  });
+
+  it.each([
+    ['verify', 'mfa_required'],
+    ['enroll', 'mfa_enrollment_required'],
+  ])('answers a valid staff password (%s) with only an httpOnly challenge cookie, no session cookie', async (purpose, status) => {
+    mfa.beginLogin.mockResolvedValue({ purpose, token: challengeToken, expiresAt });
+    const response = responseFor();
+    const result = await controller.login({ email: 'staff@example.test', password: 'valid-password',
+      turnstileToken: 'turnstile-token', turnstileAction: 'staff-login' }, requestFor(), response);
+    expect(result).toEqual({ status, expiresAt: expiresAt.toISOString() });
+    expect(turnstile.verifyLogin).toHaveBeenCalledWith(expect.objectContaining({ action: 'staff-login' }));
+    expect(mfa.beginLogin).toHaveBeenCalledWith('staff@example.test', 'valid-password', expect.any(Object), 'staff');
+    // The password alone never yields a session: no session cookie, no CSRF header, nothing cleared.
+    expect(authService.login).not.toHaveBeenCalled();
+    expect(sessionCookies(response)).toEqual([]);
+    expect(response.cookie).toHaveBeenCalledTimes(1);
+    expect(response.cookie).toHaveBeenCalledWith(challengeCookie, challengeToken, { secure: true, sameSite: 'strict',
+      httpOnly: true, path: '/api/v1/auth/mfa', expires: expiresAt });
+    expect(response.setHeader).not.toHaveBeenCalledWith('x-csrf-token', expect.anything());
+    expect(response.clearCookie).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('actor');
+  });
+
+  it('records a wrong staff password as a login failure and sets no cookie', async () => {
+    mfa.beginLogin.mockRejectedValue(new UnauthorizedException('Invalid credentials'));
+    const response = responseFor();
+    await expect(controller.login({ email: 'staff@example.test', password: 'wrong-password',
+      turnstileAction: 'staff-login' }, requestFor(), response)).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(sessionAudit.recordLoginFailure).toHaveBeenCalledWith('staff@example.test', expect.any(Object));
+    expect(response.cookie).not.toHaveBeenCalled();
+  });
+
+  it('refuses the staff password step from an unapproved origin before Turnstile', async () => {
+    await expect(controller.login({ email: 'staff@example.test', password: 'valid-password',
+      turnstileAction: 'staff-login' }, requestFor({ origin: 'https://attacker.example' }), responseFor()))
+      .rejects.toMatchObject({ code: 'ORIGIN_DENIED' });
+    expect(turnstile.verifyLogin).not.toHaveBeenCalled();
+    expect(mfa.beginLogin).not.toHaveBeenCalled();
+  });
+
+  it('issues the staff session cookies only at the second factor, and clears the challenge cookie', async () => {
+    mfa.completeLogin.mockResolvedValue(staffSession());
+    const response = responseFor();
+    const result = await controller.verifyStaffMfa({ code: '123456' },
+      requestFor({ cookies: { [challengeCookie]: challengeToken } }), response);
+    expect(mfa.completeLogin).toHaveBeenCalledWith(challengeToken, { code: '123456' }, expect.any(Object), 'staff');
+    expect(sessionCookies(response).sort()).toEqual(['hid_access', 'hid_access_csrf', 'hid_access_refresh']);
+    expect(response.setHeader).toHaveBeenCalledWith('x-csrf-token', 'csrf-token');
+    expect(response.clearCookie).toHaveBeenCalledWith(challengeCookie, expect.objectContaining({ path: '/api/v1/auth/mfa' }));
+    expect(result).toMatchObject({ actor: { sessionId: 'session-1' }, expiresAt: '2030-01-01T00:00:00.000Z' });
+  });
+
+  it.each([
+    ['verify', (c: AuthController, r: HidRequest, s: Response) => c.verifyStaffMfa({ code: '123456' }, r, s)],
+    ['enrolment code', (c: AuthController, r: HidRequest, s: Response) => c.sendStaffEnrollmentCode(r, s)],
+    ['enrolment start', (c: AuthController, r: HidRequest, s: Response) => c.startStaffEnrollment({ emailCode: '123456' }, r, s)],
+    ['enrolment activation', (c: AuthController, r: HidRequest, s: Response) => c.activateStaffEnrollment({ code: '123456' }, r, s)],
+  ])('refuses the %s step without the challenge cookie (401 MFA_CHALLENGE_INVALID) or from another origin', async (_label, step) => {
+    await expect(step(controller, requestFor(), responseFor())).rejects.toMatchObject({ status: 401, code: 'MFA_CHALLENGE_INVALID' });
+    await expect(step(controller, requestFor({ origin: 'https://attacker.example', cookies: { [challengeCookie]: challengeToken } }),
+      responseFor())).rejects.toMatchObject({ code: 'ORIGIN_DENIED' });
+    for (const call of Object.values(mfa)) expect(call).not.toHaveBeenCalled();
+  });
+
+  it('starts a staff enrolment with the emailed code and activates it into a session with recovery codes', async () => {
+    mfa.sendEnrollmentCode.mockResolvedValue({ accepted: true, channel: 'email', expiresAt });
+    mfa.startEnrollment.mockResolvedValue({ secret: 'A'.repeat(32), otpauthUri: 'otpauth://totp/x', algorithm: 'SHA1',
+      digits: 6, periodSeconds: 30, expiresAt });
+    mfa.activateEnrollment.mockResolvedValue({ session: staffSession(), recoveryCodes: ['ABCDE-12345'] });
+    const request = requestFor({ cookies: { [challengeCookie]: challengeToken } });
+    const sent = responseFor();
+    await expect(controller.sendStaffEnrollmentCode(request, sent)).resolves.toEqual({ accepted: true, channel: 'email',
+      expiresAt: expiresAt.toISOString() });
+    expect(sent.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    const started = responseFor();
+    await controller.startStaffEnrollment({ emailCode: '654321' }, request, started);
+    expect(mfa.startEnrollment).toHaveBeenCalledWith(challengeToken, expect.any(Object), 'staff', { emailCode: '654321' });
+    expect(sessionCookies(started)).toEqual([]);
+    const activated = responseFor();
+    const result = await controller.activateStaffEnrollment({ code: '123456' }, request, activated);
+    expect(mfa.activateEnrollment).toHaveBeenCalledWith(challengeToken, '123456', expect.any(Object), 'staff');
+    expect(result.recoveryCodes).toEqual(['ABCDE-12345']);
+    expect(sessionCookies(activated).sort()).toEqual(['hid_access', 'hid_access_csrf', 'hid_access_refresh']);
   });
 });
 

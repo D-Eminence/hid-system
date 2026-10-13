@@ -9,6 +9,7 @@ import { AuthController } from './auth.controller';
 import type { AuthService } from './auth.service';
 import type { AuthSessionAuditService } from './auth-session-audit.service';
 import type { GoogleAuthenticationService } from './google-authentication.service';
+import type { MfaService } from './mfa/mfa.service';
 import type { TokenService } from './token.service';
 import type { TurnstileService } from './turnstile.service';
 import type { WorkloadAuthService } from './workload-auth.service';
@@ -68,7 +69,7 @@ function harness(liveAccess: Record<string, ActorContext> = { 'access-A': actor(
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
   const controller = new AuthController(auth as unknown as AuthService, tokens as unknown as TokenService,
     { record: jest.fn() } as unknown as AuthSessionAuditService, audit as unknown as AuditService,
-    {} as WorkloadAuthService, {} as TurnstileService, {} as GoogleAuthenticationService);
+    {} as WorkloadAuthService, {} as TurnstileService, {} as GoogleAuthenticationService, {} as MfaService);
   return { controller, tokens, auth, audit };
 }
 

@@ -1,7 +1,7 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
 
 import type { Response } from 'express';
-import type { AuthService } from '../auth/auth.service';
+import type { MfaService } from '../auth/mfa/mfa.service';
 import type { TurnstileService } from '../auth/turnstile.service';
 import type { HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
@@ -21,7 +21,7 @@ function request(cookie: string): HidRequest {
     }) } as unknown as HidRequest;
 }
 
-describe('ProviderEnrollmentController activation sign-in', () => {
+describe('ProviderEnrollmentController activation', () => {
   beforeEach(() => {
     Object.assign(process.env, {
       NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
@@ -39,26 +39,33 @@ describe('ProviderEnrollmentController activation sign-in', () => {
     resetEnvironmentForTests();
   });
 
-  it('signs the new administrator in and retires the public patient enrollment cookie (ENR-3)', async () => {
+  it('opens the first staff sign-in at enrolment, proven by the activation, and sets no session cookie (MFA-1)', async () => {
     const completion = { activate: jest.fn().mockResolvedValue({ email: 'provider@example.invalid',
       organizationId: 'organization-1', facilityId: 'facility-1', accountId: 'account-1' }) };
-    const auth = { login: jest.fn().mockResolvedValue({ actor: { subject: 'staff:provider' },
-      accessToken: 'access-token', refreshToken: 'refresh-token', csrfToken: 'csrf-token',
-      expiresAt: new Date('2030-01-01T00:00:00.000Z'), refreshExpiresAt: new Date('2030-01-02T00:00:00.000Z') }) };
+    const expiresAt = new Date(Date.now() + 600_000);
+    const mfa = { beginLogin: jest.fn().mockResolvedValue({ purpose: 'enroll', token: 'P'.repeat(43), expiresAt }) };
     const controller = new ProviderEnrollmentController({} as ProviderEnrollmentService,
       completion as unknown as OrganizationProfileCompletionService, {} as TurnstileService,
-      auth as unknown as AuthService);
+      mfa as unknown as MfaService);
     const response = { cookie: jest.fn(), clearCookie: jest.fn(), setHeader: jest.fn() };
 
-    await controller.activate({ password: 'a-strong-test-password' },
+    const result = await controller.activate({ password: 'a-strong-test-password' },
       request('hid_provider_enrollment=opaque-provider-value'), response as unknown as Response);
 
     expect(completion.activate).toHaveBeenCalledWith('opaque-provider-value', 'a-strong-test-password',
       'provider-enrollment-controller-test');
-    expect(response.cookie.mock.calls.map(([name]) => name).sort())
-      .toEqual(['hid_access', 'hid_access_csrf', 'hid_access_refresh']);
+    // The password just set opens a staff challenge whose enrolment proof is this activation.
+    expect(mfa.beginLogin).toHaveBeenCalledWith('provider@example.invalid', 'a-strong-test-password',
+      expect.objectContaining({ correlationId: 'provider-enrollment-controller-test' }), 'staff', { activationProof: true });
+    expect(response.cookie.mock.calls.map(([name]) => name)).toEqual(['hid_access_mfa']);
+    expect(response.cookie).toHaveBeenCalledWith('hid_access_mfa', 'P'.repeat(43), { secure: true, sameSite: 'strict',
+      httpOnly: true, path: '/api/v1/auth/mfa', expires: expiresAt });
+    expect(result).toEqual({ activated: true, organizationId: 'organization-1', facilityId: 'facility-1',
+      accountId: 'account-1', status: 'mfa_enrollment_required', expiresAt: expiresAt.toISOString() });
+    expect(result).not.toHaveProperty('actor');
     expect(response.clearCookie).toHaveBeenCalledWith('hid_provider_enrollment', expect.objectContaining({
       path: '/api/v1/identity/provider-enrollments' }));
+    // ENR-3: the device's public patient enrollment cookie is retired, as at any sign-in.
     expect(response.clearCookie).toHaveBeenCalledWith('hid_enrollment', { secure: true, sameSite: 'strict',
       httpOnly: true, path: '/api/v1/identity/patient-enrollments' });
   });
