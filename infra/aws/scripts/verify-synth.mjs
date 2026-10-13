@@ -120,8 +120,9 @@ if (!asleep) {
   // The public API web ACL: the origin secret first; the Core Rule Set with
   // only SizeRestrictions_BODY counted, and a rule after it that blocks the
   // oversized bodies it labels outside the encounter-scoped clinical writes
-  // (WAF-CRS-BODY); a rate limit per client address (X-Real-IP, set by the
-  // Worker) and a high backstop per connecting address (A7).
+  // (WAF-CRS-BODY); a rate limit per client network (X-HID-Client-Network,
+  // the IPv4 address or IPv6 /64 the Worker derives from CF-Connecting-IP) and
+  // a high backstop per connecting address (A7).
   const [apiAcl] = resources('AWS::WAFv2::WebACL')
     .filter(resource => resource.Properties.VisibilityConfig?.MetricName === `hid-${environment}-api-origin`)
   assert.ok(apiAcl, 'the public API web ACL is missing')
@@ -137,7 +138,7 @@ if (!asleep) {
     { LabelMatchStatement: { Scope: 'LABEL', Key: 'awswaf:managed:aws:core-rule-set:SizeRestrictions_Body' } })
   assert.match(JSON.stringify(rules[2].Statement.AndStatement.Statements[1].NotStatement), /clinical-notes/)
   assert.deepEqual(rules[4].Statement.RateBasedStatement, { AggregateKeyType: 'FORWARDED_IP', Limit: 2000,
-    ForwardedIPConfig: { HeaderName: 'X-Real-IP', FallbackBehavior: 'MATCH' } })
+    ForwardedIPConfig: { HeaderName: 'X-HID-Client-Network', FallbackBehavior: 'MATCH' } })
   assert.deepEqual(rules[5].Statement.RateBasedStatement, { AggregateKeyType: 'IP', Limit: 50000 })
 }
 assert.equal(resources('AWS::ApplicationAutoScaling::ScalableTarget').length, asleep ? 0 : 11)

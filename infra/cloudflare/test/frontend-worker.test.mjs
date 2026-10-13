@@ -340,9 +340,44 @@ test('sends no X-Real-IP when Cloudflare supplied no valid single client address
     '010.1.2.3', '1.2.3', '0x7f.0.0.1', 'fe80::1%eth0', '[2001:db8::1]', '2001:db8::1::2']) {
     const headers = await forwardedApiHeaders({
       'x-real-ip': '203.0.113.99',
+      'x-hid-client-network': '203.0.113.99',
       ...(value === undefined ? {} : { 'cf-connecting-ip': value }),
     })
     assert.equal(headers.get('x-real-ip'), null, `cf-connecting-ip ${JSON.stringify(value)} must not be forwarded`)
+    assert.equal(headers.get('x-hid-client-network'), null, `cf-connecting-ip ${JSON.stringify(value)}: no client network`)
+  }
+})
+
+// A7. The WAF's per-client rate limit (ApiOriginRateLimit) is keyed on
+// X-HID-Client-Network: the client's IPv4 address, or the /64 network address
+// of its IPv6 address (one subscriber allocation, as Identity's own limits
+// count it), so rotating addresses inside a /64 does not reset the limit. An
+// IPv4-mapped IPv6 address counts as its IPv4 address. A caller's own value
+// never reaches the origin. X-Real-IP keeps the full address.
+for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
+  for (const app of Object.keys(profile.hosts)) {
+    test(`${deployment} ${app} sends the client network the WAF counts and replaces a caller-supplied one`, async () => {
+      const spoofed = await forwardedApiHeaders({ 'cf-connecting-ip': '198.51.100.23', 'X-HID-Client-Network': '10.40.1.9' }, deployment, app)
+      assert.equal(spoofed.get('x-hid-client-network'), '198.51.100.23')
+    })
+  }
+}
+
+test('the client network is the IPv4 address or the canonical IPv6 /64 network address', async () => {
+  for (const [connecting, network, realIp] of [
+    ['198.51.100.23', '198.51.100.23', '198.51.100.23'],
+    ['2001:db8:4:5:aaaa:bbbb:cccc:dddd', '2001:db8:4:5::', '2001:db8:4:5:aaaa:bbbb:cccc:dddd'],
+    ['2001:db8:4:5::1', '2001:db8:4:5::', '2001:db8:4:5::1'],
+    ['2001:DB8:4:5:FFFF:FFFF:FFFF:FFFF', '2001:db8:4:5::', '2001:db8:4:5:ffff:ffff:ffff:ffff'],
+    ['2001:db8:4:6::1', '2001:db8:4:6::', '2001:db8:4:6::1'],
+    ['2001:DB8:0:0:1::7', '2001:db8::', '2001:db8::1:0:0:7'],
+    ['2001:db8:0:1::', '2001:db8:0:1::', '2001:db8:0:1::'],
+    ['::ffff:192.0.2.44', '192.0.2.44', '::ffff:c000:22c'],
+    ['::1', '::', '::1'],
+  ]) {
+    const headers = await forwardedApiHeaders({ 'cf-connecting-ip': connecting, 'x-hid-client-network': '203.0.113.200' })
+    assert.equal(headers.get('x-hid-client-network'), network, connecting)
+    assert.equal(headers.get('x-real-ip'), realIp, `${connecting}: X-Real-IP keeps the full address`)
   }
 })
 

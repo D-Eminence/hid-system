@@ -319,11 +319,14 @@ export class GatewayModel {
     const outcome = this.runRewrite(selected.directive.block, expand, variables, value)
     const scopes = [...chain].reverse().map(item => item.directive.block)
     // Directives that a location inherits from its enclosing levels unless it
-    // sets its own: where the request is logged, whether upstream error
-    // statuses are replaced by error_page (nginx's default is off), and the
-    // largest request body nginx accepts (its default is 1m).
+    // sets its own: where the request is logged (access and error log; an
+    // empty error log means the http-level one of the image's nginx.conf),
+    // whether upstream error statuses are replaced by error_page (nginx's
+    // default is off), and the largest request body nginx accepts (its
+    // default is 1m).
     const inheritedSettings = {
       accessLog: this.inheritedAll('access_log', scopes).map(item => item.args),
+      errorLog: this.inheritedAll('error_log', scopes).map(item => item.args),
       interceptErrors: (this.inherited('proxy_intercept_errors', scopes)?.[0] ?? 'off') === 'on',
       clientMaxBodySize: this.inherited('client_max_body_size', scopes)?.[0] ?? '1m',
     }
@@ -392,6 +395,7 @@ export class GatewayModel {
       contentType: this.inherited('default_type', scopes)?.[0],
       addHeaders: outcome.addHeaders ?? this.addHeaders(scopes),
       accessLog: this.inheritedAll('access_log', scopes).map(item => item.args),
+      errorLog: this.inheritedAll('error_log', scopes).map(item => item.args),
     }
   }
 

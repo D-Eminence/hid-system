@@ -510,12 +510,15 @@ test('the WAF body-size rule is relaxed only for encounter-scoped clinical write
 
 // A7. Every connection to the ALB comes from the Cloudflare Worker, so a rate
 // rule keyed on the connecting address throttled every user behind one
-// Cloudflare egress address together. The Worker always replaces X-Real-IP
-// with CF-Connecting-IP, and rule 0 blocks every request without the Worker's
-// origin secret before any rate rule counts it, so the per-client rule keys on
-// X-Real-IP. A backstop on the connecting address catches a leaked secret or a
-// request without the header.
-test('the WAF rate limit is per client address, with a high backstop per connecting address', () => {
+// Cloudflare egress address together. Rule 0 blocks every request without the
+// Worker's origin secret before any rate rule counts it, and the Worker always
+// replaces X-HID-Client-Network with the client network it derives from
+// CF-Connecting-IP: the IPv4 address, or the IPv6 /64 network address, so a
+// client rotating addresses inside its /64 keeps one count (keyed on the full
+// IPv6 address in X-Real-IP it could not be limited, and only the backstop
+// would stop it, for every user behind that egress address). A backstop on the
+// connecting address catches a leaked secret or a request without the header.
+test('the WAF rate limit is per client network (IPv4 address or IPv6 /64), with a high backstop per connecting address', () => {
   for (const [template, environment] of [[regional, 'production'], [stagingRegional, 'staging']] as const) {
     const rules = apiOriginRules(template, environment);
     assert.deepEqual(rules.map((rule) => [rule.Priority, rule.Name]), [
@@ -526,7 +529,7 @@ test('the WAF rate limit is per client address, with a high backstop per connect
     assert.deepEqual(perClient.Action, { Block: {} });
     assert.deepEqual(perClient.Statement.RateBasedStatement, {
       AggregateKeyType: 'FORWARDED_IP', Limit: 2_000,
-      ForwardedIPConfig: { HeaderName: 'X-Real-IP', FallbackBehavior: 'MATCH' },
+      ForwardedIPConfig: { HeaderName: 'X-HID-Client-Network', FallbackBehavior: 'MATCH' },
     });
     const backstop = rules.find((rule) => rule.Name === 'ApiOriginEdgeRateLimit')!;
     assert.deepEqual(backstop.Action, { Block: {} });

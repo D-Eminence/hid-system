@@ -46,6 +46,10 @@ export const forbiddenLogVariables = Object.freeze([
   /\$http_x_hid_origin_authorization\b/, /\$sent_http_set_cookie\b/, /\$upstream_http_set_cookie\b/,
 ])
 
+// The error-log levels at which nginx writes nothing for an ordinary failed
+// request (refused, reset or timed-out upstream, oversized or buffered body).
+const errorLogLevels = Object.freeze(['crit', 'alert', 'emerg'])
+
 // The largest body any launch service accepts as JSON (ehr-api 512 KiB).
 const maxBodyBytes = 512 * 1024
 
@@ -94,6 +98,7 @@ export function assertGatewayContract({ template, dockerfile, includes }) {
       assert.equal(outcome.upstreamHeaders['x-forwarded-for'], client, `${uri} must forward the client address`)
       assert.equal(outcome.upstreamHeaders['x-real-ip'], '', `${uri} must not pass the raw client-address header on`)
       assert.equal(outcome.upstreamHeaders['x-hid-origin-authorization'], '', `${uri} must not pass the Worker's origin secret on`)
+      assert.equal(outcome.upstreamHeaders['x-hid-client-network'], '', `${uri} must not pass the WAF's client-network key on`)
     }
     for (const headers of [{}, { 'x-hid-client-ip': client }]) {
       const refused = all.route({ uri: `${prefix}/x`, peer: vpcPeer, headers })
@@ -142,12 +147,24 @@ export function assertGatewayContract({ template, dockerfile, includes }) {
   }
   assert.deepEqual(all.directives('access_log').map(item => item.args), [['/var/log/nginx/access.log', 'hid_api']],
     'the server must replace the image\'s http-level access_log (format main logs the request line)')
+  // D7: nginx appends the request line (query string included) and the
+  // upstream URL to every error or warning about a request, and the image's
+  // http-level error log takes notice and above. The server logs only
+  // critical messages, so a refused upstream, an oversized or buffered body or
+  // a timeout never writes a query string to the container's stderr.
+  const quietErrorLog = args => args.length === 2 && args[0] === '/var/log/nginx/error.log'
+    && errorLogLevels.includes(args[1])
+  const serverErrorLog = all.directives('error_log').map(item => item.args)
+  assert.ok(serverErrorLog.length === 1 && quietErrorLog(serverErrorLog[0]),
+    `the server must log only critical errors (error_log /var/log/nginx/error.log crit), not ${JSON.stringify(serverErrorLog)}`)
   // WAF-CRS-BODY: bodies are bounded at the largest service limit, with Problem Details.
   assert.equal(pages['413']?.target, '@payload_too_large', 'an oversized body must answer Problem Details')
   assert.equal(problemCode(all.named('@payload_too_large')), 'PAYLOAD_TOO_LARGE')
   for (const [prefix] of routeOwners) {
     const outcome = all.route({ method: 'POST', uri: `${prefix}/x`, peer: vpcPeer, headers: { 'x-real-ip': client } })
     assert.deepEqual(outcome.accessLog, [['/var/log/nginx/access.log', 'hid_api']], `${prefix} must use the gateway access log`)
+    assert.ok(outcome.errorLog.length === 1 && quietErrorLog(outcome.errorLog[0]),
+      `${prefix} must not log errors below crit (the request line carries the query string)`)
     assert.ok(sizeInBytes(outcome.clientMaxBodySize) <= maxBodyBytes,
       `${prefix} accepts bodies up to ${outcome.clientMaxBodySize}; the bound is 512k`)
   }

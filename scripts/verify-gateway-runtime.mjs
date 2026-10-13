@@ -10,7 +10,10 @@
 //               or closes without answering gets 503 UPSTREAM_UNAVAILABLE.
 //   D7          the access log is one JSON object per request, with the path but
 //               never the query string, and the image's http-level "main" format
-//               (which logs the request line) records nothing.
+//               (which logs the request line) records nothing. The error log
+//               (the image's stderr) never records a request line or query
+//               string: not for an upstream that refuses, a body over 512 KiB,
+//               or a body buffered to a temporary file.
 //   SCAN-EDGE   POST /api/v1/ehr/documents/scan-events (any spelling) answers
 //               404 API_ROUTE_NOT_FOUND and never reaches ehr-api.
 //   WAF-CRS-BODY  a 300 KiB clinical note body reaches ehr-api; a body over
@@ -69,7 +72,8 @@ const application = createHttpServer((request, response) => {
   request.on('end', () => {
     const body = Buffer.concat(chunks)
     reached.push({ method: request.method, url: request.url, bytes: body.length,
-      originSecret: request.headers['x-hid-origin-authorization'] ?? null })
+      originSecret: request.headers['x-hid-origin-authorization'] ?? null,
+      clientNetwork: request.headers['x-hid-client-network'] ?? null })
     const problem = (status, code, extra = {}) => {
       response.writeHead(status, {
         'content-type': 'application/problem+json',
@@ -127,8 +131,10 @@ try {
   const server = rendered
     .replace('listen 3000;', `listen 127.0.0.1:${gatewayPort};`)
     .replaceAll('/etc/nginx/hid-proxy-headers.conf', join(temporary, 'hid-proxy-headers.conf'))
-    // The image links /var/log/nginx/access.log to the container's stdout.
+    // The image links /var/log/nginx/access.log to the container's stdout and
+    // /var/log/nginx/error.log (its http-level error log, at notice) to stderr.
     .replaceAll('/var/log/nginx/access.log', join(temporary, 'access.log'))
+    .replaceAll('/var/log/nginx/error.log', join(temporary, 'error.log'))
   for (const directory of ['client_body', 'proxy', 'fastcgi', 'uwsgi', 'scgi']) {
     await mkdir(join(temporary, directory), { recursive: true })
   }
@@ -247,11 +253,13 @@ try {
     assert.equal(refused.json().code, 'PAYLOAD_TOO_LARGE')
     assert.equal(reached.length, before, 'an oversized body never reaches the upstream')
   })
-  check('A7: the Worker\'s origin secret stops at the gateway', async () => {
-    const answer = await send('POST', '/api/v1/identity/x', { body: '{}', headers: { 'x-hid-origin-authorization': 'edge-secret-value' } })
+  check('A7: the Worker\'s origin secret and the WAF\'s client-network key stop at the gateway', async () => {
+    const answer = await send('POST', '/api/v1/identity/x', { body: '{}', headers: {
+      'x-hid-origin-authorization': 'edge-secret-value', 'x-hid-client-network': '2001:db8:4:5::' } })
     assert.equal(answer.status, 200)
     assert.equal(reached.at(-1).url, '/api/v1/identity/x')
     assert.equal(reached.at(-1).originSecret, null, 'no backend receives X-HID-Origin-Authorization')
+    assert.equal(reached.at(-1).clientNetwork, null, 'no backend receives X-HID-Client-Network')
   })
   check('D7: each request is logged as JSON with its path and no query string; the image log receives nothing', async () => {
     await send('GET', `/api/v1/admin/principals?query=${secretTerm}&page=2`)
@@ -275,6 +283,25 @@ try {
     assert.equal(search.correlation_id, correlationId)
     assert.equal(search.client, client)
     assert.equal(await readFile(join(temporary, 'image-access.log'), 'utf8'), '', 'the image\'s "main" access log is not used')
+  })
+  check('D7: the error log records no request line or query string', async () => {
+    // nginx logs each of these about the request, with its request line and
+    // upstream URL, at error or warn level: an upstream that refuses the
+    // connection, a body over the 512 KiB bound, and a body over the 16 KiB
+    // client_body_buffer_size, which nginx buffers to a temporary file.
+    const refused = await send('GET', `/api/v1/lab/work-items?query=${secretTerm}-refused`)
+    assert.equal(refused.status, 503)
+    const tooLarge = await send('POST', `/api/v1/admin/principals?query=${secretTerm}-too-large`,
+      { body: JSON.stringify({ content: 'x'.repeat(600 * 1024) }) })
+    assert.equal(tooLarge.status, 413)
+    const buffered = await send('POST', `/api/v1/ehr/patients/x/encounters?query=${secretTerm}-buffered`,
+      { body: JSON.stringify({ content: 'x'.repeat(300 * 1024) }) })
+    assert.equal(buffered.status, 200)
+    await new Promise(done => setTimeout(done, 300))
+    // Every request of this run counts, the earlier checks' failures included.
+    const leaked = (await readFile(join(temporary, 'error.log'), 'utf8')).split('\n')
+      .filter(line => line.includes(secretTerm) || /\b(?:request|upstream): "/.test(line))
+    assert.deepEqual(leaked, [], 'no request line, upstream URL or query string reaches the error log')
   })
 
   const results = []

@@ -210,10 +210,17 @@ assert.doesNotMatch(`${gatewayConfig}\n${proxyHeaders}`, /^\s*proxy_intercept_er
   'gateway must not replace upstream error answers')
 // D7: the access log records the path, never the request line or query string.
 assert.match(gatewayConfig, /^\s*access_log \/var\/log\/nginx\/access\.log hid_api;/m, 'gateway must log with its own format')
+// D7: nginx writes the request line (query string included) into every error
+// or warning about a request; the server logs only critical messages.
+assert.deepEqual([...`${gatewayConfig}\n${proxyHeaders}`.matchAll(/^\s*error_log\s+([^;]*);/gm)].map(([, args]) => args),
+  ['/var/log/nginx/error.log crit'], 'gateway must log only critical errors (no request line or query string)')
 // WAF-CRS-BODY: the edge bound on request bodies, with a Problem Details 413.
 assert.match(gatewayConfig, /^\s*client_max_body_size 512k;/m, 'gateway must bound request bodies at 512 KiB')
 assert.match(gatewayConfig, /error_page 413 = @payload_too_large/)
 assert.match(proxyHeaders, /X-Forwarded-For \$remote_addr/, 'gateway must overwrite caller-supplied forwarding chains')
+// A7: the Worker's origin secret and the WAF's client-network key stop here.
+assert.match(proxyHeaders, /^proxy_set_header X-HID-Origin-Authorization "";$/m, 'gateway must not forward the origin secret')
+assert.match(proxyHeaders, /^proxy_set_header X-HID-Client-Network "";$/m, 'gateway must not forward the WAF client-network key')
 assert.match(proxyHeaders, /if \(\$hid_client_address_missing\)[\s\S]*CLIENT_ADDRESS_REQUIRED/,
   'gateway must refuse an API request without a client address when required')
 assert.match(proxyHeaders, /Origin \$http_origin/)

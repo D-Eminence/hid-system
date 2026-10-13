@@ -139,6 +139,22 @@ test('the Worker\'s origin secret is not passed to any backend', () => {
   }
 })
 
+// A7. The Worker also sends X-HID-Client-Network (the client's IPv4 address or
+// IPv6 /64), the key of the WAF's per-client rate limit. No backend reads it:
+// the services take the client address from X-Forwarded-For.
+test('the WAF\'s client-network key is not passed to any backend', () => {
+  const model = gateway({ ...production, HID_ENABLED_API_ROUTES: allModules })
+  for (const prefix of ['/api/v1/auth', '/api/v1/identity', '/api/v1/audit', '/api/v1/admin', '/api/v1/commercial',
+    '/api/v1/ehr', '/api/v1/lab', '/api/v1/pharmacy', '/api/v1/ocr', '/api/v1/outreach']) {
+    for (const uri of [prefix, `${prefix}/x`]) {
+      const outcome = model.route({ method: 'POST', uri, peer: alb, headers: viaEdge({ 'x-hid-client-network': '2001:db8:4:5::' }) })
+      assert.equal(outcome.action, 'proxy', uri)
+      assert.equal(outcome.upstreamHeaders['x-hid-client-network'], '', `${uri}: an empty value is not sent`)
+      assert.equal(outcome.upstreamHeaders['x-forwarded-for'], client, `${uri}: the client address still comes from X-Real-IP`)
+    }
+  }
+})
+
 test('with the switch on, an API request without a usable client address is refused before proxying', () => {
   const model = gateway(production)
   // The Worker before this change deleted X-Real-IP and passed a caller's
@@ -402,6 +418,32 @@ test('the access log records method, path without its query, status, timing and 
   assert.deepEqual(model.route({ uri: '/gateway-health/ready', peer: alb }).accessLog, [['off']])
 })
 
+// D7, error log. nginx appends the request line (query string included) and
+// the upstream URL to every error or warning it logs about a request: an
+// upstream that refuses, resets, times out or does not resolve, a body over the
+// limit, a body or response buffered to a temporary file. The image's
+// http-level error_log (/var/log/nginx/error.log, the container's stderr) takes
+// notice and above and reaches the same CloudWatch log group, so the server
+// logs only critical messages; the access log records each failure's status,
+// upstream status and timing.
+test('the error log records no ordinary request failure, so no query string reaches it', () => {
+  const model = gateway({ ...production, HID_ENABLED_API_ROUTES: allModules })
+  assert.deepEqual(model.directives('error_log').map(item => item.args), [['/var/log/nginx/error.log', 'crit']],
+    'the server must replace the image\'s notice-level error log')
+  for (const prefix of routePrefixes) {
+    for (const uri of [prefix, `${prefix}/x?query=Ada%20Obi`]) {
+      assert.deepEqual(model.route({ method: 'POST', uri, peer: alb, headers: viaEdge() }).errorLog,
+        [['/var/log/nginx/error.log', 'crit']], uri)
+    }
+  }
+  for (const uri of ['/api/v1/ehr/internal/x?y=z', '/api/v2/x?query=a', '/?query=a']) {
+    assert.deepEqual(model.route({ uri, peer: alb, headers: viaEdge() }).errorLog, [['/var/log/nginx/error.log', 'crit']], uri)
+  }
+  for (const name of ['@upstream_unavailable', '@payload_too_large']) {
+    assert.deepEqual(model.named(name).errorLog, [['/var/log/nginx/error.log', 'crit']], name)
+  }
+})
+
 // WAF-CRS-BODY. The WAF no longer refuses every body over 8 KB on the clinical
 // write routes, so the gateway states the bound: the largest JSON body a launch
 // service accepts (ehr-api 512 KiB; identity-api 256 KiB refuses more itself),
@@ -455,6 +497,12 @@ test('the container verifier contract accepts the shipped gateway and rejects ea
     ['query strings logged', { ...shipped, template: template.replace('"path":"$uri"', '"path":"$request_uri"') }],
     ['the request line logged', { ...shipped, template: template.replace('"method":"$request_method"', '"request":"$request"') }],
     ['the image access log kept', { ...shipped, template: template.replace(/\n\s*access_log \/var\/log\/nginx\/access\.log hid_api;/, '') }],
+    ['the image error log kept', { ...shipped, template: template.replace(/\n\s*error_log \/var\/log\/nginx\/error\.log crit;/, '') }],
+    ['request errors logged', { ...shipped, template: template.replace('error_log /var/log/nginx/error.log crit;', 'error_log /var/log/nginx/error.log error;') }],
+    ['request errors logged in one location', { ...shipped, template: template.replace(
+      'set $hid_upstream ${EHR_API_UPSTREAM};', 'error_log /var/log/nginx/error.log warn;\n    set $hid_upstream ${EHR_API_UPSTREAM};') }],
+    ['the client-network key passed on', { ...shipped, includes: { '/etc/nginx/hid-proxy-headers.conf':
+      proxyHeaders.replace(/\nproxy_set_header X-HID-Client-Network "";/, '') } }],
     ['unbounded request bodies', { ...shipped, template: template.replace(/\n\s*client_max_body_size 512k;/, '') }],
     ['a larger body bound', { ...shipped, template: template.replace('client_max_body_size 512k;', 'client_max_body_size 10m;') }],
   ]) {
