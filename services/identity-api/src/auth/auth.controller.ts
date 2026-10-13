@@ -225,7 +225,7 @@ export class AuthController {
       await this.recordSuccess('auth.google.login', result.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
-      return this.sessionResponse(result.actor, result.expiresAt, this.newSignInSelection(result.actor));
+      return this.sessionResponse(result.actor, result.expiresAt);
     } catch (error) {
       await this.sessionAudit.record({
         correlationId: request.correlationId,
@@ -293,7 +293,7 @@ export class AuthController {
       await this.recordSuccess('auth.login', result.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
-      return this.sessionResponse(result.actor, result.expiresAt, this.newSignInSelection(result.actor));
+      return this.sessionResponse(result.actor, result.expiresAt);
     } catch (error) {
       await this.recordLoginFailure(error, input.email, request);
       throw error;
@@ -314,12 +314,17 @@ export class AuthController {
     }
   }
 
-  /** A staff session issued after its second factor: the session cookies, as a sign-in always set them. */
+  /**
+   * A staff session issued after its second factor: the session cookies, as a
+   * sign-in always set them. It is a new sign-in, so it has no facility
+   * selection yet (0089): facilitySelection 'default'. The password step
+   * issues no session and reports none.
+   */
   private staffSessionResponse(response: Response, result: LoginResult) {
     this.setCookies(response, result);
     response.setHeader('x-csrf-token', result.csrfToken);
     response.setHeader('Cache-Control', 'no-store');
-    return this.sessionResponse(result.actor, result.expiresAt);
+    return this.sessionResponse(result.actor, result.expiresAt, this.newSignInSelection(result.actor));
   }
 
   private staffChallengeCookieName(): string {
@@ -362,28 +367,16 @@ export class AuthController {
       const kind = await this.tokens.refreshSessionKind(refreshToken);
       if (kind && kind !== expectedKind) throw this.clientMismatch(kind, request);
     }
-    let result: LoginResult;
     try {
-      result = await this.auth.refresh(refreshToken, this.event(request));
-    } catch (error) {
-      this.clearCookies(response);
-      throw error;
-    }
-    // The rotation has committed: the presented refresh token is spent and only
-    // the rotated session is live. The rotated session keeps the sign-in's
-    // family, and so its facility selection. If that cannot be read, the
-    // browser is kept on the rotated session (its cookies and CSRF token) and
-    // answered 503: clearing the cookies would sign the user out, and
-    // answering without the selection would report a facility they did not choose.
-    let reported: SessionReport;
-    try {
-      reported = await this.withFacilitySelection(result.actor);
-    } catch (error) {
-      this.setCookies(response, result);
-      response.setHeader('x-csrf-token', result.csrfToken);
-      throw error;
-    }
-    try {
+      const result = await this.auth.refresh(refreshToken, this.event(request));
+      // The rotation has committed: the presented refresh token is spent and
+      // only the rotated session is live. It keeps the sign-in's family, and so
+      // its facility selection (0089). A selection that cannot be read now does
+      // not fail the refresh: a 5xx would lose its Set-Cookie at the gateway,
+      // leaving the browser with the spent token. It is answered as
+      // 'unavailable', with the default facility, which the client does not
+      // take as a choice; the stored choice is kept for the next read.
+      const reported = await this.withFacilitySelection(result.actor, undefined, 'report');
       await this.recordSuccess('auth.refresh', reported.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
@@ -637,14 +630,18 @@ export class AuthController {
    * The actor at the facility its sign-in selected (0089), re-checked against
    * the actor's current active facilities. `boundFacilityId` is the facility a
    * valid X-Facility-ID bound to this request, which keeps the actor at it.
-   * A failed read is 503 DEPENDENCY_UNAVAILABLE, never the default facility.
+   * A failed read is never answered as the default facility: it is 503
+   * DEPENDENCY_UNAVAILABLE, or, when `unreadable` is 'report' (a refresh whose
+   * rotation has committed), the actor as resolved with 'unavailable'.
    */
-  private async withFacilitySelection(actor: ActorContext, boundFacilityId?: string): Promise<SessionReport> {
+  private async withFacilitySelection(actor: ActorContext, boundFacilityId?: string,
+    unreadable: 'refuse' | 'report' = 'refuse'): Promise<SessionReport> {
     if (!this.staffSignIn(actor)) return { actor };
     let selectedId: string | undefined;
     try {
       selectedId = await this.tokens.selectedFacilityId(actor.sessionId, actor.accountId);
     } catch {
+      if (unreadable === 'report') return { actor, facilitySelection: 'unavailable' };
       throw new ServiceUnavailableException('The facility selection is unavailable');
     }
     if (!selectedId) return { actor, facilitySelection: 'default' };

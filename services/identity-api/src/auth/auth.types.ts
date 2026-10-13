@@ -48,7 +48,10 @@ export interface CredentialIdentity {
  * 'selected', the facility this sign-in chose with POST /auth/facility;
  * 'default', none chosen, so the primary facility (else the first by name);
  * 'reselect', the chosen facility is no longer one of the actor's active
- * facilities, so the default is reported and the user must choose again.
- * Staff sign-ins only; patient and platform sessions carry no such field.
+ * facilities, so the default is reported and the user must choose again;
+ * 'unavailable', a refresh whose rotation committed could not read the
+ * choice, so the default is reported and is not a choice: the client asks
+ * where the user is working. Staff sign-ins only; patient and platform
+ * sessions carry no such field.
  */
-export type FacilitySelectionState = 'selected' | 'default' | 'reselect';
+export type FacilitySelectionState = 'selected' | 'default' | 'reselect' | 'unavailable';
