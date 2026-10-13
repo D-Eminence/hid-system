@@ -1124,6 +1124,12 @@ app-specific Cloudflare Worker
   -> private owner API
 ```
 
+The Worker supplies the client address in `X-HID-Client-IP`; the Gateway
+trusts it only from the VPC, forwards it as `X-Forwarded-For`, resolves owner
+API names per request, proxies only the modules in `HID_ENABLED_API_ROUTES`
+and never proxies service-to-service routes (`AWS_DEPLOYMENT_ARCHITECTURE.md`,
+"Client address and gateway routing").
+
 Server-to-server clients use the private HTTPS ALB and exact internal names.
 Fargate tasks have no public IPs; RDS is isolated. Eleven long-running services
 remain separate. A twelfth digest input is the controlled one-shot migration

@@ -19,6 +19,15 @@ to root-equivalent Migrate paths; `/api/v1/*` paths retain their API path. The p
 counterpart because `staging.healthidentitydirectory.com` is the staging Web
 application.
 
+Before proxying, the Worker deletes every inbound forwarding header
+(`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`, `Forwarded`, and any
+caller-supplied `X-HID-Client-IP`) and sets `X-HID-Client-IP` to the address
+Cloudflare reported in `CF-Connecting-IP`, only when that is one valid IPv4 or
+IPv6 address (IPv6 in canonical form). The AWS gateway trusts that header only
+on connections from its VPC and, in staging and production, refuses API
+requests without it, so the Worker must be deployed before a gateway that
+requires it.
+
 `ORIGIN_AUTH_TOKEN` is one secret binding in each named environment, but its
 staging and production values must be generated and stored independently. It
 must be installed with `wrangler secret put ORIGIN_AUTH_TOKEN --env <environment>`;

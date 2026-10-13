@@ -1118,6 +1118,60 @@ Consequences:
 Related ADRs: ADR-001, ADR-002, ADR-003, ADR-005, ADR-007, ADR-021, ADR-025,
 ADR-026, ADR-029, ADR-031, ADR-032.
 
+## ADR-033 addendum: the edge carries the client address; the gateway routes only enabled modules
+
+Date: 2026-10-13
+
+Change: BRANCH:launch/edge-client-ip-gateway (register IP-1, GW-DNS, DEP-4-KEY
+part d, and the gateway part of MOD-1).
+
+Context: the Worker discarded every client-address header and the Gateway
+forwarded `$remote_addr`, so every API saw a public ALB node as the client:
+per-network limits became a few platform-wide buckets, and audit source
+addresses named the load balancer. The Gateway resolved its Cloud Map upstreams
+once at start-up, proxied every module, and proxied the service-to-service
+routes from the public edge.
+
+Decision:
+
+- The Worker is the only source of the client address. It deletes any
+  caller-supplied `X-HID-Client-IP` and sets it from `CF-Connecting-IP` when
+  that is one valid address. The Gateway trusts the header only from the VPC
+  (realip, `VPC_CIDR`), forwards the result as `X-Forwarded-For`, and in staging
+  and production refuses an API request without it
+  (`403 CLIENT_ADDRESS_REQUIRED`). The APIs keep trusting only the VPC.
+- Identity's public IP-keyed limits key on the client network (IPv4 address or
+  IPv6 /64) and, in production, refuse an address inside `TRUST_PROXY_CIDRS`
+  with their `503` rather than share a bucket. Guess budgets stay per account
+  or recipient (D6).
+- The Gateway resolves upstream names per request through the VPC resolver
+  (variable `proxy_pass`, `valid=10s`), so it follows redeploys and starts
+  when a module has no task.
+- The Gateway proxies only the modules in `HID_ENABLED_API_ROUTES` (deny by
+  default; CDK passes `identity,ehr`; staging may opt modules in; production
+  refuses more until a recorded decision). Other modules answer
+  `404 API_ROUTE_NOT_FOUND`.
+- Service-to-service routes are never reachable from the public edge: the
+  Gateway answers `404` for them in any letter case, because Express routing
+  ignores case. A gateway marker header that internal routes refuse was
+  considered; it needs a change in every service and is left as defense in
+  depth for later.
+
+Consequences:
+
+- deployment order is Worker, then Gateway with the regional stack, then
+  Identity; rollback reverses it (release checklist §6 and §9);
+- disabling a module keeps its Identity caller subject and EHR's token files,
+  which production configuration requires; its tasks may run or not;
+- the WAF rate rule still keys on Cloudflare egress addresses, and the
+  accountless QoreID cost ceiling for public enrollment is separate work; and
+- the configuration is checked against a model of nginx
+  (`scripts/lib/nginx-config-model.mjs`); nginx has not run, so a running
+  gateway is staging acceptance evidence (release checklist S4j).
+
+Related: ADR-032; ADR-034; `AWS_DEPLOYMENT_ARCHITECTURE.md` ("Client address
+and gateway routing"); `INTERFACE_CONTRACT.md` (first section).
+
 # ADR-034: Cost-Safe Staging Modes with Scale-Preserving Production Guardrails
 
 Status: Accepted

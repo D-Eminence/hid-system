@@ -426,11 +426,27 @@ behavior. The AWS origin must reject a direct request without the origin secret.
 Release and roll back each application independently. A frontend rollback must
 not change an API image or database schema.
 
+The Workers set `X-HID-Client-IP` from `CF-Connecting-IP`, and the gateway of
+staging and production refuses API requests without it
+(`403 CLIENT_ADDRESS_REQUIRED`). Deploy Workers that send the header before a
+gateway that requires it, and never roll a Worker back to a build without it
+while such a gateway runs. Through the Worker, confirm that Identity's request
+logs show the client's public address, not a VPC address.
+
 ## 9. Progressive runtime rollout
 
 Raise minimum dependencies first: Identity and Notification API, then owner
 APIs and Gateway, then OCR Worker, Event Dispatcher, and Notification Worker.
 Use small desired counts and alarms before reaching the environment profile.
+
+The gateway proxies only the modules in its `HID_ENABLED_API_ROUTES`
+(`identity,ehr` unless a staging synth sets the synth input of that name; a
+production synth refuses more) and resolves upstream names per request, so it
+starts and keeps serving Identity and EHR while a module runs no task, and it
+follows Identity and EHR redeploys without its own redeploy. When upgrading a
+running environment, deploy Identity with the client-network change only after
+the gateway that forwards the client address: behind an earlier gateway, every
+public IP-keyed Identity request in production answers `503`.
 Run clinical, identity, OCR, notification, offline/reconnect, and administrative
 smoke tests with synthetic data.
 

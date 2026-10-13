@@ -34,6 +34,47 @@ incorrect value before the ALB target path. This is defense in depth and does
 not replace browser authentication, CSRF, authorization, or owner-service
 checks.
 
+## Client address and gateway routing
+
+The client's address crosses the edge in one header (BRANCH:launch/edge-client-ip-gateway):
+
+- The Worker deletes every inbound forwarding header, including any
+  `X-HID-Client-IP` the caller sent, and sets `X-HID-Client-IP` from
+  Cloudflare's `CF-Connecting-IP` only when that is one valid IPv4 or IPv6
+  address.
+- The Gateway's realip module takes the client address from
+  `X-HID-Client-IP` only on connections from the VPC CIDR (`VPC_CIDR`), which
+  in AWS means the public ALB. It then sends that address as
+  `X-Forwarded-For`, and the owner APIs, which trust only the VPC
+  (`TRUST_PROXY_CIDRS`), see it as the request address. Per-network limits,
+  Turnstile `remoteip` and audit source addresses therefore key on the client,
+  not on an ALB node.
+- With `HID_REQUIRE_CLIENT_IP=true` (set by CDK in staging and production) an
+  API request without a usable client address is refused
+  `403 CLIENT_ADDRESS_REQUIRED` before any backend sees it. Identity also
+  refuses, in production, a public IP-keyed request whose address is inside
+  `TRUST_PROXY_CIDRS`, so a misconfigured edge fails closed rather than
+  putting every client in one bucket.
+
+The Gateway resolves its upstream Cloud Map names per request through the
+Amazon-provided VPC resolver (`GATEWAY_DNS_RESOLVER`, the VPC CIDR base plus
+two; answers cached for 10 seconds). It follows task replacements without a
+restart and starts even when a module runs no task; requests to such a module
+answer `503 UPSTREAM_UNAVAILABLE`.
+
+`HID_ENABLED_API_ROUTES` lists the modules whose `/api/v1/*` prefixes the
+Gateway proxies. Any other module answers `404 API_ROUTE_NOT_FOUND` before
+proxying. CDK passes `identity,ehr` (the launch module set) by default; a
+staging synth may opt more modules in with the synth input
+`HID_ENABLED_API_ROUTES`, and a production synth refuses any module beyond the
+launch set. Service-to-service routes (`/api/v1/auth/service-session`,
+`/api/v1/identity/service/*`, `/api/v1/identity/outreach/*`,
+`/api/v1/ehr/internal/*`, and the Lab and Pharmacy `accept-ehr-*` and
+`imports/from-ocr` routes) answer `404 API_ROUTE_NOT_FOUND` at the Gateway in
+any letter case, because callers use the private service names. Disabling a
+module's routes leaves its Identity caller subject and EHR's Lab and Pharmacy
+token files in place: production configuration validation requires them.
+
 ## Environment isolation
 
 Production and staging are separate edge-to-origin trust boundaries. Production
@@ -201,7 +242,7 @@ reducing extraction quality or hard-rejecting clinical work on price.
 | Notification API | 3007; internal only | none | regional `ses:SendEmail`; other providers through HTTPS |
 | Notification Worker | 3008; internal health only | Notification Worker LOGIN | consume the exact notification queue; providers through HTTPS |
 | Event Dispatcher | 3010; internal health only | Dispatcher LOGIN | `PutEvents` to the exact HID bus |
-| Gateway | 3000; `/api/v1/*` only | none | none |
+| Gateway | 3000; `/api/v1/*` of the enabled modules only | none | none |
 | Database migration | one-shot task | migration administrator | no steady-state service or business authority |
 
 The migration target shares EHR's repository but has its own required image

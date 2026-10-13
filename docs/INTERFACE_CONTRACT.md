@@ -7,6 +7,31 @@ hostname. The app-specific Cloudflare Worker proxies only that versioned
 namespace to the fixed AWS origin and never accepts an upstream from browser
 input. Cookie sessions are host-only; browser token storage is prohibited.
 
+The client address reaches the APIs through the edge only
+(BRANCH:launch/edge-client-ip-gateway). The Worker replaces any caller-supplied
+`X-HID-Client-IP` with the address Cloudflare reports, and the AWS gateway
+trusts that header only from the VPC and sends it on as `X-Forwarded-For`. In
+staging and production the gateway refuses an API request without a usable
+client address with `403 CLIENT_ADDRESS_REQUIRED`; a browser that reaches the
+API through its Worker never sees it. The gateway proxies only the modules
+named in `HID_ENABLED_API_ROUTES`: at launch Identity (`/api/v1/auth`,
+`/identity`, `/audit`, `/admin`, `/commercial`) and EHR (`/api/v1/ehr`). Lab,
+Pharmacy, OCR and Outreach prefixes answer `404 API_ROUTE_NOT_FOUND`, as do the
+service-to-service routes (`/api/v1/auth/service-session`,
+`/api/v1/identity/service/*`, `/api/v1/identity/outreach/*`,
+`/api/v1/ehr/internal/*`, and the Lab and Pharmacy `accept-ehr-*` and
+`imports/from-ocr` routes) in any letter case. Public IP-keyed limits
+(recovery start, patient enrollment start and contact, provider enrollment,
+organization application intake and profile completion) count per client
+network: an IPv4 address or an IPv6 /64. Without a usable client address, or,
+in production, with an address of one of the platform's own proxies, they
+answer their 503 (`OTP_RATE_LIMIT_UNAVAILABLE` for recovery start,
+`ENROLLMENT_RATE_LIMIT_UNAVAILABLE`, `PROVIDER_ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
+`APPLICATION_RATE_LIMIT_UNAVAILABLE`) instead of sharing one bucket. The
+gateway passes a backend `503` to the browser as `503 UPSTREAM_UNAVAILABLE`
+(its `error_page` intercepts backend 502, 503 and 504), so clients must treat
+any 503 as unavailable rather than rely on the backend code.
+
 Authentication OTP commands are purpose-bound and use three stages: start
 returns a generic challenge, verify accepts exactly six digits and returns an
 opaque one-time completion credential, and complete consumes that credential.
@@ -1513,6 +1538,9 @@ These UI prefixes are distinct from API ownership:
 API-owned. Browser applications call only gateway API paths with Identity
 cookies/CSRF, exact facility and purpose context, correlation, and idempotency
 where the owning command requires it. No browser calls an internal host/port.
+The production gateway proxies only the enabled modules (see the first
+section); a browser application for a module that is not enabled receives
+`404 API_ROUTE_NOT_FOUND` for its API calls.
 
 Pharmacy reads only existing work items/evidence and sends acceptance,
 dispensing, and reversal commands through the typed Pharmacy client. A UI state
