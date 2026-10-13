@@ -2725,3 +2725,210 @@ Tests:
   The container acceptance runs both new suites after
   `purpose-of-use-vocabulary.integration.sql`, and the rehearsal runs them
   with the additional suites.
+
+## Account recovery and patient search hardening (0086)
+
+`0086_recovery_and_patient_search_hardening.sql` closes the database part of
+launch blockers REC-GOOGLE, REC-AUDIENCE, REC-NOTIFY and PSEARCH-1 (change
+D-Eminence/hid-system#69). 0001 through 0085 are unchanged.
+
+**Recovery.** `auth.complete_recovery_otp` (0029) is replaced with `CREATE OR
+REPLACE`, so it keeps its owner and ACL; its signature, result, `SECURITY
+DEFINER` and `search_path` are restated as in 0029. After it revokes the
+account's sessions it now sets every external sign-in identity of the account
+(`auth.external_identities` rows whose issuer is not `legacy-identity` and
+whose status is not `revoked`, active or disabled) to `revoked`, with
+`revoked_at` kept if already set, and its `auth.otp.recovery.completed` audit
+event adds `details.external_identities_revoked`, the count. Today the only
+sign-in issuer is Google (`https://accounts.google.com`). The legacy
+importer's provenance record (issuer `legacy-identity`,
+`promote-legacy-identity.mjs`) is not a sign-in: it is kept and not counted,
+so legacy reconciliation still matches it after a recovery. Before, a Google
+link made by whoever once held the password survived the owner's reset, and
+Google sign-in issues a session at the current token version. An audit failure
+rolls the revocation back with the rest of the completion. The revoked row
+stays, and the Google link commands (0059) refuse any subject that was ever
+linked (`GOOGLE_IDENTITY_ALREADY_LINKED`), so the owner cannot link the same
+Google account again after a recovery, only a different one; re-linking needs
+a later change before Google sign-in is enabled.
+
+`auth.recovery_account_audience(account_id uuid, audience text) returns
+boolean` (stable, `SECURITY DEFINER`, pinned `search_path`) tells Identity's
+recovery start whether an account is of the kind its page reaches: `patient`
+(an active `identity.patients` row of the account), `staff` (an active
+`identity.staff` row) or `platform` (an unrevoked platform-scoped assignment
+of an active role that grants the active `platform.admin.access` permission).
+It requires the `system:auth` actor (`42501` otherwise), refuses any other
+audience (`22023`) and answers false for a null account. The start runs it in
+its system transaction with the account lookup; a mismatch, or a patient whose
+email is not verified and who has no verified enrollment phone, is answered and
+counted as an unknown identifier. Staff and platform accounts carry no
+`email_verified_at` (their email is provisioned), so the verified-contact rule
+reads it only for the patient audience.
+
+`otp_challenges_account_consumed_idx` on `auth.otp_challenges (account_id,
+consumed_at desc) where consumed_at is not null` serves the 24-hour hold
+Identity applies after any consumed recovery challenge of the account (access
+PIN set, emergency-contact add and update, new access approvals; `403
+PATIENT_RECENT_RECOVERY_HOLD`). The hold reads the table and writes nothing.
+The index is built inside the migration transaction under a `SHARE` lock on
+`auth.otp_challenges`, held to commit, which blocks recovery starts,
+verifications and completions; the table holds one row per recovery
+challenge.
+
+**Staff search budgets.** `otp_rate_limits_scope_check` is dropped and re-added
+with four more scopes: `patient_lookup_actor`, `patient_lookup_facility`,
+`access_request_actor` and `access_request_facility`. Identity counts every
+access-request creation there before the command runs, and every refused
+patient lookup after its audit event (bucket: SHA-256 of a labelled actor
+account or facility id); a lookup reads its two buckets first and is refused
+while either is blocked, and one that returns a granted patient is not counted
+(FE-10). Re-adding the
+check validates the existing rows under an `ACCESS EXCLUSIVE` lock on
+`auth.otp_rate_limits`; every existing scope stays allowed.
+
+**Registration reads (PSEARCH-1, ENUM-1, DB-RLS-PATIENTS).** Before 0086 the
+policy `patients_registration_read` (0011) admitted a membership holding
+`identity.registration.write` or `identity.registration.approve` at its
+current facility to every `identity.patients` row, of every facility. 0086
+drops the policy and creates it again in the same transaction, with the same
+name, table, command (`SELECT`) and role (`PUBLIC`), so no other session sees
+it absent. (`ALTER POLICY` would do the same, but the static privilege replay
+`scripts/verify-runtime-locking-privileges.mjs` does not follow that form.)
+The new expression keeps the permission check and adds that the row is the
+resolved patient of a registration case at the current facility, a duplicate
+candidate a case at the current facility lists, or the patient an approve-new
+review is creating in its transaction
+(`source_system` `hid-nin-registration`, no account, and a
+`pending_new_identity_approval` case at the facility with the same
+demographics and no resolved patient yet). The other `identity.patients`
+policies are unchanged. Registration reads what it no longer sees through two
+narrow `SECURITY DEFINER` functions that check the same permissions (`42501`
+otherwise):
+
+- `identity.registration_nin_holder(lookup_hmac text) returns table
+  (patient_id uuid, hid_code text, patient_status text)`: the patient holding
+  a verified, unrevoked NIN identifier with that lookup HMAC (lower-case hex,
+  64 characters, else `22023`), at most one row. Duplicate checks before
+  approve-new and link-existing, and the resolve step, use it.
+- `identity.registration_candidates(dob date, first_name text, last_name text)
+  returns table (patient_id uuid, first_name text, last_name text, full_name
+  text, dob date)`: at most 100 active patients sharing the date of birth or
+  either name (case-insensitive), oldest first; Identity scores them as
+  before.
+
+`identity.patient_lookup_audit_subject(hid text) returns uuid` (requires
+`identity.patient.read` at the current facility) names, for the audit event
+only, the active patient a refused staff lookup was about; the API answers
+every refusal `404 PATIENT_NOT_AVAILABLE`.
+
+`identity.create_access_request` (0010) is replaced with `CREATE OR REPLACE`
+(signature, result, `SECURITY DEFINER` and `search_path` restated as in 0010).
+For an HID that names no active patient it no longer raises `P0002`: it
+returns a row with a new random request id, no patient, status `pending`, the
+requested duration, the current time and `existing_request` false, persists no
+request, and appends `identity.access-request.refused` (`denied`, no patient,
+resource id the returned request id, details scope, duration and `reason`
+`patient_not_available`; the HID is not copied into the event). Every other
+check and result is as in 0010. Identity no longer returns the patient id of a
+created request.
+
+`identity.list_my_staff_access_requests` (0074) is replaced with `CREATE OR
+REPLACE` (argument, result, caller checks, filter, order and limit restated
+as in 0074; owner and ACL kept). Its `patient_id` is now the request's
+patient only while the grant made from the request is active
+(`effective_status` `active`), and NULL for every other request: pending,
+denied, expired, closed and revoked. Before, one request for a guessed HID
+and one list call gave the clinician the patient id of any active patient
+before the patient answered. Identity's projection of the list applies the
+same rule.
+
+**Locks.** In the order taken, each held to commit: `ACCESS EXCLUSIVE` on
+`identity.patients` (the policy), which holds back every HID sign-in,
+recovery start, registration read, patient lookup and access request until
+commit; `ACCESS EXCLUSIVE` on `auth.otp_rate_limits` (the check); `SHARE` on
+`auth.otp_challenges` (the index). The policy also takes `ACCESS SHARE` on
+`identity.registration_cases` and `identity.registration_case_candidates`.
+The other statements change functions only. An OTP start of the Identity
+build serving during the migration reads `identity.patients`, then writes
+`auth.otp_rate_limits` and `auth.otp_challenges`, the same order, so it and
+the migration wait for each other without a cycle. With the index first (the
+first version of this change) such a start deadlocked with the migration and
+PostgreSQL cancelled the start; reproduced locally. An OTP completion writes
+`auth.otp_challenges` and then reads `identity.patients` inside
+`auth.complete_recovery_otp`, the opposite order, so a completion caught
+between those two statements can still deadlock with the migration
+(reproduced locally with a pause inserted between them). PostgreSQL then
+cancels one of the two (`40P01`): that completion fails and the owner submits
+it again while the verification is valid, or the migration rolls back whole
+and `migrate` is run again. The runner's 5 s `lock_timeout` bounds every wait
+(`55P03` also rolls it back whole).
+
+The four new functions are revoked from `PUBLIC`; the role bootstrap
+(`runtime-grants.sql`) grants `EXECUTE` on them to `hid_identity_runtime` and
+`hid_schema_test_runtime` only. Run `db:bootstrap` and `db:verify-roles`
+immediately after the migration, then deploy the Identity build of the same
+change. An older Identity build still reads `identity.patients` directly for
+registration duplicate checks and candidates; under the narrowed policy those
+reads miss every patient not linked to a case at the facility, so the two must
+be deployed together.
+
+Rollback: the migration is forward-only. Restoring the old behaviour means a
+later migration restoring the 0011 policy expression, the 0029, 0010 and
+0074 function bodies and the old scope check (after deleting rows of the four new
+scopes); the index and the new functions may stay. Do not restore the policy
+without also returning to the previous Identity build.
+
+Tests:
+
+- `patient-search.integration.sql` (new, rollback-only) as
+  `hid_identity_api_runtime`: a registration nurse at facility A reads only
+  the patients linked to facility A's cases (resolved and candidate), not a
+  patient with a grant only, a patient of facility B or an unlinked one, nor
+  the unlinked patient's NIN identifier or that patient by exact HID; a doctor
+  with registration and clinical roles reads facility A's linked patients and
+  the one it holds a grant for, and at facility B only facility B's linked
+  patient; a pharmacist reads none; the audit-subject function names an active patient and refuses a
+  membership without `identity.patient.read`; the two registration functions
+  answer for a registration member and refuse others; `create_access_request`
+  for an unknown HID returns the uniform row and persists nothing, with one
+  refused audit event that does not contain the HID; the four scopes are
+  accepted; the EHR runtime may execute none of the new functions. Without
+  0086 it fails at its first visibility assertion (the nurse reads all five
+  fixture patients).
+- `otp-recovery.integration.sql` adds: completion revokes the account's
+  active and disabled Google links, and
+  `auth.resolve_google_identity` finds nothing for it afterwards; the
+  account's `legacy-identity` provenance record stays active; the audit
+  event counts `2` (and `0` for an account without links); an audit failure
+  rolls the revocation back; a staff reset ends staff and platform sessions;
+  the audience matrix for patient, staff, platform,
+  dual, inactive-staff and revoked-role accounts, `22023` and `42501`.
+  Without 0086 it fails with "Recovery left an external identity (Google
+  link) of the account usable"; with the first version of 0086, which
+  revoked every external identity, with "Recovery revoked the legacy
+  importer provenance record, which is not a sign-in".
+- `staff-access-request-outcome.integration.sql` adds: the list names the
+  patient for the two requests with an active grant and for no other
+  (pending, denied, expired, revoked, closed). Without the 0086 list change
+  it fails with "the list must name the patient of an active grant only".
+- `runtime-roles.integration.sql` requires `EXECUTE` on the four functions
+  for the Identity and schema-test runtimes and for no other runtime or
+  `PUBLIC`.
+- Runtime verifiers (`hid_identity_api_runtime`, real HTTP):
+  `verify-otp-recovery-runtime.mjs` (Google link revoked by recovery and
+  legacy provenance record kept,
+  audience mismatch answered alike with no code, staff reset ends staff and
+  platform sessions, unverified patient email gets no code until verified),
+  `verify-patient-enrollment-runtime.mjs` (staff and administrator pages send
+  a patient no code; five wrong passwords across the email and the HID lock
+  the account), `verify-patient-safety-runtime.mjs` (recent sign-in and the
+  recovery hold on approval, PIN and emergency contacts; the staff list
+  names the patient of the active approval only, not of the pending or the
+  revoked one),
+  `verify-patient-search-runtime.mjs` (new: lookup `200`, one identical `404`
+  for every refusal, whether row-level security hides the patient or the
+  authorization check refuses one the caller can read, `400`, audit reasons,
+  uniform access-request answer, `429`s for refusals only) and
+  `verify-registration-review-runtime.mjs` (registration review, unchanged,
+  passes under the narrowed policy).

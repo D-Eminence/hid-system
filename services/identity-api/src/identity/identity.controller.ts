@@ -1,4 +1,4 @@
-import { Body, Controller, Post, Req } from '@nestjs/common';
+import { Body, Controller, HttpCode, Post, Req } from '@nestjs/common';
 import { AuditAction, DelegatedBrowserRequest, Public, RequirePermissions } from '../common/decorators';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { AuthorizationCheckDto } from './dto/authorization-check.dto';
@@ -16,7 +16,10 @@ export class IdentityController {
     private readonly workloadAuth: WorkloadAuthService,
   ) {}
 
+  // A lookup creates nothing: 200 with the authorized patient, or one 404
+  // PATIENT_NOT_AVAILABLE for every refusal (0086).
   @Post('patient-lookup')
+  @HttpCode(200)
   @RequirePermissions('identity.patient.read')
   @AuditAction('identity.patient.lookup.request')
   lookup(@Body() input: PatientLookupDto, @Req() request: HidRequest) {

@@ -410,6 +410,25 @@ begin
      ) then
     raise exception 'staff access-request list privileges are inconsistent';
   end if;
+  -- Recovery and patient search hardening (0086): Identity-only commands that
+  -- check their own caller; no other runtime and not PUBLIC may call them.
+  if exists (
+       select 1
+         from unnest(array['auth.recovery_account_audience(uuid,text)',
+           'identity.patient_lookup_audit_subject(text)', 'identity.registration_nin_holder(text)',
+           'identity.registration_candidates(date,text,text)']) command(signature)
+        where not has_function_privilege('hid_identity_api_runtime', command.signature, 'EXECUTE')
+           or not has_function_privilege('hid_schema_test_runtime', command.signature, 'EXECUTE')
+           or has_function_privilege('public', command.signature, 'EXECUTE')
+           or exists (
+             select 1 from unnest(array['hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_lab_api_runtime',
+               'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime',
+               'hid_notification_worker', 'hid_event_dispatcher']) runtime(role_name)
+             where has_function_privilege(runtime.role_name, command.signature, 'EXECUTE')
+           )
+     ) then
+    raise exception 'recovery audience, lookup audit and registration match privileges are inconsistent';
+  end if;
   if not has_table_privilege('hid_identity_api_runtime', 'identity.patients', 'INSERT')
      or has_table_privilege('hid_identity_api_runtime', 'ehr.encounters', 'INSERT')
      or not has_table_privilege('hid_identity_api_runtime', 'audit.events', 'INSERT')

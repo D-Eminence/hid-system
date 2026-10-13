@@ -1,10 +1,11 @@
 import { createHmac, randomBytes } from 'node:crypto';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import * as argon2 from 'argon2';
 import bcrypt from 'bcryptjs';
 import { DatabaseService } from '../database/database.service';
 import { getEnvironment } from '../config/environment';
 import type { CredentialIdentity } from './auth.types';
+import { accountLoginBucket, RECORD_LOGIN_FAILURE_SQL } from './login-attempts';
 
 interface AccountRow {
   id: string;
@@ -67,8 +68,28 @@ export class LocalAuthProvider {
     } else {
       passwordValid = await argon2.verify(hash, password).catch(() => false);
     }
-    if (!account || !passwordValid || !['argon2id', 'bcrypt_legacy'].includes(account.password_algorithm ?? '')) {
+    if (!account) throw new UnauthorizedException('Invalid credentials');
+    // One failure budget per resolved account as well as per identifier, so the
+    // email and the HID of an account share it (SIGNIN-LOCKOUT). Read after the
+    // password check, so a locked account costs what any sign-in does. While it
+    // is locked even the correct password is refused, with the same 401.
+    const accountBucket = this.accountHash(account.id);
+    const accountAttempt = await this.database.query<{ locked: boolean }>(
+      `select locked_until is not null and locked_until > clock_timestamp() as locked
+         from auth.login_attempts
+        where principal_hmac = $1 and pepper_version = $2`,
+      [accountBucket, this.environment.AUTH_LOGIN_PEPPER_VERSION],
+    );
+    if (accountAttempt.rows[0]?.locked
+      || !passwordValid || !['argon2id', 'bcrypt_legacy'].includes(account.password_algorithm ?? '')) {
+      await this.recordAccountFailure(accountBucket);
       throw new UnauthorizedException('Invalid credentials');
+    }
+    if (accountAttempt.rows[0]) {
+      // A correct password ends the account's failure window, as a session
+      // issue ends the identifier's.
+      await this.database.query('delete from auth.login_attempts where principal_hmac = $1 and pepper_version = $2',
+        [accountBucket, this.environment.AUTH_LOGIN_PEPPER_VERSION]);
     }
 
     const expectedRowVersion = Number(account.row_version);
@@ -96,6 +117,20 @@ export class LocalAuthProvider {
       authenticationMethod: 'local',
       ...(passwordUpgrade ? { passwordUpgrade } : {}),
     };
+  }
+
+  private accountHash(accountId: string): string {
+    const pepper = this.environment.AUTH_LOGIN_PEPPER;
+    if (!pepper) throw new Error('Login-attempt pepper is unavailable');
+    return accountLoginBucket(pepper, accountId);
+  }
+
+  private async recordAccountFailure(accountBucket: string): Promise<void> {
+    try {
+      await this.database.query(RECORD_LOGIN_FAILURE_SQL, [accountBucket, this.environment.AUTH_LOGIN_PEPPER_VERSION]);
+    } catch {
+      throw new ServiceUnavailableException('Authentication audit persistence is unavailable');
+    }
   }
 
   principalHash(email: string): string {

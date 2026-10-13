@@ -60,15 +60,19 @@ describe('EmergencyContactService', () => {
       const { query, database } = fakeDatabase();
       const protector = new EmergencyContactProtector();
       const service = new EmergencyContactService(database, protector, {} as NotificationOtpClient);
-      query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] })
-        .mockImplementationOnce(async () => {
-          const written = query.mock.calls[1][1] as unknown[];
+      let written: unknown[] = [];
+      query.mockImplementation(async (sql: string, values: unknown[] = []) => {
+        if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: false }] };
+        if (sql.includes('add_my_emergency_contact')) { written = values; return { rows: [] }; }
+        if (sql.includes('list_my_emergency_contacts')) {
           return { rows: [row(protector, { contact_id: written[2], contact_ciphertext: written[5] })] };
-        });
+        }
+        return { rows: [] };
+      });
       const view = await service.add(patientRequest, {
         name: 'Chidi Okafor', relationship: 'sibling', channel: 'sms', destination: '0803 123 4567',
       });
-      const parameters = query.mock.calls[1][1] as unknown[];
+      const parameters = written;
       expect(parameters.slice(0, 2)).toEqual([...patientSession]);
       expect(parameters).not.toContain('+2348031234567');
       expect(parameters).not.toContain('Chidi Okafor');
@@ -128,10 +132,51 @@ describe('EmergencyContactService', () => {
     ])('maps contact command refusal %o', async (failure, code) => {
       const { query, database } = fakeDatabase();
       const service = new EmergencyContactService(database, new EmergencyContactProtector(), {} as NotificationOtpClient);
-      query.mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(failure);
+      query.mockImplementation(async (sql: string) => {
+        if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: false }] };
+        if (sql.includes('add_my_emergency_contact')) throw failure;
+        return { rows: [] };
+      });
       await expect(service.add(patientRequest, {
         name: 'Chidi Okafor', relationship: 'sibling', channel: 'email', destination: 'chidi@example.test',
       })).rejects.toMatchObject({ code });
+    });
+
+    describe('for 24 hours after an OTP account recovery (REC-NOTIFY)', () => {
+      function held(protector: EmergencyContactProtector) {
+        const { query, database } = fakeDatabase();
+        query.mockImplementation(async (sql: string) => {
+          if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: true }] };
+          if (sql.includes('list_my_emergency_contacts')) return { rows: [row(protector, { status: 'verified' })] };
+          if (sql.includes('deactivate_my_emergency_contact')) return { rows: [{ contact_id: contactId, replayed: false }] };
+          return { rows: [] };
+        });
+        const service = new EmergencyContactService(database, protector, {} as NotificationOtpClient);
+        const commands = () => query.mock.calls.map(([sql]) => String(sql))
+          .filter((sql) => /identity\.(add|update|deactivate)_my_emergency_contact/.test(sql));
+        return { service, query, commands };
+      }
+
+      it('refuses to add or change a contact, before any contact command', async () => {
+        const protector = new EmergencyContactProtector();
+        const { service, query, commands } = held(protector);
+        await expect(service.add(patientRequest, {
+          name: 'Chidi Okafor', relationship: 'sibling', channel: 'email', destination: 'chidi@example.test',
+        })).rejects.toMatchObject({ status: 403, code: 'PATIENT_RECENT_RECOVERY_HOLD' });
+        await expect(service.update(patientRequest, contactId, { expectedVersion: 1, name: 'Someone Else' }))
+          .rejects.toMatchObject({ status: 403, code: 'PATIENT_RECENT_RECOVERY_HOLD' });
+        expect(commands()).toEqual([]);
+        const hold = query.mock.calls.find(([sql]) => String(sql).includes('from auth.otp_challenges'));
+        expect(hold?.[1]).toEqual(['70000000-0000-4000-8000-000000000001', 24]);
+      });
+
+      it('still deactivates a contact', async () => {
+        const { service, query, commands } = held(new EmergencyContactProtector());
+        await expect(service.deactivate(patientRequest, contactId))
+          .resolves.toMatchObject({ contactId, status: 'deactivated' });
+        expect(commands()).toHaveLength(1);
+        expect(query.mock.calls.some(([sql]) => String(sql).includes('from auth.otp_challenges'))).toBe(false);
+      });
     });
   });
 
