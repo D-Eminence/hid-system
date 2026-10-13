@@ -171,7 +171,10 @@ mutation lacks one.
 
 ## 6. Principal export
 
-`GET /admin/principals/export?reason=…[&query&status]`:
+`POST /admin/principals/export` with `{ reason, query?, status? }` in the
+body (ADR-057, `BRANCH:launch/identity-error-hardening`), or the deprecated
+`GET /admin/principals/export?reason=…[&query&status]`, kept for one release
+for the Health-id `82b474e` console:
 
 - **Access.** Requires `platform.principal.export` (Super Admin only; Support
   Admin loses it) and a step-up.

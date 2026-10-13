@@ -3483,3 +3483,155 @@ Consequences:
 Related: ADR-038; ADR-040; ADR-044; `INTERFACE_CONTRACT.md` (Auth session
 contract); `PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §10; `DATABASE.md` (0088);
 release checklist §2, §3, §5, §8 and §9.
+
+# ADR-057: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
+
+Status: Proposed for source implementation
+(`BRANCH:launch/identity-error-hardening`, no migration). Not merged or
+deployed.
+
+Date: 2026-10-13
+
+Context:
+
+The launch review found that Identity and the services behind it answered
+faults as if the user's credential had been refused, and refusals as faults.
+Health-id signs a user out on any `401` and retries a `5xx`, so:
+
+- a database or pool fault in Identity's `SecurityGuard`, a runtime-control
+  read that timed out, or an unreachable OIDC key set answered `401`, and a
+  partial outage signed every patient and provider out (A4);
+- Identity refused a service's own workload credential (a JWKS outage, an
+  expired workload token, a wrong caller) with `401`, which EHR relayed to the
+  browser as the user's own `401` (A5);
+- `POST /auth/refresh` cleared the session cookies on any failure, a `500`
+  included, so a transient fault during rotation ended the sign-in; and the
+  rotation's `auth.refresh` audit row was written after the commit, so a
+  rotation could commit without it (A6);
+- a staff session on a patient-only Identity route reached the handler, whose
+  refusal of a staff actor with no facility failed its own audit (0067) and
+  answered `503` with nothing recorded (A9);
+- a staff account whose password was right but which had no active facility
+  membership got the wrong-password `401` and counted toward the lockout
+  (A10), while other sign-in refusals put their internal reason ("Patient
+  account is unavailable") in the detail, which confirmed a right password
+  (LOGIN-DETAIL-ORACLE);
+- a request from an `Origin` not in `CORS_ORIGINS` answered `500` in all six
+  services (A19);
+- the patient authorization check answered `write_records` for a request the
+  guard admitted as a reported browser read (A18);
+- any actor whose account held `platform.admin.access` was exempt from
+  maintenance mode and the portal switches, in Identity, EHR and Outreach, so
+  an administrator's clinical session kept reading and writing records during
+  maintenance (A16);
+- the admin principal search and export put names, emails and the export
+  reason in `GET` query strings (A24).
+
+The owner policy defaults decide these: deny by default, least privilege,
+verified identity, auditable actions, no production bypasses.
+
+Decision:
+
+- `401` means the credential was refused and nothing else. A fault that
+  leaves Identity unable to decide is `503` with a stable code:
+  `AUTHENTICATION_UNAVAILABLE` (session verification, actor resolution, the
+  platform assurance read, the OIDC key set), `PLATFORM_CONTROL_UNAVAILABLE`
+  (any runtime-control read fault other than SQLSTATE `55000`
+  `PLATFORM_CONTROL_DISABLED`). The guard still audits the denial first. A
+  `DomainProblem` keeps its status and code.
+- Workload refusals have their own codes: `503 WORKLOAD_IDENTITY_UNAVAILABLE`
+  (the key set cannot be fetched or used, or workload authentication is not
+  configured), `401 WORKLOAD_AUTHENTICATION_FAILED`, `403
+  WORKLOAD_CALLER_DENIED`; a refused document scanner token is `401
+  DOCUMENT_SCANNER_AUTHENTICATION_FAILED`, which EHR relays because it is the
+  browser caller's own credential. A calling service answers Identity's
+  refusal of its own workload credential as `503`: EHR answers `503
+  IDENTITY_SERVICE_AUTH_UNAVAILABLE` (`isWorkloadRefusal` in
+  `@hid/api-client`) and refuses to send an expired Identity workload token
+  (`503 IDENTITY_WORKLOAD_IDENTITY_UNAVAILABLE`, logged as
+  `identity_workload_token_expired` and counted). A refusal of the user's own
+  session keeps its status and code.
+- Refresh clears the session cookies only for a `4xx` refusal of the refresh
+  token, on `/auth/refresh` and `/auth/admin/refresh`. A `5xx` keeps them. The
+  `auth.refresh` audit row is written inside the rotation's transaction, so
+  the rotation commits with it or not at all.
+- Patient-only routes are marked `@PatientOnly()` and the guard refuses any
+  other session with `403 PATIENT_SESSION_REQUIRED`, before the handler, as
+  an audited `auth.authorization.denied`. Any other staff failure without a
+  facility, outside session events and platform administration, is audited as
+  an `auth.*` event on `authentication` instead of failing its audit.
+- A staff account with the right password, a staff record or a facility
+  membership, and no eligible membership is refused at the password step with
+  `403 NO_ACTIVE_FACILITY_MEMBERSHIP` (launch decision NO-MEMBERSHIP-SIGN-IN,
+  owner default (a)): no MFA challenge, no session, a denied `login_failed`
+  session event, not counted toward the lockout. An account with neither keeps
+  the uniform `401`. A live session whose membership ended stays `401`: its
+  credential no longer resolves, and Health-id returns the user to sign-in,
+  where the `403` explains.
+- Every other refused sign-in credential, patient or staff, answers `401` with
+  the one detail "Invalid credentials"; a refused Google sign-in answers `401
+  GOOGLE_SIGN_IN_DENIED`. The internal reason stays in the audit and session
+  events.
+- A disallowed `Origin` is refused by the CORS layer with `403 ORIGIN_DENIED`
+  and no CORS headers, in Identity, EHR, Lab, OCR, Outreach and Pharmacy.
+- After a delegated read skip, the patient authorization check decides only
+  `read_records`; any other scope is `403 CSRF_VALIDATION_FAILED`.
+- Only a platform administration session is exempt from runtime controls in
+  Identity. EHR and Outreach exempt no session. A grant never makes clinical
+  access exempt.
+- `POST /admin/principals/search` and `POST /admin/principals/export` take
+  their terms and reason in the body. The `GET` forms stay for one release
+  because the Health-id `82b474e` console uses them, and are then removed.
+
+Alternatives not taken:
+
+- Answering faults `401` and relying on clients to retry: a client cannot
+  tell a refused credential from a fault, and Health-id signs out on `401`.
+- A session that authorizes nothing for a staff account without a membership
+  (option (b)): it issues a token to an account with no workforce authority,
+  needs every facility-optional staff route audited, and the Health-id "No
+  facility assignment" screen has no sign-out.
+- Keeping the uniform `401` for that account: the password was right, the
+  user cannot tell what to do, and the refusal counted toward the lockout.
+- Mapping workload refusals to `503` in Lab, Pharmacy, OCR and Outreach now:
+  they are off at launch (D17), and the shared helper makes it a small
+  follow-up.
+- Rewriting the EHR and OCR guard `catch` (any non-HTTP fault to `503`): the
+  EHR guard's `catch` is rewritten on `BRANCH:launch/ehr-retraction-integrity`,
+  and its Identity and runtime-control calls already answer `503`; OCR is off
+  at launch. Left as a follow-up to avoid a conflicting change.
+- An audited maintenance exemption for clinical sessions of administrators:
+  no decision asks for one; it would need its own control and review.
+- Removing the `GET` admin routes now: the Health-id `82b474e` console would
+  fail. The gateway's access log already omits query strings
+  (`BRANCH:launch/edge-hardening-2`, ADR-055).
+
+Consequences:
+
+- A partial outage (database, key set, runtime controls, audit write during
+  refresh) no longer signs users out; Health-id shows its existing temporary
+  error and retries. Monitoring must watch `503` rates, the
+  `identity_workload_token_expired` log of EHR and the codes above
+  (`AWS_DEPLOYMENT_RUNBOOK.md`); no alarm is defined for that log yet.
+- Health-id `82b474e` needs no change. Staff and patient sign-in show the
+  `403` detail and the uniform "Invalid credentials"
+  (`apps/patient-web/src/staff/routes/SignIn.tsx:71`,
+  `apps/patient-web/src/routes/SignIn.tsx:32`); the session clients sign out
+  only on `401` and treat a `5xx` as temporary
+  (`apps/patient-web/src/session.tsx:91`, `:146-152`;
+  `apps/patient-web/src/staff/api.ts:712-725`); the admin console keeps the
+  `GET` search and export (`apps/patient-web/src/admin/api.ts:354-357`,
+  `:374-376`) and should move to the `POST` forms before they are removed.
+- Administrators' clinical sessions are now refused during maintenance and
+  with the provider portal off, like every other clinician's.
+- Evidence is local and synthetic: unit specs, and the runtime verifiers
+  `verify-patient-runtime.mjs`, `verify-session-sign-out-runtime.mjs`,
+  `verify-staff-mfa-runtime.mjs`, `verify-platform-admin-runtime.mjs`,
+  `verify-platform-security-runtime.mjs` and
+  `verify-outreach-cookie-read-runtime.mjs` with injected database faults
+  (release checklist §8). Nothing has been run on staging or production.
+
+Related: ADR-038; ADR-043; ADR-045; ADR-047; ADR-054; ADR-055;
+`INTERFACE_CONTRACT.md` (Auth session contract, "Refusals and faults";
+Extracted Identity boundary; §19); `PHASE_3_LAUNCH_DECISIONS.md`
+(NO-MEMBERSHIP-SIGN-IN); release checklist §2, §3 and §8.

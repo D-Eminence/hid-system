@@ -76,7 +76,9 @@ enrollment cookie rule and the lookups' actor condition come from
 D-Eminence/hid-system#50, also not deployed. Staff sign-in with an
 authenticator, the `STAFF_MFA_REQUIRED` refusals and the refusal of a staff
 Google exchange (below) come from `BRANCH:launch/staff-mfa` (launch blocker
-MFA-1, migration 0088), also not deployed.
+MFA-1, migration 0088), also not deployed. The refusal and fault answers of
+ADR-057 ("Refusals and faults", below) and the refresh fault row come from
+`BRANCH:launch/identity-error-hardening` (no migration), also not deployed.
 
 Identity sets three cookies at sign-in and on every refresh (`setCookies` in
 `services/identity-api/src/auth/auth.controller.ts`). Their names derive from
@@ -129,7 +131,7 @@ is no permission or role allowlist: every staff sign-in needs it.
 
 | Route | Body | Answer |
 |---|---|---|
-| `POST /api/v1/auth/login` | `{ email, password, turnstileAction: 'staff-login', turnstileToken? }` | `200 { status: 'mfa_required' \| 'mfa_enrollment_required', expiresAt }` with only the challenge cookie `hid_access_mfa` (HttpOnly, `SameSite=Strict`, `Secure` as above, path `/api/v1/auth/mfa`, 5 minutes for `mfa_required`, 10 minutes for enrolment) and `Cache-Control: no-store`. No session cookie, no `X-CSRF-Token`, no actor. A wrong password and an account without an eligible staff membership get the same `401` ("Invalid credentials") and count against the sign-in budget below |
+| `POST /api/v1/auth/login` | `{ email, password, turnstileAction: 'staff-login', turnstileToken? }` | `200 { status: 'mfa_required' \| 'mfa_enrollment_required', expiresAt }` with only the challenge cookie `hid_access_mfa` (HttpOnly, `SameSite=Strict`, `Secure` as above, path `/api/v1/auth/mfa`, 5 minutes for `mfa_required`, 10 minutes for enrolment) and `Cache-Control: no-store`. No session cookie, no `X-CSRF-Token`, no actor. A wrong password, and an account with neither a staff record nor a facility membership, get the same `401` ("Invalid credentials") and count against the sign-in budget below. The right password of an active account that has a staff record or a membership, none of them eligible, gets `403 NO_ACTIVE_FACILITY_MEMBERSHIP` (below) |
 | `POST /api/v1/auth/mfa/verify` | `{ code }` or `{ recoveryCode }` | `200 { actor, expiresAt }` with the three session cookies, `X-CSRF-Token`, and the challenge cookie cleared |
 | `POST /api/v1/auth/mfa/enroll/email-code` | none | First sign-in without an authenticator: sends a six-digit code to the account's email address. `200 { accepted: true, channel: 'email', expiresAt }`. A resend replaces the code |
 | `POST /api/v1/auth/mfa/enroll/start` | `{ emailCode? }` | `200 { secret, otpauthUri, algorithm, digits, periodSeconds, expiresAt }`, once (`Cache-Control: no-store`). Needs the emailed code, or a challenge opened by provider enrollment activation (no code) |
@@ -144,6 +146,7 @@ platform challenge by no staff step. Refusals:
 | Code | When |
 |---|---|
 | `403 STAFF_MFA_FACTOR_UNPROVEN` | `POST /auth/login` with the right password, but the account's authenticator was enrolled at platform sign-in on the password alone (before 0088, or before the account held a staff membership), so it records no staff proof. No challenge or cookie is issued; a denied `login_failed` session event (reason `staff_mfa_factor_unproven`) is recorded. The remedy is a two-person MFA reset (0070), after which the account enrols at staff sign-in; the new factor then verifies platform sign-in too. The same answer at `/auth/mfa/verify` if such a factor is met there |
+| `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | `POST /auth/login` with the right password of an active, enabled account that has a staff record or a facility membership but no membership eligible for staff sign-in: every one ended, suspended or held, the staff record not active or its verification not accepted, or the organization or facility not active (`eligibleStaffMembershipJoins`). Launch decision NO-MEMBERSHIP-SIGN-IN, owner default (a), ADR-057. No challenge or cookie and no session. A denied `login_failed` session event (reason `no_active_membership`) is recorded. It does not count toward the sign-in budget and does not reset it. The detail asks the user to contact their organization administrator. Checked before the factor, so it answers the same with or without an authenticator. An account with neither (a patient or a platform-only account) keeps the uniform `401` |
 | `401 MFA_INVALID_CODE` | A wrong, reused (the same 30-second step twice) or already used code; a wrong email code. Each counts against the challenge (five attempts), the account's MFA failure budget and the source address's staff budget |
 | `429 MFA_RATE_LIMITED` | A failure budget is spent, and while it is every code is refused, a correct one too, until its 15-minute window passes: the account's (the fifth failed code within 15 minutes, staff and platform together), or the source address's staff budget (the 100th failed staff code from one address within 15 minutes; it is the staff sign-in's own, apart from platform sign-in's per-address budget of 20, and sized for a facility whose staff share one address). Also more than five enrolment-code sends or enrolment starts in 15 minutes |
 | `403 MFA_ENROLLMENT_PROOF_REQUIRED` | Enrolment start or activation without a verified proof (no email code, and the challenge was not opened by provider activation). No factor is created |
@@ -234,8 +237,16 @@ this order:
 | `403 CSRF_VALIDATION_FAILED` | The refresh cookie is missing, or `X-CSRF-Token` and the CSRF cookie are missing, differ, or are not the value derived from the refresh token | Untouched |
 | `403 SESSION_CLIENT_MISMATCH` | `X-HID-Client` names the other kind of sign-in (below). Nothing is rotated | Kept |
 | `403 STAFF_MFA_REQUIRED` | A staff sign-in without live MFA assurance (MFA-1, 0088): one from before staff MFA, or whose authenticator was reset. Nothing is rotated; the whole sign-in is ended (revocation reason `staff_mfa_required`, a denied `refresh` session event) | Cleared |
-| `401 AUTHENTICATION_REQUIRED` | Rotation refuses the token: unknown, ended, expired, reused (reuse ends the whole sign-in), a platform token, or an account that is no longer active, is disabled or has a new token version. Any other failure during rotation also clears the cookies | Cleared |
+| `401 AUTHENTICATION_REQUIRED` | Rotation refuses the token: unknown, ended, expired, reused (reuse ends the whole sign-in), a platform token, or an account that is no longer active, is disabled or has a new token version | Cleared |
+| `5xx` | A fault while rotating (ADR-057): `503 DEPENDENCY_UNAVAILABLE` when the `auth.refresh` audit row cannot be written, `500` for another database fault. The audit row is written in the rotation's own transaction, so the rotation commits with it or not at all: nothing is rotated and the presented refresh token stays live. Before, such a fault cleared the cookies and signed the user out, and a rotation could commit without its audit row. The client may retry | Untouched |
 | `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header | The refresh token is rotated into a new session of the same sign-in | Replaced |
+
+The cookies are cleared only for a `4xx` refusal of the refresh token itself
+(`refreshRefused` in `services/identity-api/src/auth/refresh-refusal.ts`).
+`POST /auth/admin/refresh` follows the same rule for the platform cookies: a
+refused platform token (`401 PLATFORM_SESSION_EXPIRED`,
+`PLATFORM_SESSION_REVOKED`, `AUTHENTICATION_REQUIRED`) clears them, a fault
+keeps them.
 
 `POST /api/v1/auth/logout` takes no body and answers `204` with no content
 when it does not refuse. It is public at the guard and authenticates the
@@ -356,6 +367,45 @@ and sign-out (since `22e8664`). Earlier Health-id builds and
 a cookie sign-out without a live access cookie ends whichever staff or patient
 sign-in the refresh cookie holds.
 
+#### Refusals and faults (ADR-057)
+
+From `BRANCH:launch/identity-error-hardening` (no migration, not deployed)
+Identity tells a refused credential from a fault, so that a client signs a
+user out only when the credential itself was refused. Health-id signs out on
+`401` and retries a `5xx`.
+
+| Answer | When |
+|---|---|
+| `401 AUTHENTICATION_REQUIRED` | No credential, or the access token is refused: unknown, ended, expired, badly signed, or of an account that is no longer active, is disabled or has a new token version. The client signs in again |
+| `503 AUTHENTICATION_UNAVAILABLE` | `SecurityGuard` could not decide: a database or other fault while verifying the session, resolving the actor or reading the platform session's assurance, or (with `AUTH_MODE=oidc`) the OIDC key set cannot be fetched or used. The denial is audited first where a row can be written. Nothing is ended; the client retries. Before, every such fault answered `401` and signed the user out |
+| `503 PLATFORM_CONTROL_UNAVAILABLE` | A runtime control (`maintenance_mode`, the patient and provider portal switches) cannot be read for any reason other than the control being disabled (SQLSTATE `55000` `PLATFORM_CONTROL_DISABLED`, which keeps `503 PLATFORM_MAINTENANCE` and `423 PLATFORM_PORTAL_DISABLED`): a statement or pool timeout, a lost connection, a missing grant. Before, Identity answered those `401` and Outreach `500` |
+| `403 PATIENT_SESSION_REQUIRED` | A staff or platform session on a patient-only route ("Patient sessions and self service", below), refused by the guard before the handler runs. Audited as `auth.authorization.denied` on resource type `authentication` with no facility, membership or organization |
+| `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | Staff sign-in only, with the right password (refusals table above). A live session whose membership ends is refused `401`: its credential no longer resolves, and Health-id returns the user to sign-in, where the `403` explains |
+| `403 ORIGIN_DENIED` | A cross-origin request whose `Origin` is not in `CORS_ORIGINS`, refused by the CORS layer before routing, with no `Access-Control-Allow-*` header. The same in Identity, EHR, Lab, OCR, Outreach and Pharmacy (`config/cors.ts` in each); all six answered `500` before |
+
+Sign-in answers every refused credential alike. `POST /auth/login` (the staff
+password step) and `POST /auth/patient/login` answer any refusal of the
+credential (an unknown account, a wrong password, a staff-only account at
+patient sign-in, an account deactivated or whose credentials changed during
+sign-in) with `401 AUTHENTICATION_REQUIRED` and the one detail "Invalid
+credentials", and counts it against the sign-in budget. Before, the internal
+reason reached the browser as the detail (for example "Patient account is
+unavailable" for a staff account's right password at patient sign-in), which
+told the caller that the password was right. The
+named refusals keep their codes: `429` budgets, `403 STAFF_MFA_FACTOR_UNPROVEN`,
+`403 NO_ACTIVE_FACILITY_MEMBERSHIP`, Turnstile and Origin refusals.
+`POST /auth/oidc/exchange` answers any refused Google sign-in or enrolment
+`401 GOOGLE_SIGN_IN_DENIED` ("Google sign-in could not be completed for this
+HID account"), as it already did for a missing nonce.
+
+Runtime controls apply to every staff and patient session. Only a platform
+administration session (`/auth/admin/*` sign-in, `/admin/*` routes) is exempt
+in Identity, so the console works during maintenance. Before, any actor whose
+account held `platform.admin.access` was exempt, so an administrator's
+clinical staff session kept reading and writing records during maintenance and
+with the provider portal off. EHR and Outreach exempt no session (they never
+see a platform session).
+
 ### Staff facility binding (N5, migration 0087)
 
 A staff actor lists one entry per active membership (`actor.facilities`), and
@@ -416,6 +466,28 @@ command for QoreID evidence verification. Its body is exactly `{ "nin":
 opaque provider reference, and timestamp. It does not accept patient identity
 attributes, create a patient, or modify a canonical identity. The integration
 is disabled by default and does not expose provider credentials or tokens.
+
+Patient-only routes refuse any other session in `SecurityGuard`, before the
+handler, with `403 PATIENT_SESSION_REQUIRED` (ADR-057), audited as
+`auth.authorization.denied` on resource type `authentication` with no
+facility. They are every `/api/v1/identity/me` route of `PatientSelfController`
+(`GET /me`, `GET /me/access-history`, `GET /me/notifications`,
+`POST /me/notifications/:id/read`, `POST` and `DELETE /me/access-pin`) and
+`GET /identity/service/patient-self-authorization`, `POST
+/me/verification/nin`, the emergency contact routes
+(`/identity/me/emergency-contacts/*`), the account deletion routes
+(`/identity/me/account-deletion/*`) and the patient consent decisions
+(`GET /identity/me/access-requests`, `POST
+/identity/access-requests/:requestId/approve` and `/deny`, `POST
+/identity/me/consent-grants/:grantId/revoke`). Before, a staff session reached
+these handlers, and their refusal of a staff actor with no facility failed its
+own audit row (0067): the answer was `503 DEPENDENCY_UNAVAILABLE` with nothing
+recorded. The audit interceptor now records
+any other staff failure that has no facility bound, on a route that is neither
+a session event nor platform administration, as `auth.authorization.denied`
+(a `4xx`, outcome `denied`) or `auth.request.failed` (a `5xx`, outcome
+`failure`) on `authentication`, with the request's own `api.*` action in its
+details, instead of answering `503`.
 
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
@@ -721,6 +793,32 @@ issued in the future, 5 seconds of clock tolerance) and `token_use: workload`;
 any other token is refused `401` (ADR-047). Local per-caller secrets are
 development-only.
 
+Identity's workload refusals carry their own codes, never a user refusal's
+(ADR-057), so a calling service can tell "Identity refused my workload
+credential" (a fault between services) from "Identity refused the user's
+session" (which it relays):
+
+| Answer | When |
+|---|---|
+| `503 WORKLOAD_IDENTITY_UNAVAILABLE` | The issuer's JWKS cannot be fetched (network error, timeout) or holds no usable key set, workload authentication is not configured, or local-secret mode is configured in production |
+| `401 WORKLOAD_AUTHENTICATION_FAILED` | No workload credential, an unknown caller name, or a token that fails verification (signature, issuer, audience, expiry, age, `token_use`) or a wrong local secret |
+| `403 WORKLOAD_CALLER_DENIED` | A valid workload token whose subject is not the configured subject of the named caller |
+| `401 DOCUMENT_SCANNER_AUTHENTICATION_FAILED` | A document scanner token is refused. It is the browser caller's own credential, not EHR's, so EHR relays it |
+
+`@hid/api-client` exports `WORKLOAD_REFUSAL_CODES` and `isWorkloadRefusal`.
+EHR answers any Identity refusal of its own workload credential (a `401`,
+`403` or `503` with one of those codes, or the older
+`INTERNAL_SERVICE_AUTH_REQUIRED`, `INVALID_WORKLOAD_IDENTITY` and
+`WORKLOAD_AUTHENTICATION_REQUIRED`) as `503 IDENTITY_SERVICE_AUTH_UNAVAILABLE`
+(`translate` in `services/ehr-api/src/integrations/identity-api.service.ts`),
+on the session check and the patient authorization check alike. Before, it
+relayed Identity's `401`, and Health-id signed the user out. EHR also refuses
+to send an Identity workload token file whose `exp` has passed: `503
+IDENTITY_WORKLOAD_IDENTITY_UNAVAILABLE`, logged as
+`identity_workload_token_expired` and counted, instead of a call Identity would
+refuse. Lab, Pharmacy, OCR and Outreach still relay Identity's workload refusal
+as it is; they are off at launch, and their mapping is a follow-up (ADR-057).
+
 Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 `POST` for cookie mutation revalidation. Patient decisions use
 `POST /api/v1/identity/service/authorization/check`. These return API DTOs,
@@ -763,10 +861,16 @@ requests are unchanged. Skipping the check changes nothing else: the session,
 runtime controls, exact facility and the handler's own workload authentication
 still apply, and on the patient authorization check so do the
 `identity.authorization.check` permission and the patient authorization
-decision. A skip is recorded as the reported method in
+decision. After a skip, the patient authorization check decides only the
+`read_records` scope: any other scope (`write_records`) is `403
+CSRF_VALIDATION_FAILED`, so a reported read never yields a write decision
+(ADR-057). When the workload issuer is unavailable, the check is not skipped
+and the request is answered `503 WORKLOAD_IDENTITY_UNAVAILABLE` rather than the
+browser's `403 ORIGIN_DENIED`; any other workload failure keeps the check, as
+before. A skip is recorded as the reported method in
 `request.delegatedBrowserMethod`. On `POST /api/v1/identity/outreach/authorize`
 the handler still requires the `outreach-api` workload (`authenticateOutreach`,
-so another approved caller is refused `401`), and after a skip it authorizes
+so another approved caller is refused `401 WORKLOAD_AUTHENTICATION_FAILED`), and after a skip it authorizes
 only a permission ending in `.read`, refusing a write permission with
 `403 CSRF_VALIDATION_FAILED`. An Outreach write therefore still needs the
 cookie's `Origin` and CSRF token, which Outreach's guard requires and Identity
@@ -790,7 +894,9 @@ such as a stale tab after the membership ended, is
 controls (`503 PLATFORM_MAINTENANCE`, `423 PLATFORM_PORTAL_DISABLED`, and
 `503 PLATFORM_CONTROL_UNAVAILABLE` when the control cannot be read, a database
 fault included) and refuses a patient on a workforce route
-(`403 PATIENT_SCOPE_DENIED`). A permission missing from the bound membership is
+(`403 PATIENT_SCOPE_DENIED`). No session is exempt from the runtime controls:
+before ADR-057, a clinical session whose account also held
+`platform.admin.access` skipped them in EHR and Outreach. A permission missing from the bound membership is
 `403 PERMISSION_DENIED`. Each guard refusal is audited before it is answered:
 
 * refused before a facility is bound, with an actor: `auth.authorization.denied`
@@ -1872,12 +1978,27 @@ GET /api/v1/admin/session
 GET /api/v1/admin/overview
 GET /api/v1/admin/facilities?page=&pageSize=&status=&query=
 GET /api/v1/admin/facilities/:facilityId
-GET /api/v1/admin/principals?query=&page=&pageSize=&status=
+GET /api/v1/admin/principals?query=&page=&pageSize=&status=   (deprecated: POST /principals/search)
 GET /api/v1/admin/identity/reviews?page=&pageSize=&status=
 GET /api/v1/admin/audit/events?limit=&beforeSequenceId=&actor=&facilityId=&action=&correlationId=&outcome=&from=&to=
 GET /api/v1/admin/operations/services
 GET /api/v1/admin/operations/events
 ```
+
+`POST /api/v1/admin/principals/search` (`200`) takes the same `query`,
+`page`, `pageSize` and `status` in a JSON body and answers exactly what the
+`GET` answers; it needs `platform.principal.read`, the allowed `Origin` and
+the CSRF token of any platform cookie `POST`, and is registered as the
+standard high-risk action `platform.principals.search` (no step-up, reason,
+`If-Match` or `Idempotency-Key`). `POST /api/v1/admin/principals/export`
+(`200`, the same CSV and headers) takes `reason`, `query` and `status` in the
+body under `platform.principal.export` with step-up, and the guard reads and
+audits the body's reason; a reason only in the query string is `400
+REASON_REQUIRED`. The `GET` forms stay, unchanged, for one release because the
+Health-id `82b474e` console calls them
+(`apps/patient-web/src/admin/api.ts:354-357` and `:374-376`), and are then removed: they put names, emails and the export
+reason in the URL (A24, ADR-057, `BRANCH:launch/identity-error-hardening`).
+The gateway's access log omits query strings (ADR-055).
 
 Principal search requires at least two characters. Facility, principal, and
 review page sizes are bounded to 100; audit pages are bounded to 200 and use a

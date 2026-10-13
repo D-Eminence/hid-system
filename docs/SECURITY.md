@@ -40,6 +40,17 @@ refresh token. A client's declaration of which application it is (`X-HID-Client`
 only narrow what a request acts on; it never authenticates or authorizes
 (ADR-044).
 
+A `401` means the credential was refused, and clients sign out on it; a fault
+that leaves a service unable to decide is a `503` with a stable code, never a
+`401` (ADR-057, `BRANCH:launch/identity-error-hardening`). That includes a
+service's own workload credential refused by Identity, which the calling
+service answers `503`. Sign-in refusals carry one detail, "Invalid
+credentials", so the answer never confirms a right password; the reason stays
+in the audit. A disallowed `Origin` is refused `403 ORIGIN_DENIED` by every
+service's CORS layer. No platform grant exempts a staff or patient session
+from maintenance mode or the portal switches; only a platform administration
+session is exempt in Identity.
+
 ## 3. Authorization
 
 Use RBAC and domain permissions.

@@ -670,6 +670,20 @@ age/DLQ, event terminal failure, provider outcomes, OCR failures, S3/KMS denies,
 and sanitized telemetry. Stop on unexplained authentication, duplicate patient,
 OTP, notification, or migration behavior.
 
+With ADR-057 (`BRANCH:launch/identity-error-hardening`) a fault no longer
+signs users out: it answers `503` with a stable code and Health-id retries, so
+an outage shows up as `503` rates, not as a wave of sign-ins. Watch for
+`AUTHENTICATION_UNAVAILABLE` and `PLATFORM_CONTROL_UNAVAILABLE` from Identity
+(database, OIDC key set or runtime-control reads),
+`WORKLOAD_IDENTITY_UNAVAILABLE` from Identity (the workload issuer's JWKS
+cannot be fetched), and `IDENTITY_SERVICE_AUTH_UNAVAILABLE` and
+`IDENTITY_WORKLOAD_IDENTITY_UNAVAILABLE` from EHR (Identity refused EHR's
+workload token, or the token file EHR reads has expired). Each expired token
+EHR refuses to send is logged as `identity_workload_token_expired`: the token
+agent has stopped renewing (ADR-047 D2); restart the agent or its task. No
+alarm is defined on that log yet. `403 ORIGIN_DENIED` from any service means a
+browser origin outside `CORS_ORIGINS`; before ADR-057 it was a `500`.
+
 Normal scaling ceilings are not million-user capacity evidence. Any move above
 a normal ceiling must use the separately bounded emergency parameter, have an
 external approval record, and confirm representative load/soak, latency/error,
