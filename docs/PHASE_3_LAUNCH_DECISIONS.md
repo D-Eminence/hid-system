@@ -5,7 +5,9 @@ the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
 the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
 (§1, ADR-052, D-Eminence/hid-system#67), N1 and N2 (ADR-048,
 BRANCH:launch/identity-enrollment-gates), and N5 and the workforce part of D14
-(ADR-049, BRANCH:launch/staff-workforce-provisioning) with the owner's defaults;
+(ADR-049, BRANCH:launch/staff-workforce-provisioning) with the owner's defaults,
+and the facility a sign-in keeps (N5, E7; ADR-046 as ported in
+`BRANCH:launch/facility-selection-0089`) with the owner's defaults;
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
 
@@ -161,7 +163,9 @@ separate deployment authorization. None of them has been run.
   (D-Eminence/hid-system#48), and 0081 and 0082 are taken too
   (D-Eminence/hid-system#55, D-Eminence/hid-system#58). #47 must be renumbered
   to the next free number, 0083 today, before it can merge. It also overlaps
-  #50 on `auth.controller.ts` and `token.service.ts`.
+  #50 on `auth.controller.ts` and `token.service.ts`. **Resolved:** ported as
+  0089, after the launch migrations 0085-0088, in
+  `BRANCH:launch/facility-selection-0089` (below).
 - **Data check.** Run I4 (§3) before deciding: whether such memberships exist.
 - **Decided (2026-10-13, owner defaults: deny by default, least privilege;
   ADR-049).** One active, unheld membership per account and facility, not
@@ -175,6 +179,26 @@ separate deployment authorization. None of them has been run.
   last, which fixes every guard at once (they all read Identity's facility
   list). The legacy promotion refuses duplicates before it writes. Which
   facility a session family binds by default (#47) stays separate.
+- **Decided, the facility a sign-in keeps (launch items C1 and FE-20,
+  decision E7; 2026-10-13, owner defaults: deny by default, least privilege;
+  ADR-046 as ported).** #47 is ported as migration 0089 in
+  `BRANCH:launch/facility-selection-0089` (not merged): the facility a staff
+  sign-in chooses is kept per session family and reported on a reload or
+  refresh as `facilitySelection: 'selected'`; it is only the default the
+  session reports, and `X-Facility-ID` still authorizes every facility-scoped
+  request. Every new staff sign-in (the session issued after the second
+  factor, ADR-054) reports `default`, so the portal asks anyone who works at
+  more than one facility at every sign-in, as Health-id `82b474e` already
+  does; no Health-id change. A chosen facility the person no longer holds is
+  `reselect` (asked again, never moved silently). A refresh whose stored
+  choice cannot be read answers `200` with `facilitySelection: 'unavailable'`
+  (asked, never reported as chosen) rather than #47's `503`, which the
+  gateway's interception of upstream `5xx` (A8) would strip of the rotated
+  cookies. With 0087 a stored facility names one membership.
+- **Risks.** One extra question at sign-in for multi-facility staff, and at a
+  refresh while the selection store cannot be read. Release order: 0089, then
+  the role bootstrap, then the Identity build (release checklist §5 step 22,
+  §6); without the table every staff session read answers `503`.
 
 ### FE-HOST. Launch frontend hosting (FE-HOST, MOD-EDGE)
 
@@ -511,3 +535,4 @@ for each merged change and its evidence. Pull requests from this review:
 | REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | `BRANCH:launch/identity-recovery-search`, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
 | WF-1 (no governed way to provision clinicians), N5 (two memberships at one facility) | BRANCH:launch/staff-workforce-provisioning, migration 0087, ADR-049 | branch, not merged (D14 workforce part, N5) |
 | MFA-1 (staff sessions without MFA; D14 MFA part) | `BRANCH:launch/staff-mfa`, migration 0088, ADR-054 | local commits, not pushed; owner notices wait on the notification route; Health-id staff and platform sign-in changes listed in the release checklist §3; release checklist P22 (enrolment before clinical roles, review of enrolments after a recovery) is an operator gate; a second enrolment channel is an open decision |
+| C1, FE-20 (a clinician's chosen facility was not kept across a reload; D-Eminence/hid-system#47 unmerged and numbered 0080) | `BRANCH:launch/facility-selection-0089`, migration 0089, ADR-046 (as ported) | local commits, not pushed (N5, E7); D-Eminence/hid-system#47 stays open with its own owner; no Health-id change |

@@ -2480,7 +2480,8 @@ and §9.
 Status: Accepted for source implementation (D-Eminence/hid-system#47, ported
 as `BRANCH:launch/facility-selection-0089`, migration 0089). Not deployed.
 
-Date: 2026-10-12
+Date: 2026-10-12; amended 2026-10-13 for the port onto the launch stack
+(below).
 
 Context:
 
@@ -2512,18 +2513,24 @@ Decision:
   refreshes and retries.
 - Staff responses carry `facilitySelection`: `selected` (the stored facility,
   still one of the actor's active facilities, is reported), `default` (none
-  stored; every new sign-in), or `reselect` (the stored facility is no longer
+  stored; every new sign-in), `reselect` (the stored facility is no longer
   one of the actor's active facilities: the default is reported and the client
-  asks the user to choose again rather than working elsewhere silently).
+  asks the user to choose again rather than working elsewhere silently), or,
+  on a refresh only, `unavailable` (below). A new staff sign-in is the session
+  issued after the second factor (`POST /auth/mfa/verify` or
+  `POST /auth/mfa/enroll/activate`, ADR-054); the password step issues no
+  session and reports nothing.
   Patient and platform sessions, and `/auth/service-session`, are unchanged
   and carry no field. Facilities are compared by id, so a membership replaced
   by another active one at the same facility keeps the choice `selected`, with
   the new membership's roles.
-- A stored choice that cannot be read is never replaced by the default:
+- A stored choice that cannot be read is never reported as a choice:
   `GET /auth/session` answers `503 DEPENDENCY_UNAVAILABLE` with the cookies
-  untouched, and refresh, whose rotation has already committed, sets the
-  rotated session's cookies and CSRF token and answers
-  `503 DEPENDENCY_UNAVAILABLE` with no actor, so the user stays signed in.
+  untouched. A refresh, whose rotation has already committed, answers `200`
+  with the rotated session's cookies and CSRF token, the actor as resolved
+  (the default facility) and `facilitySelection: 'unavailable'`, which the
+  client must not take as a choice; it asks where the user is working, and
+  the stored choice is reported again on the next read.
 - The stored choice is only the default the session reports. It authorizes
   nothing: every facility-scoped request still carries `X-Facility-ID`, which
   the guard checks against the actor's active memberships, and the stored
@@ -2561,10 +2568,10 @@ Consequences:
   active again before the user chooses, the choice is reported as `selected`
   again.
 - Deployment order: apply 0089 and the role bootstrap before this Identity API
-  serves traffic. Without the table, every staff `GET /auth/session` and
-  refresh answers `503` (refresh keeps the rotated cookies), so no staff page
-  loads, and `POST /auth/facility` fails. The previous Identity API ignores the
-  table, so rolling the API back needs no schema change.
+  serves traffic. Without the table, every staff `GET /auth/session` answers
+  `503`, every staff refresh answers `unavailable` and `POST /auth/facility`
+  fails, so a reload cannot keep a facility. The previous Identity API ignores
+  the table, so rolling the API back needs no schema change.
 - Numbering: written as 0080 in D-Eminence/hid-system#47; main has its own
   0080 (Pharmacy source prescription guards), so it is ported as 0089, after
   the launch migrations 0085-0088, and `release/config/components.json` lists
@@ -2573,11 +2580,49 @@ Consequences:
   on `auth.sessions`, `auth.accounts`, `identity.facilities` and
   `identity.staff_facility_memberships` (`MIGRATION_RUNBOOK.md`).
 - An actor without an Identity sign-in (`AUTH_MODE=oidc` bearer tokens, no
-  session id) has nowhere to keep a choice: `POST /auth/facility` answers as
-  before without storing it, and no field is reported.
+  session id) has nowhere to keep a choice. Since staff MFA (0088) such a
+  token carries no MFA assurance and the guard refuses it before the
+  controller (`403 STAFF_MFA_REQUIRED`); the controller still answers one as
+  before, without storing or reporting anything, should it ever reach it.
+
+Port onto the launch stack (2026-10-13, `BRANCH:launch/facility-selection-0089`):
+
+D-Eminence/hid-system#47 was written on `main` before 0080-0088. Ported after
+staff MFA (0088), it keeps the decisions above with three changes, each
+because the stack changed what #47 assumed:
+
+- Number: main has its own 0080, so the migration is 0089, after 0088. Its
+  table, guard and grants are unchanged. The guard does not check MFA
+  assurance: the selection authorizes nothing, and Identity reaches it only
+  through a session `SecurityGuard` has already found MFA-verified.
+- Where `default` is reported: #47 reported it on `POST /auth/login`, which
+  since 0088 issues no session. It is reported on the two routes that issue
+  the staff session, `POST /auth/mfa/verify` and
+  `POST /auth/mfa/enroll/activate`. Provider activation issues no session
+  either since 0088 and continues with those routes.
+- Refresh when the choice cannot be read: #47 answered `503` with the rotated
+  cookies. The gateway on this base replaces every upstream `502`, `503` and
+  `504` with its own `503` and drops `Set-Cookie` (`proxy_intercept_errors`,
+  launch item A8; the edge hardening of ADR-055 turns that interception off on
+  its own branch), so the browser would keep the spent refresh token and its
+  next refresh would be taken as token reuse, ending the whole sign-in and
+  recording a false reuse event. A refresh carrying cookies should not depend
+  on the edge passing a `5xx` through, so it answers `200` with `unavailable` (deny by default: the
+  default facility is reported but not as a choice, and the user is asked; the
+  cost is one extra question while the table cannot be read). The rest of
+  refresh, the cookie clearing on a refused or failed rotation included, is as
+  on the base; the clearing rule and the audit inside the rotation are a
+  separate change (A6).
+
+The facility comparison (by id), the per-family key, the account lock, the
+guard's conditions and the 503 on `GET /auth/session` are unchanged. 0087's
+one active membership per facility (ADR-049) makes the comparison by id
+unambiguous; `FACILITY_MEMBERSHIP_AMBIGUOUS` still refuses a staff actor
+that holds two.
 
 Related: ADR-038 (session assurance per family), ADR-044 (sign-out under the
-account lock); `INTERFACE_CONTRACT.md`, "Working facility per sign-in";
+account lock), ADR-049 (one active membership per facility), ADR-054 (staff
+sign-in is password then TOTP); `INTERFACE_CONTRACT.md`, "Working facility per sign-in";
 `DATABASE.md`, "Session facility selection (0089)".
 
 # ADR-047: One Environment-Bound Workload Issuer for Staging and Production

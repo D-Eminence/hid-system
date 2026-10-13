@@ -181,13 +181,19 @@ The executable covers:
    refresh to end the sign-in. The rehearsal also runs the new rollback-only
    `staff-mfa.integration.sql` with the additional suites.
    `facility_selection_runtime` (`verify-facility-selection-runtime.mjs`,
-   migration 0089, ADR-046) covers a staff member's selected facility kept for
-   the sign-in across a session read and refresh, `reselect` once the selected
-   membership ends, another sign-in of the account unaffected, refused
-   selections writing no selection and only their failed
-   `auth.facility.select` audit row (the global `AuditInterceptor` registered
-   as `AppModule` registers it), the 0089 guard as the runtime, and a selection
-   waiting at the account lock while a sign-out ends the sign-in.
+   migration 0089, ADR-046) signs staff in with password and authenticator
+   (`staff-session-client.mjs`) and covers the password step storing and
+   reporting nothing, `default` on the enrolment activation and second-factor
+   responses, a staff member's selected facility kept for the sign-in across
+   a session read and refresh, the selection made unreadable for one step
+   (`SELECT` revoked from the Identity runtime and restored): the session read
+   `503` with no `Set-Cookie` and the refresh `200` with the rotated cookies
+   and `unavailable`, `reselect` once the selected membership ends, another
+   sign-in of the account unaffected, refused selections writing no selection
+   and only their failed `auth.facility.select` audit row (the global
+   `AuditInterceptor` registered as `AppModule` registers it), the 0089 guard
+   as the runtime, and a selection waiting at the account lock while a
+   sign-out ends the sign-in.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

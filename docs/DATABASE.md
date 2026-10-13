@@ -3314,12 +3314,19 @@ runner's 5 s lock timeout (`MIGRATION_RUNBOOK.md`).
   session of the account, `ON CONFLICT (family_id) DO UPDATE` (a new choice
   replaces the old and increments `row_version`), then the
   `auth.facility.select` audit row on the same transaction. It reads the row
-  only through a live staff session of the family. A read that fails is
-  answered `503 DEPENDENCY_UNAVAILABLE`, never with the default facility.
+  only through a live staff session of the family. A read that fails is never
+  reported as a choice: `GET /auth/session` answers
+  `503 DEPENDENCY_UNAVAILABLE`, and a refresh, whose rotation has committed,
+  answers `200` with `facilitySelection: 'unavailable'` (ADR-046, as ported).
+  Since staff MFA (0088) the API reaches the row only through a staff session
+  its guard found MFA-verified; the database guard does not repeat that check,
+  because the row authorizes nothing.
 - `runtime-grants.sql` grants `SELECT`, `INSERT` and `UPDATE` to
-  `hid_identity_runtime` (so `hid_identity_api_runtime`), and no `DELETE`;
-  no other role, `hid_schema_test_runtime` included, gets any privilege. The
-  guard reads only tables the Identity runtime already reads.
+  `hid_identity_runtime` (so `hid_identity_api_runtime`), and no `DELETE`,
+  next to the `auth.session_assurance` grants and before the bootstrap's
+  closing membership revocation; no other role, `hid_schema_test_runtime`
+  included, gets any privilege. The guard reads only tables the Identity
+  runtime already reads. The bootstrap fails on a database without 0089.
 - `session-facility-selection.integration.sql` (rollback-only, synthetic
   fixtures) checks the catalog contract (columns, keys, the guard's
   attributes, trigger timing and grants) and, as `hid_identity_api_runtime`,
@@ -3334,11 +3341,21 @@ runner's 5 s lock timeout (`MIGRATION_RUNBOOK.md`).
   and DELETE (refused to the runtime by privilege and to the owner by the
   guard). It then checks that the rotated session reads the selection while
   the replaced session and another sign-in of the account do not, and that
-  after sign-out the row stays but is neither read nor changeable.
+  after sign-out the row stays but is neither read nor changeable. Its
+  privilege check covers every `hid_` role that is neither the Identity
+  runtime, one of its members, nor the table owner, so roles added after #47
+  (`hid_platform_control_reader`, among others) are covered too.
   `scripts/run-container-database-acceptance.sh` runs it last, after
   `staff-mfa.integration.sql`.
   `services/identity-api/scripts/verify-facility-selection-runtime.mjs`
   exercises the HTTP contract against a migrated database as
   `hid_identity_api_runtime`, with the global `AuditInterceptor` registered as
   `AppModule` registers it, so each refused selection must also write its
-  failed `auth.facility.select` row past 0067's staff CHECKs.
+  failed `auth.facility.select` row past 0067's staff CHECKs. It signs staff
+  in through `staff-session-client.mjs` (password, enrolment with the emailed
+  code, then TOTP), checks that the password step stores and reports nothing
+  and that the enrolment activation and the second-factor responses report
+  `default`, and revokes `SELECT` on the table from `hid_identity_runtime` for
+  one step (restored in `finally`) to check that the session read answers
+  `503` with no `Set-Cookie` and the refresh `200` with the rotated cookies
+  and `unavailable`. The rehearsal runs it after the sign-out verifier.
