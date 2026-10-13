@@ -1,0 +1,94 @@
+// The API gateway's routing and trust-boundary contract, checked by
+// scripts/verify-container-platform.mjs and scripts/tests/gateway-config.test.mjs
+// against the nginx model in ./nginx-config-model.mjs (nginx itself is not run).
+
+import assert from 'node:assert/strict'
+import { GatewayModel, renderTemplate, templateVariables } from './nginx-config-model.mjs'
+
+/** Browser API prefixes and the upstream variable of the module that owns each. */
+export const routeOwners = Object.freeze([
+  ['/api/v1/auth', 'identity', 'IDENTITY_API_UPSTREAM'], ['/api/v1/identity', 'identity', 'IDENTITY_API_UPSTREAM'],
+  ['/api/v1/audit', 'identity', 'IDENTITY_API_UPSTREAM'], ['/api/v1/admin', 'identity', 'IDENTITY_API_UPSTREAM'],
+  ['/api/v1/commercial', 'identity', 'IDENTITY_API_UPSTREAM'], ['/api/v1/ehr', 'ehr', 'EHR_API_UPSTREAM'],
+  ['/api/v1/lab', 'lab', 'LAB_API_UPSTREAM'], ['/api/v1/pharmacy', 'pharmacy', 'PHARMACY_API_UPSTREAM'],
+  ['/api/v1/ocr', 'ocr', 'OCR_API_UPSTREAM'], ['/api/v1/outreach', 'outreach', 'OUTREACH_API_UPSTREAM'],
+])
+
+/** Service-to-service routes that the public gateway must never proxy. */
+export const internalRoutes = Object.freeze([
+  '/api/v1/auth/service-session',
+  '/api/v1/identity/service/authorization/check',
+  '/api/v1/identity/service/patient-self-authorization',
+  '/api/v1/identity/service/workloads/document-scanner/authorize',
+  '/api/v1/identity/outreach/authorize',
+  '/api/v1/identity/outreach/patient-authorization',
+  '/api/v1/ehr/internal/ocr/documents/0b9d2f9e-6b7c-4b55-9a39-1d3e0e7a1f11/source',
+  '/api/v1/ehr/internal/ocr/patients/0b9d2f9e-6b7c-4b55-9a39-1d3e0e7a1f11/clinical-notes',
+  '/api/v1/lab/work-items/accept-ehr-order',
+  '/api/v1/lab/imports/from-ocr',
+  '/api/v1/pharmacy/work-items/accept-ehr-prescription',
+  '/api/v1/pharmacy/imports/from-ocr',
+])
+
+const modules = ['identity', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach']
+const vpcPeer = '10.40.1.10'
+const client = '198.51.100.23'
+
+function problemCode(outcome) {
+  return outcome.action === 'return' && outcome.body ? JSON.parse(outcome.body).code : undefined
+}
+
+/**
+ * Asserts the contract for the gateway files as the image ships them.
+ * `dockerfile` supplies the local ENV defaults; `includes` maps runtime paths
+ * (as the template includes them) to file contents.
+ */
+export function assertGatewayContract({ template, dockerfile, includes }) {
+  const defaults = Object.fromEntries([...dockerfile.matchAll(/^\s*(?:ENV\s+)?([A-Z][A-Z0-9_]*)=(\S+?)(?:\s*\\)?$/gm)]
+    .map(([, name, value]) => [name, value]))
+  for (const name of templateVariables(template)) {
+    assert.ok(Object.hasOwn(defaults, name), `gateway image must define a default for ${name}`)
+  }
+  assert.equal(defaults.HID_REQUIRE_CLIENT_IP, 'false', 'local runs do not require the client address')
+  assert.equal(defaults.HID_ENABLED_API_ROUTES, 'identity,ehr', 'the image routes only the launch modules by default')
+  for (const [, argument] of template.matchAll(/proxy_pass\s+([^;]+);/g)) {
+    assert.equal(argument.trim(), '$hid_upstream', 'every proxy_pass must use the per-request resolved upstream variable')
+  }
+  assert.match(template, /resolver \$\{GATEWAY_DNS_RESOLVER\} valid=10s ipv6=off;/, 'gateway must re-resolve upstream names')
+  assert.match(template, /set_real_ip_from \$\{VPC_CIDR\};/, 'gateway must trust X-HID-Client-IP only from the VPC')
+  assert.match(template, /real_ip_header X-HID-Client-IP;/, 'gateway must take the client address from X-HID-Client-IP')
+
+  const upstreams = Object.fromEntries(routeOwners.map(([, module, variable]) =>
+    [variable, `http://${module}-api.contract.invalid:3000`]))
+  const environment = {
+    ...upstreams, VPC_CIDR: '10.40.0.0/16', GATEWAY_DNS_RESOLVER: '10.40.0.2',
+    HID_REQUIRE_CLIENT_IP: 'true', HID_ENABLED_API_ROUTES: modules.join(','),
+  }
+  const all = new GatewayModel(renderTemplate(template, environment), includes)
+  for (const [prefix, module, variable] of routeOwners) {
+    for (const uri of [prefix, `${prefix}/x/Y?z=%2F`]) {
+      const outcome = all.route({ method: 'POST', uri, peer: vpcPeer, headers: { 'x-hid-client-ip': client } })
+      assert.equal(outcome.action, 'proxy', `${uri} must be proxied when ${module} is enabled`)
+      assert.equal(outcome.upstream, upstreams[variable], `production gateway ownership mismatch for ${prefix}`)
+      assert.equal(outcome.upstreamUri, uri, `${uri} must reach ${module} unchanged`)
+      assert.equal(outcome.upstreamHeaders['x-forwarded-for'], client, `${uri} must forward the client address`)
+    }
+    const refused = all.route({ uri: `${prefix}/x`, peer: vpcPeer })
+    assert.equal(problemCode(refused), 'CLIENT_ADDRESS_REQUIRED', `${prefix} must refuse a request without a client address`)
+    assert.equal(refused.status, 403)
+  }
+  for (const route of internalRoutes) {
+    for (const uri of [route, `${route}/`, route.replace(/\/([a-z-]+)$/, (_whole, last) => `/${last.toUpperCase()}`),
+      route.replace(/^(\/api\/v1\/[a-z]+\/)(.)/, (_whole, prefix, first) => `${prefix}${first.toUpperCase()}`)]) {
+      const outcome = all.route({ method: 'POST', uri, peer: vpcPeer, headers: { 'x-hid-client-ip': client } })
+      assert.equal(problemCode(outcome), 'API_ROUTE_NOT_FOUND', `internal route ${uri} must not be proxied`)
+    }
+  }
+  const launch = new GatewayModel(renderTemplate(template, { ...environment, HID_ENABLED_API_ROUTES: 'identity,ehr' }), includes)
+  for (const [prefix, module] of routeOwners) {
+    const outcome = launch.route({ uri: `${prefix}/x`, peer: vpcPeer, headers: { 'x-hid-client-ip': client } })
+    if (module === 'identity' || module === 'ehr') assert.equal(outcome.action, 'proxy', `${prefix} is a launch route`)
+    else assert.equal(problemCode(outcome), 'API_ROUTE_NOT_FOUND', `${prefix} must be closed unless ${module} is enabled`)
+  }
+  return { routes: routeOwners.length, internalRoutes: internalRoutes.length }
+}

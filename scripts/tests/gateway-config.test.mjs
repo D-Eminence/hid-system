@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
+import { assertGatewayContract } from '../lib/gateway-contract.mjs'
 import {
   GatewayModel, parseConfig, renderTemplate, templateVariables,
 } from '../lib/nginx-config-model.mjs'
@@ -247,4 +248,30 @@ test('non-API paths and unknown API namespaces keep their bounded answers', () =
   expectProblem(model.route({ uri: '/API/v1/auth/session', peer: alb, headers: viaEdge() }), 404, 'API_ONLY_ORIGIN', '/API')
   expectProblem(model.route({ uri: '/ehr/', peer: alb, headers: viaEdge() }), 404, 'API_ONLY_ORIGIN', '/ehr/')
   assert.ok(parseConfig(renderTemplate(template, production)).length > 0)
+})
+
+// scripts/verify-container-platform.mjs runs this contract; it must accept the
+// shipped files and catch each regression this change closes.
+test('the container verifier contract accepts the shipped gateway and rejects each regression', () => {
+  const shipped = { template, dockerfile, includes }
+  assert.deepEqual(assertGatewayContract(shipped), { routes: 10, internalRoutes: 12 })
+  const proxyHeaders = includes['/etc/nginx/hid-proxy-headers.conf']
+  for (const [label, mutated] of [
+    ['a literal proxy_pass', { ...shipped, template: template.replace('proxy_pass $hid_upstream;', 'proxy_pass ${LAB_API_UPSTREAM};') }],
+    ['no resolver', { ...shipped, template: template.replace(/resolver \$\{GATEWAY_DNS_RESOLVER\}[^;]*;/, '') }],
+    ['no realip', { ...shipped, template: template.replace(/set_real_ip_from[^;]*;/, '') }],
+    ['an internal route proxied', { ...shipped, template: template.replace('(?:service|outreach)', '(?:service)') }],
+    ['a case-sensitive internal-route denial', { ...shipped, template: template.replace('location ~* ^/api/v1/auth/service-session', 'location ~ ^/api/v1/auth/service-session') }],
+    ['a module routed by default', { ...shipped, template: template.replace(/(\$hid_lab_routes \{\n\s*default) off;/, '$1 on;') }],
+    ['an owner swapped', { ...shipped, template: template.replace('set $hid_upstream ${OUTREACH_API_UPSTREAM};', 'set $hid_upstream ${OCR_API_UPSTREAM};') }],
+    ['no client-address refusal', { ...shipped, includes: { '/etc/nginx/hid-proxy-headers.conf':
+      proxyHeaders.replace(/if \(\$hid_client_address_missing\) \{[\s\S]*?\n\}\n/, '') } }],
+    ['the load balancer forwarded', { ...shipped, includes: { '/etc/nginx/hid-proxy-headers.conf':
+      proxyHeaders.replace('X-Forwarded-For $remote_addr', 'X-Forwarded-For $realip_remote_addr') } }],
+    ['every module routed by the image', { ...shipped, dockerfile: dockerfile.replace('HID_ENABLED_API_ROUTES=identity,ehr', `HID_ENABLED_API_ROUTES=${allModules}`) }],
+    ['a missing image default', { ...shipped, dockerfile: dockerfile.replace(/\n\s*VPC_CIDR=\S+ \\/, '') }],
+  ]) {
+    assert.notEqual(JSON.stringify(mutated), JSON.stringify(shipped), `${label}: the mutation must apply`)
+    assert.throws(() => assertGatewayContract(mutated), undefined, `the contract must reject ${label}`)
+  }
 })

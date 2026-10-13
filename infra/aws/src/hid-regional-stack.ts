@@ -32,7 +32,7 @@ import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
 import { StagingWorkloadIdentity } from './staging-workload-identity.js';
-import type { HidEnvironmentConfig } from './config.js';
+import { type HidEnvironmentConfig, vpcDnsResolver } from './config.js';
 import {
   serviceHostLabels,
   tokenRoot,
@@ -853,7 +853,16 @@ export class HidRegionalStack extends Stack {
         const namespace = `services.${this.configuration.name}.hid`;
         return { IDENTITY_API_UPSTREAM: `http://identity-api.${namespace}:3001`, EHR_API_UPSTREAM: `http://ehr-api.${namespace}:3002`,
           LAB_API_UPSTREAM: `http://lab-api.${namespace}:3003`, PHARMACY_API_UPSTREAM: `http://pharmacy-api.${namespace}:3004`,
-          OCR_API_UPSTREAM: `http://ocr-api.${namespace}:3005`, OUTREACH_API_UPSTREAM: `http://outreach-api.${namespace}:3006` };
+          OCR_API_UPSTREAM: `http://ocr-api.${namespace}:3005`, OUTREACH_API_UPSTREAM: `http://outreach-api.${namespace}:3006`,
+          // The Cloud Map names are resolved per request through the VPC resolver.
+          GATEWAY_DNS_RESOLVER: vpcDnsResolver(this.configuration.vpcCidr),
+          // X-HID-Client-IP is trusted only from the VPC (the public ALB), the
+          // same range the backends trust for X-Forwarded-For.
+          VPC_CIDR: this.configuration.vpcCidr,
+          // Staging and production sit behind the Cloudflare Worker that sets
+          // X-HID-Client-IP; an API request without it is refused.
+          HID_REQUIRE_CLIENT_IP: this.configuration.name === 'development' ? 'false' : 'true',
+          HID_ENABLED_API_ROUTES: this.configuration.enabledApiRoutes.join(',') };
       }
     }
   }

@@ -23,6 +23,20 @@ const fullInterfaceEndpoints: readonly InterfaceEndpointName[] = [
   'ecr-api', 'ecr-docker', 'logs', 'secrets-manager', 'kms', 'eventbridge', 'sqs', 'textract',
 ];
 
+/**
+ * Browser API modules the gateway can route, in canonical order. Identity owns
+ * /api/v1/auth, /identity, /audit, /admin and /commercial.
+ */
+export const apiRouteModules = ['identity', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach'] as const;
+export type ApiRouteModule = typeof apiRouteModules[number];
+
+/**
+ * The launch module set (MOD-1): only Identity and EHR routes are proxied.
+ * Lab, Pharmacy, OCR and Outreach answer 404 at the gateway until a recorded
+ * decision, their own fixes and a staging acceptance run enable them.
+ */
+export const launchApiRoutes: readonly ApiRouteModule[] = ['identity', 'ehr'];
+
 export interface HidEnvironmentConfig {
   readonly name: EnvironmentName;
   readonly profile: DeploymentProfile;
@@ -52,6 +66,9 @@ export interface HidEnvironmentConfig {
   // Deliberately opt-in at synth time. The default task definition contains
   // no QoreID credential reference and application calls remain disabled.
   readonly qoreIdEnabled: boolean;
+  // The gateway's HID_ENABLED_API_ROUTES (deny by default). Synth input
+  // HID_ENABLED_API_ROUTES; production accepts only the launch set.
+  readonly enabledApiRoutes: readonly ApiRouteModule[];
 }
 
 interface ProfileValues {
@@ -155,10 +172,53 @@ const environmentIdentity: Record<EnvironmentName, Pick<HidEnvironmentConfig,
   },
 };
 
+/**
+ * Parses the synth input HID_ENABLED_API_ROUTES: a comma-separated list of
+ * exact module names that always includes identity and ehr. Production may
+ * not route a module outside the launch set; enabling one there needs its own
+ * decision and a change to this rule.
+ */
+export function enabledApiRoutes(name: EnvironmentName, value: string | undefined): readonly ApiRouteModule[] {
+  if (value === undefined) return launchApiRoutes;
+  const entries = value.split(',').map((entry) => entry.trim());
+  const unknown = entries.filter((entry) => !(apiRouteModules as readonly string[]).includes(entry));
+  if (unknown.length > 0) {
+    throw new Error(`HID_ENABLED_API_ROUTES must name only ${apiRouteModules.join(', ')}; received ${JSON.stringify(value)}`);
+  }
+  if (new Set(entries).size !== entries.length) {
+    throw new Error(`HID_ENABLED_API_ROUTES must name each module once; received ${JSON.stringify(value)}`);
+  }
+  for (const required of launchApiRoutes) {
+    if (!entries.includes(required)) throw new Error(`HID_ENABLED_API_ROUTES must include ${required}`);
+  }
+  const selected = apiRouteModules.filter((module) => entries.includes(module));
+  if (name === 'production' && selected.some((module) => !launchApiRoutes.includes(module))) {
+    throw new Error(`HID_ENABLED_API_ROUTES in production is fixed to ${launchApiRoutes.join(',')} (the launch module set); `
+      + 'enabling another module needs its own decision, its fixes and a staging acceptance run');
+  }
+  return selected;
+}
+
+/** The Amazon-provided DNS server of an IPv4 VPC: the CIDR's base address plus two. */
+export function vpcDnsResolver(vpcCidr: string): string {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(vpcCidr);
+  if (!match) throw new Error(`VPC CIDR must be IPv4; received ${vpcCidr}`);
+  const octets = match.slice(1, 5).map(Number);
+  const prefix = Number(match[5]);
+  if (octets.some((octet) => octet > 255) || prefix < 16 || prefix > 28) {
+    throw new Error(`VPC CIDR is not a valid VPC range; received ${vpcCidr}`);
+  }
+  const address = octets.reduce((total, octet) => total * 256 + octet, 0);
+  const base = address - (address % 2 ** (32 - prefix));
+  const resolver = base + 2;
+  return [24, 16, 8, 0].map((shift) => Math.floor(resolver / 2 ** shift) % 256).join('.');
+}
+
 export function environmentConfig(
   value: string | undefined,
   stagingModeValue?: string,
   qoreIdEnabledValue?: string,
+  enabledApiRoutesValue?: string,
 ): HidEnvironmentConfig {
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
@@ -184,6 +244,7 @@ export function environmentConfig(
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
     qoreIdEnabled: qoreIdEnabledInput === 'true',
+    enabledApiRoutes: enabledApiRoutes(name, enabledApiRoutesValue),
   };
 }
 

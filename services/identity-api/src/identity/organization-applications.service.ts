@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { createHmac, randomBytes } from 'node:crypto';
-import { isIP } from 'node:net';
 import type { QueryResultRow } from 'pg';
+import { publicClientNetwork } from '../common/client-network';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest, PlatformAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -301,8 +301,10 @@ export class OrganizationApplicationsService {
 
   private publicNetworkDigest(remoteIp: string | undefined): string {
     const environment = getEnvironment();
-    if (!remoteIp || isIP(remoteIp) === 0
-      || (environment.NODE_ENV === 'production' && !environment.OTP_HMAC_KEY_B64)) {
+    // The client network (IPv4 address or IPv6 /64); in production never one
+    // of our own proxies, which every client would share (IP-1).
+    const network = publicClientNetwork(remoteIp, environment);
+    if (!network || (environment.NODE_ENV === 'production' && !environment.OTP_HMAC_KEY_B64)) {
       throw new DomainProblem(503, 'APPLICATION_RATE_LIMIT_UNAVAILABLE',
         'Organization application intake is temporarily unavailable');
     }
@@ -310,7 +312,7 @@ export class OrganizationApplicationsService {
       ? Buffer.from(environment.OTP_HMAC_KEY_B64, 'base64') : localApplicationHmacKey;
     return createHmac('sha256', key)
       .update('public-organization-application-ip\0', 'utf8')
-      .update(remoteIp, 'utf8').digest('hex');
+      .update(network, 'utf8').digest('hex');
   }
 }
 

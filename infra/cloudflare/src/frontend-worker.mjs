@@ -6,6 +6,7 @@ import {
 const API_PATH = /^\/api\/v1(?:\/|$)/
 const CORRELATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/
 const ORIGIN_AUTH_TOKEN = /^[A-Za-z0-9._~+/-]{32,256}$/
+const IPV4_ADDRESS = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/
 
 const DEPLOYMENT_PROFILES = Object.freeze({
   production: Object.freeze({
@@ -125,14 +126,35 @@ function applicationRouteRedirect(request, requestUrl, deployment) {
   )
 }
 
+// The client address Cloudflare observed, as one canonical IPv4 or IPv6
+// address, or null. IPv4 must be four plain decimal octets; IPv6 is parsed by
+// the URL host parser (no zone identifier) and serialized in its canonical
+// form. A list, a port, brackets or anything else is not an address.
+function clientAddress(value) {
+  if (typeof value !== 'string') return null
+  if (IPV4_ADDRESS.test(value)) return value
+  if (!/^[0-9A-Fa-f:.]{2,45}$/.test(value) || !value.includes(':')) return null
+  try {
+    return new URL(`http://[${value}]/`).hostname.slice(1, -1)
+  } catch {
+    return null
+  }
+}
+
 async function proxyApi(request, deployment, requestUrl) {
   const requestCorrelationId = correlationId(request)
   const upstream = new URL(requestUrl.pathname + requestUrl.search, deployment.origin)
   const headers = new Headers(request.headers)
+  // Read before the forwarding headers are discarded. Cloudflare sets
+  // CF-Connecting-IP on every inbound request, so a client cannot choose it.
+  const client = clientAddress(request.headers.get('cf-connecting-ip'))
   for (const name of [
     'cf-connecting-ip', 'cf-ipcountry', 'cf-ray', 'forwarded', 'host', 'x-forwarded-for',
-    'x-forwarded-host', 'x-forwarded-proto', 'x-hid-edge-origin', 'x-real-ip',
+    'x-forwarded-host', 'x-forwarded-proto', 'x-hid-client-ip', 'x-hid-edge-origin', 'x-real-ip',
   ]) headers.delete(name)
+  // The only client address the AWS gateway trusts, and only from the VPC;
+  // without it the gateway refuses the request in staging and production.
+  if (client) headers.set('x-hid-client-ip', client)
   headers.set('x-correlation-id', requestCorrelationId)
   headers.set('x-forwarded-host', requestUrl.host)
   headers.set('x-forwarded-proto', 'https')

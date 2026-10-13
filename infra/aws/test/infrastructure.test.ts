@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { environmentConfig, externalAwsEnvironment } from '../src/config.js';
+import { environmentConfig, externalAwsEnvironment, vpcDnsResolver } from '../src/config.js';
 import { HidCostGovernanceStack } from '../src/cost-governance-stack.js';
 import { HidRegionalStack } from '../src/hid-regional-stack.js';
 import { costInventory } from '../src/cost-inventory.js';
@@ -886,5 +886,14 @@ test('the enabled API routes are an explicit, validated synth input that product
   for (const value of ['ehr', 'identity', '', 'identity,ehr,billing', 'identity,ehr,ehr', 'identity,ehr,LAB', 'identity;ehr']) {
     assert.throws(() => environmentConfig('staging', 'economy', undefined, value), /HID_ENABLED_API_ROUTES/,
       `HID_ENABLED_API_ROUTES=${JSON.stringify(value)} must be refused`);
+  }
+});
+
+test('the gateway resolver is the Amazon-provided DNS server of the VPC', () => {
+  assert.equal(vpcDnsResolver('10.40.0.0/16'), '10.40.0.2');
+  assert.equal(vpcDnsResolver('10.0.128.0/20'), '10.0.128.2');
+  assert.equal(vpcDnsResolver('172.31.255.0/24'), '172.31.255.2');
+  for (const value of ['10.40.0.0', '10.40.0.0/8', '10.40.0.0/29', '300.1.0.0/16', 'fd00::/56']) {
+    assert.throws(() => vpcDnsResolver(value), /VPC CIDR/, value);
   }
 });
