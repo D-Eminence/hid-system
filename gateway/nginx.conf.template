@@ -3,6 +3,20 @@
 # braced dollar reference is an environment variable; the Dockerfile defines a
 # local default for every one, because envsubst leaves undefined names in place.
 
+# Access log (D7). The image's own http-level access_log uses the stock format
+# "main", which logs "$request": the whole request line, query string included,
+# so administrator searches (names, emails, HIDs) would reach CloudWatch. The
+# server below logs this format instead: one JSON object per request with the
+# path ($uri, never the arguments), the method, status, timing and request ids.
+# Never add $request, $request_uri, $args, $query_string, $http_referer,
+# cookies or credentials to it. escape=json keeps a request from forging
+# fields.
+log_format hid_api escape=json '{"time":"$time_iso8601","client":"$remote_addr",'
+  '"method":"$request_method","path":"$uri","status":$status,"bytes":$body_bytes_sent,'
+  '"request_time":$request_time,"upstream_status":"$upstream_status",'
+  '"upstream_time":"$upstream_response_time","request_id":"$request_id",'
+  '"correlation_id":"$http_x_correlation_id"}';
+
 # Client address. Only the public ALB connects to the gateway, from inside the
 # VPC, and the WAF admits only requests carrying the Cloudflare Worker's origin
 # secret, so X-Real-IP on such a connection is the address the Worker took from
@@ -86,6 +100,20 @@ server {
   resolver ${GATEWAY_DNS_RESOLVER} valid=10s ipv6=off;
   resolver_timeout 5s;
 
+  # The image links this path to the container's stdout, as for its default log.
+  access_log /var/log/nginx/access.log hid_api;
+
+  # The largest JSON body a launch service accepts (ehr-api 512 KiB; identity-api
+  # refuses more than 256 KiB itself). The WAF no longer refuses every body over
+  # 8 KB on the clinical write routes (WAF-CRS-BODY), so this is the edge bound.
+  client_max_body_size 512k;
+  error_page 413 = @payload_too_large;
+  location @payload_too_large {
+    default_type application/problem+json;
+    add_header Cache-Control "no-store" always;
+    return 413 '{"type":"about:blank","title":"Payload too large","status":413,"detail":"The request body is larger than the service accepts.","code":"PAYLOAD_TOO_LARGE"}';
+  }
+
   add_header X-Content-Type-Options "nosniff" always;
   add_header Referrer-Policy "strict-origin-when-cross-origin" always;
   add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
@@ -103,6 +131,11 @@ server {
     return 200 '{"status":"ready"}';
   }
 
+  # Only for the errors nginx itself produces: an upstream that refuses or
+  # resets the connection, times out, does not resolve or closes without
+  # answering. An upstream's own 502/503/504 reaches the client unchanged, with
+  # its Problem Details code, Set-Cookie and Retry-After (A8): no location sets
+  # proxy_intercept_errors, so nginx's default (off) applies.
   error_page 502 503 504 = @upstream_unavailable;
   location @upstream_unavailable {
     default_type application/problem+json;
@@ -250,7 +283,10 @@ server {
     proxy_pass $hid_upstream;
   }
   location ^~ /api/v1/ehr/ {
-    location ~* ^/api/v1/ehr/internal(?:/|$) {
+    # documents/scan-events is the document scanner's callback, a
+    # workload-authenticated service route like /internal; the scanner calls
+    # ehr-api on its private service name when uploads ship (D5).
+    location ~* ^/api/v1/ehr/(?:internal|documents/scan-events)(?:/|$) {
       add_header Cache-Control "no-store" always;
       return 404 '{"type":"about:blank","title":"Not found","status":404,"code":"API_ROUTE_NOT_FOUND"}';
     }

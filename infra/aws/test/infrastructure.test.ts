@@ -497,6 +497,7 @@ test('the WAF body-size rule is relaxed only for encounter-scoped clinical write
     for (const route of [
       `${encounter}/vitals`, `${encounter}/vitals/${uuid}/corrections`, `${encounter}/prescriptions/${uuid}/pharmacy-work-item`,
       `${encounter}/lab-requests/${uuid}/lab-work-item`, `${encounter}/clinical-notes/${uuid}/revisions/x`,
+      `${encounter}/diagnoses/${uuid}/revisions`, `${encounter}/prescriptions/${uuid}/revisions`,
       `${encounter}/clinical-notes/`, `${encounter}//clinical-notes`, `${encounter}/./clinical-notes`,
       `${encounter}/x/../clinical-notes`, `${encounter}/clinical%2Dnotes`, `${encounter}/CLINICAL-NOTES`,
       `/api/v1/ehr/patients/${uuid.toUpperCase()}/encounters`, `/api/v1/ehr/patients/x/encounters`,

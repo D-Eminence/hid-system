@@ -3,7 +3,7 @@
 // against the nginx model in ./nginx-config-model.mjs (nginx itself is not run).
 
 import assert from 'node:assert/strict'
-import { GatewayModel, renderTemplate, templateVariables } from './nginx-config-model.mjs'
+import { GatewayModel, expandIncludes, parseConfig, renderTemplate, templateVariables } from './nginx-config-model.mjs'
 
 /** Browser API prefixes and the upstream variable of the module that owns each. */
 export const routeOwners = Object.freeze([
@@ -24,6 +24,7 @@ export const internalRoutes = Object.freeze([
   '/api/v1/identity/outreach/patient-authorization',
   '/api/v1/ehr/internal/ocr/documents/0b9d2f9e-6b7c-4b55-9a39-1d3e0e7a1f11/source',
   '/api/v1/ehr/internal/ocr/patients/0b9d2f9e-6b7c-4b55-9a39-1d3e0e7a1f11/clinical-notes',
+  '/api/v1/ehr/documents/scan-events',
   '/api/v1/lab/work-items/accept-ehr-order',
   '/api/v1/lab/imports/from-ocr',
   '/api/v1/pharmacy/work-items/accept-ehr-prescription',
@@ -36,6 +37,22 @@ const client = '198.51.100.23'
 
 function problemCode(outcome) {
   return outcome.action === 'return' && outcome.body ? JSON.parse(outcome.body).code : undefined
+}
+
+/** Variables the access log must never record (request line, query, cookies, credentials). */
+export const forbiddenLogVariables = Object.freeze([
+  /\$request(?![_a-z])/, /\$request_uri\b/, /\$request_body\b/, /\$args\b/, /\$arg_/, /\$query_string\b/, /\$is_args\b/,
+  /\$http_referer\b/, /\$http_cookie\b/, /\$cookie_/, /\$http_authorization\b/, /\$http_x_csrf_token\b/,
+  /\$http_x_hid_origin_authorization\b/, /\$sent_http_set_cookie\b/, /\$upstream_http_set_cookie\b/,
+])
+
+// The largest body any launch service accepts as JSON (ehr-api 512 KiB).
+const maxBodyBytes = 512 * 1024
+
+function sizeInBytes(value) {
+  const match = /^(\d+)([kKmMgG]?)$/.exec(value ?? '')
+  assert.ok(match, `unparseable client_max_body_size ${value}`)
+  return Number(match[1]) * ({ '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 })[match[2].toLowerCase()]
 }
 
 /**
@@ -102,6 +119,39 @@ export function assertGatewayContract({ template, dockerfile, includes }) {
       assert.notEqual(outcome.action, 'proxy', `internal route ${uri} must not be proxied`)
     }
   }
+  // A8: an upstream's own error answer reaches the client unchanged; only the
+  // errors nginx produces itself get the bounded UPSTREAM_UNAVAILABLE answer.
+  const expanded = JSON.stringify(expandIncludes(parseConfig(renderTemplate(template, environment)), includes))
+  assert.doesNotMatch(expanded, /"name":"proxy_intercept_errors","args":\["on"\]/,
+    'the gateway must not replace upstream error answers (proxy_intercept_errors on)')
+  const pages = all.errorPages()
+  for (const status of ['502', '503', '504']) {
+    assert.equal(pages[status]?.target, '@upstream_unavailable', `nginx's own ${status} must answer UPSTREAM_UNAVAILABLE`)
+  }
+  assert.equal(problemCode(all.named('@upstream_unavailable')), 'UPSTREAM_UNAVAILABLE')
+  // D7: the server's own access log, without the request line or query string.
+  const format = all.logFormats.get('hid_api')
+  assert.ok(format, 'the gateway must define log_format hid_api')
+  assert.equal(format.escape, 'json', 'the access log must JSON-escape request values')
+  for (const variable of ['$request_method', '$uri', '$status', '$request_time', '$request_id']) {
+    assert.ok(format.format.includes(variable), `the access log must record ${variable}`)
+  }
+  for (const forbidden of forbiddenLogVariables) {
+    assert.doesNotMatch(format.format, forbidden, `the access log must not record ${forbidden}`)
+  }
+  assert.deepEqual(all.directives('access_log').map(item => item.args), [['/var/log/nginx/access.log', 'hid_api']],
+    'the server must replace the image\'s http-level access_log (format main logs the request line)')
+  // WAF-CRS-BODY: bodies are bounded at the largest service limit, with Problem Details.
+  assert.equal(pages['413']?.target, '@payload_too_large', 'an oversized body must answer Problem Details')
+  assert.equal(problemCode(all.named('@payload_too_large')), 'PAYLOAD_TOO_LARGE')
+  for (const [prefix] of routeOwners) {
+    const outcome = all.route({ method: 'POST', uri: `${prefix}/x`, peer: vpcPeer, headers: { 'x-real-ip': client } })
+    assert.deepEqual(outcome.accessLog, [['/var/log/nginx/access.log', 'hid_api']], `${prefix} must use the gateway access log`)
+    assert.ok(sizeInBytes(outcome.clientMaxBodySize) <= maxBodyBytes,
+      `${prefix} accepts bodies up to ${outcome.clientMaxBodySize}; the bound is 512k`)
+  }
+  assert.ok(all.directives('client_max_body_size').length === 1, 'the server must state the body bound explicitly')
+
   const launch = new GatewayModel(renderTemplate(template, { ...environment, HID_ENABLED_API_ROUTES: 'identity,ehr' }), includes)
   for (const [prefix, module] of routeOwners) {
     const outcome = launch.route({ uri: `${prefix}/x`, peer: vpcPeer, headers: { 'x-real-ip': client } })

@@ -205,6 +205,14 @@ for (const [app, base] of Object.entries(bases).filter(([name]) => name !== 'web
 }
 assert.match(gatewayConfig, /error_page 502 503 504 = @upstream_unavailable/)
 assert.match(gatewayConfig, /UPSTREAM_UNAVAILABLE/)
+// A8: an upstream's own 5xx keeps its code, Set-Cookie and Retry-After.
+assert.doesNotMatch(`${gatewayConfig}\n${proxyHeaders}`, /^\s*proxy_intercept_errors\s+on\s*;/m,
+  'gateway must not replace upstream error answers')
+// D7: the access log records the path, never the request line or query string.
+assert.match(gatewayConfig, /^\s*access_log \/var\/log\/nginx\/access\.log hid_api;/m, 'gateway must log with its own format')
+// WAF-CRS-BODY: the edge bound on request bodies, with a Problem Details 413.
+assert.match(gatewayConfig, /^\s*client_max_body_size 512k;/m, 'gateway must bound request bodies at 512 KiB')
+assert.match(gatewayConfig, /error_page 413 = @payload_too_large/)
 assert.match(proxyHeaders, /X-Forwarded-For \$remote_addr/, 'gateway must overwrite caller-supplied forwarding chains')
 assert.match(proxyHeaders, /if \(\$hid_client_address_missing\)[\s\S]*CLIENT_ADDRESS_REQUIRED/,
   'gateway must refuse an API request without a client address when required')

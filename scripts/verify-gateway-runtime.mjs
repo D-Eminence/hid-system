@@ -9,8 +9,8 @@
 //               X-Correlation-ID; only an upstream that refuses the connection
 //               or closes without answering gets 503 UPSTREAM_UNAVAILABLE.
 //   D7          the access log is one JSON object per request, with the path but
-//               never the query string, and the image's http-level "main" log
-//               (which logs the request line) receives nothing.
+//               never the query string, and the image's http-level "main" format
+//               (which logs the request line) records nothing.
 //   SCAN-EDGE   POST /api/v1/ehr/documents/scan-events (any spelling) answers
 //               404 API_ROUTE_NOT_FOUND and never reaches ehr-api.
 //   WAF-CRS-BODY  a 300 KiB clinical note body reaches ehr-api; a body over
@@ -99,7 +99,6 @@ const silent = createTcpServer(socket => socket.destroy())
 
 const temporary = await mkdtemp(join(tmpdir(), 'hid-gateway-runtime-'))
 let nginx
-let stdout = ''
 let stderr = ''
 try {
   const applicationPort = await listen(application)
@@ -127,6 +126,8 @@ try {
   const server = rendered
     .replace('listen 3000;', `listen 127.0.0.1:${gatewayPort};`)
     .replaceAll('/etc/nginx/hid-proxy-headers.conf', join(temporary, 'hid-proxy-headers.conf'))
+    // The image links /var/log/nginx/access.log to the container's stdout.
+    .replaceAll('/var/log/nginx/access.log', join(temporary, 'access.log'))
   for (const directory of ['client_body', 'proxy', 'fastcgi', 'uwsgi', 'scgi']) {
     await mkdir(join(temporary, directory), { recursive: true })
   }
@@ -157,9 +158,10 @@ try {
     '',
   ].join('\n'))
   await writeFile(join(temporary, 'image-access.log'), '')
+  await writeFile(join(temporary, 'access.log'), '')
 
-  nginx = spawn(nginxBinary, ['-p', temporary, '-c', join(temporary, 'nginx.conf')], { stdio: ['ignore', 'pipe', 'pipe'] })
-  nginx.stdout.on('data', chunk => { stdout += chunk })
+  nginx = spawn(nginxBinary, ['-p', temporary, '-e', join(temporary, 'error.log'), '-c', join(temporary, 'nginx.conf')],
+    { stdio: ['ignore', 'ignore', 'pipe'] })
   nginx.stderr.on('data', chunk => { stderr += chunk })
   const exited = new Promise(resolveExit => nginx.once('exit', code => resolveExit(code)))
   const deadline = Date.now() + 10_000
@@ -248,8 +250,8 @@ try {
     await send('GET', `/api/v1/admin/principals?query=${secretTerm}&page=2`)
     await send('GET', '/gateway-health/ready')
     await new Promise(done => setTimeout(done, 300))
-    const lines = stdout.split('\n').filter(Boolean)
-    assert.ok(lines.length >= 10, `expected access log lines on stdout, got ${lines.length}`)
+    const lines = (await readFile(join(temporary, 'access.log'), 'utf8')).split('\n').filter(Boolean)
+    assert.ok(lines.length >= 10, `expected gateway access log lines, got ${lines.length}`)
     for (const line of lines) {
       const entry = JSON.parse(line)
       assert.doesNotMatch(line, new RegExp(secretTerm), 'no query string is logged')

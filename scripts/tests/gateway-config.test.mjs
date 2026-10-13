@@ -379,12 +379,12 @@ test('the access log records method, path without its query, status, timing and 
   const sample = format.format.replace(/\$([a-z_]+)/g, (_whole, name) =>
     ['status', 'body_bytes_sent', 'request_time'].includes(name) ? '200' : 'value')
   assert.equal(typeof JSON.parse(sample), 'object')
-  assert.deepEqual(model.directives('access_log').map(item => item.args), [['/dev/stdout', 'hid_api']],
+  assert.deepEqual(model.directives('access_log').map(item => item.args), [['/var/log/nginx/access.log', 'hid_api']],
     'the server must replace the image\'s http-level access_log')
   for (const uri of ['/api/v1/admin/principals?query=Ada%20Obi', '/api/v1/ehr/patients/x/encounters?cursor=y', '/api/v2/x', '/']) {
-    assert.deepEqual(model.route({ uri, peer: alb, headers: viaEdge() }).accessLog, [['/dev/stdout', 'hid_api']], uri)
+    assert.deepEqual(model.route({ uri, peer: alb, headers: viaEdge() }).accessLog, [['/var/log/nginx/access.log', 'hid_api']], uri)
   }
-  assert.deepEqual(model.named('@upstream_unavailable').accessLog, [['/dev/stdout', 'hid_api']])
+  assert.deepEqual(model.named('@upstream_unavailable').accessLog, [['/var/log/nginx/access.log', 'hid_api']])
   assert.deepEqual(model.route({ uri: '/gateway-health/ready', peer: alb }).accessLog, [['off']])
 })
 
@@ -438,7 +438,7 @@ test('the container verifier contract accepts the shipped gateway and rejects ea
     ['the scanner callback proxied', { ...shipped, template: template.replace('|documents/scan-events)', ')') }],
     ['query strings logged', { ...shipped, template: template.replace('"path":"$uri"', '"path":"$request_uri"') }],
     ['the request line logged', { ...shipped, template: template.replace('"method":"$request_method"', '"request":"$request"') }],
-    ['the image access log kept', { ...shipped, template: template.replace(/\n\s*access_log \/dev\/stdout hid_api;/, '') }],
+    ['the image access log kept', { ...shipped, template: template.replace(/\n\s*access_log \/var\/log\/nginx\/access\.log hid_api;/, '') }],
     ['unbounded request bodies', { ...shipped, template: template.replace(/\n\s*client_max_body_size 512k;/, '') }],
     ['a larger body bound', { ...shipped, template: template.replace('client_max_body_size 512k;', 'client_max_body_size 10m;') }],
   ]) {
