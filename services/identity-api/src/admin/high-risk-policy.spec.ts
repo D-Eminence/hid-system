@@ -9,12 +9,14 @@ import { IntegrationAdminController } from '../integrations/integration-admin.co
 import { AdminController } from './admin.controller';
 import { PLATFORM_ACTION_POLICIES, platformActionPolicy, requiresTwoPersonApproval, type PlatformAction } from './high-risk-policy';
 import { PlatformSecurityController } from './platform-security.controller';
+import { WorkforceAdminController } from './workforce-admin.controller';
 
 interface PlatformRoute { controller: string; handler: string; method: RequestMethod; path: string;
   action?: string; permissions: readonly string[] }
 
 const controllers = [AdminController, PlatformSecurityController, IntegrationAdminController,
-  AdminOrganizationApplicationsController, AdminDemoRequestsController, PlatformAuthController];
+  AdminOrganizationApplicationsController, AdminDemoRequestsController, PlatformAuthController,
+  WorkforceAdminController];
 
 function platformRoutes(): PlatformRoute[] {
   const routes: PlatformRoute[] = [];
@@ -77,6 +79,8 @@ describe('central high-risk platform policy', () => {
     ['platform.integration.enable', 'critical'], ['platform.integration.pause', 'critical'],
     ['platform.integration.selection', 'critical'], ['platform.integration.fallback', 'critical'],
     ['platform.integration.credential-reference', 'critical'], ['platform.principals.export', 'critical'],
+    ['platform.workforce.attach', 'critical'], ['platform.workforce.attest', 'critical'],
+    ['platform.workforce.role.change', 'critical'], ['platform.workforce.membership.end', 'critical'],
     ['platform.facility.status', 'high'], ['platform.pricing.product', 'high'], ['platform.pricing.price', 'high'],
     ['platform.integration.configure', 'high'], ['platform.integration.test', 'high'],
     ['platform.organization-application.verify-cac', 'high'], ['platform.organization-application.approve', 'high'],
@@ -89,6 +93,26 @@ describe('central high-risk platform policy', () => {
     // Critical and high actions always need a recent TOTP step-up.
     expect(policy.stepUp).toBe(tier !== 'standard');
     if (tier === 'critical') expect(policy.reason).toBe(true);
+  });
+
+  it('guards every workforce command with the workforce permission, a reason, a version and a key (D14)', () => {
+    const workforce = routes.filter((route) => route.path.startsWith('admin/workforce/'));
+    expect(workforce.map((route) => `${route.method === RequestMethod.GET ? 'GET' : 'POST'} ${route.path}`).sort())
+      .toEqual(['GET admin/workforce/accounts/:accountId', 'POST admin/workforce/accounts/:accountId/attestations',
+        'POST admin/workforce/memberships', 'POST admin/workforce/memberships/:membershipId/end',
+        'POST admin/workforce/memberships/:membershipId/roles'].sort());
+    for (const route of workforce) expect(route.permissions).toEqual(['platform.workforce.manage']);
+    for (const action of ['platform.workforce.attach', 'platform.workforce.attest', 'platform.workforce.role.change',
+      'platform.workforce.membership.end'] as const) {
+      const policy = PLATFORM_ACTION_POLICIES[action];
+      expect(policy).toMatchObject({ permissions: ['platform.workforce.manage'], stepUp: true, reason: true,
+        idempotencyKey: true });
+      expect(policy.ifMatch).toBe(action !== 'platform.workforce.attach');
+    }
+    // A role grant is one step for the granter; its second person is the
+    // attestation reviewer, which the SQL command enforces.
+    expect(PLATFORM_ACTION_POLICIES['platform.workforce.role.change'].approval).toBe('independent-attestation');
+    expect(requiresTwoPersonApproval('platform.workforce.role.change')).toBe(false);
   });
 
   it('requires two-person approval for Super Admin grants and MFA resets only', () => {

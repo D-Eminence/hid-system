@@ -12,8 +12,12 @@
 // doctor's (vitals as first recorded, available documents, audit counts).
 // Staff sign in with the password and then an authenticator (MFA-1, 0088);
 // a staff session without MFA assurance is refused by EHR as by Identity.
-// Disposable copy of the owned synthetic rehearsal database; synthetic
-// accounts only.
+// Since 0084 it also checks that a signed note reaches the patient only with
+// its completed encounter and that the emergency summary leaves out the notes
+// of an encounter entered in error, and that the seeded doctor role, under
+// the launch module set, is refused the EHR lab-ordering, Lab and Pharmacy
+// write routes. Disposable copy of the owned synthetic rehearsal database;
+// synthetic accounts only.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -420,7 +424,70 @@ if (process.argv[2] === '--identity-child') {
     'The emergency summary audit does not record the count of each disclosed category');
     checks.push('the break-glass emergency summary returns every vital as first recorded, corrected or not, with no correction field, lists only the clean-scanned document, reports 50 of 51 encounters as truncated, and audits each category\'s count');
 
-    // 7. Every staff session is MFA-verified (MFA-1, 0088). A staff session
+    // 7. A signed note reaches the patient only with its completed encounter,
+    //    and the emergency summary leaves out the notes of an encounter
+    //    entered in error (0084): a note of the newest completed encounter, a
+    //    note of the open encounter, and a note of an encounter entered in
+    //    error, all signed.
+    const notes = { released: randomUUID(), open: randomUUID(), retracted: randomUUID(), retractedEncounter: randomUUID() };
+    const completedEncounter = (await owner.query(`select id from ehr.encounters where patient_id=$1 and status='completed'
+      order by started_at desc, id desc limit 1`, [ids.patient])).rows[0].id;
+    await database.fixture(async (client) => {
+      await client.query(`insert into ehr.encounters(id,patient_id,facility_id,created_by,created_by_membership_id,
+        encounter_type,status,started_at) values($1,$2,$3,$4,$5,'ambulatory','entered_in_error',
+        clock_timestamp()-interval '20 minutes')`,
+      [notes.retractedEncounter, ids.patient, ids.facility, ids.doctorAccount, ids.membership]);
+      for (const [note, encounterId] of [[notes.released, completedEncounter], [notes.open, ids.encounter],
+        [notes.retracted, notes.retractedEncounter]]) {
+        await client.query(`insert into ehr.clinical_notes(id,encounter_id,patient_id,facility_id,created_by,
+          created_by_membership_id,note_type,title,status,current_revision_no,signed_at,signed_by)
+          values($1,$2,$3,$4,$5,$6,'progress','Synthetic signed note','signed',1,clock_timestamp(),$5)`,
+        [note, encounterId, ids.patient, ids.facility, ids.doctorAccount, ids.membership]);
+        await client.query(`insert into ehr.clinical_note_revisions(clinical_note_id,patient_id,facility_id,revision_no,
+          content,change_reason,created_by,created_by_membership_id)
+          values($1,$2,$3,1,'Synthetic signed content','Synthetic fixture create',$4,$5)`,
+        [note, ids.patient, ids.facility, ids.doctorAccount, ids.membership]);
+      }
+    });
+    const ownNotes = await call(ehrBase, 'GET', '/ehr/me/records', { cookie: patient.cookie });
+    assert.equal(ownNotes.status, 200, JSON.stringify(ownNotes.body));
+    assert.deepEqual(ownNotes.body.notes.map((note) => note.id), [notes.released],
+      'GET /ehr/me/records released a signed note whose encounter is not completed');
+    const emergencyNotes = await call(ehrBase, 'GET', `/ehr/patients/${ids.patient}/emergency-records`,
+      { cookie: doctor.cookie, 'x-facility-id': ids.facility, 'x-purpose-of-use': 'emergency' });
+    assert.equal(emergencyNotes.status, 200, JSON.stringify(emergencyNotes.body));
+    assert.deepEqual(emergencyNotes.body.notes.map((note) => note.id).sort(), [notes.released, notes.open].sort(),
+      'The emergency summary does not show the signed notes of open and completed encounters, or shows one entered in error');
+    checks.push('a signed note reaches the patient only with its completed encounter (not the open encounter\'s, not one entered in error), and the emergency summary shows the open and completed encounters\' signed notes but not the note of an encounter entered in error');
+
+    // 8. The launch module set (0084): the seeded doctor role holds no EHR
+    //    lab-ordering, Lab or Pharmacy write permission, so the routes that
+    //    need one answer 403 before any write or call to Lab or Pharmacy.
+    const browserWrite = { ...clinical, origin: ORIGIN, 'x-csrf-token': doctor.csrf };
+    const labRequestCount = async () => Number((await owner.query(
+      'select count(*) from ehr.lab_requests where patient_id=$1', [ids.patient])).rows[0].count);
+    const labRequestsBefore = await labRequestCount();
+    const encounterBase = `/ehr/patients/${ids.patient}/encounters/${ids.encounter}`;
+    const refusedWrites = [
+      ['POST', `${encounterBase}/lab-requests`, { testCodeSystem: 'http://loinc.org', testCode: '718-7',
+        testDisplay: 'Haemoglobin', priority: 'routine', status: 'draft' }],
+      ['PATCH', `${encounterBase}/lab-requests/${randomUUID()}`, { status: 'active', expectedRowVersion: 1,
+        changeReason: 'Synthetic activation' }],
+      ['POST', `${encounterBase}/lab-requests/${randomUUID()}/lab-work-item`, { expectedRowVersion: 1 }],
+      ['POST', `${encounterBase}/prescriptions/${randomUUID()}/pharmacy-work-item`, { expectedRowVersion: 1,
+        reason: 'Synthetic Pharmacy handoff' }],
+    ];
+    for (const [method, path, body] of refusedWrites) {
+      const refused = await call(ehrBase, method, path, { ...browserWrite, 'idempotency-key': randomUUID() }, body);
+      assert.deepEqual([refused.status, refused.body?.code], [403, 'PERMISSION_DENIED'],
+        `${method} ${path} is not refused for lack of a launch-withdrawn permission: ${JSON.stringify(refused.body)}`);
+    }
+    assert.equal(await labRequestCount(), labRequestsBefore, 'A refused lab-request write stored a row');
+    const allowedRead = await call(ehrBase, 'GET', `${encounterBase}/lab-requests`, clinical);
+    assert.equal(allowedRead.status, 200, `lab-request read after the launch module set: ${JSON.stringify(allowedRead.body)}`);
+    checks.push('with the launch module set, the seeded doctor gets 403 PERMISSION_DENIED for creating or changing a lab request, sending one to Lab and sending a prescription to Pharmacy, with no row written, and can still read lab requests');
+
+    // 9. Every staff session is MFA-verified (MFA-1, 0088). A staff session
     //    whose family has no assurance row, as every sign-in from before staff
     //    MFA has, is refused by EHR through Identity's guard, and its refresh is
     //    refused and ends it. The reader's assurance row is removed as the

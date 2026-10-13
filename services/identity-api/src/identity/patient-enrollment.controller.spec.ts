@@ -93,17 +93,27 @@ describe('PatientEnrollmentController', () => {
     expect(service.verifyContact).toHaveBeenCalledWith('opaque-value', challenge, '123456', correlationId);
   });
 
-  it('rejects duplicate enrollment cookies and retains replay recovery after activation', async () => {
+  it('rejects duplicate enrollment cookies and expires the enrollment cookie in a successful activation response', async () => {
     await controller.current(request('hid_enrollment=first; hid_enrollment=second'));
     expect(service.current).toHaveBeenCalledWith(undefined, correlationId);
     const response = { clearCookie: jest.fn() };
-    await controller.activate({ password: 'a-strong-test-password' },
-      request('hid_enrollment=opaque-value'), response as unknown as Response);
+    await expect(controller.activate({ password: 'a-strong-test-password' },
+      request('hid_enrollment=opaque-value'), response as unknown as Response))
+      .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST' });
     expect(service.activate).toHaveBeenCalledWith('opaque-value', 'a-strong-test-password',
       correlationId, undefined);
-    // Activation keeps the enrollment cookie, so a lost response can be
-    // replayed; whether to retire it at activation waits on a product decision.
-    // Sign-in, refresh and sign-out retire it (AuthController).
+    // The response that carries the HID expires the cookie on its path (N2(b)):
+    // a lost response can still be replayed with the cookie, for 15 minutes.
+    expect(response.clearCookie).toHaveBeenCalledTimes(1);
+    expect(response.clearCookie).toHaveBeenCalledWith('hid_enrollment', {
+      secure: true, sameSite: 'strict', httpOnly: true, path: '/api/v1/identity/patient-enrollments',
+    });
+
+    // A refused activation keeps it.
+    response.clearCookie.mockClear();
+    service.activate.mockRejectedValueOnce(new Error('activation failed'));
+    await expect(controller.activate({ password: 'a-strong-test-password' },
+      request('hid_enrollment=opaque-value'), response as unknown as Response)).rejects.toThrow('activation failed');
     expect(response.clearCookie).not.toHaveBeenCalled();
   });
 

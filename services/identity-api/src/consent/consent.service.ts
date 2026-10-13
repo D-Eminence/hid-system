@@ -109,7 +109,9 @@ export class ConsentService {
    * grant made from it is active (effective status 'active'): the database
    * command returns no patient id otherwise (0086), and this projection keeps
    * it that way, so a request for a guessed HID never yields the patient id
-   * before the patient consents (PSEARCH-1).
+   * before the patient consents (PSEARCH-1). A withheld id is answered as
+   * `withheld-<last four characters of the request id>` with
+   * `patientIdWithheld: true`, never null.
    */
   async listMyStaffAccessRequests(context: DataAccessContext, query: ListStaffAccessRequestsDto) {
     try {
@@ -125,9 +127,17 @@ export class ConsentService {
            from identity.list_my_staff_access_requests($1)`,
           [query.status ?? null],
         );
-        return result.rows.map((row): Record<string, unknown> => ({
-          ...row, patientId: row.effectiveStatus === 'active' ? row.patientId ?? null : null,
-        }));
+        return result.rows.map((row): Record<string, unknown> => {
+          const named = row.effectiveStatus === 'active' && typeof row.patientId === 'string';
+          return {
+            ...row,
+            // A withheld id stays a string so that clients rendering its last
+            // characters keep working; it is derived from the request, never
+            // from the patient.
+            patientId: named ? row.patientId : `withheld-${String(row.accessRequestId).slice(-4)}`,
+            patientIdWithheld: !named,
+          };
+        });
       }, { readOnly: true });
     } catch (error) {
       throw this.translate(error);
@@ -223,8 +233,24 @@ export class ConsentService {
         return this.requireRow(result.rows[0]);
       });
     } catch (error) {
-      throw this.translate(error);
+      throw this.translateBreakGlass(error);
     }
+  }
+
+  /**
+   * identity.activate_break_glass (0031) refuses with 22023 and this message
+   * when no active 'emergency' purpose of use exists. The route always runs it
+   * with the emergency purpose, so here the refusal means emergency access is
+   * not enabled on the platform: 0082 seeds only direct-care, and 'emergency'
+   * is to be added only by a reviewed migration after the D9 and N3 decisions
+   * (P10). It is answered like the disabled platform control.
+   */
+  private translateBreakGlass(error: unknown): unknown {
+    if (isDatabaseError(error) && error.code === '22023'
+      && (error as unknown as { message?: unknown }).message === 'Break-glass requires the emergency purpose of use') {
+      return new DomainProblem(423, 'BREAK_GLASS_DISABLED', 'Emergency access is not enabled on this platform');
+    }
+    return this.translate(error);
   }
 
   /**

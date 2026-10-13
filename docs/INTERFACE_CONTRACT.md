@@ -7,11 +7,48 @@ hostname. The app-specific Cloudflare Worker proxies only that versioned
 namespace to the fixed AWS origin and never accepts an upstream from browser
 input. Cookie sessions are host-only; browser token storage is prohibited.
 
+The client address reaches the APIs through the edge only
+(D-Eminence/hid-system#65). The Worker replaces any caller-supplied
+`X-Real-IP` with the address Cloudflare reports, and the AWS gateway trusts
+that header only from the VPC and sends it on as `X-Forwarded-For`. In staging
+and production the gateway refuses an API request without a usable client
+address with `403 CLIENT_ADDRESS_REQUIRED`; a browser that reaches the API
+through a Worker with this change never sees it (a Worker built earlier sends
+no client address, so its API requests are refused). Every proxied API request
+whose target holds a backslash before the query or a `#` anywhere answers
+`400 INVALID_REQUEST_TARGET`; a browser's URL parser never sends either. The
+gateway proxies only the modules named in `HID_ENABLED_API_ROUTES`: at launch
+Identity (`/api/v1/auth`, `/identity`, `/audit`, `/admin`, `/commercial`) and
+EHR (`/api/v1/ehr`). Lab, Pharmacy, OCR and Outreach prefixes answer
+`404 API_ROUTE_NOT_FOUND`, as do the service-to-service routes
+(`/api/v1/auth/service-session`, `/api/v1/identity/service/*`,
+`/api/v1/identity/outreach/*`, `/api/v1/ehr/internal/*`, and the Lab and
+Pharmacy `accept-ehr-*` and `imports/from-ocr` routes) in any letter case or
+spelling nginx normalizes. Public IP-keyed limits (recovery start, patient
+enrollment start and contact, provider enrollment, organization application
+intake and profile completion) count per client network: an IPv4 address or an
+IPv6 /64. Without a usable client address, or, in production, with an address
+of one of the platform's own proxies, they answer their 503
+(`OTP_RATE_LIMIT_UNAVAILABLE` for recovery start,
+`ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
+`PROVIDER_ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
+`APPLICATION_RATE_LIMIT_UNAVAILABLE`) instead of sharing one bucket. The
+gateway passes a backend `503` to the browser as `503 UPSTREAM_UNAVAILABLE`
+(its `error_page` intercepts backend 502, 503 and 504), so clients must treat
+any 503 as unavailable rather than rely on the backend code.
+
 Authentication OTP commands are purpose-bound and use three stages: start
 returns a generic challenge, verify accepts exactly six digits and returns an
 opaque one-time completion credential, and complete consumes that credential.
 Identity calls Notification API directly over workload authentication; these
-credentials never use the ordinary-notification event path. Ordinary domain
+credentials never use the ordinary-notification event path. In production the
+Notification API runs the `otp-email-sms` profile (ADR-053,
+D-Eminence/hid-system#66): `POST /notifications/otp` delivers
+`email` through SES and `sms` through Termii and answers `400` for `whatsapp`
+without a provider attempt; Identity sends only `email` and `sms`. The `202`
+response's `requestId` is also the correlation id of the one PHI-free
+`notification.otp.outcome` log line written per send; when the fallback ran,
+that line also names the primary provider and its safe code. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
 Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
@@ -62,17 +99,21 @@ Google, the second factor or enrolment activation of a staff sign-in, and a
 refresh) or clears them also expires the public patient enrollment cookie
 `hid_enrollment` on its
 path, `/api/v1/identity/patient-enrollments` (HttpOnly, `SameSite=Strict`,
-`Secure` as above). That cookie lets `GET /identity/patient-enrollments/current`
-and an activation replay show the enrollment's HID on the enrolling device for
-up to 24 hours ([QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md));
-a signed-in patient reads the HID from `GET /identity/me`, and the enrollment
+`Secure` as above). So does every successful public enrollment activation
+response (`200`, a replay's included; BRANCH:launch/identity-enrollment-gates,
+not deployed). If that response is lost, the cookie lets
+`GET /identity/patient-enrollments/current` and an activation replay show the
+enrollment's HID on the enrolling device for 15 minutes after activation;
+after that both answer `404 ENROLLMENT_NOT_FOUND`
+([QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md)). A
+signed-in patient reads the HID from `GET /identity/me`, and the enrollment
 routes refuse while session cookies are present. Every other response leaves
-it: a refused sign-in, a pending Google enrollee (`202`), the staff password
-step and the email-code and enrolment-start steps, and each refresh or
-sign-out refusal that leaves the session cookies untouched or kept (below).
-Patient enrollment activation itself keeps it; provider enrollment activation
-(which now opens a staff MFA enrolment, below) expires it. Platform
-administration sign-in does not touch it.
+it: a refused sign-in or activation, a pending Google enrollee (`202`), the
+staff password step and the email-code and enrolment-start steps, and each
+refresh or sign-out refusal that leaves the session cookies untouched or kept
+(below). Provider enrollment activation (which now opens a staff MFA
+enrolment, below) expires it. Platform administration sign-in does not touch
+it.
 
 #### Staff sign-in with an authenticator (MFA-1, 0088)
 
@@ -136,7 +177,7 @@ recovery keeps it, and a mailbox alone never yields a staff session. Until a
 second enrolment channel exists (an open decision, D14 in
 `PHASE_3_LAUNCH_DECISIONS.md`), existing clinical accounts enrol before
 clinical roles are enabled, and operators review enrolments that followed a
-recovery (`PHASE_4_STAGE_5_RELEASE_READINESS.md` P11, `MIGRATION_RUNBOOK.md`
+recovery (`PHASE_4_STAGE_5_RELEASE_READINESS.md` P22, `MIGRATION_RUNBOOK.md`
 §6).
 
 A platform first enrolment (`POST /api/v1/auth/admin/mfa/enroll/start`) of an
@@ -315,6 +356,35 @@ and sign-out (since `22e8664`). Earlier Health-id builds and
 a cookie sign-out without a live access cookie ends whichever staff or patient
 sign-in the refresh cookie holds.
 
+### Staff facility binding (N5, migration 0087)
+
+A staff actor lists one entry per active membership (`actor.facilities`), and
+`X-Facility-ID` binds the entry whose `id` equals it. From 0087 an account
+holds at most one active, unheld membership per facility
+(`staff_memberships_one_active_per_facility_uq`), so a facility binds exactly
+one membership, its roles, its permissions and its consent grants. Entries are
+ordered by primary first, then facility name, facility id and membership id.
+Should two active memberships of one account at one facility ever be read
+anyway, Identity refuses to resolve the actor at all: sign-in, refresh,
+`GET /auth/session`, the service-session routes the other services call, and
+every staff request answer `409 FACILITY_MEMBERSHIP_AMBIGUOUS` until a platform
+administrator ends one of them. Nothing is bound by row order.
+
+A facility entry's `roles` are the codes of the membership's live, effective
+facility role assignments, the same assignments its `permissions` come from;
+the actor's `roles` and `role` and the access token's `roles` claim are those
+of the bound entry. A membership with no effective role is still listed, with
+`roles: []` and `permissions: []`. From 0087 the stored membership labels
+(`membership_role`, `app_role`) are not read for the actor. A facility role
+granted through workforce provisioning (§19) is effective only while the
+credential attestation it was granted on is current: when the attestation
+lapses, or the role is revoked, the role and its permissions disappear from
+`actor.facilities` at the next request (and from the token's `roles` claim
+when it is next issued). The workforce profile still lists a lapsed role, with
+`effective: false`. The principals list (`GET /admin/principals`) shows each
+membership's stored labels as `role` and `appRole`: the role it was activated
+with, which later grants and revokes do not change.
+
 ### Patient sessions and self service
 
 `POST /api/v1/auth/patient/login` accepts an email address or the issued HIDCode
@@ -331,7 +401,8 @@ patient mapping on use.
 `GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
 grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
 returns at most 50 completed encounters and 50 current signed/amended note
-revisions, after fresh Identity authorization through the EHR workload caller.
+revisions of completed encounters (since 0084), after fresh Identity
+authorization through the EHR workload caller.
 It names the other five record categories as withheld from the patient, not as
 absent (§11, "Record summaries").
 These routes accept no browser-selected patient identity. Patient record access
@@ -355,6 +426,12 @@ notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
 Activation also requires the platform `break_glass_enabled` control inside the
 activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
+It also requires an active `emergency` purpose of use, which no migration seeds
+(0082 seeds only `direct-care`); without it activation also returns
+`423 BREAK_GLASS_DISABLED` ("Emergency access is not enabled on this
+platform"), where it returned `400 INVALID_CONSENT_COMMAND`. Break-glass is off
+at launch (owner default, deny by default; release checklist P10 and P11): `break_glass_enabled`
+is false and no `emergency` code exists.
 The summary's sections, the read permission each needs, its limits and audit
 counts are in §11, "Record summaries".
 
@@ -390,10 +467,15 @@ it was revoked only after it lapsed), `closed` (by the requesting clinician) or
 filter accepts `pending`, `approved`, `denied`, `revoked`, `expired`, `active`
 and `closed`, and matches the request status or the effective status. Since
 0086 (PSEARCH-1) an item's `patientId` is the patient's id only while its
-`effectiveStatus` is `active`, and `null` for every other item (pending,
-denied, expired, closed, revoked); before, every item named its patient, so
-one request for a guessed HID and one list call disclosed the patient id
-before the patient answered. Until the role bootstrap of this
+`effectiveStatus` is `active`; for every other item (pending, denied, expired,
+closed, revoked) it is the non-identifying string
+`withheld-<last four characters of accessRequestId>`, and each item carries
+`patientIdWithheld` (`true` when withheld). The withheld value is derived from
+the request, never from the patient, and is a string rather than `null` so
+that a client rendering its last characters keeps working (Health-id
+`AccessRequests.tsx`). Before 0086, every item named its patient, so one
+request for a guessed HID and one list call disclosed the patient id before
+the patient answered. Until the role bootstrap of this
 fix, the Identity runtime could not execute `identity.list_my_staff_access_requests`,
 and every caller got `403 CONSENT_COMMAND_DENIED`.
 
@@ -633,8 +715,11 @@ approved service workload identity + exact caller name
 
 Identity validates both. Cookie mutation validation also propagates the exact
 Origin and CSRF header/cookie evidence. Production workload evidence is an
-issuer/JWKS-validated, audience-bound, unexpired JWT with an exact configured
-caller subject; local per-caller secrets are development-only.
+issuer/JWKS-validated, audience-bound, unexpired ES256 JWT with an exact
+configured caller subject, `exp` and `iat` (at most 300 seconds old and not
+issued in the future, 5 seconds of clock tolerance) and `token_use: workload`;
+any other token is refused `401` (ADR-047). Local per-caller secrets are
+development-only.
 
 Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 `POST` for cookie mutation revalidation. Patient decisions use
@@ -775,6 +860,41 @@ attempts that then fail (for example `503 ENROLLMENT_RECONCILIATION_REQUIRED`
 or `409 CONTACT_ALREADY_REGISTERED`). A malformed password (`400`), a missing
 or forged enrollment cookie (`404`) or an enrollment not yet at the password
 step (`409`) is refused first and not counted. Success bodies are unchanged.
+
+Changes of BRANCH:launch/identity-enrollment-gates (migration 0085; not
+deployed). Request and success bodies are unchanged:
+
+- `POST /api/v1/identity/patient-enrollments` checks the QoreID gate after
+  the Origin, Turnstile, signed-in-session and input checks and before
+  anything that reads the NIN's registration: `503 QOREID_DISABLED`,
+  `503 QOREID_NIN_ONLY_DISABLED` or `503 INTEGRATION_PAUSED`, the same for a
+  bound, a pending and an unknown NIN. A same-key resume is refused the same
+  way while the gate is closed. Before, a bound or pending NIN got
+  `409 NIN_ALREADY_REGISTERED` whatever the gate's state; with the gate open
+  it still does.
+- The same route answers `429 VERIFICATION_QUOTA_EXCEEDED` ("Verification
+  request limit reached; try again later") when the QoreID lookup quota
+  refuses the lookup: per client network (an IPv4 address or an IPv6 /64)
+  `PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX` (5) an hour and
+  `PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX` (15) a day, and
+  `PATIENT_ENROLLMENT_QOREID_DAILY_CAP` (200) a day across the platform. It is
+  charged only when QoreID is called: never for a resume, a duplicate or an
+  earlier refusal. A quota fault answers `503 VERIFICATION_QUOTA_UNAVAILABLE`.
+- `POST .../activate` answers `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED`
+  ("Verify your contact again before setting a password") when the contact
+  was proved more than 30 minutes earlier. The enrollment is back at the
+  contact step (`GET .../current` answers `stage: verify_contact` without a
+  contact): choose and prove a contact again (`POST .../contact`, then
+  `/contact/verify`). Nothing is created, and the attempt is not counted
+  against the activation budget unless the activation command made the
+  decision.
+- An enrollment activated more than 15 minutes ago answers
+  `404 ENROLLMENT_NOT_FOUND` on every enrollment route (`GET .../current`,
+  `POST .../activate`, `/contact`, `/contact/verify`, `/google`), without the
+  HID, as an unknown enrollment does. Within those 15 minutes `GET .../current`
+  and a replay still answer `stage: active` with the HID.
+- A successful activation response (`200`) expires `hid_enrollment`
+  ("Auth session contract", above).
 
 ### HID Resolution
 
@@ -983,6 +1103,81 @@ All writes require:
 * audit
 * appropriate concurrency protection
 
+### Launch module set
+
+Lab, Pharmacy, OCR and Outreach are off at launch (decision D17); EHR
+prescriptions and lab requests are records only. Migration 0084 withdrew
+`ehr.lab-request.write`, `lab.work-item.accept`, `lab.accession.create`,
+`pharmacy.work-item.accept` and `pharmacy.dispensing.create` from every role,
+so these routes answer `403 PERMISSION_DENIED` before any write or call to Lab
+or Pharmacy:
+
+- `POST` and `PATCH .../lab-requests` and `POST .../lab-requests/:requestId/lab-work-item`;
+- `POST .../prescriptions/:prescriptionId/pharmacy-work-item`;
+- Lab's EHR-order acceptance and accession creation, and Pharmacy's
+  acceptance and dispensing.
+
+The read permissions stay, so existing lab requests, prescriptions and Lab and
+Pharmacy records remain readable. Prescriptions are still created and changed
+in the EHR. An existing lab request changes status only through its
+encounter: cancelling the encounter cancels its open lab requests, and marking
+it entered in error marks them entered in error ("Encounter status and its
+records"). An open lab request of a completed encounter that is not
+retracted, or of an encounter that was already cancelled or entered in error,
+stays as it is. Re-enabling a module takes its own decision, its fixes, a
+staging acceptance run and a reviewed migration granting the permissions
+again; the sections on the Lab and Pharmacy handoffs below describe the routes
+as they work then.
+
+### Encounter status and its records
+
+An encounter's status decides what may still be recorded on it (CLIN-EIE,
+migration 0084). `PATCH /api/v1/ehr/patients/:patientId/encounters/:encounterId`
+moves an encounter only along these transitions; any other answers
+`409 INVALID_ENCOUNTER_TRANSITION`:
+
+| From | To |
+|---|---|
+| `planned` | `in_progress`, `cancelled`, `entered_in_error` |
+| `in_progress` | `on_hold`, `completed`, `cancelled`, `entered_in_error` |
+| `on_hold` | `in_progress`, `cancelled`, `entered_in_error` |
+| `completed` | `entered_in_error` |
+| `cancelled`, `entered_in_error` | none |
+
+Marking an encounter entered in error (a wrong-patient retraction, possible
+also after completion) marks, in the same transaction and under the
+encounter's row lock, its draft, signed and amended notes `entered_in_error`,
+its diagnoses' `verificationStatus` `entered_in_error`, and its draft, active
+and on-hold prescriptions and lab requests `entered_in_error`. Cancelling an
+encounter cancels its draft, active and on-hold prescriptions and lab
+requests, and leaves its notes and diagnoses. Completed orders and vitals keep
+their state. Each changed record gets a version carrying the request's
+`changeReason`, and the encounter's audit event (`ehr.encounter.update`)
+records `cascade`: the new status and the ids changed in each category
+(`clinicalNoteIds`, `diagnosisIds`, `prescriptionIds`, `labRequestIds`). The
+response is the encounter, as before; list the records to see the change.
+Lab and Pharmacy are not told (they are off at launch; Pharmacy refuses to
+dispense a prescription that is no longer active, 0080).
+
+Creates and order activations check the encounter, under a share lock, and
+answer `409 ENCOUNTER_NOT_OPEN` without writing anything:
+
+| Encounter | Notes (also OCR-imported), vitals, diagnoses, documents linked to it | New prescription or lab request; activating a draft one | Resuming an on-hold order |
+|---|---|---|---|
+| `planned`, `in_progress`, `on_hold` | allowed | allowed | allowed |
+| `completed` | allowed (late documentation, versioned and audited) | `409 ENCOUNTER_NOT_OPEN` | allowed |
+| `cancelled`, `entered_in_error` | `409 ENCOUNTER_NOT_OPEN` | `409 ENCOUNTER_NOT_OPEN` | `409 ENCOUNTER_NOT_OPEN` |
+
+An idempotent replay of an earlier create still returns its record. Changes
+to existing records are not checked against the encounter's status: a note
+amendment, a diagnosis update and a vital correction follow their own rules. A
+diagnosis whose `verificationStatus` is `entered_in_error` cannot be changed
+at all: `409 DIAGNOSIS_NOT_AMENDABLE`. A vital's recorded values are changed
+only by a correction (`POST .../vitals/:vitalId/corrections`); the database
+refuses any other update of them (D8). The database enforces each of these
+rules too, so a writer that bypasses the API gets the same refusal
+(`DATABASE.md`, "EHR clinical safety and launch module set (0084)").
+
 ### EHR lab requests sent to Lab
 
 EHR saves a lab request, then, when it is active, asks Lab to accept it
@@ -1090,8 +1285,8 @@ within its millisecond (earlier in that millisecond, or tied with a lower
 
 Two read-only summaries return the same seven arrays, each newest first:
 `encounters` (completed), `notes` (signed or amended, with the current
-revision's content), `vitals`, `diagnoses`, `prescriptions`, `labRequests` and
-`documents`.
+revision's content; which encounters' notes depends on the summary, below),
+`vitals`, `diagnoses`, `prescriptions`, `labRequests` and `documents`.
 
 - `GET /api/v1/ehr/me/records`: the patient's own records, from every facility.
 - `GET /api/v1/ehr/patients/:patientId/emergency-records`: the break-glass
@@ -1109,7 +1304,11 @@ Both also return:
 
 **Patient summary.** Only encounters and notes are released to the patient:
 `released` is `["encounters","notes"]` and `withheld` is
-`["vitals","diagnoses","prescriptions","labRequests","documents"]`. Which other
+`["vitals","diagnoses","prescriptions","labRequests","documents"]`. A note is
+released only once its encounter is completed (decision D7, since 0084): the
+notes of an encounter in progress, on hold, cancelled or entered in error are
+not returned, whatever the note's own status, and row-level security refuses
+them to the patient's session as well. Which other
 categories are released, and on which conditions, is an open product decision;
 this is the current default. The audit event `ehr.patient.self.records.read`
 records `encounterCount`, `noteCount` and `withheldCategories`.
@@ -1124,12 +1323,18 @@ require: vitals `ehr.vital.read`, diagnoses `ehr.diagnosis.read`, prescriptions
 authorization bypass: a category the reader lacks the permission for is
 withheld. The seeded doctor, clinician and nurse roles hold all seven.
 
+- `notes` leaves out the notes of an encounter entered in error (since 0084).
+  Notes of open, completed and cancelled encounters are returned; whether
+  cancelled encounters' notes belong in the summary is part of the open
+  break-glass scope decision (D9).
+
 - `documents` lists only documents whose effective status is `available`: the
   latest scan of the exact stored object version and SHA-256 is clean, the rule
   the download applies. Each has `status` `available`, `scanStatus` `clean`,
   and `mediaType` as the scan detected it (as declared if the scan named none).
 - `vitals` are returned as first recorded (the vital row's eight measurement
-  columns, which no API route changes), with the same fields as before; a
+  columns, which no API route changes and, since 0084, the database refuses
+  to change), with the same fields as before; a
   vital's corrections are not applied. Applying them is pending the product
   decision on correction semantics (proposed default: the current correction
   is the whole current set, as Health-id's clinician chart applies it); the
@@ -1586,7 +1791,7 @@ full history read records `lab.result.history.read`.
 
 ### Extracted Lab transport
 
-Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused by the guard (SQLSTATE `23514`, `409 LAB_ORDER_NOT_CURRENT`) for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets Lab's `409 IDEMPOTENCY_CONFLICT`, which the EHR create reports as `409 LAB_HANDOFF_REFUSED` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
+Public Lab routes remain `/api/v1/lab/*` through the gateway when the Lab module is enabled (`HID_ENABLED_API_ROUTES`; it is not in the launch set, so the gateway answers `404 API_ROUTE_NOT_FOUND` until it is). Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused by the guard (SQLSTATE `23514`, `409 LAB_ORDER_NOT_CURRENT`) for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets Lab's `409 IDEMPOTENCY_CONFLICT`, which the EHR create reports as `409 LAB_HANDOFF_REFUSED` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
 
 Lab answers EHR order acceptance (D-Eminence/hid-system#56):
 
@@ -1624,7 +1829,9 @@ terminal.
 ### Extracted Pharmacy transport
 
 Public Pharmacy reads and pharmacist commands remain
-`/api/v1/pharmacy/*` through the gateway. EHR prescription acceptance and OCR
+`/api/v1/pharmacy/*` through the gateway when the Pharmacy module is enabled
+(`HID_ENABLED_API_ROUTES`; it is not in the launch set, so the gateway answers
+`404 API_ROUTE_NOT_FOUND` until it is). EHR prescription acceptance and OCR
 medication import use internal-only routes with exact caller metadata. The
 shared Pharmacy client propagates bearer or Identity session-cookie user
 evidence, facility, purpose, correlation ID and idempotency key. Cookie
@@ -1698,6 +1905,125 @@ Operations aggregation forwards `X-Correlation-ID`, uses a 250–5000 ms
 configured bound (1500 ms default), reports each dependency independently,
 and whitelists terminal failure fields. No arbitrary retry command exists.
 
+### Workforce provisioning (launch decision D14, migration 0087)
+
+Clinicians are provisioned only by platform administrators holding
+`platform.workforce.manage` (granted to `platform_super_admin` only). A
+facility's `org_admin` has no route to grant itself or anyone a clinical role.
+Every route below is a platform route: it needs an MFA-verified platform
+session (`PLATFORM_SESSION_REQUIRED` otherwise) and the permission
+(`PERMISSION_DENIED`). Every command also needs a TOTP step-up from the last
+five minutes (`STEP_UP_REQUIRED` or `STEP_UP_EXPIRED`), `Idempotency-Key` (16
+to 128 URL-safe characters) and a `reason` of 8 to 500 characters; commands on
+an existing staff record or membership need `If-Match` with its version
+(`428 IF_MATCH_REQUIRED`, `409 VERSION_CONFLICT`). An exact replay returns the
+first answer with `replayed: true`; the same key with a different body is
+`409 IDEMPOTENCY_CONFLICT`. Commands answer `201`. Each new command records a
+platform-scoped audit event (`admin.workforce.membership.attached`,
+`admin.workforce.credential.attested`, `admin.workforce.role.granted`,
+`admin.workforce.role.revoked`, `admin.workforce.membership.ended`) with no
+facility or membership bound; the facility is in `details`.
+
+```text
+GET  /api/v1/admin/workforce/accounts/:accountId
+POST /api/v1/admin/workforce/memberships
+POST /api/v1/admin/workforce/accounts/:accountId/attestations
+POST /api/v1/admin/workforce/memberships/:membershipId/roles
+POST /api/v1/admin/workforce/memberships/:membershipId/end
+```
+
+`GET .../accounts/:accountId` returns `{ account: { id, email, displayName,
+status, version, patientAccount }, staff: { id, fullName, verificationStatus,
+active, version } | null, attestations: [{ id, attestedRoles,
+credentialReference, issuingAuthority, verificationMethod, evidenceReference,
+validUntil, current, reviewerAccountId, recordedAt }], memberships: [{ id,
+facilityId, facilityName, state, active, held, version, roles: [{ roleCode,
+effective, grantedAt }] }] }`. `state` is `pending`, `active`, `ended`, or
+`inactive` for an inactive membership the workforce commands never touched.
+`staff.version` is the `If-Match` of an attestation; a membership's `version`
+is the `If-Match` of its role and end commands.
+
+`POST .../memberships` attaches a staff identity to a verified facility. The
+body is `{ facilityId, accountId, reason }` for an existing staff account, or
+`{ facilityId, email, fullName, reason }` for a new one, never both and no
+password. The membership is created inactive (`state: pending`) and grants
+nothing. A new account is `pending_reset` with no password and a new staff
+record is `pending`: the clinician sets a password through the staff account
+recovery flow (`/auth/otp/*`), and cannot sign in before a role is granted. The
+answer is `{ membershipId, accountId, staffId, facilityId, state: "pending",
+accountStatus, accountCreated, membershipVersion, staffVersion, replayed }`.
+
+`POST .../accounts/:accountId/attestations` records a professional-credential
+attestation: `{ attestedRoles, credentialReference, issuingAuthority,
+verificationMethod: "manual_review", evidenceReference, validUntil, reason }`
+with `If-Match` the staff version. `attestedRoles` is one to three of
+`doctor`, `clinician`, `nurse`, each once. `validUntil` is an ISO 8601 time in
+the future and at most three years ahead; set it no later than the licence's
+expiry. `evidenceReference` names where the reviewed evidence is kept (a ticket
+or document reference), never the document itself. The administrator who
+records it is its reviewer and cannot attest for their own account. A
+`pending` staff record becomes `verified`. The answer is `{ attestationId,
+accountId, staffId, attestedRoles, verificationMethod, validUntil,
+verificationStatus, staffVersion, replayed }`. The evidence text is not copied
+into the audit event.
+
+`POST .../memberships/:membershipId/roles` grants or revokes one role:
+`{ facilityId, roleCode, action: "grant" | "revoke", reason }` with `If-Match`
+the membership version. `facilityId` must be the membership's facility.
+`grant` accepts `doctor`, `clinician` or `nurse`; `revoke` also accepts `lab`
+and `pharmacist`. A grant needs a current attestation for that role by a
+reviewer who is not the target, has no active membership at the facility and
+is not the administrator granting it, so a clinical role always takes two
+platform administrators. The first grant activates a pending membership. The
+answer is `{ membershipId, facilityId, roleCode, roleActive, membershipActive,
+state, version, attestationId, renewed, replayed }`; `attestationId` is null for
+a revoke.
+
+Renewal: a granted role rests on the attestation it was granted on, and a
+later attestation does not extend it by itself. To keep a clinician's role,
+record a new attestation (one administrator) and grant the role again (a
+second administrator, under the same rules). The grant renews the role, with
+`renewed: true`, when the role's attestation has lapsed, or before the lapse
+when the best current attestation lasts longer: the old assignment is revoked
+with the grant's reason and the new one rests on the new attestation, so the
+role stays effective without a gap. Otherwise a grant of a held role is
+`WORKFORCE_ROLE_ALREADY_ACTIVE`. A role granted by onboarding or the legacy
+promotion never lapses and is never renewed. The audit event of a grant
+carries `renewed` in `details`.
+
+`POST .../memberships/:membershipId/end` ends a membership for good:
+`{ facilityId, reason }` with `If-Match` the membership version. It
+deactivates the membership, revokes its facility roles, expires its pending
+access requests, revokes every active consent grant bound to it and, when the
+membership was active, revokes all the account's staff sessions (a staff
+session is not bound to one facility). A patient approval that commits while
+the end runs is counted in `revokedGrants`, not `expiredRequests`. An access
+request created and committed concurrently, after the end has read the
+pending requests, stays pending on the ended membership; it, and any grant
+approved from it, authorizes nothing, because every authorization needs an
+active membership. The answer is `{ membershipId, facilityId, accountId,
+state: "ended", revokedRoles, revokedGrants, expiredRequests, revokedSessions,
+version, replayed }`. To give the person access again, attach them again: a
+new membership starts pending.
+
+| Status and code | When |
+|---|---|
+| `400 WORKFORCE_COMMAND_INVALID` | The body names both or neither identity form, or a field is out of range |
+| `400 WORKFORCE_ROLE_NOT_GRANTABLE` | The role cannot be granted (or revoked) through this route |
+| `403 WORKFORCE_SELF_CHANGE_DENIED` | The target is the caller's own account or membership |
+| `403 WORKFORCE_FACILITY_CONFLICT` | The caller has an active membership at the facility (its `org_admin` included) and attaches or grants there |
+| `403 WORKFORCE_SECOND_PERSON_REQUIRED` | The only current attestation for the role was recorded by the caller |
+| `404 WORKFORCE_ACCOUNT_NOT_FOUND`, `WORKFORCE_STAFF_NOT_FOUND`, `WORKFORCE_FACILITY_NOT_FOUND`, `WORKFORCE_MEMBERSHIP_NOT_FOUND` | The named record does not exist |
+| `409 WORKFORCE_ATTESTATION_REQUIRED` | No current attestation for the role by an independent reviewer |
+| `409 WORKFORCE_ROLE_CONFLICT` | The membership holds `org_admin` or `admin`; an administering membership stays non-clinical |
+| `409 WORKFORCE_ROLE_ALREADY_ACTIVE`, `WORKFORCE_ROLE_NOT_ACTIVE` | Granting a held role that is not due for renewal (its attestation is current and no current attestation lasts longer, or it was not granted on an attestation), or revoking one the membership does not hold |
+| `409 WORKFORCE_MEMBERSHIP_EXISTS` | The account already has an active or pending membership at the facility |
+| `409 WORKFORCE_MEMBERSHIP_ENDED`, `WORKFORCE_MEMBERSHIP_INACTIVE`, `WORKFORCE_MEMBERSHIP_HELD` | The membership has ended, is inactive and was not attached by these commands, or is held for migration review |
+| `409 WORKFORCE_FACILITY_MISMATCH` | `facilityId` is not the membership's facility |
+| `409 WORKFORCE_FACILITY_NOT_VERIFIED` | The facility or its organization is not verified and active |
+| `409 WORKFORCE_ACCOUNT_INELIGIBLE`, `WORKFORCE_STAFF_INELIGIBLE` | The account is disabled, locked, deleted or a patient's own account, the staff record is inactive, or its verification status cannot be attested or granted |
+| `409 WORKFORCE_EMAIL_IN_USE` | A new identity's email is already used by an account or staff record |
+
 ## 20. Browser gateway and application contract
 
 The local one-origin gateway serves Web at `/` and proxies EHR, Lab, Pharmacy,
@@ -1710,6 +2036,9 @@ These UI prefixes are distinct from API ownership:
 API-owned. Browser applications call only gateway API paths with Identity
 cookies/CSRF, exact facility and purpose context, correlation, and idempotency
 where the owning command requires it. No browser calls an internal host/port.
+The production gateway proxies only the enabled modules (see the first
+section); a browser application for a module that is not enabled receives
+`404 API_ROUTE_NOT_FOUND` for its API calls.
 
 Pharmacy reads only existing work items/evidence and sends acceptance,
 dispensing, and reversal commands through the typed Pharmacy client. A UI state

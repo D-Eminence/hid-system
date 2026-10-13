@@ -39,9 +39,45 @@ const TRANSITIONS: Readonly<Record<EncounterStatus, readonly EncounterStatus[]>>
   [EncounterStatus.Planned]: [EncounterStatus.InProgress, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
   [EncounterStatus.InProgress]: [EncounterStatus.OnHold, EncounterStatus.Completed, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
   [EncounterStatus.OnHold]: [EncounterStatus.InProgress, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
-  [EncounterStatus.Completed]: [],
+  // A completed encounter documented on the wrong patient can still be retracted (CLIN-EIE).
+  [EncounterStatus.Completed]: [EncounterStatus.EnteredInError],
   [EncounterStatus.Cancelled]: [],
   [EncounterStatus.EnteredInError]: [],
+};
+
+const OPEN_ORDER_STATUSES = ['draft', 'active', 'on_hold'] as const;
+
+/** One step of closing an encounter: the records of `table` whose `column` is in `from` take `to`. */
+interface CloseStep {
+  table: 'clinical_notes' | 'diagnoses' | 'prescriptions' | 'lab_requests';
+  column: 'status' | 'verification_status';
+  from: readonly string[];
+  to: string;
+  key: 'clinicalNoteIds' | 'diagnosisIds' | 'prescriptionIds' | 'labRequestIds';
+}
+
+/**
+ * What closing an encounter does to its records, in the same transaction and
+ * under the encounter's row lock (CLIN-EIE). Entered in error retracts every
+ * note, diagnosis and open order of it: they belong to the wrong patient or to
+ * an encounter that did not happen. Cancelling cancels its open orders and
+ * keeps its notes and diagnoses. Completed and dispensed orders, and vitals
+ * (which have no status), keep their state.
+ */
+const CLOSE_STEPS: Readonly<Partial<Record<EncounterStatus, readonly CloseStep[]>>> = {
+  [EncounterStatus.EnteredInError]: [
+    { table: 'clinical_notes', column: 'status', from: ['draft', 'signed', 'amended'], to: 'entered_in_error',
+      key: 'clinicalNoteIds' },
+    { table: 'diagnoses', column: 'verification_status',
+      from: ['unconfirmed', 'provisional', 'differential', 'confirmed', 'refuted'], to: 'entered_in_error',
+      key: 'diagnosisIds' },
+    { table: 'prescriptions', column: 'status', from: OPEN_ORDER_STATUSES, to: 'entered_in_error', key: 'prescriptionIds' },
+    { table: 'lab_requests', column: 'status', from: OPEN_ORDER_STATUSES, to: 'entered_in_error', key: 'labRequestIds' },
+  ],
+  [EncounterStatus.Cancelled]: [
+    { table: 'prescriptions', column: 'status', from: OPEN_ORDER_STATUSES, to: 'cancelled', key: 'prescriptionIds' },
+    { table: 'lab_requests', column: 'status', from: OPEN_ORDER_STATUSES, to: 'cancelled', key: 'labRequestIds' },
+  ],
 };
 
 @Injectable()
@@ -168,10 +204,33 @@ export class EncountersService {
         );
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Encounter changed since it was loaded');
-        return { value: row, resourceId: encounterId, details: { rowVersion: row.rowVersion } };
+        const closing = input.status !== undefined && input.status !== current.status ? CLOSE_STEPS[input.status] : undefined;
+        const cascade = closing ? await this.closeRecords(client, row, closing) : undefined;
+        return { value: row, resourceId: encounterId,
+          details: { rowVersion: row.rowVersion, ...(cascade ? { cascade } : {}) } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
+  }
+
+  /**
+   * Applies the encounter's close steps. The encounter is locked FOR UPDATE,
+   * so no record can be added to it or activated meanwhile (each takes a share
+   * lock on it first, 0084). The change reason already set is recorded in each
+   * record's version; the ids changed go into the encounter's audit event.
+   */
+  private async closeRecords(client: PoolClient, encounter: EncounterRow, steps: readonly CloseStep[]) {
+    const cascade: Record<string, unknown> = { status: encounter.status };
+    for (const step of steps) {
+      const result = await client.query<{ id: string }>(
+        `update ehr.${step.table} set ${step.column} = $1
+         where encounter_id = $2 and patient_id = $3 and facility_id = $4 and ${step.column} = any($5::text[])
+         returning id`,
+        [step.to, encounter.id, encounter.patientId, encounter.facilityId, [...step.from]],
+      );
+      cascade[step.key] = result.rows.map((changed) => changed.id).sort();
+    }
+    return cascade;
   }
 
   private async findRow(client: PoolClient, patientId: string, facilityId: string, id: string): Promise<EncounterRow | undefined> {

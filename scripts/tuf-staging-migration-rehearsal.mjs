@@ -273,6 +273,12 @@ try {
       { role_code:'doctor', permission_code:'identity.patient-access-pin.verify' },
       { role_code:'nurse', permission_code:'identity.patient-access-pin.verify' },
     ]);
+    // 0084 (launch module set) withdraws the EHR lab-ordering, Lab and
+    // Pharmacy write permissions the baseline roles held from every role.
+    assert.deepEqual((await client.query(`select role_code, permission_code from auth.role_permissions
+      where permission_code = any($1::text[])`, [['ehr.lab-request.write', 'lab.work-item.accept',
+      'lab.accession.create', 'pharmacy.work-item.accept', 'pharmacy.dispensing.create']])).rows, [],
+    'Upgrade must leave no role holding a launch-withdrawn write permission');
     // The 0028 baseline holds no purpose-of-use code; 0082 seeds only
     // direct-care (emergency and healthcare-operations await product decisions).
     assert.deepEqual((await client.query(`select code, display, active, source_system
@@ -291,7 +297,8 @@ try {
     } finally { await client.query('rollback'); }
   });
   const upgradeAfter = await snapshot('hid_upgrade');
-  // identity.purpose_of_use_codes gains 0082's seed, checked exactly above.
+  // identity.purpose_of_use_codes gains 0082's seed, and auth.role_permissions
+  // loses 0084's launch-withdrawn write permissions, both checked above.
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
     'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes',
@@ -308,7 +315,7 @@ try {
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
-    purpose_of_use_seeded:['direct-care'],
+    purpose_of_use_seeded:['direct-care'],launch_write_permissions_withdrawn:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);
@@ -360,6 +367,10 @@ try {
   evidence.checks.platform_admin_runtime = JSON.parse(command('exact-role platform admin HTTP boundaries',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-platform-admin-runtime.mjs')],
     workflowEnvironment));
+  // N5 (0087): the legacy promotion's duplicate facility membership check against the real schema.
+  evidence.checks.membership_duplicates_runtime = JSON.parse(command('legacy promotion duplicate membership check',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-membership-duplicates-runtime.mjs')],
+    workflowEnvironment));
   evidence.checks.session_sign_out_runtime = JSON.parse(command('exact-role sign-out by refresh cookie and client-kind refresh',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-session-sign-out-runtime.mjs')],
     workflowEnvironment));
@@ -387,6 +398,7 @@ try {
   for (const [name, script] of [['pharmacy_runtime', 'services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs'],
     ['lab_runtime', 'services/lab-api/scripts/verify-lab-runtime.mjs'],
     ['ehr_lab_handoff_runtime', 'services/ehr-api/scripts/verify-ehr-lab-handoff-runtime.mjs'],
+    ['encounter_lifecycle_runtime', 'services/ehr-api/scripts/verify-encounter-lifecycle-runtime.mjs'],
     ['ocr_runtime', 'services/ocr-api/scripts/verify-ocr-runtime.mjs'],
     ['outreach_runtime', 'services/outreach-api/scripts/verify-outreach-runtime.mjs']]) {
     evidence.checks[name] = JSON.parse(command(`exact-role ${name.replace('_runtime', '')} HTTP write commands`,
@@ -438,6 +450,14 @@ try {
     ['-X', '-d', 'hid_owner_check', '-v', 'ON_ERROR_STOP=1', '-f', join(service, 'database/tests', name)]);
   evidence.checks.non_superuser_definer_owner = {role:'hid_synthetic_schema_owner',login:false,superuser:false,
     bypass_rls:false,definer_commands_checked:8,runtime_callers:'exact service roles',suites:additionalSuites};
+  // As RDS runs it, on a second disposable cluster whose roles a non-superuser
+  // creates: a NOSUPERUSER NOBYPASSRLS CREATEROLE administrator migrates 0001
+  // to the latest migration (SET ON PARAMETER held only for that run), runs the
+  // role bootstrap twice and db:verify-roles, and the runtime logins it creates
+  // pass db:verify-logins and read the platform controls.
+  evidence.checks.non_superuser_database = JSON.parse(command('non-superuser migration, role bootstrap, logins and controls',
+    process.execPath, [join(repository, 'scripts/verify-non-superuser-database.mjs'), '--pg-bindir', pgBindir]));
+  assert.equal(evidence.checks.non_superuser_database.status, 'passed');
   await writeFile(join(evidenceDirectory, 'before-counts-checksums.json'), JSON.stringify(before, null, 2) + '\n');
   await artifact('before-counts-checksums.json');
   process.stdout.write('Synthetic schema, baseline records, and pre-migration backup verified.\n');

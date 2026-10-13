@@ -1,6 +1,6 @@
 import { DomainProblem } from '../common/problem';
 
-/** Maps governed SQL command errors (0027, 0068-0070) to stable API problems. */
+/** Maps governed SQL command errors (0027, 0068-0070, 0087) to stable API problems. */
 export function adminCommandError(error: unknown): Error {
   if (error instanceof DomainProblem) return error;
   const message = typeof error === 'object' && error && 'message' in error ? String(error.message) : '';
@@ -22,6 +22,29 @@ export function adminCommandError(error: unknown): Error {
     ['ADMIN_APPROVAL_EXPIRED', 409, 'APPROVAL_EXPIRED', 'This request expired; create a new one'],
     ['ADMIN_TARGET_INELIGIBLE', 409, 'TARGET_INELIGIBLE', 'The account cannot receive this change in its current state'],
     ['ADMIN_MFA_NOT_ENROLLED', 409, 'MFA_NOT_ENROLLED', 'This administrator has no authenticator to reset'],
+    // Launch D14 workforce provisioning (0087).
+    ['WORKFORCE_SELF_CHANGE_DENIED', 403, 'WORKFORCE_SELF_CHANGE_DENIED', 'Administrators cannot provision their own facility access'],
+    ['WORKFORCE_FACILITY_CONFLICT', 403, 'WORKFORCE_FACILITY_CONFLICT', 'Administrators who work at this facility cannot provision its clinicians'],
+    ['WORKFORCE_SECOND_PERSON_REQUIRED', 403, 'WORKFORCE_SECOND_PERSON_REQUIRED', 'A clinical role needs a credential attestation recorded by another administrator'],
+    ['WORKFORCE_ATTESTATION_REQUIRED', 409, 'WORKFORCE_ATTESTATION_REQUIRED', 'No current credential attestation by an independent reviewer supports this role at this facility'],
+    ['WORKFORCE_ROLE_CONFLICT', 409, 'WORKFORCE_ROLE_CONFLICT', 'A facility administrator membership cannot hold a clinical role'],
+    ['WORKFORCE_ROLE_NOT_GRANTABLE', 400, 'WORKFORCE_ROLE_NOT_GRANTABLE', 'This role cannot be granted through workforce provisioning'],
+    ['WORKFORCE_ROLE_ALREADY_ACTIVE', 409, 'WORKFORCE_ROLE_ALREADY_ACTIVE', 'The membership already holds this role'],
+    ['WORKFORCE_ROLE_NOT_ACTIVE', 409, 'WORKFORCE_ROLE_NOT_ACTIVE', 'The membership does not hold this role'],
+    ['WORKFORCE_MEMBERSHIP_EXISTS', 409, 'WORKFORCE_MEMBERSHIP_EXISTS', 'The account already has an active or pending membership at this facility'],
+    ['WORKFORCE_MEMBERSHIP_ENDED', 409, 'WORKFORCE_MEMBERSHIP_ENDED', 'This membership has ended; attach the person again for new access'],
+    ['WORKFORCE_MEMBERSHIP_INACTIVE', 409, 'WORKFORCE_MEMBERSHIP_INACTIVE', 'This membership is inactive and was not attached through workforce provisioning'],
+    ['WORKFORCE_MEMBERSHIP_HELD', 409, 'WORKFORCE_MEMBERSHIP_HELD', 'This membership is held for migration review'],
+    ['WORKFORCE_FACILITY_MISMATCH', 409, 'WORKFORCE_FACILITY_MISMATCH', 'The membership belongs to another facility'],
+    ['WORKFORCE_FACILITY_NOT_VERIFIED', 409, 'WORKFORCE_FACILITY_NOT_VERIFIED', 'The facility is not verified and active'],
+    ['WORKFORCE_ACCOUNT_INELIGIBLE', 409, 'WORKFORCE_ACCOUNT_INELIGIBLE', 'The account cannot hold staff access in its current state'],
+    ['WORKFORCE_STAFF_INELIGIBLE', 409, 'WORKFORCE_STAFF_INELIGIBLE', 'The staff record is not in a state that can be attested or granted a role'],
+    ['WORKFORCE_EMAIL_IN_USE', 409, 'WORKFORCE_EMAIL_IN_USE', 'An account or staff record already uses this email; attach that account instead'],
+    ['WORKFORCE_MEMBERSHIP_NOT_FOUND', 404, 'WORKFORCE_MEMBERSHIP_NOT_FOUND', 'The membership was not found'],
+    ['WORKFORCE_FACILITY_NOT_FOUND', 404, 'WORKFORCE_FACILITY_NOT_FOUND', 'The facility was not found'],
+    ['WORKFORCE_ACCOUNT_NOT_FOUND', 404, 'WORKFORCE_ACCOUNT_NOT_FOUND', 'The account was not found'],
+    ['WORKFORCE_STAFF_NOT_FOUND', 404, 'WORKFORCE_STAFF_NOT_FOUND', 'The account has no staff record'],
+    ['WORKFORCE_INVALID_COMMAND', 400, 'WORKFORCE_COMMAND_INVALID', 'The workforce command is invalid'],
   ];
   for (const [marker, status, code, detail] of problems) {
     if (message.includes(marker)) return new DomainProblem(status, code, detail);

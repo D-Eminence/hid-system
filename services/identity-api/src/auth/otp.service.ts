@@ -3,6 +3,7 @@ import { type BeforeApplicationShutdown, Inject, Injectable, Logger, Optional } 
 import * as argon2 from 'argon2';
 import type { PoolClient } from 'pg';
 import { AFTER_RESPONSE_SHUTDOWN_GRACE_MS, AfterResponseTasks } from '../common/after-response-tasks';
+import { publicClientNetwork } from '../common/client-network';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
@@ -118,7 +119,14 @@ export class OtpService implements BeforeApplicationShutdown {
   }> {
     this.assertConfigured();
     const identifier = input.identifier.trim();
-    const ipHmac = this.hmac('ip', input.remoteIp ?? 'unavailable');
+    // The client network (an IPv4 address or an IPv6 /64). Without one, or
+    // with one of our own proxies in production, every client would share one
+    // bucket, so recovery answers 503 instead, for every identifier alike (IP-1).
+    const network = publicClientNetwork(input.remoteIp, this.environment);
+    if (!network) {
+      throw new DomainProblem(503, 'OTP_RATE_LIMIT_UNAVAILABLE', 'Verification codes are temporarily unavailable');
+    }
+    const ipHmac = this.hmac('ip', network);
     // Email addresses and HIDs are both matched without regard to case. Each
     // recovery page keeps its own cooldown, so a start on another page (which
     // reaches no account) never holds back the account's own page.

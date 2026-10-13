@@ -298,6 +298,6 @@ contract. Not deployed.
   way. Once an account has a factor, a mailbox alone never yields a staff
   session. Enrol every clinical account (or provision through provider
   activation) before granting clinical roles, review enrolments that followed
-  a recovery (release checklist P11, `MIGRATION_RUNBOOK.md` §6), and treat an
+  a recovery (release checklist P22, `MIGRATION_RUNBOOK.md` §6), and treat an
   unexpected `auth.staff.mfa.enrolled` as an incident. A second enrolment
   channel that does not rest on the mailbox is an open decision (D14).

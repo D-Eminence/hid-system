@@ -29,8 +29,13 @@ export interface PlatformActionPolicy {
   readonly reason: boolean;
   readonly ifMatch: boolean;
   readonly idempotencyKey: boolean;
-  /** Two-person approval: the one-step command is refused for this case. */
-  readonly approval: 'none' | 'two-person' | 'two-person-for-super-admin-grant';
+  /**
+   * Two-person approval: the one-step command is refused for this case.
+   * 'independent-attestation' (D14): the command runs in one step, but the SQL
+   * command accepts it only on a current credential attestation recorded by
+   * another administrator who does not work at the facility.
+   */
+  readonly approval: 'none' | 'two-person' | 'two-person-for-super-admin-grant' | 'independent-attestation';
 }
 
 const critical = { tier: 'critical', stepUp: true, reason: true } as const;
@@ -75,6 +80,15 @@ export const PLATFORM_ACTION_POLICIES = {
   // Exports leave the platform's control once downloaded.
   'platform.principals.export': { ...critical, permissions: ['platform.principal.export'], ifMatch: false,
     idempotencyKey: false, approval: 'none' },
+  // Workforce provisioning (launch D14, 0087): clinical access for a facility.
+  'platform.workforce.attach': { ...critical, permissions: ['platform.workforce.manage'], ifMatch: false,
+    idempotencyKey: true, approval: 'none' },
+  'platform.workforce.attest': { ...critical, permissions: ['platform.workforce.manage'], ifMatch: true,
+    idempotencyKey: true, approval: 'none' },
+  'platform.workforce.role.change': { ...critical, permissions: ['platform.workforce.manage'], ifMatch: true,
+    idempotencyKey: true, approval: 'independent-attestation' },
+  'platform.workforce.membership.end': { ...critical, permissions: ['platform.workforce.manage'], ifMatch: true,
+    idempotencyKey: true, approval: 'none' },
   // Facility, provider onboarding and pricing.
   'platform.facility.status': { ...high, permissions: ['platform.facility.manage'], reason: true, ifMatch: true,
     idempotencyKey: true, approval: 'none' },

@@ -61,7 +61,11 @@ The executable covers:
    refused (with D-Eminence/hid-system#52 it also reads the
    patient's record summary and two break-glass emergency summaries, a reader
    lacking four category read permissions and the doctor, with their audit
-   events); and `outreach_cookie_read_runtime`
+   events; with 0084 it also checks that the patient receives a signed note
+   only with its completed encounter and that the emergency summary leaves out
+   the notes of an encounter entered in error, and that the seeded doctor is
+   refused `403 PERMISSION_DENIED` on the lab-request write, send-to-Lab and
+   send-to-Pharmacy routes the launch module set withdrew); and `outreach_cookie_read_runtime`
    (`services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs`,
    D-Eminence/hid-system#43), which runs Outreach as
    `hid_outreach_api_runtime` and Identity as `hid_identity_api_runtime`: a
@@ -73,7 +77,14 @@ The executable covers:
    (`verify-patient-enrollment-runtime.mjs`) runs public NIN enrollment through
    activation, sign-in, refresh, recovery and sign-out, with QoreID (behind the
    real adapter), Siteverify and delivery stubbed (see
-   [QoreID verification](QOREID_VERIFICATION_CONTRACT.md)).
+   [QoreID verification](QOREID_VERIFICATION_CONTRACT.md)); with migration
+   0085 it also checks that the enrollment gate answers bound, pending and
+   unknown NINs alike while closed, the 15-minute HID re-display and
+   30-minute contact proof windows, and the QoreID lookup quota per IPv6 /64
+   and per day across the platform. The rehearsal runs 0085's two SQL suites
+   (`public-patient-enrollment-windows.integration.sql`,
+   `public-patient-nin-quota.integration.sql`) with the additional suites;
+   0085 changes no row of a table the 0028 upgrade check compares.
    `session_sign_out_runtime` (`verify-session-sign-out-runtime.mjs`,
    D-Eminence/hid-system#39) covers sign-out by refresh cookie after the access
    cookie has expired, and refresh and sign-out refused with
@@ -81,6 +92,18 @@ The executable covers:
    application. It also covers an older rotated token, which ends its sign-in
    whichever application signs out; a sign-out during a timed account
    suspension; and two concurrent sign-outs with one cookie, recorded once.
+   After them the module verifiers run on disposable copies with the other
+   services faked, among them `encounter_lifecycle_runtime`
+   (`services/ehr-api/scripts/verify-encounter-lifecycle-runtime.mjs`, 0084):
+   EHR as `hid_ehr_api_runtime` refuses new orders on a completed encounter
+   and every record on one entered in error (`409 ENCOUNTER_NOT_OPEN`),
+   retracts an encounter's notes, diagnoses and open orders when it is marked
+   entered in error (versions and audit included), cancels open orders with
+   the encounter, makes a retraction wait for a child create holding the
+   encounter, and lets activations race retractions without a deadlock. The
+   Lab, Pharmacy, OCR and EHR-to-Lab verifiers give their actors the Lab and
+   Pharmacy write permissions through their fake Identity, so 0084's
+   withdrawal of those permissions from the seeded roles does not affect them.
    With 0086 (`BRANCH:launch/identity-recovery-search`): `otp_runtime` also
    requires a completed recovery to revoke the account's Google link and keep
    its `legacy-identity` provenance record, a start
@@ -106,6 +129,30 @@ The executable covers:
    the actor and facility budgets to answer `429`. The rehearsal also runs
    the new rollback-only `patient-search.integration.sql` with the additional
    suites.
+   `platform_admin_runtime` (`verify-platform-admin-runtime.mjs`) also
+   provisions a clinician through the workforce routes of migration 0087
+   (launch decision D14, BRANCH:launch/staff-workforce-provisioning): a new
+   staff identity is attached to a verified facility as a pending membership,
+   one Super Admin records the credential attestation, the same administrator
+   is refused the grant (`WORKFORCE_SECOND_PERSON_REQUIRED`) and a second one
+   grants `doctor`; the clinician then signs in, is refused the patient lookup
+   before consent, creates access requests (`201`), and after the patient's
+   approval the lookup succeeds (with the status the route declares: `201`
+   until 0086 and `200` with it); the facility's `org_admin` is refused it
+   (`PERMISSION_DENIED`). A revoke leaves the clinician's actor with no role
+   and no permission, and a new grant restores `doctor`. The membership is
+   then ended while a patient approval holds its access request FOR UPDATE
+   and a staff transaction holds the membership's KEY SHARE and then asks for
+   its account's: neither deadlocks, the end waits for the approval, revokes
+   both grants (the new one included), expires the other pending request and
+   signs the clinician out (`401`). The verifier provides `StaffSearchBudget`
+   whenever the source has it, so it runs before and after 0086.
+   `membership_duplicates_runtime` (`verify-membership-duplicates-runtime.mjs`,
+   N5) runs the legacy promotion's membership uniqueness check against a
+   disposable copy of the rehearsal schema: a staged membership beside an
+   active, unheld membership the target holds is refused (and would break the
+   N5 index); an exact re-promotion and memberships beside inactive, held or
+   other facilities' ones are accepted; staged duplicates are refused.
    With 0088 (`BRANCH:launch/staff-mfa`): every verifier that signs staff in
    does it with password and authenticator (`staff-session-client.mjs`: the
    password step, the emailed enrolment code on a first sign-in, then a TOTP
@@ -137,11 +184,37 @@ The executable covers:
    Separately build a synthetic `0028` database with historical staff sessions,
    verified OTP challenges and registration outbox records; back it up, dry-run
    and apply `0029`–`0034`, verify preservation, fail-closed old OTP behavior,
-   the new cutover controls, and minimal verification-evidence boundaries, then
+   the new cutover controls, and minimal verification-evidence boundaries (and,
+   since 0084, that no role holds a launch-withdrawn Lab, Pharmacy or EHR
+   lab-ordering write permission), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites
    with exact runtime callers so superuser function ownership cannot hide RLS failures.
+   Then `scripts/verify-non-superuser-database.mjs` runs the chain as RDS runs
+   it, on a second disposable Unix-socket cluster of its own whose cluster
+   superuser acts only where the RDS master would. That superuser creates a
+   `NOSUPERUSER NOBYPASSRLS CREATEROLE NOCREATEDB` LOGIN administrator and a
+   database it owns. As that administrator the script checks that a migration
+   run without `SET ON PARAMETER plpgsql.variable_conflict` stops at 0015 with
+   0001-0014 committed; with the grant it applies 0015 to the latest migration,
+   and the grant is revoked afterwards. It then runs the role bootstrap twice,
+   each run overlapping a transaction that holds a lock on
+   `platform.control_settings` and then locks `identity.outbox_events`, as a
+   break-glass activation does: the first run must wait for the control table
+   holding no application table lock, the second must take no lock on it. It
+   runs `db:verify-roles`, checks that it refuses an `ADMIN OPTION`-only grant
+   of `hid_ocr_queue_metrics` to `hid_ocr_worker`, creates one LOGIN per
+   runtime credential as the administrator and passes
+   `db:verify-logins` for all ten, and checks that `db:verify-logins` refuses
+   the administrator's URL, a login with an extra role and another service's
+   login. `platform.control_enabled` must answer the Identity, EHR and
+   Outreach logins from the control rows, and the OCR worker login's claim
+   must reach the function's own authorization check without the parameter
+   privilege. It also runs `platform-control-owner.integration.sql` and
+   `function-parameter-settings.integration.sql`, removes its cluster, and is
+   recorded under `evidence.checks` as `non_superuser_database` (about 5 s
+   locally).
 2. Seed a separate synthetic canonical patient/account/facility/membership,
    encounter, clinical note/revision and audit event before backup. Record
    per-table counts and deterministic sorted-row SHA-256 plus sequence state.

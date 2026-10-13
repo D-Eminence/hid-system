@@ -8,7 +8,7 @@ import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { ActivatePatientEnrollmentDto, PatientEnrollmentContactDto,
   StartPatientEnrollmentDto, VerifyPatientEnrollmentContactDto } from './dto/patient-enrollment.dto';
-import { ENROLLMENT_COOKIE_NAME, enrollmentCookieOptions } from './enrollment-cookie';
+import { ENROLLMENT_COOKIE_NAME, clearEnrollmentCookie, enrollmentCookieOptions } from './enrollment-cookie';
 import { PatientEnrollmentService } from './patient-enrollment.service';
 
 @Controller('identity/patient-enrollments')
@@ -93,8 +93,11 @@ export class PatientEnrollmentController {
     this.assertAccountlessEnrollment(request, googleCookie);
     const result = await this.enrollments.activate(this.cookie(request), input.password,
       request.correlationId, googleCookie);
-    // The enrollment cookie is kept, so a lost response can be replayed; a
-    // sign-in, refresh or sign-out on this device expires it (AuthController).
+    // The response that carries the HID expires the enrollment cookie (N2(b)),
+    // a replay's too. If it is lost, the cookie it would have expired can
+    // replay the activation for 15 minutes; a sign-in, refresh or sign-out on
+    // this device also expires it (AuthController).
+    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
     if (googleCookie) response.clearCookie(this.google.onboardingCookieName, {
       secure: this.environment.AUTH_COOKIE_SECURE,
       sameSite: 'strict', httpOnly: true, path: '/api/v1',

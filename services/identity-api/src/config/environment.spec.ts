@@ -69,6 +69,50 @@ describe('Identity production database transport', () => {
     expect(getEnvironment().QOREID_MAX_RETRIES).toBe(0);
   });
 
+  // Each production refusal, one case per unsafe setting (CFG-PROD).
+  const qoreId = { QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'synthetic-client', QOREID_CLIENT_SECRET: 'synthetic-secret' };
+  it.each<[string, Record<string, string>, RegExp]>([
+    ['NIN-only enrollment, until its NIN holder possession step (N1) ships',
+      { ...qoreId, QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true' },
+      /QOREID_NIN_ONLY_ENROLLMENT_ENABLED: NIN-only enrollment is refused in production until the NIN holder possession step \(N1\) ships/],
+    ['Turnstile disabled', { TURNSTILE_MODE: 'disabled' }, /TURNSTILE_MODE: Turnstile is required/],
+    ['insecure cookies', { AUTH_COOKIE_SECURE: 'false' }, /AUTH_COOKIE_SECURE: Secure cookies are required/],
+    ['a wildcard CORS origin', { CORS_ORIGINS: '*' }, /CORS_ORIGINS: Production CORS origins must be exact HTTPS origins/],
+    ['an HTTP CORS origin', { CORS_ORIGINS: 'http://www.healthidentitydirectory.com' }, /CORS_ORIGINS: Production CORS origins/],
+    ['local-secret Identity callers', { IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret' },
+      /IDENTITY_SERVICE_IDENTITY_MODE: Production Identity callers require JWT workload identity/],
+    ['a local service token', { IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: 'x'.repeat(40) },
+      /IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: Local service tokens are forbidden in production/],
+    ['local-secret Notification calls', { NOTIFICATION_SERVICE_IDENTITY_MODE: 'local-secret',
+      NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: 'y'.repeat(40) },
+    /NOTIFICATION_SERVICE_IDENTITY_MODE: Production Identity-to-Notification calls require JWT workload identity/],
+    ['an HTTP Notification API', { NOTIFICATION_API_URL: 'http://notification.internal.example' },
+      /NOTIFICATION_API_URL: Production Notification API URL must use HTTPS/],
+    ['no OTP HMAC key', { OTP_HMAC_KEY_B64: '' }, /OTP_HMAC_KEY_B64: The server-only OTP HMAC key is required/],
+    ['no trusted proxy list', { TRUST_PROXY_CIDRS: '' }, /TRUST_PROXY_CIDRS: Approved reverse-proxy CIDRs are required/],
+  ])('refuses %s in production', (_label, values, message) => {
+    production(); Object.assign(process.env, values); resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(message);
+  });
+
+  it.each<[string, string, string | undefined]>([
+    ['the staging deployment profile', 'production', 'staging'],
+    ['local development', 'development', undefined],
+    ['tests', 'test', undefined],
+  ])('accepts NIN-only enrollment in %s', (_label, nodeEnvironment, deployment) => {
+    production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
+      NODE_ENV: nodeEnvironment });
+    if (deployment) process.env.HID_DEPLOYMENT_ENV = deployment; else delete process.env.HID_DEPLOYMENT_ENV;
+    resetEnvironmentForTests();
+    expect(getEnvironment().QOREID_NIN_ONLY_ENROLLMENT_ENABLED).toBe(true);
+  });
+
+  it('refuses NIN-only enrollment under the production deployment profile whatever NODE_ENV says', () => {
+    production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NODE_ENV: 'test' });
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/NIN-only enrollment is refused in production/);
+  });
+
   it('keeps emergency-contact delivery disabled by default and refuses it in production', () => {
     production(); resetEnvironmentForTests();
     expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(false);
@@ -125,5 +169,55 @@ describe('Public patient enrollment contact-code failure budget', () => {
       local({ [key]: value });
       expect(() => getEnvironment()).toThrow(new RegExp(`${key}: `));
     }
+  });
+});
+
+describe('Public patient enrollment QoreID lookup quota', () => {
+  const original = { ...process.env };
+  const keys = ['PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX', 'PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX',
+    'PATIENT_ENROLLMENT_QOREID_DAILY_CAP'];
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
+    Object.assign(process.env, original);
+    resetEnvironmentForTests();
+  });
+
+  function local(values: Record<string, string> = {}): void {
+    for (const key of keys) delete process.env[key];
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+    }, values);
+    resetEnvironmentForTests();
+  }
+
+  function limits(): unknown[] {
+    const environment: Record<string, unknown> = getEnvironment();
+    return keys.map((key) => environment[key]);
+  }
+
+  it('defaults to 5 lookups an hour and 15 a day per client network, and 200 a day in all', () => {
+    local();
+    expect(limits()).toEqual([5, 15, 200]);
+  });
+
+  it('accepts limits within their bounds and refuses others', () => {
+    local({ [keys[0]!]: '1', [keys[1]!]: '1', [keys[2]!]: '1' });
+    expect(limits()).toEqual([1, 1, 1]);
+    local({ [keys[0]!]: '100', [keys[1]!]: '1000', [keys[2]!]: '100000' });
+    expect(limits()).toEqual([100, 1000, 100000]);
+    const outside: Array<[string, string]> = [[keys[0]!, '0'], [keys[0]!, '101'], [keys[1]!, '0'],
+      [keys[1]!, '1001'], [keys[2]!, '0'], [keys[2]!, '100001']];
+    for (const [key, value] of outside) {
+      local({ [key]: value });
+      expect(() => getEnvironment()).toThrow(new RegExp(`${key}: `));
+    }
+  });
+
+  it('refuses an hourly network limit above the daily one', () => {
+    local({ [keys[0]!]: '20', [keys[1]!]: '15' });
+    expect(() => getEnvironment()).toThrow(/PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX: /);
   });
 });

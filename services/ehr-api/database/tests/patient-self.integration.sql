@@ -175,12 +175,60 @@ insert into ehr.clinical_note_revisions(clinical_note_id,patient_id,facility_id,
 select id,patient_id,facility_id,1,'Synthetic clinical content','Synthetic fixture create',created_by,created_by_membership_id
 from ehr.clinical_notes where id::text like 'a8000000-%';
 
+-- Signed notes of patient 1 whose encounter is not completed (0084): encounter
+-- 4 is in progress, 5 cancelled, 6 entered in error, and 7 was completed and
+-- then entered in error (a wrong-patient retraction). Each note was signed
+-- while its encounter was open; only then did the encounter change.
+insert into ehr.encounters(id,patient_id,facility_id,created_by,created_by_membership_id,encounter_type,status,started_at)
+select ('a7000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,'a2000000-0000-4000-8000-000000000001',
+ 'a4000000-0000-4000-8000-000000000002','a1000000-0000-4000-8000-000000000003','a6000000-0000-4000-8000-000000000001',
+ 'ambulatory','in_progress',clock_timestamp()-interval '1 hour'
+from generate_series(4,7)n;
+insert into ehr.clinical_notes(id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,
+  note_type,title,status,current_revision_no,signed_at,signed_by)
+select ('a8000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
+ ('a7000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,'a2000000-0000-4000-8000-000000000001',
+ 'a4000000-0000-4000-8000-000000000002','a1000000-0000-4000-8000-000000000003','a6000000-0000-4000-8000-000000000001',
+ 'progress','Synthetic note of an unreleased encounter','signed',1,clock_timestamp(),'a1000000-0000-4000-8000-000000000003'
+from generate_series(4,7)n;
+insert into ehr.clinical_note_revisions(clinical_note_id,patient_id,facility_id,revision_no,content,change_reason,created_by,created_by_membership_id)
+select id,patient_id,facility_id,1,'Synthetic content of another encounter','Synthetic fixture create',created_by,created_by_membership_id
+from ehr.clinical_notes where id::text like 'a8000000-%' and id::text >= 'a8000000-0000-4000-8000-000000000004';
+select set_config('app.change_reason','Synthetic encounter status change',true);
+update ehr.encounters set status='completed',ended_at=clock_timestamp()
+  where id='a7000000-0000-4000-8000-000000000007';
+update ehr.encounters set status=case id
+    when 'a7000000-0000-4000-8000-000000000005'::uuid then 'cancelled' else 'entered_in_error' end
+  where id in ('a7000000-0000-4000-8000-000000000005','a7000000-0000-4000-8000-000000000006',
+               'a7000000-0000-4000-8000-000000000007');
+
 set local role hid_ehr_api_runtime;
 select set_config('app.actor_subject','synthetic:self:1',true),set_config('app.facility_id','',true),set_config('app.membership_id','',true),
   set_config('app.purpose_of_use','patient-self',true),set_config('app.account_id','a1000000-0000-4000-8000-000000000001',true),
   set_config('app.session_id','a3000000-0000-4000-8000-000000000001',true),
   set_config('app.patient_id','a2000000-0000-4000-8000-000000000001',true),
   set_config('app.self_authorized_until',(clock_timestamp()+interval '30 seconds')::text,true);
+do $$
+declare
+  leaked text;
+begin
+  -- A signed note is released only with its completed encounter (0084).
+  select string_agg(e.status_label,', ' order by e.status_label) into leaked
+    from ehr.clinical_notes n
+    join (values ('a7000000-0000-4000-8000-000000000004'::uuid,'in progress'),
+                 ('a7000000-0000-4000-8000-000000000005'::uuid,'cancelled'),
+                 ('a7000000-0000-4000-8000-000000000006'::uuid,'entered in error'),
+                 ('a7000000-0000-4000-8000-000000000007'::uuid,'completed, then entered in error'))
+         e(id,status_label) on e.id=n.encounter_id;
+  if leaked is not null then
+    raise exception 'self note RLS released signed notes of encounters that are not completed: %', leaked;
+  end if;
+  if exists(select 1 from ehr.clinical_note_revisions
+             where clinical_note_id::text >= 'a8000000-0000-4000-8000-000000000004'
+               and clinical_note_id::text like 'a8000000-%') then
+    raise exception 'self revision RLS released the content of a note whose encounter is not completed';
+  end if;
+end $$;
 do $$ begin
   if (select count(*) from ehr.encounters)<>1 then raise exception 'self encounter RLS leaked wrong-patient or incomplete record'; end if;
   if (select count(*) from ehr.clinical_notes)<>1 then raise exception 'self note RLS leaked draft or another patient'; end if;

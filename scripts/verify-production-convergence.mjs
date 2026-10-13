@@ -43,6 +43,10 @@ for (const path of files.map((value) => relative(root, value))) {
   assert.ok(!/(?:^|\/)vercel\.json$|(?:^|\/)\.vercel\//i.test(path), `Retired Vercel target file remains: ${path}`)
 }
 
+// hid-web and hid-admin serve the Health-id patient-web build staged per
+// environment (ADR-052; infra/cloudflare/launch-deployment.json), not apps/web
+// or apps/admin.
+const healthIdWorkers = new Set(['hid-web', 'hid-admin'])
 const appByWorker = {
   'hid-web': ['apps/web/dist', 'web'],
   'hid-ehr': ['apps/ehr/dist', 'ehr'],
@@ -75,7 +79,11 @@ for (const [worker, [assets, app]] of Object.entries(appByWorker)) {
   assert.ok((await stat(configPath)).isFile(), `${worker} Wrangler configuration is missing`)
   const config = JSON.parse(await readFile(configPath, 'utf8'))
   assert.equal(config.name, worker)
-  assert.ok(String(config.assets?.directory).endsWith(assets), `${worker} does not own ${assets}`)
+  if (healthIdWorkers.has(worker)) {
+    assert.equal(config.assets, undefined, `${worker} must not have a default asset directory`)
+  } else {
+    assert.ok(String(config.assets?.directory).endsWith(assets), `${worker} does not own ${assets}`)
+  }
   assert.equal(config.routes, undefined, `${worker} must use named deployment environments`)
   assert.equal(config.vars, undefined, `${worker} must not expose shared deployment variables`)
   for (const [deployment, expected] of Object.entries(cloudflareDeployments)) {
@@ -90,6 +98,10 @@ for (const [worker, [assets, app]] of Object.entries(appByWorker)) {
       EXPECTED_HOST: hostname,
       APP_NAME: app,
     })
+    if (healthIdWorkers.has(worker)) {
+      assert.equal(environment.assets?.directory, `./staged/${deployment}/site`,
+        `${worker} ${deployment} must serve the Health-id build staged for that environment`)
+    }
     assert.equal(JSON.stringify(environment).includes('ORIGIN_AUTH_TOKEN'), false,
       `${worker} must bind its origin token as a Cloudflare secret, not config`)
   }
