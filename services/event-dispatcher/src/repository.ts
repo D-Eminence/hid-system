@@ -1,5 +1,6 @@
 import { Pool, type PoolConfig, type QueryResultRow } from 'pg';
 import type { EventDispatcherConfig } from './config';
+import { assertRuntimeDatabaseRole } from './runtime-role-guard';
 import type { ClaimedEvent, DeliveryMetrics, DeliveryRepository, EventProducer,
   SafeDeliveryFailure, TerminalDeliveryFailure } from './types';
 
@@ -39,6 +40,17 @@ export class PostgresDeliveryRepository implements DeliveryRepository {
       max: config.EVENT_DISPATCHER_POOL_MAX, application_name: 'hid-event-dispatcher', ssl,
       connectionTimeoutMillis: 5_000, statement_timeout: 30_000, query_timeout: 35_000 });
     this.pool.on('error', (error) => this.logPoolFailure(error));
+  }
+
+  /** In production, refuse to start over a superuser, BYPASSRLS or owner connection (runtime-role-guard.ts). */
+  async verifyRuntimeRole(): Promise<void> {
+    if (this.config.NODE_ENV !== 'production') return;
+    try {
+      await assertRuntimeDatabaseRole(this.pool);
+    } catch (error) {
+      await this.pool.end().catch(() => undefined);
+      throw error;
+    }
   }
 
   async checkReadiness(): Promise<void> { await this.pool.query('select 1'); }

@@ -5,7 +5,7 @@ import { WorkloadAuthService } from '../auth/workload-auth.service';
 import { getEnvironment } from '../config/environment';
 import { DeliverEmergencyContactAlertDto } from './dto/deliver-emergency-contact-alert.dto';
 import { DeliverOtpDto, OtpPurpose, validateRecipient } from './dto/deliver-otp.dto';
-import { NotificationService } from './notification.service';
+import { type DeliveryResult, NotificationService } from './notification.service';
 
 @Controller('notifications')
 export class NotificationController {
@@ -22,8 +22,11 @@ export class NotificationController {
       throw new BadRequestException('Recipient does not match the selected channel');
     }
     if (input.purpose === OtpPurpose.EMERGENCY_CONTACT_VERIFY) this.assertEmergencyContactDelivery(input.channel);
-    const result = await this.notifications.deliverOtp({ ...input, idempotencyKey }, input.plan);
-    return this.response(result);
+    // The response requestId is also the correlation id of the PHI-free
+    // notification.otp.outcome log line.
+    const requestId = randomUUID();
+    const result = await this.notifications.deliverOtp({ ...input, idempotencyKey }, input.plan, requestId);
+    return this.response(result, requestId);
   }
 
   @Post('emergency-contact-alert') @HttpCode(202)
@@ -41,7 +44,7 @@ export class NotificationController {
       channel: input.channel, recipient: input.recipient, patientFirstName: input.patientFirstName,
       facilityName: input.facilityName ?? null, occurredAt: new Date(input.occurredAt), idempotencyKey,
     }, input.plan);
-    return this.response(result);
+    return this.response(result, randomUUID());
   }
 
   /** Emergency-contact messages reach non-users; production delivery is not approved. */
@@ -51,9 +54,9 @@ export class NotificationController {
     }
   }
 
-  private response(result: Awaited<ReturnType<NotificationService['deliverOtp']>>) {
+  private response(result: DeliveryResult, requestId: string) {
     return {
-      requestId: randomUUID(), outcome: result.outcome,
+      requestId, outcome: result.outcome,
       primary: { provider: result.primary.provider, outcome: result.primary.outcome, safeCode: result.primary.safeCode },
       ...(result.fallback ? { fallback: { provider: result.fallback.provider, outcome: result.fallback.outcome, safeCode: result.fallback.safeCode } } : {}),
     };

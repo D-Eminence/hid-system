@@ -1,9 +1,18 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
-import type { JWTVerifyGetKey } from 'jose';
+import type { JWTVerifyGetKey, JWTVerifyOptions } from 'jose';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
+
+// The workload token contract (ADR-047): the issuer signs ES256 tokens with
+// iat = nbf, exp = iat + 300 s and token_use 'workload'. A token without exp
+// or iat, older than 300 s, issued in the future, signed with any other
+// algorithm or meant for another use is refused. The 5 s clock tolerance
+// matches the agent's own allowance for an iat ahead of its clock.
+const WORKLOAD_TOKEN_POLICY = {
+  algorithms: ['ES256'], requiredClaims: ['exp', 'iat'], maxTokenAge: 300, clockTolerance: 5,
+} satisfies JWTVerifyOptions;
 
 @Injectable()
 export class OcrInternalCallerGuard implements CanActivate {
@@ -47,9 +56,12 @@ export class OcrInternalCallerGuard implements CanActivate {
     const { createRemoteJWKSet, jwtVerify } = await import('jose');
     const jwks = this.jwks ??= createRemoteJWKSet(new URL(jwksUrl));
     const { payload } = await jwtVerify(token, jwks, {
-      issuer, audience, algorithms: ['RS256', 'ES256'],
+      issuer, audience, ...WORKLOAD_TOKEN_POLICY,
     }).catch(() => { throw new DomainProblem(401, 'INVALID_WORKLOAD_IDENTITY',
       'Workload identity is invalid or expired'); });
+    if (payload.token_use !== 'workload') {
+      throw new DomainProblem(401, 'INVALID_WORKLOAD_IDENTITY', 'Workload identity is invalid or expired');
+    }
     if (payload.sub !== subject) {
       throw new DomainProblem(403, 'WORKLOAD_CALLER_DENIED',
         'Workload identity is not authorized for the OCR caller');

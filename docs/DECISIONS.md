@@ -1054,7 +1054,9 @@ ADR-027, ADR-028, ADR-029, ADR-031.
 
 # ADR-033: Cloudflare Frontend Edge, Notification Boundary, and Legacy Migration Convergence
 
-Status: Accepted
+Status: Accepted. Amended for launch by ADR-052 (2026-10-13): only www,
+staging and admin.* are deployed, and they serve the staged Health-id
+`apps/patient-web` build; the other application hosts are not deployed.
 
 Date: 2026-08-12
 
@@ -1118,6 +1120,71 @@ Consequences:
 Related ADRs: ADR-001, ADR-002, ADR-003, ADR-005, ADR-007, ADR-021, ADR-025,
 ADR-026, ADR-029, ADR-031, ADR-032.
 
+## ADR-033 addendum: the edge carries the client address; the gateway routes only enabled modules
+
+Date: 2026-10-13
+
+Change: D-Eminence/hid-system#65 (register IP-1, GW-DNS, DEP-4-KEY
+part d, and the gateway part of MOD-1).
+
+Context: the Worker discarded every client-address header and the Gateway
+forwarded `$remote_addr`, so every API saw a public ALB node as the client:
+per-network limits became a few platform-wide buckets, and audit source
+addresses named the load balancer. The Gateway resolved its Cloud Map upstreams
+once at start-up, proxied every module, and proxied the service-to-service
+routes from the public edge.
+
+Decision:
+
+- The Worker is the only source of the client address. It deletes any
+  caller-supplied `X-Real-IP` and sets it from `CF-Connecting-IP` when that is
+  one valid address. The Gateway trusts the header only from the VPC (realip,
+  `VPC_CIDR`), forwards the result as `X-Forwarded-For`, and in staging and
+  production refuses an API request without it
+  (`403 CLIENT_ADDRESS_REQUIRED`). The APIs keep trusting only the VPC.
+  `X-Real-IP` is used because Workers built before this decision delete it:
+  behind a stale or rolled-back Worker the Gateway sees no address and fails
+  closed. A new header (an earlier draft used `X-HID-Client-IP`) would pass
+  through such a Worker with whatever value the caller chose.
+- Identity's public IP-keyed limits key on the client network (IPv4 address or
+  IPv6 /64) and, in production, refuse an address inside `TRUST_PROXY_CIDRS`
+  with their `503` rather than share a bucket. Guess budgets stay per account
+  or recipient (D6).
+- The Gateway resolves upstream names per request through the VPC resolver
+  (variable `proxy_pass`, `valid=10s`), so it follows redeploys and starts
+  when a module has no task.
+- The Gateway proxies only the modules in `HID_ENABLED_API_ROUTES` (deny by
+  default; CDK passes `identity,ehr`; staging may opt modules in; production
+  refuses more until a recorded decision). Other modules answer
+  `404 API_ROUTE_NOT_FOUND`.
+- Service-to-service routes are never reachable from the public edge: the
+  Gateway answers `404` for them in any letter case, because Express routing
+  ignores case. Every proxied location refuses a request target with a
+  backslash before the query or a `#` (`400 INVALID_REQUEST_TARGET`), because
+  Express reads a target holding `#` through `url.parse`, which turns those
+  backslashes into slashes, so it could reach a route the deny expression did
+  not match. A gateway marker header that internal routes refuse was
+  considered; it needs a change in every service and is left as defense in
+  depth for later.
+
+Consequences:
+
+- deployment order is every API-proxying Worker, then Gateway with the
+  regional stack, then Identity; rollback reverses it (release checklist §6
+  and §9), and a Worker that is not redeployed makes the Gateway refuse its
+  API requests rather than trust its caller;
+- disabling a module keeps its Identity caller subject and EHR's token files,
+  which production configuration requires; its tasks may run or not;
+- the WAF rate rule still keys on Cloudflare egress addresses, and the
+  accountless QoreID cost ceiling for public enrollment is separate work; and
+- the configuration is checked against a model of nginx
+  (`scripts/lib/nginx-config-model.mjs`), and was also loaded and exercised
+  locally by an nginx 1.29.8 binary (not the gateway image); the image in
+  ECS is staging acceptance evidence (release checklist S4k).
+
+Related: ADR-032; ADR-034; `AWS_DEPLOYMENT_ARCHITECTURE.md` ("Client address
+and gateway routing"); `INTERFACE_CONTRACT.md` (first section).
+
 # ADR-034: Cost-Safe Staging Modes with Scale-Preserving Production Guardrails
 
 Status: Accepted
@@ -1159,6 +1226,19 @@ Supersedes or extends:
 
 ADR-033 for AWS staging operating modes; ADR-033 remains authoritative for the
 Cloudflare edge, notification boundary, and legacy migration convergence.
+
+## ADR-034 addendum: production starts at zero tasks; a module that is off cannot run
+
+Date: 2026-10-13
+
+Change: D-Eminence/hid-system#66 (register INFRA-COUNT; ADR-053).
+
+"Production never scales to zero" applies once a service is rolled out. Until
+then every production `*DesiredCount` defaults to 0, as ADR-032 required: the
+autoscaling minimum follows the desired count, and the reviewed I6 parameter
+file raises each enabled service to at least its live minimum. A module
+outside the enabled set (D17) is pinned at 0 tasks in every environment. The
+details are in ADR-053.
 
 # ADR-035: TUF Release Admission with Isolated Trust and Atomic Edge Repositories
 
@@ -1375,7 +1455,8 @@ and never lifts a timed suspension. An administrator cannot change their own
 account status or platform roles.
 
 The authoritative Platform Admin frontend is `apps/patient-web/src/admin` in
-`D-Eminence/Health-id`; `apps/admin` here is legacy reference code.
+`D-Eminence/Health-id`; `apps/admin` here is legacy reference code and is not
+deployed: admin.* serves the staged Health-id build (ADR-052).
 
 Consequences:
 
@@ -1837,6 +1918,70 @@ Alternatives considered:
   privileges with the guards'. It is simpler, but it is not least privilege.
 
 Related: ADR-028, ADR-039, ADR-040; release checklist P8 and §4.1.
+
+## ADR-041 addendum: the non-superuser chain on RDS (launch, 0083)
+
+Status: Accepted (D-Eminence/hid-system#63). Items 3 and 4 are
+implemented for what launch needs; the five technical owners of items 1 and 2
+stay proposed.
+
+Date: 2026-10-13
+
+Decision:
+
+- **Item 3.** Migration 0083 replaces `ocr.claim_worker_job` as item 3
+  proposed. A fresh chain on RDS still needs
+  `SET ON PARAMETER plpgsql.variable_conflict` for 0015; the operator holds it
+  only for the migration run and revokes it after 0083
+  (`MIGRATION_RUNBOOK.md` §6.1). If RDS refuses the grant, the fallback is a
+  reviewed ledger exception that rewrites 0015's statement, which no staging
+  or production database has applied; not a superuser-like role and not
+  `BYPASSRLS`.
+- **Item 4, the bootstrap.** The role bootstrap creates the roles and checks
+  their attributes; it refuses a HID group role with `SUPERUSER`,
+  `BYPASSRLS` or `REPLICATION` and a runner without `ADMIN OPTION` on them.
+  Its function transfers hold `CREATE` on the schema only around each
+  transfer, as proposed. Its grants and revokes on the transferred functions
+  also need the owner's privileges, which a `SET`-only membership does not
+  give (`REVOKE ALL` on a rerun fails with `permission denied for function`).
+  The bootstrap therefore holds `INHERIT` and `SET` membership in the
+  technical owners for its own transaction only, and revokes it before
+  committing. That transaction reads no table, so the technical policies
+  widen no visibility; this differs from the persistent `INHERIT` membership
+  item 4 rejected. No persistent membership is granted, so
+  `runtime-roles.integration.sql` allows only the `ADMIN OPTION`-only row
+  that PostgreSQL 16 records for a non-superuser creator, and only when that
+  creator is the `CREATEROLE` role running the check; an `ADMIN OPTION`-only
+  grant to any other role fails it. The platform control policy is created
+  before any other table lock of the bootstrap and only when it is missing
+  or differs, so its `ACCESS EXCLUSIVE` lock is taken in the same order as a
+  break-glass activation's (control read, then `identity.outbox_events`) and
+  not at all on a rerun.
+- **A sixth technical owner.** `platform.control_enabled(text)` gets
+  `hid_platform_control_reader`, on the `hid_ocr_queue_metrics` pattern:
+  `SELECT (control_key, enabled)` on `platform.control_settings` and one
+  `FOR SELECT TO hid_platform_control_reader USING (true)` policy, since the
+  six controls are platform-wide non-PHI flags. It also needs `USAGE` on
+  `auth`, without any privilege on an `auth` object: the table's PUBLIC read
+  policy applies to it, and PostgreSQL inlines that policy's SQL function
+  `platform.current_account_id()`, whose body names `auth`, while planning as
+  the reading role. Without this every patient and provider request answered
+  `503 PLATFORM_CONTROL_UNAVAILABLE` under an owner without `BYPASSRLS`.
+- **Runtime credentials.** `db:verify-logins` checks each runtime LOGIN over
+  its own connection, and every database-connected service refuses to start
+  in production over a superuser, `BYPASSRLS` or owner connection.
+
+Consequences:
+
+- the chain, the bootstrap and the platform controls need no superuser and no
+  `BYPASSRLS`; the rehearsal checks this on its own cluster
+  (`scripts/verify-non-superuser-database.mjs`);
+- the OCR, document-scanner and Outreach paths of P8 still need an owner that
+  bypasses row-level security or the technical owners of item 1. Launch
+  decision I3 does not rely on owner `BYPASSRLS`, so they stay out of the
+  release until they pass under a non-bypass owner;
+- a later migration that replaces a function owned by a technical role needs
+  that owner's privileges, as item 4 describes for a `CREATE OR REPLACE`.
 
 # ADR-042: Services Lock Only Rows Their Runtime Role May Update; SERIALIZABLE Transactions Retry
 
@@ -2330,6 +2475,305 @@ Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity
 boundary; Outreach registration boundary); release checklist §2, §3, §7, §8
 and §9.
 
+# ADR-047: One Environment-Bound Workload Issuer for Staging and Production
+
+Status: Accepted (2026-10-13). The owner instructed that the technical
+decisions be taken now with the owner defaults (deny by default, least
+privilege, no production bypass); D1, D2 and D3 below are those defaults.
+Acceptance authorizes no deployment: staging needs its own deployment
+authorization and the live proof I5 (`AWS_DEPLOYMENT_RUNBOOK.md` §7), and
+production needs the production unlock, a production change approval and its
+own deployment authorization (I6, §12). Nothing has been deployed.
+
+Date: 2026-10-12 (proposed); 2026-10-13 (accepted, with D1-D3 and the
+DEP-4-KEY, DEP-4-DOS and DEP-4-RES changes implemented on
+D-Eminence/hid-system#54).
+
+Supersedes for production ADR-032's external HTTPS workload issuer/JWKS/subjects
+and rotating mounted token delivery, and records the workload issuer as an
+implemented workflow under ADR-032's rule that no Lambda or API Gateway exists
+without one. Development is unchanged.
+
+Context:
+
+- Each token-bearing task (Identity, EHR, Lab, Pharmacy, OCR API, Outreach)
+  mounts a task-local `workload-tokens` volume read-only. Only a container of
+  the same task can write it, and before this change only staging added one,
+  the `workload-token-agent` sidecar. The production and development templates
+  had no writer and no input through which an external mechanism could
+  deliver tokens, so production could not obtain a token from any issuer.
+  Every service-to-service call then fails closed: Identity cannot send an OTP
+  (`503 OTP_DELIVERY_UNAVAILABLE`), the EHR cannot authenticate any request
+  through Identity (`503 SERVICE_WORKLOAD_IDENTITY_UNAVAILABLE`), and Lab,
+  Pharmacy, OCR and Outreach calls fail the same way. Production correctly
+  forces `jwt` workload mode and refuses local secrets.
+- Production `*DesiredCount` parameters default to 2. ADR-032's rule that
+  counts stay zero until staging proves an approved issuer and delivery
+  mechanism is not enforced by the template. (Later: ADR-053 makes every
+  production count default to 0.)
+- The issuer Lambda (`infra/aws/runtime/workload-issuer/issuer.mjs`) and the
+  agent (`services/workload-token-agent/src/agent.mjs`) accepted only
+  `HID_DEPLOYMENT_ENV=staging`, the `/staging` stage and `hid:staging:`
+  subjects, so reusing the staging construct in CDK alone fails at run time.
+- The staging issuer (P-256 KMS key, Lambda, regional REST API with an
+  IAM-authenticated `POST /token` and a public JWKS) was added without an ADR.
+  This ADR records it.
+- The draft of this ADR left four findings open: the signing key had the CDK
+  default key policy and receivers checked no token age (DEP-4-KEY); the public
+  JWKS shared one stage throttle with `POST /token` and the agent fetched it
+  for every renewal (DEP-4-DOS); and an essential agent took a whole task down
+  during an issuer outage longer than a token's lifetime, Identity sign-in
+  included (DEP-4-RES).
+- Staging is not deployed (`STAGING_AWS_CHECKPOINT.md`), so the mechanism has
+  never minted a token live. Production is locked
+  (`TUF-STAGING-EXECUTION.md`).
+
+Question:
+
+Is the production workload issuer the in-account, CDK-managed KMS, Lambda and
+API Gateway issuer (the staging mechanism with production names), or an
+external issuer, for example in a separate security account? How does it
+behave during an issuer outage (D2), and how is its public endpoint protected
+(D3)? Secondary: does development get an issuer too, or stay non-functional
+for service-to-service calls?
+
+Decision:
+
+D1, the issuer and key custody. Production uses the staging mechanism with an
+independent production key, API, stage and `hid:production:<service>`
+subjects:
+
+- `WorkloadIdentity` (`infra/aws/src/workload-identity.ts`, renamed from
+  `staging-workload-identity.ts`) is bound to one environment, `staging` or
+  `production`. Each has its own retained P-256 `SIGN_VERIFY` key
+  (`alias/hid-<env>-workload-signing`), log group `/hid/<env>/workload-issuer`
+  (staging 14 days, production the production retention of one year), function
+  `hid-<env>-workload-issuer`, REST API `hid-<env>-workload-identity` with stage
+  `<env>`, issuer `https://<api>.execute-api.<region>.<suffix>/<env>` and
+  subjects `hid:<env>:<service>`.
+- Staging keeps construct ID `StagingWorkloadIdentity`, so its retained key
+  keeps logical ID `StagingWorkloadIdentitySigningKey53DFD52F`.
+- Both environments keep the six caller task roles and eleven caller/audience
+  bindings, `execute-api:Invoke` on the exact `/<env>/POST/token` ARN, IAM-only
+  `POST /token`, an unauthenticated `GET /.well-known/jwks.json`, no test
+  invoke, and data trace and logging off.
+- The key policy keeps the account root statement, so key administration stays
+  with the account and the key cannot be locked out, and adds three Deny
+  statements for `kms:Sign` (DEP-4-KEY): for every principal whose
+  `aws:PrincipalArn` is not the issuer Lambda role, for any
+  `kms:SigningAlgorithm` other than `ECDSA_SHA_256`, and for any
+  `kms:MessageType` other than `RAW` (the issuer signs `RAW`; the TUF broker's
+  `DIGEST` rule is not copied). Staging and production alike.
+- A warm issuer re-reads the public key at least every five minutes and never
+  caches a failed read, so a disabled key stops being published and stops
+  minting within five minutes.
+- The issuer and the agent accept only `staging` and `production` and derive
+  one stage from it. The issuer URL path, every subject prefix, the API
+  Gateway `requestContext.stage` (issuer) and the signed `/<stage>/token` path
+  (agent) must all name that stage. A token of one environment fails the
+  other's issuer, subject and stage checks.
+- Receivers (Identity's service and document-scanner paths, Notification, Lab,
+  Pharmacy and the EHR's OCR caller guard) accept only the token the issuer
+  mints: ES256, `exp` and `iat` required, at most 300 seconds old, not issued
+  in the future (5 seconds of clock tolerance, the agent's own allowance), and
+  `token_use: workload`. They keep one remote JWKS set per process.
+- Production token tasks get the `workload-token-agent` sidecar from the
+  admitted Identity API image, exactly as staging, and receivers take the
+  in-stack issuer, JWKS and exact caller subjects. Production loses the eight
+  `WorkloadIssuerUrl`, `WorkloadJwksUrl` and `*WorkloadSubject` parameters.
+  Synthesis fails for staging or production if a token task lacks exactly one
+  rw `workload-token-agent` mount next to a read-only application mount.
+- No local-secret fallback; production configuration already refuses one.
+
+D2, behaviour during an issuer outage. An issuer outage stops a task's
+service-to-service calls, not the task:
+
+- The agent is `essential: false` with an ECS container restart policy
+  (restart attempt period 60 seconds), and the application keeps its `HEALTHY`
+  start dependency on it, so a task starts only with valid tokens.
+- ECS restarts the agent only if it exits after running for at least the
+  60-second restart attempt period. An agent that exits sooner (within a
+  minute of the task's start or of its last restart) is not restarted: the
+  task keeps running with no token writer until it is replaced, and the token
+  files the agent last wrote stay after they expire, because only the agent
+  removes them and the application mount is read-only. Once those tokens
+  expire, calls fail closed, but a caller other than Identity's Notification
+  client sends the expired token and its receiver answers `401` rather than
+  the caller's missing-token `503`. The task shows the agent container
+  `STOPPED`; no alarm routes that (D4). Remedy: stop the task so its service
+  starts a new one (`AWS_DEPLOYMENT_RUNBOOK.md` §7).
+- Once running, an unhealthy agent no longer makes ECS replace the task.
+  Without tokens, service-to-service calls fail closed (`503`); Identity
+  password sign-in and session reads keep working. Consequence: during an
+  issuer outage, EHR record access, OTP delivery, Lab, Pharmacy, OCR and
+  Outreach calls are unavailable while sign-in works.
+- In JWT mode, Identity's Notification client sends nothing when its token file
+  is missing or unusable or its token's `exp` has passed, logs
+  `notification_workload_token_unavailable` with a reason (`missing`,
+  `invalid` or `expired`) and a running count, without recipient, code or
+  token, and counts it.
+  An OTP is reported as not delivered, as before; an emergency-contact alert is
+  reported as `unknown`, so its dispatcher retries it.
+
+D3, edge protection for the issuer. Deny by default:
+
+- `POST /token` and the JWKS `GET` each have their own method throttle (30
+  requests per second, burst 60; at production normal maximum the six token
+  services renew 74 caller/audience pairs every 90 seconds, 148 at the
+  reviewed emergency maximum). There is no shared stage-wide `/*/*` setting.
+- Every agent and receiver reaches the issuer through the VPC's NAT gateways
+  (there is no `execute-api` interface endpoint). Wherever NAT gateways exist
+  (staging economy and fidelity, production), a REGIONAL web ACL associated
+  with the issuer stage blocks by default and allows only an IP set of the
+  VPC's NAT gateway Elastic IPs, matched on the connection source, never a
+  forwarded header. CDK's NAT gateway provider allocates one `AWS::EC2::EIP`
+  per gateway in the stack, so the allowlist is built deterministically from
+  them, and synthesis fails if a gateway uses any other address. Staging sleep
+  has no NAT gateway and no running task, and no web ACL.
+- The agent keeps the keys that verified its tokens by `kid` and fetches the
+  JWKS only at start, for an unknown `kid` and after a cached key stops
+  verifying, at most once every 30 seconds once a token has verified, so a
+  JWKS outage, throttle or block does not stop renewal under a known `kid`.
+  Until its first token verifies, the agent may fetch the JWKS on each
+  10-second renewal retry, never faster: its health check (start period 30
+  seconds, interval 10 seconds, three retries) turns it `UNHEALTHY` about 60
+  seconds after start, and the application starts only on `HEALTHY`, so a
+  JWKS failure at task start leaves about six attempts (at about 0, 10, 20,
+  30, 40 and 50 seconds) rather than two.
+- A PRIVATE API behind an `execute-api` interface endpoint was not chosen: its
+  private DNS changes every `execute-api` name in the VPC. A per-IP rate rule
+  was not chosen as the control: it does not stop a distributed flood, and all
+  legitimate callers share the NAT addresses.
+
+Alternative:
+
+An external issuer that implements the same SigV4 `POST /token` contract (the
+IAM caller names only an audience; the issuer returns an ES256 JWT) and
+publishes a JWKS. The stack keeps `WorkloadIssuerUrl` and `WorkloadJwksUrl`,
+runs the same agent pointed at it, and exports the six task-role ARNs for the
+issuer's caller policy. It needs cross-account `execute-api:Invoke` and issuer
+IaC that this repository does not have. It keeps signing-key custody out of
+the workload account. Because Identity verifies the document scanner's token
+against the same issuer and JWKS, such an issuer could also mint a scanner
+subject, which the in-stack issuer cannot (Risks). Not chosen for launch.
+
+Risks accepted:
+
+- Same-account key custody. The key policy stops any principal other than the
+  issuer role from signing, even one granted `kms:Sign` by IAM, but an account
+  administrator can still change the key policy (`kms:PutKeyPolicy` through the
+  root statement) or the issuer function (`lambda:UpdateFunctionCode`). Either
+  change is recorded by CloudTrail. Containing administrators needs an SCP or a
+  separate custody account, which is the account owner's decision. A minted
+  token also passes Identity's Origin and CSRF exemption for delegated cookie
+  reads (ADR-043, ADR-045).
+- Kill switch latency. Receivers cache the JWKS for up to 10 minutes, so after
+  the key is disabled and the JWKS withdrawn they still accept a token at most
+  300 seconds old for that time. Someone with brief signing access could
+  pre-sign tokens with future `iat` values; each becomes valid when its `iat`
+  arrives, while receivers still trust the key. Only a new key (new `kid`)
+  ends that (runbook §12, key disable).
+- Single point of failure. All six token-bearing services depend on one
+  issuer. Under D2 an outage longer than a token's lifetime stops their
+  service-to-service calls, not the tasks; registration, recovery and EHR
+  record access are unavailable for its length.
+- The edge allowlist holds only while every caller leaves through the NAT
+  gateways. A NAT gateway replaced by CDK gets a new Elastic IP in the same
+  deployment, which updates the IP set. Any future caller outside the VPC,
+  such as a document scanner (D5), must leave through the NAT gateways or be
+  added to the allowlist by a reviewed change. In staging sleep the issuer has
+  no web ACL; only its method throttles apply, and no task runs.
+- No document-scanner token. Identity authorizes the malware-scan callback
+  (`POST /ehr/documents/scan-events`, through
+  `service/workloads/document-scanner/authorize`) with a JWT from the same
+  issuer and JWKS whose subject must belong to an active `document_scanner`
+  account. The in-stack issuer mints only the six service subjects. Production
+  also loses `WorkloadIssuerUrl` and `WorkloadJwksUrl`. So, as in staging, no
+  scan callback can authenticate: no document becomes `available` and
+  `clean`, every download is refused and OCR cannot claim a job (DEP-4-SCAN,
+  DOC-3, D5).
+- Never run live: staging is not deployed, so no token has been minted against
+  real IAM, KMS, WAF or API Gateway.
+- The issuer code is a CDK file asset, not a TUF-admitted image digest
+  (ADR-035); deployment evidence must bind its asset hash to the approved Git
+  SHA.
+- The regional alarms have no actions, so an issuer alarm would reach nobody;
+  ADR-032 forbids an SNS topic without a workflow (D4). This change adds no
+  alarm; the agent's `Workload token renewal unavailable` line and Identity's
+  `notification_workload_token_unavailable` line are visible in logs only.
+  (Later: ADR-053 adds the issuer and renewal alarms and routes every alarm
+  to the environment's operational topic; Identity's line is still not
+  alarmed.)
+
+Preconditions for deployment (not for this decision):
+
+1. A staging deployment authorization, staging redeployed with this change's
+   issuer Lambda and Identity API image, and the live proof of
+   `AWS_DEPLOYMENT_RUNBOOK.md` §7 recorded (I5): minting, renewal, expiry,
+   removal before expiry, refusal of the wrong audience, subject and signature,
+   no direct KMS signing by a caller or an IAM-granted administrator role, the
+   web ACL's refusal of other sources, a JWKS and token flood of at least 30
+   minutes with no renewal failure, and the issuer-outage (invoke-deny) test.
+2. The production unlock approval (`TUF-STAGING-EXECUTION.md`), a production
+   change approval and a production deployment authorization (I6, §12).
+
+Follow-ups, not implemented by this change:
+
+- D5 / DEP-4-SCAN (DOC-3), scanner callbacks: which malware scanner runs at
+  launch and how it authenticates is the documents owner's decision. With this
+  issuer, it needs a seventh caller rule (`hid:<env>:document-scanner` for the
+  scanner's own IAM role), a change to the issuer's six-rule cap and to
+  `bindCallers`, and a provisioned `auth.accounts` row holding
+  `document_scanner`; or a separate scanner issuer. No service subject is
+  reused.
+- D4, alert routing for issuer errors, the agent's renewal failures and
+  Identity's missing-token line.
+- Key custody beyond the key policy (SCP or separate custody account), by the
+  account owner.
+- Internal Identity, EHR, Lab and Pharmacy routes stay reachable through the
+  public gateway (DEP-4-KEY item d); that belongs to the gateway change.
+
+Consequences:
+
+- The production template grows from 414 to 438 resources and from 524,141 to
+  574,128 bytes and falls from 62 to 54 parameters (`AWS_DEPLOYMENT_RUNBOOK.md`
+  §1). It gains a fourth KMS key and a second web ACL (cost inventory
+  `kmsKeys: 4`, `wafs: 2`). Eight task definitions get new revisions: the six
+  token tasks (the agent added) and the Notification API and OCR worker
+  (issuer, JWKS and subject values from the stack). Five task roles get a new
+  default policy and the EHR's existing one gains the `execute-api:Invoke`
+  statement.
+- The staging templates change in the issuer Lambda asset, the key policy,
+  the method settings and the agent's essential flag and restart policy, and
+  economy and fidelity gain the issuer web ACL; staging must be redeployed and
+  re-accepted.
+- The agent ships in the Identity API image, so a new image digest must be
+  admitted and run in staging and production. The receivers' token contract
+  changes in the Identity, Notification, Lab, Pharmacy and EHR images; a
+  development external issuer must mint the same token shape.
+- Development stays unchanged and non-functional for service-to-service calls
+  until it gets an issuer and a writer.
+- The production execution plan is `AWS_DEPLOYMENT_RUNBOOK.md` §12, not
+  approved.
+
+Migration Impact: none.
+
+Security Impact: only the issuer role can sign with the key, whatever IAM
+grants, and only ES256 over `RAW` messages; receivers refuse any token the
+issuer would not mint; the issuer stage refuses every source but the VPC's NAT
+addresses. No task role gains more than `execute-api:Invoke` on its own
+environment's `POST /token`. Residual risks are listed above.
+
+Compatibility Impact: an agent or issuer from before this change refuses
+`production` and still accepts the unchanged staging configuration, so a
+production task with an older Identity API image never starts its
+application. Receivers from this change refuse RS256 tokens, tokens without
+`exp` or `iat`, tokens older than 300 seconds and tokens without
+`token_use: workload`; the in-stack issuer mints none of those.
+
+Related ADRs: ADR-025, ADR-032, ADR-033, ADR-034, ADR-035, ADR-043, ADR-045.
+
+
 # ADR-048: Public Enrollment Checks Its Gate First, Bounds the HID Re-display and the Contact Proof, and Caps QoreID Lookups
 
 Status: Proposed for source implementation
@@ -2438,3 +2882,316 @@ Related: ADR-008; ADR-023; `INTERFACE_CONTRACT.md`;
 `QOREID_VERIFICATION_CONTRACT.md`; `DATABASE.md` ("Public enrollment
 windows and NIN lookup quota (0085)"); release checklist §2, §3, §5, §6, §8
 and §9.
+# ADR-052: Health-id Is the Single Launch Frontend; Only Its Hosts Are Deployed
+
+Status: Accepted (2026-10-13) with the owner's defaults (deny by default, least
+privilege, verified identity for sensitive operations, auditable actions, no
+production bypass). Acceptance authorizes no deployment: Cloudflare and AWS
+changes need their own authorization, and nothing has been deployed.
+
+Date: 2026-10-13. Change: D-Eminence/hid-system#67 (launch register
+FE-HOST, including MOD-EDGE).
+
+Amends: ADR-033 (seven Cloudflare frontend Workers, each serving a hid-system
+application). Extends ADR-037's note that Health-id is the authoritative admin
+frontend to what is deployed.
+
+Context:
+
+- `hid-web` served hid-system's legacy `apps/web` on www and staging, and
+  `hid-admin` served the legacy `apps/admin` on admin.*. `apps/web` still calls
+  about 30 retired `/api/v1/functions/*` routes, which the gateway answers with
+  `404`, and `apps/admin`'s staff sign-in is refused by the platform-scoped
+  admin endpoints (ADR-037). Only Health-id implements the governed
+  access-request loop and the platform console the backend now serves.
+- Health-id `apps/patient-web` is one Vite portal: patient routes at `/`, the
+  provider workspace at `/provider/*` and the platform console at `/admin/*`.
+  Its cookie mode is same-origin: it needs `/api/v1` on its own host, with
+  `VITE_HID_API_BASE_URL` and `VITE_HID_APP_ORIGIN` both that host's origin.
+  Identity's Turnstile allowlist accepts the full browser action set only on
+  www and staging, and `admin-login` and `admin-reset` on admin.*.
+- Health-id had no deployment definition, and `verify-config.mjs` required a
+  `manifest.webmanifest` and `service-worker.js`, which Health-id deliberately
+  lacks: it registers no service worker and keeps no clinical data in browser
+  storage.
+- Every frontend Worker proxies all of `/api/v1`, so not deploying a host does
+  not close its API.
+
+Decision:
+
+1. Health-id `apps/patient-web` is the single launch frontend for www
+   (production), staging (staging) and admin.* (both). hid-system's legacy
+   `apps/web` and `apps/admin` stay in this repository, built and tested, but
+   are not deployed.
+2. Each host gets its own build: `VITE_HID_ENVIRONMENT` names the environment;
+   `VITE_HID_API_BASE_URL` and `VITE_HID_APP_ORIGIN` are both exactly
+   `https://<host>`; `VITE_HID_TURNSTILE_SITE_KEY` is the environment widget's
+   site key; `VITE_HID_GOOGLE_CLIENT_ID` is unset (Google sign-in is off,
+   REC-GOOGLE) and so is `VITE_HID_SENTRY_DSN` (no error-reporting processor
+   is approved).
+3. A build reaches a Worker only through
+   `infra/cloudflare/scripts/stage-health-id-build.mjs`. It refuses a build
+   that breaks rule 2, or that holds anything but `index.html` and
+   content-hashed files under `assets/`, a source map or `sourceMappingURL`, a
+   service worker or web app manifest, a Google sign-in reference (the Google
+   Identity Services loader or calls, or a Google OAuth client id: Health-id
+   inlines `VITE_HID_GOOGLE_CLIENT_ID` as a bare value where it is used, so
+   these markers are the check), or a credential-shaped value. Its
+   `index.html` must be exactly the shell Vite writes, checked against an
+   allow-list of elements and attributes: one module entry script, and
+   scripts and links that name only `.js` and `.css` files of the build's own
+   `/assets/`; anything else, including `base`, `style`, inline handlers,
+   `meta http-equiv` and markup it cannot parse exactly, is refused. It writes
+   the build to the Worker's git-ignored `staged/<environment>/site` with
+   `provenance.json` beside it, never inside the served directory: the
+   Health-id source commit, every file's SHA-256, a tree hash and the inlined
+   public environment record (the five keys of `src/publicEnvironment.ts`).
+   On a refusal it writes nothing, and it replaces an existing destination
+   only when that is an earlier artefact of the same Worker and environment.
+   `npm --prefix infra/cloudflare run verify:launch:<environment>`
+   re-verifies every staged artefact against its provenance and the same
+   rules before a deployment, and the Wrangler dry-run runs it first. It
+   checks every Worker configuration but needs no legacy `apps/<app>/dist`
+   build of a Worker the launch does not deploy.
+4. Launch subset, deny by default (`infra/cloudflare/launch-deployment.json`):
+   staging and production deploy `hid-web` and `hid-admin`, and production
+   also the originless apex redirect. `hid-ehr` (the legacy `apps/ehr`;
+   clinicians use `/provider/clinical` on www or staging), `hid-lab`,
+   `hid-pharmacy`, `hid-ocr`, `hid-ocr-redirect` and `hid-outreach` are not
+   deployed. The TUF repository Workers stay with their protected publication
+   (ADR-035). `verify-config.mjs` holds the same decided subset and requires
+   every configured Worker to be classified once, so widening the launch
+   changes two reviewed files and needs its own decision.
+5. API closure for deferred modules stays with the gateway route switch
+   `HID_ENABLED_API_ROUTES` (ADR-033 addendum, D-Eminence/hid-system#65); the
+   manifest records it and a test keeps it equal to `launchApiRoutes`.
+6. `frontend-worker.mjs` is unchanged: host and environment binding,
+   `X-Real-IP`, security headers and `/api/v1` proxying. No Content Security
+   Policy is added: the Worker sets none for any frontend today, and Health-id
+   needs none to work (it loads its own `/assets/` and the Turnstile script
+   from `challenges.cloudflare.com`). Until an edge CSP is added, the staging
+   step's `index.html` allow-list (rule 3) is what keeps the shell to the
+   build's own files. An edge CSP is later hardening, with its own tests.
+
+Consequences:
+
+- Once staged and deployed, www, staging and admin.* serve Health-id; the
+  legacy builds and their retired routes are no longer served. The Health-id
+  team supplies the four builds (or the commit an operator builds); no
+  Health-id code change is needed.
+- www serves the portal, not Health-id's Next.js public site
+  (`apps/public-web`: public pricing and demo requests), which is not deployed
+  at launch. The portal's `index.html` is `noindex, nofollow`, so www is not
+  indexed. Deploying the public site needs its own decision, host and
+  artefact rules.
+- Frontend rollback restages the previous accepted commit's build for that
+  host, re-verifies it and redeploys that Worker; no API image or schema
+  changes.
+- The signed release-bundle frontend contract (`release/config/components.json`
+  `frontends`, and `frontend_archive.required_files` with a manifest and a
+  service worker) still describes the seven legacy builds and cannot carry the
+  Health-id artefact. Until it is extended, a frontend deployment's release
+  record is the verified staged artefact and its provenance.
+- On www, legacy `GET /migrate*` and `/ocr*` paths still answer `308` to the
+  Migrate host, which is not deployed; Health-id has no such routes.
+- The regional stack's `browserSubdomains` (Identity `CORS_ORIGINS`) and
+  Identity's Turnstile allowlist still name all seven hosts. Same-origin
+  cookie sessions use no CORS, and no Worker serves the other hosts; narrowing
+  both is separate work.
+
+Migration Impact: none. No database, grant or API contract change.
+
+Security Impact: deny by default at the edge (five product hosts and the legacy
+redirect not deployed, and the legacy EHR host withheld); the APIs of deferred
+modules stay closed at the gateway. Only a build that is bound to its own host
+and environment, has no Google client, no source maps, no service worker and
+no unexpected files, and is recorded with its source commit and hashes, can be
+served.
+
+Compatibility Impact: a deployment that still points at `apps/web/dist` or
+`apps/admin/dist` fails `verify-config.mjs`. Bookmarks to the legacy
+applications' routes on www or admin.* land in Health-id's single-page
+application.
+
+Related ADRs: ADR-033, ADR-035, ADR-037. Launch module set: D17
+(`PHASE_3_LAUNCH_DECISIONS.md`).
+
+# ADR-053: Production Alarms Reach a Person; Production Starts at Zero Tasks; Launch OTP Is Email and SMS Only
+
+Status: Accepted (owner policy defaults for launch decision D4 and the
+launch module set D17); not deployed
+
+Date: 2026-10-13
+
+Change: D-Eminence/hid-system#66 (register INFRA-COUNT, D4, the code
+part of NOTIF-PROD, CFG-PROD, and the preflight parts of I1 and REC-GOOGLE).
+
+Context:
+
+- None of the regional stack's 47 alarms had an action and the CDK defines no
+  dashboard, so an alarm reached nobody. The workload issuer had no alarm, the
+  token agent reports a failed renewal only as a plain-text stderr line, and
+  notification-api logged no OTP outcome. D4's proposed default, "dashboards
+  only", was not even implemented, and would leave issuer, renewal and OTP
+  failures unseen. ADR-032 forbids an SNS topic without a workflow; release
+  trust (ADR-035) already routes its alarms to a pre-existing environment
+  topic validated by exact ARN.
+- Every production `*DesiredCount` defaulted to 2, with the autoscaling
+  minimum equal to it, contradicting ADR-032 (counts default to zero until the
+  prerequisites pass) and the I6 rollout, in which the reviewed parameter file
+  raises counts.
+- In production, notification-api required SES plus the Termii, Meta and
+  Brevo fields (the `full` profile) and the CDK injected eleven provider
+  fields, although launch (D17) sends OTP only by email and SMS.
+
+Decision:
+
+1. **Alarms reach a person (D4).** Each environment's alarms notify one
+   operator-created SNS topic, `hid-<env>-operational-alerts`, encrypted with
+   a customer-managed KMS key whose policy lets `cloudwatch.amazonaws.com`
+   use it (CloudWatch cannot publish through the AWS-managed `alias/aws/sns`
+   key) and subscribed by the on-call recipients the operations owner names.
+   The CDK does not create the topic. The synth input
+   `HID_OPERATIONAL_ALARM_TOPIC_ARN` names it by exact ARN
+   (`arn:<partition>:sns:<region>:<account>:hid-<env>-operational-alerts` and
+   nothing else). Production refuses to synthesize without it; elsewhere it is
+   optional, and without it alarms have no action. A stack bound to an account
+   and region (`HID_AWS_ACCOUNT`, `HID_AWS_REGION`) refuses a topic in
+   another, and the action is built from the deploying account, region and
+   partition, so an alarm can only notify its own environment's topic. Every
+   alarm in the regional stack, the workload issuer's included, notifies the
+   topic on ALARM and on OK, and the stack outputs the topic ARN.
+   New alarms: the issuer Lambda's `Errors` and `Throttles` (at least 1 in
+   5 minutes); the issuer stage's `5XXError` (at least 1) and `4XXError` (at
+   least 20; REST API Gateway publishes no separate 429 metric, so throttled
+   requests are counted there); `TokenRenewalUnavailable` (at least 3 in
+   5 minutes), counted by a literal-text metric filter for the agent's exact
+   line `Workload token renewal unavailable` on each enabled token task's log
+   group; and `OtpDefinitiveFailures` (at least 3 in 5 minutes), counted from
+   notification-api's `notification.otp.outcome` lines whose `outcome` is
+   `definitive_failure`. "Dashboards only" is rejected.
+   The running-task alarms of the enabled services treat missing data as
+   breaching with a threshold of at least 1. During the zero-task rollout
+   (decision 2) the five production ones (`GatewayRunningTaskAlarm`,
+   `IdentityApiRunningTaskAlarm`, `EhrApiRunningTaskAlarm`,
+   `NotificationApiRunningTaskAlarm` and `EventDispatcherRunningTaskAlarm`)
+   therefore enter ALARM and notify the topic on the first deploy, and
+   notify again on OK once each service runs its live minimum. That is
+   accepted and announced to the recipients beforehand: the alarm is true
+   (the service serves nothing), and an alarm that followed the desired
+   count would stay silent if a reviewed parameter file left an enabled
+   service at 0 by mistake.
+2. **Production starts at zero tasks (INFRA-COUNT, D17).** Every production
+   `*DesiredCount` defaults to 0 and keeps its live minimum and recommended
+   count in its description. The autoscaling minimum follows it, so nothing
+   runs until the reviewed I6 parameter file raises each enabled service to
+   at least its live minimum; ADR-034's "never scales to zero" applies from
+   then on. A module outside the enabled set is pinned at 0 tasks in every
+   environment: Lab, Pharmacy, OCR (API and worker) and Outreach unless the
+   synth input `HID_ENABLED_API_ROUTES` names them, and the notification
+   worker unless `HID_NOTIFICATION_WORKER_ENABLED` (default true outside
+   production; production fixes it to false until a Novu account and region
+   are approved, and a disabled worker reads no `novuApiKey`). Its desired
+   count and scaling ceiling allow only 0, its scaling target has no policy,
+   and it has no running-task, log-volume, request, OCR or queue alarm, which
+   would otherwise sit in ALARM or watch nothing. Staging and development keep
+   their profile defaults for enabled modules; a staging acceptance run opts a
+   module in with `HID_ENABLED_API_ROUTES`, as before.
+3. **Launch OTP is email and SMS only (NOTIF-PROD).** notification-api's
+   `otp-email-sms` profile sends email OTP through SES and SMS OTP through
+   Termii: it requires `SES_FROM_ADDRESS` and the three Termii fields,
+   refuses any WhatsApp configuration and any WhatsApp send, and treats Brevo
+   as an optional fallback. Production requires that profile and refuses
+   `full`, `email-only` and a local service token. The CDK gives production
+   (and development) that profile and injects only `sesFromAddress`,
+   `termiiBaseUrl`, `termiiApiKey` and `termiiSenderId`; staging keeps
+   `email-only`. Every OTP send writes exactly one PHI-free JSON line,
+   `notification.otp.outcome`: channel, purpose, outcome (`accepted`,
+   `retryable_failure` or `definitive_failure`), the provider that answered
+   last (`none` for a refused send), whether the fallback ran, the response
+   `requestId` as correlation id and an allowlisted safe code, and, when the
+   fallback ran, the primary provider and its allowlisted safe code
+   (`primaryProvider`, `primarySafeCode`); never the recipient, the code,
+   the message or provider text. A send the service refuses or cannot route
+   counts as a definitive failure. Migration 0047 seeds Brevo as an enabled
+   email and SMS fallback, and Identity plans an enabled fallback; with no
+   Brevo field injected it answers `not_configured`. Before ingress a
+   platform administrator pauses Brevo through the audited
+   `POST /admin/integrations/brevo/pause` (release checklist P21), so that
+   Identity plans no fallback and a definitive SES or Termii failure is
+   reported as the primary's.
+4. **Configuration cannot re-enable a bypass (CFG-PROD).** In production EHR
+   refuses static S3 keys and the AWS SDK's environment keys
+   (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, which
+   its S3 client's default credential chain reads before the task role), and
+   the OCR worker refuses static AWS keys, as Notification, the notification
+   worker and the event dispatcher already did. Every service that calls AWS
+   therefore refuses static keys from its environment in production, and
+   the task definitions give each service only its ECS task role. The synth
+   input `HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED` (default false, refused
+   unless `HID_QOREID_ENABLED=true`) sets Identity's
+   `QOREID_NIN_ONLY_ENROLLMENT_ENABLED`, and a production synth refuses
+   `true` (the regional stack too, however its configuration was built):
+   NIN-only enrollment proves that a NIN exists, not that the caller holds
+   it. The change that ships N1's registry-phone holder step lifts this
+   refusal together with Identity's own production refusal, which belongs to
+   the enrollment change; until both ship, production cannot enable the flag
+   whatever the merge order.
+5. **A production preflight (I1, REC-GOOGLE).**
+   `scripts/production-external-preflight.py` is the production counterpart of
+   the staging-only preflight: read-only, value-free checks of the auth,
+   Identity sensitive and notification provider secrets, the five Identity
+   keys, `googleOidcClientIds` present and empty (Google sign-in off), SES
+   production access and DKIM, and the alarm topic, whose key it resolves
+   with `kms describe-key` (customer managed, enabled, in the topic's account
+   and region; any spelling of the AWS-managed `alias/aws/sns` key fails) and
+   whose default key policy must allow `cloudwatch.amazonaws.com`
+   `kms:Decrypt` and `kms:GenerateDataKey`. The repository fixes no
+   production account, so the approved `HID_AWS_ACCOUNT` and `HID_AWS_REGION`
+   are required inputs; the staging account is refused.
+
+Consequences:
+
+- Production cannot be synthesized without the topic's ARN. Before any
+  production deploy an operator creates the key, the topic and the
+  subscriptions, and the operations owner names the on-call recipients
+  (external dependency; release checklist P15 and P16).
+- The production template has 31 alarms (47 before; the alarms of the modules
+  that are off are gone, the issuer, renewal and OTP alarms are new) and 16
+  metric filters, every alarm with an action. It changes in its parameter
+  defaults and ranges and in the notification-api and identity-api task
+  definitions; record a new production template baseline
+  (`AWS_DEPLOYMENT_RUNBOOK.md` §1).
+- Production deploys with every service at 0 tasks; the first scale-up is an
+  I6 parameter-file change. A parameter file that raises a module that is off
+  fails CloudFormation validation. Until each enabled service is scaled, its
+  running-task alarm is in ALARM and has notified the on-call recipients
+  (decision 1).
+- Staging and development: the modules that are off now default to 0 tasks
+  and cannot be raised without opting them in; development notification-api
+  runs the `otp-email-sms` profile.
+- No WhatsApp OTP, no Brevo fallback (paused, P21, and given no key), no
+  NIN-only enrollment and no Novu-based patient notifications in production
+  at launch.
+- Residual risks: a token agent that stops, rather than failing renewals,
+  writes no renewal line, so nothing alarms until callers fail; Identity's
+  `notification_workload_token_unavailable` line (an OTP that never reached
+  notification-api) is not alarmed; no alarm has fired against a real topic.
+
+Migration Impact: none.
+
+Security Impact: deny by default. A module that is off cannot run;
+production refuses static AWS keys, a local service token, WhatsApp, every
+OTP profile but `otp-email-sms` and NIN-only enrollment; an alarm can reach
+only its own environment's topic. The outcome line and the preflight receipt carry no secret, recipient,
+code or message.
+
+Compatibility Impact: a production synth needs the new input and refuses
+`HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true`; a production notification-api
+started with `NOTIFICATION_DELIVERY_PROFILE=full`, Meta or WhatsApp
+configuration, or a local service token, and a production EHR started with
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or `AWS_SESSION_TOKEN`, now
+refuse to start. The outcome line gains `primaryProvider` and
+`primarySafeCode` when the fallback ran; its other fields are unchanged.
+
+Related ADRs: ADR-032, ADR-033, ADR-034, ADR-035, ADR-047.

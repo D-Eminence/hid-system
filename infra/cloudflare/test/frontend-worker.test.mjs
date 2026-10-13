@@ -198,6 +198,54 @@ for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
   }
 }
 
+// Identity's per-network limits, Turnstile remoteip and audit source addresses
+// need the client's address. Cloudflare sets CF-Connecting-IP on the inbound
+// request and the Worker forwards it as X-Real-IP, the one header the AWS
+// gateway trusts (from the VPC only). The Worker before this change deleted
+// X-Real-IP, so a gateway behind a stale or rolled-back Worker finds no client
+// address and refuses the request instead of trusting one the caller chose.
+// A caller's own X-Real-IP, or an address that does not parse, must never
+// reach the origin.
+async function forwardedApiHeaders(headers, deployment = 'production', app = 'web') {
+  let received
+  globalThis.fetch = async (_url, init) => {
+    received = init.headers
+    return new Response('{}', { headers: { 'content-type': 'application/json' } })
+  }
+  await worker.fetch(new Request(`https://${deploymentProfiles[deployment].hosts[app]}/api/v1/auth/otp/start`, {
+    method: 'POST', body: '{}', headers: { 'content-type': 'application/json', ...headers },
+  }), environment({ DEPLOYMENT_ENV: deployment, APP_NAME: app }))
+  return received
+}
+
+// Every application host proxies /api/v1, so each must replace the header.
+for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
+  for (const app of Object.keys(profile.hosts)) {
+    test(`${deployment} ${app} forwards the Cloudflare client address as X-Real-IP and replaces a caller-supplied one`, async () => {
+      const spoofed = await forwardedApiHeaders({ 'cf-connecting-ip': '198.51.100.23', 'x-real-ip': '10.40.1.9' }, deployment, app)
+      assert.equal(spoofed.get('x-real-ip'), '198.51.100.23')
+      for (const name of ['cf-connecting-ip', 'x-forwarded-for', 'forwarded']) {
+        assert.equal(spoofed.get(name), null, `${name} must not reach the origin`)
+      }
+      const ipv6 = await forwardedApiHeaders({ 'cf-connecting-ip': '2001:DB8:0:0:1::7' }, deployment, app)
+      assert.equal(ipv6.get('x-real-ip'), '2001:db8::1:0:0:7')
+      const mixedCaseSpoof = await forwardedApiHeaders({ 'X-Real-IP': '203.0.113.200', 'cf-connecting-ip': '192.0.2.44' }, deployment, app)
+      assert.equal(mixedCaseSpoof.get('x-real-ip'), '192.0.2.44')
+    })
+  }
+}
+
+test('sends no X-Real-IP when Cloudflare supplied no valid single client address', async () => {
+  for (const value of [undefined, '', 'not-an-address', '203.0.113.7, 198.51.100.1', '203.0.113.256',
+    '010.1.2.3', '1.2.3', '0x7f.0.0.1', 'fe80::1%eth0', '[2001:db8::1]', '2001:db8::1::2']) {
+    const headers = await forwardedApiHeaders({
+      'x-real-ip': '203.0.113.99',
+      ...(value === undefined ? {} : { 'cf-connecting-ip': value }),
+    })
+    assert.equal(headers.get('x-real-ip'), null, `cf-connecting-ip ${JSON.stringify(value)} must not be forwarded`)
+  }
+})
+
 test('preserves mutation bodies and methods', async () => {
   globalThis.fetch = async (_url, init) => new Response(await new Response(init.body).text(), { status: 202 })
   const response = await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/auth/login', {

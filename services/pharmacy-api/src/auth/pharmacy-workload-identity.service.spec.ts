@@ -17,17 +17,18 @@ describe('PharmacyWorkloadIdentityService', () => {
   });
 
   it('accepts the exact EHR subject, issuer, and audience', async () => {
-    jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:ehr' },
-      protectedHeader: { alg: 'RS256' } } as never);
+    jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:ehr', token_use: 'workload' },
+      protectedHeader: { alg: 'ES256' } } as never);
     await expect(new PharmacyWorkloadIdentityService().authenticate('ehr-api', 'Bearer signed-token'))
       .resolves.toBeUndefined();
-    expect(jwtVerify).toHaveBeenCalledWith('signed-token', expect.any(Function), expect.objectContaining({
-      issuer: 'https://issuer.test', audience: 'hid-pharmacy-api' }));
+    expect(jwtVerify).toHaveBeenCalledWith('signed-token', expect.any(Function), {
+      issuer: 'https://issuer.test', audience: 'hid-pharmacy-api', algorithms: ['ES256'],
+      requiredClaims: ['exp', 'iat'], maxTokenAge: 300, clockTolerance: 5 });
   });
 
   it('rejects a valid token belonging to the other workload', async () => {
-    jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:ocr' },
-      protectedHeader: { alg: 'RS256' } } as never);
+    jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:ocr', token_use: 'workload' },
+      protectedHeader: { alg: 'ES256' } } as never);
     await expect(new PharmacyWorkloadIdentityService().authenticate('ehr-api', 'Bearer signed-token'))
       .rejects.toMatchObject({ status: 403, code: 'WORKLOAD_CALLER_DENIED' });
   });
@@ -45,7 +46,7 @@ describe('PharmacyWorkloadIdentityService', () => {
   });
 
   it('reuses one remote JWKS set for every verification instead of fetching it per request', async () => {
-    jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:ehr' },
+    jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:ehr', token_use: 'workload' },
       protectedHeader: { alg: 'ES256' } } as never);
     const service = new PharmacyWorkloadIdentityService();
     await service.authenticate('ehr-api', 'Bearer first-signed-token');

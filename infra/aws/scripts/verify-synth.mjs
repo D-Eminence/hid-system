@@ -32,6 +32,11 @@ if (environment === 'staging') {
   assert.equal(regional.Parameters.RdsCaBundleBase64.MaxLength, 4096,
     'staging public CA parameter must enforce the CloudFormation value limit')
 }
+const templateBytes = (await readFile(resolve(output, names[0]))).byteLength
+assert.ok(templateBytes <= 1024 * 1024, `${profile} template exceeds the CloudFormation S3 object quota`)
+assert.ok(Object.keys(regional.Parameters ?? {}).length <= 200, `${profile} template exceeds the parameter quota`)
+assert.ok(Object.keys(regional.Resources ?? {}).length <= 500, `${profile} template exceeds the resource quota`)
+assert.ok(Object.keys(regional.Outputs ?? {}).length <= 200, `${profile} template exceeds the output quota`)
 assert.ok(names[0].includes('Regional'), 'regional template is missing')
 const resources = (type) => Object.values(regional.Resources ?? {}).filter(resource => resource.Type === type)
 const text = JSON.stringify(regional)
@@ -82,14 +87,35 @@ for (const field of sensitiveFields) {
   assert.match(regional.Parameters.IdentitySensitiveSecretArn.Description, new RegExp(`\\b${field}\\b`),
     `the IdentitySensitiveSecretArn description must name ${field}, which the Identity task reads`)
 }
+// The gateway trusts X-Real-IP only from the VPC, requires it outside
+// development, resolves upstreams through the VPC resolver, and routes the
+// launch modules unless the synth input HID_ENABLED_API_ROUTES opts staging in.
+const gateways = resources('AWS::ECS::TaskDefinition')
+  .filter(task => String(task.Properties.Family).endsWith('-gateway'))
+  .flatMap(task => task.Properties.ContainerDefinitions).filter(container => container.Name === 'gateway')
+assert.equal(gateways.length, 1)
+const gatewayEnvironment = Object.fromEntries(gateways[0].Environment.map(entry => [entry.Name, entry.Value]))
+const vpcCidr = { development: '10.20.0.0/16', staging: '10.30.0.0/16', production: '10.40.0.0/16' }[environment]
+assert.equal(gatewayEnvironment.VPC_CIDR, vpcCidr, 'the gateway trusts X-Real-IP only from the VPC')
+assert.equal(gatewayEnvironment.GATEWAY_DNS_RESOLVER, vpcCidr.replace(/0\/16$/, '2'), 'the gateway resolves through the VPC resolver')
+assert.equal(gatewayEnvironment.HID_REQUIRE_CLIENT_IP, environment === 'development' ? 'false' : 'true')
+if (environment === 'production' || process.env.HID_ENABLED_API_ROUTES === undefined) {
+  assert.equal(gatewayEnvironment.HID_ENABLED_API_ROUTES, 'identity,ehr', 'the gateway routes only the launch modules')
+}
+assert.equal(identityApis[0].Environment.find(entry => entry.Name === 'TRUST_PROXY_CIDRS')?.Value, vpcCidr)
+
 assert.equal(resources('AWS::EC2::NatGateway').length, contract.nat)
 assert.equal(resources('AWS::EC2::VPCEndpoint')
   .filter(resource => resource.Properties.VpcEndpointType === 'Interface').length, contract.endpoints)
 
 const asleep = profile === 'sleep'
 assert.equal(resources('AWS::ElasticLoadBalancingV2::LoadBalancer').length, asleep ? 0 : 2)
-assert.equal(resources('AWS::WAFv2::WebACL').length, asleep ? 0 : 1)
-assert.equal(resources('AWS::WAFv2::WebACLAssociation').length, asleep ? 0 : 1)
+// The public API web ACL, and the workload issuer's NAT allowlist web ACL
+// wherever an in-stack issuer runs behind NAT gateways (staging live modes and
+// production; D3 in ADR-047).
+const issuerWebAcl = ['economy', 'fidelity', 'production'].includes(profile) ? 1 : 0
+assert.equal(resources('AWS::WAFv2::WebACL').length, asleep ? 0 : 1 + issuerWebAcl)
+assert.equal(resources('AWS::WAFv2::WebACLAssociation').length, asleep ? 0 : 1 + issuerWebAcl)
 assert.equal(resources('AWS::ApplicationAutoScaling::ScalableTarget').length, asleep ? 0 : 11)
 assert.equal(resources('AWS::Scheduler::Schedule').length, asleep ? 1 : 0)
 
@@ -128,13 +154,45 @@ assert.doesNotMatch(text, /(?:AKIA|ASIA)[0-9A-Z]{16}/)
 assert.doesNotMatch(text, /CloudFront/i)
 assert.equal(resources('AWS::SQS::Queue').length, 2)
 assert.equal(resources('AWS::Events::Rule').length, 1)
-assert.equal(resources('AWS::Lambda::Function').length, environment === 'staging' ? 1 : 0)
-if (environment === 'staging') {
+
+// Staging and production carry their own in-stack workload issuer; development
+// deliberately keeps the external issuer, JWKS and subject inputs.
+const issuerEnvironment = ['staging', 'production'].includes(environment) ? environment : undefined
+const workloadParameters = ['WorkloadIssuerUrl', 'WorkloadJwksUrl', 'EhrWorkloadSubject', 'LabWorkloadSubject',
+  'PharmacyWorkloadSubject', 'OcrWorkloadSubject', 'OutreachWorkloadSubject', 'IdentityWorkloadSubject']
+const tokenMounts = container => (container.MountPoints ?? []).filter(mount => mount.SourceVolume === 'workload-tokens')
+const tokenTasks = resources('AWS::ECS::TaskDefinition')
+  .filter(task => (task.Properties.Volumes ?? []).some(volume => volume.Name === 'workload-tokens'))
+assert.equal(tokenTasks.length, 6, 'six token-bearing tasks must have a workload token volume')
+for (const task of tokenTasks) {
+  const containers = task.Properties.ContainerDefinitions
+  const app = containers.find(container => container.Name !== 'workload-token-agent')
+  const writers = containers.filter(container => tokenMounts(container).some(mount => mount.ReadOnly === false))
+  assert.deepEqual(tokenMounts(app).map(mount => mount.ReadOnly), [true], `${app.Name} must mount its token volume read-only`)
+  if (issuerEnvironment) {
+    assert.deepEqual(writers.map(container => container.Name), ['workload-token-agent'],
+      `${app.Name} token volume must have exactly one workload-token-agent writer`)
+    assert.deepEqual(tokenMounts(writers[0]).map(mount => mount.ReadOnly), [false])
+    assert.deepEqual(app.DependsOn, [{ ContainerName: 'workload-token-agent', Condition: 'HEALTHY' }],
+      `${app.Name} must wait for its token agent to be healthy`)
+    const agentEnvironment = Object.fromEntries(writers[0].Environment.map(item => [item.Name, item.Value]))
+    assert.equal(agentEnvironment.HID_DEPLOYMENT_ENV, issuerEnvironment)
+    assert.equal(agentEnvironment.WORKLOAD_SUBJECT, `hid:${issuerEnvironment}:${app.Name}`)
+  } else {
+    assert.equal(writers.length, 0, 'development token delivery remains an external prerequisite')
+  }
+}
+assert.equal(resources('AWS::Lambda::Function').length, issuerEnvironment ? 1 : 0)
+if (issuerEnvironment) {
   const methods = resources('AWS::ApiGateway::Method')
   assert.equal(methods.length, 2)
   assert.equal(methods.find(method => method.Properties.HttpMethod === 'POST').Properties.AuthorizationType, 'AWS_IAM')
   assert.equal(methods.find(method => method.Properties.HttpMethod === 'GET').Properties.AuthorizationType, 'NONE')
-  assert.equal(regional.Parameters.WorkloadIssuerUrl, undefined)
+  assert.deepEqual(resources('AWS::ApiGateway::Stage').map(stage => stage.Properties.StageName), [issuerEnvironment])
+  assert.equal(resources('AWS::Lambda::Function')[0].Properties.FunctionName, `hid-${issuerEnvironment}-workload-issuer`)
+  assert.equal(resources('AWS::KMS::Key').filter(key => key.Properties.KeyUsage === 'SIGN_VERIFY').length, 1)
+  for (const name of workloadParameters) assert.equal(regional.Parameters[name], undefined, `${name} must not be an input`)
+  assert.doesNotMatch(text, issuerEnvironment === 'production' ? /hid:staging:|hid-staging-workload/ : /hid:production:|hid-production-workload/)
   const tokenAgents = resources('AWS::ECS::TaskDefinition').flatMap(task => task.Properties.ContainerDefinitions)
     .filter(container => container.Name === 'workload-token-agent')
   assert.equal(tokenAgents.length, 6)
@@ -142,8 +200,173 @@ if (environment === 'staging') {
     assert.deepEqual(agent.Image, { Ref: 'IdentityApiImageUri' })
     assert.equal(agent.User, '65532:65532')
     assert.equal(agent.ReadonlyRootFilesystem, true)
+    // D2: an issuer outage stops service-to-service calls, not the task.
+    assert.equal(agent.Essential, false, 'the token agent must not be essential')
+    assert.deepEqual(agent.RestartPolicy, { Enabled: true, RestartAttemptPeriod: 60 },
+      'ECS must restart an exited token agent')
+  }
+  // DEP-4-KEY: only the issuer role may sign, and only ES256 over RAW messages.
+  const [signingKey] = resources('AWS::KMS::Key').filter(key => key.Properties.KeyUsage === 'SIGN_VERIFY')
+  const keyStatements = signingKey.Properties.KeyPolicy.Statement
+  assert.equal(keyStatements.filter(statement => statement.Effect === 'Allow' && statement.Action === 'kms:*').length, 1,
+    'the signing key keeps its account root statement')
+  const issuerRole = resources('AWS::Lambda::Function')[0].Properties.Role['Fn::GetAtt'][0]
+  const denied = Object.fromEntries(keyStatements.filter(statement => statement.Effect === 'Deny')
+    .map(statement => [statement.Sid, statement]))
+  assert.deepEqual(Object.keys(denied).sort(),
+    ['DenyEveryOtherMessageType', 'DenyEveryOtherSigningAlgorithm', 'DenySigningFromEveryOtherPrincipal'])
+  for (const statement of Object.values(denied)) {
+    assert.deepEqual([statement.Principal, statement.Action, statement.Resource], [{ AWS: '*' }, 'kms:Sign', '*'])
+  }
+  assert.deepEqual(denied.DenySigningFromEveryOtherPrincipal.Condition,
+    { ArnNotEquals: { 'aws:PrincipalArn': { 'Fn::GetAtt': [issuerRole, 'Arn'] } } })
+  assert.deepEqual(denied.DenyEveryOtherSigningAlgorithm.Condition, { StringNotEquals: { 'kms:SigningAlgorithm': 'ECDSA_SHA_256' } })
+  assert.deepEqual(denied.DenyEveryOtherMessageType.Condition, { StringNotEquals: { 'kms:MessageType': 'RAW' } })
+  // DEP-4-DOS: separate method throttles; no stage-wide setting shared by both methods.
+  const [issuerStage] = resources('AWS::ApiGateway::Stage')
+  assert.deepEqual(issuerStage.Properties.MethodSettings.map(setting => `${setting.HttpMethod} ${setting.ResourcePath}`).sort(),
+    ['GET /~1.well-known~1jwks.json', 'POST /~1token'])
+  for (const setting of issuerStage.Properties.MethodSettings) {
+    assert.ok(setting.ThrottlingRateLimit >= 30 && setting.ThrottlingBurstLimit >= 60)
+    assert.equal(setting.DataTraceEnabled, false)
+    assert.equal(setting.LoggingLevel, 'OFF')
+  }
+  // D3: a REGIONAL web ACL on the issuer stage blocks every source except this VPC's NAT gateway addresses.
+  const issuerAssociations = resources('AWS::WAFv2::WebACLAssociation')
+    .filter(association => JSON.stringify(association.Properties.ResourceArn).includes('/restapis/'))
+  assert.equal(issuerAssociations.length, issuerWebAcl)
+  if (issuerWebAcl) {
+    const acl = regional.Resources[issuerAssociations[0].Properties.WebACLArn['Fn::GetAtt'][0]].Properties
+    assert.equal(acl.Scope, 'REGIONAL')
+    assert.deepEqual(acl.DefaultAction, { Block: {} })
+    assert.deepEqual(acl.Rules.map(rule => rule.Action), [{ Allow: {} }])
+    const ipSet = regional.Resources[acl.Rules[0].Statement.IPSetReferenceStatement.Arn['Fn::GetAtt'][0]].Properties
+    const natEips = resources('AWS::EC2::NatGateway').map(nat => nat.Properties.AllocationId['Fn::GetAtt'][0]).sort()
+    assert.equal(natEips.length, contract.nat)
+    assert.deepEqual(ipSet.Addresses.map(address => address['Fn::Join'][1][0]['Fn::GetAtt'][0]).sort(), natEips,
+      'the issuer allowlist must be exactly the NAT gateway Elastic IPs')
+    assert.ok(ipSet.Addresses.every(address => address['Fn::Join'][1][0]['Fn::GetAtt'][1] === 'PublicIp'
+      && address['Fn::Join'][1][1] === '/32'))
+  }
+} else {
+  for (const name of workloadParameters) {
+    assert.ok(regional.Parameters[name], `development must still require ${name}`)
+    assert.equal(regional.Parameters[name].Default, undefined)
+  }
+  assert.equal(resources('AWS::ApiGateway::RestApi').length, 0)
+  assert.doesNotMatch(text, /workload-token-agent/)
+}
+// INFRA-COUNT and D17: every production task count defaults to 0 and is raised
+// only through the reviewed parameter file (I6); a module outside the enabled
+// set is pinned at 0 tasks, has no scaling policy and raises no alarm.
+const taskContainer = name => resources('AWS::ECS::TaskDefinition')
+  .filter(task => String(task.Properties.Family).endsWith(`-${name}`))
+  .flatMap(task => task.Properties.ContainerDefinitions).find(container => container.Name === name)
+const routeModules = { LabApi: 'lab', PharmacyApi: 'pharmacy', OcrApi: 'ocr', OcrWorker: 'ocr', OutreachApi: 'outreach' }
+const enabledRoutes = String(gatewayEnvironment.HID_ENABLED_API_ROUTES).split(',')
+const notificationWorkerEnabled = environment !== 'production' && process.env.HID_NOTIFICATION_WORKER_ENABLED !== 'false'
+const disabledIds = [...Object.entries(routeModules).filter(([, module]) => !enabledRoutes.includes(module)).map(([id]) => id),
+  ...(notificationWorkerEnabled ? [] : ['NotificationWorker'])]
+const desiredCounts = Object.entries(regional.Parameters).filter(([name]) => name.endsWith('DesiredCount'))
+assert.equal(desiredCounts.length, asleep ? 0 : 11)
+for (const [name, parameter] of desiredCounts) {
+  const id = name.slice(0, -'DesiredCount'.length)
+  const ceiling = regional.Parameters[`${id}ScalingCeiling`]
+  assert.ok(ceiling, `${id} must have a scaling ceiling`)
+  if (environment === 'production') {
+    assert.equal(parameter.Default, 0, `production ${name} must default to 0 tasks (ADR-032, I6)`)
+    assert.match(parameter.Description, /recommended \d+/, `${name} must keep its recommended count`)
+  }
+  if (disabledIds.includes(id)) {
+    assert.deepEqual([parameter.Default, parameter.MaxValue], [0, 0], `${name} is outside the enabled modules and stays at 0`)
+    assert.deepEqual([ceiling.Default, ceiling.MinValue, ceiling.MaxValue], [0, 0, 0], `${id} scaling is pinned at 0`)
+  } else {
+    assert.ok(parameter.MaxValue > 0, `${name} must be scalable`)
   }
 }
+const resourceIds = Object.keys(regional.Resources)
+const scalingPolicies = resources('AWS::ApplicationAutoScaling::ScalingPolicy')
+for (const id of disabledIds) {
+  for (const prefix of [`${id}RunningTask`, `${id}LogVolume`, `${id}TargetLatency`, `${id}TargetError`, `${id}TokenRenewal`]) {
+    assert.ok(!resourceIds.some(resource => resource.startsWith(prefix)), `${id} is disabled and must have no ${prefix} resource`)
+  }
+  assert.ok(!scalingPolicies.some(policy => JSON.stringify(policy.Properties.ScalingTargetId).includes(`${id}Service`)),
+    `${id} is disabled and must have no scaling policy`)
+}
+if (disabledIds.includes('OcrWorker')) {
+  assert.ok(!resourceIds.some(resource => /^Ocr(WorkerFailure|QueueAge|DrainRate)Alarm/.test(resource)), 'OCR is disabled: no OCR alarms')
+}
+if (!notificationWorkerEnabled) {
+  assert.ok(!resourceIds.some(resource => /^NotificationQueue(Age|Backlog|Drain)Alarm/.test(resource)),
+    'the notification worker is off: no notification queue alarms')
+  assert.doesNotMatch(text, /:novuApiKey::/, 'a disabled notification worker reads nothing from the provider secret')
+}
+
+// D4 (ADR-053): in production, and wherever HID_OPERATIONAL_ALARM_TOPIC_ARN is
+// supplied, every alarm notifies the environment's own operator-created
+// topic on ALARM and on OK; otherwise no alarm has an action.
+const alarms = resources('AWS::CloudWatch::Alarm')
+const alarmTopic = { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':sns:', { Ref: 'AWS::Region' }, ':',
+  { Ref: 'AWS::AccountId' }, `:hid-${environment}-operational-alerts`]] }
+const alarmsRouted = environment === 'production' || process.env.HID_OPERATIONAL_ALARM_TOPIC_ARN !== undefined
+assert.ok(alarms.length > 0)
+for (const alarm of alarms) {
+  for (const key of ['AlarmActions', 'OKActions']) {
+    if (alarmsRouted) assert.deepEqual(alarm.Properties[key], [alarmTopic], `every alarm must notify the operational topic (${key})`)
+    else assert.equal(alarm.Properties[key], undefined, 'no alarm action without an operational topic')
+  }
+}
+if (alarmsRouted) assert.deepEqual(regional.Outputs.OperationalAlarmTopicArn?.Value, alarmTopic)
+const alarmsOn = (namespace, metricName) => alarms.filter(alarm =>
+  alarm.Properties.Namespace === namespace && alarm.Properties.MetricName === metricName)
+if (issuerEnvironment) {
+  for (const metricName of ['Errors', 'Throttles']) {
+    assert.equal(alarmsOn('AWS/Lambda', metricName).length, 1, `the issuer Lambda needs a ${metricName} alarm`)
+  }
+  for (const metricName of ['5XXError', '4XXError']) {
+    assert.equal(alarmsOn('AWS/ApiGateway', metricName).length, 1, `the issuer stage needs a ${metricName} alarm`)
+  }
+}
+const filters = resources('AWS::Logs::MetricFilter')
+if (!asleep) {
+  const otp = filters.filter(filter => filter.Properties.MetricTransformations[0].MetricName === 'OtpDefinitiveFailures')
+  assert.equal(otp.length, 1)
+  assert.equal(otp[0].Properties.FilterPattern,
+    '{ ($.event = "notification.otp.outcome") && ($.outcome = "definitive_failure") }')
+  assert.equal(alarmsOn('HID/Notification', 'OtpDefinitiveFailures').length, 1)
+  if (issuerEnvironment) {
+    const renewal = filters.filter(filter => filter.Properties.MetricTransformations[0].MetricName === 'TokenRenewalUnavailable')
+    const disabledNames = disabledIds.map(id => id.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase())
+    const enabledTokenApps = tokenTasks.map(task => task.Properties.ContainerDefinitions
+      .find(container => container.Name !== 'workload-token-agent').Name).filter(name => !disabledNames.includes(name))
+    assert.equal(renewal.length, enabledTokenApps.length, 'one renewal filter per enabled token-bearing task')
+    for (const filter of renewal) assert.equal(filter.Properties.FilterPattern, '"Workload token renewal unavailable"')
+    assert.equal(alarmsOn('HID/WorkloadIdentity', 'TokenRenewalUnavailable').length, 1)
+  }
+}
+
+// NOTIF-PROD: notification-api reads exactly its delivery profile's provider
+// fields: email-only (staging) is the SES sender; otp-email-sms is the SES
+// sender and the three Termii fields. No Meta, WhatsApp or Brevo field.
+const notificationApi = taskContainer('notification-api')
+const notificationEnvironment = Object.fromEntries(notificationApi.Environment.map(entry => [entry.Name, entry.Value]))
+assert.equal(notificationEnvironment.NOTIFICATION_DELIVERY_PROFILE, environment === 'staging' ? 'email-only' : 'otp-email-sms')
+assert.equal(notificationEnvironment.HID_DEPLOYMENT_ENV, environment)
+const providerFields = notificationApi.Secrets.map(secret => secret.ValueFrom?.['Fn::Join']?.[1])
+  .filter(parts => Array.isArray(parts) && parts[0]?.Ref === 'NotificationProviderSecretArn')
+  .map(parts => /^:([A-Za-z0-9]+)::$/.exec(String(parts[1]))?.[1]).sort()
+assert.deepEqual(providerFields, environment === 'staging' ? ['sesFromAddress']
+  : ['sesFromAddress', 'termiiApiKey', 'termiiBaseUrl', 'termiiSenderId'])
+assert.doesNotMatch(text, /:(meta[A-Za-z]+|brevo[A-Za-z]+)::/, 'no Meta, WhatsApp or Brevo provider field is read')
+
+// CFG-PROD: Identity's NIN-only enrollment flag is the explicit synth input,
+// false by default, and always false in production until N1's holder step.
+const ninOnlyEnrollment = identityApis[0].Environment.find(entry => entry.Name === 'QOREID_NIN_ONLY_ENROLLMENT_ENABLED')?.Value
+assert.equal(ninOnlyEnrollment, process.env.HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED ?? 'false')
+if (environment === 'production') {
+  assert.equal(ninOnlyEnrollment, 'false', 'production identity-api must not enable NIN-only enrollment (CFG-PROD, N1)')
+}
+
 assert.equal(regional.Parameters.OriginDomainName, undefined)
 if (asleep) {
   assert.equal(regional.Parameters[contract.secret], undefined)

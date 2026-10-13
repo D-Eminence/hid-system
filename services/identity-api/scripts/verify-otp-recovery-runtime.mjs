@@ -69,6 +69,20 @@ try {
   // Uniform cooldown (0081): the accepted starts for one unknown identifier share one challengeId, as a known one's do.
   const rateIds=new Set(rate.filter(result=>result.status==='fulfilled').map(result=>result.value.challengeId));
   assert.equal(rateIds.size,1,'Concurrent recovery starts for one unknown identifier must answer one challengeId within the cooldown');
+  // IP-1: the start limit is per client network against the real table. Six
+  // clients each get their own bucket; every address of one IPv6 /64 shares
+  // one, so rotating addresses inside an allocation does not reset it; and a
+  // start with no client address is refused rather than charged to a bucket
+  // every such request would share.
+  const networkStarts=addresses=>Promise.allSettled(addresses.map((remoteIp,index)=>otp.start({identifier:`absent-${randomUUID()}@example.invalid`,purpose:'PASSWORD_RESET',remoteIp,correlationId:`otp-network-${index}`})));
+  const ipv4Clients=await networkStarts(Array.from({length:6},(_,index)=>`198.51.100.${150+index}`));
+  assert.equal(ipv4Clients.filter(result=>result.status==='fulfilled').length,6,'Six clients with their own addresses must each be accepted');
+  const oneAllocation=await networkStarts(Array.from({length:7},(_,index)=>`2001:db8:4:5:${index+1}::${index+9}`));
+  assert.equal(oneAllocation.filter(result=>result.status==='fulfilled').length,5,'Every address of one IPv6 /64 must share one start bucket');
+  assert.equal(oneAllocation.filter(result=>result.status==='rejected'&&result.reason.code==='OTP_RATE_LIMITED').length,2);
+  assert.equal((await otp.start({identifier:`absent-${randomUUID()}@example.invalid`,purpose:'PASSWORD_RESET',remoteIp:'2001:db8:4:6::1',correlationId:'otp-network-other'})).accepted,true,'Another /64 must have its own bucket');
+  for (const remoteIp of [undefined,'not-an-address']) await assert.rejects(otp.start({identifier:`absent-${randomUUID()}@example.invalid`,purpose:'PASSWORD_RESET',remoteIp,correlationId:'otp-network-none'}),
+    error=>error.code==='OTP_RATE_LIMIT_UNAVAILABLE'&&error.getStatus()===503,'A start without a client address must answer 503, never share a bucket');
   // One failure budget per account across its challenges and purposes (five wrong codes in 15 minutes by default).
   const budgetId=randomUUID(), budgetEmail=`synthetic-${budgetId}@example.invalid`;
   await pool.query("insert into auth.accounts(id,subject,email,status) values($1,$2,$3,'active')",[budgetId,`synthetic:otp-budget:${budgetId}`,budgetEmail]);
@@ -102,7 +116,7 @@ try {
   assert.equal(recovered.delivery?.challengeId,recovered.started.challengeId,'A recovery start after the failure block ends must deliver a code');
   assert.equal((await otp.verify({challengeId:recovered.started.challengeId,purpose:'PASSWORD_RESET',code:recovered.delivery.code,correlationId:'otp-budget-recovered'})).verified,true);
   assert.equal(typeof otp.settleDeliveries,'function','OtpService must let its owner wait for deliveries that run after the response');
-  process.stdout.write(JSON.stringify({status:'passed',scope:'local-synthetic-only',role:'hid_identity_api_runtime',otp_start_verify_complete:'passed',provider:'test-double-no-delivery',concurrent_completion_successes:1,concurrent_completion_denials:1,argon2_password_verified:true,semantic_audit_count:1,disabled_after_verification_denied:true,reenabled_old_challenge_denied:true,concurrent_rate_allowed:5,concurrent_rate_denied:3,concurrent_unknown_start_challenge_ids:rateIds.size,failure_budget_correct_code_denied:true,failure_budget_two_purpose_denials:2,failure_budget_suspended_start_codes:0,failure_budget_recovered_after_block:true})+'\n');
+  process.stdout.write(JSON.stringify({status:'passed',scope:'local-synthetic-only',role:'hid_identity_api_runtime',otp_start_verify_complete:'passed',provider:'test-double-no-delivery',concurrent_completion_successes:1,concurrent_completion_denials:1,argon2_password_verified:true,semantic_audit_count:1,disabled_after_verification_denied:true,reenabled_old_challenge_denied:true,concurrent_rate_allowed:5,concurrent_rate_denied:3,concurrent_unknown_start_challenge_ids:rateIds.size,failure_budget_correct_code_denied:true,failure_budget_two_purpose_denials:2,failure_budget_suspended_start_codes:0,failure_budget_recovered_after_block:true,network_clients_accepted:6,ipv6_allocation_accepted:5,ipv6_allocation_denied:2,missing_client_address:'503 OTP_RATE_LIMIT_UNAVAILABLE'})+'\n');
 } finally {
   // Deliveries and their bookkeeping run after start() answers; let them finish before the pool ends.
   await otp.settleDeliveries?.();

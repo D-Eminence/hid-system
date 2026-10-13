@@ -1,4 +1,4 @@
-import type { DeploymentProfile } from './config.js';
+import { type DeploymentProfile, type HidEnvironmentConfig, workloadEnabled } from './config.js';
 
 export const tokenRoot = '/var/run/hid/workload-tokens';
 
@@ -96,6 +96,24 @@ export function workloadScale(profile: DeploymentProfile, name: WorkloadName): W
   const normalMaxTasks = requestNormalMax[name];
   return { minimumLiveTasks: 2, recommendedTasks: 2, normalMaxTasks,
     reviewedEmergencyMaxTasks: normalMaxTasks * 2 };
+}
+
+type CountConfiguration = Pick<HidEnvironmentConfig, 'name' | 'profile' | 'enabledApiRoutes' | 'notificationWorkerEnabled'>;
+
+/**
+ * The CloudFormation default of a workload's *DesiredCount parameter. Every
+ * production count defaults to zero (ADR-032): nothing serves traffic until
+ * the reviewed parameter file (I6) raises it. A disabled module stays at zero
+ * everywhere (D17).
+ */
+export function desiredCountDefault(configuration: CountConfiguration, name: WorkloadName): number {
+  if (!workloadEnabled(configuration, name) || configuration.name === 'production') return 0;
+  return workloadScale(configuration.profile, name).recommendedTasks;
+}
+
+/** The largest *DesiredCount a parameter file may set: zero for a disabled module. */
+export function desiredCountMaximum(configuration: CountConfiguration, name: WorkloadName): number {
+  return workloadEnabled(configuration, name) ? workloadScale(configuration.profile, name).normalMaxTasks : 0;
 }
 
 export function databaseConnectionDemand(profile: DeploymentProfile, emergency = false): number {

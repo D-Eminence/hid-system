@@ -1,8 +1,12 @@
 # Phase 3 launch decisions and operator plans
 
-Date: 2026-10-12. Status: open. N1 and N2 were decided on 2026-10-13 with
-the owner's policy defaults (§1); nothing else in this document has been
-decided, and nothing has been deployed or executed.
+Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
+the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
+the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
+(§1, ADR-052, D-Eminence/hid-system#67) and N1 and N2 (ADR-048,
+BRANCH:launch/identity-enrollment-gates) with the owner's defaults;
+nothing else in this document has been decided, and nothing has been deployed
+or executed.
 
 The Phase 3 launch review (workload tokens, identity and recovery, patient
 records, Pharmacy, Lab, OCR and purpose of use, document completion and
@@ -159,16 +163,50 @@ separate deployment authorization. None of them has been run.
   #50 on `auth.controller.ts` and `token.service.ts`.
 - **Data check.** Run I4 (§3) before deciding: whether such memberships exist.
 
+### FE-HOST. Launch frontend hosting (FE-HOST, MOD-EDGE)
+
+- **Question.** Which frontend serves www, staging and admin.* at launch, and
+  which product hosts are deployed? hid-system's legacy `apps/web` (about 30
+  retired `/api/v1/functions/*` calls that answer `404`) and `apps/admin`
+  (staff sign-in refused by the platform-scoped admin endpoints) were the
+  configured assets; Health-id, the only frontend with the governed access
+  loop, had no deployment definition, and `verify-config.mjs` required a
+  manifest and service worker it deliberately lacks.
+- **Decided (2026-10-13, owner defaults: deny by default, least privilege;
+  ADR-052, D-Eminence/hid-system#67, not merged).** Health-id
+  `apps/patient-web` is the single launch frontend for www, staging and
+  admin.*, one build per host with `VITE_HID_API_BASE_URL` and
+  `VITE_HID_APP_ORIGIN` equal to the host's origin, the environment's
+  Turnstile site key, and no `VITE_HID_GOOGLE_CLIENT_ID` (REC-GOOGLE) or
+  `VITE_HID_SENTRY_DSN`. A build is served only after
+  `infra/cloudflare/scripts/stage-health-id-build.mjs` accepts it and records
+  its provenance. Under the launch module set (D17) the product hosts for
+  deferred modules are not deployed: `hid-lab`, `hid-pharmacy`, `hid-ocr`,
+  `hid-ocr-redirect` and `hid-outreach`, and also `hid-ehr`, whose legacy
+  build is not the launch frontend (clinicians use `/provider/clinical` on www
+  or staging). `infra/cloudflare/launch-deployment.json` records the subset;
+  the deferred APIs stay closed at the gateway (`HID_ENABLED_API_ROUTES`,
+  D-Eminence/hid-system#65).
+- **Risks.** Each host needs its own Health-id build. Serving a build on ehr.*
+  later needs its own decision. www serves the portal (`noindex`), not
+  Health-id's public site (`apps/public-web`), which is not deployed at
+  launch. The signed release bundle cannot yet carry the Health-id artefact
+  (ADR-052 consequences).
+- **External.** Cloudflare and AWS operator authorization,
+  `ORIGIN_AUTH_TOKEN` per environment, the Turnstile widget site and secret
+  keys, the Cloudflare account and zone identifiers, a staging environment
+  (none exists yet), and the Health-id builds (release checklist P14, S4l).
+
 ## 2. Other open decisions
 
 | # | Decision | Proposed default | Risks | Waits on it |
 | --- | --- | --- | --- | --- |
-| D1 | Production workload issuer and key custody (DEP-4, ADR-047 Proposed, D-Eminence/hid-system#54 draft) | The staging mechanism with an independent production key, API, stage and `hid:production:` subjects; a key policy that denies `kms:Sign` to anyone but the issuer role | Same-account key custody; a single issuer for six services; the JWKS endpoint shares the stage throttle | Every service-to-service call in production |
-| D2 | Behaviour during an issuer outage | Agent stays essential and keeps the `HEALTHY` start gate; decide restart policy with D4 | An outage longer than a token's lifetime takes every token task down | DEP-4 rollout |
-| D3 | Edge protection for the issuer | A separate `POST /token` throttle and a WAF rate rule or private API, by ADR | — | DEP-4 rollout |
-| D4 | Alert routing | Dashboards only until an alerting workflow exists (ADR-032 forbids an SNS topic without one) | Nothing pages anyone | Every mitigation that relies on an alarm |
+| D1 | Production workload issuer and key custody (DEP-4, DEP-4-KEY; ADR-047 accepted 2026-10-13, D-Eminence/hid-system#54) | **Decided (default):** the staging mechanism with an independent production key, API, stage and `hid:production:` subjects; the key policy keeps the root statement and denies `kms:Sign` to every principal but the issuer role, to any algorithm but `ECDSA_SHA_256` and to any message type but `RAW`; receivers accept only ES256 tokens with `exp`, `iat` at most 300 s old and `token_use: workload`; no local-secret fallback | Same-account key custody (an administrator can still change the key policy or the function); a single issuer for six services; receivers trust a withdrawn key for up to 10 minutes | Every service-to-service call in production; deployment still needs I5 and I6 |
+| D2 | Behaviour during an issuer outage (DEP-4-RES) | **Decided (default):** the agent is `essential: false` with an ECS container restart policy and keeps the `HEALTHY` start gate (ADR-047) | During an outage longer than a token's lifetime, service-to-service calls fail closed (OTP delivery, EHR records, Lab, Pharmacy, OCR, Outreach) while sign-in keeps working; nothing pages anyone until D4 | DEP-4 rollout |
+| D3 | Edge protection for the issuer (DEP-4-DOS) | **Decided (default, deny by default):** separate method throttles for `POST /token` and the JWKS `GET`, a REGIONAL web ACL on the issuer stage that blocks every source except the VPC's NAT gateway Elastic IPs (none in staging sleep), and an agent that caches its verified JWKS by `kid` (ADR-047) | A future caller outside the VPC (such as a D5 scanner) must leave through NAT or be allowlisted by a reviewed change; per-request WAF charges during a flood | DEP-4 rollout |
+| D4 | Alert routing | **Decided (owner policy default, ADR-053, D-Eminence/hid-system#66):** every production alarm notifies, on ALARM and on OK, an operator-created SNS topic `hid-<env>-operational-alerts` encrypted with a customer-managed KMS key and named by its exact ARN (synth input `HID_OPERATIONAL_ALARM_TOPIC_ARN`, required in production, in the stack's own account and region). New alarms: issuer Lambda errors and throttles, issuer stage `5XXError` and `4XXError` (429s count there), token renewal (`Workload token renewal unavailable`) and OTP `definitive_failure`. "Dashboards only" is rejected: the CDK defines no dashboard, so it would mean nobody is told | The operations owner must name the on-call recipients, and an operator must create the topic and confirm each subscription (release checklist P15, P16) before production. A stopped token agent and Identity's `notification_workload_token_unavailable` line still raise no alarm. The five enabled services' running-task alarms are in ALARM, and notify, while production runs zero tasks before the I6 scale-up (P20); the recipients are told beforehand | Every mitigation that relies on an alarm |
 | D5 | Malware scanner engine and credential (DOC-3, DEP-4-SCAN) | An in-account scanner role as a seventh issuer rule with subject `hid:<env>:document-scanner`, and a governed provisioning step for the `document_scanner` account | Until decided, no document becomes downloadable and no OCR job can start | Documents, OCR |
-| D6 | Recovery and enrollment code guess budgets (REC-4, ENR-6) | 5 failures per 15 minutes per account or recipient, never per IP (the edge discards client IPs); no daily cap | A daily cap makes denial of recovery cheap | Implemented as the default in D-Eminence/hid-system#55 (recovery codes) and D-Eminence/hid-system#61 (enrollment contact codes); thresholds are environment values |
+| D6 | Recovery and enrollment code guess budgets (REC-4, ENR-6) | 5 failures per 15 minutes per account or recipient, never per IP (the budget holds whatever network a guess comes from; until D-Eminence/hid-system#65 the edge also discarded client IPs); no daily cap | A daily cap makes denial of recovery cheap | Implemented as the default in D-Eminence/hid-system#55 (recovery codes) and D-Eminence/hid-system#61 (enrollment contact codes); thresholds are environment values |
 | D7 | Patient record release categories (PREC-1 Phase B) | Completed-encounter items only; never draft or entered in error; confirmed diagnoses only; documents only once a patient download route exists | Docs are silent | Phase B of the record summaries |
 | D8 | Vital correction semantics (CLIN-1, VIT-1) | The current correction is the whole current set, as Health-id renders it | API clients that send partial corrections lose omitted values | Held out of D-Eminence/hid-system#52 |
 | D9 | Break-glass detailed reads (PREC-4 scope, OCR-READ-PURPOSE) | The emergency summary returns only categories the reader may read (D-Eminence/hid-system#52); EHR document and OCR reads unchanged until decided together | The seeded clinical roles hold every read permission, so the summary stays wide in practice | Emergency summary narrowing |
@@ -193,8 +231,16 @@ Cloudflare, DNS, IAM, secrets or live data until an operator runs it.
    `mfaSecretKeyB64` through `jq` from standard input, then
    `aws secretsmanager put-secret-value`. Never put the value on a command line
    or in a log.
-3. Run `scripts/staging-external-preflight.py` and confirm the field is
-   present and in canonical 32-byte base64.
+3. Confirm the field is present and in canonical 32-byte base64 with the
+   environment's own preflight. `scripts/staging-external-preflight.py` is
+   staging-only: it is fixed to the staging account and refuses any other. In
+   production run `scripts/production-external-preflight.py --cloud-read-only`
+   with the approved `HID_AWS_ACCOUNT` and `HID_AWS_REGION` (it refuses the
+   staging account): its launch profile must pass, which also requires the
+   NIN lookup and encryption, OTP and contact lookup keys canonical,
+   `googleOidcClientIds` present and empty (REC-GOOGLE), the notification
+   secret to hold exactly the `otp-email-sms` fields, SES production access
+   and the operational alarm topic (release checklist P15).
 4. Only then deploy the task definition with `MFA_KEY_VERSION=aws-v1`. If the
    field is missing, no Identity task starts.
 5. Verify platform-admin TOTP enrolment answers without `503 MFA_UNAVAILABLE`.
@@ -218,13 +264,27 @@ Cloudflare, DNS, IAM, secrets or live data until an operator runs it.
 
 ### I3. RDS owner attributes (OCR-P8, release checklist P8, ADR-041)
 
-Before staging S1, as the RDS migration administrator: check
-`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
-try `GRANT SET ON PARAMETER plpgsql.variable_conflict`; run the role bootstrap
-without superuser; rehearse 0001 to the latest migration and confirm OCR
-claims, patient confirmation, scan events and job events work. If BYPASSRLS
-is unavailable, ADR-041 becomes a launch blocker for documents, OCR and
-Outreach.
+Before staging S1, as the RDS master: record
+`select rolname, rolsuper, rolbypassrls, rolcreaterole from pg_roles where rolname in (current_user, '<migration administrator>')`
+and the master's own role memberships, then grant
+`SET ON PARAMETER plpgsql.variable_conflict` to the migration administrator
+for the migration run. As that administrator, migrate 0001 to the latest
+migration, run the role bootstrap twice and `db:verify-roles`, and verify
+every runtime credential with `db:verify-logins`; then, as the master, revoke
+the grant, which 0083 makes unnecessary after the run (`MIGRATION_RUNBOOK.md`
+§6). Do not try or grant `BYPASSRLS`. If RDS refuses the grant, take a
+reviewed ledger exception for 0015 rather than waiting on AWS. Then confirm
+that OCR claims, patient confirmation, scan events and job events work.
+
+The impact of an owner without `BYPASSRLS` was understated here. Besides
+documents, OCR and Outreach, `platform.control_enabled`, which the Identity,
+EHR and Outreach guards call on every patient and provider request, raised
+`PLATFORM_CONTROL_UNAVAILABLE` (`503`) under such an owner, and the role
+bootstrap needed a superuser. Both are fixed by
+D-Eminence/hid-system#63, with 0083 for the OCR claim's setting.
+Owner `BYPASSRLS` is not relied on: document scanning, OCR and Outreach
+campaign registration stay out of the release unless they pass under a
+non-bypass owner (ADR-041).
 
 ### I4. Duplicate-membership data check (N5)
 
@@ -238,17 +298,22 @@ group by 1, 2
 having count(*) > 1;
 ```
 
-### I5. Staging issuer acceptance (after D1 to D3)
+### I5. Staging issuer acceptance (D1 to D3 decided)
 
-Staging is not deployed. After redeploying it: admit the Identity image that
-carries the agent; run `AWS_DEPLOYMENT_RUNBOOK.md` §7 (ES256, issuer,
-subject, audience, 300-second lifetime, renewal about every 90 seconds,
-refusal of a wrong audience, subject or signature); prove an administrator
-cannot sign with the key; flood the JWKS endpoint from outside for 10 minutes
-and confirm no renewal fails; deny one task role's invoke for 6 minutes and
-observe task health.
+Staging is not deployed, and this needs a staging deployment authorization.
+After redeploying it: admit the Identity image that carries the agent; run
+`AWS_DEPLOYMENT_RUNBOOK.md` §7 (ES256, issuer, subject, audience,
+`token_use`, 300-second lifetime, renewal about every 90 seconds with one
+JWKS fetch per agent, refusal of a wrong audience, subject or signature);
+prove that a role granted `kms:Sign` by IAM is refused by the key policy;
+confirm the web ACL answers `403` to any source but the NAT addresses; flood
+the JWKS endpoint and `POST /token` from a non-allowlisted source for at least
+30 minutes, scaling one task out during it, and confirm no renewal fails; deny
+one task role's invoke for 6 minutes and confirm the task keeps running with
+its service-to-service calls failing closed and sign-in working; then a real
+enrollment OTP, a recovery OTP and an EHR read.
 
-### I6. Production issuer rollout (after D1, I5 and the production unlock)
+### I6. Production issuer rollout (after I5, the production unlock and a deployment authorization)
 
 Follow `AWS_DEPLOYMENT_RUNBOOK.md` §12 on D-Eminence/hid-system#54: synth and
 verify; record the new template SHA as a new evidence entry; `cdk diff` must
@@ -291,4 +356,4 @@ for each merged change and its evidence. Pull requests from this review:
 | Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
 | ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota) | BRANCH:launch/identity-enrollment-gates, migration 0085 | local branch (N1, N2) |
-| DEP-4, DEP-4-RT (production workload tokens) | D-Eminence/hid-system#54, draft, ADR-047 Proposed | waits on D1 |
+| DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |

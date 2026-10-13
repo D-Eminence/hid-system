@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Pool, type PoolConfig } from 'pg';
 import type { NotificationWorkerConfig } from './config';
+import { assertRuntimeDatabaseRole } from './runtime-role-guard';
 import { WORKFLOW_BY_EVENT } from './event';
 import type { ClaimedInbox, HidEventEnvelope, OrchestrationResult } from './types';
 
@@ -74,6 +75,17 @@ export class NotificationRepository {
         retryable, nextAttempt, this.config.NOTIFICATION_WORKER_MAX_ATTEMPTS],
     );
     return response.rows[0]?.fail_inbox_message ?? 'failed_terminal';
+  }
+
+  /** In production, refuse to start over a superuser, BYPASSRLS or owner connection (runtime-role-guard.ts). */
+  async verifyRuntimeRole(): Promise<void> {
+    if (this.config.NODE_ENV !== 'production') return;
+    try {
+      await assertRuntimeDatabaseRole(this.pool);
+    } catch (error) {
+      await this.pool.end().catch(() => undefined);
+      throw error;
+    }
   }
 
   async readiness(): Promise<void> { await this.pool.query('select 1'); }

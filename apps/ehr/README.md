@@ -96,12 +96,13 @@ npm run test:ehr-api
 Run `npm run build` for the complete repository build.
 # Extracted Lab integration
 
-The EHR frontend continues using `/api/v1/lab/*`, but the gateway now routes those calls to the standalone Lab API on port 3003. The EHR backend owns laboratory-order intent only and uses the shared typed client for exact-version Lab acceptance. Lab backend implementation is not registered or stored in `services/ehr-api`.
+The EHR frontend continues using `/api/v1/lab/*`, but the gateway now routes those calls to the standalone Lab API on port 3003 when `lab` is in the gateway's `HID_ENABLED_API_ROUTES` (it is not by default or at launch; the gateway then answers `404 API_ROUTE_NOT_FOUND`). The EHR backend owns laboratory-order intent only and uses the shared typed client for exact-version Lab acceptance. Lab backend implementation is not registered or stored in `services/ehr-api`.
 
 # Extracted Pharmacy integration
 
 The gateway routes `/api/v1/pharmacy/*` to the standalone Pharmacy API on port
-3004. EHR retains prescription intent and sends only an exact active
+3004 when `pharmacy` is in its `HID_ENABLED_API_ROUTES` (not by default or at
+launch; otherwise `404 API_ROUTE_NOT_FOUND`). EHR retains prescription intent and sends only an exact active
 prescription version through the shared typed client. OCR sends governed
 historical medication evidence through the same service boundary. No Pharmacy
 backend module or direct Pharmacy-table writer remains in EHR. The current
@@ -112,7 +113,8 @@ is intentionally designed.
 
 The governed OCR review workspace remains in the typed EHR frontend, but its
 shared client now reaches `/api/v1/ocr/*` through the gateway on standalone
-port 3005. EHR port 3002 no longer registers OCR controllers. EHR exposes only
+port 3005 when `ocr` is in the gateway's `HID_ENABLED_API_ROUTES` (not by
+default or at launch; otherwise `404 API_ROUTE_NOT_FOUND`). EHR port 3002 no longer registers OCR controllers. EHR exposes only
 narrow internal, `ocr-api` workload-authenticated source-document and imported
 clinical-note commands. The provider worker runs independently from
 `services/ocr-worker` and is not an OCR API or EHR API readiness dependency.

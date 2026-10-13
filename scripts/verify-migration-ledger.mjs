@@ -94,6 +94,8 @@ const acceptedMigrations = new Map([
   ['0080_pharmacy_source_prescription_guards.sql', 'b22c3e189260a5dcac9975278e7c51e4ddc8d674e5f486230bb031b202ea99c2'],
   ['0081_uniform_recovery_start_cooldown.sql', 'a900db0fb50eead3328530a71864be795cacbf5e389506d302326d7b77ee1a45'],
   ['0082_purpose_of_use_vocabulary.sql', 'bd3c730051405860fd4cb4feacb5bde259eb627b45724433e44196c9403f9351'],
+  ['0083_ocr_claim_in_body_variable_conflict.sql', '0c9e0c70cb643877e31c0b831a41960e3f23cb7c6120a9a431bc96e068502583'],
+  ['0084_ehr_clinical_safety_and_launch_modules.sql', 'f2cb745300e3487ca42c9dcb396a93dfa777b503e421b2e221cee5181bcec323'],
   ['0085_public_enrollment_windows_and_nin_lookup_quota.sql', 'e752dc338d78d9183ad937628a1fe53b31c28a60f664bd6479617e6664cc0e8e'],
 ])
 

@@ -1,6 +1,9 @@
 import { createPublicKey, randomUUID } from 'node:crypto';
 
 const audiences = new Set(['hid-identity-api', 'hid-ehr-api', 'hid-lab-api', 'hid-pharmacy-api', 'hid-notification-api']);
+// One allowlisted deployment environment names the API stage, the issuer path
+// and the subject prefix together, so no token can cross environments.
+const stages = new Set(['staging', 'production']);
 const rolePattern = /^arn:(aws):iam::(\d{12}):role\/([A-Za-z0-9_+=,.@/-]{1,512})$/;
 const assumedRolePattern = /^arn:(aws):sts::(\d{12}):assumed-role\/([A-Za-z0-9_+=,.@-]{1,64})\/([A-Za-z0-9_+=,.@-]{1,64})$/;
 const json = (statusCode, payload, publicCache = false) => ({ statusCode,
@@ -9,12 +12,14 @@ const json = (statusCode, payload, publicCache = false) => ({ statusCode,
 const encoded = value => Buffer.from(JSON.stringify(value)).toString('base64url');
 
 export function issuerConfiguration(environment) {
-  if (environment.HID_DEPLOYMENT_ENV !== 'staging') throw new Error('Workload issuer is staging only');
+  const stage = environment.HID_DEPLOYMENT_ENV;
+  if (!stages.has(stage)) throw new Error('Workload issuer environment is not allowed');
+  const subjectPattern = new RegExp(`^hid:${stage}:[a-z-]+$`);
   const issuer = environment.WORKLOAD_ISSUER_URL;
   const parsed = new URL(issuer);
   if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash
-    || parsed.pathname !== '/staging' || !/^[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com$/.test(parsed.hostname)) {
-    throw new Error('Invalid staging issuer URL');
+    || parsed.pathname !== `/${stage}` || !/^[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com$/.test(parsed.hostname)) {
+    throw new Error('Invalid workload issuer URL');
   }
   const apiId = environment.WORKLOAD_API_ID;
   if (!apiId || parsed.hostname.split('.')[0] !== apiId) throw new Error('Issuer API binding is missing');
@@ -27,7 +32,7 @@ export function issuerConfiguration(environment) {
   const rules = policy.map(rule => {
     const role = rolePattern.exec(rule?.roleArn ?? '');
     if (!role || role[2] !== key[2] || typeof rule.subject !== 'string'
-      || !/^hid:staging:[a-z-]+$/.test(rule.subject) || !Array.isArray(rule.audiences)
+      || !subjectPattern.test(rule.subject) || !Array.isArray(rule.audiences)
       || rule.audiences.length < 1 || rule.audiences.length > 4 || rule.audiences.some(audience => !audiences.has(audience))) {
       throw new Error('Invalid workload caller policy');
     }
@@ -37,7 +42,7 @@ export function issuerConfiguration(environment) {
     seen.add(principal); subjects.add(rule.subject);
     return Object.freeze({ roleArn: rule.roleArn, principal, subject: rule.subject, audiences: Object.freeze([...new Set(rule.audiences)]) });
   });
-  return Object.freeze({ issuer, apiId, hostname: parsed.hostname, accountId: key[2], keyId,
+  return Object.freeze({ stage, issuer, apiId, hostname: parsed.hostname, accountId: key[2], keyId,
     kid: key[3], ttlSeconds: 300, rules: Object.freeze(rules) });
 }
 
@@ -69,16 +74,28 @@ export function publicJwk(result, configuration) {
   return { kty: 'EC', crv: 'P-256', x: key.x, y: key.y, kid: configuration.kid, alg: 'ES256', use: 'sig' };
 }
 
+// A warm container re-reads the public key at least this often, so a disabled
+// key stops being published, and stops minting, within five minutes.
+export const publicKeyTtlMs = 300_000;
+
 export function createIssuer(configuration, dependencies) {
-  let cachedKey;
+  if (!stages.has(configuration?.stage)) throw new Error('Workload issuer environment is not allowed');
+  const clock = () => dependencies.now?.() ?? Date.now();
+  let cachedKey, cachedAt = 0;
   const getKey = async () => {
-    if (!cachedKey) cachedKey = Promise.resolve(dependencies.getPublicKey(configuration.keyId))
-      .then(result => publicJwk(result, configuration)).catch(error => { cachedKey = undefined; throw error; });
+    if (!cachedKey || clock() - cachedAt >= publicKeyTtlMs) {
+      cachedAt = clock();
+      // A failed read is never cached: the next request reads the key again.
+      const read = Promise.resolve(dependencies.getPublicKey(configuration.keyId))
+        .then(result => publicJwk(result, configuration))
+        .catch(error => { if (cachedKey === read) cachedKey = undefined; throw error; });
+      cachedKey = read;
+    }
     return cachedKey;
   };
   return async event => {
     const context = event?.requestContext;
-    if (context?.apiId !== configuration.apiId || context?.stage !== 'staging'
+    if (context?.apiId !== configuration.apiId || context?.stage !== configuration.stage
       || context?.accountId !== configuration.accountId || context?.domainName !== configuration.hostname
       || context.httpMethod !== event?.httpMethod || context.resourcePath !== event?.resource) {
       return json(403, { code: 'WORKLOAD_CALLER_DENIED' });
@@ -103,7 +120,7 @@ export function createIssuer(configuration, dependencies) {
     if (!rule.audiences.includes(input.audience)) return json(403, { code: 'WORKLOAD_AUDIENCE_DENIED' });
     try {
       await getKey();
-      const now = Math.floor((dependencies.now?.() ?? Date.now()) / 1000);
+      const now = Math.floor(clock() / 1000);
       const exp = now + configuration.ttlSeconds;
       const claims = { iss: configuration.issuer, sub: rule.subject, aud: input.audience,
         iat: now, nbf: now, exp, jti: randomUUID(), token_use: 'workload' };

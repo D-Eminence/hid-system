@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Read-only, value-free checks for the fixed HID staging account and zone.
+"""Read-only, value-free checks for the fixed HID staging account and zone (staging only).
+
+Production has its own preflight, scripts/production-external-preflight.py.
 
 No login, provisioning, delivery, signing, deployment, or secret mutation occurs.
 Run without --cloud-read-only for an entirely local configuration inventory.
@@ -29,8 +31,18 @@ SECRET_FIELDS = {
         "googleOidcClientIds", "mfaSecretKeyB64"],
     "/hid/staging/notification-provider": ["sesFromAddress", "novuApiKey"],
 }
+IDENTITY_SECRET = "/hid/staging/identity-sensitive"
+# A QoreID-enabled staging synth (HID_QOREID_ENABLED=true) also injects both NIN
+# keys into Identity, and the QoreID OAuth client from its own secret
+# (QoreIdCredentialsSecretArn). Read only with --qoreid.
+NIN_KEY_FIELDS = ["ninLookupHmacKeyB64", "ninEncryptionKeyB64"]
+QOREID_SECRET = "/hid/staging/qoreid-credentials"
+QOREID_FIELDS = ["clientId", "secret"]
 # Identity refuses to start unless each of these is exactly 32 bytes in canonical padded base64.
-KEY_FIELDS = {"otpHmacKeyB64", "contactLookupHmacKeyB64", "mfaSecretKeyB64"}
+KEY_FIELDS = {"otpHmacKeyB64", "contactLookupHmacKeyB64", "mfaSecretKeyB64", *NIN_KEY_FIELDS}
+# REC-GOOGLE: the key must exist (ECS resolves it), but an empty value turns
+# Google sign-in off, which is the launch profile.
+GOOGLE_FIELD = "googleOidcClientIds"
 
 
 def aws_json(arguments, run=subprocess.run):
@@ -62,7 +74,19 @@ def canonical_32_byte_base64(value):
     return len(decoded) == 32 and base64.b64encode(decoded).decode("ascii") == text
 
 
-def secret_summary(name, response):
+def required_fields(name, qoreid_enabled=False):
+    if name == QOREID_SECRET:
+        return QOREID_FIELDS
+    if name == IDENTITY_SECRET and qoreid_enabled:
+        return [*SECRET_FIELDS[name], *NIN_KEY_FIELDS]
+    return SECRET_FIELDS[name]
+
+
+def present(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def secret_summary(name, response, qoreid_enabled=False):
     expected = f"arn:aws:secretsmanager:{AWS_REGION}:{AWS_ACCOUNT}:secret:{name}-"
     if not isinstance(response, dict) or not str(response.get("ARN", "")).startswith(expected):
         return {"status": "unexpected_secret_identity"}
@@ -72,26 +96,31 @@ def secret_summary(name, response):
         return {"status": "missing_or_invalid_json"}
     if not isinstance(value, dict):
         return {"status": "missing_or_invalid_json"}
+    fields = required_fields(name, qoreid_enabled)
     summary = {"status": "read", "required_fields_present": {
-        field: isinstance(value.get(field), str) and bool(value[field].strip())
-        for field in SECRET_FIELDS[name]}}
-    keys = [field for field in SECRET_FIELDS[name] if field in KEY_FIELDS]
+        # The Google allowlist must exist; an empty value is allowed and means sign-in off.
+        field: isinstance(value.get(field), str) if field == GOOGLE_FIELD else present(value.get(field))
+        for field in fields}}
+    keys = [field for field in fields if field in KEY_FIELDS]
     if keys:
         # Value-free: one boolean per key, never the value, its length or its encoding.
         summary["canonical_32_byte_base64"] = {field: canonical_32_byte_base64(value.get(field)) for field in keys}
+    if GOOGLE_FIELD in fields:
+        google = value.get(GOOGLE_FIELD)
+        summary["google_sign_in_enabled"] = present(google) if isinstance(google, str) else None
     return summary
 
 
-def aws_checks(call=aws_json):
+def aws_checks(call=aws_json, qoreid_enabled=False):
     identity, error = call(["sts", "get-caller-identity"])
     if error or not isinstance(identity, dict):
         return {"status": error or "invalid_identity", "account_matches": False}
     if identity.get("Account") != AWS_ACCOUNT:
         return {"status": "wrong_account_refused", "account_matches": False}
     report = {"status": "authenticated", "account_matches": True, "region": AWS_REGION, "secrets": {}}
-    for name in SECRET_FIELDS:
+    for name in [*SECRET_FIELDS, *([QOREID_SECRET] if qoreid_enabled else [])]:
         value, error = call(["secretsmanager", "get-secret-value", "--secret-id", name])
-        report["secrets"][name] = {"status": error} if error else secret_summary(name, value)
+        report["secrets"][name] = {"status": error} if error else secret_summary(name, value, qoreid_enabled)
     account, error = call(["sesv2", "get-account"])
     report["ses"] = {"status": error or "invalid_response"} if error or not isinstance(account, dict) else {
         "status": "read", "sending_enabled": account.get("SendingEnabled") is True,
@@ -172,16 +201,19 @@ def local_configuration():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cloud-read-only", action="store_true", help="Use existing credentials for fixed staging GET/read checks")
+    parser.add_argument("--qoreid", action="store_true",
+        help="Check a QoreID-enabled staging synth: both NIN keys and the QoreID credential field names")
     parser.add_argument("--output", type=Path, help="Write a new, value-free receipt; existing files are never overwritten")
     args = parser.parse_args()
     local, token = local_configuration()
     report = {"schema_version": "hid.staging-external-preflight/v1", "environment": "staging",
         "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "local": local,
         "deployment_authorized": False, "staging_accepted": False,
-        "nin": {"state": "deferred", "required_for_staging": False, "provider_secret_required": False},
+        "nin": {"state": "qoreid", "required_for_staging": True, "provider_secret_required": True} if args.qoreid
+            else {"state": "deferred", "required_for_staging": False, "provider_secret_required": False},
         "scope": "read-only presence and key-format checks, not provider delivery or release acceptance"}
     if args.cloud_read_only:
-        report["aws"] = aws_checks()
+        report["aws"] = aws_checks(qoreid_enabled=args.qoreid)
         report["cloudflare"] = cloudflare_checks(token)
     serialized = json.dumps(report, indent=2) + "\n"
     if args.output:
