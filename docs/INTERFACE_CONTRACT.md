@@ -237,6 +237,35 @@ and sign-out (since `22e8664`). Earlier Health-id builds and
 a cookie sign-out without a live access cookie ends whichever staff or patient
 sign-in the refresh cookie holds.
 
+### Staff facility binding (N5, migration 0087)
+
+A staff actor lists one entry per active membership (`actor.facilities`), and
+`X-Facility-ID` binds the entry whose `id` equals it. From 0087 an account
+holds at most one active, unheld membership per facility
+(`staff_memberships_one_active_per_facility_uq`), so a facility binds exactly
+one membership, its roles, its permissions and its consent grants. Entries are
+ordered by primary first, then facility name, facility id and membership id.
+Should two active memberships of one account at one facility ever be read
+anyway, Identity refuses to resolve the actor at all: sign-in, refresh,
+`GET /auth/session`, the service-session routes the other services call, and
+every staff request answer `409 FACILITY_MEMBERSHIP_AMBIGUOUS` until a platform
+administrator ends one of them. Nothing is bound by row order.
+
+A facility entry's `roles` are the codes of the membership's live, effective
+facility role assignments, the same assignments its `permissions` come from;
+the actor's `roles` and `role` and the access token's `roles` claim are those
+of the bound entry. A membership with no effective role is still listed, with
+`roles: []` and `permissions: []`. From 0087 the stored membership labels
+(`membership_role`, `app_role`) are not read for the actor. A facility role
+granted through workforce provisioning (§19) is effective only while the
+credential attestation it was granted on is current: when the attestation
+lapses, or the role is revoked, the role and its permissions disappear from
+`actor.facilities` at the next request (and from the token's `roles` claim
+when it is next issued). The workforce profile still lists a lapsed role, with
+`effective: false`. The principals list (`GET /admin/principals`) shows each
+membership's stored labels as `role` and `appRole`: the role it was activated
+with, which later grants and revokes do not change.
+
 ### Patient sessions and self service
 
 `POST /api/v1/auth/patient/login` accepts an email address or the issued HIDCode
@@ -1833,6 +1862,125 @@ surface.
 Operations aggregation forwards `X-Correlation-ID`, uses a 250–5000 ms
 configured bound (1500 ms default), reports each dependency independently,
 and whitelists terminal failure fields. No arbitrary retry command exists.
+
+### Workforce provisioning (launch decision D14, migration 0087)
+
+Clinicians are provisioned only by platform administrators holding
+`platform.workforce.manage` (granted to `platform_super_admin` only). A
+facility's `org_admin` has no route to grant itself or anyone a clinical role.
+Every route below is a platform route: it needs an MFA-verified platform
+session (`PLATFORM_SESSION_REQUIRED` otherwise) and the permission
+(`PERMISSION_DENIED`). Every command also needs a TOTP step-up from the last
+five minutes (`STEP_UP_REQUIRED` or `STEP_UP_EXPIRED`), `Idempotency-Key` (16
+to 128 URL-safe characters) and a `reason` of 8 to 500 characters; commands on
+an existing staff record or membership need `If-Match` with its version
+(`428 IF_MATCH_REQUIRED`, `409 VERSION_CONFLICT`). An exact replay returns the
+first answer with `replayed: true`; the same key with a different body is
+`409 IDEMPOTENCY_CONFLICT`. Commands answer `201`. Each new command records a
+platform-scoped audit event (`admin.workforce.membership.attached`,
+`admin.workforce.credential.attested`, `admin.workforce.role.granted`,
+`admin.workforce.role.revoked`, `admin.workforce.membership.ended`) with no
+facility or membership bound; the facility is in `details`.
+
+```text
+GET  /api/v1/admin/workforce/accounts/:accountId
+POST /api/v1/admin/workforce/memberships
+POST /api/v1/admin/workforce/accounts/:accountId/attestations
+POST /api/v1/admin/workforce/memberships/:membershipId/roles
+POST /api/v1/admin/workforce/memberships/:membershipId/end
+```
+
+`GET .../accounts/:accountId` returns `{ account: { id, email, displayName,
+status, version, patientAccount }, staff: { id, fullName, verificationStatus,
+active, version } | null, attestations: [{ id, attestedRoles,
+credentialReference, issuingAuthority, verificationMethod, evidenceReference,
+validUntil, current, reviewerAccountId, recordedAt }], memberships: [{ id,
+facilityId, facilityName, state, active, held, version, roles: [{ roleCode,
+effective, grantedAt }] }] }`. `state` is `pending`, `active`, `ended`, or
+`inactive` for an inactive membership the workforce commands never touched.
+`staff.version` is the `If-Match` of an attestation; a membership's `version`
+is the `If-Match` of its role and end commands.
+
+`POST .../memberships` attaches a staff identity to a verified facility. The
+body is `{ facilityId, accountId, reason }` for an existing staff account, or
+`{ facilityId, email, fullName, reason }` for a new one, never both and no
+password. The membership is created inactive (`state: pending`) and grants
+nothing. A new account is `pending_reset` with no password and a new staff
+record is `pending`: the clinician sets a password through the staff account
+recovery flow (`/auth/otp/*`), and cannot sign in before a role is granted. The
+answer is `{ membershipId, accountId, staffId, facilityId, state: "pending",
+accountStatus, accountCreated, membershipVersion, staffVersion, replayed }`.
+
+`POST .../accounts/:accountId/attestations` records a professional-credential
+attestation: `{ attestedRoles, credentialReference, issuingAuthority,
+verificationMethod: "manual_review", evidenceReference, validUntil, reason }`
+with `If-Match` the staff version. `attestedRoles` is one to three of
+`doctor`, `clinician`, `nurse`, each once. `validUntil` is an ISO 8601 time in
+the future and at most three years ahead; set it no later than the licence's
+expiry. `evidenceReference` names where the reviewed evidence is kept (a ticket
+or document reference), never the document itself. The administrator who
+records it is its reviewer and cannot attest for their own account. A
+`pending` staff record becomes `verified`. The answer is `{ attestationId,
+accountId, staffId, attestedRoles, verificationMethod, validUntil,
+verificationStatus, staffVersion, replayed }`. The evidence text is not copied
+into the audit event.
+
+`POST .../memberships/:membershipId/roles` grants or revokes one role:
+`{ facilityId, roleCode, action: "grant" | "revoke", reason }` with `If-Match`
+the membership version. `facilityId` must be the membership's facility.
+`grant` accepts `doctor`, `clinician` or `nurse`; `revoke` also accepts `lab`
+and `pharmacist`. A grant needs a current attestation for that role by a
+reviewer who is not the target, has no active membership at the facility and
+is not the administrator granting it, so a clinical role always takes two
+platform administrators. The first grant activates a pending membership. The
+answer is `{ membershipId, facilityId, roleCode, roleActive, membershipActive,
+state, version, attestationId, renewed, replayed }`; `attestationId` is null for
+a revoke.
+
+Renewal: a granted role rests on the attestation it was granted on, and a
+later attestation does not extend it by itself. To keep a clinician's role,
+record a new attestation (one administrator) and grant the role again (a
+second administrator, under the same rules). The grant renews the role, with
+`renewed: true`, when the role's attestation has lapsed, or before the lapse
+when the best current attestation lasts longer: the old assignment is revoked
+with the grant's reason and the new one rests on the new attestation, so the
+role stays effective without a gap. Otherwise a grant of a held role is
+`WORKFORCE_ROLE_ALREADY_ACTIVE`. A role granted by onboarding or the legacy
+promotion never lapses and is never renewed. The audit event of a grant
+carries `renewed` in `details`.
+
+`POST .../memberships/:membershipId/end` ends a membership for good:
+`{ facilityId, reason }` with `If-Match` the membership version. It
+deactivates the membership, revokes its facility roles, expires its pending
+access requests, revokes every active consent grant bound to it and, when the
+membership was active, revokes all the account's staff sessions (a staff
+session is not bound to one facility). A patient approval that commits while
+the end runs is counted in `revokedGrants`, not `expiredRequests`. An access
+request created and committed concurrently, after the end has read the
+pending requests, stays pending on the ended membership; it, and any grant
+approved from it, authorizes nothing, because every authorization needs an
+active membership. The answer is `{ membershipId, facilityId, accountId,
+state: "ended", revokedRoles, revokedGrants, expiredRequests, revokedSessions,
+version, replayed }`. To give the person access again, attach them again: a
+new membership starts pending.
+
+| Status and code | When |
+|---|---|
+| `400 WORKFORCE_COMMAND_INVALID` | The body names both or neither identity form, or a field is out of range |
+| `400 WORKFORCE_ROLE_NOT_GRANTABLE` | The role cannot be granted (or revoked) through this route |
+| `403 WORKFORCE_SELF_CHANGE_DENIED` | The target is the caller's own account or membership |
+| `403 WORKFORCE_FACILITY_CONFLICT` | The caller has an active membership at the facility (its `org_admin` included) and attaches or grants there |
+| `403 WORKFORCE_SECOND_PERSON_REQUIRED` | The only current attestation for the role was recorded by the caller |
+| `404 WORKFORCE_ACCOUNT_NOT_FOUND`, `WORKFORCE_STAFF_NOT_FOUND`, `WORKFORCE_FACILITY_NOT_FOUND`, `WORKFORCE_MEMBERSHIP_NOT_FOUND` | The named record does not exist |
+| `409 WORKFORCE_ATTESTATION_REQUIRED` | No current attestation for the role by an independent reviewer |
+| `409 WORKFORCE_ROLE_CONFLICT` | The membership holds `org_admin` or `admin`; an administering membership stays non-clinical |
+| `409 WORKFORCE_ROLE_ALREADY_ACTIVE`, `WORKFORCE_ROLE_NOT_ACTIVE` | Granting a held role that is not due for renewal (its attestation is current and no current attestation lasts longer, or it was not granted on an attestation), or revoking one the membership does not hold |
+| `409 WORKFORCE_MEMBERSHIP_EXISTS` | The account already has an active or pending membership at the facility |
+| `409 WORKFORCE_MEMBERSHIP_ENDED`, `WORKFORCE_MEMBERSHIP_INACTIVE`, `WORKFORCE_MEMBERSHIP_HELD` | The membership has ended, is inactive and was not attached by these commands, or is held for migration review |
+| `409 WORKFORCE_FACILITY_MISMATCH` | `facilityId` is not the membership's facility |
+| `409 WORKFORCE_FACILITY_NOT_VERIFIED` | The facility or its organization is not verified and active |
+| `409 WORKFORCE_ACCOUNT_INELIGIBLE`, `WORKFORCE_STAFF_INELIGIBLE` | The account is disabled, locked, deleted or a patient's own account, the staff record is inactive, or its verification status cannot be attested or granted |
+| `409 WORKFORCE_EMAIL_IN_USE` | A new identity's email is already used by an account or staff record |
 
 ## 20. Browser gateway and application contract
 

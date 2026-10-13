@@ -3,8 +3,9 @@
 Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
 the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
 the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
-(§1, ADR-052, D-Eminence/hid-system#67) and N1 and N2 (ADR-048,
-D-Eminence/hid-system#68) with the owner's defaults;
+(§1, ADR-052, D-Eminence/hid-system#67), N1 and N2 (ADR-048,
+D-Eminence/hid-system#68), and N5 and the workforce part of D14
+(ADR-049, D-Eminence/hid-system#70) with the owner's defaults;
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
 
@@ -177,6 +178,18 @@ separate deployment authorization. None of them has been run.
   to the next free number, 0083 today, before it can merge. It also overlaps
   #50 on `auth.controller.ts` and `token.service.ts`.
 - **Data check.** Run I4 (§3) before deciding: whether such memberships exist.
+- **Decided (2026-10-13, owner defaults: deny by default, least privilege;
+  ADR-049).** One active, unheld membership per account and facility, not
+  "pick the oldest": migration 0087
+  (D-Eminence/hid-system#70) adds a unique partial index on
+  `identity.staff_facility_memberships (account_id, facility_id)` where
+  active, with a facility and no migration hold. If duplicates exist, 0087
+  stops and changes nothing; I4 resolves them first (§3). Identity's staff
+  context fails closed with `409 FACILITY_MEMBERSHIP_AMBIGUOUS` if two
+  memberships of one facility are ever read, and orders by membership id
+  last, which fixes every guard at once (they all read Identity's facility
+  list). The legacy promotion refuses duplicates before it writes. Which
+  facility a session family binds by default (#47) stays separate.
 
 ### FE-HOST. Launch frontend hosting (FE-HOST, MOD-EDGE)
 
@@ -316,7 +329,7 @@ proposal; that change is the place to alter it.
 | D11 | Lab result detail for clinicians | No "unreleased correction pending" flag (D-Eminence/hid-system#51) | Clinicians cannot see that a correction is coming | Result retraction API |
 | D12 | OCR publication after an authorization lapse | Terminal, as today | — | — |
 | D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (implemented in D-Eminence/hid-system#59) | No delegated completion | — |
-| D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decide which roles hold `workforce.manage` (legacy `admin` holds it), how existing staff are attached, whether pending access requests close when a membership ends, and whether staff MFA is a launch gate, by ADR before WF-1 | Invites and offboarding stay manual | Workforce management |
+| D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decided for the workforce part on 2026-10-13 (ADR-049, D-Eminence/hid-system#70, migration 0087): clinical facility roles are granted only by platform-governed commands under the new `platform.workforce.manage` (`platform_super_admin` only), with step-up, `If-Match`, `Idempotency-Key` and a reason; a grant needs a current professional-credential attestation by another platform reviewer who is neither the target nor working at that facility (so not its `org_admin`); `org_admin` stays non-clinical and has no role-granting route; ending a membership revokes its roles and consent grants, expires its pending access requests and revokes the account's staff sessions; a role lapses with its attestation and is renewed by a new attestation and a second administrator's grant, never by the attestation alone. Facility self-service is deferred. Staff MFA is still open (a separate change) | Until staff MFA ships, a clinician's sign-in is single-factor. Which credential source counts (regulator registry or documented manual review) and who may review are product and legal decisions; until then the only method is documented manual review | Workforce management |
 | D15 | Launch scope of EHR-to-Lab ordering and in-system result return | In scope (the EHR already sends orders) | If in scope, the Lab handoff is launch-blocking; it merged as D-Eminence/hid-system#56 | Lab handoff |
 | D16 | Health-id OCR publication retry | Persist the publication key per validation; offer Retry for retryable failures | Frontend change | OCR publication retry |
 
@@ -393,12 +406,20 @@ non-bypass owner (ADR-041).
 Read-only, as the migration administrator:
 
 ```sql
-select account_id, facility_id, count(*)
+select account_id, facility_id, count(*),
+  array_agg(id order by id) as membership_ids,
+  array_agg(membership_role || '/' || app_role order by id) as membership_roles
 from identity.staff_facility_memberships
 where active and facility_id is not null and migration_hold_reason is null
 group by 1, 2
 having count(*) > 1;
 ```
+
+Migration 0087 (N5) refuses to apply while this returns rows. For each row,
+the facility confirms which membership to keep; the extras are deactivated
+(`active = false`) by a reviewed, audited change, never deleted, and their
+consent grants are never moved to the kept membership (that would change whom
+a patient's consent covers; those patients consent again). Then apply 0087.
 
 ### I5. Staging issuer acceptance (D1 to D3 decided)
 
@@ -460,3 +481,4 @@ for each merged change and its evidence. Pull requests from this review:
 | ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota); FE-4 (enrollment availability read, registration-not-open answer) | D-Eminence/hid-system#68, migration 0085 (FE-4 adds none) | local branch (N1, N2); FE-4's Health-id follow-up open |
 | DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
 | REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | D-Eminence/hid-system#69, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
+| WF-1 (no governed way to provision clinicians), N5 (two memberships at one facility) | D-Eminence/hid-system#70, migration 0087, ADR-049 | branch, not merged (D14 workforce part, N5) |

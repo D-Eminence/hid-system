@@ -367,6 +367,10 @@ try {
   evidence.checks.platform_admin_runtime = JSON.parse(command('exact-role platform admin HTTP boundaries',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-platform-admin-runtime.mjs')],
     workflowEnvironment));
+  // N5 (0087): the legacy promotion's duplicate facility membership check against the real schema.
+  evidence.checks.membership_duplicates_runtime = JSON.parse(command('legacy promotion duplicate membership check',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-membership-duplicates-runtime.mjs')],
+    workflowEnvironment));
   evidence.checks.session_sign_out_runtime = JSON.parse(command('exact-role sign-out by refresh cookie and client-kind refresh',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-session-sign-out-runtime.mjs')],
     workflowEnvironment));

@@ -13,6 +13,7 @@ import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
 import { normalizeContactForLookup, contactLookupHmac } from './contact-lookup.mjs';
 import { validLegacyPinHash } from './legacy-pin-hash.mjs';
+import { membershipUniquenessConflict } from './membership-duplicates.mjs';
 
 const { Client } = pg;
 const targetUrl = process.env.DATABASE_URL;
@@ -314,6 +315,29 @@ async function validateRbacVocabulary(client) {
         }
       }
     }
+  }
+}
+
+// N5 (0087): refuse, before any write, memberships that would give one staff
+// identity two active bindings at one facility, within the staged rows or
+// beside a membership the target already holds. Operator plan I4 resolves
+// them in the source; nothing is promoted until then.
+async function validateMembershipUniqueness(client) {
+  const staged = [];
+  let cursor = '';
+  for (;;) {
+    const rows = await stagedRows(client, 'memberships', cursor);
+    if (rows.rows.length === 0) break;
+    for (const row of rows.rows) {
+      cursor = row.source_pk;
+      staged.push(row);
+    }
+  }
+  // Tested against the real schema by verify-membership-duplicates-runtime.mjs.
+  const conflict = await membershipUniquenessConflict(client, staged);
+  if (conflict) {
+    throw new PromotionConflict('memberships', conflict.row.source_pk, conflict.conflictType,
+      conflict.row.payload_sha256.trim(), null, conflict.details);
   }
 }
 
@@ -712,6 +736,7 @@ async function main() {
       throw error;
     }
     await validateRbacVocabulary(client);
+    await validateMembershipUniqueness(client);
     // The verifier runs on a separate read-only connection. Re-read the run
     // after it returns; the sealed-row/run guards and the session lock make
     // this the state used by the first write transaction.
