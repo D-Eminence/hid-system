@@ -3406,7 +3406,7 @@ runner's 5 s lock timeout (`MIGRATION_RUNBOOK.md`).
 
 ## EHR retraction integrity (0090)
 
-`0090_ehr_retraction_integrity.sql` (BRANCH:launch/ehr-retraction-integrity)
+`0090_ehr_retraction_integrity.sql` (D-Eminence/hid-system#74)
 adds one column, six trigger functions (one of them replacing 0084's) and six
 triggers, and one runtime grant (`runtime-grants.sql`). It changes no row.
 Migrations 0085 to 0089 belong to other changes.

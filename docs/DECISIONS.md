@@ -3910,7 +3910,7 @@ ENC-RETRACT-2 and ALLERGY-1); not deployed
 
 Date: 2026-10-13
 
-Change: BRANCH:launch/ehr-retraction-integrity, migration 0090 (register ENC-RETRACT-1, ENC-RETRACT-2,
+Change: D-Eminence/hid-system#74, migration 0090 (register ENC-RETRACT-1, ENC-RETRACT-2,
 RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT and ALLERGY-1).
 
 Context:
