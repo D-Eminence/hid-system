@@ -185,9 +185,11 @@ export function selectLocation(serverBlock, uri) {
 
 // nginx decodes %XX, merges slashes (merge_slashes on) and resolves "." and
 // ".." segments before it selects a location; the proxied request keeps the
-// client's unparsed URI when proxy_pass names no URI part.
+// client's unparsed URI when proxy_pass names no URI part. Its URI ends at the
+// first "?" (the arguments) or, before that, at a "#" (ngx_http_parse_complex_uri);
+// a backslash is an ordinary character outside Windows.
 export function normalizeUri(raw) {
-  const path = raw.split('?', 1)[0]
+  const path = raw.split(/[?#]/, 1)[0]
   const decoded = path.replace(/%([0-9A-Fa-f]{2})/g, (_whole, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
   const output = []
   for (const segment of decoded.split('/').slice(1)) {

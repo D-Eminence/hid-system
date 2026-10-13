@@ -55,8 +55,11 @@ export function assertGatewayContract({ template, dockerfile, includes }) {
     assert.equal(argument.trim(), '$hid_upstream', 'every proxy_pass must use the per-request resolved upstream variable')
   }
   assert.match(template, /resolver \$\{GATEWAY_DNS_RESOLVER\} valid=10s ipv6=off;/, 'gateway must re-resolve upstream names')
-  assert.match(template, /set_real_ip_from \$\{VPC_CIDR\};/, 'gateway must trust X-HID-Client-IP only from the VPC')
-  assert.match(template, /real_ip_header X-HID-Client-IP;/, 'gateway must take the client address from X-HID-Client-IP')
+  assert.match(template, /set_real_ip_from \$\{VPC_CIDR\};/, 'gateway must trust X-Real-IP only from the VPC')
+  // X-Real-IP, which the Worker before this change deleted: behind a stale or
+  // rolled-back Worker requests fail closed instead of carrying an address the
+  // caller chose.
+  assert.match(template, /real_ip_header X-Real-IP;/, 'gateway must take the client address from X-Real-IP')
 
   const upstreams = Object.fromEntries(routeOwners.map(([, module, variable]) =>
     [variable, `http://${module}-api.contract.invalid:3000`]))
@@ -67,26 +70,41 @@ export function assertGatewayContract({ template, dockerfile, includes }) {
   const all = new GatewayModel(renderTemplate(template, environment), includes)
   for (const [prefix, module, variable] of routeOwners) {
     for (const uri of [prefix, `${prefix}/x/Y?z=%2F`]) {
-      const outcome = all.route({ method: 'POST', uri, peer: vpcPeer, headers: { 'x-hid-client-ip': client } })
+      const outcome = all.route({ method: 'POST', uri, peer: vpcPeer, headers: { 'x-real-ip': client } })
       assert.equal(outcome.action, 'proxy', `${uri} must be proxied when ${module} is enabled`)
       assert.equal(outcome.upstream, upstreams[variable], `production gateway ownership mismatch for ${prefix}`)
       assert.equal(outcome.upstreamUri, uri, `${uri} must reach ${module} unchanged`)
       assert.equal(outcome.upstreamHeaders['x-forwarded-for'], client, `${uri} must forward the client address`)
+      assert.equal(outcome.upstreamHeaders['x-real-ip'], '', `${uri} must not pass the raw client-address header on`)
     }
-    const refused = all.route({ uri: `${prefix}/x`, peer: vpcPeer })
-    assert.equal(problemCode(refused), 'CLIENT_ADDRESS_REQUIRED', `${prefix} must refuse a request without a client address`)
-    assert.equal(refused.status, 403)
+    for (const headers of [{}, { 'x-hid-client-ip': client }]) {
+      const refused = all.route({ uri: `${prefix}/x`, peer: vpcPeer, headers })
+      assert.equal(problemCode(refused), 'CLIENT_ADDRESS_REQUIRED', `${prefix} must refuse a request without a client address`)
+      assert.equal(refused.status, 403)
+    }
+    for (const uri of [`${prefix}/x#y`, `${prefix}/x\\y`, `${prefix}/x?y#z`]) {
+      const refused = all.route({ uri, peer: vpcPeer, headers: { 'x-real-ip': client } })
+      assert.equal(problemCode(refused), 'INVALID_REQUEST_TARGET', `${uri} must be refused before proxying`)
+      assert.equal(refused.status, 400)
+    }
   }
   for (const route of internalRoutes) {
     for (const uri of [route, `${route}/`, route.replace(/\/([a-z-]+)$/, (_whole, last) => `/${last.toUpperCase()}`),
       route.replace(/^(\/api\/v1\/[a-z]+\/)(.)/, (_whole, prefix, first) => `${prefix}${first.toUpperCase()}`)]) {
-      const outcome = all.route({ method: 'POST', uri, peer: vpcPeer, headers: { 'x-hid-client-ip': client } })
+      const outcome = all.route({ method: 'POST', uri, peer: vpcPeer, headers: { 'x-real-ip': client } })
       assert.equal(problemCode(outcome), 'API_ROUTE_NOT_FOUND', `internal route ${uri} must not be proxied`)
+    }
+    // Express (parseurl, then url.parse on a '#') reads a backslash before the
+    // query as '/'; nginx does not, so these miss the location's deny.
+    const backslashed = route.replace(/^(\/api\/v1\/[a-z]+\/[^/]+)\//, (_whole, head) => `${head}\\`)
+    for (const uri of [`${backslashed}#x`, `${route}\\#`]) {
+      const outcome = all.route({ method: 'POST', uri, peer: vpcPeer, headers: { 'x-real-ip': client } })
+      assert.notEqual(outcome.action, 'proxy', `internal route ${uri} must not be proxied`)
     }
   }
   const launch = new GatewayModel(renderTemplate(template, { ...environment, HID_ENABLED_API_ROUTES: 'identity,ehr' }), includes)
   for (const [prefix, module] of routeOwners) {
-    const outcome = launch.route({ uri: `${prefix}/x`, peer: vpcPeer, headers: { 'x-hid-client-ip': client } })
+    const outcome = launch.route({ uri: `${prefix}/x`, peer: vpcPeer, headers: { 'x-real-ip': client } })
     if (module === 'identity' || module === 'ehr') assert.equal(outcome.action, 'proxy', `${prefix} is a launch route`)
     else assert.equal(problemCode(outcome), 'API_ROUTE_NOT_FOUND', `${prefix} must be closed unless ${module} is enabled`)
   }

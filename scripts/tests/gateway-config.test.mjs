@@ -55,7 +55,7 @@ function gateway(environment) {
 
 const alb = '10.40.1.10'
 const client = '198.51.100.23'
-const viaEdge = (extra = {}) => ({ 'x-hid-client-ip': client, ...extra })
+const viaEdge = (extra = {}) => ({ 'x-real-ip': client, ...extra })
 
 function expectProblem(outcome, status, code, message) {
   assert.equal(outcome.action, 'return', `${message}: expected a gateway answer, got ${outcome.action} to ${outcome.upstream}`)
@@ -110,15 +110,15 @@ test('each API prefix is proxied to its owner with the client URI unchanged', ()
   }
 })
 
-test('the client address comes from X-HID-Client-IP only on connections from the VPC', () => {
+test('the client address comes from X-Real-IP only on connections from the VPC', () => {
   const model = gateway(production)
   const forwarded = model.route({ uri: '/api/v1/auth/session', peer: alb, headers: viaEdge() })
   assert.equal(forwarded.action, 'proxy')
   assert.equal(forwarded.upstreamHeaders['x-forwarded-for'], client,
     'the backends trust X-Forwarded-For from the gateway, so it must carry the client, not the load balancer')
-  const ipv6 = model.route({ uri: '/api/v1/auth/session', peer: alb, headers: { 'x-hid-client-ip': '2001:db8:4:5::9' } })
+  const ipv6 = model.route({ uri: '/api/v1/auth/session', peer: alb, headers: { 'x-real-ip': '2001:db8:4:5::9' } })
   assert.equal(ipv6.upstreamHeaders['x-forwarded-for'], '2001:db8:4:5::9')
-  assert.equal(forwarded.upstreamHeaders['x-hid-client-ip'], '', 'the raw header is not passed on')
+  assert.equal(forwarded.upstreamHeaders['x-real-ip'], '', 'the raw header is not passed on')
   // A connection that does not come from the VPC is not a trusted hop.
   const direct = gateway({ ...production, HID_REQUIRE_CLIENT_IP: 'false' })
     .route({ uri: '/api/v1/auth/session', peer: '203.0.113.50', headers: viaEdge() })
@@ -127,8 +127,11 @@ test('the client address comes from X-HID-Client-IP only on connections from the
 
 test('with the switch on, an API request without a usable client address is refused before proxying', () => {
   const model = gateway(production)
-  for (const headers of [{}, { 'x-hid-client-ip': 'not-an-address' }, { 'x-hid-client-ip': '10.40.7.7' },
-    { 'x-hid-client-ip': '' }]) {
+  // The Worker before this change deleted X-Real-IP and passed a caller's
+  // X-HID-Client-IP through. Behind a stale or rolled-back Worker the request
+  // must fail closed, never carry an address the caller chose.
+  for (const headers of [{}, { 'x-real-ip': 'not-an-address' }, { 'x-real-ip': '10.40.7.7' },
+    { 'x-real-ip': '' }, { 'x-hid-client-ip': client }, { 'x-forwarded-for': client }, { 'cf-connecting-ip': client }]) {
     for (const uri of ['/api/v1/auth/otp/start', '/api/v1/identity/patient-enrollments', '/api/v1/ehr/patients/x/encounters']) {
       expectProblem(model.route({ method: 'POST', uri, peer: alb, headers }), 403, 'CLIENT_ADDRESS_REQUIRED',
         `${uri} with ${JSON.stringify(headers)}`)
@@ -150,7 +153,7 @@ test('local runs (the image defaults) proxy without the header and forward the p
   assert.equal(outcome.action, 'proxy')
   assert.equal(outcome.upstream, 'http://identity-api:3001')
   assert.equal(outcome.upstreamHeaders['x-forwarded-for'], '172.18.0.4')
-  const spoofed = model.route({ uri: '/api/v1/auth/session', peer: '172.18.0.4', headers: { 'x-hid-client-ip': '198.51.100.1' } })
+  const spoofed = model.route({ uri: '/api/v1/auth/session', peer: '172.18.0.4', headers: { 'x-real-ip': '198.51.100.1' } })
   assert.equal(spoofed.upstreamHeaders['x-forwarded-for'], '172.18.0.4', 'a local peer is not a trusted hop')
 })
 
@@ -183,7 +186,9 @@ test('modules outside HID_ENABLED_API_ROUTES answer 404 API_ROUTE_NOT_FOUND befo
 
 // Service-to-service routes are called on the private service names, never
 // through the public edge. Express routes without regard to case or a
-// trailing slash, so the denial must too.
+// trailing slash, so the denial must too. nginx matches the decoded,
+// normalized URI, so dot segments, repeated slashes and percent-encodings are
+// denied by the same expressions.
 const internalRoutes = [
   '/api/v1/auth/service-session',
   '/api/v1/identity/service/authorization/check',
@@ -208,7 +213,7 @@ function variants(uri) {
     `${prefix}${rest.replace(/e/, '%65')}`, `${prefix}${rest.replace(/\//, '%2F')}`]
 }
 
-test('internal service routes answer 404 at the public gateway in every spelling', () => {
+test('internal service routes answer 404 at the public gateway in case, slash, dot-segment and percent-encoded spellings', () => {
   for (const model of [gateway(production), gateway({ ...production, HID_ENABLED_API_ROUTES: allModules })]) {
     for (const route of internalRoutes) {
       for (const uri of variants(route)) {
@@ -222,6 +227,64 @@ test('internal service routes answer 404 at the public gateway in every spelling
       expectProblem(model.route({ uri, peer: alb, headers: viaEdge() }), 404, 'API_ROUTE_NOT_FOUND', uri)
     }
   }
+})
+
+// Express's URL parsing (parseurl) falls back to Node's url.parse when the
+// request target holds a '#', and url.parse turns backslashes before the query
+// into slashes. nginx keeps a backslash literally and ends its URI at '#', so
+// "/api/v1/identity/service\authorization/check#x" missed the deny expression
+// and reached the internal handler. Neither character can come from a browser
+// through the Worker (the URL parser turns a path backslash into '/', drops the
+// fragment and percent-encodes '#' in a query), so the gateway refuses both.
+function backslashSpellings(uri) {
+  const [, prefix, rest] = /^(\/api\/v1\/[a-z]+\/)(.*)$/.exec(uri)
+  const backslashed = rest.includes('/') ? `${prefix}${rest.replace('/', '\\')}` : `${prefix.slice(0, -1)}\\${rest}`
+  return [`${backslashed}#x`, `${backslashed}#`, `${uri}\\#`, `${backslashed}`, `${prefix.slice(0, -1)}\\${rest}#`,
+    `${backslashed}?a=1#x`, `${prefix}${backslashed.slice(prefix.length).toUpperCase()}#`]
+}
+
+test('internal service routes with a backslash or "#" in the request target are never proxied', () => {
+  for (const model of [gateway(production), gateway({ ...production, HID_ENABLED_API_ROUTES: allModules })]) {
+    for (const route of internalRoutes) {
+      for (const uri of backslashSpellings(route)) {
+        for (const method of ['GET', 'POST']) {
+          const outcome = model.route({ method, uri, peer: alb, headers: viaEdge() })
+          assert.equal(outcome.action, 'return', `${method} ${uri} must not be proxied`)
+          assert.ok([400, 404].includes(outcome.status), `${method} ${uri}: ${outcome.status}`)
+        }
+      }
+    }
+  }
+  // The reviewer's spellings, on a gateway routing every module, answer 400.
+  const all = gateway({ ...production, HID_ENABLED_API_ROUTES: allModules })
+  for (const uri of ['/api/v1/identity/service\\authorization/check#x', '/api/v1/auth/service-session\\#',
+    '/api/v1/ehr/internal\\ocr/documents/abc/source#', '/api/v1/lab/work-items\\accept-ehr-order#',
+    '/api/v1/pharmacy/imports\\from-ocr#', '/api/v1/identity/outreach\\authorize#']) {
+    expectProblem(all.route({ method: 'POST', uri, peer: alb, headers: viaEdge() }), 400, 'INVALID_REQUEST_TARGET', uri)
+  }
+})
+
+test('a request target with a backslash in its path or a "#" anywhere is refused 400 before proxying', () => {
+  const model = gateway(production)
+  for (const uri of ['/api/v1/auth/session#x', '/api/v1/auth/session#', '/api/v1/auth/x\\session', '/api/v1/auth/session\\',
+    '/api/v1/auth/session?q=a#b', '/api/v1/auth#x', '/api/v1/identity/me\\?x=1', '/api/v1/ehr/patients/x\\encounters']) {
+    expectProblem(model.route({ method: 'POST', uri, peer: alb, headers: viaEdge() }), 400, 'INVALID_REQUEST_TARGET', uri)
+    // Refused before the client-address check, so the answer does not depend on the edge.
+    expectProblem(model.route({ method: 'POST', uri, peer: alb }), 400, 'INVALID_REQUEST_TARGET', `${uri} without a client address`)
+  }
+  // A backslash right after a module prefix matches no module location.
+  expectProblem(model.route({ uri: '/api/v1/auth\\session#x', peer: alb, headers: viaEdge() }), 404, 'API_ROUTE_NOT_FOUND',
+    'a backslash after the prefix')
+  // A browser may send a raw backslash in a query string (the URL parser does
+  // not encode it there); url.parse leaves the query alone, so it is proxied.
+  for (const uri of ['/api/v1/auth/session?q=a\\b', '/api/v1/auth/session?q=%5C%23', '/api/v1/ehr/patients/x/encounters?q=%23']) {
+    const outcome = model.route({ uri, peer: alb, headers: viaEdge() })
+    assert.equal(outcome.action, 'proxy', uri)
+    assert.equal(outcome.upstreamUri, uri, uri)
+  }
+  // Health checks and the non-API answers are unchanged.
+  assert.equal(model.route({ uri: '/gateway-health/ready', peer: alb }).status, 200)
+  expectProblem(model.route({ uri: '/ehr\\x#y', peer: alb }), 404, 'API_ONLY_ORIGIN', 'non-API path')
 })
 
 test('routes that only resemble internal ones are still proxied', () => {
@@ -260,6 +323,10 @@ test('the container verifier contract accepts the shipped gateway and rejects ea
     ['a literal proxy_pass', { ...shipped, template: template.replace('proxy_pass $hid_upstream;', 'proxy_pass ${LAB_API_UPSTREAM};') }],
     ['no resolver', { ...shipped, template: template.replace(/resolver \$\{GATEWAY_DNS_RESOLVER\}[^;]*;/, '') }],
     ['no realip', { ...shipped, template: template.replace(/set_real_ip_from[^;]*;/, '') }],
+    ['the pre-change header trusted', { ...shipped, template: template.replace('real_ip_header X-Real-IP;', 'real_ip_header X-HID-Client-IP;') }],
+    ['no request-target refusal', { ...shipped, includes: { '/etc/nginx/hid-proxy-headers.conf':
+      proxyHeaders.replace(/if \(\$hid_request_target_invalid\) \{[\s\S]*?\n\}\n/, '') } }],
+    ['a backslash in the path allowed', { ...shipped, template: template.replace('"~^[^?]*\\\\\\\\" 1;', '') }],
     ['an internal route proxied', { ...shipped, template: template.replace('(?:service|outreach)', '(?:service)') }],
     ['a case-sensitive internal-route denial', { ...shipped, template: template.replace('location ~* ^/api/v1/auth/service-session', 'location ~ ^/api/v1/auth/service-session') }],
     ['a module routed by default', { ...shipped, template: template.replace(/(\$hid_lab_routes \{\n\s*default) off;/, '$1 on;') }],
