@@ -158,8 +158,9 @@ test('a production agent rejects a staging-issued or staging-subject token', () 
 });
 
 // DEP-4-DOS: the agent keeps the verified key set by kid, so a JWKS outage or
-// flood does not stop renewal, and it refetches only for an unknown kid, at
-// most once every 30 seconds.
+// flood does not stop renewal. Once a token has verified, it refetches only for
+// an unknown kid or after a cached key stops verifying, at most once every 30
+// seconds.
 function rotatingIssuer() {
   const keys = new Map();
   const addKey = kid => {
@@ -253,21 +254,39 @@ test('an unknown kid refetches the JWKS at most once every 30 seconds and drops 
   });
 });
 
-test('a JWKS outage at start is retried no more than once every 30 seconds', async () => {
+// The agent health check (start period 30 s, interval 10 s, three retries)
+// turns an agent without ready.json UNHEALTHY about 60 s after it starts, and
+// the application starts only once the agent is HEALTHY. Until its first token
+// verifies, the agent may fetch the JWKS on every 10-second renewal retry
+// (never faster), so a JWKS failure at task start leaves it about six attempts.
+test('a JWKS outage at start is retried with each 10-second renewal retry, so the agent becomes ready inside its health window', async () => {
   await withAgent(async (agent, state, directory) => {
     state.jwksStatus = 503;
-    await assert.rejects(agent.renew());
+    await assert.rejects(agent.renew(), /rejected request/);
     assert.equal(state.jwksFetches, 1);
-    state.jwksStatus = 200;
-    for (const step of [10_000, 10_000]) {
-      state.clock += step;
-      await assert.rejects(agent.renew());
-      assert.equal(state.jwksFetches, 1);
+    // Never faster than the renewal retry.
+    state.clock += 5_000;
+    await assert.rejects(agent.renew(), /rate limited/);
+    assert.equal(state.jwksFetches, 1);
+    state.clock += 5_000;
+    for (const fetches of [2, 3, 4, 5]) {
+      await assert.rejects(agent.renew(), /rejected request/);
+      assert.equal(state.jwksFetches, fetches);
+      state.clock += 10_000;
     }
     await assert.rejects(readFile(join(directory, 'ready.json')), { code: 'ENOENT' });
-    state.clock += 10_000;
+    // 50 s after start, still inside the health window, the JWKS answers.
+    state.jwksStatus = 200;
     await agent.renew();
-    assert.equal(state.jwksFetches, 2);
+    assert.equal(state.jwksFetches, 6);
+    assert.equal(await readyAt(directory), state.clock + 300_000);
+    // Once a token has verified, the 30-second limit applies again.
+    state.signingKid = 'key-b'; state.published = ['key-a', 'key-b']; state.clock += 10_000;
+    await assert.rejects(agent.renew(), /rate limited/);
+    assert.equal(state.jwksFetches, 6);
+    state.clock += 20_000;
+    await agent.renew();
+    assert.equal(state.jwksFetches, 7);
     assert.equal(await readyAt(directory), state.clock + 300_000);
   });
 });

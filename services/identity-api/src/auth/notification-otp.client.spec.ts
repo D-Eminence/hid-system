@@ -183,6 +183,38 @@ describe('NotificationOtpClient workload token in JWT mode', () => {
     expect(String(warn.mock.calls[0]?.[0])).toContain('reason=invalid');
   });
 
+  // The agent removes a file before its token expires, but a file stays if the
+  // agent stops and ECS does not restart it (an exit within the 60-second
+  // restart attempt period). Notification would refuse the expired token 401,
+  // a definitive failure, so an alert would never be retried.
+  const workloadToken = (exp: number) => [{ alg: 'ES256', typ: 'JWT', kid: 'synthetic-key' },
+    { sub: 'hid:staging:identity-api', aud: 'hid-notification-api', iat: exp - 300, exp }]
+    .map((part) => Buffer.from(JSON.stringify(part)).toString('base64url')).join('.') + '.synthetic-signature';
+
+  it('treats an expired token file as unavailable: an OTP is not sent and an alert stays retryable', async () => {
+    await writeFile(join(directory, 'notification.jwt'), `${workloadToken(Math.floor(Date.now() / 1000) - 1)}\n`);
+    const notification = client();
+    await expect(notification.deliver(otp))
+      .resolves.toEqual({ outcome: 'definitive_failure', safeCode: 'workload_token_unavailable' });
+    await expect(notification.deliverEmergencyContactAlert(alert))
+      .resolves.toEqual({ outcome: 'unknown', safeCode: 'workload_token_unavailable' });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(unavailableCount(notification)).toBe(2);
+    const lines = warn.mock.calls.map(([message]) => String(message));
+    expect(lines[1]).toContain('notification_workload_token_unavailable');
+    expect(lines[1]).toContain('reason=expired');
+    expect(lines[1]).toContain('count=2');
+  });
+
+  it('sends a token whose expiry has not passed', async () => {
+    const token = workloadToken(Math.floor(Date.now() / 1000) + 120);
+    await writeFile(join(directory, 'notification.jwt'), token);
+    await expect(client().deliver(otp)).resolves.toEqual({ outcome: 'accepted', provider: 'test_sms' });
+    const [, init] = (global.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
+    expect(init.headers).toEqual(expect.objectContaining({ 'x-hid-service-authorization': `Bearer ${token}` }));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it('keeps an emergency-contact alert retryable while the token is missing', async () => {
     const notification = client();
     await expect(notification.deliverEmergencyContactAlert(alert))
