@@ -77,20 +77,40 @@ The script refuses, and writes nothing, unless the build:
   `VITE_HID_API_BASE_URL` and `VITE_HID_APP_ORIGIN` each exactly
   `https://<host>` (same-origin cookie sessions);
 - has a deployable Turnstile site key (`0x…`; Cloudflare test keys are
-  refused), no Google client id or Google sign-in script, and no
-  error-reporting DSN;
+  refused) and no error-reporting DSN;
+- has no Google sign-in: no Google Identity Services loader or call
+  (`accounts.google.com`, `/gsi/client`, `google.accounts.id`) and no Google
+  OAuth client id. Health-id inlines `VITE_HID_GOOGLE_CLIENT_ID` as a bare
+  value where it is used, so these markers, which a build with it set always
+  carries, are the check, not the variable's name;
 - holds only `index.html` and content-hashed `.js`, `.css`, image and font
   files under `assets/`, with no source map, `sourceMappingURL`, service
   worker, web app manifest, symbolic link or credential-shaped value; and
-- loads code and styles in `index.html` only from its own `/assets/` files.
+- has an `index.html` that is exactly the shell Vite writes: the doctype;
+  `html lang`; a head with `meta` charset (UTF-8), viewport and robots, the
+  title, comments, one module entry script, and `modulepreload` and
+  `stylesheet` links; and a body holding the root `div`. Every script and
+  link must name a `.js` or `.css` file of the build's own `/assets/`. Any
+  other element (`base`, `style`, `img`, `iframe`, `object`, `embed`,
+  `noscript`, `template`, `svg` and so on), any other or repeated attribute
+  (an `on*` handler, `http-equiv`, `data-*`), text outside the title, and
+  markup it cannot parse exactly are refused. There is no edge CSP (see
+  below), so this check is what keeps `index.html` to the build's own files.
 
 It copies the build to `workers/<worker>/staged/<environment>/site`, checks
 the copy again, and writes `provenance.json`: the Health-id repository,
 application and source commit, the build command, the Worker, environment and
-host, the inlined public build environment, every file's SHA-256 and size, and
-a tree hash. A new staging replaces the previous artefact. The Health-id
-artefact has no `manifest.webmanifest` or `service-worker.js` by design;
-`verify-config.mjs` requires those only of the legacy builds.
+host, the inlined public environment record (the five keys of Health-id's
+`src/publicEnvironment.ts`), every file's SHA-256 and size, and a tree hash.
+The Health-id artefact has no `manifest.webmanifest` or `service-worker.js` by
+design; `verify-config.mjs` requires those only of the legacy builds.
+
+A new staging replaces the previous artefact only when the destination is
+that artefact: exactly `site/` and a `provenance.json` of this schema, staged
+for the same Worker and environment. It also stages into a missing or empty
+directory. Any other destination, such as a mistyped `--staged-directory`, a
+file, a symbolic link or another Worker's artefact, is refused and left
+unchanged.
 
 ### Verification before a deployment
 
@@ -106,10 +126,14 @@ configuration and the launch manifest, and verifies any staged artefact that
 is present; it needs the legacy application builds of the Workers that still
 use them (`npm run build:cloudflare` at the root). CI's Cloudflare job runs
 `npm --prefix infra/cloudflare test`, which covers the staging step, the
-launch manifest and the dry-run wrapper with fixture builds. `verify:launch:<environment>` also requires a
-staged artefact for every Health-id Worker deployed in that environment, and
-re-verifies each against its provenance (hashes, host, environment, source
-commit) and the staging rules. The dry-run scripts run that check first, then
+launch manifest and the dry-run wrapper with fixture builds.
+`verify:launch:<environment>` checks every Worker configuration and the launch
+manifest too, but not the legacy builds of the Workers the launch does not
+deploy there, so a deployment checkout needs `npm ci` in `infra/cloudflare`
+and the staged Health-id builds only. It requires a staged artefact for every
+Health-id Worker deployed in that environment, and re-verifies each against
+its provenance (hashes, host, environment, source commit) and the staging
+rules. The dry-run scripts run that check first, then
 Wrangler's build-only deployment check for the launch Workers of the
 environment only. They do not publish a Worker or mutate DNS. Deploy only from
 an authorized pipeline or operator session, one Worker at a time, with the

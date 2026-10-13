@@ -2807,15 +2807,26 @@ Decision:
    `infra/cloudflare/scripts/stage-health-id-build.mjs`. It refuses a build
    that breaks rule 2, or that holds anything but `index.html` and
    content-hashed files under `assets/`, a source map or `sourceMappingURL`, a
-   service worker or web app manifest, code or styles in `index.html` from
-   anywhere but its own assets, a Google sign-in reference, or a
-   credential-shaped value. It writes the build to the Worker's git-ignored
-   `staged/<environment>/site` with `provenance.json` beside it, never inside
-   the served directory: the Health-id source commit, every file's SHA-256, a
-   tree hash and the inlined public build environment. On a refusal it writes
-   nothing. `npm --prefix infra/cloudflare run verify:launch:<environment>`
+   service worker or web app manifest, a Google sign-in reference (the Google
+   Identity Services loader or calls, or a Google OAuth client id: Health-id
+   inlines `VITE_HID_GOOGLE_CLIENT_ID` as a bare value where it is used, so
+   these markers are the check), or a credential-shaped value. Its
+   `index.html` must be exactly the shell Vite writes, checked against an
+   allow-list of elements and attributes: one module entry script, and
+   scripts and links that name only `.js` and `.css` files of the build's own
+   `/assets/`; anything else, including `base`, `style`, inline handlers,
+   `meta http-equiv` and markup it cannot parse exactly, is refused. It writes
+   the build to the Worker's git-ignored `staged/<environment>/site` with
+   `provenance.json` beside it, never inside the served directory: the
+   Health-id source commit, every file's SHA-256, a tree hash and the inlined
+   public environment record (the five keys of `src/publicEnvironment.ts`).
+   On a refusal it writes nothing, and it replaces an existing destination
+   only when that is an earlier artefact of the same Worker and environment.
+   `npm --prefix infra/cloudflare run verify:launch:<environment>`
    re-verifies every staged artefact against its provenance and the same
-   rules before a deployment, and the Wrangler dry-run runs it first.
+   rules before a deployment, and the Wrangler dry-run runs it first. It
+   checks every Worker configuration but needs no legacy `apps/<app>/dist`
+   build of a Worker the launch does not deploy.
 4. Launch subset, deny by default (`infra/cloudflare/launch-deployment.json`):
    staging and production deploy `hid-web` and `hid-admin`, and production
    also the originless apex redirect. `hid-ehr` (the legacy `apps/ehr`;
@@ -2832,8 +2843,9 @@ Decision:
    `X-Real-IP`, security headers and `/api/v1` proxying. No Content Security
    Policy is added: the Worker sets none for any frontend today, and Health-id
    needs none to work (it loads its own `/assets/` and the Turnstile script
-   from `challenges.cloudflare.com`). An edge CSP is later hardening, with its
-   own tests.
+   from `challenges.cloudflare.com`). Until an edge CSP is added, the staging
+   step's `index.html` allow-list (rule 3) is what keeps the shell to the
+   build's own files. An edge CSP is later hardening, with its own tests.
 
 Consequences:
 

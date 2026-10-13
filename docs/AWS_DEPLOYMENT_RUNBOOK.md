@@ -242,9 +242,11 @@ Cloudflare frontend artifacts are built, hashed, checked for source-map/secret
 leakage, and released independently per host. At launch the only frontend is
 Health-id `apps/patient-web`, built once per host and staged with
 `infra/cloudflare/scripts/stage-health-id-build.mjs`, which refuses a build
-bound to another origin or environment, carrying a Google client id, source
-maps, a service worker, a manifest or unexpected files, and records the source
-commit and every file's SHA-256 in `provenance.json`. The signed release
+bound to another origin or environment, carrying Google sign-in, source maps,
+a service worker, a manifest or unexpected files, or an `index.html` other
+than the allow-listed Vite shell, and records the source commit and every
+file's SHA-256 in `provenance.json`. It replaces an existing staged directory
+only when that is an earlier artefact of the same Worker and environment. The signed release
 bundle's frontend section still describes the legacy builds (ADR-052); until
 it carries the Health-id artefact, the staged artefact's provenance is the
 frontend release record.
@@ -532,7 +534,9 @@ apex redirect. `hid-ehr`, `hid-lab`, `hid-pharmacy`, `hid-ocr`,
 by the gateway's `HID_ENABLED_API_ROUTES`. Before deploying, stage the Health-id
 build for each host and run
 `npm --prefix infra/cloudflare run verify:launch:<environment>` and
-`dry-run:<environment>`.
+`dry-run:<environment>` (after `npm --prefix infra/cloudflare ci`; they need no
+hid-system frontend build, since the legacy builds belong to Workers that are
+not deployed).
 
 For each deployed frontend, bind the exact selected-environment custom hostname,
 the staged asset directory (`staged/<environment>/site`), compatibility date,
