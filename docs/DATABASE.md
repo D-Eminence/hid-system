@@ -3259,3 +3259,86 @@ Tests:
   authenticator through `staff-session-client.mjs`, and
   `verify-delegated-cookie-read-runtime.mjs` checks that the EHR refuses an
   unassured reader with `403 STAFF_MFA_REQUIRED`.
+
+## Session facility selection (0089)
+
+`0089_session_facility_selection.sql` (ADR-046, `BRANCH:launch/facility-selection-0089`;
+written as `0080` in D-Eminence/hid-system#47) follows `0088` (staff MFA).
+Migrations `0001`–`0088` are unchanged; no existing row, function, policy or
+grant changes. Creating
+the table's four foreign keys takes `SHARE ROW EXCLUSIVE` on `auth.sessions`,
+`auth.accounts`, `identity.facilities` and
+`identity.staff_facility_memberships` until the migration commits, within the
+runner's 5 s lock timeout (`MIGRATION_RUNBOOK.md`).
+
+- `auth.session_facility_selection` holds the facility a staff sign-in
+  explicitly selected with `POST /auth/facility`: `family_id` (primary key,
+  the sign-in's root session in `auth.sessions`), `account_id`, `facility_id`,
+  `membership_id`, `selected_at` (`clock_timestamp()`) and `row_version`. Like
+  `auth.session_assurance` (0069) it is keyed by the session family, so the
+  refresh rotation, which keeps the family, keeps the selection, and another
+  sign-in of the same account has its own. A composite foreign key binds
+  `(membership_id, facility_id, account_id)` to one membership of that account
+  at that facility. Every foreign key is `ON DELETE RESTRICT`.
+- The row is only the default `GET /auth/session` and refresh report. It
+  authorizes nothing: facility-scoped requests still carry `X-Facility-ID`,
+  checked against the actor's active memberships, and the Identity API checks
+  the stored facility against them on every read (`reselect` when it is no
+  longer active). It compares facility ids, so a membership replaced by another
+  active one at the same facility is still reported `selected`, with the new
+  membership's roles; `membership_id` records the membership the choice was
+  made under.
+- `auth.guard_session_facility_selection_change()` (invoker, fixed
+  `search_path`, revoked from `PUBLIC`) fires before every row insert, update
+  and delete. An insert or update must name the root session of a staff
+  sign-in of the same account (`id = family_id`, `session_kind = 'staff'`),
+  the family must still have a live session (unrevoked, within its idle and
+  absolute windows), and the membership must be active, of this account and
+  facility, without a migration hold, with an active staff record of the
+  account whose trimmed, lower-cased verification status is `verified`,
+  `approved` or `active`, in an active organization, at an active facility of
+  that organization. These membership, hold, staff, organization and facility
+  conditions mirror `CurrentStaffContextService`; the account's status and
+  `disabled_until` are not repeated, since `TokenService.verify()` refuses an
+  inactive or disabled account before the API writes. The status list
+  duplicates `ACTIVE_STAFF_VERIFICATION_STATUSES` (`auth-policy.ts`), as
+  `identity.has_active_membership` (0008) does; comments at each place name the
+  others. Otherwise
+  `23514 SESSION_FACILITY_SELECTION_INVALID`. An update cannot change
+  `family_id` or `account_id`, and DELETE is refused, both with
+  `55000 SESSION_FACILITY_SELECTION_IMMUTABLE`. Sign-out and revocation leave
+  the row; with no live session left, the sign-in can never change it again.
+- The Identity API writes it in one system transaction: `auth.lock_account_sessions`
+  on the account first (0073, as sign-out and revocation), then
+  `INSERT ... SELECT` from the presented session while it is a live staff
+  session of the account, `ON CONFLICT (family_id) DO UPDATE` (a new choice
+  replaces the old and increments `row_version`), then the
+  `auth.facility.select` audit row on the same transaction. It reads the row
+  only through a live staff session of the family. A read that fails is
+  answered `503 DEPENDENCY_UNAVAILABLE`, never with the default facility.
+- `runtime-grants.sql` grants `SELECT`, `INSERT` and `UPDATE` to
+  `hid_identity_runtime` (so `hid_identity_api_runtime`), and no `DELETE`;
+  no other role, `hid_schema_test_runtime` included, gets any privilege. The
+  guard reads only tables the Identity runtime already reads.
+- `session-facility-selection.integration.sql` (rollback-only, synthetic
+  fixtures) checks the catalog contract (columns, keys, the guard's
+  attributes, trigger timing and grants) and, as `hid_identity_api_runtime`,
+  the API's upsert and replacement, and the guard's refusals: another
+  account's id on a sign-in, an ended membership, a membership held for
+  migration, a suspended facility, a deactivated organization, another
+  account's membership, a membership of another facility, another account's
+  sign-in, a patient sign-in (of the same account, so only the kind differs)
+  and another patient's, a signed-out and a lapsed sign-in, an inactive and an
+  unverified staff record, a session that is not its family's root, an unknown
+  session, an update to an ended membership or to another sign-in or account,
+  and DELETE (refused to the runtime by privilege and to the owner by the
+  guard). It then checks that the rotated session reads the selection while
+  the replaced session and another sign-in of the account do not, and that
+  after sign-out the row stays but is neither read nor changeable.
+  `scripts/run-container-database-acceptance.sh` runs it last, after
+  `staff-mfa.integration.sql`.
+  `services/identity-api/scripts/verify-facility-selection-runtime.mjs`
+  exercises the HTTP contract against a migrated database as
+  `hid_identity_api_runtime`, with the global `AuditInterceptor` registered as
+  `AppModule` registers it, so each refused selection must also write its
+  failed `auth.facility.select` row past 0067's staff CHECKs.

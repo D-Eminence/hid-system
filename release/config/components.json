@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0088",
-    "count": 88,
+    "last": "0089",
+    "count": 89,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -449,6 +449,10 @@
       {
         "name": "0088_staff_mfa_sessions.sql",
         "sha256": "a4c07736768147bc24d0d374f8a002791faa7323e6fd96706fd79b89ef1f3ed8"
+      },
+      {
+        "name": "0089_session_facility_selection.sql",
+        "sha256": "a90b3a60f21df3e5b6233302ed7f7ab67cb320f89c5b883a22dea3982ca3c5cf"
       }
     ]
   },

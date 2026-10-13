@@ -10,6 +10,7 @@ import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
 import { CurrentStaffContextService, eligibleStaffMembershipJoins } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
+import { databaseMessage, isDatabaseError } from '../patient-safety/database-error';
 import { classifyPlatformSessionEnd, platformSessionEnded, type StoredPlatformSessionState } from './platform-session-end';
 
 type SessionKind = 'staff' | 'patient' | 'platform';
@@ -82,6 +83,22 @@ export interface RefreshSignOut {
   actorSubject: string;
   kind: 'staff' | 'patient';
 }
+
+/** A staff sign-in's choice of working facility (0089), and the membership it was made under. */
+export interface FacilitySelectionInput {
+  sessionId: string;
+  accountId: string;
+  facilityId: string;
+  membershipId: string;
+}
+
+/**
+ * How recordFacilitySelection ended: stored; the session is no longer a live
+ * staff session of the account (a sign-out or revocation got there first); or
+ * the database guard refused the membership, which ended after the request
+ * was authorized. Only 'selected' wrote anything.
+ */
+export type FacilitySelectionOutcome = 'selected' | 'session_ended' | 'refused';
 
 @Injectable()
 export class TokenService {
@@ -630,6 +647,76 @@ export class TokenService {
       [this.sha256(refreshToken), TokenService.ROTATED_KIND_GRACE_SECONDS, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
     );
     return result.rows[0]?.session_kind;
+  }
+
+  /**
+   * Stores a staff sign-in's choice of working facility (0089), keyed by its
+   * session family, so refresh (which keeps the family) keeps it and another
+   * sign-in of the account does not see it. A new choice replaces the old.
+   *
+   * The account row is locked first (0073), as sign-out and every revocation
+   * lock it, and the row is written only for the presented session while it is
+   * a live staff session of the account: so no selection is written for a
+   * sign-in a concurrent sign-out or revocation has just ended. The database
+   * guard also requires an active membership of the account at the facility.
+   * `withinTransaction` runs on the same transaction once the row is written
+   * (the caller's audit), so a selection is stored only with it.
+   */
+  async recordFacilitySelection(input: FacilitySelectionInput, event: SessionEventMetadata,
+    withinTransaction: (client: PoolClient) => Promise<void>): Promise<FacilitySelectionOutcome> {
+    try {
+      return await this.database.withSystemTransaction(event.correlationId, async (client) => {
+        await client.query('select auth.lock_account_sessions($1)', [input.accountId]);
+        const stored = await client.query<{ family_id: string }>(
+          `insert into auth.session_facility_selection (family_id, account_id, facility_id, membership_id)
+           select session.family_id, session.account_id, $3::uuid, $4::uuid
+             from auth.sessions session
+            where session.id = $1
+              and session.account_id = $2
+              and session.session_kind = 'staff'
+              and session.revoked_at is null
+              and session.expires_at > clock_timestamp()
+              and session.absolute_expires_at > clock_timestamp()
+           on conflict (family_id) do update
+              set facility_id = excluded.facility_id, membership_id = excluded.membership_id,
+                  selected_at = clock_timestamp(), row_version = auth.session_facility_selection.row_version + 1
+           returning family_id::text`,
+          [input.sessionId, input.accountId, input.facilityId, input.membershipId],
+        );
+        if (stored.rowCount !== 1) return 'session_ended' as const;
+        await withinTransaction(client);
+        return 'selected' as const;
+      });
+    } catch (error) {
+      if (isDatabaseError(error) && error.code === '23514'
+        && databaseMessage(error) === 'SESSION_FACILITY_SELECTION_INVALID') {
+        return 'refused';
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The facility a staff sign-in selected (0089), read through the presented
+   * session: only while it is a live staff session of the account, so a
+   * signed-out or revoked sign-in never reads its selection again. The caller
+   * re-checks it against the actor's current facilities; it authorizes nothing.
+   */
+  async selectedFacilityId(sessionId: string, accountId: string): Promise<string | undefined> {
+    const result = await this.database.query<{ facility_id: string }>(
+      `select selection.facility_id::text
+         from auth.sessions session
+         join auth.session_facility_selection selection
+           on selection.family_id = session.family_id and selection.account_id = session.account_id
+        where session.id = $1
+          and session.account_id = $2
+          and session.session_kind = 'staff'
+          and session.revoked_at is null
+          and session.expires_at > clock_timestamp()
+          and session.absolute_expires_at > clock_timestamp()`,
+      [sessionId, accountId],
+    );
+    return result.rows[0]?.facility_id;
   }
 
   verifyCsrf(claims: HidJwtClaims | JWTPayload, cookieToken: string | undefined, headerToken: string | undefined): boolean {

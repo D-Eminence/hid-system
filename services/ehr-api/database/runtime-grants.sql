@@ -1163,6 +1163,17 @@ revoke all on function auth.require_platform_step_up(uuid),
   auth.guard_admin_approval_request_change()
   from public;
 
+-- Staff working facility per sign-in (0089, ADR-046). The Identity runtime
+-- reads, records and replaces a sign-in's selection, as it does
+-- auth.session_assurance; the 0089 guard admits only the root session of a
+-- live staff sign-in of the same account and an active membership, and refuses
+-- deletes, so DELETE is not granted. No other service reads it: the selection
+-- authorizes nothing, and every service authorizes a request by its
+-- X-Facility-ID. The guard runs as the invoker and reads only tables this
+-- runtime already reads (auth.sessions and the identity workforce tables).
+grant select, insert, update on auth.session_facility_selection to hid_identity_runtime;
+revoke all on function auth.guard_session_facility_selection_change() from public;
+
 -- Phase 4 Stage 5B (0073): the Identity API's own revocations (refresh-token
 -- reuse, an administrator revoking their own session, sign-out, expiry) take the
 -- account row lock through this helper before revoking, as the 0073 admin

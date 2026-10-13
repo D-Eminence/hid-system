@@ -2475,6 +2475,111 @@ Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity
 boundary; Outreach registration boundary); release checklist §2, §3, §7, §8
 and §9.
 
+# ADR-046: A Staff Sign-In Keeps Its Selected Facility; X-Facility-ID Still Authorizes
+
+Status: Accepted for source implementation (D-Eminence/hid-system#47, ported
+as `BRANCH:launch/facility-selection-0089`, migration 0089). Not deployed.
+
+Date: 2026-10-12
+
+Context:
+
+A staff member who works at more than one facility chooses one with
+`POST /auth/facility`. Identity checked the membership, audited
+`auth.facility.select` and answered with the actor at that facility, but
+stored nothing. `GET /auth/session` and `POST /auth/refresh` resolve the
+actor afresh and bind the primary facility (else the first by name), so a
+page reload silently moved the user back to the primary facility, where the
+next clinical action would have been taken.
+
+Decision:
+
+- Identity keeps the choice per sign-in in `auth.session_facility_selection`
+  (0089), keyed by the session family as `auth.session_assurance` is (0069):
+  refresh rotates the session row but keeps the family, so the choice survives
+  rotation, and another sign-in of the same account has its own. A new choice
+  replaces the old one (`row_version` increments).
+- `POST /auth/facility` stores the choice after the existing membership check,
+  for the presented session while it is a live staff session of the account,
+  under the account row lock that sign-out and revocation take (0073), and
+  writes the existing `auth.facility.select` audit on the same transaction.
+  A refusal writes no selection row and no successful `auth.facility.select`
+  audit; the global `AuditInterceptor` records it as a failed
+  `auth.facility.select` session event with no facility
+  (D-Eminence/hid-system#42). A
+  presented session that another tab's refresh rotated after the request was
+  authorized is no longer live, so that selection is `401` and the client
+  refreshes and retries.
+- Staff responses carry `facilitySelection`: `selected` (the stored facility,
+  still one of the actor's active facilities, is reported), `default` (none
+  stored; every new sign-in), or `reselect` (the stored facility is no longer
+  one of the actor's active facilities: the default is reported and the client
+  asks the user to choose again rather than working elsewhere silently).
+  Patient and platform sessions, and `/auth/service-session`, are unchanged
+  and carry no field. Facilities are compared by id, so a membership replaced
+  by another active one at the same facility keeps the choice `selected`, with
+  the new membership's roles.
+- A stored choice that cannot be read is never replaced by the default:
+  `GET /auth/session` answers `503 DEPENDENCY_UNAVAILABLE` with the cookies
+  untouched, and refresh, whose rotation has already committed, sets the
+  rotated session's cookies and CSRF token and answers
+  `503 DEPENDENCY_UNAVAILABLE` with no actor, so the user stays signed in.
+- The stored choice is only the default the session reports. It authorizes
+  nothing: every facility-scoped request still carries `X-Facility-ID`, which
+  the guard checks against the actor's active memberships, and the stored
+  facility is re-checked against those memberships whenever it is read. A
+  valid `X-Facility-ID` on `GET /auth/session` itself still binds the
+  facility it names. `verify()` and the per-request guard are unchanged, so
+  protected routes make no extra query.
+- The 0089 guard admits a row only for the root session of a staff sign-in of
+  the same account that still has a live session, and an active membership of
+  that account at that facility. Its membership, migration-hold, staff,
+  organization and facility conditions mirror `CurrentStaffContextService`;
+  the account's status and `disabled_until` are not repeated, because
+  `TokenService.verify()` refuses an inactive or disabled account before the
+  API writes. The verified staff statuses are hard-coded in SQL, duplicating
+  `ACTIVE_STAFF_VERIFICATION_STATUSES` (`auth-policy.ts`) as
+  `identity.has_active_membership` already does; a comment at each place names
+  the others. It refuses moving a row to another sign-in or account, and
+  refuses DELETE. The Identity runtime gets select, insert and update; no
+  other service gets any privilege.
+
+Consequences:
+
+- A reload or refresh keeps the user at the facility they chose.
+- The choice belongs to the sign-in, not the tab: every tab holding the same
+  cookies reads the same choice, and the last choice made in any tab wins. A
+  client keeps the facility it is working at in memory across a refresh while
+  it is still in `actor.facilities`, because the refresh response reports the
+  sign-in's last choice, which may come from another tab.
+- Sign-out and revocation leave the row, as with `auth.session_assurance`; a
+  signed-out or revoked sign-in never reads it again (reads go through a live
+  session of the family) and can never change it (the guard requires a live
+  session). Rows are not deleted; they are one small row per staff sign-in
+  that made a choice, with no retention job yet.
+- `reselect` does not clear the stored choice. If the membership becomes
+  active again before the user chooses, the choice is reported as `selected`
+  again.
+- Deployment order: apply 0089 and the role bootstrap before this Identity API
+  serves traffic. Without the table, every staff `GET /auth/session` and
+  refresh answers `503` (refresh keeps the rotated cookies), so no staff page
+  loads, and `POST /auth/facility` fails. The previous Identity API ignores the
+  table, so rolling the API back needs no schema change.
+- Numbering: written as 0080 in D-Eminence/hid-system#47; main has its own
+  0080 (Pharmacy source prescription guards), so it is ported as 0089, after
+  the launch migrations 0085-0088, and `release/config/components.json` lists
+  it last.
+- Creating the table's four foreign keys briefly takes `SHARE ROW EXCLUSIVE`
+  on `auth.sessions`, `auth.accounts`, `identity.facilities` and
+  `identity.staff_facility_memberships` (`MIGRATION_RUNBOOK.md`).
+- An actor without an Identity sign-in (`AUTH_MODE=oidc` bearer tokens, no
+  session id) has nowhere to keep a choice: `POST /auth/facility` answers as
+  before without storing it, and no field is reported.
+
+Related: ADR-038 (session assurance per family), ADR-044 (sign-out under the
+account lock); `INTERFACE_CONTRACT.md`, "Working facility per sign-in";
+`DATABASE.md`, "Session facility selection (0089)".
+
 # ADR-047: One Environment-Bound Workload Issuer for Staging and Production
 
 Status: Accepted (2026-10-13). The owner instructed that the technical

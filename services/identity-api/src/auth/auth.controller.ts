@@ -1,10 +1,12 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { Body, Controller, Get, HttpCode, MethodNotAllowedException, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, MethodNotAllowedException, Post, Req, Res, ServiceUnavailableException,
+  UnauthorizedException } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { AuditService } from '../audit/audit.service';
+import type { PoolClient } from 'pg';
+import { AuditService, type AuditEventInput } from '../audit/audit.service';
 import { AuditFailuresOnly, AuditSessionEvent, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
-import type { ActorContext, HidRequest } from '../common/request-context';
+import type { ActorContext, FacilityAssignment, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { clearEnrollmentCookie } from '../identity/enrollment-cookie';
 import { AuthService } from './auth.service';
@@ -15,11 +17,17 @@ import { PatientLoginDto } from './dto/patient-login.dto';
 import { PlatformMfaVerifyDto, StaffMfaEnrollmentStartDto, TotpCodeDto } from './dto/platform-auth.dto';
 import { SelectFacilityDto } from './dto/select-facility.dto';
 import { GoogleAuthenticationService } from './google-authentication.service';
-import type { LoginResult } from './auth.types';
+import type { FacilitySelectionState, LoginResult } from './auth.types';
 import { MfaService } from './mfa/mfa.service';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
+
+/** The actor a session response reports and, for a staff sign-in, where its facility comes from. */
+interface SessionReport {
+  actor: ActorContext;
+  facilitySelection?: FacilitySelectionState;
+}
 
 @Controller('auth')
 @AuditFailuresOnly()
@@ -217,7 +225,7 @@ export class AuthController {
       await this.recordSuccess('auth.google.login', result.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
-      return this.sessionResponse(result.actor, result.expiresAt);
+      return this.sessionResponse(result.actor, result.expiresAt, this.newSignInSelection(result.actor));
     } catch (error) {
       await this.sessionAudit.record({
         correlationId: request.correlationId,
@@ -285,7 +293,7 @@ export class AuthController {
       await this.recordSuccess('auth.login', result.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
-      return this.sessionResponse(result.actor, result.expiresAt);
+      return this.sessionResponse(result.actor, result.expiresAt, this.newSignInSelection(result.actor));
     } catch (error) {
       await this.recordLoginFailure(error, input.email, request);
       throw error;
@@ -354,18 +362,47 @@ export class AuthController {
       const kind = await this.tokens.refreshSessionKind(refreshToken);
       if (kind && kind !== expectedKind) throw this.clientMismatch(kind, request);
     }
+    let result: LoginResult;
     try {
-      const result = await this.auth.refresh(refreshToken, this.event(request));
-      await this.recordSuccess('auth.refresh', result.actor, request);
+      result = await this.auth.refresh(refreshToken, this.event(request));
+    } catch (error) {
+      this.clearCookies(response);
+      throw error;
+    }
+    // The rotation has committed: the presented refresh token is spent and only
+    // the rotated session is live. The rotated session keeps the sign-in's
+    // family, and so its facility selection. If that cannot be read, the
+    // browser is kept on the rotated session (its cookies and CSRF token) and
+    // answered 503: clearing the cookies would sign the user out, and
+    // answering without the selection would report a facility they did not choose.
+    let reported: SessionReport;
+    try {
+      reported = await this.withFacilitySelection(result.actor);
+    } catch (error) {
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
-      return this.sessionResponse(result.actor, result.expiresAt);
+      throw error;
+    }
+    try {
+      await this.recordSuccess('auth.refresh', reported.actor, request);
+      this.setCookies(response, result);
+      response.setHeader('x-csrf-token', result.csrfToken);
+      return this.sessionResponse(reported.actor, result.expiresAt, reported.facilitySelection);
     } catch (error) {
       this.clearCookies(response);
       throw error;
     }
   }
 
+  /**
+   * The signed-in actor. For a staff sign-in the reported facility is the one
+   * it selected with POST /auth/facility (facilitySelection 'selected'), so a
+   * reload does not move the user back to the primary facility; with no
+   * selection it is the default ('default'), and when the selected facility is
+   * no longer one of the actor's active facilities it is the default and the
+   * user must choose again ('reselect'). A valid X-Facility-ID on this request
+   * still binds the facility it names. The selection authorizes nothing.
+   */
   @Get('session')
   @AuditSessionEvent('auth.session.read')
   @FacilityOptional()
@@ -376,24 +413,7 @@ export class AuthController {
   ) {
     const actor = request.actor;
     if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
-    await this.audit.record({
-      correlationId: request.correlationId,
-      actorType: actor.kind === 'patient' ? 'patient' : 'staff',
-      actorSubject: actor.subject,
-      actorAccountId: actor.accountId,
-      actorMembershipId: actor.facility?.membershipId,
-      organizationId: actor.facility?.organizationId,
-      facilityId: actor.facility?.id,
-      action: 'auth.session.read',
-      resourceType: 'session',
-      resourceId: actor.sessionId,
-      outcome: 'success',
-      sourceIp: request.ip,
-      userAgent: request.header('user-agent'),
-    });
-    const csrfToken = this.cookies(request)[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
-    if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
-    return this.sessionResponse(actor);
+    return this.readSession(request, response, await this.withFacilitySelection(actor, request.facilityId));
   }
 
   @Get('service-session')
@@ -409,7 +429,11 @@ export class AuthController {
       request.header('x-hid-service-authorization'),
       request.header('x-hid-service-token'),
     );
-    return this.session(request, response);
+    const actor = request.actor;
+    if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+    // A service authorizes one browser request by its X-Facility-ID: the actor
+    // as the guard bound it, with no facility selection read or reported.
+    return this.readSession(request, response, { actor });
   }
 
   @Post('service-session')
@@ -530,14 +554,8 @@ export class AuthController {
     if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
     const facility = actor.facilities.find((candidate) => candidate.id === input.facilityId);
     if (!facility) throw new DomainProblem(403, 'FACILITY_ACCESS_DENIED', 'The actor is not active at this facility');
-    const selectedActor: ActorContext = {
-      ...actor,
-      facility,
-      roles: facility.roles,
-      role: facility.roles[0],
-      permissions: facility.permissions,
-    };
-    await this.audit.record({
+    const selectedActor = this.atFacility(actor, facility);
+    const selectionAudit: AuditEventInput = {
       correlationId: request.correlationId,
       actorType: 'staff',
       actorSubject: actor.subject,
@@ -551,17 +569,102 @@ export class AuthController {
       outcome: 'success',
       sourceIp: request.ip,
       userAgent: request.header('user-agent'),
-    });
+    };
     const csrfToken = this.cookies(request)[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
+    if (!this.staffSignIn(actor)) {
+      // No Identity sign-in to keep the choice for (an external OIDC bearer
+      // token): answered as before, nothing stored.
+      await this.audit.record(selectionAudit);
+      if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
+      return this.sessionResponse(selectedActor);
+    }
+    // Stored for this sign-in with its audit, in one transaction (0089).
+    const outcome = await this.tokens.recordFacilitySelection({
+      sessionId: actor.sessionId, accountId: actor.accountId, facilityId: facility.id, membershipId: facility.membershipId,
+    }, this.event(request), (client) => this.auditOnTransaction(client, selectionAudit));
+    if (outcome === 'session_ended') {
+      throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+    }
+    if (outcome === 'refused') {
+      throw new DomainProblem(403, 'FACILITY_ACCESS_DENIED', 'The actor is not active at this facility');
+    }
     if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
-    return this.sessionResponse(selectedActor);
+    return this.sessionResponse(selectedActor, undefined, 'selected');
   }
 
-  private sessionResponse(actor: ActorContext, expiresAt?: Date) {
+  private sessionResponse(actor: ActorContext, expiresAt?: Date, facilitySelection?: FacilitySelectionState) {
     return {
       actor,
       ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
+      ...(facilitySelection ? { facilitySelection } : {}),
     };
+  }
+
+  /** Records the session read and answers with the actor and facility it reports. */
+  private async readSession(request: HidRequest, response: Response, reported: SessionReport) {
+    const actor = reported.actor;
+    await this.audit.record({
+      correlationId: request.correlationId,
+      actorType: actor.kind === 'patient' ? 'patient' : 'staff',
+      actorSubject: actor.subject,
+      actorAccountId: actor.accountId,
+      actorMembershipId: actor.facility?.membershipId,
+      organizationId: actor.facility?.organizationId,
+      facilityId: actor.facility?.id,
+      action: 'auth.session.read',
+      resourceType: 'session',
+      resourceId: actor.sessionId,
+      outcome: 'success',
+      sourceIp: request.ip,
+      userAgent: request.header('user-agent'),
+    });
+    const csrfToken = this.cookies(request)[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
+    if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
+    return this.sessionResponse(actor, undefined, reported.facilitySelection);
+  }
+
+  /** A staff actor of an Identity sign-in (a staff actor carries no kind), which can keep a facility selection. */
+  private staffSignIn(actor: ActorContext): actor is ActorContext & { sessionId: string } {
+    return actor.kind !== 'patient' && actor.kind !== 'platform' && typeof actor.sessionId === 'string';
+  }
+
+  /** A new staff sign-in has no selection yet. */
+  private newSignInSelection(actor: ActorContext): FacilitySelectionState | undefined {
+    return this.staffSignIn(actor) ? 'default' : undefined;
+  }
+
+  /**
+   * The actor at the facility its sign-in selected (0089), re-checked against
+   * the actor's current active facilities. `boundFacilityId` is the facility a
+   * valid X-Facility-ID bound to this request, which keeps the actor at it.
+   * A failed read is 503 DEPENDENCY_UNAVAILABLE, never the default facility.
+   */
+  private async withFacilitySelection(actor: ActorContext, boundFacilityId?: string): Promise<SessionReport> {
+    if (!this.staffSignIn(actor)) return { actor };
+    let selectedId: string | undefined;
+    try {
+      selectedId = await this.tokens.selectedFacilityId(actor.sessionId, actor.accountId);
+    } catch {
+      throw new ServiceUnavailableException('The facility selection is unavailable');
+    }
+    if (!selectedId) return { actor, facilitySelection: 'default' };
+    const selected = actor.facilities.find((candidate) => candidate.id === selectedId);
+    if (!selected) return { actor, facilitySelection: 'reselect' };
+    return { actor: boundFacilityId ? actor : this.atFacility(actor, selected), facilitySelection: 'selected' };
+  }
+
+  /** The actor working at one of its facilities, with that membership's roles and permissions. */
+  private atFacility(actor: ActorContext, facility: FacilityAssignment): ActorContext {
+    return { ...actor, facility, roles: facility.roles, role: facility.roles[0], permissions: facility.permissions };
+  }
+
+  /** An audit row on the caller's transaction; a failure is answered as AuditService.record answers it. */
+  private async auditOnTransaction(client: PoolClient, event: AuditEventInput): Promise<void> {
+    try {
+      await this.audit.recordWithClient(client, event);
+    } catch {
+      throw new ServiceUnavailableException('Audit persistence is unavailable; request was denied');
+    }
   }
 
   /** The kind of sign-in the calling app holds, when it names itself in X-HID-Client. */
