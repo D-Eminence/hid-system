@@ -286,14 +286,20 @@ try {
   evidence.steps.logins = { verified: passed.verified.map(({ credential, expected_role }) =>
     ({ credential, expected_role })), refused: ['administrator URL', 'extra role', 'another service login'] };
 
-  // P8-CONTROL: the guards' control reads, as each guard's runtime login.
+  // P8-CONTROL: the guards' control reads, as each guard's runtime login. The
+  // last three are the launch controls 0091 turns off where 0039 left them
+  // seeded: the administrator owns platform.control_settings, whose forced
+  // row-level security hides every row from it, so the migration's update
+  // reaches the rows only with forced security lifted for its transaction.
   const controls = {};
   for (const credential of ['identity-api', 'ehr-api', 'outreach-api']) {
     controls[credential] = psql(`platform controls as ${credential}`, logins[credential][0],
       `select platform.control_enabled('patient_portal_enabled') || ',' || platform.control_enabled('provider_portal_enabled')
-         || ',' || platform.control_enabled('maintenance_mode'); select platform.require_control_enabled('patient_portal_enabled')`)
+         || ',' || platform.control_enabled('maintenance_mode') || ',' || platform.control_enabled('uploads_enabled')
+         || ',' || platform.control_enabled('outreach_portal_enabled') || ',' || platform.control_enabled('break_glass_enabled');
+       select platform.require_control_enabled('patient_portal_enabled')`)
       .stdout.trim().split('\n')[0];
-    assert.equal(controls[credential], 'true,true,false');
+    assert.equal(controls[credential], 'true,true,false,false,false,false');
   }
   evidence.steps.platform_controls = { read_as: controls, owner: psql('control owner', superuser,
     `select proowner::regrole from pg_proc where oid = 'platform.control_enabled(text)'::regprocedure`).stdout.trim() };

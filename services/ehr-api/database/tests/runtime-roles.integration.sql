@@ -855,6 +855,45 @@ begin
 end
 $$;
 
+-- 0091 objects. The patient-self RLS context is a security-definer check
+-- with a pinned search_path that only the EHR runtime (and the test role)
+-- may call (PSELF-RLS); the PIN-use inbox trigger function is internal; the
+-- patient's access-request list is reachable only through its session-bound
+-- wrapper (CONSENT-GRANTEE).
+do $$
+declare
+  checked record;
+begin
+  select prosecdef, proconfig into checked from pg_proc where oid = 'ehr.patient_self_context(uuid)'::regprocedure;
+  if not checked.prosecdef or checked.proconfig is distinct from array['search_path=pg_catalog, pg_temp'] then
+    raise exception 'ehr.patient_self_context must be SECURITY DEFINER with search_path pg_catalog, pg_temp';
+  end if;
+  if not has_function_privilege('hid_ehr_runtime', 'ehr.patient_self_context(uuid)', 'EXECUTE')
+     or has_function_privilege('public', 'ehr.patient_self_context(uuid)', 'EXECUTE')
+     or has_function_privilege('hid_identity_runtime', 'ehr.patient_self_context(uuid)', 'EXECUTE')
+     or has_function_privilege('hid_notification_worker', 'ehr.patient_self_context(uuid)', 'EXECUTE') then
+    raise exception 'ehr.patient_self_context must be executable by the EHR runtime only';
+  end if;
+  if to_regprocedure('notification.on_identity_pin_outbox_created()') is null
+     or not exists (select 1 from pg_trigger
+                     where tgrelid = 'identity.outbox_events'::regclass and tgname = 'pin_use_notification_inbox'
+                       and tgfoid = 'notification.on_identity_pin_outbox_created()'::regprocedure and tgenabled = 'O') then
+    raise exception 'the PIN-use inbox trigger is missing';
+  end if;
+  if has_function_privilege('public', 'notification.on_identity_pin_outbox_created()', 'EXECUTE')
+     or has_function_privilege('hid_identity_runtime', 'notification.on_identity_pin_outbox_created()', 'EXECUTE')
+     or has_function_privilege('hid_notification_worker', 'notification.on_identity_pin_outbox_created()', 'EXECUTE') then
+    raise exception 'the PIN-use inbox trigger function must not be callable by a runtime role';
+  end if;
+  if not has_function_privilege('hid_identity_runtime', 'identity.list_my_patient_access_requests(text,uuid)', 'EXECUTE')
+     or has_function_privilege('public', 'identity.list_my_patient_access_requests(text,uuid)', 'EXECUTE')
+     or has_function_privilege('hid_identity_runtime', 'identity.list_my_access_requests()', 'EXECUTE')
+     or has_function_privilege('public', 'identity.list_my_access_requests()', 'EXECUTE') then
+    raise exception 'the patient access-request list must be reachable only through its session-bound wrapper';
+  end if;
+end
+$$;
+
 select
   rolname,
   rolcanlogin,
