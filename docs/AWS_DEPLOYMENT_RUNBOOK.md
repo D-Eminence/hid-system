@@ -47,10 +47,15 @@ Record and approve:
 
 - exact Git SHA and release ID;
 - AWS account/region and `development`, `staging`, or `production` profile;
-- Cloudflare account/zone and one selected profile: production uses the seven
-  approved production hostnames, apex redirect, and
-  `api.healthidentitydirectory.com`; staging uses its seven `.staging`
-  hostnames and `api.staging.healthidentitydirectory.com`;
+- Cloudflare account/zone and one selected profile. At launch (ADR-052,
+  `infra/cloudflare/launch-deployment.json`) production deploys only `www`,
+  `admin`, the apex redirect and `api.healthidentitydirectory.com`; staging
+  deploys only `staging`, `admin.staging` and
+  `api.staging.healthidentitydirectory.com`. The other application hosts are
+  configured but not deployed;
+- for each deployed frontend host, the Health-id commit and its staged
+  `apps/patient-web` build with `provenance.json` (`infra/cloudflare/README.md`),
+  verified by `npm --prefix infra/cloudflare run verify:launch:<environment>`;
 - regional ACM certificate covering that API origin and the internal wildcard
   certificate;
 - RDS CA bundle and regional S3 managed prefix-list ID;
@@ -234,7 +239,15 @@ Docker availability. For each component:
 
 Populate ECS parameters only with digest-qualified URIs. Gateway is API-only.
 Cloudflare frontend artifacts are built, hashed, checked for source-map/secret
-leakage, and released independently per application.
+leakage, and released independently per host. At launch the only frontend is
+Health-id `apps/patient-web`, built once per host and staged with
+`infra/cloudflare/scripts/stage-health-id-build.mjs`, which refuses a build
+bound to another origin or environment, carrying a Google client id, source
+maps, a service worker, a manifest or unexpected files, and records the source
+commit and every file's SHA-256 in `provenance.json`. The signed release
+bundle's frontend section still describes the legacy builds (ADR-052); until
+it carries the Health-id artefact, the staged artefact's provenance is the
+frontend release record.
 
 ## 4. Provision the regional foundation
 
@@ -512,23 +525,35 @@ Before raising task counts, prove in staging:
 
 ## 8. Cloudflare rollout
 
-For each frontend, bind the exact selected-environment custom hostname, static
-asset directory, compatibility date, and matching Worker origin secret.
-Validate apex redirect where applicable, TLS,
-security headers, application-specific camera/geolocation permissions,
-root-scoped service worker, direct refresh, cache rules, and `/api/v1/*` proxy
-behavior. The AWS origin must reject a direct request without the origin secret.
+Deploy only the launch Workers of `infra/cloudflare/launch-deployment.json`
+(ADR-052): `hid-web` and `hid-admin` in each environment, and the production
+apex redirect. `hid-ehr`, `hid-lab`, `hid-pharmacy`, `hid-ocr`,
+`hid-ocr-redirect` and `hid-outreach` are not deployed; their APIs stay closed
+by the gateway's `HID_ENABLED_API_ROUTES`. Before deploying, stage the Health-id
+build for each host and run
+`npm --prefix infra/cloudflare run verify:launch:<environment>` and
+`dry-run:<environment>`.
+
+For each deployed frontend, bind the exact selected-environment custom hostname,
+the staged asset directory (`staged/<environment>/site`), compatibility date,
+and matching Worker origin secret. Validate apex redirect where applicable,
+TLS, security headers, application-specific camera/geolocation permissions,
+direct refresh (single-page fallback), cache rules, and `/api/v1/*` proxy
+behavior. The Health-id artefact has no service worker or web app manifest:
+`/service-worker.js` and `/manifest.webmanifest` must answer with the
+application shell, not a script or manifest. The AWS origin must reject a
+direct request without the origin secret.
 
 Release and roll back each application independently. A frontend rollback must
 not change an API image or database schema.
 
 The Workers set `X-Real-IP` from `CF-Connecting-IP`, and the gateway of
 staging and production refuses API requests without it
-(`403 CLIENT_ADDRESS_REQUIRED`). Every Worker that proxies `/api/v1` (web,
-EHR, Lab, Pharmacy, OCR, Outreach and admin) must send the header before a
-gateway that requires it is deployed: redeploy all seven, and once that
-gateway runs confirm on each host that a request carrying its own `X-Real-IP`
-reaches Identity with the client's public address instead. A Worker built
+(`403 CLIENT_ADDRESS_REQUIRED`). Every deployed Worker that proxies `/api/v1`
+(at launch web and admin) must send the header before a gateway that requires
+it is deployed: deploy them, and once that gateway runs confirm on each
+deployed host that a request carrying its own `X-Real-IP` reaches Identity with
+the client's public address instead. A Worker built
 before this change deletes a caller's `X-Real-IP` and sets none, so behind it,
 or behind a Worker rolled back to such a build, the gateway answers `403` to
 every API request (it does not trust a caller-chosen address). Do not roll a
@@ -588,7 +613,9 @@ Action and no automatic production shutdown.
 ## 11. Rollback and evidence
 
 Application rollback selects an earlier accepted digest/task-definition.
-Frontend rollback selects the previous per-host Cloudflare artifact. Database
+Frontend rollback selects the previous per-host Cloudflare artifact: restage
+the previous accepted Health-id commit's build for that host, re-verify it
+(`verify:launch:<environment>`) and redeploy that Worker only. Database
 rollback is not a down migration: use additive correction or the approved
 PITR/incident path. Preserve deployment parameters, manifest, approvals,
 redacted test evidence, reconciliation totals, and rollback decision.

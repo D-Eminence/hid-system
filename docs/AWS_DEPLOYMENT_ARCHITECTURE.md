@@ -11,7 +11,8 @@ CloudFront distribution and no AWS-hosted frontend artifacts.
 ```text
 browser
   -> Cloudflare DNS/TLS/WAF
-  -> one of seven Workers Static Assets applications
+  -> one of the launch Workers Static Assets hosts (www, staging, admin.*;
+     ADR-052), serving the Health-id apps/patient-web build
   -> same-origin /api/v1/* Worker proxy
   -> api.healthidentitydirectory.com
   -> regional AWS WAF (origin-secret allow rule + managed/rate rules)
@@ -100,7 +101,17 @@ in source, frontend artifacts, or CloudFormation defaults.
 
 ## Frontend ownership
 
-Cloudflare publishes seven independent static applications:
+**Launch (ADR-052).** Health-id `apps/patient-web` is the single launch
+frontend. Only `www` (production), `staging` (staging) and `admin` in both
+environments are deployed, each serving the Health-id build staged for that
+host with its provenance (`infra/cloudflare/launch-deployment.json`,
+`infra/cloudflare/README.md`). The other application hosts in the table below
+are configured but not deployed at launch; Lab, Pharmacy, OCR and Outreach are
+off (D17), their APIs closed by the gateway's `HID_ENABLED_API_ROUTES`, and
+clinicians use the Health-id provider workspace on `www`. hid-system's own
+`apps/web` and `apps/admin` are not deployed.
+
+Cloudflare is configured for seven independent static applications:
 
 | Host | Application | Root |
 |---|---|---|
@@ -125,9 +136,10 @@ The apex host performs an originless redirect to `www`. The old OCR hostname
 uses a separate originless 308 redirect to the paired Migrate hostname, retaining
 the root-equivalent request path and query. Migrate's legacy `/migrate/*` and
 `/ocr/*` paths also redirect directly to their root equivalents. Each application Worker serves only its own build,
-applies its own service-worker scope and permissions policy, and proxies only
-`/api/v1/*` to the fixed AWS API hostname. HTML, service workers, and API
-responses are not cached as durable PHI. Gateway contains no static frontend
+applies its own permissions policy (and, for the legacy builds, their
+service-worker scope; the Health-id build has no service worker or manifest),
+and proxies only `/api/v1/*` to the fixed AWS API hostname. HTML, service
+workers, and API responses are not cached as durable PHI. Gateway contains no static frontend
 output and returns `API_ONLY_ORIGIN` for non-API paths.
 
 Staging has the exact parallel namespace: `staging`, `ehr.staging`,
