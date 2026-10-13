@@ -112,8 +112,8 @@ let rows: Row[];
 let controls: Record<string, boolean>;
 let faults: Faults;
 let liveActor: IdentityActorContext | undefined;
-/** A refusal Identity's /auth/service-session answers with, as IdentityApiService translates it. */
-let identityRefusal: DomainProblem | undefined;
+/** A refusal Identity's /auth/service-session answers with, as IdentityApiService translates it, or a fault. */
+let identityRefusal: unknown;
 /** The patient records service behind GET /ehr/me/records: it refuses a non-patient itself, as the real one does. */
 let records: { self: jest.Mock; emergency: jest.Mock };
 
@@ -301,7 +301,19 @@ describe('RemoteSecurityGuard requests that bind a facility, or have no actor', 
     const response = await probe({ 'X-Facility-ID': DEFAULT_FACILITY.id });
     expect(response).toEqual({ status: 403, code: 'STAFF_MFA_REQUIRED' });
     expect(rows).toEqual([expect.objectContaining({ actorType: 'system', action: 'security.authorization.denied',
-      resourceType: 'authentication', outcome: 'denied', facilityId: null, provenance: 'system', ...requestEvidence })]);
+      resourceType: 'authentication', outcome: 'denied', facilityId: null, provenance: 'system',
+      ...requestEvidence(403, 'STAFF_MFA_REQUIRED') })]);
+  });
+
+  it('answers a fault with no status of its own 503 AUTHENTICATION_UNAVAILABLE, never a 401 that signs the user out (A4)', async () => {
+    // Not a refusal of the credential: the guard could not decide. A 401
+    // would end the browser's sign-in; the client retries a 503 instead.
+    identityRefusal = new TypeError("Cannot read properties of undefined (reading 'facilities')");
+    const response = await probe({ 'X-Facility-ID': DEFAULT_FACILITY.id });
+    expect(response).toEqual({ status: 503, code: 'AUTHENTICATION_UNAVAILABLE' });
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'system', action: 'security.authorization.denied',
+      resourceType: 'authentication', outcome: 'denied', facilityId: null, provenance: 'system',
+      ...requestEvidence(503, 'AUTHENTICATION_UNAVAILABLE') })]);
   });
 
   it('records an unauthenticated request as a system refusal', async () => {

@@ -45,6 +45,12 @@ class FacilityOptionalProbeController {
   @FacilityOptional()
   @PatientAllowed()
   refuse() { throw new DomainProblem(403, 'PROBE_REFUSED', 'The probe refuses every request'); }
+
+  /** The same route kind whose handler faults: no status or code of its own. */
+  @Get('fault')
+  @FacilityOptional()
+  @PatientAllowed()
+  fault() { throw new Error('synthetic handler fault'); }
 }
 
 interface Row { actorType: unknown; actorSubject: unknown; actorMembershipId: unknown; organizationId: unknown;
@@ -127,5 +133,15 @@ describe('refusals on facility-optional routes are answered and audited, never 5
     expect([response.status, response.body.code]).toEqual([403, 'PROBE_REFUSED']);
     expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'auth.authorization.denied',
       resourceType: 'authentication', facilityId: null, actorMembershipId: null, organizationId: null })]);
+  });
+
+  it('records a handler fault of a staff request without a facility as auth.request.failed, answering 500', async () => {
+    const response = await request(app.getHttpServer()).get('/api/v1/identity/probe/fault')
+      .set('Authorization', 'Bearer staff-token');
+    // The fault is answered as the fault it is, and recorded as a failure,
+    // not as a refusal and not replaced by a 503 for an unrecordable row.
+    expect(response.status).toBe(500);
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'auth.request.failed',
+      resourceType: 'authentication', outcome: 'failure', facilityId: null, actorMembershipId: null, organizationId: null })]);
   });
 });

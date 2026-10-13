@@ -351,6 +351,25 @@ describe('AuthController Google exchange', () => {
     expect(response.clearCookie).toHaveBeenCalledWith(nonceCookie, expect.any(Object));
   });
 
+  it('answers a refusal raised while issuing the session with the one Google denial, audited as denied (LOGIN-DETAIL-ORACLE)', async () => {
+    // The account behind the Google identity is not a patient, or was
+    // deactivated meanwhile: the caller learns neither, only the denial.
+    const challenge = issueNonce(controller);
+    google.login.mockRejectedValue(new UnauthorizedException('Patient account is unavailable'));
+    const response = responseFor();
+
+    const refused = await controller.exchangeGoogleIdToken(googleInput('patient-login'),
+      requestFor({ cookies: { [nonceCookie]: challenge.cookie } }), response).catch((error: unknown) => error);
+
+    expect(refused).toBeInstanceOf(DomainProblem);
+    expect(refused).toMatchObject({ status: 401, code: 'GOOGLE_SIGN_IN_DENIED' });
+    expect(JSON.stringify((refused as DomainProblem).getResponse())).not.toContain('Patient account');
+    expect(sessionAudit.record).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'login_failed',
+      outcome: 'denied', details: { authentication_method: 'oidc', identity_provider: 'google' } }));
+    expect(response.cookie).not.toHaveBeenCalled();
+    expect(response.clearCookie).toHaveBeenCalledWith(nonceCookie, expect.any(Object));
+  });
+
   describe('the public patient enrollment cookie (ENR-3)', () => {
     // A sign-in sets the session cookies (setCookies); it also expires the
     // enrollment capability, which would otherwise show this device's last
