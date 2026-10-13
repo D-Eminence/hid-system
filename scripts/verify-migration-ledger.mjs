@@ -96,7 +96,7 @@ const acceptedMigrations = new Map([
   ['0082_purpose_of_use_vocabulary.sql', 'bd3c730051405860fd4cb4feacb5bde259eb627b45724433e44196c9403f9351'],
   ['0083_ocr_claim_in_body_variable_conflict.sql', '0c9e0c70cb643877e31c0b831a41960e3f23cb7c6120a9a431bc96e068502583'],
   ['0084_ehr_clinical_safety_and_launch_modules.sql', 'f2cb745300e3487ca42c9dcb396a93dfa777b503e421b2e221cee5181bcec323'],
-  ['0090_ehr_retraction_integrity.sql', 'f8ce73df7089a37f5523e173ff7ee59928e3105fe02f36dc6f5b57475a1ce2c9'],
+  ['0090_ehr_retraction_integrity.sql', 'dbde76ea8cfcd237653a4d776bb195d19fa66eb411f732d8d8191a3c5241e3c7'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

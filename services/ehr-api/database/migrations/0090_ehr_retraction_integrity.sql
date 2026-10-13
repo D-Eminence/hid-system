@@ -49,6 +49,22 @@
 --    change of a vital entered in error (55000 VITAL_ENTERED_IN_ERROR), its
 --    correction number included. Existing vitals become 'final' (the column
 --    default; no row is rewritten and no version is recorded).
+--    ehr.require_final_vital() refuses a correction row of a vital entered in
+--    error (55000 VITAL_ENTERED_IN_ERROR), so the vital's corrections cannot
+--    grow after its retraction either. It reads the vital with FOR SHARE: a
+--    correction and a retraction of the same vital wait for each other, and a
+--    correction never commits beside a retraction it did not see. A vital it
+--    cannot read under the writer's row-level security is refused with 42501
+--    VITAL_NOT_AVAILABLE.
+--
+-- 5. A retracted document stays retracted (ENC-RETRACT-2).
+--    Retracting an encounter marks its initiated or uploaded documents
+--    entered in error. ehr.keep_retracted_document() refuses any update of a
+--    document entered in error (55000 DOCUMENT_ENTERED_IN_ERROR): setting it
+--    back to uploaded would let ehr.documents_effective show it as available
+--    again, and the emergency summary and the download route serve it.
+--    Upload completion (initiated to uploaded) and the retraction itself
+--    (initiated or uploaded to entered_in_error) are unchanged.
 --
 -- The guard functions are SECURITY INVOKER with a pinned search_path: they run
 -- with the writer's privileges and row-level security, so they add no
@@ -56,9 +72,11 @@
 -- calls auth.membership_has_permission, the existing SECURITY DEFINER
 -- permission decision Identity uses; runtime-grants.sql grants EXECUTE on it
 -- to hid_ehr_runtime. Each trigger's name sorts before the table's version
--- trigger, so a refused write records no version. Lock order is 0084's: the
--- encounter's row lock is taken before any record of it, and these triggers
--- read records only under the encounter's lock.
+-- trigger, so a refused write records no version (ehr.vital_corrections is
+-- append-only and has none). Lock order is 0084's: the encounter's row lock is
+-- taken before any record of it, and the retraction guard reads records only
+-- under the encounter's lock. The correction guard locks only the corrected
+-- vital, which the EHR already holds FOR UPDATE when it adds a correction.
 
 alter table ehr.vitals
   add column status text not null default 'final'
@@ -211,6 +229,46 @@ begin
 end
 $$;
 
+create function ehr.require_final_vital()
+returns trigger
+language plpgsql
+security invoker
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  vital_status text;
+begin
+  select vital.status
+    into vital_status
+    from ehr.vitals vital
+   where vital.id = new.vital_id
+     and vital.patient_id = new.patient_id
+     and vital.facility_id = new.facility_id
+     for share;
+  if not found then
+    raise exception using errcode = '42501', message = 'VITAL_NOT_AVAILABLE';
+  end if;
+  if vital_status = 'entered_in_error' then
+    raise exception using errcode = '55000', message = 'VITAL_ENTERED_IN_ERROR';
+  end if;
+  return new;
+end
+$$;
+
+create function ehr.keep_retracted_document()
+returns trigger
+language plpgsql
+security invoker
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if old.status = 'entered_in_error' then
+    raise exception using errcode = '55000', message = 'DOCUMENT_ENTERED_IN_ERROR';
+  end if;
+  return new;
+end
+$$;
+
 create trigger encounters_closed_final before update on ehr.encounters
   for each row execute function ehr.keep_closed_encounter();
 create trigger encounters_retraction_permission before update of status on ehr.encounters
@@ -219,10 +277,16 @@ create trigger prescriptions_closed_final before update on ehr.prescriptions
   for each row execute function ehr.keep_closed_order();
 create trigger lab_requests_closed_final before update on ehr.lab_requests
   for each row execute function ehr.keep_closed_order();
+create trigger vital_corrections_vital_final before insert on ehr.vital_corrections
+  for each row execute function ehr.require_final_vital();
+create trigger documents_retracted_final before update on ehr.documents
+  for each row execute function ehr.keep_retracted_document();
 
 revoke all on function ehr.keep_closed_order() from public;
 revoke all on function ehr.keep_closed_encounter() from public;
 revoke all on function ehr.require_retraction_permission() from public;
+revoke all on function ehr.require_final_vital() from public;
+revoke all on function ehr.keep_retracted_document() from public;
 
 comment on column ehr.vitals.status is
   'final, or entered_in_error once retracted (wrong patient or wrong value); a vital entered in error takes no further change (0090).';
@@ -234,3 +298,7 @@ comment on function ehr.keep_closed_encounter() is
   'Refuses any update of a cancelled or entered-in-error encounter (0090).';
 comment on function ehr.require_retraction_permission() is
   'Refuses cancelling or retracting an encounter unless the writing membership holds the write permission of every kind of record the close changes (0090).';
+comment on function ehr.require_final_vital() is
+  'Refuses a correction of a vital entered in error, reading the vital under a share lock (0090).';
+comment on function ehr.keep_retracted_document() is
+  'Refuses any update of a document entered in error, so a retracted document is never served again (0090).';

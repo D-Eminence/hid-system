@@ -247,11 +247,12 @@ export class EncountersService {
   /**
    * Refuses a close that changes a kind of record the writer may not write on
    * its own routes (ENC-RETRACT-1), before anything is written: 403
-   * ENCOUNTER_RETRACTION_NOT_PERMITTED, the missing permissions named for the
-   * refusal's audit. Only a category the writer lacks the permission for is
-   * probed, under the encounter's row lock: no record can be added to it or
-   * move into a category meanwhile (each create takes a share lock on it
-   * first, and closed records are final, 0084 and 0090).
+   * ENCOUNTER_RETRACTION_NOT_PERMITTED with a fixed detail, the missing
+   * permissions named in the refusal's audit only. Only a category the writer
+   * lacks the permission for is probed, under the encounter's row lock: no
+   * record can be added to it or move into a category meanwhile (each create
+   * takes a share lock on it first, and closed records are final, 0084 and
+   * 0090).
    */
   private async requireClosePermissions(client: PoolClient, context: DataAccessContext, encounter: EncounterRow,
     steps: readonly CloseStep[]): Promise<void> {
@@ -267,10 +268,12 @@ export class EncountersService {
       if (result.rows[0]?.present) missing.push(step.permission);
     }
     if (missing.length > 0) {
-      const sorted = [...missing].sort();
+      // Only a kind the encounter holds is probed, so the missing permissions
+      // say which kinds of record it holds, which the caller may not be allowed
+      // to read: they go to the refusal's audit row only, never the response.
       throw new DomainProblem(403, 'ENCOUNTER_RETRACTION_NOT_PERMITTED',
-        `Cancelling or retracting this encounter changes records you may not write; it requires ${sorted.join(', ')}`,
-        undefined, { missingPermissions: sorted });
+        'Cancelling or retracting this encounter changes records you may not write',
+        undefined, { missingPermissions: [...missing].sort() });
     }
   }
 

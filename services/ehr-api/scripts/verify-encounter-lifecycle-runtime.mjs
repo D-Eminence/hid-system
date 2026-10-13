@@ -377,6 +377,43 @@ try {
   assert.equal(await database.count('select count(*) from ehr.vital_corrections where vital_id = $1', [lonelyVital]), 0);
   check('POST .../vitals/:vitalId/entered-in-error marks a vital entered in error with a version carrying the reason and a success audit, the list shows its status, and a later correction or retraction is 409 VITAL_NOT_AMENDABLE with nothing written');
 
+  //    A writer that bypasses the API cannot slip a correction in beside a
+  //    retraction either: the correction guard (0090) reads the vital FOR
+  //    SHARE, so a correction waits for an uncommitted retraction of its vital
+  //    and is then refused. A plain read would see the vital still final and
+  //    commit the correction next to the retraction.
+  const racedVital = expectStatus(await post(encounter.vitalOpen, 'vitals', records.vitals), 201, 'raced vital').id;
+  const runtimeSession = `select set_config('app.actor_subject',$1,true), set_config('app.facility_id',$2,true),
+    set_config('app.correlation_id','verifier-vital-race',true), set_config('app.membership_id',$3,true),
+    set_config('app.purpose_of_use','direct-care',true),
+    set_config('app.change_reason','Recorded on the wrong patient',true)`;
+  const sessionValues = [f.doctor.subject, f.facility, f.doctor.membership];
+  await side.query('begin');
+  await side.query(runtimeSession, sessionValues);
+  await side.query(`update ehr.vitals set status = 'entered_in_error' where id = $1 and patient_id = $2 and facility_id = $3`,
+    [racedVital, f.patient, f.facility]);
+  const racer = new Client({ connectionString: database.url('hid_ehr_api_runtime') });
+  await racer.connect();
+  try {
+    await racer.query('begin');
+    await racer.query(runtimeSession, sessionValues);
+    let correctionSettled = false;
+    const racedCorrection = racer.query(`insert into ehr.vital_corrections (vital_id,patient_id,facility_id,correction_no,
+      replacement_values,reason,created_by,created_by_membership_id) values ($1,$2,$3,1,'{"pulse_bpm":70}','Synthetic correction',$4,$5)`,
+    [racedVital, f.patient, f.facility, f.doctor.account, f.doctor.membership])
+      .then(() => 'ok', (error) => `${error.code}: ${error.message}`).finally(() => { correctionSettled = true; });
+    await sleep(750);
+    assert.equal(correctionSettled, false, 'a correction did not wait for the uncommitted retraction of its vital');
+    await side.query('commit');
+    assert.equal(await racedCorrection, '55000: VITAL_ENTERED_IN_ERROR');
+    await racer.query('rollback');
+  } finally {
+    await racer.end();
+  }
+  assert.equal(await statusOf('vitals', racedVital), 'entered_in_error');
+  assert.equal(await database.count('select count(*) from ehr.vital_corrections where vital_id = $1', [racedVital]), 0);
+  check('a direct correction of a vital waits for an uncommitted retraction of that vital and is then refused with 55000 VITAL_ENTERED_IN_ERROR, leaving no correction row');
+
   // 9. Closed orders and closed encounters take no further change
   //    (RX-FINAL, ORDER-CLOSED-EDIT), and the refusal is audited.
   const finalCorrelation = `verifier-closed-prescription-${id()}`;
