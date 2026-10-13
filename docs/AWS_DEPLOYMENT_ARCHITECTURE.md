@@ -25,6 +25,7 @@ owner outbox -> Event Dispatcher -> EventBridge
 
 Identity -> workload-authenticated Notification API
   -> SES / Termii / Meta, with bounded Brevo fallback
+     (production at launch: SES email and Termii SMS only, ADR-053)
 ```
 
 Authentication OTP never enters EventBridge, SQS, Novu, or ordinary delivery
@@ -153,7 +154,10 @@ The CDK v2 application under `infra/aws` synthesizes:
   Textract boundary;
 - one EventBridge bus, one allowlisted ordinary-notification rule, and one
   KMS-encrypted SQS queue with KMS-encrypted DLQ;
-- CloudWatch logs, focused runtime/data alarms, and bounded metrics; and
+- CloudWatch logs, focused runtime/data alarms, and bounded metrics; every
+  alarm notifies the environment's operator-created topic
+  `hid-<env>-operational-alerts` on ALARM and OK (required in production,
+  ADR-053); and
 - S3 gateway plus ECR, Logs, Secrets Manager, KMS, EventBridge, SQS, and
   Textract interface endpoints.
 
@@ -207,7 +211,9 @@ ingress while retaining protected data and the workload issuer. It is never
 described as zero cost.
 Production remains three AZs, Multi-AZ RDS, two NAT gateways, full endpoints,
 two ALBs/WAF, the issuer's NAT-allowlist web ACL, and at least two replicas per
-service. The current 3-AZ/2-NAT
+enabled service once rolled out: every production desired count defaults to
+zero, and the reviewed I6 parameter file raises each enabled service to its live
+minimum (ADR-053). The current 3-AZ/2-NAT
 shape means one application AZ can share cross-AZ egress during an AZ failure;
 a measured third-NAT or alternative-egress evolution is documented capability,
 not silently provisioned cost.
@@ -229,6 +235,28 @@ service's maximum task count times its pool size and fails if it exceeds the
 normal or separately reviewed emergency budget. RDS uses the currently
 supported Database Insights Standard mode; the design does not raise
 PostgreSQL `max_connections` to make an unsafe scale plan appear viable.
+
+A module outside the enabled set (D17: Lab, Pharmacy, OCR API and worker and
+Outreach unless `HID_ENABLED_API_ROUTES` names them, and the Notification
+Worker unless `HID_NOTIFICATION_WORKER_ENABLED`, fixed to false in production)
+is pinned at zero tasks in every environment: its desired count and scaling
+ceiling allow only zero, its scaling target has no policy, and it has no alarm.
+
+Every alarm notifies the environment's operator-created SNS topic
+`hid-<env>-operational-alerts` (customer-managed KMS key, exact ARN from the
+synth input `HID_OPERATIONAL_ALARM_TOPIC_ARN`; production refuses to synthesize
+without it) on ALARM and on OK (ADR-053). Besides the RDS, task, request,
+queue, OCR, outbox and log-volume alarms, the workload issuer has Lambda
+`Errors` and `Throttles` and stage `5XXError` and `4XXError` alarms (API
+Gateway counts 429s in `4XXError`), a literal-text metric filter counts the
+token agent's `Workload token renewal unavailable` line on each enabled token
+task, and a metric filter counts notification-api's PHI-free
+`notification.otp.outcome` lines with outcome `definitive_failure`; both feed
+an alarm. A stopped token agent writes no renewal line and is not alarmed.
+The running-task alarms of enabled services treat missing data as breaching,
+so while production starts at zero tasks the five enabled services'
+running-task alarms are in ALARM and notify the topic until the I6 parameter
+file scales each to its live minimum (ADR-053).
 
 This topology preserves an elastic path but does not prove million-user
 capacity. Ceiling changes require representative load/soak, latency/error,
@@ -260,7 +288,7 @@ reducing extraction quality or hard-rejecting clinical work on price.
 | OCR API | 3005; OCR | OCR API LOGIN | none |
 | OCR Worker | no browser route | OCR Worker LOGIN | exact document read/decrypt and three Textract calls |
 | Outreach API | 3006; Outreach | Outreach LOGIN | none |
-| Notification API | 3007; internal only | none | regional `ses:SendEmail`; other providers through HTTPS |
+| Notification API | 3007; internal only | none | regional `ses:SendEmail`; Termii through HTTPS (production `otp-email-sms` profile, ADR-053); other providers through HTTPS outside production |
 | Notification Worker | 3008; internal health only | Notification Worker LOGIN | consume the exact notification queue; providers through HTTPS |
 | Event Dispatcher | 3010; internal health only | Dispatcher LOGIN | `PutEvents` to the exact HID bus |
 | Gateway | 3000; `/api/v1/*` of the enabled modules only | none | none |
@@ -282,7 +310,10 @@ proxies are migration sources/history only, never production runtime paths.
 Nine non-owner PostgreSQL LOGIN secrets are isolated by service. The migration
 administrator is separate. Only Identity receives auth signing/login-pepper,
 NIN, OTP-HMAC, Turnstile and platform MFA key material. Notification provider
-configuration is injected only into Notification API/Worker as required. Gateway
+configuration is injected only into Notification API/Worker as required: in
+production the Notification API reads exactly `sesFromAddress`,
+`termiiBaseUrl`, `termiiApiKey` and `termiiSenderId`, and the disabled
+Notification Worker reads nothing. Gateway
 receives no application secrets.
 
 Workload identity is implemented by the regional stack and token agent for

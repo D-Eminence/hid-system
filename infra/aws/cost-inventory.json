@@ -26,21 +26,21 @@
           "reviewedEmergencyMax": 3
         },
         "lab-api": {
-          "cloudFormationDefault": 1,
+          "cloudFormationDefault": 0,
           "minimumLive": 1,
           "recommended": 1,
           "normalMax": 2,
           "reviewedEmergencyMax": 3
         },
         "pharmacy-api": {
-          "cloudFormationDefault": 1,
+          "cloudFormationDefault": 0,
           "minimumLive": 1,
           "recommended": 1,
           "normalMax": 2,
           "reviewedEmergencyMax": 3
         },
         "ocr-api": {
-          "cloudFormationDefault": 1,
+          "cloudFormationDefault": 0,
           "minimumLive": 1,
           "recommended": 1,
           "normalMax": 2,
@@ -54,7 +54,7 @@
           "reviewedEmergencyMax": 3
         },
         "outreach-api": {
-          "cloudFormationDefault": 1,
+          "cloudFormationDefault": 0,
           "minimumLive": 1,
           "recommended": 1,
           "normalMax": 2,
@@ -236,21 +236,21 @@
           "reviewedEmergencyMax": 3
         },
         "lab-api": {
-          "cloudFormationDefault": 1,
+          "cloudFormationDefault": 0,
           "minimumLive": 1,
           "recommended": 1,
           "normalMax": 2,
           "reviewedEmergencyMax": 3
         },
         "pharmacy-api": {
-          "cloudFormationDefault": 1,
+          "cloudFormationDefault": 0,
           "minimumLive": 1,
           "recommended": 1,
           "normalMax": 2,
           "reviewedEmergencyMax": 3
         },
         "ocr-api": {
-          "cloudFormationDefault": 1,
+          "cloudFormationDefault": 0,
           "minimumLive": 1,
           "recommended": 1,
           "normalMax": 2,
@@ -264,7 +264,7 @@
           "reviewedEmergencyMax": 3
         },
         "outreach-api": {
-          "cloudFormationDefault": 1,
+          "cloudFormationDefault": 0,
           "minimumLive": 1,
           "recommended": 1,
           "normalMax": 2,
@@ -341,35 +341,35 @@
           "reviewedEmergencyMax": 8
         },
         "lab-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 4,
           "reviewedEmergencyMax": 8
         },
         "pharmacy-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 4,
           "reviewedEmergencyMax": 8
         },
         "ocr-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 4,
           "reviewedEmergencyMax": 8
         },
         "ocr-worker": {
-          "cloudFormationDefault": 1,
+          "cloudFormationDefault": 0,
           "minimumLive": 1,
           "recommended": 1,
           "normalMax": 3,
           "reviewedEmergencyMax": 6
         },
         "outreach-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 4,
@@ -432,77 +432,77 @@
       "estimatedPublicIpv4Count": 5,
       "ecsTasks": {
         "identity-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 8,
           "reviewedEmergencyMax": 16
         },
         "ehr-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 8,
           "reviewedEmergencyMax": 16
         },
         "lab-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 6,
           "reviewedEmergencyMax": 12
         },
         "pharmacy-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 6,
           "reviewedEmergencyMax": 12
         },
         "ocr-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 6,
           "reviewedEmergencyMax": 12
         },
         "ocr-worker": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 4,
           "reviewedEmergencyMax": 8
         },
         "outreach-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 6,
           "reviewedEmergencyMax": 12
         },
         "notification-api": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 6,
           "reviewedEmergencyMax": 12
         },
         "notification-worker": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 4,
           "reviewedEmergencyMax": 8
         },
         "event-dispatcher": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 6,
           "reviewedEmergencyMax": 12
         },
         "gateway": {
-          "cloudFormationDefault": 2,
+          "cloudFormationDefault": 0,
           "minimumLive": 2,
           "recommended": 2,
           "normalMax": 12,

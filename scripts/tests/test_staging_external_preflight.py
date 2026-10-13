@@ -94,6 +94,61 @@ class StagingPreflightTests(unittest.TestCase):
         self.assertIn("canonical_32_byte_base64", hex_result, "the identity-sensitive receipt must report whether each key has the format Identity accepts")
         self.assertFalse(hex_result["canonical_32_byte_base64"]["mfaSecretKeyB64"])
 
+    def test_an_empty_google_allowlist_is_present_and_reports_sign_in_off(self):
+        # REC-GOOGLE: the launch profile keeps the key with an empty value, which
+        # Identity reads as Google sign-in off.
+        for value, enabled in [("", False), ("   ", False), ("synthetic-client.apps.googleusercontent.com", True)]:
+            with self.subTest(value=value):
+                result = self.identity_summary(googleOidcClientIds=value)
+                self.assertTrue(result["required_fields_present"]["googleOidcClientIds"])
+                self.assertIs(result["google_sign_in_enabled"], enabled)
+                self.assertNotIn("synthetic-client", json.dumps(result))
+        result = self.identity_summary(googleOidcClientIds=None)
+        self.assertFalse(result["required_fields_present"]["googleOidcClientIds"])
+        self.assertIsNone(result["google_sign_in_enabled"])
+
+    def test_qoreid_staging_requires_both_nin_keys_in_canonical_form(self):
+        name = "/hid/staging/identity-sensitive"
+        arn = f"arn:aws:secretsmanager:eu-west-1:659225405023:secret:{name}-example"
+        base = {"otpHmacKeyB64": self.CANONICAL, "contactLookupHmacKeyB64": self.CANONICAL, "turnstileSecretKey": "fixture",
+                "googleOidcClientIds": "", "mfaSecretKeyB64": self.CANONICAL}
+        deferred = preflight.secret_summary(name, {"ARN": arn, "SecretString": json.dumps(base)})
+        self.assertNotIn("ninLookupHmacKeyB64", deferred["required_fields_present"])
+        nin = {**base, "ninLookupHmacKeyB64": self.CANONICAL, "ninEncryptionKeyB64": self.CANONICAL}
+        result = preflight.secret_summary(name, {"ARN": arn, "SecretString": json.dumps(nin)}, qoreid_enabled=True)
+        for field in ["ninLookupHmacKeyB64", "ninEncryptionKeyB64"]:
+            self.assertTrue(result["required_fields_present"][field])
+            self.assertTrue(result["canonical_32_byte_base64"][field])
+        for field, value in [("ninLookupHmacKeyB64", None), ("ninEncryptionKeyB64", self.KEY.hex())]:
+            broken = {key: item for key, item in {**nin, field: value}.items() if item is not None}
+            result = preflight.secret_summary(name, {"ARN": arn, "SecretString": json.dumps(broken)}, qoreid_enabled=True)
+            self.assertFalse(result["canonical_32_byte_base64"][field])
+            self.assertNotIn(self.KEY.hex(), json.dumps(result))
+        self.assertFalse(preflight.secret_summary(name, {"ARN": arn, "SecretString": json.dumps(base)}, qoreid_enabled=True)
+                         ["required_fields_present"]["ninLookupHmacKeyB64"])
+
+    def test_qoreid_staging_reads_only_the_qoreid_credential_field_names(self):
+        name = preflight.QOREID_SECRET
+        arn = f"arn:aws:secretsmanager:eu-west-1:659225405023:secret:{name}-example"
+        result = preflight.secret_summary(name, {"ARN": arn, "SecretString": json.dumps(
+            {"clientId": "synthetic-client-id", "secret": "never-serialize-this-value"})}, qoreid_enabled=True)
+        self.assertEqual(result["required_fields_present"], {"clientId": True, "secret": True})
+        self.assertNotIn("never-serialize", json.dumps(result))
+        self.assertNotIn("synthetic-client-id", json.dumps(result))
+
+    def test_qoreid_secret_is_read_only_when_qoreid_staging_is_checked(self):
+        for enabled in [False, True]:
+            calls = []
+            def call(arguments):
+                calls.append(arguments)
+                if arguments[0] == "sts":
+                    return {"Account": "659225405023"}, None
+                return None, "denied_or_unavailable"
+            report = preflight.aws_checks(call, qoreid_enabled=enabled)
+            read = [arguments[-1] for arguments in calls if arguments[:2] == ["secretsmanager", "get-secret-value"]]
+            self.assertEqual(preflight.QOREID_SECRET in read, enabled)
+            self.assertEqual(preflight.QOREID_SECRET in report["secrets"], enabled)
+
     def test_wrong_aws_account_stops_before_secret_reads(self):
         calls = []
         def call(arguments):

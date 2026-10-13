@@ -24,7 +24,8 @@ const labels: Readonly<Record<IssuerEnvironment, string>> = { staging: 'Staging'
 const logRetentionDays: Readonly<Record<IssuerEnvironment, number>> = { staging: 14, production: 365 };
 function synth(environment: 'staging' | 'production' | 'development', mode?: 'economy' | 'fidelity' | 'sleep'): Assembly {
   return Template.fromStack(new HidRegionalStack(new App(), `WorkloadIdentity-${environment}-${mode ?? 'production'}`, {
-    configuration: environmentConfig(environment, mode),
+    configuration: environmentConfig(environment, mode, undefined, undefined, environment === 'production'
+      ? { operationalAlarmTopicArn: 'arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts' } : {}),
   })).toJSON() as Assembly;
 }
 const economy = synth('staging', 'economy');
