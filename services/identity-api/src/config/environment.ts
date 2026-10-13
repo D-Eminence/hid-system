@@ -79,10 +79,12 @@ const environmentSchema = z.object({
   // 15 minutes blocks for 15 minutes). Never keyed by client IP.
   OTP_VERIFY_FAILURE_MAX: z.coerce.number().int().min(2).max(100).default(5),
   OTP_VERIFY_FAILURE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
-  // Staff patient search budgets (0086), in auth.otp_rate_limits: every
-  // POST /identity/patient-lookup and every POST /identity/access-requests is
-  // counted per actor account and per facility, whatever its outcome. The
-  // request after the maximum within the window is 429 until one window ends.
+  // Staff patient search budgets (0086), in auth.otp_rate_limits, per actor
+  // account and per facility: every POST /identity/access-requests is counted,
+  // whatever its outcome, and every refused POST /identity/patient-lookup
+  // (a lookup that returns a granted patient is not; FE-10). The call after
+  // the maximum within the window is 429, and so is every call of that budget
+  // until one window has passed.
   PATIENT_LOOKUP_RATE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86_400).default(300),
   PATIENT_LOOKUP_ACTOR_MAX_REQUESTS: z.coerce.number().int().min(1).max(10_000).default(60),
   PATIENT_LOOKUP_FACILITY_MAX_REQUESTS: z.coerce.number().int().min(1).max(100_000).default(600),
