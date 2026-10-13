@@ -367,17 +367,33 @@ try {
   evidence.checks.platform_admin_runtime = JSON.parse(command('exact-role platform admin HTTP boundaries',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-platform-admin-runtime.mjs')],
     workflowEnvironment));
+  // N5 (0087): the legacy promotion's duplicate facility membership check against the real schema.
+  evidence.checks.membership_duplicates_runtime = JSON.parse(command('legacy promotion duplicate membership check',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-membership-duplicates-runtime.mjs')],
+    workflowEnvironment));
   evidence.checks.session_sign_out_runtime = JSON.parse(command('exact-role sign-out by refresh cookie and client-kind refresh',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-session-sign-out-runtime.mjs')],
     workflowEnvironment));
   evidence.checks.platform_security_runtime = JSON.parse(command(
     'exact-role platform MFA, step-up, approval and export HTTP workflow', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-platform-security-runtime.mjs')], workflowEnvironment));
+  // Launch blocker MFA-1 (0088): staff sign-in is password then authenticator,
+  // a first enrolment needs an emailed code, and an unassured staff session is
+  // refused everywhere and ended on refresh.
+  evidence.checks.staff_mfa_runtime = JSON.parse(command(
+    'exact-role staff MFA sign-in, enrolment proof, unassured-session refusal, recovery and reset HTTP workflow',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-staff-mfa-runtime.mjs')],
+    workflowEnvironment));
   // Phase 4 Stage 9: the commands whose row locks their runtime roles could not
   // take, each through its real API as its runtime role, with concurrency,
   // replay, denial and rollback cases.
   evidence.checks.registration_review_runtime = JSON.parse(command('exact-role NIN registration review HTTP workflow',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-registration-review-runtime.mjs')],
+    workflowEnvironment));
+  // Launch blocker PSEARCH-1 (0086): one 404 for every refused lookup, access
+  // requests that never name the patient, and per-actor and per-facility budgets.
+  evidence.checks.patient_search_runtime = JSON.parse(command('exact-role staff patient search and access-request HTTP workflow',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-patient-search-runtime.mjs')],
     workflowEnvironment));
   for (const [name, script] of [['pharmacy_runtime', 'services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs'],
     ['lab_runtime', 'services/lab-api/scripts/verify-lab-runtime.mjs'],

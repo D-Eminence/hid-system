@@ -10,6 +10,8 @@
 // categories, limits), a break-glass emergency summary for a reader whose role
 // lacks most category read permissions (those categories withheld), and the
 // doctor's (vitals as first recorded, available documents, audit counts).
+// Staff sign in with the password and then an authenticator (MFA-1, 0088);
+// a staff session without MFA assurance is refused by EHR as by Identity.
 // Since 0084 it also checks that a signed note reaches the patient only with
 // its completed encounter and that the emergency summary leaves out the notes
 // of an encounter entered in error, and that the seeded doctor role, under
@@ -22,6 +24,8 @@ import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { join, resolve } from 'node:path';
+import { childOutboxLine, enrollmentCodeOutbox, fetchTransport, readChildOutbox, staffClient,
+  SYNTHETIC_STAFF_MFA_KEY_B64 } from '../../identity-api/scripts/staff-session-client.mjs';
 
 const ORIGIN = 'https://staging.healthidentitydirectory.com';
 // EHR's local-secret workload credential, generated for this run only.
@@ -75,7 +79,7 @@ async function disposableDatabase(require) {
  * parsers, validation pipe, problem filter). CORS and helmet only set
  * browser response headers and are left out.
  */
-async function startService({ require, service }) {
+async function startService({ require, service, override }) {
   require('ts-node').register({ project: join(service, 'tsconfig.json'), transpileOnly: true });
   require('reflect-metadata');
   const load = (path) => require(join(service, 'src', path));
@@ -85,7 +89,8 @@ async function startService({ require, service }) {
   const { DatabaseService } = load('database/database.service.ts');
   const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
   const { preventResponseCaching } = load('common/response-security.middleware.ts');
-  const module = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  const builder = Test.createTestingModule({ imports: [AppModule] });
+  const module = await (override ? override(builder, load) : builder).compile();
   const app = module.createNestApplication({ bodyParser: false, logger: false });
   app.setGlobalPrefix('api/v1');
   app.use(preventResponseCaching);
@@ -102,8 +107,15 @@ async function startService({ require, service }) {
 
 if (process.argv[2] === '--identity-child') {
   // Child: the Identity API, alone in its process so its environment is its own.
+  // A staff enrolment code (MFA-1) is reported on stdout instead of being sent.
   const app = await startService({ require: createRequire(join(identityService, 'package.json')),
-    service: identityService });
+    service: identityService, override: (builder, load) => builder
+      .overrideProvider(load('auth/notification-otp.client.ts').NotificationOtpClient).useValue({
+        deliver: async (input) => {
+          if (input.purpose !== 'LOGIN_STEP_UP') throw new Error(`Unexpected ${input.purpose} delivery`);
+          process.stdout.write(childOutboxLine(input));
+          return { outcome: 'accepted', provider: 'synthetic' };
+        } }) });
   process.stdout.write(`${JSON.stringify({ url: (await app.app.getUrl()).replace('[::1]', '127.0.0.1') })}\n`);
   process.stdin.resume();
   process.stdin.on('end', async () => { await app.close(); process.exit(0); });
@@ -233,11 +245,15 @@ if (process.argv[2] === '--identity-child') {
       env: { ...shared, DATABASE_URL: database.url('hid_identity_api_runtime'), AUTH_MODE: 'local',
         AUTH_SIGNING_SECRET: process.env.AUTH_SIGNING_SECRET, AUTH_LOGIN_PEPPER: process.env.AUTH_LOGIN_PEPPER,
         OTP_HMAC_KEY_B64: process.env.OTP_HMAC_KEY_B64, AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'staging',
-        NIN_PROVIDER_MODE: 'deferred', TURNSTILE_MODE: 'disabled' } });
+        NIN_PROVIDER_MODE: 'deferred', TURNSTILE_MODE: 'disabled',
+        MFA_SECRET_KEY_B64: SYNTHETIC_STAFF_MFA_KEY_B64, MFA_KEY_VERSION: 'delegated-runtime-v1' } });
+    const identityLines = createInterface({ input: identity.stdout });
+    const staffEnrollmentCodes = enrollmentCodeOutbox();
     const started = await new Promise((resolveStart, reject) => {
-      createInterface({ input: identity.stdout }).once('line', (line) => resolveStart(JSON.parse(line)));
+      identityLines.once('line', (line) => resolveStart(JSON.parse(line)));
       identity.once('exit', (code) => reject(new Error(`Identity exited before listening (${code})`)));
     });
+    readChildOutbox(identityLines, staffEnrollmentCodes);
     const identityUrl = `${started.url}/api/v1`;
 
     // EHR in this process, as its runtime role, delegating to that Identity.
@@ -253,7 +269,13 @@ if (process.argv[2] === '--identity-child') {
       body: body === undefined ? undefined : JSON.stringify(body) });
       return { status: response.status, headers: response.headers, body: await response.json().catch(() => null) };
     };
+    // Staff: the password, then the authenticator, enrolled with an emailed code on the first sign-in (MFA-1).
+    const staff = staffClient({ send: fetchTransport(identityUrl), origin: ORIGIN, password, outbox: staffEnrollmentCodes });
     const signIn = async (path, email, action) => {
+      if (path === '/auth/login') {
+        const signedIn = await staff.signIn(email, { action });
+        return { cookie: signedIn.cookie, csrf: signedIn.csrf, sessionId: signedIn.sessionId };
+      }
       const response = await call(identityUrl, 'POST', path, { origin: ORIGIN },
         { email, password, turnstileAction: action });
       assert.equal(response.status, 200, `${action}: ${JSON.stringify(response.body)}`);
@@ -464,6 +486,33 @@ if (process.argv[2] === '--identity-child') {
     const allowedRead = await call(ehrBase, 'GET', `${encounterBase}/lab-requests`, clinical);
     assert.equal(allowedRead.status, 200, `lab-request read after the launch module set: ${JSON.stringify(allowedRead.body)}`);
     checks.push('with the launch module set, the seeded doctor gets 403 PERMISSION_DENIED for creating or changing a lab request, sending one to Lab and sending a prescription to Pharmacy, with no row written, and can still read lab requests');
+
+    // 9. Every staff session is MFA-verified (MFA-1, 0088). A staff session
+    //    whose family has no assurance row, as every sign-in from before staff
+    //    MFA has, is refused by EHR through Identity's guard, and its refresh is
+    //    refused and ends it. The reader's assurance row is removed as the
+    //    owner, triggers off, to make such a session.
+    await database.fixture((client) => client.query(`delete from auth.session_assurance
+      where family_id = (select family_id from auth.sessions where id = $1)`, [reader.sessionId]));
+    const unassured = await call(ehrBase, 'GET', `/ehr/patients/${ids.patient}/emergency-records`,
+      { cookie: reader.cookie, 'x-facility-id': ids.facility, 'x-purpose-of-use': 'emergency' });
+    assert.equal(unassured.status, 403, `staff session without MFA assurance: ${JSON.stringify(unassured.body)}`);
+    assert.equal(unassured.body?.code, 'STAFF_MFA_REQUIRED');
+    const unassuredEncounters = await call(ehrBase, 'GET', `/ehr/patients/${ids.patient}/encounters`,
+      { cookie: reader.cookie, 'x-facility-id': ids.facility, 'x-purpose-of-use': 'direct-care' });
+    assert.equal(unassuredEncounters.status, 403, JSON.stringify(unassuredEncounters.body));
+    assert.equal(unassuredEncounters.body?.code, 'STAFF_MFA_REQUIRED');
+    const unassuredRefresh = await call(identityUrl, 'POST', '/auth/refresh',
+      { cookie: reader.cookie, origin: ORIGIN, 'x-csrf-token': reader.csrf });
+    assert.equal(unassuredRefresh.status, 403, JSON.stringify(unassuredRefresh.body));
+    assert.equal(unassuredRefresh.body?.code, 'STAFF_MFA_REQUIRED');
+    assert.equal((await owner.query(`select count(*)::int as n from auth.sessions
+      where family_id = (select family_id from auth.sessions where id = $1) and revoked_at is null`,
+    [reader.sessionId])).rows[0].n, 0, 'a refused refresh of a staff session without MFA assurance must end it');
+    // The doctor's MFA-verified session still reads.
+    const assured = await call(ehrBase, 'GET', `/ehr/patients/${ids.patient}/encounters`, clinical);
+    assert.equal(assured.status, 200, JSON.stringify(assured.body));
+    checks.push('a staff session without MFA assurance (a sign-in from before staff MFA) is refused by EHR with Identity\'s 403 STAFF_MFA_REQUIRED on reads, its refresh is refused (403 STAFF_MFA_REQUIRED) and ends the sign-in, and an MFA-verified staff session still reads');
 
     process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only',
       roles: ['hid_ehr_api_runtime', 'hid_identity_api_runtime'], checks })}\n`);

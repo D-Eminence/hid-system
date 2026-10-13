@@ -2,12 +2,15 @@ import type { PoolClient } from 'pg';
 
 /**
  * Keyed request windows in `auth.otp_rate_limits` (0028, scopes widened in
- * 0069). OTP recovery and platform MFA share this table and algorithm; callers
- * pass an HMAC bucket, never a raw identifier.
+ * 0069 and 0086). OTP recovery, platform MFA and the staff patient search
+ * budgets share this table and algorithm; callers pass a keyed or hashed
+ * bucket, never a raw identifier.
  */
 export type RateLimitScope =
   | 'ip' | 'account' | 'recipient'
-  | 'mfa_failure_account' | 'mfa_failure_ip' | 'mfa_request_account';
+  | 'mfa_failure_account' | 'mfa_failure_ip' | 'mfa_request_account'
+  | 'patient_lookup_actor' | 'patient_lookup_facility'
+  | 'access_request_actor' | 'access_request_facility';
 
 export interface RateLimitWindow {
   windowSeconds: number;

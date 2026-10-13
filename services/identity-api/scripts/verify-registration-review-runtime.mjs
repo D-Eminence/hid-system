@@ -10,6 +10,8 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
+import { createTotpClock } from './platform-session-client.mjs';
+import { enrollmentCodeOutbox, staffClient, supertestTransport, SYNTHETIC_STAFF_MFA_KEY_B64 } from './staff-session-client.mjs';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
@@ -20,7 +22,8 @@ const RUNTIME_ROLE = 'hid_identity_api_runtime';
 const isolated = `hid_rehearsal_review_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
 const SERVICE_APPLICATION = 'hid-registration-review-verifier';
 const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database: 'postgres', max: 1 });
-Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', NIN_PROVIDER_MODE: 'test', TURNSTILE_MODE: 'disabled',
+Object.assign(process.env, { MFA_SECRET_KEY_B64: SYNTHETIC_STAFF_MFA_KEY_B64, MFA_KEY_VERSION: 'registration-runtime-v1',
+  AUTH_COOKIE_SECURE: 'true', NIN_PROVIDER_MODE: 'test', TURNSTILE_MODE: 'disabled',
   IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret', PATIENT_LIFECYCLE_SWEEP_SECONDS: '0',
   NIN_ENCRYPTION_KEY_B64: Buffer.alloc(32, 0x5a).toString('base64'),
   NIN_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 0x5b).toString('base64'), NIN_KEY_VERSION: 'rehearsal-v1',
@@ -53,6 +56,8 @@ const { AuditInterceptor } = load('audit/audit.interceptor.ts');
 const { SecurityGuard } = load('auth/security.guard.ts');
 const { WorkloadAuthService } = load('auth/workload-auth.service.ts');
 const { TurnstileService } = load('auth/turnstile.service.ts');
+const { MfaService, MFA_TOTP_CLOCK } = load('auth/mfa/mfa.service.ts');
+const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
 const { NotificationOtpClient } = load('auth/notification-otp.client.ts');
 const { NinRegistrationController } = load('identity/nin-registration.controller.ts');
 const { NinRegistrationService } = load('identity/nin-registration.service.ts');
@@ -70,13 +75,17 @@ const evidence = { database: 'disposable copy of hid_rehearsal', runAs: RUNTIME_
 const check = (name) => evidence.checks.push(name);
 let app;
 try {
+  const clock = createTotpClock();
+  const staffEnrollmentCodes = enrollmentCodeOutbox(async () => ({ outcome: 'accepted', provider: 'termii' }));
   const module = await Test.createTestingModule({
     controllers: [AuthController, NinRegistrationController],
     providers: [DatabaseService, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
       AuditService, WorkloadAuthService, TurnstileService, NinRegistrationService, NinIdentifierProtector,
       HidCodeGenerator, { provide: NIN_VERIFICATION_PROVIDER, useClass: DeterministicTestNinVerificationProvider },
-      { provide: NotificationOtpClient, useValue: { deliver: async () => ({ outcome: 'accepted', provider: 'termii' }) } },
+      // Staff sign-ins (MFA-1) enrol with an emailed code; other deliveries are accepted as before.
+      { provide: NotificationOtpClient, useValue: staffEnrollmentCodes.client },
+      MfaService, MfaSecretProtector, { provide: MFA_TOTP_CLOCK, useValue: clock.now },
       { provide: GoogleAuthenticationService, useValue: {
         login: async () => { throw new Error('Google exchange is outside the registration review verifier'); },
       } }] }).compile();
@@ -120,9 +129,9 @@ try {
       membership_role,app_role,is_primary,active) values($1,$2,$3,$4,$5,$6,$6,true,true)`, [membership, staffId, account, ids.org, facility, role]);
     await pool.query(`insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason)
       values($1,$2,$3,'facility',$4,$5,'Synthetic rehearsal role')`, [randomUUID(), account, role, membership, facility]);
-    const login = await http.post('/api/v1/auth/login').set('Origin', origin)
-      .send({ email, password, turnstileAction: 'staff-login' }).expect(200);
-    return { account, membership, facility, cookie: cookies(login), csrf: login.headers['x-csrf-token'] };
+    const signedIn = await staffClient({ send: supertestTransport(http), origin, password, outbox: staffEnrollmentCodes,
+      now: clock.next }).signIn(email);
+    return { account, membership, facility, cookie: signedIn.cookie, csrf: signedIn.csrf };
   }
   const registrar = await staff('org_admin', ids.facility);
   const secondRegistrar = await staff('org_admin', ids.facility);

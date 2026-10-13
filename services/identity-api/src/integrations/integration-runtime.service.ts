@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { AccessContext } from '../common/request-context';
+import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 
 interface RuntimeProviderRow extends QueryResultRow {
@@ -98,6 +99,30 @@ export class IntegrationRuntimeService implements OnModuleInit, OnModuleDestroy 
         return result.rows[0]?.admitted;
       });
     } catch (error) { throw this.quotaError(error); }
+    // A denial is committed with its audit event, then refused here.
+    if (admitted === false) throw this.quotaError({ code: 'P4290' });
+    if (admitted !== true) throw this.quotaError(undefined);
+  }
+
+  /** Public patient enrollment has no account either. Each QoreID NIN lookup is
+   * charged to the keyed client-network digest per hour and per day and to one
+   * platform-wide daily cap, with the configured limits (0085). Any fault is
+   * 503: the caller cannot correct it, and the lookup must not proceed. */
+  async consumePublicPatientNinQuota(correlationId: string, networkDigest: string): Promise<void> {
+    const environment = getEnvironment();
+    let admitted: boolean | undefined;
+    try {
+      admitted = await this.database.withSystemTransaction(correlationId, async (client) => {
+        const result = await client.query<{ admitted: boolean }>(
+          'select platform.consume_public_patient_nin_quota($1,$2,$3,$4) as admitted',
+          [networkDigest, environment.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX,
+            environment.PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX,
+            environment.PATIENT_ENROLLMENT_QOREID_DAILY_CAP]);
+        return result.rows[0]?.admitted;
+      });
+    } catch {
+      throw this.quotaError(undefined);
+    }
     // A denial is committed with its audit event, then refused here.
     if (admitted === false) throw this.quotaError({ code: 'P4290' });
     if (admitted !== true) throw this.quotaError(undefined);

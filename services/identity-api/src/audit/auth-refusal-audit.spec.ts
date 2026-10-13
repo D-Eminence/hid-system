@@ -15,6 +15,7 @@ import { AuthController } from './../auth/auth.controller';
 import { AuthService } from './../auth/auth.service';
 import { AuthSessionAuditService } from './../auth/auth-session-audit.service';
 import { GoogleAuthenticationService } from './../auth/google-authentication.service';
+import { MfaService } from './../auth/mfa/mfa.service';
 import { TokenService } from './../auth/token.service';
 import { TurnstileService } from './../auth/turnstile.service';
 import { WorkloadAuthService } from './../auth/workload-auth.service';
@@ -111,7 +112,7 @@ beforeEach(async () => {
     // "access-live" is a live access token for `liveActor`, with CSRF token "csrf-live".
     verify: jest.fn(async (token: string) => {
       if (token !== 'access-live') throw new UnauthorizedException('Invalid or expired access token')
-      return { actor: liveActor, claims: { csrf_hash: 'hash-of-csrf-live' } }
+      return { actor: liveActor, claims: { csrf_hash: 'hash-of-csrf-live' }, mfaAssured: true }
     }),
     verifyCsrf: jest.fn((claims: { csrf_hash: string }, cookie?: string, header?: string) =>
       Boolean(cookie) && cookie === header && claims.csrf_hash === `hash-of-${cookie}`),
@@ -131,6 +132,7 @@ beforeEach(async () => {
       { provide: WorkloadAuthService, useValue: workloads },
       { provide: TurnstileService, useValue: {} },
       { provide: GoogleAuthenticationService, useValue: {} },
+      { provide: MfaService, useValue: {} },
     ],
   }).compile()
   app = module.createNestApplication({ logger: false })

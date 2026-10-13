@@ -72,6 +72,10 @@ server-observed client network (IPv4 address or IPv6 /64; 5 an hour, 15 a day)
 and the application's existing daily `application_cac` target limit (3, shared
 with the reviewer path). A refusal changes no counter; every decision is
 audited. Reviewer `application_cac` quotas are unchanged.
+Migration `0085_public_enrollment_windows_and_nin_lookup_quota.sql` does the
+same for the accountless QoreID NIN lookup of public patient enrollment
+(`platform.consume_public_patient_nin_quota`; "Public enrollment windows and
+NIN lookup quota (0085)" below).
 Migration `0050_patient_nin_evidence_binding.sql` removes the unbound
 five-argument patient evidence command. A verified result now requires the
 submitted NIN's keyed lookup HMAC to match an existing verified, unrevoked NIN
@@ -2596,3 +2600,667 @@ Tests:
 - `verify-delegated-cookie-read-runtime.mjs` (steps 7 and 8): the two summaries'
   note release, and `403 PERMISSION_DENIED` for the seeded doctor on the
   withdrawn write routes, with no row written.
+
+## Public enrollment windows and NIN lookup quota (0085)
+
+`0085_public_enrollment_windows_and_nin_lookup_quota.sql`
+(D-Eminence/hid-system#68) implements decisions N2(b) and
+N2(c) in the activation command and caps QoreID NIN lookups of public patient
+enrollment (IP-1). It replaces two functions and adds one table and one
+function; no existing table is changed.
+
+**Activation windows.** `identity.activate_public_patient_enrollment`
+(0058) is replaced with the same signature, result columns, `SECURITY
+DEFINER` attribute, `search_path`, owner and grants. Two refusals are added;
+the rest of the body is 0058's:
+
+- a replay of an active enrollment whose `activated_at` is null or more than
+  15 minutes old raises `P0002` (`no_data_found`)
+  `PATIENT_ENROLLMENT_REPLAY_EXPIRED` and returns no HID. Identity answers it
+  `404 ENROLLMENT_NOT_FOUND`; it also refuses such an enrollment itself on
+  every enrollment route before calling the command, so the command's check
+  matters only for a request that crosses the 15 minutes in flight;
+- a first activation whose `contact_verified_at` is more than 30 minutes old
+  raises `23514` (`check_violation`) `PATIENT_CONTACT_REVERIFY_REQUIRED`
+  after the token check and before any write. Identity then clears the proof
+  and sends the enrollment back to the contact step:
+  `update identity.public_patient_enrollments set state='verify_contact'`,
+  with `contact_channel`, `contact_hmac`, `contact_lookup_hmac`,
+  `contact_ciphertext`, `contact_verified_at` and `verified_challenge_id`
+  null, only where the row is still `set_password` and the proof is more than
+  30 minutes old by `clock_timestamp()`. It does the same before calling the
+  command when its own clock already finds the proof too old, and answers
+  `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED` only when the update changed the
+  row or the command refused. The 0051 checks allow that state
+  (`set_password` exactly when `contact_verified_at` is set and
+  `activated_at` is not). No grant changes: the Identity runtime already
+  updates these rows.
+
+Both windows use `clock_timestamp()`. The replay window is shorter than the
+enrollment's `expires_at` (24 hours after start), which still bounds pending
+enrollments and the prune.
+
+**NIN lookup quota.** `platform.public_patient_nin_quota_counters` holds one
+row per `(scope, scope_key, bucket_period, bucket_start)`:
+
+- `scope` `network`: `scope_key` is a keyed HMAC of the client network
+  (lower-case hex, 64 characters) that the Identity API computes with its
+  server-only OTP HMAC key in its own domain (`patient-enrollment-qoreid-network`)
+  over an IPv4 address or the /64 prefix of an IPv6 address (IPv4-mapped IPv6
+  counts as IPv4; `quotaNetwork`, as for 0063); `bucket_period` `hour` or
+  `day`;
+- `scope` `platform`: `scope_key` `all`, `bucket_period` `day` only.
+
+No NIN, raw address or provider payload is stored. Row-level security is
+forced and its policies admit only the definer command's own reads and
+writes, as in 0049 and 0063; no runtime role has a table privilege.
+`platform.consume_public_patient_nin_quota(char, integer, integer, integer)`
+takes the network digest and the hourly network, daily network and daily
+platform limits that Identity reads from `PATIENT_ENROLLMENT_QOREID_*`
+(defaults 5, 15 and 200). It:
+
+1. refuses (`42501`) any caller but the accountless system context (actor
+   `system:auth`, a correlation id, no account) and a malformed digest, and
+   (`22023`) a missing limit or one outside its bounds: 1–100 an hour, from
+   the hourly limit to 1,000 a day per network, and 1–100,000 a day in all;
+2. deletes up to 100 counter rows whose bucket started more than 48 hours
+   ago;
+3. counts the lookup in the network's hour and day buckets and the platform's
+   day bucket, in that order, each `INSERT ... ON CONFLICT DO UPDATE` only
+   while the count is below its limit. The first bucket at its limit ends the
+   charge, and leaving its subtransaction rolls back the increments already
+   made, so a refusal changes no counter;
+4. inserts one `audit.events` row (`identity.public-patient-enrollment.nin-lookup-quota`,
+   actor `system`, resource `qoreid-lookup-quota`/`patient_nin`, outcome
+   `success` or `denied`, details `operation`, `exhaustedLimit`
+   (`network_hour`, `network_day` or `platform_day`, or null) and
+   `networkDigest`), and returns whether the lookup may proceed. A refusal
+   returns false instead of raising, so its audit event commits.
+
+Buckets are calendar hours and days by `date_trunc` in the session time zone,
+as in 0049 and 0063. The role bootstrap grants `EXECUTE` to
+`hid_identity_runtime` and `hid_schema_test_runtime` only, and
+`runtime-roles.integration.sql` asserts that no other required runtime role
+can execute it or reach the counters. `platform.prune_verification_quotas()`
+(0063) is replaced to drain these counters too, hourly, from the Identity
+runtime.
+
+Identity calls the command in `QoreIdPublicPatientIdentityProvider.verifyNin`,
+after the enrollment gate and immediately before the QoreID request, in its
+own system transaction. A resume, a duplicate and every earlier refusal of a
+start never reach it. `false` is answered `429 VERIFICATION_QUOTA_EXCEEDED`;
+any error, or no row, `503 VERIFICATION_QUOTA_UNAVAILABLE`, and QoreID is not
+called. A denial's network digest is in the audit event; the address is not.
+
+Locks: `CREATE OR REPLACE` takes no table lock; the new table and its index
+lock nothing else. At run time the command locks only the counter rows it
+increments, for the length of its own transaction; the activation command's
+locking is unchanged.
+
+Tests:
+
+- `public-patient-enrollment-windows.integration.sql` (rollback-only, as
+  `hid_identity_api_runtime`): a wrong token is still `42501`; a contact
+  proved 31 minutes earlier is refused `23514
+  PATIENT_CONTACT_REVERIFY_REQUIRED` and changes nothing; one proved 29
+  minutes earlier activates and replays; a replay 14 minutes after activation
+  returns the HID and one 16 minutes after is refused `P0002
+  PATIENT_ENROLLMENT_REPLAY_EXPIRED`; the command keeps its signature,
+  definer rights and grants. On 0082 it fails at "A contact proof 31 minutes
+  old activated a patient".
+- `public-patient-nin-quota.integration.sql` (rollback-only, as
+  `hid_identity_api_runtime`): only the Identity runtime can execute the
+  command and no runtime role can read the counters; with limits 2, 3 and 10
+  a network's third lookup in an hour and its fourth in a day are refused and
+  change no counter; with a platform cap of 5 another network is refused once
+  the platform has 5, without a network row; malformed digests, missing or
+  out-of-bounds limits, a missing correlation id and another actor are
+  refused and write nothing; five successes and three denials
+  (`network_hour`, `network_day`, `platform_day`) are audited exactly; the
+  prune drains the counters. Without 0085 it fails at its first statement
+  (the command does not exist).
+- `runtime-roles.integration.sql` asserts the grant.
+- `services/identity-api/scripts/verify-patient-enrollment-runtime.mjs`
+  checks both windows and the quota over HTTP (QoreID verification contract).
+  The container acceptance runs both new suites after
+  `purpose-of-use-vocabulary.integration.sql`, and the rehearsal runs them
+  with the additional suites.
+
+## Account recovery and patient search hardening (0086)
+
+`0086_recovery_and_patient_search_hardening.sql` closes the database part of
+launch blockers REC-GOOGLE, REC-AUDIENCE, REC-NOTIFY and PSEARCH-1 (change
+D-Eminence/hid-system#69). 0001 through 0085 are unchanged.
+
+**Recovery.** `auth.complete_recovery_otp` (0029) is replaced with `CREATE OR
+REPLACE`, so it keeps its owner and ACL; its signature, result, `SECURITY
+DEFINER` and `search_path` are restated as in 0029. After it revokes the
+account's sessions it now sets every external sign-in identity of the account
+(`auth.external_identities` rows whose issuer is not `legacy-identity` and
+whose status is not `revoked`, active or disabled) to `revoked`, with
+`revoked_at` kept if already set, and its `auth.otp.recovery.completed` audit
+event adds `details.external_identities_revoked`, the count. Today the only
+sign-in issuer is Google (`https://accounts.google.com`). The legacy
+importer's provenance record (issuer `legacy-identity`,
+`promote-legacy-identity.mjs`) is not a sign-in: it is kept and not counted,
+so legacy reconciliation still matches it after a recovery. Before, a Google
+link made by whoever once held the password survived the owner's reset, and
+Google sign-in issues a session at the current token version. An audit failure
+rolls the revocation back with the rest of the completion. The revoked row
+stays, and the Google link commands (0059) refuse any subject that was ever
+linked (`GOOGLE_IDENTITY_ALREADY_LINKED`), so the owner cannot link the same
+Google account again after a recovery, only a different one; re-linking needs
+a later change before Google sign-in is enabled.
+
+`auth.recovery_account_audience(account_id uuid, audience text) returns
+boolean` (stable, `SECURITY DEFINER`, pinned `search_path`) tells Identity's
+recovery start whether an account is of the kind its page reaches: `patient`
+(an active `identity.patients` row of the account), `staff` (an active
+`identity.staff` row) or `platform` (an unrevoked platform-scoped assignment
+of an active role that grants the active `platform.admin.access` permission).
+It requires the `system:auth` actor (`42501` otherwise), refuses any other
+audience (`22023`) and answers false for a null account. The start runs it in
+its system transaction with the account lookup; a mismatch, or a patient whose
+email is not verified and who has no verified enrollment phone, is answered and
+counted as an unknown identifier. Staff and platform accounts carry no
+`email_verified_at` (their email is provisioned), so the verified-contact rule
+reads it only for the patient audience.
+
+`otp_challenges_account_consumed_idx` on `auth.otp_challenges (account_id,
+consumed_at desc) where consumed_at is not null` serves the 24-hour hold
+Identity applies after any consumed recovery challenge of the account (access
+PIN set, emergency-contact add and update, new access approvals; `403
+PATIENT_RECENT_RECOVERY_HOLD`). The hold reads the table and writes nothing.
+The index is built inside the migration transaction under a `SHARE` lock on
+`auth.otp_challenges`, held to commit, which blocks recovery starts,
+verifications and completions; the table holds one row per recovery
+challenge.
+
+**Staff search budgets.** `otp_rate_limits_scope_check` is dropped and re-added
+with four more scopes: `patient_lookup_actor`, `patient_lookup_facility`,
+`access_request_actor` and `access_request_facility`. Identity counts every
+access-request creation there before the command runs, and every refused
+patient lookup after its audit event (bucket: SHA-256 of a labelled actor
+account or facility id); a lookup reads its two buckets first and is refused
+while either is blocked, and one that returns a granted patient is not counted
+(FE-10). Re-adding the
+check validates the existing rows under an `ACCESS EXCLUSIVE` lock on
+`auth.otp_rate_limits`; every existing scope stays allowed.
+
+**Registration reads (PSEARCH-1, ENUM-1, DB-RLS-PATIENTS).** Before 0086 the
+policy `patients_registration_read` (0011) admitted a membership holding
+`identity.registration.write` or `identity.registration.approve` at its
+current facility to every `identity.patients` row, of every facility. 0086
+drops the policy and creates it again in the same transaction, with the same
+name, table, command (`SELECT`) and role (`PUBLIC`), so no other session sees
+it absent. (`ALTER POLICY` would do the same, but the static privilege replay
+`scripts/verify-runtime-locking-privileges.mjs` does not follow that form.)
+The new expression keeps the permission check and adds that the row is the
+resolved patient of a registration case at the current facility, a duplicate
+candidate a case at the current facility lists, or the patient an approve-new
+review is creating in its transaction
+(`source_system` `hid-nin-registration`, no account, and a
+`pending_new_identity_approval` case at the facility with the same
+demographics and no resolved patient yet). The other `identity.patients`
+policies are unchanged. Registration reads what it no longer sees through two
+narrow `SECURITY DEFINER` functions that check the same permissions (`42501`
+otherwise):
+
+- `identity.registration_nin_holder(lookup_hmac text) returns table
+  (patient_id uuid, hid_code text, patient_status text)`: the patient holding
+  a verified, unrevoked NIN identifier with that lookup HMAC (lower-case hex,
+  64 characters, else `22023`), at most one row. Duplicate checks before
+  approve-new and link-existing, and the resolve step, use it.
+- `identity.registration_candidates(dob date, first_name text, last_name text)
+  returns table (patient_id uuid, first_name text, last_name text, full_name
+  text, dob date)`: at most 100 active patients sharing the date of birth or
+  either name (case-insensitive), oldest first; Identity scores them as
+  before.
+
+`identity.patient_lookup_audit_subject(hid text) returns uuid` (requires
+`identity.patient.read` at the current facility) names, for the audit event
+only, the active patient a refused staff lookup was about; the API answers
+every refusal `404 PATIENT_NOT_AVAILABLE`.
+
+`identity.create_access_request` (0010) is replaced with `CREATE OR REPLACE`
+(signature, result, `SECURITY DEFINER` and `search_path` restated as in 0010).
+For an HID that names no active patient it no longer raises `P0002`: it
+returns a row with a new random request id, no patient, status `pending`, the
+requested duration, the current time and `existing_request` false, persists no
+request, and appends `identity.access-request.refused` (`denied`, no patient,
+resource id the returned request id, details scope, duration and `reason`
+`patient_not_available`; the HID is not copied into the event). Every other
+check and result is as in 0010. Identity no longer returns the patient id of a
+created request.
+
+`identity.list_my_staff_access_requests` (0074) is replaced with `CREATE OR
+REPLACE` (argument, result, caller checks, filter, order and limit restated
+as in 0074; owner and ACL kept). Its `patient_id` is now the request's
+patient only while the grant made from the request is active
+(`effective_status` `active`), and NULL for every other request: pending,
+denied, expired, closed and revoked. Before, one request for a guessed HID
+and one list call gave the clinician the patient id of any active patient
+before the patient answered. Identity's projection of the list applies the
+same rule.
+
+**Locks.** In the order taken, each held to commit: `ACCESS EXCLUSIVE` on
+`identity.patients` (the policy), which holds back every HID sign-in,
+recovery start, registration read, patient lookup and access request until
+commit; `ACCESS EXCLUSIVE` on `auth.otp_rate_limits` (the check); `SHARE` on
+`auth.otp_challenges` (the index). The policy also takes `ACCESS SHARE` on
+`identity.registration_cases` and `identity.registration_case_candidates`.
+The other statements change functions only. An OTP start of the Identity
+build serving during the migration reads `identity.patients`, then writes
+`auth.otp_rate_limits` and `auth.otp_challenges`, the same order, so it and
+the migration wait for each other without a cycle. With the index first (the
+first version of this change) such a start deadlocked with the migration and
+PostgreSQL cancelled the start; reproduced locally. An OTP completion writes
+`auth.otp_challenges` and then reads `identity.patients` inside
+`auth.complete_recovery_otp`, the opposite order, so a completion caught
+between those two statements can still deadlock with the migration
+(reproduced locally with a pause inserted between them). PostgreSQL then
+cancels one of the two (`40P01`): that completion fails and the owner submits
+it again while the verification is valid, or the migration rolls back whole
+and `migrate` is run again. The runner's 5 s `lock_timeout` bounds every wait
+(`55P03` also rolls it back whole).
+
+The four new functions are revoked from `PUBLIC`; the role bootstrap
+(`runtime-grants.sql`) grants `EXECUTE` on them to `hid_identity_runtime` and
+`hid_schema_test_runtime` only. Run `db:bootstrap` and `db:verify-roles`
+immediately after the migration, then deploy the Identity build of the same
+change. An older Identity build still reads `identity.patients` directly for
+registration duplicate checks and candidates; under the narrowed policy those
+reads miss every patient not linked to a case at the facility, so the two must
+be deployed together.
+
+Rollback: the migration is forward-only. Restoring the old behaviour means a
+later migration restoring the 0011 policy expression, the 0029, 0010 and
+0074 function bodies and the old scope check (after deleting rows of the four new
+scopes); the index and the new functions may stay. Do not restore the policy
+without also returning to the previous Identity build.
+
+Tests:
+
+- `patient-search.integration.sql` (new, rollback-only) as
+  `hid_identity_api_runtime`: a registration nurse at facility A reads only
+  the patients linked to facility A's cases (resolved and candidate), not a
+  patient with a grant only, a patient of facility B or an unlinked one, nor
+  the unlinked patient's NIN identifier or that patient by exact HID; a doctor
+  with registration and clinical roles reads facility A's linked patients and
+  the one it holds a grant for, and at facility B only facility B's linked
+  patient; a pharmacist reads none; the audit-subject function names an active patient and refuses a
+  membership without `identity.patient.read`; the two registration functions
+  answer for a registration member and refuse others; `create_access_request`
+  for an unknown HID returns the uniform row and persists nothing, with one
+  refused audit event that does not contain the HID; the four scopes are
+  accepted; the EHR runtime may execute none of the new functions. Without
+  0086 it fails at its first visibility assertion (the nurse reads all five
+  fixture patients).
+- `otp-recovery.integration.sql` adds: completion revokes the account's
+  active and disabled Google links, and
+  `auth.resolve_google_identity` finds nothing for it afterwards; the
+  account's `legacy-identity` provenance record stays active; the audit
+  event counts `2` (and `0` for an account without links); an audit failure
+  rolls the revocation back; a staff reset ends staff and platform sessions;
+  the audience matrix for patient, staff, platform,
+  dual, inactive-staff and revoked-role accounts, `22023` and `42501`.
+  Without 0086 it fails with "Recovery left an external identity (Google
+  link) of the account usable"; with the first version of 0086, which
+  revoked every external identity, with "Recovery revoked the legacy
+  importer provenance record, which is not a sign-in".
+- `staff-access-request-outcome.integration.sql` adds: the list names the
+  patient for the two requests with an active grant and for no other
+  (pending, denied, expired, revoked, closed). Without the 0086 list change
+  it fails with "the list must name the patient of an active grant only".
+- `runtime-roles.integration.sql` requires `EXECUTE` on the four functions
+  for the Identity and schema-test runtimes and for no other runtime or
+  `PUBLIC`.
+- Runtime verifiers (`hid_identity_api_runtime`, real HTTP):
+  `verify-otp-recovery-runtime.mjs` (Google link revoked by recovery and
+  legacy provenance record kept,
+  audience mismatch answered alike with no code, staff reset ends staff and
+  platform sessions, unverified patient email gets no code until verified),
+  `verify-patient-enrollment-runtime.mjs` (staff and administrator pages send
+  a patient no code; five wrong passwords across the email and the HID lock
+  the account), `verify-patient-safety-runtime.mjs` (recent sign-in and the
+  recovery hold on approval, PIN and emergency contacts; the staff list
+  names the patient of the active approval only, not of the pending or the
+  revoked one),
+  `verify-patient-search-runtime.mjs` (new: lookup `200`, one identical `404`
+  for every refusal, whether row-level security hides the patient or the
+  authorization check refuses one the caller can read, `400`, audit reasons,
+  uniform access-request answer, `429`s for refusals only) and
+  `verify-registration-review-runtime.mjs` (registration review, unchanged,
+  passes under the narrowed policy).
+
+## Governed workforce provisioning and one membership per facility (0087)
+
+`0087_governed_workforce_provisioning.sql` implements launch decision D14
+(workforce part) and N5 (ADR-049; D-Eminence/hid-system#70).
+
+**One active membership per facility (N5).** A unique partial index,
+`staff_memberships_one_active_per_facility_uq`, allows one active membership
+per account and facility among rows with a facility and no
+`migration_hold_reason`. Several roles at one facility are several
+`auth.account_roles` rows on that one membership. Before building it the
+migration takes a `SHARE ROW EXCLUSIVE` lock on
+`identity.staff_facility_memberships` and counts duplicate pairs; if there
+are any it raises `23505 MEMBERSHIP_DUPLICATES_FOUND` with a hint naming
+operator plan I4 (`PHASE_3_LAUNCH_DECISIONS.md` §3) and changes nothing.
+`staff_memberships_scoped_uq` (0002) is narrowed to active rows, so ended and
+other inactive memberships stay as history and a clinician can be attached to
+a facility again. Dropping and recreating it takes an `ACCESS EXCLUSIVE` lock
+on the memberships table for as long as the small index build lasts.
+
+**Permission.** `platform.workforce.manage`, granted to
+`platform_super_admin` only, as 0069 did for the other high-risk platform
+permissions. The facility-scoped `workforce.manage` (0006) still authorizes
+nothing.
+
+**Tables.** All three have row-level security enabled with no policy and no
+runtime grant: only their SECURITY DEFINER commands read or write them.
+
+- `identity.staff_credential_attestations` (append-only): the staff record,
+  the attested roles (one to three of `doctor`, `clinician`, `nurse`), the
+  credential reference, issuing authority, `verification_method`
+  (`manual_review` only), evidence reference, `valid_until` (later than the
+  recording and at most three years after it), the reviewer (never the
+  target), reason and correlation id.
+- `identity.workforce_memberships`: the lifecycle of memberships the
+  workforce commands attach or end: `pending` (attached, inactive), `active`
+  (activated by the first grant) and `ended`, with who and when for each step
+  and a row version. Ended is terminal. A trigger,
+  `staff_memberships_ended_guard`, refuses every update of an ended membership
+  in `identity.staff_facility_memberships`, the schema owner's included, so an
+  ended membership and the consent grants still bound to it can never become
+  usable again.
+- `identity.workforce_role_grants` (append-only): for each facility role the
+  grant command created, the attestation it relied on and who granted it.
+
+**Effective roles.** `auth.facility_role_is_effective(account_role_id)` is
+false only for a role granted on an attestation that has lapsed. The Identity
+staff context joins facility roles through it, and
+`auth.membership_has_permission` (0010, same signature, owner and grants) now
+calls it too. Roles granted by onboarding or the legacy promotion have no
+attestation and are unaffected. The staff context lists as a membership's
+roles the codes of exactly those effective, unrevoked assignments (with an
+active `auth.roles` row), the rows its permissions come from; it no longer
+reads `membership_role` and `app_role`. Those labels keep the role the
+membership was activated with (`pending` until then) and are shown only in the
+principals list.
+
+**Commands.** Each is SECURITY DEFINER, executable by the Identity runtime
+only, and checks, in order: `platform.workforce.manage` for the session's
+account and a correlation id (`ADMIN_PERMISSION_DENIED`), its inputs
+(`WORKFORCE_INVALID_COMMAND`), an active MFA factor (`ADMIN_MFA_REQUIRED`), a
+step-up from the last five minutes on the session's platform session
+(`ADMIN_STEP_UP_REQUIRED`), then its idempotency record
+(`auth.admin_command_idempotency`, replay or `ADMIN_IDEMPOTENCY_CONFLICT`). It
+locks the target's and the caller's account rows in id order before anything
+else, as 0073 requires of every session revocation, and then locks the
+membership or staff row it works on FOR NO KEY UPDATE. Those updates change no
+key column (the keys are `id`, `account_id`, `staff_id` and `facility_id`), and
+every insert that references the row through a foreign key (an approval's
+consent grant, an access request) takes FOR KEY SHARE on it, which FOR NO KEY
+UPDATE does not block. A FOR UPDATE lock there deadlocked: with an approval
+that held its access request FOR UPDATE and then inserted the grant, while the
+end held the membership and waited on that request; and with a staff
+transaction that referenced the membership and then its own account, while
+the end held the account and waited on the membership.
+
+- `identity.admin_attach_workforce_member(facility, account, email,
+  full_name, reason, key, digest)`: exactly one of an existing account, or an
+  email and full name for a new one. The facility must be verified and active
+  with an active organization (`WORKFORCE_FACILITY_NOT_VERIFIED`); the caller
+  must have no active membership there (`WORKFORCE_FACILITY_CONFLICT`) and is
+  not the target (`WORKFORCE_SELF_CHANGE_DENIED`). An existing account must
+  have an active staff record and be `active` or `pending_reset`, not
+  disabled and not a patient's own account (`WORKFORCE_ACCOUNT_INELIGIBLE`). A
+  new account is created `pending_reset` with no password and subject
+  `workforce:<id>`, with a `pending` staff record, unless the email is already
+  used (`WORKFORCE_EMAIL_IN_USE`). An account with an active or pending
+  membership at the facility is refused (`WORKFORCE_MEMBERSHIP_EXISTS`). The
+  membership is inserted inactive, labelled `pending`, with a `pending`
+  lifecycle row.
+- `identity.admin_record_credential_attestation(account, staff_version,
+  roles, credential_reference, issuing_authority, evidence_reference,
+  valid_until, reason, key, digest)`: the staff record must be at the
+  expected version (`ADMIN_VERSION_CONFLICT`), active, of an eligible
+  account, and `pending`, `verified`, `approved` or `active`
+  (`WORKFORCE_STAFF_INELIGIBLE`). The caller is the reviewer and cannot be the
+  target. A `pending` staff record becomes `verified`; the staff row version
+  increases either way.
+- `identity.admin_change_workforce_role(membership, facility,
+  membership_version, role, action, reason, key, digest)`: `grant` takes
+  `doctor`, `clinician` or `nurse`; `revoke` also `lab` and `pharmacist`
+  (`WORKFORCE_ROLE_NOT_GRANTABLE`). The membership must exist, belong to the
+  named facility (`WORKFORCE_FACILITY_MISMATCH`), not be the caller's own, be
+  at the expected version, not have ended (`WORKFORCE_MEMBERSHIP_ENDED`) and
+  not be held (`WORKFORCE_MEMBERSHIP_HELD`). A grant also requires a verified
+  facility, a caller with no active membership there, an active or pending
+  membership (`WORKFORCE_MEMBERSHIP_INACTIVE` for any other inactive one), an
+  eligible account, a membership holding no `org_admin` or `admin` role or
+  label (`WORKFORCE_ROLE_CONFLICT`), and a current attestation for the role
+  whose reviewer has no active membership at the facility and is not the
+  caller: `WORKFORCE_SECOND_PERSON_REQUIRED` when only the caller's own
+  attestation would do, `WORKFORCE_ATTESTATION_REQUIRED` otherwise. A role the
+  membership already holds (its live assignment is locked FOR NO KEY UPDATE)
+  is `WORKFORCE_ROLE_ALREADY_ACTIVE` when it was not granted on an
+  attestation, or when its attestation is current and the chosen one does not
+  last longer; otherwise the grant renews it: the old assignment is revoked
+  (`revoked_by` the caller, the grant's reason) and the new one rests on the
+  chosen attestation, and the command returns `renewed` true. The role is
+  inserted with `granted_by` and `grant_reason`, with its
+  `workforce_role_grants` row. The first grant on a pending membership
+  activates it and labels it with the role. A revoke sets `revoked_at`,
+  `revoked_by` and the reason (`WORKFORCE_ROLE_NOT_ACTIVE` when not held).
+  Either way the membership's row version increases.
+- `identity.admin_end_workforce_membership(membership, facility,
+  membership_version, reason, key, digest)`: same membership checks. It
+  deactivates the membership; revokes its facility roles; expires its
+  `pending` access requests; revokes every `active` consent grant bound to it
+  (`revoked_by` the caller, `revoked_reason` the reason); and, when the
+  membership was active, revokes every unrevoked `staff` session of the
+  account (reason `workforce_membership_ended`) with one `revoked` session
+  event. It records the `ended` lifecycle row (inserting one for a membership
+  the commands never attached) and returns the counts. Requests come before
+  grants: an approval holding a request's row lock makes the request update
+  wait, and once the approval commits the grant update, with a new snapshot,
+  revokes the grant it made. An access request inserted by a transaction that
+  commits after the request update has read the pending requests stays
+  pending on the ended membership; it, and any grant later approved from it,
+  authorizes nothing, because every authorization requires an active
+  membership and an ended one is never reactivated.
+- `identity.admin_workforce_profile(account)`: the account, staff record,
+  attestations and memberships with their state, version and active roles
+  (with whether each is effective), for the administration UI.
+
+The shared helpers (`identity.workforce_command_actor`,
+`workforce_require_assurance`, `workforce_works_at`,
+`workforce_target_eligible`) and both trigger functions are revoked from
+PUBLIC and granted to nobody.
+
+Tests:
+
+- `workforce-provisioning.integration.sql` (rollback-only, as the Identity
+  runtime with synthetic platform sessions): the N5 index; the privileges;
+  every refusal above; attach (new and existing identity, replay), the
+  attestation, the grant by a second administrator and its activation, the
+  pending account's lack of authority until it has a password, a lapsed
+  attestation, revoke, the end of a membership with its grant, request and
+  sessions, terminal ended state, re-attachment, the profile, the lock modes
+  and the end's statement order (section 13, read from the function
+  definitions), and renewal (section 14: a lapsed role renewed by a second
+  administrator, the reviewer and an administrator at the facility refused,
+  no renewal without a longer attestation, a legacy role never renewed, a
+  renewal before the lapse, and a first grant of another role). Six mutants
+  of the migration (no two-person check, no insider check on grants, no
+  session revocation, no lapse check, no grant revocation, no request
+  expiry) each fail it. On a database without 0087 it fails at its first
+  assertion ("a second active membership at one facility was accepted").
+  The rehearsal runs it with the additional suites and the acceptance script
+  after `purpose-of-use-vocabulary.integration.sql`.
+- `runtime-roles.integration.sql` (the role bootstrap's verification) checks
+  the command and helper grants, that no runtime reads the three tables or
+  updates memberships, and that only `platform_super_admin` holds the
+  permission.
+- `ocr-job-source-and-publication.integration.sql` gave account A two active
+  memberships at one clinic; the second is now inactive, which keeps its
+  "the session account's other membership" case.
+- `services/identity-api/scripts/verify-platform-admin-runtime.mjs` runs the
+  workforce routes end to end as the Identity runtime, including a revoke
+  that leaves the clinician's actor with no role and no permission, and the
+  end of the membership while a patient approval holds its request FOR
+  UPDATE and a staff transaction holds the membership's KEY SHARE and then
+  asks for its account's: no deadlock, the end waits for the approval, the
+  approval's grant is revoked and the other pending request expires.
+- `services/ehr-api/scripts/verify-membership-duplicates-runtime.mjs` (in the
+  rehearsal) runs the legacy promotion's membership uniqueness check
+  (`membershipUniquenessConflict`) against a disposable copy of the rehearsal
+  schema: refused beside an active, unheld target membership (and that row
+  would break the N5 index); accepted for an exact re-promotion and beside an
+  inactive, held or other facility's membership; staged duplicates refused.
+  Dropping `active`, `migration_hold_reason is null` or `id <> $3` from its
+  query each fails it.
+
+## Staff MFA sessions (0088)
+
+`0088_staff_mfa_sessions.sql` is the database part of launch blocker MFA-1
+(decision D14, ADR-054; change D-Eminence/hid-system#71): every staff
+session that can reach patient data is MFA-verified. 0001 through 0087 are
+unchanged. A staff session uses the 0069 tables, as a platform session does:
+`auth.mfa_factors`, `auth.mfa_recovery_codes`, `auth.mfa_login_challenges` and
+`auth.session_assurance`. An account has one factor whichever kind of session
+it signs in to.
+
+**Challenges.** `auth.mfa_login_challenges` gains `session_kind` (`platform`
+or `staff`, `not null default 'platform'`; existing rows and rows written by an
+earlier Identity build, which issues platform challenges only, are
+`platform`) and the proof of a staff enrolment: `proof_method`,
+`proof_verifier_hmac` (`char(64)`, the keyed digest of the emailed code; the
+code is never stored), `proof_key_version`, `proof_sent_at` and
+`proof_verified_at`. The check `mfa_login_challenges_proof_check` allows
+three shapes: no proof (every platform and staff verify challenge, and a staff
+enrolment challenge before a code is sent); `email_code` on a staff enrolment
+challenge, with a hex digest, a key version, `proof_sent_at` and a
+`proof_verified_at` that is null or not before it; and `provider_activation`
+on a staff enrolment challenge, with only `proof_verified_at` (the activation
+that opened the challenge is its proof).
+
+`auth.guard_mfa_login_challenge_change` is replaced with `CREATE OR REPLACE`
+(owner, ACL and trigger kept). As before, a consumed or invalidated challenge
+is immutable, and the identity, token, expiry and attempt columns never change
+and the attempt count never falls. It now also keeps `session_kind`
+immutable, keeps a verified proof final (neither unset nor replaced by another
+code), and refuses to consume a staff enrolment challenge that records no
+verified proof (`23514 MFA_ENROLLMENT_PROOF_REQUIRED`). The database records
+that a proof was verified; it cannot check the emailed code, whose key only
+Identity holds.
+
+**Factors.** `auth.mfa_factors` gains `enrollment_proof` (`email_code` or
+`provider_activation`) and `enrollment_challenge_id` (the staff enrolment
+challenge that carried the proof); the check
+`mfa_factors_enrollment_proof_check` requires both or neither. The new trigger
+`mfa_factors_enrollment_proof_guard` (`auth.guard_mfa_factor_enrollment_proof`,
+`BEFORE INSERT OR UPDATE`, revoked from `PUBLIC`) accepts them only on a row
+that names a staff enrolment challenge of the same account, not consumed,
+invalidated or expired, whose verified proof has that method
+(`23514 MFA_ENROLLMENT_PROOF_REQUIRED` otherwise), and never lets them change
+(`55000 MFA_FACTOR_IMMUTABLE`). Identity sets them when staff enrolment
+creates the pending factor; a factor created by platform sign-in, and every
+factor that exists before 0088, records none.
+
+**Assurance.** `auth.guard_session_assurance_change` (0069) is replaced with
+`CREATE OR REPLACE`, restated exactly except that an assurance row may be
+inserted for a `staff` session family as well as a `platform` one, a `staff`
+one only on a factor that records a staff proof (`23514
+STAFF_MFA_FACTOR_UNPROVEN` otherwise); a patient session still never has one,
+a staff assurance row is not step-up evidence (`step_up_at` null and count 0
+at insert), and the immutability rules are unchanged. So a factor that a
+platform first enrolment created on the password alone never verifies a staff
+session, whichever account holds it, while it still verifies platform
+sessions. Together these rules mean a staff session's assurance always names
+a factor created under a staff enrolment challenge with a verified proof.
+Identity authorizes a staff session only while its family has an assurance row
+whose factor is still active; sessions issued before the Identity build of
+this change have none and are refused and ended
+(`revocation_reason = 'staff_mfa_required'`). 0088 itself changes no session,
+account or factor row. An administrator whose existing factor records no proof
+and whose account holds an eligible staff membership is refused staff sign-in
+(`403 STAFF_MFA_FACTOR_UNPROVEN`) until a two-person MFA reset, after which
+they enrol at staff sign-in (`MIGRATION_RUNBOOK.md` lists such accounts).
+
+**Recovery and reset.** `auth.complete_recovery_otp` (0086) is unchanged: it
+revokes sessions and external sign-in identities and leaves `auth.mfa_factors`
+and `auth.mfa_recovery_codes`, so recovering a password never removes the
+second factor. The two-person MFA reset of 0070 (`auth.admin_request_approval`,
+`auth.admin_decide_approval`) checks no account kind, only that the target has
+an active or pending factor, so it already resets staff accounts; only the
+`platform.mfa.reset` permission description changes ("administrator or
+staff").
+
+**Locks.** `ACCESS EXCLUSIVE` on `auth.mfa_login_challenges` and then on
+`auth.mfa_factors` while their columns, checks and (on `auth.mfa_factors`) the
+new trigger are added, until commit; Identity also locks a challenge before a
+factor. The columns need no table rewrite; the checks scan the tables, whose
+rows are kept (until now written by platform sign-in only). Everything else
+replaces functions, sets comments or updates one `auth.permissions` row. No
+grant changes: the Identity runtime's table grants on the three tables
+(`runtime-grants.sql`) cover the new columns, the new trigger function is
+revoked from `PUBLIC` in the migration, and `runtime-roles.integration.sql`
+passes unchanged.
+
+Tests:
+
+- `staff-mfa.integration.sql` (new, rollback-only) as
+  `hid_identity_api_runtime`: assurance accepted for a staff session on a
+  factor with a staff proof and refused for a patient session, another
+  account's factor, a stepped-up row and a factor without a staff proof (a
+  platform-enrolled factor of a security auditor who is also a doctor, which
+  still verifies that account's platform session), and a staff assurance row
+  is not step-up evidence; a factor records a proof only from a live, verified
+  staff enrolment challenge of its own account of that method (refused for an
+  unverified, platform, other account's, other method's, consumed or missing
+  challenge, and for an inconsistent pair), the record never changes, and an
+  activated factor with a proof verifies the staff session; challenge shapes
+  outside the three allowed are refused; a staff enrolment challenge cannot be
+  consumed without a proof or with a sent but unverified code, a resend
+  replaces the digest, a verified proof is final, a `provider_activation`
+  challenge is consumable, a staff verify challenge needs no proof and its
+  kind is immutable; `auth.complete_recovery_otp` leaves the factor row
+  identical (`to_jsonb`) and both unused recovery codes, revokes the
+  sessions and bumps the token version; a staff target's MFA reset through
+  `auth.admin_request_approval` and `auth.admin_decide_approval` with
+  step-up revokes the factor (`admin_reset`), invalidates the codes, ends the
+  staff session (`mfa_reset`), bumps the token version, records the
+  `mfa_reset` event and leaves no live assurance; the permission description
+  names staff. On a database built to 0086 it fails with
+  `SESSION_ASSURANCE_INVALID` at its first staff assurance insert; with the
+  guard's proof check removed it fails with "a staff enrolment was completed
+  without a proof"; with the assurance guard's staff proof check removed it
+  fails with "a factor enrolled without a staff proof verified a staff
+  session".
+- `platform-mfa-approval.integration.sql`: the case that expected a staff
+  session to be refused assurance now expects `STAFF_MFA_FACTOR_UNPROVEN`: that
+  Super Admin's factor was enrolled by platform sign-in. With the assurance
+  guard's staff proof check removed it fails with "a platform-enrolled factor
+  verified a staff session".
+- Runtime verifiers (`hid_identity_api_runtime`, real HTTP):
+  `verify-staff-mfa-runtime.mjs` (new: the password step sets only the
+  challenge cookie and creates no session; enrolment refused without the
+  emailed code and with a wrong one; the session and its assurance at the
+  first TOTP code; refresh in the same family; TOTP replay and recovery-code
+  reuse refused; a staff challenge refused by the platform steps; a staff
+  session without assurance refused by cookie and bearer and ended on
+  refresh, but able to sign out; staff Google exchange refused; OTP recovery
+  keeps the factor; a two-person reset of a staff account and re-enrolment;
+  the platform first enrolment of a security auditor who is also a doctor
+  refused with `409 MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED`, then enrolled at
+  staff sign-in and used for platform sign-in; a platform-enrolled factor
+  refused at staff sign-in with `403 STAFF_MFA_FACTOR_UNPROVEN` and by the
+  database as the runtime role, then reset by two Super Admins and enrolled
+  again with the proof).
+  Every verifier that signs staff in now does it with password and
+  authenticator through `staff-session-client.mjs`, and
+  `verify-delegated-cookie-read-runtime.mjs` checks that the EHR refuses an
+  unassured reader with `403 STAFF_MFA_REQUIRED`.

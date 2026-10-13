@@ -1,5 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
+import { DomainProblem } from '../common/problem';
 import type { ActorContext, FacilityAssignment } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CredentialIdentity } from './auth.types';
@@ -58,15 +59,21 @@ export function eligibleStaffMembershipJoins(account: string, statuses: string):
 export class CurrentStaffContextService {
   constructor(private readonly database: DatabaseService) {}
 
+  /**
+   * Staff actor. Given a transaction's `client`, it reads on that client: a
+   * staff sign-in (MFA-1) resolves the actor while it holds the account row
+   * lock (Stage 7A), as a platform sign-in does.
+   */
   async resolve(
     subject: string,
     authenticationMethod: ActorContext['authenticationMethod'],
     sessionId?: string,
     preferredFacilityId?: string,
+    client?: Pick<PoolClient, 'query'>,
   ): Promise<ActorContext> {
-    const identity = await this.resolvePostgres(subject, authenticationMethod);
+    const identity = await this.resolvePostgres(subject, authenticationMethod, client);
     if (!identity.accountId) {
-      const account = await this.database.query<{ id: string }>(
+      const account = await this.read<{ id: string }>(client,
         `select id::text from auth.accounts
           where subject = $1 and status = 'active'
             and (disabled_until is null or disabled_until <= clock_timestamp())`,
@@ -76,7 +83,7 @@ export class CurrentStaffContextService {
       if (!accountId) throw new UnauthorizedException('Migrated authentication account is unavailable');
       identity.accountId = accountId;
     }
-    const platformAuthority = await this.resolvePlatformAuthority(identity.accountId);
+    const platformAuthority = await this.resolvePlatformAuthority(identity.accountId, client);
     return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
   }
 
@@ -120,11 +127,19 @@ export class CurrentStaffContextService {
     };
   }
 
+  /**
+   * One row per active, unheld membership. Its roles are the codes of the
+   * membership's live, effective facility role assignments, the same rows its
+   * permissions come from: a revoked role, or one whose credential attestation
+   * has lapsed (D14), is neither listed nor counted. The membership's stored
+   * membership_role and app_role labels are not read.
+   */
   private async resolvePostgres(
     subject: string,
     authenticationMethod: 'local' | 'oidc',
+    client?: Pick<PoolClient, 'query'>,
   ): Promise<CredentialIdentity> {
-    const result = await this.database.query<StaffContextRow>(
+    const result = await this.read<StaffContextRow>(client,
       `select account.id::text as account_id,
               account.subject,
               account.email,
@@ -134,7 +149,7 @@ export class CurrentStaffContextService {
               membership.organization_id::text,
               facility.name as facility_name,
               facility.code as facility_code,
-              array_remove(array[membership.membership_role, membership.app_role], null) as roles,
+              coalesce(array_agg(distinct role.code) filter (where role.code is not null), array[]::text[]) as roles,
               coalesce(array_agg(distinct permission.code) filter (where permission.code is not null), array[]::text[]) as permissions,
               membership.is_primary
          from auth.accounts account
@@ -145,6 +160,7 @@ export class CurrentStaffContextService {
           and account_role.membership_id = membership.id
           and account_role.facility_id = membership.facility_id
           and account_role.revoked_at is null
+          and auth.facility_role_is_effective(account_role.id)
          left join auth.roles role
            on role.code = account_role.role_code
           and role.active
@@ -156,10 +172,9 @@ export class CurrentStaffContextService {
           and account.status = 'active'
           and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
         group by account.id, account.subject, account.email, account.display_name,
-                 membership.id, membership.facility_id, membership.organization_id,
-                 membership.membership_role, membership.app_role, membership.is_primary,
+                 membership.id, membership.facility_id, membership.organization_id, membership.is_primary,
                  facility.name, facility.code
-        order by membership.is_primary desc, facility.name, membership.facility_id`,
+        order by membership.is_primary desc, facility.name, membership.facility_id, membership.id`,
       [subject, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
     );
     const first = result.rows[0];
@@ -205,9 +220,21 @@ export class CurrentStaffContextService {
     sessionId?: string,
     preferredFacilityId?: string,
   ): ActorContext {
+    // N5: a facility binds exactly one membership. 0087 makes a second active
+    // membership at one facility impossible; should one appear anyway, no
+    // facility of this account is bound rather than one chosen by row order.
+    const facilityIds = new Set<string>();
+    for (const facility of identity.facilities) {
+      if (facilityIds.has(facility.id)) {
+        throw new DomainProblem(409, 'FACILITY_MEMBERSHIP_AMBIGUOUS',
+          'More than one active membership binds this account at one facility; a platform administrator must resolve it');
+      }
+      facilityIds.add(facility.id);
+    }
     const facilities = [...identity.facilities].sort((left, right) => {
       if (left.isPrimary !== right.isPrimary) return left.isPrimary ? -1 : 1;
-      return left.name.localeCompare(right.name) || left.id.localeCompare(right.id);
+      return left.name.localeCompare(right.name) || left.id.localeCompare(right.id)
+        || left.membershipId.localeCompare(right.membershipId);
     });
     const selected = facilities.find((facility) => facility.id === preferredFacilityId)
       ?? facilities.find((facility) => facility.isPrimary)

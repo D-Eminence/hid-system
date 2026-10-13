@@ -12,6 +12,16 @@ import type { RecoveryOtpPurpose } from './dto/otp.dto';
 import type { NotificationOtpClient, OtpDeliveryOutcome } from './notification-otp.client';
 import { generateSixDigitOtp, OtpService } from './otp.service';
 
+/**
+ * A start names the account kind of its recovery page (REC-AUDIENCE, 0086).
+ * Cast so that these specs also compile, and fail at their own assertions,
+ * against a service that takes no audience.
+ */
+type StartInput = Parameters<OtpService['start']>[0];
+type Audience = 'patient' | 'staff' | 'platform';
+const startArgs = (input: { identifier: string; purpose: RecoveryOtpPurpose; remoteIp?: string; correlationId: string;
+  audience?: Audience }): StartInput => ({ audience: 'patient', ...input }) as unknown as StartInput;
+
 // Deliveries run after the response (REC-3). Optional here so that these specs
 // also run, and fail at their own assertions, against a service without them.
 interface AfterResponseLifecycle {
@@ -26,6 +36,10 @@ const KNOWN_EMAIL = 'person@example.test';
 const KNOWN_HID = 'HID-ABCDEFGH';
 const OTHER_EMAIL = 'other.person@example.test';
 const UNKNOWN_EMAIL = 'nobody@example.test';
+const STAFF_EMAIL = 'clinician@example.test';
+const ADMIN_EMAIL = 'administrator@example.test';
+const UNVERIFIED_EMAIL = 'unconfirmed@example.test';
+const UNVERIFIED_HID = 'HID-UNCNFRMD';
 
 interface SqlCall { sql: string; values: readonly unknown[] }
 interface StoredChallenge {
@@ -74,7 +88,8 @@ describe('Identity OTP credentials', () => {
     const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
       calls.push({ sql, values });
       if (sql.includes('from auth.otp_rate_limits')) return { rows: [] };
-      if (sql.includes('from auth.accounts account')) return { rows: [{ id: 'account-1', email: 'person@example.test' }] };
+      if (sql.includes('from auth.accounts account')) return { rows: [{ id: 'account-1', email: 'person@example.test',
+        email_verified: true, audience_matches: true }] };
       if (sql.includes('from auth.otp_challenges')) return { rows: [] };
       if (sql.includes('insert into auth.otp_challenges')) return { rows: [] };
       return { rows: [] };
@@ -88,10 +103,10 @@ describe('Identity OTP credentials', () => {
     const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const stderr = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
-    await new OtpService(database, notification).start({
+    await new OtpService(database, notification).start(startArgs({
       identifier: 'person@example.test', purpose: 'PASSWORD_RESET',
       remoteIp: '192.0.2.10', correlationId: 'otp-correlation-0001',
-    });
+    }));
 
     const delivered = (notification.deliver as jest.Mock).mock.calls[0][0] as { code: string };
     expect(delivered.code).toMatch(/^\d{6}$/);
@@ -109,16 +124,16 @@ describe('Identity OTP credentials', () => {
     const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
       calls.push({ sql, values });
       if (sql.includes('from auth.accounts account')) return { rows: [{
-        id: 'account-1', email: null, token_version: '1', phone_enrollment_id: enrollmentId,
-        phone_ciphertext: ciphertext, phone_key_version: 'local-v1',
+        id: 'account-1', email: null, email_verified: false, audience_matches: true, token_version: '1',
+        phone_enrollment_id: enrollmentId, phone_ciphertext: ciphertext, phone_key_version: 'local-v1',
       }] };
       return { rows: [] };
     }) } as unknown as PoolClient;
     const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
 
     const result = await new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient)
-      .start({ identifier: 'hid-abcdefgh', purpose: 'PASSWORD_RESET',
-        remoteIp: '192.0.2.30', correlationId: 'phone-recovery-0001' });
+      .start(startArgs({ identifier: 'hid-abcdefgh', purpose: 'PASSWORD_RESET',
+        remoteIp: '192.0.2.30', correlationId: 'phone-recovery-0001' }));
 
     expect(result).toEqual(expect.objectContaining({ accepted: true, deliveryChannels: ['email', 'sms'] }));
     expect(result.challengeId).toMatch(/^[0-9a-f-]{36}$/);
@@ -126,7 +141,8 @@ describe('Identity OTP credentials', () => {
       channel: 'sms', recipient: phone, purpose: 'PASSWORD_RESET', challengeId: result.challengeId,
     }));
     const lookup = calls.find(({ sql }) => sql.includes('from auth.accounts account'));
-    expect(lookup?.values).toEqual(['hid-abcdefgh']);
+    expect(lookup?.values).toEqual(['hid-abcdefgh', 'patient']);
+    expect(lookup?.sql).toContain('auth.recovery_account_audience(account.id, $2) as audience_matches');
     expect(lookup?.sql).toContain("enrollment.state = 'active'");
     expect(lookup?.sql).toContain('enrollment.contact_verified_at is not null');
     expect(lookup?.sql).toContain("patient.status = 'active'");
@@ -145,18 +161,18 @@ describe('Identity OTP credentials', () => {
     tampered[tampered.length - 1] = tampered[tampered.length - 1]! ^ 1;
     const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
       if (sql.includes('from auth.accounts account')) return { rows: values[0] === 'HID-ABCDEFGH' ? [{
-        id: 'account-1', email: null, token_version: '1', phone_enrollment_id: enrollmentId,
-        phone_ciphertext: tampered, phone_key_version: 'local-v1',
+        id: 'account-1', email: null, email_verified: false, audience_matches: true, token_version: '1',
+        phone_enrollment_id: enrollmentId, phone_ciphertext: tampered, phone_key_version: 'local-v1',
       }] : [] };
       return { rows: [] };
     }) } as unknown as PoolClient;
     const notification = { deliver: jest.fn() };
     const service = new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient);
 
-    const unknown = await service.start({ identifier: 'HID-ZYXWVUTS', purpose: 'PASSWORD_RESET',
-      remoteIp: '192.0.2.31', correlationId: 'phone-recovery-unknown' });
-    const unusable = await service.start({ identifier: 'HID-ABCDEFGH', purpose: 'PASSWORD_RESET',
-      remoteIp: '192.0.2.32', correlationId: 'phone-recovery-tampered' });
+    const unknown = await service.start(startArgs({ identifier: 'HID-ZYXWVUTS', purpose: 'PASSWORD_RESET',
+      remoteIp: '192.0.2.31', correlationId: 'phone-recovery-unknown' }));
+    const unusable = await service.start(startArgs({ identifier: 'HID-ABCDEFGH', purpose: 'PASSWORD_RESET',
+      remoteIp: '192.0.2.32', correlationId: 'phone-recovery-tampered' }));
 
     expect({ ...unknown, challengeId: '<opaque>' }).toEqual({ ...unusable, challengeId: '<opaque>' });
     expect(unknown.challengeId).toMatch(/^[0-9a-f-]{36}$/);
@@ -267,6 +283,60 @@ describe('Identity OTP credentials', () => {
     expect(sqlCalls.filter((sql) => sql.includes('select auth.complete_recovery_otp'))).toHaveLength(1);
   });
 
+  it('tells a bound recovery-notice sink of each completed recovery after it commits, and nothing of a refused one', async () => {
+    const challengeId = '86e1e934-dac3-40a4-b15f-bd76904a9a33';
+    const verificationToken = 'opaque-completion-token-with-more-than-32-characters';
+    let consumed = false;
+    const client = { query: jest.fn(async (sql: string) => {
+      if (sql.includes('select challenge.id::text, challenge.account_id::text')) return { rows: consumed ? [] : [{
+        id: challengeId, account_id: 'account-7',
+        completion_token_hmac: hmac('otp-completion', challengeId, verificationToken),
+        completion_expires_at: new Date(Date.now() + 60_000),
+      }] };
+      if (sql.includes('select auth.complete_recovery_otp')) { consumed = true; return { rows: [{ completed: true }] }; }
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    const recoveryCompleted = jest.fn().mockResolvedValue(undefined);
+    // The sink is an optional third dependency (REC-NOTIFY hook, 0086); constructed
+    // loosely so that this spec also compiles against a service without it.
+    const service = new (OtpService as unknown as new (...dependencies: unknown[]) => OtpService)(
+      transactionDatabase(client), { deliver: jest.fn() }, { recoveryCompleted });
+    const input = { challengeId, purpose: 'PASSWORD_RESET' as const, verificationToken,
+      newPassword: 'a-strong-test-password', correlationId: 'otp-correlation-notice' };
+
+    await expect(service.complete(input)).resolves.toEqual({ completed: true });
+    await expect(service.complete(input)).rejects.toMatchObject({ code: 'OTP_INVALID_OR_EXPIRED' });
+    await lifecycle(service).settleDeliveries?.();
+    expect(recoveryCompleted.mock.calls).toEqual([[{
+      accountId: 'account-7', purpose: 'PASSWORD_RESET', correlationId: 'otp-correlation-notice',
+    }]]);
+  });
+
+  it('completes a recovery without a notice sink, and a failing sink never undoes it', async () => {
+    const challengeId = '86e1e934-dac3-40a4-b15f-bd76904a9a34';
+    const verificationToken = 'opaque-completion-token-with-more-than-32-characters';
+    const client = { query: jest.fn(async (sql: string) => {
+      if (sql.includes('select challenge.id::text, challenge.account_id::text')) return { rows: [{
+        id: challengeId, account_id: 'account-8',
+        completion_token_hmac: hmac('otp-completion', challengeId, verificationToken),
+        completion_expires_at: new Date(Date.now() + 60_000),
+      }] };
+      if (sql.includes('select auth.complete_recovery_otp')) return { rows: [{ completed: true }] };
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    const input = { challengeId, purpose: 'PASSWORD_RESET' as const, verificationToken,
+      newPassword: 'a-strong-test-password', correlationId: 'otp-correlation-no-sink' };
+    const unbound = new OtpService(transactionDatabase(client), { deliver: jest.fn() } as unknown as NotificationOtpClient);
+    await expect(unbound.complete(input)).resolves.toEqual({ completed: true });
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const failing = new (OtpService as unknown as new (...dependencies: unknown[]) => OtpService)(
+      transactionDatabase(client), { deliver: jest.fn() },
+      { recoveryCompleted: jest.fn().mockRejectedValue(new Error('synthetic notice outage')) });
+    await expect(failing.complete(input)).resolves.toEqual({ completed: true });
+    await lifecycle(failing).settleDeliveries?.();
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('synthetic notice outage');
+  });
+
   it('rejects completion when current database authority changes after the precheck', async () => {
     const challengeId = '86e1e934-dac3-40a4-b15f-bd76904a9a32';
     const verificationToken = 'opaque-completion-token-with-more-than-32-characters';
@@ -311,10 +381,10 @@ describe('Identity OTP credentials', () => {
       return { rows: [] };
     }) } as unknown as PoolClient;
     const notification = { deliver: jest.fn() };
-    await expect(new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient).start({
+    await expect(new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient).start(startArgs({
       identifier: 'person@example.test', purpose: 'PASSWORD_RESET',
       remoteIp: '192.0.2.12', correlationId: 'otp-rate-denial-0001',
-    })).rejects.toMatchObject({ code: 'OTP_RATE_LIMITED' });
+    }))).rejects.toMatchObject({ code: 'OTP_RATE_LIMITED' });
     expect(notification.deliver).not.toHaveBeenCalled();
     expect(statements.findIndex(sql => sql.includes('pg_advisory_xact_lock')))
       .toBeLessThan(statements.findIndex(sql => sql.includes('from auth.otp_rate_limits')));
@@ -324,7 +394,8 @@ describe('Identity OTP credentials', () => {
     const calls: string[] = [];
     const client = { query: jest.fn(async (sql: string) => {
       calls.push(sql);
-      if (sql.includes('from auth.accounts account')) return { rows: [{ id: 'account-1', email: 'person@example.test' }] };
+      if (sql.includes('from auth.accounts account')) return { rows: [{ id: 'account-1', email: 'person@example.test',
+        email_verified: true, audience_matches: true }] };
       if (sql.includes('from auth.otp_rate_limits')) return { rows: [] };
       if (/^\s*select id::text, created_at/.test(sql)) return { rows: [{
         id: 'old-challenge', created_at: new Date(Date.now() - 61_000), cooling: false,
@@ -333,10 +404,10 @@ describe('Identity OTP credentials', () => {
     }) } as unknown as PoolClient;
     const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'ses' }) };
 
-    await new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient).start({
+    await new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient).start(startArgs({
       identifier: 'person@example.test', purpose: 'PASSWORD_RESET',
       remoteIp: '192.0.2.12', correlationId: 'otp-correlation-0006',
-    });
+    }));
 
     const invalidated = calls.findIndex((sql) => sql.includes("invalidation_reason = 'resend'"));
     const inserted = calls.findIndex((sql) => sql.includes('insert into auth.otp_challenges'));
@@ -590,6 +661,120 @@ describe('Identity OTP credentials', () => {
     });
   });
 
+  describe('a recovery start reaches only its own kind of account (REC-AUDIENCE)', () => {
+    const accountBuckets = (limits: Map<string, RateRow>) => [...limits.keys()].filter((key) => key.startsWith('account:'));
+
+    it('answers a start from another page like an unknown identifier: same answer, nothing counted or sent', async () => {
+      const store = recoveryStore();
+      const notification = recordingNotification();
+      const service = new OtpService(store.database, notification.client);
+
+      const answers = [
+        await service.start(startInput(UNKNOWN_EMAIL, '192.0.2.80', 'PASSWORD_RESET', 'patient')),
+        await service.start(startInput(STAFF_EMAIL, '192.0.2.81', 'PASSWORD_RESET', 'patient')),
+        await service.start(startInput(ADMIN_EMAIL, '192.0.2.82', 'PASSWORD_RESET', 'staff')),
+        await service.start(startInput(KNOWN_EMAIL, '192.0.2.83', 'PASSWORD_RESET', 'platform')),
+        await service.start(startInput(KNOWN_HID, '192.0.2.84', 'PASSWORD_RESET', 'staff')),
+      ];
+      await service.settleDeliveries?.();
+
+      expect(notification.deliveries).toEqual([]);
+      expect(store.challenges).toEqual([]);
+      expect(accountBuckets(store.limits)).toEqual([]);
+      const shapes = answers.map(({ challengeId, ...rest }) => ({ ...rest, challengeId: typeof challengeId }));
+      for (const shape of shapes) expect(shape).toEqual(shapes[0]);
+      expect(new Set(answers.map(({ challengeId }) => challengeId)).size).toBe(answers.length);
+    });
+
+    it('keeps a cooldown per page: a start on another page does not hold back the account\'s own page', async () => {
+      const store = recoveryStore();
+      const notification = recordingNotification();
+      const service = new OtpService(store.database, notification.client);
+
+      const elsewhere = await service.start(startInput(STAFF_EMAIL, '192.0.2.88', 'PASSWORD_RESET', 'patient'));
+      const own = await service.start(startInput(STAFF_EMAIL, '192.0.2.89', 'PASSWORD_RESET', 'staff'));
+      await service.settleDeliveries?.();
+
+      expect(own.challengeId).not.toBe(elsewhere.challengeId);
+      expect(notification.deliveries.map(({ challengeId }) => challengeId)).toEqual([own.challengeId]);
+    });
+
+    it('delivers through the page of the account kind, and asks the database for exactly that kind', async () => {
+      const store = recoveryStore();
+      const notification = recordingNotification();
+      const service = new OtpService(store.database, notification.client);
+
+      const patient = await service.start(startInput(KNOWN_EMAIL, '192.0.2.85', 'PASSWORD_RESET', 'patient'));
+      const staff = await service.start(startInput(STAFF_EMAIL, '192.0.2.86', 'PASSWORD_RESET', 'staff'));
+      const admin = await service.start(startInput(ADMIN_EMAIL, '192.0.2.87', 'PASSWORD_RESET', 'platform'));
+      await service.settleDeliveries?.();
+
+      expect(notification.deliveries.map(({ challengeId, recipient }) => [challengeId, recipient])).toEqual([
+        [patient.challengeId, KNOWN_EMAIL], [staff.challengeId, STAFF_EMAIL], [admin.challengeId, ADMIN_EMAIL],
+      ]);
+      const lookups = store.calls.filter(({ sql }) => sql.includes('from auth.accounts account'));
+      expect(lookups.map(({ values }) => values)).toEqual([
+        [KNOWN_EMAIL, 'patient'], [STAFF_EMAIL, 'staff'], [ADMIN_EMAIL, 'platform'],
+      ]);
+      expect(lookups[0]?.sql).toContain('auth.recovery_account_audience(account.id, $2) as audience_matches');
+    });
+  });
+
+  describe('a patient recovery code goes only to a verified contact (REC-UNVERIFIED-CONTACT)', () => {
+    it('sends nothing to a patient with an unverified email and no verified phone, by email or HID', async () => {
+      const store = recoveryStore();
+      const notification = recordingNotification();
+      const service = new OtpService(store.database, notification.client);
+
+      const unknown = await service.start(startInput(UNKNOWN_EMAIL, '192.0.2.90'));
+      const byEmail = await service.start(startInput(UNVERIFIED_EMAIL, '192.0.2.91'));
+      const byHid = await service.start(startInput(UNVERIFIED_HID, '192.0.2.92'));
+      const legacy = await service.start(startInput(UNVERIFIED_EMAIL, '192.0.2.93', 'LEGACY_ACCOUNT_RECOVERY'));
+      await service.settleDeliveries?.();
+
+      expect(notification.deliveries).toEqual([]);
+      expect(store.challenges).toEqual([]);
+      expect([...store.limits.keys()].filter((key) => key.startsWith('account:'))).toEqual([]);
+      for (const answer of [byEmail, byHid, legacy]) {
+        expect({ ...answer, challengeId: '<opaque>' }).toEqual({ ...unknown, challengeId: '<opaque>' });
+      }
+      expect(store.calls.find(({ sql }) => sql.includes('from auth.accounts account'))?.sql)
+        .toContain('account.email_verified_at is not null as email_verified');
+    });
+
+    it('sends a patient with an unverified email the code by its verified phone, never by email', async () => {
+      const enrollmentId = '50000000-0000-4000-8000-000000000002';
+      const phone = '+2348012345679';
+      const client = { query: jest.fn(async (sql: string) => {
+        if (sql.includes('from auth.accounts account')) return { rows: [{
+          id: 'account-1', email: 'unconfirmed@example.test', email_verified: false, audience_matches: true,
+          token_version: '1', phone_enrollment_id: enrollmentId, phone_ciphertext: encryptedContact(enrollmentId, phone),
+          phone_key_version: 'local-v1',
+        }] };
+        return { rows: [] };
+      }) } as unknown as PoolClient;
+      const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
+      const service = new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient);
+
+      await service.start(startInput('unconfirmed@example.test', '192.0.2.94'));
+      await service.settleDeliveries?.();
+
+      expect(notification.deliver).toHaveBeenCalledTimes(1);
+      expect(notification.deliver).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms', recipient: phone }));
+    });
+
+    it('sends a staff or platform account its code at the provisioned work email, which no flow marks verified', async () => {
+      const store = recoveryStore();
+      const notification = recordingNotification();
+      const service = new OtpService(store.database, notification.client);
+
+      await service.start(startInput(STAFF_EMAIL, '192.0.2.95', 'PASSWORD_RESET', 'staff'));
+      await service.settleDeliveries?.();
+
+      expect(notification.deliveries.map(({ recipient }) => recipient)).toEqual([STAFF_EMAIL]);
+    });
+  });
+
   describe('recovery codes have one failure budget per account across challenges (REC-4)', () => {
     it('defaults to five failures per 15 minutes and bounds both settings', () => {
       const environment = getEnvironment() as unknown as Record<string, unknown>;
@@ -774,9 +959,13 @@ describe('Identity OTP credentials', () => {
    * does not know fail the test.
    */
   function recoveryStore(options: { recordDeliveryError?: Error } = {}) {
-    const accounts = [
-      { id: '70000000-0000-4000-8000-000000000001', email: KNOWN_EMAIL, hid: KNOWN_HID as string | null },
-      { id: '70000000-0000-4000-8000-000000000002', email: OTHER_EMAIL, hid: null },
+    const accounts: Array<{ id: string; email: string; hid: string | null; kinds: Audience[]; emailVerified: boolean }> = [
+      { id: '70000000-0000-4000-8000-000000000001', email: KNOWN_EMAIL, hid: KNOWN_HID, kinds: ['patient'], emailVerified: true },
+      { id: '70000000-0000-4000-8000-000000000002', email: OTHER_EMAIL, hid: null, kinds: ['patient'], emailVerified: true },
+      { id: '70000000-0000-4000-8000-000000000003', email: STAFF_EMAIL, hid: null, kinds: ['staff'], emailVerified: false },
+      { id: '70000000-0000-4000-8000-000000000004', email: ADMIN_EMAIL, hid: null, kinds: ['platform'], emailVerified: false },
+      { id: '70000000-0000-4000-8000-000000000005', email: UNVERIFIED_EMAIL, hid: UNVERIFIED_HID, kinds: ['patient'],
+        emailVerified: false },
     ];
     const calls: SqlCall[] = [];
     const challenges: StoredChallenge[] = [];
@@ -800,6 +989,7 @@ describe('Identity OTP credentials', () => {
         const account = accounts.find(({ email }) => email.toLowerCase() === identifier.toLowerCase())
           ?? accounts.find(({ hid }) => hid?.toUpperCase() === identifier.toUpperCase());
         return { rows: account ? [{ id: account.id, email: account.email, token_version: '1',
+          email_verified: account.emailVerified, audience_matches: account.kinds.includes(values[1] as Audience),
           phone_enrollment_id: null, phone_ciphertext: null, phone_key_version: null }] : [] };
       }
       if (sql.includes('coalesce(blocked_until')) {
@@ -926,8 +1116,9 @@ describe('Identity OTP credentials', () => {
     };
   }
 
-  function startInput(identifier: string, remoteIp = '192.0.2.40', purpose: RecoveryOtpPurpose = 'PASSWORD_RESET') {
-    return { identifier, purpose, remoteIp, correlationId: 'otp-start-0001' };
+  function startInput(identifier: string, remoteIp = '192.0.2.40', purpose: RecoveryOtpPurpose = 'PASSWORD_RESET',
+    audience: Audience = 'patient'): StartInput {
+    return startArgs({ identifier, purpose, remoteIp, correlationId: 'otp-start-0001', audience });
   }
 
   async function startAndCapture(service: OtpService, notification: RecordingNotification, identifier: string,

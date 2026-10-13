@@ -934,6 +934,19 @@ revoke all on function identity.current_patient_account(text),
   identity.authorize_patient_self(text,uuid), identity.patient_self_access_history(text,uuid),
   ehr.patient_self_context(uuid) from public;
 
+-- Recovery and patient search hardening (0086): the recovery audience check,
+-- the audit subject of a refused staff lookup and governed registration's
+-- duplicate checks are Identity-only commands; each checks its own caller.
+grant execute on function auth.recovery_account_audience(uuid, text),
+  identity.patient_lookup_audit_subject(text),
+  identity.registration_nin_holder(text),
+  identity.registration_candidates(date, text, text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function auth.recovery_account_audience(uuid, text),
+  identity.patient_lookup_audit_subject(text),
+  identity.registration_nin_holder(text),
+  identity.registration_candidates(date, text, text) from public;
+
 -- Governed enrollment creates only a pending-reset account for a resolved case.
 grant execute on function identity.enroll_registered_patient(uuid, bigint, text, text, text, char)
   to hid_identity_runtime;
@@ -1064,6 +1077,11 @@ grant execute on function identity.public_patient_nin_already_bound(char),
   identity.prune_expired_public_patient_enrollments(),
   identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)
   to hid_identity_runtime, hid_schema_test_runtime;
+-- Each QoreID NIN lookup of public enrollment is charged, before any account
+-- exists, through the network and platform quota command (0085); the runtime
+-- has no privilege on its counters.
+grant execute on function platform.consume_public_patient_nin_quota(char,integer,integer,integer)
+  to hid_identity_runtime, hid_schema_test_runtime;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
@@ -1158,6 +1176,39 @@ revoke all on function auth.lock_account_sessions(uuid) from public;
 -- transactions of the account. It only locks.
 grant execute on function auth.lock_account_for_mfa(uuid) to hid_identity_runtime;
 revoke all on function auth.lock_account_for_mfa(uuid) from public;
+
+-- Launch D14 (0087): governed workforce provisioning. The Identity runtime
+-- runs the five platform commands, each of which repeats the
+-- platform.workforce.manage, MFA and step-up checks, and the effective-role
+-- check its staff context uses. It reads and writes the attestation, lifecycle
+-- and role-grant tables only through those commands; the shared check helpers
+-- and the triggers stay internal.
+grant execute on function identity.admin_attach_workforce_member(uuid, uuid, text, text, text, text, character),
+  identity.admin_record_credential_attestation(uuid, bigint, text[], text, text, text, timestamptz, text, text,
+    character),
+  identity.admin_change_workforce_role(uuid, uuid, bigint, text, text, text, text, character),
+  identity.admin_end_workforce_membership(uuid, uuid, bigint, text, text, character),
+  identity.admin_workforce_profile(uuid),
+  auth.facility_role_is_effective(uuid)
+  to hid_identity_runtime;
+revoke all on function identity.admin_attach_workforce_member(uuid, uuid, text, text, text, text, character),
+  identity.admin_record_credential_attestation(uuid, bigint, text[], text, text, text, timestamptz, text, text,
+    character),
+  identity.admin_change_workforce_role(uuid, uuid, bigint, text, text, text, text, character),
+  identity.admin_end_workforce_membership(uuid, uuid, bigint, text, text, character),
+  identity.admin_workforce_profile(uuid),
+  auth.facility_role_is_effective(uuid),
+  identity.workforce_command_actor(),
+  identity.workforce_require_assurance(uuid),
+  identity.workforce_works_at(uuid, uuid),
+  identity.workforce_target_eligible(auth.accounts),
+  identity.guard_workforce_membership_change(),
+  identity.guard_ended_membership_change()
+  from public;
+revoke all on identity.staff_credential_attestations, identity.workforce_memberships,
+  identity.workforce_role_grants
+  from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
+    hid_ehr_api_runtime, hid_schema_test_runtime;
 
 -- End the temporary memberships granted after the role check above. A
 -- creator's ADMIN OPTION, which PostgreSQL 16 gives a CREATEROLE

@@ -239,7 +239,7 @@ fields; Identity gets `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=false`. The base
 templates after D-Eminence/hid-system#65 were not re-recorded here. Record the
 production baseline again from the approved SHA (§12 step 2).
 
-**Under ADR-055 (BRANCH:launch/edge-hardening-2).** The same offline synthesis
+**Under ADR-055 (D-Eminence/hid-system#72).** The same offline synthesis
 on `main` `cf5a14f` plus this branch (with its review follow-up) gives
 production
 `6e0300ce7fd7f083759d419208b83a70cd515075c68859055b7926fcf6af4609` (550,607

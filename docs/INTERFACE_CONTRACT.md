@@ -117,7 +117,10 @@ a live access token, the `X-HID-Client` check and the refresh-token lookup
 rules below come from D-Eminence/hid-system#39, which is not yet deployed. Platform administration sessions use their own cookies and
 `/auth/admin/*` routes (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1). The
 enrollment cookie rule and the lookups' actor condition come from
-D-Eminence/hid-system#50, also not deployed.
+D-Eminence/hid-system#50, also not deployed. Staff sign-in with an
+authenticator, the `STAFF_MFA_REQUIRED` refusals and the refusal of a staff
+Google exchange (below) come from D-Eminence/hid-system#71 (launch blocker
+MFA-1, migration 0088), also not deployed.
 
 Identity sets three cookies at sign-in and on every refresh (`setCookies` in
 `services/identity-api/src/auth/auth.controller.ts`). Their names derive from
@@ -135,18 +138,135 @@ The CSRF token is derived from the refresh token. Sign-in and refresh also
 return it in the `X-CSRF-Token` response header, and cookie mutations send it
 back in the `X-CSRF-Token` request header.
 
-Every response that sets these cookies (a staff or patient sign-in by
-password or Google, provider enrollment activation, and a refresh) or clears
-them also expires the public patient enrollment cookie `hid_enrollment` on its
+Every response that sets these cookies (a patient sign-in by password or
+Google, the second factor or enrolment activation of a staff sign-in, and a
+refresh) or clears them also expires the public patient enrollment cookie
+`hid_enrollment` on its
 path, `/api/v1/identity/patient-enrollments` (HttpOnly, `SameSite=Strict`,
-`Secure` as above). That cookie lets `GET /identity/patient-enrollments/current`
-and an activation replay show the enrollment's HID on the enrolling device for
-up to 24 hours ([QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md));
-a signed-in patient reads the HID from `GET /identity/me`, and the enrollment
+`Secure` as above). So does every successful public enrollment activation
+response (`200`, a replay's included; D-Eminence/hid-system#68,
+not deployed). If that response is lost, the cookie lets
+`GET /identity/patient-enrollments/current` and an activation replay show the
+enrollment's HID on the enrolling device for 15 minutes after activation;
+after that both answer `404 ENROLLMENT_NOT_FOUND`
+([QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md)). A
+signed-in patient reads the HID from `GET /identity/me`, and the enrollment
 routes refuse while session cookies are present. Every other response leaves
-it: a refused sign-in, a pending Google enrollee (`202`), and each refresh or
-sign-out refusal that leaves the session cookies untouched or kept (below).
-Activation itself keeps it. Platform administration sign-in does not touch it.
+it: a refused sign-in or activation, a pending Google enrollee (`202`), the
+staff password step and the email-code and enrolment-start steps, and each
+refresh or sign-out refusal that leaves the session cookies untouched or kept
+(below). Provider enrollment activation (which now opens a staff MFA
+enrolment, below) expires it. Platform administration sign-in does not touch
+it.
+
+#### Staff sign-in with an authenticator (MFA-1, 0088)
+
+A staff session is issued only after the password and a second factor: a TOTP
+code (RFC 6238, SHA-1, six digits, 30-second steps) or one unused recovery
+code, as a platform session is (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1).
+The account has one factor whichever kind of session it signs in to, so an
+administrator who also works at a facility uses the same authenticator for
+both, provided it was enrolled at staff sign-in: only a factor that records a
+staff enrolment proof (below) verifies a staff sign-in. A factor enrolled at
+platform sign-in, on the password alone, verifies platform sign-in only. There
+is no permission or role allowlist: every staff sign-in needs it.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /api/v1/auth/login` | `{ email, password, turnstileAction: 'staff-login', turnstileToken? }` | `200 { status: 'mfa_required' \| 'mfa_enrollment_required', expiresAt }` with only the challenge cookie `hid_access_mfa` (HttpOnly, `SameSite=Strict`, `Secure` as above, path `/api/v1/auth/mfa`, 5 minutes for `mfa_required`, 10 minutes for enrolment) and `Cache-Control: no-store`. No session cookie, no `X-CSRF-Token`, no actor. A wrong password and an account without an eligible staff membership get the same `401` ("Invalid credentials") and count against the sign-in budget below |
+| `POST /api/v1/auth/mfa/verify` | `{ code }` or `{ recoveryCode }` | `200 { actor, expiresAt }` with the three session cookies, `X-CSRF-Token`, and the challenge cookie cleared |
+| `POST /api/v1/auth/mfa/enroll/email-code` | none | First sign-in without an authenticator: sends a six-digit code to the account's email address. `200 { accepted: true, channel: 'email', expiresAt }`. A resend replaces the code |
+| `POST /api/v1/auth/mfa/enroll/start` | `{ emailCode? }` | `200 { secret, otpauthUri, algorithm, digits, periodSeconds, expiresAt }`, once (`Cache-Control: no-store`). Needs the emailed code, or a challenge opened by provider enrollment activation (no code) |
+| `POST /api/v1/auth/mfa/enroll/activate` | `{ code }` (the first TOTP code) | `200 { actor, expiresAt, recoveryCodes }` (ten codes, shown once) with the session cookies and `X-CSRF-Token`, and the challenge cookie cleared |
+
+Every step requires an allowed `Origin` (`403 ORIGIN_DENIED`) and the
+challenge cookie (`401 MFA_CHALLENGE_INVALID` without it, or when it is
+expired, consumed, superseded by a newer password step, or a platform
+challenge). A staff challenge is accepted by no `/auth/admin/mfa/*` step and a
+platform challenge by no staff step. Refusals:
+
+| Code | When |
+|---|---|
+| `403 STAFF_MFA_FACTOR_UNPROVEN` | `POST /auth/login` with the right password, but the account's authenticator was enrolled at platform sign-in on the password alone (before 0088, or before the account held a staff membership), so it records no staff proof. No challenge or cookie is issued; a denied `login_failed` session event (reason `staff_mfa_factor_unproven`) is recorded. The remedy is a two-person MFA reset (0070), after which the account enrols at staff sign-in; the new factor then verifies platform sign-in too. The same answer at `/auth/mfa/verify` if such a factor is met there |
+| `401 MFA_INVALID_CODE` | A wrong, reused (the same 30-second step twice) or already used code; a wrong email code. Each counts against the challenge (five attempts), the account's MFA failure budget and the source address's staff budget |
+| `429 MFA_RATE_LIMITED` | A failure budget is spent, and while it is every code is refused, a correct one too, until its 15-minute window passes: the account's (the fifth failed code within 15 minutes, staff and platform together), or the source address's staff budget (the 100th failed staff code from one address within 15 minutes; it is the staff sign-in's own, apart from platform sign-in's per-address budget of 20, and sized for a facility whose staff share one address). Also more than five enrolment-code sends or enrolment starts in 15 minutes |
+| `403 MFA_ENROLLMENT_PROOF_REQUIRED` | Enrolment start or activation without a verified proof (no email code, and the challenge was not opened by provider activation). No factor is created |
+| `409 MFA_ENROLLMENT_PROOF_COMPLETE` | An email code asked for once the proof is verified |
+| `409 MFA_ENROLLMENT_PROOF_UNAVAILABLE` | The account has no email address |
+| `503 MFA_ENROLLMENT_CODE_UNDELIVERABLE` | The notification service refused the code definitively, or no notification client is configured |
+| `503 MFA_UNAVAILABLE` | `MFA_SECRET_KEY_B64` is not configured: no staff or platform session can be issued |
+| `400 MFA_CODE_REQUIRED` | `verify` with neither or both of `code` and `recoveryCode` |
+
+Only a keyed digest of the email code is stored, bound to its challenge. The
+code goes to the account's email address (`auth.accounts.email`) whether or
+not `email_verified_at` is set: no flow marks a staff address verified (it is
+the work address that provisioning or onboarding set, as for staff password
+recovery), so the code itself proves control of that address. The code, or
+the provider activation, is the fresh proof of a first enrolment, and the new
+factor records it (`enrollment_proof`). So the password alone never enrols a
+staff authenticator, and a stolen password cannot be turned into a staff
+session on an account that has none. The database enforces what it can see
+(0088): a staff enrolment challenge is consumed only once it records a
+verified proof, a factor records a proof only from such a challenge of its own
+account, and a staff session's MFA assurance must name a factor that records
+one. It cannot check the emailed code itself; Identity does.
+
+The email code proves the same mailbox that staff password recovery uses. For
+an account without a factor, control of that mailbox is therefore enough on
+its own: `staff-reset` recovery sets a new password and the enrolment code
+goes to the same address. Accounts provisioned without a password
+(organization onboarding, 0046, and governed workforce provisioning, 0087) set
+their first password that way, by design. Once an account has a factor,
+recovery keeps it, and a mailbox alone never yields a staff session. Until a
+second enrolment channel exists (an open decision, D14 in
+`PHASE_3_LAUNCH_DECISIONS.md`), existing clinical accounts enrol before
+clinical roles are enabled, and operators review enrolments that followed a
+recovery (`PHASE_4_STAGE_5_RELEASE_READINESS.md` P22, `MIGRATION_RUNBOOK.md`
+§6).
+
+A platform first enrolment (`POST /api/v1/auth/admin/mfa/enroll/start`) of an
+account that holds an eligible staff membership answers `409
+MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED` and creates no factor: such an account
+enrols at staff sign-in, with the proof, and then uses that factor for
+platform sign-in. A platform administrator without a staff membership enrols
+at platform sign-in as before (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1).
+
+`POST /api/v1/identity/provider-enrollments/activate` sets the administrator's
+password and answers `200 { activated: true, organizationId, facilityId,
+accountId, status, expiresAt }` with the `hid_access_mfa` challenge cookie of
+an enrolment whose proof is the activation itself (the administrator's email
+was verified by that enrollment), and no session cookie. It clears the
+provider enrollment cookie and `hid_enrollment`. The client continues with
+`/auth/mfa/enroll/start` (no email code) and `/auth/mfa/enroll/activate`,
+which issues the session. If the account already has an authenticator the
+status is `mfa_required` and the client continues with `/auth/mfa/verify`.
+
+A staff session is authorized only while its sign-in has live MFA assurance:
+an `auth.session_assurance` row for its family whose factor is still active.
+Without it (every staff sign-in from before this change, or one whose
+authenticator was reset by a two-person MFA reset), every route behind
+`SecurityGuard` answers `403 STAFF_MFA_REQUIRED`, audited as
+`auth.authorization.denied` (before any facility is bound). That includes
+`GET /auth/session`, `POST /auth/facility` and the
+`/auth/service-session` checks that EHR, Lab, Pharmacy, OCR and Outreach make,
+which relay the `403 STAFF_MFA_REQUIRED` to the browser. Refresh ends such a
+sign-in (below). Sign-out still works. Clients sign in again with password and
+authenticator on `STAFF_MFA_REQUIRED`.
+
+`POST /api/v1/auth/oidc/exchange` signs in patients only: any
+`turnstileAction` other than `patient-login` is `403
+GOOGLE_STAFF_SIGN_IN_DISABLED`, before Turnstile, the nonce or the Google
+token are checked, and is audited. With `AUTH_MODE=oidc`, OIDC bearer tokens
+carry no MFA assurance and are refused for staff (`403 STAFF_MFA_REQUIRED`).
+
+Audit: `auth.staff.mfa.enrolled` (with the proof method),
+`auth.staff.mfa.failed`, `auth.staff.mfa.recovery-code.used` (with the codes
+left; platform: `auth.admin.mfa.recovery-code.used`), and `auth.login` with
+`mfaMethod` (`totp` or `recovery_code`) at the second factor. Session events
+record `mfa_challenge_issued`, `login_succeeded` (with `session_kind` and
+`mfa_method`) and `mfa_rate_limited`. Enrolment, recovery-code use and a
+two-person MFA reset are offered to an owner notice sink (`MFA_NOTICE_SINK`)
+after commit; no delivery route is bound yet, so today they are audited only.
 
 `POST /api/v1/auth/refresh` takes no body. It reads the refresh and CSRF
 cookies, `X-CSRF-Token` and, optionally, `X-HID-Client`, and checks them in
@@ -157,6 +277,7 @@ this order:
 | `403 ORIGIN_DENIED` | `Origin` is missing or not in `CORS_ORIGINS` | Untouched |
 | `403 CSRF_VALIDATION_FAILED` | The refresh cookie is missing, or `X-CSRF-Token` and the CSRF cookie are missing, differ, or are not the value derived from the refresh token | Untouched |
 | `403 SESSION_CLIENT_MISMATCH` | `X-HID-Client` names the other kind of sign-in (below). Nothing is rotated | Kept |
+| `403 STAFF_MFA_REQUIRED` | A staff sign-in without live MFA assurance (MFA-1, 0088): one from before staff MFA, or whose authenticator was reset. Nothing is rotated; the whole sign-in is ended (revocation reason `staff_mfa_required`, a denied `refresh` session event) | Cleared |
 | `401 AUTHENTICATION_REQUIRED` | Rotation refuses the token: unknown, ended, expired, reused (reuse ends the whole sign-in), a platform token, or an account that is no longer active, is disabled or has a new token version. Any other failure during rotation also clears the cookies | Cleared |
 | `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header | The refresh token is rotated into a new session of the same sign-in | Replaced |
 
@@ -231,7 +352,9 @@ A staff or patient sign-in is one refresh could renew now when:
   facility (`eligibleStaffMembershipJoins` in
   `current-staff-context.service.ts`, the joins staff resolution uses); a
   patient sign-in's patient is still the account's active patient
-  (`identity.current_patient_account`).
+  (`identity.current_patient_account`); and
+- a staff sign-in has live MFA assurance (0088): an `auth.session_assurance`
+  row for its family whose factor is still active (`STAFF_ASSURED`).
 
 On refresh, the kind lookup answers only for such a sign-in. Any other token
 gets no kind and goes on to rotation, which refuses it with `401`; for an
@@ -276,6 +399,35 @@ and sign-out (since `22e8664`). Earlier Health-id builds and
 `packages/identity-browser-client` send none; for them the check is inert, and
 a cookie sign-out without a live access cookie ends whichever staff or patient
 sign-in the refresh cookie holds.
+
+### Staff facility binding (N5, migration 0087)
+
+A staff actor lists one entry per active membership (`actor.facilities`), and
+`X-Facility-ID` binds the entry whose `id` equals it. From 0087 an account
+holds at most one active, unheld membership per facility
+(`staff_memberships_one_active_per_facility_uq`), so a facility binds exactly
+one membership, its roles, its permissions and its consent grants. Entries are
+ordered by primary first, then facility name, facility id and membership id.
+Should two active memberships of one account at one facility ever be read
+anyway, Identity refuses to resolve the actor at all: sign-in, refresh,
+`GET /auth/session`, the service-session routes the other services call, and
+every staff request answer `409 FACILITY_MEMBERSHIP_AMBIGUOUS` until a platform
+administrator ends one of them. Nothing is bound by row order.
+
+A facility entry's `roles` are the codes of the membership's live, effective
+facility role assignments, the same assignments its `permissions` come from;
+the actor's `roles` and `role` and the access token's `roles` claim are those
+of the bound entry. A membership with no effective role is still listed, with
+`roles: []` and `permissions: []`. From 0087 the stored membership labels
+(`membership_role`, `app_role`) are not read for the actor. A facility role
+granted through workforce provisioning (§19) is effective only while the
+credential attestation it was granted on is current: when the attestation
+lapses, or the role is revoked, the role and its permissions disappear from
+`actor.facilities` at the next request (and from the token's `roles` claim
+when it is next issued). The workforce profile still lists a lapsed role, with
+`effective: false`. The principals list (`GET /admin/principals`) shows each
+membership's stored labels as `role` and `appRole`: the role it was activated
+with, which later grants and revokes do not change.
 
 ### Patient sessions and self service
 
@@ -331,7 +483,17 @@ Patient access-request decisions are session-bound patient commands:
 `GET /api/v1/identity/me/access-requests`,
 `POST /api/v1/identity/access-requests/:requestId/approve` and
 `POST /api/v1/identity/access-requests/:requestId/deny` (`{ "reason" }`) require
-a patient session and no facility context. `POST
+a patient session and no facility context. Since 0086 an approval grants
+access only from a session family first issued within the last 10 minutes (as
+an access-PIN change does), else `403 PATIENT_RECENT_AUTH_REQUIRED` with the
+detail "For your security, sign out, sign in again, and approve within 10
+minutes."; the client signs the patient out and in again and repeats it.
+Health-id shows that detail as it is on Approve, so it says what to do (FE-8;
+it was "Sign in again before approving access to your records", which left a
+patient who was already signed in no way forward). For 24 hours after an OTP account
+recovery of the account (any recovery purpose) an approval is `403
+PATIENT_RECENT_RECOVERY_HOLD`, checked before recent sign-in, because signing in
+again does not end it. A denial or a revocation is never held. `POST
 /api/v1/identity/me/consent-grants/:grantId/revoke` (`{ "reason" }`) revokes a
 grant the patient authorized (patient-approved or PIN-derived); break-glass and
 workforce grants return `409`. Access-history items include `breakGlass` and
@@ -351,9 +513,53 @@ approval with a grant, whichever ended it first, `active`, `expired` (also when
 it was revoked only after it lapsed), `closed` (by the requesting clinician) or
 `revoked` (by anyone else); otherwise the request `status` (0074). The `status`
 filter accepts `pending`, `approved`, `denied`, `revoked`, `expired`, `active`
-and `closed`, and matches the request status or the effective status. Until the role bootstrap of this
+and `closed`, and matches the request status or the effective status. Since
+0086 (PSEARCH-1) an item's `patientId` is the patient's id only while its
+`effectiveStatus` is `active`; for every other item (pending, denied, expired,
+closed, revoked) it is the non-identifying string
+`withheld-<last four characters of accessRequestId>`, and each item carries
+`patientIdWithheld` (`true` when withheld). The withheld value is derived from
+the request, never from the patient, and is a string rather than `null` so
+that a client rendering its last characters keeps working (Health-id
+`AccessRequests.tsx`). Before 0086, every item named its patient, so one
+request for a guessed HID and one list call disclosed the patient id before
+the patient answered. Until the role bootstrap of this
 fix, the Identity runtime could not execute `identity.list_my_staff_access_requests`,
 and every caller got `403 CONSENT_COMMAND_DENIED`.
+
+Staff patient search (0086, launch blocker PSEARCH-1). Searching by HID never
+grants access by itself, and its answers do not tell whether an HID exists:
+
+| Route | Contract |
+|---|---|
+| `POST /api/v1/identity/patient-lookup` | `identity.patient.read` at the `X-Facility-ID` facility; body `{ hid, purpose }` (`direct-care`, `emergency` or `healthcare-operations`; anything else `400`). `200 { patient: { patientId, hid, firstName, lastName, fullName, dateOfBirth, gender, version }, authorization: { decision: 'allow', facilityId, membershipId, scope, purpose, consentGrantId, expiresAt, breakGlass } }` only with an active grant for this account, membership, facility and purpose (before 0086 a success answered `201`). Every refusal, whether the HID is unknown, the patient has no grant, or the grant is held at another facility or for another purpose, is the same `404 PATIENT_NOT_AVAILABLE` ("The patient is not available"); before 0086 a patient visible to the caller without a grant (any patient, for a registration member) answered `403`, and an unknown or hidden one `404`. The audit event `identity.patient.lookup` keeps the true outcome: `success`, or `denied` with `details.reason` `not_found` or `not_authorized` and, for the latter, the patient |
+| `POST /api/v1/identity/access-requests` | `identity.consent.write` at the `X-Facility-ID` facility, `X-Purpose-Of-Use` `direct-care` or `healthcare-operations`; body `{ hid, scope: read_records\|write_records, reason (8–500), durationMinutes (5–1440) }`. `201 { accessRequestId, status: 'pending', scope, purpose, durationMinutes, requestedAt, existingRequest }`, which no longer carries `patientId`. An unknown HID gets the same `201` shape (a new `accessRequestId`, `existingRequest: false`) instead of `404 CONSENT_RESOURCE_NOT_FOUND`; nothing is persisted for it, and the audit records `identity.access-request.refused` (`denied`, no patient, `details.reason: patient_not_available`) under that `accessRequestId`. The clinician's own list (above) shows only recorded requests, and names the patient only once a grant made from the request is active |
+
+Both commands have budgets in `auth.otp_rate_limits`, per actor account
+(across facilities) and per facility. An access request is counted before it
+runs, whatever its outcome. A patient lookup reads its two budgets first and,
+while either is blocked, answers `429 PATIENT_LOOKUP_RATE_LIMITED` before it
+reads anything, a lookup of a patient the caller holds a grant for included.
+Otherwise only a refused lookup is counted: an unknown HID, a patient without a
+grant and a grant held at another facility or for another purpose alike, after
+its audit event and before its `404`. A lookup that answers `200` is never
+counted, nor is one that fails on a dependency (`5xx`), so Health-id's lookup
+before each clinical read and write of a granted patient spends nothing (FE-10;
+until this change every lookup was counted, so the about ten lookups of one
+consultation could leave a clinician's saves refused with `429`). Defaults: 60
+refused lookups per actor and 600 per facility in 5 minutes
+(`PATIENT_LOOKUP_RATE_WINDOW_SECONDS`, `PATIENT_LOOKUP_ACTOR_MAX_REQUESTS`,
+`PATIENT_LOOKUP_FACILITY_MAX_REQUESTS`); 20 access requests per actor and 200
+per facility in 15 minutes (`ACCESS_REQUEST_RATE_WINDOW_SECONDS`,
+`ACCESS_REQUEST_ACTOR_MAX_REQUESTS`, `ACCESS_REQUEST_FACILITY_MAX_REQUESTS`;
+windows 60–86400 s, actor maxima 1–10000, facility maxima 1–100000). The
+refused lookup or the access request after a maximum is `429
+PATIENT_LOOKUP_RATE_LIMITED` (instead of the `404`, for an unknown and an
+unauthorized HID alike) or `429 ACCESS_REQUEST_RATE_LIMITED`, and blocks that
+budget for one window: until it ends, every lookup by that actor, or at that
+facility, and every access request by that actor, or at that facility, is
+`429`. A call refused for the actor's own budget does not count against the
+facility's.
 
 Patient login/account deletion (Phase 3, ADR-036) closes the login only:
 
@@ -379,15 +585,52 @@ Patient emergency contacts (POST-only commands):
 | `POST /api/v1/identity/me/emergency-contacts/:contactId/verification` | Sends a six-digit code to the contact; `503 EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE` while delivery is disabled |
 | `POST /api/v1/identity/me/emergency-contacts/:contactId/verification/confirm` | `{ challengeId, code }`; single use, expiring, attempt-limited |
 
+For 24 hours after an OTP account recovery (0086, REC-NOTIFY), adding or
+changing an emergency contact and setting the access PIN
+(`POST /api/v1/identity/me/access-pin`) answer `403
+PATIENT_RECENT_RECOVERY_HOLD`, as does an access-request approval (above).
+Deactivating a contact, verifying one already added and removing the PIN
+(`DELETE /api/v1/identity/me/access-pin`) stay available.
+
 Recovery completion atomically consumes the account/token-bound OTP credential,
-sets an Argon2 password and revokes sessions. Disabled, stale, expired and replayed
-credentials fail closed. Completion returns to login rather than opening a session.
+sets an Argon2 password and revokes every session of the account (patient,
+staff and platform). Since 0086 it also revokes every external sign-in identity
+(today only Google links) of the account not already revoked, so a link another
+party made stops signing in; the audit event `auth.otp.recovery.completed`
+records how many (`details.external_identities_revoked`). The legacy importer's
+provenance record (issuer `legacy-identity`) is not a sign-in: it is kept and
+not counted. The revoked Google subject cannot be linked again (the link
+commands answer `GOOGLE_IDENTITY_ALREADY_LINKED` for any subject ever linked),
+so after a recovery the owner can link only a different Google account.
+Recovery never touches the account's authenticator: the TOTP factor and its
+recovery codes stay, so a staff or platform account that recovered its
+password still needs its authenticator at the next sign-in, and for an account
+with a factor a mailbox alone never yields a staff session (MFA-1, pinned by
+`staff-mfa.integration.sql` and `verify-staff-mfa-runtime.mjs`). An account
+without a factor enrols on a code sent to the same mailbox, so for it the
+mailbox is enough (staff sign-in, above). A lost authenticator is reset only by the
+two-person MFA reset (0070), for staff accounts as for administrators.
+Disabled, stale, expired and replayed credentials fail closed. Completion
+returns to login rather than opening a session.
+The owner notice of a completed recovery ("your password was changed", to every
+verified contact, with an inbox entry) is not sent yet: Identity offers each
+completion, after commit, to a bound `ACCOUNT_RECOVERY_NOTICE_SINK`, which the
+notification route will provide.
 
 Recovery start (`POST /api/v1/auth/otp/start`, every purpose) answers every
 identifier alike: `202 { accepted, challengeId, deliveryChannels: ['email', 'sms'],
-expiresInSeconds, resendAfterSeconds }`, before any code is delivered. Within
-`resendAfterSeconds` a repeat for the same purpose and identifier (email or HID,
-any case) answers the same `challengeId` whether or not an account exists, and
+expiresInSeconds, resendAfterSeconds }`, before any code is delivered. Since 0086
+(REC-AUDIENCE, REC-UNVERIFIED-CONTACT) a start reaches only the account kind of
+its page, named by `turnstileAction`: `patient-reset-start` and
+`legacy-recovery` an account with an active patient record, `staff-reset` one
+with an active staff record, `admin-reset` a platform administrator. A
+patient's code goes only to a verified contact: the account email once
+`email_verified_at` is set, else the verified phone of its public enrollment. A
+start for an account of another kind, or for a patient with no verified
+contact, is answered and counted exactly as for an unknown identifier and sends
+nothing. A staff or platform account's code goes to its provisioned work email.
+Within `resendAfterSeconds` a repeat for the same purpose, page and identifier
+(email or HID, any case) answers the same `challengeId` whether or not an account exists, and
 sends nothing. A start for the account's other identifier in that window, or for
 an account whose code budget is spent, gets a new `challengeId` and no code, as
 an unknown identifier does. Clients keep the `challengeId` of their latest start.
@@ -397,6 +640,16 @@ code within 15 minutes (`OTP_VERIFY_FAILURE_MAX`,
 `OTP_VERIFY_FAILURE_WINDOW_SECONDS`) refuses every code of that account, a correct
 one too, for 15 minutes. Every refusal is `403 OTP_INVALID_OR_EXPIRED`; start
 limits are `429 OTP_RATE_LIMITED`, unchanged.
+
+Password sign-in (`POST /api/v1/auth/login`, `POST /api/v1/auth/patient/login`,
+the platform password step and the password check of a Google link) counts a
+failure per identifier as typed (email or HID, any case) and, since 0086
+(SIGNIN-LOCKOUT), per resolved account, so the email and the HID of one account
+share a budget. The fifth failure within 15 minutes of a budget's first locks it
+for 15 minutes; a refused attempt within that window extends the lock.
+While the account's budget is locked the correct password is refused too, by
+either identifier. Every refusal is the same `401` ("Invalid credentials"); a
+correct password while the budget is open ends that budget's window.
 
 ## 1. Purpose
 
@@ -493,6 +746,14 @@ Do not leak:
 * NIN
 * access tokens
 * protected clinical information
+
+Identity replaces the `detail` of every `5xx` answer with "The service could
+not complete the request.", because an unexpected failure's message can carry
+internal state. The one exception is a problem raised as `PublicDetailProblem`:
+a fixed sentence written for the person using the client, which keeps its
+`detail` whatever its status. Today only the closed public enrollment gate
+uses it (`503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED`, section 8,
+"Public patient enrollment"; D-Eminence/hid-system#68, FE-4).
 
 ## 7. Health Endpoints
 
@@ -669,6 +930,100 @@ attempts that then fail (for example `503 ENROLLMENT_RECONCILIATION_REQUIRED`
 or `409 CONTACT_ALREADY_REGISTERED`). A malformed password (`400`), a missing
 or forged enrollment cookie (`404`) or an enrollment not yet at the password
 step (`409`) is refused first and not counted. Success bodies are unchanged.
+
+Changes of D-Eminence/hid-system#68 (migration 0085; not
+deployed). Request and success bodies are unchanged:
+
+- `POST /api/v1/identity/patient-enrollments` checks the QoreID gate after
+  the Origin, Turnstile, signed-in-session and input checks and before
+  anything that reads the NIN's registration: `503 QOREID_DISABLED`,
+  `503 QOREID_NIN_ONLY_DISABLED` or `503 INTEGRATION_PAUSED`, the same for a
+  bound, a pending and an unknown NIN. A same-key resume is refused the same
+  way while the gate is closed. Before, a bound or pending NIN got
+  `409 NIN_ALREADY_REGISTERED` whatever the gate's state; with the gate open
+  it still does.
+- The same route answers `429 VERIFICATION_QUOTA_EXCEEDED` ("Verification
+  request limit reached; try again later") when the QoreID lookup quota
+  refuses the lookup: per client network (an IPv4 address or an IPv6 /64)
+  `PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX` (5) an hour and
+  `PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX` (15) a day, and
+  `PATIENT_ENROLLMENT_QOREID_DAILY_CAP` (200) a day across the platform. It is
+  charged only when QoreID is called: never for a resume, a duplicate or an
+  earlier refusal. A quota fault answers `503 VERIFICATION_QUOTA_UNAVAILABLE`.
+- `POST .../activate` answers `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED`
+  ("Verify your contact again before setting a password") when the contact
+  was proved more than 30 minutes earlier. The enrollment is back at the
+  contact step (`GET .../current` answers `stage: verify_contact` without a
+  contact): choose and prove a contact again (`POST .../contact`, then
+  `/contact/verify`). Nothing is created, and the attempt is not counted
+  against the activation budget unless the activation command made the
+  decision.
+- An enrollment activated more than 15 minutes ago answers
+  `404 ENROLLMENT_NOT_FOUND` on every enrollment route (`GET .../current`,
+  `POST .../activate`, `/contact`, `/contact/verify`, `/google`), without the
+  HID, as an unknown enrollment does. Within those 15 minutes `GET .../current`
+  and a replay still answer `stage: active` with the HID.
+- A successful activation response (`200`) expires `hid_enrollment`
+  ("Auth session contract", above).
+
+Enrollment availability and the closed-registration answer (FE-4,
+D-Eminence/hid-system#68; no migration; not deployed):
+
+- `GET /api/v1/identity/patient-enrollments/availability` (new). Public: no
+  session, Origin, Turnstile token, cookie or input; a signed-in caller gets
+  the same answer. `200 { "open": boolean }`, nothing else. The route itself
+  refuses no `Origin`, but Identity's CORS middleware (`main.ts`) runs first,
+  as on every route: a request without an `Origin` or from one in
+  `CORS_ORIGINS` (the Health-id hosts) gets the answer, and a request from
+  any other `Origin` is answered `500` with no CORS permission before the
+  route is reached. `open` is `true` only when a start would now pass the
+  checks it makes before it reads a NIN: the enrollment keys are
+  configured, `QOREID_ENABLED` and `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` are
+  on, and QoreID's `patient_nin` capability is not paused at runtime. It
+  does not predict per-request
+  refusals (Turnstile, rate limits, the lookup quota, a registered NIN,
+  `503 ENROLLMENT_RECONCILIATION_REQUIRED`), so a client still handles every
+  start answer. A fault reading the runtime pause answers `503` (generic
+  detail), not `{ "open": false }`; a client treats any answer other than
+  `200 { "open": true }` as not open. With either flag off the route reads
+  nothing; with both on it makes the one runtime-state read that start makes.
+  It writes no audit row (as `GET /commercial/pricing`) and sets no cookie.
+  The `200` carries `Cache-Control: public, max-age=30` and no `Pragma`,
+  `Expires` or `Surrogate-Control`; a failure keeps the no-store default.
+  Behind the Cloudflare Worker every API response is `private, no-store`
+  (`infra/cloudflare/src/frontend-worker.mjs`), so a browser on the
+  Health-id hosts refetches it each time. Identity does not rate limit it,
+  as it does not `GET /commercial/pricing`: a per-network counter would cost
+  a database write per anonymous read. The WAF rate rule that covers every
+  API request applies (keyed per client by ADR-055). The gateway
+  serves it under the identity prefix only (`^~ /api/v1/identity/`; with the
+  route switch of #65, only while `HID_ENABLED_API_ROUTES` names `identity`,
+  otherwise `404 API_ROUTE_NOT_FOUND`).
+- While `QOREID_ENABLED` or `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` is off,
+  `POST /api/v1/identity/patient-enrollments` still answers
+  `503 QOREID_DISABLED` or `503 QOREID_NIN_ONLY_DISABLED`, now with
+  `detail` "New Health ID registration is not open yet. If you already have a
+  Health ID, sign in." Before, Identity replaced it with the generic 5xx
+  detail (section 6), so a client calling Identity directly got "The
+  service could not complete the request.". Production keeps NIN-only
+  enrollment off until the N1 holder step ships
+  (`PHASE_3_LAUNCH_DECISIONS.md`), so in production Identity answers every
+  start this way. `503 INTEGRATION_PAUSED` (a runtime pause) and
+  `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` keep the generic detail. A
+  patient on Health-id sees neither detail yet: the gateway, on this branch
+  and on main (#65), replaces every upstream `502/503/504` with
+  `503 UPSTREAM_UNAVAILABLE` ("A required platform service is temporarily
+  unavailable.") and drops the `QOREID_*` code, before this change and
+  after it. The new detail and codes reach a browser only once the gateway
+  passes upstream errors through (ADR-055, D-Eminence/hid-system#72).
+  The availability read is a `200` and is not affected.
+- Health-id follow-up (not in Health-id 82b474e, which keeps working
+  unchanged): read availability before showing the NIN step and the
+  "Get your Health ID" link, and show a "registration is not open" notice
+  instead when it is not `200 { "open": true }`; on the completion screen,
+  ask the patient to save the Health ID (ENR-2), because the enrollment
+  cookie is expired by the activation response and `GET .../current` shows
+  the HID for 15 minutes only.
 
 ### HID Resolution
 
@@ -1678,6 +2033,125 @@ surface.
 Operations aggregation forwards `X-Correlation-ID`, uses a 250–5000 ms
 configured bound (1500 ms default), reports each dependency independently,
 and whitelists terminal failure fields. No arbitrary retry command exists.
+
+### Workforce provisioning (launch decision D14, migration 0087)
+
+Clinicians are provisioned only by platform administrators holding
+`platform.workforce.manage` (granted to `platform_super_admin` only). A
+facility's `org_admin` has no route to grant itself or anyone a clinical role.
+Every route below is a platform route: it needs an MFA-verified platform
+session (`PLATFORM_SESSION_REQUIRED` otherwise) and the permission
+(`PERMISSION_DENIED`). Every command also needs a TOTP step-up from the last
+five minutes (`STEP_UP_REQUIRED` or `STEP_UP_EXPIRED`), `Idempotency-Key` (16
+to 128 URL-safe characters) and a `reason` of 8 to 500 characters; commands on
+an existing staff record or membership need `If-Match` with its version
+(`428 IF_MATCH_REQUIRED`, `409 VERSION_CONFLICT`). An exact replay returns the
+first answer with `replayed: true`; the same key with a different body is
+`409 IDEMPOTENCY_CONFLICT`. Commands answer `201`. Each new command records a
+platform-scoped audit event (`admin.workforce.membership.attached`,
+`admin.workforce.credential.attested`, `admin.workforce.role.granted`,
+`admin.workforce.role.revoked`, `admin.workforce.membership.ended`) with no
+facility or membership bound; the facility is in `details`.
+
+```text
+GET  /api/v1/admin/workforce/accounts/:accountId
+POST /api/v1/admin/workforce/memberships
+POST /api/v1/admin/workforce/accounts/:accountId/attestations
+POST /api/v1/admin/workforce/memberships/:membershipId/roles
+POST /api/v1/admin/workforce/memberships/:membershipId/end
+```
+
+`GET .../accounts/:accountId` returns `{ account: { id, email, displayName,
+status, version, patientAccount }, staff: { id, fullName, verificationStatus,
+active, version } | null, attestations: [{ id, attestedRoles,
+credentialReference, issuingAuthority, verificationMethod, evidenceReference,
+validUntil, current, reviewerAccountId, recordedAt }], memberships: [{ id,
+facilityId, facilityName, state, active, held, version, roles: [{ roleCode,
+effective, grantedAt }] }] }`. `state` is `pending`, `active`, `ended`, or
+`inactive` for an inactive membership the workforce commands never touched.
+`staff.version` is the `If-Match` of an attestation; a membership's `version`
+is the `If-Match` of its role and end commands.
+
+`POST .../memberships` attaches a staff identity to a verified facility. The
+body is `{ facilityId, accountId, reason }` for an existing staff account, or
+`{ facilityId, email, fullName, reason }` for a new one, never both and no
+password. The membership is created inactive (`state: pending`) and grants
+nothing. A new account is `pending_reset` with no password and a new staff
+record is `pending`: the clinician sets a password through the staff account
+recovery flow (`/auth/otp/*`), and cannot sign in before a role is granted. The
+answer is `{ membershipId, accountId, staffId, facilityId, state: "pending",
+accountStatus, accountCreated, membershipVersion, staffVersion, replayed }`.
+
+`POST .../accounts/:accountId/attestations` records a professional-credential
+attestation: `{ attestedRoles, credentialReference, issuingAuthority,
+verificationMethod: "manual_review", evidenceReference, validUntil, reason }`
+with `If-Match` the staff version. `attestedRoles` is one to three of
+`doctor`, `clinician`, `nurse`, each once. `validUntil` is an ISO 8601 time in
+the future and at most three years ahead; set it no later than the licence's
+expiry. `evidenceReference` names where the reviewed evidence is kept (a ticket
+or document reference), never the document itself. The administrator who
+records it is its reviewer and cannot attest for their own account. A
+`pending` staff record becomes `verified`. The answer is `{ attestationId,
+accountId, staffId, attestedRoles, verificationMethod, validUntil,
+verificationStatus, staffVersion, replayed }`. The evidence text is not copied
+into the audit event.
+
+`POST .../memberships/:membershipId/roles` grants or revokes one role:
+`{ facilityId, roleCode, action: "grant" | "revoke", reason }` with `If-Match`
+the membership version. `facilityId` must be the membership's facility.
+`grant` accepts `doctor`, `clinician` or `nurse`; `revoke` also accepts `lab`
+and `pharmacist`. A grant needs a current attestation for that role by a
+reviewer who is not the target, has no active membership at the facility and
+is not the administrator granting it, so a clinical role always takes two
+platform administrators. The first grant activates a pending membership. The
+answer is `{ membershipId, facilityId, roleCode, roleActive, membershipActive,
+state, version, attestationId, renewed, replayed }`; `attestationId` is null for
+a revoke.
+
+Renewal: a granted role rests on the attestation it was granted on, and a
+later attestation does not extend it by itself. To keep a clinician's role,
+record a new attestation (one administrator) and grant the role again (a
+second administrator, under the same rules). The grant renews the role, with
+`renewed: true`, when the role's attestation has lapsed, or before the lapse
+when the best current attestation lasts longer: the old assignment is revoked
+with the grant's reason and the new one rests on the new attestation, so the
+role stays effective without a gap. Otherwise a grant of a held role is
+`WORKFORCE_ROLE_ALREADY_ACTIVE`. A role granted by onboarding or the legacy
+promotion never lapses and is never renewed. The audit event of a grant
+carries `renewed` in `details`.
+
+`POST .../memberships/:membershipId/end` ends a membership for good:
+`{ facilityId, reason }` with `If-Match` the membership version. It
+deactivates the membership, revokes its facility roles, expires its pending
+access requests, revokes every active consent grant bound to it and, when the
+membership was active, revokes all the account's staff sessions (a staff
+session is not bound to one facility). A patient approval that commits while
+the end runs is counted in `revokedGrants`, not `expiredRequests`. An access
+request created and committed concurrently, after the end has read the
+pending requests, stays pending on the ended membership; it, and any grant
+approved from it, authorizes nothing, because every authorization needs an
+active membership. The answer is `{ membershipId, facilityId, accountId,
+state: "ended", revokedRoles, revokedGrants, expiredRequests, revokedSessions,
+version, replayed }`. To give the person access again, attach them again: a
+new membership starts pending.
+
+| Status and code | When |
+|---|---|
+| `400 WORKFORCE_COMMAND_INVALID` | The body names both or neither identity form, or a field is out of range |
+| `400 WORKFORCE_ROLE_NOT_GRANTABLE` | The role cannot be granted (or revoked) through this route |
+| `403 WORKFORCE_SELF_CHANGE_DENIED` | The target is the caller's own account or membership |
+| `403 WORKFORCE_FACILITY_CONFLICT` | The caller has an active membership at the facility (its `org_admin` included) and attaches or grants there |
+| `403 WORKFORCE_SECOND_PERSON_REQUIRED` | The only current attestation for the role was recorded by the caller |
+| `404 WORKFORCE_ACCOUNT_NOT_FOUND`, `WORKFORCE_STAFF_NOT_FOUND`, `WORKFORCE_FACILITY_NOT_FOUND`, `WORKFORCE_MEMBERSHIP_NOT_FOUND` | The named record does not exist |
+| `409 WORKFORCE_ATTESTATION_REQUIRED` | No current attestation for the role by an independent reviewer |
+| `409 WORKFORCE_ROLE_CONFLICT` | The membership holds `org_admin` or `admin`; an administering membership stays non-clinical |
+| `409 WORKFORCE_ROLE_ALREADY_ACTIVE`, `WORKFORCE_ROLE_NOT_ACTIVE` | Granting a held role that is not due for renewal (its attestation is current and no current attestation lasts longer, or it was not granted on an attestation), or revoking one the membership does not hold |
+| `409 WORKFORCE_MEMBERSHIP_EXISTS` | The account already has an active or pending membership at the facility |
+| `409 WORKFORCE_MEMBERSHIP_ENDED`, `WORKFORCE_MEMBERSHIP_INACTIVE`, `WORKFORCE_MEMBERSHIP_HELD` | The membership has ended, is inactive and was not attached by these commands, or is held for migration review |
+| `409 WORKFORCE_FACILITY_MISMATCH` | `facilityId` is not the membership's facility |
+| `409 WORKFORCE_FACILITY_NOT_VERIFIED` | The facility or its organization is not verified and active |
+| `409 WORKFORCE_ACCOUNT_INELIGIBLE`, `WORKFORCE_STAFF_INELIGIBLE` | The account is disabled, locked, deleted or a patient's own account, the staff record is inactive, or its verification status cannot be attested or granted |
+| `409 WORKFORCE_EMAIL_IN_USE` | A new identity's email is already used by an account or staff record |
 
 ## 20. Browser gateway and application contract
 

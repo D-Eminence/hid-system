@@ -23,7 +23,7 @@ import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { readPlatformAssurance, stepUpProblem } from './platform-assurance';
-import { TokenService } from './token.service';
+import { staffMfaRequired, TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -69,6 +69,14 @@ export class SecurityGuard implements CanActivate {
       if (!platformScope && verified.actor.kind === 'platform') {
         throw new DomainProblem(403, 'PLATFORM_SESSION_SCOPE_DENIED',
           'A platform administration session cannot be used for this operation');
+      }
+      // Every staff session is MFA-verified (MFA-1, 0088): a staff session
+      // whose family has no live assurance (a sign-in from before staff MFA,
+      // one whose authenticator was reset, an OIDC-mode token) is authorized
+      // for nothing. Delegated EHR, Lab, Pharmacy, OCR and Outreach checks
+      // come through this guard and are refused alike.
+      if (verified.actor.kind !== 'patient' && verified.actor.kind !== 'platform' && verified.mfaAssured !== true) {
+        throw staffMfaRequired();
       }
       if (transport === 'cookie' && !SAFE_METHODS.has(request.method)
         && !(await this.delegatedSafeBrowserRequest(request, context))) {

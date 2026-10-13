@@ -1,4 +1,5 @@
 import { DomainProblem } from '../common/problem';
+import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import { IntegrationRuntimeService } from './integration-runtime.service';
 
@@ -111,5 +112,62 @@ describe('provider runtime decisions', () => {
     await expect(service.consumeQuota({} as never, 'existing_cac',
       'a0000000-0000-4000-8000-000000000001'))
       .rejects.toMatchObject({ status: 503, code: 'VERIFICATION_QUOTA_UNAVAILABLE' });
+  });
+  describe('public patient enrollment lookup quota (IP-1)', () => {
+    const original = { ...process.env };
+    beforeEach(() => {
+      Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+        CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
+        AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+        AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456' });
+      resetEnvironmentForTests();
+    });
+    afterEach(() => {
+      for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
+      Object.assign(process.env, original);
+      resetEnvironmentForTests();
+    });
+    const quotaService = (query: jest.Mock) => {
+      const database = { withSystemTransaction: jest.fn(async (_correlation, work) => work({ query })) };
+      return { database, service: new IntegrationRuntimeService(database as unknown as DatabaseService) };
+    };
+
+    it('charges only the keyed network digest, with the configured limits, in a system transaction', async () => {
+      Object.assign(process.env, { PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX: '4',
+        PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX: '9', PATIENT_ENROLLMENT_QOREID_DAILY_CAP: '150' });
+      resetEnvironmentForTests();
+      const query = jest.fn().mockResolvedValue({ rows: [{ admitted: true }] });
+      const { database, service } = quotaService(query);
+      await service.consumePublicPatientNinQuota('enrollment-quota-correlation', 'b'.repeat(64));
+      expect(database.withSystemTransaction).toHaveBeenCalledWith('enrollment-quota-correlation', expect.any(Function));
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(query.mock.calls[0]?.[0]).toBe('select platform.consume_public_patient_nin_quota($1,$2,$3,$4) as admitted');
+      expect(query.mock.calls[0]?.[1]).toEqual(['b'.repeat(64), 4, 9, 150]);
+    });
+
+    it('sends the default limits: 5 an hour and 15 a day per network, 200 a day in all', async () => {
+      const query = jest.fn().mockResolvedValue({ rows: [{ admitted: true }] });
+      await quotaService(query).service.consumePublicPatientNinQuota('enrollment-quota-correlation', 'b'.repeat(64));
+      expect(query.mock.calls[0]?.[1]).toEqual(['b'.repeat(64), 5, 15, 200]);
+    });
+
+    it('answers a denial 429 and every fault 503, without database diagnostics', async () => {
+      const outcomes: Array<[unknown, number, string]> = [
+        [{ rows: [{ admitted: false }] }, 429, 'VERIFICATION_QUOTA_EXCEEDED'],
+        [{ rows: [] }, 503, 'VERIFICATION_QUOTA_UNAVAILABLE'],
+        [{ code: '42501', message: 'private SQL diagnostics' }, 503, 'VERIFICATION_QUOTA_UNAVAILABLE'],
+        [{ code: '22023', message: 'private SQL diagnostics' }, 503, 'VERIFICATION_QUOTA_UNAVAILABLE'],
+        [new Error('private connection detail'), 503, 'VERIFICATION_QUOTA_UNAVAILABLE'],
+      ];
+      for (const [outcome, status, code] of outcomes) {
+        const query = 'rows' in (outcome as object)
+          ? jest.fn().mockResolvedValue(outcome) : jest.fn().mockRejectedValue(outcome);
+        const failure = await quotaService(query).service.consumePublicPatientNinQuota('enrollment-quota-correlation',
+          'b'.repeat(64)).catch((error) => error);
+        expect(failure).toBeInstanceOf(DomainProblem);
+        expect(failure).toMatchObject({ status, code });
+        expect(JSON.stringify(failure)).not.toMatch(/private|network_|platform_day|exhausted/i);
+      }
+    });
   });
 });

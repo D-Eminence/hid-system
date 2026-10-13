@@ -193,9 +193,11 @@ test('modules outside HID_ENABLED_API_ROUTES answer 404 API_ROUTE_NOT_FOUND befo
     '/api/v1/ocr/jobs', '/api/v1/ocr', '/api/v1/outreach/registration-cases', '/api/v1/outreach']) {
     expectProblem(launch.route({ uri, peer: alb, headers: viaEdge() }), 404, 'API_ROUTE_NOT_FOUND', uri)
   }
-  for (const uri of ['/api/v1/auth/session', '/api/v1/identity/me', '/api/v1/audit/events', '/api/v1/admin/controls',
-    '/api/v1/commercial/pricing', '/api/v1/ehr/patients/x/encounters']) {
-    assert.equal(launch.route({ uri, peer: alb, headers: viaEdge() }).action, 'proxy', uri)
+  for (const uri of ['/api/v1/auth/session', '/api/v1/identity/me', '/api/v1/identity/patient-enrollments/availability',
+    '/api/v1/audit/events', '/api/v1/admin/controls', '/api/v1/commercial/pricing', '/api/v1/ehr/patients/x/encounters']) {
+    const outcome = launch.route({ uri, peer: alb, headers: viaEdge() })
+    assert.equal(outcome.action, 'proxy', uri)
+    if (uri.startsWith('/api/v1/identity/')) assert.equal(outcome.upstream, upstreams.IDENTITY_API_UPSTREAM, uri)
   }
   // Only exact module names count; anything else stays closed.
   for (const list of ['identity,EHR', 'identity, ehr ,labx', 'identity;ehr', '', 'all']) {

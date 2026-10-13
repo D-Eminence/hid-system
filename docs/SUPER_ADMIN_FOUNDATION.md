@@ -73,7 +73,10 @@ still requires an active facility membership; platform routes never use it.
 Since Phase 4 Stage 2A (ADR-038, `docs/PHASE_4_STAGE_2A_BACKEND_SECURITY.md`)
 the Admin browser signs in through `/api/v1/auth/admin/login` (password), then
 `/auth/admin/mfa/verify` (TOTP or a one-time recovery code) or, on first sign-in,
-`/auth/admin/mfa/enroll/start` and `/enroll/activate`. That issues a separate
+`/auth/admin/mfa/enroll/start` and `/enroll/activate` (an administrator who
+also holds a staff membership is refused there with `409
+MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED` and enrols at staff sign-in instead,
+MFA-1, 0088). That issues a separate
 platform session (`hid_access_admin*` cookies) with a 15-minute idle and 8-hour
 absolute lifetime; it needs no facility membership. Staff, patient and facility
 sessions are refused on every `/admin` route, and a platform session is refused
@@ -123,6 +126,7 @@ All routes are under `/api/v1/admin` and are Identity-authenticated.
 | `GET /audit/events` | `platform.audit.read` | Cursor-paginated immutable evidence. Patient IDs and free-form detail payloads are omitted. |
 | `GET /operations/services` | `platform.operations.read` | Concurrent, per-service, 1.5-second-bounded readiness aggregation. |
 | `GET /operations/events` | `platform.operations.read` | Whitelisted dispatcher metrics and PHI-minimal terminal failures. |
+| `GET /workforce/accounts/:id`, `POST /workforce/memberships`, `POST /workforce/accounts/:id/attestations`, `POST /workforce/memberships/:id/roles`, `POST /workforce/memberships/:id/end` | `platform.workforce.manage` (Super Admin only) | Launch D14 clinician provisioning (0087, ADR-049, D-Eminence/hid-system#70): attach a staff identity to a verified facility as a pending membership, record a credential attestation, grant or revoke one clinical role (needs another administrator's current attestation), end a membership. Step-up, reason and `Idempotency-Key` on every command (`INTERFACE_CONTRACT.md` §19). |
 
 No `/admin/sql`, generic record writer, Lab result, Pharmacy dispensing, OCR
 validation, Outreach reconciliation, clinical history, audit update/delete,

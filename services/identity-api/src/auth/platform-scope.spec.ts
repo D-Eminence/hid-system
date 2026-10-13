@@ -78,7 +78,7 @@ function guardFor(route: RouteMetadata, actor: ActorContext, assurance: Assuranc
   const database = { query: jest.fn(async (sql: string, parameters: unknown[]) => isAssuranceQuery(sql)
     ? assuranceResult(assurance)
     : { rows: [{ enabled: parameters[0] !== 'maintenance_mode' }] }) };
-  const tokens = { verify: jest.fn().mockResolvedValue({ actor, claims: {} }),
+  const tokens = { verify: jest.fn().mockResolvedValue({ actor, claims: {}, mfaAssured: true }),
     verifyCsrf: jest.fn((_claims, cookie: string | undefined, header: string | undefined) =>
       Boolean(cookie) && cookie === header) };
   const guard = new SecurityGuard(reflector(route), tokens as unknown as TokenService,

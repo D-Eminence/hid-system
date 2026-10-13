@@ -127,6 +127,23 @@ begin
        where access_request_id = 'f9600000-0000-4000-8000-000000000002') <= clock_timestamp() then
     raise exception 'an active grant must report its expiry';
   end if;
+
+  -- PSEARCH-1 (0086): the list names the patient only while the grant made
+  -- from the request is active. A pending, denied, expired, revoked or closed
+  -- request names none, so a request for a guessed HID never yields the
+  -- patient id without the patient's consent.
+  select string_agg(format('%s: %s', ltrim(right(listed.access_request_id::text, 12), '0'),
+           coalesce(listed.patient_id::text, 'none')), '; ' order by listed.access_request_id)
+    into mismatches
+    from identity.list_my_staff_access_requests(null) listed
+   where listed.patient_id is distinct from case when listed.effective_status = 'active'
+           then 'f9200000-0000-4000-8000-000000000001'::uuid end;
+  if mismatches is not null then
+    raise exception 'the list must name the patient of an active grant only: %', mismatches;
+  end if;
+  if (select count(*) from identity.list_my_staff_access_requests(null) where patient_id is not null) <> 2 then
+    raise exception 'the two active grants must still name their patient';
+  end if;
 end $$;
 
 -- A colleague sees only their own request.

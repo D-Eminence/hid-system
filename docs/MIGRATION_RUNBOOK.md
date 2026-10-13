@@ -81,11 +81,15 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0082_purpose_of_use_vocabulary.sql` | Seeds `identity.purpose_of_use_codes` with `direct-care` ("Direct patient care", active, source `hid`), `ON CONFLICT (code) DO NOTHING`, so a row already inserted or deactivated by an operator is kept as it is. 0003 created the table empty and nothing inserted a row, while every consent decision requires an active code, so on a database built only from migrations every staff consent check, access request, grant close, PIN and break-glass failed closed. `emergency` and `healthcare-operations` are not seeded: each waits for a product decision (§5). `ROW EXCLUSIVE` lock on that table only; no grant or service change |
 | `database/migrations/0083_ocr_claim_in_body_variable_conflict.sql` | Replaces `ocr.claim_worker_job(text, integer)` (`CREATE OR REPLACE`; same signature, result columns, `SECURITY DEFINER`, `search_path` and body) with `#variable_conflict use_column` as the first line of its body instead of 0015's `SET plpgsql.variable_conflict = 'use_column'`. That parameter has superuser context: on RDS, where no role is a superuser, a fresh chain stops at 0015 unless the migration administrator holds `SET ON PARAMETER plpgsql.variable_conflict`, and the definer applied the setting as its owner on every claim, so the privilege was needed for good. After 0083 no function needs it, and the operator revokes it (§6). The option resolves the same names to columns, so claims behave as before; owner, grants and comment are kept. Function replacement only; no table lock, grant or data change (`DATABASE.md`, "Non-superuser database chain on RDS (0083)") |
 | `database/migrations/0084_ehr_clinical_safety_and_launch_modules.sql` | EHR clinical safety and the launch module set (D-Eminence/hid-system#64). Deletes `ehr.lab-request.write`, `lab.work-item.accept`, `lab.accession.create`, `pharmacy.work-item.accept` and `pharmacy.dispensing.create` from every role in `auth.role_permissions` (decision D17: Lab and Pharmacy off at launch; the routes answer `403`); reads stay. Adds `SECURITY INVOKER` triggers that share-lock the encounter and refuse a note, vital, diagnosis, document, prescription or lab request on a cancelled or entered-in-error encounter, and a new or activated order on a completed one (`55000 ENCOUNTER_NOT_OPEN`); refuse any update of a diagnosis entered in error; and refuse an update of a recorded vital other than its current correction number. Recreates the two patient-self note policies to require a completed encounter. No table, column or grant change, no scan. `CREATE TRIGGER` takes a brief `SHARE ROW EXCLUSIVE` lock on six clinical tables and the policy change a brief `ACCESS EXCLUSIVE` lock on `ehr.clinical_notes` and `ehr.clinical_note_revisions`, each within the 5 s lock timeout. Existing rows are not changed; retract the open lab requests of closed encounters that the clinical owner does not keep before it, while the permission is still held (P12). Run `db:bootstrap` and `db:verify-roles` after it: the role assertions require that no role holds the five permissions. The platform controls are set by an operator, not by the migration (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, P11, P12) |
+| `database/migrations/0085_public_enrollment_windows_and_nin_lookup_quota.sql` | Replaces `identity.activate_public_patient_enrollment` (same signature, result, `SECURITY DEFINER` attribute, `search_path` and grants) so that it refuses a replay more than 15 minutes after activation (`P0002 PATIENT_ENROLLMENT_REPLAY_EXPIRED`) and a first activation whose contact was proved more than 30 minutes earlier (`23514 PATIENT_CONTACT_REVERIFY_REQUIRED`), decisions N2(b) and N2(c). New table `platform.public_patient_nin_quota_counters` (forced row-level security, no runtime privilege) and command `platform.consume_public_patient_nin_quota(char,integer,integer,integer)`: each QoreID NIN lookup of public enrollment is charged to a keyed client-network digest per hour and day and to a platform-wide daily cap, refusals audited; `platform.prune_verification_quotas()` also drains it. No lock on an existing table, no window. Run `db:bootstrap` and `db:verify-roles` after it (the bootstrap grants `EXECUTE` to the Identity runtime), and only then deploy the Identity build of this change, whose every enrollment start that reaches QoreID fails (`503 VERIFICATION_QUOTA_UNAVAILABLE`) without the command and the grant. Deploy it right after: an earlier Identity on 0085 answers an activation with a contact proof more than 30 minutes old `409 ENROLLMENT_STAGE_INVALID` and cannot send it back to the contact step, so that enrollment cannot activate until it expires (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3, §5, §6, §9) |
+| `database/migrations/0086_recovery_and_patient_search_hardening.sql` | Account recovery and patient search hardening (D-Eminence/hid-system#69). `CREATE OR REPLACE` of `auth.complete_recovery_otp` (also revokes every external sign-in identity, today Google links, of the recovered account and keeps the legacy importer's `legacy-identity` provenance record; audit counts the revoked ones), `identity.create_access_request` (an unknown HID gets a uniform pending answer, an `identity.access-request.refused` audit event and no row) and `identity.list_my_staff_access_requests` (`patient_id` only while the request's grant is active); `patients_registration_read` dropped and created again in the same transaction (a registration member reads only patients linked to a case or candidate at its facility, no longer every patient; `ACCESS EXCLUSIVE` on `identity.patients` until commit, taken first); new `SECURITY DEFINER` functions `auth.recovery_account_audience`, `identity.registration_nin_holder`, `identity.registration_candidates` and `identity.patient_lookup_audit_subject`, revoked from `PUBLIC` and granted by the role bootstrap to the Identity and schema-test runtimes only; four staff search scopes in `otp_rate_limits_scope_check` (`ACCESS EXCLUSIVE` on `auth.otp_rate_limits`, taken second); index `otp_challenges_account_consumed_idx` (`SHARE` on `auth.otp_challenges`, taken last). Each lock is held until commit. A recovery completion caught between its challenge update and its patient read can deadlock with the migration (`40P01`); if PostgreSQL cancels the migration, or a wait exceeds the 5 s `lock_timeout` (`55P03`), 0086 rolls back whole and `migrate` is run again. Run `db:bootstrap` and `db:verify-roles` after it and deploy the Identity build of the same change with it: the older build's registration duplicate checks read patients the narrowed policy hides. After it a patient recovery code goes only to a verified contact, so an imported account whose source email was never confirmed (`email_verified_at` null) and that has no verified enrollment phone gets no code (§6, §11) |
+| `database/migrations/0087_governed_workforce_provisioning.sql` | Launch D14 (workforce) and N5 (ADR-049). A unique partial index allows one active, unheld membership per account and facility; if a database already holds duplicates the migration stops with `23505 MEMBERSHIP_DUPLICATES_FOUND` and changes nothing, so run operator plan I4 first (`PHASE_3_LAUNCH_DECISIONS.md` §3) on any database the legacy promotion or SQL has written. `staff_memberships_scoped_uq` is narrowed to active rows (drop and recreate: a brief `ACCESS EXCLUSIVE` lock on `identity.staff_facility_memberships`, which every staff request reads, so apply it in the migration window). New permission `platform.workforce.manage` (`platform_super_admin` only); tables for credential attestations, the workforce membership lifecycle and attested role grants (row-level security, no runtime grant); SECURITY DEFINER commands to attach staff, record an attestation, grant or revoke a clinical role and end a membership, plus a profile read; `auth.membership_has_permission` ignores a role whose attestation lapsed. Run `db:bootstrap` and `db:verify-roles` immediately after it: the Identity build of this change calls `auth.facility_role_is_effective` on every staff sign-in and request, which fails until the bootstrap grants it (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, §6, §9) |
+| `database/migrations/0088_staff_mfa_sessions.sql` | Staff MFA (D-Eminence/hid-system#71, launch blocker MFA-1). `auth.mfa_login_challenges` gains `session_kind` (`platform` default, or `staff`) and the enrolment proof columns (`proof_method`, `proof_verifier_hmac`, `proof_key_version`, `proof_sent_at`, `proof_verified_at`) with two checks; `auth.mfa_factors` gains `enrollment_proof` and `enrollment_challenge_id` with one check and the new trigger `mfa_factors_enrollment_proof_guard` (a factor records a staff proof only from a live, verified staff enrolment challenge of its account, and never changes it); `ACCESS EXCLUSIVE` on each of the two tables until commit, no rewrite, the checks scan their rows. `CREATE OR REPLACE` of `auth.guard_mfa_login_challenge_change` (kind immutable, verified proof final, a staff enrolment challenge cannot be consumed without a verified proof) and `auth.guard_session_assurance_change` (accepts staff session families, but only on a factor that records a staff proof: `STAFF_MFA_FACTOR_UNPROVEN`); comments; the `platform.mfa.reset` description. No session, account or factor row changes and no grant changes (the new trigger function is revoked from `PUBLIC`). Existing factors record no staff proof: they keep verifying platform sign-in, and an administrator who also holds an eligible staff membership is refused staff sign-in (`403 STAFF_MFA_FACTOR_UNPROVEN`) until a two-person MFA reset (§6 lists them). Deploy the Identity build of the same change after it (the build writes the new columns); from that deploy every existing staff session is refused (`403 STAFF_MFA_REQUIRED`) and ended on refresh, and every staff member signs in again with an authenticator, enrolling on first sign-in with a code sent to the account email. The older Identity build keeps working on 0088 (it writes platform challenges only and the defaults fit) (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, §9) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles. Runs as a superuser or as the non-superuser administrator that created the roles (RDS); checks the roles' attributes instead of re-asserting them (§6) |
 | `database/runtime-login-assertions.sql` and `scripts/verify-runtime-logins.mjs` | `npm run db:verify-logins`: checks each runtime credential's own LOGIN, connected with that credential's URL (§6) |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
-| `scripts/promote-legacy-identity.mjs` | Explicit dependency ordering, UUID/HID preservation, encryption/HMAC, holds and conflict evidence |
+| `scripts/promote-legacy-identity.mjs` | Explicit dependency ordering, UUID/HID preservation, encryption/HMAC, holds and conflict evidence; refuses, before any write, staged memberships that would give one staff identity two active memberships at one facility, or one beside a membership the target already holds (N5, `membership-duplicates.mjs`) |
 | `scripts/reconcile-legacy-identity.mjs` | Independent destination read-back, counts, decryption and checksums |
 | `scripts/verify-legacy-migration.mjs` | Offline determinism, preservation, idempotency and blocking-contract verification |
 | `scripts/rekey-patient-contact-lookups.mjs` | Dry-run-default, conflict-checked canonical contact lookup rekey with an atomic completion marker |
@@ -387,8 +391,85 @@ the rotated credentials). Clear the variables afterwards. In production every
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
-Confirm the candidate ledger reaches `0084`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0088`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
+After the legacy import, record (read-only, counts only, no identifiers) how
+many imported patient accounts have `email_verified_at` null and no verified
+enrollment phone: after 0086 their OTP recovery and activation send no code,
+so each needs another approved activation route before it can sign in
+(`PHASE_4_STAGE_5_RELEASE_READINESS.md` §10). Also count (read-only,
+counts only) the imported staff accounts with an active membership and no
+email address: after the Identity build of 0088 a staff account enrols its
+authenticator only with a code sent to its email, so each of them is refused
+(`409 MFA_ENROLLMENT_PROOF_UNAVAILABLE`) until it is given one.
+
+After 0088, list (read-only) the accounts whose active authenticator was
+enrolled at platform sign-in and that also hold an active staff membership.
+Each is refused staff sign-in (`403 STAFF_MFA_FACTOR_UNPROVEN`) until a
+two-person MFA reset, after which the administrator enrols at staff sign-in
+and uses that factor for both. Before 0088 every factor is listed this way,
+since only platform sign-in enrolled factors.
+
+```sql
+begin transaction isolation level repeatable read read only;
+set local row_security = off;
+select factor.account_id, factor.activated_at
+  from auth.mfa_factors factor
+ where factor.status = 'active' and factor.enrollment_proof is null
+   and exists (select 1 from identity.staff_facility_memberships membership
+                where membership.account_id = factor.account_id and membership.active)
+ order by factor.activated_at;
+rollback;
+```
+
+Before clinical roles are enabled, and after every bulk provisioning, check
+(read-only) that every account with an active clinical membership has an
+authenticator enrolled at staff sign-in; the release checklist (P22) makes
+this a gate. An account without one is as strong as its mailbox until it
+enrols (`INTERFACE_CONTRACT.md`, staff sign-in):
+
+```sql
+begin transaction isolation level repeatable read read only;
+set local row_security = off;
+select membership.facility_id, membership.app_role, count(*) as accounts_without_staff_factor
+  from identity.staff_facility_memberships membership
+ where membership.active
+   and membership.app_role in ('doctor', 'clinician', 'nurse', 'lab', 'pharmacist')
+   and not exists (select 1 from auth.mfa_factors factor
+                    where factor.account_id = membership.account_id and factor.status = 'active'
+                      and factor.enrollment_proof is not null)
+ group by membership.facility_id, membership.app_role
+ order by membership.facility_id, membership.app_role;
+rollback;
+```
+
+Review, at least daily during the launch period, the staff enrolments by
+emailed code that followed a password recovery of the same account. Each is
+one where control of the mailbox alone was enough; confirm it with the staff
+member through a channel other than that mailbox:
+
+```sql
+begin transaction isolation level repeatable read read only;
+set local row_security = off;
+select enrolled.actor_account_id as account_id, enrolled.occurred_at as enrolled_at,
+       max(recovered.occurred_at) as recovered_at
+  from audit.events enrolled
+  join audit.events recovered
+    on recovered.actor_account_id = enrolled.actor_account_id
+   and recovered.action = 'auth.otp.recovery.completed'
+   and recovered.occurred_at < enrolled.occurred_at
+ where enrolled.action = 'auth.staff.mfa.enrolled'
+   and enrolled.details->>'proofMethod' = 'email_code'
+   and enrolled.occurred_at > now() - interval '7 days'
+   and not exists (select 1 from audit.events earlier
+                    where earlier.actor_account_id = enrolled.actor_account_id
+                      and earlier.action = 'auth.staff.mfa.enrolled'
+                      and earlier.occurred_at between recovered.occurred_at and enrolled.occurred_at
+                      and earlier.event_id <> enrolled.event_id)
+ group by enrolled.actor_account_id, enrolled.occurred_at
+ order by enrolled.occurred_at desc;
+rollback;
+```
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task. The
 migration image also carries `scripts/bootstrap-database-roles.mjs` and
@@ -477,13 +558,22 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify the ledger at `0084`, runtime grants (`db:verify-roles`) and logins
+6. Verify the ledger at `0088`, runtime grants (`db:verify-roles`) and logins
    (`db:verify-logins`), RLS and purpose/deny behavior, and list the
    purpose-of-use codes (release checklist P10). After `0084`, confirm the
    launch platform controls and the launch module set (P11) and review the
-   open records of closed encounters (P12).
+   open records of closed encounters (P12). Record the count of imported
+   patient accounts without a verified contact (§6). Run I4 before applying 0087
+   to a database the promotion has written: 0087 refuses duplicate active
+   memberships at one facility.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
-   fallback against migrated accounts.
+   fallback against migrated accounts. A migrated staff account signs in with
+   its password, then enrols an authenticator with the code emailed to it
+   (MFA-1, 0088); no staff session is issued on the password alone. A
+   platform administrator who also holds a staff membership enrols at staff
+   sign-in (platform enrolment answers `409
+   MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED`); one whose factor predates 0088 is
+   reset first (§6).
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.
 9. Prove private object read/version/checksum/scanner behavior.
 10. Start minimum target services and run synthetic smoke tests.

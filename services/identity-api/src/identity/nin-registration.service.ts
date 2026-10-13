@@ -163,18 +163,15 @@ export class NinRegistrationService {
       const replay = await this.findByIdempotency(client, context, idempotencyKey, requestSha256);
       if (replay) return this.auditAndProject(client, context, replay, 'identity.nin.resolve.replay');
 
+      // Registration members read no patient outside their facility's cases
+      // (0086): the verified-NIN holder comes from a narrow command.
       const existing = await client.query<{
         patient_id: string;
         hid_code: string;
       }>(
-        `select patient.id::text as patient_id, patient.hid_code
-           from identity.patient_identifiers identifier
-           join identity.patients patient on patient.id = identifier.patient_id
-          where identifier.identifier_type = 'nin'
-            and identifier.lookup_hmac = $1
-            and identifier.verified
-            and identifier.revoked_at is null
-            and patient.status = 'active'
+        `select holder.patient_id::text as patient_id, holder.hid_code
+           from identity.registration_nin_holder($1) holder
+          where holder.patient_status = 'active'
           limit 1`,
         [protectedNin.lookupHmac],
       );
@@ -326,7 +323,7 @@ export class NinRegistrationService {
           if (row.status !== 'pending_new_identity_approval') {
             throw new ConflictException('This registration case is not awaiting new-identity approval');
           }
-          const existing = await client.query('select 1 from identity.patient_identifiers where identifier_type = \'nin\' and lookup_hmac = $1 and verified and revoked_at is null limit 1', [row.nin_lookup_hmac]);
+          const existing = await client.query('select 1 from identity.registration_nin_holder($1) limit 1', [row.nin_lookup_hmac]);
           if ((existing.rowCount ?? 0) > 0) throw new ConflictException('This NIN is already linked to a canonical patient');
           const patientId = randomUUID();
           await client.query(
@@ -431,7 +428,7 @@ export class NinRegistrationService {
           [caseId, input.patientId],
         );
         if ((candidate.rowCount ?? 0) === 0) throw new DomainProblem(409, 'PATIENT_NOT_A_REVIEW_CANDIDATE', 'The selected patient was not a reviewed candidate');
-        const existing = await client.query('select 1 from identity.patient_identifiers where identifier_type = \'nin\' and lookup_hmac = $1 and verified and revoked_at is null limit 1', [row.nin_lookup_hmac]);
+        const existing = await client.query('select 1 from identity.registration_nin_holder($1) limit 1', [row.nin_lookup_hmac]);
         if ((existing.rowCount ?? 0) > 0) throw new ConflictException('This NIN is already linked to a canonical patient');
         await client.query(
           `insert into identity.patient_identifiers (
@@ -506,14 +503,12 @@ export class NinRegistrationService {
     );
   }
 
+  /** Up to 100 active patients sharing the date of birth or a name, through the narrow command (0086). */
   private async findCandidates(client: PoolClient, demographics: NinClaimedDemographics) {
     const result = await client.query<CandidateRow>(
-      `select id::text, first_name, last_name, full_name, dob::text
-         from identity.patients
-        where status = 'active'
-          and (dob = $1::date or lower(first_name) = lower($2) or lower(last_name) = lower($3))
-        order by created_at asc
-        limit 100`,
+      `select candidate.patient_id::text as id, candidate.first_name, candidate.last_name,
+              candidate.full_name, candidate.dob::text
+         from identity.registration_candidates($1::date, $2, $3) candidate`,
       [demographics.dateOfBirth, demographics.firstName, demographics.lastName],
     );
     return rankCandidates(result.rows, demographics);

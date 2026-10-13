@@ -3,7 +3,9 @@
 Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
 the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
 the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
-(§1, ADR-052, D-Eminence/hid-system#67) with the owner's defaults;
+(§1, ADR-052, D-Eminence/hid-system#67), N1 and N2 (ADR-048,
+D-Eminence/hid-system#68), and N5 and the workforce part of D14
+(ADR-049, D-Eminence/hid-system#70) with the owner's defaults;
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
 
@@ -14,8 +16,9 @@ product or security decision, and questions it could not answer alone. The
 fixes are in pull requests (§4). This document records the open questions:
 for each, the question, the default engineering proposes, the risks of that
 default, and the work that waits on the answer. A default here is a proposal,
-not a decision. Where a pull request already implements a proposed default,
-it says so, and that pull request is the place to change it.
+not a decision, unless its entry says it was decided. Where a pull request
+already implements a proposed default, it says so, and that pull request is
+the place to change it.
 
 The infrastructure plans in §3 are written to be run by an operator after a
 separate deployment authorization. None of them has been run.
@@ -28,17 +31,47 @@ separate deployment authorization. None of them has been run.
   holder? Today anyone who knows a NIN can enroll as its holder, receive
   `NIN_VERIFIED` assurance and see the registry name. The NIN lookup proves the
   number exists, not that the caller owns it.
-- **Proposed default.** Do not enable public NIN-only enrollment
-  (`QOREID_NIN_ONLY_ENROLLMENT_ENABLED` stays unset, as in every deployment
-  today, DEP-1) until ownership is bound to something the holder controls: an
-  OTP to the phone number the NIN registry holds for that NIN, or an assisted
-  check at a facility. Enrollment that verifies only the patient's own phone or
-  email records contact assurance, never `NIN_VERIFIED`.
+- **Decided (owner defaults, 2026-10-13).** Binding a NIN requires proof that
+  the caller holds the phone the NIN registry lists for it: a code sent to
+  that registry phone, verified before the NIN is bound and before anyone is
+  told the NIN already has a Health ID (ENR-4 step 2). Enrollment that
+  verifies only the patient's own phone or email records contact assurance,
+  never `NIN_VERIFIED`. Until that holder step ships, Identity refuses
+  `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true` in production
+  (`HID_DEPLOYMENT_ENV=production`, or `NODE_ENV=production` outside the
+  staging profile): it does not start (D-Eminence/hid-system#68,
+  CFG-PROD). The change that adds the holder step lifts that refusal; staging
+  may run NIN-only enrollment for acceptance.
+- **Implemented now (D-Eminence/hid-system#68), ENR-4 step 1.**
+  Enrollment start checks the QoreID gate (`QOREID_ENABLED`,
+  `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` and the runtime pause of
+  `qoreid`/`patient_nin`) before it reads whether the NIN is bound or pending,
+  so while the gate is closed every NIN gets the same `503`. Once the gate is
+  open the `409 NIN_ALREADY_REGISTERED` answer remains until step 2 ships;
+  each probe of an unbound NIN then costs a QoreID lookup, bounded by the
+  lookup quota (N2, below).
+- **Implemented now (D-Eminence/hid-system#68), FE-4.** While
+  the gate is closed by configuration, start answers its `503` with "New
+  Health ID registration is not open yet. If you already have a Health ID,
+  sign in." instead of the generic 5xx detail (the gateway on main still
+  replaces it with `503 UPSTREAM_UNAVAILABLE` until ADR-055), and
+  `GET /api/v1/identity/patient-enrollments/availability` answers
+  `{ "open": boolean }` from the same gate, so Health-id can say so before it
+  asks for a NIN (ADR-057; `INTERFACE_CONTRACT.md`). Health-id
+  82b474e does not read it yet (release checklist §3).
+- **Launch consequence (open for the owner to confirm).** With N1 as decided
+  and facility-assisted registration out of scope (N2(d), D17), no new
+  patient can get a Health ID in production at launch; legacy-migrated
+  patients sign in. The owner confirms launching with registration closed,
+  or prioritises ENR-4 step 2 (the registry-phone code), which needs a QoreID
+  contract that exposes the registry phone (DEP-1, unconfirmed).
 - **Risks.** Patients without a reachable registry phone cannot self-enroll
   with a NIN. A registry phone OTP depends on what the provider contract
-  exposes (`QOREID_VERIFICATION_CONTRACT.md`), which nobody has confirmed.
-- **Waits on it.** DEP-1 (NIN-only enrollment), ENR-4 (enrollment reveals
-  whether a NIN already has a Health ID), the registry-name display.
+  exposes (`QOREID_VERIFICATION_CONTRACT.md`), which nobody has confirmed;
+  until it is, public NIN-only enrollment stays closed in production (DEP-1).
+- **Waits on it.** DEP-1 (NIN-only enrollment in production), ENR-4 step 2
+  (existence revealed only to the proven holder) and the contact step's
+  non-disclosure, the registry-name display.
 
 ### N2. Enrollment assurance and HID recovery (ENR-2, ENR-3 Part B, ENR-3b, FAC-2/REG-1)
 
@@ -48,16 +81,40 @@ separate deployment authorization. None of them has been run.
   How long may a verified contact wait before the password step (ENR-3b)? (d)
   Is facility-assisted registration in launch scope? It is unavailable in
   every deployed environment (FAC-2, REG-1).
-- **Proposed defaults.** (a) Send the HID to the verified contact at
-  activation and offer HID lookup by verified contact plus OTP. (b) Clear the
-  cookie at activation, with a 15-minute replay window. (c) 30 minutes, then
-  verify again. (d) Out of launch scope; walk-in patients self-enroll.
-- **Implemented now (D-Eminence/hid-system#50).** The enrollment cookie is
-  expired at every sign-in, refresh and sign-out, and activation is limited
-  per enrollment. The post-activation window itself is unchanged until (b) is
-  answered.
-- **Risks.** (b) and (c) need Health-id copy for new errors. Without (a), a
-  phone-only patient who loses the HID cannot reach the account.
+- **Decided (owner defaults, 2026-10-13).**
+  - (a) The HID is sent to the verified contact after the first activation,
+    and a public HID reminder sends it again by SMS only when the phone and the
+    NIN match the same active account. It follows in a later change (ENR-2);
+    until then a phone-only patient must keep the HID shown at activation.
+  - (b) 15 minutes. Every successful activation response expires the
+    enrollment cookie; if that response is lost, the cookie can replay the
+    activation, and `GET /current` show the HID, for 15 minutes after
+    activation. After that both answer `404 ENROLLMENT_NOT_FOUND` without the
+    HID, and so does the activation command (0085).
+  - (c) 30 minutes. Activation with a contact proved more than 30 minutes
+    earlier clears the proof and the contact, sends the enrollment back to the
+    contact step and answers `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED`; the
+    activation command refuses it as well (0085).
+  - (d) Facility-assisted registration is out of launch scope (D17); walk-in
+    patients self-enroll.
+- **Implemented now.** D-Eminence/hid-system#50 expires the enrollment cookie
+  at every sign-in, refresh and sign-out, and limits activation per
+  enrollment. D-Eminence/hid-system#68 implements (b) and (c)
+  in Identity and in migration 0085, and caps QoreID lookups: each lookup of
+  public enrollment is charged, before QoreID is called, to the client network
+  (an IPv4 address or an IPv6 /64) at 5 an hour and 15 a day, and to a
+  platform-wide cap of 200 a day (`PATIENT_ENROLLMENT_QOREID_*`); the owner
+  sets the cap from the QoreID contract. A refusal is `429
+  VERIFICATION_QUOTA_EXCEEDED` and is audited.
+- **Risks.** (b) and (c) need Health-id handling of the new `409` (route it
+  to the contact step). Without (a), a phone-only patient who loses the HID
+  cannot reach the account. The per-network quota counts a carrier-grade NAT
+  address as one network, so a busy mobile network can reach 15 lookups a day;
+  the limits are environment values. The platform cap bounds cost, not
+  availability: every lookup counts, whatever QoreID answers, so at the
+  defaults 14 networks passing Turnstile can spend it with unregistered NINs
+  and close enrollment starts that need a lookup for the rest of the day.
+  Operations alert on `platform_day` denials (release checklist §10).
 
 ### N3. OCR purpose of use (OCR-1, OCR-READ-PURPOSE)
 
@@ -121,6 +178,18 @@ separate deployment authorization. None of them has been run.
   to the next free number, 0083 today, before it can merge. It also overlaps
   #50 on `auth.controller.ts` and `token.service.ts`.
 - **Data check.** Run I4 (§3) before deciding: whether such memberships exist.
+- **Decided (2026-10-13, owner defaults: deny by default, least privilege;
+  ADR-049).** One active, unheld membership per account and facility, not
+  "pick the oldest": migration 0087
+  (D-Eminence/hid-system#70) adds a unique partial index on
+  `identity.staff_facility_memberships (account_id, facility_id)` where
+  active, with a facility and no migration hold. If duplicates exist, 0087
+  stops and changes nothing; I4 resolves them first (§3). Identity's staff
+  context fails closed with `409 FACILITY_MEMBERSHIP_AMBIGUOUS` if two
+  memberships of one facility are ever read, and orders by membership id
+  last, which fixes every guard at once (they all read Identity's facility
+  list). The legacy promotion refuses duplicates before it writes. Which
+  facility a session family binds by default (#47) stays separate.
 
 ### FE-HOST. Launch frontend hosting (FE-HOST, MOD-EDGE)
 
@@ -156,6 +225,137 @@ separate deployment authorization. None of them has been run.
   keys, the Cloudflare account and zone identifiers, a staging environment
   (none exists yet), and the Health-id builds (release checklist P14, S4l).
 
+### Account recovery and patient search (REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE, SIGNIN-LOCKOUT, PSEARCH-1, REC-NOTIFY)
+
+Implemented as proposed defaults in D-Eminence/hid-system#69
+(migration 0086; release checklist §2, "Account recovery and patient search
+hardening"; `INTERFACE_CONTRACT.md`; `DATABASE.md`). Each default is a
+proposal; that change is the place to alter it.
+
+- **Questions.** (a) Which accounts may each recovery page reach (REC-AUDIENCE)?
+  (b) Where may a recovery code be sent (REC-UNVERIFIED-CONTACT)? (c) What
+  happens to Google links when a password is recovered (REC-GOOGLE)? (d) Is
+  the sign-in failure budget per identifier or per account (SIGNIN-LOCKOUT)?
+  (e) What may a clinician's search by HID reveal, and how often (PSEARCH-1,
+  ENUM-1), and which patient rows may a registration member read
+  (DB-RLS-PATIENTS)? (f) What must a patient do again before approving
+  access, and what is held after a recovery (REC-NOTIFY)?
+- **Proposed defaults (implemented).**
+  (a) The patient reset page and legacy activation reach only an account with
+  an active patient record; the staff reset page only one with an active
+  staff record; the administrator reset page only a platform administrator.
+  Any other start is answered as an unknown identifier. An account that is
+  both patient and staff recovers from either page.
+  (b) A patient's code goes to the account email only once it is verified,
+  else to the verified phone of the account's active public enrollment, else
+  nowhere. Staff and administrator codes go to the provisioned work email.
+  (c) A completed recovery revokes every external sign-in identity of the
+  account (today Google links); the legacy importer's provenance record is not
+  a sign-in and is kept. The revoked row stays, and the Google link commands
+  (0059) refuse any subject that was ever linked, so the owner cannot link the
+  same Google account again, only a different one.
+  (d) Both: five failures within 15 minutes lock the identifier and, shared
+  by its email and HID, the account, for 15 minutes; while the account is
+  locked the correct password is refused too, with the same `401`.
+  (e) Every refused lookup is one `404 PATIENT_NOT_AVAILABLE`; an access
+  request for an unknown HID is answered like a recorded one; neither answer
+  names a patient id, and the clinician's own request list names the patient
+  only while a grant made from the request is active (otherwise a
+  non-identifying `withheld-…` string, so Health-id's list keeps rendering). Budgets per actor and
+  per facility: 60 and 600 refused lookups per 5 minutes (a lookup that
+  returns a granted patient is not counted, FE-10), 20 and 200 access requests
+  per 15 minutes (environment values). A registration member reads only
+  patients linked to a case or candidate at its facility; duplicate checks go
+  through two functions that return minimum fields.
+  (f) Approving an access request needs a sign-in within 10 minutes, as the
+  access PIN does. For 24 hours after any OTP recovery of the account,
+  approvals, access-PIN set and emergency-contact add or update are refused
+  (`403 PATIENT_RECENT_RECOVERY_HOLD`); denials, revocations, PIN removal and
+  contact deactivation stay available so the owner can shut access.
+- **Risks.**
+  (a) An account with no active patient, staff or administrator record
+  cannot recover by code from any page.
+  (b) Imported legacy patients whose source never confirmed their email and
+  who have no verified enrollment phone can no longer activate by code; the
+  release checklist §10 counts them. They need an approved route (for
+  example assisted verification) before launch. Facility-assisted (governed)
+  enrollment, `POST /identity/registration-cases/:caseId/enroll`
+  (`identity.enroll_registered_patient`, 0032), creates a `pending_reset`
+  account whose email is not verified and that has no public enrollment
+  phone, so its owner can never receive an activation or recovery code. It
+  is off at launch (D17); enabling it needs an email verification step
+  before activation.
+  (c) After a recovery the patient cannot link the same Google account
+  again, only a different one, until a later change lets the owner re-link a
+  subject that the owner's own recovery revoked. Google sign-in is off at
+  launch (D17).
+  (d) Anyone who knows a patient's email or HID can keep the account locked,
+  15 minutes at a time, as they already could per identifier; there is no
+  per-IP budget because the edge discards client IPs (D6).
+  (e) A busy facility can reach its facility budget; the values are
+  environment settings. A clinician can still tell a known HID from their
+  own request list (a recorded request appears there, without the patient
+  id, and an unknown HID's does not) and from a repeated request (the
+  pending request comes back), bounded by the budgets and audited. The
+  candidate search still reads names and dates of birth across facilities
+  for verified registry demographics, as registration did before.
+  (f) A patient who has just recovered cannot approve access for 24 hours;
+  clinicians use the access PIN the patient already set, or break-glass
+  (when enabled).
+- **Waits on it.** The owner notice of REC-NOTIFY: telling the owner, on every
+  verified contact and in the inbox, that the password was changed. Identity
+  offers each completed recovery to `ACCOUNT_RECOVERY_NOTICE_SINK` after
+  commit; the notification route change binds a sink and sends the notice.
+  Health-id copy and error handling for the new answers (release checklist
+  §3). Before Google sign-in is enabled: a way to re-link a Google subject
+  revoked by the owner's own recovery (risk (c)). Before facility-assisted
+  enrollment is enabled: verifying the enrollment email before activation
+  (risk (b)).
+
+### Staff MFA (MFA-1, D14 MFA part)
+
+Decided under the owner default "verified identity for sensitive
+operations", and implemented in D-Eminence/hid-system#71 (migration 0088;
+ADR-054; release checklist §2, "Staff MFA"; `INTERFACE_CONTRACT.md`, "Staff
+sign-in with an authenticator"; `PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §10).
+
+- **Question.** Is staff MFA a launch gate, and for which staff?
+- **Decision.** Yes, for every staff session that can reach patient data, with
+  no permission or role allowlist. Staff sign-in is two-step like platform
+  sign-in: the password yields only a challenge; the session comes after a
+  TOTP code or a one-time recovery code. A first enrolment needs a fresh
+  proof (a code emailed to the account address, or the provider enrollment
+  activation that opened it), never the password alone; the factor records
+  the proof, and only such a factor verifies a staff sign-in. A platform
+  first enrolment (still trust on first use) is refused for an account with
+  a staff membership, which enrols at staff sign-in; a factor enrolled at
+  platform sign-in is refused at staff sign-in until a two-person reset. The
+  email code goes to the account address without requiring it to be marked
+  verified, because no staff flow verifies one. A staff session
+  without live MFA assurance is refused everywhere (`403
+  STAFF_MFA_REQUIRED`) and ended on refresh, so every existing staff session
+  is invalidated at deploy. Google sign-in is for patients only. OTP password
+  recovery keeps the authenticator; a lost authenticator is reset only by the
+  two-person MFA reset, which now names staff targets.
+- **Risks.** Every staff member signs in again at deploy and enrols on first
+  sign-in; the Health-id staff portal must ship the new steps first (release
+  checklist §3). For an account without a factor the mailbox alone is
+  enough: staff password recovery and the enrolment code use the same
+  address, and accounts provisioned without a password (0046, 0087) set their
+  first one by that recovery. Mitigation at launch (release checklist P22):
+  enrol existing clinical accounts before clinical roles are enabled, and
+  review every enrolment that followed a recovery. Staff sign-in needs
+  `MFA_SECRET_KEY_B64` (operator plan I1).
+- **Open (needs a product and security decision).** A second enrolment
+  channel that does not rest on the mailbox, for example a one-time code that
+  the provisioning administrator hands over in person, so that an account
+  without a factor is no longer as strong as its mailbox. It would extend the
+  workforce provisioning commands (0087).
+- **Waits on it.** Owner notices of enrolment, recovery-code use and an MFA
+  reset (audited now; offered to `MFA_NOTICE_SINK`, delivered once a
+  notification route exists). A notice to the account's mailbox cannot warn
+  of that mailbox's compromise.
+
 ## 2. Other open decisions
 
 | # | Decision | Proposed default | Risks | Waits on it |
@@ -173,7 +373,7 @@ separate deployment authorization. None of them has been run.
 | D11 | Lab result detail for clinicians | No "unreleased correction pending" flag (D-Eminence/hid-system#51) | Clinicians cannot see that a correction is coming | Result retraction API |
 | D12 | OCR publication after an authorization lapse | Terminal, as today | — | — |
 | D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (implemented in D-Eminence/hid-system#59) | No delegated completion | — |
-| D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decide which roles hold `workforce.manage` (legacy `admin` holds it), how existing staff are attached, whether pending access requests close when a membership ends, and whether staff MFA is a launch gate, by ADR before WF-1 | Invites and offboarding stay manual | Workforce management |
+| D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decided for the workforce part on 2026-10-13 (ADR-049, D-Eminence/hid-system#70, migration 0087): clinical facility roles are granted only by platform-governed commands under the new `platform.workforce.manage` (`platform_super_admin` only), with step-up, `If-Match`, `Idempotency-Key` and a reason; a grant needs a current professional-credential attestation by another platform reviewer who is neither the target nor working at that facility (so not its `org_admin`); `org_admin` stays non-clinical and has no role-granting route; ending a membership revokes its roles and consent grants, expires its pending access requests and revokes the account's staff sessions; a role lapses with its attestation and is renewed by a new attestation and a second administrator's grant, never by the attestation alone. Facility self-service is deferred. **Staff MFA: decided, yes** (MFA-1, "Staff MFA" in §1, ADR-054, D-Eminence/hid-system#71, migration 0088): every staff session that can reach patient data is TOTP-verified, with no permission allowlist; a second enrolment channel (beyond the account mailbox) is open | An unenrolled staff account is as strong as its mailbox until it enrols. Which credential source counts (regulator registry or documented manual review) and who may review are product and legal decisions; until then the only method is documented manual review | Workforce management; the Health-id staff sign-in (release checklist §3) |
 | D15 | Launch scope of EHR-to-Lab ordering and in-system result return | In scope (the EHR already sends orders) | If in scope, the Lab handoff is launch-blocking; it merged as D-Eminence/hid-system#56 | Lab handoff |
 | D16 | Health-id OCR publication retry | Persist the publication key per validation; offer Retry for retryable failures | Frontend change | OCR publication retry |
 | IP-THRESHOLDS | Per-network limits now that they key on the real client network (A7) | **Decided (owner default, deny by default; ADR-055):** keep Identity's 5 recovery starts and 5 enrollment starts per 15 minutes per IPv4 address or IPv6 /64, and the WAF's 2,000 requests per 5 minutes per client network (an IPv4 address or IPv6 /64, `X-HID-Client-Network` from the Worker), at launch; if the `ip`-scope 429 rate or the WAF metric `hid-<env>-origin-rate` shows carrier-grade or facility NAT collisions, raise Identity's by configuration and the WAF's by a reviewed CDK change to `API_ORIGIN_CLIENT_RATE_LIMIT` (a code constant). Per-account and per-recipient budgets and Turnstile stay the primary guards | Patients behind a busy carrier NAT address, or clinicians behind one facility NAT, can be refused at peak; Identity logs no `ip`-scope 429 event yet, so a collision shows only in the WAF metric and support reports. Traffic spread over many client networks that passes the 50,000-per-5-minutes backstop through one Cloudflare egress address blocks every user behind it for the rest of the window (ADR-055) | Identity limits, WAF rate rule |
@@ -251,12 +451,20 @@ non-bypass owner (ADR-041).
 Read-only, as the migration administrator:
 
 ```sql
-select account_id, facility_id, count(*)
+select account_id, facility_id, count(*),
+  array_agg(id order by id) as membership_ids,
+  array_agg(membership_role || '/' || app_role order by id) as membership_roles
 from identity.staff_facility_memberships
 where active and facility_id is not null and migration_hold_reason is null
 group by 1, 2
 having count(*) > 1;
 ```
+
+Migration 0087 (N5) refuses to apply while this returns rows. For each row,
+the facility confirms which membership to keep; the extras are deactivated
+(`active = false`) by a reviewed, audited change, never deleted, and their
+consent grants are never moved to the kept membership (that would change whom
+a patient's consent covers; those patients consent again). Then apply 0087.
 
 ### I5. Staging issuer acceptance (D1 to D3 decided)
 
@@ -321,5 +529,9 @@ for each merged change and its evidence. Pull requests from this review:
 | DOC-1 (any facility member could complete a colleague's upload) | D-Eminence/hid-system#59 | merged (D13) |
 | Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
+| ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota); FE-4 (enrollment availability read, registration-not-open answer) | D-Eminence/hid-system#68, migration 0085 (FE-4 adds none) | local branch (N1, N2); FE-4's Health-id follow-up open |
 | DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
-| WAF-CRS-BODY (long clinical notes refused by the WAF's 8 KB body rule), A7 WAF part (rate limit per Cloudflare egress address), A8 (gateway replaced upstream 5xx), D6 (no CSP or HSTS on the portal hosts), D7 (query strings in the gateway access log), SCAN-EDGE/EDGE-DOCS (scanner callback public) | BRANCH:launch/edge-hardening-2, ADR-055 | ready for review; IP-THRESHOLDS decided above; staging checks S4p |
+| REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | D-Eminence/hid-system#69, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
+| WF-1 (no governed way to provision clinicians), N5 (two memberships at one facility) | D-Eminence/hid-system#70, migration 0087, ADR-049 | branch, not merged (D14 workforce part, N5) |
+| MFA-1 (staff sessions without MFA; D14 MFA part) | D-Eminence/hid-system#71, migration 0088, ADR-054 | local commits, not pushed; owner notices wait on the notification route; Health-id staff and platform sign-in changes listed in the release checklist §3; release checklist P22 (enrolment before clinical roles, review of enrolments after a recovery) is an operator gate; a second enrolment channel is an open decision |
+| WAF-CRS-BODY (long clinical notes refused by the WAF's 8 KB body rule), A7 WAF part (rate limit per Cloudflare egress address), A8 (gateway replaced upstream 5xx), D6 (no CSP or HSTS on the portal hosts), D7 (query strings in the gateway access log), SCAN-EDGE/EDGE-DOCS (scanner callback public) | D-Eminence/hid-system#72, ADR-055 | ready for review; IP-THRESHOLDS decided above; staging checks S4p |

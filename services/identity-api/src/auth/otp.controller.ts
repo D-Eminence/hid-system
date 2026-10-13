@@ -3,7 +3,7 @@ import { AuditFailuresOnly, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
-import { CompleteOtpDto, StartOtpDto, VerifyOtpDto } from './dto/otp.dto';
+import { CompleteOtpDto, RECOVERY_AUDIENCE_BY_ACTION, StartOtpDto, VerifyOtpDto } from './dto/otp.dto';
 import { OtpService } from './otp.service';
 import { TurnstileService } from './turnstile.service';
 
@@ -30,6 +30,9 @@ export class OtpController {
     return this.otp.start({
       identifier: input.identifier,
       purpose: input.purpose,
+      // The Turnstile action names the recovery page, and so the account kind
+      // this start may reach.
+      audience: RECOVERY_AUDIENCE_BY_ACTION[input.turnstileAction],
       remoteIp: request.ip,
       correlationId: request.correlationId,
     });

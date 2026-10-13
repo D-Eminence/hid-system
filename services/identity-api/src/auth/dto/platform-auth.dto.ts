@@ -43,3 +43,16 @@ export class TotpCodeDto {
   @Matches(/^[0-9]{6}$/)
   code!: string;
 }
+
+/**
+ * Staff enrolment start (MFA-1): the code sent to the account's email address
+ * by POST /auth/mfa/enroll/email-code. Optional only because a challenge
+ * opened by provider activation already carries its proof; the service
+ * refuses any other start without it (MFA_ENROLLMENT_PROOF_REQUIRED).
+ */
+export class StaffMfaEnrollmentStartDto {
+  @IsOptional()
+  @Transform(trim)
+  @Matches(/^[0-9]{6}$/)
+  emailCode?: string;
+}
