@@ -63,22 +63,41 @@ monthly gross = Fargate task-hours and scale-out
               + Textract pages and bounded attempts
               + NAT/endpoints/ALB/WAF/public IPv4
               + EventBridge/SQS and providers
-              + staging workload signing key, KMS signing, API Gateway and Lambda requests
+              + workload signing key, KMS signing, API Gateway and Lambda requests
               + logs, metrics, Insights scans and retained evidence
               + ECR storage/scanning and Cloudflare delivery
 ```
 
-Every staging mode has **four customer-managed KMS keys**; development and
-production retain three. Sleep still incurs the signing key's fixed charge and
-any metered issuer traffic, although zero ECS tasks means no token-agent calls.
-The issuer is not a provisioned ECS service and has no provisioned Lambda
-concurrency. Its log group retains logs for 14 days.
+Every staging mode has **four customer-managed KMS keys**, and so does
+production with its own workload signing key (ADR-047); development retains
+three. Sleep still incurs the
+signing key's fixed charge and any metered issuer traffic, although zero ECS
+tasks means no token-agent calls. The issuer is not a provisioned ECS service
+and has no provisioned Lambda concurrency. The staging issuer's log group
+retains logs for 14 days; production's for 365 days.
 
-Six staging caller task definitions include token agents, each with a 64 MiB
+Staging economy and fidelity and production have **two regional web ACLs**,
+each with its fixed monthly charge, its per-rule charges and per-request
+inspection charges for every request it sees, blocked floods included: the
+public API web ACL keeps its four rules (the origin-secret rule, the AWS
+common and known-bad-inputs managed rule groups, and the rate rule), and the
+issuer's NAT-allowlist web ACL (ADR-047, D3) adds one rule. Sleep and
+development have none and one respectively (cost inventory `wafs`).
+
+Six caller task definitions in staging, and in production under ADR-047,
+include token agents, each with a 64 MiB
 memory reservation inside its existing Fargate task allocation. At one running
 replica per caller, a successful renewal cycle makes eleven audience-specific
-token requests and six JWKS requests about every 90 seconds. Starts, retries,
-replica counts, and receiver JWKS retrieval affect actual request volume. Count
+token requests about every 90 seconds; each agent fetches the JWKS at start
+(again on each 10-second retry until its first token verifies) and then only
+for an unknown `kid` or after a cached key stops verifying, at most every 30
+seconds. Each receiver
+process (Identity, Notification, EHR, Lab and Pharmacy APIs) keeps one cached
+JWKS and fetches it at most every 10 minutes, or every 30 seconds while tokens
+with an unknown `kid` arrive; before D-Eminence/hid-system#53 Lab,
+Pharmacy and the EHR's OCR caller guard fetched it for every service call they
+verified. Starts, retries, replica counts, and receiver JWKS retrieval affect
+actual request volume. Count
 API Gateway requests, Lambda execution, KMS signing, logs, and applicable NAT
 traffic in the dated estimate; the inventory supplies quantities, not prices.
 

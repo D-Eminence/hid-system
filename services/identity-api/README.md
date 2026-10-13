@@ -21,7 +21,8 @@ Public authentication and identity URLs remain under `/api/v1/auth/*` and
 `/api/v1/commercial/*` in the same Identity service. Approved
 service consumers use workload-authenticated internal actor/authorization
 routes while separately propagating the user credential. Production accepts
-only asymmetric issuer/JWKS workload evidence; local tokens are development
+only ES256 issuer/JWKS workload evidence with `exp`, an `iat` at most 300
+seconds old and `token_use: workload` (ADR-047); local tokens are development
 only. A cookie-authenticated request with an unsafe method needs Origin and
 CSRF evidence, with one exception for delegated reads: on the two routes
 marked `@DelegatedBrowserRequest()`,

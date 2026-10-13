@@ -106,13 +106,20 @@ The CDK v2 application under `infra/aws` synthesizes:
 - S3 gateway plus ECR, Logs, Secrets Manager, KMS, EventBridge, SQS, and
   Textract interface endpoints.
 
-Staging additionally has a regional API Gateway and Lambda workload-token
-issuer backed by a retained P-256 KMS signing key. `POST /token` requires AWS
-IAM authentication; `GET /.well-known/jwks.json` publishes only the public key.
-This issuer is present in every staging mode, including sleep. Development and
-production retain their external workload-identity contract and have no issuer
-API Gateway or Lambda. There is no SNS, Redis, search cluster, Bedrock resource,
-CloudFront distribution, or duplicate frontend host in the regional design.
+Staging and production additionally have a regional API Gateway and Lambda
+workload-token issuer backed by a retained P-256 KMS signing key (ADR-047,
+accepted). `POST /token` requires AWS IAM authentication;
+`GET /.well-known/jwks.json` publishes only the public key. Each method has its
+own throttle (30 requests per second, burst 60). Wherever NAT gateways exist
+(staging economy and fidelity, production), a second REGIONAL web ACL on the
+issuer stage blocks every source except the VPC's NAT gateway Elastic IPs. The
+staging issuer is present in every staging mode, including sleep, where it has
+no web ACL (no NAT gateway and no running task). Production has its own issuer
+of the same design, with its own key, API, `/production` stage and
+`hid:production:<service>` subjects. Development retains its external
+workload-identity contract and has no issuer API Gateway or Lambda. There is no SNS, Redis,
+search cluster, Bedrock resource, CloudFront distribution, or duplicate
+frontend host in the regional design.
 
 ## Cost-safe staging modes
 
@@ -125,11 +132,13 @@ of:
   controlled operation stops compute and a staging-only daily schedule re-stops
   the exact instance after AWS automatic restart. S3/KMS, secrets, ECR, logs,
   EventBridge/SQS and DNS metadata remain, as do the stable workload issuer,
-  public JWKS endpoint, and fourth KMS key. Token-agent task definitions remain
-  present, but zero ECS tasks means no running token agents.
+  public JWKS endpoint, and fourth KMS key. The issuer has no web ACL in sleep:
+  there is no NAT address to allow and no task to call it; its method throttles
+  still apply. Token-agent task definitions remain present, but zero ECS tasks
+  means no running token agents.
 - `economy`: two AZs, one NAT, ECR API/Docker, Logs, Secrets Manager,
   EventBridge, SQS, and Textract endpoints in one AZ plus S3 gateway, two ALBs
-  and regional WAF, one Gateway/
+  and regional WAF, the issuer's NAT-allowlist web ACL, one Gateway/
   request API replica, workers default zero, bounded worker/API scaling, and a
   single-AZ `db.t4g.small` database with 100 GiB initial storage.
   ECR and Logs endpoints let Gateway and restricted workers bootstrap without
@@ -137,7 +146,8 @@ of:
   database, the endpoint security group on HTTPS, and the S3 managed prefix
   list for image layers; sleep keeps those migration HTTPS paths closed.
 - `fidelity`: two AZs, two NAT gateways, all eight interface endpoints in both
-  AZs, two ALBs/WAF, multiple request replicas, live workers, Multi-AZ RDS, and
+  AZs, two ALBs/WAF, the issuer's NAT-allowlist web ACL, multiple request
+  replicas, live workers, Multi-AZ RDS, and
   release/failover/load/migration/provider/rollback parity testing.
 
 Persistent data/security resources and ephemeral ingress/runtime resources are
@@ -145,7 +155,8 @@ selected independently by the profile. A sleep transition removes application
 ingress while retaining protected data and the workload issuer. It is never
 described as zero cost.
 Production remains three AZs, Multi-AZ RDS, two NAT gateways, full endpoints,
-two ALBs/WAF, and at least two replicas per service. The current 3-AZ/2-NAT
+two ALBs/WAF, the issuer's NAT-allowlist web ACL, and at least two replicas per
+service. The current 3-AZ/2-NAT
 shape means one application AZ can share cross-AZ egress during an AZ failure;
 a measured third-NAT or alternative-egress evolution is documented capability,
 not silently provisioned cost.
@@ -206,8 +217,8 @@ reducing extraction quality or hard-rejecting clinical work on price.
 
 The migration target shares EHR's repository but has its own required image
 digest, giving twelve governed image identities for eleven repositories.
-Six staging API task definitions also run a token-agent sidecar from the same
-admitted Identity API image digest. This adds neither a thirteenth image
+Six staging and six production API task definitions also run a token-agent
+sidecar from the same admitted Identity API image digest. This adds neither a thirteenth image
 identity nor another ECS service.
 
 ## Identity, data, and secrets
@@ -223,26 +234,74 @@ NIN, OTP-HMAC, Turnstile and platform MFA key material. Notification provider
 configuration is injected only into Notification API/Worker as required. Gateway
 receives no application secrets.
 
-Staging workload identity is implemented by the regional stack and token agent.
-The issuer maps exactly six IAM task roles to fixed `hid:staging:<service>`
-subjects and eleven allowed caller/audience bindings, listed in the
-[IAM matrix](AWS_IAM_MATRIX.md#workload-identity). A caller can request only an
-audience; IAM request context supplies its identity. Only the issuer Lambda can
-sign with the exact KMS key, using `ECDSA_SHA_256`. Tasks receive no KMS signing
-authority. The issuer signs ES256 JWTs with a 300-second lifetime, and receivers
-enforce the configured issuer, JWKS, subject, and audience.
+Workload identity is implemented by the regional stack and token agent for
+staging and production (ADR-047, accepted 2026-10-13; not deployed). Each
+environment's issuer maps exactly six IAM task roles to fixed
+`hid:<environment>:<service>` subjects and eleven allowed caller/audience
+bindings, listed in the [IAM matrix](AWS_IAM_MATRIX.md#workload-identity). A
+caller can request only an audience; IAM request context supplies its identity.
+Only the issuer Lambda's role may sign with the exact KMS key: the key policy
+keeps the account root statement (key administration stays with the account)
+and denies `kms:Sign` to every other principal (`aws:PrincipalArn`), to any
+algorithm other than `ECDSA_SHA_256` and to any message type other than `RAW`.
+An account administrator can still change that policy or the issuer function;
+ADR-047 accepts that same-account custody risk. Tasks receive no KMS signing
+authority. A warm issuer re-reads the public key at least every five minutes,
+so a disabled key stops being published and stops minting within that time.
+
+The issuer signs ES256 JWTs with `iat = nbf`, a 300-second lifetime and
+`token_use: workload`. Receivers (Identity's service and document-scanner
+paths, Notification, Lab, Pharmacy and the EHR's OCR caller guard) enforce the
+configured issuer, JWKS, subject and audience, accept only ES256, require `exp`
+and `iat`, refuse a token older than 300 seconds or issued in the future (5
+seconds of clock tolerance) and refuse any other `token_use`. Each receiver
+process keeps one remote JWKS set (jose's 10-minute cache, refetched early only
+for an unknown `kid`); it does not fetch the JWKS per request. The issuer and
+the agent accept only `staging` and `production` and bind that one value to the
+issuer path, the subject prefix and the API Gateway stage, so a token of one
+environment fails every check of the other.
 
 The six agents run as UID/GID 65532 with read-only root filesystems, validate
 the returned JWT signature and claims, and atomically replace mode-0600 files
-in an owned mode-0700 task volume. Each application mounts that volume read-only
-and waits for the agent's one-shot readiness check to pass. Agents renew about
-every 90 seconds, retry failures after 10 seconds, and remove expiring files.
-This renews tokens; it does not rotate the retained KMS signing key.
+in an owned mode-0700 task volume. Each application mounts that volume
+read-only and starts only once the agent's health check passes (`HEALTHY`).
+Agents renew about every 90 seconds, retry failures after 10 seconds, and
+remove expiring files. An agent keeps the keys that verified its tokens by
+`kid` and fetches the JWKS only at start, for an unknown `kid` and after a
+cached key stops verifying, at most once every 30 seconds once a token has
+verified, so a JWKS outage or flood does not stop renewal. Until its first
+token verifies it may fetch the JWKS on each 10-second retry, so a JWKS
+failure at task start leaves about six attempts before its health check
+(start period 30 seconds, interval 10 seconds, three retries) turns it
+`UNHEALTHY` at about 60 seconds. The agent
+is not essential and has an ECS container restart policy (D2): its health
+check keeps running, but an unhealthy agent no longer stops the task. During an
+issuer outage longer than a token's lifetime, the task's service-to-service
+calls fail closed (`503`) while Identity password sign-in and session reads
+keep working; Identity logs and counts each OTP or alert it could not send
+for want of a usable token (`notification_workload_token_unavailable`). ECS
+restarts an agent only if it exits after running for at least 60 seconds. One
+that exits sooner is not restarted: the task runs on without a token writer until it is
+replaced, and the files the agent last wrote stay after their tokens expire.
+Identity's Notification client treats an expired token as missing; other
+callers send it and their receivers refuse it (`401`). This renews
+tokens; it does not rotate the retained KMS signing key.
 
-Staging has no external issuer/JWKS/subject parameters. Development and
-production retain those external inputs and delivery requirements; the staging
-implementation preserved the production template byte for byte against the
-baseline recorded then. The current baseline is in the
+The issuer's only callers are the agents and the receivers, and all of them
+reach it through the VPC's NAT gateways (there is no `execute-api` interface
+endpoint). Where NAT gateways exist, the issuer stage's web ACL therefore
+blocks by default and allows only the NAT gateway Elastic IPs (D3). Any future
+caller outside the VPC, such as a document scanner (D5), must leave through
+the NAT gateways or be added to the allowlist by a reviewed change.
+
+Neither staging nor production has external issuer/JWKS/subject parameters.
+Development retains those external inputs and delivery requirements and has no
+token writer. ADR-047 changes the production template (its issuer, web ACL,
+six agents and eight fewer parameters) and the staging templates (key policy,
+method throttles, web ACL in economy and fidelity, agent restart policy and the
+issuer Lambda asset); its production execution plan
+([runbook](AWS_DEPLOYMENT_RUNBOOK.md) §12) still needs a separate deployment
+authorization and the staging proof (I5). The template baseline recorded for `main` is in the
 [deployment runbook](AWS_DEPLOYMENT_RUNBOOK.md#1-freeze-the-release-inputs) §1.
 Local tests do not establish deployed token delivery.
 Live profiles encode their reviewed recommended defaults, but the guarded
