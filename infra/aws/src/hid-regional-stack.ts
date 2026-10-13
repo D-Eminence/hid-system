@@ -700,7 +700,9 @@ export class HidRegionalStack extends Stack {
           command: ['/app/services/workload-token-agent/src/main.mjs'],
           // D2 (ADR-047): not essential, so an issuer outage stops only this
           // task's service-to-service calls, which fail closed, and not the
-          // task; ECS restarts an agent that exits after running 60 s.
+          // task. ECS restarts an agent that exits after running at least
+          // 60 s; one that exits sooner is not restarted, and the task runs
+          // on without a token writer until it is replaced.
           user: '65532:65532', readonlyRootFilesystem: true, essential: false, memoryReservationMiB: 64,
           enableRestartPolicy: true, restartAttemptPeriod: Duration.seconds(60),
           environment: {

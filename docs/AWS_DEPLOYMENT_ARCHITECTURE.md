@@ -268,14 +268,23 @@ read-only and starts only once the agent's health check passes (`HEALTHY`).
 Agents renew about every 90 seconds, retry failures after 10 seconds, and
 remove expiring files. An agent keeps the keys that verified its tokens by
 `kid` and fetches the JWKS only at start, for an unknown `kid` and after a
-cached key stops verifying, at most once every 30 seconds, so a JWKS outage or
-flood does not stop renewal. The agent
+cached key stops verifying, at most once every 30 seconds once a token has
+verified, so a JWKS outage or flood does not stop renewal. Until its first
+token verifies it may fetch the JWKS on each 10-second retry, so a JWKS
+failure at task start leaves about six attempts before its health check
+(start period 30 seconds, interval 10 seconds, three retries) turns it
+`UNHEALTHY` at about 60 seconds. The agent
 is not essential and has an ECS container restart policy (D2): its health
 check keeps running, but an unhealthy agent no longer stops the task. During an
 issuer outage longer than a token's lifetime, the task's service-to-service
 calls fail closed (`503`) while Identity password sign-in and session reads
 keep working; Identity logs and counts each OTP or alert it could not send
-for want of a token (`notification_workload_token_unavailable`). This renews
+for want of a usable token (`notification_workload_token_unavailable`). ECS
+restarts an agent only if it exits after running for at least 60 seconds. One
+that exits sooner is not restarted: the task runs on without a token writer until it is
+replaced, and the files the agent last wrote stay after their tokens expire.
+Identity's Notification client treats an expired token as missing; other
+callers send it and their receivers refuse it (`401`). This renews
 tokens; it does not rotate the retained KMS signing key.
 
 The issuer's only callers are the agents and the receivers, and all of them

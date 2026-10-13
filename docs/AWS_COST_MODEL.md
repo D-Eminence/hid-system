@@ -76,18 +76,22 @@ tasks means no token-agent calls. The issuer is not a provisioned ECS service
 and has no provisioned Lambda concurrency. The staging issuer's log group
 retains logs for 14 days; production's for 365 days.
 
-Staging economy and fidelity and production have **two regional web ACLs**:
-the public API web ACL and the issuer's NAT-allowlist web ACL (ADR-047, D3),
-each with its fixed monthly charge, one rule, and per-request inspection
-charges for every request it sees, blocked floods included. Sleep and
+Staging economy and fidelity and production have **two regional web ACLs**,
+each with its fixed monthly charge, its per-rule charges and per-request
+inspection charges for every request it sees, blocked floods included: the
+public API web ACL keeps its four rules (the origin-secret rule, the AWS
+common and known-bad-inputs managed rule groups, and the rate rule), and the
+issuer's NAT-allowlist web ACL (ADR-047, D3) adds one rule. Sleep and
 development have none and one respectively (cost inventory `wafs`).
 
 Six caller task definitions in staging, and in production under ADR-047,
 include token agents, each with a 64 MiB
 memory reservation inside its existing Fargate task allocation. At one running
 replica per caller, a successful renewal cycle makes eleven audience-specific
-token requests about every 90 seconds; each agent fetches the JWKS once at
-start and again only for an unknown `kid`, at most every 30 seconds. Each receiver
+token requests about every 90 seconds; each agent fetches the JWKS at start
+(again on each 10-second retry until its first token verifies) and then only
+for an unknown `kid` or after a cached key stops verifying, at most every 30
+seconds. Each receiver
 process (Identity, Notification, EHR, Lab and Pharmacy APIs) keeps one cached
 JWKS and fetches it at most every 10 minutes, or every 30 seconds while tokens
 with an unknown `kid` arrive; before D-Eminence/hid-system#53 Lab,

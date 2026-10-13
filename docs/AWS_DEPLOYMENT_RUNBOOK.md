@@ -428,13 +428,14 @@ readiness and sanitized outcomes without printing token contents.
 With synthetic service requests, verify ES256 signatures and the exact issuer,
 subject, audience, `token_use: workload` and 300-second lifetime. Observe
 renewal at about 90 seconds with one JWKS fetch per agent after start (the
-agent caches the verified key by `kid`), bounded 10-second retry after failure,
-removal before expiry, and an `UNHEALTHY` agent once usable credentials are
-unavailable while its task keeps running. Verify the mapped caller can request
-only its allowed audiences and cannot sign directly with KMS. Run the
-caller-refusal checks from inside the VPC (for example a one-off task in the
-application subnets whose role is not in the caller map); the web ACL refuses
-them from anywhere else. These local contracts still require live staging
+agent caches the verified key by `kid`), bounded 10-second retry after failure
+(until its first token verifies, the JWKS fetch is retried with it; afterwards
+at most every 30 seconds), removal before expiry, and an `UNHEALTHY` agent once
+usable credentials are unavailable while its task keeps running. Verify the
+mapped caller can request only its allowed audiences and cannot sign directly
+with KMS. Run the caller-refusal checks from inside the VPC (for example a
+one-off task in the application subnets whose role is not in the caller map);
+the web ACL refuses them from anywhere else. These local contracts still require live staging
 proof of ECS IAM credentials, network reachability, API Gateway authorization,
 KMS signing, and receiver validation; successful synthesis alone is
 insufficient.
@@ -471,6 +472,16 @@ Issuer hardening (ADR-047 D1-D3), each with recorded evidence:
   such a token; the unit suites prove the refusals against real tokens, and
   staging confirms that the Identity, Notification, Lab, Pharmacy and EHR
   tasks run the admitted digests built from this change.
+
+Agent stopped (D2), in any environment: ECS restarts an agent only if it
+exited after running for at least 60 seconds. When `aws ecs describe-tasks`
+shows a task `RUNNING` with its `workload-token-agent` container still
+`STOPPED` a minute later, ECS did not restart it (it exited within 60 seconds
+of its last start). The task has no token writer and its token files stay
+after they expire: Identity's Notification client logs
+`notification_workload_token_unavailable` with `reason=expired`, and other
+callers' requests are refused `401`. Stop that task so its service starts a
+new one, and record the agent's exit code and last log lines (never a token).
 
 Before raising task counts, prove in staging:
 
@@ -649,8 +660,10 @@ Steps:
 7. Scale the EHR, Lab, Pharmacy, OCR and Outreach APIs. On synthetic data: an
    EHR request authenticates through Identity's service session, Lab accepts
    an EHR order, and OCR publishes to EHR, Lab and Pharmacy.
-8. Watch renewals (about every 90 seconds), task health, issuer Lambda errors
-   and API `5XX` for at least 15 minutes before continuing with §9.
+8. Watch renewals (about every 90 seconds), task health (including any
+   `workload-token-agent` container `STOPPED` in a running task, §7 "Agent
+   stopped"), issuer Lambda errors and API `5XX` for at least 15 minutes
+   before continuing with §9.
 
 Record commands, outputs, the template SHA-256, the asset hash, the image
 digest, the key ARN and the time window. Record no token, credential or

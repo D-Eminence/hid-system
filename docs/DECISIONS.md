@@ -2445,14 +2445,27 @@ service-to-service calls, not the task:
 - The agent is `essential: false` with an ECS container restart policy
   (restart attempt period 60 seconds), and the application keeps its `HEALTHY`
   start dependency on it, so a task starts only with valid tokens.
+- ECS restarts the agent only if it exits after running for at least the
+  60-second restart attempt period. An agent that exits sooner (within a
+  minute of the task's start or of its last restart) is not restarted: the
+  task keeps running with no token writer until it is replaced, and the token
+  files the agent last wrote stay after they expire, because only the agent
+  removes them and the application mount is read-only. Once those tokens
+  expire, calls fail closed, but a caller other than Identity's Notification
+  client sends the expired token and its receiver answers `401` rather than
+  the caller's missing-token `503`. The task shows the agent container
+  `STOPPED`; no alarm routes that (D4). Remedy: stop the task so its service
+  starts a new one (`AWS_DEPLOYMENT_RUNBOOK.md` §7).
 - Once running, an unhealthy agent no longer makes ECS replace the task.
   Without tokens, service-to-service calls fail closed (`503`); Identity
   password sign-in and session reads keep working. Consequence: during an
   issuer outage, EHR record access, OTP delivery, Lab, Pharmacy, OCR and
   Outreach calls are unavailable while sign-in works.
 - In JWT mode, Identity's Notification client sends nothing when its token file
-  is missing or unusable, logs `notification_workload_token_unavailable` with a
-  reason and a running count, without recipient, code or token, and counts it.
+  is missing or unusable or its token's `exp` has passed, logs
+  `notification_workload_token_unavailable` with a reason (`missing`,
+  `invalid` or `expired`) and a running count, without recipient, code or
+  token, and counts it.
   An OTP is reported as not delivered, as before; an emergency-contact alert is
   reported as `unknown`, so its dispatcher retries it.
 
@@ -2472,9 +2485,15 @@ D3, edge protection for the issuer. Deny by default:
   them, and synthesis fails if a gateway uses any other address. Staging sleep
   has no NAT gateway and no running task, and no web ACL.
 - The agent keeps the keys that verified its tokens by `kid` and fetches the
-  JWKS only at start and for an unknown `kid`, at most once every 30 seconds,
-  so a JWKS outage, throttle or block does not stop renewal under a known
-  `kid`.
+  JWKS only at start, for an unknown `kid` and after a cached key stops
+  verifying, at most once every 30 seconds once a token has verified, so a
+  JWKS outage, throttle or block does not stop renewal under a known `kid`.
+  Until its first token verifies, the agent may fetch the JWKS on each
+  10-second renewal retry, never faster: its health check (start period 30
+  seconds, interval 10 seconds, three retries) turns it `UNHEALTHY` about 60
+  seconds after start, and the application starts only on `HEALTHY`, so a
+  JWKS failure at task start leaves about six attempts (at about 0, 10, 20,
+  30, 40 and 50 seconds) rather than two.
 - A PRIVATE API behind an `execute-api` interface endpoint was not chosen: its
   private DNS changes every `execute-api` name in the VPC. A per-IP rate rule
   was not chosen as the control: it does not stop a distributed flood, and all

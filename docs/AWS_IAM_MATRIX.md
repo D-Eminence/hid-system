@@ -142,9 +142,9 @@ API image, runs as UID/GID 65532 with a read-only root filesystem, verifies the
 token, and atomically writes mode-0600 files into its owned mode-0700 task
 volume. The application mounts that volume read-only and starts only once the
 sidecar is healthy; the sidecar is not essential and ECS restarts it if it
-exits (D2). Renewal runs about every 90 seconds, failures
-retry after 10 seconds, and expiring files are removed. Token renewal does not
-rotate the retained signing key.
+exits after running at least 60 seconds (D2). Renewal runs about every 90
+seconds, failures retry after 10 seconds, and expiring files are removed.
+Token renewal does not rotate the retained signing key.
 
 All staging modes retain the same issuer, public JWKS endpoint, and key; sleep
 has no running ECS tasks or token agents. There are no external staging issuer,
