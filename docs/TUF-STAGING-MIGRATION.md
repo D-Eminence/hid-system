@@ -96,8 +96,14 @@ The executable covers:
    database it owns. As that administrator the script checks that a migration
    run without `SET ON PARAMETER plpgsql.variable_conflict` stops at 0015 with
    0001-0014 committed; with the grant it applies 0015 to the latest migration,
-   and the grant is revoked afterwards. It then runs the role bootstrap twice
-   and `db:verify-roles`, creates one LOGIN per runtime credential and passes
+   and the grant is revoked afterwards. It then runs the role bootstrap twice,
+   each run overlapping a transaction that holds a lock on
+   `platform.control_settings` and then locks `identity.outbox_events`, as a
+   break-glass activation does: the first run must wait for the control table
+   holding no application table lock, the second must take no lock on it. It
+   runs `db:verify-roles`, checks that it refuses an `ADMIN OPTION`-only grant
+   of `hid_ocr_queue_metrics` to `hid_ocr_worker`, creates one LOGIN per
+   runtime credential as the administrator and passes
    `db:verify-logins` for all ten, and checks that `db:verify-logins` refuses
    the administrator's URL, a login with an extra role and another service's
    login. `platform.control_enabled` must answer the Identity, EHR and

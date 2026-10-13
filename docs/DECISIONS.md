@@ -1869,7 +1869,13 @@ Decision:
   widen no visibility; this differs from the persistent `INHERIT` membership
   item 4 rejected. No persistent membership is granted, so
   `runtime-roles.integration.sql` allows only the `ADMIN OPTION`-only row
-  that PostgreSQL 16 records for a non-superuser creator.
+  that PostgreSQL 16 records for a non-superuser creator, and only when that
+  creator is the `CREATEROLE` role running the check; an `ADMIN OPTION`-only
+  grant to any other role fails it. The platform control policy is created
+  before any other table lock of the bootstrap and only when it is missing
+  or differs, so its `ACCESS EXCLUSIVE` lock is taken in the same order as a
+  break-glass activation's (control read, then `identity.outbox_events`) and
+  not at all on a rerun.
 - **A sixth technical owner.** `platform.control_enabled(text)` gets
   `hid_platform_control_reader`, on the `hid_ocr_queue_metrics` pattern:
   `SELECT (control_key, enabled)` on `platform.control_settings` and one

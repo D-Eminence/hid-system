@@ -1723,8 +1723,12 @@ Checks:
   to model each runtime role's effective privileges, following only
   memberships that pass on privileges (the `INHERIT` attribute as it is when
   each grant is made, `WITH INHERIT`, `REVOKE INHERIT OPTION`, `CREATE ROLE
-  ... IN ROLE`), row-level security and `UPDATE` policies. It fails on a lock
-  the role cannot take, and on the locks PostgreSQL refuses for every role
+  ... IN ROLE`), row-level security and `UPDATE` policies. It refuses a table
+  grant or a policy statement inside a dollar-quoted body, except a `DO`
+  block that drops and creates one policy only when `pg_policy` lacks it (the
+  bootstrap's `platform_controls_definer_read`), whose two statements it
+  replays as top-level ones. It fails on a lock the role cannot take, and on
+  the locks PostgreSQL refuses for every role
   (`0A000`): the nullable side of an outer join, `DISTINCT`, `GROUP BY`,
   `HAVING`, aggregates, window functions, set-returning functions in the
   select list and set operations. It does not follow SQL assembled by string
@@ -2334,15 +2338,30 @@ back. It now:
   requires of the new owner;
 - revokes the memberships at its end and refuses the run if a membership or
   `CREATE` is left. The file runs as one transaction, so neither is visible
-  to another session.
+  to another session;
+- sets up the platform control owner below before any statement that locks
+  a table, and recreates its policy only when it is missing or differs.
+  `CREATE POLICY` locks the table `ACCESS EXCLUSIVE` until the bootstrap
+  commits, and an Identity break-glass activation reads the controls and then
+  inserts into `identity.outbox_events` in one transaction. The run that
+  creates the policy therefore locks `platform.control_settings` before the
+  `ocr.jobs` and outbox policies, in the activation's order, so the two wait
+  for each other instead of deadlocking; until it commits, the guards' control
+  reads wait behind it, within the services' 15 s statement timeout. A later
+  run takes no lock on that table.
 
 A superuser run grants exactly what it did before, plus the new role below;
 a catalogue diff of the two bootstraps on the same 0082 schema shows nothing
 else. PostgreSQL 16 records an `ADMIN OPTION`-only membership, granted by the
 bootstrap superuser, of a non-superuser creator in each role it creates. It
 carries no privilege and no `SET ROLE`, and its holder cannot revoke it.
-`runtime-roles.integration.sql` allows exactly that row on the technical
-owners and refuses any other member, membership or schema `CREATE`.
+`runtime-roles.integration.sql` allows that row on a technical owner only
+when its member is the `CREATEROLE` role running the assertions (the
+administrator, in both `db:bootstrap` and `db:verify-roles`), and refuses any
+other member, membership or schema `CREATE`. A superuser records its grants
+with the same grantor, so without that condition an `ADMIN OPTION`-only grant
+to a runtime role would pass, and with it that role's login could grant
+itself the technical owner and `SET ROLE` to it.
 
 **Platform controls.** `platform.control_enabled(text)` (0040) is the
 `SECURITY DEFINER` read that the Identity, EHR and Outreach guards make on
@@ -2410,14 +2429,22 @@ Tests:
   refusal. Under a non-bypass owner without the bootstrap change the call
   raises `PLATFORM_CONTROL_UNAVAILABLE`.
 - `runtime-roles.integration.sql` asserts the new role's attributes, owner,
-  column grants, schema usage and single policy, the creator's `ADMIN
-  OPTION`-only row, and no schema `CREATE` on the three technical owners.
+  column grants, schema usage and single policy, no membership in the three
+  technical owners except the running administrator's own `ADMIN
+  OPTION`-only row, and no schema `CREATE` on them. The container acceptance
+  checks on its superuser database that an `ADMIN OPTION`-only grant of
+  `hid_ocr_queue_metrics` to `hid_ocr_worker` fails `db:verify-roles`.
 - `ocr-worker-lease.integration.sql`: under a non-bypass owner, the claim of a
   provider whose only job the owner cannot see returns no row and changes
   nothing (0015's setting refused it before 0083).
 - `scripts/verify-non-superuser-database.mjs`, run by the rehearsal, does the
   whole chain on its own disposable cluster as a `NOSUPERUSER NOBYPASSRLS
-  CREATEROLE NOCREATEDB` administrator (`TUF-STAGING-MIGRATION.md`).
+  CREATEROLE NOCREATEDB` administrator (`TUF-STAGING-MIGRATION.md`). Each of
+  its two bootstrap runs overlaps a transaction that holds a lock on
+  `platform.control_settings` and then locks `identity.outbox_events`: the
+  first run must wait for the control table holding no application table
+  lock, the second must not wait at all. It also requires `db:verify-roles`
+  to refuse an `ADMIN OPTION`-only grant to a runtime role.
 - The start-up check has a unit spec in each of the nine services, and
   `scripts/tests` checks `db:verify-logins`'s credential map and that the nine
   copies of the check are identical.

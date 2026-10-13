@@ -137,9 +137,10 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-The bootstrap needs no superuser. On RDS it runs as the migration
-administrator (`NOSUPERUSER NOBYPASSRLS CREATEROLE`) that created the HID roles;
-a fresh chain there also needs `SET ON PARAMETER plpgsql.variable_conflict` for
+The bootstrap needs no superuser. On RDS it runs as the migration administrator
+(`NOSUPERUSER NOBYPASSRLS CREATEROLE`) that created the HID roles, and so do
+`db:verify-roles` and the grants of the aggregate roles to the runtime LOGINs; a
+fresh chain there also needs `SET ON PARAMETER plpgsql.variable_conflict` for
 the migration run that applies 0015 (`docs/MIGRATION_RUNBOOK.md` §6). Verify
 each runtime credential's own LOGIN with its own URL, after provisioning and
 after every rotation:

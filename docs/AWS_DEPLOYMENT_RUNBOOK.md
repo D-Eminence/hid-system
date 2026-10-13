@@ -303,9 +303,10 @@ typed recommended counts. Validate:
 Migrate and provision as `MIGRATION_RUNBOOK.md` §6 describes: the RDS master
 grants the migration administrator `SET ON PARAMETER
 plpgsql.variable_conflict` only for a migration run that applies 0015 and
-revokes it after 0083; the migration administrator, a `NOSUPERUSER
-NOBYPASSRLS CREATEROLE` LOGIN, applies `runtime-grants.sql` with
-`npm run db:bootstrap` and `db:verify-roles`. Create one LOGIN per runtime
+revokes it after 0083; the migration administrator, a `NOSUPERUSER NOBYPASSRLS
+CREATEROLE` LOGIN, applies `runtime-grants.sql` with `npm run db:bootstrap`
+and `db:verify-roles`. As that administrator, which alone may grant the
+aggregate roles (the RDS master is refused), create one LOGIN per runtime
 secret (the EHR secret's `scannerUrl` is a second, scanner-only LOGIN) and
 verify every one with `npm run db:verify-logins`, which connects with each
 secret's own URL and refuses a superuser, `BYPASSRLS`, owner or

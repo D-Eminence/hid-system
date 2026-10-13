@@ -295,20 +295,43 @@ npm run db:verify-roles
 
 Run it only with `npm run db:bootstrap`, which sends `runtime-grants.sql` as
 one transaction (with `psql`, only as `psql -1 -v ON_ERROR_STOP=1 -f`): its
-temporary memberships below must never outlive or leave that transaction.
-The bootstrap may run again at any time; a second run changes nothing. It
-creates each role with its attributes and then checks them. It refuses a HID
-group role with `SUPERUSER`, `BYPASSRLS` or `REPLICATION`, and a runner that
-is neither a superuser nor holds `ADMIN OPTION` on every HID role; neither can
+temporary memberships below must never outlive or leave that transaction. The
+bootstrap may run again at any time. A run that transfers a function to its
+technical owner leaves that owner an `EXECUTE` entry on it, which the next
+run's `REVOKE ALL` removes; from then on a run changes nothing. It creates
+each role with its attributes and then checks them. It refuses a HID group
+role with `SUPERUSER`, `BYPASSRLS` or `REPLICATION`, and a runner that is
+neither a superuser nor holds `ADMIN OPTION` on every HID role; neither can
 happen to roles this administrator created. Inside its own transaction it
 holds `SET` and `INHERIT` membership in the three technical owners
 (`hid_event_delivery_commands`, `hid_ocr_queue_metrics`,
 `hid_platform_control_reader`), and each of them holds `CREATE` on one schema
 only around its function transfer; it revokes both before it commits.
-PostgreSQL 16 records, for a non-superuser that creates a role, an
-`ADMIN OPTION`-only membership granted by the bootstrap superuser. It carries
-no privilege and no `SET ROLE`, the administrator cannot revoke it, and
-`db:verify-roles` allows exactly that row.
+PostgreSQL 16 records, for a non-superuser that creates a role, an `ADMIN
+OPTION`-only membership granted by the bootstrap superuser. It carries no
+privilege and no `SET ROLE`, and the administrator cannot revoke it.
+`db:verify-roles` allows that row on a technical owner only when its member is
+the role running the check, so run `db:verify-roles` as the same
+administrator; any other membership in a technical owner, `ADMIN OPTION` alone
+included, fails it.
+
+Locks. Every lock the bootstrap takes is held until its transaction commits.
+`lock_timeout` (5 s) and `statement_timeout` (120 s) apply to the bootstrap's
+own statements only. The run that first creates
+`platform_controls_definer_read` (the first run of
+BRANCH:launch/db-rds-nonsuperuser, or one after the policy was removed or
+changed) takes an `ACCESS EXCLUSIVE` lock on `platform.control_settings`,
+before any other table lock. Until it commits, every control read of the
+Identity, EHR and Outreach guards, that is every request that is not a
+platform administrator's, waits behind it, within the services' 15 s statement
+timeout; locally, on a synthetic database, the rest of the transaction took
+about 0.1 s. Run that first bootstrap with traffic low. Because that lock
+comes first, a break-glass activation (which reads the controls and then
+writes `identity.outbox_events` in one transaction) waits for the bootstrap or
+the bootstrap waits for it; they do not deadlock. A later run finds the policy
+and takes no lock on `platform.control_settings`. Every run still recreates
+the `ocr.jobs` and outbox delivery policies under brief `ACCESS EXCLUSIVE`
+locks, as before.
 
 A later migration that replaces a function a technical role owns
 (`ocr.worker_queue_metrics()`, the `integration` delivery commands,
@@ -318,10 +341,14 @@ function's owner back and rerun the bootstrap afterwards.
 
 ### 6.3 Runtime LOGINs
 
-Create one LOGIN per runtime credential, as the RDS master or the migration
-administrator, `LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE
-NOREPLICATION INHERIT`, granted exactly its aggregate role, and store its URL in
-that service's secret (`url`; the EHR scanner pool's in `scannerUrl`):
+Create one LOGIN per runtime credential, `LOGIN NOSUPERUSER NOBYPASSRLS
+NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT`, granted exactly its aggregate
+role, and store its URL in that service's secret (`url`; the EHR scanner
+pool's in `scannerUrl`). Only a role with `ADMIN OPTION` on the aggregate may
+grant it, which in PostgreSQL 16 is the migration administrator that created
+the HID roles; the RDS master is refused (`permission denied to grant role`).
+Create the LOGINs as that administrator too, so one role does both steps. If
+the master creates a LOGIN, the administrator still issues the grant.
 
 | Credential | Variable for `db:verify-logins` | Aggregate role |
 | --- | --- | --- |
