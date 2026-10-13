@@ -10,6 +10,7 @@ export const runtimePolicyPath = c => c === 'identity-api'
   ? 'security/staging-identity-runtime-assessment.json' : c === 'ehr-api' ? 'security/staging-ehr-runtime-assessment.json' : 'security/staging-novu-runtime-assessment.json';
 const run = (command,args,options={}) => (execFileSync(command,args,{encoding:'utf8',stdio:['ignore','pipe','inherit'],...options})??'').trim();
 export function selectComponents(paths, requested='changed') {
+  if(requested==='patient-chat-update') return ['identity-api','ehr-api','lab-api','database-migration'];
   if(requested==='admin-update') return ['identity-api','database-migration'];
   if(requested==='novu-update') return ['notification-worker','database-migration'];
   if(requested==='all') return components;

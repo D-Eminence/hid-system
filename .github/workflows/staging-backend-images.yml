@@ -11,7 +11,7 @@ on:
         description: Backend component name, or all
         type: choice
         default: notification-worker
-        options: [notification-worker, database-migration, novu-update, admin-update, identity-api, ehr-api, lab-api, pharmacy-api, ocr-api, ocr-worker, outreach-api, notification-api, event-dispatcher, gateway, support-api, all]
+        options: [notification-worker, database-migration, novu-update, admin-update, patient-chat-update, identity-api, ehr-api, lab-api, pharmacy-api, ocr-api, ocr-worker, outreach-api, notification-api, event-dispatcher, gateway, support-api, all]
 permissions:
   contents: read
 concurrency:
