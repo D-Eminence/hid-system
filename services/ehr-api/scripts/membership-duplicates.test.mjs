@@ -46,5 +46,6 @@ test('the promotion checks membership uniqueness before it writes anything', asy
   const started = promotion.indexOf('promotionStarted = true;');
   assert.ok(check > 0, 'promote-legacy-identity.mjs must call validateMembershipUniqueness');
   assert.ok(check < started, 'the uniqueness check must run before the first promotion write');
-  assert.match(promotion, /reason: 'duplicate_active_facility_membership'/);
+  // The check itself runs against the real schema in verify-membership-duplicates-runtime.mjs.
+  assert.match(promotion, /await membershipUniquenessConflict\(client, staged\)/);
 });

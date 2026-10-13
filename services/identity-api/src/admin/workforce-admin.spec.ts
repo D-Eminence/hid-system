@@ -48,7 +48,7 @@ const attachRow = { membership_id: MEMBERSHIP, account_id: ACCOUNT, staff_id: '3
   staff_version: '1', replayed: false };
 const roleRow = { membership_id: MEMBERSHIP, facility_id: FACILITY, role_code: 'doctor', role_active: true,
   membership_active: true, membership_state: 'active', membership_version: '2', attestation_id: ATTESTATION,
-  replayed: false };
+  renewed: false, replayed: false };
 const endRow = { membership_id: MEMBERSHIP, facility_id: FACILITY, account_id: ACCOUNT, revoked_roles: 1,
   revoked_grants: 2, expired_requests: 3, revoked_sessions: 4, membership_version: '4', replayed: false };
 const attestation = { attestedRoles: ['doctor'], credentialReference: 'MDCN/R/0001',
@@ -132,13 +132,29 @@ describe('WorkforceAdminService', () => {
     await expect(service.changeRole(context, MEMBERSHIP, 1,
       { facilityId: FACILITY, roleCode: 'doctor', action: 'grant', reason: 'Attested clinician' }, 'workforce-key-000006'))
       .resolves.toEqual({ membershipId: MEMBERSHIP, facilityId: FACILITY, roleCode: 'doctor', roleActive: true,
-        membershipActive: true, state: 'active', version: 2, attestationId: ATTESTATION, replayed: false });
+        membershipActive: true, state: 'active', version: 2, attestationId: ATTESTATION, renewed: false,
+        replayed: false });
     expect(command).toHaveBeenCalledWith(expect.stringContaining('identity.admin_change_workforce_role'),
       [MEMBERSHIP, FACILITY, 1, 'doctor', 'grant', 'Attested clinician', 'workforce-key-000006',
         expect.stringMatching(/^[0-9a-f]{64}$/)]);
     expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: 'admin.workforce.role.granted', details: expect.objectContaining({ roleCode: 'doctor',
-        attestationId: ATTESTATION, facilityId: FACILITY }) }));
+        attestationId: ATTESTATION, facilityId: FACILITY, renewed: false }) }));
+  });
+
+  it('reports and audits a grant that renews a role on a newer attestation', async () => {
+    const { service, audit } = harness({ ...roleRow, renewed: true, membership_version: '5' });
+    await expect(service.changeRole(context, MEMBERSHIP, 4, role, 'workforce-key-000016'))
+      .resolves.toMatchObject({ roleActive: true, renewed: true, version: 5, attestationId: ATTESTATION });
+    expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: 'admin.workforce.role.granted', details: expect.objectContaining({ renewed: true,
+        attestationId: ATTESTATION }) }));
+  });
+
+  it('reports a revoke as no renewal', async () => {
+    const { service } = harness({ ...roleRow, role_active: false, attestation_id: null, renewed: false });
+    await expect(service.changeRole(context, MEMBERSHIP, 2, { ...role, action: 'revoke', reason: 'Left the ward' },
+      'workforce-key-000017')).resolves.toMatchObject({ roleActive: false, renewed: false, attestationId: null });
   });
 
   it('ends a membership and reports what it closed', async () => {

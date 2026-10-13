@@ -130,6 +130,24 @@ describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
       expect(String(query.mock.calls[0]?.[0])).toContain('and auth.facility_role_is_effective(account_role.id)');
     });
 
+    it('lists as roles only the effective role assignments its permissions come from, never the membership labels', async () => {
+      const { query, service } = serviceReturning([STAFF_CONTEXT_ROW]);
+      await service.resolve(STAFF_CONTEXT_ROW.subject, 'local');
+      const sql = String(query.mock.calls[0]?.[0]).replace(/\s+/g, ' ');
+      expect(sql).toContain('coalesce(array_agg(distinct role.code) filter (where role.code is not null), array[]::text[]) as roles');
+      expect(sql).not.toContain('membership.membership_role');
+      expect(sql).not.toContain('membership.app_role');
+    });
+
+    it('binds a membership whose roles were all revoked or lapsed with no roles and no permissions', async () => {
+      const { service } = serviceReturning([{ ...STAFF_CONTEXT_ROW, roles: [], permissions: [] }]);
+      const actor = await service.resolve(STAFF_CONTEXT_ROW.subject, 'local');
+      expect(actor.facility?.roles).toEqual([]);
+      expect(actor.roles).toEqual([]);
+      expect(actor.role).toBeUndefined();
+      expect(actor.permissions).toEqual([]);
+    });
+
     it('binds distinct facilities as before', async () => {
       const second = { ...STAFF_CONTEXT_ROW, facility_id: '10000000-0000-4000-8000-000000000003',
         membership_id: '40000000-0000-4000-8000-000000000003', facility_name: 'Another Facility', is_primary: false };

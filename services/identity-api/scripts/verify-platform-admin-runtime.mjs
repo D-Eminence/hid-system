@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { createTotpClock, platformClient } from './platform-session-client.mjs';
 const service = resolve(import.meta.dirname, '..');
@@ -73,6 +74,15 @@ const { IdentityController } = load('identity/identity.controller.ts');
 const { IdentityService } = load('identity/identity.service.ts');
 const { PostgresIdentityProvider } = load('identity/postgres-identity.provider.ts');
 const { IDENTITY_PROVIDER } = load('identity/identity.types.ts');
+// The staff search budget (0086) is a dependency of ConsentService and
+// IdentityService once it exists; provide it whenever the source has it, so
+// this verifier builds the same services on either side of that change.
+const optionalProviders = existsSync(join(service, 'src', 'identity', 'staff-search-budget.ts'))
+  ? [load('identity/staff-search-budget.ts').StaffSearchBudget] : [];
+// The status the lookup route declares (201 by default for a POST; 0086
+// declares 200), read from the route rather than assumed.
+const { HTTP_CODE_METADATA } = require('@nestjs/common/constants');
+const lookupStatus = Reflect.getMetadata(HTTP_CODE_METADATA, IdentityController.prototype.lookup) ?? 201;
 const { encodeCursor } = load('common/cursor.ts');
 const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
 
@@ -140,7 +150,8 @@ try {
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
       AuditService, WorkloadAuthService, TurnstileService, AdminService, AdminOperationsService, PricingService,
       MfaService, MfaSecretProtector, PlatformSecurityService, DemoRequestsService, WorkforceAdminService,
-      ConsentService, IdentityService, { provide: IDENTITY_PROVIDER, useClass: PostgresIdentityProvider },
+      ConsentService, IdentityService, ...optionalProviders,
+      { provide: IDENTITY_PROVIDER, useClass: PostgresIdentityProvider },
       { provide: MFA_TOTP_CLOCK, useValue: clock.now },
       { provide: NotificationOtpClient, useValue: {
         deliver: async () => { throw new Error('Notification delivery is outside the platform admin verifier'); },
@@ -559,7 +570,7 @@ try {
   const clinicianCookie = (clinicianLoggedIn.headers['set-cookie'] ?? []).map(value => value.split(';')[0]).join('; ');
   const clinicianSession = { cookie: clinicianCookie, csrf: clinicianLoggedIn.headers['x-csrf-token'] };
 
-  // HID lookup and an access request at facility C; the patient approves
+  // HID lookup and access requests at facility C; the patient approves
   // through the governed approval command; then the lookup is authorized.
   async function patientFixture(hid) {
     const accountId = randomUUID(); const patientId = randomUUID();
@@ -572,46 +583,126 @@ try {
   const hidSuffix = () => Array.from({ length: 8 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
   const patientA = await patientFixture(`HID-${hidSuffix()}`);
   const patientB = await patientFixture(`HID-${hidSuffix()}`);
+  const patientC = await patientFixture(`HID-${hidSuffix()}`);
   const clinical = (who, path, body) => http.post(`/api/v1${path}`).set('Cookie', who.cookie).set('Origin', origin)
     .set('x-csrf-token', who.csrf).set('X-Facility-ID', facilityC).set('X-Purpose-Of-Use', 'direct-care').send(body);
   const lookup = who => clinical(who, '/identity/patient-lookup', { hid: patientA.hid, purpose: 'direct-care' });
   const beforeConsent = await lookup(clinicianSession);
   assert([403, 404].includes(beforeConsent.status), `lookup before consent answered ${beforeConsent.status}`);
-  const requestA = await clinical(clinicianSession, '/identity/access-requests',
-    { hid: patientA.hid, scope: 'read_records', reason: 'Clinic visit at facility C', durationMinutes: 60 });
-  expectStatus(requestA, 201);
-  const requestB = await clinical(clinicianSession, '/identity/access-requests',
-    { hid: patientB.hid, scope: 'read_records', reason: 'Clinic visit at facility C', durationMinutes: 60 });
-  expectStatus(requestB, 201);
-  const requestId = (await owner.query(`select id::text from identity.access_requests
-    where patient_id = $1 and status = 'pending'`, [patientA.patientId])).rows[0].id;
+  for (const patient of [patientA, patientB, patientC]) {
+    expectStatus(await clinical(clinicianSession, '/identity/access-requests',
+      { hid: patient.hid, scope: 'read_records', reason: 'Clinic visit at facility C', durationMinutes: 60 }), 201);
+  }
+  const pendingRequest = async patient => (await owner.query(`select id::text from identity.access_requests
+    where patient_id = $1 and status = 'pending'`, [patient.patientId])).rows[0].id;
+  const approveAs = async (client, patient, requestId) => {
+    await client.query(`select set_config('app.actor_subject', $1, true), set_config('app.correlation_id', $2, true)`,
+      [patient.subject, `workforce-runtime-approve-${randomUUID().slice(0, 8)}`]);
+    await client.query('select * from identity.approve_access_request($1)', [requestId]);
+  };
   const approver = await owner.connect();
   try {
     await approver.query('begin');
-    await approver.query(`select set_config('app.actor_subject', $1, true), set_config('app.correlation_id', $2, true)`,
-      [patientA.subject, `workforce-runtime-approve-${randomUUID().slice(0, 8)}`]);
-    await approver.query('select * from identity.approve_access_request($1)', [requestId]);
+    await approveAs(approver, patientA, await pendingRequest(patientA));
     await approver.query('commit');
   } catch (error) { await approver.query('rollback'); throw error; } finally { approver.release(); }
   const afterConsent = await lookup(clinicianSession);
-  expectStatus(afterConsent, 201);
+  expectStatus(afterConsent, lookupStatus);
   assert.equal(afterConsent.body.patient.hid, patientA.hid);
   // The facility's org_admin stays non-clinical.
   expectStatus(await lookup(orgAdminStaff), 403, 'PERMISSION_DENIED');
 
-  // Ending the membership closes its grant and pending request and signs the clinician out.
-  const membershipVersion = (await owner.query('select row_version from identity.staff_facility_memberships where id = $1',
-    [attached.body.membershipId])).rows[0].row_version;
+  // A revoked role leaves the membership bound with no role and no permission:
+  // the actor's roles are the effective role assignments, never the stored
+  // membership labels. A new grant on the current attestation restores both.
+  const membershipVersion = async () => Number((await owner.query(
+    'select row_version from identity.staff_facility_memberships where id = $1', [attached.body.membershipId])).rows[0].row_version);
+  const changeRole = async action => command(superSession, `/admin/workforce/memberships/${attached.body.membershipId}/roles`,
+    { facilityId: facilityC, roleCode: 'doctor', action, reason: `Runtime doctor ${action} at facility C` },
+    { 'If-Match': String(await membershipVersion()), 'Idempotency-Key': workforceKey() });
+  const clinicianFacilityNow = async () => {
+    const current = await get(clinicianSession, '/auth/session');
+    expectStatus(current, 200);
+    return current.body.actor.facilities.find(facility => facility.id === facilityC);
+  };
+  const revoked = await changeRole('revoke');
+  expectStatus(revoked, 201);
+  assert.equal(revoked.body.roleActive, false);
+  assert.equal(revoked.body.renewed, false);
+  const afterRevoke = await clinicianFacilityNow();
+  assert.deepEqual([afterRevoke.roles, afterRevoke.permissions], [[], []]);
+  expectStatus(await lookup(clinicianSession), 403, 'PERMISSION_DENIED');
+  const regranted = await changeRole('grant');
+  expectStatus(regranted, 201);
+  assert.equal(regranted.body.renewed, false);
+  const afterRegrant = await clinicianFacilityNow();
+  assert.deepEqual(afterRegrant.roles, ['doctor']);
+  assert(afterRegrant.permissions.includes('identity.patient.read'));
+
+  // Ending the membership while two transactions hold row locks on it. The
+  // patient (P) holds B's request FOR UPDATE and approves it 1.5 s later; a
+  // staff transaction (S) holds the membership's KEY SHARE, as any insert that
+  // references it does, and 0.7 s later asks for KEY SHARE on the clinician's
+  // account row, which the end holds FOR UPDATE. The end locks the accounts,
+  // then the membership FOR NO KEY UPDATE (which S's KEY SHARE does not block),
+  // and waits on B's request until P commits. Nobody deadlocks; B's new grant
+  // is revoked with A's, and C's pending request expires.
+  const requestB = await pendingRequest(patientB);
+  const deadlocks = async () => Number((await owner.query(`select deadlocks from pg_stat_database
+    where datname = current_database()`)).rows[0].deadlocks);
+  const deadlocksBefore = await deadlocks();
+  const pause = milliseconds => new Promise(done => setTimeout(done, milliseconds));
   await platform.stepUp(superSession);
-  const ended = await command(superSession, `/admin/workforce/memberships/${attached.body.membershipId}/end`,
-    { facilityId: facilityC, reason: 'Clinician left facility C' },
-    { 'If-Match': String(membershipVersion), 'Idempotency-Key': workforceKey() });
+  const endVersion = await membershipVersion();
+  // The fixture pool's two connections; nothing else may use it until both are released.
+  const patientTransaction = await owner.connect();
+  const staffTransaction = await owner.connect();
+  let ended;
+  try {
+    await patientTransaction.query('begin');
+    await patientTransaction.query('select id from identity.access_requests where id = $1 for update', [requestB]);
+    await staffTransaction.query('begin');
+    await staffTransaction.query('select id from identity.staff_facility_memberships where id = $1 for key share',
+      [attached.body.membershipId]);
+    const approval = (async () => {
+      await patientTransaction.query('select pg_sleep(1.5)');
+      await approveAs(patientTransaction, patientB, requestB);
+      await patientTransaction.query('commit');
+    })();
+    const staffWork = (async () => {
+      await pause(700);
+      await staffTransaction.query('select id from auth.accounts where id = $1 for key share', [clinician.id]);
+      await staffTransaction.query('rollback');
+    })();
+    const ending = command(superSession, `/admin/workforce/memberships/${attached.body.membershipId}/end`,
+      { facilityId: facilityC, reason: 'Clinician left facility C' },
+      { 'If-Match': String(endVersion), 'Idempotency-Key': workforceKey() }).then(response => response);
+    const [approvalOutcome, staffOutcome, endOutcome] = await Promise.allSettled([approval, staffWork, ending]);
+    assert.equal(approvalOutcome.status, 'fulfilled', `the racing approval failed: ${approvalOutcome.reason?.message}`);
+    assert.equal(staffOutcome.status, 'fulfilled', `the racing staff transaction failed: ${staffOutcome.reason?.message}`);
+    assert.equal(endOutcome.status, 'fulfilled', `the end failed: ${endOutcome.reason?.message}`);
+    ended = endOutcome.value;
+  } finally {
+    await patientTransaction.query('rollback').catch(() => undefined);
+    await staffTransaction.query('rollback').catch(() => undefined);
+    patientTransaction.release(); staffTransaction.release();
+  }
   expectStatus(ended, 201);
   assert.equal(ended.body.state, 'ended');
   assert.equal(ended.body.revokedRoles, 1);
-  assert.equal(ended.body.revokedGrants, 1);
+  assert.equal(ended.body.revokedGrants, 2);
   assert.equal(ended.body.expiredRequests, 1);
   assert(ended.body.revokedSessions >= 1);
+  // pg_stat_database is flushed when a backend's transaction ends; allow it a moment.
+  await pause(1200);
+  const raceDeadlocks = (await deadlocks()) - deadlocksBefore;
+  assert.equal(raceDeadlocks, 0, 'ending the membership deadlocked with the racing transactions');
+  const left = (await owner.query(`select
+      (select count(*)::integer from identity.consent_grants where membership_id = $1 and status = 'active') as active_grants,
+      (select count(*)::integer from identity.access_requests where membership_id = $1 and status = 'pending') as pending_requests,
+      (select status from identity.access_requests where id = $2) as request_b`,
+  [attached.body.membershipId, requestB])).rows[0];
+  assert.deepEqual(left, { active_grants: 0, pending_requests: 0, request_b: 'approved' });
   expectStatus(await lookup(clinicianSession), 401);
   expectStatus(await clinicianLogin(), 401);
   const workforceAudit = (await owner.query(`select action, access_scope, facility_id from audit.events
@@ -619,13 +710,16 @@ try {
     order by sequence_id`, [[reviewer.id, superAdmin.id]])).rows;
   assert.deepEqual(workforceAudit.map(row => row.action).filter(action => !action.endsWith('.request')),
     ['admin.workforce.membership.attached', 'admin.workforce.credential.attested', 'admin.workforce.role.granted',
-      'admin.workforce.membership.ended']);
+      'admin.workforce.role.revoked', 'admin.workforce.role.granted', 'admin.workforce.membership.ended']);
   assert(workforceAudit.every(row => row.access_scope === 'platform' && row.facility_id === null));
   boundaries.workforce_provisioning = { org_admin_route: 'PLATFORM_SESSION_REQUIRED', without_permission: 'PERMISSION_DENIED',
     without_step_up: 'STEP_UP_REQUIRED', attach: 'pending', reviewer_grants: 'WORKFORCE_SECOND_PERSON_REQUIRED',
     other_facility: 'WORKFORCE_FACILITY_MISMATCH', insider: 'WORKFORCE_FACILITY_CONFLICT', clinician_sign_in: 200,
-    lookup_before_consent: beforeConsent.status, access_request: 201, lookup_after_approval: 201,
-    org_admin_lookup: 'PERMISSION_DENIED', end: { revokedGrants: 1, expiredRequests: 1, signed_out: 401 } };
+    lookup_before_consent: beforeConsent.status, access_request: 201, lookup_after_approval: lookupStatus,
+    org_admin_lookup: 'PERMISSION_DENIED', after_revoke: { roles: [], lookup: 'PERMISSION_DENIED' },
+    after_regrant: { roles: ['doctor'] },
+    end_during_approval_and_key_share: { deadlocks: raceDeadlocks, revokedGrants: 2, expiredRequests: 1,
+      approved_request_grant: 'revoked', signed_out: 401 } };
 
   process.stdout.write(JSON.stringify({ status: 'passed', runtimeRole,
     routes: ['/admin/session', '/admin/overview', '/admin/principals', '/admin/audit/events', '/admin/facilities/:id/status',

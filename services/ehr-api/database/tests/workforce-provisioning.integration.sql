@@ -661,5 +661,192 @@ begin
   end if;
 end $$;
 
+-- 13. Lock order. Both membership commands lock the account rows FOR UPDATE
+-- first (0073), then the membership FOR NO KEY UPDATE: the membership update
+-- changes no key column, and a foreign-key insert that references the
+-- membership (an approval's consent grant, an access request) takes KEY SHARE,
+-- which FOR NO KEY UPDATE does not block, so neither side waits for the other
+-- while holding what the other needs. Ending a membership expires its pending
+-- requests before it revokes its grants, so an approval that commits while the
+-- end waits on its request has its new grant revoked. The two-connection races
+-- run in services/identity-api/scripts/verify-platform-admin-runtime.mjs.
+reset role;
+do $$
+declare
+  command regprocedure;
+  definition text;
+  account_lock integer;
+  membership_lock integer;
+begin
+  foreach command in array array[
+    'identity.admin_change_workforce_role(uuid,uuid,bigint,text,text,text,text,character)'::regprocedure,
+    'identity.admin_end_workforce_membership(uuid,uuid,bigint,text,text,character)'::regprocedure
+  ] loop
+    definition := regexp_replace(lower(pg_get_functiondef(command)), '\s+', ' ', 'g');
+    account_lock := position('order by account_row.id for update' in definition);
+    membership_lock := position('where membership.id = requested_membership_id for no key update' in definition);
+    if account_lock = 0 or membership_lock = 0 or account_lock > membership_lock
+       or position('where membership.id = requested_membership_id for update' in definition) > 0 then
+      raise exception '% must lock the accounts FOR UPDATE and then the membership FOR NO KEY UPDATE', command;
+    end if;
+  end loop;
+  -- The staff row is referenced the same way (consent grants, access
+  -- requests) and its update changes no key column either.
+  foreach command in array array[
+    'identity.admin_attach_workforce_member(uuid,uuid,text,text,text,text,character)'::regprocedure,
+    'identity.admin_record_credential_attestation(uuid,bigint,text[],text,text,text,timestamptz,text,text,character)'::regprocedure
+  ] loop
+    definition := regexp_replace(lower(pg_get_functiondef(command)), '\s+', ' ', 'g');
+    if position('where staff_row.account_id = target.id for no key update' in definition) = 0
+       or position('where staff_row.account_id = target.id for update' in definition) > 0 then
+      raise exception '% must lock the staff row FOR NO KEY UPDATE', command;
+    end if;
+  end loop;
+  definition := regexp_replace(lower(pg_get_functiondef(
+    'identity.admin_end_workforce_membership(uuid,uuid,bigint,text,text,character)'::regprocedure)), '\s+', ' ', 'g');
+  if position('update identity.access_requests' in definition) = 0
+     or position('update identity.consent_grants' in definition) = 0
+     or position('update identity.access_requests' in definition)
+        > position('update identity.consent_grants' in definition) then
+    raise exception 'ending a membership must expire its pending requests before it revokes its consent grants';
+  end if;
+end $$;
+
+-- 14. Renewal. A role that rests on a lapsed attestation, or on one that a
+-- newer attestation outlasts, is replaced by a grant on the current
+-- attestation: the old assignment is revoked with the grant's reason, a new
+-- one rests on the new attestation, and the reviewer still cannot grant.
+-- Account 08's doctor role at B rests on the lapsed attestation of section 8.
+set local role hid_identity_api_runtime;
+select pg_temp.wf_as('1');
+do $$
+declare
+  attested record;
+begin
+  select * into attested from identity.admin_record_credential_attestation('c8820000-0000-4000-8000-000000000008', 1,
+    array['doctor'], 'MDCN/R/0008', 'Medical and Dental Council of Nigeria', 'Synthetic renewed evidence WF-8',
+    clock_timestamp() + interval '1 year', 'Synthetic review of the renewed licence', 'wf-key-attest-renew-1',
+    repeat('7', 64));
+  perform set_config('suite.renewal_attestation', attested.attestation_id::text, true);
+end $$;
+select pg_temp.wf_refused($c$select * from identity.admin_change_workforce_role('c8840000-0000-4000-8000-000000000008',
+  'c8810000-0000-4000-8000-00000000000b', 1, 'doctor', 'grant', 'Synthetic renewal grant', 'wf-key-renew-reviewer',
+  repeat('a', 64))$c$, 'WORKFORCE_SECOND_PERSON_REQUIRED');
+-- The granter (02) works at B; the insider (03) works only at A.
+select pg_temp.wf_as('2');
+select pg_temp.wf_refused($c$select * from identity.admin_change_workforce_role('c8840000-0000-4000-8000-000000000008',
+  'c8810000-0000-4000-8000-00000000000b', 1, 'doctor', 'grant', 'Synthetic renewal grant', 'wf-key-renew-insider',
+  repeat('a', 64))$c$, 'WORKFORCE_FACILITY_CONFLICT');
+select pg_temp.wf_as('3');
+do $$
+declare
+  renewed record;
+begin
+  select * into renewed from identity.admin_change_workforce_role('c8840000-0000-4000-8000-000000000008',
+    'c8810000-0000-4000-8000-00000000000b', 1, 'doctor', 'grant', 'Synthetic renewal of a lapsed doctor role',
+    'wf-key-renew-1', repeat('8', 64));
+  if renewed.replayed or not renewed.role_active or not renewed.renewed or not renewed.membership_active
+     or renewed.membership_version <> 2
+     or renewed.attestation_id <> current_setting('suite.renewal_attestation')::uuid then
+    raise exception 'renewal returned %', row_to_json(renewed);
+  end if;
+  select * into renewed from identity.admin_change_workforce_role('c8840000-0000-4000-8000-000000000008',
+    'c8810000-0000-4000-8000-00000000000b', 1, 'doctor', 'grant', 'Synthetic renewal of a lapsed doctor role',
+    'wf-key-renew-1', repeat('8', 64));
+  if not renewed.replayed or not renewed.renewed then
+    raise exception 'renewal replay returned %', row_to_json(renewed);
+  end if;
+end $$;
+-- Nothing outlasts the renewed attestation, so a further grant is refused.
+select pg_temp.wf_refused($c$select * from identity.admin_change_workforce_role('c8840000-0000-4000-8000-000000000008',
+  'c8810000-0000-4000-8000-00000000000b', 2, 'doctor', 'grant', 'Synthetic second renewal', 'wf-key-renew-again',
+  repeat('a', 64))$c$, 'WORKFORCE_ROLE_ALREADY_ACTIVE');
+-- A role granted any other way never lapses, so it is never renewed.
+select pg_temp.wf_refused($c$select * from identity.admin_change_workforce_role('c8840000-0000-4000-8000-000000000005',
+  'c8810000-0000-4000-8000-00000000000b', 2, 'doctor', 'grant', 'Synthetic legacy renewal', 'wf-key-renew-legacy',
+  repeat('a', 64))$c$, 'WORKFORCE_ROLE_ALREADY_ACTIVE');
+
+reset role;
+do $$
+declare
+  live record;
+begin
+  if not exists (select 1 from auth.account_roles where id = 'c889f000-0000-4000-8000-000000000008'
+      and revoked_at is not null and revoked_by = 'c8820000-0000-4000-8000-000000000003'
+      and revocation_reason = 'Synthetic renewal of a lapsed doctor role') then
+    raise exception 'the lapsed assignment must be revoked, not edited, by the renewal';
+  end if;
+  select assignment.id, role_grant.attestation_id into live
+  from auth.account_roles assignment
+  join identity.workforce_role_grants role_grant on role_grant.account_role_id = assignment.id
+  where assignment.membership_id = 'c8840000-0000-4000-8000-000000000008' and assignment.role_code = 'doctor'
+    and assignment.revoked_at is null;
+  if live.id is null or live.attestation_id <> current_setting('suite.renewal_attestation')::uuid
+     or not auth.facility_role_is_effective(live.id)
+     or (select count(*) from auth.account_roles where membership_id = 'c8840000-0000-4000-8000-000000000008'
+       and revoked_at is null) <> 1
+     or not auth.membership_has_permission('synthetic:wf:lapsed', 'c8840000-0000-4000-8000-000000000008',
+       'c8810000-0000-4000-8000-00000000000b', 'identity.consent.write') then
+    raise exception 'the renewed role must rest on the new attestation and authorize again';
+  end if;
+  perform set_config('suite.renewed_role', live.id::text, true);
+end $$;
+
+-- Before a lapse: a shorter attestation renews nothing; a longer one does.
+set local role hid_identity_api_runtime;
+select pg_temp.wf_as('1');
+select * from identity.admin_record_credential_attestation('c8820000-0000-4000-8000-000000000008', 2,
+  array['doctor'], 'MDCN/R/0008', 'Medical and Dental Council of Nigeria', 'Synthetic short evidence WF-8',
+  clock_timestamp() + interval '6 months', 'Synthetic shorter attestation', 'wf-key-attest-renew-2',
+  repeat('9', 64)) \gset short_
+select pg_temp.wf_as('3');
+select pg_temp.wf_refused($c$select * from identity.admin_change_workforce_role('c8840000-0000-4000-8000-000000000008',
+  'c8810000-0000-4000-8000-00000000000b', 2, 'doctor', 'grant', 'Synthetic shorter renewal', 'wf-key-renew-short',
+  repeat('a', 64))$c$, 'WORKFORCE_ROLE_ALREADY_ACTIVE');
+select pg_temp.wf_as('1');
+do $$
+declare
+  attested record;
+begin
+  select * into attested from identity.admin_record_credential_attestation('c8820000-0000-4000-8000-000000000008', 3,
+    array['doctor', 'nurse'], 'MDCN/R/0008', 'Medical and Dental Council of Nigeria', 'Synthetic long evidence WF-8',
+    clock_timestamp() + interval '2 years', 'Synthetic longer attestation', 'wf-key-attest-renew-3', repeat('b', 64));
+  perform set_config('suite.longer_attestation', attested.attestation_id::text, true);
+end $$;
+select pg_temp.wf_as('3');
+do $$
+declare
+  renewed record;
+begin
+  select * into renewed from identity.admin_change_workforce_role('c8840000-0000-4000-8000-000000000008',
+    'c8810000-0000-4000-8000-00000000000b', 2, 'doctor', 'grant', 'Synthetic renewal before the lapse',
+    'wf-key-renew-2', repeat('c', 64));
+  if not renewed.renewed or renewed.membership_version <> 3
+     or renewed.attestation_id <> current_setting('suite.longer_attestation')::uuid then
+    raise exception 'renewal before the lapse returned %', row_to_json(renewed);
+  end if;
+  -- A first grant of another role is not a renewal.
+  select * into renewed from identity.admin_change_workforce_role('c8840000-0000-4000-8000-000000000008',
+    'c8810000-0000-4000-8000-00000000000b', 3, 'nurse', 'grant', 'Synthetic nurse role grant',
+    'wf-key-renew-nurse', repeat('d', 64));
+  if renewed.renewed or not renewed.role_active or renewed.membership_version <> 4 then
+    raise exception 'a first grant returned %', row_to_json(renewed);
+  end if;
+end $$;
+reset role;
+do $$ begin
+  if not exists (select 1 from auth.account_roles where id = current_setting('suite.renewed_role')::uuid
+      and revoked_at is not null and revocation_reason = 'Synthetic renewal before the lapse')
+     or (select count(*) from auth.account_roles where membership_id = 'c8840000-0000-4000-8000-000000000008'
+       and revoked_at is null) <> 2
+     or not exists (select 1 from auth.account_roles assignment
+       join identity.workforce_role_grants role_grant on role_grant.account_role_id = assignment.id
+       where assignment.membership_id = 'c8840000-0000-4000-8000-000000000008' and assignment.role_code = 'doctor'
+         and assignment.revoked_at is null
+         and role_grant.attestation_id = current_setting('suite.longer_attestation')::uuid) then
+    raise exception 'the renewal before the lapse must replace the earlier assignment';
+  end if;
+end $$;
+
 reset role;
 rollback;
