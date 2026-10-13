@@ -59,7 +59,9 @@ export class NotificationService {
    * Delivers one OTP and writes exactly one PHI-free `notification.otp.outcome`
    * line for it (D4, NOTIF-PROD): channel, purpose, outcome, the provider that
    * answered last, whether the fallback ran, a correlation id and a fixed safe
-   * code. Never the recipient, the code, the message or provider text. The
+   * code; when the fallback ran, also the primary provider and its fixed safe
+   * code, so an unconfigured fallback cannot hide why the primary failed.
+   * Never the recipient, the code, the message or provider text. The
    * CloudWatch metric filter counts `definitive_failure` lines.
    */
   async deliverOtp(message: OtpMessage, rawPlan?: unknown, correlationId: string = randomUUID()): Promise<DeliveryResult> {
@@ -73,17 +75,21 @@ export class NotificationService {
       throw error;
     }
     const last = result.fallback ?? result.primary;
-    this.logOtpOutcome(message, correlationId, otpOutcome[result.outcome], last.provider, Boolean(result.fallback), last.safeCode);
+    this.logOtpOutcome(message, correlationId, otpOutcome[result.outcome], last.provider, Boolean(result.fallback), last.safeCode,
+      result.fallback ? result.primary : undefined);
     return result;
   }
 
   private logOtpOutcome(message: OtpMessage, correlationId: string, outcome: OtpOutcome, provider: string,
-    fallbackUsed: boolean, safeCode?: string): void {
+    fallbackUsed: boolean, safeCode?: string, primary?: ProviderResult): void {
+    const loggable = (code?: string): code is string =>
+      code !== undefined && (loggableSafeCodes.has(code) || /^http_\d{3}$/.test(code));
     process.stdout.write(`${JSON.stringify({
       event: 'notification.otp.outcome', channel: message.channel,
       purpose: /^[A-Z_]{3,64}$/.test(message.purpose) ? message.purpose : 'unknown',
       outcome, provider, fallbackUsed, correlationId,
-      ...(safeCode !== undefined && (loggableSafeCodes.has(safeCode) || /^http_\d{3}$/.test(safeCode)) ? { safeCode } : {}),
+      ...(loggable(safeCode) ? { safeCode } : {}),
+      ...(primary ? { primaryProvider: primary.provider, ...(loggable(primary.safeCode) ? { primarySafeCode: primary.safeCode } : {}) } : {}),
     })}\n`);
   }
 

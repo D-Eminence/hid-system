@@ -1174,6 +1174,10 @@ test('NIN-only enrollment is an explicit synth input that defaults to false and 
   /HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production/);
   assert.equal(environmentConfig('production', undefined, 'true', undefined,
     { ...productionTopic, qoreIdNinOnlyEnrollmentEnabled: 'false' }).qoreIdNinOnlyEnrollmentEnabled, false);
+  // The regional stack refuses it too, for a configuration built by hand.
+  assert.throws(() => new HidRegionalStack(new App(), 'NinOnlyProduction', { configuration: {
+    ...environmentConfig('production', undefined, 'true', undefined, productionTopic), qoreIdNinOnlyEnrollmentEnabled: true,
+  } }), /HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production/);
   assert.equal(containerOf(regional, 'identity-api').environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED, 'false');
   assert.equal(containerOf(stagingRegional, 'identity-api').environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED, 'false');
   assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { qoreIdNinOnlyEnrollmentEnabled: 'true' }),

@@ -71,8 +71,8 @@ export interface HidEnvironmentConfig {
   readonly enabledApiRoutes: readonly ApiRouteModule[];
   // Identity's QOREID_NIN_ONLY_ENROLLMENT_ENABLED. Synth input
   // HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED, default false, refused unless
-  // QoreID is enabled (N1). Identity itself refuses it in production until
-  // the registry-phone holder step ships.
+  // QoreID is enabled, and refused in production until the change that ships
+  // the registry-phone holder step (N1) lifts this refusal and Identity's.
   readonly qoreIdNinOnlyEnrollmentEnabled: boolean;
   // Whether the Novu notification worker may run. Synth input
   // HID_NOTIFICATION_WORKER_ENABLED; production is fixed to false (D17)
@@ -314,6 +314,13 @@ export function environmentConfig(
     options.qoreIdNinOnlyEnrollmentEnabled, 'false');
   if (qoreIdNinOnlyEnrollmentEnabled && !qoreIdEnabled) {
     throw new Error('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true requires HID_QOREID_ENABLED=true');
+  }
+  // CFG-PROD, N1: NIN-only enrollment proves that a NIN exists, not that the
+  // caller holds it. Deny by default in production, independent of Identity's
+  // own refusal, until the registry-phone holder step ships.
+  if (qoreIdNinOnlyEnrollmentEnabled && name === 'production') {
+    throw new Error('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production until NIN-only enrollment '
+      + 'proves that the caller holds the registry phone (N1)');
   }
   const notificationWorkerEnabled = booleanInput('HID_NOTIFICATION_WORKER_ENABLED', options.notificationWorkerEnabled,
     name === 'production' ? 'false' : 'true');

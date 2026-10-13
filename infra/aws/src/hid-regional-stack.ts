@@ -125,6 +125,11 @@ export class HidRegionalStack extends Stack {
       throw new Error(`The operational alarm topic must be in this stack's region ${this.region}; `
         + `HID_OPERATIONAL_ALARM_TOPIC_ARN names region ${alarmTopic.region}`);
     }
+    // CFG-PROD, N1: also for a configuration not built by environmentConfig.
+    if (this.configuration.name === 'production' && this.configuration.qoreIdNinOnlyEnrollmentEnabled) {
+      throw new Error('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production until NIN-only enrollment '
+        + 'proves that the caller holds the registry phone (N1)');
+    }
 
     validateDatabaseConnectionBudget(
       this.configuration.profile,

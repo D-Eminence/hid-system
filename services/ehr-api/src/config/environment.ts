@@ -75,6 +75,11 @@ const environmentSchema = z
     S3_SECRET_ACCESS_KEY: optionalString,
     S3_FORCE_PATH_STYLE: booleanString,
     S3_KMS_KEY_ID: optionalString,
+    // Read only to refuse them in production: without S3_* keys the S3 client
+    // uses the SDK's default chain, which reads these before the task role.
+    AWS_ACCESS_KEY_ID: optionalString,
+    AWS_SECRET_ACCESS_KEY: optionalString,
+    AWS_SESSION_TOKEN: optionalString,
   })
   .superRefine((environment, context) => {
     if (environment.EHR_SERVICE_IDENTITY_MODE === 'local-secret'
@@ -135,6 +140,10 @@ const environmentSchema = z
       // CFG-PROD: production reaches S3 only with the ECS task role.
       if (environment.S3_ACCESS_KEY_ID || environment.S3_SECRET_ACCESS_KEY) context.addIssue({ code: 'custom',
         path: ['S3_ACCESS_KEY_ID'], message: 'Static S3 credentials are forbidden in production; use the ECS task role' });
+      if (environment.AWS_ACCESS_KEY_ID || environment.AWS_SECRET_ACCESS_KEY || environment.AWS_SESSION_TOKEN) {
+        context.addIssue({ code: 'custom', path: ['AWS_ACCESS_KEY_ID'],
+          message: 'Static AWS credentials are forbidden in production; use the ECS task role' });
+      }
       for (const [key, value] of [['DATABASE_URL', environment.DATABASE_URL],
         ['WORKLOAD_DATABASE_URL', environment.WORKLOAD_DATABASE_URL]] as const) {
         if (value && databaseUrlOverridesTls(value)) context.addIssue({ code: 'custom', path: [key],

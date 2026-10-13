@@ -8,9 +8,11 @@ Identity sensitive and notification provider secrets is present, the five
 Identity keys are canonical 32-byte base64, the notification secret holds
 exactly the otp-email-sms fields, the Google allowlist is present and empty,
 SES has production access and a DKIM-verified domain, and the operational
-alarm topic exists, is encrypted with a customer-managed KMS key (CloudWatch
-cannot publish through the AWS-managed SNS key) and has a confirmed
-subscription.
+alarm topic exists, is encrypted with an enabled customer-managed KMS key in
+its own account and region whose key policy lets cloudwatch.amazonaws.com use
+it (CloudWatch cannot publish through the AWS-managed SNS key; the key is
+resolved with kms describe-key, so an alias ARN or key id of that key fails
+too) and has a confirmed subscription.
 
 No value, length, encoding, sender, recipient or API error text is printed or
 stored. No login, provisioning, delivery, signing, deployment or secret
@@ -20,6 +22,7 @@ import argparse
 import base64
 import binascii
 import datetime
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -45,6 +48,17 @@ NOTIFICATION_PROVIDER_FIELDS = ["sesFromAddress", "termiiBaseUrl", "termiiApiKey
 KEY_FIELDS = ["mfaSecretKeyB64", "otpHmacKeyB64", "contactLookupHmacKeyB64", "ninLookupHmacKeyB64", "ninEncryptionKeyB64"]
 GOOGLE_FIELD = "googleOidcClientIds"
 ALARM_TOPIC_NAME = "hid-production-operational-alerts"
+# The KMS identifiers SNS reports as KmsMasterKeyId: a key id (multi-Region
+# keys start with mrk-), a key ARN, an alias name or an alias ARN.
+KMS_KEY_ID = re.compile(r"^(?:mrk-[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
+KMS_KEY_IDENTIFIER = re.compile(
+    r"^(?:(?:mrk-[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"|arn:aws(?:-cn|-us-gov)?:kms:[a-z]{2}(?:-gov)?-[a-z]+-[0-9]:[0-9]{12}:(?:key/[A-Za-z0-9-]{1,128}|alias/[A-Za-z0-9/_-]{1,250})"
+    r"|alias/[A-Za-z0-9/_-]{1,250})$")
+CLOUDWATCH_SERVICE = "cloudwatch.amazonaws.com"
+# What CloudWatch needs to publish to an encrypted topic, matched against the
+# policy's actions case-insensitively, wildcards included (kms:*, kms:GenerateDataKey*).
+CLOUDWATCH_KEY_ACTIONS = ["kms:decrypt", "kms:generatedatakey"]
 SECRET_FIELDS = {AUTH_SECRET: AUTH_FIELDS, IDENTITY_SECRET: IDENTITY_SENSITIVE_FIELDS,
                  NOTIFICATION_SECRET: NOTIFICATION_PROVIDER_FIELDS}
 
@@ -147,6 +161,78 @@ def count(value):
         return None
 
 
+def kms_key_identifier(value):
+    """A KMS key id, key ARN, alias name or alias ARN as SNS reports it, else None.
+
+    Only a recognised identifier is passed to the AWS CLI, so a topic attribute can
+    never add an option or another argument to the fixed read-only command.
+    """
+    if not isinstance(value, str):
+        return None
+    return value if KMS_KEY_IDENTIFIER.fullmatch(value) else None
+
+
+def statement_list(policy):
+    statements = policy.get("Statement") if isinstance(policy, dict) else None
+    if isinstance(statements, dict):
+        return [statements]
+    return [item for item in statements if isinstance(item, dict)] if isinstance(statements, list) else []
+
+
+def as_list(value):
+    return value if isinstance(value, list) else [value]
+
+
+def grants_cloudwatch(policy):
+    """Whether the key policy allows cloudwatch.amazonaws.com kms:Decrypt and kms:GenerateDataKey.
+
+    Only explicit Allow statements that name the service principal count; a wildcard
+    principal, NotAction or NotPrincipal statement never does. Conditions are not
+    evaluated, so a statement scoped by condition still counts (the check is a
+    presence check, not a policy simulation).
+    """
+    granted = []
+    for statement in statement_list(policy):
+        if statement.get("Effect") != "Allow" or "NotAction" in statement or "NotPrincipal" in statement:
+            continue
+        principal = statement.get("Principal")
+        services = as_list(principal.get("Service")) if isinstance(principal, dict) else []
+        if CLOUDWATCH_SERVICE not in [item for item in services if isinstance(item, str)]:
+            continue
+        granted += [action.lower() for action in as_list(statement.get("Action")) if isinstance(action, str)]
+    return all(any(fnmatch.fnmatchcase(action, pattern) for pattern in granted) for action in CLOUDWATCH_KEY_ACTIONS)
+
+
+def topic_key_checks(call, key, partition, account, region):
+    """Resolves the topic's key and reports booleans only, never the key identifier or policy."""
+    result = {"customer_managed_key": False, "key_enabled": False, "key_in_topic_account_and_region": False,
+              "key_policy_grants_cloudwatch": False}
+    identifier = kms_key_identifier(key)
+    # CloudWatch alarms cannot publish to a topic encrypted with the AWS-managed
+    # SNS key, whose key policy cannot grant cloudwatch.amazonaws.com.
+    if identifier is None or identifier.lower().endswith("alias/aws/sns"):
+        return result
+    described, error = call(["kms", "describe-key", "--key-id", identifier])
+    metadata = described.get("KeyMetadata") if not error and isinstance(described, dict) else None
+    if not isinstance(metadata, dict):
+        return result
+    key_id = metadata.get("KeyId")
+    expected_arn = re.compile(r"^arn:" + re.escape(partition) + ":kms:" + re.escape(region) + ":" + re.escape(account)
+                              + r":key/[A-Za-z0-9-]{1,128}$")
+    result["customer_managed_key"] = metadata.get("KeyManager") == "CUSTOMER"
+    result["key_enabled"] = metadata.get("KeyState") == "Enabled"
+    result["key_in_topic_account_and_region"] = bool(expected_arn.fullmatch(str(metadata.get("Arn", ""))))
+    if not result["customer_managed_key"] or not isinstance(key_id, str) or not KMS_KEY_ID.fullmatch(key_id):
+        return result
+    response, error = call(["kms", "get-key-policy", "--key-id", key_id, "--policy-name", "default"])
+    try:
+        policy = json.loads(response.get("Policy", "")) if not error and isinstance(response, dict) else None
+    except (TypeError, ValueError):
+        policy = None
+    result["key_policy_grants_cloudwatch"] = grants_cloudwatch(policy)
+    return result
+
+
 def topic_checks(call, partition, account, region):
     topic_arn = f"arn:{partition}:sns:{region}:{account}:{ALARM_TOPIC_NAME}"
     response, error = call(["sns", "get-topic-attributes", "--topic-arn", topic_arn])
@@ -154,11 +240,7 @@ def topic_checks(call, partition, account, region):
         return {"status": error or "invalid_response"}
     attributes = response["Attributes"]
     key = attributes.get("KmsMasterKeyId")
-    # CloudWatch alarms cannot publish to a topic encrypted with the AWS-managed
-    # SNS key: its key policy cannot grant cloudwatch.amazonaws.com. Value-free:
-    # only whether the key is the AWS-managed one, never the key identifier.
-    aws_managed = isinstance(key, str) and key.strip().lower() in {"alias/aws/sns", "aws/sns"}
-    return {"status": "read", "kms_encrypted": present(key), "customer_managed_key": present(key) and not aws_managed,
+    return {"status": "read", "kms_encrypted": present(key), **topic_key_checks(call, key, partition, account, region),
             "subscriptions_confirmed": count(attributes.get("SubscriptionsConfirmed")),
             "subscriptions_pending": count(attributes.get("SubscriptionsPending"))}
 
@@ -195,6 +277,9 @@ def launch_profile(report):
         "alarm_topic_exists": topic.get("status") == "read",
         "alarm_topic_kms_encrypted": topic.get("kms_encrypted") is True,
         "alarm_topic_customer_managed_key": topic.get("customer_managed_key") is True,
+        "alarm_topic_key_enabled": topic.get("key_enabled") is True,
+        "alarm_topic_key_in_account_and_region": topic.get("key_in_topic_account_and_region") is True,
+        "alarm_topic_key_policy_grants_cloudwatch": topic.get("key_policy_grants_cloudwatch") is True,
         "alarm_topic_confirmed_subscription": (topic.get("subscriptions_confirmed") or 0) >= 1,
     }
     failures.extend(name for name, passed in checks.items() if not passed)
@@ -230,7 +315,8 @@ def base_report(account, region):
                        "notification secret holds exactly the otp-email-sms fields",
                        "googleOidcClientIds present and empty (Google sign-in off)",
                        "SES production access, sending, and a DKIM-verified domain",
-                       f"{ALARM_TOPIC_NAME} exists, uses a customer-managed KMS key and has a confirmed subscription"],
+                       f"{ALARM_TOPIC_NAME} exists, uses an enabled customer-managed KMS key in its account and "
+                       "region whose policy lets cloudwatch.amazonaws.com use it, and has a confirmed subscription"],
             "scope": "read-only presence and format checks, not provider delivery or release acceptance"}
 
 
