@@ -169,6 +169,7 @@ function rotatingIssuer() {
   };
   const state = { clock: now, signingKid: 'key-a', published: ['key-a'], jwksStatus: 200, jwksFetches: 0, mints: 0 };
   addKey('key-a'); addKey('key-b'); addKey('key-c');
+  state.replaceKey = addKey;
   const mint = () => {
     const seconds = Math.floor(state.clock / 1000);
     const claims = { iss: configuration.issuer, sub: configuration.subject, aud: 'hid-identity-api', iat: seconds,
@@ -264,6 +265,20 @@ test('a JWKS outage at start is retried no more than once every 30 seconds', asy
       assert.equal(state.jwksFetches, 1);
     }
     await assert.rejects(readFile(join(directory, 'ready.json')), { code: 'ENOENT' });
+    state.clock += 10_000;
+    await agent.renew();
+    assert.equal(state.jwksFetches, 2);
+    assert.equal(await readyAt(directory), state.clock + 300_000);
+  });
+});
+
+test('a cached key that stops verifying is dropped, so the next renewal fetches the JWKS again', async () => {
+  await withAgent(async (agent, state, directory) => {
+    await agent.renew();
+    // The same kid now carries different key material, published by the JWKS.
+    state.replaceKey('key-a'); state.clock += 90_000;
+    await assert.rejects(agent.renew(), /signature is invalid/);
+    assert.equal(state.jwksFetches, 1);
     state.clock += 10_000;
     await agent.renew();
     assert.equal(state.jwksFetches, 2);
