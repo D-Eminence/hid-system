@@ -255,7 +255,9 @@ try {
     .find((item) => item.accessRequestId === accessRequestId && item.status === 'pending');
   assert(pendingListed, 'the clinician sees their pending request');
   // PSEARCH-1 (0086): a request names its patient only while its grant is active.
-  assert.equal(pendingListed.patientId, null, 'a pending request in the staff list must not name the patient');
+  assert.equal(pendingListed.patientIdWithheld, true, 'a pending request in the staff list must not name the patient');
+  assert.equal(pendingListed.patientId, `withheld-${accessRequestId.slice(-4)}`,
+    'a withheld patient id is a non-identifying string, so a client that renders its last characters keeps working');
   assert.equal((await staffRequests(clinician, '', null).expect(400)).body.code, 'PURPOSE_OF_USE_REQUIRED');
   // A facility member without identity.consent.write is refused.
   const orgAdmin = { account: randomUUID(), staff: randomUUID(), membership: randomUUID() };
@@ -297,7 +299,8 @@ try {
     .expect(200)).body.status, 'revoked');
   const revokedOutcome = await ownOutcome();
   assert.equal(revokedOutcome.effectiveStatus, 'revoked', 'the clinician sees the patient revoked the approval');
-  assert.equal(revokedOutcome.patientId, null, 'a revoked approval no longer names the patient in the staff list');
+  assert.equal(revokedOutcome.patientIdWithheld, true, 'a revoked approval no longer names the patient in the staff list');
+  assert.equal(revokedOutcome.patientId, `withheld-${accessRequestId.slice(-4)}`);
   assert((await staffRequests(clinician, '?status=revoked').expect(200)).body
     .some((item) => item.accessRequestId === accessRequestId), 'the outcome filter finds the revoked approval');
   assert(!(await staffRequests(clinician, '?status=active').expect(200)).body

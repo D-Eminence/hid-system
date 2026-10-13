@@ -279,10 +279,17 @@ describe('ConsentService', () => {
       ],
     });
     const rows = await service.listMyStaffAccessRequests(context, {});
-    expect(rows.map((row) => [row.effectiveStatus, row.patientId])).toEqual([
-      ['pending', null], ['denied', null], ['expired', null], ['closed', null], ['revoked', null],
-      ['active', '50000000-0000-4000-8000-000000000007'],
+    // Withheld ids stay a string (Health-id renders the last four characters of
+    // patientId) but carry nothing of the patient: they end in the request's own
+    // last four characters.
+    expect(rows.map((row) => [row.effectiveStatus, row.patientId, row.patientIdWithheld])).toEqual([
+      ['pending', 'withheld-0001', true], ['denied', 'withheld-0002', true], ['expired', 'withheld-0003', true],
+      ['closed', 'withheld-0004', true], ['revoked', 'withheld-0005', true],
+      ['active', '50000000-0000-4000-8000-000000000007', false],
     ]);
+    for (const row of rows.filter((item) => item.patientIdWithheld)) {
+      expect(String(row.patientId)).not.toContain('0007');
+    }
   });
 
   it('lists the authenticated patient access request inbox without unrelated identity data', async () => {
