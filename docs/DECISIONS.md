@@ -2780,7 +2780,7 @@ privilege, verified identity for sensitive operations, auditable actions, no
 production bypass). Acceptance authorizes no deployment: Cloudflare and AWS
 changes need their own authorization, and nothing has been deployed.
 
-Date: 2026-10-13. Change: BRANCH:launch/frontend-host-healthid (launch register
+Date: 2026-10-13. Change: D-Eminence/hid-system#67 (launch register
 FE-HOST, including MOD-EDGE).
 
 Amends: ADR-033 (seven Cloudflare frontend Workers, each serving a hid-system

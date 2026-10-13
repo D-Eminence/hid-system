@@ -3,7 +3,7 @@
 Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
 the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
 the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
-(§1, ADR-052, BRANCH:launch/frontend-host-healthid) with the owner's defaults;
+(§1, ADR-052, D-Eminence/hid-system#67) with the owner's defaults;
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
 
@@ -132,7 +132,7 @@ separate deployment authorization. None of them has been run.
   loop, had no deployment definition, and `verify-config.mjs` required a
   manifest and service worker it deliberately lacks.
 - **Decided (2026-10-13, owner defaults: deny by default, least privilege;
-  ADR-052, BRANCH:launch/frontend-host-healthid, not merged).** Health-id
+  ADR-052, D-Eminence/hid-system#67, not merged).** Health-id
   `apps/patient-web` is the single launch frontend for www, staging and
   admin.*, one build per host with `VITE_HID_API_BASE_URL` and
   `VITE_HID_APP_ORIGIN` equal to the host's origin, the environment's

@@ -43,7 +43,7 @@ with the existing Identity validator. It rejects production hostnames,
 unexpected API origins, default routes, a Health-id Worker pointed at a legacy
 build, and any launch set other than the decided one.
 
-**Launch subset (ADR-052, BRANCH:launch/frontend-host-healthid).** Only two
+**Launch subset (ADR-052, D-Eminence/hid-system#67).** Only two
 staging Workers are deployed: `hid-web-staging` on `staging` and
 `hid-admin-staging` on `admin.staging`, both serving the Health-id
 `apps/patient-web` build staged for that host with its provenance
