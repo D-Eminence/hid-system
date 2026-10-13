@@ -312,6 +312,50 @@ proposal; that change is the place to alter it.
   enrollment is enabled: verifying the enrollment email before activation
   (risk (b)).
 
+### Staff MFA (MFA-1, D14 MFA part)
+
+Decided under the owner default "verified identity for sensitive
+operations", and implemented in D-Eminence/hid-system#71 (migration 0088;
+ADR-054; release checklist §2, "Staff MFA"; `INTERFACE_CONTRACT.md`, "Staff
+sign-in with an authenticator"; `PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §10).
+
+- **Question.** Is staff MFA a launch gate, and for which staff?
+- **Decision.** Yes, for every staff session that can reach patient data, with
+  no permission or role allowlist. Staff sign-in is two-step like platform
+  sign-in: the password yields only a challenge; the session comes after a
+  TOTP code or a one-time recovery code. A first enrolment needs a fresh
+  proof (a code emailed to the account address, or the provider enrollment
+  activation that opened it), never the password alone; the factor records
+  the proof, and only such a factor verifies a staff sign-in. A platform
+  first enrolment (still trust on first use) is refused for an account with
+  a staff membership, which enrols at staff sign-in; a factor enrolled at
+  platform sign-in is refused at staff sign-in until a two-person reset. The
+  email code goes to the account address without requiring it to be marked
+  verified, because no staff flow verifies one. A staff session
+  without live MFA assurance is refused everywhere (`403
+  STAFF_MFA_REQUIRED`) and ended on refresh, so every existing staff session
+  is invalidated at deploy. Google sign-in is for patients only. OTP password
+  recovery keeps the authenticator; a lost authenticator is reset only by the
+  two-person MFA reset, which now names staff targets.
+- **Risks.** Every staff member signs in again at deploy and enrols on first
+  sign-in; the Health-id staff portal must ship the new steps first (release
+  checklist §3). For an account without a factor the mailbox alone is
+  enough: staff password recovery and the enrolment code use the same
+  address, and accounts provisioned without a password (0046, 0087) set their
+  first one by that recovery. Mitigation at launch (release checklist P22):
+  enrol existing clinical accounts before clinical roles are enabled, and
+  review every enrolment that followed a recovery. Staff sign-in needs
+  `MFA_SECRET_KEY_B64` (operator plan I1).
+- **Open (needs a product and security decision).** A second enrolment
+  channel that does not rest on the mailbox, for example a one-time code that
+  the provisioning administrator hands over in person, so that an account
+  without a factor is no longer as strong as its mailbox. It would extend the
+  workforce provisioning commands (0087).
+- **Waits on it.** Owner notices of enrolment, recovery-code use and an MFA
+  reset (audited now; offered to `MFA_NOTICE_SINK`, delivered once a
+  notification route exists). A notice to the account's mailbox cannot warn
+  of that mailbox's compromise.
+
 ## 2. Other open decisions
 
 | # | Decision | Proposed default | Risks | Waits on it |
@@ -329,7 +373,7 @@ proposal; that change is the place to alter it.
 | D11 | Lab result detail for clinicians | No "unreleased correction pending" flag (D-Eminence/hid-system#51) | Clinicians cannot see that a correction is coming | Result retraction API |
 | D12 | OCR publication after an authorization lapse | Terminal, as today | — | — |
 | D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (implemented in D-Eminence/hid-system#59) | No delegated completion | — |
-| D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decided for the workforce part on 2026-10-13 (ADR-049, D-Eminence/hid-system#70, migration 0087): clinical facility roles are granted only by platform-governed commands under the new `platform.workforce.manage` (`platform_super_admin` only), with step-up, `If-Match`, `Idempotency-Key` and a reason; a grant needs a current professional-credential attestation by another platform reviewer who is neither the target nor working at that facility (so not its `org_admin`); `org_admin` stays non-clinical and has no role-granting route; ending a membership revokes its roles and consent grants, expires its pending access requests and revokes the account's staff sessions; a role lapses with its attestation and is renewed by a new attestation and a second administrator's grant, never by the attestation alone. Facility self-service is deferred. Staff MFA is still open (a separate change) | Until staff MFA ships, a clinician's sign-in is single-factor. Which credential source counts (regulator registry or documented manual review) and who may review are product and legal decisions; until then the only method is documented manual review | Workforce management |
+| D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decided for the workforce part on 2026-10-13 (ADR-049, D-Eminence/hid-system#70, migration 0087): clinical facility roles are granted only by platform-governed commands under the new `platform.workforce.manage` (`platform_super_admin` only), with step-up, `If-Match`, `Idempotency-Key` and a reason; a grant needs a current professional-credential attestation by another platform reviewer who is neither the target nor working at that facility (so not its `org_admin`); `org_admin` stays non-clinical and has no role-granting route; ending a membership revokes its roles and consent grants, expires its pending access requests and revokes the account's staff sessions; a role lapses with its attestation and is renewed by a new attestation and a second administrator's grant, never by the attestation alone. Facility self-service is deferred. **Staff MFA: decided, yes** (MFA-1, "Staff MFA" in §1, ADR-054, D-Eminence/hid-system#71, migration 0088): every staff session that can reach patient data is TOTP-verified, with no permission allowlist; a second enrolment channel (beyond the account mailbox) is open | An unenrolled staff account is as strong as its mailbox until it enrols. Which credential source counts (regulator registry or documented manual review) and who may review are product and legal decisions; until then the only method is documented manual review | Workforce management; the Health-id staff sign-in (release checklist §3) |
 | D15 | Launch scope of EHR-to-Lab ordering and in-system result return | In scope (the EHR already sends orders) | If in scope, the Lab handoff is launch-blocking; it merged as D-Eminence/hid-system#56 | Lab handoff |
 | D16 | Health-id OCR publication retry | Persist the publication key per validation; offer Retry for retryable failures | Frontend change | OCR publication retry |
 
@@ -482,3 +526,4 @@ for each merged change and its evidence. Pull requests from this review:
 | DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
 | REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | D-Eminence/hid-system#69, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
 | WF-1 (no governed way to provision clinicians), N5 (two memberships at one facility) | D-Eminence/hid-system#70, migration 0087, ADR-049 | branch, not merged (D14 workforce part, N5) |
+| MFA-1 (staff sessions without MFA; D14 MFA part) | D-Eminence/hid-system#71, migration 0088, ADR-054 | local commits, not pushed; owner notices wait on the notification route; Health-id staff and platform sign-in changes listed in the release checklist §3; release checklist P22 (enrolment before clinical roles, review of enrolments after a recovery) is an operator gate; a second enrolment channel is an open decision |

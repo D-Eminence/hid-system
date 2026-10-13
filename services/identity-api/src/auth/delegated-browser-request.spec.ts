@@ -53,7 +53,7 @@ function guard(workloadAuth: Partial<WorkloadAuthService> | null = {
     return { subject: `local:${caller}`, accountId: `local:${caller}` };
   }),
 }) {
-  const tokens = { verify: jest.fn().mockResolvedValue({ actor: doctor, claims: {} }),
+  const tokens = { verify: jest.fn().mockResolvedValue({ actor: doctor, claims: {}, mfaAssured: true }),
     verifyCsrf: jest.fn((_claims, cookie: string | undefined, header: string | undefined) =>
       Boolean(cookie) && cookie === header) };
   const database = { query: jest.fn(async (_sql: string, parameters: unknown[]) =>

@@ -59,15 +59,21 @@ export function eligibleStaffMembershipJoins(account: string, statuses: string):
 export class CurrentStaffContextService {
   constructor(private readonly database: DatabaseService) {}
 
+  /**
+   * Staff actor. Given a transaction's `client`, it reads on that client: a
+   * staff sign-in (MFA-1) resolves the actor while it holds the account row
+   * lock (Stage 7A), as a platform sign-in does.
+   */
   async resolve(
     subject: string,
     authenticationMethod: ActorContext['authenticationMethod'],
     sessionId?: string,
     preferredFacilityId?: string,
+    client?: Pick<PoolClient, 'query'>,
   ): Promise<ActorContext> {
-    const identity = await this.resolvePostgres(subject, authenticationMethod);
+    const identity = await this.resolvePostgres(subject, authenticationMethod, client);
     if (!identity.accountId) {
-      const account = await this.database.query<{ id: string }>(
+      const account = await this.read<{ id: string }>(client,
         `select id::text from auth.accounts
           where subject = $1 and status = 'active'
             and (disabled_until is null or disabled_until <= clock_timestamp())`,
@@ -77,7 +83,7 @@ export class CurrentStaffContextService {
       if (!accountId) throw new UnauthorizedException('Migrated authentication account is unavailable');
       identity.accountId = accountId;
     }
-    const platformAuthority = await this.resolvePlatformAuthority(identity.accountId);
+    const platformAuthority = await this.resolvePlatformAuthority(identity.accountId, client);
     return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
   }
 
@@ -131,8 +137,9 @@ export class CurrentStaffContextService {
   private async resolvePostgres(
     subject: string,
     authenticationMethod: 'local' | 'oidc',
+    client?: Pick<PoolClient, 'query'>,
   ): Promise<CredentialIdentity> {
-    const result = await this.database.query<StaffContextRow>(
+    const result = await this.read<StaffContextRow>(client,
       `select account.id::text as account_id,
               account.subject,
               account.email,

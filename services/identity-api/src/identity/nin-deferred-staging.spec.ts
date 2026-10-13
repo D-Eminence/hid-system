@@ -183,7 +183,7 @@ describe('explicitly deferred staging NIN', () => {
     const query = jest.fn()
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ evidenceId: randomUUID(), recordedAt: new Date() }] });
-    const tokens = { verify: jest.fn().mockResolvedValue({ actor: patientActor, claims: {} }) };
+    const tokens = { verify: jest.fn().mockResolvedValue({ actor: patientActor, claims: {}, mfaAssured: true }) };
     await startModule(tokens);
     database.withSystemTransaction.mockImplementation(async (_correlation, operation) => operation({ query }));
 
@@ -204,7 +204,7 @@ describe('explicitly deferred staging NIN', () => {
 
   it('does not let a facility actor verify an organization without organization.manage', async () => {
     const tokens = { verify: jest.fn().mockResolvedValue({
-      actor: { ...actor, facilities: [{ ...actor.facility!, permissions: [] }], permissions: [] }, claims: {},
+      actor: { ...actor, facilities: [{ ...actor.facility!, permissions: [] }], permissions: [] }, claims: {}, mfaAssured: true,
     }) };
     await startModule(tokens);
     const response = await request(app!.getHttpServer())
@@ -231,7 +231,7 @@ describe('explicitly deferred staging NIN', () => {
       Object.assign(verifiedActor, { kind: 'patient', patientId: randomUUID(),
         roles: [], permissions: [], platformPermissions: ['platform.admin.access'], platformRoles: ['platform_super_admin'], facilities: [], facilityIds: [], facility: undefined });
     }
-    const tokens = { verify: jest.fn().mockResolvedValue({ actor: verifiedActor, claims: {} }) };
+    const tokens = { verify: jest.fn().mockResolvedValue({ actor: verifiedActor, claims: {}, mfaAssured: true }) };
     await startModule(tokens);
     let pending = request(app!.getHttpServer()).get('/api/v1/identity/registration-capabilities');
     if (scenario !== 'missing authentication') pending = pending.set('authorization', 'Bearer synthetic-token');
@@ -251,7 +251,7 @@ describe('explicitly deferred staging NIN', () => {
 
   it('allows an authorized facility member to read deferred capabilities through the actual security guard', async () => {
     const tokens = { verify: jest.fn().mockResolvedValue({
-      actor: { ...actor, facilities: [actor.facility!] }, claims: {},
+      actor: { ...actor, facilities: [actor.facility!] }, claims: {}, mfaAssured: true,
     }) };
     await startModule(tokens);
     const response = await request(app!.getHttpServer()).get('/api/v1/identity/registration-capabilities')

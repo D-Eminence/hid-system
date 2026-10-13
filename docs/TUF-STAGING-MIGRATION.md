@@ -156,6 +156,32 @@ The executable covers:
    active, unheld membership the target holds is refused (and would break the
    N5 index); an exact re-promotion and memberships beside inactive, held or
    other facilities' ones are accepted; staged duplicates are refused.
+   With 0088 (D-Eminence/hid-system#71): every verifier that signs staff in
+   does it with password and authenticator (`staff-session-client.mjs`: the
+   password step, the emailed enrolment code on a first sign-in, then a TOTP
+   code, or a recovery code when a TOTP step would repeat), so each also
+   requires the password step to set no session cookie. `staff_mfa_runtime`
+   (`verify-staff-mfa-runtime.mjs`, new) requires the password step to set
+   only the challenge cookie and create no session, a first enrolment to be
+   refused without the emailed code (`403 MFA_ENROLLMENT_PROOF_REQUIRED`) and
+   with a wrong one, the session and its assurance at the first TOTP code,
+   TOTP replay and recovery-code reuse to be refused, a staff challenge to be
+   refused by the platform steps, a staff session without assurance (as
+   issued before 0088) to be refused `403 STAFF_MFA_REQUIRED` by cookie and
+   bearer and ended on refresh while it can still sign out, a staff Google
+   exchange to be refused `403 GOOGLE_STAFF_SIGN_IN_DISABLED`, an OTP recovery
+   to keep the factor, a two-person reset of a staff account to revoke it
+   and its sessions, the platform first enrolment of an administrator who is
+   also a doctor to be refused `409 MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED`
+   (that account enrols at staff sign-in and uses the factor for both), and a
+   factor enrolled at platform sign-in to be refused at staff sign-in (`403
+   STAFF_MFA_FACTOR_UNPROVEN`) and by the database as the runtime role, until
+   a two-person reset; `platform_admin_runtime` enrols its auditor and support
+   administrator, who also hold staff memberships, at staff sign-in;
+   `delegated_cookie_read_runtime` also requires the EHR to
+   refuse a reader whose assurance is gone (`403 STAFF_MFA_REQUIRED`) and its
+   refresh to end the sign-in. The rehearsal also runs the new rollback-only
+   `staff-mfa.integration.sql` with the additional suites.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

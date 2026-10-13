@@ -22,6 +22,8 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
+import { createTotpClock } from './platform-session-client.mjs';
+import { enrollmentCodeOutbox, staffClient, supertestTransport, SYNTHETIC_STAFF_MFA_KEY_B64 } from './staff-session-client.mjs';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
@@ -34,7 +36,8 @@ const SERVICE_APPLICATION = 'hid-patient-search-verifier';
 const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database: 'postgres', max: 1 });
 // Small budgets so that the rate limits are reached within this run.
 const LIMITS = { lookupActor: 6, lookupFacility: 8, requestActor: 3 };
-Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', NIN_PROVIDER_MODE: 'unavailable', TURNSTILE_MODE: 'disabled',
+Object.assign(process.env, { MFA_SECRET_KEY_B64: SYNTHETIC_STAFF_MFA_KEY_B64, MFA_KEY_VERSION: 'patient-search-runtime-v1',
+  AUTH_COOKIE_SECURE: 'true', NIN_PROVIDER_MODE: 'unavailable', TURNSTILE_MODE: 'disabled',
   IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret', PATIENT_LIFECYCLE_SWEEP_SECONDS: '0',
   PATIENT_LOOKUP_ACTOR_MAX_REQUESTS: String(LIMITS.lookupActor),
   PATIENT_LOOKUP_FACILITY_MAX_REQUESTS: String(LIMITS.lookupFacility),
@@ -66,6 +69,9 @@ const { AuditInterceptor } = load('audit/audit.interceptor.ts');
 const { SecurityGuard } = load('auth/security.guard.ts');
 const { WorkloadAuthService } = load('auth/workload-auth.service.ts');
 const { TurnstileService } = load('auth/turnstile.service.ts');
+const { MfaService, MFA_TOTP_CLOCK } = load('auth/mfa/mfa.service.ts');
+const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
+const { NotificationOtpClient } = load('auth/notification-otp.client.ts');
 const { IdentityController } = load('identity/identity.controller.ts');
 const { IdentityService } = load('identity/identity.service.ts');
 const { PostgresIdentityProvider } = load('identity/postgres-identity.provider.ts');
@@ -83,11 +89,16 @@ const evidence = { database: 'disposable copy of hid_rehearsal', runAs: RUNTIME_
 const check = (name) => evidence.checks.push(name);
 let app;
 try {
+  // Staff sign-in (MFA-1): an emailed enrolment code, then the authenticator on a virtual clock.
+  const clock = createTotpClock();
+  const staffEnrollmentCodes = enrollmentCodeOutbox();
   const module = await Test.createTestingModule({
     controllers: [AuthController, IdentityController, ConsentController],
     providers: [DatabaseService, TokenService, LocalAuthProvider, CurrentStaffContextService,
       CurrentPatientContextService, AuthService, AuthSessionAuditService, AuditService, WorkloadAuthService,
-      TurnstileService, IdentityService, StaffSearchBudget, ConsentService,
+      TurnstileService, IdentityService, StaffSearchBudget, ConsentService, MfaService, MfaSecretProtector,
+      { provide: MFA_TOTP_CLOCK, useValue: clock.now },
+      { provide: NotificationOtpClient, useValue: staffEnrollmentCodes.client },
       { provide: IDENTITY_PROVIDER, useClass: PostgresIdentityProvider },
       { provide: GoogleAuthenticationService, useValue: {
         login: async () => { throw new Error('Google exchange is outside the patient search verifier'); },
@@ -140,9 +151,9 @@ try {
         values($1,$2,'doctor','facility',$3,$4,'Synthetic rehearsal role')`, [randomUUID(), account, membership, facility]);
       memberships[facility] = membership;
     }
-    const login = await http.post('/api/v1/auth/login').set('Origin', origin)
-      .send({ email, password, turnstileAction: 'staff-login' }).expect(200);
-    return { account, staffId, memberships, cookie: cookies(login), csrf: login.headers['x-csrf-token'] };
+    const signedIn = await staffClient({ send: supertestTransport(http), origin, password, outbox: staffEnrollmentCodes,
+      now: clock.next }).signIn(email);
+    return { account, staffId, memberships, cookie: signedIn.cookie, csrf: signedIn.csrf };
   }
   /** An active patient, linked to an account when one is given. */
   const patient = async (hid, account = null) => {

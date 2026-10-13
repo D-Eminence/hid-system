@@ -10,6 +10,7 @@ import { createRequire } from 'node:module';
 import { createHmac, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
 import { createTotpClock, platformClient } from './platform-session-client.mjs';
+import { enrollmentCodeOutbox, staffClient, supertestTransport } from './staff-session-client.mjs';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
@@ -137,13 +138,14 @@ const owner = new Pool({ host: socket, user: process.env.PGUSER, database: isola
 // Local delivery stub: captures the emailed code exactly as notification-api would receive it.
 const codes = new Map();
 const recipients = [];
-const notification = {
-  deliver: async (input) => {
-    assert.equal(input.purpose, 'EMAIL_VERIFY'); assert.equal(input.channel, 'email');
-    codes.set(input.challengeId, input.code); recipients.push(input.recipient);
-    return { outcome: 'accepted', provider: 'brevo' };
-  },
-};
+// Staff enrolment codes (MFA-1, LOGIN_STEP_UP) are kept apart; every other
+// delivery is the enrollment's email verification.
+const staffEnrollmentCodes = enrollmentCodeOutbox(async (input) => {
+  assert.equal(input.purpose, 'EMAIL_VERIFY'); assert.equal(input.channel, 'email');
+  codes.set(input.challengeId, input.code); recipients.push(input.recipient);
+  return { outcome: 'accepted', provider: 'brevo' };
+});
+const notification = staffEnrollmentCodes.client;
 let app;
 try {
   // Fixture: the platform has enabled QoreID CAC verification (an admin action).
@@ -279,7 +281,8 @@ try {
   assert.match(verified.headers['set-cookie'].join(';'), /HttpOnly/i);
 
   // 12-16. Activation creates the organization, facility, EHR product, account
-  // and org-admin membership, and signs the administrator in.
+  // and org-admin membership, and opens the administrator's first staff
+  // sign-in at authenticator enrolment (MFA-1): a challenge cookie, no session.
   const password = 'Synthetic-Provider-Password-2026';
   expectProblem(await http.post('/api/v1/identity/provider-enrollments/activate').set('Origin', origin)
     .send({ password }), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
@@ -287,11 +290,16 @@ try {
     .set('Cookie', enrollmentCookie).send({ password });
   assert.equal(activated.status, 200, `activation failed: ${JSON.stringify(activated.body)}`);
   assert.equal(activated.body.activated, true);
+  assert.equal(activated.body.status, 'mfa_enrollment_required');
+  assert.equal(activated.body.actor, undefined, 'Activation answered a session actor');
   const { organizationId, facilityId, accountId } = activated.body;
-  assert.equal(activated.body.actor.accountId, accountId);
-  assert(activated.headers['x-csrf-token'], 'Activation did not return a CSRF token for the new session');
-  const sessionCookies = cookies(activated).filter(value => value.startsWith(cookieName));
-  assert(sessionCookies.some(value => value.startsWith(`${cookieName}=`)), 'Activation did not sign the provider in');
+  assert.equal(activated.headers['x-csrf-token'], undefined, 'Activation returned a CSRF token');
+  const activationCookies = cookies(activated).filter(value => value.startsWith(cookieName));
+  for (const name of [cookieName, `${cookieName}_refresh`, `${cookieName}_csrf`]) {
+    assert(!activationCookies.some(value => value.startsWith(`${name}=`)), `Activation set the session cookie ${name}`);
+  }
+  const challengeCookie = activationCookies.find(value => value.startsWith(`${cookieName}_mfa=`));
+  assert(challengeCookie, 'Activation did not open the staff MFA enrolment');
   const created = (await owner.query(`
     select o.name organization, f.lifecycle_status facility_status, f.active facility_active,
       p.product_code product, a.email, a.status account_status, s.default_role staff_role,
@@ -312,19 +320,24 @@ try {
     membership_role: 'org_admin', membership_active: true, role_code: 'org_admin',
     application_status: 'approved', reviewer: null, application_facility: true, cac_bindings: 1 }]);
 
-  // 17. The new provider is authenticated: the activation session works, the
-  // facility can be selected, and a fresh staff login succeeds.
-  const sessionHeader = sessionCookies.join('; ');
+  // 17. The new provider enrols an authenticator: the activation is the
+  // enrolment's fresh proof, so no emailed code is asked; the first TOTP code
+  // issues the session. The session works, the facility can be selected, and
+  // a fresh staff sign-in (password, then TOTP) succeeds.
+  const staff = staffClient({ send: supertestTransport(http), origin, password, outbox: staffEnrollmentCodes,
+    now: clock.next, turnstileToken: (action) => turnstile(action) });
+  const enrolled = await staff.enroll(emailA, challengeCookie, { emailedProof: false });
+  assert.equal(enrolled.accountId, accountId);
+  const sessionHeader = enrolled.cookie;
   const session = await http.get('/api/v1/auth/session').set('Cookie', sessionHeader);
   assert.equal(session.status, 200, `session failed: ${JSON.stringify(session.body)}`);
   assert.equal(session.body.actor.accountId, accountId);
   const selected = await http.post('/api/v1/auth/facility').set('Cookie', sessionHeader).set('Origin', origin)
-    .set('x-csrf-token', activated.headers['x-csrf-token']).send({ facilityId });
+    .set('x-csrf-token', enrolled.csrf).send({ facilityId });
   assert.equal(selected.status, 200, `facility selection failed: ${JSON.stringify(selected.body)}`);
-  const login = await http.post('/api/v1/auth/login').set('Origin', origin)
-    .send({ email: emailA, password, turnstileAction: 'staff-login', turnstileToken: turnstile('staff-login') });
-  assert.equal(login.status, 200, `provider login failed: ${JSON.stringify(login.body)}`);
-  assert.equal(login.body.actor.accountId, accountId);
+  const login = await staff.signIn(emailA);
+  assert.equal(login.accountId, accountId);
+  security.activation_mfa = 'enrolment on the activation proof, then TOTP sign-in';
 
   // 18. A signed-in caller cannot use the accountless flow.
   const cacB = 'RC9900063202'; const emailB = email('b');
@@ -438,10 +451,11 @@ try {
     returning id, row_version`, [email('reviewed')])).rows[0];
   const networkRowsBefore = (await owner.query('select coalesce(sum(attempt_count),0)::int n from platform.self_service_cac_quota_counters')).rows[0].n;
   // Stage 2A: the reviewer signs in to platform administration (password +
-  // TOTP enrollment) and steps up, since verify-CAC is a high-tier action.
+  // TOTP) and steps up, since verify-CAC is a high-tier action. The account
+  // enrolled its one authenticator at its first staff sign-in (17, MFA-1).
   const platform = platformClient({ http, origin, totp, clock, password,
     turnstileToken: () => turnstile('admin-login') });
-  const reviewer = await platform.enroll(emailA);
+  const reviewer = await platform.signIn({ email: emailA, secret: staff.secretOf(emailA) });
   await platform.stepUp(reviewer);
   const verifiedByReviewer = await platform.command(reviewer,
     `/admin/organization-applications/${reviewed.id}/verify-cac`, {},

@@ -73,7 +73,10 @@ a live access token, the `X-HID-Client` check and the refresh-token lookup
 rules below come from D-Eminence/hid-system#39, which is not yet deployed. Platform administration sessions use their own cookies and
 `/auth/admin/*` routes (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1). The
 enrollment cookie rule and the lookups' actor condition come from
-D-Eminence/hid-system#50, also not deployed.
+D-Eminence/hid-system#50, also not deployed. Staff sign-in with an
+authenticator, the `STAFF_MFA_REQUIRED` refusals and the refusal of a staff
+Google exchange (below) come from D-Eminence/hid-system#71 (launch blocker
+MFA-1, migration 0088), also not deployed.
 
 Identity sets three cookies at sign-in and on every refresh (`setCookies` in
 `services/identity-api/src/auth/auth.controller.ts`). Their names derive from
@@ -91,9 +94,10 @@ The CSRF token is derived from the refresh token. Sign-in and refresh also
 return it in the `X-CSRF-Token` response header, and cookie mutations send it
 back in the `X-CSRF-Token` request header.
 
-Every response that sets these cookies (a staff or patient sign-in by
-password or Google, provider enrollment activation, and a refresh) or clears
-them also expires the public patient enrollment cookie `hid_enrollment` on its
+Every response that sets these cookies (a patient sign-in by password or
+Google, the second factor or enrolment activation of a staff sign-in, and a
+refresh) or clears them also expires the public patient enrollment cookie
+`hid_enrollment` on its
 path, `/api/v1/identity/patient-enrollments` (HttpOnly, `SameSite=Strict`,
 `Secure` as above). So does every successful public enrollment activation
 response (`200`, a replay's included; D-Eminence/hid-system#68,
@@ -104,9 +108,121 @@ after that both answer `404 ENROLLMENT_NOT_FOUND`
 ([QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md)). A
 signed-in patient reads the HID from `GET /identity/me`, and the enrollment
 routes refuse while session cookies are present. Every other response leaves
-it: a refused sign-in or activation, a pending Google enrollee (`202`), and
-each refresh or sign-out refusal that leaves the session cookies untouched or
-kept (below). Platform administration sign-in does not touch it.
+it: a refused sign-in or activation, a pending Google enrollee (`202`), the
+staff password step and the email-code and enrolment-start steps, and each
+refresh or sign-out refusal that leaves the session cookies untouched or kept
+(below). Provider enrollment activation (which now opens a staff MFA
+enrolment, below) expires it. Platform administration sign-in does not touch
+it.
+
+#### Staff sign-in with an authenticator (MFA-1, 0088)
+
+A staff session is issued only after the password and a second factor: a TOTP
+code (RFC 6238, SHA-1, six digits, 30-second steps) or one unused recovery
+code, as a platform session is (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1).
+The account has one factor whichever kind of session it signs in to, so an
+administrator who also works at a facility uses the same authenticator for
+both, provided it was enrolled at staff sign-in: only a factor that records a
+staff enrolment proof (below) verifies a staff sign-in. A factor enrolled at
+platform sign-in, on the password alone, verifies platform sign-in only. There
+is no permission or role allowlist: every staff sign-in needs it.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /api/v1/auth/login` | `{ email, password, turnstileAction: 'staff-login', turnstileToken? }` | `200 { status: 'mfa_required' \| 'mfa_enrollment_required', expiresAt }` with only the challenge cookie `hid_access_mfa` (HttpOnly, `SameSite=Strict`, `Secure` as above, path `/api/v1/auth/mfa`, 5 minutes for `mfa_required`, 10 minutes for enrolment) and `Cache-Control: no-store`. No session cookie, no `X-CSRF-Token`, no actor. A wrong password and an account without an eligible staff membership get the same `401` ("Invalid credentials") and count against the sign-in budget below |
+| `POST /api/v1/auth/mfa/verify` | `{ code }` or `{ recoveryCode }` | `200 { actor, expiresAt }` with the three session cookies, `X-CSRF-Token`, and the challenge cookie cleared |
+| `POST /api/v1/auth/mfa/enroll/email-code` | none | First sign-in without an authenticator: sends a six-digit code to the account's email address. `200 { accepted: true, channel: 'email', expiresAt }`. A resend replaces the code |
+| `POST /api/v1/auth/mfa/enroll/start` | `{ emailCode? }` | `200 { secret, otpauthUri, algorithm, digits, periodSeconds, expiresAt }`, once (`Cache-Control: no-store`). Needs the emailed code, or a challenge opened by provider enrollment activation (no code) |
+| `POST /api/v1/auth/mfa/enroll/activate` | `{ code }` (the first TOTP code) | `200 { actor, expiresAt, recoveryCodes }` (ten codes, shown once) with the session cookies and `X-CSRF-Token`, and the challenge cookie cleared |
+
+Every step requires an allowed `Origin` (`403 ORIGIN_DENIED`) and the
+challenge cookie (`401 MFA_CHALLENGE_INVALID` without it, or when it is
+expired, consumed, superseded by a newer password step, or a platform
+challenge). A staff challenge is accepted by no `/auth/admin/mfa/*` step and a
+platform challenge by no staff step. Refusals:
+
+| Code | When |
+|---|---|
+| `403 STAFF_MFA_FACTOR_UNPROVEN` | `POST /auth/login` with the right password, but the account's authenticator was enrolled at platform sign-in on the password alone (before 0088, or before the account held a staff membership), so it records no staff proof. No challenge or cookie is issued; a denied `login_failed` session event (reason `staff_mfa_factor_unproven`) is recorded. The remedy is a two-person MFA reset (0070), after which the account enrols at staff sign-in; the new factor then verifies platform sign-in too. The same answer at `/auth/mfa/verify` if such a factor is met there |
+| `401 MFA_INVALID_CODE` | A wrong, reused (the same 30-second step twice) or already used code; a wrong email code. Each counts against the challenge (five attempts), the account's MFA failure budget and the source address's staff budget |
+| `429 MFA_RATE_LIMITED` | A failure budget is spent, and while it is every code is refused, a correct one too, until its 15-minute window passes: the account's (the fifth failed code within 15 minutes, staff and platform together), or the source address's staff budget (the 100th failed staff code from one address within 15 minutes; it is the staff sign-in's own, apart from platform sign-in's per-address budget of 20, and sized for a facility whose staff share one address). Also more than five enrolment-code sends or enrolment starts in 15 minutes |
+| `403 MFA_ENROLLMENT_PROOF_REQUIRED` | Enrolment start or activation without a verified proof (no email code, and the challenge was not opened by provider activation). No factor is created |
+| `409 MFA_ENROLLMENT_PROOF_COMPLETE` | An email code asked for once the proof is verified |
+| `409 MFA_ENROLLMENT_PROOF_UNAVAILABLE` | The account has no email address |
+| `503 MFA_ENROLLMENT_CODE_UNDELIVERABLE` | The notification service refused the code definitively, or no notification client is configured |
+| `503 MFA_UNAVAILABLE` | `MFA_SECRET_KEY_B64` is not configured: no staff or platform session can be issued |
+| `400 MFA_CODE_REQUIRED` | `verify` with neither or both of `code` and `recoveryCode` |
+
+Only a keyed digest of the email code is stored, bound to its challenge. The
+code goes to the account's email address (`auth.accounts.email`) whether or
+not `email_verified_at` is set: no flow marks a staff address verified (it is
+the work address that provisioning or onboarding set, as for staff password
+recovery), so the code itself proves control of that address. The code, or
+the provider activation, is the fresh proof of a first enrolment, and the new
+factor records it (`enrollment_proof`). So the password alone never enrols a
+staff authenticator, and a stolen password cannot be turned into a staff
+session on an account that has none. The database enforces what it can see
+(0088): a staff enrolment challenge is consumed only once it records a
+verified proof, a factor records a proof only from such a challenge of its own
+account, and a staff session's MFA assurance must name a factor that records
+one. It cannot check the emailed code itself; Identity does.
+
+The email code proves the same mailbox that staff password recovery uses. For
+an account without a factor, control of that mailbox is therefore enough on
+its own: `staff-reset` recovery sets a new password and the enrolment code
+goes to the same address. Accounts provisioned without a password
+(organization onboarding, 0046, and governed workforce provisioning, 0087) set
+their first password that way, by design. Once an account has a factor,
+recovery keeps it, and a mailbox alone never yields a staff session. Until a
+second enrolment channel exists (an open decision, D14 in
+`PHASE_3_LAUNCH_DECISIONS.md`), existing clinical accounts enrol before
+clinical roles are enabled, and operators review enrolments that followed a
+recovery (`PHASE_4_STAGE_5_RELEASE_READINESS.md` P22, `MIGRATION_RUNBOOK.md`
+§6).
+
+A platform first enrolment (`POST /api/v1/auth/admin/mfa/enroll/start`) of an
+account that holds an eligible staff membership answers `409
+MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED` and creates no factor: such an account
+enrols at staff sign-in, with the proof, and then uses that factor for
+platform sign-in. A platform administrator without a staff membership enrols
+at platform sign-in as before (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1).
+
+`POST /api/v1/identity/provider-enrollments/activate` sets the administrator's
+password and answers `200 { activated: true, organizationId, facilityId,
+accountId, status, expiresAt }` with the `hid_access_mfa` challenge cookie of
+an enrolment whose proof is the activation itself (the administrator's email
+was verified by that enrollment), and no session cookie. It clears the
+provider enrollment cookie and `hid_enrollment`. The client continues with
+`/auth/mfa/enroll/start` (no email code) and `/auth/mfa/enroll/activate`,
+which issues the session. If the account already has an authenticator the
+status is `mfa_required` and the client continues with `/auth/mfa/verify`.
+
+A staff session is authorized only while its sign-in has live MFA assurance:
+an `auth.session_assurance` row for its family whose factor is still active.
+Without it (every staff sign-in from before this change, or one whose
+authenticator was reset by a two-person MFA reset), every route behind
+`SecurityGuard` answers `403 STAFF_MFA_REQUIRED`, audited as
+`auth.authorization.denied` (before any facility is bound). That includes
+`GET /auth/session`, `POST /auth/facility` and the
+`/auth/service-session` checks that EHR, Lab, Pharmacy, OCR and Outreach make,
+which relay the `403 STAFF_MFA_REQUIRED` to the browser. Refresh ends such a
+sign-in (below). Sign-out still works. Clients sign in again with password and
+authenticator on `STAFF_MFA_REQUIRED`.
+
+`POST /api/v1/auth/oidc/exchange` signs in patients only: any
+`turnstileAction` other than `patient-login` is `403
+GOOGLE_STAFF_SIGN_IN_DISABLED`, before Turnstile, the nonce or the Google
+token are checked, and is audited. With `AUTH_MODE=oidc`, OIDC bearer tokens
+carry no MFA assurance and are refused for staff (`403 STAFF_MFA_REQUIRED`).
+
+Audit: `auth.staff.mfa.enrolled` (with the proof method),
+`auth.staff.mfa.failed`, `auth.staff.mfa.recovery-code.used` (with the codes
+left; platform: `auth.admin.mfa.recovery-code.used`), and `auth.login` with
+`mfaMethod` (`totp` or `recovery_code`) at the second factor. Session events
+record `mfa_challenge_issued`, `login_succeeded` (with `session_kind` and
+`mfa_method`) and `mfa_rate_limited`. Enrolment, recovery-code use and a
+two-person MFA reset are offered to an owner notice sink (`MFA_NOTICE_SINK`)
+after commit; no delivery route is bound yet, so today they are audited only.
 
 `POST /api/v1/auth/refresh` takes no body. It reads the refresh and CSRF
 cookies, `X-CSRF-Token` and, optionally, `X-HID-Client`, and checks them in
@@ -117,6 +233,7 @@ this order:
 | `403 ORIGIN_DENIED` | `Origin` is missing or not in `CORS_ORIGINS` | Untouched |
 | `403 CSRF_VALIDATION_FAILED` | The refresh cookie is missing, or `X-CSRF-Token` and the CSRF cookie are missing, differ, or are not the value derived from the refresh token | Untouched |
 | `403 SESSION_CLIENT_MISMATCH` | `X-HID-Client` names the other kind of sign-in (below). Nothing is rotated | Kept |
+| `403 STAFF_MFA_REQUIRED` | A staff sign-in without live MFA assurance (MFA-1, 0088): one from before staff MFA, or whose authenticator was reset. Nothing is rotated; the whole sign-in is ended (revocation reason `staff_mfa_required`, a denied `refresh` session event) | Cleared |
 | `401 AUTHENTICATION_REQUIRED` | Rotation refuses the token: unknown, ended, expired, reused (reuse ends the whole sign-in), a platform token, or an account that is no longer active, is disabled or has a new token version. Any other failure during rotation also clears the cookies | Cleared |
 | `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header | The refresh token is rotated into a new session of the same sign-in | Replaced |
 
@@ -191,7 +308,9 @@ A staff or patient sign-in is one refresh could renew now when:
   facility (`eligibleStaffMembershipJoins` in
   `current-staff-context.service.ts`, the joins staff resolution uses); a
   patient sign-in's patient is still the account's active patient
-  (`identity.current_patient_account`).
+  (`identity.current_patient_account`); and
+- a staff sign-in has live MFA assurance (0088): an `auth.session_assurance`
+  row for its family whose factor is still active (`STAFF_ASSURED`).
 
 On refresh, the kind lookup answers only for such a sign-in. Any other token
 gets no kind and goes on to rotation, which refuses it with `401`; for an
@@ -439,6 +558,14 @@ provenance record (issuer `legacy-identity`) is not a sign-in: it is kept and
 not counted. The revoked Google subject cannot be linked again (the link
 commands answer `GOOGLE_IDENTITY_ALREADY_LINKED` for any subject ever linked),
 so after a recovery the owner can link only a different Google account.
+Recovery never touches the account's authenticator: the TOTP factor and its
+recovery codes stay, so a staff or platform account that recovered its
+password still needs its authenticator at the next sign-in, and for an account
+with a factor a mailbox alone never yields a staff session (MFA-1, pinned by
+`staff-mfa.integration.sql` and `verify-staff-mfa-runtime.mjs`). An account
+without a factor enrols on a code sent to the same mailbox, so for it the
+mailbox is enough (staff sign-in, above). A lost authenticator is reset only by the
+two-person MFA reset (0070), for staff accounts as for administrators.
 Disabled, stale, expired and replayed credentials fail closed. Completion
 returns to login rather than opening a session.
 The owner notice of a completed recovery ("your password was changed", to every

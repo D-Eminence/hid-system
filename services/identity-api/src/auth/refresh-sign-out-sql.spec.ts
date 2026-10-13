@@ -32,8 +32,14 @@ const FAMILY_LIVE = 'exists (select 1 from auth.sessions live where live.family_
  */
 const STAFF_ELIGIBLE = "join identity.staff_facility_memberships membership on membership.account_id = eligible.id and membership.active and membership.migration_hold_reason is null join identity.staff staff on staff.id = membership.staff_id and staff.account_id = eligible.id and staff.active and lower(btrim(staff.verification_status)) = any($3::text[]) join identity.organizations organization on organization.id = membership.organization_id and organization.active join identity.facilities facility on facility.id = membership.facility_id and facility.organization_id = membership.organization_id and facility.active";
 const ACTOR_RESOLVES = `case session.session_kind when 'staff' then exists (select 1 from auth.accounts eligible ${STAFF_ELIGIBLE} where eligible.id = account.id) when 'patient' then exists (select 1 from identity.current_patient_account(account.subject) current_patient where current_patient.patient_id = session.patient_id) else false end`;
-/** A sign-in refresh() could renew now: live, or rotated moments ago (the other app's tab) into one that is, and its actor resolves. */
-const RENEWABLE = `${ACCOUNT_LIVE} and session.absolute_expires_at > clock_timestamp() and ((session.revoked_at is null and session.expires_at > clock_timestamp()) or (session.revocation_reason = 'rotated' and session.revoked_at > clock_timestamp() - make_interval(secs => $2) and ${FAMILY_LIVE})) and ${ACTOR_RESOLVES}`;
+/**
+ * refresh() also refuses, and ends, a staff sign-in without live MFA
+ * assurance (MFA-1, 0088): its family needs an assurance row whose factor is
+ * still active. A patient sign-in needs none.
+ */
+const STAFF_ASSURED = "(session.session_kind <> 'staff' or exists (select 1 from auth.session_assurance assurance join auth.mfa_factors factor on factor.id = assurance.mfa_factor_id and factor.account_id = assurance.account_id and factor.status = 'active' where assurance.family_id = session.family_id and assurance.account_id = session.account_id))";
+/** A sign-in refresh() could renew now: live, or rotated moments ago (the other app's tab) into one that is, its actor resolves, and a staff one is MFA-verified. */
+const RENEWABLE = `${ACCOUNT_LIVE} and session.absolute_expires_at > clock_timestamp() and ((session.revoked_at is null and session.expires_at > clock_timestamp()) or (session.revocation_reason = 'rotated' and session.revoked_at > clock_timestamp() - make_interval(secs => $2) and ${FAMILY_LIVE})) and ${ACTOR_RESOLVES} and ${STAFF_ASSURED}`;
 /** The staff verification statuses refresh() accepts (auth-policy.ts), the lookups' $3. */
 const STAFF_STATUSES = ['verified', 'approved', 'active'];
 
@@ -202,6 +208,15 @@ describe('refresh session kind', () => {
     const { service, lookups } = harness();
     await expect(service.refreshSessionKind(refreshToken)).resolves.toBeUndefined();
     expect(flat(lookups[0]?.sql)).toContain(ACTOR_RESOLVES);
+  });
+
+  it('has no kind for a staff sign-in without live MFA assurance, which refresh() then refuses and ends', async () => {
+    // A staff sign-in from before staff MFA (0088), or one whose factor was
+    // reset: the patient app's refresh is not told SESSION_CLIENT_MISMATCH for
+    // it, and its sign-out ends it.
+    const { service, lookups } = harness();
+    await expect(service.refreshSessionKind(refreshToken)).resolves.toBeUndefined();
+    expect(flat(lookups[0]?.sql)).toContain(`and ${STAFF_ASSURED}`);
   });
 
   it('has no kind for any other token, which refresh() then refuses', async () => {

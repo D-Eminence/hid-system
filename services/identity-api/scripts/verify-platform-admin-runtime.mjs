@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { createTotpClock, platformClient } from './platform-session-client.mjs';
+import { enrollmentCodeOutbox, staffClient, supertestTransport } from './staff-session-client.mjs';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
@@ -143,6 +144,7 @@ try {
   const pendingReset = await account('pending-reset', { status: 'pending_reset' });
 
   const clock = createTotpClock();
+  const staffEnrollmentCodes = enrollmentCodeOutbox();
   const module = await Test.createTestingModule({
     controllers: [AuthController, PlatformAuthController, AdminController, PlatformSecurityController, AuditController,
       AdminDemoRequestsController, WorkforceAdminController, ConsentController, IdentityController],
@@ -153,9 +155,8 @@ try {
       ConsentService, IdentityService, ...optionalProviders,
       { provide: IDENTITY_PROVIDER, useClass: PostgresIdentityProvider },
       { provide: MFA_TOTP_CLOCK, useValue: clock.now },
-      { provide: NotificationOtpClient, useValue: {
-        deliver: async () => { throw new Error('Notification delivery is outside the platform admin verifier'); },
-      } },
+      // Staff sign-ins (MFA-1) enrol with an emailed code; no other delivery is expected.
+      { provide: NotificationOtpClient, useValue: staffEnrollmentCodes.client },
       { provide: GoogleAuthenticationService, useValue: {
         login: async () => { throw new Error('Google exchange is outside the platform admin verifier'); },
       } }] }).compile();
@@ -181,14 +182,13 @@ try {
     assert.equal(response.status, status, `${code ?? status}: ${JSON.stringify(response.body)}`);
     if (code) assert.equal(response.body.code, code, JSON.stringify(response.body));
   };
+  // Staff sign-in (MFA-1): the password, then the account's authenticator, on the shared virtual clock.
+  const staff = staffClient({ send: supertestTransport(http), origin, password, outbox: staffEnrollmentCodes,
+    now: clock.next });
   async function signIn(who) {
-    const response = await http.post('/api/v1/auth/login').set('Origin', origin)
-      .send({ email: who.email, password, turnstileAction: 'staff-login' });
-    expectStatus(response, 200);
-    assert.equal(response.body.actor.accountId, who.id);
-    const cookie = (response.headers['set-cookie'] ?? []).map(value => value.split(';')[0]).join('; ');
-    return { cookie, csrf: response.headers['x-csrf-token'], account: who,
-      bearer: `Bearer ${/(?:^|; )hid_access=([^;]+)/.exec(cookie)[1]}` };
+    const signedIn = await staff.signIn(who.email);
+    assert.equal(signedIn.accountId, who.id);
+    return { cookie: signedIn.cookie, csrf: signedIn.csrf, account: who, bearer: `Bearer ${signedIn.cookies.hid_access}` };
   }
   const get = (who, path, headers = {}) => {
     let call = http.get(`/api/v1${path}`);
@@ -216,9 +216,19 @@ try {
   // Staff sessions (facility work) and separate platform sessions (password + TOTP).
   const superStaff = await signIn(superAdmin);
   const facilitySession = await signIn(facilityAdmin);
-  const superSession = asPlatform(await platform.enroll(superAdmin.email));
-  const auditorSession = asPlatform(await platform.enroll(auditor.email));
-  const supportSession = asPlatform(await platform.enroll(support.email));
+  // The Super Admin enrolled the account's one authenticator at their staff sign-in.
+  const superSession = asPlatform(await platform.signIn({ email: superAdmin.email,
+    secret: staff.secretOf(superAdmin.email) }));
+  // The auditor and the support administrator hold staff memberships too, so
+  // each enrols the account's one authenticator at staff sign-in, with the
+  // emailed proof (a platform first enrolment of such an account is refused,
+  // MFA-1), and then uses it for platform sign-in.
+  await signIn(auditor);
+  await signIn(support);
+  const auditorSession = asPlatform(await platform.signIn({ email: auditor.email,
+    secret: staff.secretOf(auditor.email) }));
+  const supportSession = asPlatform(await platform.signIn({ email: support.email,
+    secret: staff.secretOf(support.email) }));
 
   // 2-3. An ordinary facility administrator is refused, with or without the
   // facility context of their own membership; the denial is platform-scoped.
@@ -297,7 +307,9 @@ try {
     + `&actor=${encodeURIComponent('synthetic:admin-runtime:facility-admin')}`);
   expectStatus(lastPage, 200);
   assert.equal(lastPage.body.nextBeforeSequenceId, null);
-  assert.equal(seen.length + lastPage.body.items.length, facilityDenials.length + 1,
+  // Besides the denials: the facility administrator's first staff sign-in,
+  // which records its authenticator enrolment and the sign-in (MFA-1).
+  assert.equal(seen.length + lastPage.body.items.length, facilityDenials.length + 2,
     'Pagination must return each matching event exactly once');
   expectStatus(await get(auditorSession, '/admin/audit/events?limit=0'), 400, 'VALIDATION_FAILED');
   boundaries.audit_pagination = { pages: 4, events: seen.length + lastPage.body.items.length };
@@ -418,16 +430,17 @@ try {
     keyset_pages: 2, facility_column_finds: 0, invalid: 'VALIDATION_FAILED', support: 'PERMISSION_DENIED' };
 
   // Per-principal MFA enrolment: true only with an active authenticator; no factor detail.
+  // The facility administrator enrolled at their first staff sign-in (MFA-1).
   const listed = await get(superSession, '/admin/principals?query=admin-runtime&pageSize=100');
   expectStatus(listed, 200);
   const enrolment = Object.fromEntries(listed.body.items.map(item => [item.id, item.mfaEnrolled]));
   assert.deepEqual([enrolment[superAdmin.id], enrolment[auditor.id], enrolment[support.id],
-    enrolment[facilityAdmin.id], enrolment[pendingReset.id]], [true, true, true, false, false]);
+    enrolment[facilityAdmin.id], enrolment[pendingReset.id]], [true, true, true, true, false]);
   for (const item of listed.body.items) {
     assert.equal(typeof item.mfaEnrolled, 'boolean');
     for (const key of Object.keys(item)) assert(!/secret|factor|recovery|totp/i.test(key), `principal row exposes ${key}`);
   }
-  boundaries.principal_mfa_state = { enrolled: 3, not_enrolled: 2, factor_detail: 'none' };
+  boundaries.principal_mfa_state = { enrolled: 4, not_enrolled: 1, factor_detail: 'none' };
 
   // Demo requests: newest first by (created_at, id), in pages joined by an
   // opaque cursor. Microsecond-distinct and equal timestamps sit at page edges.
@@ -562,13 +575,14 @@ try {
   await owner.query(`update auth.accounts set password_hash = $2, password_algorithm = 'argon2id', status = 'active',
     password_changed_at = clock_timestamp() where id = $1 and status = 'pending_reset' and password_hash is null`,
   [clinician.id, passwordHash]);
-  const clinicianLoggedIn = await clinicianLogin();
-  expectStatus(clinicianLoggedIn, 200);
-  const clinicianFacility = clinicianLoggedIn.body.actor.facilities.find(facility => facility.id === facilityC);
+  // Staff MFA (0088): the first sign-in enrols an authenticator with the code
+  // emailed to the provisioned address.
+  const clinicianSignedIn = await staff.signIn(clinicianEmail);
+  assert.equal(clinicianSignedIn.accountId, clinician.id);
+  const clinicianFacility = clinicianSignedIn.actor.facilities.find(facility => facility.id === facilityC);
   assert.deepEqual(clinicianFacility.roles, ['doctor']);
   assert(clinicianFacility.permissions.includes('identity.patient.read'));
-  const clinicianCookie = (clinicianLoggedIn.headers['set-cookie'] ?? []).map(value => value.split(';')[0]).join('; ');
-  const clinicianSession = { cookie: clinicianCookie, csrf: clinicianLoggedIn.headers['x-csrf-token'] };
+  const clinicianSession = { cookie: clinicianSignedIn.cookie, csrf: clinicianSignedIn.csrf };
 
   // HID lookup and access requests at facility C; the patient approves
   // through the governed approval command; then the lookup is authorized.

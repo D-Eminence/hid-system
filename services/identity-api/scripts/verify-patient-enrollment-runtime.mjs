@@ -67,6 +67,8 @@ const { OtpController } = load('auth/otp.controller.ts');
 const { OtpService } = load('auth/otp.service.ts');
 const { PatientSelfController } = load('auth/patient-self.controller.ts');
 const { PatientSelfService } = load('auth/patient-self.service.ts');
+const { MfaService } = load('auth/mfa/mfa.service.ts');
+const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
 const { IntegrationRuntimeService } = load('integrations/integration-runtime.service.ts');
 const { PatientEnrollmentController } = load('identity/patient-enrollment.controller.ts');
 const { PatientEnrollmentService } = load('identity/patient-enrollment.service.ts');
@@ -152,6 +154,8 @@ try {
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
       AuditService, WorkloadAuthService, TurnstileService, IntegrationRuntimeService,
       PatientEnrollmentService, NinIdentifierProtector, HidCodeGenerator, PatientSelfService, OtpService,
+      // AuthController's staff sign-in steps (MFA-1); no staff sign-in happens here.
+      MfaService, MfaSecretProtector,
       GoogleAuthenticationService, QoreIdVerificationAdapter, QoreIdPublicPatientIdentityProvider,
       { provide: PUBLIC_PATIENT_IDENTITY_PROVIDER, useExisting: QoreIdPublicPatientIdentityProvider },
       { provide: QOREID_ADAPTER_CONFIGURATION, useValue: { baseUrl: 'https://api.qoreid.com',

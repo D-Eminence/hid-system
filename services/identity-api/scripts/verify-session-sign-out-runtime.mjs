@@ -6,19 +6,23 @@
 // a client that names itself must not refresh, and so rotate, or sign out the
 // other's sign-in while refresh could renew it; any other sign-in a sign-out
 // ends without naming its kind. A sign-in, a refresh and a sign-out also
-// expire the public patient enrollment cookie. Executes only against the owned
-// disposable synthetic rehearsal.
+// expire the public patient enrollment cookie. A staff sign-in completes its
+// authenticator step (MFA-1, staff-session-client.mjs). Executes only against
+// the owned disposable synthetic rehearsal.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
+import { createTotpClock } from './platform-session-client.mjs';
+import { enrollmentCodeOutbox, staffClient, supertestTransport, SYNTHETIC_STAFF_MFA_KEY_B64 } from './staff-session-client.mjs';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
 assert(process.env.NODE_ENV === 'test' && socket?.startsWith('/tmp/hid-tuf-migration.')
   && process.env.PGDATABASE === 'hid_rehearsal', 'Only the owned synthetic rehearsal is supported');
 Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'staging',
-  NIN_PROVIDER_MODE: 'deferred', TURNSTILE_MODE: 'disabled' });
+  NIN_PROVIDER_MODE: 'deferred', TURNSTILE_MODE: 'disabled', MFA_SECRET_KEY_B64: SYNTHETIC_STAFF_MFA_KEY_B64,
+  MFA_KEY_VERSION: 'sign-out-runtime-v1' });
 require('ts-node').register({ project: join(service, 'tsconfig.json'), transpileOnly: true });
 require('reflect-metadata');
 const load = path => require(join(service, 'src', path));
@@ -41,6 +45,9 @@ const { AuditInterceptor } = load('audit/audit.interceptor.ts');
 const { SecurityGuard } = load('auth/security.guard.ts');
 const { WorkloadAuthService } = load('auth/workload-auth.service.ts');
 const { TurnstileService } = load('auth/turnstile.service.ts');
+const { MfaService, MFA_TOTP_CLOCK } = load('auth/mfa/mfa.service.ts');
+const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
+const { NotificationOtpClient } = load('auth/notification-otp.client.ts');
 const { ProblemDetailsFilter } = load('common/problem.ts');
 const { getEnvironment } = load('config/environment.ts');
 const pool = new Pool({ host: socket, user: process.env.PGUSER, database: process.env.PGDATABASE, max: 5 });
@@ -61,10 +68,13 @@ const database = {
 };
 let app;
 try {
+  const clock = createTotpClock();
+  const outbox = enrollmentCodeOutbox();
   const module = await Test.createTestingModule({ controllers: [AuthController],
     providers: [{ provide: DatabaseService, useValue: database }, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
-      AuditService, WorkloadAuthService, TurnstileService,
+      AuditService, WorkloadAuthService, TurnstileService, MfaService, MfaSecretProtector,
+      { provide: MFA_TOTP_CLOCK, useValue: clock.now }, { provide: NotificationOtpClient, useValue: outbox.client },
       { provide: GoogleAuthenticationService, useValue: {} }] }).compile();
   app = module.createNestApplication({ logger: false });
   app.use(require('cookie-parser')());
@@ -127,8 +137,15 @@ try {
       && /; HttpOnly/i.test(enrollment[0]) && /; Secure/i.test(enrollment[0]) && /; SameSite=Strict/i.test(enrollment[0]),
     `${label} enrollment cookie: ${enrollment[0]}`);
   };
+  const staffSignIns = staffClient({ send: supertestTransport(http), origin, password, outbox, now: clock.next });
   const signIn = async (who, kind) => {
-    const response = await http.post(kind === 'patient' ? '/api/v1/auth/patient/login' : '/api/v1/auth/login')
+    if (kind === 'staff') {
+      // Password, then the authenticator (enrolled on the first sign-in): the session cookies come with the second step.
+      const signedIn = await staffSignIns.signIn(who.email);
+      retiresEnrollment(signedIn.response.raw, 'staff sign-in');
+      return { cookies: jar(signedIn.response.raw), sessionId: signedIn.sessionId };
+    }
+    const response = await http.post('/api/v1/auth/patient/login')
       .set('Origin', origin).send({ email: who.email, password, turnstileAction: `${kind}-login` });
     assert.equal(response.status, 200, `${kind} sign-in: ${JSON.stringify(response.body)}`);
     retiresEnrollment(response, `${kind} sign-in`);

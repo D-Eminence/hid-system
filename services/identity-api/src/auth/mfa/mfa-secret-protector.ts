@@ -53,6 +53,16 @@ export class MfaSecretProtector {
       .update(`hid-platform-mfa-recovery:v1\u001f${accountId}\u001f${normalizedCode}`, 'utf8').digest('hex');
   }
 
+  /**
+   * Keyed digest of a staff enrolment email code (MFA-1, 0088), bound to its
+   * challenge, so a stored digest neither reveals the six digits nor verifies
+   * a code of another challenge.
+   */
+  enrollmentCodeDigest(challengeId: string, code: string): string {
+    return createHmac('sha256', this.keys().recoveryKey)
+      .update(`hid-staff-mfa-enrollment-code:v1\u001f${challengeId}\u001f${code}`, 'utf8').digest('hex');
+  }
+
   /** Challenge and similar bearer tokens carry 256 random bits; a plain digest suffices. */
   tokenDigest(token: string): string {
     return createHash('sha256').update(token, 'utf8').digest('hex');
@@ -79,6 +89,6 @@ export class MfaSecretProtector {
   }
 
   private unavailable(): DomainProblem {
-    return new DomainProblem(503, 'MFA_UNAVAILABLE', 'Administrator MFA is temporarily unavailable');
+    return new DomainProblem(503, 'MFA_UNAVAILABLE', 'Multi-factor authentication is temporarily unavailable');
   }
 }

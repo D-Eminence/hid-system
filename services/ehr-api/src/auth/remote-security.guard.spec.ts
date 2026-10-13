@@ -94,14 +94,18 @@ let rows: Row[];
 let controls: Record<string, boolean>;
 let faults: Faults;
 let liveActor: IdentityActorContext | undefined;
+/** A refusal Identity's /auth/service-session answers with, as IdentityApiService translates it. */
+let identityRefusal: DomainProblem | undefined;
 
 beforeEach(async () => {
   rows = [];
+  identityRefusal = undefined;
   controls = { maintenance_mode: false, provider_portal_enabled: true, patient_portal_enabled: true };
   faults = {};
   liveActor = staff;
   const identity = {
     authenticateRequest: jest.fn(async () => {
+      if (identityRefusal) throw identityRefusal;
       if (!liveActor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
       return liveActor;
     }),
@@ -248,6 +252,17 @@ describe('RemoteSecurityGuard requests that bind a facility, or have no actor', 
       action: 'security.authorization.denied', resourceType: 'http-request', outcome: 'denied', facilityId: SECOND_FACILITY.id,
       actorMembershipId: SECOND_FACILITY.membershipId, organizationId: SECOND_FACILITY.organizationId, provenance: 'application',
       ...requestEvidence })]);
+  });
+
+  it('answers a staff session Identity refuses for missing MFA with Identity\'s 403 STAFF_MFA_REQUIRED (MFA-1)', async () => {
+    // A staff sign-in from before staff MFA (0088), or one whose authenticator
+    // was reset: Identity's guard authorizes nothing for it, and EHR passes
+    // the refusal on instead of reading anything.
+    identityRefusal = new DomainProblem(403, 'STAFF_MFA_REQUIRED', 'Sign in again with your authenticator code to continue');
+    const response = await probe({ 'X-Facility-ID': DEFAULT_FACILITY.id });
+    expect(response).toEqual({ status: 403, code: 'STAFF_MFA_REQUIRED' });
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'system', action: 'security.authorization.denied',
+      resourceType: 'authentication', outcome: 'denied', facilityId: null, provenance: 'system', ...requestEvidence })]);
   });
 
   it('records an unauthenticated request as a system refusal', async () => {

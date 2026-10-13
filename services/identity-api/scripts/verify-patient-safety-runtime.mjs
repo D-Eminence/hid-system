@@ -6,12 +6,15 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
+import { createTotpClock } from './platform-session-client.mjs';
+import { enrollmentCodeOutbox, staffClient, supertestTransport, SYNTHETIC_STAFF_MFA_KEY_B64 } from './staff-session-client.mjs';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
 assert(process.env.NODE_ENV === 'test' && socket?.startsWith('/tmp/hid-tuf-migration.')
   && process.env.PGDATABASE === 'hid_rehearsal', 'Only the owned synthetic rehearsal is supported');
-Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'staging',
+Object.assign(process.env, { MFA_SECRET_KEY_B64: SYNTHETIC_STAFF_MFA_KEY_B64, MFA_KEY_VERSION: 'patient-safety-runtime-v1',
+  AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'staging',
   NIN_PROVIDER_MODE: 'deferred', TURNSTILE_MODE: 'disabled', IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret',
   NIN_ENCRYPTION_KEY_B64: Buffer.alloc(32, 0x5a).toString('base64'), NIN_KEY_VERSION: 'rehearsal-v1',
   OTP_HMAC_KEY_B64: process.env.OTP_HMAC_KEY_B64 ?? Buffer.alloc(32, 0x33).toString('base64'),
@@ -40,6 +43,8 @@ const { SecurityGuard } = load('auth/security.guard.ts');
 const { WorkloadAuthService } = load('auth/workload-auth.service.ts');
 const { TurnstileService } = load('auth/turnstile.service.ts');
 const { NotificationOtpClient } = load('auth/notification-otp.client.ts');
+const { MfaService, MFA_TOTP_CLOCK } = load('auth/mfa/mfa.service.ts');
+const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
 const { PatientSelfController } = load('auth/patient-self.controller.ts');
 const { PatientSelfService } = load('auth/patient-self.service.ts');
 const { ConsentController } = load('consent/consent.controller.ts');
@@ -88,8 +93,13 @@ const database = {
 };
 // Local delivery stub: captures what notification-api would receive.
 const delivered = [];
+// Staff sign-ins (MFA-1) enrol with an emailed code, kept apart from the patient deliveries.
+const staffEnrollmentCodes = enrollmentCodeOutbox(async (input) => {
+  delivered.push({ kind: 'verification', ...input }); return { outcome: 'accepted', provider: 'termii' };
+});
+const clock = createTotpClock();
 const notification = {
-  deliver: async (input) => { delivered.push({ kind: 'verification', ...input }); return { outcome: 'accepted', provider: 'termii' }; },
+  deliver: staffEnrollmentCodes.client.deliver,
   deliverEmergencyContactAlert: async (input) => { delivered.push({ kind: 'alert', ...input }); return { outcome: 'accepted', provider: 'termii' }; },
 };
 let app;
@@ -101,6 +111,7 @@ try {
       AuditService, WorkloadAuthService, TurnstileService, PatientSelfService, ConsentService, StaffSearchBudget,
       PatientAccountDeletionService, EmergencyContactService, EmergencyContactProtector, EmergencyContactNotificationDispatcher,
       { provide: NotificationOtpClient, useValue: notification },
+      MfaService, MfaSecretProtector, { provide: MFA_TOTP_CLOCK, useValue: clock.now },
       { provide: GoogleAuthenticationService, useValue: {
         login: async () => { throw new Error('Google exchange is outside the patient-safety verifier'); },
       } }] }).compile();
@@ -240,11 +251,13 @@ try {
   assert(requests.some((item) => item.accessRequestId === accessRequestId && item.status === 'pending'));
   // The requesting clinician lists their own requests through
   // identity.list_my_staff_access_requests as the Identity runtime role.
+  const staff = staffClient({ send: supertestTransport(http), origin, password, outbox: staffEnrollmentCodes,
+    now: clock.next });
   const staffSession = async (accountId) => {
     await pool.query("update auth.accounts set password_hash=$2, password_algorithm='argon2id' where id=$1", [accountId, passwordHash]);
     const email = (await pool.query('select email from auth.accounts where id=$1', [accountId])).rows[0].email;
-    return { cookie: cookies(await http.post('/api/v1/auth/login').set('Origin', origin)
-      .send({ email, password, turnstileAction: 'staff-login' }).expect(200)) };
+    // Password, then the authenticator (MFA-1): enrolled with an emailed code on the first sign-in.
+    return { cookie: (await staff.signIn(email)).cookie };
   };
   const clinician = await staffSession(ids.staffAccount);
   const staffRequests = (who, query = '', purpose = 'direct-care') => {
