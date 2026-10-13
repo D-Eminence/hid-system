@@ -2329,3 +2329,81 @@ Consequences:
 Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity
 boundary; Outreach registration boundary); release checklist §2, §3, §7, §8
 and §9.
+
+# ADR-054: Every Staff Session Is MFA-Verified; a First Enrolment Needs a Fresh Proof
+
+Status: Proposed for source implementation (`BRANCH:launch/staff-mfa`,
+migration 0088). Not merged or deployed. The number is provisional: ADR-050
+and ADR-051 may be taken by changes in flight; renumber on merge if needed.
+
+Date: 2026-10-13
+
+Context:
+
+Launch decision D14 (`PHASE_3_LAUNCH_DECISIONS.md`) asked whether staff MFA is
+a launch gate (MFA-1). Before this change a staff session was issued on the
+password alone (`POST /auth/login`, provider enrollment activation, and a
+staff Google exchange), and every EHR, Lab, Pharmacy, OCR and Outreach check
+accepted it. Platform administration already required TOTP (ADR-038,
+0069/0070). The owner defaults decide it: verified identity for sensitive
+operations, deny by default, no production bypass.
+
+Decision:
+
+- Every staff session is MFA-verified, with no permission or role allowlist.
+  The password step answers only a challenge cookie; the session and its
+  `auth.session_assurance` row are issued after a TOTP code or one unused
+  recovery code, through `TokenService.issueStaffSession`, the only path to a
+  staff session. `TokenService.issue` issues patient sessions only.
+- An account has one factor, recovery codes and assurance table for platform
+  and staff sign-in alike (0069 tables). A challenge carries its kind
+  (`session_kind`, 0088) and is accepted only by its own sign-in.
+- A first enrolment needs a fresh proof, never the password alone: a code
+  emailed to the account address (keyed digest bound to the challenge), or the
+  provider enrollment activation that opened the challenge in the same request
+  (its email was verified by that enrollment). The database refuses to consume
+  a staff enrolment challenge without a verified proof.
+- A staff session without live assurance is authorized for nothing:
+  `SecurityGuard` answers `403 STAFF_MFA_REQUIRED` and refresh ends the
+  sign-in. Every staff session issued before the deploy is therefore
+  invalidated at deploy, with no data migration. Sign-out still works.
+- Google sign-in is for patients only: `/auth/oidc/exchange` refuses any staff
+  action (`403 GOOGLE_STAFF_SIGN_IN_DISABLED`). With `AUTH_MODE=oidc`, staff
+  tokens carry no assurance and are refused.
+- OTP password recovery keeps the factor (0086 `auth.complete_recovery_otp`,
+  pinned). A lost authenticator is reset only by the two-person MFA reset
+  (0070), which already reaches staff accounts.
+- Enrolment, recovery-code use and an MFA reset are audited, and offered after
+  commit to an owner notice sink (`MFA_NOTICE_SINK`); delivery waits on the
+  notification route.
+
+Alternatives not taken:
+
+- A permission allowlist (MFA only for some clinical permissions): every staff
+  session reaches patient data through some route, and an allowlist drifts.
+- Trust on first use for staff enrolment, as platform enrolment still is: a
+  stolen password would then become a staff session on any unenrolled account.
+- Letting existing sessions finish their lifetime: they would keep reaching
+  patient data for up to 24 hours without MFA.
+
+Consequences:
+
+- Every staff member signs in again after the deploy and enrols on first
+  sign-in; the Health-id staff portal must implement the challenge, the email
+  code, enrolment (QR from `otpauthUri`, recovery codes once) and the
+  `STAFF_MFA_REQUIRED` re-sign-in before the Identity build is deployed
+  (release checklist §3). The in-repo `apps/ehr`, `apps/admin` and `apps/web`
+  clients still expect a session from `/auth/login` and are not launch
+  frontends.
+- `MFA_SECRET_KEY_B64` is now required for staff sign-in as well
+  (`503 MFA_UNAVAILABLE` without it); operator plan I1 must run first.
+- Residual risk: an unenrolled account is as strong as its mailbox until it
+  enrols. Enrol every clinical account (or provision it by provider
+  activation) before it holds a clinical role.
+- Evidence is local and synthetic: unit specs, `staff-mfa.integration.sql`,
+  `verify-staff-mfa-runtime.mjs` and every runtime verifier that signs staff
+  in (release checklist §8). Nothing has been run on staging or production.
+
+Related: ADR-038; ADR-040; ADR-044; `INTERFACE_CONTRACT.md` (Auth session
+contract); `PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §10; `DATABASE.md` (0088);
+release checklist §2, §3, §5, §8 and §9.

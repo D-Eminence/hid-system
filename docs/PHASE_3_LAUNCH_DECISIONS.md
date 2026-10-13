@@ -203,6 +203,34 @@ proposal; that change is the place to alter it.
   enrollment is enabled: verifying the enrollment email before activation
   (risk (b)).
 
+### Staff MFA (MFA-1, D14 MFA part)
+
+Decided under the owner default "verified identity for sensitive
+operations", and implemented in `BRANCH:launch/staff-mfa` (migration 0088;
+ADR-054; release checklist §2, "Staff MFA"; `INTERFACE_CONTRACT.md`, "Staff
+sign-in with an authenticator"; `PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §10).
+
+- **Question.** Is staff MFA a launch gate, and for which staff?
+- **Decision.** Yes, for every staff session that can reach patient data, with
+  no permission or role allowlist. Staff sign-in is two-step like platform
+  sign-in: the password yields only a challenge; the session comes after a
+  TOTP code or a one-time recovery code. A first enrolment needs a fresh
+  proof (a code emailed to the account address, or the provider enrollment
+  activation that opened it), never the password alone. A staff session
+  without live MFA assurance is refused everywhere (`403
+  STAFF_MFA_REQUIRED`) and ended on refresh, so every existing staff session
+  is invalidated at deploy. Google sign-in is for patients only. OTP password
+  recovery keeps the authenticator; a lost authenticator is reset only by the
+  two-person MFA reset, which now names staff targets.
+- **Risks.** Every staff member signs in again at deploy and enrols on first
+  sign-in; the Health-id staff portal must ship the new steps first (release
+  checklist §3). An unenrolled account is as strong as its mailbox until it
+  enrols: enrol (or provision by provider activation) before granting a
+  clinical role. Staff sign-in needs `MFA_SECRET_KEY_B64` (operator plan I1).
+- **Waits on it.** Owner notices of enrolment, recovery-code use and an MFA
+  reset (audited now; offered to `MFA_NOTICE_SINK`, delivered once a
+  notification route exists).
+
 ## 2. Other open decisions
 
 | # | Decision | Proposed default | Risks | Waits on it |
@@ -220,7 +248,7 @@ proposal; that change is the place to alter it.
 | D11 | Lab result detail for clinicians | No "unreleased correction pending" flag (D-Eminence/hid-system#51) | Clinicians cannot see that a correction is coming | Result retraction API |
 | D12 | OCR publication after an authorization lapse | Terminal, as today | — | — |
 | D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (implemented in D-Eminence/hid-system#59) | No delegated completion | — |
-| D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decide which roles hold `workforce.manage` (legacy `admin` holds it), how existing staff are attached, whether pending access requests close when a membership ends, and whether staff MFA is a launch gate, by ADR before WF-1 | Invites and offboarding stay manual | Workforce management |
+| D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decide which roles hold `workforce.manage` (legacy `admin` holds it), how existing staff are attached and whether pending access requests close when a membership ends, by ADR before WF-1. **Staff MFA: decided, yes** (MFA-1, "Staff MFA" in §1, ADR-054, `BRANCH:launch/staff-mfa`, migration 0088): every staff session that can reach patient data is TOTP-verified, with no permission allowlist | Invites and offboarding stay manual; an unenrolled staff account is as strong as its mailbox until it enrols | Workforce management; the Health-id staff sign-in (release checklist §3) |
 | D15 | Launch scope of EHR-to-Lab ordering and in-system result return | In scope (the EHR already sends orders) | If in scope, the Lab handoff is launch-blocking; it merged as D-Eminence/hid-system#56 | Lab handoff |
 | D16 | Health-id OCR publication retry | Persist the publication key per validation; offer Retry for retryable failures | Frontend change | OCR publication retry |
 
@@ -336,3 +364,4 @@ for each merged change and its evidence. Pull requests from this review:
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
 | DEP-4, DEP-4-RT (production workload tokens) | D-Eminence/hid-system#54, draft, ADR-047 Proposed | waits on D1 |
 | REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | `BRANCH:launch/identity-recovery-search`, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
+| MFA-1 (staff sessions without MFA; D14 MFA part) | `BRANCH:launch/staff-mfa`, migration 0088, ADR-054 | local commits, not pushed; owner notices wait on the notification route; Health-id staff sign-in changes listed in the release checklist §3 |

@@ -80,6 +80,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0081_uniform_recovery_start_cooldown.sql` | New table `auth.otp_start_cooldowns`: the recovery start cooldown per purpose and keyed identifier, kept whether or not the identifier has an account, so a repeat start inside the cooldown is answered with the same challenge id for a known and an unknown identifier (before, only a real account's repeat got its live id back). No foreign key, no row-level security; the role bootstrap grants `SELECT`, `INSERT` and `UPDATE` to the Identity runtime and the schema-test runtime, and `DELETE` to none. A new table: no lock on an existing table, no window. Run `db:bootstrap` and `db:verify-roles` after it, and only then deploy the Identity build of this change, whose every recovery start fails (`500`) without the table and the grant (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3, §5, §6) |
 | `database/migrations/0082_purpose_of_use_vocabulary.sql` | Seeds `identity.purpose_of_use_codes` with `direct-care` ("Direct patient care", active, source `hid`), `ON CONFLICT (code) DO NOTHING`, so a row already inserted or deactivated by an operator is kept as it is. 0003 created the table empty and nothing inserted a row, while every consent decision requires an active code, so on a database built only from migrations every staff consent check, access request, grant close, PIN and break-glass failed closed. `emergency` and `healthcare-operations` are not seeded: each waits for a product decision (§5). `ROW EXCLUSIVE` lock on that table only; no grant or service change |
 | `database/migrations/0086_recovery_and_patient_search_hardening.sql` | Account recovery and patient search hardening (`BRANCH:launch/identity-recovery-search`). `CREATE OR REPLACE` of `auth.complete_recovery_otp` (also revokes every external sign-in identity, today Google links, of the recovered account and keeps the legacy importer's `legacy-identity` provenance record; audit counts the revoked ones), `identity.create_access_request` (an unknown HID gets a uniform pending answer, an `identity.access-request.refused` audit event and no row) and `identity.list_my_staff_access_requests` (`patient_id` only while the request's grant is active); `patients_registration_read` dropped and created again in the same transaction (a registration member reads only patients linked to a case or candidate at its facility, no longer every patient; `ACCESS EXCLUSIVE` on `identity.patients` until commit, taken first); new `SECURITY DEFINER` functions `auth.recovery_account_audience`, `identity.registration_nin_holder`, `identity.registration_candidates` and `identity.patient_lookup_audit_subject`, revoked from `PUBLIC` and granted by the role bootstrap to the Identity and schema-test runtimes only; four staff search scopes in `otp_rate_limits_scope_check` (`ACCESS EXCLUSIVE` on `auth.otp_rate_limits`, taken second); index `otp_challenges_account_consumed_idx` (`SHARE` on `auth.otp_challenges`, taken last). Each lock is held until commit. A recovery completion caught between its challenge update and its patient read can deadlock with the migration (`40P01`); if PostgreSQL cancels the migration, or a wait exceeds the 5 s `lock_timeout` (`55P03`), 0086 rolls back whole and `migrate` is run again. Run `db:bootstrap` and `db:verify-roles` after it and deploy the Identity build of the same change with it: the older build's registration duplicate checks read patients the narrowed policy hides. After it a patient recovery code goes only to a verified contact, so an imported account whose source email was never confirmed (`email_verified_at` null) and that has no verified enrollment phone gets no code (§6, §11) |
+| `database/migrations/0088_staff_mfa_sessions.sql` | Staff MFA (`BRANCH:launch/staff-mfa`, launch blocker MFA-1). `auth.mfa_login_challenges` gains `session_kind` (`platform` default, or `staff`) and the enrolment proof columns (`proof_method`, `proof_verifier_hmac`, `proof_key_version`, `proof_sent_at`, `proof_verified_at`) with two checks (`ACCESS EXCLUSIVE` on that table until commit; no rewrite, the checks scan its rows); `CREATE OR REPLACE` of `auth.guard_mfa_login_challenge_change` (kind immutable, verified proof final, a staff enrolment challenge cannot be consumed without a verified proof) and `auth.guard_session_assurance_change` (accepts staff session families); comments; the `platform.mfa.reset` description. No session, account or factor row changes and no grant changes. Deploy the Identity build of the same change after it (the build writes the new columns); from that deploy every existing staff session is refused (`403 STAFF_MFA_REQUIRED`) and ended on refresh, and every staff member signs in again with an authenticator, enrolling on first sign-in with a code sent to the account email. The older Identity build keeps working on 0088 (it writes platform challenges only and the defaults fit) (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, §9) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
@@ -237,13 +238,17 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0086`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0088`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 After the legacy import, record (read-only, counts only, no identifiers) how
 many imported patient accounts have `email_verified_at` null and no verified
 enrollment phone: after 0086 their OTP recovery and activation send no code,
 so each needs another approved activation route before it can sign in
-(`PHASE_4_STAGE_5_RELEASE_READINESS.md` §10).
+(`PHASE_4_STAGE_5_RELEASE_READINESS.md` §10). Also count (read-only,
+counts only) the imported staff accounts with an active membership and no
+email address: after the Identity build of 0088 a staff account enrols its
+authenticator only with a code sent to its email, so each of them is refused
+(`409 MFA_ENROLLMENT_PROOF_UNAVAILABLE`) until it is given one.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
 
@@ -330,11 +335,13 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0082` and `0086`, runtime grants, RLS and purpose/deny behavior,
+6. Verify `0082`, `0086` and `0088`, runtime grants, RLS and purpose/deny behavior,
    list the purpose-of-use codes (release checklist P10), and record the
    count of imported patient accounts without a verified contact (§6).
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
-   fallback against migrated accounts.
+   fallback against migrated accounts. A migrated staff account signs in with
+   its password, then enrols an authenticator with the code emailed to it
+   (MFA-1, 0088); no staff session is issued on the password alone.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.
 9. Prove private object read/version/checksum/scanner behavior.
 10. Start minimum target services and run synthetic smoke tests.
