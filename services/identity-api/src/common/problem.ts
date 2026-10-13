@@ -31,6 +31,14 @@ export class DomainProblem extends HttpException {
   }
 }
 
+/**
+ * A problem whose detail is a fixed sentence written for the person using the
+ * client, which the client may show as it is, even with a 5xx status. The
+ * filter replaces every other 5xx detail, because an unexpected failure's
+ * message can carry internal state. Never put a request value in it.
+ */
+export class PublicDetailProblem extends DomainProblem {}
+
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
   private readonly logger = new Logger(ProblemDetailsFilter.name);
@@ -44,7 +52,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       ? exception.getStatus()
       : this.bodyParserStatus(exception) ?? HttpStatus.INTERNAL_SERVER_ERROR;
     const domainProblem = exception instanceof DomainProblem ? exception : undefined;
-    const detail = status >= 500
+    const detail = status >= 500 && !(exception instanceof PublicDetailProblem)
       ? 'The service could not complete the request.'
       : this.safeMessage(exception);
     const code = domainProblem?.code ?? this.defaultCode(status);
