@@ -16,7 +16,7 @@
 // before the retraction (which then retracts it too) or sees the retracted
 // encounter and is refused.
 //
-// Since 0090 (BRANCH:launch/ehr-retraction-integrity) the retraction also
+// Since 0090 (D-Eminence/hid-system#74) the retraction also
 // requires the write permission of every record it changes: a nurse cannot
 // retract a doctor's diagnosis or prescription through the encounter (403
 // ENCOUNTER_RETRACTION_NOT_PERMITTED, nothing changed, the refusal audited),

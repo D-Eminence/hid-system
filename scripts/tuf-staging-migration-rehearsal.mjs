@@ -291,7 +291,7 @@ try {
       from identity.purpose_of_use_codes order by code`)).rows,
     [{ code:'direct-care', display:'Direct patient care', active:true, source_system:'hid' }],
     'Upgrade must seed exactly the active direct-care purpose of use');
-    // 0090 (BRANCH:launch/ehr-retraction-integrity) adds the retraction,
+    // 0090 (D-Eminence/hid-system#74) adds the retraction,
     // closed-encounter, closed-order, retracted-vital-correction and
     // retracted-document guards and the vital status, and the upgraded role
     // bootstrap lets the EHR runtime ask the membership permission decision

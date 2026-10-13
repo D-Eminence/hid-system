@@ -610,7 +610,7 @@ It names the other five record categories as withheld from the patient, not as
 absent (§11, "Record summaries"). Only a patient session may use it: EHR's
 guard answers any other session `403 PATIENT_SESSION_REQUIRED` before the
 handler runs and records `auth.authorization.denied` (§7). Before
-BRANCH:launch/ehr-retraction-integrity a staff session there got `503 DEPENDENCY_UNAVAILABLE` and nothing was
+D-Eminence/hid-system#74 a staff session there got `503 DEPENDENCY_UNAVAILABLE` and nothing was
 audited.
 These routes accept no browser-selected patient identity. Patient record access
 is read-only and owning-service disclosure/audit is atomic. The internal
@@ -1111,7 +1111,7 @@ before ADR-059, a clinical session whose account also held
 
 A refusal keeps its own status and code. If its audit row cannot be written,
 the request fails closed with `503 DEPENDENCY_UNAVAILABLE`. Since
-BRANCH:launch/ehr-retraction-integrity each EHR refusal row carries `details.status` and `details.code`,
+D-Eminence/hid-system#74 each EHR refusal row carries `details.status` and `details.code`,
 the status and code answered, next to `method` and `route`. A route marked
 patient-only (EHR's `GET /api/v1/ehr/me/records`) refuses any other session
 with `403 PATIENT_SESSION_REQUIRED` before a facility is bound.
@@ -1531,7 +1531,7 @@ which applies to every environment (the role bootstrap refuses a permission
 granted by hand), and then a staging acceptance run; the sections on the Lab
 and Pharmacy handoffs below describe the routes as they work then.
 
-With 0090 (`BRANCH:launch/ehr-retraction-integrity`, ADR-056), marking an
+With 0090 (D-Eminence/hid-system#74, ADR-056), marking an
 encounter entered in error needs the write permission of each record it
 retracts, `ehr.document.write` for a linked document whose upload was started
 or completed. Since no role holds it after 0091, `PATCH
@@ -1575,7 +1575,7 @@ are off at launch; Pharmacy refuses to dispense a prescription that is no
 longer active, 0080).
 
 Cancelling or retracting needs the write permission of every kind of record
-the close changes (ENC-RETRACT-1, ADR-056, BRANCH:launch/ehr-retraction-integrity): `ehr.note.write` for notes,
+the close changes (ENC-RETRACT-1, ADR-056, D-Eminence/hid-system#74): `ehr.note.write` for notes,
 `ehr.diagnosis.write` for diagnoses, `ehr.vital.write` for vitals,
 `ehr.prescription.write` for prescriptions, `ehr.lab-request.write` for lab
 requests and `ehr.document.write` for documents. Without one of them the
