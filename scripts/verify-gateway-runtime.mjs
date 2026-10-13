@@ -68,7 +68,8 @@ const application = createHttpServer((request, response) => {
   request.on('data', chunk => chunks.push(chunk))
   request.on('end', () => {
     const body = Buffer.concat(chunks)
-    reached.push({ method: request.method, url: request.url, bytes: body.length })
+    reached.push({ method: request.method, url: request.url, bytes: body.length,
+      originSecret: request.headers['x-hid-origin-authorization'] ?? null })
     const problem = (status, code, extra = {}) => {
       response.writeHead(status, {
         'content-type': 'application/problem+json',
@@ -245,6 +246,12 @@ try {
     assert.match(refused.headers.get('content-type'), /^application\/problem\+json/)
     assert.equal(refused.json().code, 'PAYLOAD_TOO_LARGE')
     assert.equal(reached.length, before, 'an oversized body never reaches the upstream')
+  })
+  check('A7: the Worker\'s origin secret stops at the gateway', async () => {
+    const answer = await send('POST', '/api/v1/identity/x', { body: '{}', headers: { 'x-hid-origin-authorization': 'edge-secret-value' } })
+    assert.equal(answer.status, 200)
+    assert.equal(reached.at(-1).url, '/api/v1/identity/x')
+    assert.equal(reached.at(-1).originSecret, null, 'no backend receives X-HID-Origin-Authorization')
   })
   check('D7: each request is logged as JSON with its path and no query string; the image log receives nothing', async () => {
     await send('GET', `/api/v1/admin/principals?query=${secretTerm}&page=2`)

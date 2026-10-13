@@ -125,6 +125,20 @@ test('the client address comes from X-Real-IP only on connections from the VPC',
   assert.equal(direct.upstreamHeaders['x-forwarded-for'], '203.0.113.50')
 })
 
+// A7 hygiene. The WAF admits a request only with the Worker's origin secret
+// (X-HID-Origin-Authorization); no backend reads it, so it stops at the
+// gateway and never reaches a service, its logs or its error reports.
+test('the Worker\'s origin secret is not passed to any backend', () => {
+  const model = gateway({ ...production, HID_ENABLED_API_ROUTES: allModules })
+  for (const prefix of ['/api/v1/auth', '/api/v1/identity', '/api/v1/admin', '/api/v1/ehr', '/api/v1/lab', '/api/v1/outreach']) {
+    for (const uri of [prefix, `${prefix}/x`]) {
+      const outcome = model.route({ method: 'POST', uri, peer: alb, headers: viaEdge({ 'x-hid-origin-authorization': 'edge-secret-value' }) })
+      assert.equal(outcome.action, 'proxy', uri)
+      assert.equal(outcome.upstreamHeaders['x-hid-origin-authorization'], '', `${uri}: an empty value is not sent`)
+    }
+  }
+})
+
 test('with the switch on, an API request without a usable client address is refused before proxying', () => {
   const model = gateway(production)
   // The Worker before this change deleted X-Real-IP and passed a caller's
@@ -430,6 +444,8 @@ test('the container verifier contract accepts the shipped gateway and rejects ea
       proxyHeaders.replace('X-Forwarded-For $remote_addr', 'X-Forwarded-For $realip_remote_addr') } }],
     ['every module routed by the image', { ...shipped, dockerfile: dockerfile.replace('HID_ENABLED_API_ROUTES=identity,ehr', `HID_ENABLED_API_ROUTES=${allModules}`) }],
     ['a missing image default', { ...shipped, dockerfile: dockerfile.replace(/\n\s*VPC_CIDR=\S+ \\/, '') }],
+    ['the origin secret passed on', { ...shipped, includes: { '/etc/nginx/hid-proxy-headers.conf':
+      proxyHeaders.replace(/\nproxy_set_header X-HID-Origin-Authorization "";/, '') } }],
     ['upstream 5xx answers intercepted', { ...shipped, includes: { '/etc/nginx/hid-proxy-headers.conf':
       `${proxyHeaders}proxy_intercept_errors on;\n` } }],
     ['upstream 5xx answers intercepted in one location', { ...shipped, template: template.replace(
