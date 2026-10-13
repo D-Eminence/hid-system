@@ -122,7 +122,7 @@ authenticator, the `STAFF_MFA_REQUIRED` refusals and the refusal of a staff
 Google exchange (below) come from D-Eminence/hid-system#71 (launch blocker
 MFA-1, migration 0088), also not deployed. `facilitySelection` on staff session
 responses ("Working facility per sign-in", below) comes from
-`BRANCH:launch/facility-selection-0089` (ADR-046, migration 0089), also not
+D-Eminence/hid-system#73 (ADR-046, migration 0089), also not
 deployed.
 
 Identity sets three cookies at sign-in and on every refresh (`setCookies` in
@@ -434,7 +434,7 @@ with, which later grants and revokes do not change.
 
 #### Working facility per sign-in
 
-Not yet deployed (ADR-046, migration 0089, `BRANCH:launch/facility-selection-0089`,
+Not yet deployed (ADR-046, migration 0089, D-Eminence/hid-system#73,
 ported from D-Eminence/hid-system#47). A staff member who works at more
 than one facility chooses one with `POST /api/v1/auth/facility`
 `{ "facilityId": "<uuid>" }`. Identity keeps the choice for the sign-in in

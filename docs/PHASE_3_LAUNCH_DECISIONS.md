@@ -7,7 +7,7 @@ the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
 D-Eminence/hid-system#68), and N5 and the workforce part of D14
 (ADR-049, D-Eminence/hid-system#70) with the owner's defaults,
 and the facility a sign-in keeps (N5, E7; ADR-046 as ported in
-`BRANCH:launch/facility-selection-0089`), and ENC-RETRACT-1, ENC-RETRACT-2 and ALLERGY-1
+D-Eminence/hid-system#73), and ENC-RETRACT-1, ENC-RETRACT-2 and ALLERGY-1
 (ADR-056, BRANCH:launch/ehr-retraction-integrity), and the launch module
 permissions and patient access transparency (§1, ADR-058,
 BRANCH:launch/launch-permission-withdrawal) with the owner's defaults;
@@ -183,7 +183,7 @@ separate deployment authorization. None of them has been run.
   to the next free number, 0083 today, before it can merge. It also overlaps
   #50 on `auth.controller.ts` and `token.service.ts`. **Resolved:** ported as
   0089, after the launch migrations 0085-0088, in
-  `BRANCH:launch/facility-selection-0089` (below).
+  D-Eminence/hid-system#73 (below).
 - **Data check.** Run I4 (§3) before deciding: whether such memberships exist.
 - **Decided (2026-10-13, owner defaults: deny by default, least privilege;
   ADR-049).** One active, unheld membership per account and facility, not
@@ -200,7 +200,7 @@ separate deployment authorization. None of them has been run.
 - **Decided, the facility a sign-in keeps (launch items C1 and FE-20,
   decision E7; 2026-10-13, owner defaults: deny by default, least privilege;
   ADR-046 as ported).** #47 is ported as migration 0089 in
-  `BRANCH:launch/facility-selection-0089` (not merged): the facility a staff
+  D-Eminence/hid-system#73 (merged, not deployed): the facility a staff
   sign-in chooses is kept per session family and reported on a reload or
   refresh as `facilitySelection: 'selected'`; it is only the default the
   session reports, and `X-Facility-ID` still authorizes every facility-scoped
@@ -617,12 +617,12 @@ for each merged change and its evidence. Pull requests from this review:
 | DOC-1 (any facility member could complete a colleague's upload) | D-Eminence/hid-system#59 | merged (D13) |
 | Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
-| ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota); FE-4 (enrollment availability read, registration-not-open answer) | D-Eminence/hid-system#68, migration 0085 (FE-4 adds none) | local branch (N1, N2); FE-4's Health-id follow-up open |
+| ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota); FE-4 (enrollment availability read, registration-not-open answer) | D-Eminence/hid-system#68, migration 0085 (FE-4 adds none) | merged to `main` 2026-10-13, not deployed (N1, N2); FE-4's Health-id follow-up open |
 | DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
-| REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | D-Eminence/hid-system#69, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
-| WF-1 (no governed way to provision clinicians), N5 (two memberships at one facility) | D-Eminence/hid-system#70, migration 0087, ADR-049 | branch, not merged (D14 workforce part, N5) |
-| MFA-1 (staff sessions without MFA; D14 MFA part) | D-Eminence/hid-system#71, migration 0088, ADR-054 | local commits, not pushed; owner notices wait on the notification route; Health-id staff and platform sign-in changes listed in the release checklist §3; release checklist P22 (enrolment before clinical roles, review of enrolments after a recovery) is an operator gate; a second enrolment channel is an open decision |
-| WAF-CRS-BODY (long clinical notes refused by the WAF's 8 KB body rule), A7 WAF part (rate limit per Cloudflare egress address), A8 (gateway replaced upstream 5xx), D6 (no CSP or HSTS on the portal hosts), D7 (query strings in the gateway access log), SCAN-EDGE/EDGE-DOCS (scanner callback public) | D-Eminence/hid-system#72, ADR-055 | ready for review; IP-THRESHOLDS decided above; staging checks S4p |
-| C1, FE-20 (a clinician's chosen facility was not kept across a reload; D-Eminence/hid-system#47 unmerged and numbered 0080) | `BRANCH:launch/facility-selection-0089`, migration 0089, ADR-046 (as ported) | local commits, not pushed (N5, E7); D-Eminence/hid-system#47 stays open with its own owner; no Health-id change |
+| REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | D-Eminence/hid-system#69, migration 0086 | merged to `main` 2026-10-13, not deployed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
+| WF-1 (no governed way to provision clinicians), N5 (two memberships at one facility) | D-Eminence/hid-system#70, migration 0087, ADR-049 | merged to `main` 2026-10-13, not deployed (D14 workforce part, N5) |
+| MFA-1 (staff sessions without MFA; D14 MFA part) | D-Eminence/hid-system#71, migration 0088, ADR-054 | merged to `main` 2026-10-13, not deployed; owner notices wait on the notification route; Health-id staff and platform sign-in changes listed in the release checklist §3; release checklist P22 (enrolment before clinical roles, review of enrolments after a recovery) is an operator gate; a second enrolment channel is an open decision |
+| WAF-CRS-BODY (long clinical notes refused by the WAF's 8 KB body rule), A7 WAF part (rate limit per Cloudflare egress address), A8 (gateway replaced upstream 5xx), D6 (no CSP or HSTS on the portal hosts), D7 (query strings in the gateway access log), SCAN-EDGE/EDGE-DOCS (scanner callback public) | D-Eminence/hid-system#72, ADR-055 | merged to `main` 2026-10-13, not deployed; IP-THRESHOLDS decided above; staging checks S4p |
+| C1, FE-20 (a clinician's chosen facility was not kept across a reload; D-Eminence/hid-system#47 unmerged and numbered 0080) | D-Eminence/hid-system#73, migration 0089, ADR-046 (as ported) | merged to `main` 2026-10-13, not deployed (N5, E7); D-Eminence/hid-system#47 stays open with its own owner; no Health-id change |
 | ENC-RETRACT-1 (launch blocker), ENC-RETRACT-2, RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT, ALLERGY-1 (EHR retraction integrity) | BRANCH:launch/ehr-retraction-integrity, migration 0090, ADR-056 | local only; not pushed |
 | MOD-PERM-OCR-OUTREACH, FE-17, FE-15, UPLOADS-DEFAULT-ON, PSELF-RLS, CONSENT-GRANTEE, NOTIF-PIN-NOTICE (launch module permissions, launch controls, patient-self binding, named grantee, PIN-use notice); ACCESS-REQ-STALE deferred | `BRANCH:launch/launch-permission-withdrawal`, migration 0091, ADR-058 | local commits, not pushed; numbered after 0089 and 0090 on other branches (the release contract reports the gap until they land); optional Health-id changes listed in the release checklist §3 |
