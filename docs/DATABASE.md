@@ -3602,7 +3602,7 @@ Tests:
 ## Launch module withdrawal and patient access transparency (0091)
 
 `0091_launch_module_withdrawal_and_patient_access_transparency.sql` (decisions
-D17 and D9, ADR-058; change `BRANCH:launch/launch-permission-withdrawal`)
+D17 and D9, ADR-058; change D-Eminence/hid-system#75)
 makes the launch database start in the launch module set, binds the
 patient-self row-level security context to the patient's own session, names
 the requesting clinician to the patient and tells the patient when their PIN

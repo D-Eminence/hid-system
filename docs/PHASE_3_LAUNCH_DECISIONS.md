@@ -10,7 +10,7 @@ and the facility a sign-in keeps (N5, E7; ADR-046 as ported in
 D-Eminence/hid-system#73), and ENC-RETRACT-1, ENC-RETRACT-2 and ALLERGY-1
 (ADR-056, D-Eminence/hid-system#74), and the launch module
 permissions and patient access transparency (§1, ADR-058,
-BRANCH:launch/launch-permission-withdrawal) with the owner's defaults;
+D-Eminence/hid-system#75) with the owner's defaults;
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
 
@@ -388,7 +388,7 @@ sign-in with an authenticator"; `PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §10).
 
 Decided under the owner defaults (deny by default, least privilege, explicit
 and informed consent, auditable actions) and implemented in
-`BRANCH:launch/launch-permission-withdrawal` (migration 0091; ADR-058; release
+D-Eminence/hid-system#75 (migration 0091; ADR-058; release
 checklist §2, "Launch module permissions"; `INTERFACE_CONTRACT.md`, "Launch
 module set").
 
@@ -453,7 +453,7 @@ module set").
 | D6 | Recovery and enrollment code guess budgets (REC-4, ENR-6) | 5 failures per 15 minutes per account or recipient, never per IP (the budget holds whatever network a guess comes from; until D-Eminence/hid-system#65 the edge also discarded client IPs); no daily cap | A daily cap makes denial of recovery cheap | Implemented as the default in D-Eminence/hid-system#55 (recovery codes) and D-Eminence/hid-system#61 (enrollment contact codes); thresholds are environment values |
 | D7 | Patient record release categories (PREC-1 Phase B) | Completed-encounter items only; never draft or entered in error; confirmed diagnoses only; documents only once a patient download route exists | Docs are silent | Phase B of the record summaries |
 | D8 | Vital correction semantics (CLIN-1, VIT-1) | The current correction is the whole current set, as Health-id renders it | API clients that send partial corrections lose omitted values | Held out of D-Eminence/hid-system#52 |
-| D9 | Break-glass detailed reads (PREC-4 scope, OCR-READ-PURPOSE) | The emergency summary returns only categories the reader may read (D-Eminence/hid-system#52); EHR document and OCR reads unchanged until decided together. Break-glass itself is off at launch: since 0091 (ADR-058, `BRANCH:launch/launch-permission-withdrawal`) no role holds `identity.break-glass.write` and `break_glass_enabled` starts off; re-enabling it is a reviewed migration with this decision, the `emergency` purpose and the control | The seeded clinical roles hold every read permission, so the summary stays wide in practice | Emergency summary narrowing |
+| D9 | Break-glass detailed reads (PREC-4 scope, OCR-READ-PURPOSE) | The emergency summary returns only categories the reader may read (D-Eminence/hid-system#52); EHR document and OCR reads unchanged until decided together. Break-glass itself is off at launch: since 0091 (ADR-058, D-Eminence/hid-system#75) no role holds `identity.break-glass.write` and `break_glass_enabled` starts off; re-enabling it is a reviewed migration with this decision, the `emergency` purpose and the control | The seeded clinical roles hold every read permission, so the summary stays wide in practice | Emergency summary narrowing |
 | D10 | Pharmacy and Lab lifecycle after acceptance (CLIN-2-POLICY, CLIN-3b) | Strict version equality for dispensing (D-Eminence/hid-system#48); Lab refuses new accession and execution for cancelled or entered-in-error orders; released results stay | Stranded queue items: a changed prescription leaves its work item `accepted` and undispensable | Queue cleanup, re-acceptance |
 | D11 | Lab result detail for clinicians | No "unreleased correction pending" flag (D-Eminence/hid-system#51) | Clinicians cannot see that a correction is coming | Result retraction API |
 | D12 | OCR publication after an authorization lapse | Terminal, as today | — | — |
@@ -624,5 +624,5 @@ for each merged change and its evidence. Pull requests from this review:
 | MFA-1 (staff sessions without MFA; D14 MFA part) | D-Eminence/hid-system#71, migration 0088, ADR-054 | merged to `main` 2026-10-13, not deployed; owner notices wait on the notification route; Health-id staff and platform sign-in changes listed in the release checklist §3; release checklist P22 (enrolment before clinical roles, review of enrolments after a recovery) is an operator gate; a second enrolment channel is an open decision |
 | WAF-CRS-BODY (long clinical notes refused by the WAF's 8 KB body rule), A7 WAF part (rate limit per Cloudflare egress address), A8 (gateway replaced upstream 5xx), D6 (no CSP or HSTS on the portal hosts), D7 (query strings in the gateway access log), SCAN-EDGE/EDGE-DOCS (scanner callback public) | D-Eminence/hid-system#72, ADR-055 | merged to `main` 2026-10-13, not deployed; IP-THRESHOLDS decided above; staging checks S4p |
 | C1, FE-20 (a clinician's chosen facility was not kept across a reload; D-Eminence/hid-system#47 unmerged and numbered 0080) | D-Eminence/hid-system#73, migration 0089, ADR-046 (as ported) | merged to `main` 2026-10-13, not deployed (N5, E7); D-Eminence/hid-system#47 stays open with its own owner; no Health-id change |
-| ENC-RETRACT-1 (launch blocker), ENC-RETRACT-2, RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT, ALLERGY-1 (EHR retraction integrity) | D-Eminence/hid-system#74, migration 0090, ADR-056 | local only; not pushed |
-| MOD-PERM-OCR-OUTREACH, FE-17, FE-15, UPLOADS-DEFAULT-ON, PSELF-RLS, CONSENT-GRANTEE, NOTIF-PIN-NOTICE (launch module permissions, launch controls, patient-self binding, named grantee, PIN-use notice); ACCESS-REQ-STALE deferred | `BRANCH:launch/launch-permission-withdrawal`, migration 0091, ADR-058 | local commits, not pushed; numbered after 0089 and 0090 on other branches (the release contract reports the gap until they land); optional Health-id changes listed in the release checklist §3 |
+| ENC-RETRACT-1 (launch blocker), ENC-RETRACT-2, RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT, ALLERGY-1 (EHR retraction integrity) | D-Eminence/hid-system#74, migration 0090, ADR-056 | merged to `main` 2026-10-13, not deployed |
+| MOD-PERM-OCR-OUTREACH, FE-17, FE-15, UPLOADS-DEFAULT-ON, PSELF-RLS, CONSENT-GRANTEE, NOTIF-PIN-NOTICE (launch module permissions, launch controls, patient-self binding, named grantee, PIN-use notice); ACCESS-REQ-STALE deferred | D-Eminence/hid-system#75, migration 0091, ADR-058 | in review, not deployed; optional Health-id changes listed in the release checklist §3 |

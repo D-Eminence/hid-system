@@ -211,7 +211,7 @@ The executable covers:
    `AuditInterceptor` registered as `AppModule` registers it), the 0089 guard
    as the runtime, and a selection waiting at the account lock while a
    sign-out ends the sign-in.
-   With 0091 (`BRANCH:launch/launch-permission-withdrawal`, ADR-058): the role
+   With 0091 (D-Eminence/hid-system#75, ADR-058): the role
    bootstrap's assertions require that no role holds a `lab.*`, `pharmacy.*`,
    `ocr.*` or `outreach.*` permission, break-glass or document upload;
    `patient_safety_runtime` also requires the patient's request list and

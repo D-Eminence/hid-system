@@ -4010,7 +4010,7 @@ Related ADRs: ADR-047, ADR-053.
 # ADR-058: Modules That Are Off Hold No Permissions; the Launch Database Starts in the Launch State; Patients See Who Gets Access and When Their PIN Is Used
 
 Status: Proposed for source implementation
-(`BRANCH:launch/launch-permission-withdrawal`, migration 0091). Not merged or
+(D-Eminence/hid-system#75, migration 0091). Not merged or
 deployed.
 
 Date: 2026-10-13
