@@ -3,7 +3,7 @@ import { DomainProblem } from '../common/problem';
 
 /**
  * Cross-origin settings for browser callers on an allowed origin (moved
- * unchanged from main.ts so they can be tested). A request without Origin (a
+ * unchanged out of the bootstrap so they can be tested). A request without Origin (a
  * same-origin GET) or from an allowed origin gets the CORS headers; one from
  * any other origin is refused with 403 ORIGIN_DENIED and no CORS headers,
  * never the 500 a plain Error became (A19).
