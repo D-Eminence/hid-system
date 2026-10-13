@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, Post, Req, Res } from '@nestj
 import type { Response } from 'express';
 import { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import { TurnstileService } from '../auth/turnstile.service';
-import { AuditAction, Public } from '../common/decorators';
+import { AuditAction, NoAudit, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -39,6 +39,22 @@ export class PatientEnrollmentController {
     response.cookie(ENROLLMENT_COOKIE_NAME, result.cookie,
       enrollmentCookieOptions(this.environment.AUTH_COOKIE_SECURE));
     return result.progress;
+  }
+
+  /**
+   * Whether patient self-enrollment is open (FE-4), from the checks start
+   * makes before it reads a NIN, so a client can say so before it asks for
+   * one. Public and without input: every caller gets the same answer and it
+   * carries no PHI, so, as GET /commercial/pricing, it writes no audit row
+   * and may be cached briefly. A failure keeps main.ts's no-store default.
+   */
+  @Get('availability')
+  @NoAudit()
+  async availability(@Res({ passthrough: true }) response: Response) {
+    const result = await this.enrollments.availability();
+    response.setHeader('Cache-Control', 'public, max-age=30');
+    for (const name of ['Pragma', 'Expires', 'Surrogate-Control']) response.removeHeader(name);
+    return result;
   }
 
   @Get('current')

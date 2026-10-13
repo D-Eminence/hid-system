@@ -308,3 +308,37 @@ describe('LabRequestsService update sends the active version to Lab', () => {
     expect(labApi.acceptEhrOrder).not.toHaveBeenCalled();
   });
 });
+
+describe('LabRequestsService update of a closed lab request (ORDER-CLOSED-EDIT)', () => {
+  const update = (service: LabRequestsService, input: Record<string, unknown>) =>
+    service.update(context, patientId, encounterId, requestId,
+      { changeReason: 'Clinical review', expectedRowVersion: 3, ...input } as never);
+  const updates = (query: jest.Mock) => query.mock.calls.filter(([sql]) => /^\s*update\b/i.test(String(sql)));
+
+  it.each([
+    [OrderStatus.Completed, { clinicalInformation: 'Rewritten information' }],
+    [OrderStatus.Cancelled, { priority: 'stat' }],
+    [OrderStatus.EnteredInError, { clinicalInformation: 'Rewritten information' }],
+    [OrderStatus.Cancelled, { status: OrderStatus.Cancelled }],
+    [OrderStatus.Completed, { status: OrderStatus.EnteredInError, priority: 'stat' }],
+  ])('refuses to change a %s lab request (%j) with 409 LAB_REQUEST_NOT_AMENDABLE before any UPDATE', async (status, fields) => {
+    const { query, service } = fakeDatabase(at(status, '3'));
+    await expect(update(service, fields)).rejects.toMatchObject({ status: 409, code: 'LAB_REQUEST_NOT_AMENDABLE' });
+    expect(updates(query)).toEqual([]);
+  });
+
+  it('marks a completed lab request entered in error (ENC-RETRACT-2)', async () => {
+    const { query, labApi, service } = fakeDatabase(at(OrderStatus.Completed, '3'), at(OrderStatus.EnteredInError, '4'));
+    await expect(update(service, { status: OrderStatus.EnteredInError }))
+      .resolves.toMatchObject({ status: OrderStatus.EnteredInError, labWorkItem: null, labHandoff: null });
+    expect(updates(query)).toHaveLength(1);
+    expect(labApi.acceptEhrOrder).not.toHaveBeenCalled();
+  });
+
+  it('keeps answering a cancelled request reactivated with 409 INVALID_LAB_REQUEST_TRANSITION', async () => {
+    const { query, service } = fakeDatabase(at(OrderStatus.Cancelled, '3'));
+    await expect(update(service, { status: OrderStatus.Active }))
+      .rejects.toMatchObject({ status: 409, code: 'INVALID_LAB_REQUEST_TRANSITION' });
+    expect(updates(query)).toEqual([]);
+  });
+});

@@ -239,6 +239,28 @@ fields; Identity gets `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=false`. The base
 templates after D-Eminence/hid-system#65 were not re-recorded here. Record the
 production baseline again from the approved SHA (§12 step 2).
 
+**Under ADR-055 (D-Eminence/hid-system#72).** The same offline synthesis
+on `main` `cf5a14f` plus this branch (with its review follow-up) gives
+production
+`6e0300ce7fd7f083759d419208b83a70cd515075c68859055b7926fcf6af4609` (550,607
+bytes, 407 resources, 54 parameters), development
+`190f915e24bcd841c973198fb15d0e952e7851668d4012e108d6cd72115594ea` (481,364
+bytes), economy
+`d2cc1e696d4f6cf1aefd5e867c7b209b5c6ce50c20e7e289b4818b52c34e8a8b` (531,805
+bytes) and fidelity
+`b5d3962f7864c03bc3cd35c7eb5ddc44cd677ea9e3a0a8b5f24a59692279ea08` (535,654
+bytes); sleep, which has no public web ACL, is unchanged
+(`c1c018c79f403100bb221774d80eba07ec3c7822b508ac6a8d3467247c2c88e9`). The base
+`cf5a14f` synthesizes production to the ADR-053 hash above, and a structural
+comparison finds exactly one changed resource, `ApiOriginWebAcl`, whose rules
+change and nothing else: the Core Rule Set's `SizeRestrictions_BODY` override
+to count, the new `AwsCommonRulesBodySize` and `ApiOriginEdgeRateLimit` rules,
+and `ApiOriginRateLimit` keyed on `X-HID-Client-Network` (`FORWARDED_IP`), the
+client network the Worker derives from `CF-Connecting-IP`. Deploy the Workers
+that send that header before this web ACL: behind a Worker that does not,
+requests are counted only by the backstop. `verify:synth` and `verify:policy`
+pass for all five profiles.
+
 ## 2. Local source gates
 
 From a locked checkout:
@@ -670,7 +692,7 @@ age/DLQ, event terminal failure, provider outcomes, OCR failures, S3/KMS denies,
 and sanitized telemetry. Stop on unexplained authentication, duplicate patient,
 OTP, notification, or migration behavior.
 
-With ADR-057 (`BRANCH:launch/identity-error-hardening`) a fault no longer
+With ADR-059 (`BRANCH:launch/identity-error-hardening`) a fault no longer
 signs users out: it answers `503` with a stable code and Health-id retries, so
 an outage shows up as `503` rates, not as a wave of sign-ins. Watch for
 `AUTHENTICATION_UNAVAILABLE` and `PLATFORM_CONTROL_UNAVAILABLE` from Identity
@@ -682,7 +704,7 @@ workload token, or the token file EHR reads has expired). Each expired token
 EHR refuses to send is logged as `identity_workload_token_expired`: the token
 agent has stopped renewing (ADR-047 D2); restart the agent or its task. No
 alarm is defined on that log yet. `403 ORIGIN_DENIED` from any service means a
-browser origin outside `CORS_ORIGINS`; before ADR-057 it was a `500`.
+browser origin outside `CORS_ORIGINS`; before ADR-059 it was a `500`.
 
 Normal scaling ceilings are not million-user capacity evidence. Any move above
 a normal ceiling must use the separately bounded emergency parameter, have an

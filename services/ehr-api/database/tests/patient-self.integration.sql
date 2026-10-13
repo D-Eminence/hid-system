@@ -240,6 +240,71 @@ do $$ begin
   exception when insufficient_privilege then null;
   end;
 end $$;
+-- The patient-self context is bound to the patient's own live session
+-- (PSELF-RLS, 0091): the database checks the named patient, account, subject
+-- and session against identity.patient_self_session, as the staff path
+-- checks a grant, and never trusts the transaction settings alone. Each
+-- case names patient 2, whose completed encounter and signed note exist, or
+-- binds patient 1 to an account or session that is not its own.
+reset role;
+update auth.sessions set revoked_at=clock_timestamp(),revocation_reason='synthetic-test'
+  where id='a3000000-0000-4000-8000-000000000002';
+set local role hid_ehr_api_runtime;
+do $$
+declare
+  probe record;
+  leaked text := '';
+begin
+  for probe in select * from (values
+    ('another patient with the caller''s own live session',
+     'a2000000-0000-4000-8000-000000000002','synthetic:self:1','a1000000-0000-4000-8000-000000000001','a3000000-0000-4000-8000-000000000001'),
+    ('another patient with a session that does not exist',
+     'a2000000-0000-4000-8000-000000000002','synthetic:self:2','a1000000-0000-4000-8000-000000000002','a3000000-0000-4000-8000-000000000099'),
+    ('a patient whose own session is revoked',
+     'a2000000-0000-4000-8000-000000000002','synthetic:self:2','a1000000-0000-4000-8000-000000000002','a3000000-0000-4000-8000-000000000002'),
+    ('a patient session of another account',
+     'a2000000-0000-4000-8000-000000000002','synthetic:self:2','a1000000-0000-4000-8000-000000000002','a3000000-0000-4000-8000-000000000001'),
+    ('the patient''s own session under another account id',
+     'a2000000-0000-4000-8000-000000000001','synthetic:self:1','a1000000-0000-4000-8000-000000000002','a3000000-0000-4000-8000-000000000001'),
+    ('the patient''s own session under another subject',
+     'a2000000-0000-4000-8000-000000000001','synthetic:self:2','a1000000-0000-4000-8000-000000000001','a3000000-0000-4000-8000-000000000001'),
+    ('a session id that is not a UUID',
+     'a2000000-0000-4000-8000-000000000001','synthetic:self:1','a1000000-0000-4000-8000-000000000001','not-a-session-id'))
+    cases(label, patient, subject, account, session)
+  loop
+    perform set_config('app.patient_id', probe.patient, true), set_config('app.actor_subject', probe.subject, true),
+      set_config('app.account_id', probe.account, true), set_config('app.session_id', probe.session, true),
+      set_config('app.self_authorized_until', (clock_timestamp() + interval '30 seconds')::text, true);
+    if exists(select 1 from ehr.encounters) or exists(select 1 from ehr.clinical_notes)
+       or exists(select 1 from ehr.clinical_note_revisions) then
+      leaked := leaked || probe.label || '; ';
+    end if;
+  end loop;
+  if leaked <> '' then
+    raise exception 'an unbound patient-self context read clinical records: %', leaked;
+  end if;
+end $$;
+reset role;
+update auth.sessions set revoked_at=null,revocation_reason=null
+  where id='a3000000-0000-4000-8000-000000000002';
+set local role hid_ehr_api_runtime;
+-- Patient 2 bound to its own live session sees its own released records only.
+select set_config('app.patient_id','a2000000-0000-4000-8000-000000000002',true),
+  set_config('app.actor_subject','synthetic:self:2',true),
+  set_config('app.account_id','a1000000-0000-4000-8000-000000000002',true),
+  set_config('app.session_id','a3000000-0000-4000-8000-000000000002',true),
+  set_config('app.self_authorized_until',(clock_timestamp()+interval '30 seconds')::text,true);
+do $$ begin
+  if (select array_agg(id::text order by id) from ehr.encounters)
+       is distinct from array['a7000000-0000-4000-8000-000000000003']
+     or (select count(*) from ehr.clinical_notes) <> 1 or (select count(*) from ehr.clinical_note_revisions) <> 1 then
+    raise exception 'a patient bound to its own session did not see exactly its released records';
+  end if;
+end $$;
+select set_config('app.patient_id','a2000000-0000-4000-8000-000000000001',true),
+  set_config('app.actor_subject','synthetic:self:1',true),
+  set_config('app.account_id','a1000000-0000-4000-8000-000000000001',true),
+  set_config('app.session_id','a3000000-0000-4000-8000-000000000001',true);
 select set_config('app.self_authorized_until',(clock_timestamp()-interval '1 second')::text,true);
 do $$ begin
   if exists(select 1 from ehr.encounters) or exists(select 1 from ehr.clinical_notes)

@@ -26,9 +26,46 @@ export class DomainProblem extends HttpException {
     public readonly code: string,
     detail: string,
     public readonly errors?: ProblemDetails['errors'],
+    /**
+     * Details for the refusal's audit row only, never the response: codes and
+     * identifiers, no clinical content (A17-EHR-AUDIT).
+     */
+    public readonly auditDetails?: Readonly<Record<string, unknown>>,
   ) {
     super(detail, status);
   }
+}
+
+const DEFAULT_CODES: Readonly<Record<number, string>> = {
+  400: 'BAD_REQUEST',
+  401: 'AUTHENTICATION_REQUIRED',
+  403: 'ACCESS_DENIED',
+  404: 'NOT_FOUND',
+  409: 'CONFLICT',
+  412: 'VERSION_CONFLICT',
+  413: 'PAYLOAD_TOO_LARGE',
+  415: 'UNSUPPORTED_MEDIA_TYPE',
+  429: 'RATE_LIMITED',
+  503: 'DEPENDENCY_UNAVAILABLE',
+};
+
+/** The code the problem filter answers for a status without a DomainProblem code. */
+export function defaultProblemCode(status: number): string {
+  return DEFAULT_CODES[status] ?? 'INTERNAL_ERROR';
+}
+
+/** The status and code the problem filter answers for an exception (an unknown one is 500 INTERNAL_ERROR). */
+export function problemStatusAndCode(exception: unknown): { status: number; code: string } {
+  const status = exception instanceof HttpException ? exception.getStatus() : HttpStatus.INTERNAL_SERVER_ERROR;
+  return { status, code: exception instanceof DomainProblem ? exception.code : defaultProblemCode(status) };
+}
+
+/** Statuses that refuse the request rather than fail it, audited as `denied` (A17-EHR-AUDIT). */
+const REFUSAL_STATUSES: ReadonlySet<number> = new Set([401, 403, 409, 412, 423, 429]);
+
+/** The audit outcome of an answered status: `denied` for a refusal, `failure` otherwise. */
+export function refusalOutcome(status: number): 'denied' | 'failure' {
+  return REFUSAL_STATUSES.has(status) ? 'denied' : 'failure';
 }
 
 @Catch()
@@ -92,19 +129,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
   }
 
   private defaultCode(status: number): string {
-    const byStatus: Record<number, string> = {
-      400: 'BAD_REQUEST',
-      401: 'AUTHENTICATION_REQUIRED',
-      403: 'ACCESS_DENIED',
-      404: 'NOT_FOUND',
-      409: 'CONFLICT',
-      412: 'VERSION_CONFLICT',
-      413: 'PAYLOAD_TOO_LARGE',
-      415: 'UNSUPPORTED_MEDIA_TYPE',
-      429: 'RATE_LIMITED',
-      503: 'DEPENDENCY_UNAVAILABLE',
-    };
-    return byStatus[status] ?? 'INTERNAL_ERROR';
+    return defaultProblemCode(status);
   }
 
   private bodyParserStatus(exception: unknown): number | undefined {

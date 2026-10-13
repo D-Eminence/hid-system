@@ -547,9 +547,12 @@ grant execute on function platform.current_actor_subject(),
   audit.list_platform_events(integer, bigint, text, uuid, text, text, text, timestamptz, timestamptz, text, text)
   to hid_identity_runtime;
 
--- EHR owns only clinical persistence. Its single Identity capability is the
--- security-definer authorization decision needed by the current transaction
--- boundary; it receives no Identity table or sequence privilege.
+-- EHR owns only clinical persistence. Its Identity capabilities are the
+-- security-definer authorization decisions needed by the current transaction
+-- boundary: the consent decision row-level security uses and, since 0090, the
+-- membership permission decision the encounter retraction guard uses
+-- (ehr.require_retraction_permission). It receives no Identity table or
+-- sequence privilege.
 grant usage on schema platform, auth, ehr, identity to hid_ehr_runtime;
 grant select, insert, update on ehr.encounters, ehr.clinical_notes, ehr.vitals,
   ehr.diagnoses, ehr.prescriptions, ehr.lab_requests, ehr.documents,
@@ -568,6 +571,7 @@ grant execute on function platform.current_actor_subject(),
   platform.current_purpose_of_use(),
   auth.account_id_for_subject(text),
   auth.account_has_active_role(uuid, text),
+  auth.membership_has_permission(text, uuid, uuid, text),
   identity.has_active_consent_grant(uuid, text, uuid, uuid, text, text, timestamptz),
   ehr.context_allows(uuid, uuid, text) to hid_ehr_runtime;
 
@@ -1163,6 +1167,17 @@ revoke all on function auth.require_platform_step_up(uuid),
   auth.guard_admin_approval_request_change()
   from public;
 
+-- Staff working facility per sign-in (0089, ADR-046). The Identity runtime
+-- reads, records and replaces a sign-in's selection, as it does
+-- auth.session_assurance; the 0089 guard admits only the root session of a
+-- live staff sign-in of the same account and an active membership, and refuses
+-- deletes, so DELETE is not granted. No other service reads it: the selection
+-- authorizes nothing, and every service authorizes a request by its
+-- X-Facility-ID. The guard runs as the invoker and reads only tables this
+-- runtime already reads (auth.sessions and the identity workforce tables).
+grant select, insert, update on auth.session_facility_selection to hid_identity_runtime;
+revoke all on function auth.guard_session_facility_selection_change() from public;
+
 -- Phase 4 Stage 5B (0073): the Identity API's own revocations (refresh-token
 -- reuse, an administrator revoking their own session, sign-out, expiry) take the
 -- account row lock through this helper before revoking, as the 0073 admin
@@ -1209,6 +1224,14 @@ revoke all on identity.staff_credential_attestations, identity.workforce_members
   identity.workforce_role_grants
   from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
     hid_ehr_api_runtime, hid_schema_test_runtime;
+
+-- Launch (0091, ADR-058). ehr.patient_self_context is now a security-definer
+-- binding check; its EXECUTE grant to hid_ehr_runtime is above (Phase 3 patient
+-- self-service). 0091 recreates identity.list_my_patient_access_requests with
+-- the requesting clinician's name and role, so its Identity grant above
+-- returns with this run; the internal list stays revoked. The PIN-use inbox
+-- trigger function runs only as its trigger.
+revoke all on function notification.on_identity_pin_outbox_created() from public;
 
 -- End the temporary memberships granted after the role check above. A
 -- creator's ADMIN OPTION, which PostgreSQL 16 gives a CREATEROLE

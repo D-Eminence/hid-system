@@ -23,10 +23,13 @@
 //   the administrator's URL and of a login with an extra role;
 // - platform.control_enabled as the Identity, EHR and Outreach logins, and
 //   ocr.claim_worker_job as the OCR worker login without the SET grant;
+// - the release checklist's read-only P10 and P11 checks, taken from
+//   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
+//   operator runs them on RDS;
 // - the platform-control-owner and function-parameter-settings suites.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -286,18 +289,51 @@ try {
   evidence.steps.logins = { verified: passed.verified.map(({ credential, expected_role }) =>
     ({ credential, expected_role })), refused: ['administrator URL', 'extra role', 'another service login'] };
 
-  // P8-CONTROL: the guards' control reads, as each guard's runtime login.
+  // P8-CONTROL: the guards' control reads, as each guard's runtime login. The
+  // last three are the launch controls 0091 turns off where 0039 left them
+  // seeded: the administrator owns platform.control_settings, whose forced
+  // row-level security hides every row from it, so the migration's update
+  // reaches the rows only with forced security lifted for its transaction.
   const controls = {};
   for (const credential of ['identity-api', 'ehr-api', 'outreach-api']) {
     controls[credential] = psql(`platform controls as ${credential}`, logins[credential][0],
       `select platform.control_enabled('patient_portal_enabled') || ',' || platform.control_enabled('provider_portal_enabled')
-         || ',' || platform.control_enabled('maintenance_mode'); select platform.require_control_enabled('patient_portal_enabled')`)
+         || ',' || platform.control_enabled('maintenance_mode') || ',' || platform.control_enabled('uploads_enabled')
+         || ',' || platform.control_enabled('outreach_portal_enabled') || ',' || platform.control_enabled('break_glass_enabled');
+       select platform.require_control_enabled('patient_portal_enabled')`)
       .stdout.trim().split('\n')[0];
-    assert.equal(controls[credential], 'true,true,false');
+    assert.equal(controls[credential], 'true,true,false,false,false,false');
   }
   evidence.steps.platform_controls = { read_as: controls, owner: psql('control owner', superuser,
     `select proowner::regrole from pg_proc where oid = 'platform.control_enabled(text)'::regprocedure`).stdout.trim() };
   assert.equal(evidence.steps.platform_controls.owner, 'hid_platform_control_reader');
+
+  // P10 and P11 as the operator runs them: the release checklist's read-only
+  // SQL, as the migration administrator. That administrator owns
+  // platform.control_settings but is subject to its forced row-level security
+  // (NOBYPASSRLS), so a check that read the table directly would fail here.
+  const checklist = await readFile(join(repository, 'docs/PHASE_4_STAGE_5_RELEASE_READINESS.md'), 'utf8');
+  const checklistCheck = async (heading) => {
+    const start = checklist.indexOf(`\n${heading}`);
+    assert.notEqual(start, -1, `the release checklist has no "${heading}"`);
+    const block = /\n```sql\n([\s\S]*?)\n```/.exec(checklist.slice(start));
+    assert(block, `the release checklist has no SQL block after "${heading}"`);
+    const file = join(temporary, `${heading.split(' ')[0].toLowerCase()}-check.sql`);
+    await writeFile(file, `${block[1]}\n`, { mode: 0o600 });
+    return run(`release checklist ${heading} as the migration administrator`, join(pgBindir, 'psql'),
+      ['-X', '-q', '-At', '-F', '|', '-v', 'ON_ERROR_STOP=1', '-h', temporary, '-U', admin, '-d', database, '-f', file])
+      .stdout.trim().split('\n').filter(Boolean);
+  };
+  const p10 = await checklistCheck('P10 check (read-only)');
+  assert.deepEqual(p10.map((line) => line.split('|').slice(0, 4).join('|')),
+    ['break_glass_enabled|f', 'direct-care|Direct patient care|t|hid'], `P10 check: ${p10.join('; ')}`);
+  // After 0091 and the bootstrap: the three launch controls off, no emergency or
+  // healthcare-operations purpose, no withdrawn permission, no control event.
+  const p11 = await checklistCheck('P11 check (read-only)');
+  assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f'],
+    `P11 check: ${p11.join('; ')}`);
+  evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
+    p11 };
 
   // I3 at call time: the claim runs its body without the parameter privilege.
   const claim = psql('OCR claim without a workload context', logins['ocr-worker'][0],

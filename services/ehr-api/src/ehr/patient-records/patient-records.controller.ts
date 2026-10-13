@@ -1,5 +1,5 @@
 import { Controller, Get, Param, ParseUUIDPipe, Req } from '@nestjs/common';
-import { AuditFailuresOnly, FacilityOptional, PatientAllowed, RequirePermissions } from '../../common/decorators';
+import { AuditFailuresOnly, PatientOnly, RequirePermissions } from '../../common/decorators';
 import { DomainProblem } from '../../common/problem';
 import { requireRequestContext, type HidRequest } from '../../common/request-context';
 import { PatientRecordsService } from './patient-records.service';
@@ -9,9 +9,10 @@ import { PatientRecordsService } from './patient-records.service';
 export class PatientRecordsController {
   constructor(private readonly records: PatientRecordsService) {}
 
+  // Patient sessions only: the guard refuses any other session with 403
+  // PATIENT_SESSION_REQUIRED, audited, before this handler runs (A9-EHR).
   @Get('me/records')
-  @FacilityOptional()
-  @PatientAllowed()
+  @PatientOnly()
   self(@Req() request: HidRequest) { return this.records.self(request); }
 
   @Get('patients/:patientId/emergency-records')

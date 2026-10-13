@@ -96,6 +96,14 @@ begin
        'f1300000-0000-4000-8000-000000000001')) <> 2 then
     raise exception 'Session-bound access-request list is wrong';
   end if;
+  -- CONSENT-GRANTEE (0091): the patient approves a grant to one clinician, so
+  -- each request names that clinician (display name and role) next to the facility.
+  if exists (select 1 from identity.list_my_patient_access_requests('synthetic:safety:1',
+       'f1300000-0000-4000-8000-000000000001')
+      where requester_display_name is distinct from 'Safety Clinician'
+         or requester_role is distinct from 'doctor' or facility_name is distinct from 'Safety Test Clinic') then
+    raise exception 'An access request did not name the requesting clinician and role';
+  end if;
   begin
     perform identity.list_my_patient_access_requests('synthetic:safety:1', 'f1300000-0000-4000-8000-000000000002');
     raise exception 'Access requests were listed with another patient session';
@@ -127,6 +135,17 @@ do $$
 declare revoked record; history jsonb; item jsonb;
 begin
   history := identity.patient_self_access_history('synthetic:safety:1', 'f1300000-0000-4000-8000-000000000001');
+  -- CONSENT-GRANTEE (0091): every grant names who holds it, and the list says
+  -- whether it is complete.
+  if history->'truncated' is distinct from 'false'::jsonb or jsonb_array_length(history->'items') <> 3 then
+    raise exception 'Access history did not report a complete list of three grants: %', history;
+  end if;
+  if exists (select 1 from jsonb_array_elements(history->'items') entry
+              where entry->>'requesterDisplayName' is distinct from 'Safety Clinician'
+                 or entry->>'requesterRole' is distinct from 'doctor'
+                 or entry->>'facilityName' is distinct from 'Safety Test Clinic') then
+    raise exception 'An access-history grant did not name its clinician and role: %', history;
+  end if;
   for item in select * from jsonb_array_elements(history->'items') loop
     if (item->>'consentGrantId')::uuid = current_setting('hid.test.approved_grant')::uuid
        and not (item->>'patientRevocable')::boolean then
@@ -170,6 +189,30 @@ begin
     raise exception 'Another patient revoked a foreign grant';
   exception when no_data_found then null;
   end;
+end
+$$;
+reset role;
+
+-- The history shows the latest 50 grants and says when there are more
+-- (CONSENT-GRANTEE, 0091): 48 more grants make 51.
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id,
+  scope, purpose_of_use, status, granted_by_patient_id, reason, starts_at, expires_at, break_glass)
+select ('f1900000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'f1200000-0000-4000-8000-000000000001',
+  'f1500000-0000-4000-8000-000000000001', 'f1100000-0000-4000-8000-000000000003',
+  'f1600000-0000-4000-8000-000000000001', 'f1400000-0000-4000-8000-000000000002', 'read_records', 'direct-care',
+  'expired', 'f1200000-0000-4000-8000-000000000001', 'Older synthetic grant', clock_timestamp() - interval '2 days',
+  clock_timestamp() - interval '1 day', false
+from generate_series(1, 48) n;
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'synthetic:safety:1', true);
+do $$
+declare history jsonb;
+begin
+  history := identity.patient_self_access_history('synthetic:safety:1', 'f1300000-0000-4000-8000-000000000001');
+  if history->'truncated' is distinct from 'true'::jsonb or jsonb_array_length(history->'items') <> 50 then
+    raise exception 'Access history of 51 grants did not show 50 and report truncation: truncated=%, items=%',
+      history->'truncated', jsonb_array_length(history->'items');
+  end if;
 end
 $$;
 reset role;

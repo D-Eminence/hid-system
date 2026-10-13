@@ -46,39 +46,62 @@ const TRANSITIONS: Readonly<Record<EncounterStatus, readonly EncounterStatus[]>>
 };
 
 const OPEN_ORDER_STATUSES = ['draft', 'active', 'on_hold'] as const;
+/** Orders a wrong-patient retraction marks entered in error: open ones and completed ones (ENC-RETRACT-2). */
+const RETRACTED_ORDER_STATUSES = ['draft', 'active', 'on_hold', 'completed'] as const;
 
-/** One step of closing an encounter: the records of `table` whose `column` is in `from` take `to`. */
+/** An encounter in one of these takes no further change (ORDER-CLOSED-EDIT, 0090). */
+const CLOSED_ENCOUNTER_STATUSES: ReadonlySet<EncounterStatus> =
+  new Set([EncounterStatus.Cancelled, EncounterStatus.EnteredInError]);
+
+/**
+ * One step of closing an encounter: the records of `table` whose `column` is
+ * in `from` take `to`. Changing them needs `permission`, the write permission
+ * of that kind of record on its own routes (ENC-RETRACT-1).
+ */
 interface CloseStep {
-  table: 'clinical_notes' | 'diagnoses' | 'prescriptions' | 'lab_requests';
+  table: 'clinical_notes' | 'diagnoses' | 'vitals' | 'prescriptions' | 'lab_requests' | 'documents';
   column: 'status' | 'verification_status';
   from: readonly string[];
   to: string;
-  key: 'clinicalNoteIds' | 'diagnosisIds' | 'prescriptionIds' | 'labRequestIds';
+  key: 'clinicalNoteIds' | 'diagnosisIds' | 'vitalIds' | 'prescriptionIds' | 'labRequestIds' | 'documentIds';
+  permission: string;
 }
 
 /**
  * What closing an encounter does to its records, in the same transaction and
  * under the encounter's row lock (CLIN-EIE). Entered in error retracts every
- * note, diagnosis and open order of it: they belong to the wrong patient or to
- * an encounter that did not happen. Cancelling cancels its open orders and
- * keeps its notes and diagnoses. Completed and dispensed orders, and vitals
- * (which have no status), keep their state.
+ * note, diagnosis, vital, open or completed order and linked document of it:
+ * they belong to the wrong patient or to an encounter that did not happen
+ * (ENC-RETRACT-2). Cancelling cancels its open orders and keeps everything
+ * else. The database refuses a close the writer may not make, as the service
+ * does (ehr.require_retraction_permission, 0090).
  */
 const CLOSE_STEPS: Readonly<Partial<Record<EncounterStatus, readonly CloseStep[]>>> = {
   [EncounterStatus.EnteredInError]: [
     { table: 'clinical_notes', column: 'status', from: ['draft', 'signed', 'amended'], to: 'entered_in_error',
-      key: 'clinicalNoteIds' },
+      key: 'clinicalNoteIds', permission: 'ehr.note.write' },
     { table: 'diagnoses', column: 'verification_status',
       from: ['unconfirmed', 'provisional', 'differential', 'confirmed', 'refuted'], to: 'entered_in_error',
-      key: 'diagnosisIds' },
-    { table: 'prescriptions', column: 'status', from: OPEN_ORDER_STATUSES, to: 'entered_in_error', key: 'prescriptionIds' },
-    { table: 'lab_requests', column: 'status', from: OPEN_ORDER_STATUSES, to: 'entered_in_error', key: 'labRequestIds' },
+      key: 'diagnosisIds', permission: 'ehr.diagnosis.write' },
+    { table: 'vitals', column: 'status', from: ['final'], to: 'entered_in_error', key: 'vitalIds',
+      permission: 'ehr.vital.write' },
+    { table: 'prescriptions', column: 'status', from: RETRACTED_ORDER_STATUSES, to: 'entered_in_error',
+      key: 'prescriptionIds', permission: 'ehr.prescription.write' },
+    { table: 'lab_requests', column: 'status', from: RETRACTED_ORDER_STATUSES, to: 'entered_in_error',
+      key: 'labRequestIds', permission: 'ehr.lab-request.write' },
+    { table: 'documents', column: 'status', from: ['initiated', 'uploaded'], to: 'entered_in_error', key: 'documentIds',
+      permission: 'ehr.document.write' },
   ],
   [EncounterStatus.Cancelled]: [
-    { table: 'prescriptions', column: 'status', from: OPEN_ORDER_STATUSES, to: 'cancelled', key: 'prescriptionIds' },
-    { table: 'lab_requests', column: 'status', from: OPEN_ORDER_STATUSES, to: 'cancelled', key: 'labRequestIds' },
+    { table: 'prescriptions', column: 'status', from: OPEN_ORDER_STATUSES, to: 'cancelled', key: 'prescriptionIds',
+      permission: 'ehr.prescription.write' },
+    { table: 'lab_requests', column: 'status', from: OPEN_ORDER_STATUSES, to: 'cancelled', key: 'labRequestIds',
+      permission: 'ehr.lab-request.write' },
   ],
 };
+
+/** What a close changed: the new status and the ids changed in each category. Returned and audited. */
+export type EncounterCascade = Readonly<Record<string, unknown>>;
 
 @Injectable()
 export class EncountersService {
@@ -172,7 +195,7 @@ export class EncountersService {
     patientId: string,
     encounterId: string,
     input: UpdateEncounterDto,
-  ): Promise<EncounterRow> {
+  ): Promise<EncounterRow & { cascade?: EncounterCascade }> {
     this.requireMutation(input, ['status', 'endedAt', 'chiefComplaint']);
     return this.repository.run(
       context,
@@ -184,6 +207,14 @@ export class EncountersService {
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_ENCOUNTER_TRANSITION', 'Encounter status transition is not allowed');
         }
+        // A cancelled or entered-in-error encounter is final (ORDER-CLOSED-EDIT); the database refuses it too (0090).
+        if (CLOSED_ENCOUNTER_STATUSES.has(current.status)) {
+          throw new DomainProblem(409, 'ENCOUNTER_NOT_OPEN',
+            `The encounter is ${current.status === EncounterStatus.Cancelled ? 'cancelled' : 'entered in error'}`
+            + ' and takes no further change');
+        }
+        const closing = input.status !== undefined && input.status !== current.status ? CLOSE_STEPS[input.status] : undefined;
+        if (closing) await this.requireClosePermissions(client, context, current, closing);
         await this.repository.setChangeReason(client, input.changeReason);
         const result = await client.query<EncounterRow>(
           `update ehr.encounters set
@@ -204,13 +235,46 @@ export class EncountersService {
         );
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Encounter changed since it was loaded');
-        const closing = input.status !== undefined && input.status !== current.status ? CLOSE_STEPS[input.status] : undefined;
         const cascade = closing ? await this.closeRecords(client, row, closing) : undefined;
-        return { value: row, resourceId: encounterId,
+        // `cascade` is additive: the encounter as before, and what its close changed.
+        return { value: cascade ? { ...row, cascade } : row, resourceId: encounterId,
           details: { rowVersion: row.rowVersion, ...(cascade ? { cascade } : {}) } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
+  }
+
+  /**
+   * Refuses a close that changes a kind of record the writer may not write on
+   * its own routes (ENC-RETRACT-1), before anything is written: 403
+   * ENCOUNTER_RETRACTION_NOT_PERMITTED with a fixed detail, the missing
+   * permissions named in the refusal's audit only. Only a category the writer
+   * lacks the permission for is probed, under the encounter's row lock: no
+   * record can be added to it or move into a category meanwhile (each create
+   * takes a share lock on it first, and closed records are final, 0084 and
+   * 0090).
+   */
+  private async requireClosePermissions(client: PoolClient, context: DataAccessContext, encounter: EncounterRow,
+    steps: readonly CloseStep[]): Promise<void> {
+    const held: readonly string[] = context.actor?.permissions ?? [];
+    const missing: string[] = [];
+    for (const step of steps) {
+      if (held.includes(step.permission) || missing.includes(step.permission)) continue;
+      const result = await client.query<{ present: boolean }>(
+        `select exists (select 1 from ehr.${step.table}
+           where encounter_id = $1 and patient_id = $2 and facility_id = $3 and ${step.column} = any($4::text[])) as present`,
+        [encounter.id, encounter.patientId, encounter.facilityId, [...step.from]],
+      );
+      if (result.rows[0]?.present) missing.push(step.permission);
+    }
+    if (missing.length > 0) {
+      // Only a kind the encounter holds is probed, so the missing permissions
+      // say which kinds of record it holds, which the caller may not be allowed
+      // to read: they go to the refusal's audit row only, never the response.
+      throw new DomainProblem(403, 'ENCOUNTER_RETRACTION_NOT_PERMITTED',
+        'Cancelling or retracting this encounter changes records you may not write',
+        undefined, { missingPermissions: [...missing].sort() });
+    }
   }
 
   /**

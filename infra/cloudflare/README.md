@@ -94,8 +94,10 @@ The script refuses, and writes nothing, unless the build:
   other element (`base`, `style`, `img`, `iframe`, `object`, `embed`,
   `noscript`, `template`, `svg` and so on), any other or repeated attribute
   (an `on*` handler, `http-equiv`, `data-*`), text outside the title, and
-  markup it cannot parse exactly are refused. There is no edge CSP (see
-  below), so this check is what keeps `index.html` to the build's own files.
+  markup it cannot parse exactly are refused. Together with the edge
+  Content-Security-Policy (below, ADR-055), which allows script only from the
+  page's own origin and Turnstile, this keeps `index.html` to the build's own
+  files.
 
 It copies the build to `workers/<worker>/staged/<environment>/site`, checks
 the copy again, and writes `provenance.json`: the Health-id repository,
@@ -168,22 +170,58 @@ staging counterpart because `staging.healthidentitydirectory.com` is the
 staging web host.
 
 Before proxying, the Worker deletes every inbound forwarding header
-(`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP` and `Forwarded`) and sets
-`X-Real-IP` to the address Cloudflare reported in `CF-Connecting-IP`, only when
-that is one valid IPv4 or IPv6 address (IPv6 in canonical form). The AWS
-gateway trusts that header only on connections from its VPC and, in staging
-and production, refuses API requests without it. Every deployed Worker that
+(`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP` and `Forwarded`) and a
+caller's `X-HID-Client-Network`, and sets `X-Real-IP` to the address
+Cloudflare reported in `CF-Connecting-IP`, only when that is one valid IPv4 or
+IPv6 address (IPv6 in canonical form). The AWS gateway trusts that header only
+on connections from its VPC and, in staging and production, refuses API
+requests without it. With it the Worker sets `X-HID-Client-Network`, the key
+of the AWS WAF's per-client rate limit (ADR-055, A7): the IPv4 address, or the
+canonical network address of the IPv6 /64 (`2001:db8:4:5::`), with an
+IPv4-mapped IPv6 address counted as IPv4, so a client cannot escape the limit
+by rotating addresses inside its /64. The gateway drops it before any
+backend. Every deployed Worker that
 proxies `/api/v1` (at launch `hid-web` and `hid-admin`) must be deployed with
 this behaviour before a gateway that requires it. A Worker built earlier
 deletes the caller's `X-Real-IP` and sets none, so the gateway refuses its API
 requests rather than trusting an address the caller chose.
 
 The Worker sets `Cross-Origin-Opener-Policy`, `Referrer-Policy`,
-`X-Content-Type-Options`, `X-Frame-Options: DENY` and a per-application
-`Permissions-Policy`. It sets no Content Security Policy for any frontend;
-Health-id loads only its own `/assets/` and the Turnstile script from
-`challenges.cloudflare.com`, so none is needed for it to work. An edge CSP is
-later hardening (ADR-052).
+`Strict-Transport-Security: max-age=31536000`, `X-Content-Type-Options`,
+`X-Frame-Options: DENY` and a per-application `Permissions-Policy` on every
+response (ADR-055). It replaces any Content Security Policy the origin or the
+asset binding sent:
+
+- `hid-web` and `hid-admin` (the Health-id build) get
+  `default-src 'none'; script-src 'self' https://challenges.cloudflare.com;
+  style-src 'self'; img-src 'self' data:; font-src 'self';
+  connect-src 'self' https://challenges.cloudflare.com;
+  frame-src https://challenges.cloudflare.com; worker-src 'none';
+  object-src 'none'; base-uri 'none'; form-action 'self';
+  frame-ancestors 'none'; upgrade-insecure-requests`. Health-id loads code
+  only from its own `/assets/` (the artefact verifier refuses inline script)
+  and Turnstile's `api.js`, which redirects within
+  `challenges.cloudflare.com`, renders its widget in a frame from it and posts
+  failure feedback to it with `sendBeacon` or `fetch`. A headless Chromium
+  run of the 82b474e build through this Worker, with Turnstile's real
+  `api.js`, recorded no violation on the www and admin sign-in, enrollment and
+  recovery pages (release checklist §8); staging confirms it with the real
+  widget. A Health-id build that adds a script, frame or connection origin
+  (Sentry, Google sign-in, analytics) needs this policy changed in the same
+  release. So does switching document uploads on (off at launch, D17):
+  Health-id 82b474e `PUT`s the file straight to the presigned S3 URL from the
+  upload intent (`packages/http/src/upload.ts:60`), so that release must add
+  the documents bucket's exact S3 origin to `connect-src` for `hid-web` and
+  `hid-admin` (ADR-055; `docs/PHASE_3_LAUNCH_DECISIONS.md` D5 and I7).
+  Downloads open the presigned URL in a new tab, which `connect-src` does not
+  govern.
+- Every `/api/v1` answer and every answer the Worker writes itself gets
+  `default-src 'none'; frame-ancestors 'none'`.
+- The undeployed legacy product hosts get no page policy; each needs its own
+  reviewed policy before it is deployed.
+
+`hid-web` grants no camera, microphone or location: Health-id uses none of
+them and uploads are off at launch.
 
 `ORIGIN_AUTH_TOKEN` is one secret binding in each named environment, but its
 staging and production values must be generated and stored independently. It

@@ -7,6 +7,7 @@ import {
   CreateVitalCorrectionDto,
   CreateVitalDto,
   hasMeasurements,
+  MarkVitalEnteredInErrorDto,
   TimelineQueryDto,
   VitalMeasurementsDto,
 } from '../shared/clinical.dto';
@@ -30,6 +31,8 @@ export interface VitalRow extends QueryResultRow {
   oxygenSaturationPercent: string | null;
   source: string;
   currentCorrectionNo: number;
+  /** final, or entered_in_error once retracted (ENC-RETRACT-2, 0090). */
+  status: 'final' | 'entered_in_error';
   rowVersion: string;
   createdAt: Date;
   updatedAt: Date;
@@ -56,7 +59,7 @@ const VITAL_COLUMNS = `
   temperature_c as "temperatureC", pulse_bpm as "pulseBpm", respiratory_rate as "respiratoryRate",
   systolic_mmhg as "systolicMmhg", diastolic_mmhg as "diastolicMmhg",
   oxygen_saturation_percent as "oxygenSaturationPercent", source,
-  current_correction_no as "currentCorrectionNo", row_version as "rowVersion",
+  current_correction_no as "currentCorrectionNo", status, row_version as "rowVersion",
   created_at as "createdAt", updated_at as "updatedAt"`;
 
 const CORRECTION_COLUMNS = `
@@ -173,6 +176,7 @@ export class VitalsService {
           if (Number(vital.rowVersion) !== input.expectedRowVersion) {
             throw new DomainProblem(412, 'VERSION_CONFLICT', 'Vitals changed since they were loaded');
           }
+          this.refuseEnteredInError(vital);
           const nextCorrection = vital.currentCorrectionNo + 1;
           const result = await client.query<VitalCorrectionRow>(
             `insert into ehr.vital_corrections (
@@ -202,6 +206,50 @@ export class VitalsService {
       ),
       (client) => this.repository.exists(client, 'vitals', vitalId, patientId, context.facilityId, encounterId),
     );
+  }
+
+  /**
+   * Marks a vital entered in error: recorded on the wrong patient, or a value
+   * that was never measured (ENC-RETRACT-2). Nothing is deleted: the vital
+   * keeps its values, takes a version carrying the reason, and is left out of
+   * the emergency summary; it then takes no correction or further change.
+   */
+  markEnteredInError(
+    context: DataAccessContext,
+    patientId: string,
+    encounterId: string,
+    vitalId: string,
+    input: MarkVitalEnteredInErrorDto,
+  ) {
+    return this.repository.run(
+      context, patientId, 'write_records',
+      { action: 'ehr.vital.entered-in-error', resourceType: 'vital', resourceId: vitalId },
+      async (client) => {
+        const vital = await this.lockVital(client, context, patientId, encounterId, vitalId);
+        this.refuseEnteredInError(vital);
+        if (Number(vital.rowVersion) !== input.expectedRowVersion) {
+          throw new DomainProblem(412, 'VERSION_CONFLICT', 'Vitals changed since they were loaded');
+        }
+        await this.repository.setChangeReason(client, input.changeReason);
+        const result = await client.query<VitalRow>(
+          `update ehr.vitals set status = 'entered_in_error'
+           where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4 and row_version = $5
+           returning ${VITAL_COLUMNS}`,
+          [vitalId, encounterId, patientId, context.facilityId, input.expectedRowVersion],
+        );
+        const row = result.rows[0];
+        if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Vitals changed since they were loaded');
+        return { value: row, resourceId: vitalId, details: { rowVersion: row.rowVersion } };
+      },
+      (client) => this.repository.exists(client, 'vitals', vitalId, patientId, context.facilityId, encounterId),
+    );
+  }
+
+  /** A vital entered in error takes no further change (0090; the database refuses it too). */
+  private refuseEnteredInError(vital: VitalRow): void {
+    if (vital.status === 'entered_in_error') {
+      throw new DomainProblem(409, 'VITAL_NOT_AMENDABLE', 'A vital entered in error cannot be changed');
+    }
   }
 
   private async findVital(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {

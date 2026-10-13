@@ -45,11 +45,12 @@ The executable covers:
    `patient_enrollment_runtime`, `patient_safety_runtime`,
    `delegated_cookie_read_runtime`, `outreach_cookie_read_runtime`,
    `provider_enrollment_runtime`, `platform_admin_runtime`,
-   `session_sign_out_runtime`, `platform_security_runtime`,
-   `registration_review_runtime` and `patient_search_runtime` (the patient
-   enrollment, patient safety, delegated cookie-read, Outreach cookie-read,
-   provider enrollment, platform admin, platform security, registration review
-   and patient search verifiers on a disposable copy of the rehearsal
+   `session_sign_out_runtime`, `facility_selection_runtime`,
+   `platform_security_runtime`, `registration_review_runtime` and
+   `patient_search_runtime` (the patient enrollment, patient safety, delegated
+   cookie-read, Outreach cookie-read, provider enrollment, platform admin,
+   session sign-out, facility selection, platform security, registration
+   review and patient search verifiers on a disposable copy of the rehearsal
    database). Each is in
    `services/identity-api/scripts/` and runs Identity as
    `hid_identity_api_runtime`, except `delegated_cookie_read_runtime`
@@ -100,11 +101,25 @@ The executable covers:
    retracts an encounter's notes, diagnoses and open orders when it is marked
    entered in error (versions and audit included), cancels open orders with
    the encounter, makes a retraction wait for a child create holding the
-   encounter, and lets activations race retractions without a deadlock. The
+   encounter, and lets activations race retractions without a deadlock. Since
+   0090 (BRANCH:launch/ehr-retraction-integrity) it also checks over HTTP that
+   a nurse cannot retract a doctor's diagnosis and prescription through the
+   encounter (`403 ENCOUNTER_RETRACTION_NOT_PERMITTED` with a fixed detail,
+   nothing changed, the refusal audited with the missing permissions) while
+   she can retract her own notes and vitals; that the retraction also covers
+   vitals and completed prescriptions and returns `cascade`; that a vital can
+   be entered in error on its own and then takes no correction, not even a
+   direct runtime-role correction racing its retraction (which waits for it
+   and is refused); that a closed prescription and a closed encounter take no
+   change; and that a staff session on `GET /ehr/me/records` is
+   `403 PATIENT_SESSION_REQUIRED` with one audit row. Its fixture gives the
+   copy's doctor role `ehr.lab-request.write`, which its fake Identity session
+   has always carried, because the 0090 database guard checks it when a
+   retraction changes a lab request. The
    Lab, Pharmacy, OCR and EHR-to-Lab verifiers give their actors the Lab and
    Pharmacy write permissions through their fake Identity, so 0084's
    withdrawal of those permissions from the seeded roles does not affect them.
-   With 0086 (`BRANCH:launch/identity-recovery-search`): `otp_runtime` also
+   With 0086 (D-Eminence/hid-system#69): `otp_runtime` also
    requires a completed recovery to revoke the account's Google link and keep
    its `legacy-identity` provenance record, a start
    from another account kind's page and a patient start with only an
@@ -122,16 +137,19 @@ The executable covers:
    unchanged against the narrowed `patients_registration_read` policy; and
    `patient_search_runtime` (`verify-patient-search-runtime.mjs`, new) requires
    a lookup with a grant to answer `200`, an unknown HID, a patient without a
-   grant and a grant at another facility to answer the same `404
+   grant, a grant at another facility and a patient the caller can read but
+   holds no grant for (a doctor's own patient record) to answer the same `404
    PATIENT_NOT_AVAILABLE` while the audit keeps `not_found` or
    `not_authorized`, a bad purpose `400`, an access request for an unknown HID
    to answer like a recorded one without `patientId` and persist nothing, and
-   the actor and facility budgets to answer `429`. The rehearsal also runs
+   the actor and facility budgets to count those refusals alike, and not a
+   granted lookup, and to answer `429` while blocked, each such request
+   audited as a failure. The rehearsal also runs
    the new rollback-only `patient-search.integration.sql` with the additional
    suites.
    `platform_admin_runtime` (`verify-platform-admin-runtime.mjs`) also
    provisions a clinician through the workforce routes of migration 0087
-   (launch decision D14, BRANCH:launch/staff-workforce-provisioning): a new
+   (launch decision D14, D-Eminence/hid-system#70): a new
    staff identity is attached to a verified facility as a pending membership,
    one Super Admin records the credential attestation, the same administrator
    is refused the grant (`WORKFORCE_SECOND_PERSON_REQUIRED`) and a second one
@@ -153,7 +171,7 @@ The executable covers:
    active, unheld membership the target holds is refused (and would break the
    N5 index); an exact re-promotion and memberships beside inactive, held or
    other facilities' ones are accepted; staged duplicates are refused.
-   With 0088 (`BRANCH:launch/staff-mfa`): every verifier that signs staff in
+   With 0088 (D-Eminence/hid-system#71): every verifier that signs staff in
    does it with password and authenticator (`staff-session-client.mjs`: the
    password step, the emailed enrolment code on a first sign-in, then a TOTP
    code, or a recovery code when a TOTP step would repeat), so each also
@@ -179,6 +197,47 @@ The executable covers:
    refuse a reader whose assurance is gone (`403 STAFF_MFA_REQUIRED`) and its
    refresh to end the sign-in. The rehearsal also runs the new rollback-only
    `staff-mfa.integration.sql` with the additional suites.
+   `facility_selection_runtime` (`verify-facility-selection-runtime.mjs`,
+   migration 0089, ADR-046) signs staff in with password and authenticator
+   (`staff-session-client.mjs`) and covers the password step storing and
+   reporting nothing, `default` on the enrolment activation and second-factor
+   responses, a staff member's selected facility kept for the sign-in across
+   a session read and refresh, the selection made unreadable for one step
+   (`SELECT` revoked from the Identity runtime and restored): the session read
+   `503` with no `Set-Cookie` and the refresh `200` with the rotated cookies
+   and `unavailable`, `reselect` once the selected membership ends, another
+   sign-in of the account unaffected, refused selections writing no selection
+   and only their failed `auth.facility.select` audit row (the global
+   `AuditInterceptor` registered as `AppModule` registers it), the 0089 guard
+   as the runtime, and a selection waiting at the account lock while a
+   sign-out ends the sign-in.
+   With 0091 (`BRANCH:launch/launch-permission-withdrawal`, ADR-058): the role
+   bootstrap's assertions require that no role holds a `lab.*`, `pharmacy.*`,
+   `ocr.*` or `outreach.*` permission, break-glass or document upload;
+   `patient_safety_runtime` also requires the patient's request list and
+   access history to name the requesting clinician and role, the history to
+   report `truncated: false`, a doctor's `GET /auth/session` to list none of
+   the withdrawn permissions, and a PIN use over HTTP to place one
+   `PATIENT_ACCESS_PIN_USED` inbox item (none for the replay); it grants
+   break-glass to the doctor role in its copy only for the activation;
+   `patient_runtime` expects the history's additive `truncated`;
+   `outreach_runtime` and `outreach_cookie_read_runtime` opt their disposable
+   copies into Outreach (the doctor role's Outreach permissions and the
+   portal control), as the module's re-enabling migration would (a
+   permission granted by hand on a staging database stops its next bootstrap,
+   ADR-058); the non-superuser database check requires the three launch
+   controls to read off after a `NOSUPERUSER NOBYPASSRLS` administrator
+   migrates, and runs the release checklist's read-only P10 and P11 checks,
+   taken from `PHASE_4_STAGE_5_RELEASE_READINESS.md`, as that administrator
+   (they read the controls through `platform.control_enabled`, because the
+   table's forced row-level security hides its rows from it); and the P8 owner check
+   counts `ehr.patient_self_context` among its nine security-definer
+   commands. The additional suites now include the patient-self binding cases
+   and the launch-control state. Once 0090
+   (`BRANCH:launch/ehr-retraction-integrity`) and 0091 are on one branch,
+   0090's `encounter-retraction.integration.sql` needs the merge change in the
+   release checklist §2 (the nurse role's `ehr.document.write` inside its
+   rollback-only transaction); without it the rehearsal fails on that suite.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -186,7 +245,11 @@ The executable covers:
    and apply `0029`–`0034`, verify preservation, fail-closed old OTP behavior,
    the new cutover controls, and minimal verification-evidence boundaries (and,
    since 0084, that no role holds a launch-withdrawn Lab, Pharmacy or EHR
-   lab-ordering write permission), then
+   lab-ordering write permission; since 0090, that the retraction,
+   closed-record, retracted-vital-correction and retracted-document triggers
+   and the vital status are installed and the upgraded
+   role bootstrap grants the EHR runtime the permission decision they use; and since 0091 no Lab, Pharmacy, OCR or
+   Outreach permission, break-glass or document upload), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

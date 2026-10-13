@@ -812,10 +812,15 @@ begin
 end
 $$;
 
--- The launch module set (0084, decision D17): Lab, Pharmacy and EHR lab
--- ordering are off, so no role holds their write permissions; the routes that
--- need them answer 403 before any write or call to Lab or Pharmacy. Their read
--- permissions stay. Re-enabling a module takes its own reviewed migration.
+-- The launch module set (0084 and 0091, decision D17, ADR-058): Lab, Pharmacy,
+-- OCR and Outreach are off, EHR lab ordering is off, break-glass is off (D9)
+-- and document uploads are off. No role holds a permission of a module that
+-- is off (lab.*, pharmacy.*, ocr.*, outreach.*), the EHR lab-ordering write,
+-- identity.break-glass.write or ehr.document.write, so the routes that need
+-- them answer 403 before any write and Health-id hides their navigation and
+-- actions. The EHR reads and writes of the launch set stay. Re-enabling a
+-- module takes its own reviewed migration that grants the permissions again
+-- and changes this assertion with it.
 do $$
 declare
   holders text;
@@ -823,22 +828,68 @@ begin
   select string_agg(format('%s holds %s', role_code, permission_code), ', ' order by role_code, permission_code)
     into holders
     from auth.role_permissions
-   where permission_code in ('ehr.lab-request.write', 'lab.work-item.accept', 'lab.accession.create',
-                             'pharmacy.work-item.accept', 'pharmacy.dispensing.create');
+   where permission_code ~ '^(lab|pharmacy|ocr|outreach)\.'
+      or permission_code in ('ehr.lab-request.write', 'identity.break-glass.write', 'ehr.document.write');
   if holders is not null then
-    raise exception 'a role holds a write permission withdrawn by the launch module set: %', holders;
+    raise exception 'a role holds a permission withdrawn by the launch module set: %', holders;
   end if;
   select string_agg(format('%s lacks %s', expected.role_code, expected.permission_code), ', ')
     into holders
     from (values ('doctor', 'ehr.lab-request.read'), ('clinician', 'ehr.lab-request.read'),
-                 ('lab', 'ehr.lab-request.read'), ('doctor', 'lab.work-item.read'), ('lab', 'lab.work-item.read'),
-                 ('lab', 'lab.accession.read'), ('pharmacist', 'pharmacy.work-item.read'),
-                 ('pharmacist', 'pharmacy.dispensing.read'), ('doctor', 'ehr.prescription.write'))
+                 ('lab', 'ehr.lab-request.read'), ('doctor', 'ehr.prescription.write'),
+                 ('clinician', 'ehr.prescription.write'),
+                 ('doctor', 'ehr.document.read'), ('clinician', 'ehr.document.read'),
+                 ('nurse', 'ehr.document.read'), ('lab', 'ehr.document.read'),
+                 ('doctor', 'ehr.encounter.read'), ('nurse', 'ehr.encounter.read'),
+                 ('doctor', 'identity.consent.write'), ('clinician', 'identity.consent.write'),
+                 ('nurse', 'identity.consent.write'),
+                 ('doctor', 'identity.patient-access-pin.verify'),
+                 ('clinician', 'identity.patient-access-pin.verify'),
+                 ('nurse', 'identity.patient-access-pin.verify'))
          expected(role_code, permission_code)
    where not exists (select 1 from auth.role_permissions held
                       where held.role_code = expected.role_code and held.permission_code = expected.permission_code);
   if holders is not null then
     raise exception 'the launch module set withdrew a permission it must keep: %', holders;
+  end if;
+end
+$$;
+
+-- 0091 objects. The patient-self RLS context is a security-definer check
+-- with a pinned search_path that only the EHR runtime (and the test role)
+-- may call (PSELF-RLS); the PIN-use inbox trigger function is internal; the
+-- patient's access-request list is reachable only through its session-bound
+-- wrapper (CONSENT-GRANTEE).
+do $$
+declare
+  checked record;
+begin
+  select prosecdef, proconfig into checked from pg_proc where oid = 'ehr.patient_self_context(uuid)'::regprocedure;
+  if not checked.prosecdef or checked.proconfig is distinct from array['search_path=pg_catalog, pg_temp'] then
+    raise exception 'ehr.patient_self_context must be SECURITY DEFINER with search_path pg_catalog, pg_temp';
+  end if;
+  if not has_function_privilege('hid_ehr_runtime', 'ehr.patient_self_context(uuid)', 'EXECUTE')
+     or has_function_privilege('public', 'ehr.patient_self_context(uuid)', 'EXECUTE')
+     or has_function_privilege('hid_identity_runtime', 'ehr.patient_self_context(uuid)', 'EXECUTE')
+     or has_function_privilege('hid_notification_worker', 'ehr.patient_self_context(uuid)', 'EXECUTE') then
+    raise exception 'ehr.patient_self_context must be executable by the EHR runtime only';
+  end if;
+  if to_regprocedure('notification.on_identity_pin_outbox_created()') is null
+     or not exists (select 1 from pg_trigger
+                     where tgrelid = 'identity.outbox_events'::regclass and tgname = 'pin_use_notification_inbox'
+                       and tgfoid = 'notification.on_identity_pin_outbox_created()'::regprocedure and tgenabled = 'O') then
+    raise exception 'the PIN-use inbox trigger is missing';
+  end if;
+  if has_function_privilege('public', 'notification.on_identity_pin_outbox_created()', 'EXECUTE')
+     or has_function_privilege('hid_identity_runtime', 'notification.on_identity_pin_outbox_created()', 'EXECUTE')
+     or has_function_privilege('hid_notification_worker', 'notification.on_identity_pin_outbox_created()', 'EXECUTE') then
+    raise exception 'the PIN-use inbox trigger function must not be callable by a runtime role';
+  end if;
+  if not has_function_privilege('hid_identity_runtime', 'identity.list_my_patient_access_requests(text,uuid)', 'EXECUTE')
+     or has_function_privilege('public', 'identity.list_my_patient_access_requests(text,uuid)', 'EXECUTE')
+     or has_function_privilege('hid_identity_runtime', 'identity.list_my_access_requests()', 'EXECUTE')
+     or has_function_privilege('public', 'identity.list_my_access_requests()', 'EXECUTE') then
+    raise exception 'the patient access-request list must be reachable only through its session-bound wrapper';
   end if;
 end
 $$;

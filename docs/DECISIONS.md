@@ -2475,6 +2475,156 @@ Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity
 boundary; Outreach registration boundary); release checklist §2, §3, §7, §8
 and §9.
 
+# ADR-046: A Staff Sign-In Keeps Its Selected Facility; X-Facility-ID Still Authorizes
+
+Status: Accepted for source implementation (D-Eminence/hid-system#47, ported
+as `BRANCH:launch/facility-selection-0089`, migration 0089). Not deployed.
+
+Date: 2026-10-12; amended 2026-10-13 for the port onto the launch stack
+(below).
+
+Context:
+
+A staff member who works at more than one facility chooses one with
+`POST /auth/facility`. Identity checked the membership, audited
+`auth.facility.select` and answered with the actor at that facility, but
+stored nothing. `GET /auth/session` and `POST /auth/refresh` resolve the
+actor afresh and bind the primary facility (else the first by name), so a
+page reload silently moved the user back to the primary facility, where the
+next clinical action would have been taken.
+
+Decision:
+
+- Identity keeps the choice per sign-in in `auth.session_facility_selection`
+  (0089), keyed by the session family as `auth.session_assurance` is (0069):
+  refresh rotates the session row but keeps the family, so the choice survives
+  rotation, and another sign-in of the same account has its own. A new choice
+  replaces the old one (`row_version` increments).
+- `POST /auth/facility` stores the choice after the existing membership check,
+  for the presented session while it is a live staff session of the account,
+  under the account row lock that sign-out and revocation take (0073), and
+  writes the existing `auth.facility.select` audit on the same transaction.
+  A refusal writes no selection row and no successful `auth.facility.select`
+  audit; the global `AuditInterceptor` records it as a failed
+  `auth.facility.select` session event with no facility
+  (D-Eminence/hid-system#42). A
+  presented session that another tab's refresh rotated after the request was
+  authorized is no longer live, so that selection is `401` and the client
+  refreshes and retries.
+- Staff responses carry `facilitySelection`: `selected` (the stored facility,
+  still one of the actor's active facilities, is reported), `default` (none
+  stored; every new sign-in), `reselect` (the stored facility is no longer
+  one of the actor's active facilities: the default is reported and the client
+  asks the user to choose again rather than working elsewhere silently), or,
+  on a refresh only, `unavailable` (below). A new staff sign-in is the session
+  issued after the second factor (`POST /auth/mfa/verify` or
+  `POST /auth/mfa/enroll/activate`, ADR-054); the password step issues no
+  session and reports nothing.
+  Patient and platform sessions, and `/auth/service-session`, are unchanged
+  and carry no field. Facilities are compared by id, so a membership replaced
+  by another active one at the same facility keeps the choice `selected`, with
+  the new membership's roles.
+- A stored choice that cannot be read is never reported as a choice:
+  `GET /auth/session` answers `503 DEPENDENCY_UNAVAILABLE` with the cookies
+  untouched. A refresh, whose rotation has already committed, answers `200`
+  with the rotated session's cookies and CSRF token, the actor as resolved
+  (the default facility) and `facilitySelection: 'unavailable'`, which the
+  client must not take as a choice; it asks where the user is working, and
+  the stored choice is reported again on the next read.
+- The stored choice is only the default the session reports. It authorizes
+  nothing: every facility-scoped request still carries `X-Facility-ID`, which
+  the guard checks against the actor's active memberships, and the stored
+  facility is re-checked against those memberships whenever it is read. A
+  valid `X-Facility-ID` on `GET /auth/session` itself still binds the
+  facility it names. `verify()` and the per-request guard are unchanged, so
+  protected routes make no extra query.
+- The 0089 guard admits a row only for the root session of a staff sign-in of
+  the same account that still has a live session, and an active membership of
+  that account at that facility. Its membership, migration-hold, staff,
+  organization and facility conditions mirror `CurrentStaffContextService`;
+  the account's status and `disabled_until` are not repeated, because
+  `TokenService.verify()` refuses an inactive or disabled account before the
+  API writes. The verified staff statuses are hard-coded in SQL, duplicating
+  `ACTIVE_STAFF_VERIFICATION_STATUSES` (`auth-policy.ts`) as
+  `identity.has_active_membership` already does; a comment at each place names
+  the others. It refuses moving a row to another sign-in or account, and
+  refuses DELETE. The Identity runtime gets select, insert and update; no
+  other service gets any privilege.
+
+Consequences:
+
+- A reload or refresh keeps the user at the facility they chose.
+- The choice belongs to the sign-in, not the tab: every tab holding the same
+  cookies reads the same choice, and the last choice made in any tab wins. A
+  client keeps the facility it is working at in memory across a refresh while
+  it is still in `actor.facilities`, because the refresh response reports the
+  sign-in's last choice, which may come from another tab.
+- Sign-out and revocation leave the row, as with `auth.session_assurance`; a
+  signed-out or revoked sign-in never reads it again (reads go through a live
+  session of the family) and can never change it (the guard requires a live
+  session). Rows are not deleted; they are one small row per staff sign-in
+  that made a choice, with no retention job yet.
+- `reselect` does not clear the stored choice. If the membership becomes
+  active again before the user chooses, the choice is reported as `selected`
+  again.
+- Deployment order: apply 0089 and the role bootstrap before this Identity API
+  serves traffic. Without the table, every staff `GET /auth/session` answers
+  `503`, every staff refresh answers `unavailable` and `POST /auth/facility`
+  fails, so a reload cannot keep a facility. The previous Identity API ignores
+  the table, so rolling the API back needs no schema change.
+- Numbering: written as 0080 in D-Eminence/hid-system#47; main has its own
+  0080 (Pharmacy source prescription guards), so it is ported as 0089, after
+  the launch migrations 0085-0088, and `release/config/components.json` lists
+  it last.
+- Creating the table's four foreign keys briefly takes `SHARE ROW EXCLUSIVE`
+  on `auth.sessions`, `auth.accounts`, `identity.facilities` and
+  `identity.staff_facility_memberships` (`MIGRATION_RUNBOOK.md`).
+- An actor without an Identity sign-in (`AUTH_MODE=oidc` bearer tokens, no
+  session id) has nowhere to keep a choice. Since staff MFA (0088) such a
+  token carries no MFA assurance and the guard refuses it before the
+  controller (`403 STAFF_MFA_REQUIRED`); the controller still answers one as
+  before, without storing or reporting anything, should it ever reach it.
+
+Port onto the launch stack (2026-10-13, `BRANCH:launch/facility-selection-0089`):
+
+D-Eminence/hid-system#47 was written on `main` before 0080-0088. Ported after
+staff MFA (0088), it keeps the decisions above with three changes, each
+because the stack changed what #47 assumed:
+
+- Number: main has its own 0080, so the migration is 0089, after 0088. Its
+  table, guard and grants are unchanged. The guard does not check MFA
+  assurance: the selection authorizes nothing, and Identity reaches it only
+  through a session `SecurityGuard` has already found MFA-verified.
+- Where `default` is reported: #47 reported it on `POST /auth/login`, which
+  since 0088 issues no session. It is reported on the two routes that issue
+  the staff session, `POST /auth/mfa/verify` and
+  `POST /auth/mfa/enroll/activate`. Provider activation issues no session
+  either since 0088 and continues with those routes.
+- Refresh when the choice cannot be read: #47 answered `503` with the rotated
+  cookies. The gateway before D-Eminence/hid-system#72 replaced every upstream
+  `502`, `503` and `504` with its own `503` and dropped `Set-Cookie`
+  (`proxy_intercept_errors`, launch item A8; ADR-055 turned that interception
+  off), so behind such an edge the browser would keep the spent refresh token
+  and its next refresh would be taken as token reuse, ending the whole sign-in and
+  recording a false reuse event. A refresh carrying cookies should not depend
+  on the edge passing a `5xx` through, so it answers `200` with `unavailable` (deny by default: the
+  default facility is reported but not as a choice, and the user is asked; the
+  cost is one extra question while the table cannot be read). The rest of
+  refresh, the cookie clearing on a refused or failed rotation included, is as
+  on the base; the clearing rule and the audit inside the rotation are a
+  separate change (A6).
+
+The facility comparison (by id), the per-family key, the account lock, the
+guard's conditions and the 503 on `GET /auth/session` are unchanged. 0087's
+one active membership per facility (ADR-049) makes the comparison by id
+unambiguous; `FACILITY_MEMBERSHIP_AMBIGUOUS` still refuses a staff actor
+that holds two.
+
+Related: ADR-038 (session assurance per family), ADR-044 (sign-out under the
+account lock), ADR-049 (one active membership per facility), ADR-054 (staff
+sign-in is password then TOTP); `INTERFACE_CONTRACT.md`, "Working facility per sign-in";
+`DATABASE.md`, "Session facility selection (0089)".
+
 # ADR-047: One Environment-Bound Workload Issuer for Staging and Production
 
 Status: Accepted (2026-10-13). The owner instructed that the technical
@@ -2691,7 +2841,8 @@ Risks accepted:
   also loses `WorkloadIssuerUrl` and `WorkloadJwksUrl`. So, as in staging, no
   scan callback can authenticate: no document becomes `available` and
   `clean`, every download is refused and OCR cannot claim a job (DEP-4-SCAN,
-  DOC-3, D5).
+  DOC-3, D5). (Later: ADR-055 closes the callback at the public gateway; the
+  scanner calls ehr-api on its private service name.)
 - Never run live: staging is not deployed, so no token has been minted against
   real IAM, KMS, WAF or API Gateway.
 - The issuer code is a CDK file asset, not a TUF-admitted image digest
@@ -2777,7 +2928,7 @@ Related ADRs: ADR-025, ADR-032, ADR-033, ADR-034, ADR-035, ADR-043, ADR-045.
 # ADR-048: Public Enrollment Checks Its Gate First, Bounds the HID Re-display and the Contact Proof, and Caps QoreID Lookups
 
 Status: Proposed for source implementation
-(BRANCH:launch/identity-enrollment-gates, migration 0085). Not merged or
+(D-Eminence/hid-system#68, migration 0085). Not merged or
 deployed. The number may need renumbering when the parallel launch branches
 merge.
 
@@ -2886,7 +3037,7 @@ and §9.
 # ADR-049: Clinicians Are Provisioned Only by Platform Governance; One Active Membership per Facility
 
 Status: Accepted for launch with the owner's default policy (launch decision
-D14, workforce part, and N5), in BRANCH:launch/staff-workforce-provisioning,
+D14, workforce part, and N5), in D-Eminence/hid-system#70,
 migration 0087. Not merged or deployed. The number may move when the launch
 branches merge.
 
@@ -3365,7 +3516,7 @@ Related ADRs: ADR-032, ADR-033, ADR-034, ADR-035, ADR-047.
 
 # ADR-054: Every Staff Session Is MFA-Verified; a First Enrolment Needs a Fresh Proof
 
-Status: Proposed for source implementation (`BRANCH:launch/staff-mfa`,
+Status: Proposed for source implementation (D-Eminence/hid-system#71,
 migration 0088). Not merged or deployed.
 
 Date: 2026-10-13
@@ -3484,7 +3635,520 @@ Related: ADR-038; ADR-040; ADR-044; `INTERFACE_CONTRACT.md` (Auth session
 contract); `PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §10; `DATABASE.md` (0088);
 release checklist §2, §3, §5, §8 and §9.
 
-# ADR-057: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
+# ADR-057: Closed Registration Says So, and a Public Read Tells Clients Before They Ask for a NIN
+
+Status: Proposed for source implementation
+(D-Eminence/hid-system#68, FE-4, no migration). Not merged or
+deployed. It builds on ADR-048 (the enrollment gate). The number may need
+renumbering when the parallel launch branches merge (ADR-054 to ADR-056 and
+ADR-058 are taken on other launch branches).
+
+Date: 2026-10-13
+
+Context:
+
+- Under N1 Identity refuses `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true` in
+  production, and infrastructure leaves QoreID off by default, so every
+  production enrollment start answers `503 QOREID_NIN_ONLY_DISABLED` or
+  `503 QOREID_DISABLED`. Facility-assisted registration is off at launch
+  (D17), so no new patient can get a Health ID; legacy-migrated patients
+  sign in.
+- Health-id 82b474e links to `/enroll` from sign-in and learns this only
+  after the patient types a NIN and spends a Turnstile token. It shows a
+  problem's `detail` as sent, but the authored "temporarily unavailable"
+  text never reached it: Identity's problem filter replaced every 5xx
+  detail with "The service could not complete the request.", and the
+  gateway (on main and on this branch) replaces every upstream 502/503/504
+  with `503 UPSTREAM_UNAVAILABLE` "A required platform service is
+  temporarily unavailable.", which is what the patient saw. Either text is
+  wrong for this case: the closure is a decision, not an outage.
+
+Decision (owner defaults: deny by default, least exposure, no production
+bypass):
+
+- `503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED` keep their status
+  and codes and carry "New Health ID registration is not open yet. If you
+  already have a Health ID, sign in." They are raised as
+  `PublicDetailProblem`, the only 5xx whose detail the filter keeps; every
+  other 5xx detail is still replaced.
+- `GET /api/v1/identity/patient-enrollments/availability` answers
+  `{ "open": boolean }` from the checks start makes before it reads a NIN
+  (enrollment keys, both flags, the runtime pause), through the same
+  provider method, so the two cannot disagree. A fault reading the runtime
+  state is a `503`, not `false`; a client treats anything but
+  `200 { "open": true }` as not open.
+- It is public and takes no input. Every caller that reaches it gets the
+  same answer and it carries no PHI, so it writes no audit row (as
+  `GET /commercial/pricing`): a row per anonymous read would let anyone
+  grow the audit log without bound and records nothing about a person.
+  For the same reason Identity keeps no per-network counter for it; the WAF
+  rate rule covers it as every API request. It may be cached for 30 seconds (`public, max-age=30`); the
+  Cloudflare Worker still makes every API response `no-store` at the edge,
+  which this change does not relax. Identity's CORS policy is unchanged and
+  applies first, as on every route: a request with no `Origin` or one in
+  `CORS_ORIGINS` is answered, and a foreign `Origin` is refused by the CORS
+  middleware (`500`, no CORS permission) before the route.
+- `PublicDetailProblem` is the one exception to Identity's 5xx detail
+  masking. It takes only a fixed sentence written for the person using the
+  client, never a message built from an error or from request data; any
+  new use needs its own decision.
+
+Consequences:
+
+- Enrollment stays closed in production; this changes what the patient is
+  told, not who may enroll. Opening it needs N1's holder step (ENR-4 step 2)
+  or an owner decision to the contrary.
+- Until Health-id reads availability, each production start attempt is a
+  target 5xx on the gateway's load balancer target group (the gateway
+  reaches Identity by its Cloud Map name), counted by the gateway's
+  `TargetErrorAlarm` (at least 5 in 5 minutes, two periods), which routes to
+  a person under ADR-053 (infra on main). Health-id should read availability
+  before it shows the NIN step and the "Get your Health ID" link.
+- On main the gateway replaces every upstream 502/503/504 with
+  `503 UPSTREAM_UNAVAILABLE`, so the new detail reaches a browser only once
+  ADR-055 (D-Eminence/hid-system#72) passes upstream errors through.
+  The availability read is a `200` and works either way.
+- Health-id follow-up (ENR-2): on completion, ask the patient to save the
+  Health ID, because the activation response expires the enrollment cookie
+  and `GET .../current` re-displays the HID for 15 minutes only.
+- Evidence is local and synthetic: unit specs and step 19 of
+  `verify-patient-enrollment-runtime.mjs` (release checklist §8); the gateway
+  route was checked against main's gateway model in a scratch copy.
+
+Related: ADR-048; ADR-053; ADR-055; `INTERFACE_CONTRACT.md` (section 6;
+section 8, "Public patient enrollment"); `QOREID_VERIFICATION_CONTRACT.md`;
+`PHASE_3_LAUNCH_DECISIONS.md` (N1); release checklist §2, §3 and §8.
+
+# ADR-055: Edge and Gateway Hardening for Launch: Scoped WAF Body Rule, Per-Client WAF Rate Limit, Upstream Errors Passed Through, Portal CSP and HSTS, Query-Free Access Log, Scanner Callback Closed
+
+Status: Accepted (owner policy defaults: deny by default, least privilege,
+auditable actions, no production bypasses); not deployed
+
+Date: 2026-10-13
+
+Change: D-Eminence/hid-system#72 (register WAF-CRS-BODY, the
+non-Identity part of A7, A8, D6, D7, SCAN-EDGE/EDGE-DOCS; IP-THRESHOLDS
+documented), including its review follow-up (error log, per-network WAF key,
+CI runtime check, upload CSP dependency). ADR-054 is taken by the unmerged
+launch/staff-mfa branch.
+
+Context:
+
+- **WAF-CRS-BODY.** The public API web ACL ran `AWSManagedRulesCommonRuleSet`
+  with its defaults. Its `SizeRestrictions_BODY` rule blocks every body over
+  8 KB, but ehr-api accepts clinical note content up to 100,000 characters
+  (512 KiB JSON) and Health-id's note editor allows 100,000. A clinician
+  saving a long note got a WAF `403` with a non-JSON body and the note was
+  not saved.
+- **A7 (WAF part).** The rate rule aggregated by the connecting address. Every
+  connection to the ALB comes from the Cloudflare Worker, so all users behind
+  one Cloudflare egress address shared 2,000 requests per 5 minutes: one
+  script through the Worker could block sign-in, EHR and OTP for everyone on
+  that address. The application path was fixed by #65 (`X-Real-IP`).
+- **A8.** With `proxy_intercept_errors on`, the gateway's `error_page 502 503
+  504` replaced every backend 502/503/504 with `503 UPSTREAM_UNAVAILABLE`,
+  dropping the code, `Set-Cookie`, `Retry-After` and `X-Correlation-ID`, so
+  Health-id could not tell maintenance, MFA, Turnstile, enrollment or
+  delivery outages apart.
+- **D6.** The portal hosts sent no Content-Security-Policy and no HSTS.
+- **D7.** The gateway inherited the image's `main` access-log format, which
+  logs `$request`: the whole request line, so administrator search terms
+  (names, emails, HIDs) in query strings reached CloudWatch for a year.
+- **SCAN-EDGE/EDGE-DOCS.** `POST /api/v1/ehr/documents/scan-events`, the
+  document scanner's workload-authenticated callback, was public through the
+  gateway while uploads and the scanner are off; each anonymous call cost an
+  EHR-to-Identity call and audit rows.
+
+Decision:
+
+1. **Scoped WAF body rule (WAF-CRS-BODY).** `SizeRestrictions_BODY` counts
+   (and labels) instead of blocking. A rule right after the group,
+   `AwsCommonRulesBodySize`, blocks a labelled request unless it is a `POST`
+   or `PATCH` whose raw path (no transformation) is an encounter-scoped
+   clinical write: `/api/v1/ehr/patients/<uuid>/encounters`, `/<uuid>`, and
+   its `clinical-notes` (with `/<uuid>/revisions`), `diagnoses`,
+   `prescriptions` and `lab-requests` (with `/<uuid>`), lowercase UUIDs only.
+   These carry 100,000-character notes or 4,000-character fields that exceed
+   8 KB in multi-byte text; vitals carry no free text and keep the limit.
+   Every other Core Rule Set rule keeps blocking. The bound for the exempt
+   routes is the gateway's `client_max_body_size 512k` with a Problem Details
+   `413 PAYLOAD_TOO_LARGE` (the ehr-api JSON limit; identity-api refuses more
+   than 256 KiB itself).
+2. **Per-client WAF rate limit (A7).** The Worker sends
+   `X-HID-Client-Network`, derived from `CF-Connecting-IP` and always
+   replacing a caller's value: the IPv4 address, or the canonical network
+   address of the IPv6 /64 (`2001:db8:4:5::`), with IPv4-mapped IPv6 counted
+   as IPv4, as Identity's own limits count a client network. `X-Real-IP` keeps
+   the full address. `ApiOriginRateLimit` aggregates on `X-HID-Client-Network`
+   (`FORWARDED_IP`, fallback `MATCH`): rule 0 has already refused anything
+   without the Worker's origin secret. Keyed on the full IPv6 address, one
+   client could rotate addresses inside its /64 and never reach the limit.
+   The limit stays 2,000 per 5 minutes, now per client network.
+   `ApiOriginEdgeRateLimit` (50,000 per 5 minutes per connecting address) is
+   the backstop for a leaked secret or a request without the header. The
+   gateway forwards neither the origin secret nor the client network to any
+   backend. Identity's MFA bucket (the other part of A7) is a separate
+   change.
+3. **Upstream answers pass through (A8).** `proxy_intercept_errors` is removed.
+   `error_page 502 503 504 = @upstream_unavailable` still answers bounded
+   `503 UPSTREAM_UNAVAILABLE` when nginx itself gets no answer (refused,
+   reset, timed out, unresolved, closed without a response).
+4. **Portal CSP and HSTS (D6).** Every frontend Worker response carries
+   `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains` or
+   preload until every subdomain is confirmed HTTPS-only). `hid-web` and
+   `hid-admin` (the Health-id build) send `default-src 'none'; script-src
+   'self' https://challenges.cloudflare.com; style-src 'self'; img-src 'self'
+   data:; font-src 'self'; connect-src 'self'
+   https://challenges.cloudflare.com; frame-src
+   https://challenges.cloudflare.com; worker-src 'none'; object-src 'none';
+   base-uri 'none'; form-action 'self'; frame-ancestors 'none';
+   upgrade-insecure-requests`, derived from the 82b474e build output and
+   Turnstile's `api.js`. API and edge answers send `default-src 'none';
+   frame-ancestors 'none'`. The policy is enforced, not report-only: the
+   build was run through the Worker in headless Chromium with no violation.
+   The undeployed legacy product hosts get no page policy until they have
+   their own. `hid-web` grants no camera or microphone.
+5. **Query-free logs (D7).** The gateway logs its own JSON format
+   (`hid_api`, `escape=json`) to the image's access-log path: time, client
+   address, method, path (`$uri`), status, bytes, request and upstream timing,
+   upstream status, `request_id` and `X-Correlation-ID`. It never records the
+   request line, arguments, referrer, cookies or credentials. The server's
+   error log takes only critical messages (`error_log
+   /var/log/nginx/error.log crit`): nginx appends the request line and the
+   upstream URL, query string included, to every error or warning about a
+   request (a refused, reset, timed-out or unresolved upstream, a body over
+   512 KiB, a body buffered to a temporary file, which every clinical write
+   over 16 KiB is), and the image's notice-level error log is the container's
+   stderr, in the same CloudWatch log group.
+6. **Scanner callback closed (SCAN-EDGE).** The gateway answers
+   `/api/v1/ehr/documents/scan-events` with `404 API_ROUTE_NOT_FOUND` in every
+   spelling, like the other service-to-service routes. The scanner (D5, I7)
+   calls ehr-api on its private service name when uploads ship.
+7. **IP-THRESHOLDS** stays a documented decision: the Identity per-network
+   limits (5 per 15 minutes) and the WAF per-client-network limit are
+   unchanged at launch. They are raised if the `ip`-scope 429 rate or the
+   `hid-<env>-origin-rate` metric shows NAT collisions: the Identity limits by
+   their configuration, the WAF limits only by a reviewed CDK change to
+   `API_ORIGIN_CLIENT_RATE_LIMIT` (and `API_ORIGIN_EDGE_RATE_LIMIT`), which are
+   code constants.
+8. **Gateway runtime check in CI.** `scripts/verify-gateway-runtime.mjs
+   --pinned-image` runs the shipped configuration under the nginx of the image
+   `gateway/Dockerfile` pins by digest; it is the `gateway-runtime` step of
+   `release/scripts/run-workspace-gates.mjs`, which the required workspace
+   job of `tuf-local-gates.yml` runs, so the pass-through, body bound, header
+   strips and both logs are checked against real nginx on every change, not
+   only against the nginx model.
+
+Consequences:
+
+- Clinicians can save notes up to the service limit through the edge; a body
+  over 512 KiB answers `413 PAYLOAD_TOO_LARGE` Problem Details. The other CRS
+  body rules inspect only the first 8 KB of a long note (an ALB limit).
+- One client network (an IPv4 address or an IPv6 /64) over the rate limit is
+  blocked alone; a busy facility or carrier NAT address counts as one client.
+  Traffic spread across many networks (a botnet, or a client holding many
+  IPv4 addresses or /64s) is limited per network only; if it passes 50,000
+  requests per 5 minutes through one Cloudflare egress address, the backstop
+  blocks every user behind that egress address for the rest of the window.
+  That is the shared throttle A7 removed, now only for traffic 25 times the
+  old limit.
+- Browsers now see a service's own 5xx code and any `502`. A refresh that
+  fails with a 5xx now reaches the browser with its cookie-clearing
+  `Set-Cookie`; before, a `503` dropped it, the browser kept a possibly spent
+  refresh token, and the next refresh could revoke the sign-in as reuse. A
+  refresh `500` already passed through. Keeping cookies on a 5xx is A6
+  (Identity), still open; this change adds no new sign-out path.
+- A Health-id release that loads a new script, frame or connection origin
+  (Sentry, Google sign-in, analytics) must change the policy in the same
+  release, or the browser blocks it.
+- Gateway logs can no longer answer "which query did this request carry";
+  audit rows remain the record of administrative reads. They no longer say
+  why nginx got no upstream answer (refused, timed out, unresolved): the
+  access log's status, `upstream_status` and `upstream_time` remain. A
+  critical nginx message about a request (it cannot write a temporary file,
+  or cannot open an upstream connection for a reason other than refusal or an
+  unreachable network, such as exhausted local ports) still carries the
+  request line; those mean a broken or overloaded task and are rare.
+- Document uploads (off at launch, D17) need a CSP change when they are
+  switched on: Health-id 82b474e `PUT`s the file straight to the presigned
+  S3 URL from the upload intent (`packages/http/src/upload.ts:60`, called from
+  `apps/patient-web/src/staff/api.ts:1089`), which `connect-src 'self'
+  https://challenges.cloudflare.com` blocks. The release that enables uploads
+  (D5, P11) adds the documents bucket's exact S3 origin to `connect-src` for
+  `hid-web` and `hid-admin` in the same reviewed change. Downloads open the
+  presigned URL with `window.open` (`Clinical.tsx:890`), which `connect-src`
+  does not govern.
+
+Migration Impact: none.
+
+Security Impact: deny by default. The body exemption is limited to the
+clinical write routes by method and raw path; the rate limit no longer lets
+one client network, IPv6 address rotation included, exhaust an egress
+address (traffic over the 50,000 backstop from many networks still can); a
+portal XSS has no script, frame or connection origin beyond the site and
+Turnstile; administrator search terms leave the access and error logs except
+in a critical nginx message about the request; the origin secret and the
+client-network key stay at the edge; one more service route is closed at the
+edge. Authentication, authorization, CSRF and Origin checks,
+RLS and audit are unchanged.
+
+Compatibility Impact: Health-id 82b474e needs no change: it loads only its
+own assets and Turnstile, calls only its own origin except the presigned
+document upload (uploads are off at launch; see Consequences), never calls
+`scan-events`, and already branches on specific codes and treats other 5xx
+generically. Operators keep Cloudflare Pseudo IPv4 off or in "add header"
+mode. Staging confirms the WAF behaviour (a 20,000-character note answers
+`201`; 2,100 requests from one client block only that client) and a browser
+sign-in with the real Turnstile widget and no CSP violation.
+
+Related ADRs: ADR-033, ADR-047, ADR-052, ADR-053.
+
+# ADR-056: Retracting an Encounter Needs the Records' Write Permissions; Closed Orders Are Final; Allergies Are Not Recorded at Launch
+
+Status: Accepted (owner policy defaults for register items ENC-RETRACT-1,
+ENC-RETRACT-2 and ALLERGY-1); not deployed
+
+Date: 2026-10-13
+
+Change: BRANCH:launch/ehr-retraction-integrity, migration 0090 (register ENC-RETRACT-1, ENC-RETRACT-2,
+RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT and ALLERGY-1).
+
+Context:
+
+- Since 0084, cancelling an encounter cancels its open orders and marking it
+  entered in error retracts its notes, diagnoses and orders. Both ran for
+  anyone holding `ehr.encounter.write`: per-record write permissions were
+  checked only on each record's own routes, and row-level security checks the
+  patient's consent, not the role. A nurse (no diagnosis or prescription
+  write) could retract a doctor's confirmed diagnosis and active prescription,
+  and a legacy receptionist (encounter write only) could retract notes they
+  cannot read. Retraction is irreversible and hides notes from the patient.
+- A vital had no status and a completed order no retraction, so a
+  wrong-patient encounter left its vitals and medication history as valid
+  chart data; a completed, cancelled or entered-in-error prescription still
+  accepted new instructions, frequency and end date, and the database let a
+  cancelled one become active again.
+- The EHR records no allergies, while `DATABASE.md` described an allergy table
+  as current.
+
+Decision:
+
+1. **Who may retract (ENC-RETRACT-1).** Cancelling or retracting an encounter
+   needs the write permission of every kind of record the close changes:
+   `ehr.note.write`, `ehr.diagnosis.write`, `ehr.vital.write`,
+   `ehr.prescription.write`, `ehr.lab-request.write`, `ehr.document.write`.
+   This is the least-privilege reading of the owner defaults: the cascade may
+   do only what the actor could do record by record. No new permission is
+   introduced. The EHR API refuses with `403 ENCOUNTER_RETRACTION_NOT_PERMITTED`
+   before writing anything and audits the refusal with the missing permission
+   codes. The response carries a fixed detail and does not name them: only a
+   kind of record the encounter holds is checked, so the names would tell a
+   caller (a receptionist reads none of these records) which kinds of record
+   the encounter holds. The database refuses the same close (`42501`) through
+   `auth.membership_has_permission`, which the EHR runtime may now execute.
+   An encounter holding none of these records may be cancelled or retracted
+   with `ehr.encounter.write` alone. The proposal of a new
+   `ehr.encounter.retract` permission (doctor and clinician only) was not
+   taken: it would let a doctor retract through the encounter what no route
+   lets them write, and it would need its own grant governance.
+2. **What a retraction covers (ENC-RETRACT-2).** Marking an encounter entered
+   in error also marks its final vitals, its completed prescriptions and lab
+   requests, and its linked documents entered in error, in the same
+   transaction. A vital can be entered in error on its own
+   (`POST .../vitals/:vitalId/entered-in-error`, `ehr.vital.write`, with a
+   version, a reason and an audit event), and a completed prescription or lab
+   request may move to `entered_in_error`. Nothing is deleted. A vital entered
+   in error takes no further change, not even a new correction row, and is
+   left out of the emergency summary; a document entered in error takes no
+   further change, so it is never available or served again; the patient
+   summary releases neither vitals nor orders. The database enforces both
+   (`ehr.require_final_vital`, which reads the vital `FOR SHARE` so a
+   correction cannot commit beside a retraction it did not see, and
+   `ehr.keep_retracted_document`).
+3. **Closed records are final (RX-FINAL, ORDER-CLOSED-EDIT).** A completed,
+   cancelled or entered-in-error prescription or lab request takes no change
+   except completed to `entered_in_error`; status changes follow the order
+   transitions; a cancelled or entered-in-error encounter takes no change.
+   The services answer `409`, and 0090's triggers refuse the same writes.
+4. **Refusals are audited (A9-EHR, A17-EHR-AUDIT).** A clinical command refused
+   inside its transaction is audited after the rollback with its status and
+   code, never clinical content; refusal rows carry the status and code
+   answered; a staff session on the patient's own records route is refused in
+   the guard and audited instead of answering `503`.
+5. **Allergies (ALLERGY-1).** Structured allergy capture is not in scope for
+   launch. No allergy table is added. A clinician records an allergy as a
+   diagnosis (ICD-10 `Z88.x`) or in a note; no prescription is checked against
+   it. `DATABASE.md` §7 lists only implemented tables, and a documentation test
+   keeps it so.
+
+Consequences:
+
+- Marking entered in error: a nurse or receptionist who opened an encounter
+  on the wrong patient asks a doctor or clinician to retract it once it holds
+  a diagnosis or an open or completed prescription; a nurse may still retract
+  one holding only notes, vitals and documents, and a receptionist only one
+  holding none of the records a retraction changes. Cancelling: anyone with
+  `ehr.encounter.write` may cancel an encounter whatever notes, vitals,
+  diagnoses and documents it holds, unless it holds an open prescription
+  (then doctors and clinicians only) or an open lab request. Records already
+  entered in error and cancelled orders block nothing. Health-id `82b474e`
+  still offers the actions to every `ehr.encounter.write` holder and shows
+  the refusal's detail, now a fixed sentence (frontend follow-up: offer them
+  by permission, and correct `ORDERS_NOT_CANCELLED`).
+- No role holds `ehr.lab-request.write` (0084), so an encounter that still
+  holds a lab request cannot be cancelled or retracted until Lab ordering is
+  enabled again by its own migration; none can be created at launch.
+- The rule follows record kinds, not authorship: a nurse may retract a
+  doctor's signed note through the encounter, as on the note route. Narrowing
+  that is a clinical owner decision.
+- Prescribers get no structured allergy check at launch.
+- One new runtime privilege: `EXECUTE` on `auth.membership_has_permission` for
+  `hid_ehr_runtime`; the role bootstrap must run right after 0090.
+
+Related ADRs: ADR-047, ADR-053.
+
+# ADR-058: Modules That Are Off Hold No Permissions; the Launch Database Starts in the Launch State; Patients See Who Gets Access and When Their PIN Is Used
+
+Status: Proposed for source implementation
+(`BRANCH:launch/launch-permission-withdrawal`, migration 0091). Not merged or
+deployed.
+
+Date: 2026-10-13
+
+Context:
+
+Decision D17 turns Lab, Pharmacy, OCR and Outreach off at launch, D9 keeps
+break-glass off, and document uploads are off (no scanner). The gateway
+refuses the off modules' routes, but 0084 withdrew only the Lab and Pharmacy
+writes: every clinical role kept the modules' reads, OCR and Outreach
+permissions, `identity.break-glass.write` and `ehr.document.write`, so
+Health-id offered workspaces, actions, emergency access and an upload card that
+fail (MOD-PERM-OCR-OUTREACH, FE-17, FE-15). The controls `uploads_enabled`,
+`outreach_portal_enabled` and `break_glass_enabled` were seeded on and turned
+off only by an operator (P11, UPLOADS-DEFAULT-ON). The patient-self
+row-level security trusted transaction settings without a relational check
+(PSELF-RLS). Patients approved and reviewed access seeing only a facility,
+though a grant goes to one clinician (CONSENT-GRANTEE), and were not told when
+a clinician used their access PIN, because the only consumer of that event,
+the notification worker, is off (NOTIF-PIN-NOTICE). Owner defaults: deny by
+default, least privilege, explicit and informed patient consent, auditable
+actions, no production bypass.
+
+Decision:
+
+- No role holds a permission of a module that is off: 0091 deletes every
+  `lab.*`, `pharmacy.*`, `ocr.*` and `outreach.*` permission,
+  `identity.break-glass.write` and `ehr.document.write` from every role,
+  `ocr_worker` included, reversing 0084's choice to keep reads. The EHR's
+  own permissions stay. The bootstrap role assertions require it.
+  Re-enabling a module, on staging too, is a reviewed migration that grants
+  its permissions again (with its decision and fixes) and changes the
+  assertions with it; break-glass also needs the `emergency` purpose and its
+  control (D9). There is no staging-only re-grant: the bootstrap runs the
+  assertions on every run and refuses a role holding a withdrawn permission,
+  so a permission granted by hand on staging stops every later staging
+  bootstrap; and a ledger migration applies in every environment, so the
+  re-enabling migration is a production decision too. Production then stays
+  closed for Lab, Pharmacy, OCR and Outreach by the gateway route switches
+  (`HID_ENABLED_API_ROUTES`, `identity,ehr` in production) and desired counts
+  of 0 (ADR-053), and for Outreach also by `outreach_portal_enabled`; uploads
+  and break-glass live in modules that are on, so there only their controls
+  (and, for break-glass, the absent `emergency` purpose) keep them closed. A
+  module's staging acceptance (release checklist S4b, S4c, S4g) therefore runs
+  after its re-enabling migration; until then the runtime verifiers exercise
+  it by granting the permissions inside their disposable copies.
+- Document uploads are off by the permission, not only by the control:
+  upload intent and completion answer `403` for every role, and completion
+  now also checks `uploads_enabled` (`409`), so an upload in flight when the
+  control is turned off does not complete.
+- The launch database starts with the three launch controls off: 0091 sets
+  each off only while it is exactly as 0039 seeded it, so an administrator's
+  own setting is never overwritten. Mechanism chosen over the alternatives:
+  a column default would not change the seeded rows; a control event needs an
+  acting account, which a migration does not have, and inventing a system
+  account would put a fabricated actor in the audit trail. As for 0041, the
+  row records the change (version, reason naming 0091, no updating account)
+  and the migration ledger records when it ran; an administrator turns a
+  control on again through the audited `POST /admin/controls`. Because the
+  table forces row-level security, the migration lifts forced security for
+  its own transaction; otherwise a non-superuser administrator (RDS) would
+  silently update nothing.
+- The patient-self context is bound in the database: `ehr.patient_self_context`
+  becomes a security-definer check that the named patient, account, subject
+  and live session match `identity.patient_self_session`, under the same
+  owner check (P8) as the other definer commands.
+- Consent names the grantee: the patient's request list and access history
+  carry the requesting clinician's display name and membership role (staff
+  identities, not PHI); the history reports `truncated`. The staff list,
+  which withholds the patient id until a grant is active, is unchanged.
+- The patient is told in the app when their PIN is used: an inbox item per
+  new PIN grant, written in the PIN transaction, without the notification
+  worker. SMS and email notices wait for an approved notification channel.
+- Pending access requests do not yet lapse (ACCESS-REQ-STALE): deferred.
+  A lapse needs request creation (0086), which reuses a pending request, the
+  approval command and both lists to change together, beyond this change's
+  scope. Risk until then: a patient can approve an old request and grant the
+  clinician current access. Mitigations: the request now names the clinician,
+  approval needs a recent sign-in (0086), a membership that ends expires its
+  pending requests (0087), and the patient can revoke the grant.
+
+Alternatives not taken:
+
+- Health-id build flags hiding modules (FE-17 option B): a frontend-only
+  switch leaves the permissions usable by any other client and needs a
+  Health-id change; the permission withdrawal works with Health-id 82b474e as
+  it is. A capability signal for break-glass (FE-15 option B) remains a later
+  frontend option.
+- Keeping `ocr.job.process` on `ocr_worker`: nothing checks it, and keeping it
+  would make the launch assertion carry an exception for a workload that is
+  off.
+- Only the operator step P11 for the controls: the launch would depend on a
+  manual action by a platform administrator holding an MFA session; P11 now
+  checks the state instead. The check reads the controls through
+  `platform.control_enabled`, as every guard does, because the table's forced
+  row-level security hides its rows from the migration administrator on RDS.
+- An environment-scoped exception in the bootstrap's role assertion (staging
+  may hold a withdrawn permission): a switch that lets a database hold the
+  permissions of an off module is a production bypass carried by
+  configuration, against the owner default.
+
+Consequences:
+
+- Doctors, clinicians and nurses no longer see Laboratory, Pharmacy, Document
+  OCR, Outreach, released Lab results, Extract with OCR or the upload card,
+  and the Emergency method is disabled with a permission explanation
+  (Health-id 82b474e, unchanged). Lab and Pharmacy data are unreadable through
+  Health-id until re-granted; a launch database holds none.
+- Staff session permission lists shrink at once: Identity resolves a staff
+  session's roles and permissions from the database on every request, so a
+  session issued before 0091 loses them on its next request.
+- The patient's access-request list is unavailable (`403`) between 0091 and
+  the role bootstrap that follows it. An Identity build of this change needs
+  0091's request-list columns: it must not start before 0091 and the
+  bootstrap, and a restore of a pre-0091 backup takes Identity back to the
+  previous build (otherwise the list answers `500`).
+- With 0090 (ADR-056, `BRANCH:launch/ehr-retraction-integrity`), whose
+  retraction guard requires `ehr.document.write` to mark an encounter entered
+  in error while it holds an initiated or uploaded document, no role can do
+  that until uploads are re-enabled (`403 ENCOUNTER_RETRACTION_NOT_PERMITTED`);
+  cancelling such an encounter is unaffected. A database on which no upload
+  was ever started, as the launch production database is expected to be,
+  holds no such document; a staging database might. 0090's
+  `encounter-retraction.integration.sql` grants the nurse role
+  `ehr.document.write` in its rollback-only transaction once both changes are
+  on one branch (release checklist §2).
+- Staff display names become visible to patients for requests and grants
+  about them.
+- Evidence is local and synthetic: SQL suites, unit specs and the runtime
+  verifiers on a PostgreSQL 16 cluster built from empty to 0091 (release
+  checklist §8). Nothing has been run on staging or production.
+
+Related: ADR-041 (P8 owners); ADR-045 (Outreach campaign governance);
+`PHASE_3_LAUNCH_DECISIONS.md` (D9, D17); `INTERFACE_CONTRACT.md` (launch
+module set, patient self-service, document upload completion);
+`DATABASE.md` (0091); release checklist §1, §2, §3, P10, P11, §5, §8, §9.
+
+# ADR-059: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
 
 Status: Proposed for source implementation
 (`BRANCH:launch/identity-error-hardening`, no migration). Not merged or

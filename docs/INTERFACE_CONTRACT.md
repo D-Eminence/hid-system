@@ -22,9 +22,11 @@ Identity (`/api/v1/auth`, `/identity`, `/audit`, `/admin`, `/commercial`) and
 EHR (`/api/v1/ehr`). Lab, Pharmacy, OCR and Outreach prefixes answer
 `404 API_ROUTE_NOT_FOUND`, as do the service-to-service routes
 (`/api/v1/auth/service-session`, `/api/v1/identity/service/*`,
-`/api/v1/identity/outreach/*`, `/api/v1/ehr/internal/*`, and the Lab and
-Pharmacy `accept-ehr-*` and `imports/from-ocr` routes) in any letter case or
-spelling nginx normalizes. Public IP-keyed limits (recovery start, patient
+`/api/v1/identity/outreach/*`, `/api/v1/ehr/internal/*`, the document
+scanner's callback `POST /api/v1/ehr/documents/scan-events` (ADR-055; the
+scanner calls ehr-api on its private service name when uploads ship), and the
+Lab and Pharmacy `accept-ehr-*` and `imports/from-ocr` routes) in any letter
+case or spelling nginx normalizes. Public IP-keyed limits (recovery start, patient
 enrollment start and contact, provider enrollment, organization application
 intake and profile completion) count per client network: an IPv4 address or an
 IPv6 /64. Without a usable client address, or, in production, with an address
@@ -32,10 +34,52 @@ of one of the platform's own proxies, they answer their 503
 (`OTP_RATE_LIMIT_UNAVAILABLE` for recovery start,
 `ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
 `PROVIDER_ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
-`APPLICATION_RATE_LIMIT_UNAVAILABLE`) instead of sharing one bucket. The
-gateway passes a backend `503` to the browser as `503 UPSTREAM_UNAVAILABLE`
-(its `error_page` intercepts backend 502, 503 and 504), so clients must treat
-any 503 as unavailable rather than rely on the backend code.
+`APPLICATION_RATE_LIMIT_UNAVAILABLE`) instead of sharing one bucket.
+
+The gateway passes every backend answer through unchanged, 5xx included
+(ADR-055, A8): the status, the Problem Details body with its `code`,
+`Set-Cookie`, `Retry-After` and `X-Correlation-ID`. Clients see the service's
+own code (for example `503 PLATFORM_MAINTENANCE`, `503 MFA_UNAVAILABLE`,
+`503 TURNSTILE_UNAVAILABLE`, `503 OTP_DELIVERY_UNAVAILABLE`,
+`503 QOREID_DISABLED`) and any `502`. Only when the gateway gets no answer at
+all (the service refuses or resets the connection, times out, has no running
+task or closes without responding) does it answer
+`503 UPSTREAM_UNAVAILABLE` with `Cache-Control: no-store`; the Worker answers
+`502 API_ORIGIN_UNAVAILABLE` when it cannot reach the AWS origin. Clients
+should branch on the codes they know and treat any other 5xx as unavailable.
+A `POST /api/v1/auth/refresh` that fails with a 5xx clears the session cookies
+(table below); before this change the gateway dropped that `Set-Cookie` on a
+`503`, so the browser kept a refresh token that rotation may already have
+spent. Keeping the cookies on a 5xx is register item A6 (Identity, open).
+
+The gateway refuses a request body over 512 KiB with
+`413 PAYLOAD_TOO_LARGE` Problem Details before any service sees it (the
+largest JSON body a launch service accepts; Identity refuses more than
+256 KiB with the same code). The public API WAF limits each client network
+(an IPv4 address, or an IPv6 /64, which the Worker sends as
+`X-HID-Client-Network` and the gateway does not pass on; a caller's own value
+is replaced) to 2,000 requests per 5 minutes and answers a request over the
+limit with `403` and the WAF's own non-JSON body; clients should treat it as
+rate limiting. Devices sharing one IPv6 /64 share that limit. The WAF's 8 KB request-body rule does not
+apply to `POST` and `PATCH` on the encounter-scoped clinical writes
+(`/api/v1/ehr/patients/:patientId/encounters`, `/:encounterId`, and its
+`clinical-notes` with `/:noteId/revisions`, `diagnoses`, `prescriptions` and
+`lab-requests`), so a note up to the 100,000-character limit is accepted;
+any other request with a body over 8 KB is refused by the WAF with `403`
+(ADR-055, WAF-CRS-BODY).
+
+The Health-id hosts (www, the staging web host and admin.*) answer with
+`Strict-Transport-Security: max-age=31536000` and a Content-Security-Policy
+that allows script only from the page's own origin and
+`https://challenges.cloudflare.com` (Turnstile), frames and connections only to
+that origin besides its own, styles, fonts and images (plus `data:` images)
+only from its own origin, and no inline script, `eval`, plugins, workers or
+framing by another site. Every `/api/v1` and edge answer carries
+`Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and the
+same HSTS (ADR-055, D6). The page policy allows no storage origin: document
+uploads (off at launch) send the file straight to the presigned S3 URL, so the
+release that switches them on adds the documents bucket's origin to
+`connect-src`.
 
 Authentication OTP commands are purpose-bound and use three stages: start
 returns a generic challenge, verify accepts exactly six digits and returns an
@@ -75,9 +119,12 @@ rules below come from D-Eminence/hid-system#39, which is not yet deployed. Platf
 enrollment cookie rule and the lookups' actor condition come from
 D-Eminence/hid-system#50, also not deployed. Staff sign-in with an
 authenticator, the `STAFF_MFA_REQUIRED` refusals and the refusal of a staff
-Google exchange (below) come from `BRANCH:launch/staff-mfa` (launch blocker
-MFA-1, migration 0088), also not deployed. The refusal and fault answers of
-ADR-057 ("Refusals and faults", below) and the refresh fault row come from
+Google exchange (below) come from D-Eminence/hid-system#71 (launch blocker
+MFA-1, migration 0088), also not deployed. `facilitySelection` on staff session
+responses ("Working facility per sign-in", below) comes from
+`BRANCH:launch/facility-selection-0089` (ADR-046, migration 0089), also not
+deployed. The refusal and fault answers of
+ADR-059 ("Refusals and faults", below) and the refresh fault row come from
 `BRANCH:launch/identity-error-hardening` (no migration), also not deployed.
 
 Identity sets three cookies at sign-in and on every refresh (`setCookies` in
@@ -102,7 +149,7 @@ refresh) or clears them also expires the public patient enrollment cookie
 `hid_enrollment` on its
 path, `/api/v1/identity/patient-enrollments` (HttpOnly, `SameSite=Strict`,
 `Secure` as above). So does every successful public enrollment activation
-response (`200`, a replay's included; BRANCH:launch/identity-enrollment-gates,
+response (`200`, a replay's included; D-Eminence/hid-system#68,
 not deployed). If that response is lost, the cookie lets
 `GET /identity/patient-enrollments/current` and an activation replay show the
 enrollment's HID on the enrolling device for 15 minutes after activation;
@@ -132,10 +179,10 @@ is no permission or role allowlist: every staff sign-in needs it.
 | Route | Body | Answer |
 |---|---|---|
 | `POST /api/v1/auth/login` | `{ email, password, turnstileAction: 'staff-login', turnstileToken? }` | `200 { status: 'mfa_required' \| 'mfa_enrollment_required', expiresAt }` with only the challenge cookie `hid_access_mfa` (HttpOnly, `SameSite=Strict`, `Secure` as above, path `/api/v1/auth/mfa`, 5 minutes for `mfa_required`, 10 minutes for enrolment) and `Cache-Control: no-store`. No session cookie, no `X-CSRF-Token`, no actor. A wrong password, and an account with neither a staff record nor a facility membership, get the same `401` ("Invalid credentials") and count against the sign-in budget below. The right password of an active account that has a staff record or a membership, none of them eligible, gets `403 NO_ACTIVE_FACILITY_MEMBERSHIP` (below) |
-| `POST /api/v1/auth/mfa/verify` | `{ code }` or `{ recoveryCode }` | `200 { actor, expiresAt }` with the three session cookies, `X-CSRF-Token`, and the challenge cookie cleared |
+| `POST /api/v1/auth/mfa/verify` | `{ code }` or `{ recoveryCode }` | `200 { actor, expiresAt, facilitySelection: 'default' }` with the three session cookies, `X-CSRF-Token`, and the challenge cookie cleared (`facilitySelection`: "Working facility per sign-in", below) |
 | `POST /api/v1/auth/mfa/enroll/email-code` | none | First sign-in without an authenticator: sends a six-digit code to the account's email address. `200 { accepted: true, channel: 'email', expiresAt }`. A resend replaces the code |
 | `POST /api/v1/auth/mfa/enroll/start` | `{ emailCode? }` | `200 { secret, otpauthUri, algorithm, digits, periodSeconds, expiresAt }`, once (`Cache-Control: no-store`). Needs the emailed code, or a challenge opened by provider enrollment activation (no code) |
-| `POST /api/v1/auth/mfa/enroll/activate` | `{ code }` (the first TOTP code) | `200 { actor, expiresAt, recoveryCodes }` (ten codes, shown once) with the session cookies and `X-CSRF-Token`, and the challenge cookie cleared |
+| `POST /api/v1/auth/mfa/enroll/activate` | `{ code }` (the first TOTP code) | `200 { actor, expiresAt, facilitySelection: 'default', recoveryCodes }` (ten codes, shown once) with the session cookies and `X-CSRF-Token`, and the challenge cookie cleared |
 
 Every step requires an allowed `Origin` (`403 ORIGIN_DENIED`) and the
 challenge cookie (`401 MFA_CHALLENGE_INVALID` without it, or when it is
@@ -146,7 +193,7 @@ platform challenge by no staff step. Refusals:
 | Code | When |
 |---|---|
 | `403 STAFF_MFA_FACTOR_UNPROVEN` | `POST /auth/login` with the right password, but the account's authenticator was enrolled at platform sign-in on the password alone (before 0088, or before the account held a staff membership), so it records no staff proof. No challenge or cookie is issued; a denied `login_failed` session event (reason `staff_mfa_factor_unproven`) is recorded. The remedy is a two-person MFA reset (0070), after which the account enrols at staff sign-in; the new factor then verifies platform sign-in too. The same answer at `/auth/mfa/verify` if such a factor is met there |
-| `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | `POST /auth/login` with the right password of an active, enabled account that has a staff record or a facility membership but no membership eligible for staff sign-in: every one ended, suspended or held, the staff record not active or its verification not accepted, or the organization or facility not active (`eligibleStaffMembershipJoins`). Launch decision NO-MEMBERSHIP-SIGN-IN, owner default (a), ADR-057. No challenge or cookie and no session. A denied `login_failed` session event (reason `no_active_membership`) is recorded. It does not count toward the sign-in budget and does not reset it. The detail asks the user to contact their organization administrator. Checked before the factor, so it answers the same with or without an authenticator. An account with neither (a patient or a platform-only account) keeps the uniform `401` |
+| `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | `POST /auth/login` with the right password of an active, enabled account that has a staff record or a facility membership but no membership eligible for staff sign-in: every one ended, suspended or held, the staff record not active or its verification not accepted, or the organization or facility not active (`eligibleStaffMembershipJoins`). Launch decision NO-MEMBERSHIP-SIGN-IN, owner default (a), ADR-059. No challenge or cookie and no session. A denied `login_failed` session event (reason `no_active_membership`) is recorded. It does not count toward the sign-in budget and does not reset it. The detail asks the user to contact their organization administrator. Checked before the factor, so it answers the same with or without an authenticator. An account with neither (a patient or a platform-only account) keeps the uniform `401` |
 | `401 MFA_INVALID_CODE` | A wrong, reused (the same 30-second step twice) or already used code; a wrong email code. Each counts against the challenge (five attempts), the account's MFA failure budget and the source address's staff budget |
 | `429 MFA_RATE_LIMITED` | A failure budget is spent, and while it is every code is refused, a correct one too, until its 15-minute window passes: the account's (the fifth failed code within 15 minutes, staff and platform together), or the source address's staff budget (the 100th failed staff code from one address within 15 minutes; it is the staff sign-in's own, apart from platform sign-in's per-address budget of 20, and sized for a facility whose staff share one address). Also more than five enrolment-code sends or enrolment starts in 15 minutes |
 | `403 MFA_ENROLLMENT_PROOF_REQUIRED` | Enrolment start or activation without a verified proof (no email code, and the challenge was not opened by provider activation). No factor is created |
@@ -238,8 +285,8 @@ this order:
 | `403 SESSION_CLIENT_MISMATCH` | `X-HID-Client` names the other kind of sign-in (below). Nothing is rotated | Kept |
 | `403 STAFF_MFA_REQUIRED` | A staff sign-in without live MFA assurance (MFA-1, 0088): one from before staff MFA, or whose authenticator was reset. Nothing is rotated; the whole sign-in is ended (revocation reason `staff_mfa_required`, a denied `refresh` session event) | Cleared |
 | `401 AUTHENTICATION_REQUIRED` | Rotation refuses the token: unknown, ended, expired, reused (reuse ends the whole sign-in), a platform token, or an account that is no longer active, is disabled or has a new token version | Cleared |
-| `5xx` | A fault while rotating (ADR-057): `503 DEPENDENCY_UNAVAILABLE` when the `auth.refresh` audit row cannot be written, `500` for another database fault. The audit row is written in the rotation's own transaction, so the rotation commits with it or not at all: nothing is rotated and the presented refresh token stays live. Before, such a fault cleared the cookies and signed the user out, and a rotation could commit without its audit row. The client may retry | Untouched |
-| `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header | The refresh token is rotated into a new session of the same sign-in | Replaced |
+| `5xx` | A fault while rotating (ADR-059): `503 DEPENDENCY_UNAVAILABLE` when the `auth.refresh` audit row cannot be written, `500` for another database fault. The audit row is written in the rotation's own transaction, so the rotation commits with it or not at all: nothing is rotated and the presented refresh token stays live. Before, such a fault cleared the cookies and signed the user out, and a rotation could commit without its audit row. The client may retry | Untouched |
+| `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header, plus `facilitySelection` for a staff sign-in (below) | The refresh token is rotated into a new session of the same sign-in. If a staff sign-in's facility selection cannot be read after the rotation, it is still `200`, with `facilitySelection: 'unavailable'` (below) | Replaced |
 
 The cookies are cleared only for a `4xx` refusal of the refresh token itself
 (`refreshRefused` in `services/identity-api/src/auth/refresh-refusal.ts`).
@@ -367,7 +414,7 @@ and sign-out (since `22e8664`). Earlier Health-id builds and
 a cookie sign-out without a live access cookie ends whichever staff or patient
 sign-in the refresh cookie holds.
 
-#### Refusals and faults (ADR-057)
+#### Refusals and faults (ADR-059)
 
 From `BRANCH:launch/identity-error-hardening` (no migration, not deployed)
 Identity tells a refused credential from a fault, so that a client signs a
@@ -435,6 +482,107 @@ when it is next issued). The workforce profile still lists a lapsed role, with
 membership's stored labels as `role` and `appRole`: the role it was activated
 with, which later grants and revokes do not change.
 
+#### Working facility per sign-in
+
+Not yet deployed (ADR-046, migration 0089, `BRANCH:launch/facility-selection-0089`,
+ported from D-Eminence/hid-system#47). A staff member who works at more
+than one facility chooses one with `POST /api/v1/auth/facility`
+`{ "facilityId": "<uuid>" }`. Identity keeps the choice for the sign-in in
+`auth.session_facility_selection`, keyed by the session family: refresh
+rotates the session but keeps the family, so it keeps the choice, and another
+sign-in of the same account has its own. A reload therefore reports the chosen
+facility instead of moving the user back to the primary one. A staff sign-in
+is the session issued after its second factor (MFA-1, 0088): the password step
+issues no session, so it has no choice to keep and reports none.
+
+Staff session responses carry `facilitySelection`:
+
+| `facilitySelection` | When | `actor.facility` |
+|---|---|---|
+| `selected` | The sign-in chose a facility that is still one of the actor's active facilities. Facilities are compared by id: if the membership at that facility was replaced by another active one, the choice is still `selected`, with the new membership's roles | The chosen facility, with that membership's `roles`, `role` and `permissions`: the actor `POST /auth/facility` returns. On `GET /auth/session` with a valid `X-Facility-ID`, the facility that header binds instead (below) |
+| `default` | The sign-in has not chosen one; every new sign-in | The default, as before: the primary facility, else the first by name, or the facility a valid `X-Facility-ID` binds on `GET /auth/session` |
+| `reselect` | The chosen facility is no longer one of the actor's active facilities: the membership ended, or the staff record, facility or organization is no longer active | As for `default`. The client asks the user to choose again instead of working elsewhere silently |
+| `unavailable` | `POST /auth/refresh` only: the rotation committed, but the stored choice could not be read | As for `default`, and not a choice: the client asks where the user is working (Health-id treats a value it does not name as unconfirmed and asks). The stored choice is kept and reported on the next read |
+
+`facilitySelection` always describes the sign-in's stored choice. A valid
+`X-Facility-ID` on `GET /auth/session` still binds the facility it names, as
+before, so `actor.facility` is then that bound facility while
+`facilitySelection` describes the stored choice, which may differ.
+
+| Route | `facilitySelection` |
+|---|---|
+| `POST /auth/mfa/verify`, `POST /auth/mfa/enroll/activate` (the staff session) | `default` |
+| `POST /auth/login` (the staff password step, no session) | Absent; nothing is read or stored |
+| `GET /auth/session`, `POST /auth/refresh` | Read for the sign-in, as above |
+| `POST /auth/facility` | `selected` |
+| Patient and platform sessions (`POST /auth/patient/login`, `POST /auth/oidc/exchange`), `GET` and `POST /auth/service-session` | Absent; nothing is read |
+
+If the stored choice cannot be read, Identity never reports a facility as
+chosen when the user did not choose it. `GET /auth/session` answers
+`503 DEPENDENCY_UNAVAILABLE` and leaves the cookies untouched. A refresh has
+already rotated the session by then: it answers `200` with the rotated
+session's cookies and `X-CSRF-Token`, as a successful refresh does, the actor
+as resolved (its default facility) and `facilitySelection: 'unavailable'`,
+and records the `auth.refresh` audit event. It does not answer a `5xx`
+carrying the rotated cookies: an edge that replaces an upstream `5xx` drops its
+`Set-Cookie` (the gateway did before D-Eminence/hid-system#72, `proxy_intercept_errors`), so the
+browser would keep the spent refresh token and its next refresh would end the
+whole sign-in as reuse.
+
+`POST /auth/facility` (cookie mutations need Origin and CSRF as any other):
+
+| Outcome | When |
+|---|---|
+| `400 VALIDATION_FAILED` | `facilityId` is missing or not a UUID, or another field is sent |
+| `403 PATIENT_SCOPE_DENIED` | A patient session |
+| `403 STAFF_MFA_REQUIRED` | A staff session without live MFA assurance (MFA-1, 0088), including any `AUTH_MODE=oidc` bearer token: refused before anything is read or stored |
+| `403 FACILITY_ACCESS_DENIED` | The facility is not one of the actor's active facilities when the request is authorized, or its membership is no longer active when the choice is written: the database guard checks the membership, migration hold, staff record, organization and facility again, as `CurrentStaffContextService` does (the account's status was checked when the request was authorized) |
+| `401 AUTHENTICATION_REQUIRED` | The presented session is no longer live when the choice is written: the sign-in was signed out or revoked, or another tab's refresh rotated the presented session after it was authorized. The client refreshes and, if the sign-in is still live, selects again |
+| `503` | The audit could not be written; nothing is stored |
+| `200` `{ actor, facilitySelection: "selected" }` | Stored for the sign-in, replacing any earlier choice, and audited as `auth.facility.select` in the same transaction |
+
+A refusal writes no selection row and no successful `auth.facility.select`
+audit. The global `AuditInterceptor` records it once as a failed
+`auth.facility.select` event on `session`, with no facility, membership or
+organization unless the guard bound one from `X-Facility-ID`, as for the other
+session routes (D-Eminence/hid-system#42). The write takes the account lock
+first, as sign-out and revocation do, and is made only while the presented
+session is a live staff session of the account.
+
+The choice is only the facility the session reports by default; it authorizes
+nothing. Every facility-scoped request still carries `X-Facility-ID`, which
+Identity checks against the actor's active memberships on each request, and
+services authorize a delegated request by it (`/auth/service-session` ignores
+the choice). The stored facility is checked against the actor's active
+facilities each time it is read.
+
+The choice belongs to the sign-in, not to a tab: every tab holding the
+sign-in's cookies reads the same choice, and the last choice made in any tab
+wins. A client should therefore keep the facility it is working at in memory
+across a refresh, as long as that facility is still in `actor.facilities`,
+rather than adopt `actor.facility` from the refresh response, which reports
+the sign-in's last choice and may come from another tab. It uses the reported
+facility when it has none of its own: after a reload or a new tab. `reselect`
+keeps the stored choice until the user chooses again, so if the membership
+becomes active again first, the choice is reported as `selected` again.
+Sign-out and revocation leave the stored row, but a signed-out or revoked
+sign-in never reads or changes it again. Since staff MFA (0088) a staff token
+without MFA assurance, an `AUTH_MODE=oidc` bearer token included, is refused
+by the guard (`403 STAFF_MFA_REQUIRED`), so only an MFA-verified Identity
+staff sign-in reaches the choice; the controller still answers an actor
+without an Identity sign-in as before, audited and without
+`facilitySelection`, storing nothing.
+
+Release note: apply migration 0089 and the role bootstrap before deploying this
+Identity API. Without the table every staff `GET /auth/session` answers `503`,
+every staff refresh answers `unavailable` (so Health-id asks where the user is
+working at each refresh of a reload), and `POST /auth/facility` fails with a
+`5xx`. The previous Identity API ignores the table. Clients that ignore the
+new field keep working as before; to keep the user at their facility after a
+reload they use `actor.facility` from `GET /auth/session`, and on any value
+other than `selected` (or `default` with one facility) ask the user to choose.
+Health-id 82b474e already does (`apps/patient-web/src/staff/facilitySelection.ts`).
+
 ### Patient sessions and self service
 
 `POST /api/v1/auth/patient/login` accepts an email address or the issued HIDCode
@@ -448,13 +596,22 @@ revocation. The server rechecks account eligibility, token version, session and
 patient mapping on use.
 
 `GET /api/v1/identity/me` returns the authenticated patient's profile and HID.
-`GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
-grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
+`GET /api/v1/identity/me/access-history` returns `{ items, truncated }`: the
+latest 50 safe grant summaries, newest first, and `truncated` (`true` when the
+patient has more than 50 grants; since 0091, additive). Since 0091 each item
+also names who holds the grant: `requesterDisplayName` (the display name of the
+clinician's account, or `null`) and `requesterRole` (the membership role at the
+facility, for example `doctor`, or `null`), next to `facilityName`. Grant
+status does not assert notification delivery. `GET /api/v1/ehr/me/records`
 returns at most 50 completed encounters and 50 current signed/amended note
 revisions of completed encounters (since 0084), after fresh Identity
 authorization through the EHR workload caller.
 It names the other five record categories as withheld from the patient, not as
-absent (§11, "Record summaries").
+absent (§11, "Record summaries"). Only a patient session may use it: EHR's
+guard answers any other session `403 PATIENT_SESSION_REQUIRED` before the
+handler runs and records `auth.authorization.denied` (§7). Before
+BRANCH:launch/ehr-retraction-integrity a staff session there got `503 DEPENDENCY_UNAVAILABLE` and nothing was
+audited.
 These routes accept no browser-selected patient identity. Patient record access
 is read-only and owning-service disclosure/audit is atomic. The internal
 `GET /api/v1/identity/service/patient-self-authorization` requires both the
@@ -468,7 +625,7 @@ attributes, create a patient, or modify a canonical identity. The integration
 is disabled by default and does not expose provider credentials or tokens.
 
 Patient-only routes refuse any other session in `SecurityGuard`, before the
-handler, with `403 PATIENT_SESSION_REQUIRED` (ADR-057), audited as
+handler, with `403 PATIENT_SESSION_REQUIRED` (ADR-059), audited as
 `auth.authorization.denied` on resource type `authentication` with no
 facility. They are every `/api/v1/identity/me` route of `PatientSelfController`
 (`GET /me`, `GET /me/access-history`, `GET /me/notifications`,
@@ -502,19 +659,32 @@ It also requires an active `emergency` purpose of use, which no migration seeds
 (0082 seeds only `direct-care`); without it activation also returns
 `423 BREAK_GLASS_DISABLED` ("Emergency access is not enabled on this
 platform"), where it returned `400 INVALID_CONSENT_COMMAND`. Break-glass is off
-at launch (owner default, deny by default; release checklist P10 and P11): `break_glass_enabled`
-is false and no `emergency` code exists.
+at launch (owner default, deny by default; release checklist P10 and P11): since
+0091 no role holds `identity.break-glass.write`, so `POST
+/api/v1/identity/break-glass` answers `403 PERMISSION_DENIED` before the
+control or purpose check, and
+Health-id 82b474e disables its Emergency method with the permission
+explanation; `break_glass_enabled` starts false (0091) and no `emergency` code
+exists. Re-enabling it takes decision D9, a reviewed migration granting the
+permission again, the `emergency` code and the control.
 The summary's sections, the read permission each needs, its limits and audit
 counts are in §11, "Record summaries".
 
 Patient access-request decisions are session-bound patient commands:
-`GET /api/v1/identity/me/access-requests`,
+`GET /api/v1/identity/me/access-requests` (at most 100, newest first; since
+0091 each item also carries `requesterDisplayName` and `requesterRole`, the
+requesting clinician's display name and membership role, next to
+`facilityName`: approval grants that one clinician access; additive),
 `POST /api/v1/identity/access-requests/:requestId/approve` and
 `POST /api/v1/identity/access-requests/:requestId/deny` (`{ "reason" }`) require
 a patient session and no facility context. Since 0086 an approval grants
 access only from a session family first issued within the last 10 minutes (as
-an access-PIN change does), else `403 PATIENT_RECENT_AUTH_REQUIRED`; the client
-signs the patient in again and repeats it. For 24 hours after an OTP account
+an access-PIN change does), else `403 PATIENT_RECENT_AUTH_REQUIRED` with the
+detail "For your security, sign out, sign in again, and approve within 10
+minutes."; the client signs the patient out and in again and repeats it.
+Health-id shows that detail as it is on Approve, so it says what to do (FE-8;
+it was "Sign in again before approving access to your records", which left a
+patient who was already signed in no way forward). For 24 hours after an OTP account
 recovery of the account (any recovery purpose) an approval is `403
 PATIENT_RECENT_RECOVERY_HOLD`, checked before recent sign-in, because signing in
 again does not end it. A denial or a revocation is never held. `POST
@@ -522,7 +692,16 @@ again does not end it. A denial or a revocation is never held. `POST
 grant the patient authorized (patient-approved or PIN-derived); break-glass and
 workforce grants return `409`. Access-history items include `breakGlass` and
 `patientRevocable`. `GET /api/v1/identity/me/notifications` and
-`POST /api/v1/identity/me/notifications/:id/read` serve the patient inbox.
+`POST /api/v1/identity/me/notifications/:id/read` serve the patient inbox. Its
+`notificationCode` values are `ACCESS_REQUEST_RECEIVED` (resource
+`access-request`), `EMERGENCY_ACCESS_ACTIVATED` and, since 0091,
+`PATIENT_ACCESS_PIN_USED` (both resource `consent-grant`, `resourceId` the
+grant, `metadata` `{ consentGrantId, reviewRequired: true }`): one item each
+time a clinician opens the patient's record with the patient's access PIN
+(`POST /api/v1/identity/standard-access/pin` creating a grant; a replay of an
+existing grant adds none), written in the PIN transaction without the
+notification worker. Health-id 82b474e shows an unknown code with its generic
+title ("An update about your Health ID account").
 
 The requesting clinician's own list is `GET /api/v1/identity/access-requests`
 (optional `?status=pending|approved|denied|revoked|expired`). It needs
@@ -559,17 +738,31 @@ grants access by itself, and its answers do not tell whether an HID exists:
 | `POST /api/v1/identity/patient-lookup` | `identity.patient.read` at the `X-Facility-ID` facility; body `{ hid, purpose }` (`direct-care`, `emergency` or `healthcare-operations`; anything else `400`). `200 { patient: { patientId, hid, firstName, lastName, fullName, dateOfBirth, gender, version }, authorization: { decision: 'allow', facilityId, membershipId, scope, purpose, consentGrantId, expiresAt, breakGlass } }` only with an active grant for this account, membership, facility and purpose (before 0086 a success answered `201`). Every refusal, whether the HID is unknown, the patient has no grant, or the grant is held at another facility or for another purpose, is the same `404 PATIENT_NOT_AVAILABLE` ("The patient is not available"); before 0086 a patient visible to the caller without a grant (any patient, for a registration member) answered `403`, and an unknown or hidden one `404`. The audit event `identity.patient.lookup` keeps the true outcome: `success`, or `denied` with `details.reason` `not_found` or `not_authorized` and, for the latter, the patient |
 | `POST /api/v1/identity/access-requests` | `identity.consent.write` at the `X-Facility-ID` facility, `X-Purpose-Of-Use` `direct-care` or `healthcare-operations`; body `{ hid, scope: read_records\|write_records, reason (8–500), durationMinutes (5–1440) }`. `201 { accessRequestId, status: 'pending', scope, purpose, durationMinutes, requestedAt, existingRequest }`, which no longer carries `patientId`. An unknown HID gets the same `201` shape (a new `accessRequestId`, `existingRequest: false`) instead of `404 CONSENT_RESOURCE_NOT_FOUND`; nothing is persisted for it, and the audit records `identity.access-request.refused` (`denied`, no patient, `details.reason: patient_not_available`) under that `accessRequestId`. The clinician's own list (above) shows only recorded requests, and names the patient only once a grant made from the request is active |
 
-Both commands are counted in `auth.otp_rate_limits` before they run, whatever
-their outcome, per actor account (across facilities) and per facility.
-Defaults: 60 lookups per actor and 600 per facility in 5 minutes
+Both commands have budgets in `auth.otp_rate_limits`, per actor account
+(across facilities) and per facility. An access request is counted before it
+runs, whatever its outcome. A patient lookup reads its two budgets first and,
+while either is blocked, answers `429 PATIENT_LOOKUP_RATE_LIMITED` before it
+reads anything, a lookup of a patient the caller holds a grant for included.
+Otherwise only a refused lookup is counted: an unknown HID, a patient without a
+grant and a grant held at another facility or for another purpose alike, after
+its audit event and before its `404`. A lookup that answers `200` is never
+counted, nor is one that fails on a dependency (`5xx`), so Health-id's lookup
+before each clinical read and write of a granted patient spends nothing (FE-10;
+until this change every lookup was counted, so the about ten lookups of one
+consultation could leave a clinician's saves refused with `429`). Defaults: 60
+refused lookups per actor and 600 per facility in 5 minutes
 (`PATIENT_LOOKUP_RATE_WINDOW_SECONDS`, `PATIENT_LOOKUP_ACTOR_MAX_REQUESTS`,
 `PATIENT_LOOKUP_FACILITY_MAX_REQUESTS`); 20 access requests per actor and 200
 per facility in 15 minutes (`ACCESS_REQUEST_RATE_WINDOW_SECONDS`,
 `ACCESS_REQUEST_ACTOR_MAX_REQUESTS`, `ACCESS_REQUEST_FACILITY_MAX_REQUESTS`;
 windows 60–86400 s, actor maxima 1–10000, facility maxima 1–100000). The
-call after a maximum is `429 PATIENT_LOOKUP_RATE_LIMITED` or `429
-ACCESS_REQUEST_RATE_LIMITED` until its window ends. A call refused for the
-actor's own budget does not count against the facility's.
+refused lookup or the access request after a maximum is `429
+PATIENT_LOOKUP_RATE_LIMITED` (instead of the `404`, for an unknown and an
+unauthorized HID alike) or `429 ACCESS_REQUEST_RATE_LIMITED`, and blocks that
+budget for one window: until it ends, every lookup by that actor, or at that
+facility, and every access request by that actor, or at that facility, is
+`429`. A call refused for the actor's own budget does not count against the
+facility's.
 
 Patient login/account deletion (Phase 3, ADR-036) closes the login only:
 
@@ -757,6 +950,14 @@ Do not leak:
 * access tokens
 * protected clinical information
 
+Identity replaces the `detail` of every `5xx` answer with "The service could
+not complete the request.", because an unexpected failure's message can carry
+internal state. The one exception is a problem raised as `PublicDetailProblem`:
+a fixed sentence written for the person using the client, which keeps its
+`detail` whatever its status. Today only the closed public enrollment gate
+uses it (`503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED`, section 8,
+"Public patient enrollment"; D-Eminence/hid-system#68, FE-4).
+
 ## 7. Health Endpoints
 
 Every service should provide:
@@ -794,7 +995,7 @@ any other token is refused `401` (ADR-047). Local per-caller secrets are
 development-only.
 
 Identity's workload refusals carry their own codes, never a user refusal's
-(ADR-057), so a calling service can tell "Identity refused my workload
+(ADR-059), so a calling service can tell "Identity refused my workload
 credential" (a fault between services) from "Identity refused the user's
 session" (which it relays):
 
@@ -817,7 +1018,7 @@ to send an Identity workload token file whose `exp` has passed: `503
 IDENTITY_WORKLOAD_IDENTITY_UNAVAILABLE`, logged as
 `identity_workload_token_expired` and counted, instead of a call Identity would
 refuse. Lab, Pharmacy, OCR and Outreach still relay Identity's workload refusal
-as it is; they are off at launch, and their mapping is a follow-up (ADR-057).
+as it is; they are off at launch, and their mapping is a follow-up (ADR-059).
 
 Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 `POST` for cookie mutation revalidation. Patient decisions use
@@ -864,7 +1065,7 @@ still apply, and on the patient authorization check so do the
 decision. After a skip, the patient authorization check decides only the
 `read_records` scope: any other scope (`write_records`) is `403
 CSRF_VALIDATION_FAILED`, so a reported read never yields a write decision
-(ADR-057). When the workload issuer is unavailable, the check is not skipped
+(ADR-059). When the workload issuer is unavailable, the check is not skipped
 and the request is answered `503 WORKLOAD_IDENTITY_UNAVAILABLE` rather than the
 browser's `403 ORIGIN_DENIED`; any other workload failure keeps the check, as
 before. A skip is recorded as the reported method in
@@ -895,7 +1096,7 @@ controls (`503 PLATFORM_MAINTENANCE`, `423 PLATFORM_PORTAL_DISABLED`, and
 `503 PLATFORM_CONTROL_UNAVAILABLE` when the control cannot be read, a database
 fault included) and refuses a patient on a workforce route
 (`403 PATIENT_SCOPE_DENIED`). No session is exempt from the runtime controls:
-before ADR-057, a clinical session whose account also held
+before ADR-059, a clinical session whose account also held
 `platform.admin.access` skipped them in EHR and Outreach. A permission missing from the bound membership is
 `403 PERMISSION_DENIED`. Each guard refusal is audited before it is answered:
 
@@ -909,7 +1110,27 @@ before ADR-057, a clinical session whose account also held
   `authentication`.
 
 A refusal keeps its own status and code. If its audit row cannot be written,
-the request fails closed with `503 DEPENDENCY_UNAVAILABLE`. Before
+the request fails closed with `503 DEPENDENCY_UNAVAILABLE`. Since
+BRANCH:launch/ehr-retraction-integrity each EHR refusal row carries `details.status` and `details.code`,
+the status and code answered, next to `method` and `route`. A route marked
+patient-only (EHR's `GET /api/v1/ehr/me/records`) refuses any other session
+with `403 PATIENT_SESSION_REQUIRED` before a facility is bound.
+
+EHR's request audit (`api.<method>.<route>` on `http-request`) records a failed
+request with `details.status` and `details.code` too, and with outcome `denied`
+for a refusal (`401`, `403`, `409`, `412`, `423`, `429`) and `failure`
+otherwise. A staff actor's failure on a facility-optional route, where no
+facility is bound, is recorded as `auth.authorization.denied` (a refusal) or
+`auth.request.failed` on `authentication`, without facility, membership or
+organization, instead of failing with `503`. A clinical command refused inside
+its database transaction (a refusal of row-level security, `409`, `412`, and
+the other refusals of §11) is also recorded after the rollback as the
+command's own semantic action (for example `ehr.encounter.update`), outcome
+`denied` for a refusal and `failure` for `400` and `404`, with
+`details.status`, `details.code` and, where the refusal names them, codes such
+as `missingPermissions`; never clinical content. Before, the rollback removed
+that row and only the request row, outcome `failure` without status or code,
+remained. Before
 D-Eminence/hid-system#46, every refusal of a staff actor before a facility was
 bound answered that `503` and was not audited, `PLATFORM_CONTROL_UNAVAILABLE`
 included: its row carried the default membership but no facility, and a staff
@@ -967,7 +1188,7 @@ or `409 CONTACT_ALREADY_REGISTERED`). A malformed password (`400`), a missing
 or forged enrollment cookie (`404`) or an enrollment not yet at the password
 step (`409`) is refused first and not counted. Success bodies are unchanged.
 
-Changes of BRANCH:launch/identity-enrollment-gates (migration 0085; not
+Changes of D-Eminence/hid-system#68 (migration 0085; not
 deployed). Request and success bodies are unchanged:
 
 - `POST /api/v1/identity/patient-enrollments` checks the QoreID gate after
@@ -1001,6 +1222,65 @@ deployed). Request and success bodies are unchanged:
   and a replay still answer `stage: active` with the HID.
 - A successful activation response (`200`) expires `hid_enrollment`
   ("Auth session contract", above).
+
+Enrollment availability and the closed-registration answer (FE-4,
+D-Eminence/hid-system#68; no migration; not deployed):
+
+- `GET /api/v1/identity/patient-enrollments/availability` (new). Public: no
+  session, Origin, Turnstile token, cookie or input; a signed-in caller gets
+  the same answer. `200 { "open": boolean }`, nothing else. The route itself
+  refuses no `Origin`, but Identity's CORS middleware (`main.ts`) runs first,
+  as on every route: a request without an `Origin` or from one in
+  `CORS_ORIGINS` (the Health-id hosts) gets the answer, and a request from
+  any other `Origin` is answered `500` with no CORS permission before the
+  route is reached. `open` is `true` only when a start would now pass the
+  checks it makes before it reads a NIN: the enrollment keys are
+  configured, `QOREID_ENABLED` and `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` are
+  on, and QoreID's `patient_nin` capability is not paused at runtime. It
+  does not predict per-request
+  refusals (Turnstile, rate limits, the lookup quota, a registered NIN,
+  `503 ENROLLMENT_RECONCILIATION_REQUIRED`), so a client still handles every
+  start answer. A fault reading the runtime pause answers `503` (generic
+  detail), not `{ "open": false }`; a client treats any answer other than
+  `200 { "open": true }` as not open. With either flag off the route reads
+  nothing; with both on it makes the one runtime-state read that start makes.
+  It writes no audit row (as `GET /commercial/pricing`) and sets no cookie.
+  The `200` carries `Cache-Control: public, max-age=30` and no `Pragma`,
+  `Expires` or `Surrogate-Control`; a failure keeps the no-store default.
+  Behind the Cloudflare Worker every API response is `private, no-store`
+  (`infra/cloudflare/src/frontend-worker.mjs`), so a browser on the
+  Health-id hosts refetches it each time. Identity does not rate limit it,
+  as it does not `GET /commercial/pricing`: a per-network counter would cost
+  a database write per anonymous read. The WAF rate rule that covers every
+  API request applies (keyed per client by ADR-055). The gateway
+  serves it under the identity prefix only (`^~ /api/v1/identity/`; with the
+  route switch of #65, only while `HID_ENABLED_API_ROUTES` names `identity`,
+  otherwise `404 API_ROUTE_NOT_FOUND`).
+- While `QOREID_ENABLED` or `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` is off,
+  `POST /api/v1/identity/patient-enrollments` still answers
+  `503 QOREID_DISABLED` or `503 QOREID_NIN_ONLY_DISABLED`, now with
+  `detail` "New Health ID registration is not open yet. If you already have a
+  Health ID, sign in." Before, Identity replaced it with the generic 5xx
+  detail (section 6), so a client calling Identity directly got "The
+  service could not complete the request.". Production keeps NIN-only
+  enrollment off until the N1 holder step ships
+  (`PHASE_3_LAUNCH_DECISIONS.md`), so in production Identity answers every
+  start this way. `503 INTEGRATION_PAUSED` (a runtime pause) and
+  `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` keep the generic detail. A
+  patient on Health-id sees neither detail yet: the gateway, on this branch
+  and on main (#65), replaces every upstream `502/503/504` with
+  `503 UPSTREAM_UNAVAILABLE` ("A required platform service is temporarily
+  unavailable.") and drops the `QOREID_*` code, before this change and
+  after it. The new detail and codes reach a browser only once the gateway
+  passes upstream errors through (ADR-055, D-Eminence/hid-system#72).
+  The availability read is a `200` and is not affected.
+- Health-id follow-up (not in Health-id 82b474e, which keeps working
+  unchanged): read availability before showing the NIN step and the
+  "Get your Health ID" link, and show a "registration is not open" notice
+  instead when it is not `200 { "open": true }`; on the completion screen,
+  ask the patient to save the Health ID (ENR-2), because the enrollment
+  cookie is expired by the activation response and `GET .../current` shows
+  the HID for 15 minutes only.
 
 ### HID Resolution
 
@@ -1211,8 +1491,19 @@ All writes require:
 
 ### Launch module set
 
-Lab, Pharmacy, OCR and Outreach are off at launch (decision D17); EHR
-prescriptions and lab requests are records only. Migration 0084 withdrew
+Lab, Pharmacy, OCR and Outreach are off at launch (decision D17), and so are
+break-glass (D9) and document uploads; EHR prescriptions and lab requests are
+records only. Since 0091 no role holds any `lab.*`, `pharmacy.*`, `ocr.*` or
+`outreach.*` permission, `identity.break-glass.write` or `ehr.document.write`
+(ADR-058): the staff session's and staff context's permission lists no longer
+carry them, every route that needs one answers `403 PERMISSION_DENIED` before
+any write or call to another service (where the gateway routes it at all; in
+production it answers `404 API_ROUTE_NOT_FOUND` for the Lab, Pharmacy, OCR and
+Outreach APIs), and Health-id 82b474e hides Laboratory, Pharmacy, Document OCR
+and Outreach, their dashboard tiles, released Lab results, Extract with OCR and
+the upload card, and disables emergency access. Its ungated "Health ID Migrate"
+dashboard card still links to a page the gateway refuses (cosmetic). The EHR
+reads, `ehr.document.read` included, stay. Before 0091, migration 0084 withdrew
 `ehr.lab-request.write`, `lab.work-item.accept`, `lab.accession.create`,
 `pharmacy.work-item.accept` and `pharmacy.dispensing.create` from every role,
 so these routes answer `403 PERMISSION_DENIED` before any write or call to Lab
@@ -1223,17 +1514,31 @@ or Pharmacy:
 - Lab's EHR-order acceptance and accession creation, and Pharmacy's
   acceptance and dispensing.
 
-The read permissions stay, so existing lab requests, prescriptions and Lab and
-Pharmacy records remain readable. Prescriptions are still created and changed
-in the EHR. An existing lab request changes status only through its
-encounter: cancelling the encounter cancels its open lab requests, and marking
-it entered in error marks them entered in error ("Encounter status and its
-records"). An open lab request of a completed encounter that is not
-retracted, or of an encounter that was already cancelled or entered in error,
-stays as it is. Re-enabling a module takes its own decision, its fixes, a
-staging acceptance run and a reviewed migration granting the permissions
-again; the sections on the Lab and Pharmacy handoffs below describe the routes
-as they work then.
+0084 kept the read permissions; 0091 withdraws the Lab and Pharmacy reads too
+(the EHR's own `ehr.lab-request.read` and `ehr.prescription.read` stay), so
+existing lab requests and prescriptions remain readable in the EHR, and a
+production database built at launch holds no Lab or Pharmacy records. The
+platform controls `uploads_enabled`, `outreach_portal_enabled` and
+`break_glass_enabled` start off (0091, where still seeded). Prescriptions are
+still created and changed in the EHR. No lab request can be created or changed
+at launch. Since 0090 an encounter's cancellation or retraction needs the write
+permission of every kind of record it changes, so an encounter that still holds
+a lab request cannot be cancelled or retracted either (`403
+ENCOUNTER_RETRACTION_NOT_PERMITTED`) until Lab ordering is enabled again
+("Encounter status and its records"). Re-enabling a module takes its own
+decision, its fixes and a reviewed migration granting the permissions again,
+which applies to every environment (the role bootstrap refuses a permission
+granted by hand), and then a staging acceptance run; the sections on the Lab
+and Pharmacy handoffs below describe the routes as they work then.
+
+With 0090 (`BRANCH:launch/ehr-retraction-integrity`, ADR-056), marking an
+encounter entered in error needs the write permission of each record it
+retracts, `ehr.document.write` for a linked document whose upload was started
+or completed. Since no role holds it after 0091, `PATCH
+.../encounters/:encounterId` to `entered_in_error` for such an encounter
+answers `403 ENCOUNTER_RETRACTION_NOT_PERMITTED` for every role and changes
+nothing, until uploads are re-enabled; cancelling it is not affected. A
+database on which no upload was ever started holds no such encounter.
 
 ### Encounter status and its records
 
@@ -1253,17 +1558,60 @@ moves an encounter only along these transitions; any other answers
 Marking an encounter entered in error (a wrong-patient retraction, possible
 also after completion) marks, in the same transaction and under the
 encounter's row lock, its draft, signed and amended notes `entered_in_error`,
-its diagnoses' `verificationStatus` `entered_in_error`, and its draft, active
-and on-hold prescriptions and lab requests `entered_in_error`. Cancelling an
-encounter cancels its draft, active and on-hold prescriptions and lab
-requests, and leaves its notes and diagnoses. Completed orders and vitals keep
-their state. Each changed record gets a version carrying the request's
-`changeReason`, and the encounter's audit event (`ehr.encounter.update`)
-records `cascade`: the new status and the ids changed in each category
-(`clinicalNoteIds`, `diagnosisIds`, `prescriptionIds`, `labRequestIds`). The
-response is the encounter, as before; list the records to see the change.
-Lab and Pharmacy are not told (they are off at launch; Pharmacy refuses to
-dispense a prescription that is no longer active, 0080).
+its diagnoses' `verificationStatus` `entered_in_error`, its `final` vitals,
+its draft, active, on-hold and (since 0090) completed prescriptions and lab
+requests, and the `initiated` or `uploaded` documents linked to it
+`entered_in_error`. Cancelling an encounter cancels its draft, active and
+on-hold prescriptions and lab requests, and leaves everything else. Each
+changed record gets a version carrying the request's `changeReason`, and the
+encounter's audit event (`ehr.encounter.update`) records `cascade`: the new
+status and the ids changed in each category (`clinicalNoteIds`,
+`diagnosisIds`, `vitalIds`, `prescriptionIds`, `labRequestIds`,
+`documentIds`; cancelling lists only the two order categories). Since 0090
+the response is the encounter with the additive field `cascade`, the same
+object, whenever the status change cancelled or retracted it; any other
+update returns the encounter without it. Lab and Pharmacy are not told (they
+are off at launch; Pharmacy refuses to dispense a prescription that is no
+longer active, 0080).
+
+Cancelling or retracting needs the write permission of every kind of record
+the close changes (ENC-RETRACT-1, ADR-056, BRANCH:launch/ehr-retraction-integrity): `ehr.note.write` for notes,
+`ehr.diagnosis.write` for diagnoses, `ehr.vital.write` for vitals,
+`ehr.prescription.write` for prescriptions, `ehr.lab-request.write` for lab
+requests and `ehr.document.write` for documents. Without one of them the
+`PATCH` answers `403 ENCOUNTER_RETRACTION_NOT_PERMITTED` with the fixed detail
+"Cancelling or retracting this encounter changes records you may not write",
+writes nothing, and is audited (§7) with the missing permission codes as
+`missingPermissions`. The response does not name them: only a kind of record
+the encounter holds is checked, so the names would tell a caller which kinds
+of record it holds, records the caller's role may not read (a receptionist
+reads none of them). An encounter that holds none of these records needs only
+`ehr.encounter.write`, as the route always did; holding, resuming and
+completing need no record permission. Only records the close would change
+count: a note, diagnosis or order already entered in error, a cancelled
+order, a rejected document and a vital entered in error do not. With the
+seeded roles:
+
+- **Marking entered in error.** Doctors and clinicians may retract any
+  encounter unless it holds a draft, active, on-hold or completed lab request
+  (no role holds `ehr.lab-request.write` since 0084). Nurses may retract one
+  unless it holds a diagnosis not yet entered in error, or a draft, active,
+  on-hold or completed prescription or lab request. Receptionists may retract
+  only one that holds none of the records listed above (no note, diagnosis,
+  final vital, open or completed order, or initiated or uploaded document).
+- **Cancelling.** Anyone holding `ehr.encounter.write` may cancel an encounter
+  whatever notes, vitals, diagnoses and documents it holds, unless it holds a
+  draft, active or on-hold prescription (then only doctors and clinicians) or
+  lab request (then no one, until Lab ordering is enabled again).
+
+The database refuses the same close (`ehr.require_retraction_permission`,
+0090); the EHR answers it the same `403` with the same detail.
+
+A cancelled or entered-in-error encounter takes no further change: any
+`PATCH` of one that is not a refused transition (which keeps
+`409 INVALID_ENCOUNTER_TRANSITION`), a chief complaint or end time edit or
+its own status sent again, answers `409 ENCOUNTER_NOT_OPEN` (ORDER-CLOSED-EDIT).
+A completed encounter still takes header corrections.
 
 Creates and order activations check the encounter, under a share lock, and
 answer `409 ENCOUNTER_NOT_OPEN` without writing anything:
@@ -1280,9 +1628,50 @@ amendment, a diagnosis update and a vital correction follow their own rules. A
 diagnosis whose `verificationStatus` is `entered_in_error` cannot be changed
 at all: `409 DIAGNOSIS_NOT_AMENDABLE`. A vital's recorded values are changed
 only by a correction (`POST .../vitals/:vitalId/corrections`); the database
-refuses any other update of them (D8). The database enforces each of these
-rules too, so a writer that bypasses the API gets the same refusal
-(`DATABASE.md`, "EHR clinical safety and launch module set (0084)").
+refuses any other update of them (D8).
+
+Closed orders are final (RX-FINAL, ORDER-CLOSED-EDIT, 0090). A prescription
+moves only along these transitions; any other answers
+`409 INVALID_PRESCRIPTION_TRANSITION` (`409 INVALID_LAB_REQUEST_TRANSITION`
+for a lab request, which follows the same table):
+
+| From | To |
+|---|---|
+| `draft` | `active`, `cancelled`, `entered_in_error` |
+| `active` | `on_hold`, `completed`, `cancelled`, `entered_in_error` |
+| `on_hold` | `active`, `cancelled`, `entered_in_error` |
+| `completed` | `entered_in_error` (since 0090: a completed prescription written for the wrong patient is retracted) |
+| `cancelled`, `entered_in_error` | none |
+
+Any other change of a `completed`, `cancelled` or `entered_in_error`
+prescription (its frequency, instructions or end date, or its own status sent
+again, or a field together with `completed` to `entered_in_error`) answers
+`409 PRESCRIPTION_NOT_AMENDABLE`, and of such a lab request
+`409 LAB_REQUEST_NOT_AMENDABLE`; nothing is written. Before 0090 these edits
+were stored.
+
+Vitals carry `status`: `final`, or `entered_in_error` once retracted
+(ENC-RETRACT-2, 0090). `POST
+/api/v1/ehr/patients/:patientId/encounters/:encounterId/vitals/:vitalId/entered-in-error`
+(`ehr.vital.write`; body `{ "expectedRowVersion": 2, "changeReason": "..." }`,
+`changeReason` 3 to 500 characters; no `Idempotency-Key`) marks a final vital
+entered in error and answers `200` with the vital at its next `rowVersion`.
+It is versioned with the reason and audited as `ehr.vital.entered-in-error`.
+A stale `expectedRowVersion` answers `412 VERSION_CONFLICT`. A vital entered in
+error keeps its values and takes no further change: the route again, or a
+correction, answers `409 VITAL_NOT_AMENDABLE`, and it gains no correction
+(`GET .../vitals/:vitalId/corrections` lists only those made before its
+retraction). The emergency summary leaves it out. A vital is never deleted.
+
+A document linked to an encounter that is marked entered in error becomes
+`entered_in_error` (ENC-RETRACT-2) and stays so: it is never `available` again,
+so the emergency summary does not list it and `GET
+/api/v1/ehr/documents/:id/download` answers `409` for it. The EHR routes
+never change such a document; the database refuses it too (0090).
+
+The database enforces each of these rules too, so a writer that bypasses the
+API gets the same refusal (`DATABASE.md`, "EHR clinical safety and launch
+module set (0084)" and "EHR retraction integrity (0090)").
 
 ### EHR lab requests sent to Lab
 
@@ -1440,7 +1829,8 @@ withheld. The seeded doctor, clinician and nurse roles hold all seven.
   and `mediaType` as the scan detected it (as declared if the scan named none).
 - `vitals` are returned as first recorded (the vital row's eight measurement
   columns, which no API route changes and, since 0084, the database refuses
-  to change), with the same fields as before; a
+  to change), with the same fields as before, and since 0090 without the
+  vitals entered in error; a
   vital's corrections are not applied. Applying them is pending the product
   decision on correction semantics (proposed default: the current correction
   is the whole current set, as Health-id's clinician chart applies it); the
@@ -1715,6 +2105,17 @@ Use:
 * short-lived signed access where appropriate
 
 ### Document upload completion
+
+Document uploads are off at launch (0091, ADR-058): no role holds
+`ehr.document.write`, so `POST /api/v1/ehr/documents/upload-intents` and
+`POST /api/v1/ehr/documents/:id/complete` answer `403 PERMISSION_DENIED` (where
+they answered `201`, `200` or `409 CONFLICT`) before any write, and Health-id
+82b474e hides the upload card. `uploads_enabled` also starts off, and since
+0091 completion checks it first, as an upload intent does: with the control off
+it answers `409 CONFLICT` ("Document uploads are temporarily disabled") before
+Identity, the storage read or any write, so an upload started before the
+control was turned off cannot complete either. The rules below apply once a
+reviewed migration grants `ehr.document.write` again and the control is on.
 
 `POST /api/v1/ehr/documents/:id/complete` confirms an upload. Only the
 account that created the upload intent (`created_by`) may complete it, at the
@@ -1997,7 +2398,7 @@ audits the body's reason; a reason only in the query string is `400
 REASON_REQUIRED`. The `GET` forms stay, unchanged, for one release because the
 Health-id `82b474e` console calls them
 (`apps/patient-web/src/admin/api.ts:354-357` and `:374-376`), and are then removed: they put names, emails and the export
-reason in the URL (A24, ADR-057, `BRANCH:launch/identity-error-hardening`).
+reason in the URL (A24, ADR-059, `BRANCH:launch/identity-error-hardening`).
 The gateway's access log omits query strings (ADR-055).
 
 Principal search requires at least two characters. Facility, principal, and

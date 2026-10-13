@@ -61,10 +61,15 @@ const TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
   [OrderStatus.Draft]: [OrderStatus.Active, OrderStatus.Cancelled, OrderStatus.EnteredInError],
   [OrderStatus.Active]: [OrderStatus.OnHold, OrderStatus.Completed, OrderStatus.Cancelled, OrderStatus.EnteredInError],
   [OrderStatus.OnHold]: [OrderStatus.Active, OrderStatus.Cancelled, OrderStatus.EnteredInError],
-  [OrderStatus.Completed]: [],
+  // A completed prescription written for the wrong patient is retracted (ENC-RETRACT-2).
+  [OrderStatus.Completed]: [OrderStatus.EnteredInError],
   [OrderStatus.Cancelled]: [],
   [OrderStatus.EnteredInError]: [],
 };
+
+/** A prescription in one of these is final: only completed to entered_in_error, alone, changes it (RX-FINAL, 0090). */
+const FINAL_STATUSES: ReadonlySet<OrderStatus> =
+  new Set([OrderStatus.Completed, OrderStatus.Cancelled, OrderStatus.EnteredInError]);
 
 @Injectable()
 export class PrescriptionsService {
@@ -161,6 +166,13 @@ export class PrescriptionsService {
         const current = await this.lock(client, context, patientId, encounterId, prescriptionId);
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
+        }
+        // A closed prescription is final (RX-FINAL, ORDER-CLOSED-EDIT); the database refuses it too (0090).
+        const retraction = current.status === OrderStatus.Completed && input.status === OrderStatus.EnteredInError
+          && input.frequency === undefined && input.instructions === undefined && input.endsOn === undefined;
+        if (FINAL_STATUSES.has(current.status) && !retraction) {
+          throw new DomainProblem(409, 'PRESCRIPTION_NOT_AMENDABLE',
+            'A completed, cancelled or entered-in-error prescription cannot be changed');
         }
         if (encounterStatus && current.status !== OrderStatus.Active) {
           refuseClosedEncounter(encounterStatus, current.status === OrderStatus.OnHold ? 'resume' : 'order');
