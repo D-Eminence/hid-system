@@ -41,6 +41,14 @@ const fidelityApplication = new App();
 const fidelityRegional = Template.fromStack(new HidRegionalStack(fidelityApplication, 'FidelityRegionalTest', {
   configuration: fidelityConfiguration,
 })).toJSON() as typeof regional;
+const developmentRegional = Template.fromStack(new HidRegionalStack(new App(), 'DevelopmentRegionalTest', {
+  configuration: environmentConfig('development'),
+})).toJSON() as typeof regional;
+const workloadParameters = [
+  'WorkloadIssuerUrl', 'WorkloadJwksUrl', 'EhrWorkloadSubject', 'LabWorkloadSubject',
+  'PharmacyWorkloadSubject', 'OcrWorkloadSubject', 'OutreachWorkloadSubject',
+  'IdentityWorkloadSubject',
+] as const;
 const qoreIdStagingApplication = new App();
 const qoreIdStagingRegional = Template.fromStack(new HidRegionalStack(qoreIdStagingApplication, 'QoreIdStagingRegionalTest', {
   configuration: environmentConfig('staging', 'economy', 'true'),
@@ -351,7 +359,9 @@ test('ordinary notifications have one selected EventBridge route and encrypted S
     'PatientAccessPinVerified.v1',
   ]);
   assert.equal(eventPattern['detail-type'].some((eventType) => /otp|passwordreset/i.test(eventType)), false);
-  assert.equal(resources(regional, 'AWS::Lambda::Function').length, 0);
+  assert.equal(resources(regional, 'AWS::Lambda::Function')
+    .filter(([, item]) => item.Properties?.FunctionName !== 'hid-production-workload-issuer').length, 0,
+  'the only production Lambda is the workload issuer');
   assert.equal(resources(regional, 'AWS::Events::EventBus').length, 1);
 });
 
@@ -408,7 +418,10 @@ test('ECR repositories are encrypted, scan-on-push, immutable, and lifecycle-bou
 });
 
 test('regional API WAF requires the Cloudflare origin secret and baseline protections', () => {
-  const [acl] = properties(regional, 'AWS::WAFv2::WebACL');
+  const acls = properties(regional, 'AWS::WAFv2::WebACL').filter((item) =>
+    (item.VisibilityConfig as { readonly MetricName?: string }).MetricName === 'hid-production-api-origin');
+  assert.equal(acls.length, 1);
+  const [acl] = acls;
   const serialized = JSON.stringify(acl!.Rules);
   assert.match(serialized, /x-hid-origin-authorization/);
   assert.match(serialized, /ProductionCloudflareOriginSecret/);
@@ -624,14 +637,12 @@ test('staging email OTP injects only its SES sender while ordinary delivery reta
   }
 });
 
-test('workload identity issuer, JWKS, and subjects are required external inputs', () => {
-  for (const name of [
-    'WorkloadIssuerUrl', 'WorkloadJwksUrl', 'EhrWorkloadSubject', 'LabWorkloadSubject',
-    'PharmacyWorkloadSubject', 'OcrWorkloadSubject', 'OutreachWorkloadSubject',
-    'IdentityWorkloadSubject',
-  ]) {
-    assert.ok(regional.Parameters[name]);
-    assert.equal(regional.Parameters[name]!.Default, undefined);
+test('production takes its workload issuer from the stack; development keeps the external inputs', () => {
+  for (const name of workloadParameters) {
+    assert.equal(regional.Parameters[name], undefined, `production must not take ${name}`);
+    assert.equal(stagingRegional.Parameters[name], undefined, `staging must not take ${name}`);
+    assert.ok(developmentRegional.Parameters[name], `development must still require ${name}`);
+    assert.equal(developmentRegional.Parameters[name]!.Default, undefined);
   }
 });
 
@@ -662,6 +673,8 @@ test('sleep removes application ingress while retaining protected data and stabl
   assert.equal(signingKeys[0]![1].Properties?.KeySpec, 'ECC_NIST_P256');
   assert.equal(signingKeys[0]![1].DeletionPolicy, 'Retain');
   assert.equal(signingKeys[0]![1].UpdateReplacePolicy, 'Retain');
+  assert.deepEqual(signingKeys.map(([id]) => id), ['StagingWorkloadIdentitySigningKey53DFD52F'],
+    'the retained staging signing key keeps its logical ID');
   for (const template of [stagingRegional, fidelityRegional, sleepRegional]) {
     assert.equal(resources(template, 'AWS::KMS::Key').length, 4);
     assert.deepEqual(resources(template, 'AWS::KMS::Key')
@@ -671,7 +684,8 @@ test('sleep removes application ingress while retaining protected data and stabl
     assert.equal(resources(template, 'AWS::ApiGateway::RestApi').length, 1);
     assert.equal(resources(template, 'AWS::Lambda::Function').length, 1);
   }
-  assert.equal(resources(regional, 'AWS::KMS::Key').length, 3);
+  assert.equal(resources(regional, 'AWS::KMS::Key').length, 4);
+  assert.equal(resources(developmentRegional, 'AWS::KMS::Key').length, 3);
 });
 
 test('economy and fidelity are explicit, bounded staging modes', () => {
@@ -762,6 +776,14 @@ test('staging public CA input and native templates respect CloudFormation quotas
     'this staging repair must preserve the approved production parameter');
 });
 
+test('production and development templates respect CloudFormation quotas', () => {
+  for (const template of [regional, developmentRegional]) {
+    assert.ok(Object.keys(template.Parameters).length <= 200);
+    assert.ok(Object.keys(template.Resources).length <= 500);
+    assert.ok(Buffer.byteLength(JSON.stringify(template)) <= 1024 * 1024);
+  }
+});
+
 test('every live workload has typed resource and autoscaling boundaries', () => {
   assert.equal(resources(regional, 'AWS::ApplicationAutoScaling::ScalableTarget').length, workloadNames.length);
   assert.equal(resources(regional, 'AWS::ApplicationAutoScaling::ScalingPolicy').length, 33);
@@ -793,9 +815,16 @@ test('cost inventory is deterministic and never labels sleep zero-cost', () => {
     assert.equal(costInventory(environmentConfig('staging', mode)).kmsKeys, 4,
       `${mode} must account for the retained workload signing key`);
   }
-  for (const environment of ['development', 'production'] as const) {
-    assert.equal(costInventory(environmentConfig(environment)).kmsKeys, 3);
-  }
+  assert.equal(costInventory(environmentConfig('production')).kmsKeys, 4,
+    'production must account for its workload signing key');
+  assert.equal(costInventory(environmentConfig('development')).kmsKeys, 3);
+  // The public API web ACL, plus the workload issuer's allowlist web ACL
+  // wherever an issuer runs behind NAT (D3); sleep and development have none.
+  assert.equal(costInventory(environmentConfig('production')).wafs, 2);
+  assert.equal(costInventory(environmentConfig('staging', 'economy')).wafs, 2);
+  assert.equal(costInventory(environmentConfig('staging', 'fidelity')).wafs, 2);
+  assert.equal(costInventory(environmentConfig('staging', 'sleep')).wafs, 0);
+  assert.equal(costInventory(environmentConfig('development')).wafs, 1);
 });
 
 test('optional billing governance notifies without creating cost actions', () => {

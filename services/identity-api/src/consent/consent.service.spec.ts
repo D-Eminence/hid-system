@@ -143,6 +143,35 @@ describe('ConsentService', () => {
     expect(query).not.toHaveBeenCalledWith(expect.stringContaining('identity.activate_break_glass'), expect.anything());
   });
 
+  it('answers 423 BREAK_GLASS_DISABLED when no active emergency purpose of use is seeded', async () => {
+    // identity.activate_break_glass (0031) refuses with 22023 when the
+    // 'emergency' purpose is absent or inactive; the consent route always runs
+    // it with the emergency purpose, so this refusal means emergency access is
+    // not enabled on the platform (0082 seeds only direct-care).
+    query.mockResolvedValueOnce({ rows: [{}] }).mockRejectedValueOnce({
+      code: '22023', message: 'Break-glass requires the emergency purpose of use',
+    });
+    await expect(service.activateBreakGlass({ ...context, purposeOfUse: 'emergency' }, {
+      hid: 'HID-ABCDEFGH', reason: 'Emergency care required', durationMinutes: 30,
+    })).rejects.toMatchObject({ code: 'BREAK_GLASS_DISABLED', status: 423 });
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['Invalid break-glass duration', 'An explicit break-glass reason is required'])(
+    'keeps every other break-glass integrity refusal a 400: %s', async (message) => {
+      query.mockResolvedValueOnce({ rows: [{}] }).mockRejectedValueOnce({ code: '22023', message });
+      await expect(service.activateBreakGlass({ ...context, purposeOfUse: 'emergency' }, {
+        hid: 'HID-ABCDEFGH', reason: 'Emergency care required', durationMinutes: 30,
+      })).rejects.toMatchObject({ code: 'INVALID_CONSENT_COMMAND', status: 400 });
+    },
+  );
+
+  it('keeps the emergency-purpose message a 400 outside break-glass activation', async () => {
+    query.mockRejectedValueOnce({ code: '22023', message: 'Break-glass requires the emergency purpose of use' });
+    await expect(service.closeOwnGrant(context, '60000000-0000-4000-8000-000000000001',
+      'Treatment relationship ended')).rejects.toMatchObject({ code: 'INVALID_CONSENT_COMMAND', status: 400 });
+  });
+
   it('activates break-glass normally when the control is enabled, inside the same transaction', async () => {
     query.mockResolvedValueOnce({ rows: [{}] }).mockResolvedValueOnce({
       rows: [{ accessRequestId: '40000000-0000-4000-8000-000000000011', consentGrantId: '60000000-0000-4000-8000-000000000011',

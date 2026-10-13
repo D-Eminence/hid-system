@@ -146,6 +146,35 @@ describe('Patient self records: release honesty', () => {
   });
 });
 
+describe('Record summaries release notes by their encounter (PREC-NOTES)', () => {
+  // The note's own encounter, matched on all three keys of the composite foreign key.
+  const ENCOUNTER_JOIN = 'join ehr.encounters e on e.id=n.encounter_id and e.patient_id=n.patient_id'
+    + ' and e.facility_id=n.facility_id';
+
+  it('releases to the patient only signed or amended notes of completed encounters', async () => {
+    const { service, query } = setup({ encounters: rows(1), notes: rows(1) });
+    await service.self(request);
+    const notes = sqlFor(query, 'notes');
+    expect(notes).toContain(ENCOUNTER_JOIN);
+    expect(notes).toContain("n.status in ('signed','amended')");
+    expect(notes).toContain("e.status='completed'");
+    // The note of a cancelled, entered-in-error or still open encounter is never read for the patient.
+    expect(notes).not.toContain("e.status<>'entered_in_error'");
+  });
+
+  it('leaves out of the emergency summary the notes of an encounter entered in error, and only those', async () => {
+    const { service, query } = setup({ encounters: rows(1), notes: rows(1) });
+    await service.emergency('patient-id', emergencyContext);
+    const notes = sqlFor(query, 'notes');
+    expect(notes).toContain(ENCOUNTER_JOIN);
+    expect(notes).toContain("n.status in ('signed','amended')");
+    expect(notes).toContain("e.status<>'entered_in_error'");
+    // Signed notes of an encounter still in progress matter in an emergency: completion is not required.
+    expect(notes).not.toContain("e.status='completed'");
+    expect(notes).toContain('n.facility_id=$2');
+  });
+});
+
 describe('Emergency record summary', () => {
   it('reads every section for the patient at the active facility, each with its own limit and truncation flag', async () => {
     const { service, query } = setup({ encounters: rows(50), notes: rows(51), vitals: rows(101), documents: rows(100) });

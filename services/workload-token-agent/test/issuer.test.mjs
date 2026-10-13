@@ -67,12 +67,105 @@ test('fails closed on unavailable or mismatched KMS key without leaking error or
   const response = await handler(makeEvent()); assert.equal(response.statusCode, 503);
   assert.deepEqual(JSON.parse(response.body), { code: 'WORKLOAD_ISSUER_UNAVAILABLE' });
 });
-test('configuration rejects production, ambiguous roles, shared subjects, and foreign signing regions', () => {
-  assert.throws(() => issuerConfiguration({ ...env, HID_DEPLOYMENT_ENV: 'production' }));
+test('configuration rejects an environment other than staging or production, an environment/path mismatch, ambiguous roles, shared subjects, and foreign signing regions', () => {
+  // Another environment is refused by the allowlist itself, even with an issuer path and subjects of its own name.
+  const development = { ...env, HID_DEPLOYMENT_ENV: 'development',
+    WORKLOAD_ISSUER_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/development',
+    WORKLOAD_CALLER_POLICY_JSON: JSON.stringify([{ roleArn: 'arn:aws:iam::123456789012:role/service/hid-development-ehr',
+      subject: 'hid:development:ehr-api', audiences: ['hid-identity-api'] }]) };
+  assert.throws(() => issuerConfiguration(development), /^Error: Workload issuer environment is not allowed$/);
+  assert.throws(() => issuerConfiguration({ ...env, HID_DEPLOYMENT_ENV: 'production' }), /^Error: Invalid workload issuer URL$/);
   const policy = JSON.parse(env.WORKLOAD_CALLER_POLICY_JSON);
   assert.throws(() => issuerConfiguration({ ...env, WORKLOAD_CALLER_POLICY_JSON: JSON.stringify([...policy, ...policy]) }));
   assert.throws(() => issuerConfiguration({ ...env, WORKLOAD_SIGNING_KEY_ID: keyArn.replace('eu-west-2', 'us-east-1') }));
 });
 test('DER conversion rejects malformed or non-minimal integers', () => {
   for (const bytes of [[], [0x30, 0], [0x30, 6, 2, 1, 0, 2, 1, 1], [0x30, 7, 2, 2, 0, 1, 2, 1, 1]]) assert.throws(() => derToJose(bytes));
+});
+
+const productionEnv = { ...env, HID_DEPLOYMENT_ENV: 'production',
+  WORKLOAD_ISSUER_URL: 'https://abc123.execute-api.eu-west-2.amazonaws.com/production',
+  WORKLOAD_CALLER_POLICY_JSON: JSON.stringify([{ roleArn: 'arn:aws:iam::123456789012:role/service/hid-production-ehr',
+    subject: 'hid:production:ehr-api', audiences: ['hid-identity-api', 'hid-lab-api', 'hid-pharmacy-api'] }]) };
+const productionEvent = (stage = 'production') => {
+  const event = makeEvent();
+  event.requestContext.stage = stage;
+  event.requestContext.identity.userArn = 'arn:aws:sts::123456789012:assumed-role/hid-production-ehr/task123';
+  return event;
+};
+function productionSetup() {
+  let signed = 0;
+  const handler = createIssuer(issuerConfiguration(productionEnv), { now: () => 2_000_000_000_000,
+    getPublicKey: async () => publicResult,
+    sign: async (key, message) => { signed++; return { KeyId: keyArn, SigningAlgorithm: 'ECDSA_SHA_256', Signature: sign('sha256', message, privateKey) }; } });
+  return { handler, signed: () => signed };
+}
+test('production issues tokens only for its own stage, issuer and subjects', async () => {
+  const configuration = issuerConfiguration(productionEnv);
+  assert.equal(configuration.stage, 'production');
+  assert.equal(issuerConfiguration(env).stage, 'staging');
+  const { handler, signed } = productionSetup();
+  const response = await handler(productionEvent()); assert.equal(response.statusCode, 200); assert.equal(signed(), 1);
+  const claims = JSON.parse(Buffer.from(JSON.parse(response.body).token.split('.')[1], 'base64url'));
+  assert.equal(claims.iss, 'https://abc123.execute-api.eu-west-2.amazonaws.com/production');
+  assert.equal(claims.sub, 'hid:production:ehr-api');
+  const jwksEvent = productionEvent();
+  jwksEvent.httpMethod = jwksEvent.requestContext.httpMethod = 'GET';
+  jwksEvent.resource = jwksEvent.requestContext.resourcePath = '/.well-known/jwks.json';
+  delete jwksEvent.requestContext.identity;
+  assert.equal((await handler(jwksEvent)).statusCode, 200);
+});
+test('a request context from another stage is denied before any KMS signing', async () => {
+  for (const stage of ['staging', 'Production', '', undefined]) {
+    const { handler, signed } = productionSetup(); const event = productionEvent(); event.requestContext.stage = stage;
+    assert.equal((await handler(event)).statusCode, 403); assert.equal(signed(), 0);
+  }
+  const { handler, signed } = setup(); const event = makeEvent(); event.requestContext.stage = 'production';
+  assert.equal((await handler(event)).statusCode, 403); assert.equal(signed(), 0);
+});
+test('the deployment environment, issuer path and every subject must name the same stage', () => {
+  const stagingRule = JSON.parse(env.WORKLOAD_CALLER_POLICY_JSON);
+  const productionRule = JSON.parse(productionEnv.WORKLOAD_CALLER_POLICY_JSON);
+  for (const changed of [
+    { ...productionEnv, WORKLOAD_CALLER_POLICY_JSON: JSON.stringify(stagingRule) },
+    { ...productionEnv, WORKLOAD_CALLER_POLICY_JSON: JSON.stringify([...productionRule,
+      { ...stagingRule[0], roleArn: 'arn:aws:iam::123456789012:role/service/hid-production-lab', subject: 'hid:staging:lab-api' }]) },
+    { ...productionEnv, WORKLOAD_ISSUER_URL: env.WORKLOAD_ISSUER_URL },
+    { ...env, WORKLOAD_ISSUER_URL: productionEnv.WORKLOAD_ISSUER_URL },
+    { ...env, WORKLOAD_CALLER_POLICY_JSON: JSON.stringify(productionRule) },
+    { ...productionEnv, HID_DEPLOYMENT_ENV: 'development' },
+    { ...productionEnv, HID_DEPLOYMENT_ENV: 'Production' },
+    { ...productionEnv, HID_DEPLOYMENT_ENV: '' },
+    { ...productionEnv, HID_DEPLOYMENT_ENV: undefined },
+  ]) assert.throws(() => issuerConfiguration(changed));
+  assert.throws(() => issuerConfiguration({ ...productionEnv, WORKLOAD_ISSUER_URL: env.WORKLOAD_ISSUER_URL }), /^Error: Invalid workload issuer URL$/);
+  assert.throws(() => issuerConfiguration({ ...env, WORKLOAD_ISSUER_URL: productionEnv.WORKLOAD_ISSUER_URL }), /^Error: Invalid workload issuer URL$/);
+});
+
+// DEP-4-KEY kill switch: a warm issuer re-reads the public key at least every
+// five minutes, so a disabled key stops being published and stops minting.
+test('the cached public key expires after five minutes; a disabled key then stops the JWKS and minting', async () => {
+  let clock = 2_000_000_000_000, reads = 0, signed = 0, disabled = false;
+  const handler = createIssuer(issuerConfiguration(env), { now: () => clock,
+    getPublicKey: async () => { reads++; if (disabled) throw Object.assign(new Error('synthetic'), { name: 'DisabledException' }); return publicResult; },
+    sign: async (key, message) => { signed++; return { KeyId: keyArn, SigningAlgorithm: 'ECDSA_SHA_256', Signature: sign('sha256', message, privateKey) }; } });
+  const jwksEvent = () => { const event = makeEvent();
+    event.httpMethod = event.requestContext.httpMethod = 'GET'; event.resource = event.requestContext.resourcePath = '/.well-known/jwks.json';
+    delete event.requestContext.identity; return event; };
+  assert.equal((await handler(jwksEvent())).statusCode, 200);
+  assert.equal((await handler(makeEvent())).statusCode, 200);
+  assert.equal(reads, 1);
+  disabled = true; clock += 299_000;
+  assert.equal((await handler(jwksEvent())).statusCode, 200, 'within five minutes the warm cache still serves');
+  assert.equal(reads, 1);
+  clock += 1_000;
+  const refused = await handler(jwksEvent());
+  assert.equal(refused.statusCode, 503);
+  assert.deepEqual(JSON.parse(refused.body), { code: 'WORKLOAD_ISSUER_UNAVAILABLE' });
+  assert.equal(reads, 2);
+  const before = signed;
+  assert.equal((await handler(makeEvent())).statusCode, 503);
+  assert.equal(signed, before, 'no token is signed once the key cannot be read');
+  disabled = false;
+  assert.equal((await handler(jwksEvent())).statusCode, 200, 'a re-enabled key is published again on the next read');
 });

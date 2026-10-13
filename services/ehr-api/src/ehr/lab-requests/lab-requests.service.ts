@@ -11,6 +11,7 @@ import {
   UpdateLabRequestDto,
 } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { refuseClosedEncounter } from '../shared/encounter-status';
 import { LabApiService } from '../../integrations/lab-api.service';
 
 export interface LabRequestRow extends QueryResultRow {
@@ -135,6 +136,7 @@ export class LabRequestsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'lab-request',
         async () => {
+          await this.repository.requireOpenEncounter(client, encounterId, patientId, context.facilityId, 'order');
           const result = await client.query<CreatedLabRequestRow>(
             `insert into ehr.lab_requests (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
@@ -282,9 +284,16 @@ export class LabRequestsService {
       context, patientId, 'write_records',
       { action: 'ehr.lab-request.update', resourceType: 'lab-request', resourceId: requestId },
       async (client) => {
+        // An activation share-locks the encounter before the request, the order its retraction locks in.
+        const encounterStatus = input.status === OrderStatus.Active
+          ? await this.repository.lockEncounterStatus(client, encounterId, patientId, context.facilityId)
+          : undefined;
         const current = await this.lock(client, context, patientId, encounterId, requestId);
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_LAB_REQUEST_TRANSITION', 'Lab request status transition is not allowed');
+        }
+        if (encounterStatus && current.status !== OrderStatus.Active) {
+          refuseClosedEncounter(encounterStatus, current.status === OrderStatus.OnHold ? 'resume' : 'order');
         }
         await this.repository.setChangeReason(client, input.changeReason);
         const result = await client.query<CreatedLabRequestRow>(

@@ -312,7 +312,7 @@
       "ecrImagesPerRepository": 25,
       "kmsKeys": 4,
       "secretInterfaces": 14,
-      "wafs": 1,
+      "wafs": 2,
       "sqsQueuesAndDlqs": 2,
       "s3Buckets": 1
     },
@@ -417,7 +417,7 @@
       "ecrImagesPerRepository": 50,
       "kmsKeys": 4,
       "secretInterfaces": 14,
-      "wafs": 1,
+      "wafs": 2,
       "sqsQueuesAndDlqs": 2,
       "s3Buckets": 1
     },
@@ -520,9 +520,9 @@
       },
       "logRetentionDays": 365,
       "ecrImagesPerRepository": 100,
-      "kmsKeys": 3,
+      "kmsKeys": 4,
       "secretInterfaces": 14,
-      "wafs": 1,
+      "wafs": 2,
       "sqsQueuesAndDlqs": 2,
       "s3Buckets": 1
     }

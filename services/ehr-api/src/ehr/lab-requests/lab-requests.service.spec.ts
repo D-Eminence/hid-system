@@ -33,7 +33,9 @@ const row = (status: OrderStatus): LabRequestRow => ({
 
 describe('LabRequestsService handoff to Lab', () => {
   const labApi = { acceptEhrOrder: jest.fn() };
-  const repository = { run: jest.fn(), executeCreate: jest.fn() };
+  // The encounter is open (CLIN-EIE): the share-locked status check passes.
+  const repository = { run: jest.fn(), executeCreate: jest.fn(),
+    requireOpenEncounter: jest.fn(async () => 'in_progress'), lockEncounterStatus: jest.fn(async () => 'in_progress') };
   const input = { testCodeSystem: 'loinc', testCode: '718-7', testDisplay: 'Hemoglobin', priority: 'routine',
     status: OrderStatus.Active, clinicalInformation: 'Fatigue' };
 
@@ -116,6 +118,9 @@ const fakeDatabase = (before: LabRequestRow, after: LabRequestRow = before) => {
     executeCreate: jest.fn(async (...args: unknown[]) => (args[7] as () => Promise<unknown>)()),
     setChangeReason: jest.fn(async () => undefined),
     exists: jest.fn(async () => true),
+    // The encounter is open (CLIN-EIE): the share-locked status check passes.
+    requireOpenEncounter: jest.fn(async () => 'in_progress'),
+    lockEncounterStatus: jest.fn(async () => 'in_progress'),
   };
   const labApi = { acceptEhrOrder: jest.fn().mockResolvedValue(workItem) };
   return { query, repository, labApi, service: new LabRequestsService(repository as never, labApi as never) };

@@ -2,8 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service';
+import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
+import { lockEncounterStatus, refuseClosedEncounter } from '../ehr/shared/encounter-status';
 import { IdentityApiService } from '../integrations/identity-api.service';
 import type { StorageProvider } from '../storage/storage.types';
 import { STORAGE_PROVIDER } from '../storage/storage.types';
@@ -70,6 +72,13 @@ export class DocumentService {
       }
       if (existing) throw new ConflictException('An identical request is already being processed');
 
+      if (input.encounterId) {
+        // A document linked to an encounter is a record of it (CLIN-EIE, 0084): the encounter is share-locked
+        // and must not be cancelled or entered in error.
+        const encounterStatus = await lockEncounterStatus(client, input.encounterId, input.patientId, context.facilityId);
+        if (!encounterStatus) throw new DomainProblem(404, 'ENCOUNTER_NOT_FOUND', 'Encounter was not found');
+        refuseClosedEncounter(encounterStatus, 'record');
+      }
       const documentId = randomUUID();
       // Clinical objects live under a non-expiring lifecycle prefix. The
       // version ID captured after upload remains the immutable OCR boundary.

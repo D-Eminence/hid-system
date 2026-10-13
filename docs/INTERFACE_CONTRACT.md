@@ -242,7 +242,8 @@ patient mapping on use.
 `GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
 grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
 returns at most 50 completed encounters and 50 current signed/amended note
-revisions, after fresh Identity authorization through the EHR workload caller.
+revisions of completed encounters (since 0084), after fresh Identity
+authorization through the EHR workload caller.
 It names the other five record categories as withheld from the patient, not as
 absent (§11, "Record summaries").
 These routes accept no browser-selected patient identity. Patient record access
@@ -266,6 +267,12 @@ notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
 Activation also requires the platform `break_glass_enabled` control inside the
 activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
+It also requires an active `emergency` purpose of use, which no migration seeds
+(0082 seeds only `direct-care`); without it activation also returns
+`423 BREAK_GLASS_DISABLED` ("Emergency access is not enabled on this
+platform"), where it returned `400 INVALID_CONSENT_COMMAND`. Break-glass is off
+at launch (owner default, deny by default; release checklist P10 and P11): `break_glass_enabled`
+is false and no `emergency` code exists.
 The summary's sections, the read permission each needs, its limits and audit
 counts are in §11, "Record summaries".
 
@@ -466,8 +473,11 @@ approved service workload identity + exact caller name
 
 Identity validates both. Cookie mutation validation also propagates the exact
 Origin and CSRF header/cookie evidence. Production workload evidence is an
-issuer/JWKS-validated, audience-bound, unexpired JWT with an exact configured
-caller subject; local per-caller secrets are development-only.
+issuer/JWKS-validated, audience-bound, unexpired ES256 JWT with an exact
+configured caller subject, `exp` and `iat` (at most 300 seconds old and not
+issued in the future, 5 seconds of clock tolerance) and `token_use: workload`;
+any other token is refused `401` (ADR-047). Local per-caller secrets are
+development-only.
 
 Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 `POST` for cookie mutation revalidation. Patient decisions use
@@ -816,6 +826,81 @@ All writes require:
 * audit
 * appropriate concurrency protection
 
+### Launch module set
+
+Lab, Pharmacy, OCR and Outreach are off at launch (decision D17); EHR
+prescriptions and lab requests are records only. Migration 0084 withdrew
+`ehr.lab-request.write`, `lab.work-item.accept`, `lab.accession.create`,
+`pharmacy.work-item.accept` and `pharmacy.dispensing.create` from every role,
+so these routes answer `403 PERMISSION_DENIED` before any write or call to Lab
+or Pharmacy:
+
+- `POST` and `PATCH .../lab-requests` and `POST .../lab-requests/:requestId/lab-work-item`;
+- `POST .../prescriptions/:prescriptionId/pharmacy-work-item`;
+- Lab's EHR-order acceptance and accession creation, and Pharmacy's
+  acceptance and dispensing.
+
+The read permissions stay, so existing lab requests, prescriptions and Lab and
+Pharmacy records remain readable. Prescriptions are still created and changed
+in the EHR. An existing lab request changes status only through its
+encounter: cancelling the encounter cancels its open lab requests, and marking
+it entered in error marks them entered in error ("Encounter status and its
+records"). An open lab request of a completed encounter that is not
+retracted, or of an encounter that was already cancelled or entered in error,
+stays as it is. Re-enabling a module takes its own decision, its fixes, a
+staging acceptance run and a reviewed migration granting the permissions
+again; the sections on the Lab and Pharmacy handoffs below describe the routes
+as they work then.
+
+### Encounter status and its records
+
+An encounter's status decides what may still be recorded on it (CLIN-EIE,
+migration 0084). `PATCH /api/v1/ehr/patients/:patientId/encounters/:encounterId`
+moves an encounter only along these transitions; any other answers
+`409 INVALID_ENCOUNTER_TRANSITION`:
+
+| From | To |
+|---|---|
+| `planned` | `in_progress`, `cancelled`, `entered_in_error` |
+| `in_progress` | `on_hold`, `completed`, `cancelled`, `entered_in_error` |
+| `on_hold` | `in_progress`, `cancelled`, `entered_in_error` |
+| `completed` | `entered_in_error` |
+| `cancelled`, `entered_in_error` | none |
+
+Marking an encounter entered in error (a wrong-patient retraction, possible
+also after completion) marks, in the same transaction and under the
+encounter's row lock, its draft, signed and amended notes `entered_in_error`,
+its diagnoses' `verificationStatus` `entered_in_error`, and its draft, active
+and on-hold prescriptions and lab requests `entered_in_error`. Cancelling an
+encounter cancels its draft, active and on-hold prescriptions and lab
+requests, and leaves its notes and diagnoses. Completed orders and vitals keep
+their state. Each changed record gets a version carrying the request's
+`changeReason`, and the encounter's audit event (`ehr.encounter.update`)
+records `cascade`: the new status and the ids changed in each category
+(`clinicalNoteIds`, `diagnosisIds`, `prescriptionIds`, `labRequestIds`). The
+response is the encounter, as before; list the records to see the change.
+Lab and Pharmacy are not told (they are off at launch; Pharmacy refuses to
+dispense a prescription that is no longer active, 0080).
+
+Creates and order activations check the encounter, under a share lock, and
+answer `409 ENCOUNTER_NOT_OPEN` without writing anything:
+
+| Encounter | Notes (also OCR-imported), vitals, diagnoses, documents linked to it | New prescription or lab request; activating a draft one | Resuming an on-hold order |
+|---|---|---|---|
+| `planned`, `in_progress`, `on_hold` | allowed | allowed | allowed |
+| `completed` | allowed (late documentation, versioned and audited) | `409 ENCOUNTER_NOT_OPEN` | allowed |
+| `cancelled`, `entered_in_error` | `409 ENCOUNTER_NOT_OPEN` | `409 ENCOUNTER_NOT_OPEN` | `409 ENCOUNTER_NOT_OPEN` |
+
+An idempotent replay of an earlier create still returns its record. Changes
+to existing records are not checked against the encounter's status: a note
+amendment, a diagnosis update and a vital correction follow their own rules. A
+diagnosis whose `verificationStatus` is `entered_in_error` cannot be changed
+at all: `409 DIAGNOSIS_NOT_AMENDABLE`. A vital's recorded values are changed
+only by a correction (`POST .../vitals/:vitalId/corrections`); the database
+refuses any other update of them (D8). The database enforces each of these
+rules too, so a writer that bypasses the API gets the same refusal
+(`DATABASE.md`, "EHR clinical safety and launch module set (0084)").
+
 ### EHR lab requests sent to Lab
 
 EHR saves a lab request, then, when it is active, asks Lab to accept it
@@ -923,8 +1008,8 @@ within its millisecond (earlier in that millisecond, or tied with a lower
 
 Two read-only summaries return the same seven arrays, each newest first:
 `encounters` (completed), `notes` (signed or amended, with the current
-revision's content), `vitals`, `diagnoses`, `prescriptions`, `labRequests` and
-`documents`.
+revision's content; which encounters' notes depends on the summary, below),
+`vitals`, `diagnoses`, `prescriptions`, `labRequests` and `documents`.
 
 - `GET /api/v1/ehr/me/records`: the patient's own records, from every facility.
 - `GET /api/v1/ehr/patients/:patientId/emergency-records`: the break-glass
@@ -942,7 +1027,11 @@ Both also return:
 
 **Patient summary.** Only encounters and notes are released to the patient:
 `released` is `["encounters","notes"]` and `withheld` is
-`["vitals","diagnoses","prescriptions","labRequests","documents"]`. Which other
+`["vitals","diagnoses","prescriptions","labRequests","documents"]`. A note is
+released only once its encounter is completed (decision D7, since 0084): the
+notes of an encounter in progress, on hold, cancelled or entered in error are
+not returned, whatever the note's own status, and row-level security refuses
+them to the patient's session as well. Which other
 categories are released, and on which conditions, is an open product decision;
 this is the current default. The audit event `ehr.patient.self.records.read`
 records `encounterCount`, `noteCount` and `withheldCategories`.
@@ -957,12 +1046,18 @@ require: vitals `ehr.vital.read`, diagnoses `ehr.diagnosis.read`, prescriptions
 authorization bypass: a category the reader lacks the permission for is
 withheld. The seeded doctor, clinician and nurse roles hold all seven.
 
+- `notes` leaves out the notes of an encounter entered in error (since 0084).
+  Notes of open, completed and cancelled encounters are returned; whether
+  cancelled encounters' notes belong in the summary is part of the open
+  break-glass scope decision (D9).
+
 - `documents` lists only documents whose effective status is `available`: the
   latest scan of the exact stored object version and SHA-256 is clean, the rule
   the download applies. Each has `status` `available`, `scanStatus` `clean`,
   and `mediaType` as the scan detected it (as declared if the scan named none).
 - `vitals` are returned as first recorded (the vital row's eight measurement
-  columns, which no API route changes), with the same fields as before; a
+  columns, which no API route changes and, since 0084, the database refuses
+  to change), with the same fields as before; a
   vital's corrections are not applied. Applying them is pending the product
   decision on correction semantics (proposed default: the current correction
   is the whole current set, as Health-id's clinician chart applies it); the

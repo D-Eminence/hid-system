@@ -13,8 +13,9 @@ async function bootstrap(): Promise<void> {
   }
   const provider: WorkerOcrProvider = config.OCR_PROVIDER === 'textract'
     ? new TextractOcrProvider(config) : new TestOcrProvider();
-  const worker = new OcrWorker(config, new PostgresWorkerRepository(config),
-    new S3ExactDocumentReader(config), provider);
+  const repository = new PostgresWorkerRepository(config);
+  await repository.verifyRuntimeRole();
+  const worker = new OcrWorker(config, repository, new S3ExactDocumentReader(config), provider);
   process.once('SIGTERM', () => worker.stop());
   process.once('SIGINT', () => worker.stop());
   await worker.run();

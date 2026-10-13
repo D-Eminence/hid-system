@@ -9,9 +9,10 @@ import { ClinicalRepository } from '../shared/clinical.repository';
 
 /**
  * Categories released to the patient (INTERFACE_CONTRACT.md, "Patient sessions and self service"):
- * completed encounters and current signed/amended note revisions, the only categories with
- * patient-self row-level security policies (migration 0030). The service defines the release
- * set itself, so a later policy cannot widen the patient response on its own.
+ * completed encounters and the current signed/amended note revisions of completed encounters, the
+ * only categories with patient-self row-level security policies (migrations 0030 and 0084). The
+ * service defines the release set itself, so a later policy cannot widen the patient response on
+ * its own.
  */
 export const PATIENT_RELEASED = ['encounters', 'notes'] as const;
 /** Not released to the patient until the release decision; returned empty and named as withheld. */
@@ -107,7 +108,7 @@ export class PatientRecordsService {
   private async readSelf(client: PoolClient, patientId: string) {
     const values = [patientId];
     const encounters = await this.section(client, 'encounters', encountersSql(''), values);
-    const notes = await this.section(client, 'notes', notesSql(''), values);
+    const notes = await this.section(client, 'notes', notesSql('', "e.status='completed'"), values);
     return {
       encounters: encounters.rows,
       notes: notes.rows,
@@ -134,7 +135,8 @@ export class PatientRecordsService {
     const read = async (name: EmergencyCategory, sql: string): Promise<SectionRows | undefined> =>
       withheld.includes(name) ? undefined : this.section(client, name, sql, values);
     const encounters = await this.section(client, 'encounters', encountersSql(' and facility_id=$2'), values);
-    const notes = await this.section(client, 'notes', notesSql(' and n.facility_id=$2'), values);
+    const notes = await this.section(client, 'notes',
+      notesSql(' and n.facility_id=$2', "e.status<>'entered_in_error'"), values);
 
     // Vitals as first recorded; corrections are not applied, pending the decision on correction semantics.
     const vitals = await read('vitals', `select id,encounter_id as "encounterId",facility_id as "facilityId",
@@ -209,12 +211,18 @@ function encountersSql(facilityClause: string): string {
     where patient_id=$1 and status='completed'${facilityClause} order by started_at desc,id desc`;
 }
 
-function notesSql(facilityClause: string): string {
+/**
+ * Current signed or amended notes, with the status their encounter must have (PREC-NOTES): the patient
+ * receives notes of completed encounters only (D7, as row-level security requires since 0084); the
+ * emergency summary leaves out notes of an encounter entered in error, a wrong-patient retraction.
+ */
+function notesSql(facilityClause: string, encounterCondition: string): string {
   return `select n.id,n.encounter_id as "encounterId",n.facility_id as "facilityId",
     n.note_type as "noteType",n.title,n.status,n.current_revision_no as "revisionNo",r.content,n.signed_at as "signedAt"
     from ehr.clinical_notes n join ehr.clinical_note_revisions r
       on r.clinical_note_id=n.id and r.revision_no=n.current_revision_no
       and r.patient_id=n.patient_id and r.facility_id=n.facility_id
-    where n.patient_id=$1 and n.status in ('signed','amended')${facilityClause}
+    join ehr.encounters e on e.id=n.encounter_id and e.patient_id=n.patient_id and e.facility_id=n.facility_id
+    where n.patient_id=$1 and n.status in ('signed','amended') and ${encounterCondition}${facilityClause}
     order by n.signed_at desc,n.id desc`;
 }
