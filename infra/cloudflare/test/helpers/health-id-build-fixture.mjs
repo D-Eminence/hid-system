@@ -53,12 +53,18 @@ export function buildValues({ worker = 'hid-web', environment = 'staging', ...ov
   }
 }
 
-export function indexHtml({ extraHead = '' } = {}) {
+/**
+ * The index.html Vite 8 writes for Health-id apps/patient-web (82b474e): the
+ * source's head, its HTML comment kept, plus the entry script, modulepreload
+ * links and stylesheet Vite adds. `extraHead` and `extraBody` append markup.
+ */
+export function indexHtml({ extraHead = '', extraBody = '' } = {}) {
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Patient screens are private: never let a search engine or a preview crawler index one. -->
     <meta name="robots" content="noindex, nofollow" />
     <title>Health ID: Patient</title>
     <script type="module" crossorigin src="/assets/index-AbCdEf12.js"></script>
@@ -66,7 +72,7 @@ export function indexHtml({ extraHead = '' } = {}) {
     <link rel="stylesheet" crossorigin href="/assets/index-Mn56OpQr.css">${extraHead}
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"></div>${extraBody}
   </body>
 </html>
 `

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { access, appendFile, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, readFile, readdir, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { relative, resolve, sep } from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
@@ -103,8 +103,7 @@ test('stages a Health-id build with its provenance for each launch worker and en
       VITE_HID_APP_ORIGIN: origin,
       VITE_HID_TURNSTILE_SITE_KEY: SITE_KEY,
       VITE_HID_SENTRY_DSN: null,
-      VITE_HID_GOOGLE_CLIENT_ID: null,
-    })
+    }, 'the provenance records the public environment record Health-id inlines (src/publicEnvironment.ts), nothing more')
     assert.deepEqual(provenance.files.map((file) => file.path), await filesBelow(siteDirectory))
     for (const file of provenance.files) {
       const bytes = await readFile(resolve(siteDirectory, file.path))
@@ -148,6 +147,13 @@ test('refuses a build that carries a Google client id or loads Google sign-in', 
   await assertRefused(t, { files: {
     'assets/env-Ab12Cd34.js': 'const g={VITE_HID_GOOGLE_CLIENT_ID:`configured`};\n',
   } }, /VITE_HID_GOOGLE_CLIENT_ID/)
+  // As a Health-id build with VITE_HID_GOOGLE_CLIENT_ID set compiles it: the id
+  // inlined as a bare literal where GoogleButton reads it (any value, here not
+  // a googleusercontent.com id), and Google Identity Services called by name.
+  await assertRefused(t, { files: {
+    'assets/App-Ab12Cd34.js': 'function g({onCredential:r}){let i=`placeholder-google-client`;'
+      + 'window.google.accounts.id.initialize({client_id:i,callback:r})}export{g};\n',
+  } }, /Google/)
 })
 
 test('refuses a build without a usable Turnstile site key', async (t) => {
@@ -205,6 +211,66 @@ test('refuses index.html that loads code or styles from anywhere but its own ass
   await assertRefused(t, { html: indexHtml({ extraHead: '\n    <script src="https://cdn.example.invalid/x.js"></script>' }) }, /index\.html/)
   await assertRefused(t, { html: indexHtml({ extraHead: '\n    <script>window.x=1</script>' }) }, /inline script/i)
   await assertRefused(t, { html: indexHtml({ extraHead: '\n    <link rel="stylesheet" href="//cdn.example.invalid/x.css">' }) }, /index\.html/)
+})
+
+test('index.html must be the Vite shell only: every other tag, attribute or markup trick is refused', async (t) => {
+  // With no edge CSP (ADR-052), this check is what keeps index.html to the
+  // build's own /assets/ files, so it allow-lists what Vite writes rather than
+  // looking for known-bad markup.
+  const evil = 'https://evil.example.invalid'
+  const head = [
+    `<base href="${evil}/">`,
+    `<script type="module" data-src="/assets/index-AbCdEf12.js" src="${evil}/x.js"></script>`,
+    `<script type="module" src="/assets/index-AbCdEf12.js" src="${evil}/x.js"></script>`,
+    `<style>@import url(${evil}/x.css)</style>`,
+    `<img src="/assets/logo-Bvs4aJ19.png" onerror="alert(1)">`,
+    `<meta http-equiv="refresh" content="0;url=${evil}/">`,
+    `<meta name="viewport" content="width=device-width" http-equiv="refresh">`,
+    `<iframe src="${evil}/"></iframe>`,
+    `<object data="${evil}/x"></object>`,
+    `<embed src="${evil}/x">`,
+    `<link rel="preload" as="script" href="${evil}/x.js">`,
+    `<link rel="icon" href="${evil}/favicon.ico">`,
+    '<link rel="stylesheet modulepreload" href="/assets/index-Mn56OpQr.css">',
+    '<link rel="stylesheet" href="/assets/index-Mn56OpQr.css" onload="alert(1)">',
+    '<link rel="stylesheet" href="/assets/vendor-react-Gh34IjKl.js">',
+    '<link rel="modulepreload" href="/assets/index-Mn56OpQr.css">',
+    '<link rel="modulepreload" href="/assets/index-AbCdEf12.js?v=1">',
+    `<SCRIPT SRC="${evil}/x.js"></SCRIPT>`,
+    `<script/src="${evil}/x.js"></script>`,
+    `<script type="module" src='${evil}/x.js'></script>`,
+    '<script type="module" crossorigin src="/assets/vendor-react-Gh34IjKl.js"></script>',
+    '<script type="text/javascript" src="/assets/index-AbCdEf12.js"></script>',
+    '<script type="module" src="/assets/index-AbCdEf12.js" crossorigin="use-credentials"></script>',
+    `<!--><script src="${evil}/x.js"></script>-->`,
+    `<!-- a --!><script src="${evil}/x.js"></script><!-- b -->`,
+    `<!---><script src="${evil}/x.js"></script>-->`,
+    `<noscript><img src="${evil}/p.gif"></noscript>`,
+    `<template><script src="${evil}/x.js"></script></template>`,
+    `<svg><script href="${evil}/x.js"></script></svg>`,
+    `<title>x</title><script src="${evil}/x.js"></script>`,
+    '<meta charset="iso-8859-1">',
+  ]
+  for (const extraHead of head) {
+    await assertRefused(t, { html: indexHtml({ extraHead: `\n    ${extraHead}` }) }, /index\.html/)
+  }
+  for (const extraBody of [
+    `<a href="${evil}/">x</a>`,
+    '<div id="root" onclick="alert(1)"></div>',
+    '<div id="other"></div>',
+    'loose text',
+    `<form action="${evil}/"></form>`,
+  ]) await assertRefused(t, { html: indexHtml({ extraBody: `\n    ${extraBody}` }) }, /index\.html/)
+
+  // The entry script itself is required, exactly once.
+  await assertRefused(t, {
+    html: indexHtml().replace('<script type="module" crossorigin src="/assets/index-AbCdEf12.js"></script>', ''),
+  }, /index\.html.*entry script/)
+  await assertRefused(t, {
+    html: indexHtml().replace('src="/assets/index-AbCdEf12.js"></script>', 'src="/assets/index-AbCdEf12.js">alert(1)</script>'),
+  }, /index\.html/)
+  await assertRefused(t, { html: `${indexHtml()}<script src="${evil}/x.js"></script>` }, /index\.html/)
+  await assertRefused(t, { html: indexHtml().replace('<!doctype html>', '') }, /index\.html/)
 })
 
 test('refuses a build without exactly one Health-id public environment record', async (t) => {
@@ -284,6 +350,87 @@ test('restaging replaces the previous artefact completely', async (t) => {
   assert.deepEqual(await filesBelow(siteDirectory), await filesBelow(fixture.buildDirectory))
 })
 
+/** Every entry below `directory`, with file contents and link targets, to show nothing changed. */
+async function snapshot(directory) {
+  const entries = {}
+  async function visit(current) {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const path = resolve(current, entry.name)
+      const key = relative(directory, path).split(sep).join('/')
+      if (entry.isSymbolicLink()) entries[key] = `symlink -> ${await readlink(path)}`
+      else if (entry.isDirectory()) {
+        entries[`${key}/`] = 'directory'
+        await visit(path)
+      } else entries[key] = (await readFile(path)).toString('base64')
+    }
+  }
+  await visit(directory)
+  return entries
+}
+
+test('refuses to stage over anything but an earlier artefact of the same Worker and environment, and changes nothing', async (t) => {
+  const fixture = await stageFixture(t)
+  const adminBuild = await writeHealthIdBuild(resolve(fixture.root, 'admin-build'), { worker: 'hid-admin' })
+  const productionBuild = await writeHealthIdBuild(resolve(fixture.root, 'production-build'), { environment: 'production' })
+  const stageOther = (build, worker, environment) => (destination) => stageHealthIdBuild({
+    build, sourceCommit: SOURCE_COMMIT, worker, environment, stagedDirectory: destination,
+  })
+  const outside = resolve(fixture.root, 'outside')
+  await mkdir(outside)
+  await writeFile(resolve(outside, 'important.txt'), 'keep me\n')
+  const cases = [
+    ['an unrelated directory', async (destination) => {
+      await mkdir(resolve(destination, 'nested'), { recursive: true })
+      await writeFile(resolve(destination, 'important.txt'), 'keep me\n')
+      await writeFile(resolve(destination, 'nested', 'also-important.txt'), 'keep me too\n')
+    }],
+    ['a regular file', (destination) => writeFile(destination, 'keep me\n')],
+    ['a symbolic link to a directory', (destination) => symlink(outside, destination)],
+    ['site/ and provenance.json of another schema', async (destination) => {
+      await mkdir(resolve(destination, 'site'), { recursive: true })
+      await writeFile(resolve(destination, 'site', 'index.html'), '<!doctype html>\n')
+      await writeFile(resolve(destination, 'provenance.json'),
+        JSON.stringify({ schema_version: 'something-else/v1', worker: 'hid-web', environment: 'staging' }))
+    }],
+    ['site/ and a provenance.json that is not JSON', async (destination) => {
+      await mkdir(resolve(destination, 'site'), { recursive: true })
+      await writeFile(resolve(destination, 'provenance.json'), 'not json\n')
+    }],
+    ['an earlier artefact with an extra file beside it', async (destination) => {
+      await fixture.stage({ stagedDirectory: destination })
+      await writeFile(resolve(destination, 'notes.txt'), 'keep me\n')
+    }],
+    ['an earlier artefact whose site is a symbolic link', async (destination) => {
+      await fixture.stage({ stagedDirectory: destination })
+      await rm(resolve(destination, 'site'), { recursive: true })
+      await symlink(outside, resolve(destination, 'site'))
+    }],
+    ['the artefact of another Worker', stageOther(adminBuild, 'hid-admin', 'staging')],
+    ['the artefact of another environment', stageOther(productionBuild, 'hid-web', 'production')],
+  ]
+  for (const [index, [label, prepare]] of cases.entries()) {
+    const parent = resolve(fixture.root, `case-${index}`)
+    await mkdir(parent)
+    const destination = resolve(parent, 'staged')
+    await prepare(destination)
+    const before = { parent: await snapshot(parent), outside: await snapshot(outside) }
+    await assert.rejects(fixture.stage({ stagedDirectory: destination }), (error) => {
+      assert.ok(error instanceof HealthIdArtifactError, `${label}: expected a refusal, got ${error}`)
+      assert.ok(error.issues.some((issue) => /not an earlier staged Health-id artefact for hid-web staging/.test(issue)),
+        `${label}: unexpected issues:\n- ${error.issues.join('\n- ')}`)
+      return true
+    }, label)
+    assert.deepEqual({ parent: await snapshot(parent), outside: await snapshot(outside) }, before,
+      `${label}: a refused stage must leave the destination and its parent unchanged`)
+  }
+
+  // Nothing is lost by replacing an empty directory, such as a fresh mkdtemp.
+  const empty = resolve(fixture.root, 'empty')
+  await mkdir(empty)
+  const { siteDirectory } = await fixture.stage({ stagedDirectory: empty })
+  assert.deepEqual(await filesBelow(siteDirectory), await filesBelow(fixture.buildDirectory))
+})
+
 test('the stage command reports a refusal, writes nothing, and stages an accepted build', async (t) => {
   const root = await temporaryDirectory()
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -300,6 +447,23 @@ test('the stage command reports a refusal, writes nothing, and stages an accepte
     return true
   })
   assert.equal(await exists(stagedDirectory), false)
+
+  // A mistyped --staged-directory that names anything but an earlier artefact
+  // of this Worker and environment is refused and left as it was.
+  const mistyped = resolve(root, 'not-an-artefact')
+  await mkdir(resolve(mistyped, 'nested'), { recursive: true })
+  await writeFile(resolve(mistyped, 'important.txt'), 'keep me\n')
+  await writeFile(resolve(mistyped, 'nested', 'also-important.txt'), 'keep me too\n')
+  const mistypedArgs = args(good)
+  mistypedArgs[mistypedArgs.indexOf('--staged-directory') + 1] = mistyped
+  await assert.rejects(execute(process.execPath, mistypedArgs), (error) => {
+    assert.equal(error.code, 1)
+    assert.match(error.stderr, /Refusing to stage/)
+    assert.match(error.stderr, /not an earlier staged Health-id artefact/)
+    return true
+  })
+  assert.deepEqual(await filesBelow(mistyped), ['important.txt', 'nested/also-important.txt'])
+  assert.deepEqual((await readdir(root)).sort(), ['bad', 'good', 'not-an-artefact'])
 
   const { stdout } = await execute(process.execPath, args(good))
   const summary = JSON.parse(stdout)
