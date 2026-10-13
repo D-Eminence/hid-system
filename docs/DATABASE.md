@@ -2479,7 +2479,9 @@ Tests:
   recovery hold on approval, PIN and emergency contacts; the staff list
   names the patient of the active approval only, not of the pending or the
   revoked one),
-  `verify-patient-search-runtime.mjs` (new: lookup `200`, three identical
-  `404`s, `400`, audit reasons, uniform access-request answer, `429`s) and
+  `verify-patient-search-runtime.mjs` (new: lookup `200`, one identical `404`
+  for every refusal, whether row-level security hides the patient or the
+  authorization check refuses one the caller can read, `400`, audit reasons,
+  uniform access-request answer, `429`s for refusals only) and
   `verify-registration-review-runtime.mjs` (registration review, unchanged,
   passes under the narrowed policy).
