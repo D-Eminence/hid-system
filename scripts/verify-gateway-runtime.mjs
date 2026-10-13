@@ -23,8 +23,9 @@
 //   node scripts/verify-gateway-runtime.mjs --pinned-image
 //     runs nginx from the image gateway/Dockerfile pins by digest (docker run
 //     on the host network, as this user, with only the temporary directory
-//     mounted). CI runs this form: npm run verify:gateway-runtime:image in the
-//     workspace job of .github/workflows/tuf-local-gates.yml.
+//     mounted). CI runs this form: npm run verify:gateway-runtime:image is the
+//     gateway-runtime step of release/scripts/run-workspace-gates.mjs, which
+//     the workspace job of .github/workflows/tuf-local-gates.yml runs.
 //   HID_NGINX_BINARY=/path/to/nginx node scripts/verify-gateway-runtime.mjs
 //     runs a local binary, which should be the nginx release the pinned image
 //     runs (1.29.x); no container engine is used.
