@@ -81,7 +81,7 @@ its refresh-cookie path never matches a platform refresh token
   - Password lockout (`auth.login_attempts`) is unchanged.
 - **Mandatory for all platform roles.** No path to a platform session skips the
   second factor, and every `/admin` route requires a platform session.
-- **Mandatory for staff too (MFA-1, 0088, `BRANCH:launch/staff-mfa`).** Staff
+- **Mandatory for staff too (MFA-1, 0088, D-Eminence/hid-system#71).** Staff
   sign-in uses the same factor, recovery codes, challenges and assurance table,
   with its own challenge cookie and routes (§10). An account has one factor
   whichever kind of session it signs in to.
@@ -224,7 +224,7 @@ The rehearsal runs the new SQL suite automatically and records
 
 ## 10. Staff sessions are MFA-verified (MFA-1, 0088)
 
-`BRANCH:launch/staff-mfa`, launch blocker MFA-1, decision D14 (MFA part):
+D-Eminence/hid-system#71, launch blocker MFA-1, decision D14 (MFA part):
 every staff session that can reach patient data is TOTP-verified. There is no
 permission or role allowlist. ADR-054 records the decision;
 `INTERFACE_CONTRACT.md` ("Staff sign-in with an authenticator") has the full

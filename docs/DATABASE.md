@@ -3126,7 +3126,7 @@ Tests:
 ## Staff MFA sessions (0088)
 
 `0088_staff_mfa_sessions.sql` is the database part of launch blocker MFA-1
-(decision D14, ADR-054; change `BRANCH:launch/staff-mfa`): every staff
+(decision D14, ADR-054; change D-Eminence/hid-system#71): every staff
 session that can reach patient data is MFA-verified. 0001 through 0087 are
 unchanged. A staff session uses the 0069 tables, as a platform session does:
 `auth.mfa_factors`, `auth.mfa_recovery_codes`, `auth.mfa_login_challenges` and

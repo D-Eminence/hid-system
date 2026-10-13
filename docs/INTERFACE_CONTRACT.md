@@ -75,7 +75,7 @@ rules below come from D-Eminence/hid-system#39, which is not yet deployed. Platf
 enrollment cookie rule and the lookups' actor condition come from
 D-Eminence/hid-system#50, also not deployed. Staff sign-in with an
 authenticator, the `STAFF_MFA_REQUIRED` refusals and the refusal of a staff
-Google exchange (below) come from `BRANCH:launch/staff-mfa` (launch blocker
+Google exchange (below) come from D-Eminence/hid-system#71 (launch blocker
 MFA-1, migration 0088), also not deployed.
 
 Identity sets three cookies at sign-in and on every refresh (`setCookies` in

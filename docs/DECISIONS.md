@@ -3365,7 +3365,7 @@ Related ADRs: ADR-032, ADR-033, ADR-034, ADR-035, ADR-047.
 
 # ADR-054: Every Staff Session Is MFA-Verified; a First Enrolment Needs a Fresh Proof
 
-Status: Proposed for source implementation (`BRANCH:launch/staff-mfa`,
+Status: Proposed for source implementation (D-Eminence/hid-system#71,
 migration 0088). Not merged or deployed.
 
 Date: 2026-10-13

@@ -315,7 +315,7 @@ proposal; that change is the place to alter it.
 ### Staff MFA (MFA-1, D14 MFA part)
 
 Decided under the owner default "verified identity for sensitive
-operations", and implemented in `BRANCH:launch/staff-mfa` (migration 0088;
+operations", and implemented in D-Eminence/hid-system#71 (migration 0088;
 ADR-054; release checklist §2, "Staff MFA"; `INTERFACE_CONTRACT.md`, "Staff
 sign-in with an authenticator"; `PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §10).
 

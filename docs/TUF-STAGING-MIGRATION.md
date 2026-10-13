@@ -156,7 +156,7 @@ The executable covers:
    active, unheld membership the target holds is refused (and would break the
    N5 index); an exact re-promotion and memberships beside inactive, held or
    other facilities' ones are accepted; staged duplicates are refused.
-   With 0088 (`BRANCH:launch/staff-mfa`): every verifier that signs staff in
+   With 0088 (D-Eminence/hid-system#71): every verifier that signs staff in
    does it with password and authenticator (`staff-session-client.mjs`: the
    password step, the emailed enrolment code on a first sign-in, then a TOTP
    code, or a recovery code when a TOTP step would repeat), so each also
