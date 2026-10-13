@@ -7,7 +7,7 @@ COPY gateway/proxy-headers.conf /tmp/hid-proxy-headers.conf
 FROM nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3 AS runtime
 # Local defaults for every variable the template uses: envsubst leaves an
 # undefined ${NAME} in the configuration. The CDK sets each one in AWS. Locally
-# the resolver is Docker's embedded DNS, no hop is trusted for X-HID-Client-IP,
+# the resolver is Docker's embedded DNS, no hop is trusted for X-Real-IP,
 # the client address is not required, and only the launch modules are routed.
 ENV IDENTITY_API_UPSTREAM=http://identity-api:3001 \
     EHR_API_UPSTREAM=http://ehr-api:3002 \

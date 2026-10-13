@@ -795,7 +795,7 @@ describe('PatientEnrollmentService', () => {
 
   // IP-1: the enrollment IP limits are keyed on the client network. In AWS
   // request.ip is the client only when the edge supplied it (the Worker's
-  // X-HID-Client-IP, applied by the gateway's realip module); otherwise it is
+  // X-Real-IP, applied by the gateway's realip module); otherwise it is
   // the load balancer, inside TRUST_PROXY_CIDRS, and shared by every client.
   describe('client network', () => {
     const vpc = '10.40.0.0/16';

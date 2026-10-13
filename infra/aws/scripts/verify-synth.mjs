@@ -82,7 +82,7 @@ for (const field of sensitiveFields) {
   assert.match(regional.Parameters.IdentitySensitiveSecretArn.Description, new RegExp(`\\b${field}\\b`),
     `the IdentitySensitiveSecretArn description must name ${field}, which the Identity task reads`)
 }
-// The gateway trusts X-HID-Client-IP only from the VPC, requires it outside
+// The gateway trusts X-Real-IP only from the VPC, requires it outside
 // development, resolves upstreams through the VPC resolver, and routes the
 // launch modules unless the synth input HID_ENABLED_API_ROUTES opts staging in.
 const gateways = resources('AWS::ECS::TaskDefinition')
@@ -91,7 +91,7 @@ const gateways = resources('AWS::ECS::TaskDefinition')
 assert.equal(gateways.length, 1)
 const gatewayEnvironment = Object.fromEntries(gateways[0].Environment.map(entry => [entry.Name, entry.Value]))
 const vpcCidr = { development: '10.20.0.0/16', staging: '10.30.0.0/16', production: '10.40.0.0/16' }[environment]
-assert.equal(gatewayEnvironment.VPC_CIDR, vpcCidr, 'the gateway trusts X-HID-Client-IP only from the VPC')
+assert.equal(gatewayEnvironment.VPC_CIDR, vpcCidr, 'the gateway trusts X-Real-IP only from the VPC')
 assert.equal(gatewayEnvironment.GATEWAY_DNS_RESOLVER, vpcCidr.replace(/0\/16$/, '2'), 'the gateway resolves through the VPC resolver')
 assert.equal(gatewayEnvironment.HID_REQUIRE_CLIENT_IP, environment === 'development' ? 'false' : 'true')
 if (environment === 'production' || process.env.HID_ENABLED_API_ROUTES === undefined) {

@@ -825,7 +825,7 @@ test('staging emergency notifications use the existing encrypted ordinary event 
 });
 
 // IP-1, GW-DNS, MOD-1: the gateway takes the client address from the
-// Worker's X-HID-Client-IP only on connections from the VPC (the public ALB),
+// Worker's X-Real-IP only on connections from the VPC (the public ALB),
 // requires it in staging and production, resolves its Cloud Map upstreams per
 // request through the VPC resolver, and routes only the enabled modules.
 function gatewayEnvironment(template: typeof regional): Record<string, unknown> {

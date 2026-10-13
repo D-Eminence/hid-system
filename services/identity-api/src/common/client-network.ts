@@ -75,7 +75,7 @@ function trustedProxies(cidrs: string): BlockList | null {
  * bucket other clients share.
  *
  * request.ip is the client only when the edge put the client address in the
- * forwarding chain: the Cloudflare Worker sends X-HID-Client-IP, and the
+ * forwarding chain: the Cloudflare Worker sends X-Real-IP, and the
  * gateway's realip module makes it the X-Forwarded-For it sends here. In
  * production an address inside TRUST_PROXY_CIDRS is one of our own proxies
  * (the public load balancer, when that header was missing), shared by every

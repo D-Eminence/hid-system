@@ -856,11 +856,11 @@ export class HidRegionalStack extends Stack {
           OCR_API_UPSTREAM: `http://ocr-api.${namespace}:3005`, OUTREACH_API_UPSTREAM: `http://outreach-api.${namespace}:3006`,
           // The Cloud Map names are resolved per request through the VPC resolver.
           GATEWAY_DNS_RESOLVER: vpcDnsResolver(this.configuration.vpcCidr),
-          // X-HID-Client-IP is trusted only from the VPC (the public ALB), the
+          // X-Real-IP is trusted only from the VPC (the public ALB), the
           // same range the backends trust for X-Forwarded-For.
           VPC_CIDR: this.configuration.vpcCidr,
           // Staging and production sit behind the Cloudflare Worker that sets
-          // X-HID-Client-IP; an API request without it is refused.
+          // X-Real-IP; an API request without it is refused.
           HID_REQUIRE_CLIENT_IP: this.configuration.name === 'development' ? 'false' : 'true',
           HID_ENABLED_API_ROUTES: this.configuration.enabledApiRoutes.join(',') };
       }

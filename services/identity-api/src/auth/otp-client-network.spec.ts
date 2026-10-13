@@ -10,7 +10,7 @@ import { OtpService } from './otp.service';
 
 // Recovery start's per-network limit (IP-1). In AWS every request reaches
 // Identity from the gateway task, and the gateway's X-Forwarded-For is the
-// client address the Cloudflare Worker supplied (X-HID-Client-IP, applied by
+// client address the Cloudflare Worker supplied (X-Real-IP, applied by
 // the gateway's realip module). Identity trusts the VPC (TRUST_PROXY_CIDRS),
 // so request.ip is the client. When the edge supplied no client address,
 // request.ip is a VPC address (the load balancer), shared by every client.

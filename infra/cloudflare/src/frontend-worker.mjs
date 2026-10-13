@@ -150,11 +150,13 @@ async function proxyApi(request, deployment, requestUrl) {
   const client = clientAddress(request.headers.get('cf-connecting-ip'))
   for (const name of [
     'cf-connecting-ip', 'cf-ipcountry', 'cf-ray', 'forwarded', 'host', 'x-forwarded-for',
-    'x-forwarded-host', 'x-forwarded-proto', 'x-hid-client-ip', 'x-hid-edge-origin', 'x-real-ip',
+    'x-forwarded-host', 'x-forwarded-proto', 'x-hid-edge-origin', 'x-real-ip',
   ]) headers.delete(name)
   // The only client address the AWS gateway trusts, and only from the VPC;
   // without it the gateway refuses the request in staging and production.
-  if (client) headers.set('x-hid-client-ip', client)
+  // Workers built before this change delete X-Real-IP, so a stale Worker
+  // leaves the gateway without an address instead of passing a caller's on.
+  if (client) headers.set('x-real-ip', client)
   headers.set('x-correlation-id', requestCorrelationId)
   headers.set('x-forwarded-host', requestUrl.host)
   headers.set('x-forwarded-proto', 'https')
