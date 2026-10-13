@@ -610,13 +610,14 @@ try {
   // QoreID is paused or NIN-only enrollment is switched off, a bound NIN (A), a
   // pending one (C, waiting for its password) and one never seen get the same
   // 503, and nothing is looked up, charged or stored.
+  const pendingNin = '90000000003';
   const unseenNin = '90000000004';
   const rateTotal = async () => count('select coalesce(sum(request_count), 0) as count from identity.public_patient_enrollment_rates');
   const comparable = response => ({ status: response.status, ...response.body, instance: undefined, correlationId: undefined });
   const gatedStarts = async () => {
     const answers = [];
-    for (const nin of [ninA, '90000000003', unseenNin]) {
-      answers.push(await post('/identity/patient-enrollments', startBody(nin), { key: randomUUID(), network: '198.51.100.70' }));
+    for (const candidate of [ninA, pendingNin, unseenNin]) {
+      answers.push(await post('/identity/patient-enrollments', startBody(candidate), { key: randomUUID(), network: '198.51.100.70' }));
     }
     return answers;
   };
@@ -693,7 +694,14 @@ try {
     from platform.public_patient_nin_quota_counters where scope = $1 and bucket_period = $2`, [scope, period]);
   assert.equal(await quotaCount('platform', 'day'), ninLookups.length,
     'the platform quota must count exactly the QoreID lookups: no replay, duplicate or refusal');
+  // The hourly network limit is lowered to 2 for this step, so that the three
+  // starts from one /64 below stay within any start rate limit of at least
+  // three per network, however that limit keys its client (an address or a
+  // /64). The quota reads its limits on every lookup.
+  const configuredHourly = process.env.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX;
+  process.env.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX = '2'; resetEnvironmentForTests();
   const environment = getEnvironment();
+  assert.equal(environment.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX, 2);
   const slash64 = host => `2001:db8:85:1::${host}`;
   for (let host = 1; host <= environment.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX; host += 1) {
     expectProblem(await post('/identity/patient-enrollments', startBody(NOT_VERIFIED), { key: randomUUID(),
@@ -724,7 +732,10 @@ try {
   assert.equal(await count(`select count(*) from audit.events
     where action = 'identity.public-patient-enrollment.nin-lookup-quota' and outcome = 'success'`), lookupsAtCap,
   'each charged lookup must be audited');
-  check('the QoreID lookup quota counts exactly the lookups made (none for a replay, duplicate or refusal), refuses the next lookup from an IPv6 /64 over its hourly limit and any lookup over the platform daily cap with 429 VERIFICATION_QUOTA_EXCEEDED before QoreID is called, and audits every decision');
+  if (configuredHourly === undefined) delete process.env.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX;
+  else process.env.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX = configuredHourly;
+  resetEnvironmentForTests();
+  check('the QoreID lookup quota counts exactly the lookups made (none for a replay, duplicate or refusal), refuses the next lookup from an IPv6 /64 over its hourly limit (set to 2 for this check) and any lookup over the platform daily cap with 429 VERIFICATION_QUOTA_EXCEEDED before QoreID is called, and audits every decision');
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: runtimeRole,
     qoreid: 'local stub behind the real adapter; no QoreID call', turnstile: 'local Siteverify stub',
     notification: 'local stub; no delivery', nin_lookups: ninLookups.length, deliveries: deliveries.length,
