@@ -6,7 +6,25 @@ import type { RecoveryOtpPurpose } from './dto/otp.dto';
 
 export type OtpDeliveryOutcome = 'accepted' | 'definitive_failure' | 'unknown';
 
-type WorkloadCredential = { readonly headers: Record<string, string> } | { readonly unavailable: 'missing' | 'invalid' };
+type WorkloadCredential = { readonly headers: Record<string, string> }
+  | { readonly unavailable: 'missing' | 'invalid' | 'expired' };
+
+/**
+ * True only for a JWT whose payload carries an `exp` that has passed. The
+ * token is not verified here; Notification verifies it. Anything that does not
+ * parse is left for Notification to refuse.
+ */
+function workloadTokenExpired(token: string, now: number): boolean {
+  const parts = token.split('.');
+  const payload = parts[1];
+  if (parts.length !== 3 || payload === undefined) return false;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: unknown } | null;
+    return typeof claims?.exp === 'number' && Number.isFinite(claims.exp) && claims.exp * 1000 <= now;
+  } catch {
+    return false;
+  }
+}
 
 @Injectable()
 export class NotificationOtpClient {
@@ -16,7 +34,7 @@ export class NotificationOtpClient {
 
   /**
    * Deliveries this process refused because the workload token file was
-   * missing or unusable in JWT mode. Each one is also logged, without any
+   * missing, unusable or expired in JWT mode. Each one is also logged, without any
    * recipient, code or token, as `notification_workload_token_unavailable`.
    */
   get workloadTokenUnavailableCount(): number {
@@ -126,6 +144,11 @@ export class NotificationOtpClient {
     if (token === undefined) return { unavailable: 'missing' };
     const value = token.trim();
     if (!value || value.length > 16_384 || /\s/.test(value)) return { unavailable: 'invalid' };
+    // A file stays if the agent stops and ECS does not restart it (an exit
+    // within its 60-second restart attempt period, ADR-047 D2). Notification
+    // would refuse the expired token 401, a definitive failure, so an alert
+    // would not be retried; treat it as no token instead.
+    if (workloadTokenExpired(value, Date.now())) return { unavailable: 'expired' };
     return { headers: { 'x-hid-service-authorization': `Bearer ${value}` } };
   }
 }
