@@ -42,8 +42,10 @@
 -- sign-in.
 --
 -- Locks: ACCESS EXCLUSIVE on auth.mfa_login_challenges while the columns and
--- checks are added (the checks scan its rows, which are few and short-lived),
--- held until commit. Every other statement changes functions, comments or one
+-- checks are added, held until commit. The columns need no rewrite; the checks
+-- scan the table, whose rows are kept (one per platform password step so far,
+-- as only platform sign-in wrote them before this change).
+-- Every other statement changes functions, comments or one
 -- permission row. Nothing else is granted: the Identity runtime's table grants
 -- on auth.mfa_login_challenges and auth.session_assurance (runtime-grants.sql)
 -- cover the new columns.

@@ -54,9 +54,10 @@ const environmentSchema = z.object({
   PLATFORM_IDLE_TIMEOUT_SECONDS: z.coerce.number().int().min(300).max(900).default(900),
   PLATFORM_ABSOLUTE_TTL_SECONDS: z.coerce.number().int().min(3600).max(28800).default(28800),
   PLATFORM_STEP_UP_TTL_SECONDS: z.coerce.number().int().min(60).max(300).default(300),
-  // Master key for administrator TOTP secrets and recovery-code digests. When
-  // absent, platform administration sign-in fails closed (503 MFA_UNAVAILABLE)
-  // and no platform session can be issued; the rest of the service is unaffected.
+  // Master key for administrator and staff TOTP secrets, recovery-code digests
+  // and staff enrolment-code digests. When absent, platform administration and
+  // staff sign-in fail closed (503 MFA_UNAVAILABLE, MFA-1 0088) and no platform
+  // or staff session can be issued; patient sign-in is unaffected.
   MFA_SECRET_KEY_B64: optionalString,
   MFA_KEY_VERSION: z.string().trim().min(1).max(64).default('local-v1'),
   HID_DEPLOYMENT_ENV: z.enum(['staging', 'production']).optional(),
