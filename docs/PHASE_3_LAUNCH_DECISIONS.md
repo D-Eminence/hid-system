@@ -194,7 +194,7 @@ documents, OCR and Outreach, `platform.control_enabled`, which the Identity,
 EHR and Outreach guards call on every patient and provider request, raised
 `PLATFORM_CONTROL_UNAVAILABLE` (`503`) under such an owner, and the role
 bootstrap needed a superuser. Both are fixed by
-BRANCH:launch/db-rds-nonsuperuser, with 0083 for the OCR claim's setting.
+D-Eminence/hid-system#63, with 0083 for the OCR claim's setting.
 Owner `BYPASSRLS` is not relied on: document scanning, OCR and Outreach
 campaign registration stay out of the release unless they pass under a
 non-bypass owner (ADR-041).

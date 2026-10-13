@@ -154,7 +154,7 @@ Pharmacy-to-Lab, and Identity-to-EHR wrong-service routes also returned 404.
 | `hid_event_dispatcher` | No domain role | All tables; only exact delivery claim/result/status functions |
 | `hid_event_delivery_commands` | Never inherited | Technical function owner; five domain outbox reads and `integration` state only |
 | `hid_ocr_queue_metrics` | Never inherited | Technical owner of `ocr.worker_queue_metrics()`; reads `ocr.jobs` status and queue time only |
-| `hid_platform_control_reader` | Never inherited | Technical owner of `platform.control_enabled(text)`; reads `platform.control_settings` key and enabled flag only (BRANCH:launch/db-rds-nonsuperuser) |
+| `hid_platform_control_reader` | Never inherited | Technical owner of `platform.control_enabled(text)`; reads `platform.control_settings` key and enabled flag only (D-Eminence/hid-system#63) |
 | `hid_api_runtime` | Nothing | Retired and privilege-free |
 
 The idempotent local bootstrap and assertion-only catalog verification passed.

@@ -319,7 +319,7 @@ Locks. Every lock the bootstrap takes is held until its transaction commits.
 `lock_timeout` (5 s) and `statement_timeout` (120 s) apply to the bootstrap's
 own statements only. The run that first creates
 `platform_controls_definer_read` (the first run of
-BRANCH:launch/db-rds-nonsuperuser, or one after the policy was removed or
+D-Eminence/hid-system#63, or one after the policy was removed or
 changed) takes an `ACCESS EXCLUSIVE` lock on `platform.control_settings`,
 before any other table lock. Until it commits, every control read of the
 Identity, EHR and Outreach guards, that is every request that is not a

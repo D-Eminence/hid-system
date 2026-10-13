@@ -2289,7 +2289,7 @@ Tests:
 On Amazon RDS for PostgreSQL 16 no role is a superuser. The migration
 administrator is a `NOSUPERUSER NOBYPASSRLS CREATEROLE` LOGIN that owns the
 schema (`MIGRATION_RUNBOOK.md` §6), and nothing relies on that owner bypassing
-row-level security (BRANCH:launch/db-rds-nonsuperuser). As such a role,
+row-level security (D-Eminence/hid-system#63). As such a role,
 verified locally on PostgreSQL 16.15, four things failed.
 
 **0015 and the OCR claim (0083).** 0015 gave `ocr.claim_worker_job(text,

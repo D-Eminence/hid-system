@@ -1840,7 +1840,7 @@ Related: ADR-028, ADR-039, ADR-040; release checklist P8 and §4.1.
 
 ## ADR-041 addendum: the non-superuser chain on RDS (launch, 0083)
 
-Status: Accepted (BRANCH:launch/db-rds-nonsuperuser). Items 3 and 4 are
+Status: Accepted (D-Eminence/hid-system#63). Items 3 and 4 are
 implemented for what launch needs; the five technical owners of items 1 and 2
 stay proposed.
 
