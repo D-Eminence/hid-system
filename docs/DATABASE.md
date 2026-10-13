@@ -2604,7 +2604,7 @@ Tests:
 ## Public enrollment windows and NIN lookup quota (0085)
 
 `0085_public_enrollment_windows_and_nin_lookup_quota.sql`
-(BRANCH:launch/identity-enrollment-gates) implements decisions N2(b) and
+(D-Eminence/hid-system#68) implements decisions N2(b) and
 N2(c) in the activation command and caps QoreID NIN lookups of public patient
 enrollment (IP-1). It replaces two functions and adds one table and one
 function; no existing table is changed.
