@@ -253,6 +253,10 @@ token agent's `Workload token renewal unavailable` line on each enabled token
 task, and a metric filter counts notification-api's PHI-free
 `notification.otp.outcome` lines with outcome `definitive_failure`; both feed
 an alarm. A stopped token agent writes no renewal line and is not alarmed.
+The running-task alarms of enabled services treat missing data as breaching,
+so while production starts at zero tasks the five enabled services'
+running-task alarms are in ALARM and notify the topic until the I6 parameter
+file scales each to its live minimum (ADR-053).
 
 This topology preserves an elastic path but does not prove million-user
 capacity. Ceiling changes require representative load/soak, latency/error,

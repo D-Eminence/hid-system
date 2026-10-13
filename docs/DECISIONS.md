@@ -2824,6 +2824,17 @@ Decision:
    group; and `OtpDefinitiveFailures` (at least 3 in 5 minutes), counted from
    notification-api's `notification.otp.outcome` lines whose `outcome` is
    `definitive_failure`. "Dashboards only" is rejected.
+   The running-task alarms of the enabled services treat missing data as
+   breaching with a threshold of at least 1. During the zero-task rollout
+   (decision 2) the five production ones (`GatewayRunningTaskAlarm`,
+   `IdentityApiRunningTaskAlarm`, `EhrApiRunningTaskAlarm`,
+   `NotificationApiRunningTaskAlarm` and `EventDispatcherRunningTaskAlarm`)
+   therefore enter ALARM and notify the topic on the first deploy, and
+   notify again on OK once each service runs its live minimum. That is
+   accepted and announced to the recipients beforehand: the alarm is true
+   (the service serves nothing), and an alarm that followed the desired
+   count would stay silent if a reviewed parameter file left an enabled
+   service at 0 by mistake.
 2. **Production starts at zero tasks (INFRA-COUNT, D17).** Every production
    `*DesiredCount` defaults to 0 and keeps its live minimum and recommended
    count in its description. The autoscaling minimum follows it, so nothing
@@ -2852,22 +2863,44 @@ Decision:
    `notification.otp.outcome`: channel, purpose, outcome (`accepted`,
    `retryable_failure` or `definitive_failure`), the provider that answered
    last (`none` for a refused send), whether the fallback ran, the response
-   `requestId` as correlation id and an allowlisted safe code; never the
-   recipient, the code, the message or provider text. A send the service
-   refuses or cannot route counts as a definitive failure.
-4. **Configuration cannot re-enable a bypass (CFG-PROD).** EHR refuses static
-   S3 keys and the OCR worker static AWS keys in production, as Notification
-   and the event dispatcher already did; production uses ECS task roles only.
-   The synth input `HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED` (default false,
-   refused unless `HID_QOREID_ENABLED=true`) sets Identity's
-   `QOREID_NIN_ONLY_ENROLLMENT_ENABLED`; Identity's own production refusal of
-   that flag belongs to the enrollment change (N1).
+   `requestId` as correlation id and an allowlisted safe code, and, when the
+   fallback ran, the primary provider and its allowlisted safe code
+   (`primaryProvider`, `primarySafeCode`); never the recipient, the code,
+   the message or provider text. A send the service refuses or cannot route
+   counts as a definitive failure. Migration 0047 seeds Brevo as an enabled
+   email and SMS fallback, and Identity plans an enabled fallback; with no
+   Brevo field injected it answers `not_configured`. Before ingress a
+   platform administrator pauses Brevo through the audited
+   `POST /admin/integrations/brevo/pause` (release checklist P21), so that
+   Identity plans no fallback and a definitive SES or Termii failure is
+   reported as the primary's.
+4. **Configuration cannot re-enable a bypass (CFG-PROD).** In production EHR
+   refuses static S3 keys and the AWS SDK's environment keys
+   (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, which
+   its S3 client's default credential chain reads before the task role), and
+   the OCR worker refuses static AWS keys, as Notification, the notification
+   worker and the event dispatcher already did. Every service that calls AWS
+   therefore refuses static keys from its environment in production, and
+   the task definitions give each service only its ECS task role. The synth
+   input `HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED` (default false, refused
+   unless `HID_QOREID_ENABLED=true`) sets Identity's
+   `QOREID_NIN_ONLY_ENROLLMENT_ENABLED`, and a production synth refuses
+   `true` (the regional stack too, however its configuration was built):
+   NIN-only enrollment proves that a NIN exists, not that the caller holds
+   it. The change that ships N1's registry-phone holder step lifts this
+   refusal together with Identity's own production refusal, which belongs to
+   the enrollment change; until both ship, production cannot enable the flag
+   whatever the merge order.
 5. **A production preflight (I1, REC-GOOGLE).**
    `scripts/production-external-preflight.py` is the production counterpart of
    the staging-only preflight: read-only, value-free checks of the auth,
    Identity sensitive and notification provider secrets, the five Identity
    keys, `googleOidcClientIds` present and empty (Google sign-in off), SES
-   production access and DKIM, and the alarm topic. The repository fixes no
+   production access and DKIM, and the alarm topic, whose key it resolves
+   with `kms describe-key` (customer managed, enabled, in the topic's account
+   and region; any spelling of the AWS-managed `alias/aws/sns` key fails) and
+   whose default key policy must allow `cloudwatch.amazonaws.com`
+   `kms:Decrypt` and `kms:GenerateDataKey`. The repository fixes no
    production account, so the approved `HID_AWS_ACCOUNT` and `HID_AWS_REGION`
    are required inputs; the staging account is refused.
 
@@ -2885,12 +2918,15 @@ Consequences:
   (`AWS_DEPLOYMENT_RUNBOOK.md` §1).
 - Production deploys with every service at 0 tasks; the first scale-up is an
   I6 parameter-file change. A parameter file that raises a module that is off
-  fails CloudFormation validation.
+  fails CloudFormation validation. Until each enabled service is scaled, its
+  running-task alarm is in ALARM and has notified the on-call recipients
+  (decision 1).
 - Staging and development: the modules that are off now default to 0 tasks
   and cannot be raised without opting them in; development notification-api
   runs the `otp-email-sms` profile.
-- No WhatsApp OTP, no Brevo fallback unless its key is configured, and no
-  Novu-based patient notifications in production at launch.
+- No WhatsApp OTP, no Brevo fallback (paused, P21, and given no key), no
+  NIN-only enrollment and no Novu-based patient notifications in production
+  at launch.
 - Residual risks: a token agent that stops, rather than failing renewals,
   writes no renewal line, so nothing alarms until callers fail; Identity's
   `notification_workload_token_unavailable` line (an OTP that never reached
@@ -2899,13 +2935,17 @@ Consequences:
 Migration Impact: none.
 
 Security Impact: deny by default. A module that is off cannot run;
-production refuses static AWS keys, a local service token, WhatsApp and every
-OTP profile but `otp-email-sms`; an alarm can reach only its own environment's
-topic. The outcome line and the preflight receipt carry no secret, recipient,
+production refuses static AWS keys, a local service token, WhatsApp, every
+OTP profile but `otp-email-sms` and NIN-only enrollment; an alarm can reach
+only its own environment's topic. The outcome line and the preflight receipt carry no secret, recipient,
 code or message.
 
-Compatibility Impact: a production synth needs the new input; a production
-notification-api started with `NOTIFICATION_DELIVERY_PROFILE=full`, Meta or
-WhatsApp configuration, or a local service token now refuses to start.
+Compatibility Impact: a production synth needs the new input and refuses
+`HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true`; a production notification-api
+started with `NOTIFICATION_DELIVERY_PROFILE=full`, Meta or WhatsApp
+configuration, or a local service token, and a production EHR started with
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or `AWS_SESSION_TOKEN`, now
+refuse to start. The outcome line gains `primaryProvider` and
+`primarySafeCode` when the fallback ran; its other fields are unchanged.
 
 Related ADRs: ADR-032, ADR-033, ADR-034, ADR-035, ADR-047.

@@ -48,6 +48,11 @@ local service token. The Notification Worker (Novu) is off in production
 (`HID_NOTIFICATION_WORKER_ENABLED` is fixed to `false`) and reads no
 `novuApiKey`. Every OTP send writes one PHI-free `notification.otp.outcome` log
 line, and `OtpDefinitiveFailures` alarms on its `definitive_failure` count.
+When the fallback ran, the line also names the primary provider and its safe
+code (`primaryProvider`, `primarySafeCode`); read those for why SES or Termii
+failed. Migration 0047 seeds Brevo as an enabled email and SMS fallback, and
+production gives it no key, so it answers `not_configured`: before ingress a
+platform administrator pauses it (§13 step 5, release checklist P21).
 
 Novu also needs the configured workflow, canonical synthetic patient subscriber
 mapping and approved delivery integration. See
@@ -608,7 +613,15 @@ minimum in its description (ADR-053); the modules that are off (Lab, Pharmacy,
 OCR API and worker, Outreach and the Notification Worker at launch) are pinned
 at 0, and a parameter file that raises one fails CloudFormation validation.
 Every production alarm notifies the operational topic (§13); confirm a
-recipient received the topic's test message before scaling up.
+recipient received the topic's test message before scaling up. While an
+enabled service runs 0 tasks its running-task alarm (missing data is
+breaching) is in `ALARM`: on the first production deploy
+`GatewayRunningTaskAlarm`, `IdentityApiRunningTaskAlarm`,
+`EhrApiRunningTaskAlarm`, `NotificationApiRunningTaskAlarm` and
+`EventDispatcherRunningTaskAlarm` each notify the topic, and notify again on
+`OK` once the service runs its live minimum. Tell the on-call recipients
+before the deploy; a running-task alarm still in `ALARM` after its service
+was scaled is a real failure.
 
 The gateway proxies only the modules in its `HID_ENABLED_API_ROUTES`
 (`identity,ehr` unless a staging synth sets the synth input of that name; a
@@ -693,7 +706,9 @@ Steps:
    from `IdentityApiImageUri`. Record its digest. An earlier image's agent
    refuses `production`, so a token task with it never starts its application.
 2. From the approved SHA, run the §2 gates, including
-   `npm --prefix infra/aws run synth:prod`,
+   `HID_OPERATIONAL_ALARM_TOPIC_ARN=<exact ARN of the §13 topic> HID_AWS_ACCOUNT=<approved account> HID_AWS_REGION=<approved region> npm --prefix infra/aws run synth:prod`
+   (a production synth without the topic ARN fails, ADR-053, so §13 step 1
+   comes first),
    `HID_INFRA_ENV=production npm --prefix infra/aws run verify:synth`,
    `npm --prefix infra/aws run verify:policy` and
    `npm --prefix infra/aws run cost:inventory:check`. Record as a new evidence
@@ -747,7 +762,10 @@ Steps:
      repositories or log groups, or on any other change.
 4. Deploy with every `*DesiredCount` at `0` and the eight workload parameters
    removed from the parameter file. Record the `IssuerUrl` and `JwksUrl`
-   outputs and the signing key ARN. Never record a token.
+   outputs and the signing key ARN. Never record a token. Expect the five
+   running-task alarms of the enabled services to enter `ALARM` and notify the
+   on-call recipients, who were told beforehand (§9); each returns to `OK` in
+   steps 6 and 7 or in §9.
 5. With no task running, verify the issuer:
    - from an operator workstation, `GET <JwksUrl>` and an unsigned
      `POST <IssuerUrl>/token` answer `403` from the web ACL, and its
@@ -780,8 +798,10 @@ Steps:
    `workload-token-agent` container `STOPPED` in a running task, §7 "Agent
    stopped"; no alarm covers it), issuer Lambda errors and API `5XX` for at
    least 15 minutes before continuing with §9. The issuer, renewal and OTP
-   alarms (ADR-053) must stay `OK` and their notifications reach the on-call
-   recipients.
+   alarms (ADR-053) must stay `OK`, the running-task alarms of the services
+   scaled so far must have returned to `OK`, and their notifications must
+   have reached the on-call recipients. The running-task alarms of the
+   services not yet scaled stay in `ALARM` until §9.
 
 Record commands, outputs, the template SHA-256, the asset hash, the image
 digest, the key ARN and the time window. Record no token, credential or
@@ -863,21 +883,37 @@ sender ID; the security owner's production keys (launch plan I1).
    It refuses the staging account, reads only (`sts get-caller-identity`,
    `secretsmanager get-secret-value` for the three production secrets,
    `sesv2 get-account`, `sesv2 get-email-identity`,
-   `sns get-topic-attributes`) and writes a value-free receipt: field
-   presence, a canonical-format boolean per key, `google_sign_in_enabled`,
-   whether the notification secret holds exactly the four fields, SES
-   production access, sending and DKIM, and the topic's key and confirmed
-   subscriptions. It exits 1 unless `launch_profile.passed` is true. The
-   Termii sender-ID approval and the recipients' receipt are not readable from
-   AWS: record them separately (release checklist P18, P16).
-5. Synthesize with `HID_OPERATIONAL_ALARM_TOPIC_ARN`, `HID_AWS_ACCOUNT` and
+   `sns get-topic-attributes`, `kms describe-key` and `kms get-key-policy` for
+   the topic's key; the session needs `kms:DescribeKey` and
+   `kms:GetKeyPolicy` on it) and writes a value-free receipt: field presence,
+   a canonical-format boolean per key, `google_sign_in_enabled`, whether the
+   notification secret holds exactly the four fields, SES production access,
+   sending and DKIM, and for the topic whether its key is customer managed,
+   enabled and in the topic's account and region, whether the key policy
+   lets `cloudwatch.amazonaws.com` call `kms:Decrypt` and
+   `kms:GenerateDataKey`, and the confirmed subscriptions. Any spelling of
+   the AWS-managed `alias/aws/sns` key (alias, alias ARN, key id or key ARN)
+   fails. It exits 1 unless `launch_profile.passed` is true. The Termii
+   sender-ID approval and the recipients' receipt are not readable from AWS:
+   record them separately (release checklist P18, P16).
+5. **Brevo fallback paused** (release checklist P21). After migration 0047
+   is applied in production (it seeds Brevo enabled as the email and SMS
+   fallback) and before ingress, a platform administrator with
+   `platform.integration.manage` pauses Brevo with the audited
+   `POST /api/v1/admin/integrations/brevo/pause` (a critical action: MFA
+   platform session, TOTP step-up, a reason, `If-Match` and
+   `Idempotency-Key`), which records the actor in the integration audit. Identity then plans no fallback, and a definitive SES
+   or Termii failure is reported as the primary's. `GET /api/v1/admin/integrations/brevo`
+   must show it paused.
+6. Synthesize with `HID_OPERATIONAL_ALARM_TOPIC_ARN`, `HID_AWS_ACCOUNT` and
    `HID_AWS_REGION` (§2) and continue with §12.
 
 After deployment, confirm in CloudWatch that every alarm of the stack lists the
 topic as its alarm and OK action, then run a synthetic signup OTP over email
 and over SMS and a recovery OTP, and check that each wrote one
 `notification.otp.outcome` line with outcome `accepted` and no recipient, code
-or message.
+or message. A line with `fallbackUsed: true` means Brevo was not paused (step
+5); its `primaryProvider` and `primarySafeCode` give the primary's result.
 
 Rollback: the topic, key and subscriptions are retained; removing them makes
 alarms notify nothing. To stop notifications without hiding alarm state,

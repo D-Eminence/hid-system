@@ -47,7 +47,8 @@ BRANCH:launch/infra-launch-config): `POST /notifications/otp` delivers
 `email` through SES and `sms` through Termii and answers `400` for `whatsapp`
 without a provider attempt; Identity sends only `email` and `sms`. The `202`
 response's `requestId` is also the correlation id of the one PHI-free
-`notification.otp.outcome` log line written per send. Ordinary domain
+`notification.otp.outcome` log line written per send; when the fallback ran,
+that line also names the primary provider and its safe code. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
 Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
