@@ -897,6 +897,48 @@ describe('PatientEnrollmentService', () => {
         .resolves.toMatchObject({ cookie: started.cookie });
       expect(adapter.verifyNinEnrollment).toHaveBeenCalledTimes(1);
     });
+
+    // FE-4: GET /identity/patient-enrollments/availability answers from the
+    // checks start makes before it reads a NIN, so a client can say that
+    // registration is not open before it asks for one.
+    type Availability = { availability(): Promise<{ open: boolean }> };
+    const availabilityOf = (service: PatientEnrollmentService) =>
+      (service as unknown as Availability).availability();
+
+    it.each(closures)('answers availability closed while %s, as start refuses, reading and charging nothing',
+      async (_label, closed, pause, status, code) => {
+        Object.assign(process.env, open); resetEnvironmentForTests();
+        const { f, adapter, integrations, pause: pauseQoreId } = gated();
+        await expect(availabilityOf(f.service)).resolves.toEqual({ open: true });
+        Object.assign(process.env, closed); resetEnvironmentForTests();
+        if (pause) pauseQoreId();
+        await expect(availabilityOf(f.service)).resolves.toEqual({ open: false });
+        expect(f.queries).toEqual([]);
+        await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+          .rejects.toMatchObject({ status, code });
+        expect(f.queries).toEqual([]);
+        expect(adapter.verifyNinEnrollment).not.toHaveBeenCalled();
+        expect(integrations.consumePublicPatientNinQuota).not.toHaveBeenCalled();
+      });
+
+    it('answers availability closed while the enrollment keys are not configured, as start refuses', async () => {
+      Object.assign(process.env, open); resetEnvironmentForTests();
+      delete process.env.NIN_ENCRYPTION_KEY_B64; resetEnvironmentForTests();
+      const { f, integrations } = gated();
+      await expect(availabilityOf(f.service)).resolves.toEqual({ open: false });
+      await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_CONFIGURATION_UNAVAILABLE' });
+      expect(integrations.assertAvailable).not.toHaveBeenCalled();
+      expect(f.queries).toEqual([]);
+    });
+
+    it('reports a fault reading the runtime pause as a fault, not as closed or open', async () => {
+      Object.assign(process.env, open); resetEnvironmentForTests();
+      const { f, integrations } = gated();
+      integrations.assertAvailable.mockRejectedValueOnce(new DomainProblem(503, 'INTEGRATION_UNAVAILABLE',
+        'Delivery provider is temporarily unavailable'));
+      await expect(availabilityOf(f.service)).rejects.toMatchObject({ status: 503, code: 'INTEGRATION_UNAVAILABLE' });
+    });
   });
 
   describe('QoreID lookup quota per client network (IP-1)', () => {

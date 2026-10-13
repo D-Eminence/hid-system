@@ -1,6 +1,9 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
 
+import { RequestMethod } from '@nestjs/common';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import type { Response } from 'express';
+import { NO_AUDIT, PUBLIC_ROUTE } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { TurnstileService } from '../auth/turnstile.service';
@@ -57,6 +60,44 @@ describe('PatientEnrollmentController', () => {
     for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
     Object.assign(process.env, originalEnvironment);
     resetEnvironmentForTests();
+  });
+
+  it('answers enrollment availability to anyone, unaudited and briefly cacheable (FE-4)', async () => {
+    const route = (controller as unknown as Record<string, unknown>).availability as
+      ((response: Response) => Promise<unknown>) | undefined;
+    expect(route).toBeInstanceOf(Function);
+    expect(Reflect.getMetadata(PATH_METADATA, PatientEnrollmentController)).toBe('identity/patient-enrollments');
+    expect(Reflect.getMetadata(PUBLIC_ROUTE, PatientEnrollmentController)).toBe(true);
+    expect(Reflect.getMetadata(PATH_METADATA, route!)).toBe('availability');
+    expect(Reflect.getMetadata(METHOD_METADATA, route!)).toBe(RequestMethod.GET);
+    // Every caller gets the same answer and it carries no PHI: no audit row
+    // per anonymous read, as for GET /commercial/pricing.
+    expect(Reflect.getMetadata(NO_AUDIT, route!)).toBe(true);
+
+    for (const open of [false, true]) {
+      (service as unknown as { availability: jest.Mock }).availability = jest.fn().mockResolvedValue({ open });
+      const response = { setHeader: jest.fn(), removeHeader: jest.fn() };
+      await expect(route!.call(controller, response as unknown as Response)).resolves.toEqual({ open });
+      expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'public, max-age=30');
+      for (const name of ['Pragma', 'Expires', 'Surrogate-Control']) {
+        expect(response.removeHeader).toHaveBeenCalledWith(name);
+      }
+    }
+    // It reads no input, cookie, Origin or Turnstile token.
+    expect(turnstile.verify).not.toHaveBeenCalled();
+    expect(service.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps a failed availability read uncacheable', async () => {
+    const route = (controller as unknown as Record<string, unknown>).availability as
+      ((response: Response) => Promise<unknown>) | undefined;
+    expect(route).toBeInstanceOf(Function);
+    (service as unknown as { availability: jest.Mock }).availability = jest.fn()
+      .mockRejectedValue(new Error('runtime state unavailable'));
+    const response = { setHeader: jest.fn(), removeHeader: jest.fn() };
+    await expect(route!.call(controller, response as unknown as Response)).rejects.toThrow('runtime state unavailable');
+    expect(response.setHeader).not.toHaveBeenCalled();
+    expect(response.removeHeader).not.toHaveBeenCalled();
   });
 
   it('requires an approved origin before Turnstile or provider work', async () => {
