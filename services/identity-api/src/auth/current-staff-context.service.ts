@@ -1,5 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
+import { DomainProblem } from '../common/problem';
 import type { ActorContext, FacilityAssignment } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CredentialIdentity } from './auth.types';
@@ -145,6 +146,7 @@ export class CurrentStaffContextService {
           and account_role.membership_id = membership.id
           and account_role.facility_id = membership.facility_id
           and account_role.revoked_at is null
+          and auth.facility_role_is_effective(account_role.id)
          left join auth.roles role
            on role.code = account_role.role_code
           and role.active
@@ -159,7 +161,7 @@ export class CurrentStaffContextService {
                  membership.id, membership.facility_id, membership.organization_id,
                  membership.membership_role, membership.app_role, membership.is_primary,
                  facility.name, facility.code
-        order by membership.is_primary desc, facility.name, membership.facility_id`,
+        order by membership.is_primary desc, facility.name, membership.facility_id, membership.id`,
       [subject, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
     );
     const first = result.rows[0];
@@ -205,9 +207,21 @@ export class CurrentStaffContextService {
     sessionId?: string,
     preferredFacilityId?: string,
   ): ActorContext {
+    // N5: a facility binds exactly one membership. 0087 makes a second active
+    // membership at one facility impossible; should one appear anyway, no
+    // facility of this account is bound rather than one chosen by row order.
+    const facilityIds = new Set<string>();
+    for (const facility of identity.facilities) {
+      if (facilityIds.has(facility.id)) {
+        throw new DomainProblem(409, 'FACILITY_MEMBERSHIP_AMBIGUOUS',
+          'More than one active membership binds this account at one facility; a platform administrator must resolve it');
+      }
+      facilityIds.add(facility.id);
+    }
     const facilities = [...identity.facilities].sort((left, right) => {
       if (left.isPrimary !== right.isPrimary) return left.isPrimary ? -1 : 1;
-      return left.name.localeCompare(right.name) || left.id.localeCompare(right.id);
+      return left.name.localeCompare(right.name) || left.id.localeCompare(right.id)
+        || left.membershipId.localeCompare(right.membershipId);
     });
     const selected = facilities.find((facility) => facility.id === preferredFacilityId)
       ?? facilities.find((facility) => facility.isPrimary)

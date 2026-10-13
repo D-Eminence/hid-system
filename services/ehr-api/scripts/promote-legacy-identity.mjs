@@ -13,6 +13,7 @@ import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
 import { normalizeContactForLookup, contactLookupHmac } from './contact-lookup.mjs';
 import { validLegacyPinHash } from './legacy-pin-hash.mjs';
+import { bindingMembership, duplicateFacilityMemberships } from './membership-duplicates.mjs';
 
 const { Client } = pg;
 const targetUrl = process.env.DATABASE_URL;
@@ -313,6 +314,45 @@ async function validateRbacVocabulary(client) {
           );
         }
       }
+    }
+  }
+}
+
+// N5 (0087): refuse, before any write, memberships that would give one staff
+// identity two active bindings at one facility, within the staged rows or
+// beside a membership the target already holds. Operator plan I4 resolves
+// them in the source; nothing is promoted until then.
+async function validateMembershipUniqueness(client) {
+  const staged = [];
+  let cursor = '';
+  for (;;) {
+    const rows = await stagedRows(client, 'memberships', cursor);
+    if (rows.rows.length === 0) break;
+    for (const row of rows.rows) {
+      cursor = row.source_pk;
+      staged.push(row);
+    }
+  }
+  const [duplicate] = duplicateFacilityMemberships(staged);
+  if (duplicate) {
+    const row = staged.find((candidate) => candidate.source_pk === duplicate.sourcePks[1]);
+    throw new PromotionConflict('memberships', row.source_pk, 'invalid_source_value', row.payload_sha256.trim(), null,
+      { field: 'membership', reason: 'duplicate_active_facility_membership', sourcePks: duplicate.sourcePks,
+        operatorPlan: 'I4' });
+  }
+  for (const row of staged) {
+    const source = row.payload;
+    if (!bindingMembership(source)) continue;
+    const existing = await client.query(
+      `select id::text from identity.staff_facility_memberships
+        where staff_id = $1 and facility_id = $2 and id <> $3
+          and active and migration_hold_reason is null
+        limit 1`,
+      [source.staff_account_id, source.facility_id, source.id],
+    );
+    if (existing.rows.length > 0) {
+      throw new PromotionConflict('memberships', row.source_pk, 'target_content_mismatch', row.payload_sha256.trim(), null,
+        { field: 'membership', reason: 'duplicate_active_facility_membership', operatorPlan: 'I4' });
     }
   }
 }
@@ -712,6 +752,7 @@ async function main() {
       throw error;
     }
     await validateRbacVocabulary(client);
+    await validateMembershipUniqueness(client);
     // The verifier runs on a separate read-only connection. Re-read the run
     // after it returns; the sealed-row/run guards and the session lock make
     // this the state used by the first write transaction.

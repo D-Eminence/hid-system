@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0082",
-    "count": 82,
+    "last": "0087",
+    "count": 87,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -425,6 +425,10 @@
       {
         "name": "0082_purpose_of_use_vocabulary.sql",
         "sha256": "bd3c730051405860fd4cb4feacb5bde259eb627b45724433e44196c9403f9351"
+      },
+      {
+        "name": "0087_governed_workforce_provisioning.sql",
+        "sha256": "89d827d7b60c02e1bc77784659635f972ba4a3bb71202a35f607bda49a2cfe0e"
       }
     ]
   },

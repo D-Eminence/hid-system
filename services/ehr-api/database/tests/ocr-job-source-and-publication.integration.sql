@@ -68,7 +68,9 @@ insert into identity.facilities (id, organization_id, name, code, timezone, acti
    'OCR-SOURCE-A', 'Africa/Lagos', true, 'verified'),
   ('e8b00000-0000-4000-8000-000000000003', 'e8b00000-0000-4000-8000-000000000001', 'OCR Source Clinic B',
    'OCR-SOURCE-B', 'Africa/Lagos', true, 'verified');
--- A has two memberships in clinic A (mA1, mA2), B one (mB), C one in clinic B (mC).
+-- A has two memberships in clinic A (mA1 active, mA2 inactive: since 0087 an
+-- account holds one active membership per facility), B one (mB), C one in
+-- clinic B (mC).
 insert into auth.accounts (id, subject, email, display_name, status) values
   ('e8b10000-0000-4000-8000-000000000001', 'synthetic:ocr-source-a', 'ocr-source-a@example.invalid', 'OCR Source A',
    'active'),
@@ -84,19 +86,19 @@ insert into identity.staff (id, account_id, full_name, email, verification_statu
   ('e8b20000-0000-4000-8000-000000000003', 'e8b10000-0000-4000-8000-000000000003', 'OCR Source C',
    'ocr-source-c@example.invalid', 'verified', 'doctor');
 insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
-  membership_role, app_role) values
+  membership_role, app_role, active) values
   ('e8b30000-0000-4000-8000-000000000001', 'e8b20000-0000-4000-8000-000000000001',
    'e8b10000-0000-4000-8000-000000000001', 'e8b00000-0000-4000-8000-000000000001',
-   'e8b00000-0000-4000-8000-000000000002', 'doctor', 'doctor'),
+   'e8b00000-0000-4000-8000-000000000002', 'doctor', 'doctor', true),
   ('e8b30000-0000-4000-8000-000000000002', 'e8b20000-0000-4000-8000-000000000001',
    'e8b10000-0000-4000-8000-000000000001', 'e8b00000-0000-4000-8000-000000000001',
-   'e8b00000-0000-4000-8000-000000000002', 'nurse', 'nurse'),
+   'e8b00000-0000-4000-8000-000000000002', 'nurse', 'nurse', false),
   ('e8b30000-0000-4000-8000-000000000003', 'e8b20000-0000-4000-8000-000000000002',
    'e8b10000-0000-4000-8000-000000000002', 'e8b00000-0000-4000-8000-000000000001',
-   'e8b00000-0000-4000-8000-000000000002', 'doctor', 'doctor'),
+   'e8b00000-0000-4000-8000-000000000002', 'doctor', 'doctor', true),
   ('e8b30000-0000-4000-8000-000000000004', 'e8b20000-0000-4000-8000-000000000003',
    'e8b10000-0000-4000-8000-000000000003', 'e8b00000-0000-4000-8000-000000000001',
-   'e8b00000-0000-4000-8000-000000000003', 'doctor', 'doctor');
+   'e8b00000-0000-4000-8000-000000000003', 'doctor', 'doctor', true);
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, status) values
   ('e8b40000-0000-4000-8000-000000000001', 'HID-SRCPATA', 'Source', 'Patient', 'Source Patient', 'active');
 -- Uploaded documents in clinic A: D1 scanned clean, D2 never scanned, D3 with
