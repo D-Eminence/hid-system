@@ -38,6 +38,44 @@ insert into auth.otp_challenges(id,account_id,recipient_hmac,purpose,channel,ver
   verifier_key_version,expires_at,max_attempts,account_token_version)
 values ('95000000-0000-4000-8000-000000000011','92000000-0000-4000-8000-000000000001',
   repeat('c',64),'LEGACY_ACCOUNT_RECOVERY','email',repeat('b',64),'synthetic',clock_timestamp()+interval '5 minutes',5,1);
+-- A Google link of account 1 (made by whoever once held its password) and a
+-- disabled one, and a link of account 10, whose recovery fails below (0086).
+insert into auth.external_identities(id,account_id,issuer,subject,status,source_system) values
+  ('97000000-0000-4000-8000-000000000001','92000000-0000-4000-8000-000000000001',
+   'https://accounts.google.com','synthetic-google-subject-1','active','synthetic'),
+  ('97000000-0000-4000-8000-000000000002','92000000-0000-4000-8000-000000000001',
+   'https://accounts.google.com','synthetic-google-subject-2','disabled','synthetic'),
+  ('97000000-0000-4000-8000-000000000010','92000000-0000-4000-8000-000000000010',
+   'https://accounts.google.com','synthetic-google-subject-10','active','synthetic');
+-- Account 2 completes a staff reset: its staff and platform sessions end too.
+insert into auth.sessions(id,account_id,family_id,refresh_token_sha256,access_jti,
+  account_token_version,authentication_method,issued_at,expires_at,absolute_expires_at,session_kind)
+values ('94000000-0000-4000-8000-000000000021','92000000-0000-4000-8000-000000000002',
+  '94000000-0000-4000-8000-000000000021',repeat('e',64),'94000000-0000-4000-8000-000000000022',
+  1,'password',clock_timestamp(),clock_timestamp()+interval '1 hour',clock_timestamp()+interval '2 hours','staff'),
+  ('94000000-0000-4000-8000-000000000023','92000000-0000-4000-8000-000000000002',
+  '94000000-0000-4000-8000-000000000023',repeat('f',64),'94000000-0000-4000-8000-000000000024',
+  1,'password',clock_timestamp(),clock_timestamp()+interval '10 minutes',clock_timestamp()+interval '1 hour','platform');
+-- Recovery audiences (0086): 11 staff, 12 platform administrator, 13 both a
+-- patient and staff, 14 an inactive staff record, 15 a revoked platform role.
+insert into auth.accounts(id, subject, email, status)
+select ('92000000-0000-4000-8000-' || lpad(n::text,12,'0'))::uuid, 'synthetic:otp:' || n, 'otp-' || n || '@example.invalid',
+  case when n=12 then 'pending_reset' else 'active' end
+from generate_series(11,15) n;
+insert into identity.staff(id, account_id, full_name, email, verification_status, default_role, active)
+select ('98000000-0000-4000-8000-' || lpad(n::text,12,'0'))::uuid, ('92000000-0000-4000-8000-' || lpad(n::text,12,'0'))::uuid,
+  'Synthetic Staff ' || n, 'otp-' || n || '@example.invalid', 'verified', 'nurse', n <> 14
+from (values (11), (13), (14)) staff_fixture(n);
+insert into identity.patients(id, account_id, hid_code, first_name, last_name, full_name)
+values ('93000000-0000-4000-8000-000000000013','92000000-0000-4000-8000-000000000013',
+  'HID-QRDUALRLE','Synthetic','Dual','Synthetic Dual');
+insert into auth.account_roles(id, account_id, role_code, scope_type, grant_reason, granted_at, revoked_at, revoked_by,
+  revocation_reason)
+values ('99000000-0000-4000-8000-000000000012','92000000-0000-4000-8000-000000000012','platform_admin','platform',
+   'Synthetic recovery audience role', clock_timestamp() - interval '1 hour', null, null, null),
+  ('99000000-0000-4000-8000-000000000015','92000000-0000-4000-8000-000000000015','platform_admin','platform',
+   'Synthetic recovery audience role', clock_timestamp() - interval '1 hour', clock_timestamp(),
+   '92000000-0000-4000-8000-000000000012', 'Synthetic revoked platform role');
 
 set local role hid_identity_api_runtime;
 select set_config('app.actor_subject','system:auth',true);
@@ -95,6 +133,30 @@ begin
 end
 $$;
 
+-- A completed recovery ends every session of the account, staff and platform
+-- included, and revokes every Google link not already revoked (0086).
+do $$
+begin
+  if exists (select 1 from auth.sessions where account_id='92000000-0000-4000-8000-000000000002'
+               and (revoked_at is null or revocation_reason <> 'password_recovered_with_otp')) then
+    raise exception 'A completed staff reset left a staff or platform session open';
+  end if;
+  if exists (select 1 from auth.external_identities where account_id='92000000-0000-4000-8000-000000000001'
+               and (status <> 'revoked' or revoked_at is null)) then
+    raise exception 'Recovery left an external identity (Google link) of the account usable';
+  end if;
+  if exists (select 1 from auth.resolve_google_identity('synthetic-google-subject-1')) then
+    raise exception 'Google sign-in still resolves the recovered account';
+  end if;
+  if (select details->>'external_identities_revoked' from audit.events where correlation_id='otp-schema-regression-0001'
+        and action='auth.otp.recovery.completed' and actor_account_id='92000000-0000-4000-8000-000000000001') is distinct from '2'
+     or (select details->>'external_identities_revoked' from audit.events where correlation_id='otp-schema-regression-0001'
+        and action='auth.otp.recovery.completed' and actor_account_id='92000000-0000-4000-8000-000000000002') is distinct from '0' then
+    raise exception 'The recovery audit does not record how many external identities were revoked';
+  end if;
+end
+$$;
+
 -- Mandatory audit write failure must roll back password, token and consumption.
 create function pg_temp.reject_recovery_audit() returns trigger language plpgsql as $$
 begin
@@ -129,7 +191,53 @@ begin
      or (select consumed_at is not null from auth.otp_challenges where id='95000000-0000-4000-8000-000000000010') then
     raise exception 'Recovery audit failure did not roll back authoritative mutation';
   end if;
+  if (select status from auth.external_identities where id='97000000-0000-4000-8000-000000000010') <> 'active' then
+    raise exception 'Recovery audit failure did not roll back the external identity revocation';
+  end if;
 end $$;
+
+-- Recovery audiences (0086): a start reaches only its own kind of account.
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+declare
+  expected constant jsonb := jsonb_build_object(
+    '1',  jsonb_build_array(true,  false, false),
+    '11', jsonb_build_array(false, true,  false),
+    '12', jsonb_build_array(false, false, true),
+    '13', jsonb_build_array(true,  true,  false),
+    '14', jsonb_build_array(false, false, false),
+    '15', jsonb_build_array(false, false, false),
+    '5',  jsonb_build_array(false, false, false));
+  account_number text;
+  actual jsonb;
+begin
+  for account_number in select jsonb_object_keys(expected) loop
+    actual := jsonb_build_array(
+      auth.recovery_account_audience(('92000000-0000-4000-8000-' || lpad(account_number,12,'0'))::uuid, 'patient'),
+      auth.recovery_account_audience(('92000000-0000-4000-8000-' || lpad(account_number,12,'0'))::uuid, 'staff'),
+      auth.recovery_account_audience(('92000000-0000-4000-8000-' || lpad(account_number,12,'0'))::uuid, 'platform'));
+    if actual is distinct from expected -> account_number then
+      raise exception 'Recovery audience of account % is % (patient, staff, platform), expected %',
+        account_number, actual, expected -> account_number;
+    end if;
+  end loop;
+  if auth.recovery_account_audience(null, 'patient') then
+    raise exception 'An absent account matched a recovery audience';
+  end if;
+  begin
+    perform auth.recovery_account_audience('92000000-0000-4000-8000-000000000001', 'clinician');
+    raise exception 'An unknown recovery audience was accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  perform set_config('app.actor_subject', 'synthetic:otp:11', true);
+  begin
+    perform auth.recovery_account_audience('92000000-0000-4000-8000-000000000001', 'patient');
+    raise exception 'The recovery audience was readable outside the Identity system context';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+reset role;
 
 -- Recovery start cooldown (0081): one row per purpose and keyed identifier,
 -- whether or not the identifier has an account, so a repeat start inside the

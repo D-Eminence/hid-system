@@ -491,6 +491,23 @@ try {
   expectProblem(recoveredA, 200); assert.equal(recoveredA.body.actor.patientId, patientA);
   check('password recovery answers known and unknown accounts alike, including a repeat within the cooldown (the same challengeId for both, no code sent) and the account\'s other identifier (a new id, no code), uses a single-use code, ends existing sessions and replaces the password');
 
+  // 11b. REC-AUDIENCE (0086): the staff and administrator recovery pages reach
+  // no patient account. They answer the patient's email like an unknown
+  // identifier and send it no code. As the owner, end the patient page's
+  // cooldown first, so that only the page (not the cooldown) withholds a code.
+  await owner.query("update auth.otp_start_cooldowns set started_at = started_at - interval '2 minutes'");
+  const codesBeforeOtherPages = resetCodes();
+  for (const [action, network] of [['staff-reset', '198.51.100.47'], ['admin-reset', '198.51.100.48']]) {
+    const otherPage = await http.post('/api/v1/auth/otp/start').set('Origin', origin).set('X-Forwarded-For', network)
+      .send({ identifier: emailA, purpose: 'PASSWORD_RESET', turnstileAction: action, turnstileToken: turnstile(action) });
+    expectProblem(otherPage, 202);
+    assert.deepEqual({ ...otherPage.body, challengeId: typeof otherPage.body.challengeId },
+      { ...unknownStart.body, challengeId: typeof unknownStart.body.challengeId },
+      `${action} must answer a patient account exactly like an unknown identifier`);
+  }
+  assert.equal(resetCodes(), codesBeforeOtherPages, 'A staff or administrator recovery page must send a patient no code');
+  check('the staff and administrator recovery pages answer a patient\'s email like an unknown identifier (202, same body) and send it no code');
+
   // 12. Sign-out needs the CSRF token and ends only its own sign-in: the same
   // patient's other sign-in (another device) and the other patient stay signed in.
   const otherDeviceA = await login(emailA, newPassword);
@@ -505,6 +522,33 @@ try {
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(otherDeviceA)), 200);
   expectProblem(await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(firstB)), 200);
   check('sign-out without the CSRF token is refused and ends nothing; with it, it ends only that sign-in and expires the enrollment cookie: the same patient\'s other sign-in and the other patient stay signed in');
+
+  // 12b. SIGNIN-LOCKOUT (0086): one failure budget per account across its
+  // identifiers. Five wrong passwords, three by email and two by HID (neither
+  // identifier reaches five), lock the account: the correct password is then
+  // refused by either identifier with the same 401 until the window ends, and
+  // accepted after it.
+  const wrongLockout = [];
+  for (const identifier of [emailA, emailA.toUpperCase(), emailA, hidA, hidA.toLowerCase()]) {
+    const response = await login(identifier, 'Wrong-Lockout-Password-0');
+    expectProblem(response, 401); wrongLockout.push(response);
+  }
+  assert.equal(await count('select count(*) from auth.login_attempts where locked_until > clock_timestamp()'), 1,
+    'five wrong passwords across the email and the HID must lock exactly one bucket: the account\'s');
+  const genericRefusal = response => ({ ...response.body, instance: undefined, correlationId: undefined });
+  for (const identifier of [emailA, hidA]) {
+    const refused = await login(identifier, newPassword);
+    expectProblem(refused, 401);
+    assert.deepEqual(genericRefusal(refused), genericRefusal(wrongLockout[0]),
+      'the correct password of a locked account must get the generic 401');
+  }
+  // As the owner, move every failure window 16 minutes into the past: the lock ends.
+  await owner.query(`update auth.login_attempts set window_started_at = window_started_at - interval '16 minutes',
+    last_failed_at = last_failed_at - interval '16 minutes',
+    locked_until = locked_until - interval '16 minutes'`);
+  const afterLockout = await login(emailA, newPassword);
+  expectProblem(afterLockout, 200); assert.equal(afterLockout.body.actor.patientId, patientA);
+  check('five wrong passwords across the email and the HID lock the account: the correct password is refused by either identifier with the same 401 inside the window and accepted after it');
 
   // 13. Durable evidence. Every successful start (A, its replay, B) and
   // activation (A and its replays within the budget, B) is audited as a

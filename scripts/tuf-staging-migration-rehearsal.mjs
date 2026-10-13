@@ -372,6 +372,11 @@ try {
   evidence.checks.registration_review_runtime = JSON.parse(command('exact-role NIN registration review HTTP workflow',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-registration-review-runtime.mjs')],
     workflowEnvironment));
+  // Launch blocker PSEARCH-1 (0086): one 404 for every refused lookup, access
+  // requests that never name the patient, and per-actor and per-facility budgets.
+  evidence.checks.patient_search_runtime = JSON.parse(command('exact-role staff patient search and access-request HTTP workflow',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-patient-search-runtime.mjs')],
+    workflowEnvironment));
   for (const [name, script] of [['pharmacy_runtime', 'services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs'],
     ['lab_runtime', 'services/lab-api/scripts/verify-lab-runtime.mjs'],
     ['ehr_lab_handoff_runtime', 'services/ehr-api/scripts/verify-ehr-lab-handoff-runtime.mjs'],
