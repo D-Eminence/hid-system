@@ -35,15 +35,57 @@ const DEPLOYMENT_PROFILES = Object.freeze({
   }),
 })
 
+// On every response. HSTS without includeSubDomains: each host states its own
+// (D6); add includeSubDomains or preload only once every subdomain of the zone
+// is confirmed HTTPS-only.
 const SECURITY_HEADERS = Object.freeze({
   'cross-origin-opener-policy': 'same-origin',
   'referrer-policy': 'strict-origin-when-cross-origin',
+  'strict-transport-security': 'max-age=31536000',
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
 })
 
+// API and edge answers are JSON: a policy under which a browser renders
+// nothing from them, even when one is opened as a document.
+const API_CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 'none'"
+
+// The Health-id portal (apps/patient-web, ADR-052) served on www, the staging
+// host and admin.*. Its build loads code only from its own /assets/ (the
+// artefact verifier refuses inline script and any other script source) and
+// Cloudflare Turnstile from https://challenges.cloudflare.com: api.js redirects
+// within that origin, replaces its own script tag there, renders the widget in
+// a frame from it and posts failure feedback to it with sendBeacon or fetch.
+// Styles are its own stylesheets plus CSSOM changes (React style props,
+// Turnstile), which style-src does not govern; Vite may inline a small image
+// as a data: URL. No Sentry DSN or Google sign-in is deployable at launch.
+const HEALTH_ID_CONTENT_SECURITY_POLICY = [
+  "default-src 'none'",
+  "script-src 'self' https://challenges.cloudflare.com",
+  "style-src 'self'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self' https://challenges.cloudflare.com",
+  'frame-src https://challenges.cloudflare.com',
+  "worker-src 'none'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+  'upgrade-insecure-requests',
+].join('; ')
+
+// The hosts that serve the Health-id build. The other product hosts serve
+// hid-system's legacy builds, are not deployed at launch, and need their own
+// reviewed policy before they are.
+const PAGE_POLICY_BY_APP = Object.freeze({
+  web: HEALTH_ID_CONTENT_SECURITY_POLICY,
+  admin: HEALTH_ID_CONTENT_SECURITY_POLICY,
+})
+
 const PERMISSIONS_BY_APP = Object.freeze({
-  web: 'camera=(self), microphone=(self), geolocation=()',
+  // Health-id uses no camera, microphone or location; uploads are off at launch.
+  web: 'camera=(), microphone=(), geolocation=()',
   ehr: 'camera=(), microphone=(), geolocation=()',
   lab: 'camera=(), microphone=(), geolocation=()',
   pharmacy: 'camera=(), microphone=(), geolocation=()',
@@ -67,6 +109,7 @@ function problem(status, code, detail, correlationId) {
       'cache-control': 'private, no-store, max-age=0',
       'cloudflare-cdn-cache-control': 'no-store',
       'x-correlation-id': correlationId,
+      'content-security-policy': API_CONTENT_SECURITY_POLICY,
       ...SECURITY_HEADERS,
     },
   })
@@ -101,6 +144,11 @@ function withSecurityHeaders(response, apiResponse = false, application) {
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value)
   headers.set('permissions-policy', PERMISSIONS_BY_APP[application]
     ?? 'camera=(), microphone=(), geolocation=()')
+  // Replace whatever the origin or the asset binding sent.
+  headers.delete('content-security-policy')
+  headers.delete('content-security-policy-report-only')
+  if (apiResponse) headers.set('content-security-policy', API_CONTENT_SECURITY_POLICY)
+  else if (PAGE_POLICY_BY_APP[application]) headers.set('content-security-policy', PAGE_POLICY_BY_APP[application])
   if (apiResponse) {
     headers.set('cache-control', 'private, no-store, max-age=0')
     headers.set('cloudflare-cdn-cache-control', 'no-store')
@@ -141,6 +189,24 @@ function clientAddress(value) {
   }
 }
 
+// The client network the AWS WAF's per-client rate limit counts (A7): an IPv4
+// address, or the /64 network address of an IPv6 address (one subscriber
+// allocation, as Identity's own limits count it), so that rotating addresses
+// inside a /64 does not escape the limit. An IPv4-mapped IPv6 address counts as
+// its IPv4 address. Takes the canonical address clientAddress returns.
+function clientNetwork(address) {
+  if (!address.includes(':')) return address
+  const [head, tail = ''] = address.split('::')
+  const leading = head ? head.split(':') : []
+  const trailing = tail ? tail.split(':') : []
+  const groups = [...leading, ...Array(8 - leading.length - trailing.length).fill('0'), ...trailing]
+    .map(group => Number.parseInt(group, 16))
+  if (groups.slice(0, 5).every(group => group === 0) && groups[5] === 0xffff) {
+    return [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join('.')
+  }
+  return new URL(`http://[${groups.slice(0, 4).map(group => group.toString(16)).join(':')}::]/`).hostname.slice(1, -1)
+}
+
 async function proxyApi(request, deployment, requestUrl) {
   const requestCorrelationId = correlationId(request)
   const upstream = new URL(requestUrl.pathname + requestUrl.search, deployment.origin)
@@ -150,13 +216,18 @@ async function proxyApi(request, deployment, requestUrl) {
   const client = clientAddress(request.headers.get('cf-connecting-ip'))
   for (const name of [
     'cf-connecting-ip', 'cf-ipcountry', 'cf-ray', 'forwarded', 'host', 'x-forwarded-for',
-    'x-forwarded-host', 'x-forwarded-proto', 'x-hid-edge-origin', 'x-real-ip',
+    'x-forwarded-host', 'x-forwarded-proto', 'x-hid-client-network', 'x-hid-edge-origin', 'x-real-ip',
   ]) headers.delete(name)
   // The only client address the AWS gateway trusts, and only from the VPC;
   // without it the gateway refuses the request in staging and production.
   // Workers built before this change delete X-Real-IP, so a stale Worker
   // leaves the gateway without an address instead of passing a caller's on.
-  if (client) headers.set('x-real-ip', client)
+  // X-HID-Client-Network is the WAF's per-client rate-limit key; the gateway
+  // drops it before any backend.
+  if (client) {
+    headers.set('x-real-ip', client)
+    headers.set('x-hid-client-network', clientNetwork(client))
+  }
   headers.set('x-correlation-id', requestCorrelationId)
   headers.set('x-forwarded-host', requestUrl.host)
   headers.set('x-forwarded-proto', 'https')

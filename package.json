@@ -91,6 +91,8 @@
     "verify:prebaseline-git": "bash scripts/verify-prebaseline-git.sh",
     "verify:migration": "npm --prefix services/ehr-api run migration:verify && npm --prefix services/ehr-api run migration:verify-nin-crosswalk && npm --prefix services/ehr-api run migration:verify-membership-duplicates",
     "verify:containers": "node scripts/verify-container-platform.mjs",
+    "verify:gateway-runtime": "node scripts/verify-gateway-runtime.mjs",
+    "verify:gateway-runtime:image": "node scripts/verify-gateway-runtime.mjs --pinned-image",
     "verify:identity": "npm --prefix apps/web run verify:identity",
     "verify:outreach": "npm --prefix apps/outreach run verify:outreach",
     "verify:frontends": "node scripts/verify-frontend-platform.mjs",

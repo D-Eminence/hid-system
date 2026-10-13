@@ -29,7 +29,7 @@ Behaviour:
   upstream name per request (answers cached for 10 s) instead of once at
   start-up. The gateway starts when a module's name does not resolve, follows
   task replacements without a restart, and answers `503 UPSTREAM_UNAVAILABLE`
-  for a module with no task. The upstream values carry no URI part, so the
+  for a module with no task (a name that does not resolve). The upstream values carry no URI part, so the
   client's request URI reaches the backend unchanged.
 - The realip module takes the client address from `X-Real-IP`, which the
   Cloudflare Worker sets from `CF-Connecting-IP`, only on connections from
@@ -54,10 +54,47 @@ Behaviour:
   percent-encodings (nginx matches its decoded, normalized URI):
   `/api/v1/auth/service-session`,
   `/api/v1/identity/service/*`, `/api/v1/identity/outreach/*`,
-  `/api/v1/ehr/internal/*`, `/api/v1/lab/work-items/accept-ehr-order`,
+  `/api/v1/ehr/internal/*`, `/api/v1/ehr/documents/scan-events` (the document
+  scanner's callback; ADR-055), `/api/v1/lab/work-items/accept-ehr-order`,
   `/api/v1/lab/imports/from-ocr`,
   `/api/v1/pharmacy/work-items/accept-ehr-prescription` and
   `/api/v1/pharmacy/imports/from-ocr`. Callers use the private service names.
+- An upstream's own answer reaches the client unchanged, 5xx included: its
+  status, Problem Details `code`, `Set-Cookie`, `Retry-After` and
+  `X-Correlation-ID` (`proxy_intercept_errors` stays off). Only when nginx
+  itself gets no answer (the upstream refuses or resets the connection, times
+  out, does not resolve or closes without responding) does it answer
+  `503 UPSTREAM_UNAVAILABLE` with `Cache-Control: no-store` (ADR-055, A8).
+- Request bodies are bounded at 512 KiB (`client_max_body_size 512k`, the
+  ehr-api JSON limit; identity-api refuses more than 256 KiB itself). A larger
+  body answers `413 PAYLOAD_TOO_LARGE` Problem Details before any backend sees
+  it. The WAF's 8 KB body rule no longer applies to the encounter-scoped
+  clinical writes, so this is the edge bound for them (ADR-055, WAF-CRS-BODY).
+- The access log is one JSON object per request (format `hid_api`): time,
+  client address, method, path (`$uri`, never the query string), status,
+  bytes, request and upstream timings, upstream status, nginx's `request_id`
+  and the `X-Correlation-ID`. It replaces the image's `main` format, which
+  logged the whole request line. It is written to the image's
+  `/var/log/nginx/access.log`, which the image links to stdout. Health checks
+  are not logged. Never add `$request`, `$request_uri`, `$args`,
+  `$query_string`, `$http_referer`, cookies or credentials to it (ADR-055, D7).
+- The server's error log takes only critical messages
+  (`error_log /var/log/nginx/error.log crit`). nginx appends the request line,
+  query string included, and the upstream URL to every error or warning about
+  a request (an upstream that refuses, resets, times out, does not resolve or
+  closes early; a body over 512 KiB; a request or response body buffered to a
+  temporary file), and the image links that path to stderr, which reaches the
+  same CloudWatch log group. The access log still records each such failure's
+  status, upstream status and timing. So a query string (administrator search
+  terms: names, emails, HIDs) reaches neither log for an ordinary request or
+  failure. The residue: a critical message about a request (nginx cannot write
+  a temporary file, or cannot open an upstream connection for a reason other
+  than refusal or an unreachable network, such as exhausted local ports) still
+  carries its request line. Start-up and worker-process messages keep the
+  image's level (ADR-055, D7).
+- The Worker's origin secret (`X-HID-Origin-Authorization`), which only the
+  WAF checks, and the client network the WAF's rate limit counts
+  (`X-HID-Client-Network`) are not forwarded to any backend.
 
 Notification API, Notification Worker, Event Dispatcher, and OCR Worker are
 intentionally not browser-routed. The gateway overwrites forwarding headers at
@@ -67,11 +104,29 @@ non-API path returns `API_ONLY_ORIGIN` with `Cache-Control: no-store`.
 
 `scripts/tests/gateway-config.test.mjs` and `scripts/verify-container-platform.mjs`
 check this configuration against a model of nginx
-(`scripts/lib/nginx-config-model.mjs`); they do not run nginx. The rendered
-configuration has also been loaded and exercised locally by an nginx 1.29.8
-binary in front of an Express 5 backend, where every request the tests route
-got the answer the model gives (release checklist §8). The image itself
-running in ECS is staging acceptance evidence.
+(`scripts/lib/nginx-config-model.mjs`); they do not run nginx.
+`scripts/verify-gateway-runtime.mjs` runs the shipped configuration under a
+real nginx against stub upstreams on 127.0.0.1 and checks upstream error
+pass-through, the unreachable-upstream answer, the scanner-callback denial,
+the body bound, the origin-secret and client-network strip, the access-log
+format, and that no error-log line carries a request line, upstream URL or
+query string (after a refused upstream, an oversized body and a body buffered
+to a temporary file):
+
+```bash
+npm run verify:gateway-runtime:image                        # nginx from the image gateway/Dockerfile pins (docker)
+HID_NGINX_BINARY=/path/to/nginx-1.29 npm run verify:gateway-runtime   # a local binary
+```
+
+With `--pinned-image` (the first form) it pulls the digest-pinned runtime
+image and runs its nginx with `docker run` on the host network, as the
+calling user, with capabilities dropped and only its temporary directory
+mounted. CI runs that form as the `gateway-runtime` step of
+`release/scripts/run-workspace-gates.mjs` (the workspace job of
+`.github/workflows/tuf-local-gates.yml`), whose evidence keeps its log. Without either it exits 2 and
+verifies nothing. It is not part of `npm run verify`, which needs neither
+nginx nor docker. The image itself running in ECS is staging acceptance
+evidence.
 
 The image accepts no frontend configuration, workload tokens, database
 credentials, provider secrets, or AWS credentials as build inputs.

@@ -16,6 +16,9 @@ const commands = [['build', ['npm', 'run', 'build']], ['test', ['npm', 'test']],
   ['release-tests', ['npm', '--prefix', 'release', 'test']], ['release-contracts', ['npm', '--prefix', 'release', 'run', 'verify']],
   ['ehr-tests', ['npm', '--prefix', 'apps/ehr', 'test']],
   ['migration-rehearsal', ['node', 'scripts/tuf-staging-migration-rehearsal.mjs', '--evidence-dir', join(process.env.RUNNER_TEMP, 'synthetic-migration')]],
+  // The shipped gateway configuration under the nginx of the image
+  // gateway/Dockerfile pins (docker pull and run on the runner; ADR-055).
+  ['gateway-runtime', ['npm', 'run', 'verify:gateway-runtime:image']],
   ['diff-check', ['git', 'diff', '--check']]]
 for (const [label, [executable, ...args]] of commands) {
   const started = new Date().toISOString(), path = join(output, `${label}.log`), fd = openSync(path, 'wx', 0o600)
