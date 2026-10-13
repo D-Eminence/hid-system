@@ -8,8 +8,8 @@ import { HEALTH_ID_WORKERS, assertHealthIdWorkerConfig, verifyLaunchDeployment }
 
 // `--launch <environment>` is the pre-deployment check: every Worker the launch
 // manifest deploys there must have a verified staged Health-id artefact.
-// Without it (repository and CI mode) staged artefacts are optional, but any
-// that is present must verify.
+// Without it (repository mode, as the root `npm run verify` runs it) staged
+// artefacts are optional, but any that is present must verify.
 const USAGE = 'Usage: node scripts/verify-config.mjs [--launch <staging|production>]'
 function parseArguments(argv) {
   if (argv.length === 0) return null
