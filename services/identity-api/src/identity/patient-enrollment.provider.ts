@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { DomainProblem } from '../common/problem';
+import { DomainProblem, PublicDetailProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
-import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
+import { PATIENT_REGISTRATION_NOT_OPEN, QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import type { QoreIdNinEnrollmentBinding } from './qoreid-verification.types';
 
 export const PUBLIC_PATIENT_IDENTITY_PROVIDER = Symbol('PUBLIC_PATIENT_IDENTITY_PROVIDER');
@@ -18,6 +18,9 @@ export interface PublicPatientLookupCharge {
   networkDigest: string;
 }
 
+/** The refusals of a closed gate. Any other failure is a fault, not an answer. */
+const CLOSED_GATE_CODES = new Set(['QOREID_DISABLED', 'QOREID_NIN_ONLY_DISABLED', 'INTEGRATION_PAUSED']);
+
 export interface PublicPatientIdentityProvider {
   /**
    * The enrollment gate: refuses with 503 unless QoreID and NIN-only enrollment
@@ -25,6 +28,12 @@ export interface PublicPatientIdentityProvider {
    * NIN gets the same answer while the gate is closed (ENR-4).
    */
   assertAvailable(): Promise<void>;
+  /**
+   * The same gate as an answer (FE-4): false where assertAvailable refuses
+   * because the gate is closed, true where it passes. A fault reading the
+   * runtime state is thrown, not answered.
+   */
+  isAvailable(): Promise<boolean>;
   /** Checks the gate again, charges the lookup (429 when refused), then asks QoreID. */
   verifyNin(nin: string, charge: PublicPatientLookupCharge): Promise<VerifiedPublicPatientIdentity>;
 }
@@ -37,14 +46,26 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
 
   async assertAvailable(): Promise<void> {
     const environment = getEnvironment();
+    // Switched off by configuration, which production keeps for NIN-only
+    // enrollment until the N1 holder step ships: the patient is told that
+    // registration is not open, not that it is temporarily unavailable.
     if (!environment.QOREID_ENABLED) {
-      throw new DomainProblem(503, 'QOREID_DISABLED', 'Patient identity enrollment is temporarily unavailable');
+      throw new PublicDetailProblem(503, 'QOREID_DISABLED', PATIENT_REGISTRATION_NOT_OPEN);
     }
     if (!environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED) {
-      throw new DomainProblem(503, 'QOREID_NIN_ONLY_DISABLED',
-        'Patient identity enrollment is temporarily unavailable');
+      throw new PublicDetailProblem(503, 'QOREID_NIN_ONLY_DISABLED', PATIENT_REGISTRATION_NOT_OPEN);
     }
     await this.integrations.assertAvailable('qoreid', 'patient_nin');
+  }
+
+  async isAvailable(): Promise<boolean> {
+    try {
+      await this.assertAvailable();
+      return true;
+    } catch (error) {
+      if (error instanceof DomainProblem && CLOSED_GATE_CODES.has(error.code)) return false;
+      throw error;
+    }
   }
 
   async verifyNin(nin: string, charge: PublicPatientLookupCharge): Promise<VerifiedPublicPatientIdentity> {

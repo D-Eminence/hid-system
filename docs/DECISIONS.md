@@ -3362,3 +3362,87 @@ refuse to start. The outcome line gains `primaryProvider` and
 `primarySafeCode` when the fallback ran; its other fields are unchanged.
 
 Related ADRs: ADR-032, ADR-033, ADR-034, ADR-035, ADR-047.
+
+# ADR-057: Closed Registration Says So, and a Public Read Tells Clients Before They Ask for a NIN
+
+Status: Proposed for source implementation
+(BRANCH:launch/identity-enrollment-gates, FE-4, no migration). Not merged or
+deployed. It builds on ADR-048 (the enrollment gate). The number may need
+renumbering when the parallel launch branches merge (ADR-054 to ADR-056 and
+ADR-058 are taken on other launch branches).
+
+Date: 2026-10-13
+
+Context:
+
+- Under N1 Identity refuses `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true` in
+  production, and infrastructure leaves QoreID off by default, so every
+  production enrollment start answers `503 QOREID_NIN_ONLY_DISABLED` or
+  `503 QOREID_DISABLED`. Facility-assisted registration is off at launch
+  (D17), so no new patient can get a Health ID; legacy-migrated patients
+  sign in.
+- Health-id 82b474e links to `/enroll` from sign-in and learns this only
+  after the patient types a NIN and spends a Turnstile token. It shows a
+  problem's `detail` as sent, but the authored "temporarily unavailable"
+  text never reached it: Identity's problem filter replaced every 5xx
+  detail with "The service could not complete the request.", and the
+  gateway (on main and on this branch) replaces every upstream 502/503/504
+  with `503 UPSTREAM_UNAVAILABLE` "A required platform service is
+  temporarily unavailable.", which is what the patient saw. Either text is
+  wrong for this case: the closure is a decision, not an outage.
+
+Decision (owner defaults: deny by default, least exposure, no production
+bypass):
+
+- `503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED` keep their status
+  and codes and carry "New Health ID registration is not open yet. If you
+  already have a Health ID, sign in." They are raised as
+  `PublicDetailProblem`, the only 5xx whose detail the filter keeps; every
+  other 5xx detail is still replaced.
+- `GET /api/v1/identity/patient-enrollments/availability` answers
+  `{ "open": boolean }` from the checks start makes before it reads a NIN
+  (enrollment keys, both flags, the runtime pause), through the same
+  provider method, so the two cannot disagree. A fault reading the runtime
+  state is a `503`, not `false`; a client treats anything but
+  `200 { "open": true }` as not open.
+- It is public and takes no input. Every caller that reaches it gets the
+  same answer and it carries no PHI, so it writes no audit row (as
+  `GET /commercial/pricing`): a row per anonymous read would let anyone
+  grow the audit log without bound and records nothing about a person.
+  For the same reason Identity keeps no per-network counter for it; the WAF
+  rate rule covers it as every API request. It may be cached for 30 seconds (`public, max-age=30`); the
+  Cloudflare Worker still makes every API response `no-store` at the edge,
+  which this change does not relax. Identity's CORS policy is unchanged and
+  applies first, as on every route: a request with no `Origin` or one in
+  `CORS_ORIGINS` is answered, and a foreign `Origin` is refused by the CORS
+  middleware (`500`, no CORS permission) before the route.
+- `PublicDetailProblem` is the one exception to Identity's 5xx detail
+  masking. It takes only a fixed sentence written for the person using the
+  client, never a message built from an error or from request data; any
+  new use needs its own decision.
+
+Consequences:
+
+- Enrollment stays closed in production; this changes what the patient is
+  told, not who may enroll. Opening it needs N1's holder step (ENR-4 step 2)
+  or an owner decision to the contrary.
+- Until Health-id reads availability, each production start attempt is a
+  target 5xx on the gateway's load balancer target group (the gateway
+  reaches Identity by its Cloud Map name), counted by the gateway's
+  `TargetErrorAlarm` (at least 5 in 5 minutes, two periods), which routes to
+  a person under ADR-053 (infra on main). Health-id should read availability
+  before it shows the NIN step and the "Get your Health ID" link.
+- On main the gateway replaces every upstream 502/503/504 with
+  `503 UPSTREAM_UNAVAILABLE`, so the new detail reaches a browser only once
+  ADR-055 (BRANCH:launch/edge-hardening-2) passes upstream errors through.
+  The availability read is a `200` and works either way.
+- Health-id follow-up (ENR-2): on completion, ask the patient to save the
+  Health ID, because the activation response expires the enrollment cookie
+  and `GET .../current` re-displays the HID for 15 minutes only.
+- Evidence is local and synthetic: unit specs and step 19 of
+  `verify-patient-enrollment-runtime.mjs` (release checklist §8); the gateway
+  route was checked against main's gateway model in a scratch copy.
+
+Related: ADR-048; ADR-053; ADR-055; `INTERFACE_CONTRACT.md` (section 6;
+section 8, "Public patient enrollment"); `QOREID_VERIFICATION_CONTRACT.md`;
+`PHASE_3_LAUNCH_DECISIONS.md` (N1); release checklist §2, §3 and §8.

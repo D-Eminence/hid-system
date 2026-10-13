@@ -5,7 +5,9 @@
 // then password sign-in, session, refresh rotation, self profile, OTP password
 // recovery and sign-out, each of which expires the enrollment cookie; then the
 // enrollment gate before any registration lookup, the 15-minute HID re-display
-// window, the 30-minute contact proof and the QoreID lookup quota (0085).
+// window, the 30-minute contact proof and the QoreID lookup quota (0085); and
+// the public availability read, from the same gate, with the
+// registration-not-open answer start gives while it is closed (FE-4).
 // External services are replaced, never called: QoreID behind the real adapter
 // by a local HTTP stub, Cloudflare Siteverify by a stub that encodes the
 // outcome in the token, and Notification delivery by a stub that captures the
@@ -75,6 +77,7 @@ const { HidCodeGenerator } = load('identity/hid-code-generator.service.ts');
 const { QoreIdVerificationAdapter, QOREID_ADAPTER_CONFIGURATION, QOREID_FETCH } =
   load('identity/qoreid-verification.adapter.ts');
 const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
+const { preventResponseCaching } = load('common/response-security.middleware.ts');
 const { getEnvironment, resetEnvironmentForTests } = load('config/environment.ts');
 
 // Cloudflare Siteverify stub: a token is `ok|<action>|<hostname>` or `replayed`.
@@ -161,6 +164,8 @@ try {
   app = module.createNestApplication({ logger: false });
   app.getHttpAdapter().getInstance().set('trust proxy',
     getEnvironment().TRUST_PROXY_CIDRS.split(',').map(cidr => cidr.trim()));
+  // main.ts's no-store default, which the availability read relaxes (FE-4).
+  app.use(preventResponseCaching);
   app.use(require('cookie-parser')());
   app.use((req, _res, next) => { req.correlationId = randomUUID(); next(); });
   app.setGlobalPrefix('api/v1');
@@ -780,6 +785,73 @@ try {
   else process.env.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX = configuredHourly;
   resetEnvironmentForTests();
   check('the QoreID lookup quota counts exactly the lookups made (none for a replay, duplicate or refusal), refuses the next lookup from an IPv6 /64 over its hourly limit (set to 2 for this check) and any lookup over the platform daily cap with 429 VERIFICATION_QUOTA_EXCEEDED before QoreID is called, and audits every decision');
+
+  // 19. Availability (FE-4): GET /availability answers { open } from the
+  // checks start makes before it reads a NIN, to any caller that passes CORS,
+  // with no input, audit row or cookie. While QoreID is disabled or NIN-only
+  // enrollment is off (the production setting: Identity refuses it on in
+  // production until the N1 holder step ships) it is closed and start answers
+  // 503 with the registration-not-open copy, which Health-id shows as sent
+  // once the gateway passes upstream errors through (ADR-055). A runtime
+  // pause closes it too; start keeps the generic 5xx detail for that.
+  const NOT_OPEN = 'New Health ID registration is not open yet. If you already have a Health ID, sign in.';
+  const availabilityPath = '/api/v1/identity/patient-enrollments/availability';
+  const availability = (headers = {}) => {
+    let call = http.get(availabilityPath).set('X-Forwarded-For', '198.51.100.90');
+    for (const [name, value] of Object.entries(headers)) call = call.set(name, value);
+    return call;
+  };
+  const expectAvailability = async (open, label, headers) => {
+    const response = await availability(headers);
+    assert.equal(response.status, 200, `${label}: ${response.status} ${JSON.stringify(response.body)}`);
+    assert.deepEqual(response.body, { open }, label);
+    assert.equal(response.headers['cache-control'], 'public, max-age=30', `${label}: briefly cacheable`);
+    for (const name of ['pragma', 'expires', 'surrogate-control', 'set-cookie']) {
+      assert.equal(response.headers[name], undefined, `${label}: no ${name}`);
+    }
+  };
+  const availabilityAudit = () => count(`select count(*) from audit.events
+    where action like '%availability%' or details->>'route' like '%availability%'`);
+  const lookupsBeforeAvailability = ninLookups.length;
+  const enrollmentsBeforeAvailability = await enrollmentRows();
+  const ratesBeforeAvailability = await rateTotal();
+  await expectAvailability(true, 'open gate');
+  // The same answer from the allowed Origin and with a signed-in session. The
+  // route itself refuses no Origin: this verifier mounts no CORS middleware,
+  // so a foreign Origin reaches it here. Deployed, main.ts's CORS middleware
+  // answers an Origin outside CORS_ORIGINS before any route (500, no CORS
+  // permission; src/config/cors.spec.ts), as on every Identity route.
+  await expectAvailability(true, 'allowed Origin', { Origin: origin });
+  await expectAvailability(true, 'foreign Origin without CORS middleware', { Origin: 'https://attacker.example' });
+  await expectAvailability(true, 'signed-in caller', { Cookie: `${cookieName}=existing-session; ${cookieA}` });
+  const closedStart = async (expectedCode, label) => {
+    const response = await post('/identity/patient-enrollments', startBody(unseenNin), { key: randomUUID(),
+      network: '198.51.100.91' });
+    expectProblem(response, 503, expectedCode);
+    assert.match(String(response.headers['cache-control']), /no-store/, `${label}: a refusal is not cacheable`);
+    return response.body.detail;
+  };
+  // The production setting.
+  process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'false'; resetEnvironmentForTests();
+  await expectAvailability(false, 'NIN-only enrollment off');
+  assert.equal(await closedStart('QOREID_NIN_ONLY_DISABLED', 'NIN-only enrollment off'), NOT_OPEN);
+  // QoreID disabled (the infrastructure default).
+  process.env.QOREID_ENABLED = 'false'; resetEnvironmentForTests();
+  await expectAvailability(false, 'QoreID disabled');
+  assert.equal(await closedStart('QOREID_DISABLED', 'QoreID disabled'), NOT_OPEN);
+  process.env.QOREID_ENABLED = 'true'; process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
+  resetEnvironmentForTests();
+  // A platform administrator pauses QoreID at runtime: closed, the pause read on every request.
+  await owner.query("update platform.integration_providers set enabled=false, row_version=row_version+1 where provider='qoreid'");
+  await expectAvailability(false, 'QoreID paused');
+  assert.equal(await closedStart('INTEGRATION_PAUSED', 'QoreID paused'), 'The service could not complete the request.');
+  await owner.query("update platform.integration_providers set enabled=true, row_version=row_version+1 where provider='qoreid'");
+  await expectAvailability(true, 'QoreID resumed');
+  assert.equal(ninLookups.length, lookupsBeforeAvailability, 'availability and a closed start must ask QoreID nothing');
+  assert.equal(await enrollmentRows(), enrollmentsBeforeAvailability);
+  assert.equal(await rateTotal(), ratesBeforeAvailability, 'availability and a closed start must charge no rate bucket');
+  assert.equal(await availabilityAudit(), 0, 'an availability read must write no audit row');
+  check('GET /identity/patient-enrollments/availability answers 200 { open } to every caller the route sees (no Origin, the allowed Origin, a signed-in caller; the route itself does not refuse a foreign Origin, which the CORS middleware of main.ts, not mounted here, refuses first when deployed) with Cache-Control public, max-age=30, no cookie and no audit row: open with QoreID and NIN-only enrollment on, closed with NIN-only enrollment off (the production setting), QoreID disabled or QoreID paused at runtime; while it is closed by a flag, start answers 503 QOREID_NIN_ONLY_DISABLED or QOREID_DISABLED with the registration-not-open detail, and nothing is looked up, charged or stored');
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: runtimeRole,
     qoreid: 'local stub behind the real adapter; no QoreID call', turnstile: 'local Siteverify stub',
     notification: 'local stub; no delivery', nin_lookups: ninLookups.length, deliveries: deliveries.length,

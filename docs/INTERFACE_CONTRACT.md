@@ -576,6 +576,14 @@ Do not leak:
 * access tokens
 * protected clinical information
 
+Identity replaces the `detail` of every `5xx` answer with "The service could
+not complete the request.", because an unexpected failure's message can carry
+internal state. The one exception is a problem raised as `PublicDetailProblem`:
+a fixed sentence written for the person using the client, which keeps its
+`detail` whatever its status. Today only the closed public enrollment gate
+uses it (`503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED`, section 8,
+"Public patient enrollment"; BRANCH:launch/identity-enrollment-gates, FE-4).
+
 ## 7. Health Endpoints
 
 Every service should provide:
@@ -786,6 +794,65 @@ deployed). Request and success bodies are unchanged:
   and a replay still answer `stage: active` with the HID.
 - A successful activation response (`200`) expires `hid_enrollment`
   ("Auth session contract", above).
+
+Enrollment availability and the closed-registration answer (FE-4,
+BRANCH:launch/identity-enrollment-gates; no migration; not deployed):
+
+- `GET /api/v1/identity/patient-enrollments/availability` (new). Public: no
+  session, Origin, Turnstile token, cookie or input; a signed-in caller gets
+  the same answer. `200 { "open": boolean }`, nothing else. The route itself
+  refuses no `Origin`, but Identity's CORS middleware (`main.ts`) runs first,
+  as on every route: a request without an `Origin` or from one in
+  `CORS_ORIGINS` (the Health-id hosts) gets the answer, and a request from
+  any other `Origin` is answered `500` with no CORS permission before the
+  route is reached. `open` is `true` only when a start would now pass the
+  checks it makes before it reads a NIN: the enrollment keys are
+  configured, `QOREID_ENABLED` and `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` are
+  on, and QoreID's `patient_nin` capability is not paused at runtime. It
+  does not predict per-request
+  refusals (Turnstile, rate limits, the lookup quota, a registered NIN,
+  `503 ENROLLMENT_RECONCILIATION_REQUIRED`), so a client still handles every
+  start answer. A fault reading the runtime pause answers `503` (generic
+  detail), not `{ "open": false }`; a client treats any answer other than
+  `200 { "open": true }` as not open. With either flag off the route reads
+  nothing; with both on it makes the one runtime-state read that start makes.
+  It writes no audit row (as `GET /commercial/pricing`) and sets no cookie.
+  The `200` carries `Cache-Control: public, max-age=30` and no `Pragma`,
+  `Expires` or `Surrogate-Control`; a failure keeps the no-store default.
+  Behind the Cloudflare Worker every API response is `private, no-store`
+  (`infra/cloudflare/src/frontend-worker.mjs`), so a browser on the
+  Health-id hosts refetches it each time. Identity does not rate limit it,
+  as it does not `GET /commercial/pricing`: a per-network counter would cost
+  a database write per anonymous read. The WAF rate rule that covers every
+  API request applies (keyed per client by ADR-055). The gateway
+  serves it under the identity prefix only (`^~ /api/v1/identity/`; with the
+  route switch of #65, only while `HID_ENABLED_API_ROUTES` names `identity`,
+  otherwise `404 API_ROUTE_NOT_FOUND`).
+- While `QOREID_ENABLED` or `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` is off,
+  `POST /api/v1/identity/patient-enrollments` still answers
+  `503 QOREID_DISABLED` or `503 QOREID_NIN_ONLY_DISABLED`, now with
+  `detail` "New Health ID registration is not open yet. If you already have a
+  Health ID, sign in." Before, Identity replaced it with the generic 5xx
+  detail (section 6), so a client calling Identity directly got "The
+  service could not complete the request.". Production keeps NIN-only
+  enrollment off until the N1 holder step ships
+  (`PHASE_3_LAUNCH_DECISIONS.md`), so in production Identity answers every
+  start this way. `503 INTEGRATION_PAUSED` (a runtime pause) and
+  `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` keep the generic detail. A
+  patient on Health-id sees neither detail yet: the gateway, on this branch
+  and on main (#65), replaces every upstream `502/503/504` with
+  `503 UPSTREAM_UNAVAILABLE` ("A required platform service is temporarily
+  unavailable.") and drops the `QOREID_*` code, before this change and
+  after it. The new detail and codes reach a browser only once the gateway
+  passes upstream errors through (ADR-055, BRANCH:launch/edge-hardening-2).
+  The availability read is a `200` and is not affected.
+- Health-id follow-up (not in Health-id 82b474e, which keeps working
+  unchanged): read availability before showing the NIN step and the
+  "Get your Health ID" link, and show a "registration is not open" notice
+  instead when it is not `200 { "open": true }`; on the completion screen,
+  ask the patient to save the Health ID (ENR-2), because the enrollment
+  cookie is expired by the activation response and `GET .../current` shows
+  the HID for 15 minutes only.
 
 ### HID Resolution
 
