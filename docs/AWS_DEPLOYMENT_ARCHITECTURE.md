@@ -44,8 +44,8 @@ The public API web ACL evaluates, in order (ADR-055):
 | 10 | `AwsCommonRules` (`AWSManagedRulesCommonRuleSet`) | Every rule blocks except `SizeRestrictions_BODY`, which only counts and labels (`awswaf:managed:aws:core-rule-set:SizeRestrictions_Body`) |
 | 11 | `AwsCommonRulesBodySize` | Blocks a labelled request (body over 8 KB) unless it is a `POST` or `PATCH` whose raw path is an encounter-scoped clinical write: `/api/v1/ehr/patients/<uuid>/encounters`, `/<uuid>`, and its `clinical-notes` (with `/<uuid>/revisions`), `diagnoses`, `prescriptions` and `lab-requests` (with `/<uuid>`); lowercase UUIDs, no transformation, so an encoded, dot-segment or case variant keeps the limit (WAF-CRS-BODY) |
 | 20 | `AwsKnownBadInputs` | Blocks |
-| 30 | `ApiOriginRateLimit` | Blocks a client address over 2,000 requests per 5 minutes, keyed on `X-Real-IP` (`FORWARDED_IP`); an invalid address matches and is blocked; a request without the header is not counted here and the Gateway refuses it (A7) |
-| 31 | `ApiOriginEdgeRateLimit` | Blocks a connecting address over 50,000 requests per 5 minutes: the backstop for a leaked origin secret or a request without `X-Real-IP` |
+| 30 | `ApiOriginRateLimit` | Blocks a client network over 2,000 requests per 5 minutes, keyed on `X-HID-Client-Network` (`FORWARDED_IP`): the IPv4 address, or the IPv6 /64 network address, that the Worker derives from `CF-Connecting-IP`; an invalid value matches and is blocked; a request without the header is not counted here (the Worker sends it whenever it sends `X-Real-IP`, without which the Gateway refuses the request) (A7) |
+| 31 | `ApiOriginEdgeRateLimit` | Blocks a connecting address over 50,000 requests per 5 minutes: the backstop for a leaked origin secret or a request without `X-HID-Client-Network` |
 
 The WAF's body inspection on an ALB covers the first 8 KB, so the other Core
 Rule Set body rules inspect only that part of a long clinical note. The body
@@ -53,12 +53,16 @@ bound for the exempt routes is the Gateway's `client_max_body_size 512k`
 (`413 PAYLOAD_TOO_LARGE`) and ehr-api's own 512 KiB JSON limit. Because every
 connection to the ALB comes from the Cloudflare Worker, a limit keyed on the
 connecting address would throttle all users behind one Cloudflare egress
-address together; the per-client rule keys on the address the Worker took from
-`CF-Connecting-IP`, which rule 0 guarantees came from the Worker. A facility or
-carrier-grade NAT address counts as one client: watch the
+address together; the per-client rule keys on the client network the Worker
+derived from `CF-Connecting-IP` (an IPv4 address, or an IPv6 /64, so rotating
+addresses inside a /64 keeps one count), which rule 0 guarantees came from the
+Worker. A facility or carrier-grade NAT address counts as one client: watch the
 `hid-<env>-origin-rate` metric and raise `API_ORIGIN_CLIENT_RATE_LIMIT`
-(`infra/aws/src/hid-regional-stack.ts`) if legitimate clients are blocked
-(IP-THRESHOLDS in the release checklist). Keep Cloudflare's Pseudo IPv4 setting
+(`infra/aws/src/hid-regional-stack.ts`, a code constant, so by a reviewed CDK
+change) if legitimate clients are blocked (IP-THRESHOLDS in the release
+checklist). The backstop is shared: traffic spread over many client networks
+that passes 50,000 requests per 5 minutes through one Cloudflare egress address
+blocks every user behind that address for the rest of the window (ADR-055). Keep Cloudflare's Pseudo IPv4 setting
 off or in "add header" mode, never "overwrite headers", so `CF-Connecting-IP`
 stays the client's real address.
 
@@ -67,8 +71,11 @@ stays the client's real address.
 The client's address crosses the edge in one header (D-Eminence/hid-system#65):
 
 - The Worker deletes every inbound forwarding header, including any
-  `X-Real-IP` the caller sent, and sets `X-Real-IP` from Cloudflare's
-  `CF-Connecting-IP` only when that is one valid IPv4 or IPv6 address.
+  `X-Real-IP` or `X-HID-Client-Network` the caller sent, and sets `X-Real-IP`
+  from Cloudflare's `CF-Connecting-IP` only when that is one valid IPv4 or IPv6
+  address, with `X-HID-Client-Network` (the WAF's rate-limit key: the IPv4
+  address or the IPv6 /64 network address), which the Gateway does not pass
+  on.
 - The Gateway's realip module takes the client address from `X-Real-IP` only
   on connections from the VPC CIDR (`VPC_CIDR`), which in AWS means the public
   ALB. It then sends that address as `X-Forwarded-For` and does not pass
@@ -99,7 +106,10 @@ included, passes through unchanged with its code, `Set-Cookie` and
 `Retry-After` (ADR-055, A8). The Gateway logs one JSON line per request to
 stdout (format `hid_api`): the path without its query string, method, status,
 timings and request ids, never the request line, query, cookies or
-credentials (D7).
+credentials. Its error log (stderr) takes only critical messages, because
+nginx writes the request line and upstream URL, query included, into every
+error or warning about a request; a critical message about a request still
+carries it (D7).
 
 `HID_ENABLED_API_ROUTES` lists the modules whose `/api/v1/*` prefixes the
 Gateway proxies. Any other module answers `404 API_ROUTE_NOT_FOUND` before

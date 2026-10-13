@@ -170,11 +170,17 @@ staging counterpart because `staging.healthidentitydirectory.com` is the
 staging web host.
 
 Before proxying, the Worker deletes every inbound forwarding header
-(`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP` and `Forwarded`) and sets
-`X-Real-IP` to the address Cloudflare reported in `CF-Connecting-IP`, only when
-that is one valid IPv4 or IPv6 address (IPv6 in canonical form). The AWS
-gateway trusts that header only on connections from its VPC and, in staging
-and production, refuses API requests without it. Every deployed Worker that
+(`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP` and `Forwarded`) and a
+caller's `X-HID-Client-Network`, and sets `X-Real-IP` to the address
+Cloudflare reported in `CF-Connecting-IP`, only when that is one valid IPv4 or
+IPv6 address (IPv6 in canonical form). The AWS gateway trusts that header only
+on connections from its VPC and, in staging and production, refuses API
+requests without it. With it the Worker sets `X-HID-Client-Network`, the key
+of the AWS WAF's per-client rate limit (ADR-055, A7): the IPv4 address, or the
+canonical network address of the IPv6 /64 (`2001:db8:4:5::`), with an
+IPv4-mapped IPv6 address counted as IPv4, so a client cannot escape the limit
+by rotating addresses inside its /64. The gateway drops it before any
+backend. Every deployed Worker that
 proxies `/api/v1` (at launch `hid-web` and `hid-admin`) must be deployed with
 this behaviour before a gateway that requires it. A Worker built earlier
 deletes the caller's `X-Real-IP` and sets none, so the gateway refuses its API
@@ -202,7 +208,13 @@ asset binding sent:
   recovery pages (release checklist §8); staging confirms it with the real
   widget. A Health-id build that adds a script, frame or connection origin
   (Sentry, Google sign-in, analytics) needs this policy changed in the same
-  release.
+  release. So does switching document uploads on (off at launch, D17):
+  Health-id 82b474e `PUT`s the file straight to the presigned S3 URL from the
+  upload intent (`packages/http/src/upload.ts:60`), so that release must add
+  the documents bucket's exact S3 origin to `connect-src` for `hid-web` and
+  `hid-admin` (ADR-055; `docs/PHASE_3_LAUNCH_DECISIONS.md` D5 and I7).
+  Downloads open the presigned URL in a new tab, which `connect-src` does not
+  govern.
 - Every `/api/v1` answer and every answer the Worker writes itself gets
   `default-src 'none'; frame-ancestors 'none'`.
 - The undeployed legacy product hosts get no page policy; each needs its own

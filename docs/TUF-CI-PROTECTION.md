@@ -217,7 +217,10 @@ and available paired command sizes/digests. The workspace job uploads
 `tuf-workspace-<run_id>-<attempt>` with exact build/test/verify commands,
 timestamps, exit codes and SHA-256-bound logs, including partial failure.
 It also runs the socket-only synthetic PostgreSQL migration/restore rehearsal
-and retains its bounded summary, excluding backups and raw SQL logs. The
+and retains its bounded summary, excluding backups and raw SQL logs, and the
+gateway runtime check (`gateway-runtime`), which pulls the digest-pinned
+`nginxinc/nginx-unprivileged` image of `gateway/Dockerfile` and runs its nginx
+against loopback stubs with no credential. The
 isolated historical upstream job retains reference-client evidence only; it
 has no release output or cloud authority. Production tooling and the broker
 use the independently pinned Go 1.26.9 profile and a symbol-level vulnerability

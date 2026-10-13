@@ -3097,7 +3097,9 @@ Date: 2026-10-13
 
 Change: BRANCH:launch/edge-hardening-2 (register WAF-CRS-BODY, the
 non-Identity part of A7, A8, D6, D7, SCAN-EDGE/EDGE-DOCS; IP-THRESHOLDS
-documented). ADR-054 is taken by the unmerged launch/staff-mfa branch.
+documented), including its review follow-up (error log, per-network WAF key,
+CI runtime check, upload CSP dependency). ADR-054 is taken by the unmerged
+launch/staff-mfa branch.
 
 Context:
 
@@ -3141,14 +3143,20 @@ Decision:
    routes is the gateway's `client_max_body_size 512k` with a Problem Details
    `413 PAYLOAD_TOO_LARGE` (the ehr-api JSON limit; identity-api refuses more
    than 256 KiB itself).
-2. **Per-client WAF rate limit (A7).** `ApiOriginRateLimit` aggregates on
-   `X-Real-IP` (`FORWARDED_IP`, fallback `MATCH`): rule 0 has already refused
-   anything without the Worker's origin secret, and the Worker always replaces
-   `X-Real-IP` with `CF-Connecting-IP`. The limit stays 2,000 per 5 minutes,
-   now per client address. `ApiOriginEdgeRateLimit` (50,000 per 5 minutes per
-   connecting address) is the backstop for a leaked secret or a request
-   without the header. The gateway no longer forwards the origin secret to
-   any backend. Identity's MFA bucket (the other part of A7) is a separate
+2. **Per-client WAF rate limit (A7).** The Worker sends
+   `X-HID-Client-Network`, derived from `CF-Connecting-IP` and always
+   replacing a caller's value: the IPv4 address, or the canonical network
+   address of the IPv6 /64 (`2001:db8:4:5::`), with IPv4-mapped IPv6 counted
+   as IPv4, as Identity's own limits count a client network. `X-Real-IP` keeps
+   the full address. `ApiOriginRateLimit` aggregates on `X-HID-Client-Network`
+   (`FORWARDED_IP`, fallback `MATCH`): rule 0 has already refused anything
+   without the Worker's origin secret. Keyed on the full IPv6 address, one
+   client could rotate addresses inside its /64 and never reach the limit.
+   The limit stays 2,000 per 5 minutes, now per client network.
+   `ApiOriginEdgeRateLimit` (50,000 per 5 minutes per connecting address) is
+   the backstop for a leaked secret or a request without the header. The
+   gateway forwards neither the origin secret nor the client network to any
+   backend. Identity's MFA bucket (the other part of A7) is a separate
    change.
 3. **Upstream answers pass through (A8).** `proxy_intercept_errors` is removed.
    `error_page 502 503 504 = @upstream_unavailable` still answers bounded
@@ -3169,27 +3177,50 @@ Decision:
    build was run through the Worker in headless Chromium with no violation.
    The undeployed legacy product hosts get no page policy until they have
    their own. `hid-web` grants no camera or microphone.
-5. **Query-free access log (D7).** The gateway logs its own JSON format
+5. **Query-free logs (D7).** The gateway logs its own JSON format
    (`hid_api`, `escape=json`) to the image's access-log path: time, client
    address, method, path (`$uri`), status, bytes, request and upstream timing,
    upstream status, `request_id` and `X-Correlation-ID`. It never records the
-   request line, arguments, referrer, cookies or credentials.
+   request line, arguments, referrer, cookies or credentials. The server's
+   error log takes only critical messages (`error_log
+   /var/log/nginx/error.log crit`): nginx appends the request line and the
+   upstream URL, query string included, to every error or warning about a
+   request (a refused, reset, timed-out or unresolved upstream, a body over
+   512 KiB, a body buffered to a temporary file, which every clinical write
+   over 16 KiB is), and the image's notice-level error log is the container's
+   stderr, in the same CloudWatch log group.
 6. **Scanner callback closed (SCAN-EDGE).** The gateway answers
    `/api/v1/ehr/documents/scan-events` with `404 API_ROUTE_NOT_FOUND` in every
    spelling, like the other service-to-service routes. The scanner (D5, I7)
    calls ehr-api on its private service name when uploads ship.
 7. **IP-THRESHOLDS** stays a documented decision: the Identity per-network
-   limits (5 per 15 minutes) and the WAF per-client limit are unchanged at
-   launch and are raised by configuration if the `ip`-scope 429 rate or the
-   `hid-<env>-origin-rate` metric shows NAT collisions.
+   limits (5 per 15 minutes) and the WAF per-client-network limit are
+   unchanged at launch. They are raised if the `ip`-scope 429 rate or the
+   `hid-<env>-origin-rate` metric shows NAT collisions: the Identity limits by
+   their configuration, the WAF limits only by a reviewed CDK change to
+   `API_ORIGIN_CLIENT_RATE_LIMIT` (and `API_ORIGIN_EDGE_RATE_LIMIT`), which are
+   code constants.
+8. **Gateway runtime check in CI.** `scripts/verify-gateway-runtime.mjs
+   --pinned-image` runs the shipped configuration under the nginx of the image
+   `gateway/Dockerfile` pins by digest; it is the `gateway-runtime` step of
+   `release/scripts/run-workspace-gates.mjs`, which the required workspace
+   job of `tuf-local-gates.yml` runs, so the pass-through, body bound, header
+   strips and both logs are checked against real nginx on every change, not
+   only against the nginx model.
 
 Consequences:
 
 - Clinicians can save notes up to the service limit through the edge; a body
   over 512 KiB answers `413 PAYLOAD_TOO_LARGE` Problem Details. The other CRS
   body rules inspect only the first 8 KB of a long note (an ALB limit).
-- One client over the rate limit is blocked alone; a busy facility or carrier
-  NAT address counts as one client.
+- One client network (an IPv4 address or an IPv6 /64) over the rate limit is
+  blocked alone; a busy facility or carrier NAT address counts as one client.
+  Traffic spread across many networks (a botnet, or a client holding many
+  IPv4 addresses or /64s) is limited per network only; if it passes 50,000
+  requests per 5 minutes through one Cloudflare egress address, the backstop
+  blocks every user behind that egress address for the rest of the window.
+  That is the shared throttle A7 removed, now only for traffic 25 times the
+  old limit.
 - Browsers now see a service's own 5xx code and any `502`. A refresh that
   fails with a 5xx now reaches the browser with its cookie-clearing
   `Set-Cookie`; before, a `503` dropped it, the browser kept a possibly spent
@@ -3200,20 +3231,39 @@ Consequences:
   (Sentry, Google sign-in, analytics) must change the policy in the same
   release, or the browser blocks it.
 - Gateway logs can no longer answer "which query did this request carry";
-  audit rows remain the record of administrative reads.
+  audit rows remain the record of administrative reads. They no longer say
+  why nginx got no upstream answer (refused, timed out, unresolved): the
+  access log's status, `upstream_status` and `upstream_time` remain. A
+  critical nginx message about a request (it cannot write a temporary file,
+  or cannot open an upstream connection for a reason other than refusal or an
+  unreachable network, such as exhausted local ports) still carries the
+  request line; those mean a broken or overloaded task and are rare.
+- Document uploads (off at launch, D17) need a CSP change when they are
+  switched on: Health-id 82b474e `PUT`s the file straight to the presigned
+  S3 URL from the upload intent (`packages/http/src/upload.ts:60`, called from
+  `apps/patient-web/src/staff/api.ts:1089`), which `connect-src 'self'
+  https://challenges.cloudflare.com` blocks. The release that enables uploads
+  (D5, P11) adds the documents bucket's exact S3 origin to `connect-src` for
+  `hid-web` and `hid-admin` in the same reviewed change. Downloads open the
+  presigned URL with `window.open` (`Clinical.tsx:890`), which `connect-src`
+  does not govern.
 
 Migration Impact: none.
 
 Security Impact: deny by default. The body exemption is limited to the
 clinical write routes by method and raw path; the rate limit no longer lets
-one client exhaust an egress address; a portal XSS has no script, frame or
-connection origin beyond the site and Turnstile; administrator search terms
-leave the logs; the origin secret stays at the edge; one more service route
-is closed at the edge. Authentication, authorization, CSRF and Origin checks,
+one client network, IPv6 address rotation included, exhaust an egress
+address (traffic over the 50,000 backstop from many networks still can); a
+portal XSS has no script, frame or connection origin beyond the site and
+Turnstile; administrator search terms leave the access and error logs except
+in a critical nginx message about the request; the origin secret and the
+client-network key stay at the edge; one more service route is closed at the
+edge. Authentication, authorization, CSRF and Origin checks,
 RLS and audit are unchanged.
 
 Compatibility Impact: Health-id 82b474e needs no change: it loads only its
-own assets and Turnstile, calls only its own origin, never calls
+own assets and Turnstile, calls only its own origin except the presigned
+document upload (uploads are off at launch; see Consequences), never calls
 `scan-events`, and already branches on specific codes and treats other 5xx
 generically. Operators keep Cloudflare Pseudo IPv4 off or in "add header"
 mode. Staging confirms the WAF behaviour (a 20,000-character note answers

@@ -240,22 +240,26 @@ templates after D-Eminence/hid-system#65 were not re-recorded here. Record the
 production baseline again from the approved SHA (§12 step 2).
 
 **Under ADR-055 (BRANCH:launch/edge-hardening-2).** The same offline synthesis
-on `main` `cf5a14f` plus this branch gives production
-`d4df223b0711500bfd72737d8f2f54048606f70b8930b9ad9c6d76d24c9c14f7` (550,596
+on `main` `cf5a14f` plus this branch (with its review follow-up) gives
+production
+`6e0300ce7fd7f083759d419208b83a70cd515075c68859055b7926fcf6af4609` (550,607
 bytes, 407 resources, 54 parameters), development
-`406166c2d870790542ad7f5b1abae690c503a3f42e58410cbc163a3b758f35e7` (481,353
+`190f915e24bcd841c973198fb15d0e952e7851668d4012e108d6cd72115594ea` (481,364
 bytes), economy
-`5dfba47c96826fc20d7e0eb6b41380bedd37605a0f84e5c390f80e35fb526406` (531,794
+`d2cc1e696d4f6cf1aefd5e867c7b209b5c6ce50c20e7e289b4818b52c34e8a8b` (531,805
 bytes) and fidelity
-`ac4f7dc68be77f108a0895d0d05b77b1f637a243a8cef2273466724974698823` (535,643
+`b5d3962f7864c03bc3cd35c7eb5ddc44cd677ea9e3a0a8b5f24a59692279ea08` (535,654
 bytes); sleep, which has no public web ACL, is unchanged
 (`c1c018c79f403100bb221774d80eba07ec3c7822b508ac6a8d3467247c2c88e9`). The base
 `cf5a14f` synthesizes production to the ADR-053 hash above, and a structural
 comparison finds exactly one changed resource, `ApiOriginWebAcl`, whose rules
 change and nothing else: the Core Rule Set's `SizeRestrictions_BODY` override
 to count, the new `AwsCommonRulesBodySize` and `ApiOriginEdgeRateLimit` rules,
-and `ApiOriginRateLimit` keyed on `X-Real-IP` (`FORWARDED_IP`). `verify:synth`
-and `verify:policy` pass for all five profiles.
+and `ApiOriginRateLimit` keyed on `X-HID-Client-Network` (`FORWARDED_IP`), the
+client network the Worker derives from `CF-Connecting-IP`. Deploy the Workers
+that send that header before this web ACL: behind a Worker that does not,
+requests are counted only by the backstop. `verify:synth` and `verify:policy`
+pass for all five profiles.
 
 ## 2. Local source gates
 

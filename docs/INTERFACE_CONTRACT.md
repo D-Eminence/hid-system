@@ -55,10 +55,12 @@ spent. Keeping the cookies on a 5xx is register item A6 (Identity, open).
 The gateway refuses a request body over 512 KiB with
 `413 PAYLOAD_TOO_LARGE` Problem Details before any service sees it (the
 largest JSON body a launch service accepts; Identity refuses more than
-256 KiB with the same code). The public API WAF limits each client address
-(the `X-Real-IP` the Worker sets) to 2,000 requests per 5 minutes and answers
-a request over the limit with `403` and the WAF's own non-JSON body; clients
-should treat it as rate limiting. The WAF's 8 KB request-body rule does not
+256 KiB with the same code). The public API WAF limits each client network
+(an IPv4 address, or an IPv6 /64, which the Worker sends as
+`X-HID-Client-Network` and the gateway does not pass on; a caller's own value
+is replaced) to 2,000 requests per 5 minutes and answers a request over the
+limit with `403` and the WAF's own non-JSON body; clients should treat it as
+rate limiting. Devices sharing one IPv6 /64 share that limit. The WAF's 8 KB request-body rule does not
 apply to `POST` and `PATCH` on the encounter-scoped clinical writes
 (`/api/v1/ehr/patients/:patientId/encounters`, `/:encounterId`, and its
 `clinical-notes` with `/:noteId/revisions`, `diagnoses`, `prescriptions` and
@@ -74,7 +76,10 @@ that origin besides its own, styles, fonts and images (plus `data:` images)
 only from its own origin, and no inline script, `eval`, plugins, workers or
 framing by another site. Every `/api/v1` and edge answer carries
 `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and the
-same HSTS (ADR-055, D6).
+same HSTS (ADR-055, D6). The page policy allows no storage origin: document
+uploads (off at launch) send the file straight to the presigned S3 URL, so the
+release that switches them on adds the documents bucket's origin to
+`connect-src`.
 
 Authentication OTP commands are purpose-bound and use three stages: start
 returns a generic challenge, verify accepts exactly six digits and returns an
