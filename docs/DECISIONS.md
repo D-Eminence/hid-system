@@ -2777,7 +2777,7 @@ Related ADRs: ADR-025, ADR-032, ADR-033, ADR-034, ADR-035, ADR-043, ADR-045.
 # ADR-048: Public Enrollment Checks Its Gate First, Bounds the HID Re-display and the Contact Proof, and Caps QoreID Lookups
 
 Status: Proposed for source implementation
-(BRANCH:launch/identity-enrollment-gates, migration 0085). Not merged or
+(D-Eminence/hid-system#68, migration 0085). Not merged or
 deployed. The number may need renumbering when the parallel launch branches
 merge.
 
@@ -3199,7 +3199,7 @@ Related ADRs: ADR-032, ADR-033, ADR-034, ADR-035, ADR-047.
 # ADR-057: Closed Registration Says So, and a Public Read Tells Clients Before They Ask for a NIN
 
 Status: Proposed for source implementation
-(BRANCH:launch/identity-enrollment-gates, FE-4, no migration). Not merged or
+(D-Eminence/hid-system#68, FE-4, no migration). Not merged or
 deployed. It builds on ADR-048 (the enrollment gate). The number may need
 renumbering when the parallel launch branches merge (ADR-054 to ADR-056 and
 ADR-058 are taken on other launch branches).

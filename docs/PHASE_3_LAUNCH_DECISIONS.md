@@ -4,7 +4,7 @@ Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
 the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
 the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
 (§1, ADR-052, D-Eminence/hid-system#67) and N1 and N2 (ADR-048,
-BRANCH:launch/identity-enrollment-gates) with the owner's defaults;
+D-Eminence/hid-system#68) with the owner's defaults;
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
 
@@ -38,10 +38,10 @@ separate deployment authorization. None of them has been run.
   never `NIN_VERIFIED`. Until that holder step ships, Identity refuses
   `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true` in production
   (`HID_DEPLOYMENT_ENV=production`, or `NODE_ENV=production` outside the
-  staging profile): it does not start (BRANCH:launch/identity-enrollment-gates,
+  staging profile): it does not start (D-Eminence/hid-system#68,
   CFG-PROD). The change that adds the holder step lifts that refusal; staging
   may run NIN-only enrollment for acceptance.
-- **Implemented now (BRANCH:launch/identity-enrollment-gates), ENR-4 step 1.**
+- **Implemented now (D-Eminence/hid-system#68), ENR-4 step 1.**
   Enrollment start checks the QoreID gate (`QOREID_ENABLED`,
   `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` and the runtime pause of
   `qoreid`/`patient_nin`) before it reads whether the NIN is bound or pending,
@@ -49,7 +49,7 @@ separate deployment authorization. None of them has been run.
   open the `409 NIN_ALREADY_REGISTERED` answer remains until step 2 ships;
   each probe of an unbound NIN then costs a QoreID lookup, bounded by the
   lookup quota (N2, below).
-- **Implemented now (BRANCH:launch/identity-enrollment-gates), FE-4.** While
+- **Implemented now (D-Eminence/hid-system#68), FE-4.** While
   the gate is closed by configuration, start answers its `503` with "New
   Health ID registration is not open yet. If you already have a Health ID,
   sign in." instead of the generic 5xx detail (the gateway on main still
@@ -98,7 +98,7 @@ separate deployment authorization. None of them has been run.
     patients self-enroll.
 - **Implemented now.** D-Eminence/hid-system#50 expires the enrollment cookie
   at every sign-in, refresh and sign-out, and limits activation per
-  enrollment. BRANCH:launch/identity-enrollment-gates implements (b) and (c)
+  enrollment. D-Eminence/hid-system#68 implements (b) and (c)
   in Identity and in migration 0085, and caps QoreID lookups: each lookup of
   public enrollment is charged, before QoreID is called, to the client network
   (an IPv4 address or an IPv6 /64) at 5 an hour and 15 a day, and to a
@@ -370,5 +370,5 @@ for each merged change and its evidence. Pull requests from this review:
 | DOC-1 (any facility member could complete a colleague's upload) | D-Eminence/hid-system#59 | merged (D13) |
 | Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
-| ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota); FE-4 (enrollment availability read, registration-not-open answer) | BRANCH:launch/identity-enrollment-gates, migration 0085 (FE-4 adds none) | local branch (N1, N2); FE-4's Health-id follow-up open |
+| ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota); FE-4 (enrollment availability read, registration-not-open answer) | D-Eminence/hid-system#68, migration 0085 (FE-4 adds none) | local branch (N1, N2); FE-4's Health-id follow-up open |
 | DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
