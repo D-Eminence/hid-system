@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import { consumeRateLimit } from '../auth/rate-limit';
+import { consumeRateLimit, rateLimitBlocked } from '../auth/rate-limit';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -11,16 +11,24 @@ export type StaffSearchOperation = 'patient_lookup' | 'access_request';
 /**
  * Per-actor and per-facility budgets for the two staff commands that take a
  * patient's HID before any consent: patient lookup and access-request
- * creation (PSEARCH-1, 0086). Each call is counted in auth.otp_rate_limits in
- * its own committed transaction before the command runs, whatever the
- * command's outcome, so refused and unknown HIDs count as found ones do. A
- * bucket is the SHA-256 of a labelled account or facility id: neither is a
- * secret, and the label keeps the four budgets apart.
+ * creation (PSEARCH-1, 0086), kept in auth.otp_rate_limits. A bucket is the
+ * SHA-256 of a labelled account or facility id: neither is a secret, and the
+ * label keeps the four budgets apart.
+ *
+ * Access-request creation is counted before the command runs, whatever its
+ * outcome. Patient lookup reads the budgets first (`refuseWhileBlocked`) and
+ * counts only a refused lookup, unknown and unauthorized alike (FE-10): a
+ * lookup that returns a patient the caller is already authorized for tells it
+ * nothing new, and Health-id repeats it before each clinical read and write.
  */
 @Injectable()
 export class StaffSearchBudget {
   constructor(private readonly database: DatabaseService) {}
 
+  /**
+   * Counts one call in its own committed transaction and refuses it with 429
+   * once the actor's or the facility's maximum is crossed.
+   */
   async consume(operation: StaffSearchOperation, context: DataAccessContext): Promise<void> {
     const environment = getEnvironment();
     const limits = operation === 'patient_lookup'
@@ -41,11 +49,27 @@ export class StaffSearchBudget {
         staffSearchBucket(operation, 'facility', context.facilityId),
         { windowSeconds: limits.windowSeconds, maxRequests: limits.facility });
     });
-    if (!limited) return;
-    throw operation === 'patient_lookup'
-      ? new DomainProblem(429, 'PATIENT_LOOKUP_RATE_LIMITED', 'Too many patient lookups; wait and try again')
-      : new DomainProblem(429, 'ACCESS_REQUEST_RATE_LIMITED', 'Too many access requests; wait and try again');
+    if (limited) throw rateLimited(operation);
   }
+
+  /**
+   * Refuses with 429 while the actor's or the facility's bucket is blocked,
+   * reading both and counting nothing. A bucket at its maximum is not yet
+   * blocked: only a counted call over it blocks it, for one window.
+   */
+  async refuseWhileBlocked(operation: StaffSearchOperation, context: DataAccessContext): Promise<void> {
+    const blocked = await this.database.withTransaction(context, async (client) =>
+      await rateLimitBlocked(client, `${operation}_actor`, staffSearchBucket(operation, 'actor', context.actor.accountId))
+      || rateLimitBlocked(client, `${operation}_facility`, staffSearchBucket(operation, 'facility', context.facilityId)),
+    { readOnly: true });
+    if (blocked) throw rateLimited(operation);
+  }
+}
+
+function rateLimited(operation: StaffSearchOperation): DomainProblem {
+  return operation === 'patient_lookup'
+    ? new DomainProblem(429, 'PATIENT_LOOKUP_RATE_LIMITED', 'Too many patient lookups; wait and try again')
+    : new DomainProblem(429, 'ACCESS_REQUEST_RATE_LIMITED', 'Too many access requests; wait and try again');
 }
 
 export function staffSearchBucket(operation: StaffSearchOperation, scope: 'actor' | 'facility', id: string): string {

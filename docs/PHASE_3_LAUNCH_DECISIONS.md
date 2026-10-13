@@ -247,7 +247,8 @@ proposal; that change is the place to alter it.
   names a patient id, and the clinician's own request list names the patient
   only while a grant made from the request is active (otherwise a
   non-identifying `withheld-…` string, so Health-id's list keeps rendering). Budgets per actor and
-  per facility: 60 and 600 lookups per 5 minutes, 20 and 200 access requests
+  per facility: 60 and 600 refused lookups per 5 minutes (a lookup that
+  returns a granted patient is not counted, FE-10), 20 and 200 access requests
   per 15 minutes (environment values). A registration member reads only
   patients linked to a case or candidate at its facility; duplicate checks go
   through two functions that return minimum fields.

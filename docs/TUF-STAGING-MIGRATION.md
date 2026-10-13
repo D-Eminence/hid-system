@@ -122,11 +122,14 @@ The executable covers:
    unchanged against the narrowed `patients_registration_read` policy; and
    `patient_search_runtime` (`verify-patient-search-runtime.mjs`, new) requires
    a lookup with a grant to answer `200`, an unknown HID, a patient without a
-   grant and a grant at another facility to answer the same `404
+   grant, a grant at another facility and a patient the caller can read but
+   holds no grant for (a doctor's own patient record) to answer the same `404
    PATIENT_NOT_AVAILABLE` while the audit keeps `not_found` or
    `not_authorized`, a bad purpose `400`, an access request for an unknown HID
    to answer like a recorded one without `patientId` and persist nothing, and
-   the actor and facility budgets to answer `429`. The rehearsal also runs
+   the actor and facility budgets to count those refusals alike, and not a
+   granted lookup, and to answer `429` while blocked, each such request
+   audited as a failure. The rehearsal also runs
    the new rollback-only `patient-search.integration.sql` with the additional
    suites.
    `platform_admin_runtime` (`verify-platform-admin-runtime.mjs`) also

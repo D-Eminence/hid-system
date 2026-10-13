@@ -2779,8 +2779,11 @@ challenge.
 **Staff search budgets.** `otp_rate_limits_scope_check` is dropped and re-added
 with four more scopes: `patient_lookup_actor`, `patient_lookup_facility`,
 `access_request_actor` and `access_request_facility`. Identity counts every
-patient lookup and every access-request creation there (bucket: SHA-256 of a
-labelled actor account or facility id), before the command runs. Re-adding the
+access-request creation there before the command runs, and every refused
+patient lookup after its audit event (bucket: SHA-256 of a labelled actor
+account or facility id); a lookup reads its two buckets first and is refused
+while either is blocked, and one that returns a granted patient is not counted
+(FE-10). Re-adding the
 check validates the existing rows under an `ACCESS EXCLUSIVE` lock on
 `auth.otp_rate_limits`; every existing scope stays allowed.
 
@@ -2923,8 +2926,10 @@ Tests:
   recovery hold on approval, PIN and emergency contacts; the staff list
   names the patient of the active approval only, not of the pending or the
   revoked one),
-  `verify-patient-search-runtime.mjs` (new: lookup `200`, three identical
-  `404`s, `400`, audit reasons, uniform access-request answer, `429`s) and
+  `verify-patient-search-runtime.mjs` (new: lookup `200`, one identical `404`
+  for every refusal, whether row-level security hides the patient or the
+  authorization check refuses one the caller can read, `400`, audit reasons,
+  uniform access-request answer, `429`s for refusals only) and
   `verify-registration-review-runtime.mjs` (registration review, unchanged,
   passes under the narrowed policy).
 
