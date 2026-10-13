@@ -79,6 +79,16 @@ const environmentSchema = z.object({
   // 15 minutes blocks for 15 minutes). Never keyed by client IP.
   OTP_VERIFY_FAILURE_MAX: z.coerce.number().int().min(2).max(100).default(5),
   OTP_VERIFY_FAILURE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
+  // Staff patient search budgets (0086), in auth.otp_rate_limits: every
+  // POST /identity/patient-lookup and every POST /identity/access-requests is
+  // counted per actor account and per facility, whatever its outcome. The
+  // request after the maximum within the window is 429 until one window ends.
+  PATIENT_LOOKUP_RATE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86_400).default(300),
+  PATIENT_LOOKUP_ACTOR_MAX_REQUESTS: z.coerce.number().int().min(1).max(10_000).default(60),
+  PATIENT_LOOKUP_FACILITY_MAX_REQUESTS: z.coerce.number().int().min(1).max(100_000).default(600),
+  ACCESS_REQUEST_RATE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
+  ACCESS_REQUEST_ACTOR_MAX_REQUESTS: z.coerce.number().int().min(1).max(10_000).default(20),
+  ACCESS_REQUEST_FACILITY_MAX_REQUESTS: z.coerce.number().int().min(1).max(100_000).default(200),
   NOTIFICATION_API_URL: z.string().url().default('http://127.0.0.1:3007'),
   NOTIFICATION_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: optionalSecret,

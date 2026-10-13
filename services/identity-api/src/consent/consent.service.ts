@@ -3,15 +3,20 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { requirePatient } from '../auth/patient-self.service';
+import { requireNoRecentRecoveryHold, requireRecentPatientAuthentication } from '../auth/recent-authentication';
 import { DatabaseService } from '../database/database.service';
+import { StaffSearchBudget } from '../identity/staff-search-budget';
 import type { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import type { CreateBreakGlassDto } from './dto/create-break-glass.dto';
 import type { ListStaffAccessRequestsDto } from './dto/list-staff-access-requests.dto';
 import type { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
 
+/**
+ * A recorded access request as the requesting clinician sees it. It names no
+ * patient, and an unknown HID is answered in the same shape (PSEARCH-1, 0086).
+ */
 export interface AccessRequestRow extends QueryResultRow {
   accessRequestId: string;
-  patientId: string;
   status: 'pending';
   scope: 'read_records' | 'write_records';
   purpose: string;
@@ -56,17 +61,25 @@ export interface VerifiedPatientPinAccess {
   existingGrant: boolean;
 }
 
+const RECENT_APPROVAL_AUTH_DETAIL = 'Sign in again before approving access to your records';
+
 @Injectable()
 export class ConsentService {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(private readonly database: DatabaseService, private readonly budget: StaffSearchBudget) {}
 
-  async createAccessRequest(context: DataAccessContext, input: CreateAccessRequestDto) {
+  /**
+   * Records a pending request for the patient an exact HID names. The answer
+   * never names the patient: an unknown HID gets the same answer, audited as
+   * refused by the database command, so the request does not tell whether the
+   * HID exists. Counted against the actor's and facility's budgets first.
+   */
+  async createAccessRequest(context: DataAccessContext, input: CreateAccessRequestDto): Promise<AccessRequestRow> {
+    await this.budget.consume('access_request', context);
     try {
       return await this.database.withTransaction(context, async (client) => {
         const result = await client.query<AccessRequestRow>(
           `select
              access_request_id as "accessRequestId",
-             subject_patient_id as "patientId",
              request_status as status,
              request_scope as scope,
              request_purpose as purpose,
@@ -76,13 +89,17 @@ export class ConsentService {
            from identity.create_access_request($1, $2, $3, $4)`,
           [input.hid, input.scope, input.reason, input.durationMinutes],
         );
-        return this.requireRow(result.rows[0]);
+        const row = this.requireRow(result.rows[0]);
+        // Exactly these fields, whatever else a row may carry.
+        return {
+          accessRequestId: row.accessRequestId, status: row.status, scope: row.scope, purpose: row.purpose,
+          durationMinutes: row.durationMinutes, requestedAt: row.requestedAt, existingRequest: row.existingRequest,
+        };
       });
     } catch (error) {
       throw this.translate(error);
     }
   }
-
 
 
   async listMyStaffAccessRequests(context: DataAccessContext, query: ListStaffAccessRequestsDto) {
@@ -123,15 +140,24 @@ export class ConsentService {
     }
   }
 
+  /**
+   * Approval grants a clinician access, so it needs a recent sign-in (as an
+   * access-PIN change does) and is refused for 24 hours after an OTP account
+   * recovery (REC-NOTIFY). Denial and revocation stay available.
+   */
   async approveAccessRequest(request: HidRequest, requestId: string) {
     const actor = requirePatient(request.actor);
     try {
-      return await this.asPatient(request, actor.subject, async (client) => this.requireRow((await client.query<Record<string, unknown> & QueryResultRow>(
-        `select access_request_id as "accessRequestId", consent_grant_id as "consentGrantId",
-           patient_id as "patientId", status, expires_at as "expiresAt", replayed
-         from identity.approve_my_access_request($1, $2, $3)`,
-        [actor.subject, actor.sessionId, requestId],
-      )).rows[0]));
+      return await this.asPatient(request, actor.subject, async (client) => {
+        await requireNoRecentRecoveryHold(client, actor.accountId, 'new access approvals');
+        await requireRecentPatientAuthentication(client, actor, RECENT_APPROVAL_AUTH_DETAIL);
+        return this.requireRow((await client.query<Record<string, unknown> & QueryResultRow>(
+          `select access_request_id as "accessRequestId", consent_grant_id as "consentGrantId",
+             patient_id as "patientId", status, expires_at as "expiresAt", replayed
+           from identity.approve_my_access_request($1, $2, $3)`,
+          [actor.subject, actor.sessionId, requestId],
+        )).rows[0]);
+      });
     } catch (error) {
       throw this.translate(error);
     }

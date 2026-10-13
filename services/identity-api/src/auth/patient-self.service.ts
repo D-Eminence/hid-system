@@ -3,7 +3,7 @@ import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
-import { requireRecentPatientAuthentication } from './recent-authentication';
+import { requireNoRecentRecoveryHold, requireRecentPatientAuthentication } from './recent-authentication';
 
 export function requirePatient(actor: ActorContext | undefined): ActorContext & { patientId: string; sessionId: string } {
   if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
@@ -51,6 +51,9 @@ export class PatientSelfService {
   async setAccessPin(request: HidRequest, pin: string) {
     const actor = requirePatient(request.actor);
     await this.database.withSystemTransaction(request.correlationId, async (client) => {
+      // A PIN lets staff open the records, so whoever just recovered the
+      // account may not set one for 24 hours (revoking it stays allowed).
+      await requireNoRecentRecoveryHold(client, actor.accountId, 'access-PIN changes');
       await this.requireRecentAuthentication(client, actor);
       // `withSystemTransaction` starts as system:auth. Bind the verified
       // patient subject explicitly so `patient_self_session` can enforce the

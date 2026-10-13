@@ -796,6 +796,19 @@ revoke all on function identity.current_patient_account(text),
   identity.authorize_patient_self(text,uuid), identity.patient_self_access_history(text,uuid),
   ehr.patient_self_context(uuid) from public;
 
+-- Recovery and patient search hardening (0086): the recovery audience check,
+-- the audit subject of a refused staff lookup and governed registration's
+-- duplicate checks are Identity-only commands; each checks its own caller.
+grant execute on function auth.recovery_account_audience(uuid, text),
+  identity.patient_lookup_audit_subject(text),
+  identity.registration_nin_holder(text),
+  identity.registration_candidates(date, text, text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function auth.recovery_account_audience(uuid, text),
+  identity.patient_lookup_audit_subject(text),
+  identity.registration_nin_holder(text),
+  identity.registration_candidates(date, text, text) from public;
+
 -- Governed enrollment creates only a pending-reset account for a resolved case.
 grant execute on function identity.enroll_registered_patient(uuid, bigint, text, text, text, char)
   to hid_identity_runtime;

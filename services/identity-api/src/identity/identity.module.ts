@@ -8,6 +8,7 @@ import { IdentityController } from './identity.controller';
 import { NinRegistrationController } from './nin-registration.controller';
 import { PostgresIdentityProvider } from './postgres-identity.provider';
 import { IdentityService } from './identity.service';
+import { StaffSearchBudget } from './staff-search-budget';
 import { IDENTITY_PROVIDER } from './identity.types';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
@@ -40,6 +41,7 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider }
     PatientEnrollmentController, ProviderEnrollmentController],
   providers: [
     IdentityService,
+    StaffSearchBudget,
     NinRegistrationService,
     NinIdentifierProtector,
     HidCodeGenerator,
