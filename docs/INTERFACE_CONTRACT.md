@@ -441,8 +441,12 @@ Patient access-request decisions are session-bound patient commands:
 `POST /api/v1/identity/access-requests/:requestId/deny` (`{ "reason" }`) require
 a patient session and no facility context. Since 0086 an approval grants
 access only from a session family first issued within the last 10 minutes (as
-an access-PIN change does), else `403 PATIENT_RECENT_AUTH_REQUIRED`; the client
-signs the patient in again and repeats it. For 24 hours after an OTP account
+an access-PIN change does), else `403 PATIENT_RECENT_AUTH_REQUIRED` with the
+detail "For your security, sign out, sign in again, and approve within 10
+minutes."; the client signs the patient out and in again and repeats it.
+Health-id shows that detail as it is on Approve, so it says what to do (FE-8;
+it was "Sign in again before approving access to your records", which left a
+patient who was already signed in no way forward). For 24 hours after an OTP account
 recovery of the account (any recovery purpose) an approval is `403
 PATIENT_RECENT_RECOVERY_HOLD`, checked before recent sign-in, because signing in
 again does not end it. A denial or a revocation is never held. `POST
@@ -487,17 +491,31 @@ grants access by itself, and its answers do not tell whether an HID exists:
 | `POST /api/v1/identity/patient-lookup` | `identity.patient.read` at the `X-Facility-ID` facility; body `{ hid, purpose }` (`direct-care`, `emergency` or `healthcare-operations`; anything else `400`). `200 { patient: { patientId, hid, firstName, lastName, fullName, dateOfBirth, gender, version }, authorization: { decision: 'allow', facilityId, membershipId, scope, purpose, consentGrantId, expiresAt, breakGlass } }` only with an active grant for this account, membership, facility and purpose (before 0086 a success answered `201`). Every refusal, whether the HID is unknown, the patient has no grant, or the grant is held at another facility or for another purpose, is the same `404 PATIENT_NOT_AVAILABLE` ("The patient is not available"); before 0086 a patient visible to the caller without a grant (any patient, for a registration member) answered `403`, and an unknown or hidden one `404`. The audit event `identity.patient.lookup` keeps the true outcome: `success`, or `denied` with `details.reason` `not_found` or `not_authorized` and, for the latter, the patient |
 | `POST /api/v1/identity/access-requests` | `identity.consent.write` at the `X-Facility-ID` facility, `X-Purpose-Of-Use` `direct-care` or `healthcare-operations`; body `{ hid, scope: read_records\|write_records, reason (8–500), durationMinutes (5–1440) }`. `201 { accessRequestId, status: 'pending', scope, purpose, durationMinutes, requestedAt, existingRequest }`, which no longer carries `patientId`. An unknown HID gets the same `201` shape (a new `accessRequestId`, `existingRequest: false`) instead of `404 CONSENT_RESOURCE_NOT_FOUND`; nothing is persisted for it, and the audit records `identity.access-request.refused` (`denied`, no patient, `details.reason: patient_not_available`) under that `accessRequestId`. The clinician's own list (above) shows only recorded requests, and names the patient only once a grant made from the request is active |
 
-Both commands are counted in `auth.otp_rate_limits` before they run, whatever
-their outcome, per actor account (across facilities) and per facility.
-Defaults: 60 lookups per actor and 600 per facility in 5 minutes
+Both commands have budgets in `auth.otp_rate_limits`, per actor account
+(across facilities) and per facility. An access request is counted before it
+runs, whatever its outcome. A patient lookup reads its two budgets first and,
+while either is blocked, answers `429 PATIENT_LOOKUP_RATE_LIMITED` before it
+reads anything, a lookup of a patient the caller holds a grant for included.
+Otherwise only a refused lookup is counted: an unknown HID, a patient without a
+grant and a grant held at another facility or for another purpose alike, after
+its audit event and before its `404`. A lookup that answers `200` is never
+counted, nor is one that fails on a dependency (`5xx`), so Health-id's lookup
+before each clinical read and write of a granted patient spends nothing (FE-10;
+until this change every lookup was counted, so the about ten lookups of one
+consultation could leave a clinician's saves refused with `429`). Defaults: 60
+refused lookups per actor and 600 per facility in 5 minutes
 (`PATIENT_LOOKUP_RATE_WINDOW_SECONDS`, `PATIENT_LOOKUP_ACTOR_MAX_REQUESTS`,
 `PATIENT_LOOKUP_FACILITY_MAX_REQUESTS`); 20 access requests per actor and 200
 per facility in 15 minutes (`ACCESS_REQUEST_RATE_WINDOW_SECONDS`,
 `ACCESS_REQUEST_ACTOR_MAX_REQUESTS`, `ACCESS_REQUEST_FACILITY_MAX_REQUESTS`;
 windows 60–86400 s, actor maxima 1–10000, facility maxima 1–100000). The
-call after a maximum is `429 PATIENT_LOOKUP_RATE_LIMITED` or `429
-ACCESS_REQUEST_RATE_LIMITED` until its window ends. A call refused for the
-actor's own budget does not count against the facility's.
+refused lookup or the access request after a maximum is `429
+PATIENT_LOOKUP_RATE_LIMITED` (instead of the `404`, for an unknown and an
+unauthorized HID alike) or `429 ACCESS_REQUEST_RATE_LIMITED`, and blocks that
+budget for one window: until it ends, every lookup by that actor, or at that
+facility, and every access request by that actor, or at that facility, is
+`429`. A call refused for the actor's own budget does not count against the
+facility's.
 
 Patient login/account deletion (Phase 3, ADR-036) closes the login only:
 
