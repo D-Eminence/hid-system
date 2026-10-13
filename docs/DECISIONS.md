@@ -2439,11 +2439,13 @@ Related: ADR-008; ADR-023; `INTERFACE_CONTRACT.md`;
 windows and NIN lookup quota (0085)"); release checklist §2, §3, §5, §6, §8
 and §9.
 
-## ADR-048 addendum: closed registration says so, and a public read tells clients before they ask for a NIN (FE-4)
+# ADR-057: Closed Registration Says So, and a Public Read Tells Clients Before They Ask for a NIN
 
 Status: Proposed for source implementation
-(BRANCH:launch/identity-enrollment-gates, no migration). Not merged or
-deployed.
+(BRANCH:launch/identity-enrollment-gates, FE-4, no migration). Not merged or
+deployed. It builds on ADR-048 (the enrollment gate). The number may need
+renumbering when the parallel launch branches merge (ADR-054 to ADR-056 and
+ADR-058 are taken on other launch branches).
 
 Date: 2026-10-13
 
@@ -2457,10 +2459,13 @@ Context:
   sign in.
 - Health-id 82b474e links to `/enroll` from sign-in and learns this only
   after the patient types a NIN and spends a Turnstile token. It shows a
-  problem's `detail` as sent, but Identity's problem filter replaced every
-  5xx detail with "The service could not complete the request.", so the
-  authored "temporarily unavailable" text never reached it, and that text
-  would have been wrong: the closure is a decision, not an outage.
+  problem's `detail` as sent, but the authored "temporarily unavailable"
+  text never reached it: Identity's problem filter replaced every 5xx
+  detail with "The service could not complete the request.", and the
+  gateway (on main and on this branch) replaces every upstream 502/503/504
+  with `503 UPSTREAM_UNAVAILABLE` "A required platform service is
+  temporarily unavailable.", which is what the patient saw. Either text is
+  wrong for this case: the closure is a decision, not an outage.
 
 Decision (owner defaults: deny by default, least exposure, no production
 bypass):
@@ -2476,14 +2481,21 @@ bypass):
   provider method, so the two cannot disagree. A fault reading the runtime
   state is a `503`, not `false`; a client treats anything but
   `200 { "open": true }` as not open.
-- It is public and takes no input. Every caller gets the same answer and it
-  carries no PHI, so it writes no audit row (as `GET /commercial/pricing`):
-  a row per anonymous read would let anyone grow the audit log without
-  bound and records nothing about a person. For the same reason Identity
-  keeps no per-network counter for it; the WAF rate rule covers it as every
-  API request. It may be cached for 30 seconds (`public, max-age=30`); the
+- It is public and takes no input. Every caller that reaches it gets the
+  same answer and it carries no PHI, so it writes no audit row (as
+  `GET /commercial/pricing`): a row per anonymous read would let anyone
+  grow the audit log without bound and records nothing about a person.
+  For the same reason Identity keeps no per-network counter for it; the WAF
+  rate rule covers it as every API request. It may be cached for 30 seconds (`public, max-age=30`); the
   Cloudflare Worker still makes every API response `no-store` at the edge,
-  which this change does not relax.
+  which this change does not relax. Identity's CORS policy is unchanged and
+  applies first, as on every route: a request with no `Origin` or one in
+  `CORS_ORIGINS` is answered, and a foreign `Origin` is refused by the CORS
+  middleware (`500`, no CORS permission) before the route.
+- `PublicDetailProblem` is the one exception to Identity's 5xx detail
+  masking. It takes only a fixed sentence written for the person using the
+  client, never a message built from an error or from request data; any
+  new use needs its own decision.
 
 Consequences:
 
@@ -2508,5 +2520,5 @@ Consequences:
   route was checked against main's gateway model in a scratch copy.
 
 Related: ADR-048; ADR-053; ADR-055; `INTERFACE_CONTRACT.md` (section 6;
-"Public patient enrollment"); `QOREID_VERIFICATION_CONTRACT.md`;
+section 8, "Public patient enrollment"); `QOREID_VERIFICATION_CONTRACT.md`;
 `PHASE_3_LAUNCH_DECISIONS.md` (N1); release checklist §2, §3 and §8.

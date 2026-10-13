@@ -48,10 +48,11 @@ separate deployment authorization. None of them has been run.
 - **Implemented now (BRANCH:launch/identity-enrollment-gates), FE-4.** While
   the gate is closed by configuration, start answers its `503` with "New
   Health ID registration is not open yet. If you already have a Health ID,
-  sign in." instead of the generic 5xx detail, and
+  sign in." instead of the generic 5xx detail (the gateway on main still
+  replaces it with `503 UPSTREAM_UNAVAILABLE` until ADR-055), and
   `GET /api/v1/identity/patient-enrollments/availability` answers
   `{ "open": boolean }` from the same gate, so Health-id can say so before it
-  asks for a NIN (ADR-048 addendum; `INTERFACE_CONTRACT.md`). Health-id
+  asks for a NIN (ADR-057; `INTERFACE_CONTRACT.md`). Health-id
   82b474e does not read it yet (release checklist §3).
 - **Launch consequence (open for the owner to confirm).** With N1 as decided
   and facility-assisted registration out of scope (N2(d), D17), no new

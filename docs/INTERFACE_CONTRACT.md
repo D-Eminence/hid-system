@@ -415,7 +415,7 @@ not complete the request.", because an unexpected failure's message can carry
 internal state. The one exception is a problem raised as `PublicDetailProblem`:
 a fixed sentence written for the person using the client, which keeps its
 `detail` whatever its status. Today only the closed public enrollment gate
-uses it (`503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED`, section 5,
+uses it (`503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED`, section 8,
 "Public patient enrollment"; BRANCH:launch/identity-enrollment-gates, FE-4).
 
 ## 7. Health Endpoints
@@ -631,11 +631,16 @@ BRANCH:launch/identity-enrollment-gates; no migration; not deployed):
 
 - `GET /api/v1/identity/patient-enrollments/availability` (new). Public: no
   session, Origin, Turnstile token, cookie or input; a signed-in caller gets
-  the same answer. `200 { "open": boolean }`, nothing else. `open` is `true`
-  only when a start would now pass the checks it makes before it reads a
-  NIN: the enrollment keys are configured, `QOREID_ENABLED` and
-  `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` are on, and QoreID's `patient_nin`
-  capability is not paused at runtime. It does not predict per-request
+  the same answer. `200 { "open": boolean }`, nothing else. The route itself
+  refuses no `Origin`, but Identity's CORS middleware (`main.ts`) runs first,
+  as on every route: a request without an `Origin` or from one in
+  `CORS_ORIGINS` (the Health-id hosts) gets the answer, and a request from
+  any other `Origin` is answered `500` with no CORS permission before the
+  route is reached. `open` is `true` only when a start would now pass the
+  checks it makes before it reads a NIN: the enrollment keys are
+  configured, `QOREID_ENABLED` and `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` are
+  on, and QoreID's `patient_nin` capability is not paused at runtime. It
+  does not predict per-request
   refusals (Turnstile, rate limits, the lookup quota, a registered NIN,
   `503 ENROLLMENT_RECONCILIATION_REQUIRED`), so a client still handles every
   start answer. A fault reading the runtime pause answers `503` (generic
@@ -659,14 +664,17 @@ BRANCH:launch/identity-enrollment-gates; no migration; not deployed):
   `503 QOREID_DISABLED` or `503 QOREID_NIN_ONLY_DISABLED`, now with
   `detail` "New Health ID registration is not open yet. If you already have a
   Health ID, sign in." Before, Identity replaced it with the generic 5xx
-  detail (section 6), so a client showed "The service could not complete the
-  request." Production keeps NIN-only enrollment off until the N1 holder step
-  ships (`PHASE_3_LAUNCH_DECISIONS.md`), so in production every start answers
-  this. `503 INTEGRATION_PAUSED` (a runtime pause) and
-  `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` keep the generic detail. The
-  gateway on main (#65) replaces every upstream `502/503/504` with
+  detail (section 6), so a client calling Identity directly got "The
+  service could not complete the request.". Production keeps NIN-only
+  enrollment off until the N1 holder step ships
+  (`PHASE_3_LAUNCH_DECISIONS.md`), so in production Identity answers every
+  start this way. `503 INTEGRATION_PAUSED` (a runtime pause) and
+  `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` keep the generic detail. A
+  patient on Health-id sees neither detail yet: the gateway, on this branch
+  and on main (#65), replaces every upstream `502/503/504` with
   `503 UPSTREAM_UNAVAILABLE` ("A required platform service is temporarily
-  unavailable."); the new detail reaches a browser only once the gateway
+  unavailable.") and drops the `QOREID_*` code, before this change and
+  after it. The new detail and codes reach a browser only once the gateway
   passes upstream errors through (ADR-055, BRANCH:launch/edge-hardening-2).
   The availability read is a `200` and is not affected.
 - Health-id follow-up (not in Health-id 82b474e, which keeps working
