@@ -118,6 +118,75 @@ separate deployment authorization. None of them has been run.
   #50 on `auth.controller.ts` and `token.service.ts`.
 - **Data check.** Run I4 (§3) before deciding: whether such memberships exist.
 
+### Account recovery and patient search (REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE, SIGNIN-LOCKOUT, PSEARCH-1, REC-NOTIFY)
+
+Implemented as proposed defaults in `BRANCH:launch/identity-recovery-search`
+(migration 0086; release checklist §2, "Account recovery and patient search
+hardening"; `INTERFACE_CONTRACT.md`; `DATABASE.md`). Each default is a
+proposal; that change is the place to alter it.
+
+- **Questions.** (a) Which accounts may each recovery page reach (REC-AUDIENCE)?
+  (b) Where may a recovery code be sent (REC-UNVERIFIED-CONTACT)? (c) What
+  happens to Google links when a password is recovered (REC-GOOGLE)? (d) Is
+  the sign-in failure budget per identifier or per account (SIGNIN-LOCKOUT)?
+  (e) What may a clinician's search by HID reveal, and how often (PSEARCH-1,
+  ENUM-1), and which patient rows may a registration member read
+  (DB-RLS-PATIENTS)? (f) What must a patient do again before approving
+  access, and what is held after a recovery (REC-NOTIFY)?
+- **Proposed defaults (implemented).**
+  (a) The patient reset page and legacy activation reach only an account with
+  an active patient record; the staff reset page only one with an active
+  staff record; the administrator reset page only a platform administrator.
+  Any other start is answered as an unknown identifier. An account that is
+  both patient and staff recovers from either page.
+  (b) A patient's code goes to the account email only once it is verified,
+  else to the verified phone of the account's active public enrollment, else
+  nowhere. Staff and administrator codes go to the provisioned work email.
+  (c) A completed recovery revokes every Google link of the account, and the
+  owner links Google again after signing in.
+  (d) Both: five failures within 15 minutes lock the identifier and, shared
+  by its email and HID, the account, for 15 minutes; while the account is
+  locked the correct password is refused too, with the same `401`.
+  (e) Every refused lookup is one `404 PATIENT_NOT_AVAILABLE`; an access
+  request for an unknown HID is answered like a recorded one; neither answer
+  names a patient id. Budgets per actor and per facility: 60 and 600 lookups
+  per 5 minutes, 20 and 200 access requests per 15 minutes (environment
+  values). A registration member reads only patients linked to a case or
+  candidate at its facility; duplicate checks go through two functions that
+  return minimum fields.
+  (f) Approving an access request needs a sign-in within 10 minutes, as the
+  access PIN does. For 24 hours after any OTP recovery of the account,
+  approvals, access-PIN set and emergency-contact add or update are refused
+  (`403 PATIENT_RECENT_RECOVERY_HOLD`); denials, revocations, PIN removal and
+  contact deactivation stay available so the owner can shut access.
+- **Risks.**
+  (a) An account with no active patient, staff or administrator record
+  cannot recover by code from any page.
+  (b) Imported legacy patients whose source never confirmed their email and
+  who have no verified enrollment phone can no longer activate by code; the
+  release checklist §10 counts them. They need an approved route (for
+  example assisted verification) before launch.
+  (c) Patients who sign in with Google must link it again after every
+  recovery.
+  (d) Anyone who knows a patient's email or HID can keep the account locked,
+  15 minutes at a time, as they already could per identifier; there is no
+  per-IP budget because the edge discards client IPs (D6).
+  (e) A busy facility can reach its facility budget; the values are
+  environment settings. A clinician can still tell a known HID from their
+  own request list and from a repeated request (the pending request comes
+  back), bounded by the budgets and audited. The candidate search still reads
+  names and dates of birth across facilities for verified registry
+  demographics, as registration did before.
+  (f) A patient who has just recovered cannot approve access for 24 hours;
+  clinicians use the access PIN the patient already set, or break-glass
+  (when enabled).
+- **Waits on it.** The owner notice of REC-NOTIFY: telling the owner, on every
+  verified contact and in the inbox, that the password was changed. Identity
+  offers each completed recovery to `ACCOUNT_RECOVERY_NOTICE_SINK` after
+  commit; the notification route change binds a sink and sends the notice.
+  Health-id copy and error handling for the new answers (release checklist
+  §3).
+
 ## 2. Other open decisions
 
 | # | Decision | Proposed default | Risks | Waits on it |
@@ -250,3 +319,4 @@ for each merged change and its evidence. Pull requests from this review:
 | Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
 | DEP-4, DEP-4-RT (production workload tokens) | D-Eminence/hid-system#54, draft, ADR-047 Proposed | waits on D1 |
+| REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | `BRANCH:launch/identity-recovery-search`, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |

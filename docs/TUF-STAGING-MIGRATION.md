@@ -45,10 +45,12 @@ The executable covers:
    `patient_enrollment_runtime`, `patient_safety_runtime`,
    `delegated_cookie_read_runtime`, `outreach_cookie_read_runtime`,
    `provider_enrollment_runtime`, `platform_admin_runtime`,
-   `session_sign_out_runtime` and `platform_security_runtime` (the patient
+   `session_sign_out_runtime`, `platform_security_runtime`,
+   `registration_review_runtime` and `patient_search_runtime` (the patient
    enrollment, patient safety, delegated cookie-read, Outreach cookie-read,
-   provider enrollment, platform admin and platform security verifiers on a
-   disposable copy of the rehearsal database). Each is in
+   provider enrollment, platform admin, platform security, registration review
+   and patient search verifiers on a disposable copy of the rehearsal
+   database). Each is in
    `services/identity-api/scripts/` and runs Identity as
    `hid_identity_api_runtime`, except `delegated_cookie_read_runtime`
    (`services/ehr-api/scripts/verify-delegated-cookie-read-runtime.mjs`,
@@ -79,6 +81,28 @@ The executable covers:
    application. It also covers an older rotated token, which ends its sign-in
    whichever application signs out; a sign-out during a timed account
    suspension; and two concurrent sign-outs with one cookie, recorded once.
+   With 0086 (`BRANCH:launch/identity-recovery-search`): `otp_runtime` also
+   requires a completed recovery to revoke the account's Google link, a start
+   from another account kind's page and a patient start with only an
+   unverified email to send no code, and a staff reset to end the account's
+   staff and platform sessions; `patient_enrollment_runtime` requires the
+   staff and administrator reset pages to send a patient no code and five
+   wrong passwords across a patient's email and HID to lock the account,
+   refusing the correct password by either until the window ends;
+   `patient_safety_runtime` requires a recent sign-in for an access approval
+   and refuses an approval, an access-PIN set and a new emergency contact for
+   24 hours after an OTP recovery (`403 PATIENT_RECENT_RECOVERY_HOLD`), while a
+   denial and a PIN removal succeed; `registration_review_runtime` runs
+   unchanged against the narrowed `patients_registration_read` policy; and
+   `patient_search_runtime` (`verify-patient-search-runtime.mjs`, new) requires
+   a lookup with a grant to answer `200`, an unknown HID, a patient without a
+   grant and a grant at another facility to answer the same `404
+   PATIENT_NOT_AVAILABLE` while the audit keeps `not_found` or
+   `not_authorized`, a bad purpose `400`, an access request for an unknown HID
+   to answer like a recorded one without `patientId` and persist nothing, and
+   the actor and facility budgets to answer `429`. The rehearsal also runs
+   the new rollback-only `patient-search.integration.sql` with the additional
+   suites.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

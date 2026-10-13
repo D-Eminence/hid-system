@@ -6,7 +6,7 @@ import { createHmac } from 'node:crypto';
  * and lower-cased), and, since 0086, of the resolved account id under its own
  * label, so that the email and the HID of one account share one budget. The
  * fifth failure within 15 minutes of a bucket's first locks it for 15 minutes;
- * every refused attempt while it is locked extends the lock.
+ * a refused attempt within that window extends the lock.
  */
 export const RECORD_LOGIN_FAILURE_SQL = `insert into auth.login_attempts (
      principal_hmac, pepper_version, failure_count, window_started_at,

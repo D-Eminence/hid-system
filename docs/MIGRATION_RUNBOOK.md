@@ -79,6 +79,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0080_pharmacy_source_prescription_guards.sql` | Replaces `pharmacy.validate_work_item()` and `pharmacy.validate_dispensing()` (same signature, `SECURITY DEFINER` attribute, `search_path`, volatility, owner and 0077 checks) so that each also reads the EHR prescription with a share lock: an acceptance must equal the exact active prescription version (every snapshot field except the prescription time and the start and end dates, which a later release will compare), and a dispensing needs its prescription still active at the accepted version. Each refusal is `23514` with its own constraint name, which the Pharmacy API answers with `409`. Before, Pharmacy accepted cancelled or nonexistent prescriptions and dispensed work whose prescription had been cancelled. Function replacement only; no table, grant or data change, no table lock. Deploy the Pharmacy API with the `409` mapping before or with 0080; earlier EHR builds keep working (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §3, §5, §6) |
 | `database/migrations/0081_uniform_recovery_start_cooldown.sql` | New table `auth.otp_start_cooldowns`: the recovery start cooldown per purpose and keyed identifier, kept whether or not the identifier has an account, so a repeat start inside the cooldown is answered with the same challenge id for a known and an unknown identifier (before, only a real account's repeat got its live id back). No foreign key, no row-level security; the role bootstrap grants `SELECT`, `INSERT` and `UPDATE` to the Identity runtime and the schema-test runtime, and `DELETE` to none. A new table: no lock on an existing table, no window. Run `db:bootstrap` and `db:verify-roles` after it, and only then deploy the Identity build of this change, whose every recovery start fails (`500`) without the table and the grant (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3, §5, §6) |
 | `database/migrations/0082_purpose_of_use_vocabulary.sql` | Seeds `identity.purpose_of_use_codes` with `direct-care` ("Direct patient care", active, source `hid`), `ON CONFLICT (code) DO NOTHING`, so a row already inserted or deactivated by an operator is kept as it is. 0003 created the table empty and nothing inserted a row, while every consent decision requires an active code, so on a database built only from migrations every staff consent check, access request, grant close, PIN and break-glass failed closed. `emergency` and `healthcare-operations` are not seeded: each waits for a product decision (§5). `ROW EXCLUSIVE` lock on that table only; no grant or service change |
+| `database/migrations/0086_recovery_and_patient_search_hardening.sql` | Account recovery and patient search hardening (`BRANCH:launch/identity-recovery-search`). `CREATE OR REPLACE` of `auth.complete_recovery_otp` (also revokes every Google link of the recovered account; audit counts them) and `identity.create_access_request` (an unknown HID gets a uniform pending answer, an `identity.access-request.refused` audit event and no row); `ALTER POLICY patients_registration_read` (a registration member reads only patients linked to a case or candidate at its facility, no longer every patient); new `SECURITY DEFINER` functions `auth.recovery_account_audience`, `identity.registration_nin_holder`, `identity.registration_candidates` and `identity.patient_lookup_audit_subject`, revoked from `PUBLIC` and granted by the role bootstrap to the Identity and schema-test runtimes only; index `otp_challenges_account_consumed_idx` (`SHARE` lock on `auth.otp_challenges` while it builds); four staff search scopes in `otp_rate_limits_scope_check` (`ACCESS EXCLUSIVE` on `auth.otp_rate_limits` while the check validates). Run `db:bootstrap` and `db:verify-roles` after it and deploy the Identity build of the same change with it: the older build's registration duplicate checks read patients the narrowed policy hides. After it a patient recovery code goes only to a verified contact, so an imported account whose source email was never confirmed (`email_verified_at` null) and that has no verified enrollment phone gets no code (§6, §11) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
@@ -236,8 +237,13 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0082`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0086`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
+After the legacy import, record (read-only, counts only, no identifiers) how
+many imported patient accounts have `email_verified_at` null and no verified
+enrollment phone: after 0086 their OTP recovery and activation send no code,
+so each needs another approved activation route before it can sign in
+(`PHASE_4_STAGE_5_RELEASE_READINESS.md` §10).
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
 
@@ -324,8 +330,9 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0082`, runtime grants, RLS and purpose/deny behavior, and list the
-   purpose-of-use codes (release checklist P10).
+6. Verify `0082` and `0086`, runtime grants, RLS and purpose/deny behavior,
+   list the purpose-of-use codes (release checklist P10), and record the
+   count of imported patient accounts without a verified contact (§6).
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.
