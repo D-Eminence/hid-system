@@ -139,9 +139,28 @@ for (const [mode, assembly, issuer] of profiles) {
     const stages = entries(assembly, 'AWS::ApiGateway::Stage').filter(([, item]) => item.Properties?.RestApiId.Ref === apiId);
     assert.equal(stages.length, 1);
     assert.equal(stages[0]![1].Properties!.StageName, issuer);
-    const settings = stages[0]![1].Properties!.MethodSettings;
-    assert(settings.every((setting: any) => setting.DataTraceEnabled === false && setting.LoggingLevel === 'OFF'));
-    assert(settings.every((setting: any) => setting.ThrottlingRateLimit === 30 && setting.ThrottlingBurstLimit === 60));
+    // DEP-4-DOS: POST /token and the public JWKS GET each have their own
+    // method throttle; no stage-wide '/*/*' setting is shared between them.
+    const settings = stages[0]![1].Properties!.MethodSettings as any[];
+    assert(!settings.some(setting => setting.ResourcePath === '/*' || setting.HttpMethod === '*'),
+      'no stage-wide method setting may be shared by the token and JWKS methods');
+    assert.equal(settings.length, 2);
+    const setting = (verb: string, resourcePath: string) => {
+      const found = settings.filter(item => item.HttpMethod === verb && item.ResourcePath === resourcePath);
+      assert.equal(found.length, 1, `exactly one ${verb} ${resourcePath} method setting`);
+      return found[0];
+    };
+    const token = setting('POST', '/~1token');
+    const jwks = setting('GET', '/~1.well-known~1jwks.json');
+    for (const item of [token, jwks]) {
+      assert.equal(item.DataTraceEnabled, false);
+      assert.equal(item.LoggingLevel, 'OFF');
+      assert.equal(item.MetricsEnabled, true);
+    }
+    assert.equal(token.ThrottlingRateLimit, 30);
+    assert.equal(token.ThrottlingBurstLimit, 60);
+    assert(jwks.ThrottlingRateLimit >= token.ThrottlingRateLimit && jwks.ThrottlingBurstLimit >= token.ThrottlingBurstLimit,
+      'the JWKS limit is never below the token limit');
     const [issuerId] = issuerFunction(assembly, issuer);
     const permissions = entries(assembly, 'AWS::Lambda::Permission').filter(([, r]) => JSON.stringify(r.Properties?.FunctionName).includes(issuerId));
     assert.equal(permissions.length, 2);
@@ -220,6 +239,31 @@ for (const [mode, assembly, issuer] of profiles) {
     assert.deepEqual(signed[0]!.statement.Resource, { 'Fn::GetAtt': [keyId, 'Arn'] });
     assert.deepEqual(signed[0]!.statement.Condition, { StringEquals: { 'kms:SigningAlgorithm': 'ECDSA_SHA_256' } });
     assert(!JSON.stringify(issuerProperties.Environment).includes('PRIVATE_KEY'));
+    // DEP-4-KEY: the key policy keeps the account root statement (no lockout)
+    // and denies kms:Sign to every principal but the issuer role, and any
+    // algorithm or message type other than the issuer's ES256 RAW signing.
+    const keyPolicy = key.Properties!.KeyPolicy.Statement as any[];
+    const root = keyPolicy.filter(statement => statement.Effect === 'Allow');
+    assert.equal(root.length, 1);
+    assert.equal(root[0].Action, 'kms:*');
+    assert.equal(root[0].Resource, '*');
+    assert.equal(resolve(root[0].Principal.AWS), 'arn:REF:AWS::Partition:iam::REF:AWS::AccountId:root');
+    const denies = keyPolicy.filter(statement => statement.Effect === 'Deny');
+    assert.deepEqual(denies.map(statement => statement.Sid).sort(),
+      ['DenyEveryOtherMessageType', 'DenyEveryOtherSigningAlgorithm', 'DenySigningFromEveryOtherPrincipal']);
+    const deny = (sid: string) => denies.find(statement => statement.Sid === sid);
+    for (const statement of denies) {
+      assert.deepEqual(statement.Principal, { AWS: '*' });
+      assert.equal(statement.Action, 'kms:Sign');
+      assert.equal(statement.Resource, '*');
+    }
+    assert.deepEqual(deny('DenySigningFromEveryOtherPrincipal').Condition,
+      { ArnNotEquals: { 'aws:PrincipalArn': { 'Fn::GetAtt': [role, 'Arn'] } } });
+    assert.deepEqual(deny('DenyEveryOtherSigningAlgorithm').Condition,
+      { StringNotEquals: { 'kms:SigningAlgorithm': 'ECDSA_SHA_256' } });
+    assert.deepEqual(deny('DenyEveryOtherMessageType').Condition, { StringNotEquals: { 'kms:MessageType': 'RAW' } });
+    const issuerSource = readFileSync(new URL('../runtime/workload-issuer/index.mjs', import.meta.url), 'utf8');
+    assert.match(issuerSource, /MessageType: 'RAW', SigningAlgorithm: 'ECDSA_SHA_256'/);
     const logGroups = entries(assembly, 'AWS::Logs::LogGroup').filter(([, item]) => item.Properties?.LogGroupName === `/hid/${issuer}/workload-issuer`);
     assert.equal(logGroups.length, 1);
     assert.equal(logGroups[0]![1].Properties!.RetentionInDays, logRetentionDays[issuer]);
@@ -279,7 +323,12 @@ for (const [mode, assembly, issuer] of profiles) {
       assert(app.Name in expected);
       assert.equal(agent.User, '65532:65532');
       assert.equal(agent.ReadonlyRootFilesystem, true);
-      assert.equal(agent.Essential, true);
+      // D2: an issuer outage stops service-to-service calls, not the task. The
+      // agent is not essential, ECS restarts it if it exits, and the
+      // application still starts only once the agent is HEALTHY.
+      assert.equal(agent.Essential, false);
+      assert.deepEqual(agent.RestartPolicy, { Enabled: true, RestartAttemptPeriod: 60 });
+      assert.equal(app.Essential, true);
       assert.equal(agent.Secrets, undefined);
       assert.equal(agent.Privileged, undefined);
       assert.deepEqual(agent.Image, { Ref: 'IdentityApiImageUri' });
@@ -309,6 +358,46 @@ for (const [mode, assembly, issuer] of profiles) {
     const health = readFileSync(new URL('../../../services/workload-token-agent/src/health.mjs', import.meta.url), 'utf8');
     assert.match(health, /readFile/);
     assert.doesNotMatch(health, /TokenAgent|\.renew\(|\.clear\(|writeFile|unlink|rename/);
+  });
+
+  test(`${mode} the issuer stage is behind a REGIONAL web ACL that allows only the VPC's NAT addresses`, () => {
+    const [apiId] = issuerApi(assembly, issuer);
+    const stage = entries(assembly, 'AWS::ApiGateway::Stage').find(([, item]) => item.Properties?.RestApiId.Ref === apiId)!;
+    const associations = entries(assembly, 'AWS::WAFv2::WebACLAssociation')
+      .filter(([, item]) => JSON.stringify(item.Properties?.ResourceArn).includes(apiId));
+    const nats = entries(assembly, 'AWS::EC2::NatGateway');
+    if (mode === 'sleep') {
+      // Sleep runs no task and has no NAT address to allow (D3).
+      assert.equal(nats.length, 0);
+      assert.equal(associations.length, 0);
+      return;
+    }
+    assert.equal(associations.length, 1);
+    const association = associations[0]![1].Properties!;
+    assert.equal(resolve(association.ResourceArn),
+      `arn:REF:AWS::Partition:apigateway:REF:AWS::Region::/restapis/REF:${apiId}/stages/REF:${stage[0]}`);
+    const aclId = association.WebACLArn['Fn::GetAtt'][0];
+    const acl = assembly.Resources[aclId]!.Properties!;
+    assert.equal(assembly.Resources[aclId]!.Type, 'AWS::WAFv2::WebACL');
+    assert.equal(acl.Scope, 'REGIONAL');
+    assert.deepEqual(acl.DefaultAction, { Block: {} });
+    assert.equal(acl.Rules.length, 1);
+    const [rule] = acl.Rules;
+    assert.deepEqual(rule.Action, { Allow: {} });
+    assert.equal(rule.Priority, 0);
+    const ipSetId = rule.Statement.IPSetReferenceStatement.Arn['Fn::GetAtt'][0];
+    assert.equal(rule.Statement.IPSetReferenceStatement.IPSetForwardedIPConfig, undefined,
+      'the allowlist must match the connection source, never a forwarded header');
+    const ipSet = assembly.Resources[ipSetId]!;
+    assert.equal(ipSet.Type, 'AWS::WAFv2::IPSet');
+    assert.equal(ipSet.Properties!.Scope, 'REGIONAL');
+    assert.equal(ipSet.Properties!.IPAddressVersion, 'IPV4');
+    // Exactly the Elastic IPs of this VPC's NAT gateways, as /32 addresses.
+    const natEips = nats.map(([, item]) => item.Properties!.AllocationId['Fn::GetAtt'][0]).sort();
+    assert.equal(natEips.length, mode === 'economy' ? 1 : 2);
+    for (const eip of natEips) assert.equal(assembly.Resources[eip]!.Type, 'AWS::EC2::EIP');
+    assert.deepEqual(ipSet.Properties!.Addresses.map((address: any) => resolve(address)).sort(),
+      natEips.map(eip => `ATT:${eip}.PublicIp/32`).sort());
   });
 
   test(`${mode} CloudFormation resource graph has no implicit or explicit cycle`, () => {

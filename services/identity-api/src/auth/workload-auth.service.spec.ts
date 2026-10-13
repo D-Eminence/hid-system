@@ -60,18 +60,19 @@ describe('WorkloadAuthService Outreach caller', () => {
       jest.mocked(jwtVerify).mockReset();
     });
 
-    it('accepts the exact issuer, audience, algorithm, and caller subject', async () => {
-      jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:ehr-api' } } as never);
+    it('accepts the exact issuer, audience, algorithm, token age and caller subject', async () => {
+      jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:ehr-api', token_use: 'workload' } } as never);
       await expect(new WorkloadAuthService({} as never).authenticateService(
         'ehr-api', 'Bearer signed-token', undefined,
       )).resolves.toEqual({ subject: 'workload:ehr-api', accountId: 'workload:ehr-api' });
       expect(jwtVerify).toHaveBeenCalledWith('signed-token', expect.any(Function), {
-        issuer: 'https://issuer.test', audience: 'hid-identity-api', algorithms: ['RS256', 'ES256'],
+        issuer: 'https://issuer.test', audience: 'hid-identity-api', algorithms: ['ES256'],
+        requiredClaims: ['exp', 'iat'], maxTokenAge: 300, clockTolerance: 5,
       });
     });
 
     it('denies a valid token with the wrong workload subject', async () => {
-      jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:lab-api' } } as never);
+      jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: 'workload:lab-api', token_use: 'workload' } } as never);
       await expect(new WorkloadAuthService({} as never).authenticateService(
         'ehr-api', 'Bearer signed-token', undefined,
       )).rejects.toMatchObject({ status: 403 });

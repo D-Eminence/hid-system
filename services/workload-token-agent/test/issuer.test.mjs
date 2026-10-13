@@ -141,3 +141,31 @@ test('the deployment environment, issuer path and every subject must name the sa
   assert.throws(() => issuerConfiguration({ ...productionEnv, WORKLOAD_ISSUER_URL: env.WORKLOAD_ISSUER_URL }), /^Error: Invalid workload issuer URL$/);
   assert.throws(() => issuerConfiguration({ ...env, WORKLOAD_ISSUER_URL: productionEnv.WORKLOAD_ISSUER_URL }), /^Error: Invalid workload issuer URL$/);
 });
+
+// DEP-4-KEY kill switch: a warm issuer re-reads the public key at least every
+// five minutes, so a disabled key stops being published and stops minting.
+test('the cached public key expires after five minutes; a disabled key then stops the JWKS and minting', async () => {
+  let clock = 2_000_000_000_000, reads = 0, signed = 0, disabled = false;
+  const handler = createIssuer(issuerConfiguration(env), { now: () => clock,
+    getPublicKey: async () => { reads++; if (disabled) throw Object.assign(new Error('synthetic'), { name: 'DisabledException' }); return publicResult; },
+    sign: async (key, message) => { signed++; return { KeyId: keyArn, SigningAlgorithm: 'ECDSA_SHA_256', Signature: sign('sha256', message, privateKey) }; } });
+  const jwksEvent = () => { const event = makeEvent();
+    event.httpMethod = event.requestContext.httpMethod = 'GET'; event.resource = event.requestContext.resourcePath = '/.well-known/jwks.json';
+    delete event.requestContext.identity; return event; };
+  assert.equal((await handler(jwksEvent())).statusCode, 200);
+  assert.equal((await handler(makeEvent())).statusCode, 200);
+  assert.equal(reads, 1);
+  disabled = true; clock += 299_000;
+  assert.equal((await handler(jwksEvent())).statusCode, 200, 'within five minutes the warm cache still serves');
+  assert.equal(reads, 1);
+  clock += 1_000;
+  const refused = await handler(jwksEvent());
+  assert.equal(refused.statusCode, 503);
+  assert.deepEqual(JSON.parse(refused.body), { code: 'WORKLOAD_ISSUER_UNAVAILABLE' });
+  assert.equal(reads, 2);
+  const before = signed;
+  assert.equal((await handler(makeEvent())).statusCode, 503);
+  assert.equal(signed, before, 'no token is signed once the key cannot be read');
+  disabled = false;
+  assert.equal((await handler(jwksEvent())).statusCode, 200, 'a re-enabled key is published again on the next read');
+});

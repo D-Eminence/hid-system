@@ -418,7 +418,10 @@ test('ECR repositories are encrypted, scan-on-push, immutable, and lifecycle-bou
 });
 
 test('regional API WAF requires the Cloudflare origin secret and baseline protections', () => {
-  const [acl] = properties(regional, 'AWS::WAFv2::WebACL');
+  const acls = properties(regional, 'AWS::WAFv2::WebACL').filter((item) =>
+    (item.VisibilityConfig as { readonly MetricName?: string }).MetricName === 'hid-production-api-origin');
+  assert.equal(acls.length, 1);
+  const [acl] = acls;
   const serialized = JSON.stringify(acl!.Rules);
   assert.match(serialized, /x-hid-origin-authorization/);
   assert.match(serialized, /ProductionCloudflareOriginSecret/);
@@ -815,6 +818,13 @@ test('cost inventory is deterministic and never labels sleep zero-cost', () => {
   assert.equal(costInventory(environmentConfig('production')).kmsKeys, 4,
     'production must account for its workload signing key');
   assert.equal(costInventory(environmentConfig('development')).kmsKeys, 3);
+  // The public API web ACL, plus the workload issuer's allowlist web ACL
+  // wherever an issuer runs behind NAT (D3); sleep and development have none.
+  assert.equal(costInventory(environmentConfig('production')).wafs, 2);
+  assert.equal(costInventory(environmentConfig('staging', 'economy')).wafs, 2);
+  assert.equal(costInventory(environmentConfig('staging', 'fidelity')).wafs, 2);
+  assert.equal(costInventory(environmentConfig('staging', 'sleep')).wafs, 0);
+  assert.equal(costInventory(environmentConfig('development')).wafs, 1);
 });
 
 test('optional billing governance notifies without creating cost actions', () => {

@@ -93,8 +93,12 @@ assert.equal(resources('AWS::EC2::VPCEndpoint')
 
 const asleep = profile === 'sleep'
 assert.equal(resources('AWS::ElasticLoadBalancingV2::LoadBalancer').length, asleep ? 0 : 2)
-assert.equal(resources('AWS::WAFv2::WebACL').length, asleep ? 0 : 1)
-assert.equal(resources('AWS::WAFv2::WebACLAssociation').length, asleep ? 0 : 1)
+// The public API web ACL, and the workload issuer's NAT allowlist web ACL
+// wherever an in-stack issuer runs behind NAT gateways (staging live modes and
+// production; D3 in ADR-047).
+const issuerWebAcl = ['economy', 'fidelity', 'production'].includes(profile) ? 1 : 0
+assert.equal(resources('AWS::WAFv2::WebACL').length, asleep ? 0 : 1 + issuerWebAcl)
+assert.equal(resources('AWS::WAFv2::WebACLAssociation').length, asleep ? 0 : 1 + issuerWebAcl)
 assert.equal(resources('AWS::ApplicationAutoScaling::ScalableTarget').length, asleep ? 0 : 11)
 assert.equal(resources('AWS::Scheduler::Schedule').length, asleep ? 1 : 0)
 
@@ -179,6 +183,53 @@ if (issuerEnvironment) {
     assert.deepEqual(agent.Image, { Ref: 'IdentityApiImageUri' })
     assert.equal(agent.User, '65532:65532')
     assert.equal(agent.ReadonlyRootFilesystem, true)
+    // D2: an issuer outage stops service-to-service calls, not the task.
+    assert.equal(agent.Essential, false, 'the token agent must not be essential')
+    assert.deepEqual(agent.RestartPolicy, { Enabled: true, RestartAttemptPeriod: 60 },
+      'ECS must restart an exited token agent')
+  }
+  // DEP-4-KEY: only the issuer role may sign, and only ES256 over RAW messages.
+  const [signingKey] = resources('AWS::KMS::Key').filter(key => key.Properties.KeyUsage === 'SIGN_VERIFY')
+  const keyStatements = signingKey.Properties.KeyPolicy.Statement
+  assert.equal(keyStatements.filter(statement => statement.Effect === 'Allow' && statement.Action === 'kms:*').length, 1,
+    'the signing key keeps its account root statement')
+  const issuerRole = resources('AWS::Lambda::Function')[0].Properties.Role['Fn::GetAtt'][0]
+  const denied = Object.fromEntries(keyStatements.filter(statement => statement.Effect === 'Deny')
+    .map(statement => [statement.Sid, statement]))
+  assert.deepEqual(Object.keys(denied).sort(),
+    ['DenyEveryOtherMessageType', 'DenyEveryOtherSigningAlgorithm', 'DenySigningFromEveryOtherPrincipal'])
+  for (const statement of Object.values(denied)) {
+    assert.deepEqual([statement.Principal, statement.Action, statement.Resource], [{ AWS: '*' }, 'kms:Sign', '*'])
+  }
+  assert.deepEqual(denied.DenySigningFromEveryOtherPrincipal.Condition,
+    { ArnNotEquals: { 'aws:PrincipalArn': { 'Fn::GetAtt': [issuerRole, 'Arn'] } } })
+  assert.deepEqual(denied.DenyEveryOtherSigningAlgorithm.Condition, { StringNotEquals: { 'kms:SigningAlgorithm': 'ECDSA_SHA_256' } })
+  assert.deepEqual(denied.DenyEveryOtherMessageType.Condition, { StringNotEquals: { 'kms:MessageType': 'RAW' } })
+  // DEP-4-DOS: separate method throttles; no stage-wide setting shared by both methods.
+  const [issuerStage] = resources('AWS::ApiGateway::Stage')
+  assert.deepEqual(issuerStage.Properties.MethodSettings.map(setting => `${setting.HttpMethod} ${setting.ResourcePath}`).sort(),
+    ['GET /~1.well-known~1jwks.json', 'POST /~1token'])
+  for (const setting of issuerStage.Properties.MethodSettings) {
+    assert.ok(setting.ThrottlingRateLimit >= 30 && setting.ThrottlingBurstLimit >= 60)
+    assert.equal(setting.DataTraceEnabled, false)
+    assert.equal(setting.LoggingLevel, 'OFF')
+  }
+  // D3: a REGIONAL web ACL on the issuer stage blocks every source except this VPC's NAT gateway addresses.
+  const issuerAssociations = resources('AWS::WAFv2::WebACLAssociation')
+    .filter(association => JSON.stringify(association.Properties.ResourceArn).includes('/restapis/'))
+  assert.equal(issuerAssociations.length, issuerWebAcl)
+  if (issuerWebAcl) {
+    const acl = regional.Resources[issuerAssociations[0].Properties.WebACLArn['Fn::GetAtt'][0]].Properties
+    assert.equal(acl.Scope, 'REGIONAL')
+    assert.deepEqual(acl.DefaultAction, { Block: {} })
+    assert.deepEqual(acl.Rules.map(rule => rule.Action), [{ Allow: {} }])
+    const ipSet = regional.Resources[acl.Rules[0].Statement.IPSetReferenceStatement.Arn['Fn::GetAtt'][0]].Properties
+    const natEips = resources('AWS::EC2::NatGateway').map(nat => nat.Properties.AllocationId['Fn::GetAtt'][0]).sort()
+    assert.equal(natEips.length, contract.nat)
+    assert.deepEqual(ipSet.Addresses.map(address => address['Fn::Join'][1][0]['Fn::GetAtt'][0]).sort(), natEips,
+      'the issuer allowlist must be exactly the NAT gateway Elastic IPs')
+    assert.ok(ipSet.Addresses.every(address => address['Fn::Join'][1][0]['Fn::GetAtt'][1] === 'PublicIp'
+      && address['Fn::Join'][1][1] === '/32'))
   }
 } else {
   for (const name of workloadParameters) {

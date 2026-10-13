@@ -156,3 +156,117 @@ test('a production agent rejects a staging-issued or staging-subject token', () 
   }
   assert.throws(() => verifyMintedToken(productionToken, jwks, configuration, 'hid-identity-api', now), /claims are invalid/);
 });
+
+// DEP-4-DOS: the agent keeps the verified key set by kid, so a JWKS outage or
+// flood does not stop renewal, and it refetches only for an unknown kid, at
+// most once every 30 seconds.
+function rotatingIssuer() {
+  const keys = new Map();
+  const addKey = kid => {
+    const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    keys.set(kid, { privateKey: pair.privateKey,
+      jwk: { ...pair.publicKey.export({ format: 'jwk' }), kid, alg: 'ES256', use: 'sig' } });
+  };
+  const state = { clock: now, signingKid: 'key-a', published: ['key-a'], jwksStatus: 200, jwksFetches: 0, mints: 0 };
+  addKey('key-a'); addKey('key-b'); addKey('key-c');
+  const mint = () => {
+    const seconds = Math.floor(state.clock / 1000);
+    const claims = { iss: configuration.issuer, sub: configuration.subject, aud: 'hid-identity-api', iat: seconds,
+      nbf: seconds, exp: seconds + 300, token_use: 'workload', jti: `jti-${state.mints}` };
+    const message = [{ alg: 'ES256', typ: 'JWT', kid: state.signingKid }, claims]
+      .map(value => Buffer.from(JSON.stringify(value)).toString('base64url')).join('.');
+    const signature = sign('sha256', Buffer.from(message),
+      { key: keys.get(state.signingKid).privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url');
+    return { token: `${message}.${signature}`, expiresAt: new Date((seconds + 300) * 1000).toISOString() };
+  };
+  const transport = async (url) => {
+    if (url === configuration.credentialUrl) return Response.json({ ...credentials,
+      Expiration: new Date(state.clock + 3_600_000).toISOString() });
+    if (url === configuration.jwks) {
+      state.jwksFetches += 1;
+      if (state.jwksStatus !== 200) return new Response('{"message":"Too Many Requests"}', { status: state.jwksStatus });
+      return Response.json({ keys: state.published.map(kid => keys.get(kid).jwk) });
+    }
+    assert.equal(url, `${configuration.issuer}/token`);
+    state.mints += 1;
+    return Response.json(mint());
+  };
+  return { state, transport };
+}
+async function withAgent(run) {
+  const directory = await mkdtemp(join(tmpdir(), 'hid-agent-cache-'));
+  const issuer = rotatingIssuer();
+  const agent = new TokenAgent({ ...configuration, directory }, { fetch: issuer.transport, now: () => issuer.state.clock });
+  try { await agent.start(); await run(agent, issuer.state, directory); }
+  finally { await rm(directory, { recursive: true, force: true }); }
+}
+const readyAt = async directory => JSON.parse(await readFile(join(directory, 'ready.json'), 'utf8')).expiresAt;
+
+test('renewals reuse the verified key set: one JWKS fetch for many renewals', async () => {
+  await withAgent(async (agent, state, directory) => {
+    for (let renewal = 0; renewal < 4; renewal += 1) {
+      await agent.renew();
+      assert.equal(await readyAt(directory), state.clock + 300_000);
+      state.clock += 90_000;
+    }
+    assert.equal(state.mints, 4);
+    assert.equal(state.jwksFetches, 1);
+  });
+});
+
+test('renewal keeps working while the JWKS endpoint is throttled or failing', async () => {
+  await withAgent(async (agent, state, directory) => {
+    await agent.renew();
+    for (const status of [429, 503, 403]) {
+      state.jwksStatus = status; state.clock += 90_000;
+      await agent.renew();
+      assert.equal(await readyAt(directory), state.clock + 300_000);
+    }
+    assert.equal(state.jwksFetches, 1);
+  });
+});
+
+test('an unknown kid refetches the JWKS at most once every 30 seconds and drops withdrawn keys', async () => {
+  await withAgent(async (agent, state, directory) => {
+    await agent.renew();
+    assert.equal(state.jwksFetches, 1);
+    // Rotation: the issuer signs with a new key and publishes only that key.
+    state.signingKid = 'key-b'; state.published = ['key-b']; state.clock += 90_000;
+    await agent.renew();
+    assert.equal(state.jwksFetches, 2);
+    assert.equal(await readyAt(directory), state.clock + 300_000);
+    // A token under a kid the JWKS does not publish is never written, and the
+    // agent does not refetch within 30 seconds of the last fetch.
+    const before = await readFile(join(directory, 'identity.jwt'), 'utf8');
+    state.signingKid = 'key-c'; state.clock += 10_000;
+    await assert.rejects(agent.renew());
+    assert.equal(state.jwksFetches, 2);
+    state.clock += 20_000;
+    await assert.rejects(agent.renew(), /Invalid workload JWT key/);
+    assert.equal(state.jwksFetches, 3);
+    assert.equal(await readFile(join(directory, 'identity.jwt'), 'utf8'), before);
+    // The withdrawn key is no longer trusted from the cache.
+    state.signingKid = 'key-a'; state.clock += 30_000;
+    await assert.rejects(agent.renew(), /Invalid workload JWT key/);
+    assert.equal(state.jwksFetches, 4);
+  });
+});
+
+test('a JWKS outage at start is retried no more than once every 30 seconds', async () => {
+  await withAgent(async (agent, state, directory) => {
+    state.jwksStatus = 503;
+    await assert.rejects(agent.renew());
+    assert.equal(state.jwksFetches, 1);
+    state.jwksStatus = 200;
+    for (const step of [10_000, 10_000]) {
+      state.clock += step;
+      await assert.rejects(agent.renew());
+      assert.equal(state.jwksFetches, 1);
+    }
+    await assert.rejects(readFile(join(directory, 'ready.json')), { code: 'ENOENT' });
+    state.clock += 10_000;
+    await agent.renew();
+    assert.equal(state.jwksFetches, 2);
+    assert.equal(await readyAt(directory), state.clock + 300_000);
+  });
+});
