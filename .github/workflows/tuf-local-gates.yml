@@ -405,6 +405,8 @@ jobs:
           NODE
       - name: Run and record complete workspace gates
         run: node release/scripts/run-workspace-gates.mjs
+      - name: Run the gateway configuration under the pinned nginx image
+        run: npm run verify:gateway-runtime:image
       - name: Retain workspace evidence even after failure
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

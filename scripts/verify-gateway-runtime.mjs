@@ -19,13 +19,21 @@
 //   WAF-CRS-BODY  a 300 KiB clinical note body reaches ehr-api; a body over
 //               512 KiB answers 413 PAYLOAD_TOO_LARGE before any upstream sees it.
 //
-// Usage: HID_NGINX_BINARY=/path/to/nginx node scripts/verify-gateway-runtime.mjs
-// The binary should be the nginx release the pinned image runs (1.29.x). No
-// container engine, network or credential is used; everything listens on
-// 127.0.0.1 ports the operating system assigns, and the temporary directory is
-// removed afterwards.
+// Usage:
+//   node scripts/verify-gateway-runtime.mjs --pinned-image
+//     runs nginx from the image gateway/Dockerfile pins by digest (docker run
+//     on the host network, as this user, with only the temporary directory
+//     mounted). CI runs this form: npm run verify:gateway-runtime:image in the
+//     workspace job of .github/workflows/tuf-local-gates.yml.
+//   HID_NGINX_BINARY=/path/to/nginx node scripts/verify-gateway-runtime.mjs
+//     runs a local binary, which should be the nginx release the pinned image
+//     runs (1.29.x); no container engine is used.
+// No network beyond the image pull, and no credential, is used; everything
+// listens on 127.0.0.1 ports the operating system assigns, and the temporary
+// directory is removed afterwards.
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createTcpServer, connect } from 'node:net'
@@ -34,12 +42,33 @@ import { join, resolve } from 'node:path'
 import { renderTemplate } from './lib/nginx-config-model.mjs'
 
 const repository = resolve(import.meta.dirname, '..')
+const pinnedImage = process.argv.includes('--pinned-image')
 const nginxBinary = process.env.HID_NGINX_BINARY
-if (!nginxBinary) {
-  process.stderr.write('verify-gateway-runtime: set HID_NGINX_BINARY to an nginx 1.29 binary; nothing was verified.\n')
+if (!pinnedImage && !nginxBinary) {
+  process.stderr.write('verify-gateway-runtime: pass --pinned-image (needs docker) or set HID_NGINX_BINARY to an nginx 1.29 binary; nothing was verified.\n')
   process.exit(2)
 }
-await access(nginxBinary)
+// The runtime image the gateway ships, exactly as gateway/Dockerfile pins it.
+let image
+if (pinnedImage) {
+  const dockerfile = await readFile(join(repository, 'gateway/Dockerfile'), 'utf8')
+  const pinned = [...dockerfile.matchAll(/^FROM (\S+@sha256:[0-9a-f]{64}) AS runtime$/gm)].map(([, reference]) => reference)
+  assert.equal(pinned.length, 1, 'gateway/Dockerfile must pin exactly one runtime image by digest')
+  image = pinned[0]
+  const pull = spawnSync('docker', ['pull', '--quiet', image], { stdio: ['ignore', 'ignore', 'inherit'] })
+  if (pull.status !== 0) throw new Error(`docker pull ${image} failed (${pull.error?.message ?? `exit ${pull.status}`})`)
+} else {
+  await access(nginxBinary)
+}
+const containerName = `hid-gateway-runtime-${randomBytes(6).toString('hex')}`
+
+/** nginx with these arguments: the local binary, or the pinned image's nginx. */
+function nginxCommand(args, { mount, name } = {}) {
+  if (!pinnedImage) return [nginxBinary, args]
+  return ['docker', ['run', '--rm', ...(name ? ['--name', name] : []), '--network', 'host',
+    '--user', `${process.getuid()}:${process.getgid()}`, '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+    ...(mount ? ['--volume', `${mount}:${mount}`] : []), '--entrypoint', 'nginx', image, ...args]]
+}
 
 const client = '198.51.100.23'
 const correlationId = 'gateway-runtime-check-0001'
@@ -167,11 +196,11 @@ try {
   await writeFile(join(temporary, 'image-access.log'), '')
   await writeFile(join(temporary, 'access.log'), '')
 
-  nginx = spawn(nginxBinary, ['-p', temporary, '-e', join(temporary, 'error.log'), '-c', join(temporary, 'nginx.conf')],
-    { stdio: ['ignore', 'ignore', 'pipe'] })
+  nginx = spawn(...nginxCommand(['-p', temporary, '-e', join(temporary, 'error.log'), '-c', join(temporary, 'nginx.conf')],
+    { mount: temporary, name: containerName }), { stdio: ['ignore', 'ignore', 'pipe'] })
   nginx.stderr.on('data', chunk => { stderr += chunk })
   const exited = new Promise(resolveExit => nginx.once('exit', code => resolveExit(code)))
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + (pinnedImage ? 60_000 : 10_000)
   for (;;) {
     const ready = await new Promise(resolveReady => {
       const socket = connect(gatewayPort, '127.0.0.1')
@@ -316,20 +345,26 @@ try {
     }
   }
   const nginxVersion = await new Promise(resolveVersion => {
-    const version = spawn(nginxBinary, ['-v'], { stdio: ['ignore', 'ignore', 'pipe'] })
+    const version = spawn(...nginxCommand(['-v']), { stdio: ['ignore', 'ignore', 'pipe'] })
     let text = ''
     version.stderr.on('data', chunk => { text += chunk })
     version.once('exit', () => resolveVersion(text.trim()))
   })
   const failed = results.filter(result => result.result !== 'passed')
-  process.stdout.write(`${JSON.stringify({ status: failed.length ? 'failed' : 'passed', nginx: nginxVersion, results }, null, 2)}\n`)
+  process.stdout.write(`${JSON.stringify({ status: failed.length ? 'failed' : 'passed', nginx: nginxVersion,
+    ...(pinnedImage ? { image } : {}), results }, null, 2)}\n`)
   process.exitCode = failed.length ? 1 : 0
 } finally {
   if (nginx && nginx.exitCode === null) {
     const stopped = new Promise(done => nginx.once('exit', done))
-    nginx.kill('SIGQUIT')
-    await Promise.race([stopped, new Promise(done => setTimeout(done, 3000))])
-    if (nginx.exitCode === null) nginx.kill('SIGKILL')
+    // A graceful stop; docker kill delivers it to nginx inside the container.
+    if (pinnedImage) spawnSync('docker', ['kill', '--signal', 'QUIT', containerName], { stdio: 'ignore' })
+    else nginx.kill('SIGQUIT')
+    await Promise.race([stopped, new Promise(done => setTimeout(done, pinnedImage ? 10_000 : 3000))])
+    if (nginx.exitCode === null) {
+      if (pinnedImage) spawnSync('docker', ['rm', '--force', containerName], { stdio: 'ignore' })
+      nginx.kill('SIGKILL')
+    }
   }
   application.close()
   silent.close()

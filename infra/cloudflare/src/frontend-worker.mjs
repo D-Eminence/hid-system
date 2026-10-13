@@ -189,6 +189,24 @@ function clientAddress(value) {
   }
 }
 
+// The client network the AWS WAF's per-client rate limit counts (A7): an IPv4
+// address, or the /64 network address of an IPv6 address (one subscriber
+// allocation, as Identity's own limits count it), so that rotating addresses
+// inside a /64 does not escape the limit. An IPv4-mapped IPv6 address counts as
+// its IPv4 address. Takes the canonical address clientAddress returns.
+function clientNetwork(address) {
+  if (!address.includes(':')) return address
+  const [head, tail = ''] = address.split('::')
+  const leading = head ? head.split(':') : []
+  const trailing = tail ? tail.split(':') : []
+  const groups = [...leading, ...Array(8 - leading.length - trailing.length).fill('0'), ...trailing]
+    .map(group => Number.parseInt(group, 16))
+  if (groups.slice(0, 5).every(group => group === 0) && groups[5] === 0xffff) {
+    return [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join('.')
+  }
+  return new URL(`http://[${groups.slice(0, 4).map(group => group.toString(16)).join(':')}::]/`).hostname.slice(1, -1)
+}
+
 async function proxyApi(request, deployment, requestUrl) {
   const requestCorrelationId = correlationId(request)
   const upstream = new URL(requestUrl.pathname + requestUrl.search, deployment.origin)
@@ -198,13 +216,18 @@ async function proxyApi(request, deployment, requestUrl) {
   const client = clientAddress(request.headers.get('cf-connecting-ip'))
   for (const name of [
     'cf-connecting-ip', 'cf-ipcountry', 'cf-ray', 'forwarded', 'host', 'x-forwarded-for',
-    'x-forwarded-host', 'x-forwarded-proto', 'x-hid-edge-origin', 'x-real-ip',
+    'x-forwarded-host', 'x-forwarded-proto', 'x-hid-client-network', 'x-hid-edge-origin', 'x-real-ip',
   ]) headers.delete(name)
   // The only client address the AWS gateway trusts, and only from the VPC;
   // without it the gateway refuses the request in staging and production.
   // Workers built before this change delete X-Real-IP, so a stale Worker
   // leaves the gateway without an address instead of passing a caller's on.
-  if (client) headers.set('x-real-ip', client)
+  // X-HID-Client-Network is the WAF's per-client rate-limit key; the gateway
+  // drops it before any backend.
+  if (client) {
+    headers.set('x-real-ip', client)
+    headers.set('x-hid-client-network', clientNetwork(client))
+  }
   headers.set('x-correlation-id', requestCorrelationId)
   headers.set('x-forwarded-host', requestUrl.host)
   headers.set('x-forwarded-proto', 'https')

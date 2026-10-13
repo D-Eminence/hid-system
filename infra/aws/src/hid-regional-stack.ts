@@ -1406,21 +1406,28 @@ export class HidRegionalStack extends Stack {
         // A7: every connection comes from the Cloudflare Worker, so a limit on
         // the connecting address throttled every user behind one Cloudflare
         // egress address together. Rule 0 has already refused anything without
-        // the Worker's origin secret, and the Worker always replaces X-Real-IP
-        // with CF-Connecting-IP, so this counts per client address (a facility
-        // or carrier NAT address counts as one client; IP-THRESHOLDS). An
-        // invalid address is blocked (MATCH); a request without the header is
-        // not counted here, and the gateway refuses it (CLIENT_ADDRESS_REQUIRED).
+        // the Worker's origin secret, and the Worker always replaces
+        // X-HID-Client-Network with the network of CF-Connecting-IP: the IPv4
+        // address, or the IPv6 /64 network address (one subscriber allocation,
+        // so rotating addresses inside it keeps one count). This counts per
+        // client network (a facility or carrier NAT address counts as one
+        // client; IP-THRESHOLDS). An invalid value is blocked (MATCH); a
+        // request without the header is not counted here, and the Worker sends
+        // it whenever it sends X-Real-IP, without which the gateway refuses the
+        // request (CLIENT_ADDRESS_REQUIRED). The gateway drops the header.
         {
           name: 'ApiOriginRateLimit', priority: 30, action: { block: {} },
           statement: { rateBasedStatement: { aggregateKeyType: 'FORWARDED_IP', limit: API_ORIGIN_CLIENT_RATE_LIMIT,
-            forwardedIpConfig: { headerName: 'X-Real-IP', fallbackBehavior: 'MATCH' } } },
+            forwardedIpConfig: { headerName: 'X-HID-Client-Network', fallbackBehavior: 'MATCH' } } },
           visibilityConfig: { cloudWatchMetricsEnabled: true,
             metricName: `hid-${this.configuration.name}-origin-rate`, sampledRequestsEnabled: false },
         },
         // The backstop per connecting address, for a leaked origin secret or a
-        // request without X-Real-IP. It is a platform-wide brake per Cloudflare
-        // egress address, so it is far above any one client's limit.
+        // request without the client-network header. It is a platform-wide
+        // brake per Cloudflare egress address, far above any one client's
+        // limit; when it trips (traffic spread over many client networks, such
+        // as a botnet) it blocks every user behind that egress address for the
+        // rest of the five-minute window.
         {
           name: 'ApiOriginEdgeRateLimit', priority: 31, action: { block: {} },
           statement: { rateBasedStatement: { aggregateKeyType: 'IP', limit: API_ORIGIN_EDGE_RATE_LIMIT } },
@@ -1749,10 +1756,11 @@ function regionalManagedRule(name: string, priority: number, managedRuleGroupNam
   };
 }
 
-// Requests per client address (X-Real-IP) per five minutes at the public API
-// WAF (A7), and the backstop per connecting (Cloudflare egress) address. Raise
-// the first by configuration if the hid-<env>-origin-rate metric shows a busy
-// facility or carrier NAT address being blocked (IP-THRESHOLDS).
+// Requests per client network (X-HID-Client-Network: an IPv4 address or an
+// IPv6 /64) per five minutes at the public API WAF (A7), and the backstop per
+// connecting (Cloudflare egress) address. These are code constants: raise the
+// first by a reviewed CDK change if the hid-<env>-origin-rate metric shows a
+// busy facility or carrier NAT address being blocked (IP-THRESHOLDS).
 export const API_ORIGIN_CLIENT_RATE_LIMIT = 2_000;
 export const API_ORIGIN_EDGE_RATE_LIMIT = 50_000;
 

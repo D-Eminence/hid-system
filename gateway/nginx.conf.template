@@ -102,6 +102,18 @@ server {
 
   # The image links this path to the container's stdout, as for its default log.
   access_log /var/log/nginx/access.log hid_api;
+  # Error log (D7). nginx appends the request line, query string included, and
+  # the upstream URL to every error or warning it logs about a request: an
+  # upstream that refuses, resets, times out, does not resolve or closes early,
+  # a body over client_max_body_size, a request or response body buffered to a
+  # temporary file. The image's http-level error log (this path, linked to
+  # stderr, at notice) reaches the same CloudWatch log group, so this server
+  # logs only critical messages; the access log records each such failure's
+  # status, upstream status and timing. A critical message about a request
+  # (nginx cannot write a temporary file or open a connection for a reason
+  # other than refusal) still carries its request line. Start-up and worker
+  # messages keep the image's level.
+  error_log /var/log/nginx/error.log crit;
 
   # The largest JSON body a launch service accepts (ehr-api 512 KiB; identity-api
   # refuses more than 256 KiB itself). The WAF no longer refuses every body over

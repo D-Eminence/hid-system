@@ -49,6 +49,8 @@ export const forbiddenLogVariables = Object.freeze([
 // The error-log levels at which nginx writes nothing for an ordinary failed
 // request (refused, reset or timed-out upstream, oversized or buffered body).
 const errorLogLevels = Object.freeze(['crit', 'alert', 'emerg'])
+const quietErrorLog = args => args.length === 2 && args[0] === '/var/log/nginx/error.log'
+  && errorLogLevels.includes(args[1])
 
 // The largest body any launch service accepts as JSON (ehr-api 512 KiB).
 const maxBodyBytes = 512 * 1024
@@ -99,6 +101,8 @@ export function assertGatewayContract({ template, dockerfile, includes }) {
       assert.equal(outcome.upstreamHeaders['x-real-ip'], '', `${uri} must not pass the raw client-address header on`)
       assert.equal(outcome.upstreamHeaders['x-hid-origin-authorization'], '', `${uri} must not pass the Worker's origin secret on`)
       assert.equal(outcome.upstreamHeaders['x-hid-client-network'], '', `${uri} must not pass the WAF's client-network key on`)
+      assert.ok(outcome.errorLog.length === 1 && quietErrorLog(outcome.errorLog[0]),
+        `${uri} must not log errors below crit (the request line carries the query string)`)
     }
     for (const headers of [{}, { 'x-hid-client-ip': client }]) {
       const refused = all.route({ uri: `${prefix}/x`, peer: vpcPeer, headers })
@@ -152,8 +156,6 @@ export function assertGatewayContract({ template, dockerfile, includes }) {
   // http-level error log takes notice and above. The server logs only
   // critical messages, so a refused upstream, an oversized or buffered body or
   // a timeout never writes a query string to the container's stderr.
-  const quietErrorLog = args => args.length === 2 && args[0] === '/var/log/nginx/error.log'
-    && errorLogLevels.includes(args[1])
   const serverErrorLog = all.directives('error_log').map(item => item.args)
   assert.ok(serverErrorLog.length === 1 && quietErrorLog(serverErrorLog[0]),
     `the server must log only critical errors (error_log /var/log/nginx/error.log crit), not ${JSON.stringify(serverErrorLog)}`)
