@@ -6,6 +6,7 @@ import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } 
 import { AcceptPrescriptionForPharmacyDto, CreatePrescriptionDto, OrderStatus,
   TimelineQueryDto, UpdatePrescriptionDto } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { refuseClosedEncounter } from '../shared/encounter-status';
 import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 
 export interface PrescriptionRow extends QueryResultRow {
@@ -114,6 +115,7 @@ export class PrescriptionsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'prescription',
         async () => {
+          await this.repository.requireOpenEncounter(client, encounterId, patientId, context.facilityId, 'order');
           const result = await client.query<PrescriptionRow>(
             `insert into ehr.prescriptions (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
@@ -152,9 +154,16 @@ export class PrescriptionsService {
       context, patientId, 'write_records',
       { action: 'ehr.prescription.update', resourceType: 'prescription', resourceId: prescriptionId },
       async (client) => {
+        // An activation share-locks the encounter before the prescription, the order its retraction locks in.
+        const encounterStatus = input.status === OrderStatus.Active
+          ? await this.repository.lockEncounterStatus(client, encounterId, patientId, context.facilityId)
+          : undefined;
         const current = await this.lock(client, context, patientId, encounterId, prescriptionId);
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
+        }
+        if (encounterStatus && current.status !== OrderStatus.Active) {
+          refuseClosedEncounter(encounterStatus, current.status === OrderStatus.OnHold ? 'resume' : 'order');
         }
         await this.repository.setChangeReason(client, input.changeReason);
         const result = await client.query<PrescriptionRow>(
