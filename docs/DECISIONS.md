@@ -3086,3 +3086,93 @@ refuse to start. The outcome line gains `primaryProvider` and
 `primarySafeCode` when the fallback ran; its other fields are unchanged.
 
 Related ADRs: ADR-032, ADR-033, ADR-034, ADR-035, ADR-047.
+
+# ADR-056: Retracting an Encounter Needs the Records' Write Permissions; Closed Orders Are Final; Allergies Are Not Recorded at Launch
+
+Status: Accepted (owner policy defaults for register items ENC-RETRACT-1,
+ENC-RETRACT-2 and ALLERGY-1); not deployed
+
+Date: 2026-10-13
+
+Change: BRANCH:launch/ehr-retraction-integrity, migration 0090 (register ENC-RETRACT-1, ENC-RETRACT-2,
+RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT and ALLERGY-1).
+
+Context:
+
+- Since 0084, cancelling an encounter cancels its open orders and marking it
+  entered in error retracts its notes, diagnoses and orders. Both ran for
+  anyone holding `ehr.encounter.write`: per-record write permissions were
+  checked only on each record's own routes, and row-level security checks the
+  patient's consent, not the role. A nurse (no diagnosis or prescription
+  write) could retract a doctor's confirmed diagnosis and active prescription,
+  and a legacy receptionist (encounter write only) could retract notes they
+  cannot read. Retraction is irreversible and hides notes from the patient.
+- A vital had no status and a completed order no retraction, so a
+  wrong-patient encounter left its vitals and medication history as valid
+  chart data; a completed, cancelled or entered-in-error prescription still
+  accepted new instructions, frequency and end date, and the database let a
+  cancelled one become active again.
+- The EHR records no allergies, while `DATABASE.md` described an allergy table
+  as current.
+
+Decision:
+
+1. **Who may retract (ENC-RETRACT-1).** Cancelling or retracting an encounter
+   needs the write permission of every kind of record the close changes:
+   `ehr.note.write`, `ehr.diagnosis.write`, `ehr.vital.write`,
+   `ehr.prescription.write`, `ehr.lab-request.write`, `ehr.document.write`.
+   This is the least-privilege reading of the owner defaults: the cascade may
+   do only what the actor could do record by record. No new permission is
+   introduced. The EHR API refuses with `403 ENCOUNTER_RETRACTION_NOT_PERMITTED`
+   before writing anything and audits the refusal with the missing permission
+   codes; the database refuses the same close (`42501`) through
+   `auth.membership_has_permission`, which the EHR runtime may now execute.
+   An encounter holding none of these records may be cancelled or retracted
+   with `ehr.encounter.write` alone. The proposal of a new
+   `ehr.encounter.retract` permission (doctor and clinician only) was not
+   taken: it would let a doctor retract through the encounter what no route
+   lets them write, and it would need its own grant governance.
+2. **What a retraction covers (ENC-RETRACT-2).** Marking an encounter entered
+   in error also marks its final vitals, its completed prescriptions and lab
+   requests, and its linked documents entered in error, in the same
+   transaction. A vital can be entered in error on its own
+   (`POST .../vitals/:vitalId/entered-in-error`, `ehr.vital.write`, with a
+   version, a reason and an audit event), and a completed prescription or lab
+   request may move to `entered_in_error`. Nothing is deleted. A vital entered
+   in error takes no further change and is left out of the emergency summary;
+   the patient summary releases neither vitals nor orders.
+3. **Closed records are final (RX-FINAL, ORDER-CLOSED-EDIT).** A completed,
+   cancelled or entered-in-error prescription or lab request takes no change
+   except completed to `entered_in_error`; status changes follow the order
+   transitions; a cancelled or entered-in-error encounter takes no change.
+   The services answer `409`, and 0090's triggers refuse the same writes.
+4. **Refusals are audited (A9-EHR, A17-EHR-AUDIT).** A clinical command refused
+   inside its transaction is audited after the rollback with its status and
+   code, never clinical content; refusal rows carry the status and code
+   answered; a staff session on the patient's own records route is refused in
+   the guard and audited instead of answering `503`.
+5. **Allergies (ALLERGY-1).** Structured allergy capture is not in scope for
+   launch. No allergy table is added. A clinician records an allergy as a
+   diagnosis (ICD-10 `Z88.x`) or in a note; no prescription is checked against
+   it. `DATABASE.md` §7 lists only implemented tables, and a documentation test
+   keeps it so.
+
+Consequences:
+
+- A nurse or receptionist who opened an encounter on the wrong patient asks a
+  doctor or clinician to retract it once it holds a diagnosis or a
+  prescription; a nurse may still retract one holding only notes, vitals and
+  documents. Health-id `82b474e` still offers the actions to every
+  `ehr.encounter.write` holder and shows the refusal's detail (frontend
+  follow-up: offer them by permission, and correct `ORDERS_NOT_CANCELLED`).
+- No role holds `ehr.lab-request.write` (0084), so an encounter that still
+  holds a lab request cannot be cancelled or retracted until Lab ordering is
+  enabled again by its own migration; none can be created at launch.
+- The rule follows record kinds, not authorship: a nurse may retract a
+  doctor's signed note through the encounter, as on the note route. Narrowing
+  that is a clinical owner decision.
+- Prescribers get no structured allergy check at launch.
+- One new runtime privilege: `EXECUTE` on `auth.membership_has_permission` for
+  `hid_ehr_runtime`; the role bootstrap must run right after 0090.
+
+Related ADRs: ADR-047, ADR-053.

@@ -252,7 +252,11 @@ returns at most 50 completed encounters and 50 current signed/amended note
 revisions of completed encounters (since 0084), after fresh Identity
 authorization through the EHR workload caller.
 It names the other five record categories as withheld from the patient, not as
-absent (§11, "Record summaries").
+absent (§11, "Record summaries"). Only a patient session may use it: EHR's
+guard answers any other session `403 PATIENT_SESSION_REQUIRED` before the
+handler runs and records `auth.authorization.denied` (§7). Before
+BRANCH:launch/ehr-retraction-integrity a staff session there got `503 DEPENDENCY_UNAVAILABLE` and nothing was
+audited.
 These routes accept no browser-selected patient identity. Patient record access
 is read-only and owning-service disclosure/audit is atomic. The internal
 `GET /api/v1/identity/service/patient-self-authorization` requires both the
@@ -568,7 +572,27 @@ fault included) and refuses a patient on a workforce route
   `authentication`.
 
 A refusal keeps its own status and code. If its audit row cannot be written,
-the request fails closed with `503 DEPENDENCY_UNAVAILABLE`. Before
+the request fails closed with `503 DEPENDENCY_UNAVAILABLE`. Since
+BRANCH:launch/ehr-retraction-integrity each EHR refusal row carries `details.status` and `details.code`,
+the status and code answered, next to `method` and `route`. A route marked
+patient-only (EHR's `GET /api/v1/ehr/me/records`) refuses any other session
+with `403 PATIENT_SESSION_REQUIRED` before a facility is bound.
+
+EHR's request audit (`api.<method>.<route>` on `http-request`) records a failed
+request with `details.status` and `details.code` too, and with outcome `denied`
+for a refusal (`401`, `403`, `409`, `412`, `423`, `429`) and `failure`
+otherwise. A staff actor's failure on a facility-optional route, where no
+facility is bound, is recorded as `auth.authorization.denied` (a refusal) or
+`auth.request.failed` on `authentication`, without facility, membership or
+organization, instead of failing with `503`. A clinical command refused inside
+its database transaction (a refusal of row-level security, `409`, `412`, and
+the other refusals of §11) is also recorded after the rollback as the
+command's own semantic action (for example `ehr.encounter.update`), outcome
+`denied` for a refusal and `failure` for `400` and `404`, with
+`details.status`, `details.code` and, where the refusal names them, codes such
+as `missingPermissions`; never clinical content. Before, the rollback removed
+that row and only the request row, outcome `failure` without status or code,
+remained. Before
 D-Eminence/hid-system#46, every refusal of a staff actor before a facility was
 bound answered that `503` and was not audited, `PLATFORM_CONTROL_UNAVAILABLE`
 included: its row carried the default membership but no facility, and a staff
@@ -849,12 +873,12 @@ or Pharmacy:
 
 The read permissions stay, so existing lab requests, prescriptions and Lab and
 Pharmacy records remain readable. Prescriptions are still created and changed
-in the EHR. An existing lab request changes status only through its
-encounter: cancelling the encounter cancels its open lab requests, and marking
-it entered in error marks them entered in error ("Encounter status and its
-records"). An open lab request of a completed encounter that is not
-retracted, or of an encounter that was already cancelled or entered in error,
-stays as it is. Re-enabling a module takes its own decision, its fixes, a
+in the EHR. No lab request can be created or changed at launch. Since 0090 an
+encounter's cancellation or retraction needs the write permission of every
+kind of record it changes, so an encounter that still holds a lab request
+cannot be cancelled or retracted either (`403
+ENCOUNTER_RETRACTION_NOT_PERMITTED`) until Lab ordering is enabled again
+("Encounter status and its records"). Re-enabling a module takes its own decision, its fixes, a
 staging acceptance run and a reviewed migration granting the permissions
 again; the sections on the Lab and Pharmacy handoffs below describe the routes
 as they work then.
@@ -877,17 +901,41 @@ moves an encounter only along these transitions; any other answers
 Marking an encounter entered in error (a wrong-patient retraction, possible
 also after completion) marks, in the same transaction and under the
 encounter's row lock, its draft, signed and amended notes `entered_in_error`,
-its diagnoses' `verificationStatus` `entered_in_error`, and its draft, active
-and on-hold prescriptions and lab requests `entered_in_error`. Cancelling an
-encounter cancels its draft, active and on-hold prescriptions and lab
-requests, and leaves its notes and diagnoses. Completed orders and vitals keep
-their state. Each changed record gets a version carrying the request's
-`changeReason`, and the encounter's audit event (`ehr.encounter.update`)
-records `cascade`: the new status and the ids changed in each category
-(`clinicalNoteIds`, `diagnosisIds`, `prescriptionIds`, `labRequestIds`). The
-response is the encounter, as before; list the records to see the change.
-Lab and Pharmacy are not told (they are off at launch; Pharmacy refuses to
-dispense a prescription that is no longer active, 0080).
+its diagnoses' `verificationStatus` `entered_in_error`, its `final` vitals,
+its draft, active, on-hold and (since 0090) completed prescriptions and lab
+requests, and the `initiated` or `uploaded` documents linked to it
+`entered_in_error`. Cancelling an encounter cancels its draft, active and
+on-hold prescriptions and lab requests, and leaves everything else. Each
+changed record gets a version carrying the request's `changeReason`, and the
+encounter's audit event (`ehr.encounter.update`) records `cascade`: the new
+status and the ids changed in each category (`clinicalNoteIds`,
+`diagnosisIds`, `vitalIds`, `prescriptionIds`, `labRequestIds`,
+`documentIds`; cancelling lists only the two order categories). Since 0090
+the response is the encounter with the additive field `cascade`, the same
+object, whenever the status change cancelled or retracted it; any other
+update returns the encounter without it. Lab and Pharmacy are not told (they
+are off at launch; Pharmacy refuses to dispense a prescription that is no
+longer active, 0080).
+
+Cancelling or retracting needs the write permission of every kind of record
+the close changes (ENC-RETRACT-1, ADR-056, BRANCH:launch/ehr-retraction-integrity): `ehr.note.write` for notes,
+`ehr.diagnosis.write` for diagnoses, `ehr.vital.write` for vitals,
+`ehr.prescription.write` for prescriptions, `ehr.lab-request.write` for lab
+requests and `ehr.document.write` for documents. Without one of them the
+`PATCH` answers `403 ENCOUNTER_RETRACTION_NOT_PERMITTED`, naming the missing
+permissions in its detail, writes nothing, and is audited (§7). An encounter
+that holds none of these records needs only `ehr.encounter.write`, as the
+route always did; holding, resuming and completing need no record permission.
+With the seeded roles, doctors and clinicians may close any encounter that
+holds no lab request, nurses one holding only notes, vitals and documents,
+and receptionists only one holding none of these. The database refuses the
+same close (`ehr.require_retraction_permission`, 0090).
+
+A cancelled or entered-in-error encounter takes no further change: any
+`PATCH` of one that is not a refused transition (which keeps
+`409 INVALID_ENCOUNTER_TRANSITION`), a chief complaint or end time edit or
+its own status sent again, answers `409 ENCOUNTER_NOT_OPEN` (ORDER-CLOSED-EDIT).
+A completed encounter still takes header corrections.
 
 Creates and order activations check the encounter, under a share lock, and
 answer `409 ENCOUNTER_NOT_OPEN` without writing anything:
@@ -904,9 +952,43 @@ amendment, a diagnosis update and a vital correction follow their own rules. A
 diagnosis whose `verificationStatus` is `entered_in_error` cannot be changed
 at all: `409 DIAGNOSIS_NOT_AMENDABLE`. A vital's recorded values are changed
 only by a correction (`POST .../vitals/:vitalId/corrections`); the database
-refuses any other update of them (D8). The database enforces each of these
-rules too, so a writer that bypasses the API gets the same refusal
-(`DATABASE.md`, "EHR clinical safety and launch module set (0084)").
+refuses any other update of them (D8).
+
+Closed orders are final (RX-FINAL, ORDER-CLOSED-EDIT, 0090). A prescription
+moves only along these transitions; any other answers
+`409 INVALID_PRESCRIPTION_TRANSITION` (`409 INVALID_LAB_REQUEST_TRANSITION`
+for a lab request, which follows the same table):
+
+| From | To |
+|---|---|
+| `draft` | `active`, `cancelled`, `entered_in_error` |
+| `active` | `on_hold`, `completed`, `cancelled`, `entered_in_error` |
+| `on_hold` | `active`, `cancelled`, `entered_in_error` |
+| `completed` | `entered_in_error` (since 0090: a completed prescription written for the wrong patient is retracted) |
+| `cancelled`, `entered_in_error` | none |
+
+Any other change of a `completed`, `cancelled` or `entered_in_error`
+prescription (its frequency, instructions or end date, or its own status sent
+again, or a field together with `completed` to `entered_in_error`) answers
+`409 PRESCRIPTION_NOT_AMENDABLE`, and of such a lab request
+`409 LAB_REQUEST_NOT_AMENDABLE`; nothing is written. Before 0090 these edits
+were stored.
+
+Vitals carry `status`: `final`, or `entered_in_error` once retracted
+(ENC-RETRACT-2, 0090). `POST
+/api/v1/ehr/patients/:patientId/encounters/:encounterId/vitals/:vitalId/entered-in-error`
+(`ehr.vital.write`; body `{ "expectedRowVersion": 2, "changeReason": "..." }`,
+`changeReason` 3 to 500 characters; no `Idempotency-Key`) marks a final vital
+entered in error and answers `200` with the vital at its next `rowVersion`.
+It is versioned with the reason and audited as `ehr.vital.entered-in-error`.
+A stale `expectedRowVersion` answers `412 VERSION_CONFLICT`. A vital entered in
+error keeps its values and takes no further change: the route again, or a
+correction, answers `409 VITAL_NOT_AMENDABLE`. The emergency summary leaves it
+out. A vital is never deleted.
+
+The database enforces each of these rules too, so a writer that bypasses the
+API gets the same refusal (`DATABASE.md`, "EHR clinical safety and launch
+module set (0084)" and "EHR retraction integrity (0090)").
 
 ### EHR lab requests sent to Lab
 
@@ -1064,7 +1146,8 @@ withheld. The seeded doctor, clinician and nurse roles hold all seven.
   and `mediaType` as the scan detected it (as declared if the scan named none).
 - `vitals` are returned as first recorded (the vital row's eight measurement
   columns, which no API route changes and, since 0084, the database refuses
-  to change), with the same fields as before; a
+  to change), with the same fields as before, and since 0090 without the
+  vitals entered in error; a
   vital's corrections are not applied. Applying them is pending the product
   decision on correction semantics (proposed default: the current correction
   is the whole current set, as Health-id's clinician chart applies it); the

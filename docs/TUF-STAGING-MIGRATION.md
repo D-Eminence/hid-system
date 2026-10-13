@@ -91,7 +91,19 @@ The executable covers:
    retracts an encounter's notes, diagnoses and open orders when it is marked
    entered in error (versions and audit included), cancels open orders with
    the encounter, makes a retraction wait for a child create holding the
-   encounter, and lets activations race retractions without a deadlock. The
+   encounter, and lets activations race retractions without a deadlock. Since
+   0090 (BRANCH:launch/ehr-retraction-integrity) it also checks over HTTP that
+   a nurse cannot retract a doctor's diagnosis and prescription through the
+   encounter (`403 ENCOUNTER_RETRACTION_NOT_PERMITTED`, nothing changed, the
+   refusal audited) while she can retract her own notes and vitals; that the
+   retraction also covers vitals and completed prescriptions and returns
+   `cascade`; that a vital can be entered in error on its own and then takes
+   no correction; that a closed prescription and a closed encounter take no
+   change; and that a staff session on `GET /ehr/me/records` is
+   `403 PATIENT_SESSION_REQUIRED` with one audit row. Its fixture gives the
+   copy's doctor role `ehr.lab-request.write`, which its fake Identity session
+   has always carried, because the 0090 database guard checks it when a
+   retraction changes a lab request. The
    Lab, Pharmacy, OCR and EHR-to-Lab verifiers give their actors the Lab and
    Pharmacy write permissions through their fake Identity, so 0084's
    withdrawal of those permissions from the seeded roles does not affect them.
@@ -102,7 +114,9 @@ The executable covers:
    and apply `0029`–`0034`, verify preservation, fail-closed old OTP behavior,
    the new cutover controls, and minimal verification-evidence boundaries (and,
    since 0084, that no role holds a launch-withdrawn Lab, Pharmacy or EHR
-   lab-ordering write permission), then
+   lab-ordering write permission; since 0090, that the retraction and
+   closed-record triggers and the vital status are installed and the upgraded
+   role bootstrap grants the EHR runtime the permission decision they use), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

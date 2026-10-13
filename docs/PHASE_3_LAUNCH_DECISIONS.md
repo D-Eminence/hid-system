@@ -2,8 +2,10 @@
 
 Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
 the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
-the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
-(§1, ADR-052, D-Eminence/hid-system#67) with the owner's defaults;
+the owner policy defaults (ADR-053, D-Eminence/hid-system#66), FE-HOST
+(§1, ADR-052, D-Eminence/hid-system#67) with the owner's defaults, and
+ENC-RETRACT-1, ENC-RETRACT-2 and ALLERGY-1 (§2) with the owner policy defaults
+(ADR-056, BRANCH:launch/ehr-retraction-integrity);
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
 
@@ -176,6 +178,9 @@ separate deployment authorization. None of them has been run.
 | D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decide which roles hold `workforce.manage` (legacy `admin` holds it), how existing staff are attached, whether pending access requests close when a membership ends, and whether staff MFA is a launch gate, by ADR before WF-1 | Invites and offboarding stay manual | Workforce management |
 | D15 | Launch scope of EHR-to-Lab ordering and in-system result return | In scope (the EHR already sends orders) | If in scope, the Lab handoff is launch-blocking; it merged as D-Eminence/hid-system#56 | Lab handoff |
 | D16 | Health-id OCR publication retry | Persist the publication key per validation; offer Retry for retryable failures | Frontend change | OCR publication retry |
+| ENC-RETRACT-1 | Who may cancel or retract an encounter's records through the encounter | **Decided (owner policy default, least privilege, ADR-056, BRANCH:launch/ehr-retraction-integrity):** only a member holding the write permission of every kind of record the close changes (`ehr.note.write`, `ehr.diagnosis.write`, `ehr.vital.write`, `ehr.prescription.write`, `ehr.lab-request.write`, `ehr.document.write`); an encounter holding none of them needs `ehr.encounter.write` alone. Refused with `403 ENCOUNTER_RETRACTION_NOT_PERMITTED`, nothing written, audited; the database refuses it too (0090). The proposed `ehr.encounter.retract` permission was not taken | A nurse or receptionist who opened an encounter on the wrong patient must ask a doctor or clinician once it holds a diagnosis or prescription. No role holds `ehr.lab-request.write` (0084), so an encounter holding a lab request cannot be closed until Lab ordering returns. The rule follows record kinds, not authorship | Health-id offering the actions by permission (frontend follow-up) |
+| ENC-RETRACT-2 | Retraction of wrong-patient vitals, completed orders and documents | **Decided (owner policy default, ADR-056, BRANCH:launch/ehr-retraction-integrity):** completed orders, final vitals and linked documents of an encounter entered in error become `entered_in_error` with it; a vital can be entered in error on its own (versioned, audited, with a reason) and then takes no change; the emergency summary leaves retracted vitals out; nothing is deleted | Health-id `82b474e` shows a retracted vital without a marker (frontend follow-up) | — |
+| ALLERGY-1 | Allergies at launch | **Decided (owner policy default, ADR-056, BRANCH:launch/ehr-retraction-integrity): allergies are not recorded at launch.** No allergy table, route or prescribing check; a clinician records an allergy as a diagnosis (ICD-10 `Z88.x`) or in a note. `DATABASE.md` §7 now lists only implemented tables | Prescribers get no structured allergy check: a prescription for a drug the patient is allergic to is not flagged | Structured allergy capture (table with forced row-level security, versioning, the open-encounter guard, routes and audit; effort L) and Health-id saying so on the prescription form |
 
 ## 3. Operator plans (prepared, not executed)
 
@@ -315,3 +320,4 @@ for each merged change and its evidence. Pull requests from this review:
 | Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
 | DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
+| ENC-RETRACT-1 (launch blocker), ENC-RETRACT-2, RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT, ALLERGY-1 (EHR retraction integrity) | BRANCH:launch/ehr-retraction-integrity, migration 0090, ADR-056 | local only; not pushed |
