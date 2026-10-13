@@ -3306,7 +3306,7 @@ Tests:
 
 ## Session facility selection (0089)
 
-`0089_session_facility_selection.sql` (ADR-046, `BRANCH:launch/facility-selection-0089`;
+`0089_session_facility_selection.sql` (ADR-046, D-Eminence/hid-system#73;
 written as `0080` in D-Eminence/hid-system#47) follows `0088` (staff MFA).
 Migrations `0001`–`0088` are unchanged; no existing row, function, policy or
 grant changes. Creating
