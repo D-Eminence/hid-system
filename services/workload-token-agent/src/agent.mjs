@@ -8,9 +8,16 @@ const audienceFiles = { 'hid-identity-api': 'identity.jwt', 'hid-ehr-api': 'ehr.
 // prefix together; the issuer binds the same value to the API stage.
 const stages = new Set(['staging', 'production']);
 // DEP-4-DOS: the agent keeps keys that verified a minted token, by kid, and
-// fetches the JWKS only at start and for an unknown kid, at most this often.
-// A JWKS outage or flood then does not stop renewal under a known kid.
+// fetches the JWKS only at start, for an unknown kid and after a cached key
+// stops verifying, at most this often once a token has verified. A JWKS outage
+// or flood then does not stop renewal under a known kid.
 export const jwksRefetchIntervalMs = 30_000;
+// A failed renewal is retried after this long (main.mjs). The agent health
+// check (start period 30 s, interval 10 s, three retries) turns an agent
+// without ready.json UNHEALTHY about 60 s after start, and the application
+// starts only on HEALTHY; so until its first token verifies, the agent may
+// fetch the JWKS on every renewal retry, never faster.
+export const renewalRetryMs = 10_000;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const hmac = (key, value) => createHmac('sha256', key).update(value).digest();
 
@@ -168,6 +175,7 @@ export class TokenAgent {
     this.verifiedKeys = new Map();
     this.fetchedKeys = undefined;
     this.lastJwksFetch = undefined;
+    this.tokenVerified = false;
   }
   async start() {
     await prepareDirectory(this.configuration.directory);
@@ -192,7 +200,8 @@ export class TokenAgent {
   }
   async refreshKeys(request) {
     const now = this.now();
-    if (this.lastJwksFetch !== undefined && now - this.lastJwksFetch < jwksRefetchIntervalMs) {
+    const interval = this.tokenVerified ? jwksRefetchIntervalMs : renewalRetryMs;
+    if (this.lastJwksFetch !== undefined && now - this.lastJwksFetch < interval) {
       throw new Error('Workload JWKS refresh is rate limited');
     }
     this.lastJwksFetch = now;
@@ -233,6 +242,7 @@ export class TokenAgent {
         throw error;
       }
       if (!this.verifiedKeys.has(kid)) this.verifiedKeys.set(kid, signingKeys(jwks, kid)[0]);
+      this.tokenVerified = true;
     }
     for (const entry of next) {
       await atomicToken(this.configuration.directory, entry.file, entry.token);
