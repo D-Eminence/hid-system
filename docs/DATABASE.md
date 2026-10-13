@@ -2284,7 +2284,7 @@ Tests:
 
 ## EHR clinical safety and launch module set (0084)
 
-`0084_ehr_clinical_safety_and_launch_modules.sql` (BRANCH:launch/ehr-clinical-safety)
+`0084_ehr_clinical_safety_and_launch_modules.sql` (D-Eminence/hid-system#64)
 changes no table, column or grant. It deletes rows of `auth.role_permissions`,
 adds three trigger functions and eight triggers, and replaces two row-level
 security policies.
