@@ -2730,7 +2730,7 @@ Tests:
 
 `0086_recovery_and_patient_search_hardening.sql` closes the database part of
 launch blockers REC-GOOGLE, REC-AUDIENCE, REC-NOTIFY and PSEARCH-1 (change
-`BRANCH:launch/identity-recovery-search`). 0001 through 0085 are unchanged.
+D-Eminence/hid-system#69). 0001 through 0085 are unchanged.
 
 **Recovery.** `auth.complete_recovery_otp` (0029) is replaced with `CREATE OR
 REPLACE`, so it keeps its owner and ACL; its signature, result, `SECURITY

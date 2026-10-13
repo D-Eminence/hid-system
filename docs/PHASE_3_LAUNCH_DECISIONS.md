@@ -214,7 +214,7 @@ separate deployment authorization. None of them has been run.
 
 ### Account recovery and patient search (REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE, SIGNIN-LOCKOUT, PSEARCH-1, REC-NOTIFY)
 
-Implemented as proposed defaults in `BRANCH:launch/identity-recovery-search`
+Implemented as proposed defaults in D-Eminence/hid-system#69
 (migration 0086; release checklist §2, "Account recovery and patient search
 hardening"; `INTERFACE_CONTRACT.md`; `DATABASE.md`). Each default is a
 proposal; that change is the place to alter it.
@@ -459,4 +459,4 @@ for each merged change and its evidence. Pull requests from this review:
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
 | ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota); FE-4 (enrollment availability read, registration-not-open answer) | D-Eminence/hid-system#68, migration 0085 (FE-4 adds none) | local branch (N1, N2); FE-4's Health-id follow-up open |
 | DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
-| REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | `BRANCH:launch/identity-recovery-search`, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
+| REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | D-Eminence/hid-system#69, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |

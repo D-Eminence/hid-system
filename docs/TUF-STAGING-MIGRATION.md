@@ -104,7 +104,7 @@ The executable covers:
    Lab, Pharmacy, OCR and EHR-to-Lab verifiers give their actors the Lab and
    Pharmacy write permissions through their fake Identity, so 0084's
    withdrawal of those permissions from the seeded roles does not affect them.
-   With 0086 (`BRANCH:launch/identity-recovery-search`): `otp_runtime` also
+   With 0086 (D-Eminence/hid-system#69): `otp_runtime` also
    requires a completed recovery to revoke the account's Google link and keep
    its `legacy-identity` provenance record, a start
    from another account kind's page and a patient start with only an
