@@ -102,7 +102,7 @@ The executable covers:
    entered in error (versions and audit included), cancels open orders with
    the encounter, makes a retraction wait for a child create holding the
    encounter, and lets activations race retractions without a deadlock. Since
-   0090 (BRANCH:launch/ehr-retraction-integrity) it also checks over HTTP that
+   0090 (D-Eminence/hid-system#74) it also checks over HTTP that
    a nurse cannot retract a doctor's diagnosis and prescription through the
    encounter (`403 ENCOUNTER_RETRACTION_NOT_PERMITTED` with a fixed detail,
    nothing changed, the refusal audited with the missing permissions) while
@@ -234,7 +234,7 @@ The executable covers:
    counts `ehr.patient_self_context` among its nine security-definer
    commands. The additional suites now include the patient-self binding cases
    and the launch-control state. Once 0090
-   (`BRANCH:launch/ehr-retraction-integrity`) and 0091 are on one branch,
+   (D-Eminence/hid-system#74) and 0091 are on one branch,
    0090's `encounter-retraction.integration.sql` needs the merge change in the
    release checklist §2 (the nurse role's `ehr.document.write` inside its
    rollback-only transaction); without it the rehearsal fails on that suite.

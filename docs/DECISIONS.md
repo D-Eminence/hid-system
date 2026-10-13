@@ -3910,7 +3910,7 @@ ENC-RETRACT-2 and ALLERGY-1); not deployed
 
 Date: 2026-10-13
 
-Change: BRANCH:launch/ehr-retraction-integrity, migration 0090 (register ENC-RETRACT-1, ENC-RETRACT-2,
+Change: D-Eminence/hid-system#74, migration 0090 (register ENC-RETRACT-1, ENC-RETRACT-2,
 RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT and ALLERGY-1).
 
 Context:
@@ -4127,7 +4127,7 @@ Consequences:
   0091's request-list columns: it must not start before 0091 and the
   bootstrap, and a restore of a pre-0091 backup takes Identity back to the
   previous build (otherwise the list answers `500`).
-- With 0090 (ADR-056, `BRANCH:launch/ehr-retraction-integrity`), whose
+- With 0090 (ADR-056, D-Eminence/hid-system#74), whose
   retraction guard requires `ehr.document.write` to mark an encounter entered
   in error while it holds an initiated or uploaded document, no role can do
   that until uploads are re-enabled (`403 ENCOUNTER_RETRACTION_NOT_PERMITTED`);
