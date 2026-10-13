@@ -140,8 +140,10 @@ function collectRecord(path, source, occurrences) {
   }
 }
 
-// index.html is allow-listed, not scanned for known-bad markup: with no edge
-// CSP (ADR-052), this is what keeps it to the shell Vite writes for Health-id
+// index.html is allow-listed, not scanned for known-bad markup. Together with
+// the edge Content-Security-Policy (frontend-worker.mjs, ADR-055), which allows
+// script only from the build's own origin and Turnstile, this keeps it to the
+// shell Vite writes for Health-id
 // (doctype, html, head with meta charset/viewport/robots, title, one module
 // entry script, modulepreload and stylesheet links, comments, and a body with
 // the root div), loading code and styles only from the build's own /assets/.

@@ -1381,13 +1381,58 @@ export class HidRegionalStack extends Stack {
           visibilityConfig: { cloudWatchMetricsEnabled: true,
             metricName: `hid-${this.configuration.name}-origin-auth`, sampledRequestsEnabled: false },
         },
-        regionalManagedRule('AwsCommonRules', 10, 'AWSManagedRulesCommonRuleSet'),
+        // WAF-CRS-BODY: the Core Rule Set's SizeRestrictions_BODY blocks every
+        // body over 8 KB, but ehr-api accepts clinical text up to 100,000
+        // characters. It only counts (and labels) here; the next rule blocks a
+        // labelled request unless it is a clinical write. Every other CRS rule
+        // keeps blocking (on an ALB they inspect the first 8 KB of a body).
+        regionalManagedRule('AwsCommonRules', 10, 'AWSManagedRulesCommonRuleSet',
+          [{ name: 'SizeRestrictions_BODY', actionToUse: { count: {} } }]),
+        {
+          name: 'AwsCommonRulesBodySize', priority: 11, action: { block: {} },
+          statement: { andStatement: { statements: [
+            { labelMatchStatement: { scope: 'LABEL', key: 'awswaf:managed:aws:core-rule-set:SizeRestrictions_Body' } },
+            { notStatement: { statement: { andStatement: { statements: [
+              { regexMatchStatement: { fieldToMatch: { method: {} }, regexString: CLINICAL_WRITE_METHODS,
+                textTransformations: [{ priority: 0, type: 'NONE' }] } },
+              { regexMatchStatement: { fieldToMatch: { uriPath: {} }, regexString: CLINICAL_WRITE_PATH,
+                textTransformations: [{ priority: 0, type: 'NONE' }] } },
+            ] } } } },
+          ] } },
+          visibilityConfig: { cloudWatchMetricsEnabled: true,
+            metricName: `hid-${this.configuration.name}-origin-body-size`, sampledRequestsEnabled: false },
+        },
         regionalManagedRule('AwsKnownBadInputs', 20, 'AWSManagedRulesKnownBadInputsRuleSet'),
+        // A7: every connection comes from the Cloudflare Worker, so a limit on
+        // the connecting address throttled every user behind one Cloudflare
+        // egress address together. Rule 0 has already refused anything without
+        // the Worker's origin secret, and the Worker always replaces
+        // X-HID-Client-Network with the network of CF-Connecting-IP: the IPv4
+        // address, or the IPv6 /64 network address (one subscriber allocation,
+        // so rotating addresses inside it keeps one count). This counts per
+        // client network (a facility or carrier NAT address counts as one
+        // client; IP-THRESHOLDS). An invalid value is blocked (MATCH); a
+        // request without the header is not counted here, and the Worker sends
+        // it whenever it sends X-Real-IP, without which the gateway refuses the
+        // request (CLIENT_ADDRESS_REQUIRED). The gateway drops the header.
         {
           name: 'ApiOriginRateLimit', priority: 30, action: { block: {} },
-          statement: { rateBasedStatement: { aggregateKeyType: 'IP', limit: 2_000 } },
+          statement: { rateBasedStatement: { aggregateKeyType: 'FORWARDED_IP', limit: API_ORIGIN_CLIENT_RATE_LIMIT,
+            forwardedIpConfig: { headerName: 'X-HID-Client-Network', fallbackBehavior: 'MATCH' } } },
           visibilityConfig: { cloudWatchMetricsEnabled: true,
             metricName: `hid-${this.configuration.name}-origin-rate`, sampledRequestsEnabled: false },
+        },
+        // The backstop per connecting address, for a leaked origin secret or a
+        // request without the client-network header. It is a platform-wide
+        // brake per Cloudflare egress address, far above any one client's
+        // limit; when it trips (traffic spread over many client networks, such
+        // as a botnet) it blocks every user behind that egress address for the
+        // rest of the five-minute window.
+        {
+          name: 'ApiOriginEdgeRateLimit', priority: 31, action: { block: {} },
+          statement: { rateBasedStatement: { aggregateKeyType: 'IP', limit: API_ORIGIN_EDGE_RATE_LIMIT } },
+          visibilityConfig: { cloudWatchMetricsEnabled: true,
+            metricName: `hid-${this.configuration.name}-origin-edge-rate`, sampledRequestsEnabled: false },
         },
       ],
     });
@@ -1701,14 +1746,37 @@ function pascal(value: string): string {
   return value.split(/[^A-Za-z0-9]+/).filter(Boolean).map((part) => `${part[0]!.toUpperCase()}${part.slice(1)}`).join('');
 }
 
-function regionalManagedRule(name: string, priority: number,
-  managedRuleGroupName: string): wafv2.CfnWebACL.RuleProperty {
+function regionalManagedRule(name: string, priority: number, managedRuleGroupName: string,
+  ruleActionOverrides?: readonly wafv2.CfnWebACL.RuleActionOverrideProperty[]): wafv2.CfnWebACL.RuleProperty {
   return {
     name, priority, overrideAction: { none: {} },
-    statement: { managedRuleGroupStatement: { name: managedRuleGroupName, vendorName: 'AWS' } },
+    statement: { managedRuleGroupStatement: { name: managedRuleGroupName, vendorName: 'AWS',
+      ...(ruleActionOverrides ? { ruleActionOverrides: [...ruleActionOverrides] } : {}) } },
     visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: name, sampledRequestsEnabled: false },
   };
 }
+
+// Requests per client network (X-HID-Client-Network: an IPv4 address or an
+// IPv6 /64) per five minutes at the public API WAF (A7), and the backstop per
+// connecting (Cloudflare egress) address. These are code constants: raise the
+// first by a reviewed CDK change if the hid-<env>-origin-rate metric shows a
+// busy facility or carrier NAT address being blocked (IP-THRESHOLDS).
+export const API_ORIGIN_CLIENT_RATE_LIMIT = 2_000;
+export const API_ORIGIN_EDGE_RATE_LIMIT = 50_000;
+
+// The ehr-api writes whose JSON bodies legitimately exceed the Core Rule Set's
+// 8 KB body limit (WAF-CRS-BODY): encounters (chief complaint), clinical notes
+// and their revisions (content up to 100,000 characters), diagnoses,
+// prescriptions and lab requests (4,000-character text that exceeds 8 KB in
+// multi-byte scripts), created with POST or changed with PATCH. Vitals carry no
+// free text and keep the limit. The raw path is matched without any
+// transformation, with lowercase UUIDs as Health-id sends them, so an encoded,
+// dot-segment or case variant keeps the 8 KB limit. The services bound the
+// body (gateway client_max_body_size 512k; ehr-api 512 KiB).
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+export const CLINICAL_WRITE_METHODS = '^(?:POST|PATCH)$';
+export const CLINICAL_WRITE_PATH = `^/api/v1/ehr/patients/${UUID}/encounters(?:/${UUID}(?:/(?:`
+  + `clinical-notes(?:/${UUID}(?:/revisions)?)?|(?:diagnoses|prescriptions|lab-requests)(?:/${UUID})?))?)?$`;
 
 export function eventBusArnFor(stack: Stack, busName: string): string {
   return stack.formatArn({ service: 'events', resource: 'event-bus', resourceName: busName, arnFormat: ArnFormat.SLASH_RESOURCE_NAME });

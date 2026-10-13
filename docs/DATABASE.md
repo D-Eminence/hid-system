@@ -2604,7 +2604,7 @@ Tests:
 ## Public enrollment windows and NIN lookup quota (0085)
 
 `0085_public_enrollment_windows_and_nin_lookup_quota.sql`
-(BRANCH:launch/identity-enrollment-gates) implements decisions N2(b) and
+(D-Eminence/hid-system#68) implements decisions N2(b) and
 N2(c) in the activation command and caps QoreID NIN lookups of public patient
 enrollment (IP-1). It replaces two functions and adds one table and one
 function; no existing table is changed.
@@ -2730,7 +2730,7 @@ Tests:
 
 `0086_recovery_and_patient_search_hardening.sql` closes the database part of
 launch blockers REC-GOOGLE, REC-AUDIENCE, REC-NOTIFY and PSEARCH-1 (change
-`BRANCH:launch/identity-recovery-search`). 0001 through 0085 are unchanged.
+D-Eminence/hid-system#69). 0001 through 0085 are unchanged.
 
 **Recovery.** `auth.complete_recovery_otp` (0029) is replaced with `CREATE OR
 REPLACE`, so it keeps its owner and ACL; its signature, result, `SECURITY
@@ -2779,8 +2779,11 @@ challenge.
 **Staff search budgets.** `otp_rate_limits_scope_check` is dropped and re-added
 with four more scopes: `patient_lookup_actor`, `patient_lookup_facility`,
 `access_request_actor` and `access_request_facility`. Identity counts every
-patient lookup and every access-request creation there (bucket: SHA-256 of a
-labelled actor account or facility id), before the command runs. Re-adding the
+access-request creation there before the command runs, and every refused
+patient lookup after its audit event (bucket: SHA-256 of a labelled actor
+account or facility id); a lookup reads its two buckets first and is refused
+while either is blocked, and one that returns a granted patient is not counted
+(FE-10). Re-adding the
 check validates the existing rows under an `ACCESS EXCLUSIVE` lock on
 `auth.otp_rate_limits`; every existing scope stays allowed.
 
@@ -2923,15 +2926,17 @@ Tests:
   recovery hold on approval, PIN and emergency contacts; the staff list
   names the patient of the active approval only, not of the pending or the
   revoked one),
-  `verify-patient-search-runtime.mjs` (new: lookup `200`, three identical
-  `404`s, `400`, audit reasons, uniform access-request answer, `429`s) and
+  `verify-patient-search-runtime.mjs` (new: lookup `200`, one identical `404`
+  for every refusal, whether row-level security hides the patient or the
+  authorization check refuses one the caller can read, `400`, audit reasons,
+  uniform access-request answer, `429`s for refusals only) and
   `verify-registration-review-runtime.mjs` (registration review, unchanged,
   passes under the narrowed policy).
 
 ## Governed workforce provisioning and one membership per facility (0087)
 
 `0087_governed_workforce_provisioning.sql` implements launch decision D14
-(workforce part) and N5 (ADR-049; BRANCH:launch/staff-workforce-provisioning).
+(workforce part) and N5 (ADR-049; D-Eminence/hid-system#70).
 
 **One active membership per facility (N5).** A unique partial index,
 `staff_memberships_one_active_per_facility_uq`, allows one active membership
@@ -3121,7 +3126,7 @@ Tests:
 ## Staff MFA sessions (0088)
 
 `0088_staff_mfa_sessions.sql` is the database part of launch blocker MFA-1
-(decision D14, ADR-054; change `BRANCH:launch/staff-mfa`): every staff
+(decision D14, ADR-054; change D-Eminence/hid-system#71): every staff
 session that can reach patient data is MFA-verified. 0001 through 0087 are
 unchanged. A staff session uses the 0069 tables, as a platform session does:
 `auth.mfa_factors`, `auth.mfa_recovery_codes`, `auth.mfa_login_challenges` and

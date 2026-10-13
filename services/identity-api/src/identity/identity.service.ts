@@ -31,11 +31,16 @@ export class IdentityService {
   ) {}
 
   /**
-   * Exact-HID lookup for staff. Counted against the actor's and facility's
-   * lookup budgets first; searching never grants access by itself.
+   * Exact-HID lookup for staff; searching never grants access by itself.
+   * While the actor's or the facility's lookup budget is blocked, every lookup
+   * is 429 before anything is read. Only a refusal is counted, an unknown HID
+   * and an unauthorized patient alike, after its audit (FE-10): the lookup
+   * that returns a patient the caller is authorized for, which Health-id
+   * repeats before each clinical read and write, and a dependency failure are
+   * not.
    */
   async lookupPatient(hid: string, purpose: PurposeOfUse, context: DataAccessContext) {
-    await this.budget.consume('patient_lookup', context);
+    await this.budget.refuseWhileBlocked('patient_lookup', context);
     let patient: IdentityPatient | null;
     try {
       patient = await this.provider.lookupExactHid(hid, context);
@@ -63,7 +68,7 @@ export class IdentityService {
       }
       await this.record(context, 'identity.patient.lookup', 'denied', subject ?? undefined, purpose,
         { reason: subject ? 'not_authorized' : 'not_found' });
-      throw patientNotAvailable();
+      return this.refuse(context);
     }
     const decision = await this.provider.authorize({
       patientId: patient.id,
@@ -74,7 +79,7 @@ export class IdentityService {
     if (!decision.allowed) {
       await this.record(context, 'identity.patient.lookup', 'denied', patient.id, purpose,
         { reason: 'not_authorized' });
-      throw patientNotAvailable();
+      return this.refuse(context);
     }
     await this.record(context, 'identity.patient.lookup', 'success', patient.id, purpose, {
       consentGrantId: decision.consentGrantId,
@@ -150,6 +155,16 @@ export class IdentityService {
       writeAllowed: status.writeAllowed,
     });
     return status;
+  }
+
+  /**
+   * Counts a refused lookup against the actor's and facility's budgets, the
+   * same way whatever the refusal was, then answers the one 404; the refusal
+   * that crosses a maximum is answered 429 instead.
+   */
+  private async refuse(context: DataAccessContext): Promise<never> {
+    await this.budget.consume('patient_lookup', context);
+    throw patientNotAvailable();
   }
 
   private record(

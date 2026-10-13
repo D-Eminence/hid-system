@@ -22,9 +22,11 @@ Identity (`/api/v1/auth`, `/identity`, `/audit`, `/admin`, `/commercial`) and
 EHR (`/api/v1/ehr`). Lab, Pharmacy, OCR and Outreach prefixes answer
 `404 API_ROUTE_NOT_FOUND`, as do the service-to-service routes
 (`/api/v1/auth/service-session`, `/api/v1/identity/service/*`,
-`/api/v1/identity/outreach/*`, `/api/v1/ehr/internal/*`, and the Lab and
-Pharmacy `accept-ehr-*` and `imports/from-ocr` routes) in any letter case or
-spelling nginx normalizes. Public IP-keyed limits (recovery start, patient
+`/api/v1/identity/outreach/*`, `/api/v1/ehr/internal/*`, the document
+scanner's callback `POST /api/v1/ehr/documents/scan-events` (ADR-055; the
+scanner calls ehr-api on its private service name when uploads ship), and the
+Lab and Pharmacy `accept-ehr-*` and `imports/from-ocr` routes) in any letter
+case or spelling nginx normalizes. Public IP-keyed limits (recovery start, patient
 enrollment start and contact, provider enrollment, organization application
 intake and profile completion) count per client network: an IPv4 address or an
 IPv6 /64. Without a usable client address, or, in production, with an address
@@ -32,10 +34,52 @@ of one of the platform's own proxies, they answer their 503
 (`OTP_RATE_LIMIT_UNAVAILABLE` for recovery start,
 `ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
 `PROVIDER_ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
-`APPLICATION_RATE_LIMIT_UNAVAILABLE`) instead of sharing one bucket. The
-gateway passes a backend `503` to the browser as `503 UPSTREAM_UNAVAILABLE`
-(its `error_page` intercepts backend 502, 503 and 504), so clients must treat
-any 503 as unavailable rather than rely on the backend code.
+`APPLICATION_RATE_LIMIT_UNAVAILABLE`) instead of sharing one bucket.
+
+The gateway passes every backend answer through unchanged, 5xx included
+(ADR-055, A8): the status, the Problem Details body with its `code`,
+`Set-Cookie`, `Retry-After` and `X-Correlation-ID`. Clients see the service's
+own code (for example `503 PLATFORM_MAINTENANCE`, `503 MFA_UNAVAILABLE`,
+`503 TURNSTILE_UNAVAILABLE`, `503 OTP_DELIVERY_UNAVAILABLE`,
+`503 QOREID_DISABLED`) and any `502`. Only when the gateway gets no answer at
+all (the service refuses or resets the connection, times out, has no running
+task or closes without responding) does it answer
+`503 UPSTREAM_UNAVAILABLE` with `Cache-Control: no-store`; the Worker answers
+`502 API_ORIGIN_UNAVAILABLE` when it cannot reach the AWS origin. Clients
+should branch on the codes they know and treat any other 5xx as unavailable.
+A `POST /api/v1/auth/refresh` that fails with a 5xx clears the session cookies
+(table below); before this change the gateway dropped that `Set-Cookie` on a
+`503`, so the browser kept a refresh token that rotation may already have
+spent. Keeping the cookies on a 5xx is register item A6 (Identity, open).
+
+The gateway refuses a request body over 512 KiB with
+`413 PAYLOAD_TOO_LARGE` Problem Details before any service sees it (the
+largest JSON body a launch service accepts; Identity refuses more than
+256 KiB with the same code). The public API WAF limits each client network
+(an IPv4 address, or an IPv6 /64, which the Worker sends as
+`X-HID-Client-Network` and the gateway does not pass on; a caller's own value
+is replaced) to 2,000 requests per 5 minutes and answers a request over the
+limit with `403` and the WAF's own non-JSON body; clients should treat it as
+rate limiting. Devices sharing one IPv6 /64 share that limit. The WAF's 8 KB request-body rule does not
+apply to `POST` and `PATCH` on the encounter-scoped clinical writes
+(`/api/v1/ehr/patients/:patientId/encounters`, `/:encounterId`, and its
+`clinical-notes` with `/:noteId/revisions`, `diagnoses`, `prescriptions` and
+`lab-requests`), so a note up to the 100,000-character limit is accepted;
+any other request with a body over 8 KB is refused by the WAF with `403`
+(ADR-055, WAF-CRS-BODY).
+
+The Health-id hosts (www, the staging web host and admin.*) answer with
+`Strict-Transport-Security: max-age=31536000` and a Content-Security-Policy
+that allows script only from the page's own origin and
+`https://challenges.cloudflare.com` (Turnstile), frames and connections only to
+that origin besides its own, styles, fonts and images (plus `data:` images)
+only from its own origin, and no inline script, `eval`, plugins, workers or
+framing by another site. Every `/api/v1` and edge answer carries
+`Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and the
+same HSTS (ADR-055, D6). The page policy allows no storage origin: document
+uploads (off at launch) send the file straight to the presigned S3 URL, so the
+release that switches them on adds the documents bucket's origin to
+`connect-src`.
 
 Authentication OTP commands are purpose-bound and use three stages: start
 returns a generic challenge, verify accepts exactly six digits and returns an
@@ -75,7 +119,7 @@ rules below come from D-Eminence/hid-system#39, which is not yet deployed. Platf
 enrollment cookie rule and the lookups' actor condition come from
 D-Eminence/hid-system#50, also not deployed. Staff sign-in with an
 authenticator, the `STAFF_MFA_REQUIRED` refusals and the refusal of a staff
-Google exchange (below) come from `BRANCH:launch/staff-mfa` (launch blocker
+Google exchange (below) come from D-Eminence/hid-system#71 (launch blocker
 MFA-1, migration 0088), also not deployed. `facilitySelection` on staff session
 responses ("Working facility per sign-in", below) comes from
 `BRANCH:launch/facility-selection-0089` (ADR-046, migration 0089), also not
@@ -103,7 +147,7 @@ refresh) or clears them also expires the public patient enrollment cookie
 `hid_enrollment` on its
 path, `/api/v1/identity/patient-enrollments` (HttpOnly, `SameSite=Strict`,
 `Secure` as above). So does every successful public enrollment activation
-response (`200`, a replay's included; BRANCH:launch/identity-enrollment-gates,
+response (`200`, a replay's included; D-Eminence/hid-system#68,
 not deployed). If that response is lost, the cookie lets
 `GET /identity/patient-enrollments/current` and an activation replay show the
 enrollment's HID on the enrolling device for 15 minutes after activation;
@@ -431,7 +475,7 @@ session's cookies and `X-CSRF-Token`, as a successful refresh does, the actor
 as resolved (its default facility) and `facilitySelection: 'unavailable'`,
 and records the `auth.refresh` audit event. It does not answer a `5xx`
 carrying the rotated cookies: an edge that replaces an upstream `5xx` drops its
-`Set-Cookie` (the gateway does today, `proxy_intercept_errors`), so the
+`Set-Cookie` (the gateway did before D-Eminence/hid-system#72, `proxy_intercept_errors`), so the
 browser would keep the spent refresh token and its next refresh would end the
 whole sign-in as reuse.
 
@@ -545,8 +589,12 @@ Patient access-request decisions are session-bound patient commands:
 `POST /api/v1/identity/access-requests/:requestId/deny` (`{ "reason" }`) require
 a patient session and no facility context. Since 0086 an approval grants
 access only from a session family first issued within the last 10 minutes (as
-an access-PIN change does), else `403 PATIENT_RECENT_AUTH_REQUIRED`; the client
-signs the patient in again and repeats it. For 24 hours after an OTP account
+an access-PIN change does), else `403 PATIENT_RECENT_AUTH_REQUIRED` with the
+detail "For your security, sign out, sign in again, and approve within 10
+minutes."; the client signs the patient out and in again and repeats it.
+Health-id shows that detail as it is on Approve, so it says what to do (FE-8;
+it was "Sign in again before approving access to your records", which left a
+patient who was already signed in no way forward). For 24 hours after an OTP account
 recovery of the account (any recovery purpose) an approval is `403
 PATIENT_RECENT_RECOVERY_HOLD`, checked before recent sign-in, because signing in
 again does not end it. A denial or a revocation is never held. `POST
@@ -591,17 +639,31 @@ grants access by itself, and its answers do not tell whether an HID exists:
 | `POST /api/v1/identity/patient-lookup` | `identity.patient.read` at the `X-Facility-ID` facility; body `{ hid, purpose }` (`direct-care`, `emergency` or `healthcare-operations`; anything else `400`). `200 { patient: { patientId, hid, firstName, lastName, fullName, dateOfBirth, gender, version }, authorization: { decision: 'allow', facilityId, membershipId, scope, purpose, consentGrantId, expiresAt, breakGlass } }` only with an active grant for this account, membership, facility and purpose (before 0086 a success answered `201`). Every refusal, whether the HID is unknown, the patient has no grant, or the grant is held at another facility or for another purpose, is the same `404 PATIENT_NOT_AVAILABLE` ("The patient is not available"); before 0086 a patient visible to the caller without a grant (any patient, for a registration member) answered `403`, and an unknown or hidden one `404`. The audit event `identity.patient.lookup` keeps the true outcome: `success`, or `denied` with `details.reason` `not_found` or `not_authorized` and, for the latter, the patient |
 | `POST /api/v1/identity/access-requests` | `identity.consent.write` at the `X-Facility-ID` facility, `X-Purpose-Of-Use` `direct-care` or `healthcare-operations`; body `{ hid, scope: read_records\|write_records, reason (8–500), durationMinutes (5–1440) }`. `201 { accessRequestId, status: 'pending', scope, purpose, durationMinutes, requestedAt, existingRequest }`, which no longer carries `patientId`. An unknown HID gets the same `201` shape (a new `accessRequestId`, `existingRequest: false`) instead of `404 CONSENT_RESOURCE_NOT_FOUND`; nothing is persisted for it, and the audit records `identity.access-request.refused` (`denied`, no patient, `details.reason: patient_not_available`) under that `accessRequestId`. The clinician's own list (above) shows only recorded requests, and names the patient only once a grant made from the request is active |
 
-Both commands are counted in `auth.otp_rate_limits` before they run, whatever
-their outcome, per actor account (across facilities) and per facility.
-Defaults: 60 lookups per actor and 600 per facility in 5 minutes
+Both commands have budgets in `auth.otp_rate_limits`, per actor account
+(across facilities) and per facility. An access request is counted before it
+runs, whatever its outcome. A patient lookup reads its two budgets first and,
+while either is blocked, answers `429 PATIENT_LOOKUP_RATE_LIMITED` before it
+reads anything, a lookup of a patient the caller holds a grant for included.
+Otherwise only a refused lookup is counted: an unknown HID, a patient without a
+grant and a grant held at another facility or for another purpose alike, after
+its audit event and before its `404`. A lookup that answers `200` is never
+counted, nor is one that fails on a dependency (`5xx`), so Health-id's lookup
+before each clinical read and write of a granted patient spends nothing (FE-10;
+until this change every lookup was counted, so the about ten lookups of one
+consultation could leave a clinician's saves refused with `429`). Defaults: 60
+refused lookups per actor and 600 per facility in 5 minutes
 (`PATIENT_LOOKUP_RATE_WINDOW_SECONDS`, `PATIENT_LOOKUP_ACTOR_MAX_REQUESTS`,
 `PATIENT_LOOKUP_FACILITY_MAX_REQUESTS`); 20 access requests per actor and 200
 per facility in 15 minutes (`ACCESS_REQUEST_RATE_WINDOW_SECONDS`,
 `ACCESS_REQUEST_ACTOR_MAX_REQUESTS`, `ACCESS_REQUEST_FACILITY_MAX_REQUESTS`;
 windows 60–86400 s, actor maxima 1–10000, facility maxima 1–100000). The
-call after a maximum is `429 PATIENT_LOOKUP_RATE_LIMITED` or `429
-ACCESS_REQUEST_RATE_LIMITED` until its window ends. A call refused for the
-actor's own budget does not count against the facility's.
+refused lookup or the access request after a maximum is `429
+PATIENT_LOOKUP_RATE_LIMITED` (instead of the `404`, for an unknown and an
+unauthorized HID alike) or `429 ACCESS_REQUEST_RATE_LIMITED`, and blocks that
+budget for one window: until it ends, every lookup by that actor, or at that
+facility, and every access request by that actor, or at that facility, is
+`429`. A call refused for the actor's own budget does not count against the
+facility's.
 
 Patient login/account deletion (Phase 3, ADR-036) closes the login only:
 
@@ -789,6 +851,14 @@ Do not leak:
 * access tokens
 * protected clinical information
 
+Identity replaces the `detail` of every `5xx` answer with "The service could
+not complete the request.", because an unexpected failure's message can carry
+internal state. The one exception is a problem raised as `PublicDetailProblem`:
+a fixed sentence written for the person using the client, which keeps its
+`detail` whatever its status. Today only the closed public enrollment gate
+uses it (`503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED`, section 8,
+"Public patient enrollment"; D-Eminence/hid-system#68, FE-4).
+
 ## 7. Health Endpoints
 
 Every service should provide:
@@ -965,7 +1035,7 @@ or `409 CONTACT_ALREADY_REGISTERED`). A malformed password (`400`), a missing
 or forged enrollment cookie (`404`) or an enrollment not yet at the password
 step (`409`) is refused first and not counted. Success bodies are unchanged.
 
-Changes of BRANCH:launch/identity-enrollment-gates (migration 0085; not
+Changes of D-Eminence/hid-system#68 (migration 0085; not
 deployed). Request and success bodies are unchanged:
 
 - `POST /api/v1/identity/patient-enrollments` checks the QoreID gate after
@@ -999,6 +1069,65 @@ deployed). Request and success bodies are unchanged:
   and a replay still answer `stage: active` with the HID.
 - A successful activation response (`200`) expires `hid_enrollment`
   ("Auth session contract", above).
+
+Enrollment availability and the closed-registration answer (FE-4,
+D-Eminence/hid-system#68; no migration; not deployed):
+
+- `GET /api/v1/identity/patient-enrollments/availability` (new). Public: no
+  session, Origin, Turnstile token, cookie or input; a signed-in caller gets
+  the same answer. `200 { "open": boolean }`, nothing else. The route itself
+  refuses no `Origin`, but Identity's CORS middleware (`main.ts`) runs first,
+  as on every route: a request without an `Origin` or from one in
+  `CORS_ORIGINS` (the Health-id hosts) gets the answer, and a request from
+  any other `Origin` is answered `500` with no CORS permission before the
+  route is reached. `open` is `true` only when a start would now pass the
+  checks it makes before it reads a NIN: the enrollment keys are
+  configured, `QOREID_ENABLED` and `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` are
+  on, and QoreID's `patient_nin` capability is not paused at runtime. It
+  does not predict per-request
+  refusals (Turnstile, rate limits, the lookup quota, a registered NIN,
+  `503 ENROLLMENT_RECONCILIATION_REQUIRED`), so a client still handles every
+  start answer. A fault reading the runtime pause answers `503` (generic
+  detail), not `{ "open": false }`; a client treats any answer other than
+  `200 { "open": true }` as not open. With either flag off the route reads
+  nothing; with both on it makes the one runtime-state read that start makes.
+  It writes no audit row (as `GET /commercial/pricing`) and sets no cookie.
+  The `200` carries `Cache-Control: public, max-age=30` and no `Pragma`,
+  `Expires` or `Surrogate-Control`; a failure keeps the no-store default.
+  Behind the Cloudflare Worker every API response is `private, no-store`
+  (`infra/cloudflare/src/frontend-worker.mjs`), so a browser on the
+  Health-id hosts refetches it each time. Identity does not rate limit it,
+  as it does not `GET /commercial/pricing`: a per-network counter would cost
+  a database write per anonymous read. The WAF rate rule that covers every
+  API request applies (keyed per client by ADR-055). The gateway
+  serves it under the identity prefix only (`^~ /api/v1/identity/`; with the
+  route switch of #65, only while `HID_ENABLED_API_ROUTES` names `identity`,
+  otherwise `404 API_ROUTE_NOT_FOUND`).
+- While `QOREID_ENABLED` or `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` is off,
+  `POST /api/v1/identity/patient-enrollments` still answers
+  `503 QOREID_DISABLED` or `503 QOREID_NIN_ONLY_DISABLED`, now with
+  `detail` "New Health ID registration is not open yet. If you already have a
+  Health ID, sign in." Before, Identity replaced it with the generic 5xx
+  detail (section 6), so a client calling Identity directly got "The
+  service could not complete the request.". Production keeps NIN-only
+  enrollment off until the N1 holder step ships
+  (`PHASE_3_LAUNCH_DECISIONS.md`), so in production Identity answers every
+  start this way. `503 INTEGRATION_PAUSED` (a runtime pause) and
+  `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` keep the generic detail. A
+  patient on Health-id sees neither detail yet: the gateway, on this branch
+  and on main (#65), replaces every upstream `502/503/504` with
+  `503 UPSTREAM_UNAVAILABLE` ("A required platform service is temporarily
+  unavailable.") and drops the `QOREID_*` code, before this change and
+  after it. The new detail and codes reach a browser only once the gateway
+  passes upstream errors through (ADR-055, D-Eminence/hid-system#72).
+  The availability read is a `200` and is not affected.
+- Health-id follow-up (not in Health-id 82b474e, which keeps working
+  unchanged): read availability before showing the NIN step and the
+  "Get your Health ID" link, and show a "registration is not open" notice
+  instead when it is not `200 { "open": true }`; on the completion screen,
+  ask the patient to save the Health ID (ENR-2), because the enrollment
+  cookie is expired by the activation response and `GET .../current` shows
+  the HID for 15 minutes only.
 
 ### HID Resolution
 

@@ -105,7 +105,7 @@ The executable covers:
    Lab, Pharmacy, OCR and EHR-to-Lab verifiers give their actors the Lab and
    Pharmacy write permissions through their fake Identity, so 0084's
    withdrawal of those permissions from the seeded roles does not affect them.
-   With 0086 (`BRANCH:launch/identity-recovery-search`): `otp_runtime` also
+   With 0086 (D-Eminence/hid-system#69): `otp_runtime` also
    requires a completed recovery to revoke the account's Google link and keep
    its `legacy-identity` provenance record, a start
    from another account kind's page and a patient start with only an
@@ -123,16 +123,19 @@ The executable covers:
    unchanged against the narrowed `patients_registration_read` policy; and
    `patient_search_runtime` (`verify-patient-search-runtime.mjs`, new) requires
    a lookup with a grant to answer `200`, an unknown HID, a patient without a
-   grant and a grant at another facility to answer the same `404
+   grant, a grant at another facility and a patient the caller can read but
+   holds no grant for (a doctor's own patient record) to answer the same `404
    PATIENT_NOT_AVAILABLE` while the audit keeps `not_found` or
    `not_authorized`, a bad purpose `400`, an access request for an unknown HID
    to answer like a recorded one without `patientId` and persist nothing, and
-   the actor and facility budgets to answer `429`. The rehearsal also runs
+   the actor and facility budgets to count those refusals alike, and not a
+   granted lookup, and to answer `429` while blocked, each such request
+   audited as a failure. The rehearsal also runs
    the new rollback-only `patient-search.integration.sql` with the additional
    suites.
    `platform_admin_runtime` (`verify-platform-admin-runtime.mjs`) also
    provisions a clinician through the workforce routes of migration 0087
-   (launch decision D14, BRANCH:launch/staff-workforce-provisioning): a new
+   (launch decision D14, D-Eminence/hid-system#70): a new
    staff identity is attached to a verified facility as a pending membership,
    one Super Admin records the credential attestation, the same administrator
    is refused the grant (`WORKFORCE_SECOND_PERSON_REQUIRED`) and a second one
@@ -154,7 +157,7 @@ The executable covers:
    active, unheld membership the target holds is refused (and would break the
    N5 index); an exact re-promotion and memberships beside inactive, held or
    other facilities' ones are accepted; staged duplicates are refused.
-   With 0088 (`BRANCH:launch/staff-mfa`): every verifier that signs staff in
+   With 0088 (D-Eminence/hid-system#71): every verifier that signs staff in
    does it with password and authenticator (`staff-session-client.mjs`: the
    password step, the emailed enrolment code on a first sign-in, then a TOTP
    code, or a recovery code when a TOTP step would repeat), so each also

@@ -61,6 +61,106 @@ test('grants device capabilities only to the application host that needs them', 
   assert.equal(ocr.headers.get('permissions-policy'), 'camera=(self), microphone=(), geolocation=()')
   const outreach = await worker.fetch(new Request('https://outreach.healthidentitydirectory.com/'), environment({ APP_NAME: 'outreach' }))
   assert.equal(outreach.headers.get('permissions-policy'), 'camera=(self), microphone=(), geolocation=(self)')
+  // www serves the Health-id portal (ADR-052), which uses no camera,
+  // microphone or location; document uploads are off at launch.
+  const web = await worker.fetch(new Request('https://www.healthidentitydirectory.com/'), environment({ APP_NAME: 'web' }))
+  assert.equal(web.headers.get('permissions-policy'), 'camera=(), microphone=(), geolocation=()')
+})
+
+// D6. The Health-id portal (www, staging and admin.*, ADR-052) loads code only
+// from its own /assets/ (the artefact verifier refuses inline script) and
+// Cloudflare Turnstile from https://challenges.cloudflare.com: api.js, which
+// redirects within that origin, replaces its own script tag there, renders the
+// widget in a frame from it and posts its failure feedback to it with
+// sendBeacon or fetch. Its styles are its own stylesheets plus CSSOM changes,
+// which style-src does not govern; Vite may inline a small image as a data:
+// URL. Nothing else is allowed.
+const HEALTH_ID_PAGE_POLICY = "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; "
+  + "style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://challenges.cloudflare.com; "
+  + "frame-src https://challenges.cloudflare.com; worker-src 'none'; object-src 'none'; base-uri 'none'; "
+  + "form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests"
+const API_POLICY = "default-src 'none'; frame-ancestors 'none'"
+const HSTS = 'max-age=31536000'
+
+function directives(policy) {
+  return Object.fromEntries(policy.split(';').map(part => part.trim()).filter(Boolean)
+    .map(part => { const [name, ...values] = part.split(/\s+/); return [name, values] }))
+}
+
+for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
+  for (const app of ['web', 'admin']) {
+    test(`${deployment} ${app} serves the Health-id portal with a strict Content-Security-Policy and HSTS`, async () => {
+      const host = profile.hosts[app]
+      for (const path of ['/', '/staff/sign-in', '/assets/index-B76nk1g_.js']) {
+        const response = await worker.fetch(new Request(`https://${host}${path}`), environment({ DEPLOYMENT_ENV: deployment, APP_NAME: app }))
+        assert.equal(response.status, 200, path)
+        assert.equal(response.headers.get('content-security-policy'), HEALTH_ID_PAGE_POLICY, path)
+        assert.equal(response.headers.get('strict-transport-security'), HSTS, path)
+        assert.equal(response.headers.get('x-frame-options'), 'DENY', path)
+      }
+      const policy = directives(HEALTH_ID_PAGE_POLICY)
+      for (const values of Object.values(policy)) {
+        for (const forbidden of ["'unsafe-inline'", "'unsafe-eval'", "'unsafe-hashes'", "'wasm-unsafe-eval'", '*', 'https:', 'http:', 'blob:']) {
+          assert.ok(!values.includes(forbidden), `the portal policy must not allow ${forbidden}`)
+        }
+      }
+      assert.deepEqual(policy['script-src'], ["'self'", 'https://challenges.cloudflare.com'])
+      assert.deepEqual(policy['frame-ancestors'], ["'none'"])
+      assert.deepEqual(policy['default-src'], ["'none'"])
+    })
+  }
+}
+
+test('an asset binding cannot weaken the portal policy or HSTS', async () => {
+  const response = await worker.fetch(new Request('https://www.healthidentitydirectory.com/'), environment({
+    APP_NAME: 'web',
+    ASSETS: { fetch: async () => new Response('<p>x</p>', { headers: {
+      'content-type': 'text/html', 'content-security-policy': "script-src * 'unsafe-inline'",
+      'strict-transport-security': 'max-age=0',
+    } }) },
+  }))
+  assert.equal(response.headers.get('content-security-policy'), HEALTH_ID_PAGE_POLICY)
+  assert.equal(response.headers.get('strict-transport-security'), HSTS)
+})
+
+for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
+  for (const [app, host] of Object.entries(profile.hosts)) {
+    test(`${deployment} ${app} gives API and edge answers HSTS and a policy that renders nothing`, async () => {
+      globalThis.fetch = async () => new Response('{"ok":true}', { headers: {
+        'content-type': 'application/json', 'content-security-policy': "default-src *",
+      } })
+      const proxied = await worker.fetch(new Request(`https://${host}/api/v1/auth/session`),
+        environment({ DEPLOYMENT_ENV: deployment, APP_NAME: app }))
+      assert.equal(proxied.headers.get('content-security-policy'), API_POLICY)
+      assert.equal(proxied.headers.get('strict-transport-security'), HSTS)
+      globalThis.fetch = async () => { throw new Error('origin unreachable') }
+      const unavailable = await worker.fetch(new Request(`https://${host}/api/v1/auth/session`),
+        environment({ DEPLOYMENT_ENV: deployment, APP_NAME: app }))
+      assert.equal(unavailable.status, 502)
+      const unknown = await worker.fetch(new Request(`https://${host}/api/v2/x`), environment({ DEPLOYMENT_ENV: deployment, APP_NAME: app }))
+      assert.equal(unknown.status, 404)
+      const misdirected = await worker.fetch(new Request('https://attacker.example/'), environment({ DEPLOYMENT_ENV: deployment, APP_NAME: app }))
+      assert.equal(misdirected.status, 421)
+      for (const response of [unavailable, unknown, misdirected]) {
+        assert.equal(response.headers.get('content-security-policy'), API_POLICY)
+        assert.equal(response.headers.get('strict-transport-security'), HSTS)
+      }
+      const asset = await worker.fetch(new Request(`https://${host}/`), environment({ DEPLOYMENT_ENV: deployment, APP_NAME: app }))
+      assert.equal(asset.headers.get('strict-transport-security'), HSTS)
+    })
+  }
+}
+
+// The other product hosts serve hid-system's legacy builds and are not
+// deployed at launch (launch-deployment.json, ADR-052). The Health-id policy is
+// not theirs; each needs its own reviewed policy before it is deployed.
+test('the Health-id page policy is not applied to the undeployed legacy product hosts', async () => {
+  for (const app of ['ehr', 'lab', 'pharmacy', 'ocr', 'outreach']) {
+    const host = deploymentProfiles.production.hosts[app]
+    const response = await worker.fetch(new Request(`https://${host}/`), environment({ APP_NAME: app }))
+    assert.equal(response.headers.get('content-security-policy'), null, app)
+    assert.equal(response.headers.get('strict-transport-security'), HSTS, app)
+  }
 })
 
 test('serves Migrate from its canonical hostname root and redirects legacy paths without chains', async () => {
@@ -240,9 +340,44 @@ test('sends no X-Real-IP when Cloudflare supplied no valid single client address
     '010.1.2.3', '1.2.3', '0x7f.0.0.1', 'fe80::1%eth0', '[2001:db8::1]', '2001:db8::1::2']) {
     const headers = await forwardedApiHeaders({
       'x-real-ip': '203.0.113.99',
+      'x-hid-client-network': '203.0.113.99',
       ...(value === undefined ? {} : { 'cf-connecting-ip': value }),
     })
     assert.equal(headers.get('x-real-ip'), null, `cf-connecting-ip ${JSON.stringify(value)} must not be forwarded`)
+    assert.equal(headers.get('x-hid-client-network'), null, `cf-connecting-ip ${JSON.stringify(value)}: no client network`)
+  }
+})
+
+// A7. The WAF's per-client rate limit (ApiOriginRateLimit) is keyed on
+// X-HID-Client-Network: the client's IPv4 address, or the /64 network address
+// of its IPv6 address (one subscriber allocation, as Identity's own limits
+// count it), so rotating addresses inside a /64 does not reset the limit. An
+// IPv4-mapped IPv6 address counts as its IPv4 address. A caller's own value
+// never reaches the origin. X-Real-IP keeps the full address.
+for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
+  for (const app of Object.keys(profile.hosts)) {
+    test(`${deployment} ${app} sends the client network the WAF counts and replaces a caller-supplied one`, async () => {
+      const spoofed = await forwardedApiHeaders({ 'cf-connecting-ip': '198.51.100.23', 'X-HID-Client-Network': '10.40.1.9' }, deployment, app)
+      assert.equal(spoofed.get('x-hid-client-network'), '198.51.100.23')
+    })
+  }
+}
+
+test('the client network is the IPv4 address or the canonical IPv6 /64 network address', async () => {
+  for (const [connecting, network, realIp] of [
+    ['198.51.100.23', '198.51.100.23', '198.51.100.23'],
+    ['2001:db8:4:5:aaaa:bbbb:cccc:dddd', '2001:db8:4:5::', '2001:db8:4:5:aaaa:bbbb:cccc:dddd'],
+    ['2001:db8:4:5::1', '2001:db8:4:5::', '2001:db8:4:5::1'],
+    ['2001:DB8:4:5:FFFF:FFFF:FFFF:FFFF', '2001:db8:4:5::', '2001:db8:4:5:ffff:ffff:ffff:ffff'],
+    ['2001:db8:4:6::1', '2001:db8:4:6::', '2001:db8:4:6::1'],
+    ['2001:DB8:0:0:1::7', '2001:db8::', '2001:db8::1:0:0:7'],
+    ['2001:db8:0:1::', '2001:db8:0:1::', '2001:db8:0:1::'],
+    ['::ffff:192.0.2.44', '192.0.2.44', '::ffff:c000:22c'],
+    ['::1', '::', '::1'],
+  ]) {
+    const headers = await forwardedApiHeaders({ 'cf-connecting-ip': connecting, 'x-hid-client-network': '203.0.113.200' })
+    assert.equal(headers.get('x-hid-client-network'), network, connecting)
+    assert.equal(headers.get('x-real-ip'), realIp, `${connecting}: X-Real-IP keeps the full address`)
   }
 })
 
