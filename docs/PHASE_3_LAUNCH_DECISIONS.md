@@ -1,5 +1,7 @@
 # Phase 3 launch decisions and operator plans
 
+The order of work from `main` to staging and production for the EHR and patient portal launch, with its go/no-go smoke tests and the items that block production, is `LAUNCH_STAGING_PLAN.md`.
+
 Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
 the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
 the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
