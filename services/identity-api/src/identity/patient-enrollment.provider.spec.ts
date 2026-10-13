@@ -7,9 +7,6 @@ import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 const originalEnvironment = { ...process.env };
 const nin = '12345678901';
 const charge = { correlationId: 'provider-test-correlation', networkDigest: 'e'.repeat(64) };
-/** The provider as public enrollment drives it: the gate, then a lookup charged to the client network. */
-type EnrollmentProvider = { assertAvailable(): Promise<void>;
-  verifyNin(nin: string, lookup: typeof charge): Promise<unknown> };
 const binding = { nin, firstName: 'Amina', lastName: 'Okafor', dateOfBirth: '1990-01-02',
   gender: 'female' as const, phoneNumber: '08012345678', address: 'Lagos', photo: 'ZmFrZQ==' };
 
@@ -38,7 +35,7 @@ describe('QoreID public patient identity provider', () => {
     const service = new QoreIdPublicPatientIdentityProvider(
       adapter as unknown as QoreIdVerificationAdapter,
       integrations as unknown as IntegrationRuntimeService);
-    return { adapter, integrations, service: service as unknown as EnrollmentProvider };
+    return { adapter, integrations, service };
   }
 
   function enable(ninOnly = true) {

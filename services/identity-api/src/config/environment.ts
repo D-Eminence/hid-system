@@ -103,6 +103,7 @@ const environmentSchema = z.object({
   QOREID_ENABLED: booleanString,
   // The public NIN documentation still requires name claims. This separate
   // gate must remain false until QoreID confirms the NIN-only contract.
+  // Production refuses it until the NIN holder possession step ships (below).
   QOREID_NIN_ONLY_ENROLLMENT_ENABLED: booleanString,
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
@@ -120,6 +121,14 @@ const environmentSchema = z.object({
   // keyed by client IP.
   PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX: z.coerce.number().int().min(2).max(10).default(5),
   PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: z.coerce.number().int().min(900).max(86_400).default(900),
+  // QoreID NIN lookups made by public patient enrollment. Each lookup is
+  // charged, before QoreID is called, to the client network (an IPv4 address
+  // or an IPv6 /64) per hour and per day and to one platform-wide daily cap
+  // (`platform.consume_public_patient_nin_quota`, 0085). The owner sets the
+  // cap from the QoreID contract; the defaults are conservative launch values.
+  PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX: z.coerce.number().int().min(1).max(100).default(5),
+  PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX: z.coerce.number().int().min(1).max(1000).default(15),
+  PATIENT_ENROLLMENT_QOREID_DAILY_CAP: z.coerce.number().int().min(1).max(100_000).default(200),
   IDENTITY_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: optionalSecret,
   IDENTITY_LAB_INTERNAL_SERVICE_TOKEN: optionalSecret,
@@ -187,6 +196,19 @@ const environmentSchema = z.object({
   if (environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED && !environment.QOREID_ENABLED) {
     context.addIssue({ code: 'custom', path: ['QOREID_NIN_ONLY_ENROLLMENT_ENABLED'],
       message: 'NIN-only enrollment requires enabled QoreID verification' });
+  }
+  // N1: binding a NIN requires proof that the caller holds the phone the NIN
+  // registry lists for it. That step is not built yet, so production refuses
+  // NIN-only enrollment until it ships; the change that adds it lifts this.
+  if (environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED
+      && (environment.HID_DEPLOYMENT_ENV === 'production'
+        || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging'))) {
+    context.addIssue({ code: 'custom', path: ['QOREID_NIN_ONLY_ENROLLMENT_ENABLED'],
+      message: 'NIN-only enrollment is refused in production until the NIN holder possession step (N1) ships' });
+  }
+  if (environment.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX > environment.PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX) {
+    context.addIssue({ code: 'custom', path: ['PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX'],
+      message: 'The hourly NIN lookup limit per network cannot exceed the daily one' });
   }
   if (environment.NIN_LOOKUP_HMAC_KEY_B64 && !isBase64Key(environment.NIN_LOOKUP_HMAC_KEY_B64, 32)) {
     context.addIssue({ code: 'custom', path: ['NIN_LOOKUP_HMAC_KEY_B64'], message: 'The NIN lookup key must be exactly 32 base64-encoded bytes' });

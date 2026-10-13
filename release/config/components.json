@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0082",
-    "count": 82,
+    "last": "0085",
+    "count": 83,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -425,6 +425,10 @@
       {
         "name": "0082_purpose_of_use_vocabulary.sql",
         "sha256": "bd3c730051405860fd4cb4feacb5bde259eb627b45724433e44196c9403f9351"
+      },
+      {
+        "name": "0085_public_enrollment_windows_and_nin_lookup_quota.sql",
+        "sha256": "e752dc338d78d9183ad937628a1fe53b31c28a60f664bd6479617e6664cc0e8e"
       }
     ]
   },

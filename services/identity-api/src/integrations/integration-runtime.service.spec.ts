@@ -115,8 +115,6 @@ describe('provider runtime decisions', () => {
   });
   describe('public patient enrollment lookup quota (IP-1)', () => {
     const original = { ...process.env };
-    /** The accountless charge public enrollment makes before each QoreID NIN lookup. */
-    type NinQuota = { consumePublicPatientNinQuota(correlationId: string, networkDigest: string): Promise<void> };
     beforeEach(() => {
       Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
         CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
@@ -131,7 +129,7 @@ describe('provider runtime decisions', () => {
     });
     const quotaService = (query: jest.Mock) => {
       const database = { withSystemTransaction: jest.fn(async (_correlation, work) => work({ query })) };
-      return { database, service: new IntegrationRuntimeService(database as unknown as DatabaseService) as unknown as NinQuota };
+      return { database, service: new IntegrationRuntimeService(database as unknown as DatabaseService) };
     };
 
     it('charges only the keyed network digest, with the configured limits, in a system transaction', async () => {

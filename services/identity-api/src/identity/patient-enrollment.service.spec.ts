@@ -158,6 +158,8 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
       // An active enrollment replays: the stored HID, the password ignored (0058).
       if (enrollment?.state === 'active') return { rows: [{ patient_id: 'patient-7',
         account_id: 'account-7', hid_code: 'HID-TEST-00000001', replayed: true }] };
+      // A first activation records when it happened, as the command does.
+      Object.assign(enrollment!, { activated_at: new Date() });
       return { rows: [{ patient_id: 'patient-7', account_id: 'account-7',
         hid_code: values[4], replayed: false }] };
     }

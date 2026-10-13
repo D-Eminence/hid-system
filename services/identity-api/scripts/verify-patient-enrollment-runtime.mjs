@@ -701,7 +701,7 @@ try {
   }
   const lookupsAtNetworkLimit = ninLookups.length;
   const overNetwork = await post('/identity/patient-enrollments', startBody(NOT_VERIFIED), { key: randomUUID(),
-    network: `2001:db8:85:1:ffff:ffff:ffff:ff${environment.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX}` });
+    network: '2001:db8:85:1:ffff:ffff:ffff:fffe' });
   expectProblem(overNetwork, 429, 'VERIFICATION_QUOTA_EXCEEDED');
   assert.equal(ninLookups.length, lookupsAtNetworkLimit, 'a refused lookup must not reach QoreID');
   expectProblem(await post('/identity/patient-enrollments', startBody(NOT_VERIFIED), { key: randomUUID(),

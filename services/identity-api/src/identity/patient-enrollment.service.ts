@@ -15,6 +15,7 @@ import { NinIdentifierProtector } from './nin-identifier-protector';
 import { createContactLookupHmac } from './contact-lookup';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, type PublicPatientIdentityProvider,
   type VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
+import { quotaNetwork } from './provider-enrollment.service';
 
 interface EnrollmentRow extends QueryResultRow {
   id: string; nin_lookup_hmac: string; request_hmac: string; token_hmac: string;
@@ -24,6 +25,7 @@ interface EnrollmentRow extends QueryResultRow {
   contact_hmac: string | null; contact_channel: 'phone' | 'email' | null;
   contact_lookup_hmac: string | null;
   contact_verified_at: Date | null;
+  activated_at: Date | null;
 }
 interface ChallengeRow extends QueryResultRow {
   id: string; verifier_hmac: string; expires_at: Date; created_at: Date;
@@ -33,6 +35,18 @@ interface ChallengeRow extends QueryResultRow {
 type ContactChannel = 'phone' | 'email';
 const localOtpKey = randomBytes(32);
 const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * N2(b): how long after activation the enrollment cookie may show the HID
+ * again (GET /current, an activation replay). After it the enrollment answers
+ * 404, as an unknown one does; 0085 enforces the same in the replay command.
+ */
+const HID_REDISPLAY_WINDOW_MS = 15 * 60 * 1000;
+/**
+ * N2(c): how long a contact proof stays valid for activation. An older one is
+ * cleared and the contact verified again; 0085 enforces the same in the
+ * activation command.
+ */
+const CONTACT_PROOF_WINDOW_MS = 30 * 60 * 1000;
 /** The account password hash activation stores; the database command checks this form. */
 const PASSWORD_HASH_OPTIONS = { type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1 };
 
@@ -65,11 +79,17 @@ export class PatientEnrollmentService {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
       throw new DomainProblem(400, 'IDEMPOTENCY_KEY_INVALID', 'A valid idempotency key is required');
     }
+    // The QoreID gate comes before anything that reads the registry (ENR-4):
+    // while it is closed, a bound, a pending and an unknown NIN get the same
+    // 503, and no rate bucket is charged. A same-key resume is refused too;
+    // GET /current still answers with the cookie.
+    await this.provider.assertAvailable();
     const lookupHmac = this.ninProtector.lookup(nin);
     const requestHmac = this.hmac('patient-enrollment-request', idempotencyKey);
     const token = this.hmacBuffer('patient-enrollment-cookie', idempotencyKey).toString('base64url');
     const tokenHmac = this.hmac('patient-enrollment-token', token);
     const ipHmac = this.networkHmac(remoteIp);
+    const networkDigest = this.lookupNetworkDigest(remoteIp);
 
     const preflight = await this.database.withSystemTransaction(correlationId, async (client) => {
       await client.query('select identity.prune_expired_public_patient_enrollments()');
@@ -107,7 +127,10 @@ export class PatientEnrollmentService {
     // Verification is not retried after transport or result failures. The
     // adapter may replay once after an explicit 401 with a fresh access token.
     // Unique HMAC constraints settle concurrent starts.
-    const verified = this.validateIdentity(await this.provider.verifyNin(nin), nin);
+    // The QoreID lookup quota (0085) is charged here only: never for a resume,
+    // a duplicate or a refusal above.
+    const verified = this.validateIdentity(await this.provider.verifyNin(nin,
+      { correlationId, networkDigest }), nin);
     const id = existing?.id ?? randomUUID();
     const profileJson = JSON.stringify(verified);
     const profileCiphertext = this.encrypt(id, 'profile', profileJson);
@@ -309,6 +332,14 @@ export class PatientEnrollmentService {
     }
     if (!row.contact_ciphertext) throw new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
       'Contact verification is required');
+    // A contact proof older than 30 minutes is verified again (N2(c)). The
+    // reset decides by the database clock; if it changes nothing, the
+    // activation command decides with the same clock.
+    if (row.state === 'set_password' && (!row.contact_verified_at
+      || row.contact_verified_at.getTime() + CONTACT_PROOF_WINDOW_MS <= Date.now())
+      && await this.resetStaleContact(row.id, correlationId)) {
+      throw this.contactReverifyRequired();
+    }
     // Activations and replays share one budget per enrollment, charged only
     // after the cookie has proved the enrollment, so a guessed enrollment id
     // cannot spend another browser's. Every attempt from here counts, whatever
@@ -348,6 +379,11 @@ export class PatientEnrollmentService {
       } catch (error) {
         if (this.databaseErrorCode(error) === '23505'
           && this.databaseConstraint(error) === 'patients_hid_code_ci_uq') continue;
+        if (this.databaseErrorCode(error) === '23514' && error instanceof Error
+          && error.message === 'PATIENT_CONTACT_REVERIFY_REQUIRED') {
+          await this.resetStaleContact(row.id, correlationId);
+          throw this.contactReverifyRequired();
+        }
         throw this.mapDatabaseError(error);
       }
     }
@@ -398,7 +434,7 @@ export class PatientEnrollmentService {
     const result = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<EnrollmentRow>('select * from identity.public_patient_enrollments where id=$1', [parsed.id]));
     const row = result.rows[0];
-    if (!row || row.expires_at.getTime() <= Date.now()
+    if (!row || row.expires_at.getTime() <= Date.now() || this.redisplayEnded(row)
       || !this.equalHex(row.token_hmac, this.hmac('patient-enrollment-token', parsed.token))) {
       throw new DomainProblem(404, 'ENROLLMENT_NOT_FOUND', 'No pending enrollment was found');
     }
@@ -411,12 +447,33 @@ export class PatientEnrollmentService {
     return this.database.withSystemTransaction(correlationId, async (client) => {
       const row = (await client.query<EnrollmentRow>(
         'select * from identity.public_patient_enrollments where id=$1 for update', [parsed.id])).rows[0];
-      if (!row || row.expires_at.getTime() <= Date.now()
+      if (!row || row.expires_at.getTime() <= Date.now() || this.redisplayEnded(row)
         || !this.equalHex(row.token_hmac, this.hmac('patient-enrollment-token', parsed.token))) {
         throw new DomainProblem(404, 'ENROLLMENT_NOT_FOUND', 'No pending enrollment was found');
       }
       return operation(client, row);
     });
+  }
+
+  /** An active enrollment shows its HID for 15 minutes after activation, then is gone (N2(b)). */
+  private redisplayEnded(row: EnrollmentRow) {
+    return row.state === 'active' && (!(row.activated_at instanceof Date)
+      || row.activated_at.getTime() + HID_REDISPLAY_WINDOW_MS <= Date.now());
+  }
+
+  /**
+   * Clears a contact proof older than 30 minutes, by the database clock, and
+   * sends the enrollment back to the contact step. True when it did; the
+   * contact is chosen and proved again from the start.
+   */
+  private async resetStaleContact(enrollmentId: string, correlationId: string) {
+    const reset = await this.database.withSystemTransaction(correlationId, (client) => client.query(
+      `update identity.public_patient_enrollments set state='verify_contact', contact_channel=null,
+         contact_hmac=null, contact_lookup_hmac=null, contact_ciphertext=null, contact_verified_at=null,
+         verified_challenge_id=null, updated_at=clock_timestamp(), row_version=row_version+1
+       where id=$1 and state='set_password' and contact_verified_at <= clock_timestamp() - interval '30 minutes'`,
+      [enrollmentId]));
+    return reset.rowCount === 1;
   }
 
   private parseCookie(cookie: string | undefined) {
@@ -532,6 +589,18 @@ export class PatientEnrollmentService {
     return this.hmac('patient-enrollment-ip', remoteIp);
   }
 
+  /**
+   * The QoreID lookup quota's key for the client: an IPv4 address or an IPv6
+   * /64, so rotating addresses inside one allocation does not reset it. Its
+   * own HMAC domain, so it matches no rate bucket.
+   */
+  private lookupNetworkDigest(remoteIp: string | undefined) {
+    const network = quotaNetwork(remoteIp);
+    if (!network) throw new DomainProblem(503, 'ENROLLMENT_RATE_LIMIT_UNAVAILABLE',
+      'Enrollment is temporarily unavailable');
+    return this.hmac('patient-enrollment-qoreid-network', network);
+  }
+
   private assertConfigured() {
     if (!this.env.NIN_LOOKUP_HMAC_KEY_B64 || !this.env.NIN_ENCRYPTION_KEY_B64
       || (this.env.NODE_ENV === 'production' && !this.env.OTP_HMAC_KEY_B64)) {
@@ -582,6 +651,8 @@ export class PatientEnrollmentService {
     'Too many enrollment requests; try again later'); }
   private duplicate() { return new DomainProblem(409, 'NIN_ALREADY_REGISTERED',
     'This identity already has a Health ID or a pending enrollment'); }
+  private contactReverifyRequired() { return new DomainProblem(409, 'ENROLLMENT_CONTACT_REVERIFY_REQUIRED',
+    'Verify your contact again before setting a password'); }
   private contactAlreadyRegistered() { return new DomainProblem(409, 'CONTACT_ALREADY_REGISTERED',
     'This contact is already associated with a Health ID'); }
   private reconciliationRequired() { return new DomainProblem(503, 'ENROLLMENT_RECONCILIATION_REQUIRED',
@@ -593,6 +664,10 @@ export class PatientEnrollmentService {
   private mapDatabaseError(error: unknown) {
     if (error instanceof DomainProblem) return error;
     const code = this.databaseErrorCode(error);
+    // A replay more than 15 minutes after activation (0085): as an unknown enrollment.
+    if (code === 'P0002' && error instanceof Error && error.message === 'PATIENT_ENROLLMENT_REPLAY_EXPIRED') {
+      return new DomainProblem(404, 'ENROLLMENT_NOT_FOUND', 'No pending enrollment was found');
+    }
     if (code === '23505') {
       const constraint = this.databaseConstraint(error);
       if (error instanceof Error && error.message === 'PATIENT_CONTACT_ALREADY_BOUND') {
