@@ -300,9 +300,18 @@ typed recommended counts. Validate:
 - exact task/execution-role separation and secret exposure; and
 - no CloudFront/static frontend resources.
 
-Provision the database LOGIN roles and apply `runtime-grants.sql`. Verify every
-LOGIN is non-owner, non-superuser, non-BYPASSRLS and cannot mutate another
-domain.
+Migrate and provision as `MIGRATION_RUNBOOK.md` §6 describes: the RDS master
+grants the migration administrator `SET ON PARAMETER
+plpgsql.variable_conflict` only for a migration run that applies 0015 and
+revokes it after 0083; the migration administrator, a `NOSUPERUSER NOBYPASSRLS
+CREATEROLE` LOGIN, applies `runtime-grants.sql` with `npm run db:bootstrap`
+and `db:verify-roles`. As that administrator, which alone may grant the
+aggregate roles (the RDS master is refused), create one LOGIN per runtime
+secret (the EHR secret's `scannerUrl` is a second, scanner-only LOGIN) and
+verify every one with `npm run db:verify-logins`, which connects with each
+secret's own URL and refuses a superuser, `BYPASSRLS`, owner or
+migration-administrator login, an extra role and a shared login. In production
+each service also refuses to start over such a connection.
 
 ## 5. Guarded staging operations
 

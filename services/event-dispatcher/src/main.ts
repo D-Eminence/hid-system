@@ -19,6 +19,7 @@ async function bootstrap(): Promise<void> {
     return;
   }
   const repository = new PostgresDeliveryRepository(config);
+  await repository.verifyRuntimeRole();
   const transport = config.EVENT_DISPATCHER_TRANSPORT === 'eventbridge'
     ? new EventBridgeEventTransport(config) : new DeterministicEventTransport();
   const generatedId = `event-dispatcher:${hostname().replace(/[^A-Za-z0-9._-]/g, '-')}:${process.pid}:${randomUUID()}`;

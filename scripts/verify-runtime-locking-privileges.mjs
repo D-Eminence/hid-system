@@ -573,6 +573,27 @@ export function databaseScripts(directory = databaseDirectory) {
   ];
 }
 
+/**
+ * The one dollar-quoted form the replay follows: a DO block that drops and
+ * creates one policy on one table only when a pg_policy lookup finds nothing
+ * (runtime-grants.sql recreates platform_controls_definer_read this way, so a
+ * rerun takes no lock on its table). Whether or not the block runs its two
+ * statements, the policy then exists as created, so they are replayed as if
+ * they were top-level. Returns those statements, or null for any other body.
+ */
+const POLICY_REPLACE = new RegExp([
+  String.raw`^\$([a-z_]*)\$\s*begin\s+if\s+not\s+exists\s*\(\s*select\b[^;]*?\bfrom\s+pg_policy\b[^;]*?\)\s*then\s+`,
+  String.raw`(drop\s+policy\s+if\s+exists\s+(\w+)\s+on\s+([a-z_]+\.[a-z_]\w*)\s*;\s*`,
+  String.raw`create\s+policy\s+(\w+)\s+on\s+([a-z_]+\.[a-z_]\w*)\s[^;]*;)`,
+  String.raw`\s*end\s+if\s*;\s*end\s*;?\s*\$\1\$$`,
+].join(''), 'i');
+export function policyReplacement(body) {
+  const match = POLICY_REPLACE.exec(body);
+  if (!match || match[3].toLowerCase() !== match[5].toLowerCase()
+    || match[4].toLowerCase() !== match[6].toLowerCase()) return null;
+  return match[2];
+}
+
 /** Statement forms the replay does not follow. None occurs today; if one appears, extend the replay. */
 export function unfollowedForms(scripts) {
   const found = [];
@@ -582,7 +603,9 @@ export function unfollowedForms(scripts) {
       if (/\b(?:grant|revoke)\s+[\w\s,()]*\bon\s+(?:table\s+)?(?:all\s+tables|[a-z_]+\.[a-z_])/i.test(body)) {
         found.push(`${name}: table GRANT or REVOKE in a dollar-quoted body`);
       }
-      if (/\b(?:create|alter|drop)\s+policy\b/i.test(body)) found.push(`${name}: policy statement in a dollar-quoted body`);
+      if (/\b(?:create|alter|drop)\s+policy\b/i.test(body) && policyReplacement(body) === null) {
+        found.push(`${name}: policy statement in a dollar-quoted body`);
+      }
       if (/\b(?:enable|disable)\s+row\s+level\s+security\b/i.test(body)) found.push(`${name}: row-level security change in a dollar-quoted body`);
     }
     const top = raw.replace(DOLLAR, "''");
@@ -599,7 +622,8 @@ export function unfollowedForms(scripts) {
 /**
  * Replays the scripts in order: tables, table and column privileges, role
  * membership, row-level security and policies. Statements in dollar-quoted
- * bodies are not followed (see unfollowedForms).
+ * bodies are not followed (see unfollowedForms), except a guarded policy
+ * replace (policyReplacement).
  */
 export function databaseModel(scripts) {
   const tables = new Set();
@@ -658,8 +682,12 @@ export function databaseModel(scripts) {
         if (inRole) for (const parent of names(inRole[1])) grantRole(role, parent);
       }
     };
-    // Dollar-quoted bodies blanked to the same length, so offsets line up with roleEvents.
-    const top = stripped.replace(DOLLAR, (body) => `'${' '.repeat(body.length - 2)}'`);
+    // Dollar-quoted bodies blanked to the same length, so offsets line up with
+    // roleEvents; a guarded policy replace keeps its two statements.
+    const top = stripped.replace(DOLLAR, (body) => {
+      const followed = policyReplacement(body);
+      return followed === null ? `'${' '.repeat(body.length - 2)}'` : `;${followed}`.padEnd(body.length, ' ');
+    });
     for (const chunk of top.matchAll(/[^;]+/g)) {
       applyRoleEventsBefore(chunk.index);
       const statement = chunk[0].trim().replace(/\s+/g, ' ');

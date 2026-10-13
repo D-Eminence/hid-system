@@ -22,7 +22,10 @@
 -- superuser nor BYPASSRLS (release checklist P8). The worker commands then
 -- cannot see ocr.jobs under row-level security, and every case must be
 -- refused: the suite expects that when the commands' owner cannot see the
--- fixture job.
+-- fixture job. The one exception is the claim that recovers J7: it sees no
+-- job, so it returns no row and changes nothing, without an error (until 0083
+-- its SET clause refused it, because that owner may not set
+-- plpgsql.variable_conflict); the suite checks that J7 is unchanged.
 begin;
 
 -- Security properties that CREATE OR REPLACE must keep.
@@ -410,6 +413,8 @@ begin
     into mismatches
     from ocr_lease_cases
    where case when owner_sees_jobs then actual is distinct from expected
+              when name = 'claim that recovers a job whose document was withdrawn'
+                then actual is distinct from 'ok'
               else actual is not distinct from 'ok' end;
   if mismatches is not null then
     raise exception E'OCR worker lease cases failed (owner sees jobs: %):\n%', owner_sees_jobs, mismatches;
@@ -425,6 +430,11 @@ declare
   job record;
 begin
   if not owner_sees_jobs then
+    select * into job from ocr.jobs where id = 'e8a60000-0000-4000-8000-000000000007';
+    if job.status <> 'processing' or job.claim_token is distinct from 'e8a70000-0000-4000-8000-000000000007'
+       or job.last_error_code is not null then
+      raise exception 'a claim whose owner cannot see the job changed it: %', row_to_json(job);
+    end if;
     return;
   end if;
   select * into job from ocr.jobs where id = 'e8a60000-0000-4000-8000-000000000002';

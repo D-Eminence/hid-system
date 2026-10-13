@@ -177,13 +177,27 @@ Cloudflare, DNS, IAM, secrets or live data until an operator runs it.
 
 ### I3. RDS owner attributes (OCR-P8, release checklist P8, ADR-041)
 
-Before staging S1, as the RDS migration administrator: check
-`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
-try `GRANT SET ON PARAMETER plpgsql.variable_conflict`; run the role bootstrap
-without superuser; rehearse 0001 to the latest migration and confirm OCR
-claims, patient confirmation, scan events and job events work. If BYPASSRLS
-is unavailable, ADR-041 becomes a launch blocker for documents, OCR and
-Outreach.
+Before staging S1, as the RDS master: record
+`select rolname, rolsuper, rolbypassrls, rolcreaterole from pg_roles where rolname in (current_user, '<migration administrator>')`
+and the master's own role memberships, then grant
+`SET ON PARAMETER plpgsql.variable_conflict` to the migration administrator
+for the migration run. As that administrator, migrate 0001 to the latest
+migration, run the role bootstrap twice and `db:verify-roles`, and verify
+every runtime credential with `db:verify-logins`; then, as the master, revoke
+the grant, which 0083 makes unnecessary after the run (`MIGRATION_RUNBOOK.md`
+§6). Do not try or grant `BYPASSRLS`. If RDS refuses the grant, take a
+reviewed ledger exception for 0015 rather than waiting on AWS. Then confirm
+that OCR claims, patient confirmation, scan events and job events work.
+
+The impact of an owner without `BYPASSRLS` was understated here. Besides
+documents, OCR and Outreach, `platform.control_enabled`, which the Identity,
+EHR and Outreach guards call on every patient and provider request, raised
+`PLATFORM_CONTROL_UNAVAILABLE` (`503`) under such an owner, and the role
+bootstrap needed a superuser. Both are fixed by
+D-Eminence/hid-system#63, with 0083 for the OCR claim's setting.
+Owner `BYPASSRLS` is not relied on: document scanning, OCR and Outreach
+campaign registration stay out of the release unless they pass under a
+non-bypass owner (ADR-041).
 
 ### I4. Duplicate-membership data check (N5)
 
