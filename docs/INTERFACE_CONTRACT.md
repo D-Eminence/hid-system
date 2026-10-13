@@ -436,8 +436,11 @@ approved service workload identity + exact caller name
 
 Identity validates both. Cookie mutation validation also propagates the exact
 Origin and CSRF header/cookie evidence. Production workload evidence is an
-issuer/JWKS-validated, audience-bound, unexpired JWT with an exact configured
-caller subject; local per-caller secrets are development-only.
+issuer/JWKS-validated, audience-bound, unexpired ES256 JWT with an exact
+configured caller subject, `exp` and `iat` (at most 300 seconds old and not
+issued in the future, 5 seconds of clock tolerance) and `token_use: workload`;
+any other token is refused `401` (ADR-047). Local per-caller secrets are
+development-only.
 
 Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 `POST` for cookie mutation revalidation. Patient decisions use

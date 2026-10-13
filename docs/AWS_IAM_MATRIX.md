@@ -7,8 +7,8 @@ Every ECS task definition has a distinct execution role and task role. The
 execution role pulls its image, writes its log stream, and resolves only the
 secrets referenced by that task. The application task role contains only its
 business AWS API authority plus, for the six workload callers in staging and
-(pending ADR-047) production, an exact-resource permission to request their
-own workload tokens from their own environment's issuer.
+production (ADR-047), an exact-resource permission to request their own
+workload tokens from their own environment's issuer.
 
 ## Runtime matrix
 
@@ -26,13 +26,12 @@ own workload tokens from their own environment's issuer.
 | Event Dispatcher | its DB | `events:PutEvents` on the exact HID bus | no rule/target management, queue consumption, archive/replay, or provider authority |
 | Gateway | none beyond ECS execution/logging | none | no frontend secrets, DB, application secret, S3/KMS, provider, or administrative credential |
 | Migration task | deployment-only migration DB | none | no service, runtime DB secret, master-secret read, or business AWS API |
-| Workload issuer Lambda (staging; production pending ADR-047) | no application secrets | `kms:GetPublicKey` and `kms:Sign` on its exact retained P-256 key; signing restricted to `ECDSA_SHA_256`; own logs | no database, provider, document, queue, or arbitrary-key authority |
+| Workload issuer Lambda (staging and production, ADR-047) | no application secrets | `kms:GetPublicKey` and `kms:Sign` on its exact retained P-256 key; signing restricted to `ECDSA_SHA_256`; own logs; the key policy denies `kms:Sign` to every other principal | no database, provider, document, queue, or arbitrary-key authority |
 | Staging RDS re-stop scheduler | none | `rds:StopDBInstance` on the exact staging DB ARN, sleep profile only | no production ARN, start/modify/delete/snapshot authority, wildcard resource, or retry loop |
 | Cost governance stack | notification destinations only | none | no Budget Action, IAM execution role, ECS/RDS mutation, or shutdown authority |
 
-The workload issuer exists in staging and, as proposed by ADR-047 and pending
-that decision, production; each caller may invoke only its own environment's
-`/<environment>/POST/token`. Development has no issuer, so its task roles have
+The workload issuer exists in staging and production (ADR-047); each caller
+may invoke only its own environment's `/<environment>/POST/token`. Development has no issuer, so its task roles have
 no `execute-api:Invoke`.
 
 Only Identity receives `AUTH_SIGNING_SECRET` and `AUTH_LOGIN_PEPPER`. This
@@ -113,16 +112,37 @@ These are six subjects and eleven caller/audience bindings. Only API Gateway's
 IAM request context identifies the caller; the token request contains an
 audience and cannot select a subject or role. The issuer rejects unmapped IAM
 roles, foreign account/API/stage context, and unauthorized audiences. Its
-Lambda role alone is granted signing with the dedicated P-256 key in the
-template; the key keeps the CDK default key policy, which delegates key use to
-account IAM (ADR-047 risks, DEP-4-KEY). No ECS task role has `kms:Sign`
-authority.
+Lambda role alone is granted signing with the dedicated P-256 key. The key
+policy enforces that independently of IAM (DEP-4-KEY):
 
-The issuer returns ES256 JWTs with a 300-second lifetime. Each caller's sidecar
-uses the same admitted Identity API image, runs as UID/GID 65532 with a read-only
-root filesystem, verifies the token, and atomically writes mode-0600 files into
-its owned mode-0700 task volume. The application mounts that volume read-only
-and waits for sidecar readiness. Renewal runs about every 90 seconds, failures
+| Key policy statement | Effect |
+|---|---|
+| Account root, `kms:*` | Allow; key administration stays with the account, so the key cannot be locked out |
+| `DenySigningFromEveryOtherPrincipal` | Deny `kms:Sign` to any principal whose `aws:PrincipalArn` is not the issuer Lambda role |
+| `DenyEveryOtherSigningAlgorithm` | Deny `kms:Sign` with any `kms:SigningAlgorithm` other than `ECDSA_SHA_256` |
+| `DenyEveryOtherMessageType` | Deny `kms:Sign` with any `kms:MessageType` other than `RAW` |
+
+An explicit Deny overrides any IAM grant, so an administrator who grants
+`kms:Sign` to another role still cannot sign; doing so would first need a key
+policy change, which CloudTrail records. An account administrator can still
+change the key policy or the issuer function: ADR-047 accepts that
+same-account custody risk until a separate custody account or an SCP is
+decided. No ECS task role has `kms:Sign` authority.
+
+At the network edge, the issuer stage of every profile with NAT gateways
+(staging economy and fidelity, production) has a REGIONAL web ACL that blocks
+by default and allows only the VPC's NAT gateway Elastic IPs (D3). IAM
+authentication of `POST /token` is unchanged; the web ACL also keeps the
+public JWKS out of reach of every other source.
+
+The issuer returns ES256 JWTs with a 300-second lifetime and `token_use:
+workload`; receivers accept only that (ES256, `exp` and `iat` required, at
+most 300 seconds old). Each caller's sidecar uses the same admitted Identity
+API image, runs as UID/GID 65532 with a read-only root filesystem, verifies the
+token, and atomically writes mode-0600 files into its owned mode-0700 task
+volume. The application mounts that volume read-only and starts only once the
+sidecar is healthy; the sidecar is not essential and ECS restarts it if it
+exits (D2). Renewal runs about every 90 seconds, failures
 retry after 10 seconds, and expiring files are removed. Token renewal does not
 rotate the retained signing key.
 
@@ -130,8 +150,8 @@ All staging modes retain the same issuer, public JWKS endpoint, and key; sleep
 has no running ECS tasks or token agents. There are no external staging issuer,
 JWKS, or subject parameters.
 
-Production, as proposed by ADR-047 and pending that decision, has its own
-issuer with the same six roles and eleven bindings: its own retained key
+Production (ADR-047, accepted; not deployed) has its own issuer with the same
+six roles and eleven bindings: its own retained key
 (`alias/hid-production-workload-signing`), API (`hid-production-workload-identity`),
 stage `/production`, function `hid-production-workload-issuer`, and subjects
 `hid:production:identity-api`, `hid:production:ehr-api`,
@@ -159,9 +179,14 @@ Staging must record that:
 9. migration authority is absent from every steady-state service;
 10. each staging caller can mint only its mapped audiences, while unmapped roles,
     wrong context, and subject/role overrides fail;
-11. no task can call `kms:Sign`, and the issuer cannot sign with an unrelated key; and
+11. no task can call `kms:Sign`, an administrator role granted `kms:Sign` by IAM is
+    still refused by the key policy, and the issuer cannot sign with an unrelated
+    key, another algorithm or a `DIGEST` message;
 12. application containers cannot write token files, renewal preserves valid
-    service calls, and expired, malformed, or unavailable credentials fail closed.
+    service calls, and expired, malformed, or unavailable credentials fail closed;
+    and
+13. the issuer stage refuses (`403` from WAF) a JWKS or token request from any
+    source other than the NAT gateway addresses.
 
 No live IAM claim is made by local synthesis.
 

@@ -56,8 +56,8 @@ Record and approve:
 - RDS CA bundle and regional S3 managed prefix-list ID;
 - staging workload issuer/JWKS stack outputs and signing-key ARN, the admitted
   Identity API image used by all six token agents, and the fixed IAM
-  caller/audience map; the same production outputs if ADR-047 is accepted
-  (§12); for development, the external issuer/JWKS/subjects and token delivery
+  caller/audience map; the same production outputs under ADR-047 (§12); for
+  development, the external issuer/JWKS/subjects and token delivery
   mechanism;
 - nine non-owner database secrets plus a separate migration administrator;
 - Identity auth/OTP/Turnstile secret material and the platform MFA key
@@ -118,9 +118,9 @@ service-subject parameters. Its regional stack supplies the issuer and JWKS
 URLs and binds six exact task roles to eleven allowed caller/audience pairs.
 Record the output URLs and signing-key ARN with the release evidence; do not
 record tokens. All staging modes retain the same issuer and P-256 key.
-Under ADR-047 (proposed, pending its decision) production takes its own issuer
-from its own stack in the same way, with its own key, API, `/production` stage
-and `hid:production:<service>` subjects, and no longer accepts these
+Under ADR-047 (accepted 2026-10-13, not deployed) production takes its own
+issuer from its own stack in the same way, with its own key, API, `/production`
+stage and `hid:production:<service>` subjects, and no longer accepts these
 parameters. That changes the production template: record a new production
 template baseline (§12) instead of comparing with an earlier one. Development
 keeps its external workload-identity inputs.
@@ -155,14 +155,27 @@ dependencies, among them the QoreID and enrolment changes and the
 updating the record. Every later change to a template replaces its row here,
 with the reason.
 
-**Under ADR-047 (D-Eminence/hid-system#54, draft).** The same offline
-synthesis of this draft, with `main` at `d0d8a91` merged, gives production
+**Under ADR-047 (BRANCH:draft/production-workload-identity).** The same offline
+synthesis of this branch, with `main` at `bbc6e89` merged, with the AWS
+credential variables removed from the environment and `AWS_CONFIG_FILE` and
+`AWS_SHARED_CREDENTIALS_FILE` pointing at no file, gives production
+`8e9a06321042bcbc0cbe474cfbf51388c6791913c47b45e59319d5665026d7a2` (574,128
+bytes, 438 resources, 54 parameters): its own issuer with the signing-key Deny
+statements, per-method throttles and the NAT-allowlist web ACL, six token
+agents that are not essential and have a restart policy, and eight fewer
+parameters (§12). It replaces the draft's earlier
 `030830a5a6b6018eb349fb606a547eaf98c5a4b3255386f52cb751895b64d960` (568,579
-bytes): its own issuer, six token agents and eight fewer parameters (§12).
+bytes), which had none of the DEP-4-KEY, DEP-4-DOS and DEP-4-RES changes.
 Development is unchanged
 (`20f16446bca81a8e601c76fa2fd072b5d40c8466448e2a7bdc8ddee751a603c7`, 523,711
-bytes). The production row above stays `main`'s until ADR-047 is accepted and
-this draft merges; then this hash replaces it.
+bytes). The staging templates are sleep
+`54057bff8ec55bd6d616ff4f714bdf76c7ef05b4340e6aceabc99b469c01bc44` (319,501
+bytes), economy
+`3b1e2597b44074e2889a7a4bd509188a44db39570d0c02e3901c4b2a674d4a12` (565,406
+bytes) and fidelity
+`445b52324d22f9cde3ae4d105379033e0bca9960cfcd610ecc5c31e98db587de` (569,255
+bytes). `verify:synth` and `verify:policy` pass for all five. The production
+row above stays `main`'s until this branch merges; then this hash replaces it.
 
 ## 2. Local source gates
 
@@ -199,9 +212,11 @@ Expected topology is one regional stack, eleven ECS services, eleven ECR
 repositories, twelve task definitions/image inputs including migration, the
 notification queue/DLQ/rule, and zero CloudFront distributions.
 Every staging mode additionally has the stable workload issuer API Gateway,
-Lambda, and fourth KMS key, and so does production under ADR-047 (pending),
-with its own. Six API task definitions include token agents from the Identity
-API image; they add no new image identity or ECS service.
+Lambda, and fourth KMS key, and so does production under ADR-047, with its
+own; staging economy and fidelity and production also have the issuer's
+NAT-allowlist web ACL (two web ACLs in all). Six API task definitions include
+token agents from the Identity API image; they add no new image identity or
+ECS service.
 
 ## 3. Container and release gate
 
@@ -394,8 +409,10 @@ or the six-digit contact-OTP fallback mapped to the existing patient.
 
 ## 7. Provider and workload preflight
 
-This staging proof is also a precondition of the production issuer proposed in
-ADR-047; production's own checks are in §12.
+This staging proof (launch plan I5) is also a precondition of the production
+issuer of ADR-047 (accepted 2026-10-13); production's own checks are in §12.
+Running it needs a staging deployment authorization; accepting ADR-047 is not
+one.
 
 Verify all six staging token agents use the admitted Identity API digest and
 the exact role/subject/audience bindings in the
@@ -403,22 +420,63 @@ the exact role/subject/audience bindings in the
 UID/GID 65532 with a read-only root filesystem and write only its owned token
 volume. Confirm mode 0700 on the directory, atomic mode-0600 token files, a
 read-only application mount, and application startup gated by the agent's
-one-shot `health.mjs` check. Inspect readiness and sanitized outcomes without
-printing token contents.
+`health.mjs` check (`HEALTHY` dependency). Confirm in the registered task
+definitions that the agent is `essential: false` with a restart policy
+(`RestartAttemptPeriod` 60) and the application is essential. Inspect
+readiness and sanitized outcomes without printing token contents.
 
 With synthetic service requests, verify ES256 signatures and the exact issuer,
-subject, audience, and 300-second lifetime. Observe renewal at about 90 seconds,
-bounded 10-second retry after failure, removal before expiry, and failed
-readiness once usable credentials are unavailable. Verify the mapped caller
-can request only its allowed audiences and cannot sign directly with KMS.
-These local contracts still require live staging proof of ECS IAM credentials,
-network reachability, API Gateway authorization, KMS signing, and receiver
-validation; successful synthesis alone is insufficient.
+subject, audience, `token_use: workload` and 300-second lifetime. Observe
+renewal at about 90 seconds with one JWKS fetch per agent after start (the
+agent caches the verified key by `kid`), bounded 10-second retry after failure,
+removal before expiry, and an `UNHEALTHY` agent once usable credentials are
+unavailable while its task keeps running. Verify the mapped caller can request
+only its allowed audiences and cannot sign directly with KMS. Run the
+caller-refusal checks from inside the VPC (for example a one-off task in the
+application subnets whose role is not in the caller map); the web ACL refuses
+them from anywhere else. These local contracts still require live staging
+proof of ECS IAM credentials, network reachability, API Gateway authorization,
+KMS signing, and receiver validation; successful synthesis alone is
+insufficient.
+
+Issuer hardening (ADR-047 D1-D3), each with recorded evidence:
+
+- **Key policy.** `aws kms get-key-policy` shows the root statement and the
+  three Deny statements. Grant a staging test role `kms:Sign` on the key by IAM
+  and confirm `kms:Sign` is refused (`AccessDeniedException`); then remove the
+  grant. CloudTrail shows `Sign` on the key only from the issuer role, with
+  `ECDSA_SHA_256` and `RAW`.
+- **Edge allowlist.** In economy or fidelity, a `GET` of the JWKS and an
+  unsigned `POST /token` from an operator workstation answer `403` from the web
+  ACL (its `BlockedRequests` metric counts them), while every agent stays
+  `HEALTHY`. The IP set lists exactly the VPC's NAT gateway Elastic IPs.
+- **Flood.** From a source that is not on the allowlist, flood both the JWKS
+  `GET` and `POST /token` for at least 30 minutes, longer than the 300-second
+  token lifetime and the receivers' 10-minute JWKS cache. Expect WAF blocks,
+  no `Workload token renewal unavailable` line, no task replacement, and
+  successful EHR-to-Identity, EHR-to-Lab, EHR-to-Pharmacy and OCR-to-EHR calls
+  throughout. Scale one token task out during the flood and confirm it becomes
+  `HEALTHY`.
+- **Issuer outage (D2).** Deny one task role's `execute-api:Invoke` for six
+  minutes, longer than a token's lifetime. Expect its agent to turn
+  `UNHEALTHY` and its task to keep running; that task's service-to-service
+  calls answer `503`; Identity password sign-in keeps working (when the denied
+  role is Identity's, each OTP it cannot send logs
+  `notification_workload_token_unavailable` with a running count). Restore the
+  grant and confirm renewal resumes within about 10 seconds, without a task
+  replacement.
+- **Receivers.** A token without `exp`, older than 300 seconds, issued in the
+  future, signed with another algorithm or with another `token_use` is refused
+  `401`. Only the issuer role can sign with the key, so staging cannot mint
+  such a token; the unit suites prove the refusals against real tokens, and
+  staging confirms that the Identity, Notification, Lab, Pharmacy and EHR
+  tasks run the admitted digests built from this change.
 
 Before raising task counts, prove in staging:
 
 - missing, expired, wrong-audience, wrong-subject, bad-signature, and rotated
-  workload JWT behavior;
+  workload JWT behavior, including the key-disable drill of §12 (Rollback) on
+  the staging key;
 - Turnstile success, failure, timeout, replay/hostname/action rejection, and
   fail-closed production configuration;
 - SES/Termii/Meta primary OTP delivery and Brevo fallback only after a known
@@ -498,16 +556,20 @@ repository acceptance.
 
 ## 12. Production workload issuer (ADR-047): operator plan, not approved
 
-**NOT APPROVED. Do not execute.** This plan applies only if ADR-047 is
-accepted. It has not been run: no account was read and nothing was deployed or
+**NOT APPROVED. Do not execute.** ADR-047 is accepted (2026-10-13), with D1
+(an independent production key, API, stage and `hid:production:<service>`
+subjects behind a key policy that lets only the issuer role sign), D2 (the
+agent is not essential and has a restart policy) and D3 (a NAT-allowlist web
+ACL on the issuer stage). Accepting the decision authorizes no deployment.
+This plan has not been run: no account was read and nothing was deployed or
 applied. It adds no authority to the production lock.
 
 Preconditions:
 
-- ADR-047 accepted, with a decision on DEP-4-KEY, DEP-4-DOS and DEP-4-RES or
-  their explicit acceptance as risks.
+- A separate deployment authorization for this rollout (I6).
 - Staging redeployed from the same approved SHA, with this change's issuer
-  Lambda and Identity API image, and its §7 live proof recorded.
+  Lambda and Identity API image, and its §7 live proof recorded, including the
+  key-policy, edge-allowlist, 30-minute flood and issuer-outage checks (I5).
 - The production unlock approval and a production change approval.
 - Sections 1–4 complete for the release, with every image admitted.
 
@@ -528,23 +590,31 @@ Steps:
      and its `cdk.out/asset.<hash>` directory) and the Git SHA it was built
      from; the issuer code is a CDK file asset, not an admitted image;
    - the staging template diff against the staging template last deployed,
-     which must be the issuer asset key only.
+     which must be the issuer asset key, the signing-key Deny statements, the
+     two per-method settings replacing the `/*/*` setting, the agent's
+     `Essential`/`RestartPolicy` and, in economy and fidelity, the IP set, web
+     ACL and association.
 3. In the production account and region, read-only:
    - confirm the CDK bootstrap version (`/cdk-bootstrap/hnb659fds/version`)
      and its asset bucket; the deploy publishes the issuer asset there;
    - run `cdk diff Hid-production-Regional --no-lookups` with the reviewed
      parameter file. Expect exactly:
-     - additions: the `ProductionWorkloadIdentity` key (`Retain`), alias, log
+     - additions: the `ProductionWorkloadIdentity` key (`Retain`, with the
+       root statement and the three `kms:Sign` Deny statements), alias, log
        group (`Retain`), issuer role and policy, function, REST API, three
-       resources, two methods, deployment, stage `production`, two Lambda
-       permissions, the three `ProductionWorkloadIdentity*` outputs, and five
-       task-role default policies (Identity, Lab, Pharmacy, OCR API and
-       Outreach) granting `execute-api:Invoke` on `/production/POST/token`;
+       resources, two methods, deployment, stage `production` (two per-method
+       settings, no `/*/*` setting), two Lambda permissions, the issuer IP set
+       (the two NAT gateway Elastic IPs), web ACL (default block) and its
+       association with the stage, the three `ProductionWorkloadIdentity*`
+       outputs, and five task-role default policies (Identity, Lab, Pharmacy,
+       OCR API and Outreach) granting `execute-api:Invoke` on
+       `/production/POST/token`;
      - a modification of the EHR task role's existing default policy, which
        gains the same `execute-api:Invoke` statement and nothing else;
-     - new revisions of the six token task definitions (the agent added) and of
-       the Notification API and OCR worker task definitions (issuer, JWKS and
-       subject values now from the stack), eight in all;
+     - new revisions of the six token task definitions (the agent added, not
+       essential, with a restart policy) and of the Notification API and OCR
+       worker task definitions (issuer, JWKS and subject values now from the
+       stack), eight in all;
      - `DependsOn` changes on services, scaling targets and policies and
        service-discovery services;
      - removal of the eight workload parameters.
@@ -554,19 +624,28 @@ Steps:
    removed from the parameter file. Record the `IssuerUrl` and `JwksUrl`
    outputs and the signing key ARN. Never record a token.
 5. With no task running, verify the issuer:
-   - `GET <JwksUrl>` answers `200` with exactly one `EC` `P-256` key, `alg`
-     `ES256`, `use` `sig`, whose `kid` is the key ID;
-   - an unsigned `POST <IssuerUrl>/token` answers `403`;
-   - a SigV4 `POST` signed by an operator role outside the caller map answers
-     `403 WORKLOAD_CALLER_DENIED`;
+   - from an operator workstation, `GET <JwksUrl>` and an unsigned
+     `POST <IssuerUrl>/token` answer `403` from the web ACL, and its
+     `BlockedRequests` metric counts them;
+   - the web ACL's IP set lists exactly the two production NAT gateway Elastic
+     IPs, its default action is block, and it is associated with the
+     `production` stage;
+   - `aws kms get-key-policy` shows the root statement and the three Deny
+     statements naming the issuer role; `aws kms get-public-key` shows
+     `ECC_NIST_P256` and `SIGN_VERIFY`;
    - the function's environment has `HID_DEPLOYMENT_ENV=production`, six role
      ARNs, eleven bindings and only `hid:production:` subjects;
    - CloudTrail shows `kms:Sign` on the key only from the issuer role;
-   - the staging issuer still answers, and its `kid` differs from production's.
+   - the staging issuer's key ID, and so its `kid`, differs from production's.
+   The JWKS content and the caller refusals were proved in staging (§7); in
+   production the first agent to become `HEALTHY` (step 6) proves the JWKS
+   serves the key, because the agent verifies every token against it.
 6. Scale the Notification API, then the Identity API, to their minimum. Each
    task's `workload-token-agent` must be `HEALTHY` before its application
-   starts; no `Workload token renewal unavailable` line may appear; an OTP
-   start for a synthetic account must not end with `safeCode` `http_401`.
+   starts; no `Workload token renewal unavailable` or
+   `notification_workload_token_unavailable` line may appear; an OTP start for
+   a synthetic account must not end with `safeCode` `http_401` or
+   `workload_token_unavailable`.
 7. Scale the EHR, Lab, Pharmacy, OCR and Outreach APIs. On synthetic data: an
    EHR request authenticates through Identity's service session, Lab accepts
    an EHR order, and OCR publishes to EHR, Lab and Pharmacy.
@@ -588,17 +667,25 @@ Rollback:
 - To stop minting at once, set the issuer function's reserved concurrency to
   `0` or remove a caller's `execute-api:Invoke`. Issued tokens stay valid until
   they expire, at most 300 seconds later.
-- On suspected key misuse, set the issuer function's reserved concurrency to
-  `0`, which stops both `POST /token` and the JWKS `GET`, and disable the key
-  (`aws kms disable-key`) so that no principal can sign with it. Disabling the
-  key alone is not enough: a warm issuer container keeps the public key it read
-  and goes on serving the JWKS, so receivers keep trusting the key; only new
-  containers fail to read it and answer `503`. Receivers refuse tokens only
-  once the JWKS is no longer served and their cached copy has expired, at most
-  10 minutes later. Until then they accept a token signed with the key
-  whatever its `exp`, because they check no maximum token age (ADR-047
-  follow-up). Afterwards every service-to-service call fails closed until a new
-  key is approved and deployed. Do not schedule key deletion without a
-  separate approval; it is irreversible after its waiting period.
+- Key disable, on suspected key misuse (and as a staging drill, §7):
+  1. Set the issuer function's reserved concurrency to `0`. This stops both
+     `POST /token` and the JWKS `GET` at once and leaves no warm container.
+  2. Disable the key (`aws kms disable-key`), so that no principal can sign
+     with it. Disabling alone also works, more slowly: a warm issuer re-reads
+     the public key at least every five minutes, then answers `503` for the
+     JWKS and for minting.
+  3. Wait at least 10 minutes. Receivers keep their cached JWKS for up to 10
+     minutes and accept, until then, an ES256 token signed with the key that
+     is at most 300 seconds old (5 seconds of clock tolerance) and carries
+     `token_use: workload`. A token pre-signed with a future `iat` by whoever
+     misused the key becomes valid when its `iat` arrives, so only removing the
+     key from the JWKS ends that exposure.
+  4. Every service-to-service call now fails closed, and Identity logs each OTP
+     or alert it cannot send. Recovery is a new key (new `kid`) through an
+     approved change and redeploy; re-enabling a key you suspect is not
+     recovery. In a drill, re-enable the staging key, remove the reserved
+     concurrency, and confirm renewal resumes.
+  Do not schedule key deletion without a separate approval; it is
+  irreversible after its waiting period.
 - The key and the issuer log group are retained if the construct or stack is
   removed. Deleting them is a separate, approved action.

@@ -69,18 +69,25 @@ monthly gross = Fargate task-hours and scale-out
 ```
 
 Every staging mode has **four customer-managed KMS keys**, and so does
-production with its own workload signing key, as proposed by ADR-047 and
-pending that decision; development retains three. Sleep still incurs the
+production with its own workload signing key (ADR-047); development retains
+three. Sleep still incurs the
 signing key's fixed charge and any metered issuer traffic, although zero ECS
 tasks means no token-agent calls. The issuer is not a provisioned ECS service
 and has no provisioned Lambda concurrency. The staging issuer's log group
-retains logs for 14 days; production's (ADR-047, pending) for 365 days.
+retains logs for 14 days; production's for 365 days.
 
-Six caller task definitions in staging, and in production under ADR-047
-(pending), include token agents, each with a 64 MiB
+Staging economy and fidelity and production have **two regional web ACLs**:
+the public API web ACL and the issuer's NAT-allowlist web ACL (ADR-047, D3),
+each with its fixed monthly charge, one rule, and per-request inspection
+charges for every request it sees, blocked floods included. Sleep and
+development have none and one respectively (cost inventory `wafs`).
+
+Six caller task definitions in staging, and in production under ADR-047,
+include token agents, each with a 64 MiB
 memory reservation inside its existing Fargate task allocation. At one running
 replica per caller, a successful renewal cycle makes eleven audience-specific
-token requests and six JWKS requests about every 90 seconds. Each receiver
+token requests about every 90 seconds; each agent fetches the JWKS once at
+start and again only for an unknown `kid`, at most every 30 seconds. Each receiver
 process (Identity, Notification, EHR, Lab and Pharmacy APIs) keeps one cached
 JWKS and fetches it at most every 10 minutes, or every 30 seconds while tokens
 with an unknown `kid` arrive; before D-Eminence/hid-system#53 Lab,
