@@ -85,10 +85,15 @@ const TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
   [OrderStatus.Draft]: [OrderStatus.Active, OrderStatus.Cancelled, OrderStatus.EnteredInError],
   [OrderStatus.Active]: [OrderStatus.OnHold, OrderStatus.Completed, OrderStatus.Cancelled, OrderStatus.EnteredInError],
   [OrderStatus.OnHold]: [OrderStatus.Active, OrderStatus.Cancelled, OrderStatus.EnteredInError],
-  [OrderStatus.Completed]: [],
+  // A completed lab request made for the wrong patient is retracted (ENC-RETRACT-2).
+  [OrderStatus.Completed]: [OrderStatus.EnteredInError],
   [OrderStatus.Cancelled]: [],
   [OrderStatus.EnteredInError]: [],
 };
+
+/** A lab request in one of these is final: only completed to entered_in_error, alone, changes it (ORDER-CLOSED-EDIT, 0090). */
+const FINAL_STATUSES: ReadonlySet<OrderStatus> =
+  new Set([OrderStatus.Completed, OrderStatus.Cancelled, OrderStatus.EnteredInError]);
 
 @Injectable()
 export class LabRequestsService {
@@ -291,6 +296,13 @@ export class LabRequestsService {
         const current = await this.lock(client, context, patientId, encounterId, requestId);
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_LAB_REQUEST_TRANSITION', 'Lab request status transition is not allowed');
+        }
+        // A closed lab request is final (ORDER-CLOSED-EDIT); the database refuses it too (0090).
+        const retraction = current.status === OrderStatus.Completed && input.status === OrderStatus.EnteredInError
+          && input.priority === undefined && input.clinicalInformation === undefined;
+        if (FINAL_STATUSES.has(current.status) && !retraction) {
+          throw new DomainProblem(409, 'LAB_REQUEST_NOT_AMENDABLE',
+            'A completed, cancelled or entered-in-error lab request cannot be changed');
         }
         if (encounterStatus && current.status !== OrderStatus.Active) {
           refuseClosedEncounter(encounterStatus, current.status === OrderStatus.OnHold ? 'resume' : 'order');

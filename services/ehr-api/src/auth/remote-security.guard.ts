@@ -2,7 +2,7 @@ import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuditService } from '../audit/audit.service';
 import { DatabaseService } from '../database/database.service';
-import { FACILITY_OPTIONAL, PUBLIC_ROUTE, REQUIRED_PERMISSIONS, PATIENT_ALLOWED } from '../common/decorators';
+import { FACILITY_OPTIONAL, PATIENT_ALLOWED, PATIENT_ONLY, PUBLIC_ROUTE, REQUIRED_PERMISSIONS } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { IdentityApiService } from '../integrations/identity-api.service';
@@ -26,6 +26,14 @@ export class RemoteSecurityGuard implements CanActivate {
       if (actor.kind === 'patient' && !this.metadata<boolean>(PATIENT_ALLOWED, context)) {
         throw new DomainProblem(403, 'PATIENT_SCOPE_DENIED', 'This operation requires workforce authorization');
       }
+      // A patient-only route refuses any other session here, before a facility
+      // is bound or a handler runs, so the refusal is audited as one before a
+      // facility is bound. Refused in the handler, it became a staff
+      // http-request row with no facility, which the audit layer refuses, and
+      // the answer became 503 (A9-EHR).
+      if (actor.kind !== 'patient' && this.metadata<boolean>(PATIENT_ONLY, context)) {
+        throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
+      }
       request.authTransport = request.header('authorization') ? 'bearer' : 'cookie';
       const facilityOptional = this.metadata<boolean>(FACILITY_OPTIONAL, context);
       const facilityId = request.header('x-facility-id');
@@ -48,9 +56,11 @@ export class RemoteSecurityGuard implements CanActivate {
       }
       return true;
     } catch (error) {
-      await this.recordDenied(request);
-      if (error instanceof DomainProblem) throw error;
-      throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+      const refusal = error instanceof DomainProblem
+        ? error
+        : new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+      await this.recordDenied(request, refusal);
+      throw refusal;
     }
   }
 
@@ -89,8 +99,10 @@ export class RemoteSecurityGuard implements CanActivate {
     }
   }
 
-  private async recordDenied(request: HidRequest): Promise<void> {
-    const details = { method: request.method, route: typeof request.route?.path === 'string' ? request.route.path : 'unresolved' };
+  private async recordDenied(request: HidRequest, refusal: DomainProblem): Promise<void> {
+    // The status and code answered, so a refusal can be told apart in access review (A17-EHR-AUDIT).
+    const details = { method: request.method, route: typeof request.route?.path === 'string' ? request.route.path : 'unresolved',
+      status: refusal.getStatus(), code: refusal.code };
     if (request.actor && !request.facilityId) {
       // Refused before a facility was bound (no or malformed X-Facility-ID, a
       // facility the actor is not active at, a runtime control). Recorded as

@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../../audit/audit.service';
-import { DomainProblem } from '../../common/problem';
+import { DomainProblem, refusalOutcome } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
@@ -52,6 +52,9 @@ export class ClinicalRepository {
     operation: (client: PoolClient) => Promise<OperationResult<Value>>,
     scopedLookup?: (client: PoolClient) => Promise<boolean>,
   ): Promise<Value> {
+    // Set once a refusal has its own audit row: Identity's refusal, or a
+    // resource not found, recorded inside its transaction.
+    let audited = false;
     try {
       const authorization = await this.identity.authorize(
         patientId,
@@ -76,6 +79,7 @@ export class ClinicalRepository {
           purposeOfUse: context.purposeOfUse,
           details: { ...event.details, reason: 'identity_authorization' },
         });
+        audited = true;
         throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Active consent and facility membership are required');
       }
       const result = await this.database.withTransaction(context, async (client): Promise<TransactionState<Value>> => {
@@ -99,12 +103,47 @@ export class ClinicalRepository {
         throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Active consent and facility membership are required');
       }
       if (result.state === 'missing') {
+        audited = true;
         throw new DomainProblem(404, 'CLINICAL_RESOURCE_NOT_FOUND', 'Clinical resource was not found');
       }
       return result.result.value;
     } catch (error) {
-      throw this.translate(error);
+      const translated = this.translate(error);
+      if (!audited) await this.recordRefusal(context, patientId, event, translated);
+      throw translated;
     }
+  }
+
+  /**
+   * A command refused inside its transaction lost its semantic audit row with
+   * the rollback; only the HTTP failure row remained (A17-EHR-AUDIT). The
+   * refusal is recorded here, after the rollback, outside any transaction:
+   * `denied` for a refusal (401, 403, 409, 412, 423, 429), `failure` for
+   * invalid or missing input (400, 404), with the status and code answered
+   * and the refusal's own audit details (codes, never clinical content). A
+   * server fault (5xx, or an untranslated error) is left to the HTTP failure
+   * row. When the row cannot be written the request fails closed with 503.
+   */
+  private async recordRefusal(context: DataAccessContext, patientId: string, event: SemanticEvent,
+    refusal: unknown): Promise<void> {
+    if (!(refusal instanceof DomainProblem) || refusal.getStatus() >= 500) return;
+    const status = refusal.getStatus();
+    await this.audit.record({
+      correlationId: context.correlationId,
+      actorType: 'staff',
+      actorSubject: context.actor.subject,
+      actorAccountId: context.actor.accountId,
+      actorMembershipId: context.membershipId,
+      organizationId: context.actor.facility?.organizationId,
+      facilityId: context.facilityId,
+      patientId,
+      action: event.action,
+      resourceType: event.resourceType,
+      resourceId: event.resourceId,
+      outcome: refusalOutcome(status),
+      purposeOfUse: context.purposeOfUse,
+      details: { status, code: refusal.code, ...refusal.auditDetails },
+    });
   }
 
   async executeCreate<Value>(
@@ -267,6 +306,28 @@ export class ClinicalRepository {
       if (message === 'VITAL_RECORD_IMMUTABLE') {
         return new DomainProblem(409, 'VITAL_RECORD_IMMUTABLE', 'Recorded vitals are corrected only by a correction');
       }
+      // The 0090 guards.
+      if (message === 'VITAL_ENTERED_IN_ERROR') {
+        return new DomainProblem(409, 'VITAL_NOT_AMENDABLE', 'A vital entered in error cannot be changed');
+      }
+      if (message === 'PRESCRIPTION_FINAL') {
+        return new DomainProblem(409, 'PRESCRIPTION_NOT_AMENDABLE',
+          'A completed, cancelled or entered-in-error prescription cannot be changed');
+      }
+      if (message === 'INVALID_PRESCRIPTION_TRANSITION') {
+        return new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
+      }
+      if (message === 'LAB_REQUEST_FINAL') {
+        return new DomainProblem(409, 'LAB_REQUEST_NOT_AMENDABLE',
+          'A completed, cancelled or entered-in-error lab request cannot be changed');
+      }
+      if (message === 'INVALID_LAB_REQUEST_TRANSITION') {
+        return new DomainProblem(409, 'INVALID_LAB_REQUEST_TRANSITION', 'Lab request status transition is not allowed');
+      }
+    }
+    if (error.code === '42501' && (error as { message?: unknown }).message === 'ENCOUNTER_RETRACTION_NOT_PERMITTED') {
+      return new DomainProblem(403, 'ENCOUNTER_RETRACTION_NOT_PERMITTED',
+        'Cancelling or retracting this encounter changes records you may not write');
     }
     switch (error.code) {
       case '42501':

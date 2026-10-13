@@ -64,8 +64,8 @@ insert into encounter_retraction_cases (area, name, expected, actual)
 select 'property', format('trigger %s on %s', trigger_name, table_name), 'enabled',
        coalesce((select case when t.tgenabled = 'O' and t.tgtype = 19
                                and t.tgfoid = to_regprocedure(function_name)
-                               and (update_of is null or t.tgattr::int2[] = array[(select a.attnum from pg_attribute a
-                                     where a.attrelid = t.tgrelid and a.attname = update_of)])
+                               and t.tgattr::text = coalesce((select a.attnum::text from pg_attribute a
+                                     where a.attrelid = t.tgrelid and a.attname = update_of), '')
                                and trigger_name < (select max(v.tgname) from pg_trigger v
                                      where v.tgrelid = t.tgrelid and v.tgname like '%\_versioned') collate "C" then 'enabled'
                               else format('enabled=%s type=%s function=%s columns=%s', t.tgenabled, t.tgtype,

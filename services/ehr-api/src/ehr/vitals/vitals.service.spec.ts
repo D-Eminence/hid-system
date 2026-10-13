@@ -40,7 +40,7 @@ const context = { correlationId: 'correlation-123456', facilityId, membershipId,
   authorization: 'Bearer user', actor: { id: accountId, subject: 'staff:test', accountId, authenticationMethod: 'local',
     roles: ['nurse'], permissions: ['ehr.vital.write'], facilityIds: [facilityId], facilities: [] } } as unknown as DataAccessContext;
 
-const vital = (status: string, rowVersion = '2'): VitalRow & { status: string } => ({
+const vital = (status: VitalRow['status'], rowVersion = '2'): VitalRow => ({
   id: vitalId, encounterId, patientId, facilityId, createdBy: accountId, createdByMembershipId: membershipId,
   recordedAt: new Date('2026-10-01T08:10:00.000Z'), heightCm: null, weightKg: null, temperatureC: null, pulseBpm: 72,
   respiratoryRate: null, systolicMmhg: 120, diastolicMmhg: 80, oxygenSaturationPercent: null, source: 'manual',
@@ -49,7 +49,7 @@ const vital = (status: string, rowVersion = '2'): VitalRow & { status: string } 
 });
 
 /** A fake transaction over one vital in `status`; the UPDATE answers the row at the next version unless `stale`. */
-function vitalHarness(status: string, { stale = false } = {}) {
+function vitalHarness(status: VitalRow['status'], { stale = false } = {}) {
   const query = jest.fn(async (sql: string) => {
     const statement = sql.replace(/\s+/g, ' ').trim();
     if (/^select .* from ehr\.vitals .* for update$/i.test(statement)) return { rows: [vital(status)] };
