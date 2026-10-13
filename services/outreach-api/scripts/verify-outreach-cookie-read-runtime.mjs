@@ -109,8 +109,11 @@ if (process.argv[2] === '--identity-child') {
   const database = await disposableDatabase(require);
   let identity, outreach;
   try {
-    // Fixture: a doctor at one facility (the doctor role holds every Outreach
-    // permission, migrations 0024 and 0038) and a patient account.
+    // Fixture: a doctor at one facility and a patient account. Outreach is off
+    // at launch (D17): 0091 withdraws every Outreach permission from every
+    // role and starts outreach_portal_enabled off. This copy opts in as a
+    // reviewed staging opt-in would: it grants the doctor role the Outreach
+    // permissions it held before 0091 (0024, 0038) and turns the portal on.
     // Outreach has no password hashing of its own; hash the synthetic password with Identity's argon2.
     const argon2 = createRequire(join(identityService, 'package.json'))('argon2');
     const password = 'Synthetic-Outreach-Password-2026';
@@ -120,6 +123,11 @@ if (process.argv[2] === '--identity-child') {
     const doctorEmail = `doctor-${ids.doctorAccount}@example.invalid`;
     const patientEmail = `patient-${ids.patientAccount}@example.invalid`;
     const { owner } = database;
+    await owner.query(`insert into auth.role_permissions(role_code,permission_code)
+      select 'doctor',code from unnest($1::text[]) code on conflict do nothing`,
+    [['outreach.registration.read', 'outreach.registration.write', 'outreach.campaign.read', 'outreach.campaign.write']]);
+    await owner.query(`update platform.control_settings set enabled=true, reason='Outreach cookie verifier opt-in',
+      row_version=row_version+1, updated_at=clock_timestamp() where control_key='outreach_portal_enabled' and not enabled`);
     await owner.query("insert into identity.organizations(id,name,slug) values($1,'Outreach Rehearsal Org',$2)", [ids.org, `outreach-${ids.org}`]);
     await owner.query(`insert into identity.facilities(id,organization_id,name,code,timezone,active,lifecycle_status)
       values($1,$2,'Outreach Rehearsal Hospital',$3,'Africa/Lagos',true,'verified')`, [ids.facility, ids.org, `OUT-${ids.facility.slice(0, 6)}`]);

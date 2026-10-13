@@ -219,6 +219,10 @@ try {
   await pool.query("insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason) values($1,$2,'doctor','facility',$3,$4,'Synthetic rehearsal role')",
     [randomUUID(), ids.staffAccount, ids.membership, ids.facility]);
   await pool.query("insert into identity.purpose_of_use_codes(code,display,source_system) values('emergency','Emergency treatment','patient-safety-rehearsal') on conflict(code) do nothing");
+  // Break-glass is off at launch (D9): 0091 withdraws identity.break-glass.write
+  // from every role. This copy grants it to the doctor role for the activation
+  // alone, as a reviewed staging opt-in would, and withdraws it again below.
+  await pool.query("insert into auth.role_permissions(role_code,permission_code) values('doctor','identity.break-glass.write') on conflict do nothing");
   const grant = await asRuntime(null, async (client) => {
     await client.query(`select set_config('app.actor_subject',$1,true), set_config('app.membership_id',$2,true),
       set_config('app.facility_id',$3,true), set_config('app.purpose_of_use','emergency',true),
@@ -226,6 +230,7 @@ try {
     return (await client.query("select * from identity.activate_break_glass('HID-SAFETYAA','Unconscious patient emergency access',15)")).rows[0];
   });
   assert.equal(grant.grant_status, 'active');
+  await pool.query("delete from auth.role_permissions where role_code='doctor' and permission_code='identity.break-glass.write'");
   const intents = (await pool.query('select status from identity.emergency_contact_notifications where consent_grant_id=$1', [grant.consent_grant_id])).rows;
   assert.deepEqual(intents, [{ status: 'pending' }]);
   const summary = await module.get(EmergencyContactNotificationDispatcher).dispatch(`patient-safety-${randomUUID()}`);
@@ -249,6 +254,10 @@ try {
     [accessRequestId, a.patientId, ids.staff, ids.membership, ids.facility]);
   const requests = (await get(sa, '/identity/me/access-requests').expect(200)).body;
   assert(requests.some((item) => item.accessRequestId === accessRequestId && item.status === 'pending'));
+  // CONSENT-GRANTEE (0091): the patient sees which clinician asks, not only the facility.
+  const listedRequest = requests.find((item) => item.accessRequestId === accessRequestId);
+  assert.deepEqual([listedRequest.facilityName, listedRequest.requesterDisplayName, listedRequest.requesterRole],
+    ['Safety Rehearsal Hospital', 'Synthetic clinician', 'doctor'], 'the access request names the requesting clinician and role');
   // The requesting clinician lists their own requests through
   // identity.list_my_staff_access_requests as the Identity runtime role.
   const staff = staffClient({ send: supertestTransport(http), origin, password, outbox: staffEnrollmentCodes,
@@ -257,9 +266,21 @@ try {
     await pool.query("update auth.accounts set password_hash=$2, password_algorithm='argon2id' where id=$1", [accountId, passwordHash]);
     const email = (await pool.query('select email from auth.accounts where id=$1', [accountId])).rows[0].email;
     // Password, then the authenticator (MFA-1): enrolled with an emailed code on the first sign-in.
-    return { cookie: (await staff.signIn(email)).cookie };
+    const signedIn = await staff.signIn(email);
+    return { cookie: signedIn.cookie, csrf: signedIn.csrf };
   };
   const clinician = await staffSession(ids.staffAccount);
+  // The launch module set (0091, D17, ADR-058): a doctor's session lists no
+  // permission of a module that is off, nor break-glass or document upload,
+  // and keeps the EHR reads, access requests and the patient PIN.
+  const clinicianSession = (await http.get('/api/v1/auth/session').set('Cookie', clinician.cookie).expect(200)).body;
+  const clinicianPermissions = clinicianSession.actor.facilities.find((item) => item.id === ids.facility)?.permissions ?? [];
+  assert.deepEqual(clinicianPermissions.filter((permission) => /^(lab|pharmacy|ocr|outreach)\./.test(permission)
+    || ['identity.break-glass.write', 'ehr.document.write', 'ehr.lab-request.write'].includes(permission)), [],
+  'a doctor holds no permission the launch module set withdraws');
+  for (const kept of ['identity.consent.write', 'identity.patient-access-pin.verify', 'ehr.encounter.read', 'ehr.document.read']) {
+    assert(clinicianPermissions.includes(kept), `a doctor keeps ${kept}`);
+  }
   const staffRequests = (who, query = '', purpose = 'direct-care') => {
     const call = http.get(`/api/v1/identity/access-requests${query}`).set('Cookie', who.cookie).set('X-Facility-ID', ids.facility);
     return purpose ? call.set('X-Purpose-Of-Use', purpose) : call;
@@ -304,6 +325,12 @@ try {
   const history = (await get(sa, '/identity/me/access-history').expect(200)).body;
   const approvedGrant = history.items.find((item) => item.consentGrantId === approved.body.consentGrantId);
   const emergencyGrant = history.items.find((item) => item.consentGrantId === grant.consent_grant_id);
+  // CONSENT-GRANTEE (0091): each grant names who holds it; the list says it is complete.
+  assert.equal(history.truncated, false, 'a history of two grants is complete');
+  for (const item of [approvedGrant, emergencyGrant]) {
+    assert.deepEqual([item.requesterDisplayName, item.requesterRole], ['Synthetic clinician', 'doctor'],
+      'an access-history grant names its clinician and role');
+  }
   assert.equal(approvedGrant.patientRevocable, true);
   assert.deepEqual([emergencyGrant.breakGlass, emergencyGrant.patientRevocable], [true, false]);
   await post(sa, `/identity/me/consent-grants/${grant.consent_grant_id}/revoke`, { reason: 'Not wanted' }).expect(409);
@@ -359,6 +386,24 @@ try {
   assert.equal((await post(fresh, `/identity/access-requests/${toApprove}/approve`).expect(200)).body.status, 'approved');
   await post(fresh, '/identity/me/access-pin', { pin: '482915' }).expect(200);
 
+  // NOTIF-PIN-NOTICE (0091): when a clinician opens the record with the
+  // patient's PIN, the patient's inbox says so, with the notification worker
+  // off; a replay of the same grant adds nothing.
+  const pinNotices = async () => (await get(fresh, '/identity/me/notifications').expect(200)).body
+    .filter((item) => item.notificationCode === 'PATIENT_ACCESS_PIN_USED');
+  assert.deepEqual(await pinNotices(), [], 'no PIN notice before the PIN is used');
+  const usePin = () => http.post('/api/v1/identity/standard-access/pin').set('Cookie', clinician.cookie)
+    .set('Origin', origin).set('x-csrf-token', clinician.csrf).set('X-Facility-ID', ids.facility)
+    .set('X-Purpose-Of-Use', 'direct-care').send({ hid: 'HID-SAFETYAA', pin: '482915' });
+  const pinAccess = (await usePin().expect(200)).body;
+  assert.equal(pinAccess.existingGrant, false);
+  const notices = await pinNotices();
+  assert.equal(notices.length, 1, 'one PIN use places one notice in the patient inbox');
+  assert.deepEqual([notices[0].resourceType, notices[0].resourceId, notices[0].metadata, notices[0].readAt],
+    ['consent-grant', pinAccess.consentGrantId, { consentGrantId: pinAccess.consentGrantId, reviewRequired: true }, null]);
+  assert.equal((await usePin().expect(200)).body.existingGrant, true);
+  assert.equal((await pinNotices()).length, 1, 'a PIN replay of the same grant adds no notice');
+
   // Zero waiting period completes deletion; the login is then unusable.
   await pool.query("update platform.patient_account_deletion_settings set waiting_period=interval '0'");
   const sb2 = await session(b.email);
@@ -378,6 +423,7 @@ try {
     delivery: 'local-stub-only', account_deletion: 'request-confirm-replay-cancel-complete', csrf_required: true,
     deleted_login_unusable: true, patient_identity_retained: true, emergency_contacts: 'encrypted-owned-verified-deactivated',
     break_glass_contact_alert: 'intent-created-stub-delivered-once', patient_inbox_runtime: true,
+    requester_named: true, pin_use_inbox_notice: 'once-per-grant', launch_permissions_withdrawn: true,
     patient_access_requests_runtime: 'list-approve-revoke', staff_access_requests_runtime: 'own-list-status-filter-purpose-permission', staff_access_request_outcome: 'active-then-revoked', staff_list_patient_id: 'active-grant-only', staff_close_route_denied_to_patient: true, audit_source_identity_api: true,
     approval_requires_recent_sign_in: true, recovery_hold: 'approve-pin-contact-refused-deny-revoke-allowed-lifted-after-24h',
     emergency_contact_delivery_enabled_for_this_rehearsal_only: getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED,

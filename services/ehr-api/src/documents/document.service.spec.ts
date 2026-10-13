@@ -95,9 +95,22 @@ function harness() {
     }),
   });
 
+  // platform.require_control_enabled: the uploads control is on unless a test turns it off.
+  const controls = { uploads_enabled: true } as Record<string, boolean>;
   const database = {
     withTransaction: jest.fn(async (_context: DataAccessContext, operation: (client: unknown) => Promise<unknown>,
       options: { readOnly?: boolean } = {}) => operation(clientFor(options.readOnly === true))),
+    query: jest.fn(async (sql: string, params: unknown[] = []) => {
+      issued.push({ sql, params, readOnly: false });
+      if (/platform\.require_control_enabled\(\$1\)/.test(sql)) {
+        const key = String(params[0]);
+        if (controls[key] === false) {
+          throw Object.assign(new Error(`PLATFORM_CONTROL_DISABLED:${key}`), { code: '55000' });
+        }
+        return { rows: [{}], rowCount: 1 };
+      }
+      throw new Error(`Unexpected statement in DocumentService spec: ${sql}`);
+    }),
   };
   const identity = { authorize: jest.fn().mockResolvedValue({ allowed: true }) };
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined), record: jest.fn().mockResolvedValue(undefined) };
@@ -113,6 +126,7 @@ function harness() {
   return {
     service, stored, issued, identity, audit, storage, updates, completionAudits,
     readCreatorInWriteTransactionAs: (accountId: string) => { creatorInWriteTransaction = accountId; },
+    disableControl: (key: string) => { controls[key] = false; },
   };
 }
 
@@ -190,6 +204,21 @@ describe('DocumentService.complete: only the uploader completes an upload', () =
     expect(storage.inspect).not.toHaveBeenCalled();
     expect(updates()).toHaveLength(0);
     expect(stored.status).toBe('initiated');
+  });
+
+  it('refuses completion with 409 while uploads are disabled, before Identity, storage or any write (0091)', async () => {
+    const { service, stored, identity, storage, updates, completionAudits, disableControl, issued } = harness();
+    disableControl('uploads_enabled');
+    const refusal = service.complete(documentId, uploader);
+    await expect(refusal).rejects.toBeInstanceOf(ConflictException);
+    await expect(refusal).rejects.toThrow('Document uploads are temporarily disabled');
+    expect(issued.some((query) => /platform\.require_control_enabled/.test(query.sql)
+      && query.params[0] === 'uploads_enabled')).toBe(true);
+    expect(identity.authorize).not.toHaveBeenCalled();
+    expect(storage.inspect).not.toHaveBeenCalled();
+    expect(updates()).toHaveLength(0);
+    expect(completionAudits()).toHaveLength(0);
+    expect(stored).toMatchObject({ status: 'initiated', object_version_id: null, row_version: 1 });
   });
 
   it('keeps refusing the uploader with 409 when the stored object does not match the declaration', async () => {

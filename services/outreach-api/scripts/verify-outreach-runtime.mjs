@@ -52,8 +52,13 @@ try {
       [f.org, 'Outreach Verifier Org', `outreach-verifier-${f.org.slice(0, 8)}`]);
     await client.query(`insert into identity.facilities (id,organization_id,name,code,timezone,active,lifecycle_status)
       values ($1,$2,'Outreach Verifier Clinic',$3,'Africa/Lagos',true,'verified')`, [f.facility, f.org, `OR-${f.facility.slice(0, 8)}`]);
-    // A and B are doctors of the clinic (the doctor role carries the Outreach
-    // registration and campaign permissions); only A is a campaign member.
+    // Outreach is off at launch (D17): 0091 starts outreach_portal_enabled off.
+    // This copy turns the portal on, as an audited staging opt-in would; the
+    // fake Identity below grants the Outreach permissions itself.
+    await client.query(`update platform.control_settings set enabled=true, reason='Outreach verifier opt-in',
+      row_version=row_version+1, updated_at=clock_timestamp() where control_key='outreach_portal_enabled' and not enabled`);
+    // A and B are doctors of the clinic, granted the Outreach registration and
+    // campaign permissions by the fake Identity; only A is a campaign member.
     for (const [name, member] of [['a', f.a], ['b', f.b]]) {
       await client.query(`insert into auth.accounts (id,subject,email,display_name,status) values ($1,$2,$3,$4,'active')`,
         [member.account, member.subject, `outreach-verifier-${name}-${member.account}@example.invalid`, `Outreach Verifier ${name}`]);

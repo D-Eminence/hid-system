@@ -107,7 +107,9 @@ begin
       where patient_id = 'b5000000-0000-4000-8000-000000000002')
      or exists (select 1 from identity.outbox_events
       where event_type = 'PatientAccessPinVerified'
-        and patient_id = 'b5000000-0000-4000-8000-000000000002') then
+        and patient_id = 'b5000000-0000-4000-8000-000000000002')
+     or exists (select 1 from notification.inbox_items
+      where patient_id = 'b5000000-0000-4000-8000-000000000002') then
     raise exception 'PIN audit failure leaked durable access state';
   end if;
 end
@@ -309,6 +311,25 @@ begin
      ) then
     raise exception 'PIN notification intent is missing or exceeds the minimum-necessary envelope';
   end if;
+  -- NOTIF-PIN-NOTICE (0091): the patient is told in the app inbox, without
+  -- the notification worker, each time a clinician opens their record with
+  -- their PIN: one item for the verification, none for the replay or for a
+  -- refused PIN.
+  if (select count(*) from notification.inbox_items
+       where account_id = 'b2000000-0000-4000-8000-000000000002'
+         and notification_code = 'PATIENT_ACCESS_PIN_USED') <> 1
+     or not exists (
+       select 1 from notification.inbox_items item
+         join identity.outbox_events event
+           on event.event_type = 'PatientAccessPinVerified' and event.aggregate_id = item.resource_id
+        where item.account_id = 'b2000000-0000-4000-8000-000000000002'
+          and item.patient_id = 'b5000000-0000-4000-8000-000000000001'
+          and item.notification_code = 'PATIENT_ACCESS_PIN_USED'
+          and item.resource_type = 'consent-grant'
+          and item.read_at is null
+          and item.metadata = jsonb_build_object('consentGrantId', event.aggregate_id, 'reviewRequired', true)) then
+    raise exception 'A PIN use did not place exactly one minimum-necessary notice in the patient inbox';
+  end if;
   if (select count(*) from audit.events where action = 'identity.patient-access-pin.verify'
        and outcome = 'success') <> 1
      or (select count(*) from audit.events where action = 'identity.patient-access-pin.replay'
@@ -391,6 +412,12 @@ begin
        where actor_account_id = 'b2000000-0000-4000-8000-000000000001'
          and patient_id = 'b5000000-0000-4000-8000-000000000001') is distinct from 4 then
     raise exception 'The guessed patient''s failure window lost failures';
+  end if;
+  -- The second patient's PIN was used once (NOTIF-PIN-NOTICE, 0091).
+  if (select count(*) from notification.inbox_items
+       where account_id = 'b2000000-0000-4000-8000-000000000003'
+         and notification_code = 'PATIENT_ACCESS_PIN_USED') <> 1 then
+    raise exception 'The second patient was not told once of the use of their PIN';
   end if;
 end
 $$;
