@@ -155,7 +155,7 @@ dependencies, among them the QoreID and enrolment changes and the
 updating the record. Every later change to a template replaces its row here,
 with the reason.
 
-**Under ADR-047 (BRANCH:draft/production-workload-identity).** The same offline
+**Under ADR-047 (D-Eminence/hid-system#54).** The same offline
 synthesis of this branch, with `main` at `bbc6e89` merged, with the AWS
 credential variables removed from the environment and `AWS_CONFIG_FILE` and
 `AWS_SHARED_CREDENTIALS_FILE` pointing at no file, gives production

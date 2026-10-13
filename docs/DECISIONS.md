@@ -2342,7 +2342,7 @@ own deployment authorization (I6, §12). Nothing has been deployed.
 
 Date: 2026-10-12 (proposed); 2026-10-13 (accepted, with D1-D3 and the
 DEP-4-KEY, DEP-4-DOS and DEP-4-RES changes implemented on
-BRANCH:draft/production-workload-identity).
+D-Eminence/hid-system#54).
 
 Supersedes for production ADR-032's external HTTPS workload issuer/JWKS/subjects
 and rotating mounted token delivery, and records the workload issuer as an

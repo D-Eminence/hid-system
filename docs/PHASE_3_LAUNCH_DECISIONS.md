@@ -1,7 +1,7 @@
 # Phase 3 launch decisions and operator plans
 
 Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
-the proposed owner defaults (ADR-047, BRANCH:draft/production-workload-identity);
+the proposed owner defaults (ADR-047, D-Eminence/hid-system#54);
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
 
@@ -124,7 +124,7 @@ separate deployment authorization. None of them has been run.
 
 | # | Decision | Proposed default | Risks | Waits on it |
 | --- | --- | --- | --- | --- |
-| D1 | Production workload issuer and key custody (DEP-4, DEP-4-KEY; ADR-047 accepted 2026-10-13, BRANCH:draft/production-workload-identity) | **Decided (default):** the staging mechanism with an independent production key, API, stage and `hid:production:` subjects; the key policy keeps the root statement and denies `kms:Sign` to every principal but the issuer role, to any algorithm but `ECDSA_SHA_256` and to any message type but `RAW`; receivers accept only ES256 tokens with `exp`, `iat` at most 300 s old and `token_use: workload`; no local-secret fallback | Same-account key custody (an administrator can still change the key policy or the function); a single issuer for six services; receivers trust a withdrawn key for up to 10 minutes | Every service-to-service call in production; deployment still needs I5 and I6 |
+| D1 | Production workload issuer and key custody (DEP-4, DEP-4-KEY; ADR-047 accepted 2026-10-13, D-Eminence/hid-system#54) | **Decided (default):** the staging mechanism with an independent production key, API, stage and `hid:production:` subjects; the key policy keeps the root statement and denies `kms:Sign` to every principal but the issuer role, to any algorithm but `ECDSA_SHA_256` and to any message type but `RAW`; receivers accept only ES256 tokens with `exp`, `iat` at most 300 s old and `token_use: workload`; no local-secret fallback | Same-account key custody (an administrator can still change the key policy or the function); a single issuer for six services; receivers trust a withdrawn key for up to 10 minutes | Every service-to-service call in production; deployment still needs I5 and I6 |
 | D2 | Behaviour during an issuer outage (DEP-4-RES) | **Decided (default):** the agent is `essential: false` with an ECS container restart policy and keeps the `HEALTHY` start gate (ADR-047) | During an outage longer than a token's lifetime, service-to-service calls fail closed (OTP delivery, EHR records, Lab, Pharmacy, OCR, Outreach) while sign-in keeps working; nothing pages anyone until D4 | DEP-4 rollout |
 | D3 | Edge protection for the issuer (DEP-4-DOS) | **Decided (default, deny by default):** separate method throttles for `POST /token` and the JWKS `GET`, a REGIONAL web ACL on the issuer stage that blocks every source except the VPC's NAT gateway Elastic IPs (none in staging sleep), and an agent that caches its verified JWKS by `kid` (ADR-047) | A future caller outside the VPC (such as a D5 scanner) must leave through NAT or be allowlisted by a reviewed change; per-request WAF charges during a flood | DEP-4 rollout |
 | D4 | Alert routing | Dashboards only until an alerting workflow exists (ADR-032 forbids an SNS topic without one) | Nothing pages anyone | Every mitigation that relies on an alarm |
@@ -216,7 +216,7 @@ enrollment OTP, a recovery OTP and an EHR read.
 
 ### I6. Production issuer rollout (after I5, the production unlock and a deployment authorization)
 
-Follow `AWS_DEPLOYMENT_RUNBOOK.md` §12 on BRANCH:draft/production-workload-identity: synth and
+Follow `AWS_DEPLOYMENT_RUNBOOK.md` §12 on D-Eminence/hid-system#54: synth and
 verify; record the new template SHA as a new evidence entry; `cdk diff` must
 show additions and the removed workload parameters only, with no RDS, S3 or
 data-key replacement; deploy with every desired count at zero; check the
@@ -256,4 +256,4 @@ for each merged change and its evidence. Pull requests from this review:
 | DOC-1 (any facility member could complete a colleague's upload) | D-Eminence/hid-system#59 | merged (D13) |
 | Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
-| DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | BRANCH:draft/production-workload-identity, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
+| DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
