@@ -192,6 +192,7 @@ The reviewed role model is:
 | `hid_event_dispatcher` | Event transport command surface | None | No direct table access; executes only lease-bound claim/result/status functions. |
 | `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. |
 | `hid_ocr_queue_metrics` | Technical security-definer owner | None | Never inherited; owns `ocr.worker_queue_metrics()` and reads only `ocr.jobs.status` and `queued_at` through one exact RLS policy (0075). |
+| `hid_platform_control_reader` | Technical security-definer owner | None | Never inherited; owns `platform.control_enabled(text)` and reads only `platform.control_settings.control_key` and `enabled` through one exact RLS policy (launch; role bootstrap only). |
 | `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. |
 | `hid_schema_test_runtime` | Rollback-only schema/RLS acceptance | Test-only explicit grants | NOLOGIN and never used by application processes. |
 
@@ -2278,3 +2279,145 @@ Tests:
   codes with `ON CONFLICT (code) DO NOTHING`, as every other suite and
   verifier already did, so they pass on a database where 0082 seeded
   `direct-care`.
+
+## Non-superuser database chain on RDS (0083)
+
+On Amazon RDS for PostgreSQL 16 no role is a superuser. The migration
+administrator is a `NOSUPERUSER NOBYPASSRLS CREATEROLE` LOGIN that owns the
+schema (`MIGRATION_RUNBOOK.md` §6), and nothing relies on that owner bypassing
+row-level security (BRANCH:launch/db-rds-nonsuperuser). As such a role,
+verified locally on PostgreSQL 16.15, four things failed.
+
+**0015 and the OCR claim (0083).** 0015 gave `ocr.claim_worker_job(text,
+integer)` the clause `SET plpgsql.variable_conflict = 'use_column'`.
+`plpgsql.variable_conflict` has superuser context, so a non-superuser may set
+it, in `ALTER FUNCTION` and on every call of a function that carries it, only
+with `SET ON PARAMETER` on it. A fresh chain therefore stopped at 0015, and
+with the privilege granted every claim kept needing it, because the definer
+applies its settings as its owner on entry; after a revoke each claim failed
+with `permission denied to set parameter`.
+`0083_ocr_claim_in_body_variable_conflict.sql` replaces the function with the
+same signature, result columns, `SECURITY DEFINER`, `search_path` and body,
+and `#variable_conflict use_column` as the first line of the body. The
+compiler option resolves the same unqualified names to columns (for example
+`provider` in the stale-lease query), as 0064 to 0066 already do.
+`CREATE OR REPLACE` keeps the owner, the `EXECUTE` grants and the comment and
+leaves `proconfig` with the `search_path` alone. A catalogue scan finds no
+other application function that sets a parameter which is not user-settable
+(`audit.list_platform_events` sets `plan_cache_mode`, which any role may set).
+0015 is unchanged, so the privilege is still needed while it applies, and only
+then; the operator grants it for the migration run and revokes it after 0083.
+No table lock, grant or data change.
+
+**The role bootstrap.** `runtime-grants.sql` re-asserted `NOSUPERUSER …
+NOBYPASSRLS` with `ALTER ROLE` on every run. PostgreSQL 16 lets only a
+superuser change `SUPERUSER`, and only a role holding `BYPASSRLS` change that
+attribute, even to its current value, so the file stopped there and rolled
+back. It now:
+
+- creates each of the 25 group roles with its attributes, as before, then
+  checks them: a role with `SUPERUSER`, `BYPASSRLS` or `REPLICATION` is
+  refused, and `LOGIN`, `CREATEDB`, `CREATEROLE` and `INHERIT` are corrected
+  only when they differ, so a run that changes nothing issues no
+  `ALTER ROLE`;
+- refuses a runner that is neither a superuser nor holds `ADMIN OPTION` on
+  every role (every membership grant needs it), and empties
+  `createrole_self_grant` for its session;
+- grants the runner `INHERIT` and `SET` membership in
+  `hid_event_delivery_commands`, `hid_ocr_queue_metrics` and
+  `hid_platform_control_reader` right after the role check, because a
+  non-superuser may give a function to a role only if it may `SET ROLE` to it,
+  and may grant or revoke on a function it does not own only with the owner's
+  privileges (the `REVOKE ALL` statements of a rerun included);
+- grants each technical role `CREATE` on `integration`, `ocr` or `platform`
+  only around its `ALTER FUNCTION … OWNER TO`, which a non-superuser transfer
+  requires of the new owner;
+- revokes the memberships at its end and refuses the run if a membership or
+  `CREATE` is left. The file runs as one transaction, so neither is visible
+  to another session.
+
+A superuser run grants exactly what it did before, plus the new role below;
+a catalogue diff of the two bootstraps on the same 0082 schema shows nothing
+else. PostgreSQL 16 records an `ADMIN OPTION`-only membership, granted by the
+bootstrap superuser, of a non-superuser creator in each role it creates. It
+carries no privilege and no `SET ROLE`, and its holder cannot revoke it.
+`runtime-roles.integration.sql` allows exactly that row on the technical
+owners and refuses any other member, membership or schema `CREATE`.
+
+**Platform controls.** `platform.control_enabled(text)` (0040) is the
+`SECURITY DEFINER` read that the Identity, EHR and Outreach guards make on
+every request that is not a platform administrator's.
+`platform.control_settings` forces row-level security, and its only read
+policy requires `platform.control.read`, so under an owner without
+`BYPASSRLS` the function saw no row and raised `PLATFORM_CONTROL_UNAVAILABLE`,
+which the guards answer with `503`. The bootstrap gives it a technical owner,
+`hid_platform_control_reader` (`NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+NOINHERIT NOBYPASSRLS`, never granted to any role), following
+`hid_ocr_queue_metrics`:
+
+- `SELECT (control_key, enabled)` on `platform.control_settings`, and the
+  policy `platform_controls_definer_read`, `FOR SELECT TO
+  hid_platform_control_reader USING (true)`. The six controls are
+  platform-wide booleans with no PHI, so reading all of them is the
+  function's purpose;
+- `USAGE` on `platform` and on `auth`, and no privilege on any `auth` object.
+  The table's PUBLIC read policy applies to this role too, and PostgreSQL
+  inlines its SQL function `platform.current_account_id()` while planning, as
+  the reading role; that body names `auth`. The policies are OR-ed, so the
+  `true` policy decides the row and the PUBLIC expression is folded away
+  without running;
+- `EXECUTE` stays with PUBLIC (0040). `platform.require_control_enabled`
+  reads no table and calls `control_enabled`, so its owner is unchanged.
+
+A later migration that replaces a function owned by a technical role needs
+that owner's privileges, as the bootstrap's transfers do (`MIGRATION_RUNBOOK.md`
+§6.2). The OCR, document-scanner and Outreach definer paths of the release
+checklist's P8 still need an owner that bypasses row-level security, or the
+technical owners proposed in ADR-041.
+
+**Runtime LOGINs.** `db:verify-roles` checks only the NOLOGIN group roles.
+`npm run db:verify-logins` (`scripts/verify-runtime-logins.mjs`) connects with
+each of the ten runtime credentials' own URL and runs
+`database/runtime-login-assertions.sql` on that connection: the login runs as
+itself, is not the RDS master or the migration administrator, has no
+`SUPERUSER`, `BYPASSRLS`, `CREATEROLE`, `CREATEDB` or `REPLICATION`, is a
+direct member of its aggregate only (inherited, without `ADMIN OPTION`) and
+reaches no role its aggregate does not, has the privileges of no owner of the
+database or of an application schema, relation or function, is named by no
+direct grant and may create nothing; two credentials may not share a login.
+An owner skips the policies of every table that does not force them, among
+them `identity.patients`, `patient_identifiers` and the consent tables (0005),
+so a secret holding the migration URL would otherwise read them unfiltered.
+
+In production, each service that connects to the database (the six APIs, the
+OCR worker, the event dispatcher and the notification worker; the EHR scanner
+pool too) refuses to start when `current_user` or `session_user` is a
+superuser, bypasses row-level security or has the privileges of the owner of
+any application schema, relation or function (`runtime-role-guard.ts`).
+
+Tests:
+
+- `function-parameter-settings.integration.sql` refuses any application
+  function whose `SET` names a parameter that is not user-settable, and
+  requires the claim's signature, result, `search_path`-only settings and
+  in-body option. Without 0083 it fails: "ocr.claim_worker_job(text,integer)
+  sets plpgsql.variable_conflict".
+- `platform-control-owner.integration.sql` requires the technical owner
+  (`NOLOGIN`, no `SUPERUSER` or `BYPASSRLS`) and, as `hid_identity_api_runtime`,
+  `hid_ehr_api_runtime` and `hid_outreach_api_runtime` with no account, a
+  non-administrator and an unknown subject, every control as a platform Super
+  Admin lists it after changing one, the disabled refusal and the invalid-key
+  refusal. Under a non-bypass owner without the bootstrap change the call
+  raises `PLATFORM_CONTROL_UNAVAILABLE`.
+- `runtime-roles.integration.sql` asserts the new role's attributes, owner,
+  column grants, schema usage and single policy, the creator's `ADMIN
+  OPTION`-only row, and no schema `CREATE` on the three technical owners.
+- `ocr-worker-lease.integration.sql`: under a non-bypass owner, the claim of a
+  provider whose only job the owner cannot see returns no row and changes
+  nothing (0015's setting refused it before 0083).
+- `scripts/verify-non-superuser-database.mjs`, run by the rehearsal, does the
+  whole chain on its own disposable cluster as a `NOSUPERUSER NOBYPASSRLS
+  CREATEROLE NOCREATEDB` administrator (`TUF-STAGING-MIGRATION.md`).
+- The start-up check has a unit spec in each of the nine services, and
+  `scripts/tests` checks `db:verify-logins`'s credential map and that the nine
+  copies of the check are identical.

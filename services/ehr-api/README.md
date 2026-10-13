@@ -137,6 +137,19 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
+The bootstrap needs no superuser. On RDS it runs as the migration
+administrator (`NOSUPERUSER NOBYPASSRLS CREATEROLE`) that created the HID roles;
+a fresh chain there also needs `SET ON PARAMETER plpgsql.variable_conflict` for
+the migration run that applies 0015 (`docs/MIGRATION_RUNBOOK.md` §6). Verify
+each runtime credential's own LOGIN with its own URL, after provisioning and
+after every rotation:
+
+```bash
+DATABASE_LOGIN_URL_IDENTITY_API=... DATABASE_LOGIN_URL_EHR_API=... \
+  DATABASE_FORBIDDEN_LOGINS=hid_platform_bootstrap,<migration administrator> \
+  npm run db:verify-logins   # all ten credentials, or --partial
+```
+
 Use this assignment only when the loaded `DATABASE_URL` is the approved
 migration/security-administrator credential. The bootstrap never falls back to
 the runtime application URL and never loads `DATABASE_ADMIN_URL` from a local
@@ -154,7 +167,9 @@ Runtime role separation is mandatory:
 - `OCR_WORKER_DATABASE_URL`: different login inheriting only `hid_ocr_worker`;
 - extracted Lab login: only `hid_lab_api_runtime`;
 - extracted Pharmacy login: only `hid_pharmacy_api_runtime`;
-- migration credentials: unavailable to the running service.
+- migration credentials: unavailable to the running service. In production
+  every service refuses to start over a superuser, `BYPASSRLS` or owner
+  connection.
 
 `hid_identity_api_runtime` composes only Identity/authentication persistence and
 append-only audit. `hid_ehr_api_runtime` composes only EHR persistence and

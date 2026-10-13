@@ -1838,6 +1838,64 @@ Alternatives considered:
 
 Related: ADR-028, ADR-039, ADR-040; release checklist P8 and §4.1.
 
+## ADR-041 addendum: the non-superuser chain on RDS (launch, 0083)
+
+Status: Accepted (BRANCH:launch/db-rds-nonsuperuser). Items 3 and 4 are
+implemented for what launch needs; the five technical owners of items 1 and 2
+stay proposed.
+
+Date: 2026-10-13
+
+Decision:
+
+- **Item 3.** Migration 0083 replaces `ocr.claim_worker_job` as item 3
+  proposed. A fresh chain on RDS still needs
+  `SET ON PARAMETER plpgsql.variable_conflict` for 0015; the operator holds it
+  only for the migration run and revokes it after 0083
+  (`MIGRATION_RUNBOOK.md` §6.1). If RDS refuses the grant, the fallback is a
+  reviewed ledger exception that rewrites 0015's statement, which no staging
+  or production database has applied; not a superuser-like role and not
+  `BYPASSRLS`.
+- **Item 4, the bootstrap.** The role bootstrap creates the roles and checks
+  their attributes; it refuses a HID group role with `SUPERUSER`,
+  `BYPASSRLS` or `REPLICATION` and a runner without `ADMIN OPTION` on them.
+  Its function transfers hold `CREATE` on the schema only around each
+  transfer, as proposed. Its grants and revokes on the transferred functions
+  also need the owner's privileges, which a `SET`-only membership does not
+  give (`REVOKE ALL` on a rerun fails with `permission denied for function`).
+  The bootstrap therefore holds `INHERIT` and `SET` membership in the
+  technical owners for its own transaction only, and revokes it before
+  committing. That transaction reads no table, so the technical policies
+  widen no visibility; this differs from the persistent `INHERIT` membership
+  item 4 rejected. No persistent membership is granted, so
+  `runtime-roles.integration.sql` allows only the `ADMIN OPTION`-only row
+  that PostgreSQL 16 records for a non-superuser creator.
+- **A sixth technical owner.** `platform.control_enabled(text)` gets
+  `hid_platform_control_reader`, on the `hid_ocr_queue_metrics` pattern:
+  `SELECT (control_key, enabled)` on `platform.control_settings` and one
+  `FOR SELECT TO hid_platform_control_reader USING (true)` policy, since the
+  six controls are platform-wide non-PHI flags. It also needs `USAGE` on
+  `auth`, without any privilege on an `auth` object: the table's PUBLIC read
+  policy applies to it, and PostgreSQL inlines that policy's SQL function
+  `platform.current_account_id()`, whose body names `auth`, while planning as
+  the reading role. Without this every patient and provider request answered
+  `503 PLATFORM_CONTROL_UNAVAILABLE` under an owner without `BYPASSRLS`.
+- **Runtime credentials.** `db:verify-logins` checks each runtime LOGIN over
+  its own connection, and every database-connected service refuses to start
+  in production over a superuser, `BYPASSRLS` or owner connection.
+
+Consequences:
+
+- the chain, the bootstrap and the platform controls need no superuser and no
+  `BYPASSRLS`; the rehearsal checks this on its own cluster
+  (`scripts/verify-non-superuser-database.mjs`);
+- the OCR, document-scanner and Outreach paths of P8 still need an owner that
+  bypasses row-level security or the technical owners of item 1. Launch
+  decision I3 does not rely on owner `BYPASSRLS`, so they stay out of the
+  release until they pass under a non-bypass owner;
+- a later migration that replaces a function owned by a technical role needs
+  that owner's privileges, as item 4 describes for a `CREATE OR REPLACE`.
+
 # ADR-042: Services Lock Only Rows Their Runtime Role May Update; SERIALIZABLE Transactions Retry
 
 Status: Accepted (Phase 4 Stage 9).
