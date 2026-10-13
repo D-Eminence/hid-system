@@ -28,7 +28,7 @@ unused provider startup requirements and ECS secret-field injection. Notificatio
 API tests (31), infrastructure tests (84), typechecks and the build pass. Live
 staging deployment and delivery remain unverified.
 
-**Production is not the `full` profile (ADR-053, BRANCH:launch/infra-launch-config).**
+**Production is not the `full` profile (ADR-053, D-Eminence/hid-system#66).**
 Launch OTP is email through SES and SMS through Termii: production runs
 `NOTIFICATION_DELIVERY_PROFILE=otp-email-sms`, which requires the SES sender and
 the Termii base URL, key and approved sender ID, refuses WhatsApp configuration

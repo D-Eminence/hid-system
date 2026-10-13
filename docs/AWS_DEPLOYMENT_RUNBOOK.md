@@ -38,7 +38,7 @@ acceptance scope.
 ## Production OTP profile (ADR-053)
 
 Production (and development) select `NOTIFICATION_DELIVERY_PROFILE=otp-email-sms`
-(BRANCH:launch/infra-launch-config): email OTP through SES and SMS OTP through
+(D-Eminence/hid-system#66): email OTP through SES and SMS OTP through
 Termii. The Notification API reads exactly `sesFromAddress`, `termiiBaseUrl`,
 `termiiApiKey` and `termiiSenderId` from `/hid/production/notification-provider`,
 and the secret must hold exactly those four fields: no Meta, WhatsApp, Brevo or
@@ -209,7 +209,7 @@ bytes) and fidelity
 bytes). `verify:synth` and `verify:policy` pass for all five. The production
 row above stays `main`'s until this branch merges; then this hash replaces it.
 
-**Under ADR-053 (BRANCH:launch/infra-launch-config).** The same offline
+**Under ADR-053 (D-Eminence/hid-system#66).** The same offline
 synthesis (AWS credential variables removed, `AWS_CONFIG_FILE` and
 `AWS_SHARED_CREDENTIALS_FILE` pointing at no file, no `HID_AWS_ACCOUNT`, no
 `HID_ENABLED_API_ROUTES`) gives production
@@ -750,7 +750,7 @@ Steps:
      - `DependsOn` changes on services, scaling targets and policies and
        service-discovery services;
      - removal of the eight workload parameters;
-     - under ADR-053 (BRANCH:launch/infra-launch-config), if the stack was
+     - under ADR-053 (D-Eminence/hid-system#66), if the stack was
        last deployed without it: the alarm and OK actions on every alarm, the
        four issuer alarms, the renewal and OTP metric filters and alarms, the
        removal of the alarms and scaling policies of the modules that are off,
@@ -843,7 +843,7 @@ Rollback:
 
 ## 13. Production launch preflight and alarm topic (ADR-053): operator plan, not approved
 
-**NOT APPROVED. Do not execute.** Prepared in BRANCH:launch/infra-launch-config.
+**NOT APPROVED. Do not execute.** Prepared in D-Eminence/hid-system#66.
 Nothing here has been run: no production account was read, no topic, key,
 subscription or secret exists, and nothing was deployed. Each step needs the
 production deployment authorization of §12.

@@ -1229,7 +1229,7 @@ Cloudflare edge, notification boundary, and legacy migration convergence.
 
 Date: 2026-10-13
 
-Change: BRANCH:launch/infra-launch-config (register INFRA-COUNT; ADR-053).
+Change: D-Eminence/hid-system#66 (register INFRA-COUNT; ADR-053).
 
 "Production never scales to zero" applies once a service is rolled out. Until
 then every production `*DesiredCount` defaults to 0, as ADR-032 required: the
@@ -2777,7 +2777,7 @@ launch module set D17); not deployed
 
 Date: 2026-10-13
 
-Change: BRANCH:launch/infra-launch-config (register INFRA-COUNT, D4, the code
+Change: D-Eminence/hid-system#66 (register INFRA-COUNT, D4, the code
 part of NOTIF-PROD, CFG-PROD, and the preflight parts of I1 and REC-GOOGLE).
 
 Context:

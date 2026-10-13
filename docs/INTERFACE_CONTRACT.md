@@ -43,7 +43,7 @@ opaque one-time completion credential, and complete consumes that credential.
 Identity calls Notification API directly over workload authentication; these
 credentials never use the ordinary-notification event path. In production the
 Notification API runs the `otp-email-sms` profile (ADR-053,
-BRANCH:launch/infra-launch-config): `POST /notifications/otp` delivers
+D-Eminence/hid-system#66): `POST /notifications/otp` delivers
 `email` through SES and `sms` through Termii and answers `400` for `whatsapp`
 without a provider attempt; Identity sends only `email` and `sms`. The `202`
 response's `requestId` is also the correlation id of the one PHI-free
