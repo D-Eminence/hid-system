@@ -116,15 +116,17 @@ do $$ begin
   exception when check_violation or object_not_in_prerequisite_state then null;
   end;
   -- Since 0088 a staff session family holds MFA assurance too (staff MFA,
-  -- staff-mfa.integration.sql); it is never platform step-up evidence (6).
-  -- Accepted here, then undone, so the staff session stays unverified below.
+  -- staff-mfa.integration.sql), but only on a factor enrolled with a staff
+  -- proof. This Super Admin's factor was enrolled by platform sign-in, so it
+  -- never verifies their staff session; it is never platform step-up
+  -- evidence either (6).
   begin
     insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
     values ('c7600000-0000-4000-8000-0000000000a1', 'c7200000-0000-4000-8000-000000000001',
       'c7400000-0000-4000-8000-000000000001', 'totp', now());
-    raise exception using errcode = 'P0001', message = 'STAFF_ASSURANCE_ACCEPTED';
-  exception when raise_exception then
-    if sqlerrm <> 'STAFF_ASSURANCE_ACCEPTED' then raise; end if;
+    raise exception 'a platform-enrolled factor verified a staff session';
+  exception when check_violation then
+    if sqlerrm <> 'STAFF_MFA_FACTOR_UNPROVEN' then raise; end if;
   end;
 end $$;
 

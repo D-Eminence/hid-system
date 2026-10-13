@@ -3,14 +3,24 @@
 -- synthetic data only. Every command runs as hid_identity_api_runtime, the
 -- role the Identity API uses, so a missing runtime grant fails here.
 --
--- 1. A staff session family may hold MFA assurance; a patient session never.
+-- 1. A staff session family may hold MFA assurance, but only on a factor
+--    that records a staff enrolment proof. A factor a platform first
+--    enrolment created on the password alone never verifies a staff session
+--    (it still verifies a platform one); a patient session never holds
+--    assurance.
 -- 2. Second-factor challenges carry their sign-in kind; a staff enrolment
---    challenge is consumed only with a verified fresh proof, never on the
---    password alone, and a verified proof is final.
--- 3. OTP password recovery (auth.complete_recovery_otp) ends every session
---    and leaves the account's factor and recovery codes as they are, so a
---    mailbox alone never yields an MFA-verified staff session.
--- 4. The governed two-person MFA reset (0070) accepts a staff target: it
+--    challenge is consumed only once it records a verified fresh proof, and a
+--    verified proof is final. The database records that the proof was
+--    verified; it cannot check the emailed code itself, which Identity does.
+-- 3. A factor records a staff enrolment proof only when it names a live
+--    staff enrolment challenge of the same account whose proof of that method
+--    is verified, and the record never changes.
+-- 4. OTP password recovery (auth.complete_recovery_otp) ends every session
+--    and leaves the account's factor and recovery codes as they are, so for
+--    an account with a factor a mailbox alone never yields an MFA-verified
+--    staff session. (An account without one enrols on a code sent to that
+--    same mailbox: see INTERFACE_CONTRACT.md, staff sign-in.)
+-- 5. The governed two-person MFA reset (0070) accepts a staff target: it
 --    revokes the factor, the recovery codes and every staff session, and
 --    changes the token version.
 begin;
@@ -24,13 +34,16 @@ do $$ begin
 end $$;
 
 -- Accounts: d1 a doctor, d2 a patient, d3 and d4 two Super Admins (reset
--- requester and approver), d5 a second doctor reset below.
+-- requester and approver), d5 a nurse reset below, d6 a platform security
+-- auditor who is also a doctor, d7 a nurse without a factor.
 insert into auth.accounts (id, subject, email, status, password_hash, password_algorithm) values
   ('d8200000-0000-4000-8000-000000000001', 'synthetic:staff-mfa:doctor', 'doctor@staff-mfa.invalid', 'active', 'synthetic-hash', 'argon2id'),
   ('d8200000-0000-4000-8000-000000000002', 'synthetic:staff-mfa:patient', 'patient@staff-mfa.invalid', 'active', 'synthetic-hash', 'argon2id'),
   ('d8200000-0000-4000-8000-000000000003', 'synthetic:staff-mfa:super-one', 'one@staff-mfa.invalid', 'active', 'synthetic-hash', 'argon2id'),
   ('d8200000-0000-4000-8000-000000000004', 'synthetic:staff-mfa:super-two', 'two@staff-mfa.invalid', 'active', 'synthetic-hash', 'argon2id'),
-  ('d8200000-0000-4000-8000-000000000005', 'synthetic:staff-mfa:nurse', 'nurse@staff-mfa.invalid', 'active', 'synthetic-hash', 'argon2id');
+  ('d8200000-0000-4000-8000-000000000005', 'synthetic:staff-mfa:nurse', 'nurse@staff-mfa.invalid', 'active', 'synthetic-hash', 'argon2id'),
+  ('d8200000-0000-4000-8000-000000000006', 'synthetic:staff-mfa:dual', 'dual@staff-mfa.invalid', 'active', 'synthetic-hash', 'argon2id'),
+  ('d8200000-0000-4000-8000-000000000007', 'synthetic:staff-mfa:new-nurse', 'new-nurse@staff-mfa.invalid', 'active', 'synthetic-hash', 'argon2id');
 insert into identity.organizations (id, name, slug) values
   ('d8300000-0000-4000-8000-000000000001', 'Staff MFA Suite Organization', 'staff-mfa-suite');
 insert into identity.facilities (id, organization_id, name, code, timezone, active, lifecycle_status) values
@@ -38,24 +51,45 @@ insert into identity.facilities (id, organization_id, name, code, timezone, acti
    'SMFA-SUITE', 'Africa/Lagos', true, 'verified');
 insert into identity.staff (id, account_id, full_name, email, verification_status, default_role) values
   ('d8400000-0000-4000-8000-000000000001', 'd8200000-0000-4000-8000-000000000001', 'Synthetic Doctor', 'doctor@staff-mfa.invalid', 'verified', 'doctor'),
-  ('d8400000-0000-4000-8000-000000000005', 'd8200000-0000-4000-8000-000000000005', 'Synthetic Nurse', 'nurse@staff-mfa.invalid', 'verified', 'nurse');
+  ('d8400000-0000-4000-8000-000000000005', 'd8200000-0000-4000-8000-000000000005', 'Synthetic Nurse', 'nurse@staff-mfa.invalid', 'verified', 'nurse'),
+  ('d8400000-0000-4000-8000-000000000006', 'd8200000-0000-4000-8000-000000000006', 'Synthetic Dual', 'dual@staff-mfa.invalid', 'verified', 'doctor'),
+  ('d8400000-0000-4000-8000-000000000007', 'd8200000-0000-4000-8000-000000000007', 'Synthetic New Nurse', 'new-nurse@staff-mfa.invalid', 'verified', 'nurse');
 insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
     membership_role, app_role, is_primary, active) values
   ('d8500000-0000-4000-8000-000000000001', 'd8400000-0000-4000-8000-000000000001', 'd8200000-0000-4000-8000-000000000001',
    'd8300000-0000-4000-8000-000000000001', 'd8300000-0000-4000-8000-000000000002', 'doctor', 'doctor', true, true),
   ('d8500000-0000-4000-8000-000000000005', 'd8400000-0000-4000-8000-000000000005', 'd8200000-0000-4000-8000-000000000005',
+   'd8300000-0000-4000-8000-000000000001', 'd8300000-0000-4000-8000-000000000002', 'nurse', 'nurse', true, true),
+  ('d8500000-0000-4000-8000-000000000006', 'd8400000-0000-4000-8000-000000000006', 'd8200000-0000-4000-8000-000000000006',
+   'd8300000-0000-4000-8000-000000000001', 'd8300000-0000-4000-8000-000000000002', 'doctor', 'doctor', true, true),
+  ('d8500000-0000-4000-8000-000000000007', 'd8400000-0000-4000-8000-000000000007', 'd8200000-0000-4000-8000-000000000007',
    'd8300000-0000-4000-8000-000000000001', 'd8300000-0000-4000-8000-000000000002', 'nurse', 'nurse', true, true);
 insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name) values
   ('d8600000-0000-4000-8000-000000000002', 'd8200000-0000-4000-8000-000000000002', 'HID-SMFAPTNT', 'Synthetic', 'Patient', 'Synthetic Patient');
 insert into auth.account_roles (id, account_id, role_code, scope_type, grant_reason) values
   ('d8700000-0000-4000-8000-000000000003', 'd8200000-0000-4000-8000-000000000003', 'platform_super_admin', 'platform', 'Synthetic staff MFA suite role'),
-  ('d8700000-0000-4000-8000-000000000004', 'd8200000-0000-4000-8000-000000000004', 'platform_super_admin', 'platform', 'Synthetic staff MFA suite role');
+  ('d8700000-0000-4000-8000-000000000004', 'd8200000-0000-4000-8000-000000000004', 'platform_super_admin', 'platform', 'Synthetic staff MFA suite role'),
+  ('d8700000-0000-4000-8000-000000000006', 'd8200000-0000-4000-8000-000000000006', 'security_auditor', 'platform', 'Synthetic staff MFA suite role');
 
--- Active factors: d1, d3, d4, d5. d2 (the patient) has none.
-insert into auth.mfa_factors (id, account_id, status, secret_ciphertext, secret_key_version, activated_at, last_used_step)
+-- The staff enrolment challenges d1 and d5 enrolled on: opened by provider
+-- activation, so they carry a verified proof.
+insert into auth.mfa_login_challenges (id, account_id, purpose, token_sha256, account_token_version, created_at,
+    expires_at, max_attempts, session_kind, proof_method, proof_verified_at)
+select ('d8b00000-0000-4000-8000-0000000000e' || suffix)::uuid, ('d8200000-0000-4000-8000-00000000000' || suffix)::uuid,
+  'enroll', repeat(suffix, 63) || 'e', 1, clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'staff',
+  'provider_activation', clock_timestamp()
+from unnest(array['1', '5']) as suffix;
+
+-- Active factors: d1 and d5 enrolled by staff sign-in (each records its
+-- proof); d3, d4 and d6 by platform sign-in (no staff proof). d2 (the patient)
+-- and d7 have none.
+insert into auth.mfa_factors (id, account_id, status, secret_ciphertext, secret_key_version, activated_at, last_used_step,
+    enrollment_proof, enrollment_challenge_id)
 select ('d8800000-0000-4000-8000-00000000000' || suffix)::uuid, ('d8200000-0000-4000-8000-00000000000' || suffix)::uuid,
-  'active', gen_random_bytes(49), 'suite-v1', now(), 1
-from unnest(array['1', '3', '4', '5']) as suffix;
+  'active', gen_random_bytes(49), 'suite-v1', now(), 1,
+  case when suffix in ('1', '5') then 'provider_activation' end,
+  case when suffix in ('1', '5') then ('d8b00000-0000-4000-8000-0000000000e' || suffix)::uuid end
+from unnest(array['1', '3', '4', '5', '6']) as suffix;
 insert into auth.mfa_recovery_codes (id, account_id, factor_id, batch_id, code_hmac, key_version) values
   ('d8900000-0000-4000-8000-000000000001', 'd8200000-0000-4000-8000-000000000001', 'd8800000-0000-4000-8000-000000000001',
    'd8900000-0000-4000-8000-0000000000b1', repeat('1', 64), 'suite-v1'),
@@ -64,8 +98,9 @@ insert into auth.mfa_recovery_codes (id, account_id, factor_id, batch_id, code_h
   ('d8900000-0000-4000-8000-000000000005', 'd8200000-0000-4000-8000-000000000005', 'd8800000-0000-4000-8000-000000000005',
    'd8900000-0000-4000-8000-0000000000b5', repeat('5', 64), 'suite-v1');
 
--- Sessions: staff sessions of d1 (a1, a2) and d5 (a5), a patient session of
--- d2 (a3), platform sessions of the two Super Admins (b3, b4).
+-- Sessions: staff sessions of d1 (a1, a2), d5 (a5), d6 (a6) and d7 (a7), a
+-- patient session of d2 (a3), platform sessions of the two Super Admins (b3,
+-- b4) and of d6 (b6).
 insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
     authentication_method, issued_at, expires_at, absolute_expires_at, session_kind, patient_id) values
   ('d8a00000-0000-4000-8000-0000000000a1', 'd8200000-0000-4000-8000-000000000001', 'd8a00000-0000-4000-8000-0000000000a1',
@@ -80,14 +115,21 @@ insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, acce
   ('d8a00000-0000-4000-8000-0000000000b3', 'd8200000-0000-4000-8000-000000000003', 'd8a00000-0000-4000-8000-0000000000b3',
    repeat('e', 64), gen_random_uuid(), 1, 'password', now(), now() + interval '15 minutes', now() + interval '8 hours', 'platform', null),
   ('d8a00000-0000-4000-8000-0000000000b4', 'd8200000-0000-4000-8000-000000000004', 'd8a00000-0000-4000-8000-0000000000b4',
-   repeat('f', 64), gen_random_uuid(), 1, 'password', now(), now() + interval '15 minutes', now() + interval '8 hours', 'platform', null);
+   repeat('f', 64), gen_random_uuid(), 1, 'password', now(), now() + interval '15 minutes', now() + interval '8 hours', 'platform', null),
+  ('d8a00000-0000-4000-8000-0000000000a6', 'd8200000-0000-4000-8000-000000000006', 'd8a00000-0000-4000-8000-0000000000a6',
+   repeat('0', 63) || '6', gen_random_uuid(), 1, 'password', now(), now() + interval '8 hours', now() + interval '24 hours', 'staff', null),
+  ('d8a00000-0000-4000-8000-0000000000b6', 'd8200000-0000-4000-8000-000000000006', 'd8a00000-0000-4000-8000-0000000000b6',
+   repeat('1', 63) || '6', gen_random_uuid(), 1, 'password', now(), now() + interval '15 minutes', now() + interval '8 hours', 'platform', null),
+  ('d8a00000-0000-4000-8000-0000000000a7', 'd8200000-0000-4000-8000-000000000007', 'd8a00000-0000-4000-8000-0000000000a7',
+   repeat('2', 63) || '7', gen_random_uuid(), 1, 'password', now(), now() + interval '8 hours', now() + interval '24 hours', 'staff', null);
 
 set local role hid_identity_api_runtime;
 select set_config('app.actor_subject', 'system:auth', true);
 select set_config('app.correlation_id', 'staff-mfa-suite-0001', true);
 
--- 1. Session assurance: a staff session family may hold it (0088), a patient
--- session or an inactive factor never.
+-- 1. Session assurance: a staff session family may hold it on a factor with a
+-- staff proof (0088); a patient session, an inactive factor or a factor
+-- enrolled without a staff proof never.
 insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at) values
   ('d8a00000-0000-4000-8000-0000000000a1', 'd8200000-0000-4000-8000-000000000001',
    'd8800000-0000-4000-8000-000000000001', 'totp', clock_timestamp()),
@@ -123,6 +165,20 @@ do $$ begin
   exception when check_violation then
     if sqlerrm <> 'SESSION_ASSURANCE_INVALID' then raise; end if;
   end;
+  -- A factor enrolled by platform sign-in, on the password alone, never
+  -- verifies a staff session of its account, which holds an eligible staff
+  -- membership; it still verifies the platform session.
+  begin
+    insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
+    values ('d8a00000-0000-4000-8000-0000000000a6', 'd8200000-0000-4000-8000-000000000006',
+      'd8800000-0000-4000-8000-000000000006', 'totp', clock_timestamp());
+    raise exception 'a factor enrolled without a staff proof verified a staff session';
+  exception when check_violation then
+    if sqlerrm <> 'STAFF_MFA_FACTOR_UNPROVEN' then raise; end if;
+  end;
+  insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
+  values ('d8a00000-0000-4000-8000-0000000000b6', 'd8200000-0000-4000-8000-000000000006',
+    'd8800000-0000-4000-8000-000000000006', 'totp', clock_timestamp());
   -- Staff assurance is evidence of this session family only: it is never step-up evidence.
   perform set_config('app.actor_subject', 'synthetic:staff-mfa:doctor', true);
   perform set_config('app.session_id', 'd8a00000-0000-4000-8000-0000000000a1', true);
@@ -234,7 +290,97 @@ begin
   where id = 'd8b00000-0000-4000-8000-000000000003';
 end $$;
 
--- 3. OTP recovery of the doctor's password keeps the factor and recovery codes
+-- 3. A factor's staff proof names a live staff enrolment challenge of its own
+-- account whose proof of that method is verified, and never changes. f1 is
+-- proven by an emailed code; f2's code was sent but not verified; f3 is a
+-- platform enrolment; f4 was proven and then consumed.
+insert into auth.mfa_login_challenges (id, account_id, purpose, token_sha256, account_token_version, created_at,
+    expires_at, max_attempts, session_kind, proof_method, proof_verifier_hmac, proof_key_version, proof_sent_at,
+    proof_verified_at) values
+  ('d8b00000-0000-4000-8000-0000000000f1', 'd8200000-0000-4000-8000-000000000007', 'enroll', repeat('5', 64), 1,
+   clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'staff', 'email_code', repeat('a', 64), 'suite-v1',
+   now(), clock_timestamp()),
+  ('d8b00000-0000-4000-8000-0000000000f2', 'd8200000-0000-4000-8000-000000000007', 'enroll', repeat('6', 64), 1,
+   clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'staff', 'email_code', repeat('b', 64), 'suite-v1',
+   now(), null),
+  ('d8b00000-0000-4000-8000-0000000000f3', 'd8200000-0000-4000-8000-000000000007', 'enroll', repeat('7', 64), 1,
+   clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'platform', null, null, null, null, null),
+  ('d8b00000-0000-4000-8000-0000000000f4', 'd8200000-0000-4000-8000-000000000007', 'enroll', repeat('8', 64), 1,
+   clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'staff', 'email_code', repeat('c', 64), 'suite-v1',
+   now(), clock_timestamp());
+update auth.mfa_login_challenges set consumed_at = clock_timestamp(), row_version = row_version + 1
+where id = 'd8b00000-0000-4000-8000-0000000000f4';
+do $$
+declare
+  shape text;
+begin
+  foreach shape in array array['unverified', 'platform', 'other-account', 'method', 'consumed', 'missing'] loop
+    begin
+      insert into auth.mfa_factors (id, account_id, status, secret_ciphertext, secret_key_version, enrollment_expires_at,
+          enrollment_proof, enrollment_challenge_id)
+      values (gen_random_uuid(), 'd8200000-0000-4000-8000-000000000007', 'pending', gen_random_bytes(49), 'suite-v1',
+        clock_timestamp() + interval '5 minutes',
+        case when shape in ('method', 'other-account') then 'provider_activation' else 'email_code' end,
+        case shape when 'unverified' then 'd8b00000-0000-4000-8000-0000000000f2'::uuid
+          when 'platform' then 'd8b00000-0000-4000-8000-0000000000f3'::uuid
+          when 'other-account' then 'd8b00000-0000-4000-8000-0000000000e1'::uuid
+          when 'method' then 'd8b00000-0000-4000-8000-0000000000f1'::uuid
+          when 'consumed' then 'd8b00000-0000-4000-8000-0000000000f4'::uuid
+          else gen_random_uuid() end);
+      raise exception 'a factor recorded a staff proof it does not have (%)', shape;
+    exception when check_violation then
+      if sqlerrm <> 'MFA_ENROLLMENT_PROOF_REQUIRED' then raise; end if;
+    end;
+  end loop;
+  -- A proof without its challenge, a challenge without its proof, or an
+  -- unknown method is refused by the row's own check.
+  foreach shape in array array['no-challenge', 'no-proof', 'unknown-method'] loop
+    begin
+      insert into auth.mfa_factors (id, account_id, status, secret_ciphertext, secret_key_version, enrollment_expires_at,
+          enrollment_proof, enrollment_challenge_id)
+      values (gen_random_uuid(), 'd8200000-0000-4000-8000-000000000007', 'pending', gen_random_bytes(49), 'suite-v1',
+        clock_timestamp() + interval '5 minutes',
+        case shape when 'no-proof' then null when 'unknown-method' then 'password' else 'email_code' end,
+        case when shape = 'no-challenge' then null else 'd8b00000-0000-4000-8000-0000000000f1'::uuid end);
+      raise exception 'a factor with an inconsistent staff proof was accepted (%)', shape;
+    exception when check_violation then null;
+    end;
+  end loop;
+  -- The proven challenge f1: accepted, and the record is then final.
+  insert into auth.mfa_factors (id, account_id, status, secret_ciphertext, secret_key_version, enrollment_expires_at,
+      enrollment_proof, enrollment_challenge_id)
+  values ('d8800000-0000-4000-8000-000000000007', 'd8200000-0000-4000-8000-000000000007', 'pending',
+    gen_random_bytes(49), 'suite-v1', clock_timestamp() + interval '5 minutes', 'email_code',
+    'd8b00000-0000-4000-8000-0000000000f1');
+  foreach shape in array array['unset', 'other-challenge', 'other-method'] loop
+    begin
+      update auth.mfa_factors
+        set enrollment_proof = case shape when 'unset' then null when 'other-method' then 'provider_activation'
+              else enrollment_proof end,
+            enrollment_challenge_id = case shape when 'unset' then null
+              when 'other-challenge' then 'd8b00000-0000-4000-8000-0000000000f4'::uuid else enrollment_challenge_id end,
+            row_version = row_version + 1
+      where id = 'd8800000-0000-4000-8000-000000000007';
+      raise exception 'a factor''s staff proof changed (%)', shape;
+    exception when object_not_in_prerequisite_state then
+      if sqlerrm <> 'MFA_FACTOR_IMMUTABLE' then raise; end if;
+    end;
+  end loop;
+  -- Activated, it keeps its proof and verifies the account's staff session.
+  update auth.mfa_factors set status = 'active', activated_at = clock_timestamp(), last_used_step = 1,
+      row_version = row_version + 1
+  where id = 'd8800000-0000-4000-8000-000000000007';
+  update auth.mfa_login_challenges set consumed_at = clock_timestamp(), row_version = row_version + 1
+  where id = 'd8b00000-0000-4000-8000-0000000000f1';
+  insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
+  values ('d8a00000-0000-4000-8000-0000000000a7', 'd8200000-0000-4000-8000-000000000007',
+    'd8800000-0000-4000-8000-000000000007', 'totp', clock_timestamp());
+  if (select enrollment_proof from auth.mfa_factors where id = 'd8800000-0000-4000-8000-000000000007') <> 'email_code' then
+    raise exception 'activation changed the factor''s staff proof';
+  end if;
+end $$;
+
+-- 4. OTP recovery of the doctor's password keeps the factor and recovery codes
 -- (the second factor survives a mailbox) and ends every session.
 insert into auth.otp_challenges (id, account_id, recipient_hmac, purpose, channel, verifier_hmac, verifier_key_version,
     expires_at, max_attempts, verified_at, completion_token_hmac, completion_expires_at, account_token_version) values
@@ -268,7 +414,7 @@ begin
   end if;
 end $$;
 
--- 4. Governed MFA reset of a staff target (0070): requested by one Super
+-- 5. Governed MFA reset of a staff target (0070): requested by one Super
 -- Admin, approved by another, each with a fresh step-up.
 update auth.session_assurance set step_up_at = clock_timestamp(), step_up_count = step_up_count + 1,
     row_version = row_version + 1

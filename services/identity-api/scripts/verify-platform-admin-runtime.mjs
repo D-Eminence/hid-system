@@ -199,8 +199,16 @@ try {
   // The Super Admin enrolled the account's one authenticator at their staff sign-in.
   const superSession = asPlatform(await platform.signIn({ email: superAdmin.email,
     secret: staff.secretOf(superAdmin.email) }));
-  const auditorSession = asPlatform(await platform.enroll(auditor.email));
-  const supportSession = asPlatform(await platform.enroll(support.email));
+  // The auditor and the support administrator hold staff memberships too, so
+  // each enrols the account's one authenticator at staff sign-in, with the
+  // emailed proof (a platform first enrolment of such an account is refused,
+  // MFA-1), and then uses it for platform sign-in.
+  await signIn(auditor);
+  await signIn(support);
+  const auditorSession = asPlatform(await platform.signIn({ email: auditor.email,
+    secret: staff.secretOf(auditor.email) }));
+  const supportSession = asPlatform(await platform.signIn({ email: support.email,
+    secret: staff.secretOf(support.email) }));
 
   // 2-3. An ordinary facility administrator is refused, with or without the
   // facility context of their own membership; the denial is platform-scoped.

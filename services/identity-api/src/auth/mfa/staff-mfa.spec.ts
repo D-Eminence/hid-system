@@ -17,8 +17,9 @@ import { totp } from './totp';
  * challenge; the staff session is issued after TOTP or a recovery code; and
  * a first enrolment needs a fresh proof bound to its challenge (an email code
  * to the account's address, or the provider activation that opened it),
- * never the password alone. The SQL guard of the same rule is pinned by
- * staff-mfa.integration.sql; the HTTP flow runs in
+ * never the password alone. The proof is recorded on the factor, and only a
+ * factor that carries one verifies a staff sign-in. The SQL guards of the
+ * same rules are pinned by staff-mfa.integration.sql; the HTTP flow runs in
  * scripts/verify-staff-mfa-runtime.mjs.
  */
 const ACCOUNT = '40000000-0000-4000-8000-0000000000d1';
@@ -38,6 +39,14 @@ interface Options {
   proofCode?: string;
   email?: string | null;
   delivery?: 'accepted' | 'definitive_failure';
+  /** The account's active factor was enrolled without a staff proof (a platform first enrolment). */
+  unproven?: boolean;
+  /** The account holds an eligible staff membership (asked of a platform enrolment). */
+  staffEligible?: boolean;
+  /** Failures already counted in a rate-limit bucket in its current window, by bucket. */
+  bucketCounts?: Record<string, number>;
+  /** Rate-limit buckets that are blocked. */
+  blockedBuckets?: string[];
 }
 
 useTestEnvironment({ MFA_SECRET_KEY_B64: Buffer.alloc(32, 0x5a).toString('base64'), MFA_KEY_VERSION: 'staff-v1' });
@@ -45,10 +54,14 @@ useTestEnvironment({ MFA_SECRET_KEY_B64: Buffer.alloc(32, 0x5a).toString('base64
 function harness(options: Options = {}) {
   const statements: Statement[] = [];
   const protector = new MfaSecretProtector();
-  const respond = (sql: string) => {
+  const respond = (sql: string, values: unknown[]) => {
     if (sql.includes(' as eligible')) {
       return { rowCount: 1, rows: [{ eligible: options.eligible ?? true, enrolled: options.enrolled ?? false,
+        unproven: (options.enrolled ?? false) && (options.unproven ?? false),
         token_version: '2', subject: 'synthetic:staff-mfa' }] };
+    }
+    if (sql.includes(' as staff_eligible')) {
+      return { rowCount: 1, rows: [{ staff_eligible: options.staffEligible ?? false }] };
     }
     if (sql.includes('from auth.mfa_login_challenges challenge')) {
       const proofMethod = options.proofMethod ?? null;
@@ -66,17 +79,25 @@ function harness(options: Options = {}) {
       if (!pending && !options.enrolled) return { rowCount: 0, rows: [] };
       return { rowCount: 1, rows: [{ id: FACTOR,
         secret_ciphertext: protector.encryptSecret(FACTOR, ACCOUNT, Buffer.from(SECRET)),
-        secret_key_version: 'staff-v1', last_used_step: null }] };
+        secret_key_version: 'staff-v1', last_used_step: null,
+        enrollment_proof: !pending && options.unproven ? null : 'email_code' }] };
     }
     if (sql.includes('insert into auth.mfa_login_challenges')) return { rowCount: 1, rows: [{ expires_at: new Date(NOW) }] };
     if (sql.includes('insert into auth.mfa_factors')) return { rowCount: 1, rows: [{ enrollment_expires_at: new Date(NOW) }] };
-    if (sql.includes('from auth.otp_rate_limits')) return { rowCount: 0, rows: [] };
+    if (sql.includes('as blocked') && sql.includes('from auth.otp_rate_limits')) {
+      return { rowCount: 1, rows: [{ blocked: (options.blockedBuckets ?? []).includes(String(values[1])) }] };
+    }
+    if (sql.includes('from auth.otp_rate_limits')) {
+      const counted = options.bucketCounts?.[String(values[1])];
+      return counted === undefined ? { rowCount: 0, rows: [] }
+        : { rowCount: 1, rows: [{ request_count: counted, window_started_at: new Date(), blocked_until: null }] };
+    }
     if (sql.includes('count(*)::text as remaining')) return { rowCount: 1, rows: [{ remaining: '9' }] };
     return { rowCount: 1, rows: [] };
   };
   const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
     statements.push({ sql: String(sql), values });
-    return respond(String(sql));
+    return respond(String(sql), values);
   }) } as unknown as PoolClient;
   const database = {
     withSystemTransaction: jest.fn(async (_correlationId: string, work: (client: PoolClient) => unknown) => work(client)),
@@ -290,11 +311,123 @@ describe('first staff enrolment needs a fresh proof (MFA-1)', () => {
     expect(refused.code).toBe('MFA_ENROLLMENT_CODE_UNDELIVERABLE');
   });
 
-  it('keeps platform enrolment as it was: no proof is asked of a platform challenge', async () => {
-    const { service, statements } = harness();
+  it('keeps platform enrolment of an account without a staff membership as it was, with no staff proof', async () => {
+    const { service, statements } = harness({ staffEligible: false });
     await service.startEnrollment(TOKEN, event, 'platform');
-    expect(writes(statements, /insert into auth\.mfa_factors/)).toHaveLength(1);
+    const inserted = writes(statements, /insert into auth\.mfa_factors/);
+    expect(inserted).toHaveLength(1);
+    // The factor records no staff proof, so it can never verify a staff session (0088).
+    expect(inserted[0]?.values.slice(-2)).toEqual([null, null]);
     const lookups = statements.filter(({ sql }) => sql.includes('from auth.mfa_login_challenges challenge'));
     for (const lookup of lookups) expect(lookup.values).toContain('platform');
+  });
+});
+
+/**
+ * The staff proof is a property of the factor (0088): a staff session is
+ * issued only on a factor created under a proven staff enrolment challenge,
+ * so a factor a platform first enrolment created on the password alone never
+ * verifies a staff sign-in, whichever account holds it.
+ */
+describe('the staff proof belongs to the factor (MFA-1)', () => {
+  it('creates the staff pending factor bound to the proven challenge and its proof method', async () => {
+    const { service, statements } = harness({ proofMethod: 'email_code', proofCode: '246810' });
+    await service.startEnrollment(TOKEN, event, 'staff', { emailCode: '246810' });
+    const inserted = writes(statements, /insert into auth\.mfa_factors/);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]?.sql).toContain('enrollment_proof, enrollment_challenge_id');
+    expect(inserted[0]?.values.slice(-2)).toEqual(['email_code', CHALLENGE]);
+    const activated = harness({ proofMethod: 'provider_activation', proofVerified: true });
+    await activated.service.startEnrollment(TOKEN, event, 'staff');
+    expect(writes(activated.statements, /insert into auth\.mfa_factors/)[0]?.values.slice(-2))
+      .toEqual(['provider_activation', CHALLENGE]);
+  });
+
+  it('activates only the pending factor created under the same staff challenge', async () => {
+    const { service, statements } = harness({ proofMethod: 'email_code', proofVerified: true });
+    await service.activateEnrollment(TOKEN, totp(SECRET, NOW), event, 'staff');
+    const pending = statements.find(({ sql }) => sql.includes("status = 'pending'") && /for update/.test(sql));
+    expect(pending?.sql).toContain('enrollment_challenge_id = $2');
+    expect(pending?.values).toEqual([ACCOUNT, CHALLENGE]);
+  });
+
+  it('refuses a platform first enrolment of an account with an eligible staff membership, before any factor', async () => {
+    const { service, statements } = harness({ staffEligible: true });
+    const refused = await problem(service.startEnrollment(TOKEN, event, 'platform'));
+    expect(refused.getStatus()).toBe(409);
+    expect(refused.code).toBe('MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED');
+    expect(writes(statements, /insert into auth\.mfa_factors/)).toHaveLength(0);
+    expect(writes(statements, /set status = 'revoked'/)).toHaveLength(0);
+    // Eligibility is the staff sign-in's own: the same membership joins and verification statuses.
+    const eligibility = statements.find(({ sql }) => sql.includes(' as staff_eligible'));
+    expect(eligibility?.sql).toContain('identity.staff_facility_memberships membership');
+    expect(eligibility?.values).toEqual([ACCOUNT, ['verified', 'approved', 'active']]);
+    // No enrolment request is counted for a refused start.
+    expect(statements.some(({ sql, values }) => sql.includes('insert into auth.otp_rate_limits')
+      && values[0] === 'mfa_request_account')).toBe(false);
+  });
+
+  it('refuses a staff sign-in whose authenticator was enrolled without a staff proof, issuing no challenge', async () => {
+    const { service, statements, tokens } = harness({ enrolled: true, unproven: true });
+    const refused = await problem(service.beginLogin('dual@example.invalid', 'a-strong-password', event, 'staff'));
+    expect(refused.getStatus()).toBe(403);
+    expect(refused.code).toBe('STAFF_MFA_FACTOR_UNPROVEN');
+    expect(writes(statements, /insert into auth\.mfa_login_challenges/)).toHaveLength(0);
+    expect(tokens.recordSessionEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      eventType: 'login_failed', outcome: 'denied', accountId: ACCOUNT,
+      details: { reason: 'staff_mfa_factor_unproven', session_kind: 'staff' } }));
+    // The same factor still verifies a platform sign-in.
+    const platform = harness({ enrolled: true, unproven: true });
+    expect((await platform.service.beginLogin('dual@example.invalid', 'a-strong-password', event, 'platform')).purpose)
+      .toBe('verify');
+  });
+
+  it('never issues a staff session on an unproven factor, even from an open staff challenge', async () => {
+    const { service, tokens } = harness({ enrolled: true, unproven: true });
+    const refused = await problem(service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event, 'staff'));
+    expect(refused.code).toBe('STAFF_MFA_FACTOR_UNPROVEN');
+    expect(tokens.issueStaffSession).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Per-source-IP second-factor failures: platform sign-in keeps its budget
+ * (the 20th failure in 15 minutes blocks the address); staff sign-in, used by
+ * every clinician of a facility behind one address, counts in a budget of its
+ * own where the 100th failure blocks, so a few mistyped codes, or one
+ * insider's accounts, never lock a facility out of a correct code.
+ */
+describe('per-IP failure budgets (MFA-1)', () => {
+  it('counts a staff failure in the staff per-IP bucket, which blocks only at the 100th failure', async () => {
+    const probe = new MfaSecretProtector();
+    const staffIp = probe.rateBucket('staff-ip', event.sourceIp);
+    const platformIp = probe.rateBucket('ip', event.sourceIp);
+    const counted = (statements: Statement[], bucket: string) => statements.find(({ sql, values }) =>
+      sql.includes('insert into auth.otp_rate_limits') && values[0] === 'mfa_failure_ip' && values[1] === bucket);
+    const staff = harness({ enrolled: true, bucketCounts: { [staffIp]: 19 } });
+    await problem(staff.service.completeLogin(TOKEN, { code: '000000' }, event, 'staff'));
+    // values: scope, bucket, window expired, new count, blocked, window seconds.
+    expect(counted(staff.statements, staffIp)?.values.slice(3)).toEqual([20, false, 900]);
+    expect(counted(staff.statements, platformIp)).toBeUndefined();
+    const full = harness({ enrolled: true, bucketCounts: { [staffIp]: 99 } });
+    await problem(full.service.completeLogin(TOKEN, { code: '000000' }, event, 'staff'));
+    expect(counted(full.statements, staffIp)?.values.slice(3)).toEqual([100, true, 900]);
+    const platform = harness({ enrolled: true, bucketCounts: { [platformIp]: 19 } });
+    await problem(platform.service.completeLogin(TOKEN, { code: '000000' }, event, 'platform'));
+    expect(counted(platform.statements, platformIp)?.values.slice(3)).toEqual([20, true, 900]);
+    expect(counted(platform.statements, staffIp)).toBeUndefined();
+  });
+
+  it('accepts a correct staff code while only the platform per-IP budget is blocked, and the reverse', async () => {
+    const probe = new MfaSecretProtector();
+    const staff = harness({ enrolled: true, blockedBuckets: [probe.rateBucket('ip', event.sourceIp)] });
+    await staff.service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event, 'staff');
+    expect(staff.tokens.issueStaffSession).toHaveBeenCalledTimes(1);
+    const blocked = harness({ enrolled: true, blockedBuckets: [probe.rateBucket('staff-ip', event.sourceIp)] });
+    expect((await problem(blocked.service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event, 'staff'))).code)
+      .toBe('MFA_RATE_LIMITED');
+    const platform = harness({ enrolled: true, blockedBuckets: [probe.rateBucket('staff-ip', event.sourceIp)] });
+    await platform.service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event, 'platform');
+    expect(platform.tokens.issuePlatformSession).toHaveBeenCalledTimes(1);
   });
 });

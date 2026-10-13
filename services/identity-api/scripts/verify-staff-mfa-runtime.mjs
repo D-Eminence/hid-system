@@ -18,11 +18,18 @@
 //    refused on authorized routes (403 STAFF_MFA_REQUIRED, audited) and on
 //    refresh, which ends it; it can still sign out.
 // 6. Google exchange with a staff action is refused.
-// 7. An OTP password recovery keeps the factor: the next sign-in still needs
-//    the authenticator, so a mailbox alone yields no session.
+// 7. An OTP password recovery keeps the factor: the next sign-in of an
+//    enrolled account still needs the authenticator, so for that account a
+//    mailbox alone yields no session. (An account without a factor enrols on a
+//    code sent to the same mailbox; see INTERFACE_CONTRACT.md.)
 // 8. A two-person MFA reset of a staff account by two Super Admins revokes the
 //    factor and the staff sessions; the next sign-in enrols again on a fresh
 //    emailed code.
+// 9. One factor serves both sign-ins only if it was enrolled with the staff
+//    proof: the platform first enrolment of an account that also signs in as
+//    staff is refused (enrol at staff sign-in instead), and a factor a
+//    platform enrolment created on the password alone never verifies a staff
+//    sign-in (403 STAFF_MFA_FACTOR_UNPROVEN) until a governed reset.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
@@ -107,19 +114,20 @@ try {
       await owner.query(`insert into auth.account_roles (id, account_id, role_code, scope_type, grant_reason)
         values ($1, $2, $3, 'platform', 'Synthetic staff MFA verifier')`, [randomUUID(), id, platformRole]);
     }
-    if (membershipRole) {
-      const staffId = randomUUID(); const membershipId = randomUUID();
-      await owner.query(`insert into identity.staff (id, account_id, full_name, email, verification_status, default_role)
-        values ($1, $2, $3, $4, 'verified', $5)`, [staffId, id, `Staff MFA ${label}`, email, membershipRole]);
-      await owner.query(`insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id,
-          facility_id, membership_role, app_role, is_primary, active) values ($1, $2, $3, $4, $5, $6, $6, true, true)`,
-      [membershipId, staffId, id, ids.org, ids.facility, membershipRole]);
-    }
+    if (membershipRole) await addMembership({ id, email, label }, membershipRole);
     if (patient) {
       await owner.query(`insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name, status)
         values ($1, $2, $3, 'Ada', 'Staff', 'Ada Staff', 'active')`, [randomUUID(), id, patient]);
     }
-    return { id, email, subject };
+    return { id, email, subject, label };
+  }
+  async function addMembership({ id, email, label }, membershipRole) {
+    const staffId = randomUUID(); const membershipId = randomUUID();
+    await owner.query(`insert into identity.staff (id, account_id, full_name, email, verification_status, default_role)
+      values ($1, $2, $3, $4, 'verified', $5)`, [staffId, id, `Staff MFA ${label}`, email, membershipRole]);
+    await owner.query(`insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id,
+        facility_id, membership_role, app_role, is_primary, active) values ($1, $2, $3, $4, $5, $6, $6, true, true)`,
+    [membershipId, staffId, id, ids.org, ids.facility, membershipRole]);
   }
   const doctor = await account('doctor', { membershipRole: 'doctor' });
   const nurse = await account('nurse', { membershipRole: 'nurse' });
@@ -314,7 +322,8 @@ try {
   assert.equal(google.calls, 0, 'the Google token was exchanged');
   checks.push('POST /auth/oidc/exchange with a staff action is 403 GOOGLE_STAFF_SIGN_IN_DISABLED and never exchanges the token');
 
-  // 7. OTP password recovery keeps the factor: a mailbox alone yields no session.
+  // 7. OTP password recovery keeps the factor: for an enrolled account, a
+  //    mailbox alone yields no session.
   const factorBefore = await one(`select id::text, status, row_version::text from auth.mfa_factors
     where account_id = $1 and status = 'active'`, [doctor.id]);
   const startedRecovery = await post('/auth/otp/start', {}, { identifier: doctor.email, purpose: 'PASSWORD_RESET',
@@ -366,6 +375,62 @@ try {
   assert.equal(reenrolled.accountId, doctor.id);
   expectStatus(await session(cookieHeader({ hid_access: reenrolled.cookies.hid_access })), 200);
   checks.push('a staff MFA reset requested by one Super Admin and approved by another revokes the factor and every staff session and is audited; the next sign-in enrols again on a fresh emailed code');
+
+  // 9. The staff proof belongs to the factor. A platform administrator who is
+  //    also a doctor cannot enrol at platform sign-in; enrolled at staff
+  //    sign-in, the same factor then verifies platform sign-in.
+  const factorOf = async (who) => one(`select enrollment_proof, enrollment_challenge_id is not null as bound
+    from auth.mfa_factors where account_id = $1 and status = 'active'`, [who.id]);
+  const dual = await account('dual', { platformRole: 'security_auditor', membershipRole: 'doctor' });
+  const dualPlatform = await platform.login(dual.email);
+  assert.equal(dualPlatform.response.body.status, 'mfa_enrollment_required');
+  expectStatus(await platform.post('/auth/admin/mfa/enroll/start', dualPlatform.jar), 409,
+    'MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED');
+  assert.equal((await one('select count(*)::int as n from auth.mfa_factors where account_id = $1', [dual.id])).n, 0,
+    'a refused platform enrolment created a factor');
+  const dualStaff = await staff.signIn(dual.email);
+  assert.equal(dualStaff.accountId, dual.id);
+  assert.deepEqual(await factorOf(dual), { enrollment_proof: 'email_code', bound: true });
+  const dualAdmin = await platform.signIn({ email: dual.email, secret: staff.secretOf(dual.email) });
+  assert.equal(dualAdmin.accountId, dual.id);
+  checks.push('the platform first enrolment of an account that also holds a staff membership is 409 MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED and creates no factor; enrolled at staff sign-in with the emailed code, the factor records its proof and verifies the platform sign-in too');
+
+  //    A platform administrator enrolled by platform sign-in (the password
+  //    alone) and later given a staff membership: the factor verifies the
+  //    platform sign-in only. Staff sign-in is refused at the password step,
+  //    the database refuses staff assurance on that factor, and after a
+  //    governed reset the account enrols at staff sign-in with the proof.
+  const promoted = await account('promoted', { platformRole: 'security_auditor' });
+  const promotedAdmin = await platform.enroll(promoted.email);
+  assert.deepEqual(await factorOf(promoted), { enrollment_proof: null, bound: false });
+  await addMembership(promoted, 'doctor');
+  const unproven = await post('/auth/login', {}, { email: promoted.email, password, turnstileAction: 'staff-login' });
+  expectStatus(unproven, 403, 'STAFF_MFA_FACTOR_UNPROVEN');
+  assert(!unproven.setCookie.some(value => value.startsWith('hid_access')), 'a refused staff sign-in set a cookie');
+  assert.equal((await one(`select count(*)::int as n from auth.mfa_login_challenges where account_id = $1
+    and session_kind = 'staff'`, [promoted.id])).n, 0, 'a refused staff sign-in opened a challenge');
+  assert.equal((await one(`select count(*)::int as n from auth.session_events where account_id = $1
+    and event_type = 'login_failed' and outcome = 'denied' and details->>'reason' = 'staff_mfa_factor_unproven'`,
+  [promoted.id])).n, 1);
+  const promotedSession = await legacyStaffSession(promoted);
+  const runtime = await module.get(DatabaseService).withSystemTransaction(randomUUID(), async (client) => client.query(
+    `insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
+     select $1, $2, factor.id, 'totp', clock_timestamp() from auth.mfa_factors factor
+      where factor.account_id = $2 and factor.status = 'active'`, [promotedSession.id, promoted.id]))
+    .then(() => 'accepted', (error) => error.message);
+  assert.equal(runtime, 'STAFF_MFA_FACTOR_UNPROVEN', 'the database gave a staff session assurance on an unproven factor');
+  await platform.signIn(promotedAdmin);
+  const promotedReset = await platform.command(adminA, `/admin/principals/${promoted.id}/mfa-reset-requests`,
+    { reason: 'Authenticator enrolled before the staff membership' }, { 'Idempotency-Key': `staff-mfa-reset-${randomUUID()}` });
+  expectStatus(promotedReset, 201);
+  const promotedDecided = await platform.command(adminB, `/admin/approvals/${promotedReset.body.requestId}/approve`,
+    { reason: 'Identity confirmed in person at the facility' },
+    { 'If-Match': String(promotedReset.body.version), 'Idempotency-Key': `staff-mfa-decide-${randomUUID()}` });
+  expectStatus(promotedDecided, 200);
+  const promotedStaff = await staff.signIn(promoted.email);
+  assert.equal(promotedStaff.accountId, promoted.id);
+  assert.deepEqual(await factorOf(promoted), { enrollment_proof: 'email_code', bound: true });
+  checks.push('a factor enrolled at platform sign-in on the password alone never verifies a staff sign-in: once the account holds a staff membership, POST /auth/login is 403 STAFF_MFA_FACTOR_UNPROVEN with no challenge or cookie (a denied login_failed event), the database refuses staff assurance on that factor (STAFF_MFA_FACTOR_UNPROVEN, as the runtime role), and after a governed two-person reset the account enrols at staff sign-in with the emailed code');
 
   process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: runtimeRole, checks })}\n`);
 } finally {
