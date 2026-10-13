@@ -52,9 +52,13 @@ try {
   await pool.query(`insert into auth.external_identities(id,account_id,issuer,subject,status,source_system)
     values($1,$2,'https://accounts.google.com',$3,'active','synthetic')`,[randomUUID(),id,`synthetic-google-${id}`]);
   // The legacy importer's provenance record (issuer 'legacy-identity') is not a
-  // sign-in: a recovery keeps it and does not count it.
+  // sign-in: a recovery keeps it and does not count it. 0086 tells it apart by
+  // issuer. The synthetic row is marked source_system 'synthetic', not
+  // 'legacy_identity': the rehearsal later promotes and reconciles a synthetic
+  // legacy source in the same database, and reconciliation counts every
+  // 'legacy_identity' row as one the importer must account for.
   await pool.query(`insert into auth.external_identities(id,account_id,issuer,subject,status,source_system)
-    values($1,$2,'legacy-identity',$3,'active','legacy_identity')`,[randomUUID(),id,id]);
+    values($1,$2,'legacy-identity',$3,'active','synthetic')`,[randomUUID(),id,id]);
   const started=await otp.start({audience:'patient',identifier:email,purpose:'PASSWORD_RESET',remoteIp:'192.0.2.219',correlationId:'otp-runtime-start-001'});
   assert.equal(delivered.challengeId,started.challengeId);
   assert.match(delivered.code,/^\d{6}$/);
