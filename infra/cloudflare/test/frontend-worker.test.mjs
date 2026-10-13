@@ -198,6 +198,46 @@ for (const [deployment, profile] of Object.entries(deploymentProfiles)) {
   }
 }
 
+// Identity's per-network limits, Turnstile remoteip and audit source addresses
+// need the client's address. Cloudflare sets CF-Connecting-IP on the inbound
+// request and the Worker forwards it as X-HID-Client-IP, the one header the
+// AWS gateway trusts (from the VPC only). A caller's own X-HID-Client-IP, or
+// an address that does not parse, must never reach the origin.
+async function forwardedApiHeaders(headers) {
+  let received
+  globalThis.fetch = async (_url, init) => {
+    received = init.headers
+    return new Response('{}', { headers: { 'content-type': 'application/json' } })
+  }
+  await worker.fetch(new Request('https://www.healthidentitydirectory.com/api/v1/auth/otp/start', {
+    method: 'POST', body: '{}', headers: { 'content-type': 'application/json', ...headers },
+  }), environment({ APP_NAME: 'web' }))
+  return received
+}
+
+test('forwards the Cloudflare client address as X-HID-Client-IP and replaces a caller-supplied one', async () => {
+  const spoofed = await forwardedApiHeaders({ 'cf-connecting-ip': '198.51.100.23', 'x-hid-client-ip': '10.40.1.9' })
+  assert.equal(spoofed.get('x-hid-client-ip'), '198.51.100.23')
+  for (const name of ['cf-connecting-ip', 'x-forwarded-for', 'x-real-ip', 'forwarded']) {
+    assert.equal(spoofed.get(name), null, `${name} must not reach the origin`)
+  }
+  const ipv6 = await forwardedApiHeaders({ 'cf-connecting-ip': '2001:DB8:0:0:1::7' })
+  assert.equal(ipv6.get('x-hid-client-ip'), '2001:db8::1:0:0:7')
+  const mixedCaseSpoof = await forwardedApiHeaders({ 'X-HID-Client-IP': '203.0.113.200', 'cf-connecting-ip': '192.0.2.44' })
+  assert.equal(mixedCaseSpoof.get('x-hid-client-ip'), '192.0.2.44')
+})
+
+test('sends no X-HID-Client-IP when Cloudflare supplied no valid single client address', async () => {
+  for (const value of [undefined, '', 'not-an-address', '203.0.113.7, 198.51.100.1', '203.0.113.256',
+    '010.1.2.3', '1.2.3', '0x7f.0.0.1', 'fe80::1%eth0', '[2001:db8::1]', '2001:db8::1::2']) {
+    const headers = await forwardedApiHeaders({
+      'x-hid-client-ip': '203.0.113.99',
+      ...(value === undefined ? {} : { 'cf-connecting-ip': value }),
+    })
+    assert.equal(headers.get('x-hid-client-ip'), null, `cf-connecting-ip ${JSON.stringify(value)} must not be forwarded`)
+  }
+})
+
 test('preserves mutation bodies and methods', async () => {
   globalThis.fetch = async (_url, init) => new Response(await new Response(init.body).text(), { status: 202 })
   const response = await worker.fetch(new Request('https://ehr.healthidentitydirectory.com/api/v1/auth/login', {

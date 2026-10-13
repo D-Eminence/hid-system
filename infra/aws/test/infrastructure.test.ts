@@ -823,3 +823,68 @@ test('staging emergency notifications use the existing encrypted ordinary event 
   const productionPattern = properties(regional, 'AWS::Events::Rule')[0]!.EventPattern as { readonly 'detail-type': readonly string[] };
   assert.equal(productionPattern['detail-type'].includes('EmergencyAccessActivated.v1'), false);
 });
+
+// IP-1, GW-DNS, MOD-1: the gateway takes the client address from the
+// Worker's X-HID-Client-IP only on connections from the VPC (the public ALB),
+// requires it in staging and production, resolves its Cloud Map upstreams per
+// request through the VPC resolver, and routes only the enabled modules.
+function gatewayEnvironment(template: typeof regional): Record<string, unknown> {
+  const task = properties(template, 'AWS::ECS::TaskDefinition')
+    .find(item => JSON.stringify(item.Family).endsWith('-gateway"'));
+  assert.ok(task, 'missing gateway task definition');
+  const container = (task.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }> }>)
+    .find(item => item.Name === 'gateway');
+  assert.ok(container, 'missing gateway container');
+  return Object.fromEntries(container.Environment.map(item => [item.Name, item.Value]));
+}
+
+test('the gateway trusts the client address only from the VPC, re-resolves upstreams and routes only the launch modules', () => {
+  const developmentRegional = Template.fromStack(new HidRegionalStack(new App(), 'DevelopmentGatewayTest', {
+    configuration: environmentConfig('development'),
+  })).toJSON() as typeof regional;
+  for (const [label, template, name, vpcCidr, resolver, required] of [
+    ['production', regional, 'production', '10.40.0.0/16', '10.40.0.2', 'true'],
+    ['staging economy', stagingRegional, 'staging', '10.30.0.0/16', '10.30.0.2', 'true'],
+    ['staging fidelity', fidelityRegional, 'staging', '10.30.0.0/16', '10.30.0.2', 'true'],
+    ['staging sleep', sleepRegional, 'staging', '10.30.0.0/16', '10.30.0.2', 'true'],
+    ['development', developmentRegional, 'development', '10.20.0.0/16', '10.20.0.2', 'false'],
+  ] as const) {
+    const environment = gatewayEnvironment(template);
+    assert.equal(environment.VPC_CIDR, vpcCidr, `${label}: the realip trust range is the VPC`);
+    assert.equal(environment.GATEWAY_DNS_RESOLVER, resolver, `${label}: the Amazon-provided VPC resolver`);
+    assert.equal(environment.HID_REQUIRE_CLIENT_IP, required, `${label}: client address requirement`);
+    assert.equal(environment.HID_ENABLED_API_ROUTES, 'identity,ehr', `${label}: launch routes only by default`);
+    const namespace = `services.${name}.hid`;
+    assert.deepEqual(Object.fromEntries(Object.entries(environment).filter(([key]) => key.endsWith('_API_UPSTREAM'))), {
+      IDENTITY_API_UPSTREAM: `http://identity-api.${namespace}:3001`, EHR_API_UPSTREAM: `http://ehr-api.${namespace}:3002`,
+      LAB_API_UPSTREAM: `http://lab-api.${namespace}:3003`, PHARMACY_API_UPSTREAM: `http://pharmacy-api.${namespace}:3004`,
+      OCR_API_UPSTREAM: `http://ocr-api.${namespace}:3005`, OUTREACH_API_UPSTREAM: `http://outreach-api.${namespace}:3006`,
+    }, `${label}: upstreams stay Cloud Map names`);
+    // The backends trust exactly the range the gateway takes the header from.
+    const identity = properties(template, 'AWS::ECS::TaskDefinition')
+      .find(item => JSON.stringify(item.Family).endsWith('-identity-api"'))!;
+    const api = (identity.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }> }>)
+      .find(item => item.Name === 'identity-api')!;
+    assert.equal(api.Environment.find(item => item.Name === 'TRUST_PROXY_CIDRS')?.Value, vpcCidr, label);
+  }
+  const optedIn = Template.fromStack(new HidRegionalStack(new App(), 'StagingModulesGatewayTest', {
+    configuration: environmentConfig('staging', 'economy', undefined, 'identity,ehr,outreach,lab'),
+  })).toJSON() as typeof regional;
+  assert.equal(gatewayEnvironment(optedIn).HID_ENABLED_API_ROUTES, 'identity,ehr,lab,outreach');
+});
+
+test('the enabled API routes are an explicit, validated synth input that production keeps at the launch set', () => {
+  assert.deepEqual(environmentConfig('production').enabledApiRoutes, ['identity', 'ehr']);
+  assert.deepEqual(environmentConfig('staging', 'economy').enabledApiRoutes, ['identity', 'ehr']);
+  assert.deepEqual(environmentConfig('staging', 'fidelity', undefined, 'identity, ehr, pharmacy').enabledApiRoutes,
+    ['identity', 'ehr', 'pharmacy']);
+  assert.deepEqual(environmentConfig('development', undefined, undefined, 'ocr,identity,ehr').enabledApiRoutes,
+    ['identity', 'ehr', 'ocr']);
+  assert.deepEqual(environmentConfig('production', undefined, undefined, 'identity,ehr').enabledApiRoutes, ['identity', 'ehr']);
+  assert.throws(() => environmentConfig('production', undefined, undefined, 'identity,ehr,lab'),
+    /HID_ENABLED_API_ROUTES.*production/);
+  for (const value of ['ehr', 'identity', '', 'identity,ehr,billing', 'identity,ehr,ehr', 'identity,ehr,LAB', 'identity;ehr']) {
+    assert.throws(() => environmentConfig('staging', 'economy', undefined, value), /HID_ENABLED_API_ROUTES/,
+      `HID_ENABLED_API_ROUTES=${JSON.stringify(value)} must be refused`);
+  }
+});
