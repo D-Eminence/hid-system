@@ -7,6 +7,36 @@ hostname. The app-specific Cloudflare Worker proxies only that versioned
 namespace to the fixed AWS origin and never accepts an upstream from browser
 input. Cookie sessions are host-only; browser token storage is prohibited.
 
+The client address reaches the APIs through the edge only
+(D-Eminence/hid-system#65). The Worker replaces any caller-supplied
+`X-Real-IP` with the address Cloudflare reports, and the AWS gateway trusts
+that header only from the VPC and sends it on as `X-Forwarded-For`. In staging
+and production the gateway refuses an API request without a usable client
+address with `403 CLIENT_ADDRESS_REQUIRED`; a browser that reaches the API
+through a Worker with this change never sees it (a Worker built earlier sends
+no client address, so its API requests are refused). Every proxied API request
+whose target holds a backslash before the query or a `#` anywhere answers
+`400 INVALID_REQUEST_TARGET`; a browser's URL parser never sends either. The
+gateway proxies only the modules named in `HID_ENABLED_API_ROUTES`: at launch
+Identity (`/api/v1/auth`, `/identity`, `/audit`, `/admin`, `/commercial`) and
+EHR (`/api/v1/ehr`). Lab, Pharmacy, OCR and Outreach prefixes answer
+`404 API_ROUTE_NOT_FOUND`, as do the service-to-service routes
+(`/api/v1/auth/service-session`, `/api/v1/identity/service/*`,
+`/api/v1/identity/outreach/*`, `/api/v1/ehr/internal/*`, and the Lab and
+Pharmacy `accept-ehr-*` and `imports/from-ocr` routes) in any letter case or
+spelling nginx normalizes. Public IP-keyed limits (recovery start, patient
+enrollment start and contact, provider enrollment, organization application
+intake and profile completion) count per client network: an IPv4 address or an
+IPv6 /64. Without a usable client address, or, in production, with an address
+of one of the platform's own proxies, they answer their 503
+(`OTP_RATE_LIMIT_UNAVAILABLE` for recovery start,
+`ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
+`PROVIDER_ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
+`APPLICATION_RATE_LIMIT_UNAVAILABLE`) instead of sharing one bucket. The
+gateway passes a backend `503` to the browser as `503 UPSTREAM_UNAVAILABLE`
+(its `error_page` intercepts backend 502, 503 and 504), so clients must treat
+any 503 as unavailable rather than rely on the backend code.
+
 Authentication OTP commands are purpose-bound and use three stages: start
 returns a generic challenge, verify accepts exactly six digits and returns an
 opaque one-time completion credential, and complete consumes that credential.
@@ -1484,7 +1514,7 @@ full history read records `lab.result.history.read`.
 
 ### Extracted Lab transport
 
-Public Lab routes remain `/api/v1/lab/*` through the gateway. Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused by the guard (SQLSTATE `23514`, `409 LAB_ORDER_NOT_CURRENT`) for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets Lab's `409 IDEMPOTENCY_CONFLICT`, which the EHR create reports as `409 LAB_HANDOFF_REFUSED` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
+Public Lab routes remain `/api/v1/lab/*` through the gateway when the Lab module is enabled (`HID_ENABLED_API_ROUTES`; it is not in the launch set, so the gateway answers `404 API_ROUTE_NOT_FOUND` until it is). Internal EHR order acceptance uses `POST /api/v1/lab/work-items/accept-ehr-order`; governed OCR publication uses `POST /api/v1/lab/imports/from-ocr`. Lab accepts an EHR order only when the work item's `requested_at` equals the EHR order's `created_at` exactly (`lab.validate_work_item`, 0077), so EHR sends `requestedAt` as that `created_at` rendered by PostgreSQL at the microsecond (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never through a JavaScript `Date`, which keeps only milliseconds and is refused by the guard (SQLSTATE `23514`, `409 LAB_ORDER_NOT_CURRENT`) for almost every order (`lab-session-guards.integration.sql` checks both texts against the guard, and `verify-lab-runtime.mjs` both over HTTP as the Lab runtime). Lab's idempotency digest covers the text of `requestedAt`, so an order Lab accepted from an earlier EHR build (possible only when its stored microseconds were a whole millisecond) and replayed with the same `Idempotency-Key` at any time after the upgrade, while the order is still active, gets Lab's `409 IDEMPOTENCY_CONFLICT`, which the EHR create reports as `409 LAB_HANDOFF_REFUSED` (EHR's replay does not check the key's `expires_at`); the reverse holds for an order accepted from this build and replayed through an earlier one during a rolling deploy or after a rollback. Lab still has its work item. Both preserve bearer or Identity session-cookie user evidence, facility, purpose, correlation ID, and idempotency key and additionally require authenticated internal-caller identity. Cookie mutations also preserve the Cookie header, Origin, and CSRF header so Identity can revalidate the unsafe request through `POST /api/v1/auth/service-session`. User and workload credentials remain separate. Local development uses one process-generated ephemeral credential. Production requires a rotating asymmetric JWT from an injected token file, exact issuer/JWKS/audience validation, and distinct configured EHR/OCR subjects; local-secret mode is rejected.
 
 Lab answers EHR order acceptance (D-Eminence/hid-system#56):
 
@@ -1522,7 +1552,9 @@ terminal.
 ### Extracted Pharmacy transport
 
 Public Pharmacy reads and pharmacist commands remain
-`/api/v1/pharmacy/*` through the gateway. EHR prescription acceptance and OCR
+`/api/v1/pharmacy/*` through the gateway when the Pharmacy module is enabled
+(`HID_ENABLED_API_ROUTES`; it is not in the launch set, so the gateway answers
+`404 API_ROUTE_NOT_FOUND` until it is). EHR prescription acceptance and OCR
 medication import use internal-only routes with exact caller metadata. The
 shared Pharmacy client propagates bearer or Identity session-cookie user
 evidence, facility, purpose, correlation ID and idempotency key. Cookie
@@ -1608,6 +1640,9 @@ These UI prefixes are distinct from API ownership:
 API-owned. Browser applications call only gateway API paths with Identity
 cookies/CSRF, exact facility and purpose context, correlation, and idempotency
 where the owning command requires it. No browser calls an internal host/port.
+The production gateway proxies only the enabled modules (see the first
+section); a browser application for a module that is not enabled receives
+`404 API_ROUTE_NOT_FOUND` for its API calls.
 
 Pharmacy reads only existing work items/evidence and sends acceptance,
 dispensing, and reversal commands through the typed Pharmacy client. A UI state

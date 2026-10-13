@@ -1,12 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomInt,
   randomUUID, timingSafeEqual } from 'node:crypto';
-import { isIP } from 'node:net';
 import * as argon2 from 'argon2';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { consumeRateLimit, rateLimitBlocked, type RateLimitWindow } from '../auth/rate-limit';
+import { publicClientNetwork } from '../common/client-network';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
@@ -73,7 +73,8 @@ export class PatientEnrollmentService {
 
     const preflight = await this.database.withSystemTransaction(correlationId, async (client) => {
       await client.query('select identity.prune_expired_public_patient_enrollments()');
-      const limited = await this.consumeRate(client, 'ip', ipHmac, this.env.OTP_RATE_MAX_REQUESTS);
+      const limited = await this.consumeRate(client, 'ip', ipHmac,
+        this.env.PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS);
       const bound = await client.query<{ bound: boolean }>(
         'select identity.public_patient_nin_already_bound($1) as bound', [lookupHmac]);
       const readiness = await client.query<{ ready: boolean }>(
@@ -175,6 +176,8 @@ export class PatientEnrollmentService {
   async startContact(cookie: string | undefined, channel: ContactChannel, rawContact: string,
     remoteIp: string | undefined, correlationId: string) {
     this.assertConfigured();
+    // Before any database work: without a client network nothing is charged.
+    const ipHmac = this.networkHmac(remoteIp);
     const enrollment = await this.requireEnrollment(cookie, correlationId);
     if (enrollment.state !== 'verify_contact') throw new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
       'This enrollment is not waiting for contact verification');
@@ -184,7 +187,7 @@ export class PatientEnrollmentService {
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
     const challengeId = randomUUID();
     const preflight = await this.database.withSystemTransaction(correlationId, async (client) => {
-      const ipLimited = await this.consumeRate(client, 'ip', this.networkHmac(remoteIp),
+      const ipLimited = await this.consumeRate(client, 'ip', ipHmac,
         this.env.OTP_RATE_MAX_REQUESTS * 3);
       const recipientLimited = await this.consumeRate(client, 'recipient', recipientHmac,
         this.env.OTP_RATE_MAX_REQUESTS);
@@ -232,7 +235,7 @@ export class PatientEnrollmentService {
          values($1,$2,$3,$4,$5,$6,clock_timestamp()+($7*interval '1 second'),$8,$9)`,
         [challengeId, row.id, recipientHmac, channel, verifierHmac,
           this.env.OTP_HMAC_KEY_VERSION, this.env.OTP_EXPIRY_SECONDS,
-          this.env.OTP_MAX_ATTEMPTS, this.networkHmac(remoteIp)]);
+          this.env.OTP_MAX_ATTEMPTS, ipHmac]);
       return { enrollmentId: row.id };
     });
     const delivered = await this.notification.deliver({ challengeId, recipient: contact, code,
@@ -526,10 +529,16 @@ export class PatientEnrollmentService {
     await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))', [`otp-rate:recipient:${bucket}`]);
   }
 
+  /**
+   * The keyed client network of the enrollment IP limits: an IPv4 address or
+   * an IPv6 /64, and in production never one of our own proxies, which every
+   * client would share (IP-1). Without one, enrollment answers 503.
+   */
   private networkHmac(remoteIp: string | undefined) {
-    if (!remoteIp || isIP(remoteIp) === 0) throw new DomainProblem(503,
+    const network = publicClientNetwork(remoteIp, this.env);
+    if (!network) throw new DomainProblem(503,
       'ENROLLMENT_RATE_LIMIT_UNAVAILABLE', 'Enrollment is temporarily unavailable');
-    return this.hmac('patient-enrollment-ip', remoteIp);
+    return this.hmac('patient-enrollment-ip', network);
   }
 
   private assertConfigured() {

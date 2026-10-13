@@ -8,6 +8,7 @@ jest.mock('argon2', () => ({ argon2id: 2, hash: jest.fn() }));
 import * as argon2 from 'argon2';
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
+import * as environment from '../config/environment';
 import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { NotificationOtpClient } from '../auth/notification-otp.client';
@@ -789,6 +790,72 @@ describe('PatientEnrollmentService', () => {
         .rejects.toMatchObject({ code: 'ENROLLMENT_STAGE_INVALID' });
       expect(rateLookups(f.queries)).toEqual([]);
       expect(passwordHash().mock.calls.some(([value]) => value === 'a-strong-test-password')).toBe(false);
+    });
+  });
+
+  // IP-1: the enrollment IP limits are keyed on the client network. In AWS
+  // request.ip is the client only when the edge supplied it (the Worker's
+  // X-Real-IP, applied by the gateway's realip module); otherwise it is
+  // the load balancer, inside TRUST_PROXY_CIDRS, and shared by every client.
+  describe('client network', () => {
+    const vpc = '10.40.0.0/16';
+    function inProduction() {
+      const base = getEnvironment();
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, NODE_ENV: 'production', TRUST_PROXY_CIDRS: vpc });
+    }
+    const ipBuckets = (queries: RecordedQuery[]) => rateLookups(queries)
+      .filter(({ scope }) => scope === 'ip').map(({ bucket }) => String(bucket));
+
+    it('in production, refuses a start whose client address is missing or one of our proxies, before any database work', async () => {
+      inProduction();
+      const f = fixture();
+      for (const remoteIp of [undefined, 'not-an-address', '10.40.1.10', '::ffff:10.40.200.3']) {
+        await expect(f.service.start(nin, requestKey, remoteIp, correlationId))
+          .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_RATE_LIMIT_UNAVAILABLE' });
+      }
+      expect(f.queries).toEqual([]);
+      expect(f.provider.verifyNin).not.toHaveBeenCalled();
+    });
+
+    it('in production, refuses a contact step from one of our proxies before charging or sending', async () => {
+      inProduction();
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '198.51.100.40', correlationId);
+      f.queries.length = 0;
+      await expect(f.service.startContact(started.cookie, 'email', 'patient@example.test', '10.40.1.10', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_RATE_LIMIT_UNAVAILABLE' });
+      expect(f.queries).toEqual([]);
+      expect(f.notification.deliver).not.toHaveBeenCalled();
+    });
+
+    it('gives two clients two buckets and one IPv6 /64 one bucket', async () => {
+      inProduction();
+      const buckets: string[] = [];
+      for (const remoteIp of ['198.51.100.1', '198.51.100.2', '2001:db8:1:2::10', '2001:db8:1:2:abcd::99',
+        '2001:db8:1:3::10']) {
+        const f = fixture();
+        await f.service.start(nin, requestKey, remoteIp, correlationId);
+        buckets.push(...ipBuckets(f.queries));
+      }
+      expect(buckets).toHaveLength(5);
+      expect(buckets[0]).not.toBe(buckets[1]);
+      expect(buckets[2]).toBe(buckets[3]);
+      expect(buckets[4]).not.toBe(buckets[2]);
+      expect(new Set(buckets).size).toBe(4);
+    });
+
+    it('limits starts per network with PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS, apart from the OTP limit', async () => {
+      process.env.PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS = '2';
+      process.env.OTP_RATE_MAX_REQUESTS = '5';
+      resetEnvironmentForTests();
+      const limited = fixture();
+      limited.rateCount = 2;
+      await expect(limited.service.start(nin, requestKey, '198.51.100.7', correlationId))
+        .rejects.toMatchObject({ status: 429, code: 'ENROLLMENT_RATE_LIMITED' });
+      expect(limited.provider.verifyNin).not.toHaveBeenCalled();
+      const allowed = fixture();
+      allowed.rateCount = 1;
+      await expect(allowed.service.start(nin, requestKey, '198.51.100.7', correlationId)).resolves.toBeDefined();
     });
   });
 });

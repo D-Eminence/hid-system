@@ -522,13 +522,36 @@ behavior. The AWS origin must reject a direct request without the origin secret.
 Release and roll back each application independently. A frontend rollback must
 not change an API image or database schema.
 
+The Workers set `X-Real-IP` from `CF-Connecting-IP`, and the gateway of
+staging and production refuses API requests without it
+(`403 CLIENT_ADDRESS_REQUIRED`). Every Worker that proxies `/api/v1` (web,
+EHR, Lab, Pharmacy, OCR, Outreach and admin) must send the header before a
+gateway that requires it is deployed: redeploy all seven, and once that
+gateway runs confirm on each host that a request carrying its own `X-Real-IP`
+reaches Identity with the client's public address instead. A Worker built
+before this change deletes a caller's `X-Real-IP` and sets none, so behind it,
+or behind a Worker rolled back to such a build, the gateway answers `403` to
+every API request (it does not trust a caller-chosen address). Do not roll a
+Worker back while such a gateway runs.
+
 ## 9. Progressive runtime rollout
 
 Raise minimum dependencies first: Identity and Notification API, then owner
 APIs and Gateway, then OCR Worker, Event Dispatcher, and Notification Worker.
 Use small desired counts and alarms before reaching the environment profile.
+
+The gateway proxies only the modules in its `HID_ENABLED_API_ROUTES`
+(`identity,ehr` unless a staging synth sets the synth input of that name; a
+production synth refuses more) and resolves upstream names per request, so it
+starts and keeps serving Identity and EHR while a module runs no task, and it
+follows Identity and EHR redeploys without its own redeploy. When upgrading a
+running environment, deploy Identity with the client-network change only after
+the gateway that forwards the client address: behind an earlier gateway, every
+public IP-keyed Identity request in production answers `503`.
 Run clinical, identity, OCR, notification, offline/reconnect, and administrative
-smoke tests with synthetic data.
+smoke tests with synthetic data. Lab, Pharmacy, OCR and Outreach checks through
+the edge need a staging synth whose `HID_ENABLED_API_ROUTES` names those
+modules; with the default the gateway answers `404 API_ROUTE_NOT_FOUND`.
 
 Observe RDS connections/storage, ALB/WAF results, task health/restarts, queue
 age/DLQ, event terminal failure, provider outcomes, OCR failures, S3/KMS denies,

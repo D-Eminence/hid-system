@@ -72,6 +72,11 @@ const environmentSchema = z.object({
   OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(10).max(600).default(60),
   OTP_RATE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
   OTP_RATE_MAX_REQUESTS: z.coerce.number().int().min(1).max(100).default(5),
+  // Public patient enrollment starts per client network (an IPv4 address or an
+  // IPv6 /64) within OTP_RATE_WINDOW_SECONDS. Separate from the OTP limit
+  // because mobile carrier-grade NAT can put many patients behind one address;
+  // the threshold is a product decision (IP-1).
+  PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS: z.coerce.number().int().min(1).max(100).default(5),
   // One budget of wrong recovery codes per account, across its challenges and
   // purposes: the OTP_VERIFY_FAILURE_MAX-th wrong code within the window
   // suspends recovery for that account for one window, even for a correct

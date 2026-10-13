@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { extname, join, relative, resolve } from 'node:path'
+import { assertGatewayContract } from './lib/gateway-contract.mjs'
 
 const repository = resolve(import.meta.dirname, '..')
 const backends = [
@@ -185,18 +186,17 @@ assert.doesNotMatch(gatewayDockerfile, /(?:SENTRY_AUTH_TOKEN|POSTHOG_(?:PERSONAL
   'gateway build arguments must contain public browser configuration only')
 
 const gatewayConfig = await readFile(join(repository, 'gateway/nginx.conf.template'), 'utf8')
-for (const [route, upstream] of [
-  ['/api/v1/auth', 'IDENTITY_API_UPSTREAM'], ['/api/v1/identity', 'IDENTITY_API_UPSTREAM'],
-  ['/api/v1/audit', 'IDENTITY_API_UPSTREAM'], ['/api/v1/admin', 'IDENTITY_API_UPSTREAM'],
-  ['/api/v1/commercial', 'IDENTITY_API_UPSTREAM'],
-  ['/api/v1/ehr', 'EHR_API_UPSTREAM'], ['/api/v1/lab', 'LAB_API_UPSTREAM'],
-  ['/api/v1/pharmacy', 'PHARMACY_API_UPSTREAM'], ['/api/v1/ocr', 'OCR_API_UPSTREAM'],
-  ['/api/v1/outreach', 'OUTREACH_API_UPSTREAM'],
-]) {
-  const escaped = route.replaceAll('/', '\\/')
-  assert.match(gatewayConfig, new RegExp(`${escaped}[^\\n]*proxy_pass \\$\\{${upstream}\\}`),
-    `production gateway ownership mismatch for ${route}`)
-}
+const proxyHeaders = await readFile(join(repository, 'gateway/proxy-headers.conf'), 'utf8')
+assert.ok(gatewayDockerfile.includes('COPY gateway/proxy-headers.conf /tmp/hid-proxy-headers.conf')
+  && gatewayDockerfile.includes('COPY --from=configuration /tmp/hid-proxy-headers.conf /etc/nginx/hid-proxy-headers.conf'),
+  'gateway image must ship the proxy contract it includes')
+// Route ownership, per-request upstream resolution, the client-address trust
+// boundary, module route switches and internal-route denial, checked against
+// a model of nginx (scripts/lib/nginx-config-model.mjs); nginx is not run.
+const gatewayContract = assertGatewayContract({
+  template: gatewayConfig, dockerfile: gatewayDockerfile,
+  includes: { '/etc/nginx/hid-proxy-headers.conf': proxyHeaders },
+})
 assert.doesNotMatch(gatewayConfig, /3010|EVENT_DISPATCHER/, 'dispatcher must not be browser-routed')
 for (const [app, base] of Object.entries(bases).filter(([name]) => name !== 'web')) {
   const route = base.slice(0, -1).replaceAll('/', '\\/')
@@ -205,8 +205,9 @@ for (const [app, base] of Object.entries(bases).filter(([name]) => name !== 'web
 }
 assert.match(gatewayConfig, /error_page 502 503 504 = @upstream_unavailable/)
 assert.match(gatewayConfig, /UPSTREAM_UNAVAILABLE/)
-const proxyHeaders = await readFile(join(repository, 'gateway/proxy-headers.conf'), 'utf8')
 assert.match(proxyHeaders, /X-Forwarded-For \$remote_addr/, 'gateway must overwrite caller-supplied forwarding chains')
+assert.match(proxyHeaders, /if \(\$hid_client_address_missing\)[\s\S]*CLIENT_ADDRESS_REQUIRED/,
+  'gateway must refuse an API request without a client address when required')
 assert.match(proxyHeaders, /Origin \$http_origin/)
 assert.match(proxyHeaders, /X-CSRF-Token \$http_x_csrf_token/)
 
@@ -276,6 +277,7 @@ process.stdout.write(JSON.stringify({
   backendArtifacts: backends.length,
   frontendArtifacts: apps.length,
   gatewayArtifact: 'gateway/Dockerfile',
+  gatewayContract,
   contextFilesScanned: contextFiles.length,
   builtFilesScanned: builtFiles.length,
   secretFindings: 0,
