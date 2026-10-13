@@ -74,12 +74,23 @@ export function publicJwk(result, configuration) {
   return { kty: 'EC', crv: 'P-256', x: key.x, y: key.y, kid: configuration.kid, alg: 'ES256', use: 'sig' };
 }
 
+// A warm container re-reads the public key at least this often, so a disabled
+// key stops being published, and stops minting, within five minutes.
+export const publicKeyTtlMs = 300_000;
+
 export function createIssuer(configuration, dependencies) {
   if (!stages.has(configuration?.stage)) throw new Error('Workload issuer environment is not allowed');
-  let cachedKey;
+  const clock = () => dependencies.now?.() ?? Date.now();
+  let cachedKey, cachedAt = 0;
   const getKey = async () => {
-    if (!cachedKey) cachedKey = Promise.resolve(dependencies.getPublicKey(configuration.keyId))
-      .then(result => publicJwk(result, configuration)).catch(error => { cachedKey = undefined; throw error; });
+    if (!cachedKey || clock() - cachedAt >= publicKeyTtlMs) {
+      cachedAt = clock();
+      // A failed read is never cached: the next request reads the key again.
+      const read = Promise.resolve(dependencies.getPublicKey(configuration.keyId))
+        .then(result => publicJwk(result, configuration))
+        .catch(error => { if (cachedKey === read) cachedKey = undefined; throw error; });
+      cachedKey = read;
+    }
     return cachedKey;
   };
   return async event => {
@@ -109,7 +120,7 @@ export function createIssuer(configuration, dependencies) {
     if (!rule.audiences.includes(input.audience)) return json(403, { code: 'WORKLOAD_AUDIENCE_DENIED' });
     try {
       await getKey();
-      const now = Math.floor((dependencies.now?.() ?? Date.now()) / 1000);
+      const now = Math.floor(clock() / 1000);
       const exp = now + configuration.ttlSeconds;
       const claims = { iss: configuration.issuer, sub: rule.subject, aud: input.audience,
         iat: now, nbf: now, exp, jti: randomUUID(), token_use: 'workload' };
