@@ -32,7 +32,7 @@
 //    sign-in (403 STAFF_MFA_FACTOR_UNPROVEN) until a governed reset.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
 import { cookieHeader, createTotpClock, expectStatus, mergeCookies, platformClient } from './platform-session-client.mjs';
 import { enrollmentCodeOutbox, setCookies, staffClient, supertestTransport, SYNTHETIC_STAFF_MFA_KEY_B64,
@@ -85,6 +85,7 @@ const { TurnstileService } = load('auth/turnstile.service.ts');
 const { NotificationOtpClient } = load('auth/notification-otp.client.ts');
 const { PlatformSecurityController } = load('admin/platform-security.controller.ts');
 const { PlatformSecurityService } = load('admin/platform-security.service.ts');
+const { getEnvironment } = load('config/environment.ts');
 const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
 
 globalThis.fetch = async (input) => { throw new Error(`Unexpected outbound request to ${String(input)}`); };
@@ -195,6 +196,36 @@ try {
   { session_kind: 'staff', purpose: 'enroll', proof_method: null });
   expectStatus(await session(first.challengeCookie), 401, 'AUTHENTICATION_REQUIRED');
   checks.push('the staff password step answers mfa_enrollment_required with only an httpOnly challenge cookie (path /api/v1/auth/mfa); no session row or cookie exists; a wrong password and an account without a staff membership get the same 401');
+
+  // 1b. A10: a staff account whose password is correct but which has no active
+  // facility membership (here a membership not yet activated) is refused with
+  // 403 NO_ACTIVE_FACILITY_MEMBERSHIP: no challenge, no session, the refusal
+  // recorded, and never counted as a failed password, so repeating it locks
+  // nothing. Once the membership is active, the same password signs in.
+  const pending = await account('pending');
+  const pendingStaff = randomUUID(); const pendingMembership = randomUUID();
+  await owner.query(`insert into identity.staff (id, account_id, full_name, email, verification_status, default_role)
+    values ($1, $2, 'Staff MFA pending', $3, 'verified', 'doctor')`, [pendingStaff, pending.id, pending.email]);
+  await owner.query(`insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id,
+      facility_id, membership_role, app_role, is_primary, active) values ($1, $2, $3, $4, $5, 'doctor', 'doctor', true, false)`,
+  [pendingMembership, pendingStaff, pending.id, ids.org, ids.facility]);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const refused = await post('/auth/login', {}, { email: pending.email, password, turnstileAction: 'staff-login' });
+    expectStatus(refused, 403, 'NO_ACTIVE_FACILITY_MEMBERSHIP');
+    assert.deepEqual(Object.keys(setCookies(refused)), [], 'a refused password step sets no cookie');
+  }
+  assert.equal((await one('select count(*)::int as n from auth.mfa_login_challenges where account_id = $1', [pending.id])).n, 0,
+    'no MFA challenge is issued to an account without an active facility membership');
+  const pendingBucket = createHmac('sha256', getEnvironment().AUTH_LOGIN_PEPPER)
+    .update(pending.email.trim().toLowerCase(), 'utf8').digest('hex');
+  assert.equal((await one('select count(*)::int as n from auth.login_attempts where principal_hmac = $1', [pendingBucket])).n, 0,
+    'a refused sign-in without a membership is not counted as a failed password');
+  assert.equal((await one(`select count(*)::int as n from auth.session_events where account_id = $1
+    and event_type = 'login_failed' and outcome = 'denied' and details->>'reason' = 'no_active_membership'`, [pending.id])).n, 6,
+  'each refusal is recorded against the account');
+  await owner.query('update identity.staff_facility_memberships set active = true where id = $1', [pendingMembership]);
+  assert.equal((await staff.passwordStep(pending.email)).status, 'mfa_enrollment_required');
+  checks.push('A10: a staff account with a correct password but no active facility membership is refused 403 NO_ACTIVE_FACILITY_MEMBERSHIP six times with no cookie, no MFA challenge and no failed-sign-in count, each refusal recorded as a denied login_failed event; once the membership is active the same password reaches the MFA step');
 
   // 2. A first enrolment needs the emailed code, never the password alone.
   const challenge = { hid_access_mfa: first.challengeCookie.split('=')[1] };

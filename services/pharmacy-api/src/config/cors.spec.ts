@@ -2,6 +2,7 @@ import { Controller, Get, Post, type INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { ProblemDetailsFilter } from '../common/problem';
 import { corsOptions } from './cors';
 
 const ALLOWED = 'https://pharmacy.example.test';
@@ -65,5 +66,50 @@ describe('Pharmacy CORS preflight (Stage 5)', () => {
       'x-csrf-token');
     expect(response.headers['access-control-allow-origin']).toBeUndefined();
     expect(response.headers['access-control-allow-headers']).toBeUndefined();
+  });
+});
+
+/** A plain browser request (no preflight) with the given Origin: its status, headers and body. */
+function plain(port: number, path: string, origin: string | undefined, method: string) {
+  return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
+    const outgoing = httpRequest({ host: '127.0.0.1', port, path, method, headers: origin ? { Origin: origin } : {} },
+      (response) => {
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk: string) => { body += chunk; });
+        response.on('end', () => resolve({ status: response.statusCode ?? 0, headers: response.headers, body }));
+      });
+    outgoing.on('error', reject);
+    outgoing.end();
+  });
+}
+
+// A19: the origin callback refused a disallowed Origin with a plain Error,
+// which the problem filter answers 500.
+describe('Pharmacy CORS refusal of a disallowed origin (A19)', () => {
+  let app: INestApplication;
+  let port: number;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({ controllers: [CorsProbeController] }).compile();
+    app = moduleRef.createNestApplication({ logger: false });
+    app.setGlobalPrefix('api/v1');
+    app.enableCors(corsOptions(ALLOWED));
+    app.useGlobalFilters(new ProblemDetailsFilter());
+    await app.listen(0, '127.0.0.1');
+    port = (app.getHttpServer().address() as AddressInfo).port;
+  });
+  afterAll(() => app.close());
+
+  it.each([['GET', '/api/v1/pharmacy/prescriptions'], ['POST', '/api/v1/pharmacy/dispensations']])(
+    'answers a %s from a disallowed origin 403 ORIGIN_DENIED, not 500, with no CORS headers', async (method, path) => {
+      const response = await plain(port, path, 'https://attacker.example.test', method);
+      expect(response.status).toBe(403);
+      expect(JSON.parse(response.body)).toMatchObject({ status: 403, code: 'ORIGIN_DENIED' });
+      expect(response.headers['access-control-allow-origin']).toBeUndefined();
+    });
+
+  it('keeps a request without Origin working', async () => {
+    expect((await plain(port, '/api/v1/pharmacy/prescriptions', undefined, 'GET')).status).toBe(200);
   });
 });

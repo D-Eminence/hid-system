@@ -2,6 +2,7 @@ import { Controller, Delete, Get, Patch, type INestApplication } from '@nestjs/c
 import { Test } from '@nestjs/testing';
 import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { ProblemDetailsFilter } from '../common/problem';
 import { corsOptions } from './cors';
 
 const ALLOWED = 'https://admin.example.test';
@@ -86,5 +87,58 @@ describe('Identity CORS preflight (Stage 5)', () => {
     const response = await preflight(port, '/api/v1/identity/me/access-pin', 'https://attacker.example.test', 'DELETE');
     expect(response.headers['access-control-allow-origin']).toBeUndefined();
     expect(response.headers['access-control-allow-methods']).toBeUndefined();
+  });
+});
+
+/** Sends a plain browser request (no preflight) with the given Origin and returns its status, headers and body. */
+function plain(port: number, path: string, origin: string | undefined, method: string) {
+  return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
+    const outgoing = httpRequest({ host: '127.0.0.1', port, path, method,
+      headers: { ...(origin ? { Origin: origin } : {}), 'content-type': 'application/json' } },
+    (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk: string) => { body += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode ?? 0, headers: response.headers, body }));
+    });
+    outgoing.on('error', reject);
+    outgoing.end(method === 'GET' ? undefined : '{}');
+  });
+}
+
+// A19: the origin callback refused a disallowed Origin with a plain Error,
+// which the problem filter answers 500 INTERNAL_ERROR: a forged Origin raised
+// the 5xx alarms and a missing portal origin looked like a server fault.
+describe('Identity CORS refusal of a disallowed origin (A19)', () => {
+  let app: INestApplication;
+  let port: number;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({ controllers: [CorsProbeController] }).compile();
+    app = moduleRef.createNestApplication({ logger: false });
+    app.setGlobalPrefix('api/v1');
+    app.enableCors(corsOptions(ALLOWED));
+    app.useGlobalFilters(new ProblemDetailsFilter());
+    await app.listen(0, '127.0.0.1');
+    port = (app.getHttpServer().address() as AddressInfo).port;
+  });
+  afterAll(() => app.close());
+
+  it.each(['GET', 'DELETE', 'OPTIONS'])('answers a %s from a disallowed origin 403 ORIGIN_DENIED, not 500, with no CORS headers',
+    async (method) => {
+      const response = await plain(port, method === 'GET' ? '/api/v1/admin/session' : '/api/v1/identity/me/access-pin',
+        'https://attacker.example.test', method);
+      expect(response.status).toBe(403);
+      expect(response.headers['content-type']).toMatch(/^application\/problem\+json/);
+      expect(JSON.parse(response.body)).toMatchObject({ status: 403, code: 'ORIGIN_DENIED' });
+      expect(response.headers['access-control-allow-origin']).toBeUndefined();
+      expect(response.headers['access-control-allow-credentials']).toBeUndefined();
+    });
+
+  it('keeps a request without Origin (a same-origin GET) and an allowed origin working', async () => {
+    expect((await plain(port, '/api/v1/admin/session', undefined, 'GET')).status).toBe(200);
+    const allowed = await plain(port, '/api/v1/admin/session', ALLOWED, 'GET');
+    expect(allowed.status).toBe(200);
+    expect(allowed.headers['access-control-allow-origin']).toBe(ALLOWED);
   });
 });

@@ -1114,6 +1114,21 @@ try {
   const exportAudit = (await owner.query(`select reason, details from audit.events where action = 'admin.principals.export'
     order by sequence_id desc limit 1`)).rows[0];
   assert.equal(exportAudit.reason, 'Quarterly access review');
+  // A24: the export with its terms and reason in a POST body, out of URLs and access logs: the same CSV and
+  // export headers, and the body reason is the one audited. A reason only in the query string does not count.
+  const postedExport = await platform.command(exporter, '/admin/principals/export',
+    { query: 'security-runtime', reason: 'Quarterly access review by body' });
+  expectStatus(postedExport, 200);
+  assert.equal(postedExport.text, exported.text, 'POST /admin/principals/export sends the CSV GET sends');
+  for (const header of ['content-type', 'content-disposition', 'cache-control', 'x-hid-export-row-count',
+    'x-hid-export-row-limit', 'x-hid-export-truncated']) {
+    assert.equal(postedExport.headers[header], exported.headers[header], `POST export header ${header}`);
+  }
+  expectStatus(await platform.command(exporter, '/admin/principals/export?reason=Quarterly%20access%20review',
+    { query: 'security-runtime' }), 400, 'REASON_REQUIRED');
+  const postedAudit = (await owner.query(`select reason from audit.events where action = 'admin.principals.export'
+    order by sequence_id desc limit 1`)).rows[0];
+  assert.equal(postedAudit.reason, 'Quarterly access review by body');
   evidence.export = { permission: 'platform.principal.export', step_up: true, reason: true, crlf: true,
     formula_neutralized: true, rows: Number(exported.headers['x-hid-export-row-count']),
     cors_exposed: ['x-hid-export-row-count', 'x-hid-export-row-limit', 'x-hid-export-truncated'] };

@@ -274,6 +274,13 @@ try {
   expectStatus(principals, 200);
   assert(principals.body.items.some(item => item.id === auditor.id));
   assert.equal(principals.body.page, 1);
+  // A24: the same search with the term in a POST body, so names and emails stay out of URLs and access logs.
+  const searched = await platform.command(superSession, '/admin/principals/search', { query: 'admin-runtime', pageSize: 10 });
+  expectStatus(searched, 200);
+  assert.deepEqual(searched.body, principals.body, 'POST /admin/principals/search answers what GET /admin/principals does');
+  expectStatus(await platform.command(auditorSession, '/admin/principals/search', { query: 'admin-runtime' }), 403,
+    'PERMISSION_DENIED');
+  expectStatus(await platform.command(superSession, '/admin/principals/search', { query: 'a' }), 400, 'VALIDATION_FAILED');
   // A supplied facility header is ignored on platform routes: same result, no facility bound.
   expectStatus(await get(superSession, '/admin/overview', { 'X-Facility-ID': facilityA }), 200);
   boundaries.platform_admin_without_facility = 200;

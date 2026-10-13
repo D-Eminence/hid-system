@@ -48,11 +48,18 @@ const { TurnstileService } = load('auth/turnstile.service.ts');
 const { MfaService, MFA_TOTP_CLOCK } = load('auth/mfa/mfa.service.ts');
 const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
 const { NotificationOtpClient } = load('auth/notification-otp.client.ts');
+const { PatientSelfController } = load('auth/patient-self.controller.ts');
+const { PatientSelfService } = load('auth/patient-self.service.ts');
 const { ProblemDetailsFilter } = load('common/problem.ts');
 const { getEnvironment } = load('config/environment.ts');
 const pool = new Pool({ host: socket, user: process.env.PGUSER, database: process.env.PGDATABASE, max: 5 });
+// A database fault the service can meet: while `faults.lockTimeout` is set,
+// each runtime transaction gives up waiting for a lock after that long, as
+// the service's own statement and lock timeouts would.
+const faults = { lockTimeout: null };
 const asRuntime = async (client, operation) => {
   try { await client.query('begin'); await client.query('set local role hid_identity_api_runtime');
+    if (faults.lockTimeout) await client.query(`set local lock_timeout = '${faults.lockTimeout}'`);
     const result = await operation(); await client.query('commit'); return result;
   } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
 };
@@ -70,10 +77,10 @@ let app;
 try {
   const clock = createTotpClock();
   const outbox = enrollmentCodeOutbox();
-  const module = await Test.createTestingModule({ controllers: [AuthController],
+  const module = await Test.createTestingModule({ controllers: [AuthController, PatientSelfController],
     providers: [{ provide: DatabaseService, useValue: database }, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
-      AuditService, WorkloadAuthService, TurnstileService, MfaService, MfaSecretProtector,
+      AuditService, WorkloadAuthService, TurnstileService, MfaService, MfaSecretProtector, PatientSelfService,
       { provide: MFA_TOTP_CLOCK, useValue: clock.now }, { provide: NotificationOtpClient, useValue: outbox.client },
       { provide: GoogleAuthenticationService, useValue: {} }] }).compile();
   app = module.createNestApplication({ logger: false });
@@ -500,6 +507,61 @@ try {
   assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
   assert.equal(await kindOf(renewed.body.actor.sessionId), 'staff');
   checks.push('a staff sign-in whose facility membership lapsed, refreshed with patient-web, gets refresh\'s 401 with every cookie cleared (after the CSRF check, which still answers 403 first) and stays unended; signed out with patient-web it is ended (204, one sign-out event and audit); a patient sign-in whose patient is inactive, refreshed with staff-web, gets 401; once the membership is restored, patient-web is refused SESSION_CLIENT_MISMATCH again and staff-web renews it');
+
+  // 16. A6: a refresh whose audit row cannot be written (audit.events held by
+  // another transaction past the lock timeout) is 503 and changes no cookie.
+  // The rotation and its audit commit together or not at all, so the cookies
+  // the browser keeps still refresh: no refresh-token reuse, no ended sign-in.
+  const faultedSignIn = await signIn(bola, 'patient');
+  const auditHolder = await pool.connect();
+  let faultedRefresh;
+  try {
+    await auditHolder.query('begin');
+    await auditHolder.query('lock table audit.events in access exclusive mode');
+    faults.lockTimeout = '300ms';
+    faultedRefresh = await refresh(faultedSignIn.cookies, 'patient-web');
+  } finally {
+    faults.lockTimeout = null;
+    await auditHolder.query('rollback');
+    auditHolder.release();
+  }
+  assert.equal(faultedRefresh.status, 503, JSON.stringify(faultedRefresh.body));
+  assert.deepEqual(faultedRefresh.headers['set-cookie'] ?? [], [], 'a 503 refresh must neither clear nor set a cookie');
+  assert.equal(await live(faultedSignIn.sessionId), true, 'the rotation rolled back with its audit row');
+  const retried = await refresh(faultedSignIn.cookies, 'patient-web');
+  assert.equal(retried.status, 200, JSON.stringify(retried.body));
+  assert.equal(await live(faultedSignIn.sessionId), false, 'the retry rotated the same refresh token');
+  const familyOf = async (id) => (await pool.query(`select count(*) filter (where revocation_reason = 'refresh_token_reuse')::int
+      as reused, count(*) filter (where revoked_at is null)::int as live
+     from auth.sessions where family_id = (select family_id from auth.sessions where id = $1)`, [id])).rows[0];
+  assert.deepEqual(await familyOf(faultedSignIn.sessionId), { reused: 0, live: 1 });
+  assert.equal((await pool.query(`select count(*)::int as n from auth.session_events where event_type = 'reuse_detected'
+    and session_id = $1`, [faultedSignIn.sessionId])).rows[0].n, 0, 'no refresh-token reuse was recorded');
+  assert.equal((await pool.query(`select count(*)::int as n from audit.events where action = 'auth.refresh'
+    and resource_id = $1`, [retried.body.actor.sessionId])).rows[0].n, 1, 'the committed rotation is audited once');
+  checks.push('A6: a refresh whose audit row cannot be written is 503 with no Set-Cookie; the rotation rolled back, so the same cookies refresh (200) with no refresh-token reuse recorded and one auth.refresh audit for the committed rotation');
+
+  // 17. A9: a staff session on a patient-only route is refused by the guard
+  // with 403 PATIENT_SESSION_REQUIRED and audited once, without a facility;
+  // it was 503 with nothing recorded.
+  const staffOnPatientRoutes = await signIn(doctor, 'staff');
+  const deniedRows = async () => (await pool.query(`select count(*)::int as n from audit.events
+    where actor_account_id = $1 and action = 'auth.authorization.denied' and facility_id is null and outcome = 'denied'`,
+  [doctor.id])).rows[0].n;
+  for (const path of ['/api/v1/identity/me', '/api/v1/identity/me/access-history', '/api/v1/identity/me/notifications']) {
+    const before = await deniedRows();
+    const refused = await http.get(path).set('Cookie', cookie(staffOnPatientRoutes.cookies));
+    assert.equal(refused.status, 403, `${path}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.body.code, 'PATIENT_SESSION_REQUIRED');
+    assert.equal(await deniedRows(), before + 1, `${path} records exactly one refusal`);
+  }
+  const pin = await http.post('/api/v1/identity/me/access-pin').set('Cookie', cookie(staffOnPatientRoutes.cookies))
+    .set('Origin', origin).set('x-csrf-token', staffOnPatientRoutes.cookies[`${name}_csrf`]).send({ pin: '482916' });
+  assert.equal(pin.status, 403, JSON.stringify(pin.body)); assert.equal(pin.body.code, 'PATIENT_SESSION_REQUIRED');
+  const patientOnOwnRoute = await signIn(ada, 'patient');
+  const ownProfile = await http.get('/api/v1/identity/me').set('Cookie', cookie(patientOnOwnRoute.cookies));
+  assert.equal(ownProfile.status, 200, JSON.stringify(ownProfile.body));
+  checks.push('A9: a staff session on GET /identity/me, /me/access-history, /me/notifications and POST /me/access-pin is 403 PATIENT_SESSION_REQUIRED, each refusal audited once as auth.authorization.denied with no facility; a patient session still reads its own profile');
 
   process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: 'hid_identity_api_runtime', checks })}\n`);
 } finally { if (app) await app.close(); await pool.end(); }

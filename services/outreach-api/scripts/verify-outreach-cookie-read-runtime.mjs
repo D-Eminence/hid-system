@@ -304,6 +304,8 @@ if (process.argv[2] === '--identity-child') {
     const otherWorkload = await authorize({ 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': ehrWorkloadCredential,
       'x-hid-original-method': 'GET' });
     assert.equal(otherWorkload.status, 401, JSON.stringify(otherWorkload.body));
+    // A5: a workload refusal has its own code, which a calling service tells apart from a user refusal.
+    assert.equal(otherWorkload.body.code, 'WORKLOAD_AUTHENTICATION_FAILED');
     checks.push('Identity skips the cookie-write check on /identity/outreach/authorize only for the authenticated Outreach workload reporting a read, and then authorizes only read permissions; a forged token, no reported method, a write permission and another workload are refused');
 
     process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only',
