@@ -23,10 +23,13 @@ describe('EHR production configuration refusals', () => {
     S3_FORCE_PATH_STYLE: 'false', S3_KMS_KEY_ID: 'arn:aws:kms:eu-west-1:000000000000:key/00000000-0000-4000-8000-000000000001',
   } as const;
   const localToken = 'synthetic-local-service-token-0123456789';
+  const staticAwsKeys = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN'] as const;
 
   function configure(changes: Record<string, string | undefined>): void {
     for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
     Object.assign(process.env, original, production);
+    // Hermetic: a runner's own static AWS credentials must not leak in.
+    for (const key of staticAwsKeys) delete process.env[key];
     for (const [key, value] of Object.entries(changes)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -51,6 +54,13 @@ describe('EHR production configuration refusals', () => {
       'Static S3 credentials are forbidden in production'],
     ['a static S3 access key alone', { S3_ACCESS_KEY_ID: 'synthetic-access-key-id' }, 'Static S3 credentials are forbidden in production'],
     ['a static S3 secret alone', { S3_SECRET_ACCESS_KEY: 'synthetic-secret-access-key' }, 'Static S3 credentials are forbidden in production'],
+    // The S3 client falls back to the SDK's default chain, which reads these
+    // before the ECS task role.
+    ['static AWS credentials', { AWS_ACCESS_KEY_ID: 'synthetic-access-key-id', AWS_SECRET_ACCESS_KEY: 'synthetic-secret-access-key' },
+      'Static AWS credentials are forbidden in production'],
+    ['a static AWS access key alone', { AWS_ACCESS_KEY_ID: 'synthetic-access-key-id' }, 'Static AWS credentials are forbidden in production'],
+    ['a static AWS secret alone', { AWS_SECRET_ACCESS_KEY: 'synthetic-secret-access-key' }, 'Static AWS credentials are forbidden in production'],
+    ['a static AWS session token', { AWS_SESSION_TOKEN: 'synthetic-session-token' }, 'Static AWS credentials are forbidden in production'],
     ['wildcard CORS', { CORS_ORIGINS: '*' }, 'exact HTTPS origins'],
     ['a wildcard among CORS origins', { CORS_ORIGINS: 'https://www.healthidentitydirectory.com,*' }, 'exact HTTPS origins'],
     ['plain-HTTP CORS', { CORS_ORIGINS: 'http://www.healthidentitydirectory.com' }, 'exact HTTPS origins'],
@@ -86,5 +96,11 @@ describe('EHR production configuration refusals', () => {
     configure({ NODE_ENV: 'development', S3_ACCESS_KEY_ID: 'synthetic-access-key-id',
       S3_SECRET_ACCESS_KEY: 'synthetic-secret-access-key', S3_ENDPOINT: 'http://127.0.0.1:9000' });
     expect(getEnvironment().S3_ACCESS_KEY_ID).toBe('synthetic-access-key-id');
+  });
+
+  it('still lets a non-production run start with static AWS credentials in its environment', () => {
+    configure({ NODE_ENV: 'development', AWS_ACCESS_KEY_ID: 'synthetic-access-key-id',
+      AWS_SECRET_ACCESS_KEY: 'synthetic-secret-access-key', AWS_SESSION_TOKEN: 'synthetic-session-token' });
+    expect(getEnvironment().NODE_ENV).toBe('development');
   });
 });

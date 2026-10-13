@@ -1166,6 +1166,14 @@ test('production OTP delivery injects only the otp-email-sms provider fields', (
 
 test('NIN-only enrollment is an explicit synth input that defaults to false and requires QoreID', () => {
   assert.equal(environmentConfig('production').qoreIdNinOnlyEnrollmentEnabled, false);
+  // CFG-PROD and N1: production refuses the flag, even with QoreID on, until
+  // the change that ships the registry-phone holder step lifts this refusal.
+  const productionTopic = { operationalAlarmTopicArn: 'arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts' };
+  assert.throws(() => environmentConfig('production', undefined, 'true', undefined,
+    { ...productionTopic, qoreIdNinOnlyEnrollmentEnabled: 'true' }),
+  /HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production/);
+  assert.equal(environmentConfig('production', undefined, 'true', undefined,
+    { ...productionTopic, qoreIdNinOnlyEnrollmentEnabled: 'false' }).qoreIdNinOnlyEnrollmentEnabled, false);
   assert.equal(containerOf(regional, 'identity-api').environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED, 'false');
   assert.equal(containerOf(stagingRegional, 'identity-api').environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED, 'false');
   assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { qoreIdNinOnlyEnrollmentEnabled: 'true' }),

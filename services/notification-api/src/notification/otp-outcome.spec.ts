@@ -80,12 +80,38 @@ describe('notification.otp.outcome', () => {
     assertPhiFree();
   });
 
+  // An unconfigured fallback (production injects no Brevo field) must not hide
+  // why the primary failed: the line also names the primary and its code.
+  it.each([
+    ['sms', 'termii', 'http_401'],
+    ['email', 'ses', 'SendingPausedException'],
+  ] as const)('keeps the %s primary %s and its code %s when the fallback answers not_configured', async (channel, name, safeCode) => {
+    await service(provider(name, { outcome: 'definitive_failure', safeCode }),
+      provider('brevo', { outcome: 'definitive_failure', safeCode: 'not_configured' }))
+      .deliverOtp({ ...message, channel, recipient: channel === 'email' ? 'patient@example.test' : recipient });
+    expect(events()).toEqual([{
+      event: 'notification.otp.outcome', channel, purpose: 'SIGNUP_VERIFY', outcome: 'definitive_failure',
+      provider: 'brevo', fallbackUsed: true, correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      safeCode: 'not_configured', primaryProvider: name, primarySafeCode: safeCode,
+    }]);
+    assertPhiFree();
+  });
+
   it('reports an accepted fallback after a definitive primary failure', async () => {
     await service(provider('ses', { outcome: 'definitive_failure', safeCode: 'MessageRejected' }),
       provider('brevo', { outcome: 'accepted', providerMessageId: 'provider-message-id-1' }))
       .deliverOtp({ ...message, channel: 'email', recipient: 'patient@example.test' });
-    expect(events()).toEqual([expect.objectContaining({ channel: 'email', outcome: 'accepted', provider: 'brevo', fallbackUsed: true })]);
+    expect(events()).toEqual([expect.objectContaining({ channel: 'email', outcome: 'accepted', provider: 'brevo', fallbackUsed: true,
+      primaryProvider: 'ses', primarySafeCode: 'MessageRejected' })]);
     expect(lines.join('')).not.toContain('provider-message-id-1');
+    assertPhiFree();
+  });
+
+  it('never logs an unclassified primary code next to a fallback', async () => {
+    await service(provider('termii', { outcome: 'definitive_failure', safeCode: 'Invalid number +2348012345678' }),
+      provider('brevo', { outcome: 'accepted' })).deliverOtp(message);
+    expect(events()).toEqual([expect.objectContaining({ provider: 'brevo', fallbackUsed: true, primaryProvider: 'termii' })]);
+    expect(events()[0]).not.toHaveProperty('primarySafeCode');
     assertPhiFree();
   });
 

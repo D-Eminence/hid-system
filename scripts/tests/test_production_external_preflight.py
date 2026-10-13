@@ -34,13 +34,46 @@ def notification(**overrides):
     return {field: item for field, item in value.items() if item is not None}
 
 
+CUSTOMER_KEY_ID = "1234abcd-12ab-34cd-56ef-1234567890ab"
+CUSTOMER_KEY_ARN = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/{CUSTOMER_KEY_ID}"
+CUSTOMER_KEY_ALIAS = "alias/hid-production-alerts"
+AWS_MANAGED_KEY_ID = "0987dcba-09fe-87dc-65ba-ab0987654321"
+AWS_MANAGED_KEY_ARN = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/{AWS_MANAGED_KEY_ID}"
+
+
+def customer_key(**overrides):
+    return {"KeyId": CUSTOMER_KEY_ID, "Arn": CUSTOMER_KEY_ARN, "KeyManager": "CUSTOMER", "KeyState": "Enabled",
+            "KeyUsage": "ENCRYPT_DECRYPT", **overrides}
+
+
+def aws_managed_keys():
+    """Every spelling of the AWS-managed SNS key resolves to KeyManager AWS."""
+    metadata = {"KeyId": AWS_MANAGED_KEY_ID, "Arn": AWS_MANAGED_KEY_ARN, "KeyManager": "AWS", "KeyState": "Enabled",
+                "KeyUsage": "ENCRYPT_DECRYPT"}
+    return {spelling: metadata for spelling in [
+        "alias/aws/sns", f"arn:aws:kms:{REGION}:{ACCOUNT}:alias/aws/sns", AWS_MANAGED_KEY_ID, AWS_MANAGED_KEY_ARN]}
+
+
+def cloudwatch_key_policy(service="cloudwatch.amazonaws.com", actions=("kms:Decrypt", "kms:GenerateDataKey*"),
+                          effect="Allow"):
+    return {"Version": "2012-10-17", "Statement": [
+        {"Sid": "Root", "Effect": "Allow", "Principal": {"AWS": f"arn:aws:iam::{ACCOUNT}:root"},
+         "Action": "kms:*", "Resource": "*"},
+        {"Sid": "CloudWatchAlarms", "Effect": effect, "Principal": {"Service": service},
+         "Action": list(actions), "Resource": "*"}]}
+
+
 class Account:
     """A mocked, read-only production account: every AWS CLI call is answered here."""
 
     def __init__(self, identity_value=None, notification_value=None, account=ACCOUNT, ses=None, dkim="SUCCESS",
-                 topic=None):
+                 topic=None, keys=None, key_policy=None):
         self.calls = []
         self.account = account
+        # describe-key answers by key identifier; get-key-policy by key id.
+        self.keys = {CUSTOMER_KEY_ALIAS: customer_key(), CUSTOMER_KEY_ID: customer_key(),
+                     CUSTOMER_KEY_ARN: customer_key(), **aws_managed_keys()} if keys is None else keys
+        self.key_policy = cloudwatch_key_policy() if key_policy is None else key_policy
         self.secrets = {
             preflight.AUTH_SECRET: {"authSigningSecret": PRIVATE, "authLoginPepper": PRIVATE},
             preflight.IDENTITY_SECRET: identity() if identity_value is None else identity_value,
@@ -48,7 +81,7 @@ class Account:
         }
         self.ses = {"ProductionAccessEnabled": True, "SendingEnabled": True} if ses is None else ses
         self.dkim = dkim
-        self.topic = {"KmsMasterKeyId": "alias/hid-production-alerts", "SubscriptionsConfirmed": "2",
+        self.topic = {"KmsMasterKeyId": CUSTOMER_KEY_ALIAS, "SubscriptionsConfirmed": "2",
                       "SubscriptionsPending": "0"} if topic is None else topic
 
     def __call__(self, arguments):
@@ -68,6 +101,18 @@ class Account:
             if self.topic == "missing":
                 return None, "denied_or_unavailable"
             return {"Attributes": {"TopicArn": arguments[-1], **self.topic}}, None
+        if arguments[:2] == ["kms", "describe-key"]:
+            key = arguments[arguments.index("--key-id") + 1]
+            if key not in self.keys:
+                return None, "denied_or_unavailable"
+            return {"KeyMetadata": self.keys[key]}, None
+        if arguments[:2] == ["kms", "get-key-policy"]:
+            if arguments[arguments.index("--policy-name") + 1] != "default" or self.key_policy == "denied":
+                return None, "denied_or_unavailable"
+            key = arguments[arguments.index("--key-id") + 1]
+            if key not in {metadata["KeyId"] for metadata in self.keys.values()}:
+                return None, "denied_or_unavailable"
+            return {"PolicyName": "default", "Policy": json.dumps(self.key_policy)}, None
         raise AssertionError(f"unexpected AWS call {arguments}")
 
 
@@ -96,14 +141,20 @@ class ProductionPreflightTests(unittest.TestCase):
         self.assertEqual(report["ses"], {"status": "read", "production_access_enabled": True, "sending_enabled": True,
                                          "domain_verified_for_sending": True, "dkim_status_success": True})
         self.assertEqual(report["alarm_topic"], {"status": "read", "kms_encrypted": True, "customer_managed_key": True,
+                                                 "key_enabled": True, "key_in_topic_account_and_region": True,
+                                                 "key_policy_grants_cloudwatch": True,
                                                  "subscriptions_confirmed": 2, "subscriptions_pending": 0})
-        self.assertNotIn("alias/hid-production-alerts", json.dumps(report))
+        for value in [CUSTOMER_KEY_ALIAS, CUSTOMER_KEY_ID, CUSTOMER_KEY_ARN, "CloudWatchAlarms"]:
+            self.assertNotIn(value, json.dumps(report))
         self.assert_value_free(report)
         # Read-only calls only; the alarm topic is the exact one in this account and region.
-        self.assertTrue(all(call[0] in {"sts", "secretsmanager", "sesv2", "sns"} for call in account.calls))
-        self.assertTrue(all(call[1].startswith("get-") for call in account.calls))
+        self.assertTrue(all(call[0] in {"sts", "secretsmanager", "sesv2", "sns", "kms"} for call in account.calls))
+        self.assertTrue(all(call[1].startswith(("get-", "describe-")) for call in account.calls))
         self.assertIn(["sns", "get-topic-attributes", "--topic-arn",
                        f"arn:aws:sns:{REGION}:{ACCOUNT}:hid-production-operational-alerts"], account.calls)
+        # The key is resolved, then its default policy read by the resolved key id.
+        self.assertIn(["kms", "describe-key", "--key-id", CUSTOMER_KEY_ALIAS], account.calls)
+        self.assertIn(["kms", "get-key-policy", "--key-id", CUSTOMER_KEY_ID, "--policy-name", "default"], account.calls)
 
     def test_a_non_empty_google_allowlist_fails_the_launch_profile(self):
         report = self.run_checks(Account(identity(googleOidcClientIds="synthetic-client.apps.googleusercontent.com")))
@@ -199,6 +250,70 @@ class ProductionPreflightTests(unittest.TestCase):
         ]:
             with self.subTest(failure=failure):
                 self.assertIn(failure, self.run_checks(Account(topic=topic))["launch_profile"]["failed_checks"])
+
+    def test_every_spelling_of_the_aws_managed_sns_key_fails(self):
+        for spelling in aws_managed_keys():
+            for written in [spelling, spelling.upper() if spelling.startswith("alias/") else spelling]:
+                with self.subTest(key=written):
+                    report = self.run_checks(Account(topic={"KmsMasterKeyId": written, "SubscriptionsConfirmed": "1"}))
+                    self.assertIs(report["alarm_topic"]["kms_encrypted"], True)
+                    self.assertIs(report["alarm_topic"]["customer_managed_key"], False)
+                    self.assertIn("alarm_topic_customer_managed_key", report["launch_profile"]["failed_checks"])
+                    self.assertFalse(report["launch_profile"]["passed"])
+                    self.assertNotIn(AWS_MANAGED_KEY_ID, json.dumps(report))
+
+    def test_the_customer_key_is_accepted_by_alias_key_id_or_key_arn(self):
+        for spelling in [CUSTOMER_KEY_ALIAS, CUSTOMER_KEY_ID, CUSTOMER_KEY_ARN]:
+            with self.subTest(key=spelling):
+                report = self.run_checks(Account(topic={"KmsMasterKeyId": spelling, "SubscriptionsConfirmed": "1"}))
+                self.assertTrue(report["launch_profile"]["passed"], report["launch_profile"])
+                self.assertNotIn(spelling, json.dumps(report))
+
+    def test_the_topic_key_must_be_enabled_local_and_usable_by_cloudwatch(self):
+        other_account = f"arn:aws:kms:{REGION}:111111111111:key/{CUSTOMER_KEY_ID}"
+        other_region = f"arn:aws:kms:us-east-1:{ACCOUNT}:key/{CUSTOMER_KEY_ID}"
+        for keys, policy, failure in [
+            ({CUSTOMER_KEY_ALIAS: customer_key(KeyState="Disabled")}, None, "alarm_topic_key_enabled"),
+            ({CUSTOMER_KEY_ALIAS: customer_key(KeyState="PendingDeletion")}, None, "alarm_topic_key_enabled"),
+            ({CUSTOMER_KEY_ALIAS: customer_key(Arn=other_account)}, None, "alarm_topic_key_in_account_and_region"),
+            ({CUSTOMER_KEY_ALIAS: customer_key(Arn=other_region)}, None, "alarm_topic_key_in_account_and_region"),
+            ({CUSTOMER_KEY_ALIAS: customer_key(KeyManager=None)}, None, "alarm_topic_customer_managed_key"),
+            # describe-key denied or the key gone: nothing is known, so nothing passes.
+            ({}, None, "alarm_topic_customer_managed_key"),
+            (None, "denied", "alarm_topic_key_policy_grants_cloudwatch"),
+            (None, cloudwatch_key_policy(service="events.amazonaws.com"), "alarm_topic_key_policy_grants_cloudwatch"),
+            (None, cloudwatch_key_policy(actions=("kms:Decrypt",)), "alarm_topic_key_policy_grants_cloudwatch"),
+            (None, cloudwatch_key_policy(actions=("kms:GenerateDataKey*",)), "alarm_topic_key_policy_grants_cloudwatch"),
+            (None, cloudwatch_key_policy(effect="Deny"), "alarm_topic_key_policy_grants_cloudwatch"),
+            (None, cloudwatch_key_policy(service="*"), "alarm_topic_key_policy_grants_cloudwatch"),
+            (None, {"Statement": "not a list"}, "alarm_topic_key_policy_grants_cloudwatch"),
+        ]:
+            with self.subTest(failure=failure, keys=list(keys or []), policy=str(policy)[:60]):
+                report = self.run_checks(Account(keys=keys, key_policy=policy))
+                self.assertIn(failure, report["launch_profile"]["failed_checks"])
+                self.assertFalse(report["launch_profile"]["passed"])
+                for value in [CUSTOMER_KEY_ID, CUSTOMER_KEY_ARN, "111111111111", "events.amazonaws.com"]:
+                    self.assertNotIn(value, json.dumps(report))
+
+    def test_a_policy_granting_cloudwatch_by_wildcard_actions_or_a_service_list_passes(self):
+        for policy in [
+            cloudwatch_key_policy(actions=("kms:*",)),
+            cloudwatch_key_policy(actions=("kms:decrypt", "kms:generatedatakey")),
+            cloudwatch_key_policy(service=["sns.amazonaws.com", "cloudwatch.amazonaws.com"]),
+        ]:
+            with self.subTest(policy=json.dumps(policy["Statement"][1])):
+                report = self.run_checks(Account(key_policy=policy))
+                self.assertIs(report["alarm_topic"]["key_policy_grants_cloudwatch"], True)
+                self.assertTrue(report["launch_profile"]["passed"], report["launch_profile"])
+
+    def test_an_unrecognized_key_identifier_is_never_passed_to_the_cli(self):
+        for value in ["--endpoint-url=https://example.invalid", "alias/../x y", "arn:aws:s3:::bucket", " "]:
+            with self.subTest(value=value):
+                account = Account(topic={"KmsMasterKeyId": value, "SubscriptionsConfirmed": "1"})
+                report = self.run_checks(account)
+                self.assertFalse(any(call[0] == "kms" for call in account.calls))
+                self.assertIs(report["alarm_topic"]["customer_managed_key"], False)
+                self.assertFalse(report["launch_profile"]["passed"])
 
     def test_a_different_account_stops_before_any_secret_read(self):
         account = Account(account="111111111111")

@@ -360,9 +360,12 @@ assert.deepEqual(providerFields, environment === 'staging' ? ['sesFromAddress']
 assert.doesNotMatch(text, /:(meta[A-Za-z]+|brevo[A-Za-z]+)::/, 'no Meta, WhatsApp or Brevo provider field is read')
 
 // CFG-PROD: Identity's NIN-only enrollment flag is the explicit synth input,
-// false by default.
-assert.equal(identityApis[0].Environment.find(entry => entry.Name === 'QOREID_NIN_ONLY_ENROLLMENT_ENABLED')?.Value,
-  process.env.HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED ?? 'false')
+// false by default, and always false in production until N1's holder step.
+const ninOnlyEnrollment = identityApis[0].Environment.find(entry => entry.Name === 'QOREID_NIN_ONLY_ENROLLMENT_ENABLED')?.Value
+assert.equal(ninOnlyEnrollment, process.env.HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED ?? 'false')
+if (environment === 'production') {
+  assert.equal(ninOnlyEnrollment, 'false', 'production identity-api must not enable NIN-only enrollment (CFG-PROD, N1)')
+}
 
 assert.equal(regional.Parameters.OriginDomainName, undefined)
 if (asleep) {
