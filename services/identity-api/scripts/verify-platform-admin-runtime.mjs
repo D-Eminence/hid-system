@@ -65,6 +65,14 @@ const { PlatformSecurityController } = load('admin/platform-security.controller.
 const { PlatformSecurityService } = load('admin/platform-security.service.ts');
 const { AdminDemoRequestsController } = load('commercial/demo-requests.controller.ts');
 const { DemoRequestsService } = load('commercial/demo-requests.service.ts');
+const { WorkforceAdminController } = load('admin/workforce-admin.controller.ts');
+const { WorkforceAdminService } = load('admin/workforce-admin.service.ts');
+const { ConsentController } = load('consent/consent.controller.ts');
+const { ConsentService } = load('consent/consent.service.ts');
+const { IdentityController } = load('identity/identity.controller.ts');
+const { IdentityService } = load('identity/identity.service.ts');
+const { PostgresIdentityProvider } = load('identity/postgres-identity.provider.ts');
+const { IDENTITY_PROVIDER } = load('identity/identity.types.ts');
 const { encodeCursor } = load('common/cursor.ts');
 const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
 
@@ -127,11 +135,12 @@ try {
   const clock = createTotpClock();
   const module = await Test.createTestingModule({
     controllers: [AuthController, PlatformAuthController, AdminController, PlatformSecurityController, AuditController,
-      AdminDemoRequestsController],
+      AdminDemoRequestsController, WorkforceAdminController, ConsentController, IdentityController],
     providers: [DatabaseService, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
       AuditService, WorkloadAuthService, TurnstileService, AdminService, AdminOperationsService, PricingService,
-      MfaService, MfaSecretProtector, PlatformSecurityService, DemoRequestsService,
+      MfaService, MfaSecretProtector, PlatformSecurityService, DemoRequestsService, WorkforceAdminService,
+      ConsentService, IdentityService, { provide: IDENTITY_PROVIDER, useClass: PostgresIdentityProvider },
       { provide: MFA_TOTP_CLOCK, useValue: clock.now },
       { provide: NotificationOtpClient, useValue: {
         deliver: async () => { throw new Error('Notification delivery is outside the platform admin verifier'); },
@@ -461,9 +470,167 @@ try {
     tampered: 'ADMIN_INVALID_CURSOR', other_filter: 'ADMIN_INVALID_CURSOR', other_list: 'ADMIN_INVALID_CURSOR',
     without_permission: 'PERMISSION_DENIED' };
 
+  // 10. Launch D14 workforce provisioning (0087), end to end through the real
+  // routes: an onboarded facility (0061's shape: one org_admin, no clinician),
+  // attach, credential attestation by one administrator, role grant by a
+  // second, the clinician's sign-in, HID lookup and access request, then the
+  // end of the membership. The Super Admin works at facility A, never at C.
+  const facilityC = randomUUID();
+  await owner.query(`insert into identity.facilities (id, organization_id, name, code, timezone, active, lifecycle_status)
+    values ($1, $2, 'Admin Runtime Facility C', $3, 'Africa/Lagos', true, 'verified')`,
+  [facilityC, organizationId, `ADMIN-C-${facilityC.slice(0, 6)}`]);
+  const orgAdmin = await account('workforce-org-admin', { membershipRole: 'org_admin', facility: facilityC });
+  const reviewer = await account('workforce-reviewer', { platformRole: 'platform_super_admin' });
+  const reviewerSession = asPlatform(await platform.enroll(reviewer.email));
+  const orgAdminStaff = await signIn(orgAdmin);
+  const clinicianEmail = `admin-runtime-clinician-${randomUUID().slice(0, 8)}@example.invalid`;
+  const workforceKey = () => `workforce-runtime-${randomUUID()}`;
+  const attach = (who, key) => command(who, '/admin/workforce/memberships',
+    { facilityId: facilityC, email: clinicianEmail, fullName: 'Runtime Clinician', reason: 'Clinician joins facility C' },
+    { 'Idempotency-Key': key });
+
+  // An org_admin is not a platform administrator; a Support Admin lacks the permission;
+  // an administrator without a fresh step-up is refused.
+  expectStatus(await http.post('/api/v1/admin/workforce/memberships').set('Authorization', orgAdminStaff.bearer)
+    .send({ facilityId: facilityC, email: clinicianEmail, fullName: 'Runtime Clinician', reason: 'Self-service attempt' }),
+  403, 'PLATFORM_SESSION_REQUIRED');
+  expectStatus(await attach(supportSession, workforceKey()), 403, 'PERMISSION_DENIED');
+  expectStatus(await attach(reviewerSession, workforceKey()), 403, 'STEP_UP_REQUIRED');
+  await platform.stepUp(reviewerSession);
+  const attachKey = workforceKey();
+  const attached = await attach(reviewerSession, attachKey);
+  expectStatus(attached, 201);
+  assert.equal(attached.body.state, 'pending');
+  assert.equal(attached.body.accountCreated, true);
+  assert.equal(attached.body.accountStatus, 'pending_reset');
+  const replayedAttach = await attach(reviewerSession, attachKey);
+  expectStatus(replayedAttach, 201);
+  assert.equal(replayedAttach.body.replayed, true);
+  assert.equal(replayedAttach.body.membershipId, attached.body.membershipId);
+  const clinician = { id: attached.body.accountId, email: clinicianEmail };
+  const clinicianLogin = () => http.post('/api/v1/auth/login').set('Origin', origin)
+    .send({ email: clinicianEmail, password, turnstileAction: 'staff-login' });
+  // Pending: no password was ever set or shared, and the membership grants nothing.
+  expectStatus(await clinicianLogin(), 401);
+
+  const profile = await get(reviewerSession, `/admin/workforce/accounts/${clinician.id}`);
+  expectStatus(profile, 200);
+  assert.equal(profile.body.staff.verificationStatus, 'pending');
+  assert.deepEqual(profile.body.memberships.map(item => [item.id, item.state]), [[attached.body.membershipId, 'pending']]);
+  const attest = await command(reviewerSession, `/admin/workforce/accounts/${clinician.id}/attestations`, {
+    attestedRoles: ['doctor'], credentialReference: 'MDCN/R/RUNTIME-1', issuingAuthority: 'Medical and Dental Council of Nigeria',
+    verificationMethod: 'manual_review', evidenceReference: 'Synthetic credential review WF-RUNTIME-1',
+    validUntil: new Date(Date.now() + 180 * 86_400_000).toISOString(), reason: 'Reviewed the practising licence',
+  }, { 'If-Match': String(profile.body.staff.version), 'Idempotency-Key': workforceKey() });
+  expectStatus(attest, 201);
+  assert.equal(attest.body.verificationStatus, 'verified');
+
+  const grant = (who, version) => command(who, `/admin/workforce/memberships/${attached.body.membershipId}/roles`,
+    { facilityId: facilityC, roleCode: 'doctor', action: 'grant', reason: 'Attested doctor for facility C' },
+    { 'If-Match': String(version), 'Idempotency-Key': workforceKey() });
+  // The reviewer cannot also grant: a clinical role takes two administrators.
+  expectStatus(await grant(reviewerSession, 1), 403, 'WORKFORCE_SECOND_PERSON_REQUIRED');
+  await platform.stepUp(superSession);
+  expectStatus(await command(superSession, `/admin/workforce/memberships/${attached.body.membershipId}/roles`,
+    { facilityId: facilityA, roleCode: 'doctor', action: 'grant', reason: 'Attested doctor for facility C' },
+    { 'If-Match': '1', 'Idempotency-Key': workforceKey() }), 409, 'WORKFORCE_FACILITY_MISMATCH');
+  expectStatus(await grant(superSession, 1), 201);
+  const granted = await get(superSession, `/admin/workforce/accounts/${clinician.id}`);
+  expectStatus(granted, 200);
+  const activeMembership = granted.body.memberships[0];
+  assert.equal(activeMembership.state, 'active');
+  assert.deepEqual(activeMembership.roles.map(role => [role.roleCode, role.effective]), [['doctor', true]]);
+  // A Super Admin who works at facility A cannot provision facility A.
+  expectStatus(await command(superSession, '/admin/workforce/memberships',
+    { facilityId: facilityA, accountId: auditor.id, reason: 'Insider attach attempt' }, { 'Idempotency-Key': workforceKey() }),
+  403, 'WORKFORCE_FACILITY_CONFLICT');
+
+  // Activation: the clinician sets a password through account recovery, as
+  // auth.complete_recovery_otp does (verify-otp-recovery-runtime covers that
+  // flow); nobody else ever knew a password for the account.
+  await owner.query(`update auth.accounts set password_hash = $2, password_algorithm = 'argon2id', status = 'active',
+    password_changed_at = clock_timestamp() where id = $1 and status = 'pending_reset' and password_hash is null`,
+  [clinician.id, passwordHash]);
+  const clinicianLoggedIn = await clinicianLogin();
+  expectStatus(clinicianLoggedIn, 200);
+  const clinicianFacility = clinicianLoggedIn.body.actor.facilities.find(facility => facility.id === facilityC);
+  assert.deepEqual(clinicianFacility.roles, ['doctor']);
+  assert(clinicianFacility.permissions.includes('identity.patient.read'));
+  const clinicianCookie = (clinicianLoggedIn.headers['set-cookie'] ?? []).map(value => value.split(';')[0]).join('; ');
+  const clinicianSession = { cookie: clinicianCookie, csrf: clinicianLoggedIn.headers['x-csrf-token'] };
+
+  // HID lookup and an access request at facility C; the patient approves
+  // through the governed approval command; then the lookup is authorized.
+  async function patientFixture(hid) {
+    const accountId = randomUUID(); const patientId = randomUUID();
+    await owner.query(`insert into auth.accounts (id, subject, email, status) values ($1, $2, $3, 'active')`,
+      [accountId, `synthetic:admin-runtime:patient:${hid}`, `admin-runtime-patient-${hid.toLowerCase()}@example.invalid`]);
+    await owner.query(`insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name)
+      values ($1, $2, $3, 'Runtime', 'Patient', 'Runtime Patient')`, [patientId, accountId, hid]);
+    return { accountId, patientId, hid, subject: `synthetic:admin-runtime:patient:${hid}` };
+  }
+  const hidSuffix = () => Array.from({ length: 8 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+  const patientA = await patientFixture(`HID-${hidSuffix()}`);
+  const patientB = await patientFixture(`HID-${hidSuffix()}`);
+  const clinical = (who, path, body) => http.post(`/api/v1${path}`).set('Cookie', who.cookie).set('Origin', origin)
+    .set('x-csrf-token', who.csrf).set('X-Facility-ID', facilityC).set('X-Purpose-Of-Use', 'direct-care').send(body);
+  const lookup = who => clinical(who, '/identity/patient-lookup', { hid: patientA.hid, purpose: 'direct-care' });
+  const beforeConsent = await lookup(clinicianSession);
+  assert([403, 404].includes(beforeConsent.status), `lookup before consent answered ${beforeConsent.status}`);
+  const requestA = await clinical(clinicianSession, '/identity/access-requests',
+    { hid: patientA.hid, scope: 'read_records', reason: 'Clinic visit at facility C', durationMinutes: 60 });
+  expectStatus(requestA, 201);
+  const requestB = await clinical(clinicianSession, '/identity/access-requests',
+    { hid: patientB.hid, scope: 'read_records', reason: 'Clinic visit at facility C', durationMinutes: 60 });
+  expectStatus(requestB, 201);
+  const requestId = (await owner.query(`select id::text from identity.access_requests
+    where patient_id = $1 and status = 'pending'`, [patientA.patientId])).rows[0].id;
+  const approver = await owner.connect();
+  try {
+    await approver.query('begin');
+    await approver.query(`select set_config('app.actor_subject', $1, true), set_config('app.correlation_id', $2, true)`,
+      [patientA.subject, `workforce-runtime-approve-${randomUUID().slice(0, 8)}`]);
+    await approver.query('select * from identity.approve_access_request($1)', [requestId]);
+    await approver.query('commit');
+  } catch (error) { await approver.query('rollback'); throw error; } finally { approver.release(); }
+  const afterConsent = await lookup(clinicianSession);
+  expectStatus(afterConsent, 201);
+  assert.equal(afterConsent.body.patient.hid, patientA.hid);
+  // The facility's org_admin stays non-clinical.
+  expectStatus(await lookup(orgAdminStaff), 403, 'PERMISSION_DENIED');
+
+  // Ending the membership closes its grant and pending request and signs the clinician out.
+  const membershipVersion = (await owner.query('select row_version from identity.staff_facility_memberships where id = $1',
+    [attached.body.membershipId])).rows[0].row_version;
+  await platform.stepUp(superSession);
+  const ended = await command(superSession, `/admin/workforce/memberships/${attached.body.membershipId}/end`,
+    { facilityId: facilityC, reason: 'Clinician left facility C' },
+    { 'If-Match': String(membershipVersion), 'Idempotency-Key': workforceKey() });
+  expectStatus(ended, 201);
+  assert.equal(ended.body.state, 'ended');
+  assert.equal(ended.body.revokedRoles, 1);
+  assert.equal(ended.body.revokedGrants, 1);
+  assert.equal(ended.body.expiredRequests, 1);
+  assert(ended.body.revokedSessions >= 1);
+  expectStatus(await lookup(clinicianSession), 401);
+  expectStatus(await clinicianLogin(), 401);
+  const workforceAudit = (await owner.query(`select action, access_scope, facility_id from audit.events
+    where action like 'admin.workforce.%' and outcome = 'success' and actor_account_id = any($1::uuid[])
+    order by sequence_id`, [[reviewer.id, superAdmin.id]])).rows;
+  assert.deepEqual(workforceAudit.map(row => row.action).filter(action => !action.endsWith('.request')),
+    ['admin.workforce.membership.attached', 'admin.workforce.credential.attested', 'admin.workforce.role.granted',
+      'admin.workforce.membership.ended']);
+  assert(workforceAudit.every(row => row.access_scope === 'platform' && row.facility_id === null));
+  boundaries.workforce_provisioning = { org_admin_route: 'PLATFORM_SESSION_REQUIRED', without_permission: 'PERMISSION_DENIED',
+    without_step_up: 'STEP_UP_REQUIRED', attach: 'pending', reviewer_grants: 'WORKFORCE_SECOND_PERSON_REQUIRED',
+    other_facility: 'WORKFORCE_FACILITY_MISMATCH', insider: 'WORKFORCE_FACILITY_CONFLICT', clinician_sign_in: 200,
+    lookup_before_consent: beforeConsent.status, access_request: 201, lookup_after_approval: 201,
+    org_admin_lookup: 'PERMISSION_DENIED', end: { revokedGrants: 1, expiredRequests: 1, signed_out: 401 } };
+
   process.stdout.write(JSON.stringify({ status: 'passed', runtimeRole,
     routes: ['/admin/session', '/admin/overview', '/admin/principals', '/admin/audit/events', '/admin/facilities/:id/status',
-      '/admin/demo-requests'], boundaries }) + '\n');
+      '/admin/demo-requests', '/admin/workforce/memberships', '/admin/workforce/accounts/:id/attestations',
+      '/admin/workforce/memberships/:id/roles', '/admin/workforce/memberships/:id/end'], boundaries }) + '\n');
 } finally {
   await app?.close();
   await owner.end();

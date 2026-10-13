@@ -310,6 +310,45 @@ begin
      ) then
     raise exception 'MFA account lock helper privileges are inconsistent';
   end if;
+  -- Launch D14 (0087): the workforce commands and the effective-role check are
+  -- executable by the Identity runtime only; their helpers by nobody; and no
+  -- runtime reads or writes the attestation, lifecycle or role-grant tables,
+  -- or updates memberships, directly.
+  if exists (
+       select 1 from unnest(array[
+         'identity.admin_attach_workforce_member(uuid,uuid,text,text,text,text,character)',
+         'identity.admin_record_credential_attestation(uuid,bigint,text[],text,text,text,timestamptz,text,text,character)',
+         'identity.admin_change_workforce_role(uuid,uuid,bigint,text,text,text,text,character)',
+         'identity.admin_end_workforce_membership(uuid,uuid,bigint,text,text,character)',
+         'identity.admin_workforce_profile(uuid)', 'auth.facility_role_is_effective(uuid)']) command(signature)
+       where not has_function_privilege('hid_identity_api_runtime', command.signature, 'EXECUTE')
+          or has_function_privilege('public', command.signature, 'EXECUTE')
+          or exists (
+            select 1 from unnest(array['hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_lab_api_runtime',
+              'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime',
+              'hid_schema_test_runtime']) runtime(role_name)
+            where has_function_privilege(runtime.role_name, command.signature, 'EXECUTE'))
+     ) or exists (
+       select 1 from unnest(array['identity.workforce_command_actor()', 'identity.workforce_require_assurance(uuid)',
+         'identity.workforce_works_at(uuid,uuid)', 'identity.workforce_target_eligible(auth.accounts)',
+         'identity.guard_workforce_membership_change()', 'identity.guard_ended_membership_change()']) helper(signature)
+       where has_function_privilege('public', helper.signature, 'EXECUTE')
+          or has_function_privilege('hid_identity_api_runtime', helper.signature, 'EXECUTE')
+     ) or exists (
+       select 1
+       from unnest(array['identity.staff_credential_attestations', 'identity.workforce_memberships',
+         'identity.workforce_role_grants']) evidence(table_name),
+         unnest(array['hid_identity_api_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime',
+           'hid_migration_admin']) runtime(role_name),
+         unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) privilege(name)
+       where has_table_privilege(runtime.role_name, evidence.table_name, privilege.name)
+     ) or has_table_privilege('hid_identity_api_runtime', 'identity.staff_facility_memberships', 'UPDATE')
+       or not exists (select 1 from auth.role_permissions where role_code = 'platform_super_admin'
+         and permission_code = 'platform.workforce.manage')
+       or exists (select 1 from auth.role_permissions where permission_code = 'platform.workforce.manage'
+         and role_code <> 'platform_super_admin') then
+    raise exception 'workforce provisioning privileges are inconsistent';
+  end if;
   -- Self-NIN identifiers are written only by identity.bind_my_verified_nin, a
   -- definer owned by the table owner, which bypasses row-level security on
   -- this table. No policy may let another role insert one directly (0078).

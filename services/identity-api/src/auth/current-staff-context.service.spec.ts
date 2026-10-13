@@ -1,4 +1,5 @@
 import { UnauthorizedException } from '@nestjs/common';
+import { DomainProblem } from '../common/problem';
 import type { DatabaseService } from '../database/database.service';
 import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
 import { CurrentStaffContextService, eligibleStaffMembershipJoins } from './current-staff-context.service';
@@ -86,5 +87,56 @@ describe('CurrentStaffContextService PostgreSQL authorization boundary', () => {
     await expect(service.resolve('patient:ordinary-person', 'local'))
       .rejects.toBeInstanceOf(UnauthorizedException);
     expect(String(query.mock.calls[0]?.[0])).toContain('join identity.staff staff');
+  });
+
+  describe('one membership per facility (N5)', () => {
+    const otherMembership = { ...STAFF_CONTEXT_ROW, membership_id: '40000000-0000-4000-8000-000000000002',
+      roles: ['org_admin'], permissions: ['organization.manage'], is_primary: false };
+
+    function serviceReturning(rows: readonly Record<string, unknown>[]) {
+      const query = jest.fn()
+        .mockResolvedValueOnce({ rows, rowCount: rows.length })
+        .mockResolvedValueOnce({ rows: [{ roles: [], permissions: [] }], rowCount: 1 });
+      return { query, service: new CurrentStaffContextService({ query } as unknown as DatabaseService) };
+    }
+
+    it('fails closed with FACILITY_MEMBERSHIP_AMBIGUOUS when two memberships bind one facility', async () => {
+      const { service } = serviceReturning([STAFF_CONTEXT_ROW, otherMembership]);
+      const refusal = await service.resolve(STAFF_CONTEXT_ROW.subject, 'local', undefined,
+        STAFF_CONTEXT_ROW.facility_id).then(() => undefined, (error: unknown) => error);
+      expect(refusal).toBeInstanceOf(DomainProblem);
+      expect((refusal as DomainProblem).code).toBe('FACILITY_MEMBERSHIP_AMBIGUOUS');
+      expect((refusal as DomainProblem).getStatus()).toBe(409);
+    });
+
+    it('still refuses when the duplicate facility is not the one requested', async () => {
+      const elsewhere = { ...STAFF_CONTEXT_ROW, facility_id: '10000000-0000-4000-8000-000000000003',
+        membership_id: '40000000-0000-4000-8000-000000000003', facility_name: 'Another Facility' };
+      const { service } = serviceReturning([elsewhere, STAFF_CONTEXT_ROW, otherMembership]);
+      await expect(service.resolve(STAFF_CONTEXT_ROW.subject, 'local', undefined, elsewhere.facility_id))
+        .rejects.toMatchObject({ code: 'FACILITY_MEMBERSHIP_AMBIGUOUS' });
+    });
+
+    it('orders memberships deterministically, with the membership id as the last tie-break', async () => {
+      const { query, service } = serviceReturning([STAFF_CONTEXT_ROW]);
+      await service.resolve(STAFF_CONTEXT_ROW.subject, 'local');
+      expect(String(query.mock.calls[0]?.[0]).replace(/\s+/g, ' '))
+        .toContain('order by membership.is_primary desc, facility.name, membership.facility_id, membership.id');
+    });
+
+    it('takes permissions only from roles whose credential attestation is current (D14)', async () => {
+      const { query, service } = serviceReturning([STAFF_CONTEXT_ROW]);
+      await service.resolve(STAFF_CONTEXT_ROW.subject, 'local');
+      expect(String(query.mock.calls[0]?.[0])).toContain('and auth.facility_role_is_effective(account_role.id)');
+    });
+
+    it('binds distinct facilities as before', async () => {
+      const second = { ...STAFF_CONTEXT_ROW, facility_id: '10000000-0000-4000-8000-000000000003',
+        membership_id: '40000000-0000-4000-8000-000000000003', facility_name: 'Another Facility', is_primary: false };
+      const { service } = serviceReturning([STAFF_CONTEXT_ROW, second]);
+      const actor = await service.resolve(STAFF_CONTEXT_ROW.subject, 'local', undefined, second.facility_id);
+      expect(actor.facility?.membershipId).toBe(second.membership_id);
+      expect(actor.facilityIds).toEqual([STAFF_CONTEXT_ROW.facility_id, second.facility_id]);
+    });
   });
 });
