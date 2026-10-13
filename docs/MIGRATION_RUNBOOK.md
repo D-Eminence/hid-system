@@ -293,6 +293,9 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
+Run it only with `npm run db:bootstrap`, which sends `runtime-grants.sql` as
+one transaction (with `psql`, only as `psql -1 -v ON_ERROR_STOP=1 -f`): its
+temporary memberships below must never outlive or leave that transaction.
 The bootstrap may run again at any time; a second run changes nothing. It
 creates each role with its attributes and then checks them. It refuses a HID
 group role with `SUPERUSER`, `BYPASSRLS` or `REPLICATION`, and a runner that
