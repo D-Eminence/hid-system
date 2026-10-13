@@ -76,7 +76,7 @@ insert into auth.account_roles (id, account_id, role_code, scope_type, grant_rea
 insert into auth.mfa_login_challenges (id, account_id, purpose, token_sha256, account_token_version, created_at,
     expires_at, max_attempts, session_kind, proof_method, proof_verified_at)
 select ('d8b00000-0000-4000-8000-0000000000e' || suffix)::uuid, ('d8200000-0000-4000-8000-00000000000' || suffix)::uuid,
-  'enroll', repeat(suffix, 63) || 'e', 1, clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'staff',
+  'enroll', repeat(suffix, 63) || 'e', 1, now(), now() + interval '9 minutes', 5, 'staff',
   'provider_activation', clock_timestamp()
 from unnest(array['1', '5']) as suffix;
 
@@ -298,15 +298,15 @@ insert into auth.mfa_login_challenges (id, account_id, purpose, token_sha256, ac
     expires_at, max_attempts, session_kind, proof_method, proof_verifier_hmac, proof_key_version, proof_sent_at,
     proof_verified_at) values
   ('d8b00000-0000-4000-8000-0000000000f1', 'd8200000-0000-4000-8000-000000000007', 'enroll', repeat('5', 64), 1,
-   clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'staff', 'email_code', repeat('a', 64), 'suite-v1',
+   now(), now() + interval '9 minutes', 5, 'staff', 'email_code', repeat('a', 64), 'suite-v1',
    now(), clock_timestamp()),
   ('d8b00000-0000-4000-8000-0000000000f2', 'd8200000-0000-4000-8000-000000000007', 'enroll', repeat('6', 64), 1,
-   clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'staff', 'email_code', repeat('b', 64), 'suite-v1',
+   now(), now() + interval '9 minutes', 5, 'staff', 'email_code', repeat('b', 64), 'suite-v1',
    now(), null),
   ('d8b00000-0000-4000-8000-0000000000f3', 'd8200000-0000-4000-8000-000000000007', 'enroll', repeat('7', 64), 1,
-   clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'platform', null, null, null, null, null),
+   now(), now() + interval '9 minutes', 5, 'platform', null, null, null, null, null),
   ('d8b00000-0000-4000-8000-0000000000f4', 'd8200000-0000-4000-8000-000000000007', 'enroll', repeat('8', 64), 1,
-   clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'staff', 'email_code', repeat('c', 64), 'suite-v1',
+   now(), now() + interval '9 minutes', 5, 'staff', 'email_code', repeat('c', 64), 'suite-v1',
    now(), clock_timestamp());
 update auth.mfa_login_challenges set consumed_at = clock_timestamp(), row_version = row_version + 1
 where id = 'd8b00000-0000-4000-8000-0000000000f4';

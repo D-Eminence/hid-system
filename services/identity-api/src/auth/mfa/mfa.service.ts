@@ -86,11 +86,25 @@ interface FactorRow {
   secret_ciphertext: Buffer;
   secret_key_version: string;
   last_used_step: string | null;
+  /** The staff enrolment proof the factor records (0088); null when platform sign-in enrolled it. */
+  enrollment_proof: 'email_code' | 'provider_activation' | null;
 }
 
 /** The fifth failed second-factor attempt within 15 minutes blocks the account for 15 minutes. */
 const FAILURE_PER_ACCOUNT: RateLimitWindow = { windowSeconds: 900, maxRequests: 4 };
-const FAILURE_PER_IP: RateLimitWindow = { windowSeconds: 900, maxRequests: 19 };
+/**
+ * Failed second-factor attempts per source address, in a bucket of each
+ * sign-in's own (IP_BUCKET). Platform sign-in, used by a handful of
+ * administrators, blocks the address at the 20th failure in 15 minutes.
+ * Staff sign-in serves every clinician behind a facility's address, so its
+ * bucket blocks at the 100th: mistyped codes at a shift change, or the
+ * failure budgets of a few accounts, never lock a facility out.
+ */
+const FAILURE_PER_IP: Record<MfaSessionKind, RateLimitWindow> = {
+  platform: { windowSeconds: 900, maxRequests: 19 },
+  staff: { windowSeconds: 900, maxRequests: 99 },
+};
+const IP_BUCKET: Record<MfaSessionKind, string> = { platform: 'ip', staff: 'staff-ip' };
 /** Enrollment starts and recovery-code regenerations: five per 15 minutes. */
 const REQUESTS_PER_ACCOUNT: RateLimitWindow = { windowSeconds: 900, maxRequests: 5 };
 const CHALLENGE_TTL_SECONDS: Record<PlatformChallengePurpose, number> = { verify: 300, enroll: 600 };
@@ -113,9 +127,15 @@ type Failure = { kind: 'invalid' } | { kind: 'rate_limited' } | { kind: 'failed'
  * A staff authenticator is enrolled only on a fresh proof bound to the
  * enrolment challenge: a six-digit code sent to the account's email address
  * (sendEnrollmentCode, then startEnrollment with the code), or the provider
- * activation that opened the challenge in the same request. The password
- * alone never enrols one, and the database refuses to consume a staff
- * enrolment challenge without a verified proof (0088).
+ * activation that opened the challenge in the same request. The factor
+ * records that proof, and only a factor that records one verifies a staff
+ * sign-in: a factor a platform first enrolment created on the password alone
+ * never does (403 STAFF_MFA_FACTOR_UNPROVEN until a governed reset), and a
+ * platform first enrolment of an account with an eligible staff membership is
+ * refused, so it enrols at staff sign-in. The database refuses to consume a
+ * staff enrolment challenge that records no verified proof, to record a proof
+ * on a factor without one, and to give a staff session assurance on a factor
+ * without one (0088); it cannot check the emailed code itself.
  *
  * Lock order (Stage 7A): every transaction here locks the account row
  * (auth.lock_account_for_mfa, 0076) before any other row lock or write; then
@@ -172,9 +192,13 @@ export class MfaService {
         ? `auth.account_has_platform_permission(account.id, 'platform.admin.access')`
         : `exists (select 1 from auth.accounts eligible ${eligibleStaffMembershipJoins('eligible', '$2')}
              where eligible.id = account.id)`;
-      const account = (await client.query<{ eligible: boolean; enrolled: boolean; token_version: string; subject: string }>(
+      const account = (await client.query<{ eligible: boolean; enrolled: boolean; unproven: boolean;
+        token_version: string; subject: string }>(
         `select ${eligible} as eligible,
                 auth.account_has_active_mfa(account.id) as enrolled,
+                exists (select 1 from auth.mfa_factors factor
+                         where factor.account_id = account.id and factor.status = 'active'
+                           and factor.enrollment_proof is null) as unproven,
                 account.token_version::text, account.subject
            from auth.accounts account
           where account.id = $1 and account.status = 'active'
@@ -192,6 +216,13 @@ export class MfaService {
       }
       await client.query('delete from auth.login_attempts where principal_hmac = $1 and pepper_version = $2',
         [this.localProvider.principalHash(principal), this.environment.AUTH_LOGIN_PEPPER_VERSION]);
+      // The account's factor was enrolled by platform sign-in, on the password
+      // alone: it never verifies a staff sign-in (0088). No challenge is issued.
+      if (kind === 'staff' && account.enrolled && account.unproven) {
+        await this.sessionEvent(client, 'login_failed', 'denied', identity.accountId!, event,
+          { reason: 'staff_mfa_factor_unproven', session_kind: kind });
+        return { kind: 'unproven' } as const;
+      }
       const purpose: PlatformChallengePurpose = account.enrolled ? 'verify' : 'enroll';
       const activationProof = kind === 'staff' && purpose === 'enroll' && options.activationProof === true;
       await client.query(
@@ -215,10 +246,11 @@ export class MfaService {
       await this.sessionEvent(client, 'mfa_challenge_issued', 'success', identity.accountId!, event,
         kind === 'platform' ? { purpose } : { purpose, session_kind: kind,
           ...(activationProof ? { proof: 'provider_activation' } : {}) });
-      return { purpose, expiresAt: inserted.rows[0]!.expires_at };
+      return { kind: 'challenge', purpose, expiresAt: inserted.rows[0]!.expires_at } as const;
     });
     if (!result) throw new UnauthorizedException('Invalid credentials');
-    return { ...result, token };
+    if (result.kind === 'unproven') throw this.unprovenFactor();
+    return { purpose: result.purpose, expiresAt: result.expiresAt, token };
   }
 
   /** Second-factor step of sign-in: a TOTP code or one unused recovery code. */
@@ -231,9 +263,10 @@ export class MfaService {
     const outcome = await this.database.withSystemTransaction(event.correlationId, async (client) => {
       const challenge = await this.lockChallenge(client, token, 'verify', kind);
       if (!challenge) return { kind: 'invalid' } as const;
-      if (await this.blocked(client, challenge.account_id, event)) return { kind: 'rate_limited' } as const;
+      if (await this.blocked(client, challenge.account_id, event, kind)) return { kind: 'rate_limited' } as const;
       const factor = await this.lockActiveFactor(client, challenge.account_id);
       if (!factor) return { kind: 'invalid' } as const;
+      if (kind === 'staff' && !factor.enrollment_proof) return { kind: 'unproven' } as const;
       let method: 'totp' | 'recovery_code';
       let accepted: boolean;
       if (input.code) {
@@ -261,6 +294,7 @@ export class MfaService {
         kind === 'platform' ? 'auth.admin.login' : 'auth.login', { mfaMethod: method }));
       return { kind: 'session', session, remaining } as const;
     });
+    if (outcome.kind === 'unproven') throw this.unprovenFactor();
     if (outcome.kind !== 'session') throw this.failure(outcome);
     if (outcome.remaining !== undefined) {
       this.notify({ accountId: outcome.session.actor.accountId, kind, event: 'recovery_code_used',
@@ -328,7 +362,10 @@ export class MfaService {
    * First sign-in without a factor: creates a pending TOTP factor and returns
    * its secret once. The secret is never returned again. A staff enrolment
    * needs its fresh proof first: the email code (verified here, a wrong code
-   * counted as a failed attempt) or the provider activation.
+   * counted as a failed attempt) or the provider activation; the factor
+   * records it. A platform enrolment records none, so it is refused for an
+   * account with an eligible staff membership, which enrols at staff sign-in
+   * instead and then uses that factor for both.
    */
   async startEnrollment(token: string, event: SessionEventMetadata, kind: MfaSessionKind = 'platform',
     proof: { emailCode?: string } = {}): Promise<{
@@ -339,9 +376,12 @@ export class MfaService {
       const challenge = await this.lockChallenge(client, token, 'enroll', kind);
       if (!challenge) return { kind: 'invalid' } as const;
       if (await this.lockActiveFactor(client, challenge.account_id)) return { kind: 'invalid' } as const;
+      if (kind === 'platform' && await this.staffEligible(client, challenge.account_id)) {
+        return { kind: 'staff_sign_in_required' } as const;
+      }
       if (kind === 'staff' && !challenge.proof_verified_at) {
         if (!proof.emailCode || challenge.proof_method !== 'email_code') return { kind: 'proof_required' } as const;
-        if (await this.blocked(client, challenge.account_id, event)) return { kind: 'rate_limited' } as const;
+        if (await this.blocked(client, challenge.account_id, event, kind)) return { kind: 'rate_limited' } as const;
         if (!this.proofMatches(challenge, proof.emailCode)) return this.recordChallengeFailure(client, challenge, event, kind);
         await client.query(
           `update auth.mfa_login_challenges set proof_verified_at = clock_timestamp(), row_version = row_version + 1
@@ -360,13 +400,17 @@ export class MfaService {
       );
       const factorId = randomUUID();
       const secret = randomBytes(TOTP_SECRET_BYTES);
+      // A staff factor records the proof it is enrolled on, and its challenge.
       const inserted = await client.query<{ enrollment_expires_at: Date }>(
-        `insert into auth.mfa_factors (id, account_id, status, secret_ciphertext, secret_key_version, enrollment_expires_at)
+        `insert into auth.mfa_factors (id, account_id, status, secret_ciphertext, secret_key_version, enrollment_expires_at,
+           enrollment_proof, enrollment_challenge_id)
          values ($1, $2, 'pending', $3, $4,
-           greatest(least($5::timestamptz, now() + interval '590 seconds'), clock_timestamp() + interval '5 seconds'))
+           greatest(least($5::timestamptz, now() + interval '590 seconds'), clock_timestamp() + interval '5 seconds'),
+           $6, $7)
          returning enrollment_expires_at`,
         [factorId, challenge.account_id, this.protector.encryptSecret(factorId, challenge.account_id, secret),
-          this.protector.keyVersion, challenge.expires_at],
+          this.protector.keyVersion, challenge.expires_at,
+          kind === 'staff' ? challenge.proof_method : null, kind === 'staff' ? challenge.id : null],
       );
       await this.sessionEvent(client, 'mfa_enrollment_started', 'success', challenge.account_id, event,
         kind === 'platform' ? {} : { session_kind: kind, proof: challenge.proof_method ?? 'email_code' });
@@ -380,6 +424,10 @@ export class MfaService {
     if (outcome.kind === 'proof_required') {
       throw new DomainProblem(403, 'MFA_ENROLLMENT_PROOF_REQUIRED',
         'Enter the code sent to your email address to set up your authenticator');
+    }
+    if (outcome.kind === 'staff_sign_in_required') {
+      throw new DomainProblem(409, 'MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED',
+        'This account also signs in as staff: set up your authenticator at staff sign-in, then use it here');
     }
     if (outcome.kind !== 'started') throw this.failure(outcome);
     return {
@@ -402,13 +450,15 @@ export class MfaService {
       const challenge = await this.lockChallenge(client, token, 'enroll', kind);
       if (!challenge) return { kind: 'invalid' } as const;
       if (kind === 'staff' && !challenge.proof_verified_at) return { kind: 'proof_required' } as const;
-      if (await this.blocked(client, challenge.account_id, event)) return { kind: 'rate_limited' } as const;
+      if (await this.blocked(client, challenge.account_id, event, kind)) return { kind: 'rate_limited' } as const;
+      // A staff enrolment activates only the factor its own proven challenge created.
       const factor = (await client.query<FactorRow>(
-        `select id::text, secret_ciphertext, secret_key_version, last_used_step::text
+        `select id::text, secret_ciphertext, secret_key_version, last_used_step::text, enrollment_proof
            from auth.mfa_factors
           where account_id = $1 and status = 'pending' and enrollment_expires_at > clock_timestamp()
+            ${kind === 'staff' ? 'and enrollment_challenge_id = $2' : ''}
           for update`,
-        [challenge.account_id],
+        kind === 'staff' ? [challenge.account_id, challenge.id] : [challenge.account_id],
       )).rows[0];
       if (!factor) return { kind: 'invalid' } as const;
       const step = this.matchStep(challenge.account_id, factor, code);
@@ -460,7 +510,7 @@ export class MfaService {
       await this.lockAccount(client, context.actor.accountId!);
       const state = await requirePlatformAssurance(client, context, 'platform.mfa.step-up');
       const accountId = context.actor.accountId;
-      if (await this.blocked(client, accountId, event)) return { kind: 'rate_limited' } as const;
+      if (await this.blocked(client, accountId, event, 'platform')) return { kind: 'rate_limited' } as const;
       const family = (await client.query<{ family_id: string; mfa_factor_id: string }>(
         `select assurance.family_id::text, assurance.mfa_factor_id::text
            from auth.sessions session_row
@@ -474,7 +524,7 @@ export class MfaService {
       const factor = await this.lockActiveFactor(client, accountId);
       if (!family || !factor || factor.id !== family.mfa_factor_id) return { kind: 'invalid' } as const;
       if (!(await this.acceptTotp(client, accountId, factor, code))) {
-        await this.recordFactorFailure(client, accountId, event, 'step_up_failed', context.actor.sessionId);
+        await this.recordFactorFailure(client, accountId, event, 'step_up_failed', 'platform', context.actor.sessionId);
         return { kind: 'failed' } as const;
       }
       const updated = await client.query<{ step_up_expires_at: Date }>(
@@ -635,7 +685,7 @@ export class MfaService {
 
   private async lockActiveFactor(client: PoolClient, accountId: string): Promise<FactorRow | null> {
     return (await client.query<FactorRow>(
-      `select id::text, secret_ciphertext, secret_key_version, last_used_step::text
+      `select id::text, secret_ciphertext, secret_key_version, last_used_step::text, enrollment_proof
          from auth.mfa_factors where account_id = $1 and status = 'active' for update`,
       [accountId],
     )).rows[0] ?? null;
@@ -703,19 +753,37 @@ export class MfaService {
     }
   }
 
-  private async blocked(client: PoolClient, accountId: string, event: SessionEventMetadata): Promise<boolean> {
+  /** The account's failure budget (shared by both sign-ins) or the sign-in's own per-IP budget is used up. */
+  private async blocked(client: PoolClient, accountId: string, event: SessionEventMetadata,
+    kind: MfaSessionKind): Promise<boolean> {
     const blocked = await rateLimitBlocked(client, 'mfa_failure_account', this.protector.rateBucket('account', accountId))
-      || await rateLimitBlocked(client, 'mfa_failure_ip', this.protector.rateBucket('ip', event.sourceIp ?? 'unavailable'));
+      || await rateLimitBlocked(client, 'mfa_failure_ip', this.ipBucket(kind, event));
     if (blocked) await this.sessionEvent(client, 'mfa_rate_limited', 'denied', accountId, event, {});
     return blocked;
   }
 
   private async recordFactorFailure(client: PoolClient, accountId: string, event: SessionEventMetadata,
-    eventType: 'mfa_failed' | 'step_up_failed', sessionId?: string): Promise<void> {
+    eventType: 'mfa_failed' | 'step_up_failed', kind: MfaSessionKind, sessionId?: string): Promise<void> {
     await consumeRateLimit(client, 'mfa_failure_account', this.protector.rateBucket('account', accountId), FAILURE_PER_ACCOUNT);
-    await consumeRateLimit(client, 'mfa_failure_ip', this.protector.rateBucket('ip', event.sourceIp ?? 'unavailable'),
-      FAILURE_PER_IP);
+    await consumeRateLimit(client, 'mfa_failure_ip', this.ipBucket(kind, event), FAILURE_PER_IP[kind]);
     await this.sessionEvent(client, eventType, 'denied', accountId, event, {}, sessionId);
+  }
+
+  private ipBucket(kind: MfaSessionKind, event: SessionEventMetadata): string {
+    return this.protector.rateBucket(IP_BUCKET[kind], event.sourceIp ?? 'unavailable');
+  }
+
+  /**
+   * The account holds a staff membership that staff sign-in accepts: the
+   * same membership joins and verification statuses as staff beginLogin.
+   */
+  private async staffEligible(client: PoolClient, accountId: string): Promise<boolean> {
+    const result = await client.query<{ staff_eligible: boolean }>(
+      `select exists (select 1 from auth.accounts eligible ${eligibleStaffMembershipJoins('eligible', '$2')}
+                       where eligible.id = $1) as staff_eligible`,
+      [accountId, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
+    );
+    return result.rows[0]?.staff_eligible === true;
   }
 
   private async recordChallengeFailure(client: PoolClient, challenge: ChallengeRow,
@@ -729,7 +797,7 @@ export class MfaService {
         where id = $1`,
       [challenge.id],
     );
-    await this.recordFactorFailure(client, challenge.account_id, event, 'mfa_failed');
+    await this.recordFactorFailure(client, challenge.account_id, event, 'mfa_failed', kind);
     await this.audit.recordWithClient(client, { ...this.authAudit(kind, challenge, undefined, event,
       `${AUDIT_PREFIX[kind]}.mfa.failed`, {}), outcome: 'denied' });
     return { kind: 'failed' };
@@ -757,6 +825,12 @@ export class MfaService {
       action, resourceType: 'session', resourceId: session?.actor.sessionId, outcome: 'success' as const,
       sourceIp: event.sourceIp, userAgent: event.userAgent, details,
     };
+  }
+
+  private unprovenFactor(): DomainProblem {
+    return new DomainProblem(403, 'STAFF_MFA_FACTOR_UNPROVEN',
+      'Your authenticator was set up at platform sign-in and cannot be used for staff sign-in; '
+      + 'ask a platform administrator to reset it, then set it up again at staff sign-in');
   }
 
   private failure(outcome: Failure): DomainProblem {

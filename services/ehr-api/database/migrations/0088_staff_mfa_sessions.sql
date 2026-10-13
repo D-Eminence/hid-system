@@ -16,15 +16,26 @@
 --    digest is stored) or the provider activation that created the challenge
 --    in the same request ('provider_activation'). The proof columns are empty
 --    on every other challenge. The guard trigger refuses to consume a staff
---    enrolment challenge whose proof is not verified, to change the kind, or
---    to change a proof once it is verified. So a password alone never enrols a
---    staff authenticator.
--- 3. auth.guard_session_assurance_change (0069) accepts an assurance row for a
---    staff session family as well as a platform one; a patient session still
---    never has one. Replaced with CREATE OR REPLACE, which keeps its owner, ACL
---    and trigger; language, search_path and every other check are restated
---    exactly as in 0069.
--- 4. The governed MFA reset (0070) already accepts any account that has an
+--    enrolment challenge that records no verified proof, to change the kind,
+--    or to change a proof once it is verified. The database records that the
+--    proof was verified; it cannot check the emailed code, whose key only the
+--    Identity service holds.
+-- 3. auth.mfa_factors gains enrollment_proof and enrollment_challenge_id: the
+--    staff proof the factor was enrolled with, and the staff enrolment
+--    challenge that carried it. A new trigger accepts them only on a row that
+--    names a live (unconsumed, not invalidated, unexpired) staff enrolment
+--    challenge of the same account whose proof of that method is verified,
+--    and never lets them change. A factor created by platform sign-in records
+--    no proof.
+-- 4. auth.guard_session_assurance_change (0069) accepts an assurance row for a
+--    staff session family as well as a platform one, but a staff one only on
+--    a factor that records a staff proof (STAFF_MFA_FACTOR_UNPROVEN
+--    otherwise); a patient session still never has one. So a factor enrolled
+--    by platform sign-in on the password alone never verifies a staff
+--    session, whichever account holds it. Replaced with CREATE OR REPLACE,
+--    which keeps its owner, ACL and trigger; language, search_path and every
+--    other check are restated exactly as in 0069.
+-- 5. The governed MFA reset (0070) already accepts any account that has an
 --    active or pending factor, staff included: auth.admin_request_approval and
 --    auth.admin_decide_approval check no account kind. Only the description of
 --    platform.mfa.reset changes; the staff-mfa suite pins a staff reset end to
@@ -39,16 +50,23 @@
 -- of them (403 STAFF_MFA_REQUIRED on every authorized route, the delegated
 -- EHR, Lab, Pharmacy, OCR and Outreach checks included) and ends it on its
 -- next refresh. Every staff member signs in again, and enrols on that first
--- sign-in.
+-- sign-in. Every existing factor was enrolled by platform sign-in and records
+-- no staff proof: it keeps verifying platform sign-in, and an administrator
+-- whose account also holds an eligible staff membership is refused staff
+-- sign-in (403 STAFF_MFA_FACTOR_UNPROVEN) until a governed MFA reset, after
+-- which they enrol at staff sign-in (MIGRATION_RUNBOOK.md lists them).
 --
--- Locks: ACCESS EXCLUSIVE on auth.mfa_login_challenges while the columns and
--- checks are added, held until commit. The columns need no rewrite; the checks
--- scan the table, whose rows are kept (one per platform password step so far,
--- as only platform sign-in wrote them before this change).
--- Every other statement changes functions, comments or one
+-- Locks: ACCESS EXCLUSIVE on auth.mfa_login_challenges and then on
+-- auth.mfa_factors while their columns, checks and (on auth.mfa_factors) the
+-- new trigger are added, each held until commit; the Identity runtime locks
+-- a challenge before a factor too. The columns need no rewrite; the checks
+-- scan the tables, whose rows are kept (the challenges and factors of
+-- platform sign-in, the only writer before this change). Every other
+-- statement changes functions, comments or one
 -- permission row. Nothing else is granted: the Identity runtime's table grants
--- on auth.mfa_login_challenges and auth.session_assurance (runtime-grants.sql)
--- cover the new columns.
+-- on auth.mfa_login_challenges, auth.mfa_factors and auth.session_assurance
+-- (runtime-grants.sql) cover the new columns, and the new trigger function is
+-- revoked from PUBLIC.
 
 alter table auth.mfa_login_challenges
   add column session_kind text not null default 'platform',
@@ -118,25 +136,83 @@ begin
 end
 $$;
 
+alter table auth.mfa_factors
+  add column enrollment_proof text,
+  add column enrollment_challenge_id uuid;
+
+alter table auth.mfa_factors
+  add constraint mfa_factors_enrollment_proof_check check (
+    (enrollment_proof is null and enrollment_challenge_id is null)
+    or (enrollment_proof in ('email_code', 'provider_activation') and enrollment_challenge_id is not null)
+  );
+
+comment on column auth.mfa_factors.enrollment_proof is
+  'The fresh proof of the staff enrolment that created this factor (0088): email_code or provider_activation. Null for a factor created by platform sign-in, which never verifies a staff session.';
+comment on column auth.mfa_factors.enrollment_challenge_id is
+  'The staff enrolment challenge (auth.mfa_login_challenges) whose verified proof this factor records (0088). Never changes.';
+
+create function auth.guard_mfa_factor_enrollment_proof()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if tg_op = 'UPDATE' then
+    if new.enrollment_proof is distinct from old.enrollment_proof
+       or new.enrollment_challenge_id is distinct from old.enrollment_challenge_id then
+      raise exception using errcode = '55000', message = 'MFA_FACTOR_IMMUTABLE';
+    end if;
+    return new;
+  end if;
+  -- A factor records a staff proof only from a live staff enrolment challenge
+  -- of its own account whose proof of that method is verified.
+  if new.enrollment_challenge_id is not null and not exists (
+    select 1 from auth.mfa_login_challenges challenge
+    where challenge.id = new.enrollment_challenge_id and challenge.account_id = new.account_id
+      and challenge.session_kind = 'staff' and challenge.purpose = 'enroll'
+      and challenge.proof_method = new.enrollment_proof and challenge.proof_verified_at is not null
+      and challenge.consumed_at is null and challenge.invalidated_at is null
+      and challenge.expires_at > clock_timestamp()
+  ) then
+    raise exception using errcode = '23514', message = 'MFA_ENROLLMENT_PROOF_REQUIRED';
+  end if;
+  return new;
+end
+$$;
+revoke all on function auth.guard_mfa_factor_enrollment_proof() from public;
+create trigger mfa_factors_enrollment_proof_guard
+  before insert or update on auth.mfa_factors
+  for each row execute function auth.guard_mfa_factor_enrollment_proof();
+
 create or replace function auth.guard_session_assurance_change()
 returns trigger
 language plpgsql
 set search_path = auth, pg_temp
 as $$
+declare
+  assured_kind text;
 begin
   if tg_op = 'DELETE' then
     raise exception using errcode = '55000', message = 'SESSION_ASSURANCE_IMMUTABLE';
   end if;
   if tg_op = 'INSERT' then
-    if not exists (
-      select 1 from auth.sessions session_row
-      where session_row.id = new.family_id and session_row.family_id = new.family_id
-        and session_row.account_id = new.account_id and session_row.session_kind in ('staff', 'platform')
-    ) or not exists (
+    select session_row.session_kind into assured_kind
+      from auth.sessions session_row
+     where session_row.id = new.family_id and session_row.family_id = new.family_id
+       and session_row.account_id = new.account_id and session_row.session_kind in ('staff', 'platform');
+    if assured_kind is null or not exists (
       select 1 from auth.mfa_factors factor
       where factor.id = new.mfa_factor_id and factor.account_id = new.account_id and factor.status = 'active'
     ) then
       raise exception using errcode = '23514', message = 'SESSION_ASSURANCE_INVALID';
+    end if;
+    -- A staff session is verified only by a factor enrolled with a staff
+    -- proof, never by one a platform sign-in enrolled on the password alone.
+    if assured_kind = 'staff' and not exists (
+      select 1 from auth.mfa_factors factor
+      where factor.id = new.mfa_factor_id and factor.enrollment_proof is not null
+    ) then
+      raise exception using errcode = '23514', message = 'STAFF_MFA_FACTOR_UNPROVEN';
     end if;
     if new.step_up_at is not null or new.step_up_count <> 0 then
       raise exception using errcode = '23514', message = 'SESSION_ASSURANCE_INVALID';
@@ -155,7 +231,7 @@ end
 $$;
 
 comment on table auth.mfa_factors is
-  'TOTP factors of platform administrators and staff (one active factor per account, 0088). secret_ciphertext is AES-256-GCM ciphertext; the plaintext secret is never stored or returned after enrollment.';
+  'TOTP factors of platform administrators and staff (one active factor per account, 0088). secret_ciphertext is AES-256-GCM ciphertext; the plaintext secret is never stored or returned after enrollment. Only a factor that records a staff enrolment proof verifies a staff session.';
 comment on table auth.mfa_login_challenges is
   'Short-lived second-factor challenges between a verified password and a platform or staff session (0088). The browser holds the token in an httpOnly cookie; only its digest is stored.';
 comment on table auth.session_assurance is
