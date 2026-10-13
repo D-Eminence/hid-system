@@ -32,6 +32,8 @@ describe('ClinicalNotesService OCR ingestion boundary', () => {
         return { value: created.value, resourceId: created.id };
       },
       encounterExists: jest.fn().mockResolvedValue(true),
+      // The encounter is open (CLIN-EIE): the share-locked status check passes.
+      requireOpenEncounter: jest.fn().mockResolvedValue('in_progress'),
     } as unknown as ClinicalRepository;
     const service = new ClinicalNotesService(repository);
 

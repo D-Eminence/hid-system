@@ -375,6 +375,7 @@ try {
   for (const [name, script] of [['pharmacy_runtime', 'services/pharmacy-api/scripts/verify-pharmacy-runtime.mjs'],
     ['lab_runtime', 'services/lab-api/scripts/verify-lab-runtime.mjs'],
     ['ehr_lab_handoff_runtime', 'services/ehr-api/scripts/verify-ehr-lab-handoff-runtime.mjs'],
+    ['encounter_lifecycle_runtime', 'services/ehr-api/scripts/verify-encounter-lifecycle-runtime.mjs'],
     ['ocr_runtime', 'services/ocr-api/scripts/verify-ocr-runtime.mjs'],
     ['outreach_runtime', 'services/outreach-api/scripts/verify-outreach-runtime.mjs']]) {
     evidence.checks[name] = JSON.parse(command(`exact-role ${name.replace('_runtime', '')} HTTP write commands`,
