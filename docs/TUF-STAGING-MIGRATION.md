@@ -179,6 +179,24 @@ The executable covers:
    refuse a reader whose assurance is gone (`403 STAFF_MFA_REQUIRED`) and its
    refresh to end the sign-in. The rehearsal also runs the new rollback-only
    `staff-mfa.integration.sql` with the additional suites.
+   With 0091 (`BRANCH:launch/launch-permission-withdrawal`, ADR-058): the role
+   bootstrap's assertions require that no role holds a `lab.*`, `pharmacy.*`,
+   `ocr.*` or `outreach.*` permission, break-glass or document upload;
+   `patient_safety_runtime` also requires the patient's request list and
+   access history to name the requesting clinician and role, the history to
+   report `truncated: false`, a doctor's `GET /auth/session` to list none of
+   the withdrawn permissions, and a PIN use over HTTP to place one
+   `PATIENT_ACCESS_PIN_USED` inbox item (none for the replay); it grants
+   break-glass to the doctor role in its copy only for the activation;
+   `patient_runtime` expects the history's additive `truncated`;
+   `outreach_runtime` and `outreach_cookie_read_runtime` opt their disposable
+   copies into Outreach (the doctor role's Outreach permissions and the
+   portal control), as a reviewed staging opt-in would; the non-superuser
+   database check requires the three launch controls to read off after a
+   `NOSUPERUSER NOBYPASSRLS` administrator migrates; and the P8 owner check
+   counts `ehr.patient_self_context` among its nine security-definer
+   commands. The additional suites now include the patient-self binding cases
+   and the launch-control state.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -186,7 +204,8 @@ The executable covers:
    and apply `0029`–`0034`, verify preservation, fail-closed old OTP behavior,
    the new cutover controls, and minimal verification-evidence boundaries (and,
    since 0084, that no role holds a launch-withdrawn Lab, Pharmacy or EHR
-   lab-ordering write permission), then
+   lab-ordering write permission, and since 0091 no Lab, Pharmacy, OCR or
+   Outreach permission, break-glass or document upload), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

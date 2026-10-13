@@ -3259,3 +3259,132 @@ Tests:
   authenticator through `staff-session-client.mjs`, and
   `verify-delegated-cookie-read-runtime.mjs` checks that the EHR refuses an
   unassured reader with `403 STAFF_MFA_REQUIRED`.
+
+## Launch module withdrawal and patient access transparency (0091)
+
+`0091_launch_module_withdrawal_and_patient_access_transparency.sql` (decisions
+D17 and D9, ADR-058; change `BRANCH:launch/launch-permission-withdrawal`)
+makes the launch database start in the launch module set, binds the
+patient-self row-level security context to the patient's own session, names
+the requesting clinician to the patient and tells the patient when their PIN
+is used. 0001 through 0090 are unchanged; 0089 and 0090 are on other
+branches.
+
+**Launch controls.** 0039 seeded `uploads_enabled`, `outreach_portal_enabled`
+and `break_glass_enabled` on; 0084 left them to an operator (P11). 0091 sets
+each off only while it is exactly as 0039 seeded it (`enabled`,
+`row_version = 1`, `updated_by is null`, reason `Initial platform control
+state`); a control an administrator has changed keeps its value. The row
+records the change (version 2, `updated_by` null, a reason naming 0091), and no
+`platform.control_events` row is written: its `actor_account_id` is required
+and a migration has no actor, as for 0041. `platform.control_settings` forces
+row-level security, and its policies need a platform account, so the
+migration administrator, which owns the table and is no superuser on RDS,
+would update no row (probed locally under a `NOSUPERUSER NOBYPASSRLS` owner:
+0 rows): the migration runs `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY`,
+the update and `FORCE ROW LEVEL SECURITY` in its transaction, so no other
+session ever sees the table unforced.
+
+**Launch module permissions.** Every row of `auth.role_permissions` whose
+permission is `lab.*`, `pharmacy.*`, `ocr.*`, `outreach.*`,
+`identity.break-glass.write` or `ehr.document.write` is deleted (admin,
+clinician, doctor, lab, nurse, ocr_worker, org_admin, pharmacist and
+receptionist held some). The permission codes stay in `auth.permissions`.
+The database's own checks follow: `identity.activate_break_glass` and
+Outreach's `outreach.context_allows` read role permissions, so break-glass and
+Outreach writes and reads are refused in the database as well as by the
+services; Lab, Pharmacy and OCR row-level security does not read role
+permissions. `ocr_worker` loses `ocr.job.process`, which nothing checks (the
+worker commands check the `ocr_worker` role). The EHR's own permissions,
+`ehr.lab-request.read`, `ehr.prescription.*` and `ehr.document.read`
+included, stay. `runtime-roles.integration.sql` (the bootstrap assertions)
+fails if any role holds a withdrawn permission or loses a kept one.
+
+**Patient-self binding (PSELF-RLS).** `ehr.patient_self_context(uuid)` keeps
+its signature, so the 0030/0084 policies on `ehr.encounters`,
+`ehr.clinical_notes` and `ehr.clinical_note_revisions` are unchanged. It
+becomes `LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog,
+pg_temp` (CREATE OR REPLACE keeps its owner and its `EXECUTE` for
+`hid_ehr_runtime` and `hid_schema_test_runtime`). It still requires
+`app.purpose_of_use = 'patient-self'`, the patient, subject, account, session
+and correlation settings and a future `app.self_authorized_until`, and now
+also that the patient is the one `identity.patient_self_session(subject,
+session)` returns (a live patient session of that subject, not revoked or
+expired, at the account's token version, with an active account and patient)
+and that it belongs to `app.account_id`. A malformed account or session id
+answers false, not an error. The binding is checked per row (one indexed
+lookup), bounded by the 50-row section limits; on a staff read the setting
+checks return false before any lookup. Under the rehearsal's non-superuser
+owner the function and `identity.patient_self_session` run as that owner,
+which owns `identity.patients` (row-level security not forced).
+
+**Named grantee (CONSENT-GRANTEE).** `identity.list_my_access_requests()` and
+its session-bound wrapper `identity.list_my_patient_access_requests(text,
+uuid)` are dropped and recreated with two more columns,
+`requester_display_name` (`auth.accounts.display_name` of the request's
+membership account) and `requester_role` (that membership's
+`membership_role`), joined on the request's membership at its facility (left
+joins: a missing membership gives nulls). The wrapper's `EXECUTE` for
+`hid_identity_runtime` and `hid_schema_test_runtime` returns with the role
+bootstrap (`runtime-grants.sql`), so run the bootstrap immediately after the
+migrations, as for 0074; until then the patient's request list answers `403`.
+`identity.patient_self_access_history(text, uuid)` (CREATE OR REPLACE, grants
+kept) adds `requesterDisplayName` (the grant's account) and `requesterRole`
+(the grant's membership at its facility) to each item, reads 51 grants and
+returns the latest 50 with `truncated`. The staff list is unchanged.
+
+**PIN-use notice.** `notification.on_identity_pin_outbox_created()`
+(`SECURITY DEFINER`, revoked from `PUBLIC` in the migration and the bootstrap)
+runs from the new `AFTER INSERT` trigger `pin_use_notification_inbox` on
+`identity.outbox_events` (`WHEN (new.event_type =
+'PatientAccessPinVerified')`) and calls
+`notification.enqueue_patient_inbox_item(patient, 'PATIENT_ACCESS_PIN_USED',
+'consent-grant', grant, {consentGrantId, reviewRequired: true})`, as 0037's
+emergency trigger does. `identity.access_patient_with_pin` writes the event
+only for a new grant, so a replay adds no item, and a deleted login gets
+none. The EventBridge rule is unchanged.
+
+**Not included.** Pending access requests still do not lapse
+(ACCESS-REQ-STALE, ADR-058): `identity.create_access_request` (0086) reuses a
+pending request, so a lapse needs it, the approval command and both request
+lists changed together.
+
+**Locks.** `ACCESS EXCLUSIVE` on `platform.control_settings` first, to commit
+(every control read waits; the same order as a break-glass activation and the
+role bootstrap: controls, then `identity.outbox_events`), `ROW EXCLUSIVE` on
+`auth.role_permissions`, function replacements (no table lock), and `SHARE ROW
+EXCLUSIVE` on `identity.outbox_events` for the new trigger (in-flight outbox
+writers finish first; new ones wait to commit). Each waits at most the
+runner's 5 s lock timeout; a timeout rolls 0091 back whole.
+
+Tests:
+
+- `runtime-roles.integration.sql` (bootstrap assertions): no role holds a
+  withdrawn permission, the kept EHR, access-request and PIN permissions stay;
+  `ehr.patient_self_context` is `SECURITY DEFINER` with the pinned search path
+  and executable only by the EHR runtime; the PIN trigger exists and its
+  function is not callable by a runtime role; the request list is reachable
+  only through its wrapper. On 0088 it fails on the first.
+- `patient-self.integration.sql`: seven unbound patient-self contexts (another
+  patient with the caller's own session, a session that does not exist, a
+  revoked session, another account's session, another account id, another
+  subject, a malformed session id) read no encounter, note or revision, and a
+  patient bound to its own session reads exactly its released records. On
+  0088 all seven read records.
+- `patient-access-safety.integration.sql`: the list and the history name the
+  clinician and role; `truncated` is false for three grants and true, with 50
+  items, for 51.
+- `patient-access-pin.integration.sql`: one `PATIENT_ACCESS_PIN_USED` item
+  per verification with the grant and minimum metadata, none for the replay,
+  the refused PINs or the rolled-back audit failure.
+- `platform-controls.integration.sql`: the three launch controls start off,
+  the other three keep their launch state.
+- Suites that exercise break-glass or Outreach (`schema`, `emergency`,
+  `emergency-contacts`, `outreach-session-guards`) grant those permissions to
+  the doctor role inside their rollback-only transaction, as a reviewed
+  re-grant would; `runtime-command-privileges` keeps its Outreach
+  registration/campaign invariant without requiring a holder.
+- All 45 SQL suites pass on a database built from empty to 0091, and the 44
+  additional suites again with every schema, table and function owned by a
+  `NOSUPERUSER NOBYPASSRLS` role (the rehearsal's P8 owner check, which now
+  counts `ehr.patient_self_context` among its 9 definer commands).

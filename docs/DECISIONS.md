@@ -3483,3 +3483,113 @@ Consequences:
 Related: ADR-038; ADR-040; ADR-044; `INTERFACE_CONTRACT.md` (Auth session
 contract); `PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §10; `DATABASE.md` (0088);
 release checklist §2, §3, §5, §8 and §9.
+
+# ADR-058: Modules That Are Off Hold No Permissions; the Launch Database Starts in the Launch State; Patients See Who Gets Access and When Their PIN Is Used
+
+Status: Proposed for source implementation
+(`BRANCH:launch/launch-permission-withdrawal`, migration 0091). Not merged or
+deployed.
+
+Date: 2026-10-13
+
+Context:
+
+Decision D17 turns Lab, Pharmacy, OCR and Outreach off at launch, D9 keeps
+break-glass off, and document uploads are off (no scanner). The gateway
+refuses the off modules' routes, but 0084 withdrew only the Lab and Pharmacy
+writes: every clinical role kept the modules' reads, OCR and Outreach
+permissions, `identity.break-glass.write` and `ehr.document.write`, so
+Health-id offered workspaces, actions, emergency access and an upload card that
+fail (MOD-PERM-OCR-OUTREACH, FE-17, FE-15). The controls `uploads_enabled`,
+`outreach_portal_enabled` and `break_glass_enabled` were seeded on and turned
+off only by an operator (P11, UPLOADS-DEFAULT-ON). The patient-self
+row-level security trusted transaction settings without a relational check
+(PSELF-RLS). Patients approved and reviewed access seeing only a facility,
+though a grant goes to one clinician (CONSENT-GRANTEE), and were not told when
+a clinician used their access PIN, because the only consumer of that event,
+the notification worker, is off (NOTIF-PIN-NOTICE). Owner defaults: deny by
+default, least privilege, explicit and informed patient consent, auditable
+actions, no production bypass.
+
+Decision:
+
+- No role holds a permission of a module that is off: 0091 deletes every
+  `lab.*`, `pharmacy.*`, `ocr.*` and `outreach.*` permission,
+  `identity.break-glass.write` and `ehr.document.write` from every role,
+  `ocr_worker` included, reversing 0084's choice to keep reads. The EHR's
+  own permissions stay. The bootstrap role assertions require it.
+  Re-enabling a module, staging included, is a reviewed migration that grants
+  its permissions again (with its decision, fixes and staging acceptance) and
+  changes the assertions with it; break-glass also needs the `emergency`
+  purpose and its control (D9).
+- Document uploads are off by the permission, not only by the control:
+  upload intent and completion answer `403` for every role, and completion
+  now also checks `uploads_enabled` (`409`), so an upload in flight when the
+  control is turned off does not complete.
+- The launch database starts with the three launch controls off: 0091 sets
+  each off only while it is exactly as 0039 seeded it, so an administrator's
+  own setting is never overwritten. Mechanism chosen over the alternatives:
+  a column default would not change the seeded rows; a control event needs an
+  acting account, which a migration does not have, and inventing a system
+  account would put a fabricated actor in the audit trail. As for 0041, the
+  row records the change (version, reason naming 0091, no updating account)
+  and the migration ledger records when it ran; an administrator turns a
+  control on again through the audited `POST /admin/controls`. Because the
+  table forces row-level security, the migration lifts forced security for
+  its own transaction; otherwise a non-superuser administrator (RDS) would
+  silently update nothing.
+- The patient-self context is bound in the database: `ehr.patient_self_context`
+  becomes a security-definer check that the named patient, account, subject
+  and live session match `identity.patient_self_session`, under the same
+  owner check (P8) as the other definer commands.
+- Consent names the grantee: the patient's request list and access history
+  carry the requesting clinician's display name and membership role (staff
+  identities, not PHI); the history reports `truncated`. The staff list,
+  which withholds the patient id until a grant is active, is unchanged.
+- The patient is told in the app when their PIN is used: an inbox item per
+  new PIN grant, written in the PIN transaction, without the notification
+  worker. SMS and email notices wait for an approved notification channel.
+- Pending access requests do not yet lapse (ACCESS-REQ-STALE): deferred.
+  A lapse needs request creation (0086), which reuses a pending request, the
+  approval command and both lists to change together, beyond this change's
+  scope. Risk until then: a patient can approve an old request and grant the
+  clinician current access. Mitigations: the request now names the clinician,
+  approval needs a recent sign-in (0086), a membership that ends expires its
+  pending requests (0087), and the patient can revoke the grant.
+
+Alternatives not taken:
+
+- Health-id build flags hiding modules (FE-17 option B): a frontend-only
+  switch leaves the permissions usable by any other client and needs a
+  Health-id change; the permission withdrawal works with Health-id 82b474e as
+  it is. A capability signal for break-glass (FE-15 option B) remains a later
+  frontend option.
+- Keeping `ocr.job.process` on `ocr_worker`: nothing checks it, and keeping it
+  would make the launch assertion carry an exception for a workload that is
+  off.
+- Only the operator step P11 for the controls: the launch would depend on a
+  manual action by a platform administrator holding an MFA session; P11 now
+  checks the state instead.
+
+Consequences:
+
+- Doctors, clinicians and nurses no longer see Laboratory, Pharmacy, Document
+  OCR, Outreach, released Lab results, Extract with OCR or the upload card,
+  and the Emergency method is disabled with a permission explanation
+  (Health-id 82b474e, unchanged). Lab and Pharmacy data are unreadable through
+  Health-id until re-granted; a launch database holds none.
+- Staff session permission lists shrink at once: Identity resolves a staff
+  session's roles and permissions from the database on every request, so a
+  session issued before 0091 loses them on its next request.
+- The patient's access-request list is unavailable (`403`) between 0091 and
+  the role bootstrap that follows it.
+- Staff display names become visible to patients for requests and grants
+  about them.
+- Evidence is local and synthetic: SQL suites, unit specs and the runtime
+  verifiers on a PostgreSQL 16 cluster built from empty to 0091 (release
+  checklist §8). Nothing has been run on staging or production.
+
+Related: ADR-041 (P8 owners); ADR-045 (Outreach campaign governance);
+`PHASE_3_LAUNCH_DECISIONS.md` (D9, D17); `INTERFACE_CONTRACT.md` (launch
+module set, patient self-service, document upload completion);
+`DATABASE.md` (0091); release checklist §1, §2, §3, P10, P11, §5, §8, §9.
