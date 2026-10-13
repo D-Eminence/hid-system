@@ -2478,7 +2478,7 @@ and §9.
 # ADR-046: A Staff Sign-In Keeps Its Selected Facility; X-Facility-ID Still Authorizes
 
 Status: Accepted for source implementation (D-Eminence/hid-system#47, ported
-as `BRANCH:launch/facility-selection-0089`, migration 0089). Not deployed.
+as D-Eminence/hid-system#73, migration 0089). Not deployed.
 
 Date: 2026-10-12; amended 2026-10-13 for the port onto the launch stack
 (below).
@@ -2585,7 +2585,7 @@ Consequences:
   controller (`403 STAFF_MFA_REQUIRED`); the controller still answers one as
   before, without storing or reporting anything, should it ever reach it.
 
-Port onto the launch stack (2026-10-13, `BRANCH:launch/facility-selection-0089`):
+Port onto the launch stack (2026-10-13, D-Eminence/hid-system#73):
 
 D-Eminence/hid-system#47 was written on `main` before 0080-0088. Ported after
 staff MFA (0088), it keeps the decisions above with three changes, each

@@ -7,7 +7,7 @@ the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
 D-Eminence/hid-system#68), and N5 and the workforce part of D14
 (ADR-049, D-Eminence/hid-system#70) with the owner's defaults,
 and the facility a sign-in keeps (N5, E7; ADR-046 as ported in
-`BRANCH:launch/facility-selection-0089`) with the owner's defaults;
+D-Eminence/hid-system#73) with the owner's defaults;
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
 
@@ -180,7 +180,7 @@ separate deployment authorization. None of them has been run.
   to the next free number, 0083 today, before it can merge. It also overlaps
   #50 on `auth.controller.ts` and `token.service.ts`. **Resolved:** ported as
   0089, after the launch migrations 0085-0088, in
-  `BRANCH:launch/facility-selection-0089` (below).
+  D-Eminence/hid-system#73 (below).
 - **Data check.** Run I4 (§3) before deciding: whether such memberships exist.
 - **Decided (2026-10-13, owner defaults: deny by default, least privilege;
   ADR-049).** One active, unheld membership per account and facility, not
@@ -197,7 +197,7 @@ separate deployment authorization. None of them has been run.
 - **Decided, the facility a sign-in keeps (launch items C1 and FE-20,
   decision E7; 2026-10-13, owner defaults: deny by default, least privilege;
   ADR-046 as ported).** #47 is ported as migration 0089 in
-  `BRANCH:launch/facility-selection-0089` (not merged): the facility a staff
+  D-Eminence/hid-system#73 (not merged): the facility a staff
   sign-in chooses is kept per session family and reported on a reload or
   refresh as `facilitySelection: 'selected'`; it is only the default the
   session reports, and `X-Facility-ID` still authorizes every facility-scoped
@@ -560,4 +560,4 @@ for each merged change and its evidence. Pull requests from this review:
 | WF-1 (no governed way to provision clinicians), N5 (two memberships at one facility) | D-Eminence/hid-system#70, migration 0087, ADR-049 | branch, not merged (D14 workforce part, N5) |
 | MFA-1 (staff sessions without MFA; D14 MFA part) | D-Eminence/hid-system#71, migration 0088, ADR-054 | local commits, not pushed; owner notices wait on the notification route; Health-id staff and platform sign-in changes listed in the release checklist §3; release checklist P22 (enrolment before clinical roles, review of enrolments after a recovery) is an operator gate; a second enrolment channel is an open decision |
 | WAF-CRS-BODY (long clinical notes refused by the WAF's 8 KB body rule), A7 WAF part (rate limit per Cloudflare egress address), A8 (gateway replaced upstream 5xx), D6 (no CSP or HSTS on the portal hosts), D7 (query strings in the gateway access log), SCAN-EDGE/EDGE-DOCS (scanner callback public) | D-Eminence/hid-system#72, ADR-055 | ready for review; IP-THRESHOLDS decided above; staging checks S4p |
-| C1, FE-20 (a clinician's chosen facility was not kept across a reload; D-Eminence/hid-system#47 unmerged and numbered 0080) | `BRANCH:launch/facility-selection-0089`, migration 0089, ADR-046 (as ported) | local commits, not pushed (N5, E7); D-Eminence/hid-system#47 stays open with its own owner; no Health-id change |
+| C1, FE-20 (a clinician's chosen facility was not kept across a reload; D-Eminence/hid-system#47 unmerged and numbered 0080) | D-Eminence/hid-system#73, migration 0089, ADR-046 (as ported) | local commits, not pushed (N5, E7); D-Eminence/hid-system#47 stays open with its own owner; no Health-id change |
