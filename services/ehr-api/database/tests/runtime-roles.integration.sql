@@ -17,7 +17,7 @@ begin
     'hid_schema_test_runtime', 'hid_event_delivery_commands',
     'hid_event_dispatcher', 'hid_notification_runtime',
     'hid_notification_api_runtime', 'hid_notification_worker',
-    'hid_ocr_queue_metrics'
+    'hid_ocr_queue_metrics', 'hid_platform_control_reader'
   ] loop
     if not exists (select 1 from pg_roles where rolname = role_name) then
       raise exception 'required HID role is missing: %', role_name;
@@ -148,7 +148,8 @@ begin
     'hid_lab_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_runtime',
     'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
     'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
-    'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics'
+    'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
+    'hid_platform_control_reader'
   ] loop
     if has_table_privilege(role_name, 'auth.otp_start_cooldowns',
          'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
@@ -339,7 +340,7 @@ begin
       'hid_schema_test_runtime', 'hid_event_delivery_commands',
       'hid_event_dispatcher', 'hid_notification_runtime',
       'hid_notification_api_runtime', 'hid_notification_worker',
-      'hid_ocr_queue_metrics'
+      'hid_ocr_queue_metrics', 'hid_platform_control_reader'
     ]) runtime(role_name)
     join pg_class relation on relation.relkind in ('r', 'p')
     join pg_namespace namespace_row on namespace_row.oid = relation.relnamespace
@@ -524,8 +525,9 @@ begin
   end if;
   -- OCR queue metrics (0075): only the worker executes the aggregate command
   -- (besides its owner). The non-login technical owner holds exactly SELECT on
-  -- ocr.jobs (status, queued_at) and nothing else, reads rows only through one
-  -- exact policy, has no member and is a member of no role.
+  -- ocr.jobs (status, queued_at) and nothing else and reads rows only through
+  -- one exact policy. Its memberships are checked with the other technical
+  -- owners below.
   if not has_function_privilege('hid_ocr_worker', 'ocr.worker_queue_metrics()', 'EXECUTE')
      or has_function_privilege('public', 'ocr.worker_queue_metrics()', 'EXECUTE')
      or (select coalesce(array_agg(distinct privilege.grantee::regrole::text), '{}')
@@ -552,13 +554,93 @@ begin
           and policy.polcmd = 'r' and policy.polpermissive
           and policy.polroles = array['hid_ocr_queue_metrics'::regrole::oid]
           and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
-     )
-     or exists (
-       select 1 from pg_auth_members
-        where roleid = 'hid_ocr_queue_metrics'::regrole or member = 'hid_ocr_queue_metrics'::regrole
      ) then
     raise exception 'OCR queue metrics command privileges are inconsistent';
   end if;
+  -- Platform control reads (launch, P8-CONTROL): platform.control_enabled(text)
+  -- belongs to the non-login technical role hid_platform_control_reader, so it
+  -- does not depend on its owner bypassing FORCE ROW LEVEL SECURITY. The role
+  -- holds exactly SELECT on platform.control_settings (control_key, enabled),
+  -- reads rows only through one exact policy, has USAGE on schemas platform
+  -- and auth only (auth to plan the table's PUBLIC policy), owns nothing else
+  -- and receives no function grant. EXECUTE stays with PUBLIC (0040), and
+  -- platform.require_control_enabled keeps its owner.
+  if (select owner_role.rolname from pg_proc proc join pg_roles owner_role on owner_role.oid = proc.proowner
+        where proc.oid = 'platform.control_enabled(text)'::regprocedure) <> 'hid_platform_control_reader'
+     or not (select prosecdef from pg_proc where oid = 'platform.control_enabled(text)'::regprocedure)
+     or not has_function_privilege('public', 'platform.control_enabled(text)', 'EXECUTE')
+     or not has_function_privilege('public', 'platform.require_control_enabled(text)', 'EXECUTE')
+     or (select proowner from pg_proc where oid = 'platform.require_control_enabled(text)'::regprocedure)
+        <> (select relowner from pg_class where oid = 'platform.control_settings'::regclass)
+     or (select count(*) from pg_proc where proowner = 'hid_platform_control_reader'::regrole) <> 1
+     or exists (select 1 from pg_class where relowner = 'hid_platform_control_reader'::regrole)
+     or exists (select 1 from pg_namespace where nspowner = 'hid_platform_control_reader'::regrole)
+     or (select coalesce(array_agg(relation.oid::regclass::text || '.' || attribute.attname || ':' || privilege.privilege_type
+              order by relation.oid::regclass::text, attribute.attname, privilege.privilege_type), '{}')
+           from pg_class relation
+           join pg_attribute attribute on attribute.attrelid = relation.oid
+           cross join lateral aclexplode(attribute.attacl) privilege
+          where privilege.grantee = 'hid_platform_control_reader'::regrole)
+        <> array['platform.control_settings.control_key:SELECT', 'platform.control_settings.enabled:SELECT']
+     or exists (
+       select 1 from pg_class relation, aclexplode(relation.relacl) privilege
+        where privilege.grantee = 'hid_platform_control_reader'::regrole
+     )
+     or exists (
+       select 1 from pg_proc proc, aclexplode(proc.proacl) privilege
+        where privilege.grantee = 'hid_platform_control_reader'::regrole
+          and proc.proowner <> 'hid_platform_control_reader'::regrole
+     )
+     or (select coalesce(array_agg(namespace_row.nspname::text order by namespace_row.nspname), '{}')
+           from pg_namespace namespace_row
+          where namespace_row.nspname in ('platform', 'auth', 'identity', 'ehr', 'audit', 'ocr', 'lab',
+              'pharmacy', 'outreach', 'integration', 'notification', 'migration')
+            and has_schema_privilege('hid_platform_control_reader', namespace_row.oid, 'USAGE'))
+        <> array['auth', 'platform']
+     or not exists (
+       select 1 from pg_policy policy
+        where policy.polrelid = 'platform.control_settings'::regclass
+          and policy.polname = 'platform_controls_definer_read'
+          and policy.polcmd = 'r' and policy.polpermissive
+          and policy.polroles = array['hid_platform_control_reader'::regrole::oid]
+          and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+     )
+     or exists (
+       select 1 from pg_policy policy
+        where 'hid_platform_control_reader'::regrole::oid = any(policy.polroles)
+          and policy.polname <> 'platform_controls_definer_read'
+     ) then
+    raise exception 'platform control reader privileges are inconsistent';
+  end if;
+  -- The three technical owners are never granted to a role and are members of
+  -- none, and none may create objects: the role bootstrap grants its
+  -- administrator SET and INHERIT membership in them, and each of them CREATE
+  -- on one schema, only while it transfers and grants their functions, and
+  -- revokes both in the same transaction. The one membership row allowed is
+  -- the ADMIN OPTION that PostgreSQL 16 records, as granted by the bootstrap
+  -- superuser, for a CREATEROLE administrator that is not a superuser in every
+  -- role it creates; it carries no privilege and no SET ROLE, and that
+  -- administrator cannot revoke it.
+  foreach role_name in array array[
+    'hid_event_delivery_commands', 'hid_ocr_queue_metrics', 'hid_platform_control_reader'
+  ] loop
+    if exists (select 1 from pg_auth_members where member = role_name::regrole)
+       or exists (
+         select 1 from pg_auth_members membership
+          where membership.roleid = role_name::regrole
+            and not (membership.admin_option and not membership.inherit_option
+                     and not membership.set_option and membership.grantor = 10)
+       )
+       or (select count(*) from pg_auth_members where roleid = role_name::regrole) > 1
+       or exists (
+         select 1 from pg_namespace namespace_row
+          where namespace_row.nspname in ('platform', 'auth', 'identity', 'ehr', 'audit', 'ocr', 'lab',
+              'pharmacy', 'outreach', 'integration', 'notification', 'migration')
+            and has_schema_privilege(role_name, namespace_row.oid, 'CREATE')
+       ) then
+      raise exception 'technical owner % has a member, a membership or schema CREATE privilege', role_name;
+    end if;
+  end loop;
   -- The OCR API appends outbox events for its own facility only (0075).
   if not has_table_privilege('hid_ocr_api_runtime', 'ocr.outbox_events', 'INSERT')
      or not exists (
@@ -626,7 +708,7 @@ begin
         'hid_pharmacy_api_runtime', 'hid_outreach_runtime',
         'hid_outreach_api_runtime', 'hid_schema_test_runtime',
         'hid_event_delivery_commands', 'hid_event_dispatcher',
-        'hid_ocr_queue_metrics'
+        'hid_ocr_queue_metrics', 'hid_platform_control_reader'
       )
   ) then
     raise exception 'a runtime or test role owns a protected application relation';

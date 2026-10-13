@@ -426,6 +426,14 @@ try {
     ['-X', '-d', 'hid_owner_check', '-v', 'ON_ERROR_STOP=1', '-f', join(service, 'database/tests', name)]);
   evidence.checks.non_superuser_definer_owner = {role:'hid_synthetic_schema_owner',login:false,superuser:false,
     bypass_rls:false,definer_commands_checked:8,runtime_callers:'exact service roles',suites:additionalSuites};
+  // As RDS runs it, on a second disposable cluster whose roles a non-superuser
+  // creates: a NOSUPERUSER NOBYPASSRLS CREATEROLE administrator migrates 0001
+  // to the latest migration (SET ON PARAMETER held only for that run), runs the
+  // role bootstrap twice and db:verify-roles, and the runtime logins it creates
+  // pass db:verify-logins and read the platform controls.
+  evidence.checks.non_superuser_database = JSON.parse(command('non-superuser migration, role bootstrap, logins and controls',
+    process.execPath, [join(repository, 'scripts/verify-non-superuser-database.mjs'), '--pg-bindir', pgBindir]));
+  assert.equal(evidence.checks.non_superuser_database.status, 'passed');
   await writeFile(join(evidenceDirectory, 'before-counts-checksums.json'), JSON.stringify(before, null, 2) + '\n');
   await artifact('before-counts-checksums.json');
   process.stdout.write('Synthetic schema, baseline records, and pre-migration backup verified.\n');
