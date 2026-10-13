@@ -2355,8 +2355,10 @@ services share-lock the encounter (`ehr/shared/encounter-status.ts`) before an
 insert and before locking an order row for activation, so the trigger's own
 share lock is then already held. A writer that locked an order row first and
 then activated it would invert that order and can deadlock with a retraction
-(PostgreSQL cancels one of the two, `40P01`); the lifecycle verifier shows the
-inversion deadlocking and the services' order not.
+(PostgreSQL cancels one of the two, `40P01`). With a temporary service mutant
+that locked the order row first, the lifecycle verifier's race produced
+`40P01`; the committed verifier checks that the services' order produces
+none.
 
 **Diagnoses entered in error.** `ehr.keep_entered_in_error_diagnosis()`
 (`SECURITY INVOKER`, `BEFORE UPDATE` on `ehr.diagnoses`) refuses any update of
@@ -2391,8 +2393,11 @@ The EHR service applies the same rule in its SQL (`patient-records.service.ts`).
 **Existing rows are not changed.** The version trigger needs an acting
 member, which a migration does not have, and open records of closed
 encounters are a clinical review. The release checklist lists them (P12) for
-review after the migration; until then they stay open. The guards apply from
-the migration's commit.
+review before and after the migration; until then they stay open. Open lab
+requests among them are retracted before the migration, while
+`ehr.lab-request.write` is still held: after it no role can change a lab
+request's status, and their encounter, already closed, has no transition left
+to cascade from. The guards apply from the migration's commit.
 
 **Locks.** The `DELETE` takes `ROW EXCLUSIVE` on `auth.role_permissions`.
 `CREATE TRIGGER` takes `SHARE ROW EXCLUSIVE` on each of the six clinical

@@ -809,10 +809,15 @@ or Pharmacy:
 
 The read permissions stay, so existing lab requests, prescriptions and Lab and
 Pharmacy records remain readable. Prescriptions are still created and changed
-in the EHR. Re-enabling a module takes its own decision, its fixes, a staging
-acceptance run and a reviewed migration granting the permissions again; the
-sections on the Lab and Pharmacy handoffs below describe the routes as they
-work then.
+in the EHR. An existing lab request changes status only through its
+encounter: cancelling the encounter cancels its open lab requests, and marking
+it entered in error marks them entered in error ("Encounter status and its
+records"). An open lab request of a completed encounter that is not
+retracted, or of an encounter that was already cancelled or entered in error,
+stays as it is. Re-enabling a module takes its own decision, its fixes, a
+staging acceptance run and a reviewed migration granting the permissions
+again; the sections on the Lab and Pharmacy handoffs below describe the routes
+as they work then.
 
 ### Encounter status and its records
 
