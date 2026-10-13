@@ -116,6 +116,30 @@ assert.equal(resources('AWS::ElasticLoadBalancingV2::LoadBalancer').length, asle
 const issuerWebAcl = ['economy', 'fidelity', 'production'].includes(profile) ? 1 : 0
 assert.equal(resources('AWS::WAFv2::WebACL').length, asleep ? 0 : 1 + issuerWebAcl)
 assert.equal(resources('AWS::WAFv2::WebACLAssociation').length, asleep ? 0 : 1 + issuerWebAcl)
+if (!asleep) {
+  // The public API web ACL: the origin secret first; the Core Rule Set with
+  // only SizeRestrictions_BODY counted, and a rule after it that blocks the
+  // oversized bodies it labels outside the encounter-scoped clinical writes
+  // (WAF-CRS-BODY); a rate limit per client address (X-Real-IP, set by the
+  // Worker) and a high backstop per connecting address (A7).
+  const [apiAcl] = resources('AWS::WAFv2::WebACL')
+    .filter(resource => resource.Properties.VisibilityConfig?.MetricName === `hid-${environment}-api-origin`)
+  assert.ok(apiAcl, 'the public API web ACL is missing')
+  const rules = [...apiAcl.Properties.Rules].sort((left, right) => left.Priority - right.Priority)
+  assert.deepEqual(rules.map(rule => [rule.Priority, rule.Name]), [
+    [0, 'RequireCloudflareOriginSecret'], [10, 'AwsCommonRules'], [11, 'AwsCommonRulesBodySize'],
+    [20, 'AwsKnownBadInputs'], [30, 'ApiOriginRateLimit'], [31, 'ApiOriginEdgeRateLimit'],
+  ])
+  assert.deepEqual(rules[1].Statement.ManagedRuleGroupStatement.RuleActionOverrides,
+    [{ Name: 'SizeRestrictions_BODY', ActionToUse: { Count: {} } }])
+  assert.deepEqual(rules[2].Action, { Block: {} })
+  assert.deepEqual(rules[2].Statement.AndStatement.Statements[0],
+    { LabelMatchStatement: { Scope: 'LABEL', Key: 'awswaf:managed:aws:core-rule-set:SizeRestrictions_Body' } })
+  assert.match(JSON.stringify(rules[2].Statement.AndStatement.Statements[1].NotStatement), /clinical-notes/)
+  assert.deepEqual(rules[4].Statement.RateBasedStatement, { AggregateKeyType: 'FORWARDED_IP', Limit: 2000,
+    ForwardedIPConfig: { HeaderName: 'X-Real-IP', FallbackBehavior: 'MATCH' } })
+  assert.deepEqual(rules[5].Statement.RateBasedStatement, { AggregateKeyType: 'IP', Limit: 50000 })
+}
 assert.equal(resources('AWS::ApplicationAutoScaling::ScalableTarget').length, asleep ? 0 : 11)
 assert.equal(resources('AWS::Scheduler::Schedule').length, asleep ? 1 : 0)
 

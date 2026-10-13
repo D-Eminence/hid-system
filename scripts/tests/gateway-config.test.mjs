@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { assertGatewayContract } from '../lib/gateway-contract.mjs'
 import {
-  GatewayModel, parseConfig, renderTemplate, templateVariables,
+  GatewayModel, expandIncludes, parseConfig, renderTemplate, templateVariables,
 } from '../lib/nginx-config-model.mjs'
 
 const repository = resolve(import.meta.dirname, '..', '..')
@@ -198,6 +198,10 @@ const internalRoutes = [
   '/api/v1/identity/outreach/patient-authorization',
   '/api/v1/ehr/internal/ocr/documents/0b9d2f9e-6b7c-4b55-9a39-1d3e0e7a1f11/source',
   '/api/v1/ehr/internal/ocr/patients/0b9d2f9e-6b7c-4b55-9a39-1d3e0e7a1f11/clinical-notes',
+  // The document scanner's callback: a workload-authenticated service route
+  // with no caller while uploads and the scanner are off (D5); the scanner
+  // calls ehr-api on its private service name when it ships.
+  '/api/v1/ehr/documents/scan-events',
   '/api/v1/lab/work-items/accept-ehr-order',
   '/api/v1/lab/imports/from-ocr',
   '/api/v1/pharmacy/work-items/accept-ehr-prescription',
@@ -223,7 +227,8 @@ test('internal service routes answer 404 at the public gateway in case, slash, d
       }
     }
     // The prefixes themselves (no browser route lives under them).
-    for (const uri of ['/api/v1/identity/service', '/api/v1/identity/outreach', '/api/v1/ehr/internal', '/api/v1/ehr/INTERNAL/x']) {
+    for (const uri of ['/api/v1/identity/service', '/api/v1/identity/outreach', '/api/v1/ehr/internal', '/api/v1/ehr/INTERNAL/x',
+      '/api/v1/ehr/documents/scan-events/x', '/api/v1/ehr/documents/./scan-events', '/api/v1/ehr/documents/scan%2Devents']) {
       expectProblem(model.route({ uri, peer: alb, headers: viaEdge() }), 404, 'API_ROUTE_NOT_FOUND', uri)
     }
   }
@@ -293,7 +298,8 @@ test('routes that only resemble internal ones are still proxied', () => {
     ['/api/v1/identity/services', 'IDENTITY_API_UPSTREAM'], ['/api/v1/identity/outreach-x', 'IDENTITY_API_UPSTREAM'],
     ['/api/v1/identity/authorization/check', 'IDENTITY_API_UPSTREAM'], ['/api/v1/identity/patient-lookup', 'IDENTITY_API_UPSTREAM'],
     ['/api/v1/auth/service-sessions', 'IDENTITY_API_UPSTREAM'], ['/api/v1/auth/session', 'IDENTITY_API_UPSTREAM'],
-    ['/api/v1/ehr/internals', 'EHR_API_UPSTREAM'], ['/api/v1/ehr/documents/scan-events', 'EHR_API_UPSTREAM'],
+    ['/api/v1/ehr/internals', 'EHR_API_UPSTREAM'], ['/api/v1/ehr/documents/scan-eventsx', 'EHR_API_UPSTREAM'],
+    ['/api/v1/ehr/documents/upload-intents', 'EHR_API_UPSTREAM'], ['/api/v1/ehr/documents/scan', 'EHR_API_UPSTREAM'],
     ['/api/v1/lab/work-items', 'LAB_API_UPSTREAM'], ['/api/v1/lab/imports', 'LAB_API_UPSTREAM'],
     ['/api/v1/lab/work-items/0b9d2f9e-6b7c-4b55-9a39-1d3e0e7a1f11', 'LAB_API_UPSTREAM'],
     ['/api/v1/pharmacy/work-items', 'PHARMACY_API_UPSTREAM'], ['/api/v1/pharmacy/imports/0b9d2f9e', 'PHARMACY_API_UPSTREAM'],
@@ -313,11 +319,98 @@ test('non-API paths and unknown API namespaces keep their bounded answers', () =
   assert.ok(parseConfig(renderTemplate(template, production)).length > 0)
 })
 
+const routePrefixes = ['/api/v1/auth', '/api/v1/identity', '/api/v1/audit', '/api/v1/admin', '/api/v1/commercial',
+  '/api/v1/ehr', '/api/v1/lab', '/api/v1/pharmacy', '/api/v1/ocr', '/api/v1/outreach']
+
+// A8. With proxy_intercept_errors on, error_page 502 503 504 also replaced every
+// upstream 502/503/504 (an application's own Problem Details with its code,
+// Set-Cookie, Retry-After and X-Correlation-ID) by the gateway's fixed 503
+// UPSTREAM_UNAVAILABLE. With it off (nginx's default), error_page applies only
+// to the errors nginx itself produces: an upstream that refuses, resets, times
+// out, does not resolve or closes without answering.
+test('upstream answers, 5xx included, pass through; only the gateway\'s own upstream failures get UPSTREAM_UNAVAILABLE', () => {
+  const rendered = expandIncludes(parseConfig(renderTemplate(template, production)), includes)
+  const intercepting = JSON.stringify(rendered).match(/"name":"proxy_intercept_errors","args":\["on"\]/g) ?? []
+  assert.deepEqual(intercepting, [], 'no location may intercept upstream error statuses')
+  const model = gateway({ ...production, HID_ENABLED_API_ROUTES: allModules })
+  for (const prefix of routePrefixes) {
+    for (const uri of [prefix, `${prefix}/x`]) {
+      const outcome = model.route({ method: 'POST', uri, peer: alb, headers: viaEdge() })
+      assert.equal(outcome.action, 'proxy', uri)
+      assert.equal(outcome.interceptErrors, false, `${uri}: an upstream 5xx must reach the client unchanged`)
+    }
+  }
+  const pages = model.errorPages()
+  for (const status of ['502', '503', '504']) {
+    assert.deepEqual(pages[status], { target: '@upstream_unavailable', replaceStatus: true },
+      `nginx's own ${status} (no upstream answer) keeps the bounded Problem Details`)
+  }
+  const unavailable = model.named('@upstream_unavailable')
+  assert.equal(unavailable.status, 503)
+  assert.equal(unavailable.contentType, 'application/problem+json')
+  assert.equal(JSON.parse(unavailable.body).code, 'UPSTREAM_UNAVAILABLE')
+  assert.equal(unavailable.addHeaders['Cache-Control'], 'no-store')
+})
+
+// D7. The image's http-level access_log uses the stock format "main", which
+// logs "$request": the whole request line, query string included (admin
+// search terms such as names, emails and HIDs). The server logs its own JSON
+// format instead, which names the path ($uri, no arguments) and never the
+// request line, arguments, cookies, referrer or credentials.
+const forbiddenLogVariables = [
+  /\$request(?![_a-z])/, /\$request_uri\b/, /\$request_body\b/, /\$args\b/, /\$arg_/, /\$query_string\b/, /\$is_args\b/,
+  /\$http_referer\b/, /\$http_cookie\b/, /\$cookie_/, /\$http_authorization\b/, /\$http_x_csrf_token\b/,
+  /\$http_x_hid_origin_authorization\b/, /\$sent_http_set_cookie\b/, /\$upstream_http_set_cookie\b/,
+]
+
+test('the access log records method, path without its query, status, timing and request ids only', () => {
+  const model = gateway(production)
+  const format = model.logFormats.get('hid_api')
+  assert.ok(format, 'the template must define log_format hid_api')
+  assert.equal(format.escape, 'json', 'values are JSON-escaped, so a request cannot forge log fields')
+  for (const variable of ['$request_method', '$uri', '$status', '$request_time', '$request_id',
+    '$http_x_correlation_id', '$upstream_status', '$remote_addr']) {
+    assert.ok(format.format.includes(variable), `the access log must record ${variable}`)
+  }
+  for (const forbidden of forbiddenLogVariables) {
+    assert.doesNotMatch(format.format, forbidden, `the access log must not record ${forbidden}`)
+  }
+  // Each line is one JSON object.
+  const sample = format.format.replace(/\$([a-z_]+)/g, (_whole, name) =>
+    ['status', 'body_bytes_sent', 'request_time'].includes(name) ? '200' : 'value')
+  assert.equal(typeof JSON.parse(sample), 'object')
+  assert.deepEqual(model.directives('access_log').map(item => item.args), [['/dev/stdout', 'hid_api']],
+    'the server must replace the image\'s http-level access_log')
+  for (const uri of ['/api/v1/admin/principals?query=Ada%20Obi', '/api/v1/ehr/patients/x/encounters?cursor=y', '/api/v2/x', '/']) {
+    assert.deepEqual(model.route({ uri, peer: alb, headers: viaEdge() }).accessLog, [['/dev/stdout', 'hid_api']], uri)
+  }
+  assert.deepEqual(model.named('@upstream_unavailable').accessLog, [['/dev/stdout', 'hid_api']])
+  assert.deepEqual(model.route({ uri: '/gateway-health/ready', peer: alb }).accessLog, [['off']])
+})
+
+// WAF-CRS-BODY. The WAF no longer refuses every body over 8 KB on the clinical
+// write routes, so the gateway states the bound: the largest JSON body a launch
+// service accepts (ehr-api 512 KiB; identity-api 256 KiB refuses more itself),
+// refused with Problem Details rather than nginx's HTML page.
+test('request bodies are bounded at 512 KiB and refused with a Problem Details 413', () => {
+  const model = gateway({ ...production, HID_ENABLED_API_ROUTES: allModules })
+  for (const prefix of routePrefixes) {
+    const outcome = model.route({ method: 'POST', uri: `${prefix}/x`, peer: alb, headers: viaEdge() })
+    assert.equal(outcome.clientMaxBodySize, '512k', prefix)
+  }
+  assert.deepEqual(model.errorPages()['413'], { target: '@payload_too_large', replaceStatus: true })
+  const tooLarge = model.named('@payload_too_large')
+  assert.equal(tooLarge.status, 413)
+  assert.equal(tooLarge.contentType, 'application/problem+json')
+  assert.equal(JSON.parse(tooLarge.body).code, 'PAYLOAD_TOO_LARGE', 'the code the services answer for an oversized body')
+  assert.equal(tooLarge.addHeaders['Cache-Control'], 'no-store')
+})
+
 // scripts/verify-container-platform.mjs runs this contract; it must accept the
 // shipped files and catch each regression this change closes.
 test('the container verifier contract accepts the shipped gateway and rejects each regression', () => {
   const shipped = { template, dockerfile, includes }
-  assert.deepEqual(assertGatewayContract(shipped), { routes: 10, internalRoutes: 12 })
+  assert.deepEqual(assertGatewayContract(shipped), { routes: 10, internalRoutes: 13 })
   const proxyHeaders = includes['/etc/nginx/hid-proxy-headers.conf']
   for (const [label, mutated] of [
     ['a literal proxy_pass', { ...shipped, template: template.replace('proxy_pass $hid_upstream;', 'proxy_pass ${LAB_API_UPSTREAM};') }],
@@ -337,6 +430,17 @@ test('the container verifier contract accepts the shipped gateway and rejects ea
       proxyHeaders.replace('X-Forwarded-For $remote_addr', 'X-Forwarded-For $realip_remote_addr') } }],
     ['every module routed by the image', { ...shipped, dockerfile: dockerfile.replace('HID_ENABLED_API_ROUTES=identity,ehr', `HID_ENABLED_API_ROUTES=${allModules}`) }],
     ['a missing image default', { ...shipped, dockerfile: dockerfile.replace(/\n\s*VPC_CIDR=\S+ \\/, '') }],
+    ['upstream 5xx answers intercepted', { ...shipped, includes: { '/etc/nginx/hid-proxy-headers.conf':
+      `${proxyHeaders}proxy_intercept_errors on;\n` } }],
+    ['upstream 5xx answers intercepted in one location', { ...shipped, template: template.replace(
+      'set $hid_upstream ${EHR_API_UPSTREAM};', 'proxy_intercept_errors on;\n    set $hid_upstream ${EHR_API_UPSTREAM};') }],
+    ['no bounded answer for an unreachable upstream', { ...shipped, template: template.replace('error_page 502 503 504 = @upstream_unavailable;', '') }],
+    ['the scanner callback proxied', { ...shipped, template: template.replace('|documents/scan-events)', ')') }],
+    ['query strings logged', { ...shipped, template: template.replace('"path":"$uri"', '"path":"$request_uri"') }],
+    ['the request line logged', { ...shipped, template: template.replace('"method":"$request_method"', '"request":"$request"') }],
+    ['the image access log kept', { ...shipped, template: template.replace(/\n\s*access_log \/dev\/stdout hid_api;/, '') }],
+    ['unbounded request bodies', { ...shipped, template: template.replace(/\n\s*client_max_body_size 512k;/, '') }],
+    ['a larger body bound', { ...shipped, template: template.replace('client_max_body_size 512k;', 'client_max_body_size 10m;') }],
   ]) {
     assert.notEqual(JSON.stringify(mutated), JSON.stringify(shipped), `${label}: the mutation must apply`)
     assert.throws(() => assertGatewayContract(mutated), undefined, `the contract must reject ${label}`)

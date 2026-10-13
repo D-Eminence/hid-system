@@ -245,8 +245,17 @@ export class GatewayModel {
       if (item.args.length !== 1) throw new Error('only the single-argument geo form is modelled')
       this.geos.set(item.args[0], item.block)
     }
+    // log_format name [escape=default|json|none] string ...: nginx joins the
+    // strings into one format.
+    this.logFormats = new Map()
+    for (const item of top.filter(entry => entry.name === 'log_format')) {
+      const [name, ...rest] = item.args
+      const escape = rest[0]?.startsWith('escape=') ? rest.shift().slice('escape='.length) : 'default'
+      if (this.logFormats.has(name)) throw new Error(`duplicate log_format ${name}`)
+      this.logFormats.set(name, { escape, format: rest.join('') })
+    }
     for (const item of top) {
-      if (!['server', 'map', 'geo'].includes(item.name)) throw new Error(`unmodelled http-level directive ${item.name}`)
+      if (!['server', 'map', 'geo', 'log_format'].includes(item.name)) throw new Error(`unmodelled http-level directive ${item.name}`)
     }
     this.realIpFrom = cidrList(this.server.filter(item => item.name === 'set_real_ip_from').map(item => item.args[0]))
     this.realIpHeader = this.server.find(item => item.name === 'real_ip_header')?.args[0]
@@ -309,12 +318,22 @@ export class GatewayModel {
     const selected = chain.at(-1)
     const outcome = this.runRewrite(selected.directive.block, expand, variables, value)
     const scopes = [...chain].reverse().map(item => item.directive.block)
+    // Directives that a location inherits from its enclosing levels unless it
+    // sets its own: where the request is logged, whether upstream error
+    // statuses are replaced by error_page (nginx's default is off), and the
+    // largest request body nginx accepts (its default is 1m).
+    const inheritedSettings = {
+      accessLog: this.inheritedAll('access_log', scopes).map(item => item.args),
+      interceptErrors: (this.inherited('proxy_intercept_errors', scopes)?.[0] ?? 'off') === 'on',
+      clientMaxBodySize: this.inherited('client_max_body_size', scopes)?.[0] ?? '1m',
+    }
     if (outcome) {
       return {
         ...outcome,
         location: selected.path,
         contentType: this.inherited('default_type', scopes)?.[0],
         addHeaders: outcome.addHeaders ?? this.addHeaders(scopes),
+        ...inheritedSettings,
         remoteAddress,
       }
     }
@@ -338,7 +357,41 @@ export class GatewayModel {
       // part, the unparsed client URI is sent unchanged.
       upstreamUri: uri,
       upstreamHeaders,
+      ...inheritedSettings,
       remoteAddress,
+    }
+  }
+
+  /** The server-level error_page mappings, as { status: target }. */
+  errorPages() {
+    const pages = {}
+    for (const item of this.directives('error_page')) {
+      const target = item.args.at(-1)
+      const codes = item.args.slice(0, -1).filter(argument => /^\d{3}$/.test(argument))
+      for (const code of codes) pages[code] = { target, replaceStatus: item.args.includes('=') }
+    }
+    return pages
+  }
+
+  /**
+   * The answer of a named location (an error_page target), which nginx enters
+   * by an internal redirect: its rewrite phase, content type and headers.
+   */
+  named(name) {
+    const found = locationsOf(this.server).find(item => item.modifier === '@' && item.path === name)
+    if (!found) throw new Error(`no named location ${name}`)
+    const block = found.directive.block
+    const outcome = this.runRewrite(block, (text) => text, new Map(), (variable) => {
+      throw new Error(`named location ${name} reads $${variable}, which is not modelled`)
+    })
+    if (!outcome) throw new Error(`named location ${name} does not return`)
+    const scopes = [block]
+    return {
+      ...outcome,
+      location: name,
+      contentType: this.inherited('default_type', scopes)?.[0],
+      addHeaders: outcome.addHeaders ?? this.addHeaders(scopes),
+      accessLog: this.inheritedAll('access_log', scopes).map(item => item.args),
     }
   }
 
