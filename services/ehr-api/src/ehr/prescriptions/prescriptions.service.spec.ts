@@ -143,3 +143,91 @@ describe('PrescriptionsService Pharmacy handoff', () => {
     expect(events).toEqual(['begin', 'commit', 'pharmacy']);
   });
 });
+
+/**
+ * A fake transaction for PrescriptionsService.update: the row lock returns the
+ * prescription in `status`, the UPDATE returns it at the next version, and the
+ * encounter share lock answers in_progress.
+ */
+function updateHarness(status: OrderStatus) {
+  const query = jest.fn(async (sql: string, params: unknown[] = []) => {
+    const statement = sql.replace(/\s+/g, ' ').trim();
+    if (/^select .* from ehr\.prescriptions .* for update$/i.test(statement)) return { rows: [prescription(status)] };
+    if (/^update ehr\.prescriptions\b/i.test(statement)) {
+      return { rows: [{ ...prescription((params[0] as OrderStatus | null) ?? status, '4') }] };
+    }
+    return { rows: [] };
+  });
+  const repository = {
+    run: jest.fn(async (_context: unknown, _patientId: unknown, _access: unknown, _event: unknown,
+      operation: (client: unknown) => Promise<{ value: unknown }>) => (await operation({ query })).value),
+    setChangeReason: jest.fn(async () => undefined),
+    lockEncounterStatus: jest.fn(async () => 'in_progress'),
+  };
+  const service = new PrescriptionsService(repository as never, { acceptEhrPrescription: jest.fn() } as never);
+  const updates = () => query.mock.calls.filter(([sql]) => /^\s*update\b/i.test(String(sql)));
+  return { query, repository, service, updates };
+}
+
+const change = (fields: Record<string, unknown>) =>
+  ({ expectedRowVersion: 3, changeReason: 'Synthetic prescription change', ...fields });
+
+describe('PrescriptionsService.update of a closed prescription (RX-FINAL, ORDER-CLOSED-EDIT)', () => {
+  it.each([
+    [OrderStatus.Completed, { instructions: 'Rewritten instructions' }],
+    [OrderStatus.Completed, { frequency: 'Once daily' }],
+    [OrderStatus.Cancelled, { instructions: 'Rewritten instructions' }],
+    [OrderStatus.Cancelled, { endsOn: '2026-09-01' }],
+    [OrderStatus.EnteredInError, { instructions: 'Rewritten instructions' }],
+    [OrderStatus.EnteredInError, { frequency: 'Once daily', endsOn: '2026-09-01' }],
+  ])('refuses to change a %s prescription (%j) with 409 PRESCRIPTION_NOT_AMENDABLE before any UPDATE', async (status, fields) => {
+    const { service, repository, updates } = updateHarness(status);
+    await expect(service.update(context, patientId, encounterId, prescriptionId, change(fields) as never))
+      .rejects.toMatchObject({ status: 409, code: 'PRESCRIPTION_NOT_AMENDABLE' });
+    expect(updates()).toEqual([]);
+    expect(repository.setChangeReason).not.toHaveBeenCalled();
+  });
+
+  it.each([OrderStatus.Completed, OrderStatus.Cancelled, OrderStatus.EnteredInError])(
+    'refuses a %s prescription sent its own status again', async (status) => {
+      const { service, updates } = updateHarness(status);
+      await expect(service.update(context, patientId, encounterId, prescriptionId, change({ status }) as never))
+        .rejects.toMatchObject({ status: 409, code: 'PRESCRIPTION_NOT_AMENDABLE' });
+      expect(updates()).toEqual([]);
+    });
+
+  it('marks a completed prescription entered in error, so wrong-patient medication history can be retracted (ENC-RETRACT-2)', async () => {
+    const { service, updates } = updateHarness(OrderStatus.Completed);
+    await expect(service.update(context, patientId, encounterId, prescriptionId,
+      change({ status: OrderStatus.EnteredInError }) as never)).resolves.toMatchObject({ status: OrderStatus.EnteredInError });
+    expect(updates()).toHaveLength(1);
+  });
+
+  it('refuses a completed prescription entered in error together with a field change', async () => {
+    const { service, updates } = updateHarness(OrderStatus.Completed);
+    await expect(service.update(context, patientId, encounterId, prescriptionId,
+      change({ status: OrderStatus.EnteredInError, instructions: 'Rewritten instructions' }) as never))
+      .rejects.toMatchObject({ status: 409, code: 'PRESCRIPTION_NOT_AMENDABLE' });
+    expect(updates()).toEqual([]);
+  });
+
+  it.each([
+    [OrderStatus.Cancelled, OrderStatus.Active],
+    [OrderStatus.EnteredInError, OrderStatus.Draft],
+    [OrderStatus.Completed, OrderStatus.Active],
+    [OrderStatus.Completed, OrderStatus.Cancelled],
+  ])('keeps answering %s to %s with 409 INVALID_PRESCRIPTION_TRANSITION', async (from, to) => {
+    const { service, updates } = updateHarness(from);
+    await expect(service.update(context, patientId, encounterId, prescriptionId, change({ status: to }) as never))
+      .rejects.toMatchObject({ status: 409, code: 'INVALID_PRESCRIPTION_TRANSITION' });
+    expect(updates()).toEqual([]);
+  });
+
+  it.each([OrderStatus.Draft, OrderStatus.Active, OrderStatus.OnHold])(
+    'still changes the instructions of a %s prescription', async (status) => {
+      const { service, updates } = updateHarness(status);
+      await expect(service.update(context, patientId, encounterId, prescriptionId,
+        change({ instructions: 'Take with water' }) as never)).resolves.toMatchObject({ rowVersion: '4' });
+      expect(updates()).toHaveLength(1);
+    });
+});

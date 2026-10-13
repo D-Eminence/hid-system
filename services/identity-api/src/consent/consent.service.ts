@@ -63,7 +63,8 @@ export interface VerifiedPatientPinAccess {
   existingGrant: boolean;
 }
 
-const RECENT_APPROVAL_AUTH_DETAIL = 'Sign in again before approving access to your records';
+// Health-id shows this detail as it is on Approve, so it says what to do (FE-8).
+const RECENT_APPROVAL_AUTH_DETAIL = 'For your security, sign out, sign in again, and approve within 10 minutes.';
 
 @Injectable()
 export class ConsentService {

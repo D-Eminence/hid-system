@@ -197,13 +197,13 @@ insert into auth.mfa_login_challenges (id, account_id, purpose, token_sha256, ac
 insert into auth.mfa_login_challenges (id, account_id, purpose, token_sha256, account_token_version, created_at,
     expires_at, max_attempts, session_kind) values
   ('d8b00000-0000-4000-8000-000000000002', 'd8200000-0000-4000-8000-000000000005', 'enroll', repeat('2', 64), 1,
-   clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'staff'),
+   statement_timestamp(), statement_timestamp() + interval '10 minutes', 5, 'staff'),
   ('d8b00000-0000-4000-8000-000000000003', 'd8200000-0000-4000-8000-000000000001', 'verify', repeat('3', 64), 1,
    clock_timestamp(), clock_timestamp() + interval '5 minutes', 5, 'staff');
 insert into auth.mfa_login_challenges (id, account_id, purpose, token_sha256, account_token_version, created_at,
     expires_at, max_attempts, session_kind, proof_method, proof_verified_at) values
   ('d8b00000-0000-4000-8000-000000000004', 'd8200000-0000-4000-8000-000000000005', 'enroll', repeat('4', 64), 1,
-   clock_timestamp(), clock_timestamp() + interval '10 minutes', 5, 'staff', 'provider_activation', clock_timestamp());
+   statement_timestamp(), statement_timestamp() + interval '10 minutes', 5, 'staff', 'provider_activation', clock_timestamp());
 do $$
 declare
   rejected text;
@@ -220,7 +220,7 @@ begin
           proof_verified_at)
       values (gen_random_uuid(), 'd8200000-0000-4000-8000-000000000001',
         case when rejected = 'verify-proof' then 'verify' else 'enroll' end,
-        md5(rejected) || md5(rejected || 'x'), 1, clock_timestamp(), clock_timestamp() + interval '10 minutes', 5,
+        md5(rejected) || md5(rejected || 'x'), 1, statement_timestamp(), statement_timestamp() + interval '10 minutes', 5,
         case rejected when 'kind' then 'patient' when 'platform-proof' then 'platform' else 'staff' end,
         case when rejected like 'activation%' then 'provider_activation' when rejected = 'kind' then null
           else 'email_code' end,

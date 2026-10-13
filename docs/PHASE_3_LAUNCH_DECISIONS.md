@@ -4,8 +4,11 @@ Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
 the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
 the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
 (§1, ADR-052, D-Eminence/hid-system#67), N1 and N2 (ADR-048,
-BRANCH:launch/identity-enrollment-gates), N5 and the workforce part of D14
-(ADR-049, BRANCH:launch/staff-workforce-provisioning), and the launch module
+D-Eminence/hid-system#68), and N5 and the workforce part of D14
+(ADR-049, D-Eminence/hid-system#70) with the owner's defaults,
+and the facility a sign-in keeps (N5, E7; ADR-046 as ported in
+`BRANCH:launch/facility-selection-0089`), and ENC-RETRACT-1, ENC-RETRACT-2 and ALLERGY-1
+(ADR-056, BRANCH:launch/ehr-retraction-integrity), and the launch module
 permissions and patient access transparency (§1, ADR-058,
 BRANCH:launch/launch-permission-withdrawal) with the owner's defaults;
 nothing else in this document has been decided, and nothing has been deployed
@@ -41,10 +44,10 @@ separate deployment authorization. None of them has been run.
   never `NIN_VERIFIED`. Until that holder step ships, Identity refuses
   `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true` in production
   (`HID_DEPLOYMENT_ENV=production`, or `NODE_ENV=production` outside the
-  staging profile): it does not start (BRANCH:launch/identity-enrollment-gates,
+  staging profile): it does not start (D-Eminence/hid-system#68,
   CFG-PROD). The change that adds the holder step lifts that refusal; staging
   may run NIN-only enrollment for acceptance.
-- **Implemented now (BRANCH:launch/identity-enrollment-gates), ENR-4 step 1.**
+- **Implemented now (D-Eminence/hid-system#68), ENR-4 step 1.**
   Enrollment start checks the QoreID gate (`QOREID_ENABLED`,
   `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` and the runtime pause of
   `qoreid`/`patient_nin`) before it reads whether the NIN is bound or pending,
@@ -52,6 +55,21 @@ separate deployment authorization. None of them has been run.
   open the `409 NIN_ALREADY_REGISTERED` answer remains until step 2 ships;
   each probe of an unbound NIN then costs a QoreID lookup, bounded by the
   lookup quota (N2, below).
+- **Implemented now (D-Eminence/hid-system#68), FE-4.** While
+  the gate is closed by configuration, start answers its `503` with "New
+  Health ID registration is not open yet. If you already have a Health ID,
+  sign in." instead of the generic 5xx detail (the gateway on main still
+  replaces it with `503 UPSTREAM_UNAVAILABLE` until ADR-055), and
+  `GET /api/v1/identity/patient-enrollments/availability` answers
+  `{ "open": boolean }` from the same gate, so Health-id can say so before it
+  asks for a NIN (ADR-057; `INTERFACE_CONTRACT.md`). Health-id
+  82b474e does not read it yet (release checklist §3).
+- **Launch consequence (open for the owner to confirm).** With N1 as decided
+  and facility-assisted registration out of scope (N2(d), D17), no new
+  patient can get a Health ID in production at launch; legacy-migrated
+  patients sign in. The owner confirms launching with registration closed,
+  or prioritises ENR-4 step 2 (the registry-phone code), which needs a QoreID
+  contract that exposes the registry phone (DEP-1, unconfirmed).
 - **Risks.** Patients without a reachable registry phone cannot self-enroll
   with a NIN. A registry phone OTP depends on what the provider contract
   exposes (`QOREID_VERIFICATION_CONTRACT.md`), which nobody has confirmed;
@@ -86,7 +104,7 @@ separate deployment authorization. None of them has been run.
     patients self-enroll.
 - **Implemented now.** D-Eminence/hid-system#50 expires the enrollment cookie
   at every sign-in, refresh and sign-out, and limits activation per
-  enrollment. BRANCH:launch/identity-enrollment-gates implements (b) and (c)
+  enrollment. D-Eminence/hid-system#68 implements (b) and (c)
   in Identity and in migration 0085, and caps QoreID lookups: each lookup of
   public enrollment is charged, before QoreID is called, to the client network
   (an IPv4 address or an IPv6 /64) at 5 an hour and 15 a day, and to a
@@ -163,12 +181,14 @@ separate deployment authorization. None of them has been run.
   (D-Eminence/hid-system#48), and 0081 and 0082 are taken too
   (D-Eminence/hid-system#55, D-Eminence/hid-system#58). #47 must be renumbered
   to the next free number, 0083 today, before it can merge. It also overlaps
-  #50 on `auth.controller.ts` and `token.service.ts`.
+  #50 on `auth.controller.ts` and `token.service.ts`. **Resolved:** ported as
+  0089, after the launch migrations 0085-0088, in
+  `BRANCH:launch/facility-selection-0089` (below).
 - **Data check.** Run I4 (§3) before deciding: whether such memberships exist.
 - **Decided (2026-10-13, owner defaults: deny by default, least privilege;
   ADR-049).** One active, unheld membership per account and facility, not
   "pick the oldest": migration 0087
-  (BRANCH:launch/staff-workforce-provisioning) adds a unique partial index on
+  (D-Eminence/hid-system#70) adds a unique partial index on
   `identity.staff_facility_memberships (account_id, facility_id)` where
   active, with a facility and no migration hold. If duplicates exist, 0087
   stops and changes nothing; I4 resolves them first (§3). Identity's staff
@@ -177,6 +197,27 @@ separate deployment authorization. None of them has been run.
   last, which fixes every guard at once (they all read Identity's facility
   list). The legacy promotion refuses duplicates before it writes. Which
   facility a session family binds by default (#47) stays separate.
+- **Decided, the facility a sign-in keeps (launch items C1 and FE-20,
+  decision E7; 2026-10-13, owner defaults: deny by default, least privilege;
+  ADR-046 as ported).** #47 is ported as migration 0089 in
+  `BRANCH:launch/facility-selection-0089` (not merged): the facility a staff
+  sign-in chooses is kept per session family and reported on a reload or
+  refresh as `facilitySelection: 'selected'`; it is only the default the
+  session reports, and `X-Facility-ID` still authorizes every facility-scoped
+  request. Every new staff sign-in (the session issued after the second
+  factor, ADR-054) reports `default`, so the portal asks anyone who works at
+  more than one facility at every sign-in, as Health-id `82b474e` already
+  does; no Health-id change. A chosen facility the person no longer holds is
+  `reselect` (asked again, never moved silently). A refresh whose stored
+  choice cannot be read answers `200` with `facilitySelection: 'unavailable'`
+  (asked, never reported as chosen) rather than #47's `503`, which the
+  gateway's interception of upstream `5xx` (A8, removed by
+  D-Eminence/hid-system#72) would have stripped of the rotated cookies, as any
+  edge that replaces a `5xx` would. With 0087 a stored facility names one membership.
+- **Risks.** One extra question at sign-in for multi-facility staff, and at a
+  refresh while the selection store cannot be read. Release order: 0089, then
+  the role bootstrap, then the Identity build (release checklist §5 step 22,
+  §6); without the table every staff session read answers `503`.
 
 ### FE-HOST. Launch frontend hosting (FE-HOST, MOD-EDGE)
 
@@ -214,7 +255,7 @@ separate deployment authorization. None of them has been run.
 
 ### Account recovery and patient search (REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE, SIGNIN-LOCKOUT, PSEARCH-1, REC-NOTIFY)
 
-Implemented as proposed defaults in `BRANCH:launch/identity-recovery-search`
+Implemented as proposed defaults in D-Eminence/hid-system#69
 (migration 0086; release checklist §2, "Account recovery and patient search
 hardening"; `INTERFACE_CONTRACT.md`; `DATABASE.md`). Each default is a
 proposal; that change is the place to alter it.
@@ -249,7 +290,8 @@ proposal; that change is the place to alter it.
   names a patient id, and the clinician's own request list names the patient
   only while a grant made from the request is active (otherwise a
   non-identifying `withheld-…` string, so Health-id's list keeps rendering). Budgets per actor and
-  per facility: 60 and 600 lookups per 5 minutes, 20 and 200 access requests
+  per facility: 60 and 600 refused lookups per 5 minutes (a lookup that
+  returns a granted patient is not counted, FE-10), 20 and 200 access requests
   per 15 minutes (environment values). A registration member reads only
   patients linked to a case or candidate at its facility; duplicate checks go
   through two functions that return minimum fields.
@@ -301,7 +343,7 @@ proposal; that change is the place to alter it.
 ### Staff MFA (MFA-1, D14 MFA part)
 
 Decided under the owner default "verified identity for sensitive
-operations", and implemented in `BRANCH:launch/staff-mfa` (migration 0088;
+operations", and implemented in D-Eminence/hid-system#71 (migration 0088;
 ADR-054; release checklist §2, "Staff MFA"; `INTERFACE_CONTRACT.md`, "Staff
 sign-in with an authenticator"; `PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §10).
 
@@ -407,7 +449,7 @@ module set").
 | D2 | Behaviour during an issuer outage (DEP-4-RES) | **Decided (default):** the agent is `essential: false` with an ECS container restart policy and keeps the `HEALTHY` start gate (ADR-047) | During an outage longer than a token's lifetime, service-to-service calls fail closed (OTP delivery, EHR records, Lab, Pharmacy, OCR, Outreach) while sign-in keeps working; nothing pages anyone until D4 | DEP-4 rollout |
 | D3 | Edge protection for the issuer (DEP-4-DOS) | **Decided (default, deny by default):** separate method throttles for `POST /token` and the JWKS `GET`, a REGIONAL web ACL on the issuer stage that blocks every source except the VPC's NAT gateway Elastic IPs (none in staging sleep), and an agent that caches its verified JWKS by `kid` (ADR-047) | A future caller outside the VPC (such as a D5 scanner) must leave through NAT or be allowlisted by a reviewed change; per-request WAF charges during a flood | DEP-4 rollout |
 | D4 | Alert routing | **Decided (owner policy default, ADR-053, D-Eminence/hid-system#66):** every production alarm notifies, on ALARM and on OK, an operator-created SNS topic `hid-<env>-operational-alerts` encrypted with a customer-managed KMS key and named by its exact ARN (synth input `HID_OPERATIONAL_ALARM_TOPIC_ARN`, required in production, in the stack's own account and region). New alarms: issuer Lambda errors and throttles, issuer stage `5XXError` and `4XXError` (429s count there), token renewal (`Workload token renewal unavailable`) and OTP `definitive_failure`. "Dashboards only" is rejected: the CDK defines no dashboard, so it would mean nobody is told | The operations owner must name the on-call recipients, and an operator must create the topic and confirm each subscription (release checklist P15, P16) before production. A stopped token agent and Identity's `notification_workload_token_unavailable` line still raise no alarm. The five enabled services' running-task alarms are in ALARM, and notify, while production runs zero tasks before the I6 scale-up (P20); the recipients are told beforehand | Every mitigation that relies on an alarm |
-| D5 | Malware scanner engine and credential (DOC-3, DEP-4-SCAN) | An in-account scanner role as a seventh issuer rule with subject `hid:<env>:document-scanner`, and a governed provisioning step for the `document_scanner` account | Until decided, no document becomes downloadable and no OCR job can start | Documents, OCR |
+| D5 | Malware scanner engine and credential (DOC-3, DEP-4-SCAN) | An in-account scanner role as a seventh issuer rule with subject `hid:<env>:document-scanner`, and a governed provisioning step for the `document_scanner` account. The scanner posts its callback to ehr-api's private service name: the public gateway answers `/api/v1/ehr/documents/scan-events` with `404` (ADR-055, SCAN-EDGE). Switching uploads on also adds the documents bucket's S3 origin to the portal `connect-src` in the same release (ADR-055; I7) | Until decided, no document becomes downloadable and no OCR job can start | Documents, OCR |
 | D6 | Recovery and enrollment code guess budgets (REC-4, ENR-6) | 5 failures per 15 minutes per account or recipient, never per IP (the budget holds whatever network a guess comes from; until D-Eminence/hid-system#65 the edge also discarded client IPs); no daily cap | A daily cap makes denial of recovery cheap | Implemented as the default in D-Eminence/hid-system#55 (recovery codes) and D-Eminence/hid-system#61 (enrollment contact codes); thresholds are environment values |
 | D7 | Patient record release categories (PREC-1 Phase B) | Completed-encounter items only; never draft or entered in error; confirmed diagnoses only; documents only once a patient download route exists | Docs are silent | Phase B of the record summaries |
 | D8 | Vital correction semantics (CLIN-1, VIT-1) | The current correction is the whole current set, as Health-id renders it | API clients that send partial corrections lose omitted values | Held out of D-Eminence/hid-system#52 |
@@ -416,9 +458,13 @@ module set").
 | D11 | Lab result detail for clinicians | No "unreleased correction pending" flag (D-Eminence/hid-system#51) | Clinicians cannot see that a correction is coming | Result retraction API |
 | D12 | OCR publication after an authorization lapse | Terminal, as today | — | — |
 | D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (implemented in D-Eminence/hid-system#59). Uploads are off at launch: since 0091 no role holds `ehr.document.write`, `uploads_enabled` starts off and completion also checks the control (ADR-058) | No delegated completion | Re-enabling uploads (D5, I7, and a reviewed migration granting `ehr.document.write` again, which applies to production too) |
-| D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decided for the workforce part on 2026-10-13 (ADR-049, BRANCH:launch/staff-workforce-provisioning, migration 0087): clinical facility roles are granted only by platform-governed commands under the new `platform.workforce.manage` (`platform_super_admin` only), with step-up, `If-Match`, `Idempotency-Key` and a reason; a grant needs a current professional-credential attestation by another platform reviewer who is neither the target nor working at that facility (so not its `org_admin`); `org_admin` stays non-clinical and has no role-granting route; ending a membership revokes its roles and consent grants, expires its pending access requests and revokes the account's staff sessions; a role lapses with its attestation and is renewed by a new attestation and a second administrator's grant, never by the attestation alone. Facility self-service is deferred. **Staff MFA: decided, yes** (MFA-1, "Staff MFA" in §1, ADR-054, `BRANCH:launch/staff-mfa`, migration 0088): every staff session that can reach patient data is TOTP-verified, with no permission allowlist; a second enrolment channel (beyond the account mailbox) is open | An unenrolled staff account is as strong as its mailbox until it enrols. Which credential source counts (regulator registry or documented manual review) and who may review are product and legal decisions; until then the only method is documented manual review | Workforce management; the Health-id staff sign-in (release checklist §3) |
+| D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decided for the workforce part on 2026-10-13 (ADR-049, D-Eminence/hid-system#70, migration 0087): clinical facility roles are granted only by platform-governed commands under the new `platform.workforce.manage` (`platform_super_admin` only), with step-up, `If-Match`, `Idempotency-Key` and a reason; a grant needs a current professional-credential attestation by another platform reviewer who is neither the target nor working at that facility (so not its `org_admin`); `org_admin` stays non-clinical and has no role-granting route; ending a membership revokes its roles and consent grants, expires its pending access requests and revokes the account's staff sessions; a role lapses with its attestation and is renewed by a new attestation and a second administrator's grant, never by the attestation alone. Facility self-service is deferred. **Staff MFA: decided, yes** (MFA-1, "Staff MFA" in §1, ADR-054, D-Eminence/hid-system#71, migration 0088): every staff session that can reach patient data is TOTP-verified, with no permission allowlist; a second enrolment channel (beyond the account mailbox) is open | An unenrolled staff account is as strong as its mailbox until it enrols. Which credential source counts (regulator registry or documented manual review) and who may review are product and legal decisions; until then the only method is documented manual review | Workforce management; the Health-id staff sign-in (release checklist §3) |
 | D15 | Launch scope of EHR-to-Lab ordering and in-system result return | In scope (the EHR already sends orders) | If in scope, the Lab handoff is launch-blocking; it merged as D-Eminence/hid-system#56 | Lab handoff |
 | D16 | Health-id OCR publication retry | Persist the publication key per validation; offer Retry for retryable failures | Frontend change | OCR publication retry |
+| IP-THRESHOLDS | Per-network limits now that they key on the real client network (A7) | **Decided (owner default, deny by default; ADR-055):** keep Identity's 5 recovery starts and 5 enrollment starts per 15 minutes per IPv4 address or IPv6 /64, and the WAF's 2,000 requests per 5 minutes per client network (an IPv4 address or IPv6 /64, `X-HID-Client-Network` from the Worker), at launch; if the `ip`-scope 429 rate or the WAF metric `hid-<env>-origin-rate` shows carrier-grade or facility NAT collisions, raise Identity's by configuration and the WAF's by a reviewed CDK change to `API_ORIGIN_CLIENT_RATE_LIMIT` (a code constant). Per-account and per-recipient budgets and Turnstile stay the primary guards | Patients behind a busy carrier NAT address, or clinicians behind one facility NAT, can be refused at peak; Identity logs no `ip`-scope 429 event yet, so a collision shows only in the WAF metric and support reports. Traffic spread over many client networks that passes the 50,000-per-5-minutes backstop through one Cloudflare egress address blocks every user behind it for the rest of the window (ADR-055) | Identity limits, WAF rate rule |
+| ENC-RETRACT-1 | Who may cancel or retract an encounter's records through the encounter | **Decided (owner policy default, least privilege, ADR-056, BRANCH:launch/ehr-retraction-integrity):** only a member holding the write permission of every kind of record the close changes (`ehr.note.write`, `ehr.diagnosis.write`, `ehr.vital.write`, `ehr.prescription.write`, `ehr.lab-request.write`, `ehr.document.write`); an encounter holding none of them needs `ehr.encounter.write` alone. Refused with `403 ENCOUNTER_RETRACTION_NOT_PERMITTED` and a fixed detail (the missing permissions go to the audit row only, so the refusal does not reveal which kinds of record the encounter holds), nothing written, audited; the database refuses it too (0090). Cancelling changes only open orders, so it needs only the order write permissions; retracting needs every kind's. Records already entered in error and cancelled orders block nothing. The proposed `ehr.encounter.retract` permission was not taken | A nurse or receptionist who opened an encounter on the wrong patient must ask a doctor or clinician to retract it once it holds a diagnosis or an open or completed prescription, and to cancel it once it holds an open prescription. No role holds `ehr.lab-request.write` (0084), so an encounter holding an open (or, to retract, completed) lab request cannot be closed until Lab ordering returns. The rule follows record kinds, not authorship | Health-id offering the actions by permission (frontend follow-up) |
+| ENC-RETRACT-2 | Retraction of wrong-patient vitals, completed orders and documents | **Decided (owner policy default, ADR-056, BRANCH:launch/ehr-retraction-integrity):** completed orders, final vitals and linked documents of an encounter entered in error become `entered_in_error` with it; a vital can be entered in error on its own (versioned, audited, with a reason) and then takes no change or correction; a retracted document takes no change, so it is never served again; the database enforces both (0090); the emergency summary leaves retracted vitals out; nothing is deleted | Health-id `82b474e` shows a retracted vital without a marker (frontend follow-up) | — |
+| ALLERGY-1 | Allergies at launch | **Decided (owner policy default, ADR-056, BRANCH:launch/ehr-retraction-integrity): allergies are not recorded at launch.** No allergy table, route or prescribing check; a clinician records an allergy as a diagnosis (ICD-10 `Z88.x`) or in a note. `DATABASE.md` §7 now lists only implemented tables | Prescribers get no structured allergy check: a prescription for a drug the patient is allergic to is not flagged | Structured allergy capture (table with forced row-level security, versioning, the open-encounter guard, routes and audit; effort L) and Health-id saying so on the prescription form |
 
 ## 3. Operator plans (prepared, not executed)
 
@@ -536,9 +582,15 @@ checks between; rollback is scaling to zero, never local-secret mode.
 
 Deploy the chosen engine; wire S3 object-created events on the documents
 bucket; provision the `document_scanner` account under change control; post
-`scan_started` then `clean`, `rejected` or `failed` per object version; in
-staging, a PDF becomes downloadable and can start OCR, and an EICAR file is
-refused.
+`scan_started` then `clean`, `rejected` or `failed` per object version to
+ehr-api's private service name (the public gateway refuses the callback,
+ADR-055); in the same reviewed release that switches uploads on, add the
+documents bucket's exact S3 origin (`https://<bucket>.s3.<region>.amazonaws.com`)
+to the portal `connect-src` of `hid-web` and `hid-admin`
+(`infra/cloudflare/src/frontend-worker.mjs`): Health-id `PUT`s the file
+straight to the presigned URL, which the launch policy blocks (ADR-055); in
+staging, a PDF uploads with no CSP violation, becomes downloadable and can
+start OCR, and an EICAR file is refused.
 
 ### I8. Key rotation freeze
 
@@ -565,9 +617,12 @@ for each merged change and its evidence. Pull requests from this review:
 | DOC-1 (any facility member could complete a colleague's upload) | D-Eminence/hid-system#59 | merged (D13) |
 | Missing purpose header answered `500`; OCR stored a workload-identity refusal as terminal | D-Eminence/hid-system#60 | merged; Identity's own workload refusal codes are a follow-up (release checklist §2) |
 | ENR-6 (enrollment contact codes had no budget across challenges) | D-Eminence/hid-system#61 | merged (D6) |
-| ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota) | BRANCH:launch/identity-enrollment-gates, migration 0085 | local branch (N1, N2) |
+| ENR-4 step 1, ENR-3 Part B, ENR-3b, IP-1 QoreID quota, CFG-PROD NIN-only refusal (enrollment gate, re-display and re-verify windows, lookup quota); FE-4 (enrollment availability read, registration-not-open answer) | D-Eminence/hid-system#68, migration 0085 (FE-4 adds none) | local branch (N1, N2); FE-4's Health-id follow-up open |
 | DEP-4, DEP-4-RT, DEP-4-KEY, DEP-4-DOS, DEP-4-RES (production workload tokens and issuer hardening) | D-Eminence/hid-system#54, ADR-047 accepted (D1-D3) | ready for review; deployment waits on I5 and I6 |
-| REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | `BRANCH:launch/identity-recovery-search`, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
-| WF-1 (no governed way to provision clinicians), N5 (two memberships at one facility) | BRANCH:launch/staff-workforce-provisioning, migration 0087, ADR-049 | branch, not merged (D14 workforce part, N5) |
-| MFA-1 (staff sessions without MFA; D14 MFA part) | `BRANCH:launch/staff-mfa`, migration 0088, ADR-054 | local commits, not pushed; owner notices wait on the notification route; Health-id staff and platform sign-in changes listed in the release checklist §3; release checklist P22 (enrolment before clinical roles, review of enrolments after a recovery) is an operator gate; a second enrolment channel is an open decision |
+| REC-AUDIENCE, REC-UNVERIFIED-CONTACT, REC-GOOGLE (database part), SIGNIN-LOCKOUT, PSEARCH-1 (with ENUM-1 and DB-RLS-PATIENTS), REC-NOTIFY (recent sign-in and recovery hold) | D-Eminence/hid-system#69, migration 0086 | local commits, not pushed; REC-NOTIFY owner notice waits on the notification route; Health-id changes listed in the release checklist §3 |
+| WF-1 (no governed way to provision clinicians), N5 (two memberships at one facility) | D-Eminence/hid-system#70, migration 0087, ADR-049 | branch, not merged (D14 workforce part, N5) |
+| MFA-1 (staff sessions without MFA; D14 MFA part) | D-Eminence/hid-system#71, migration 0088, ADR-054 | local commits, not pushed; owner notices wait on the notification route; Health-id staff and platform sign-in changes listed in the release checklist §3; release checklist P22 (enrolment before clinical roles, review of enrolments after a recovery) is an operator gate; a second enrolment channel is an open decision |
+| WAF-CRS-BODY (long clinical notes refused by the WAF's 8 KB body rule), A7 WAF part (rate limit per Cloudflare egress address), A8 (gateway replaced upstream 5xx), D6 (no CSP or HSTS on the portal hosts), D7 (query strings in the gateway access log), SCAN-EDGE/EDGE-DOCS (scanner callback public) | D-Eminence/hid-system#72, ADR-055 | ready for review; IP-THRESHOLDS decided above; staging checks S4p |
+| C1, FE-20 (a clinician's chosen facility was not kept across a reload; D-Eminence/hid-system#47 unmerged and numbered 0080) | `BRANCH:launch/facility-selection-0089`, migration 0089, ADR-046 (as ported) | local commits, not pushed (N5, E7); D-Eminence/hid-system#47 stays open with its own owner; no Health-id change |
+| ENC-RETRACT-1 (launch blocker), ENC-RETRACT-2, RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT, ALLERGY-1 (EHR retraction integrity) | BRANCH:launch/ehr-retraction-integrity, migration 0090, ADR-056 | local only; not pushed |
 | MOD-PERM-OCR-OUTREACH, FE-17, FE-15, UPLOADS-DEFAULT-ON, PSELF-RLS, CONSENT-GRANTEE, NOTIF-PIN-NOTICE (launch module permissions, launch controls, patient-self binding, named grantee, PIN-use notice); ACCESS-REQ-STALE deferred | `BRANCH:launch/launch-permission-withdrawal`, migration 0091, ADR-058 | local commits, not pushed; numbered after 0089 and 0090 on other branches (the release contract reports the gap until they land); optional Health-id changes listed in the release checklist §3 |

@@ -436,6 +436,107 @@ test('regional API WAF requires the Cloudflare origin secret and baseline protec
   assert.match(serialized, /RateBasedStatement/);
 });
 
+interface WafRule {
+  readonly Name: string;
+  readonly Priority: number;
+  readonly Action?: Record<string, unknown>;
+  readonly OverrideAction?: Record<string, unknown>;
+  readonly Statement: Record<string, any>;
+}
+
+function apiOriginRules(template: typeof regional, environment: string): readonly WafRule[] {
+  const acls = properties(template, 'AWS::WAFv2::WebACL').filter((item) =>
+    (item.VisibilityConfig as { readonly MetricName?: string }).MetricName === `hid-${environment}-api-origin`);
+  assert.equal(acls.length, 1);
+  return [...(acls[0]!.Rules as readonly WafRule[])].sort((left, right) => left.Priority - right.Priority);
+}
+
+const uuid = '0b9d2f9e-6b7c-4b55-9a39-1d3e0e7a1f11';
+const other = '1c8e3f0a-2b4d-4e6f-8a9b-0c1d2e3f4a5b';
+const encounter = `/api/v1/ehr/patients/${uuid}/encounters/${other}`;
+
+// WAF-CRS-BODY. The Core Rule Set's SizeRestrictions_BODY blocks any body over
+// 8 KB, but ehr-api accepts clinical text up to 100,000 characters (512 KiB
+// JSON) and 4,000-character fields that exceed 8 KB in multi-byte text. The
+// rule now only counts; a rule right after the group blocks what it labels
+// unless the request is a POST or PATCH to an encounter-scoped clinical write
+// route spelled exactly as Health-id sends it. Every other CRS rule still blocks.
+test('the WAF body-size rule is relaxed only for encounter-scoped clinical writes', () => {
+  for (const [template, environment] of [[regional, 'production'], [stagingRegional, 'staging']] as const) {
+    const rules = apiOriginRules(template, environment);
+    const common = rules.find((rule) => rule.Name === 'AwsCommonRules')!;
+    assert.deepEqual(common.OverrideAction, { None: {} });
+    assert.deepEqual(common.Statement.ManagedRuleGroupStatement, {
+      Name: 'AWSManagedRulesCommonRuleSet', VendorName: 'AWS',
+      RuleActionOverrides: [{ Name: 'SizeRestrictions_BODY', ActionToUse: { Count: {} } }],
+    }, 'only SizeRestrictions_BODY is overridden, and only to count');
+    const scoped = rules.find((rule) => rule.Name === 'AwsCommonRulesBodySize')!;
+    assert.ok(scoped, 'a rule must block oversized bodies outside the clinical write routes');
+    assert.ok(scoped.Priority > common.Priority, 'the scoped rule must run after the group that labels the request');
+    assert.ok(scoped.Priority < rules.find((rule) => rule.Name === 'AwsKnownBadInputs')!.Priority);
+    assert.deepEqual(scoped.Action, { Block: {} });
+    const [label, exemption] = scoped.Statement.AndStatement.Statements;
+    assert.deepEqual(label, { LabelMatchStatement: { Scope: 'LABEL', Key: 'awswaf:managed:aws:core-rule-set:SizeRestrictions_Body' } });
+    const [method, path] = exemption.NotStatement.Statement.AndStatement.Statements;
+    assert.deepEqual(method.RegexMatchStatement.FieldToMatch, { Method: {} });
+    assert.deepEqual(method.RegexMatchStatement.TextTransformations, [{ Priority: 0, Type: 'NONE' }]);
+    assert.deepEqual(path.RegexMatchStatement.FieldToMatch, { UriPath: {} });
+    assert.deepEqual(path.RegexMatchStatement.TextTransformations, [{ Priority: 0, Type: 'NONE' }],
+      'the raw path is matched, so an encoded or dot-segment spelling never gains the exemption');
+    const methodPattern = new RegExp(method.RegexMatchStatement.RegexString as string);
+    const pathPattern = new RegExp(path.RegexMatchStatement.RegexString as string);
+    assert.ok((path.RegexMatchStatement.RegexString as string).length <= 512, 'WAF regex strings are at most 512 characters');
+    for (const allowed of ['POST', 'PATCH']) assert.match(allowed, methodPattern);
+    for (const refused of ['GET', 'PUT', 'DELETE', 'post', 'XPOST', 'POSTX']) assert.doesNotMatch(refused, methodPattern);
+    for (const route of [
+      `/api/v1/ehr/patients/${uuid}/encounters`, encounter,
+      `${encounter}/clinical-notes`, `${encounter}/clinical-notes/${uuid}`, `${encounter}/clinical-notes/${uuid}/revisions`,
+      `${encounter}/diagnoses`, `${encounter}/diagnoses/${uuid}`, `${encounter}/prescriptions`, `${encounter}/prescriptions/${uuid}`,
+      `${encounter}/lab-requests`, `${encounter}/lab-requests/${uuid}`,
+    ]) assert.match(route, pathPattern, `${route} carries clinical text the service accepts`);
+    for (const route of [
+      `${encounter}/vitals`, `${encounter}/vitals/${uuid}/corrections`, `${encounter}/prescriptions/${uuid}/pharmacy-work-item`,
+      `${encounter}/lab-requests/${uuid}/lab-work-item`, `${encounter}/clinical-notes/${uuid}/revisions/x`,
+      `${encounter}/diagnoses/${uuid}/revisions`, `${encounter}/prescriptions/${uuid}/revisions`,
+      `${encounter}/clinical-notes/`, `${encounter}//clinical-notes`, `${encounter}/./clinical-notes`,
+      `${encounter}/x/../clinical-notes`, `${encounter}/clinical%2Dnotes`, `${encounter}/CLINICAL-NOTES`,
+      `/api/v1/ehr/patients/${uuid.toUpperCase()}/encounters`, `/api/v1/ehr/patients/x/encounters`,
+      `/API/v1/ehr/patients/${uuid}/encounters`, `/api/v1/ehr/documents/scan-events`, '/api/v1/ehr/internal/ocr/x',
+      '/api/v1/identity/patient-enrollments', '/api/v1/auth/login', `/api/v1/lab/patients/${uuid}/encounters`,
+      `/x/api/v1/ehr/patients/${uuid}/encounters`, `/api/v1/ehr/patients/${uuid}/encounters?x=1`,
+    ]) assert.doesNotMatch(route, pathPattern, `${route} keeps the 8 KB body limit`);
+  }
+});
+
+// A7. Every connection to the ALB comes from the Cloudflare Worker, so a rate
+// rule keyed on the connecting address throttled every user behind one
+// Cloudflare egress address together. Rule 0 blocks every request without the
+// Worker's origin secret before any rate rule counts it, and the Worker always
+// replaces X-HID-Client-Network with the client network it derives from
+// CF-Connecting-IP: the IPv4 address, or the IPv6 /64 network address, so a
+// client rotating addresses inside its /64 keeps one count (keyed on the full
+// IPv6 address in X-Real-IP it could not be limited, and only the backstop
+// would stop it, for every user behind that egress address). A backstop on the
+// connecting address catches a leaked secret or a request without the header.
+test('the WAF rate limit is per client network (IPv4 address or IPv6 /64), with a high backstop per connecting address', () => {
+  for (const [template, environment] of [[regional, 'production'], [stagingRegional, 'staging']] as const) {
+    const rules = apiOriginRules(template, environment);
+    assert.deepEqual(rules.map((rule) => [rule.Priority, rule.Name]), [
+      [0, 'RequireCloudflareOriginSecret'], [10, 'AwsCommonRules'], [11, 'AwsCommonRulesBodySize'],
+      [20, 'AwsKnownBadInputs'], [30, 'ApiOriginRateLimit'], [31, 'ApiOriginEdgeRateLimit'],
+    ]);
+    const perClient = rules.find((rule) => rule.Name === 'ApiOriginRateLimit')!;
+    assert.deepEqual(perClient.Action, { Block: {} });
+    assert.deepEqual(perClient.Statement.RateBasedStatement, {
+      AggregateKeyType: 'FORWARDED_IP', Limit: 2_000,
+      ForwardedIPConfig: { HeaderName: 'X-HID-Client-Network', FallbackBehavior: 'MATCH' },
+    });
+    const backstop = rules.find((rule) => rule.Name === 'ApiOriginEdgeRateLimit')!;
+    assert.deepEqual(backstop.Action, { Block: {} });
+    assert.deepEqual(backstop.Statement.RateBasedStatement, { AggregateKeyType: 'IP', Limit: 50_000 });
+  }
+});
+
 test('staging and production require independently named Cloudflare origin authorization inputs', () => {
   assert.ok(regional.Parameters.ProductionCloudflareOriginSecret);
   assert.equal(regional.Parameters.StagingCloudflareOriginSecret, undefined);

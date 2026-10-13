@@ -1,4 +1,5 @@
-import { DomainProblem } from '../common/problem';
+import { Logger, type ArgumentsHost } from '@nestjs/common';
+import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 
 const configuration = {
@@ -345,6 +346,20 @@ describe('QoreID verification adapter', () => {
       status: 503, code: 'QOREID_NIN_ONLY_DISABLED',
     });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('tells a patient that registration is not open while NIN-only enrollment is disabled (FE-4)', async () => {
+    const adapter = new QoreIdVerificationAdapter(configuration, jest.fn() as unknown as typeof globalThis.fetch);
+    const error = await adapter.verifyNinEnrollment('12345678901').catch((failure: unknown) => failure);
+    const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(), json: jest.fn() };
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    new ProblemDetailsFilter().catch(error, { switchToHttp: () => ({
+      getRequest: () => ({ correlationId: 'adapter-test', method: 'POST' }),
+      getResponse: () => response,
+    }) } as unknown as ArgumentsHost);
+    expect(response.json.mock.calls[0]?.[0]).toMatchObject({ status: 503, code: 'QOREID_NIN_ONLY_DISABLED',
+      detail: 'New Health ID registration is not open yet. If you already have a Health ID, sign in.' });
+    jest.restoreAllMocks();
   });
 
   it('accepts the observed sandbox NIN-only shape and sends a body-free request', async () => {

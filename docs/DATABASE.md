@@ -590,7 +590,41 @@ these tables.
 
 ## 7. Encounters and typed EHR records
 
-The EHR does not use a generic JSON medical-record table.
+### 7.1 Implemented EHR records
+
+The EHR does not use a generic JSON medical-record table. Migrations 0004
+onward create these EHR tables. Each has forced row-level security on the
+patient's consent at the facility (`ehr.context_allows`, 0005); every insert
+and update of a clinical row records a version in `ehr.record_versions`
+(`ehr.capture_record_version`, 0004); and no clinical row is deleted.
+
+| Table | Holds |
+|---|---|
+| `ehr.encounters` | Encounter type, status, service period and chief complaint. A cancelled or entered-in-error encounter takes no further change (0090). |
+| `ehr.clinical_notes` | Note header: type, title, status, signature and current revision. |
+| `ehr.clinical_note_revisions` | Each note revision, append-only. |
+| `ehr.vitals` | Up to eight measurements as recorded, the current correction number, and `status` (`final` or `entered_in_error`, 0090). |
+| `ehr.vital_corrections` | Vital corrections, append-only (D8). |
+| `ehr.diagnoses` | Coded condition with clinical and verification status. |
+| `ehr.prescriptions` | Medication orders; records only at launch (D17). A completed, cancelled or entered-in-error one is final (0090). |
+| `ehr.lab_requests` | Test orders; records only at launch (D17). Final as prescriptions are (0090). |
+| `ehr.documents` | Uploaded document metadata and object binding; `ehr.documents_effective` adds the latest scan result (0009). |
+| `ehr.document_scan_events` | Scanner results, append-only. |
+| `ehr.ocr_import_provenance` | Provenance of notes imported from OCR. |
+| `ehr.idempotency_keys` | Idempotency of clinical creates. |
+| `ehr.record_versions` | The version history of every clinical row. |
+
+**Allergies are not recorded.** No migration creates an allergy or
+intolerance table, no EHR route records one, and no prescribing path checks
+one. At launch a clinician records an allergy as a diagnosis (for example
+ICD-10 `Z88.0` to `Z88.9`, allergy status to drugs) or in a clinical note,
+neither of which a prescription is checked against
+(`PHASE_3_LAUNCH_DECISIONS.md`, "Allergies at launch").
+
+### 7.2 Target model (not implemented)
+
+None of the following exists in the schema; it is the governed target for a
+later, approved change (§15).
 
 `ehr.clinical_resource` provides common resource identity, immutable type,
 current patient assignment, custody scope, current version, and FHIR mapping.
@@ -679,9 +713,11 @@ binding and creates a linked replacement.
 
 ## 9. Prescriptions and Pharmacy
 
-The logical `prescriptions` requirement currently maps only to the versioned
-`ehr.medication_request` aggregate. It owns medication-order intent, dose and
-instructions, requester, reason, status, and provenance.
+The logical `prescriptions` requirement is implemented by `ehr.prescriptions`
+(0004; §7.1): medication-order intent, dose and instructions, frequency, the
+prescribing actor and membership, status, and a version for every change. The
+versioned medication-request aggregate of the target model (§1, §7.2) is not
+implemented.
 
 It does not prove that medication was dispensed.
 
@@ -2179,7 +2215,10 @@ the schema, policies or grants changes.
     (`runtime-grants.sql`), `vitals_update` allows it under `write_records`
     (0005), and `ehr.capture_record_version` (0004) guards only the ownership
     and attribution columns. Since 0084 `ehr.keep_recorded_vital()` refuses
-    every update of a vital except of `current_correction_no`.
+    every update of a vital except of `current_correction_no`. Since 0090 a
+    vital can also be marked entered in error, and the summary leaves out a
+    vital entered in error (`status = 'final'`; "EHR retraction integrity
+    (0090)").
   - Documents: read from `ehr.documents_effective` (0009, `security_invoker`,
     `security_barrier`) where `status = 'available'`, so `documents_read` and
     `document_scan_events_staff_read` apply to the view's reads. The raw
@@ -2604,7 +2643,7 @@ Tests:
 ## Public enrollment windows and NIN lookup quota (0085)
 
 `0085_public_enrollment_windows_and_nin_lookup_quota.sql`
-(BRANCH:launch/identity-enrollment-gates) implements decisions N2(b) and
+(D-Eminence/hid-system#68) implements decisions N2(b) and
 N2(c) in the activation command and caps QoreID NIN lookups of public patient
 enrollment (IP-1). It replaces two functions and adds one table and one
 function; no existing table is changed.
@@ -2730,7 +2769,7 @@ Tests:
 
 `0086_recovery_and_patient_search_hardening.sql` closes the database part of
 launch blockers REC-GOOGLE, REC-AUDIENCE, REC-NOTIFY and PSEARCH-1 (change
-`BRANCH:launch/identity-recovery-search`). 0001 through 0085 are unchanged.
+D-Eminence/hid-system#69). 0001 through 0085 are unchanged.
 
 **Recovery.** `auth.complete_recovery_otp` (0029) is replaced with `CREATE OR
 REPLACE`, so it keeps its owner and ACL; its signature, result, `SECURITY
@@ -2779,8 +2818,11 @@ challenge.
 **Staff search budgets.** `otp_rate_limits_scope_check` is dropped and re-added
 with four more scopes: `patient_lookup_actor`, `patient_lookup_facility`,
 `access_request_actor` and `access_request_facility`. Identity counts every
-patient lookup and every access-request creation there (bucket: SHA-256 of a
-labelled actor account or facility id), before the command runs. Re-adding the
+access-request creation there before the command runs, and every refused
+patient lookup after its audit event (bucket: SHA-256 of a labelled actor
+account or facility id); a lookup reads its two buckets first and is refused
+while either is blocked, and one that returns a granted patient is not counted
+(FE-10). Re-adding the
 check validates the existing rows under an `ACCESS EXCLUSIVE` lock on
 `auth.otp_rate_limits`; every existing scope stays allowed.
 
@@ -2923,15 +2965,17 @@ Tests:
   recovery hold on approval, PIN and emergency contacts; the staff list
   names the patient of the active approval only, not of the pending or the
   revoked one),
-  `verify-patient-search-runtime.mjs` (new: lookup `200`, three identical
-  `404`s, `400`, audit reasons, uniform access-request answer, `429`s) and
+  `verify-patient-search-runtime.mjs` (new: lookup `200`, one identical `404`
+  for every refusal, whether row-level security hides the patient or the
+  authorization check refuses one the caller can read, `400`, audit reasons,
+  uniform access-request answer, `429`s for refusals only) and
   `verify-registration-review-runtime.mjs` (registration review, unchanged,
   passes under the narrowed policy).
 
 ## Governed workforce provisioning and one membership per facility (0087)
 
 `0087_governed_workforce_provisioning.sql` implements launch decision D14
-(workforce part) and N5 (ADR-049; BRANCH:launch/staff-workforce-provisioning).
+(workforce part) and N5 (ADR-049; D-Eminence/hid-system#70).
 
 **One active membership per facility (N5).** A unique partial index,
 `staff_memberships_one_active_per_facility_uq`, allows one active membership
@@ -3121,7 +3165,7 @@ Tests:
 ## Staff MFA sessions (0088)
 
 `0088_staff_mfa_sessions.sql` is the database part of launch blocker MFA-1
-(decision D14, ADR-054; change `BRANCH:launch/staff-mfa`): every staff
+(decision D14, ADR-054; change D-Eminence/hid-system#71): every staff
 session that can reach patient data is MFA-verified. 0001 through 0087 are
 unchanged. A staff session uses the 0069 tables, as a platform session does:
 `auth.mfa_factors`, `auth.mfa_recovery_codes`, `auth.mfa_login_challenges` and
@@ -3259,6 +3303,301 @@ Tests:
   authenticator through `staff-session-client.mjs`, and
   `verify-delegated-cookie-read-runtime.mjs` checks that the EHR refuses an
   unassured reader with `403 STAFF_MFA_REQUIRED`.
+
+## Session facility selection (0089)
+
+`0089_session_facility_selection.sql` (ADR-046, `BRANCH:launch/facility-selection-0089`;
+written as `0080` in D-Eminence/hid-system#47) follows `0088` (staff MFA).
+Migrations `0001`–`0088` are unchanged; no existing row, function, policy or
+grant changes. Creating
+the table's four foreign keys takes `SHARE ROW EXCLUSIVE` on `auth.sessions`,
+`auth.accounts`, `identity.facilities` and
+`identity.staff_facility_memberships` until the migration commits, within the
+runner's 5 s lock timeout (`MIGRATION_RUNBOOK.md`).
+
+- `auth.session_facility_selection` holds the facility a staff sign-in
+  explicitly selected with `POST /auth/facility`: `family_id` (primary key,
+  the sign-in's root session in `auth.sessions`), `account_id`, `facility_id`,
+  `membership_id`, `selected_at` (`clock_timestamp()`) and `row_version`. Like
+  `auth.session_assurance` (0069) it is keyed by the session family, so the
+  refresh rotation, which keeps the family, keeps the selection, and another
+  sign-in of the same account has its own. A composite foreign key binds
+  `(membership_id, facility_id, account_id)` to one membership of that account
+  at that facility. Every foreign key is `ON DELETE RESTRICT`.
+- The row is only the default `GET /auth/session` and refresh report. It
+  authorizes nothing: facility-scoped requests still carry `X-Facility-ID`,
+  checked against the actor's active memberships, and the Identity API checks
+  the stored facility against them on every read (`reselect` when it is no
+  longer active). It compares facility ids, so a membership replaced by another
+  active one at the same facility is still reported `selected`, with the new
+  membership's roles; `membership_id` records the membership the choice was
+  made under.
+- `auth.guard_session_facility_selection_change()` (invoker, fixed
+  `search_path`, revoked from `PUBLIC`) fires before every row insert, update
+  and delete. An insert or update must name the root session of a staff
+  sign-in of the same account (`id = family_id`, `session_kind = 'staff'`),
+  the family must still have a live session (unrevoked, within its idle and
+  absolute windows), and the membership must be active, of this account and
+  facility, without a migration hold, with an active staff record of the
+  account whose trimmed, lower-cased verification status is `verified`,
+  `approved` or `active`, in an active organization, at an active facility of
+  that organization. These membership, hold, staff, organization and facility
+  conditions mirror `CurrentStaffContextService`; the account's status and
+  `disabled_until` are not repeated, since `TokenService.verify()` refuses an
+  inactive or disabled account before the API writes. The status list
+  duplicates `ACTIVE_STAFF_VERIFICATION_STATUSES` (`auth-policy.ts`), as
+  `identity.has_active_membership` (0008) does; comments at each place name the
+  others. Otherwise
+  `23514 SESSION_FACILITY_SELECTION_INVALID`. An update cannot change
+  `family_id` or `account_id`, and DELETE is refused, both with
+  `55000 SESSION_FACILITY_SELECTION_IMMUTABLE`. Sign-out and revocation leave
+  the row; with no live session left, the sign-in can never change it again.
+- The Identity API writes it in one system transaction: `auth.lock_account_sessions`
+  on the account first (0073, as sign-out and revocation), then
+  `INSERT ... SELECT` from the presented session while it is a live staff
+  session of the account, `ON CONFLICT (family_id) DO UPDATE` (a new choice
+  replaces the old and increments `row_version`), then the
+  `auth.facility.select` audit row on the same transaction. It reads the row
+  only through a live staff session of the family. A read that fails is never
+  reported as a choice: `GET /auth/session` answers
+  `503 DEPENDENCY_UNAVAILABLE`, and a refresh, whose rotation has committed,
+  answers `200` with `facilitySelection: 'unavailable'` (ADR-046, as ported).
+  Since staff MFA (0088) the API reaches the row only through a staff session
+  its guard found MFA-verified; the database guard does not repeat that check,
+  because the row authorizes nothing.
+- `runtime-grants.sql` grants `SELECT`, `INSERT` and `UPDATE` to
+  `hid_identity_runtime` (so `hid_identity_api_runtime`), and no `DELETE`,
+  next to the `auth.session_assurance` grants and before the bootstrap's
+  closing membership revocation; no other role, `hid_schema_test_runtime`
+  included, gets any privilege. The guard reads only tables the Identity
+  runtime already reads. The bootstrap fails on a database without 0089.
+- `session-facility-selection.integration.sql` (rollback-only, synthetic
+  fixtures) checks the catalog contract (columns, keys, the guard's
+  attributes, trigger timing and grants) and, as `hid_identity_api_runtime`,
+  the API's upsert and replacement, and the guard's refusals: another
+  account's id on a sign-in, an ended membership, a membership held for
+  migration, a suspended facility, a deactivated organization, another
+  account's membership, a membership of another facility, another account's
+  sign-in, a patient sign-in (of the same account, so only the kind differs)
+  and another patient's, a signed-out and a lapsed sign-in, an inactive and an
+  unverified staff record, a session that is not its family's root, an unknown
+  session, an update to an ended membership or to another sign-in or account,
+  and DELETE (refused to the runtime by privilege and to the owner by the
+  guard). It then checks that the rotated session reads the selection while
+  the replaced session and another sign-in of the account do not, and that
+  after sign-out the row stays but is neither read nor changeable. Its
+  privilege check covers every `hid_` role that is neither the Identity
+  runtime, one of its members, nor the table owner, so roles added after #47
+  (`hid_platform_control_reader`, among others) are covered too.
+  `scripts/run-container-database-acceptance.sh` runs it last, after
+  `staff-mfa.integration.sql`.
+  `services/identity-api/scripts/verify-facility-selection-runtime.mjs`
+  exercises the HTTP contract against a migrated database as
+  `hid_identity_api_runtime`, with the global `AuditInterceptor` registered as
+  `AppModule` registers it, so each refused selection must also write its
+  failed `auth.facility.select` row past 0067's staff CHECKs. It signs staff
+  in through `staff-session-client.mjs` (password, enrolment with the emailed
+  code, then TOTP), checks that the password step stores and reports nothing
+  and that the enrolment activation and the second-factor responses report
+  `default`, and revokes `SELECT` on the table from `hid_identity_runtime` for
+  one step (restored in `finally`) to check that the session read answers
+  `503` with no `Set-Cookie` and the refresh `200` with the rotated cookies
+  and `unavailable`. The rehearsal runs it after the sign-out verifier.
+
+## EHR retraction integrity (0090)
+
+`0090_ehr_retraction_integrity.sql` (BRANCH:launch/ehr-retraction-integrity)
+adds one column, six trigger functions (one of them replacing 0084's) and six
+triggers, and one runtime grant (`runtime-grants.sql`). It changes no row.
+Migrations 0085 to 0089 belong to other changes.
+
+**Retraction needs the records' write permissions (ENC-RETRACT-1).**
+Cancelling an encounter cancels its open orders, and marking it entered in
+error retracts its records (0084). Both ran for any member who may write the
+encounter: the update policies check the patient's consent
+(`ehr.context_allows`), not the role, so a nurse could retract a doctor's
+confirmed diagnosis and prescription through the encounter, and a
+receptionist (who holds only `ehr.encounter.write`) could retract notes they
+cannot read. `ehr.require_retraction_permission()` (`BEFORE UPDATE OF status`
+on `ehr.encounters`, trigger `encounters_retraction_permission`) runs when the
+status becomes `cancelled` or `entered_in_error`. It looks, under the writer's
+row-level security, for each kind of record the close changes, and refuses
+with `42501` `ENCOUNTER_RETRACTION_NOT_PERMITTED` (PostgreSQL detail: the
+missing permission codes; the EHR answers a fixed detail and never passes them
+on) unless the writing membership holds that kind's write
+permission, as `auth.membership_has_permission(subject, membership, the
+encounter's facility, permission)` answers it from the membership's role
+assignments:
+
+| Close | Records changed | Permission |
+|---|---|---|
+| entered in error | notes `draft`, `signed`, `amended` | `ehr.note.write` |
+| entered in error | diagnoses not yet `entered_in_error` | `ehr.diagnosis.write` |
+| entered in error | vitals `final` | `ehr.vital.write` |
+| entered in error | prescriptions `draft`, `active`, `on_hold`, `completed` | `ehr.prescription.write` |
+| entered in error | lab requests `draft`, `active`, `on_hold`, `completed` | `ehr.lab-request.write` |
+| entered in error | documents linked to it, `initiated` or `uploaded` | `ehr.document.write` |
+| cancelled | prescriptions `draft`, `active`, `on_hold` | `ehr.prescription.write` |
+| cancelled | lab requests `draft`, `active`, `on_hold` | `ehr.lab-request.write` |
+
+An encounter that holds none of these needs no record permission, and holding,
+resuming or completing an encounter needs none. Only the statuses in the table
+count: a record already entered in error, a cancelled order or a rejected
+document blocks nothing. With the seeded roles (0006, 0084):
+
+- marking entered in error: doctors and clinicians may retract any encounter
+  unless it holds a `draft`, `active`, `on_hold` or `completed` lab request;
+  nurses unless it holds a diagnosis not yet `entered_in_error`, or such a
+  prescription or lab request; receptionists only one that holds none of the
+  records in the table;
+- cancelling: anyone holding `ehr.encounter.write` (receptionists included),
+  whatever notes, vitals, diagnoses and documents it holds, unless it holds a
+  `draft`, `active` or `on_hold` prescription (then doctors and clinicians
+  only) or lab request.
+
+No role holds `ehr.lab-request.write` since 0084, so no one can cancel or
+retract an encounter that still holds an open (or, for a retraction,
+completed) lab request until Lab ordering is enabled again; no lab request can
+be created at launch, and the release checklist retracts open ones before 0084
+(P12). The EHR API refuses the same close itself, before writing anything,
+with the same code and a fixed detail ("Cancelling or retracting this
+encounter changes records you may not write"); the missing permissions go to
+the refusal's audit row only, because only a kind the encounter holds is
+checked and naming it would tell the caller which kinds of record the
+encounter holds.
+
+`auth.membership_has_permission` is the existing `SECURITY DEFINER`
+permission decision (0010) that Identity's commands use; `hid_ehr_runtime`
+gains `EXECUTE` on it in `runtime-grants.sql`, its only new privilege. It
+answers a boolean for a subject, membership and facility, and reveals nothing
+else. It is called only when the encounter holds such a record, so a close of
+an empty encounter does not depend on the grant. Without the grant (a release
+that applies 0090 but not the role bootstrap), such a close fails with `42501`
+on the function, answered `403 ACCESS_DENIED`, and nothing is written.
+
+**Closed encounters are final (ORDER-CLOSED-EDIT).**
+`ehr.keep_closed_encounter()` (`BEFORE UPDATE` on `ehr.encounters`, trigger
+`encounters_closed_final`) refuses any update of a `cancelled` or
+`entered_in_error` encounter with `55000` `ENCOUNTER_NOT_OPEN`, as 0084's
+guard does for records added to one. The row lock (`FOR UPDATE`) and the
+share lock of 0084 are not updates and are not refused.
+
+**Closed orders are final (RX-FINAL, ORDER-CLOSED-EDIT).**
+`ehr.keep_closed_order()` (`BEFORE UPDATE` on `ehr.prescriptions` and
+`ehr.lab_requests`, triggers `prescriptions_closed_final` and
+`lab_requests_closed_final`) refuses:
+
+- any update of a `cancelled` or `entered_in_error` order, and of a
+  `completed` one except marking it `entered_in_error` with no other column
+  changed: `55000` `PRESCRIPTION_FINAL` or `LAB_REQUEST_FINAL`;
+- any status change outside the transitions the services apply (`draft` to
+  `active`, `cancelled` or `entered_in_error`; `active` to `on_hold`,
+  `completed`, `cancelled` or `entered_in_error`; `on_hold` to `active`,
+  `cancelled` or `entered_in_error`; `completed` to `entered_in_error`):
+  `55000` `INVALID_PRESCRIPTION_TRANSITION` or
+  `INVALID_LAB_REQUEST_TRANSITION`.
+
+Before 0090 a cancelled prescription could be made active again, and a
+completed, cancelled or retracted one could have its frequency, instructions
+or end date rewritten, by the API and by the runtime role. Pharmacy's 0080
+guards read prescriptions and never update them.
+
+**A vital can be entered in error (ENC-RETRACT-2).** `ehr.vitals` gains
+`status text not null default 'final'` with `vitals_status_check` (`final` or
+`entered_in_error`). Existing vitals are `final` through the default: adding a
+column with a constant default rewrites no row, so no version is recorded and
+the version trigger, which needs an acting member, does not run.
+`ehr.keep_recorded_vital()` (0084, trigger `vitals_recorded_values_immutable`)
+is replaced: it still refuses any change of a recorded value
+(`VITAL_RECORD_IMMUTABLE`), also allows the one-way change of `status` from
+`final` to `entered_in_error`, and refuses any update of a vital entered in
+error, its correction number included (`55000` `VITAL_ENTERED_IN_ERROR`).
+Nothing is deleted: a retracted vital keeps its values and versions, the EHR
+lists it with its status, and the emergency summary leaves it out. The
+retraction of an encounter now also marks its final vitals, its completed
+orders and its linked documents entered in error, in the same transaction.
+
+`ehr.require_final_vital()` (`BEFORE INSERT` on `ehr.vital_corrections`,
+trigger `vital_corrections_vital_final`) refuses a correction row of a vital
+entered in error with `55000` `VITAL_ENTERED_IN_ERROR` (the EHR answers
+`409 VITAL_NOT_AMENDABLE`). Without it a writer could add a correction row to
+a retracted vital as long as it left the vital's correction number alone; the
+corrections list would show it. It reads the vital `FOR SHARE`, which waits
+for an uncommitted retraction of that vital and then sees it, so a correction
+never commits beside a retraction it did not see (the foreign key's own
+`FOR KEY SHARE` does not conflict with a status update). A vital it cannot
+read under the writer's row-level security is refused with `42501`
+`VITAL_NOT_AVAILABLE`. The EHR's correction already holds the vital
+`FOR UPDATE` when it inserts the row, so it takes no new lock.
+
+**A retracted document stays retracted (ENC-RETRACT-2).**
+`ehr.keep_retracted_document()` (`BEFORE UPDATE` on `ehr.documents`, trigger
+`documents_retracted_final`) refuses any update of a document whose status is
+`entered_in_error` with `55000` `DOCUMENT_ENTERED_IN_ERROR`. Without it a
+writer could set a retracted wrong-patient document back to `uploaded`;
+`ehr.documents_effective` would then show it as `available` again if its scan
+was clean, and the emergency summary and the download route would serve it.
+Upload completion (`initiated` to `uploaded`) and the retraction itself
+(`initiated` or `uploaded` to `entered_in_error`) select only those statuses
+and are unchanged; no EHR route changes a retracted document, so no new error
+reaches a client.
+
+**Order of checks and locks.** Each trigger's name sorts before the table's
+`*_versioned` trigger, so a refused write records no version
+(`ehr.vital_corrections` is append-only and has none); on `ehr.encounters` the
+closed check runs before the permission check. The
+functions are `SECURITY INVOKER` with `search_path = pg_catalog, pg_temp`,
+qualify every name, and are not executable by `PUBLIC`. The permission check
+reads the encounter's records while the update holds the encounter's row lock,
+which every record create and order activation waits for (0084), so no record
+can join a category during the check. A vital, order or document changes
+status on its own route under its own row lock, never under the encounter's,
+so no new lock order arises. The correction guard's share lock is on the
+corrected vital only; it takes no encounter lock, so it cannot wait on a
+retraction that waits on it.
+
+**Locks.** `ALTER TABLE ... ADD COLUMN` takes `ACCESS EXCLUSIVE` on
+`ehr.vitals` for the catalog change (no rewrite: the default is constant, and
+the check constraint is validated by a scan of the table under that lock).
+`CREATE TRIGGER` takes `SHARE ROW EXCLUSIVE` on `ehr.encounters`,
+`ehr.prescriptions`, `ehr.lab_requests`, `ehr.vital_corrections` and
+`ehr.documents`. Each waits for the transactions in
+flight on its table within the runner's 5 s `lock_timeout`; a timeout rolls
+0090 back whole, and it can be run again.
+
+Tests:
+
+- `encounter-retraction.integration.sql` (rollback-only; in the rehearsal's
+  additional suites and in `scripts/run-container-database-acceptance.sh`):
+  15 property cases (the six functions' security, the seven triggers' events,
+  columns, functions and order before the version trigger, the vital status
+  column, and the runtime's `EXECUTE` on the permission decision), then 82
+  cases as `hid_ehr_api_runtime` with the session the EHR API sets for a
+  doctor, nurse and receptionist of one clinic, each holding the seeded role:
+  retraction and cancellation by role and by the records held, closed
+  encounters, the cascade's statements on vitals, completed orders and
+  documents, every order transition for both order tables, vital retraction,
+  correction rows of a final and a retracted vital, and a retracted document
+  set back to uploaded, renamed, sent its own status, or retracted and
+  restored in one transaction (refused), beside an upload completion
+  (allowed). On 0084 (with this branch's role bootstrap) it fails with 63
+  mismatches.
+- `encounter-lifecycle.integration.sql` (0084) passes unchanged.
+- `verify-encounter-lifecycle-runtime.mjs` (in the rehearsal): over HTTP as
+  `hid_ehr_api_runtime`, a nurse refused retracting a doctor's diagnosis and
+  prescription with nothing changed, a fixed detail and the refusal audited
+  with the missing permissions, a nurse retracting her own notes and vitals,
+  the cascade over vitals and a completed prescription with `cascade` in the
+  response, the vital route, a direct runtime-role correction that waits for
+  an uncommitted retraction of its vital and is then refused (with the
+  guard's `FOR SHARE` removed it does not wait and the step fails), a closed
+  prescription and a closed encounter refused, and a staff session refused on
+  `GET /ehr/me/records`. Its fixture now gives the doctor and nurse role
+  assignments, and grants the copy's doctor role `ehr.lab-request.write`,
+  which its fake Identity session has always carried, so that it keeps
+  exercising lab requests as when Lab ordering is enabled again.
+- `scripts/tuf-staging-migration-rehearsal.mjs`: the 0028 upgrade has the six
+  triggers, the vital status, and the runtime grant after the role bootstrap.
 
 ## Launch module withdrawal and patient access transparency (0091)
 

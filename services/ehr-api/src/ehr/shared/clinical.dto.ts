@@ -252,6 +252,9 @@ export class CreateVitalDto extends VitalMeasurementsDto {
   source: VitalSource = VitalSource.Manual;
 }
 
+/** POST .../vitals/:vitalId/entered-in-error: the version read and why the vital is retracted (ENC-RETRACT-2). */
+export class MarkVitalEnteredInErrorDto extends VersionedUpdateDto {}
+
 export class CreateVitalCorrectionDto extends VersionedUpdateDto {
   @IsObject()
   @ValidateNested()

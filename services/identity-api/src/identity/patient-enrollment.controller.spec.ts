@@ -1,6 +1,9 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
 
+import { RequestMethod } from '@nestjs/common';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import type { Response } from 'express';
+import { NO_AUDIT, PUBLIC_ROUTE } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { TurnstileService } from '../auth/turnstile.service';
@@ -25,7 +28,7 @@ function request(cookie?: string, requestOrigin: string | undefined = origin,
 describe('PatientEnrollmentController', () => {
   let service: {
     start: jest.Mock; current: jest.Mock; startContact: jest.Mock;
-    verifyContact: jest.Mock; activate: jest.Mock; bindGoogle: jest.Mock;
+    verifyContact: jest.Mock; activate: jest.Mock; bindGoogle: jest.Mock; availability: jest.Mock;
   };
   let turnstile: { verify: jest.Mock };
   let google: { onboardingStatus: jest.Mock; onboardingCookieName: string };
@@ -43,7 +46,8 @@ describe('PatientEnrollmentController', () => {
     service = { start: jest.fn().mockResolvedValue({ cookie: 'opaque-enrollment-cookie',
       progress: { stage: 'verify_contact' } }), current: jest.fn(), startContact: jest.fn(),
       verifyContact: jest.fn(), bindGoogle: jest.fn().mockResolvedValue({ bound: true }),
-      activate: jest.fn().mockResolvedValue({ stage: 'active', hidCode: 'HID-TEST' }) };
+      activate: jest.fn().mockResolvedValue({ stage: 'active', hidCode: 'HID-TEST' }),
+      availability: jest.fn().mockResolvedValue({ open: false }) };
     turnstile = { verify: jest.fn().mockResolvedValue(undefined) };
     google = { onboardingStatus: jest.fn().mockResolvedValue({
       stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY' }),
@@ -57,6 +61,39 @@ describe('PatientEnrollmentController', () => {
     for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
     Object.assign(process.env, originalEnvironment);
     resetEnvironmentForTests();
+  });
+
+  it('answers enrollment availability to anyone, unaudited and briefly cacheable (FE-4)', async () => {
+    const route = PatientEnrollmentController.prototype.availability;
+    expect(Reflect.getMetadata(PATH_METADATA, PatientEnrollmentController)).toBe('identity/patient-enrollments');
+    expect(Reflect.getMetadata(PUBLIC_ROUTE, PatientEnrollmentController)).toBe(true);
+    expect(Reflect.getMetadata(PATH_METADATA, route)).toBe('availability');
+    expect(Reflect.getMetadata(METHOD_METADATA, route)).toBe(RequestMethod.GET);
+    // Every caller gets the same answer and it carries no PHI: no audit row
+    // per anonymous read, as for GET /commercial/pricing.
+    expect(Reflect.getMetadata(NO_AUDIT, route)).toBe(true);
+
+    for (const open of [false, true]) {
+      service.availability = jest.fn().mockResolvedValue({ open });
+      const response = { setHeader: jest.fn(), removeHeader: jest.fn() };
+      await expect(controller.availability(response as unknown as Response)).resolves.toEqual({ open });
+      expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'public, max-age=30');
+      for (const name of ['Pragma', 'Expires', 'Surrogate-Control']) {
+        expect(response.removeHeader).toHaveBeenCalledWith(name);
+      }
+    }
+    // It reads no input, cookie, Origin or Turnstile token.
+    expect(turnstile.verify).not.toHaveBeenCalled();
+    expect(service.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps a failed availability read uncacheable', async () => {
+    service.availability = jest.fn()
+      .mockRejectedValue(new Error('runtime state unavailable'));
+    const response = { setHeader: jest.fn(), removeHeader: jest.fn() };
+    await expect(controller.availability(response as unknown as Response)).rejects.toThrow('runtime state unavailable');
+    expect(response.setHeader).not.toHaveBeenCalled();
+    expect(response.removeHeader).not.toHaveBeenCalled();
   });
 
   it('requires an approved origin before Turnstile or provider work', async () => {

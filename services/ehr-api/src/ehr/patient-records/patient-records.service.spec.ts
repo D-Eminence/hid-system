@@ -197,19 +197,21 @@ describe('Emergency record summary', () => {
     expect(summary.limit).toBe(50);
   });
 
-  it('returns vitals as first recorded, with no correction applied and no correction field', async () => {
+  it('returns vitals as first recorded, with no correction applied and no correction field, and none entered in error', async () => {
     const recorded = { id: 'vital', encounterId: 'encounter', facilityId: 'facility', recordedAt: '2026-10-12T09:00:00.000Z',
       heightCm: null, weightKg: null, temperatureC: '37.0', pulseBpm: 90, respiratoryRate: null, systolicMmhg: 200,
       diastolicMmhg: 100, oxygenSaturationPercent: null, source: 'manual' };
     const { service, query } = setup({ vitals: [recorded] });
     const summary = await service.emergency('patient-id', emergencyContext) as unknown as Summary;
     // The columns the summary has always returned, from the vital row alone, with the section's own limit.
+    // A vital entered in error (ENC-RETRACT-2, 0090) is not a measurement of this patient: it is left out.
     expect(sqlFor(query, 'vitals')).toBe('select id,encounter_id as "encounterId",facility_id as "facilityId",'
       + ' recorded_at as "recordedAt",height_cm as "heightCm",weight_kg as "weightKg",'
       + ' temperature_c as "temperatureC",pulse_bpm as "pulseBpm",respiratory_rate as "respiratoryRate",'
       + ' systolic_mmhg as "systolicMmhg",diastolic_mmhg as "diastolicMmhg",'
       + ' oxygen_saturation_percent as "oxygenSaturationPercent",source'
-      + ' from ehr.vitals where patient_id=$1 and facility_id=$2 order by recorded_at desc,id desc limit 101');
+      + ' from ehr.vitals where patient_id=$1 and facility_id=$2 and status=\'final\''
+      + ' order by recorded_at desc,id desc limit 101');
     // No correction is read: applying corrections waits for the correction-semantics decision.
     expect(query.mock.calls.some(([sql]) => /vital_corrections|current_correction_no|replacement_values/.test(String(sql))))
       .toBe(false);

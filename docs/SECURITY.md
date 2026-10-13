@@ -536,6 +536,40 @@ Implement the correction now rather than only reporting it.
 * secure errors
 * correlation IDs
 
+### Edge controls at launch (ADR-055)
+
+* **Browser headers.** Every Cloudflare frontend Worker response carries
+  `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains` until
+  every subdomain is confirmed HTTPS-only). The Health-id hosts (www, the
+  staging web host, admin.*) send a Content-Security-Policy that allows script
+  only from the page's origin and `https://challenges.cloudflare.com`
+  (Turnstile), with `default-src 'none'`, no inline script or `eval`, no
+  plugins or workers, and `frame-ancestors 'none'`; API and edge answers send
+  `default-src 'none'; frame-ancestors 'none'`. The Health-id artefact
+  verifier keeps the build to its Vite shell with no inline script. Its
+  `connect-src` allows only the page's origin and Turnstile, so switching
+  document uploads on (off at launch) must add the documents bucket's S3
+  origin in the same release: Health-id uploads straight to the presigned URL.
+  The undeployed legacy product hosts get no page policy and need their own
+  before they are deployed. www grants no camera, microphone or location.
+* **WAF.** The origin secret first; the AWS Core Rule Set with every rule
+  blocking except the 8 KB body rule, which is lifted only for `POST`/`PATCH`
+  on the encounter-scoped clinical write routes (raw-path match); known bad
+  inputs; a rate limit per client network (`X-HID-Client-Network` from the
+  Worker: the IPv4 address or the IPv6 /64, so address rotation inside a /64
+  keeps one count) and a high backstop per connecting address, which, once
+  tripped by traffic spread over many networks, blocks every user behind that
+  Cloudflare egress address for the rest of the window. Bodies stay bounded by
+  the gateway (512 KiB, `413 PAYLOAD_TOO_LARGE`) and by each service.
+* **Gateway.** Service-to-service routes, including the document scanner's
+  callback, answer `404` at the public gateway. Upstream error answers pass
+  through with their codes. The access log records the path without its query
+  string and never the request line, cookies or credentials. The error log
+  takes only critical messages, since nginx writes the request line (query
+  included) into every error or warning about a request; a critical message
+  about a request still carries it. The Worker's origin secret and the WAF's
+  client-network key are not forwarded to any backend.
+
 ## 15. Secrets
 
 Secrets must not be committed.

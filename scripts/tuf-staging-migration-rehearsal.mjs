@@ -291,6 +291,24 @@ try {
       from identity.purpose_of_use_codes order by code`)).rows,
     [{ code:'direct-care', display:'Direct patient care', active:true, source_system:'hid' }],
     'Upgrade must seed exactly the active direct-care purpose of use');
+    // 0090 (BRANCH:launch/ehr-retraction-integrity) adds the retraction,
+    // closed-encounter, closed-order, retracted-vital-correction and
+    // retracted-document guards and the vital status, and the upgraded role
+    // bootstrap lets the EHR runtime ask the membership permission decision
+    // the retraction guard uses. It changes no row.
+    assert.equal((await client.query(`select string_agg(tgname, ',' order by tgname) as triggers from pg_trigger
+      where not tgisinternal and tgname = any($1::name[])`, [['encounters_closed_final', 'encounters_retraction_permission',
+      'prescriptions_closed_final', 'lab_requests_closed_final', 'vital_corrections_vital_final',
+      'documents_retracted_final']])).rows[0].triggers,
+    'documents_retracted_final,encounters_closed_final,encounters_retraction_permission,lab_requests_closed_final,'
+      + 'prescriptions_closed_final,vital_corrections_vital_final',
+    'Upgrade must install the 0090 retraction and closed-record guards');
+    assert.deepEqual((await client.query(`select column_default, is_nullable from information_schema.columns
+      where table_schema = 'ehr' and table_name = 'vitals' and column_name = 'status'`)).rows,
+    [{ column_default: "'final'::text", is_nullable: 'NO' }], 'Upgrade must give every vital a final status');
+    assert.equal((await client.query(`select has_function_privilege('hid_ehr_runtime',
+      'auth.membership_has_permission(text, uuid, uuid, text)', 'execute') as allowed`)).rows[0].allowed, true,
+    'The upgraded role bootstrap must let the EHR runtime ask the retraction permission decision');
     await client.query('begin');
     try {
       await client.query('set local role hid_identity_api_runtime');
@@ -321,7 +339,7 @@ try {
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
-    purpose_of_use_seeded:['direct-care'],launch_write_permissions_withdrawn:true,
+    purpose_of_use_seeded:['direct-care'],launch_write_permissions_withdrawn:true,retraction_guards_installed:true,
     launch_module_permissions_withdrawn:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
@@ -381,6 +399,9 @@ try {
   evidence.checks.session_sign_out_runtime = JSON.parse(command('exact-role sign-out by refresh cookie and client-kind refresh',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-session-sign-out-runtime.mjs')],
     workflowEnvironment));
+  evidence.checks.facility_selection_runtime = JSON.parse(command(
+    'exact-role staff facility selection kept per sign-in across reload and refresh (0089)', process.execPath,
+    [join(repository, 'services/identity-api/scripts/verify-facility-selection-runtime.mjs')], workflowEnvironment));
   evidence.checks.platform_security_runtime = JSON.parse(command(
     'exact-role platform MFA, step-up, approval and export HTTP workflow', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-platform-security-runtime.mjs')], workflowEnvironment));

@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
-import { DomainProblem } from '../common/problem';
+import { DomainProblem, PublicDetailProblem } from '../common/problem';
 import {
   QOREID_PROVIDER,
   type QoreIdNinClaims,
@@ -21,6 +21,15 @@ export interface QoreIdAdapterConfiguration {
 type FetchImplementation = typeof globalThis.fetch;
 
 export const QOREID_ADAPTER_CONFIGURATION = Symbol('QOREID_ADAPTER_CONFIGURATION');
+
+/**
+ * What patient self-enrollment answers while it is switched off (FE-4):
+ * QoreID or NIN-only enrollment disabled. In production NIN-only enrollment
+ * stays off until the holder step of decision N1 ships, so this is not a
+ * temporary outage. Health-id shows a problem's detail as sent.
+ */
+export const PATIENT_REGISTRATION_NOT_OPEN =
+  'New Health ID registration is not open yet. If you already have a Health ID, sign in.';
 export const QOREID_FETCH = Symbol('QOREID_FETCH');
 
 interface JsonRecord {
@@ -82,8 +91,7 @@ export class QoreIdVerificationAdapter {
    */
   async verifyNinEnrollment(nin: string): Promise<QoreIdVerificationResult> {
     if (!this.configuration.ninOnlyEnrollmentEnabled) {
-      throw new DomainProblem(503, 'QOREID_NIN_ONLY_DISABLED',
-        'Patient identity enrollment is temporarily unavailable');
+      throw new PublicDetailProblem(503, 'QOREID_NIN_ONLY_DISABLED', PATIENT_REGISTRATION_NOT_OPEN);
     }
     if (!/^\d{11}$/.test(nin)) {
       throw new DomainProblem(400, 'NIN_INVALID', 'An 11-digit NIN is required');
