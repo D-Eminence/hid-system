@@ -294,6 +294,47 @@ test('refuses database statements the replay does not follow', () => {
   assert.deepEqual(unfollowedForms(realScripts()), []);
 });
 
+test('follows a policy that a DO block replaces only when pg_policy lacks it', () => {
+  // runtime-grants.sql recreates platform_controls_definer_read this way, so a
+  // rerun takes no lock on platform.control_settings. Whether or not the block
+  // runs its two statements, the policy then exists as created.
+  const replace = (extra = '') => `do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 's.t'::regclass and policy.polname = 't_update'
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+  ) then
+    drop policy if exists t_update on s.t;
+    create policy t_update on s.t
+      for update to group_role using (true);${extra}
+  end if;
+end
+$$;`;
+  const fixture = (body) => [['fixture.sql', `
+    create table s.t (id uuid);
+    alter table s.t enable row level security;
+    grant select, update on s.t to group_role;
+    ${body}
+    grant select on s.t to other_role;`]];
+  assert.deepEqual(unfollowedForms(fixture(replace())), []);
+  const model = databaseModel(fixture(replace()));
+  assert.deepEqual(lockPermission(model, 'group_role', 's.t'), { allowed: true });
+  assert.match(lockPermission(model, 'other_role', 's.t').reason, /no UPDATE privilege/);
+  assert.match(lockPermission(databaseModel(fixture('')), 'group_role', 's.t').reason, /no UPDATE policy/);
+  // Any other policy statement in a dollar-quoted body is still refused.
+  for (const body of [
+    replace().replace('drop policy if exists t_update', 'drop policy if exists other_policy'),
+    replace().replace('create policy t_update on s.t', 'create policy t_update on s.other'),
+    replace('\n    create policy t_extra on s.t using (true);'),
+    replace().replace('if not exists', 'if exists'),
+    replace().replace('from pg_policy', 'from pg_class'),
+    'do $$ begin create policy t_update on s.t for update to group_role using (true); end $$;',
+  ]) {
+    assert.deepEqual(unfollowedForms(fixture(body)), ['fixture.sql: policy statement in a dollar-quoted body']);
+  }
+});
+
 // The fourteen lock clauses Stage 8 reproduced as failures (release checklist
 // section 4.2), exactly as main 54f79d2 ran them. Each must be refused.
 const STAGE_8_FAILURES = [
