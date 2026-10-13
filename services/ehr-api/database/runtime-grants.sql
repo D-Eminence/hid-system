@@ -446,6 +446,55 @@ revoke hid_platform_control_reader from hid_identity_runtime, hid_ehr_runtime,
   hid_ocr_queue_metrics, hid_notification_runtime, hid_notification_api_runtime,
   hid_notification_worker;
 
+-- Launch (P8-CONTROL): platform.control_enabled(text) is the SECURITY
+-- DEFINER read of platform.control_settings that the Identity, EHR and
+-- Outreach guards make on every request that is not a platform
+-- administrator's. The table forces row-level security, and its only read
+-- policy requires platform.control.read, so under a schema owner that does
+-- not bypass row-level security (RDS) the function saw no row and raised
+-- PLATFORM_CONTROL_UNAVAILABLE, which the guards answer with 503. Its
+-- technical owner reads only the key and enabled flag of the six non-PHI
+-- platform-wide controls through one exact policy, so the function no longer
+-- depends on its owner bypassing row-level security. EXECUTE stays granted to
+-- PUBLIC (0040). platform.require_control_enabled reads no table and calls
+-- this function, so its owner is unchanged.
+-- The table's PUBLIC read policy also applies to this role. PostgreSQL inlines
+-- its SQL function platform.current_account_id() while planning, as the
+-- reading role, and the body names schema auth, so the role needs USAGE on
+-- auth for the plan to be built; it receives no privilege on any auth object.
+-- The policies are OR-ed, so the `true` below decides the row and the PUBLIC
+-- expression is folded away and never executed.
+-- Lock order: DROP and CREATE POLICY lock the table ACCESS EXCLUSIVE until
+-- this transaction commits. An Identity break-glass activation reads the
+-- controls (platform.require_control_enabled) and then inserts into
+-- identity.outbox_events in one transaction, so this block comes before the
+-- first statement below that locks another table (the ocr.jobs and outbox
+-- policies): a run that has to wait for platform.control_settings then holds
+-- no lock that such a transaction needs. The policy is replaced only when it
+-- is missing or differs, so a rerun takes no lock on the table at all.
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'platform.control_settings'::regclass
+       and policy.polname = 'platform_controls_definer_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_platform_control_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists platform_controls_definer_read on platform.control_settings;
+    create policy platform_controls_definer_read on platform.control_settings
+      for select to hid_platform_control_reader using (true);
+  end if;
+end
+$$;
+grant usage on schema platform, auth to hid_platform_control_reader;
+grant select (control_key, enabled) on platform.control_settings to hid_platform_control_reader;
+grant create on schema platform to hid_platform_control_reader;
+alter function platform.control_enabled(text) owner to hid_platform_control_reader;
+revoke create on schema platform from hid_platform_control_reader;
+
 -- Identity owns canonical patients, registration, consent, workforce context,
 -- and the local authentication persistence used by the current Identity API.
 grant usage on schema platform, auth, identity, audit to hid_identity_runtime;
@@ -956,33 +1005,6 @@ grant select on platform.commercial_products, platform.commercial_prices,
 grant execute on function platform.admin_list_controls(),
   platform.admin_set_control(text, boolean, bigint, text)
   to hid_identity_runtime, hid_schema_test_runtime;
-
--- Launch (P8-CONTROL): platform.control_enabled(text) is the SECURITY
--- DEFINER read of platform.control_settings that the Identity, EHR and
--- Outreach guards make on every request that is not a platform
--- administrator's. The table forces row-level security, and its only read
--- policy requires platform.control.read, so under a schema owner that does
--- not bypass row-level security (RDS) the function saw no row and raised
--- PLATFORM_CONTROL_UNAVAILABLE, which the guards answer with 503. Its
--- technical owner reads only the key and enabled flag of the six non-PHI
--- platform-wide controls through one exact policy, so the function no longer
--- depends on its owner bypassing row-level security. EXECUTE stays granted to
--- PUBLIC (0040). platform.require_control_enabled reads no table and calls
--- this function, so its owner is unchanged.
--- The table's PUBLIC read policy also applies to this role. PostgreSQL inlines
--- its SQL function platform.current_account_id() while planning, as the
--- reading role, and the body names schema auth, so the role needs USAGE on
--- auth for the plan to be built; it receives no privilege on any auth object.
--- The policies are OR-ed, so the `true` below decides the row and the PUBLIC
--- expression is folded away and never executed.
-drop policy if exists platform_controls_definer_read on platform.control_settings;
-create policy platform_controls_definer_read on platform.control_settings
-  for select to hid_platform_control_reader using (true);
-grant usage on schema platform, auth to hid_platform_control_reader;
-grant select (control_key, enabled) on platform.control_settings to hid_platform_control_reader;
-grant create on schema platform to hid_platform_control_reader;
-alter function platform.control_enabled(text) owner to hid_platform_control_reader;
-revoke create on schema platform from hid_platform_control_reader;
 
 -- Runtime provider decisions and admin commands have narrow function grants.
 -- Notification API receives no direct database access or provider table grant.

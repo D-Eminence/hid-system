@@ -1,11 +1,16 @@
 -- Runtime role and grant acceptance checks.
--- Run as the database security administrator after runtime-grants.sql.
+-- Run as the database security administrator that ran runtime-grants.sql
+-- (db:bootstrap and db:verify-roles do): the creator membership allowed below
+-- is that administrator's only.
 -- This file is assertion-only and does not mutate roles or application data.
 
 do $$
 declare
   role_name text;
   table_name text;
+  -- The administrator running these assertions, if it may create roles. Every
+  -- HID role is NOCREATEROLE (checked below), so none of them qualifies.
+  administrator oid := (select oid from pg_roles where rolname = current_user and rolcreaterole);
 begin
   foreach role_name in array array[
     'hid_identity_runtime', 'hid_ehr_runtime', 'hid_api_runtime',
@@ -620,7 +625,12 @@ begin
   -- the ADMIN OPTION that PostgreSQL 16 records, as granted by the bootstrap
   -- superuser, for a CREATEROLE administrator that is not a superuser in every
   -- role it creates; it carries no privilege and no SET ROLE, and that
-  -- administrator cannot revoke it.
+  -- administrator cannot revoke it. It is allowed only when its member is the
+  -- administrator running these assertions. A superuser records its own
+  -- grants with the same grantor, so an ADMIN OPTION-only grant to any other
+  -- role (with which a runtime login could grant itself the owner and SET ROLE
+  -- to it) is refused. `is not true` also refuses the row when the runner may
+  -- not create roles (administrator is null).
   foreach role_name in array array[
     'hid_event_delivery_commands', 'hid_ocr_queue_metrics', 'hid_platform_control_reader'
   ] loop
@@ -628,8 +638,9 @@ begin
        or exists (
          select 1 from pg_auth_members membership
           where membership.roleid = role_name::regrole
-            and not (membership.admin_option and not membership.inherit_option
-                     and not membership.set_option and membership.grantor = 10)
+            and (membership.admin_option and not membership.inherit_option
+                 and not membership.set_option and membership.grantor = 10
+                 and membership.member = administrator) is not true
        )
        or (select count(*) from pg_auth_members where roleid = role_name::regrole) > 1
        or exists (
