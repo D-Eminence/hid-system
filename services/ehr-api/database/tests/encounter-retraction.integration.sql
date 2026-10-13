@@ -14,7 +14,10 @@
 --   * a cancelled or entered-in-error encounter could still have its header
 --     edited (ORDER-CLOSED-EDIT);
 --   * a vital had no status, so one recorded on the wrong patient could not be
---     retracted (ENC-RETRACT-2).
+--     retracted (ENC-RETRACT-2);
+--   * nothing kept a retraction final: a correction could still be added to a
+--     vital entered in error, and a document entered in error could be set
+--     back to uploaded and served again (review of 0090).
 --
 -- 0090 adds, as SECURITY INVOKER triggers with a pinned search_path:
 --   ehr.require_retraction_permission(): before an encounter becomes
@@ -33,6 +36,11 @@
 --   ehr.keep_recorded_vital() (replaced): also allows a final vital to be
 --     marked entered in error, and refuses any change of a vital entered in
 --     error (55000 VITAL_ENTERED_IN_ERROR).
+--   ehr.require_final_vital(): refuses a correction of a vital entered in
+--     error (55000 VITAL_ENTERED_IN_ERROR), reading the vital under a share
+--     lock so a concurrent retraction cannot slip between.
+--   ehr.keep_retracted_document(): refuses any update of a document entered
+--     in error (55000 DOCUMENT_ENTERED_IN_ERROR).
 --
 -- Runtime cases run as hid_ehr_api_runtime with the session the EHR API sets
 -- for each actor and the API's own statement shapes. Each case is undone.
@@ -59,7 +67,8 @@ select 'property', format('%s is SECURITY INVOKER with a pinned search_path', na
                              else format('definer=%s config=%s', p.prosecdef, p.proconfig) end
                    from pg_proc p where p.oid = to_regprocedure(name)), 'missing')
   from (values ('ehr.require_retraction_permission()'), ('ehr.keep_closed_encounter()'),
-               ('ehr.keep_closed_order()'), ('ehr.keep_recorded_vital()')) guard(name);
+               ('ehr.keep_closed_order()'), ('ehr.keep_recorded_vital()'), ('ehr.require_final_vital()'),
+               ('ehr.keep_retracted_document()')) guard(name);
 insert into encounter_retraction_cases (area, name, expected, actual)
 select 'property', format('trigger %s on %s', trigger_name, table_name), 'enabled',
        coalesce((select case when t.tgenabled = 'O' and t.tgtype = 19
@@ -76,8 +85,18 @@ select 'property', format('trigger %s on %s', trigger_name, table_name), 'enable
                ('ehr.encounters', 'encounters_retraction_permission', 'ehr.require_retraction_permission()', 'status'),
                ('ehr.prescriptions', 'prescriptions_closed_final', 'ehr.keep_closed_order()', null),
                ('ehr.lab_requests', 'lab_requests_closed_final', 'ehr.keep_closed_order()', null),
-               ('ehr.vitals', 'vitals_recorded_values_immutable', 'ehr.keep_recorded_vital()', null))
+               ('ehr.vitals', 'vitals_recorded_values_immutable', 'ehr.keep_recorded_vital()', null),
+               ('ehr.documents', 'documents_retracted_final', 'ehr.keep_retracted_document()', null))
        expected(table_name, trigger_name, function_name, update_of);
+-- ehr.vital_corrections is append-only (no version trigger): its guard is a
+-- BEFORE ROW INSERT trigger.
+insert into encounter_retraction_cases (area, name, expected, actual)
+select 'property', 'trigger vital_corrections_vital_final on ehr.vital_corrections', 'enabled',
+       coalesce((select case when t.tgenabled = 'O' and t.tgtype = 7
+                               and t.tgfoid = to_regprocedure('ehr.require_final_vital()') then 'enabled'
+                              else format('enabled=%s type=%s function=%s', t.tgenabled, t.tgtype, t.tgfoid::regproc) end
+                   from pg_trigger t where t.tgrelid = 'ehr.vital_corrections'::regclass
+                    and t.tgname = 'vital_corrections_vital_final' and not t.tgisinternal), 'missing');
 insert into encounter_retraction_cases (area, name, expected, actual)
 select 'property', 'ehr.vitals.status is final by default and only final or entered_in_error',
        'text not null default final; entered_in_error, final',
@@ -109,7 +128,7 @@ select 'property', 'the EHR runtime may ask whether a membership holds a permiss
 --   06 cancelled   07 entered_in_error
 --   08 completed: completed prescription
 --   09 in_progress: uploaded document
---   10 in_progress: the orders and vitals of the finality cases
+--   10 in_progress: the orders, vitals and documents of the finality cases
 set local session_replication_role = replica;
 insert into identity.purpose_of_use_codes (code, display, source_system) values
   ('direct-care', 'Direct patient care', 'encounter-retraction-test')
@@ -217,6 +236,18 @@ insert into ehr.documents (id, encounter_id, patient_id, facility_id, created_by
    'e9100000-0000-4000-8000-000000000001', 'e9300000-0000-4000-8000-000000000001', 'referral.pdf',
    'synthetic-bucket', 'clinical/objects/encounter-retraction-09', 'synthetic-version-09', 'application/pdf', 1024,
    repeat('b', 64), 'phi', 'uploaded', 'clinical_record');
+-- Documents of encounter 10: 10 entered in error (it was uploaded), 11
+-- initiated (declared, its upload not yet completed).
+insert into ehr.documents (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  original_file_name, storage_bucket, storage_key, object_version_id, declared_media_type, size_bytes, sha256_hex,
+  classification, status, retention_class)
+select ('e9c00000-0000-4000-8000-0000000000' || suffix)::uuid, 'e9600000-0000-4000-8000-000000000010',
+       'e9400000-0000-4000-8000-000000000001', 'e9000000-0000-4000-8000-000000000002',
+       'e9100000-0000-4000-8000-000000000001', 'e9300000-0000-4000-8000-000000000001', 'referral-' || suffix || '.pdf',
+       'synthetic-bucket', 'clinical/objects/encounter-retraction-' || suffix, version, 'application/pdf', 1024,
+       repeat('c', 64), 'phi', status, 'clinical_record'
+  from (values ('10', 'synthetic-version-10', 'entered_in_error'), ('11', null, 'initiated'))
+       existing(suffix, version, status);
 set local session_replication_role = origin;
 
 -- Runs a statement as the current role and undoes it: 'ok', or 'SQLSTATE: message'.
@@ -377,6 +408,45 @@ select pg_temp.retraction_case('vital', name, 'nurse', expected, format($i$updat
     ('make a vital entered in error final again', '12', 'status = ''final''', '55000: VITAL_ENTERED_IN_ERROR'))
   as change(name, suffix, assignment, expected);
 
+-- A vital entered in error takes no correction row either, not only no new
+-- correction number (VitalsService.correct statement shape).
+select pg_temp.retraction_case('vital', name, 'nurse', expected, format($i$insert into ehr.vital_corrections (
+           vital_id, patient_id, facility_id, correction_no, replacement_values, reason, created_by,
+           created_by_membership_id)
+         values (%L, 'e9400000-0000-4000-8000-000000000001', 'e9000000-0000-4000-8000-000000000002', 1,
+           '{"pulse_bpm": 80}'::jsonb, 'Synthetic correction', 'e9100000-0000-4000-8000-000000000002',
+           'e9300000-0000-4000-8000-000000000002') returning id$i$, ('e9900000-0000-4000-8000-0000000000' || suffix)::uuid))
+  from (values
+    ('add a correction row to a final vital', '11', 'ok'),
+    ('add a correction row to a vital entered in error', '12', '55000: VITAL_ENTERED_IN_ERROR'))
+  as change(name, suffix, expected);
+
+-- A document entered in error stays so: it is never served again
+-- (ehr.documents_effective would show an uploaded, clean one as available).
+-- Upload completion (DocumentService.complete statement shape) still works.
+select pg_temp.retraction_case('document', name, 'doctor', expected, statement)
+  from (values
+    ('set a document entered in error back to uploaded', '55000: DOCUMENT_ENTERED_IN_ERROR',
+     $i$update ehr.documents set status = 'uploaded' where id = 'e9c00000-0000-4000-8000-000000000010'
+          and facility_id = 'e9000000-0000-4000-8000-000000000002' returning id$i$),
+    ('rename a document entered in error', '55000: DOCUMENT_ENTERED_IN_ERROR',
+     $i$update ehr.documents set original_file_name = 'renamed.pdf' where id = 'e9c00000-0000-4000-8000-000000000010'
+          and facility_id = 'e9000000-0000-4000-8000-000000000002' returning id$i$),
+    ('send a document entered in error its own status', '55000: DOCUMENT_ENTERED_IN_ERROR',
+     $i$update ehr.documents set status = 'entered_in_error' where id = 'e9c00000-0000-4000-8000-000000000010'
+          and facility_id = 'e9000000-0000-4000-8000-000000000002' returning id$i$),
+    ('retract an uploaded document and restore it in one transaction', '55000: DOCUMENT_ENTERED_IN_ERROR',
+     $i$do $d$ begin
+          update ehr.documents set status = 'entered_in_error' where id = 'e9c00000-0000-4000-8000-000000000009';
+          update ehr.documents set status = 'uploaded' where id = 'e9c00000-0000-4000-8000-000000000009';
+        end $d$$i$),
+    ('complete the upload of an initiated document', 'ok',
+     $i$update ehr.documents set object_version_id = 'synthetic-version-11', size_bytes = 1024,
+          sha256_hex = repeat('c', 64), status = 'uploaded'
+        where id = 'e9c00000-0000-4000-8000-000000000011' and facility_id = 'e9000000-0000-4000-8000-000000000002'
+          and status = 'initiated' and created_by = 'e9100000-0000-4000-8000-000000000001' returning id$i$))
+  as change(name, expected, statement);
+
 reset role;
 
 -- Every runtime case ran as the EHR runtime, and every outcome is the expected one.
@@ -384,7 +454,7 @@ do $$
 declare
   mismatches text;
 begin
-  if (select count(*) from encounter_retraction_cases) <> 86
+  if (select count(*) from encounter_retraction_cases) <> 97
      or exists (select 1 from encounter_retraction_cases where actual is null) then
     raise exception 'the encounter retraction suite did not run every case (% recorded)',
       (select count(*) from encounter_retraction_cases);
@@ -401,7 +471,7 @@ begin
     from encounter_retraction_cases
    where actual is distinct from expected;
   if mismatches is not null then
-    raise exception E'encounter retraction, order finality or vital retraction is not enforced:\n%', mismatches;
+    raise exception E'encounter retraction, order finality, or vital or document retraction is not enforced:\n%', mismatches;
   end if;
   raise notice 'encounter retraction suite: % cases passed', (select count(*) from encounter_retraction_cases);
 end $$;

@@ -327,6 +327,10 @@ try {
   const refused = await patch(encounterPath(encounter.nurseRefused), { status: 'entered_in_error',
     expectedRowVersion: before.encounter, changeReason: 'Documented on the wrong patient' }, refusedCorrelation, 'token-nurse');
   assert.deepEqual([refused.status, refused.body?.code], [403, 'ENCOUNTER_RETRACTION_NOT_PERMITTED'], JSON.stringify(refused.body));
+  // The response does not say which kinds of record the encounter holds; the
+  // missing permissions go to the audit row only.
+  assert.equal(refused.body?.detail, 'Cancelling or retracting this encounter changes records you may not write',
+    JSON.stringify(refused.body));
   assert.deepEqual([await statusOf('encounters', encounter.nurseRefused), await statusOf('diagnoses', doctorDiagnosis),
     await statusOf('prescriptions', doctorPrescription)], ['in_progress', 'confirmed', 'draft']);
   assert.deepEqual({ encounter: await encounterVersion(encounter.nurseRefused),
@@ -347,7 +351,7 @@ try {
     expectedRowVersion: await encounterVersion(encounter.nurseAllowed), changeReason: 'Documented on the wrong patient' },
   undefined, 'token-nurse'), 200, 'nurse retracts notes and vitals');
   assert.deepEqual([nurseRetraction.cascade.clinicalNoteIds, nurseRetraction.cascade.vitalIds], [[nurseNote], [nurseVital]]);
-  check('a nurse marking entered in error an encounter with a doctor\'s diagnosis and prescription is 403 ENCOUNTER_RETRACTION_NOT_PERMITTED with no row or version changed and a denied ehr.encounter.update audit naming the missing permissions; she still retracts an encounter holding only her notes and vitals');
+  check('a nurse marking entered in error an encounter with a doctor\'s diagnosis and prescription is 403 ENCOUNTER_RETRACTION_NOT_PERMITTED with a fixed detail, no row or version changed and a denied ehr.encounter.update audit naming the missing permissions; she still retracts an encounter holding only her notes and vitals');
 
   // 8. A vital is entered in error on its own (ENC-RETRACT-2), versioned and
   //    audited, and is then neither corrected nor retracted again.

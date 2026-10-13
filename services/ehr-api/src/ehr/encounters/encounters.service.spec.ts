@@ -176,7 +176,6 @@ describe('EncountersService retraction requires the write permission of every re
       { clinical_notes: ['note-1'], diagnoses: ['d-1'], prescriptions: ['p-1'] });
     const refusal = service.update(contextWith(NURSE), patientId, encounterId, update(EncounterStatus.EnteredInError) as never);
     await expect(refusal).rejects.toMatchObject({ status: 403, code: 'ENCOUNTER_RETRACTION_NOT_PERMITTED' });
-    await expect(refusal).rejects.toThrow(/ehr\.diagnosis\.write.*ehr\.prescription\.write/);
     expect(wroteAnything(query)).toBe(false);
     expect(repository.setChangeReason).not.toHaveBeenCalled();
   });
@@ -188,6 +187,22 @@ describe('EncountersService retraction requires the write permission of every re
     expect(refusal).toBeInstanceOf(DomainProblem);
     expect((refusal as DomainProblem & { auditDetails?: unknown }).auditDetails)
       .toEqual({ missingPermissions: ['ehr.diagnosis.write', 'ehr.prescription.write'] });
+  });
+
+  it('answers a fixed detail that does not tell the caller which kinds of record the encounter holds', async () => {
+    // Only a kind the encounter holds is probed, so a permission named in the
+    // response would tell a receptionist, who reads none of these records,
+    // that the encounter holds a diagnosis or a prescription.
+    const holdings: readonly Record<string, readonly string[]>[] = [
+      { diagnoses: ['d-1'] }, { prescriptions: ['p-1'] }, { clinical_notes: ['n-1'], vitals: ['v-1'] }];
+    for (const records of holdings) {
+      const { service } = harness(EncounterStatus.InProgress, records);
+      const refusal = await service.update(contextWith(RECEPTIONIST), patientId, encounterId,
+        update(EncounterStatus.EnteredInError) as never).catch((error: unknown) => error);
+      expect(refusal).toMatchObject({ status: 403, code: 'ENCOUNTER_RETRACTION_NOT_PERMITTED' });
+      expect((refusal as DomainProblem).message)
+        .toBe('Cancelling or retracting this encounter changes records you may not write');
+    }
   });
 
   it('lets a doctor retract the same encounter, returning what changed', async () => {
