@@ -41,7 +41,13 @@ Authentication OTP commands are purpose-bound and use three stages: start
 returns a generic challenge, verify accepts exactly six digits and returns an
 opaque one-time completion credential, and complete consumes that credential.
 Identity calls Notification API directly over workload authentication; these
-credentials never use the ordinary-notification event path. Ordinary domain
+credentials never use the ordinary-notification event path. In production the
+Notification API runs the `otp-email-sms` profile (ADR-053,
+BRANCH:launch/infra-launch-config): `POST /notifications/otp` delivers
+`email` through SES and `sms` through Termii and answers `400` for `whatsapp`
+without a provider attempt; Identity sends only `email` and `sms`. The `202`
+response's `requestId` is also the correlation id of the one PHI-free
+`notification.otp.outcome` log line written per send. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
 Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 

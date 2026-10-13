@@ -2,7 +2,10 @@
 
 This is preparation for external acceptance gates. It cannot sign, provision,
 send notifications, migrate, deploy, or authorize a release. Production remains
-locked. The current ordered input list is in
+locked. This preflight is staging-only: it is fixed to the staging account and
+refuses any other. Production has its own,
+`scripts/production-external-preflight.py` (`AWS_DEPLOYMENT_RUNBOOK.md` §13,
+ADR-053). The current ordered input list is in
 [the staging execution report](TUF-STAGING-EXECUTION.md).
 
 ## Repeatable checks with existing access
@@ -49,8 +52,14 @@ receipt also has `canonical_32_byte_base64`, one boolean per key, true only
 for that format after trimming surrounding ASCII whitespace as Identity does.
 It is false for anything else, including a value Identity would accept only
 after trimming non-ASCII whitespace. No value, length or encoding is
-serialized. A QoreID staging task also reads the two NIN keys (below), which
-this check does not report.
+serialized. A QoreID staging task also reads the two NIN keys (below); run the
+check with `--qoreid` to report them too.
+
+`googleOidcClientIds` must exist, because ECS resolves it before an Identity
+task starts, but its value may be empty: an empty or whitespace-only value
+turns Google sign-in off, the launch profile (REC-GOOGLE). The receipt reports
+`google_sign_in_enabled` (`true` for a non-empty allowlist, `false` for an
+empty one, `null` when the field is missing), never the value.
 
 The Cloudflare account/zone are pinned to `20c809ffe35ccb2c240d19a664dff97a` /
 `69d385b9f6a3233a7113c525524f14fe`. Zone/account mismatch stops further reads.
@@ -82,8 +91,14 @@ call. The server-only adapter is disabled by default; ordinary staging remains
 on `NIN_PROVIDER_MODE=deferred` for the separate legacy governed-registration
 flow and requires no QoreID credential. The current route, data-minimization,
 and activation requirements are in the [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
-The preflight does not read a QoreID secret or require legacy NIN
-HMAC/encryption fields. Existing NIN material remains preserved. An HTTP
+By default the preflight does not read a QoreID secret or require the NIN
+HMAC/encryption fields. For a separately approved QoreID staging synth
+(`HID_QOREID_ENABLED=true`), run it with `--qoreid`: it then also requires
+`ninLookupHmacKeyB64` and `ninEncryptionKeyB64` in
+`/hid/staging/identity-sensitive`, each reported in `canonical_32_byte_base64`,
+and reads `/hid/staging/qoreid-credentials` (the secret behind
+`QoreIdCredentialsSecretArn`; create it under that name) for the presence of
+`clientId` and `secret` only. Existing NIN material remains preserved. An HTTP
 acknowledgment is not identity verification. A QoreID-enabled staging task
 definition does read `ninLookupHmacKeyB64` and `ninEncryptionKeyB64` from
 `/hid/staging/identity-sensitive`, and no Identity task starts without them:
