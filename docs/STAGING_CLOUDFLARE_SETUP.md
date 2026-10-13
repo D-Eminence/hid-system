@@ -36,27 +36,36 @@ node infra/cloudflare/scripts/prepare-staging-readiness.mjs
 ```
 
 The plan validates the seven application Worker configurations, the legacy OCR
-domain redirect Worker, and the staging TUF repository configuration, recording
-their source hashes. Its tests also compare the widget action list with the
-existing Identity validator. It rejects production hostnames, unexpected API
-origins and default routes.
+domain redirect Worker, the staging TUF repository configuration and the
+launch deployment manifest (`infra/cloudflare/launch-deployment.json`),
+recording their source hashes. Its tests also compare the widget action list
+with the existing Identity validator. It rejects production hostnames,
+unexpected API origins, default routes, a Health-id Worker pointed at a legacy
+build, and any launch set other than the decided one.
 
-The seven application hosts are `staging`, `ehr.staging`, `lab.staging`,
-`pharmacy.staging`, `migrate.staging`, `outreach.staging` and `admin.staging` under
-the zone. `updates.staging` belongs to the protected TUF publisher. The old
-`ocr.staging` hostname is a separate compatibility redirect to
-`migrate.staging`; it is not an application origin or a Turnstile hostname.
-These eight canonical application/update hosts plus the legacy redirect host use
-Worker **Custom Domains**: Cloudflare creates their DNS records and certificates
-at deployment. Do not precreate CNAMEs for them; an existing CNAME conflicts
-with Custom Domain installation. Inspect existing records first.
+**Launch subset (ADR-052, D-Eminence/hid-system#67).** Only two
+staging Workers are deployed: `hid-web-staging` on `staging` and
+`hid-admin-staging` on `admin.staging`, both serving the Health-id
+`apps/patient-web` build staged for that host with its provenance
+(`infra/cloudflare/README.md`, "Building and staging a Health-id artefact").
+The plan lists them under `frontends` with their staging command. The other
+application hosts, `ehr.staging`, `lab.staging`, `pharmacy.staging`,
+`migrate.staging` and `outreach.staging`, and the old `ocr.staging` redirect
+host are under `not_deployed`: no Worker is deployed there at launch. Their
+APIs stay closed at the gateway (`HID_ENABLED_API_ROUTES`), not by the missing
+host. `updates.staging` belongs to the protected TUF publisher. The deployed
+hosts use Worker **Custom Domains**: Cloudflare creates their DNS records and
+certificates at deployment. Do not precreate CNAMEs for them; an existing CNAME
+conflicts with Custom Domain installation. Inspect existing records first.
 [Cloudflare Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/).
 
 Worker route counts do not establish Custom Domain bindings. The offline plan
 now includes nine separate `GET /accounts/{account_id}/workers/domains` reads,
 each filtered to one exact staging hostname and the fixed zone. After authorized
 inventory, compare each returned hostname, zone and service with its expected
-named staging Worker before considering a change. This API needs **Workers
+named staging Worker before considering a change. For the six hosts that are
+not deployed at launch the plan expects no binding (`expect_no_binding`); a
+binding found there is a finding to resolve, not a host to keep. This API needs **Workers
 Scripts Read** for the account; Zone Workers Routes Read alone is insufficient.
 The September 22 03:02 UTC reads confirm no bindings for the previous eight-host
 set; they must not be reused as a readback for the new Migrate/redirect pair.
@@ -74,15 +83,19 @@ before completing that record. No fake ALB name, wildcard, apex change or
 nameserver cutover is part of this plan. DNS ownership or shared-zone changes
 are not inferred from permission to prepare staging.
 
-The proposed widget body uses `mode: managed`, name `HID staging`, and the seven
-application hostnames. Inspect widgets first and reuse a matching staging widget
-where appropriate. The existing server already verifies the exact staging
+The proposed widget body uses `mode: managed`, name `HID staging`, and the two
+launch hostnames, `staging` and `admin.staging`. Inspect widgets first and reuse
+a matching staging widget where appropriate; a widget that already lists the
+seven application hostnames works for the launch hosts, and narrowing it to the
+two is an operator step. The existing server already verifies the exact staging
 hostname/action and fails closed; no application auth change is needed. The
-actual site key belongs in `VITE_TURNSTILE_SITE_KEY`. Merge its secret into
-`/hid/staging/identity-sensitive` as `turnstileSecretKey`, preserving the existing
-OTP key. The origin authentication value is separate: generate it independently
-for staging and bind the same value to the seven staging Worker
-`ORIGIN_AUTH_TOKEN` secrets and the `StagingCloudflareOriginSecret` WAF parameter.
+actual site key belongs in `VITE_HID_TURNSTILE_SITE_KEY` of both Health-id
+staging builds (the staging script refuses a build without a deployable key).
+Merge its secret into `/hid/staging/identity-sensitive` as `turnstileSecretKey`,
+preserving the existing OTP key. The origin authentication value is separate:
+generate it independently for staging and bind the same value to the two
+deployed staging Workers' `ORIGIN_AUTH_TOKEN` secrets (`hid-web-staging`,
+`hid-admin-staging`) and the `StagingCloudflareOriginSecret` WAF parameter.
 Neither secret belongs in frontend code or the plan.
 [Cloudflare widget API](https://developers.cloudflare.com/turnstile/get-started/widget-management/api/).
 
@@ -100,21 +113,21 @@ The observed widget has not been established as staging-only; do not modify an
 unverified or production widget to satisfy this setup.
 
 For the staging widget, use name **HID staging**, mode **Managed**, and these exact
-hostnames:
+launch hostnames:
 
 ```text
 staging.healthidentitydirectory.com
-ehr.staging.healthidentitydirectory.com
-lab.staging.healthidentitydirectory.com
-pharmacy.staging.healthidentitydirectory.com
-migrate.staging.healthidentitydirectory.com
-outreach.staging.healthidentitydirectory.com
 admin.staging.healthidentitydirectory.com
 ```
 
+An existing staging widget created with the earlier seven-host list works for
+these two hosts. `scripts/check-staging-cloudflare-access.py` still counts
+widgets whose domains equal that seven-host set; with a two-host widget that
+count is zero, which is expected under the launch subset.
+
 The owner saved the actual public site key in the prepared, ignored mode-0600 file
-`release/local/staging-turnstile-sitekey.txt` for the later `VITE_TURNSTILE_SITE_KEY`
-build binding. The copied label was removed without changing the key, and the
+`release/local/staging-turnstile-sitekey.txt` for the later
+`VITE_HID_TURNSTILE_SITE_KEY` binding of the Health-id staging builds. The copied label was removed without changing the key, and the
 original labeled input was preserved privately. The secret is also saved in its
 designated staging field. The command below documents first entry for operators;
 **do not rerun it now**, because the helper correctly refuses existing fields:

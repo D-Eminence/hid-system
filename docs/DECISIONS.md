@@ -1054,7 +1054,9 @@ ADR-027, ADR-028, ADR-029, ADR-031.
 
 # ADR-033: Cloudflare Frontend Edge, Notification Boundary, and Legacy Migration Convergence
 
-Status: Accepted
+Status: Accepted. Amended for launch by ADR-052 (2026-10-13): only www,
+staging and admin.* are deployed, and they serve the staged Health-id
+`apps/patient-web` build; the other application hosts are not deployed.
 
 Date: 2026-08-12
 
@@ -1453,7 +1455,8 @@ and never lifts a timed suspension. An administrator cannot change their own
 account status or platform roles.
 
 The authoritative Platform Admin frontend is `apps/patient-web/src/admin` in
-`D-Eminence/Health-id`; `apps/admin` here is legacy reference code.
+`D-Eminence/Health-id`; `apps/admin` here is legacy reference code and is not
+deployed: admin.* serves the staged Health-id build (ADR-052).
 
 Consequences:
 
@@ -2769,6 +2772,140 @@ application. Receivers from this change refuse RS256 tokens, tokens without
 `token_use: workload`; the in-stack issuer mints none of those.
 
 Related ADRs: ADR-025, ADR-032, ADR-033, ADR-034, ADR-035, ADR-043, ADR-045.
+
+# ADR-052: Health-id Is the Single Launch Frontend; Only Its Hosts Are Deployed
+
+Status: Accepted (2026-10-13) with the owner's defaults (deny by default, least
+privilege, verified identity for sensitive operations, auditable actions, no
+production bypass). Acceptance authorizes no deployment: Cloudflare and AWS
+changes need their own authorization, and nothing has been deployed.
+
+Date: 2026-10-13. Change: D-Eminence/hid-system#67 (launch register
+FE-HOST, including MOD-EDGE).
+
+Amends: ADR-033 (seven Cloudflare frontend Workers, each serving a hid-system
+application). Extends ADR-037's note that Health-id is the authoritative admin
+frontend to what is deployed.
+
+Context:
+
+- `hid-web` served hid-system's legacy `apps/web` on www and staging, and
+  `hid-admin` served the legacy `apps/admin` on admin.*. `apps/web` still calls
+  about 30 retired `/api/v1/functions/*` routes, which the gateway answers with
+  `404`, and `apps/admin`'s staff sign-in is refused by the platform-scoped
+  admin endpoints (ADR-037). Only Health-id implements the governed
+  access-request loop and the platform console the backend now serves.
+- Health-id `apps/patient-web` is one Vite portal: patient routes at `/`, the
+  provider workspace at `/provider/*` and the platform console at `/admin/*`.
+  Its cookie mode is same-origin: it needs `/api/v1` on its own host, with
+  `VITE_HID_API_BASE_URL` and `VITE_HID_APP_ORIGIN` both that host's origin.
+  Identity's Turnstile allowlist accepts the full browser action set only on
+  www and staging, and `admin-login` and `admin-reset` on admin.*.
+- Health-id had no deployment definition, and `verify-config.mjs` required a
+  `manifest.webmanifest` and `service-worker.js`, which Health-id deliberately
+  lacks: it registers no service worker and keeps no clinical data in browser
+  storage.
+- Every frontend Worker proxies all of `/api/v1`, so not deploying a host does
+  not close its API.
+
+Decision:
+
+1. Health-id `apps/patient-web` is the single launch frontend for www
+   (production), staging (staging) and admin.* (both). hid-system's legacy
+   `apps/web` and `apps/admin` stay in this repository, built and tested, but
+   are not deployed.
+2. Each host gets its own build: `VITE_HID_ENVIRONMENT` names the environment;
+   `VITE_HID_API_BASE_URL` and `VITE_HID_APP_ORIGIN` are both exactly
+   `https://<host>`; `VITE_HID_TURNSTILE_SITE_KEY` is the environment widget's
+   site key; `VITE_HID_GOOGLE_CLIENT_ID` is unset (Google sign-in is off,
+   REC-GOOGLE) and so is `VITE_HID_SENTRY_DSN` (no error-reporting processor
+   is approved).
+3. A build reaches a Worker only through
+   `infra/cloudflare/scripts/stage-health-id-build.mjs`. It refuses a build
+   that breaks rule 2, or that holds anything but `index.html` and
+   content-hashed files under `assets/`, a source map or `sourceMappingURL`, a
+   service worker or web app manifest, a Google sign-in reference (the Google
+   Identity Services loader or calls, or a Google OAuth client id: Health-id
+   inlines `VITE_HID_GOOGLE_CLIENT_ID` as a bare value where it is used, so
+   these markers are the check), or a credential-shaped value. Its
+   `index.html` must be exactly the shell Vite writes, checked against an
+   allow-list of elements and attributes: one module entry script, and
+   scripts and links that name only `.js` and `.css` files of the build's own
+   `/assets/`; anything else, including `base`, `style`, inline handlers,
+   `meta http-equiv` and markup it cannot parse exactly, is refused. It writes
+   the build to the Worker's git-ignored `staged/<environment>/site` with
+   `provenance.json` beside it, never inside the served directory: the
+   Health-id source commit, every file's SHA-256, a tree hash and the inlined
+   public environment record (the five keys of `src/publicEnvironment.ts`).
+   On a refusal it writes nothing, and it replaces an existing destination
+   only when that is an earlier artefact of the same Worker and environment.
+   `npm --prefix infra/cloudflare run verify:launch:<environment>`
+   re-verifies every staged artefact against its provenance and the same
+   rules before a deployment, and the Wrangler dry-run runs it first. It
+   checks every Worker configuration but needs no legacy `apps/<app>/dist`
+   build of a Worker the launch does not deploy.
+4. Launch subset, deny by default (`infra/cloudflare/launch-deployment.json`):
+   staging and production deploy `hid-web` and `hid-admin`, and production
+   also the originless apex redirect. `hid-ehr` (the legacy `apps/ehr`;
+   clinicians use `/provider/clinical` on www or staging), `hid-lab`,
+   `hid-pharmacy`, `hid-ocr`, `hid-ocr-redirect` and `hid-outreach` are not
+   deployed. The TUF repository Workers stay with their protected publication
+   (ADR-035). `verify-config.mjs` holds the same decided subset and requires
+   every configured Worker to be classified once, so widening the launch
+   changes two reviewed files and needs its own decision.
+5. API closure for deferred modules stays with the gateway route switch
+   `HID_ENABLED_API_ROUTES` (ADR-033 addendum, D-Eminence/hid-system#65); the
+   manifest records it and a test keeps it equal to `launchApiRoutes`.
+6. `frontend-worker.mjs` is unchanged: host and environment binding,
+   `X-Real-IP`, security headers and `/api/v1` proxying. No Content Security
+   Policy is added: the Worker sets none for any frontend today, and Health-id
+   needs none to work (it loads its own `/assets/` and the Turnstile script
+   from `challenges.cloudflare.com`). Until an edge CSP is added, the staging
+   step's `index.html` allow-list (rule 3) is what keeps the shell to the
+   build's own files. An edge CSP is later hardening, with its own tests.
+
+Consequences:
+
+- Once staged and deployed, www, staging and admin.* serve Health-id; the
+  legacy builds and their retired routes are no longer served. The Health-id
+  team supplies the four builds (or the commit an operator builds); no
+  Health-id code change is needed.
+- www serves the portal, not Health-id's Next.js public site
+  (`apps/public-web`: public pricing and demo requests), which is not deployed
+  at launch. The portal's `index.html` is `noindex, nofollow`, so www is not
+  indexed. Deploying the public site needs its own decision, host and
+  artefact rules.
+- Frontend rollback restages the previous accepted commit's build for that
+  host, re-verifies it and redeploys that Worker; no API image or schema
+  changes.
+- The signed release-bundle frontend contract (`release/config/components.json`
+  `frontends`, and `frontend_archive.required_files` with a manifest and a
+  service worker) still describes the seven legacy builds and cannot carry the
+  Health-id artefact. Until it is extended, a frontend deployment's release
+  record is the verified staged artefact and its provenance.
+- On www, legacy `GET /migrate*` and `/ocr*` paths still answer `308` to the
+  Migrate host, which is not deployed; Health-id has no such routes.
+- The regional stack's `browserSubdomains` (Identity `CORS_ORIGINS`) and
+  Identity's Turnstile allowlist still name all seven hosts. Same-origin
+  cookie sessions use no CORS, and no Worker serves the other hosts; narrowing
+  both is separate work.
+
+Migration Impact: none. No database, grant or API contract change.
+
+Security Impact: deny by default at the edge (five product hosts and the legacy
+redirect not deployed, and the legacy EHR host withheld); the APIs of deferred
+modules stay closed at the gateway. Only a build that is bound to its own host
+and environment, has no Google client, no source maps, no service worker and
+no unexpected files, and is recorded with its source commit and hashes, can be
+served.
+
+Compatibility Impact: a deployment that still points at `apps/web/dist` or
+`apps/admin/dist` fails `verify-config.mjs`. Bookmarks to the legacy
+applications' routes on www or admin.* land in Health-id's single-page
+application.
+
+Related ADRs: ADR-033, ADR-035, ADR-037. Launch module set: D17
+(`PHASE_3_LAUNCH_DECISIONS.md`).
 
 # ADR-053: Production Alarms Reach a Person; Production Starts at Zero Tasks; Launch OTP Is Email and SMS Only
 

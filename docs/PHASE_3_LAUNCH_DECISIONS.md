@@ -1,8 +1,9 @@
 # Phase 3 launch decisions and operator plans
 
 Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
-the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), and D4 with
-the owner policy defaults (ADR-053, D-Eminence/hid-system#66);
+the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
+the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
+(§1, ADR-052, D-Eminence/hid-system#67) with the owner's defaults;
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
 
@@ -120,6 +121,40 @@ separate deployment authorization. None of them has been run.
   to the next free number, 0083 today, before it can merge. It also overlaps
   #50 on `auth.controller.ts` and `token.service.ts`.
 - **Data check.** Run I4 (§3) before deciding: whether such memberships exist.
+
+### FE-HOST. Launch frontend hosting (FE-HOST, MOD-EDGE)
+
+- **Question.** Which frontend serves www, staging and admin.* at launch, and
+  which product hosts are deployed? hid-system's legacy `apps/web` (about 30
+  retired `/api/v1/functions/*` calls that answer `404`) and `apps/admin`
+  (staff sign-in refused by the platform-scoped admin endpoints) were the
+  configured assets; Health-id, the only frontend with the governed access
+  loop, had no deployment definition, and `verify-config.mjs` required a
+  manifest and service worker it deliberately lacks.
+- **Decided (2026-10-13, owner defaults: deny by default, least privilege;
+  ADR-052, D-Eminence/hid-system#67, not merged).** Health-id
+  `apps/patient-web` is the single launch frontend for www, staging and
+  admin.*, one build per host with `VITE_HID_API_BASE_URL` and
+  `VITE_HID_APP_ORIGIN` equal to the host's origin, the environment's
+  Turnstile site key, and no `VITE_HID_GOOGLE_CLIENT_ID` (REC-GOOGLE) or
+  `VITE_HID_SENTRY_DSN`. A build is served only after
+  `infra/cloudflare/scripts/stage-health-id-build.mjs` accepts it and records
+  its provenance. Under the launch module set (D17) the product hosts for
+  deferred modules are not deployed: `hid-lab`, `hid-pharmacy`, `hid-ocr`,
+  `hid-ocr-redirect` and `hid-outreach`, and also `hid-ehr`, whose legacy
+  build is not the launch frontend (clinicians use `/provider/clinical` on www
+  or staging). `infra/cloudflare/launch-deployment.json` records the subset;
+  the deferred APIs stay closed at the gateway (`HID_ENABLED_API_ROUTES`,
+  D-Eminence/hid-system#65).
+- **Risks.** Each host needs its own Health-id build. Serving a build on ehr.*
+  later needs its own decision. www serves the portal (`noindex`), not
+  Health-id's public site (`apps/public-web`), which is not deployed at
+  launch. The signed release bundle cannot yet carry the Health-id artefact
+  (ADR-052 consequences).
+- **External.** Cloudflare and AWS operator authorization,
+  `ORIGIN_AUTH_TOKEN` per environment, the Turnstile widget site and secret
+  keys, the Cloudflare account and zone identifiers, a staging environment
+  (none exists yet), and the Health-id builds (release checklist P14, S4l).
 
 ## 2. Other open decisions
 

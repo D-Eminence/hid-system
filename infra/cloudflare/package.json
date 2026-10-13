@@ -7,6 +7,9 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "verify": "node scripts/verify-config.mjs",
+    "verify:launch:staging": "node scripts/verify-config.mjs --launch staging",
+    "verify:launch:production": "node scripts/verify-config.mjs --launch production",
+    "stage:health-id": "node scripts/stage-health-id-build.mjs",
     "dry-run:production": "node scripts/wrangler-dry-run.mjs production",
     "dry-run:staging": "node scripts/wrangler-dry-run.mjs staging",
     "tuf:dry-run:staging": "node scripts/tuf-wrangler.mjs dry-run staging",
