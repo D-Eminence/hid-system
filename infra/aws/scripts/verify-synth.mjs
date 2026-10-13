@@ -256,6 +256,114 @@ if (issuerEnvironment) {
   assert.equal(resources('AWS::ApiGateway::RestApi').length, 0)
   assert.doesNotMatch(text, /workload-token-agent/)
 }
+// INFRA-COUNT and D17: every production task count defaults to 0 and is raised
+// only through the reviewed parameter file (I6); a module outside the enabled
+// set is pinned at 0 tasks, has no scaling policy and raises no alarm.
+const taskContainer = name => resources('AWS::ECS::TaskDefinition')
+  .filter(task => String(task.Properties.Family).endsWith(`-${name}`))
+  .flatMap(task => task.Properties.ContainerDefinitions).find(container => container.Name === name)
+const routeModules = { LabApi: 'lab', PharmacyApi: 'pharmacy', OcrApi: 'ocr', OcrWorker: 'ocr', OutreachApi: 'outreach' }
+const enabledRoutes = String(gatewayEnvironment.HID_ENABLED_API_ROUTES).split(',')
+const notificationWorkerEnabled = environment !== 'production' && process.env.HID_NOTIFICATION_WORKER_ENABLED !== 'false'
+const disabledIds = [...Object.entries(routeModules).filter(([, module]) => !enabledRoutes.includes(module)).map(([id]) => id),
+  ...(notificationWorkerEnabled ? [] : ['NotificationWorker'])]
+const desiredCounts = Object.entries(regional.Parameters).filter(([name]) => name.endsWith('DesiredCount'))
+assert.equal(desiredCounts.length, asleep ? 0 : 11)
+for (const [name, parameter] of desiredCounts) {
+  const id = name.slice(0, -'DesiredCount'.length)
+  const ceiling = regional.Parameters[`${id}ScalingCeiling`]
+  assert.ok(ceiling, `${id} must have a scaling ceiling`)
+  if (environment === 'production') {
+    assert.equal(parameter.Default, 0, `production ${name} must default to 0 tasks (ADR-032, I6)`)
+    assert.match(parameter.Description, /recommended \d+/, `${name} must keep its recommended count`)
+  }
+  if (disabledIds.includes(id)) {
+    assert.deepEqual([parameter.Default, parameter.MaxValue], [0, 0], `${name} is outside the enabled modules and stays at 0`)
+    assert.deepEqual([ceiling.Default, ceiling.MinValue, ceiling.MaxValue], [0, 0, 0], `${id} scaling is pinned at 0`)
+  } else {
+    assert.ok(parameter.MaxValue > 0, `${name} must be scalable`)
+  }
+}
+const resourceIds = Object.keys(regional.Resources)
+const scalingPolicies = resources('AWS::ApplicationAutoScaling::ScalingPolicy')
+for (const id of disabledIds) {
+  for (const prefix of [`${id}RunningTask`, `${id}LogVolume`, `${id}TargetLatency`, `${id}TargetError`, `${id}TokenRenewal`]) {
+    assert.ok(!resourceIds.some(resource => resource.startsWith(prefix)), `${id} is disabled and must have no ${prefix} resource`)
+  }
+  assert.ok(!scalingPolicies.some(policy => JSON.stringify(policy.Properties.ScalingTargetId).includes(`${id}Service`)),
+    `${id} is disabled and must have no scaling policy`)
+}
+if (disabledIds.includes('OcrWorker')) {
+  assert.ok(!resourceIds.some(resource => /^Ocr(WorkerFailure|QueueAge|DrainRate)Alarm/.test(resource)), 'OCR is disabled: no OCR alarms')
+}
+if (!notificationWorkerEnabled) {
+  assert.ok(!resourceIds.some(resource => /^NotificationQueue(Age|Backlog|Drain)Alarm/.test(resource)),
+    'the notification worker is off: no notification queue alarms')
+  assert.doesNotMatch(text, /:novuApiKey::/, 'a disabled notification worker reads nothing from the provider secret')
+}
+
+// D4 (ADR-053): in production, and wherever HID_OPERATIONAL_ALARM_TOPIC_ARN is
+// supplied, every alarm notifies the environment's own operator-created
+// topic on ALARM and on OK; otherwise no alarm has an action.
+const alarms = resources('AWS::CloudWatch::Alarm')
+const alarmTopic = { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':sns:', { Ref: 'AWS::Region' }, ':',
+  { Ref: 'AWS::AccountId' }, `:hid-${environment}-operational-alerts`]] }
+const alarmsRouted = environment === 'production' || process.env.HID_OPERATIONAL_ALARM_TOPIC_ARN !== undefined
+assert.ok(alarms.length > 0)
+for (const alarm of alarms) {
+  for (const key of ['AlarmActions', 'OKActions']) {
+    if (alarmsRouted) assert.deepEqual(alarm.Properties[key], [alarmTopic], `every alarm must notify the operational topic (${key})`)
+    else assert.equal(alarm.Properties[key], undefined, 'no alarm action without an operational topic')
+  }
+}
+if (alarmsRouted) assert.deepEqual(regional.Outputs.OperationalAlarmTopicArn?.Value, alarmTopic)
+const alarmsOn = (namespace, metricName) => alarms.filter(alarm =>
+  alarm.Properties.Namespace === namespace && alarm.Properties.MetricName === metricName)
+if (issuerEnvironment) {
+  for (const metricName of ['Errors', 'Throttles']) {
+    assert.equal(alarmsOn('AWS/Lambda', metricName).length, 1, `the issuer Lambda needs a ${metricName} alarm`)
+  }
+  for (const metricName of ['5XXError', '4XXError']) {
+    assert.equal(alarmsOn('AWS/ApiGateway', metricName).length, 1, `the issuer stage needs a ${metricName} alarm`)
+  }
+}
+const filters = resources('AWS::Logs::MetricFilter')
+if (!asleep) {
+  const otp = filters.filter(filter => filter.Properties.MetricTransformations[0].MetricName === 'OtpDefinitiveFailures')
+  assert.equal(otp.length, 1)
+  assert.equal(otp[0].Properties.FilterPattern,
+    '{ ($.event = "notification.otp.outcome") && ($.outcome = "definitive_failure") }')
+  assert.equal(alarmsOn('HID/Notification', 'OtpDefinitiveFailures').length, 1)
+  if (issuerEnvironment) {
+    const renewal = filters.filter(filter => filter.Properties.MetricTransformations[0].MetricName === 'TokenRenewalUnavailable')
+    const disabledNames = disabledIds.map(id => id.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase())
+    const enabledTokenApps = tokenTasks.map(task => task.Properties.ContainerDefinitions
+      .find(container => container.Name !== 'workload-token-agent').Name).filter(name => !disabledNames.includes(name))
+    assert.equal(renewal.length, enabledTokenApps.length, 'one renewal filter per enabled token-bearing task')
+    for (const filter of renewal) assert.equal(filter.Properties.FilterPattern, '"Workload token renewal unavailable"')
+    assert.equal(alarmsOn('HID/WorkloadIdentity', 'TokenRenewalUnavailable').length, 1)
+  }
+}
+
+// NOTIF-PROD: notification-api reads exactly its delivery profile's provider
+// fields: email-only (staging) is the SES sender; otp-email-sms is the SES
+// sender and the three Termii fields. No Meta, WhatsApp or Brevo field.
+const notificationApi = taskContainer('notification-api')
+const notificationEnvironment = Object.fromEntries(notificationApi.Environment.map(entry => [entry.Name, entry.Value]))
+assert.equal(notificationEnvironment.NOTIFICATION_DELIVERY_PROFILE, environment === 'staging' ? 'email-only' : 'otp-email-sms')
+assert.equal(notificationEnvironment.HID_DEPLOYMENT_ENV, environment)
+const providerFields = notificationApi.Secrets.map(secret => secret.ValueFrom?.['Fn::Join']?.[1])
+  .filter(parts => Array.isArray(parts) && parts[0]?.Ref === 'NotificationProviderSecretArn')
+  .map(parts => /^:([A-Za-z0-9]+)::$/.exec(String(parts[1]))?.[1]).sort()
+assert.deepEqual(providerFields, environment === 'staging' ? ['sesFromAddress']
+  : ['sesFromAddress', 'termiiApiKey', 'termiiBaseUrl', 'termiiSenderId'])
+assert.doesNotMatch(text, /:(meta[A-Za-z]+|brevo[A-Za-z]+)::/, 'no Meta, WhatsApp or Brevo provider field is read')
+
+// CFG-PROD: Identity's NIN-only enrollment flag is the explicit synth input,
+// false by default.
+assert.equal(identityApis[0].Environment.find(entry => entry.Name === 'QOREID_NIN_ONLY_ENROLLMENT_ENABLED')?.Value,
+  process.env.HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED ?? 'false')
+
 assert.equal(regional.Parameters.OriginDomainName, undefined)
 if (asleep) {
   assert.equal(regional.Parameters[contract.secret], undefined)

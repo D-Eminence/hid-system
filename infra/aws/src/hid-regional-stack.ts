@@ -9,10 +9,12 @@ import {
   Stack,
   type StackProps,
   Tags,
+  Token,
 } from 'aws-cdk-lib';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as cloudmap from 'aws-cdk-lib/aws-servicediscovery';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
@@ -27,6 +29,7 @@ import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
@@ -36,8 +39,16 @@ import {
   workloadIdentityConstructId,
   workloadIssuerEnvironment,
 } from './workload-identity.js';
-import { type HidEnvironmentConfig, vpcDnsResolver } from './config.js';
 import {
+  type HidEnvironmentConfig,
+  operationalAlarmTopic,
+  operationalAlarmTopicName,
+  vpcDnsResolver,
+  workloadEnabled,
+} from './config.js';
+import {
+  desiredCountDefault,
+  desiredCountMaximum,
   serviceHostLabels,
   tokenRoot,
   validateDatabaseConnectionBudget,
@@ -98,6 +109,22 @@ export class HidRegionalStack extends Stack {
   public constructor(scope: Construct, id: string, props: HidRegionalStackProps) {
     super(scope, id, props);
     this.configuration = props.configuration;
+
+    // D4 (ADR-053): production alarms must reach a person, so production
+    // refuses to synthesize without the operator-created topic's exact ARN.
+    const alarmTopic = operationalAlarmTopic(this.configuration.name, this.configuration.operationalAlarmTopicArn);
+    if (this.configuration.name === 'production' && !alarmTopic) {
+      throw new Error('HID_OPERATIONAL_ALARM_TOPIC_ARN is required in production: every production alarm notifies the '
+        + `operator-created topic ${operationalAlarmTopicName('production')} (D4, ADR-053)`);
+    }
+    if (alarmTopic && !Token.isUnresolved(this.account) && alarmTopic.account !== this.account) {
+      throw new Error(`The operational alarm topic must be in this stack's account ${this.account}; `
+        + `HID_OPERATIONAL_ALARM_TOPIC_ARN names account ${alarmTopic.account}`);
+    }
+    if (alarmTopic && !Token.isUnresolved(this.region) && alarmTopic.region !== this.region) {
+      throw new Error(`The operational alarm topic must be in this stack's region ${this.region}; `
+        + `HID_OPERATIONAL_ALARM_TOPIC_ARN names region ${alarmTopic.region}`);
+    }
 
     validateDatabaseConnectionBudget(
       this.configuration.profile,
@@ -433,6 +460,34 @@ export class HidRegionalStack extends Stack {
       value: Fn.join(',', vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds),
     });
 
+    if (alarmTopic) this.routeAlarmsToOperationalTopic();
+  }
+
+  /**
+   * D4 (ADR-053): every alarm in this stack, the workload issuer's included,
+   * notifies the operator-created topic on ALARM and on OK. The ARN is built
+   * from the deploying account, region and partition, so an alarm can only
+   * reach this environment's own hid-<env>-operational-alerts topic; the
+   * reviewed HID_OPERATIONAL_ALARM_TOPIC_ARN is checked against a bound
+   * account and region at synth, and the production preflight checks that the
+   * topic exists, uses a customer-managed KMS key (CloudWatch cannot publish
+   * through the AWS-managed SNS key) and has a confirmed subscription.
+   */
+  private routeAlarmsToOperationalTopic(): void {
+    const topicArn = this.formatArn({
+      service: 'sns', resource: operationalAlarmTopicName(this.configuration.name), arnFormat: ArnFormat.NO_RESOURCE_NAME,
+    });
+    const action = new cloudwatchActions.SnsAction(sns.Topic.fromTopicArn(this, 'OperationalAlarmTopic', topicArn));
+    for (const child of this.node.findAll()) {
+      if (child instanceof cloudwatch.Alarm) {
+        child.addAlarmAction(action);
+        child.addOkAction(action);
+      }
+    }
+    new CfnOutput(this, 'OperationalAlarmTopicArn', {
+      value: topicArn,
+      description: 'The SNS topic every alarm of this stack notifies; operator-created, customer-managed KMS key (ADR-053)',
+    });
   }
 
   private addParameterContract(): void {
@@ -476,9 +531,12 @@ export class HidRegionalStack extends Stack {
       this.requiredParameter('QoreIdCredentialsSecretArn',
         'Secrets Manager JSON secret containing clientId and secret for the server-only QoreID OAuth client');
     }
+    const novu = this.configuration.notificationWorkerEnabled;
     this.requiredParameter('NotificationProviderSecretArn', this.configuration.name === 'staging'
-      ? 'Secrets Manager JSON secret containing sesFromAddress and novuApiKey for staging email OTP and ordinary notifications'
-      : 'Secrets Manager JSON secret containing Novu, SES sender, Termii, Meta, and Brevo configuration');
+      ? (novu ? 'Secrets Manager JSON secret containing sesFromAddress and novuApiKey for staging email OTP and ordinary notifications'
+        : 'Secrets Manager JSON secret containing sesFromAddress for staging email OTP')
+      : 'Secrets Manager JSON secret holding exactly the otp-email-sms fields sesFromAddress, termiiBaseUrl, termiiApiKey '
+        + `and termiiSenderId (email OTP through SES, SMS OTP through Termii)${novu ? ', plus novuApiKey for the notification worker' : ''}`);
     if (this.configuration.name === 'staging') {
       const novuApiUrl = this.requiredParameter('StagingNovuApiUrl',
         'API endpoint of the confirmed isolated Novu staging environment; no implicit region selection');
@@ -488,12 +546,26 @@ export class HidRegionalStack extends Stack {
       for (const name of workloadNames) {
         const id = pascal(name);
         const scale = workloadScale(this.configuration.profile, name);
-        this.numberParameter(`${id}DesiredCount`,
-          `${name} task count after prerequisites pass; live minimum ${scale.minimumLiveTasks}, recommended ${scale.recommendedTasks}`,
-          scale.recommendedTasks, scale.normalMaxTasks);
-        this.boundedNumberParameter(`${id}ScalingCeiling`,
-          `${name} autoscaling ceiling; values above ${scale.normalMaxTasks} require externally recorded emergency approval`,
-          scale.normalMaxTasks, scale.normalMaxTasks, scale.reviewedEmergencyMaxTasks);
+        const counts = `live minimum ${scale.minimumLiveTasks}, recommended ${scale.recommendedTasks}`;
+        // INFRA-COUNT: production counts default to zero and are raised only
+        // through the reviewed parameter file (I6); a disabled module cannot
+        // be scaled at all (D17).
+        this.numberParameter(`${id}DesiredCount`, !workloadEnabled(this.configuration, name)
+          ? `${name} is outside the launch module set (D17): fixed at 0 tasks with no autoscaling until a recorded `
+            + `decision enables the module; ${counts} once enabled`
+          : this.configuration.name === 'production'
+            ? `${name} task count after prerequisites pass; ${counts}; defaults to 0 and is raised only through the `
+              + 'reviewed parameter file (I6)'
+            : `${name} task count after prerequisites pass; ${counts}`,
+        desiredCountDefault(this.configuration, name), desiredCountMaximum(this.configuration, name));
+        if (workloadEnabled(this.configuration, name)) {
+          this.boundedNumberParameter(`${id}ScalingCeiling`,
+            `${name} autoscaling ceiling; values above ${scale.normalMaxTasks} require externally recorded emergency approval`,
+            scale.normalMaxTasks, scale.normalMaxTasks, scale.reviewedEmergencyMaxTasks);
+        } else {
+          this.boundedNumberParameter(`${id}ScalingCeiling`,
+            `${name} is outside the launch module set (D17): its scaling target is pinned at 0 tasks`, 0, 0, 0);
+        }
       }
     }
 
@@ -837,6 +909,7 @@ export class HidRegionalStack extends Stack {
           NOTIFICATION_API_URL: urls['notification-api']!, NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
           NIN_PROVIDER_MODE: this.configuration.name === 'staging' ? 'deferred' : 'unavailable', NIN_KEY_VERSION: 'aws-v1', IDENTITY_SERVICE_IDENTITY_MODE: 'jwt',
           QOREID_ENABLED: this.configuration.qoreIdEnabled ? 'true' : 'false',
+          QOREID_NIN_ONLY_ENROLLMENT_ENABLED: this.configuration.qoreIdNinOnlyEnrollmentEnabled ? 'true' : 'false',
           QOREID_BASE_URL: 'https://api.qoreid.com', QOREID_TIMEOUT_MS: '5000', QOREID_MAX_RETRIES: '0',
           WORKLOAD_ISSUER_URL: issuer, WORKLOAD_JWKS_URL: jwks, WORKLOAD_AUDIENCE: 'hid-identity-api',
           IDENTITY_EHR_CALLER_SUBJECT: subjects.ehr, IDENTITY_LAB_CALLER_SUBJECT: subjects.lab,
@@ -876,9 +949,10 @@ export class HidRegionalStack extends Stack {
           OUTREACH_IDENTITY_SERVICE_IDENTITY_MODE: 'jwt' };
       case 'notification-api':
         return { NODE_ENV: 'production', PORT: '3007', NOTIFICATION_PROVIDER_MODE: 'live',
-          ...(this.configuration.name === 'staging' ? {
-            HID_DEPLOYMENT_ENV: 'staging', NOTIFICATION_DELIVERY_PROFILE: 'email-only',
-          } : {}),
+          // NOTIF-PROD: launch OTP is email through SES and SMS through
+          // Termii; WhatsApp, Meta and Brevo are not provisioned.
+          HID_DEPLOYMENT_ENV: this.configuration.name,
+          NOTIFICATION_DELIVERY_PROFILE: this.configuration.name === 'staging' ? 'email-only' : 'otp-email-sms',
           NOTIFICATION_WORKLOAD_IDENTITY_MODE: 'jwt', WORKLOAD_ISSUER_URL: issuer,
           WORKLOAD_JWKS_URL: jwks, WORKLOAD_AUDIENCE: 'hid-notification-api',
           IDENTITY_CALLER_SUBJECT: subjects.identity, AWS_REGION: Aws.REGION };
@@ -968,19 +1042,19 @@ export class HidRegionalStack extends Stack {
       output.WORKLOAD_DATABASE_URL = ecs.Secret.fromSecretsManager(secrets[`${name}Database`]!, 'scannerUrl');
     }
     if (name === 'notification-api') {
+      // Exactly the fields the delivery profile reads: email-only (staging)
+      // or otp-email-sms (SES and Termii). The production preflight checks the
+      // secret holds exactly these.
       const providerFields = this.configuration.name === 'staging' ? { SES_FROM_ADDRESS: 'sesFromAddress' } : {
         SES_FROM_ADDRESS: 'sesFromAddress', TERMII_BASE_URL: 'termiiBaseUrl',
         TERMII_API_KEY: 'termiiApiKey', TERMII_SENDER_ID: 'termiiSenderId',
-        META_PHONE_NUMBER_ID: 'metaPhoneNumberId', META_ACCESS_TOKEN: 'metaAccessToken',
-        META_OTP_TEMPLATE_NAME: 'metaOtpTemplateName', BREVO_API_KEY: 'brevoApiKey',
-        BREVO_EMAIL_FROM: 'brevoEmailFrom', BREVO_SMS_SENDER: 'brevoSmsSender',
-        BREVO_WHATSAPP_SENDER: 'brevoWhatsAppSender',
       };
       for (const [environmentName, field] of Object.entries(providerFields)) {
         output[environmentName] = ecs.Secret.fromSecretsManager(secrets.notificationProvider!, field);
       }
     }
-    if (name === 'notification-worker') {
+    // A disabled worker never starts and reads nothing from the provider secret.
+    if (name === 'notification-worker' && this.configuration.notificationWorkerEnabled) {
       output.NOVU_API_KEY = ecs.Secret.fromSecretsManager(secrets.notificationProvider!, 'novuApiKey');
     }
     return output;
@@ -1154,6 +1228,10 @@ export class HidRegionalStack extends Stack {
         minCapacity: desiredCount,
         maxCapacity: this.parameter(`${id}ScalingCeiling`).valueAsNumber,
       });
+      // A disabled module's target is pinned at 0..0 by its parameters and has
+      // no scaling policy, so nothing can start it, not even a queue backlog
+      // (D17).
+      if (!workloadEnabled(this.configuration, name)) continue;
       const cooldowns = {
         scaleInCooldown: Duration.seconds(definition.scaleInCooldownSeconds),
         scaleOutCooldown: Duration.seconds(definition.scaleOutCooldownSeconds),
@@ -1375,8 +1453,13 @@ export class HidRegionalStack extends Stack {
 
   private createRuntimeAlarms(resources: Map<WorkloadName, RuntimeResource>): void {
     if (this.configuration.profile === 'sleep') return;
-    for (const name of ['gateway', 'identity-api', 'ehr-api', 'ocr-worker',
-      'notification-api', 'notification-worker', 'event-dispatcher'] as const) {
+    // A disabled module's tasks never run, so none of its alarms is created
+    // (D17): a running-task alarm would otherwise stay in ALARM for good.
+    const enabled = (name: WorkloadName) => workloadEnabled(this.configuration, name);
+    const ocrEnabled = enabled('ocr-worker');
+    const notificationWorkerEnabled = enabled('notification-worker');
+    for (const name of (['gateway', 'identity-api', 'ehr-api', 'ocr-worker',
+      'notification-api', 'notification-worker', 'event-dispatcher'] as const).filter(enabled)) {
       const resource = resources.get(name)!;
       const metric = new cloudwatch.Metric({
         namespace: 'ECS/ContainerInsights',
@@ -1420,14 +1503,16 @@ export class HidRegionalStack extends Stack {
       metricValue: '1',
       defaultValue: 0,
     });
-    const ocrFailures = new cloudwatch.Alarm(this, 'OcrWorkerFailureAlarm', {
-      alarmDescription: 'OCR worker loop failures exceed the bounded threshold; no OCR text is emitted',
-      metric: ocrFailureMetric.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
-      threshold: 3,
-      evaluationPeriods: 2,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-    this.tagService(ocrFailures, 'ocr-worker');
+    if (ocrEnabled) {
+      const ocrFailures = new cloudwatch.Alarm(this, 'OcrWorkerFailureAlarm', {
+        alarmDescription: 'OCR worker loop failures exceed the bounded threshold; no OCR text is emitted',
+        metric: ocrFailureMetric.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+        threshold: 3,
+        evaluationPeriods: 2,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      this.tagService(ocrFailures, 'ocr-worker');
+    }
 
     const structuredLogMetric = (id: string, logGroup: logs.ILogGroup, event: string,
       namespace: string, metricName: string, metricValue: string): logs.MetricFilter =>
@@ -1466,6 +1551,105 @@ export class HidRegionalStack extends Stack {
     structuredLogMetric('DispatcherDrainRateMetric', dispatcherLogGroup, 'event_dispatcher.backlog',
       'HID/EventDelivery', 'DrainRate', '$.drainRate');
 
+    this.createDeliveryAlarms(resources);
+
+    if (notificationWorkerEnabled) this.createNotificationQueueAlarms();
+    for (const [id, namespace, metricName, threshold, service] of [
+      ['OcrQueueAgeAlarm', 'HID/OCR', 'OldestQueueAgeSeconds', 300, 'ocr-worker'],
+      ['OcrDrainRateAlarm', 'HID/OCR', 'ClaimThroughput', 1, 'ocr-worker'],
+      ['DispatcherOutboxAgeAlarm', 'HID/EventDelivery', 'OldestPendingAgeSeconds', 300, 'event-dispatcher'],
+      ['DispatcherDrainRateAlarm', 'HID/EventDelivery', 'DrainRate', 1, 'event-dispatcher'],
+    ] as const) {
+      if (service === 'ocr-worker' && !ocrEnabled) continue;
+      const alarm = new cloudwatch.Alarm(this, id, {
+        alarmDescription: `${service} PHI-free backlog/drain boundary requires operator review`,
+        metric: this.operationalMetric(namespace, metricName),
+        threshold,
+        comparisonOperator: metricName.includes('Age')
+          ? cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD
+          : cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        evaluationPeriods: 3,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      this.tagService(alarm, service);
+    }
+
+    for (const [name, resource] of [...resources].filter(([name]) => enabled(name))) {
+      const alarm = new cloudwatch.Alarm(this, `${pascal(name)}LogVolumeAlarm`, {
+        alarmDescription: `${name} log ingestion volume requires scan/retention review; logs must remain PHI-free`,
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Logs', metricName: 'IncomingBytes', statistic: 'Sum',
+          dimensionsMap: { LogGroupName: resource.logGroup.logGroupName }, period: Duration.minutes(5),
+        }),
+        threshold: this.configuration.name === 'production' ? 2_000_000_000 : 500_000_000,
+        evaluationPeriods: 2,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      this.tagService(alarm, name);
+    }
+  }
+
+  /**
+   * D4 and NOTIF-PROD: an alarm on token renewal failures and on definitive
+   * OTP delivery failures. Both count PHI-free log lines only.
+   */
+  private createDeliveryAlarms(resources: Map<WorkloadName, RuntimeResource>): void {
+    // The token agent writes one plain-text stderr line per failed renewal
+    // (services/workload-token-agent/src/main.mjs) and never its error. Each
+    // enabled token task's log group feeds one aggregate metric; development
+    // has no agent.
+    if (this.workloadIdentity) {
+      const renewalPhrase = 'Workload token renewal unavailable';
+      const filters = workloadNames
+        .filter(name => Object.keys(workloads[name].tokenFiles).length > 0 && workloadEnabled(this.configuration, name))
+        .map(name => new logs.MetricFilter(this, `${pascal(name)}TokenRenewalUnavailableMetric`, {
+          logGroup: resources.get(name)!.logGroup,
+          filterPattern: logs.FilterPattern.allTerms(renewalPhrase),
+          metricNamespace: 'HID/WorkloadIdentity',
+          metricName: 'TokenRenewalUnavailable',
+          metricValue: '1',
+          defaultValue: 0,
+        }));
+      if (filters.length > 0) {
+        const renewal = new cloudwatch.Alarm(this, 'WorkloadTokenRenewalAlarm', {
+          alarmDescription: 'Workload token renewal is failing; service-to-service calls fail closed once tokens expire '
+            + '(about 210 s of slack). Check the issuer alarms and the token-bearing tasks (runbook section 7)',
+          metric: filters[0]!.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+          threshold: 3,
+          comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+          evaluationPeriods: 1,
+          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        });
+        this.tagService(renewal, 'workload-token-agent');
+      }
+    }
+    // notification-api writes one notification.otp.outcome line per OTP send
+    // with channel, purpose, outcome, provider and a correlation id; never the
+    // recipient, the code or the message.
+    const otpFailures = new logs.MetricFilter(this, 'NotificationOtpDefinitiveFailureMetric', {
+      logGroup: resources.get('notification-api')!.logGroup,
+      filterPattern: logs.FilterPattern.all(
+        logs.FilterPattern.stringValue('$.event', '=', 'notification.otp.outcome'),
+        logs.FilterPattern.stringValue('$.outcome', '=', 'definitive_failure'),
+      ),
+      metricNamespace: 'HID/Notification',
+      metricName: 'OtpDefinitiveFailures',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const otp = new cloudwatch.Alarm(this, 'NotificationOtpDefinitiveFailureAlarm', {
+      alarmDescription: 'OTP deliveries are failing definitively (provider refusal or a refused send); enrollment and '
+        + 'recovery codes are not reaching people. Correlate by the logged correlation id',
+      metric: otpFailures.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    this.tagService(otp, 'notification-api');
+  }
+
+  private createNotificationQueueAlarms(): void {
     const notificationAge = new cloudwatch.Alarm(this, 'NotificationQueueAgeAlarm', {
       alarmDescription: 'Ordinary notification queue oldest message age exceeds the drain objective',
       metric: this.notificationQueue.metricApproximateAgeOfOldestMessage({ period: Duration.minutes(1) }),
@@ -1501,38 +1685,6 @@ export class HidRegionalStack extends Stack {
     });
     this.tagService(notificationBacklog, 'notification-worker');
     this.tagService(notificationDrain, 'notification-worker');
-    for (const [id, namespace, metricName, threshold, service] of [
-      ['OcrQueueAgeAlarm', 'HID/OCR', 'OldestQueueAgeSeconds', 300, 'ocr-worker'],
-      ['OcrDrainRateAlarm', 'HID/OCR', 'ClaimThroughput', 1, 'ocr-worker'],
-      ['DispatcherOutboxAgeAlarm', 'HID/EventDelivery', 'OldestPendingAgeSeconds', 300, 'event-dispatcher'],
-      ['DispatcherDrainRateAlarm', 'HID/EventDelivery', 'DrainRate', 1, 'event-dispatcher'],
-    ] as const) {
-      const alarm = new cloudwatch.Alarm(this, id, {
-        alarmDescription: `${service} PHI-free backlog/drain boundary requires operator review`,
-        metric: this.operationalMetric(namespace, metricName),
-        threshold,
-        comparisonOperator: metricName.includes('Age')
-          ? cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD
-          : cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
-        evaluationPeriods: 3,
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      });
-      this.tagService(alarm, service);
-    }
-
-    for (const [name, resource] of resources) {
-      const alarm = new cloudwatch.Alarm(this, `${pascal(name)}LogVolumeAlarm`, {
-        alarmDescription: `${name} log ingestion volume requires scan/retention review; logs must remain PHI-free`,
-        metric: new cloudwatch.Metric({
-          namespace: 'AWS/Logs', metricName: 'IncomingBytes', statistic: 'Sum',
-          dimensionsMap: { LogGroupName: resource.logGroup.logGroupName }, period: Duration.minutes(5),
-        }),
-        threshold: this.configuration.name === 'production' ? 2_000_000_000 : 500_000_000,
-        evaluationPeriods: 2,
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      });
-      this.tagService(alarm, name);
-    }
   }
 
   private tagService(resource: Construct, service: string): void {

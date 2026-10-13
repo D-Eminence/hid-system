@@ -1,5 +1,5 @@
 import type { HidEnvironmentConfig } from './config.js';
-import { workloadNames, workloads, workloadScale } from './workloads.js';
+import { desiredCountDefault, workloadNames, workloads, workloadScale } from './workloads.js';
 
 export interface CostInventory {
   readonly environment: string;
@@ -42,7 +42,7 @@ export function costInventory(configuration: HidEnvironmentConfig): CostInventor
       ? configuration.natGateways + configuration.availabilityZones : 0,
     ecsTasks: Object.fromEntries(workloadNames.map((name) => {
       const scale = workloadScale(configuration.profile, name);
-      return [name, { cloudFormationDefault: scale.recommendedTasks, minimumLive: scale.minimumLiveTasks,
+      return [name, { cloudFormationDefault: desiredCountDefault(configuration, name), minimumLive: scale.minimumLiveTasks,
         recommended: scale.recommendedTasks, normalMax: scale.normalMaxTasks,
         reviewedEmergencyMax: scale.reviewedEmergencyMaxTasks }];
     })),

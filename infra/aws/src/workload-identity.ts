@@ -1,5 +1,6 @@
 import { Aws, CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -135,6 +136,7 @@ export class WorkloadIdentity extends Construct {
     this.issuer.addEnvironment('WORKLOAD_ISSUER_URL', this.issuerUrl);
     this.issuer.addEnvironment('WORKLOAD_API_ID', this.api.restApiId);
     if (props.allowedSourceAddresses) this.allowOnly(environment, props.allowedSourceAddresses);
+    this.createAlarms(environment);
     new CfnOutput(this, 'IssuerUrl', { value: this.issuerUrl });
     new CfnOutput(this, 'JwksUrl', { value: this.jwksUrl });
   }
@@ -167,6 +169,35 @@ export class WorkloadIdentity extends Construct {
     new wafv2.CfnWebACLAssociation(this, 'IssuerWebAclAssociation', {
       resourceArn: this.api.deploymentStage.stageArn, webAclArn: acl.attrArn,
     });
+  }
+
+  /**
+   * D4: the issuer's own failure signals. The regional stack routes every
+   * alarm, these included, to the operational topic in production. REST API
+   * Gateway publishes no separate 429 metric: a throttled request counts in
+   * 4XXError, as do IAM refusals and, while it reaches the stage, a flood.
+   */
+  private createAlarms(environment: WorkloadIssuerEnvironment): void {
+    const period = Duration.minutes(5);
+    const stage = this.api.deploymentStage;
+    const alarms: Array<[string, string, cloudwatch.IMetric, number]> = [
+      ['IssuerErrorsAlarm', 'The workload issuer Lambda is failing; token renewal fails closed once tokens expire',
+        this.issuer.metricErrors({ period, statistic: 'Sum' }), 1],
+      ['IssuerThrottlesAlarm', 'The workload issuer Lambda is throttled (reserved concurrency or account limit)',
+        this.issuer.metricThrottles({ period, statistic: 'Sum' }), 1],
+      ['IssuerApi5xxAlarm', `The ${environment} workload issuer stage returns 5XX`,
+        stage.metricServerError({ period, statistic: 'Sum' }), 1],
+      ['IssuerApi4xxAlarm', `The ${environment} workload issuer stage returns 4XX: throttled (429) or refused requests`,
+        stage.metricClientError({ period, statistic: 'Sum' }), 20],
+    ];
+    for (const [id, alarmDescription, metric, threshold] of alarms) {
+      new cloudwatch.Alarm(this, id, {
+        alarmDescription, metric, threshold,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+    }
   }
 
   /** The exact JWT subject of a caller in this environment. */

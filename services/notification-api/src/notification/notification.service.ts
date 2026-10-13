@@ -1,4 +1,5 @@
-import { BadRequestException, Inject, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, HttpException, Inject, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { getEnvironment, type Environment } from '../config/environment';
 import { BrevoFallbackProvider } from '../providers/brevo.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
@@ -8,10 +9,22 @@ import { TermiiSmsProvider } from '../providers/termii.provider';
 
 const NOTIFICATION_PROVIDER_OVERRIDES = Symbol('NOTIFICATION_PROVIDER_OVERRIDES');
 type ProviderName = 'ses' | 'termii' | 'meta-whatsapp' | 'brevo';
+export type DeliveryResult = { primary: ProviderResult; fallback?: ProviderResult; outcome: ProviderResult['outcome'] };
 type DeliveryPlan = { capability: OtpMessage['channel']; primary: ProviderName; fallback: ProviderName | null;
   configuration: Partial<Record<ProviderName, Record<string, string>>> };
 const supported: Record<OtpMessage['channel'], readonly ProviderName[]> = {
   email: ['ses', 'brevo'], sms: ['termii', 'brevo'], whatsapp: ['meta-whatsapp', 'brevo'],
+};
+// Provider result codes that are fixed vocabulary, never provider text: the
+// codes the adapters return and the SES exception names they classify.
+const loggableSafeCodes = new Set(['not_configured', 'channel_not_configured', 'transport_error', 'timeout',
+  'missing_message_id', 'unsupported_message', 'providers_disabled', 'BadRequestException', 'MessageRejected',
+  'MailFromDomainNotVerifiedException', 'NotFoundException', 'AccountSuspendedException', 'SendingPausedException',
+  // A send this service refused (4xx) or could not route (policy unavailable).
+  'refused', 'unavailable']);
+type OtpOutcome = 'accepted' | 'retryable_failure' | 'definitive_failure';
+const otpOutcome: Record<ProviderResult['outcome'], OtpOutcome> = {
+  accepted: 'accepted', unknown: 'retryable_failure', definitive_failure: 'definitive_failure',
 };
 const settings: Record<ProviderName, Record<string, RegExp>> = {
   ses: { fromAddress: /^[^\s@]+@[^\s@]+\.[^\s@]+$/ },
@@ -42,9 +55,44 @@ export class NotificationService {
     this.fallback = providers?.fallback ?? new BrevoFallbackProvider(this.environment);
   }
 
-  async deliverOtp(message: OtpMessage, rawPlan?: unknown): Promise<{ primary: ProviderResult; fallback?: ProviderResult; outcome: ProviderResult['outcome'] }> {
+  /**
+   * Delivers one OTP and writes exactly one PHI-free `notification.otp.outcome`
+   * line for it (D4, NOTIF-PROD): channel, purpose, outcome, the provider that
+   * answered last, whether the fallback ran, a correlation id and a fixed safe
+   * code. Never the recipient, the code, the message or provider text. The
+   * CloudWatch metric filter counts `definitive_failure` lines.
+   */
+  async deliverOtp(message: OtpMessage, rawPlan?: unknown, correlationId: string = randomUUID()): Promise<DeliveryResult> {
+    let result: DeliveryResult;
+    try {
+      result = await this.deliver(message, rawPlan);
+    } catch (error) {
+      // A refused or unroutable send reaches nobody: the operator must see it.
+      this.logOtpOutcome(message, correlationId, 'definitive_failure', 'none', false,
+        error instanceof HttpException && error.getStatus() < 500 ? 'refused' : 'unavailable');
+      throw error;
+    }
+    const last = result.fallback ?? result.primary;
+    this.logOtpOutcome(message, correlationId, otpOutcome[result.outcome], last.provider, Boolean(result.fallback), last.safeCode);
+    return result;
+  }
+
+  private logOtpOutcome(message: OtpMessage, correlationId: string, outcome: OtpOutcome, provider: string,
+    fallbackUsed: boolean, safeCode?: string): void {
+    process.stdout.write(`${JSON.stringify({
+      event: 'notification.otp.outcome', channel: message.channel,
+      purpose: /^[A-Z_]{3,64}$/.test(message.purpose) ? message.purpose : 'unknown',
+      outcome, provider, fallbackUsed, correlationId,
+      ...(safeCode !== undefined && (loggableSafeCodes.has(safeCode) || /^http_\d{3}$/.test(safeCode)) ? { safeCode } : {}),
+    })}\n`);
+  }
+
+  private async deliver(message: OtpMessage, rawPlan?: unknown): Promise<DeliveryResult> {
     if (this.environment.NOTIFICATION_DELIVERY_PROFILE === 'email-only' && message.channel !== 'email') {
       throw new BadRequestException('This delivery profile supports email OTP only');
+    }
+    if (this.environment.NOTIFICATION_DELIVERY_PROFILE === 'otp-email-sms' && message.channel === 'whatsapp') {
+      throw new BadRequestException('This delivery profile supports email and SMS OTP only');
     }
     if (this.environment.NOTIFICATION_PROVIDER_MODE === 'disabled') {
       return { primary: { outcome: 'definitive_failure', provider: 'disabled-test', safeCode: 'providers_disabled' }, outcome: 'definitive_failure' };
@@ -78,8 +126,8 @@ export class NotificationService {
     facilityName: string | null;
     occurredAt: Date;
     idempotencyKey: string;
-  }, rawPlan?: unknown) {
-    return this.deliverOtp({
+  }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
       channel: input.channel, recipient: input.recipient, code: '', purpose: 'EMERGENCY_CONTACT_ALERT',
       idempotencyKey: input.idempotencyKey,
       content: emergencyContactAlertContent({

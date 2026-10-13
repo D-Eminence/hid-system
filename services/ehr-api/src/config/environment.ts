@@ -132,6 +132,9 @@ const environmentSchema = z
     if (environment.NODE_ENV === 'production') {
       if (environment.NODE_TLS_REJECT_UNAUTHORIZED === '0') context.addIssue({ code: 'custom',
         path: ['NODE_TLS_REJECT_UNAUTHORIZED'], message: 'Production TLS verification cannot be disabled globally' });
+      // CFG-PROD: production reaches S3 only with the ECS task role.
+      if (environment.S3_ACCESS_KEY_ID || environment.S3_SECRET_ACCESS_KEY) context.addIssue({ code: 'custom',
+        path: ['S3_ACCESS_KEY_ID'], message: 'Static S3 credentials are forbidden in production; use the ECS task role' });
       for (const [key, value] of [['DATABASE_URL', environment.DATABASE_URL],
         ['WORKLOAD_DATABASE_URL', environment.WORKLOAD_DATABASE_URL]] as const) {
         if (value && databaseUrlOverridesTls(value)) context.addIssue({ code: 'custom', path: [key],
