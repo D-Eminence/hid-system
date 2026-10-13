@@ -96,6 +96,11 @@ const acceptedMigrations = new Map([
   ['0082_purpose_of_use_vocabulary.sql', 'bd3c730051405860fd4cb4feacb5bde259eb627b45724433e44196c9403f9351'],
   ['0083_ocr_claim_in_body_variable_conflict.sql', '0c9e0c70cb643877e31c0b831a41960e3f23cb7c6120a9a431bc96e068502583'],
   ['0084_ehr_clinical_safety_and_launch_modules.sql', 'f2cb745300e3487ca42c9dcb396a93dfa777b503e421b2e221cee5181bcec323'],
+  ['0085_public_enrollment_windows_and_nin_lookup_quota.sql', 'e752dc338d78d9183ad937628a1fe53b31c28a60f664bd6479617e6664cc0e8e'],
+  ['0086_recovery_and_patient_search_hardening.sql', '5b88e307d85095b8b9cca94211fc03ebfe5560ba04ace1772fa1208ae24ab10d'],
+  ['0087_governed_workforce_provisioning.sql', '8cca718db0a91ce8bc5917102164a8fefc7082d6cf836257c7f452bd89d72cf9'],
+  ['0088_staff_mfa_sessions.sql', 'a4c07736768147bc24d0d374f8a002791faa7323e6fd96706fd79b89ef1f3ed8'],
+  ['0089_session_facility_selection.sql', 'a90b3a60f21df3e5b6233302ed7f7ab67cb320f89c5b883a22dea3982ca3c5cf'],
   ['0090_ehr_retraction_integrity.sql', 'dbde76ea8cfcd237653a4d776bb195d19fa66eb411f732d8d8191a3c5241e3c7'],
 ])
 

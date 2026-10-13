@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload } from 'jose';
 import type { PoolClient } from 'pg';
+import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import type { ActorContext } from '../common/request-context';
@@ -9,6 +10,7 @@ import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
 import { CurrentStaffContextService, eligibleStaffMembershipJoins } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
+import { databaseMessage, isDatabaseError } from '../patient-safety/database-error';
 import { classifyPlatformSessionEnd, platformSessionEnded, type StoredPlatformSessionState } from './platform-session-end';
 
 type SessionKind = 'staff' | 'patient' | 'platform';
@@ -37,7 +39,7 @@ export type SessionEventType =
   | 'mfa_recovery_code_used' | 'mfa_recovery_codes_regenerated' | 'step_up_verified' | 'step_up_failed'
   | 'mfa_rate_limited';
 
-/** MFA evidence for a new platform session, verified by MfaService in the same transaction. */
+/** MFA evidence for a new platform or staff session, verified by MfaService in the same transaction. */
 export interface PlatformSessionAssurance {
   accountId: string;
   subject: string;
@@ -62,6 +64,18 @@ export interface SessionEventMetadata {
   pepperVersion?: number;
 }
 
+/** MFA evidence for a new staff session (0088): the same shape as a platform session's. */
+export type StaffSessionAssurance = PlatformSessionAssurance;
+
+/**
+ * The 403 for a staff session without live MFA assurance (MFA-1, 0088): a
+ * sign-in from before staff MFA, or one whose authenticator was reset. The
+ * client signs in again with the password and an authenticator code.
+ */
+export function staffMfaRequired(): DomainProblem {
+  return new DomainProblem(403, 'STAFF_MFA_REQUIRED', 'Sign in again with your authenticator code to continue');
+}
+
 /** The sign-in a refresh-cookie sign-out ended. */
 export interface RefreshSignOut {
   sessionId: string;
@@ -69,6 +83,22 @@ export interface RefreshSignOut {
   actorSubject: string;
   kind: 'staff' | 'patient';
 }
+
+/** A staff sign-in's choice of working facility (0089), and the membership it was made under. */
+export interface FacilitySelectionInput {
+  sessionId: string;
+  accountId: string;
+  facilityId: string;
+  membershipId: string;
+}
+
+/**
+ * How recordFacilitySelection ended: stored; the session is no longer a live
+ * staff session of the account (a sign-out or revocation got there first); or
+ * the database guard refused the membership, which ended after the request
+ * was authorized. Only 'selected' wrote anything.
+ */
+export type FacilitySelectionOutcome = 'selected' | 'session_ended' | 'refused';
 
 @Injectable()
 export class TokenService {
@@ -108,12 +138,26 @@ export class TokenService {
             else false end`;
 
   /**
+   * A staff sign-in has live MFA assurance (0088): its family has an assurance
+   * row whose factor is still active, so the authenticator that verified it
+   * was not reset. Platform sessions require it in assertSessionActive and in
+   * refresh(); a patient sign-in has none and needs none.
+   */
+  private static readonly STAFF_ASSURED = `(session.session_kind <> 'staff' or exists (select 1
+            from auth.session_assurance assurance
+            join auth.mfa_factors factor
+              on factor.id = assurance.mfa_factor_id and factor.account_id = assurance.account_id
+             and factor.status = 'active'
+           where assurance.family_id = session.family_id and assurance.account_id = session.account_id))`;
+
+  /**
    * The presented session's sign-in is one refresh() could renew now, so the
    * app that holds it may be named: its account is live, it has not reached
    * its absolute end, its own session is live or was rotated within the last
    * $2 (ROTATED_KIND_GRACE_SECONDS) seconds into a sign-in that is (the other
-   * app's tab refreshed first), and refresh() could resolve its actor
-   * (ACTOR_RESOLVES). An older rotated token is reuse.
+   * app's tab refreshed first), refresh() could resolve its actor
+   * (ACTOR_RESOLVES), and a staff sign-in has live MFA assurance
+   * (STAFF_ASSURED). An older rotated token is reuse.
    */
   private static readonly RENEWABLE = `${TokenService.ACCOUNT_LIVE}
           and session.absolute_expires_at > clock_timestamp()
@@ -121,7 +165,8 @@ export class TokenService {
             or (session.revocation_reason = 'rotated'
               and session.revoked_at > clock_timestamp() - make_interval(secs => $2)
               and ${TokenService.FAMILY_LIVE}))
-          and ${TokenService.ACTOR_RESOLVES}`;
+          and ${TokenService.ACTOR_RESOLVES}
+          and ${TokenService.STAFF_ASSURED}`;
 
   private readonly environment = getEnvironment();
   private readonly signingKey = this.environment.AUTH_SIGNING_SECRET
@@ -137,7 +182,16 @@ export class TokenService {
     private readonly currentPatient?: CurrentPatientContextService,
   ) {}
 
+  /**
+   * Issues a patient session after its credential was verified (password or
+   * a mapped Google identity). A staff session is never issued here: only
+   * issueStaffSession issues one, after its second factor (MFA-1, 0088), so
+   * no path issues a staff session from a password or an ID token alone.
+   */
   async issue(identity: CredentialIdentity, event: SessionEventMetadata): Promise<LoginResult> {
+    if ((identity.actorKind ?? 'staff') !== 'patient') {
+      throw new UnauthorizedException('A staff session requires multi-factor authentication');
+    }
     const authenticationMethod = identity.authenticationMethod;
     const resolvedActor = await this.resolveActor(
       identity.subject,
@@ -213,10 +267,29 @@ export class TokenService {
    * The session has the platform idle and absolute lifetimes, binds no
    * facility, and records its MFA evidence in auth.session_assurance.
    */
-  async issuePlatformSession(client: PoolClient, assurance: PlatformSessionAssurance,
+  issuePlatformSession(client: PoolClient, assurance: PlatformSessionAssurance,
     event: SessionEventMetadata): Promise<LoginResult> {
+    return this.issueAssuredSession(client, 'platform', assurance, event);
+  }
+
+  /**
+   * Issues a staff session (MFA-1, 0088) inside the caller's transaction,
+   * after the password and a second factor were verified there. The session
+   * has the standard lifetimes and the staff actor's facility memberships, and
+   * records its MFA evidence in auth.session_assurance; no staff session is
+   * issued any other way.
+   */
+  issueStaffSession(client: PoolClient, assurance: StaffSessionAssurance,
+    event: SessionEventMetadata): Promise<LoginResult> {
+    return this.issueAssuredSession(client, 'staff', assurance, event);
+  }
+
+  private async issueAssuredSession(client: PoolClient, kind: 'platform' | 'staff',
+    assurance: PlatformSessionAssurance, event: SessionEventMetadata): Promise<LoginResult> {
     // On this transaction's client: the caller holds the account row lock (Stage 7A).
-    const resolved = await this.currentStaff.resolvePlatform(assurance.subject, undefined, client);
+    const resolved = kind === 'platform'
+      ? await this.currentStaff.resolvePlatform(assurance.subject, undefined, client)
+      : await this.currentStaff.resolve(assurance.subject, 'local', undefined, undefined, client);
     if (resolved.accountId !== assurance.accountId) {
       throw new UnauthorizedException('Resolved account does not match the authenticated identity');
     }
@@ -233,7 +306,7 @@ export class TokenService {
     const refreshToken = this.newRefreshToken(sessionId, 'local');
     const csrfToken = this.deriveRefreshCsrf(refreshToken);
     const now = new Date();
-    const lifetimes = this.lifetimes('platform');
+    const lifetimes = this.lifetimes(kind);
     const expiresAt = new Date(now.getTime() + lifetimes.access * 1_000);
     const refreshExpiresAt = new Date(now.getTime() + lifetimes.refresh * 1_000);
     const absoluteExpiresAt = new Date(now.getTime() + lifetimes.absolute * 1_000);
@@ -241,7 +314,7 @@ export class TokenService {
     const accessToken = await this.signAccessToken(actor, sessionId, accessJti, tokenVersion, csrfToken, expiresAt);
     await this.insertSession(client, {
       id: sessionId, accountId: assurance.accountId, familyId: sessionId, refreshToken, accessJti,
-      accountTokenVersion: tokenVersion, authenticationMethod: 'local', actorKind: 'platform',
+      accountTokenVersion: tokenVersion, authenticationMethod: 'local', actorKind: kind,
       issuedAt: now, expiresAt: refreshExpiresAt, absoluteExpiresAt, event,
     });
     await client.query(
@@ -251,9 +324,11 @@ export class TokenService {
     );
     await this.insertSessionEvent(client, {
       eventType: 'login_succeeded', outcome: 'success', accountId: assurance.accountId, sessionId, event,
-      details: { session_kind: 'platform', mfa_method: assurance.method },
+      details: { session_kind: kind, mfa_method: assurance.method },
     });
-    return { actor, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt, absoluteExpiresAt };
+    return kind === 'platform'
+      ? { actor, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt, absoluteExpiresAt }
+      : { actor, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt };
   }
 
   /**
@@ -318,9 +393,15 @@ export class TokenService {
     if (this.databaseMethod(authenticationMethod) !== oldSession.authentication_method) {
       throw new UnauthorizedException('Invalid refresh session');
     }
-    if (kind === 'platform' && !(await this.platformAssuranceActive(oldSession.family_id, oldSession.account_id))) {
+    if (kind === 'platform' && !(await this.assuranceActive(oldSession.family_id, oldSession.account_id))) {
       // The authenticator that verified this sign-in was reset.
       throw platformSessionEnded('revoked');
+    }
+    if (kind === 'staff' && !(await this.assuranceActive(oldSession.family_id, oldSession.account_id))) {
+      // A staff sign-in from before staff MFA (0088), or one whose
+      // authenticator was reset: it is ended, not renewed.
+      await this.endUnassuredStaffSignIn(oldSession, event);
+      throw staffMfaRequired();
     }
     const actor = await this.resolveActor(oldSession.actor_subject, authenticationMethod, kind);
     if (actor.accountId !== oldSession.account_id) {
@@ -410,10 +491,17 @@ export class TokenService {
    * validly signed platform token whose session ended is answered with
    * PLATFORM_SESSION_EXPIRED or PLATFORM_SESSION_REVOKED; every other refusal
    * stays generic.
+   *
+   * `mfaAssured` says whether the session's family has live MFA assurance (an
+   * assurance row whose factor is still active): always true for a platform
+   * session, which is refused without it, and false for a patient session and
+   * for an OIDC-mode token, which have none. A staff session without it is
+   * still a session here (it may sign out), but SecurityGuard authorizes
+   * nothing for it (STAFF_MFA_REQUIRED, MFA-1).
    */
   async verify(token: string, scope: 'standard' | 'platform' = 'standard'):
-    Promise<{ actor: ActorContext; claims: HidJwtClaims | JWTPayload }> {
-    if (this.environment.AUTH_MODE === 'oidc') return this.verifyOidc(token);
+    Promise<{ actor: ActorContext; claims: HidJwtClaims | JWTPayload; mfaAssured: boolean }> {
+    if (this.environment.AUTH_MODE === 'oidc') return { ...await this.verifyOidc(token), mfaAssured: false };
     if (!this.signingKey) throw new UnauthorizedException('Token verification is unavailable');
     const { payload } = await jwtVerify(token, this.signingKey, {
       issuer: this.environment.AUTH_ISSUER,
@@ -421,12 +509,12 @@ export class TokenService {
       algorithms: ['HS256'],
     }).catch(() => { throw new UnauthorizedException('Invalid or expired access token'); });
     const claims = this.parseInternalClaims(payload);
-    await this.assertSessionActive(claims, scope);
+    const mfaAssured = await this.assertSessionActive(claims, scope);
     const actor = await this.resolveActor(claims.sub, claims.auth_method, claims.actor_kind ?? 'staff', claims.sid);
     if (actor.kind === 'patient' && actor.patientId !== claims.patient_id) {
       throw new UnauthorizedException('Patient account association changed');
     }
-    return { actor, claims };
+    return { actor, claims, mfaAssured };
   }
 
   async revoke(
@@ -561,6 +649,76 @@ export class TokenService {
     return result.rows[0]?.session_kind;
   }
 
+  /**
+   * Stores a staff sign-in's choice of working facility (0089), keyed by its
+   * session family, so refresh (which keeps the family) keeps it and another
+   * sign-in of the account does not see it. A new choice replaces the old.
+   *
+   * The account row is locked first (0073), as sign-out and every revocation
+   * lock it, and the row is written only for the presented session while it is
+   * a live staff session of the account: so no selection is written for a
+   * sign-in a concurrent sign-out or revocation has just ended. The database
+   * guard also requires an active membership of the account at the facility.
+   * `withinTransaction` runs on the same transaction once the row is written
+   * (the caller's audit), so a selection is stored only with it.
+   */
+  async recordFacilitySelection(input: FacilitySelectionInput, event: SessionEventMetadata,
+    withinTransaction: (client: PoolClient) => Promise<void>): Promise<FacilitySelectionOutcome> {
+    try {
+      return await this.database.withSystemTransaction(event.correlationId, async (client) => {
+        await client.query('select auth.lock_account_sessions($1)', [input.accountId]);
+        const stored = await client.query<{ family_id: string }>(
+          `insert into auth.session_facility_selection (family_id, account_id, facility_id, membership_id)
+           select session.family_id, session.account_id, $3::uuid, $4::uuid
+             from auth.sessions session
+            where session.id = $1
+              and session.account_id = $2
+              and session.session_kind = 'staff'
+              and session.revoked_at is null
+              and session.expires_at > clock_timestamp()
+              and session.absolute_expires_at > clock_timestamp()
+           on conflict (family_id) do update
+              set facility_id = excluded.facility_id, membership_id = excluded.membership_id,
+                  selected_at = clock_timestamp(), row_version = auth.session_facility_selection.row_version + 1
+           returning family_id::text`,
+          [input.sessionId, input.accountId, input.facilityId, input.membershipId],
+        );
+        if (stored.rowCount !== 1) return 'session_ended' as const;
+        await withinTransaction(client);
+        return 'selected' as const;
+      });
+    } catch (error) {
+      if (isDatabaseError(error) && error.code === '23514'
+        && databaseMessage(error) === 'SESSION_FACILITY_SELECTION_INVALID') {
+        return 'refused';
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The facility a staff sign-in selected (0089), read through the presented
+   * session: only while it is a live staff session of the account, so a
+   * signed-out or revoked sign-in never reads its selection again. The caller
+   * re-checks it against the actor's current facilities; it authorizes nothing.
+   */
+  async selectedFacilityId(sessionId: string, accountId: string): Promise<string | undefined> {
+    const result = await this.database.query<{ facility_id: string }>(
+      `select selection.facility_id::text
+         from auth.sessions session
+         join auth.session_facility_selection selection
+           on selection.family_id = session.family_id and selection.account_id = session.account_id
+        where session.id = $1
+          and session.account_id = $2
+          and session.session_kind = 'staff'
+          and session.revoked_at is null
+          and session.expires_at > clock_timestamp()
+          and session.absolute_expires_at > clock_timestamp()`,
+      [sessionId, accountId],
+    );
+    return result.rows[0]?.facility_id;
+  }
+
   verifyCsrf(claims: HidJwtClaims | JWTPayload, cookieToken: string | undefined, headerToken: string | undefined): boolean {
     if (!('csrf_hash' in claims) || typeof claims.csrf_hash !== 'string' || !cookieToken || !headerToken) return false;
     const cookieHash = this.sha256Base64(cookieToken);
@@ -655,9 +813,16 @@ export class TokenService {
     };
   }
 
-  private async assertSessionActive(claims: HidJwtClaims, scope: 'standard' | 'platform'): Promise<void> {
-    const result = await this.database.query(
-      `select 1
+  /** Refuses an inactive session; answers whether its family has live MFA assurance. */
+  private async assertSessionActive(claims: HidJwtClaims, scope: 'standard' | 'platform'): Promise<boolean> {
+    const assured = `exists (
+            select 1 from auth.session_assurance assurance
+            join auth.mfa_factors factor
+              on factor.id = assurance.mfa_factor_id and factor.account_id = assurance.account_id
+             and factor.status = 'active'
+            where assurance.family_id = session.family_id and assurance.account_id = session.account_id)`;
+    const result = await this.database.query<{ mfa_assured: boolean }>(
+      `select ${assured} as mfa_assured
          from auth.sessions session
          join auth.accounts account on account.id = session.account_id
         where session.id = $1
@@ -673,12 +838,7 @@ export class TokenService {
           and session.revoked_at is null
           and session.expires_at > clock_timestamp()
           and session.absolute_expires_at > clock_timestamp()
-          and (session.session_kind <> 'platform' or exists (
-            select 1 from auth.session_assurance assurance
-            join auth.mfa_factors factor
-              on factor.id = assurance.mfa_factor_id and factor.account_id = assurance.account_id
-             and factor.status = 'active'
-            where assurance.family_id = session.family_id and assurance.account_id = session.account_id))`,
+          and (session.session_kind <> 'platform' or ${assured})`,
       [claims.sid, claims.sub, claims.jti, claims.token_version, this.databaseMethod(claims.auth_method), claims.actor_kind ?? 'staff', claims.patient_id ?? null],
     );
     if (result.rowCount !== 1) {
@@ -691,6 +851,7 @@ export class TokenService {
       }
       throw new UnauthorizedException('Session is no longer active');
     }
+    return result.rows[0]?.mfa_assured === true;
   }
 
   /** State of one stored platform session, for classifying why it was refused. */
@@ -832,7 +993,30 @@ export class TokenService {
     return `${sessionId}.${randomBytes(48).toString('base64url')}.${method}`;
   }
 
-  private async platformAssuranceActive(familyId: string, accountId: string): Promise<boolean> {
+  /**
+   * Ends a staff sign-in that has no live MFA assurance, as a sign-out ends
+   * one (the whole family, account lock first, 0073), and records the refused
+   * refresh.
+   */
+  private async endUnassuredStaffSignIn(session: SessionRow, event: SessionEventMetadata): Promise<void> {
+    await this.database.withSystemTransaction(event.correlationId, async (client) => {
+      await client.query('select auth.lock_account_sessions($1)', [session.account_id]);
+      await client.query(
+        `update auth.sessions
+            set revoked_at = clock_timestamp(), revocation_reason = 'staff_mfa_required',
+                row_version = row_version + 1
+          where family_id = $1 and revoked_at is null`,
+        [session.family_id],
+      );
+      await this.insertSessionEvent(client, {
+        eventType: 'refresh', outcome: 'denied', accountId: session.account_id, sessionId: session.id, event,
+        details: { reason: 'staff_mfa_required', session_kind: 'staff' },
+      });
+    });
+  }
+
+  /** The session family has an assurance row whose factor is still active (platform 0069, staff 0088). */
+  private async assuranceActive(familyId: string, accountId: string): Promise<boolean> {
     const result = await this.database.query(
       `select 1 from auth.session_assurance assurance
          join auth.mfa_factors factor

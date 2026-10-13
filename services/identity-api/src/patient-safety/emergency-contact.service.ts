@@ -4,7 +4,7 @@ import type { PoolClient } from 'pg';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { generateSixDigitOtp } from '../auth/otp.service';
 import { requirePatient } from '../auth/patient-self.service';
-import type { PatientSessionActor } from '../auth/recent-authentication';
+import { requireNoRecentRecoveryHold, type PatientSessionActor } from '../auth/recent-authentication';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -50,6 +50,13 @@ export interface EmergencyContactView {
 }
 
 /**
+ * Adding or changing an emergency contact is held for 24 hours after an OTP
+ * account recovery (REC-NOTIFY); deactivating one and verifying one already
+ * added stay available.
+ */
+const EMERGENCY_CONTACT_CHANGES = 'emergency-contact changes';
+
+/**
  * Patient-managed emergency contacts. Ownership, verification, eligibility,
  * and lifecycle are enforced by session-bound security-definer commands; this
  * service encrypts the contact, derives verifiers, and delivers verification
@@ -82,6 +89,7 @@ export class EmergencyContactService {
     const contactId = randomUUID();
     try {
       const row = await this.asPatient(request, actor, async (client) => {
+        await requireNoRecentRecoveryHold(client, actor.accountId, EMERGENCY_CONTACT_CHANGES);
         await client.query(
           'select identity.add_my_emergency_contact($1, $2, $3, $4, $5, $6, $7, $8, $9)',
           [actor.subject, actor.sessionId, contactId, input.relationship, input.channel,
@@ -101,6 +109,7 @@ export class EmergencyContactService {
     const actor = requirePatient(request.actor);
     try {
       const row = await this.asPatient(request, actor, async (client) => {
+        await requireNoRecentRecoveryHold(client, actor.accountId, EMERGENCY_CONTACT_CHANGES);
         const current = (await this.rows(client, actor)).find((candidate) => candidate.contact_id === contactId);
         if (!current) throw new DomainProblem(404, 'EMERGENCY_CONTACT_NOT_FOUND', 'The emergency contact is unavailable');
         const secret = this.protector.decrypt(contactId, current.contact_key_version, current.contact_ciphertext);

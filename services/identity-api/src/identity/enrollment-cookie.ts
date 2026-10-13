@@ -3,11 +3,12 @@ import type { Response } from 'express';
 /**
  * The public patient enrollment capability (`PatientEnrollmentController`):
  * host-only, HttpOnly, SameSite=Strict and scoped to the enrollment routes.
- * It also lets `GET /current` and an activation replay show the enrollment's
- * HID after activation, so every staff or patient sign-in, refresh and
- * sign-out expires it (`clearEnrollmentCookie`): a signed-in patient reads
- * the HID from the session, and the enrollment routes refuse while session
- * cookies exist.
+ * For 15 minutes after activation it also lets `GET /current` and an
+ * activation replay show the enrollment's HID (a lost activation response).
+ * Every successful activation response expires it, and so does every staff or
+ * patient sign-in, refresh and sign-out (`clearEnrollmentCookie`): a
+ * signed-in patient reads the HID from the session, and the enrollment routes
+ * refuse while session cookies exist.
  */
 export const ENROLLMENT_COOKIE_NAME = 'hid_enrollment';
 export const ENROLLMENT_COOKIE_PATH = '/api/v1/identity/patient-enrollments';

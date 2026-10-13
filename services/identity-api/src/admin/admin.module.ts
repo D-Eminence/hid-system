@@ -11,10 +11,14 @@ import { PlatformSecurityController } from './platform-security.controller';
 import { PlatformSecurityService } from './platform-security.service';
 import { PricingService } from './pricing.service';
 import { PublicPricingController } from './public-pricing.controller';
+import { WorkforceAdminController } from './workforce-admin.controller';
+import { WorkforceAdminService } from './workforce-admin.service';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IdentityModule],
-  controllers: [AdminController, PlatformSecurityController, PublicPricingController, IntegrationAdminController],
-  providers: [AdminService, AdminOperationsService, PricingService, IntegrationAdminService, PlatformSecurityService],
+  controllers: [AdminController, PlatformSecurityController, PublicPricingController, IntegrationAdminController,
+    WorkforceAdminController],
+  providers: [AdminService, AdminOperationsService, PricingService, IntegrationAdminService, PlatformSecurityService,
+    WorkforceAdminService],
 })
 export class AdminModule {}

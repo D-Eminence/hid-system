@@ -6,7 +6,8 @@
 // X-CSRF-Token, so neither Outreach nor Identity may demand them for a read
 // that Outreach, authenticated as a workload, reports; a browser write must
 // still prove Origin and CSRF. Campaign reads are authorized; campaign writes
-// stay refused until campaigns have their own governance (ADR-045).
+// stay refused until campaigns have their own governance (ADR-045). Staff
+// sign in with the password and then an authenticator (MFA-1, 0088).
 // Disposable copy of the owned synthetic rehearsal database; synthetic
 // accounts only.
 import assert from 'node:assert/strict';
@@ -15,6 +16,8 @@ import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { join, resolve } from 'node:path';
+import { childOutboxLine, enrollmentCodeOutbox, fetchTransport, readChildOutbox, staffClient,
+  SYNTHETIC_STAFF_MFA_KEY_B64 } from '../../identity-api/scripts/staff-session-client.mjs';
 
 const ORIGIN = 'https://staging.healthidentitydirectory.com';
 // Local-secret workload credentials, generated for this run only.
@@ -60,7 +63,7 @@ async function disposableDatabase(require) {
  * browser response headers and are left out; in production Outreach's CORS
  * layer also refuses a disallowed Origin before the guard runs.
  */
-async function startService({ require, service }) {
+async function startService({ require, service, override }) {
   require('ts-node').register({ project: join(service, 'tsconfig.json'), transpileOnly: true });
   require('reflect-metadata');
   const load = (path) => require(join(service, 'src', path));
@@ -70,7 +73,8 @@ async function startService({ require, service }) {
   const { DatabaseService } = load('database/database.service.ts');
   const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
   const { preventResponseCaching } = load('common/response-security.middleware.ts');
-  const module = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  const builder = Test.createTestingModule({ imports: [AppModule] });
+  const module = await (override ? override(builder, load) : builder).compile();
   const app = module.createNestApplication({ bodyParser: false, logger: false });
   app.setGlobalPrefix('api/v1');
   app.use(preventResponseCaching);
@@ -87,8 +91,15 @@ async function startService({ require, service }) {
 
 if (process.argv[2] === '--identity-child') {
   // Child: the Identity API, alone in its process so its environment is its own.
+  // A staff enrolment code (MFA-1) is reported on stdout instead of being sent.
   const app = await startService({ require: createRequire(join(identityService, 'package.json')),
-    service: identityService });
+    service: identityService, override: (builder, load) => builder
+      .overrideProvider(load('auth/notification-otp.client.ts').NotificationOtpClient).useValue({
+        deliver: async (input) => {
+          if (input.purpose !== 'LOGIN_STEP_UP') throw new Error(`Unexpected ${input.purpose} delivery`);
+          process.stdout.write(childOutboxLine(input));
+          return { outcome: 'accepted', provider: 'synthetic' };
+        } }) });
   process.stdout.write(`${JSON.stringify({ url: (await app.app.getUrl()).replace('[::1]', '127.0.0.1') })}\n`);
   process.stdin.resume();
   process.stdin.on('end', async () => { await app.close(); process.exit(0); });
@@ -135,11 +146,15 @@ if (process.argv[2] === '--identity-child') {
         IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: ehrWorkloadCredential,
         AUTH_SIGNING_SECRET: process.env.AUTH_SIGNING_SECRET, AUTH_LOGIN_PEPPER: process.env.AUTH_LOGIN_PEPPER,
         OTP_HMAC_KEY_B64: process.env.OTP_HMAC_KEY_B64, AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'staging',
-        NIN_PROVIDER_MODE: 'deferred', TURNSTILE_MODE: 'disabled' } });
+        NIN_PROVIDER_MODE: 'deferred', TURNSTILE_MODE: 'disabled',
+        MFA_SECRET_KEY_B64: SYNTHETIC_STAFF_MFA_KEY_B64, MFA_KEY_VERSION: 'outreach-cookie-runtime-v1' } });
+    const identityLines = createInterface({ input: identity.stdout });
+    const staffEnrollmentCodes = enrollmentCodeOutbox();
     const started = await new Promise((resolveStart, reject) => {
-      createInterface({ input: identity.stdout }).once('line', (line) => resolveStart(JSON.parse(line)));
+      identityLines.once('line', (line) => resolveStart(JSON.parse(line)));
       identity.once('exit', (code) => reject(new Error(`Identity exited before listening (${code})`)));
     });
+    readChildOutbox(identityLines, staffEnrollmentCodes);
     const identityUrl = `${started.url}/api/v1`;
 
     // Outreach in this process, as its runtime role, authorizing through that Identity.
@@ -157,7 +172,13 @@ if (process.argv[2] === '--identity-child') {
       body: body === undefined ? undefined : JSON.stringify(body) });
       return { status: response.status, headers: response.headers, body: await response.json().catch(() => null) };
     };
+    // Staff: the password, then the authenticator, enrolled with an emailed code on the first sign-in (MFA-1).
+    const staff = staffClient({ send: fetchTransport(identityUrl), origin: ORIGIN, password, outbox: staffEnrollmentCodes });
     const signIn = async (path, email, action) => {
+      if (path === '/auth/login') {
+        const signedIn = await staff.signIn(email, { action });
+        return { cookie: signedIn.cookie, csrf: signedIn.csrf, access: signedIn.cookies.hid_access };
+      }
       const response = await call(identityUrl, 'POST', path, { origin: ORIGIN },
         { email, password, turnstileAction: action });
       assert.equal(response.status, 200, `${action}: ${JSON.stringify(response.body)}`);

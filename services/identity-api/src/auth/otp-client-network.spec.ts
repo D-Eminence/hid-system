@@ -50,7 +50,7 @@ describe('recovery start keys its IP limit on the real client network', () => {
   }
 
   const start = (service: OtpService, remoteIp: string | undefined, identifier = 'nobody@example.test') =>
-    service.start({ identifier, purpose: 'PASSWORD_RESET', remoteIp, correlationId: 'otp-client-network-0001' });
+    service.start({ identifier, purpose: 'PASSWORD_RESET', audience: 'patient', remoteIp, correlationId: 'otp-client-network-0001' });
 
   afterEach(() => {
     jest.restoreAllMocks();

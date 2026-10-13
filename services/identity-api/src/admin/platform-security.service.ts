@@ -1,7 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
+import { MFA_NOTICE_SINK, type MfaNoticeSink } from '../auth/mfa/mfa.service';
 import { requirePlatformAssurance } from '../auth/platform-assurance';
+import { AfterResponseTasks } from '../common/after-response-tasks';
 import { TokenService, type SessionEventMetadata } from '../auth/token.service';
 import { cursorPage, cursorTimestampSql, decodeCursor } from '../common/cursor';
 import { requestDigest } from '../common/idempotency';
@@ -44,7 +46,10 @@ export class PlatformSecurityService {
     private readonly database: DatabaseService,
     private readonly audit: AuditService,
     private readonly tokens: TokenService,
+    @Optional() @Inject(MFA_NOTICE_SINK) private readonly mfaNotices?: MfaNoticeSink,
   ) {}
+
+  private readonly notices = new AfterResponseTasks(new Logger(PlatformSecurityService.name), 'MFA owner notice failed');
 
   /** Active sessions of one account: safe metadata only, never token material. */
   async listSessions(context: PlatformAccessContext, accountId: string) {
@@ -193,6 +198,14 @@ export class PlatformSecurityService {
     });
     if (outcome.request_status === 'expired') {
       throw new DomainProblem(409, 'APPROVAL_EXPIRED', 'This request expired; create a new one');
+    }
+    // An executed MFA reset (administrator or staff target) is noticed to the
+    // owner after commit, when a notification route is bound (MFA-1); the
+    // audit event admin.mfa.reset is recorded either way.
+    const sink = this.mfaNotices;
+    if (sink && outcome.executed && !outcome.replayed && outcome.action === 'mfa.reset') {
+      this.notices.run(context.correlationId, () => sink.notify({ accountId: outcome.target_account_id,
+        event: 'factor_reset', correlationId: context.correlationId }));
     }
     return {
       requestId: outcome.request_id, status: outcome.request_status, action: outcome.action,

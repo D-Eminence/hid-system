@@ -115,13 +115,18 @@ do $$ begin
     raise exception 'email OTP was accepted as an MFA method';
   exception when check_violation or object_not_in_prerequisite_state then null;
   end;
+  -- Since 0088 a staff session family holds MFA assurance too (staff MFA,
+  -- staff-mfa.integration.sql), but only on a factor enrolled with a staff
+  -- proof. This Super Admin's factor was enrolled by platform sign-in, so it
+  -- never verifies their staff session; it is never platform step-up
+  -- evidence either (6).
   begin
     insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
     values ('c7600000-0000-4000-8000-0000000000a1', 'c7200000-0000-4000-8000-000000000001',
       'c7400000-0000-4000-8000-000000000001', 'totp', now());
-    raise exception 'a staff session received platform assurance';
+    raise exception 'a platform-enrolled factor verified a staff session';
   exception when check_violation then
-    if sqlerrm <> 'SESSION_ASSURANCE_INVALID' then raise; end if;
+    if sqlerrm <> 'STAFF_MFA_FACTOR_UNPROVEN' then raise; end if;
   end;
 end $$;
 

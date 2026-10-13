@@ -161,6 +161,33 @@ begin
       raise exception 'Runtime role % can access recovery start cooldowns', role_name;
     end if;
   end loop;
+  -- Public enrollment NIN lookup quota (0085): the Identity runtime charges it
+  -- only through its definer command and holds no privilege on the counters;
+  -- every other required runtime role can do neither. The schema-test runtime
+  -- is granted as the Identity runtime is.
+  if not has_function_privilege('hid_identity_runtime',
+       'platform.consume_public_patient_nin_quota(char,integer,integer,integer)', 'EXECUTE')
+     or has_function_privilege('public',
+       'platform.consume_public_patient_nin_quota(char,integer,integer,integer)', 'EXECUTE')
+     or has_table_privilege('hid_identity_runtime', 'platform.public_patient_nin_quota_counters',
+       'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+    raise exception 'Identity public enrollment NIN lookup quota privileges are inconsistent';
+  end if;
+  foreach role_name in array array[
+    'hid_ehr_runtime', 'hid_api_runtime', 'hid_ehr_api_runtime', 'hid_ocr_api_runtime',
+    'hid_audit_writer', 'hid_document_scanner', 'hid_ocr_runtime', 'hid_ocr_worker',
+    'hid_lab_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_runtime',
+    'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
+    'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
+    'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics'
+  ] loop
+    if has_function_privilege(role_name,
+         'platform.consume_public_patient_nin_quota(char,integer,integer,integer)', 'EXECUTE')
+       or has_table_privilege(role_name, 'platform.public_patient_nin_quota_counters',
+         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+      raise exception 'Runtime role % can reach the public enrollment NIN lookup quota', role_name;
+    end if;
+  end loop;
   if not has_table_privilege('hid_notification_runtime', 'notification.device_registrations', 'SELECT,INSERT,UPDATE')
      or not has_table_privilege('hid_notification_runtime', 'notification.delivery_attempts', 'SELECT,INSERT')
      or has_table_privilege('hid_notification_runtime', 'auth.otp_challenges', 'SELECT')
@@ -316,6 +343,45 @@ begin
      ) then
     raise exception 'MFA account lock helper privileges are inconsistent';
   end if;
+  -- Launch D14 (0087): the workforce commands and the effective-role check are
+  -- executable by the Identity runtime only; their helpers by nobody; and no
+  -- runtime reads or writes the attestation, lifecycle or role-grant tables,
+  -- or updates memberships, directly.
+  if exists (
+       select 1 from unnest(array[
+         'identity.admin_attach_workforce_member(uuid,uuid,text,text,text,text,character)',
+         'identity.admin_record_credential_attestation(uuid,bigint,text[],text,text,text,timestamptz,text,text,character)',
+         'identity.admin_change_workforce_role(uuid,uuid,bigint,text,text,text,text,character)',
+         'identity.admin_end_workforce_membership(uuid,uuid,bigint,text,text,character)',
+         'identity.admin_workforce_profile(uuid)', 'auth.facility_role_is_effective(uuid)']) command(signature)
+       where not has_function_privilege('hid_identity_api_runtime', command.signature, 'EXECUTE')
+          or has_function_privilege('public', command.signature, 'EXECUTE')
+          or exists (
+            select 1 from unnest(array['hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_lab_api_runtime',
+              'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime',
+              'hid_schema_test_runtime']) runtime(role_name)
+            where has_function_privilege(runtime.role_name, command.signature, 'EXECUTE'))
+     ) or exists (
+       select 1 from unnest(array['identity.workforce_command_actor()', 'identity.workforce_require_assurance(uuid)',
+         'identity.workforce_works_at(uuid,uuid)', 'identity.workforce_target_eligible(auth.accounts)',
+         'identity.guard_workforce_membership_change()', 'identity.guard_ended_membership_change()']) helper(signature)
+       where has_function_privilege('public', helper.signature, 'EXECUTE')
+          or has_function_privilege('hid_identity_api_runtime', helper.signature, 'EXECUTE')
+     ) or exists (
+       select 1
+       from unnest(array['identity.staff_credential_attestations', 'identity.workforce_memberships',
+         'identity.workforce_role_grants']) evidence(table_name),
+         unnest(array['hid_identity_api_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime',
+           'hid_migration_admin']) runtime(role_name),
+         unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) privilege(name)
+       where has_table_privilege(runtime.role_name, evidence.table_name, privilege.name)
+     ) or has_table_privilege('hid_identity_api_runtime', 'identity.staff_facility_memberships', 'UPDATE')
+       or not exists (select 1 from auth.role_permissions where role_code = 'platform_super_admin'
+         and permission_code = 'platform.workforce.manage')
+       or exists (select 1 from auth.role_permissions where permission_code = 'platform.workforce.manage'
+         and role_code <> 'platform_super_admin') then
+    raise exception 'workforce provisioning privileges are inconsistent';
+  end if;
   -- Self-NIN identifiers are written only by identity.bind_my_verified_nin, a
   -- definer owned by the table owner, which bypasses row-level security on
   -- this table. No policy may let another role insert one directly (0078).
@@ -382,6 +448,25 @@ begin
        where has_function_privilege(runtime.role_name, 'identity.list_my_staff_access_requests(text)', 'EXECUTE')
      ) then
     raise exception 'staff access-request list privileges are inconsistent';
+  end if;
+  -- Recovery and patient search hardening (0086): Identity-only commands that
+  -- check their own caller; no other runtime and not PUBLIC may call them.
+  if exists (
+       select 1
+         from unnest(array['auth.recovery_account_audience(uuid,text)',
+           'identity.patient_lookup_audit_subject(text)', 'identity.registration_nin_holder(text)',
+           'identity.registration_candidates(date,text,text)']) command(signature)
+        where not has_function_privilege('hid_identity_api_runtime', command.signature, 'EXECUTE')
+           or not has_function_privilege('hid_schema_test_runtime', command.signature, 'EXECUTE')
+           or has_function_privilege('public', command.signature, 'EXECUTE')
+           or exists (
+             select 1 from unnest(array['hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_lab_api_runtime',
+               'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime',
+               'hid_notification_worker', 'hid_event_dispatcher']) runtime(role_name)
+             where has_function_privilege(runtime.role_name, command.signature, 'EXECUTE')
+           )
+     ) then
+    raise exception 'recovery audience, lookup audit and registration match privileges are inconsistent';
   end if;
   if not has_table_privilege('hid_identity_api_runtime', 'identity.patients', 'INSERT')
      or has_table_privilege('hid_identity_api_runtime', 'ehr.encounters', 'INSERT')

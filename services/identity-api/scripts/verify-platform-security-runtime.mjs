@@ -10,6 +10,7 @@ import { createRequire } from 'node:module';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
 import { cookieHeader, createTotpClock, expectStatus, mergeCookies, platformClient } from './platform-session-client.mjs';
+import { enrollmentCodeOutbox, staffClient, supertestTransport } from './staff-session-client.mjs';
 
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
@@ -114,14 +115,15 @@ try {
   const plain = await account('plain');
 
   const clock = createTotpClock();
+  const staffEnrollmentCodes = enrollmentCodeOutbox();
   const module = await Test.createTestingModule({
     controllers: [AuthController, PlatformAuthController, AdminController, PlatformSecurityController, AuditController],
     providers: [DatabaseService, TokenService, LocalAuthProvider, CurrentStaffContextService, CurrentPatientContextService,
       AuthService, AuthSessionAuditService, AuditService, WorkloadAuthService, TurnstileService, AdminService,
       AdminOperationsService, PricingService, MfaService, MfaSecretProtector, PlatformSecurityService,
       { provide: MFA_TOTP_CLOCK, useValue: clock.now },
-      { provide: NotificationOtpClient, useValue: {
-        deliver: async () => { throw new Error('Notification delivery is outside the platform security verifier'); } } },
+      // Staff sign-ins (MFA-1) enrol with an emailed code; no other delivery is expected.
+      { provide: NotificationOtpClient, useValue: staffEnrollmentCodes.client },
       { provide: GoogleAuthenticationService, useValue: {
         login: async () => { throw new Error('Google exchange is outside the platform security verifier'); } } }],
   }).compile();
@@ -144,6 +146,9 @@ try {
   await app.init();
   const http = request(app.getHttpServer());
   const platform = platformClient({ http, origin, totp, clock, password });
+  // Staff sign-in (MFA-1): password, then the account's authenticator, on the same virtual clock.
+  const staff = staffClient({ send: supertestTransport(http), origin, password, outbox: staffEnrollmentCodes,
+    now: clock.next });
   const { get, command, post } = platform;
   const evidence = {};
   const key = (label) => `security-runtime-${label}-${randomUUID()}`;
@@ -201,10 +206,9 @@ try {
   evidence.enrollment = { recovery_codes: 10, platform_only_account: true, secret_returned_after_enrollment: false };
 
   // 3. Session kinds are separate in both directions.
-  const staffLogin = await http.post('/api/v1/auth/login').set('Origin', origin)
-    .send({ email: superB.email, password, turnstileAction: 'staff-login' });
-  expectStatus(staffLogin, 200);
-  const staffJar = mergeCookies({}, staffLogin);
+  // superB's first staff sign-in enrols the account's one authenticator, which
+  // its platform sign-in below uses too.
+  const staffJar = (await staff.signIn(superB.email)).cookies;
   expectStatus(await http.get('/api/v1/admin/session').set('Authorization', `Bearer ${staffJar.hid_access}`),
     403, 'PLATFORM_SESSION_REQUIRED');
   expectStatus(await http.get('/api/v1/auth/session').set('Authorization', `Bearer ${sessionA1.jar.hid_access_admin}`),
@@ -340,7 +344,7 @@ try {
   await platform.stepUp(supportAdmin);
   expectStatus(await decide(supportAdmin, elevation.body.requestId, 'approve', elevation.body.version, 'support'),
     403, 'APPROVER_INELIGIBLE');
-  const superBAdmin = await platform.enroll(superB.email);
+  const superBAdmin = await platform.signIn({ email: superB.email, secret: staff.secretOf(superB.email) });
   expectStatus(await decide(superBAdmin, elevation.body.requestId, 'approve', elevation.body.version, 'no-step-up'),
     403, 'STEP_UP_REQUIRED');
   expectStatus(await command(superBAdmin, '/admin/mfa/step-up', { code: '000000' }), 401, 'MFA_INVALID_CODE');
@@ -496,8 +500,7 @@ try {
   expectStatus(await get({ jar: { ...sessionA1.jar, hid_access_admin: forged } }, '/admin/session'), 401, 'AUTHENTICATION_REQUIRED');
   expectStatus(await http.get('/api/v1/auth/session').set('Authorization', `Bearer ${sessionA1.jar.hid_access_admin}`),
     401, 'AUTHENTICATION_REQUIRED');
-  const targetStaff = mergeCookies({}, await http.post('/api/v1/auth/login').set('Origin', origin)
-    .send({ email: target.email, password, turnstileAction: 'staff-login' }));
+  const targetStaff = (await staff.signIn(target.email)).cookies;
   const targetSessions = await get(superBAdmin, `/admin/principals/${target.id}/sessions`);
   expectStatus(targetSessions, 200);
   const targetSession = targetSessions.body.items.find(item => item.kind === 'staff');
@@ -670,13 +673,7 @@ try {
       [rotation.sessionId])).rows[0];
     return { response, created };
   }
-  const newestSession = async (accountId) => (await owner.query(`select id::text from auth.sessions
-    where account_id = $1 and revoked_at is null order by issued_at desc, id limit 1`, [accountId])).rows[0].id;
-  const staffSignIn = async () => {
-    expectStatus(await http.post('/api/v1/auth/login').set('Origin', origin)
-      .send({ email: target.email, password, turnstileAction: 'staff-login' }), 200);
-    return newestSession(target.id);
-  };
+  const staffSignIn = async () => (await staff.signIn(target.email)).sessionId;
   const raceAdmin = await platform.signIn(superBAdmin);
   await platform.stepUp(raceAdmin);
 
@@ -746,10 +743,8 @@ try {
     }
   }
   const targetLogin = async () => {
-    const response = await http.post('/api/v1/auth/login').set('Origin', origin)
-      .send({ email: target.email, password, turnstileAction: 'staff-login' });
-    expectStatus(response, 200);
-    return { jar: mergeCookies({}, response), csrf: response.headers['x-csrf-token'], sessionId: await newestSession(target.id) };
+    const signedIn = await staff.signIn(target.email);
+    return { jar: signedIn.cookies, csrf: signedIn.csrf, sessionId: signedIn.sessionId };
   };
   const leaving = await targetLogin();
   expectStatus(await revocationWhile(target.id, () => http.post('/api/v1/auth/logout').set('Origin', origin)

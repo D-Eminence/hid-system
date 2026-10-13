@@ -51,34 +51,65 @@ describe('ConsentService', () => {
       operation(client),
   );
   const database = { withTransaction, withSystemTransaction } as unknown as DatabaseService;
-  const service = new ConsentService(database);
+  const consume = jest.fn(async () => undefined);
+  const budget = { consume };
+  // The staff search budget is a second dependency since 0086; constructed
+  // loosely so that these specs also compile against a service without it.
+  const service = new (ConsentService as unknown as new (...dependencies: unknown[]) => ConsentService)(database, budget);
 
   beforeEach(() => {
     query.mockReset();
+    consume.mockReset();
+    consume.mockImplementation(async () => undefined);
     withTransaction.mockClear();
     withSystemTransaction.mockClear();
   });
 
-  it('returns the governed access-request result without patient demographics', async () => {
-    query.mockResolvedValueOnce({
-      rows: [{
-        accessRequestId: '40000000-0000-4000-8000-000000000001',
-        patientId: '50000000-0000-4000-8000-000000000001',
-        status: 'pending',
-        scope: 'read_records',
-        purpose: 'direct-care',
-        durationMinutes: 60,
-        requestedAt: new Date('2026-08-06T00:00:00.000Z'),
-        existingRequest: false,
-      }],
+  /**
+   * Answers the patient-decision transaction by statement: the recovery hold
+   * read, the recent-authentication read and the decision command.
+   */
+  function patientDecision(options: { held?: boolean; recent?: boolean; result: Record<string, unknown> }) {
+    query.mockImplementation(async (sql: string) => {
+      if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: options.held ?? false }] };
+      if (sql.includes('as recent')) return { rows: [{ recent: options.recent ?? true }] };
+      if (sql.includes('identity.approve_my_access_request') || sql.includes('identity.deny_my_access_request')
+        || sql.includes('identity.revoke_my_consent_grant')) return { rows: [options.result] };
+      return { rows: [] };
     });
+  }
+  const approvalResult = {
+    accessRequestId: '40000000-0000-4000-8000-000000000004',
+    consentGrantId: '60000000-0000-4000-8000-000000000004',
+    patientId: '50000000-0000-4000-8000-000000000004',
+    status: 'approved',
+    expiresAt: new Date('2026-09-29T13:00:00.000Z'),
+    replayed: false,
+  };
+  const statements = () => query.mock.calls.map(([sql]) => String(sql));
 
-    const result = await service.createAccessRequest(context, {
-      hid: 'HID-ABCDEFGH',
-      scope: 'read_records',
-      reason: 'Direct treatment request',
-      durationMinutes: 60,
-    });
+  const requestInput = {
+    hid: 'HID-ABCDEFGH',
+    scope: 'read_records' as const,
+    reason: 'Direct treatment request',
+    durationMinutes: 60,
+  };
+  /** What the database command returns: a recorded request names its patient; an unknown HID none (0086). */
+  const commandRow = (patientId: string | null) => ({
+    accessRequestId: '40000000-0000-4000-8000-000000000001',
+    patientId,
+    status: 'pending',
+    scope: 'read_records',
+    purpose: 'direct-care',
+    durationMinutes: 60,
+    requestedAt: new Date('2026-08-06T00:00:00.000Z'),
+    existingRequest: false,
+  });
+
+  it('returns the governed access-request result without patient demographics or the patient id', async () => {
+    query.mockResolvedValueOnce({ rows: [commandRow('50000000-0000-4000-8000-000000000001')] });
+
+    const result = await service.createAccessRequest(context, requestInput);
 
     expect(result).toMatchObject({
       status: 'pending',
@@ -86,21 +117,43 @@ describe('ConsentService', () => {
       existingRequest: false,
     });
     expect(result).not.toHaveProperty('firstName');
+    expect(result).not.toHaveProperty('patientId');
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('identity.create_access_request'),
       ['HID-ABCDEFGH', 'read_records', 'Direct treatment request', 60],
     );
+    expect(query.mock.calls[0]?.[0]).not.toContain('subject_patient_id');
+  });
+
+  it('answers an unknown HID in the same shape as a recorded request (PSEARCH-1)', async () => {
+    query.mockResolvedValueOnce({ rows: [commandRow('50000000-0000-4000-8000-000000000001')] })
+      .mockResolvedValueOnce({ rows: [commandRow(null)] });
+
+    const recorded = await service.createAccessRequest(context, requestInput);
+    const unknown = await service.createAccessRequest(context, { ...requestInput, hid: 'HID-NOBODYXY' });
+
+    expect(Object.keys(unknown).sort()).toEqual(Object.keys(recorded).sort());
+    expect(unknown).toEqual(recorded);
+  });
+
+  it('counts each access request against the budget before the command, and stops at 429', async () => {
+    query.mockResolvedValueOnce({ rows: [commandRow('50000000-0000-4000-8000-000000000001')] });
+    await service.createAccessRequest(context, requestInput);
+    expect(consume).toHaveBeenCalledWith('access_request', context);
+
+    query.mockReset();
+    consume.mockImplementation(async () => {
+      throw new DomainProblem(429, 'ACCESS_REQUEST_RATE_LIMITED', 'Too many access requests; wait and try again');
+    });
+    await expect(service.createAccessRequest(context, requestInput))
+      .rejects.toMatchObject({ status: 429, code: 'ACCESS_REQUEST_RATE_LIMITED' });
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('maps unavailable exact-HID targets to a safe not-found problem', async () => {
     query.mockRejectedValueOnce({ code: 'P0002' });
 
-    await expect(service.createAccessRequest(context, {
-      hid: 'HID-ABCDEFGH',
-      scope: 'read_records',
-      reason: 'Direct treatment request',
-      durationMinutes: 60,
-    })).rejects.toMatchObject<Partial<DomainProblem>>({
+    await expect(service.createAccessRequest(context, requestInput)).rejects.toMatchObject<Partial<DomainProblem>>({
       code: 'CONSENT_RESOURCE_NOT_FOUND',
     });
   });
@@ -225,6 +278,49 @@ describe('ConsentService', () => {
     }
   });
 
+  it('names the patient of a listed request only while its grant is active (PSEARCH-1)', async () => {
+    const listed = (accessRequestId: string, status: string, effectiveStatus: string) => ({
+      accessRequestId,
+      patientId: '50000000-0000-4000-8000-000000000007',
+      scope: 'read_records',
+      purposeOfUse: 'direct-care',
+      reason: 'Continuity of care',
+      status,
+      requestedDurationMinutes: 60,
+      requestedAt: new Date('2026-09-29T12:00:00.000Z'),
+      approvedAt: null,
+      deniedAt: null,
+      deniedReason: null,
+      consentGrantId: null,
+      grantExpiresAt: null,
+      effectiveStatus,
+      authorizationMethod: null,
+    });
+    // Rows as a database before 0086 returns them: every row names the patient.
+    query.mockResolvedValueOnce({
+      rows: [
+        listed('40000000-0000-4000-8000-000000000001', 'pending', 'pending'),
+        listed('40000000-0000-4000-8000-000000000002', 'denied', 'denied'),
+        listed('40000000-0000-4000-8000-000000000003', 'approved', 'expired'),
+        listed('40000000-0000-4000-8000-000000000004', 'approved', 'closed'),
+        listed('40000000-0000-4000-8000-000000000005', 'approved', 'revoked'),
+        listed('40000000-0000-4000-8000-000000000006', 'approved', 'active'),
+      ],
+    });
+    const rows = await service.listMyStaffAccessRequests(context, {});
+    // Withheld ids stay a string (Health-id renders the last four characters of
+    // patientId) but carry nothing of the patient: they end in the request's own
+    // last four characters.
+    expect(rows.map((row) => [row.effectiveStatus, row.patientId, row.patientIdWithheld])).toEqual([
+      ['pending', 'withheld-0001', true], ['denied', 'withheld-0002', true], ['expired', 'withheld-0003', true],
+      ['closed', 'withheld-0004', true], ['revoked', 'withheld-0005', true],
+      ['active', '50000000-0000-4000-8000-000000000007', false],
+    ]);
+    for (const row of rows.filter((item) => item.patientIdWithheld)) {
+      expect(String(row.patientId)).not.toContain('0007');
+    }
+  });
+
   it('lists the authenticated patient access request inbox without unrelated identity data', async () => {
     query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({
       rows: [{
@@ -250,22 +346,47 @@ describe('ConsentService', () => {
   });
 
   it('returns the patient approval result from the governed consent command', async () => {
-    query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({
-      rows: [{
-        accessRequestId: '40000000-0000-4000-8000-000000000004',
-        consentGrantId: '60000000-0000-4000-8000-000000000004',
-        patientId: '50000000-0000-4000-8000-000000000004',
-        status: 'approved',
-        expiresAt: new Date('2026-09-29T13:00:00.000Z'),
-        replayed: false,
-      }],
-    });
+    patientDecision({ result: approvalResult });
     await expect(service.approveAccessRequest(patientRequest, '40000000-0000-4000-8000-000000000004'))
       .resolves.toMatchObject({ status: 'approved', replayed: false });
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('identity.approve_my_access_request($1, $2, $3)'),
       [...patientSession, '40000000-0000-4000-8000-000000000004'],
     );
+  });
+
+  it('requires a recent sign-in to approve, checked in the decision transaction before the command (REC-NOTIFY)', async () => {
+    patientDecision({ recent: false, result: approvalResult });
+    // Health-id shows the detail as it is on Approve, so it says what to do (FE-8).
+    await expect(service.approveAccessRequest(patientRequest, '40000000-0000-4000-8000-000000000004'))
+      .rejects.toMatchObject({ status: 403, code: 'PATIENT_RECENT_AUTH_REQUIRED',
+        message: 'For your security, sign out, sign in again, and approve within 10 minutes.' });
+    expect(statements().some((sql) => sql.includes('identity.approve_my_access_request'))).toBe(false);
+    const recent = query.mock.calls.find(([sql]) => String(sql).includes('as recent'));
+    expect(recent?.[1]).toEqual(['80000000-0000-4000-8000-000000000001', '70000000-0000-4000-8000-000000000001',
+      '50000000-0000-4000-8000-000000000004']);
+  });
+
+  it('refuses a new approval for 24 hours after an OTP account recovery, even right after sign-in', async () => {
+    patientDecision({ held: true, recent: true, result: approvalResult });
+    await expect(service.approveAccessRequest(patientRequest, '40000000-0000-4000-8000-000000000004'))
+      .rejects.toMatchObject({ status: 403, code: 'PATIENT_RECENT_RECOVERY_HOLD' });
+    expect(statements().some((sql) => sql.includes('identity.approve_my_access_request'))).toBe(false);
+    const hold = query.mock.calls.find(([sql]) => String(sql).includes('from auth.otp_challenges'));
+    expect(hold?.[1]).toEqual(['70000000-0000-4000-8000-000000000001', 24]);
+    expect(String(hold?.[0])).toContain('consumed_at');
+  });
+
+  it('keeps denial and revocation available during the recovery hold', async () => {
+    patientDecision({ held: true, recent: false, result: { accessRequestId: '40000000-0000-4000-8000-000000000005',
+      status: 'denied', replayed: false } });
+    await expect(service.denyAccessRequest(patientRequest, '40000000-0000-4000-8000-000000000005', 'Not now'))
+      .resolves.toMatchObject({ status: 'denied' });
+    patientDecision({ held: true, recent: false, result: { consentGrantId: '60000000-0000-4000-8000-000000000006',
+      status: 'revoked', replayed: false } });
+    await expect(service.revokeMyConsentGrant(patientRequest, '60000000-0000-4000-8000-000000000006', 'No longer needed'))
+      .resolves.toMatchObject({ status: 'revoked' });
+    expect(statements().some((sql) => sql.includes('from auth.otp_challenges'))).toBe(false);
   });
 
   it('returns the patient denial result and trims the reason', async () => {

@@ -40,6 +40,8 @@ const { WorkloadAuthService } = load('auth/workload-auth.service.ts');
 const { TurnstileService } = load('auth/turnstile.service.ts');
 const { PatientSelfController } = load('auth/patient-self.controller.ts');
 const { PatientSelfService } = load('auth/patient-self.service.ts');
+const { MfaService } = load('auth/mfa/mfa.service.ts');
+const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
 const { ProblemDetailsFilter } = load('common/problem.ts');
 const { getEnvironment } = load('config/environment.ts');
 const pool = new Pool({ host: socket, user: process.env.PGUSER, database: process.env.PGDATABASE, max: 5 });
@@ -64,6 +66,8 @@ try {
     providers: [{ provide: DatabaseService, useValue: database }, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
       AuditService, WorkloadAuthService, TurnstileService, PatientSelfService,
+      // AuthController's staff sign-in steps (MFA-1); no staff sign-in happens here.
+      MfaService, MfaSecretProtector,
       { provide: GoogleAuthenticationService, useValue: {
         login: async () => { throw new Error('Google exchange is outside the patient-session verifier'); },
       } }] }).compile();
