@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0084",
-    "count": 84,
+    "last": "0090",
+    "count": 90,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -433,6 +433,10 @@
       {
         "name": "0084_ehr_clinical_safety_and_launch_modules.sql",
         "sha256": "f2cb745300e3487ca42c9dcb396a93dfa777b503e421b2e221cee5181bcec323"
+      },
+      {
+        "name": "0090_ehr_retraction_integrity.sql",
+        "sha256": "f8ce73df7089a37f5523e173ff7ee59928e3105fe02f36dc6f5b57475a1ce2c9"
       }
     ]
   },
