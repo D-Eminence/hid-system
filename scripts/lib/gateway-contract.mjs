@@ -93,6 +93,7 @@ export function assertGatewayContract({ template, dockerfile, includes }) {
       assert.equal(outcome.upstreamUri, uri, `${uri} must reach ${module} unchanged`)
       assert.equal(outcome.upstreamHeaders['x-forwarded-for'], client, `${uri} must forward the client address`)
       assert.equal(outcome.upstreamHeaders['x-real-ip'], '', `${uri} must not pass the raw client-address header on`)
+      assert.equal(outcome.upstreamHeaders['x-hid-origin-authorization'], '', `${uri} must not pass the Worker's origin secret on`)
     }
     for (const headers of [{}, { 'x-hid-client-ip': client }]) {
       const refused = all.route({ uri: `${prefix}/x`, peer: vpcPeer, headers })
