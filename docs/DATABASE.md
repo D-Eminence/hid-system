@@ -2510,20 +2510,43 @@ that opened the challenge is its proof).
 is immutable, and the identity, token, expiry and attempt columns never change
 and the attempt count never falls. It now also keeps `session_kind`
 immutable, keeps a verified proof final (neither unset nor replaced by another
-code), and refuses to consume a staff enrolment challenge whose proof is not
-verified (`23514 MFA_ENROLLMENT_PROOF_REQUIRED`). So, whatever the service
-does, a password alone never enrols a staff authenticator.
+code), and refuses to consume a staff enrolment challenge that records no
+verified proof (`23514 MFA_ENROLLMENT_PROOF_REQUIRED`). The database records
+that a proof was verified; it cannot check the emailed code, whose key only
+Identity holds.
+
+**Factors.** `auth.mfa_factors` gains `enrollment_proof` (`email_code` or
+`provider_activation`) and `enrollment_challenge_id` (the staff enrolment
+challenge that carried the proof); the check
+`mfa_factors_enrollment_proof_check` requires both or neither. The new trigger
+`mfa_factors_enrollment_proof_guard` (`auth.guard_mfa_factor_enrollment_proof`,
+`BEFORE INSERT OR UPDATE`, revoked from `PUBLIC`) accepts them only on a row
+that names a staff enrolment challenge of the same account, not consumed,
+invalidated or expired, whose verified proof has that method
+(`23514 MFA_ENROLLMENT_PROOF_REQUIRED` otherwise), and never lets them change
+(`55000 MFA_FACTOR_IMMUTABLE`). Identity sets them when staff enrolment
+creates the pending factor; a factor created by platform sign-in, and every
+factor that exists before 0088, records none.
 
 **Assurance.** `auth.guard_session_assurance_change` (0069) is replaced with
 `CREATE OR REPLACE`, restated exactly except that an assurance row may be
-inserted for a `staff` session family as well as a `platform` one; a patient
-session still never has one, a staff assurance row is not step-up evidence
-(`step_up_at` null and count 0 at insert), and the immutability rules are
-unchanged. Identity authorizes a staff session only while its family has an
-assurance row whose factor is still active; sessions issued before the
-Identity build of this change have none and are refused and ended
+inserted for a `staff` session family as well as a `platform` one, a `staff`
+one only on a factor that records a staff proof (`23514
+STAFF_MFA_FACTOR_UNPROVEN` otherwise); a patient session still never has one,
+a staff assurance row is not step-up evidence (`step_up_at` null and count 0
+at insert), and the immutability rules are unchanged. So a factor that a
+platform first enrolment created on the password alone never verifies a staff
+session, whichever account holds it, while it still verifies platform
+sessions. Together these rules mean a staff session's assurance always names
+a factor created under a staff enrolment challenge with a verified proof.
+Identity authorizes a staff session only while its family has an assurance row
+whose factor is still active; sessions issued before the Identity build of
+this change have none and are refused and ended
 (`revocation_reason = 'staff_mfa_required'`). 0088 itself changes no session,
-account or factor row.
+account or factor row. An administrator whose existing factor records no proof
+and whose account holds an eligible staff membership is refused staff sign-in
+(`403 STAFF_MFA_FACTOR_UNPROVEN`) until a two-person MFA reset, after which
+they enrol at staff sign-in (`MIGRATION_RUNBOOK.md` lists such accounts).
 
 **Recovery and reset.** `auth.complete_recovery_otp` (0086) is unchanged: it
 revokes sessions and external sign-in identities and leaves `auth.mfa_factors`
@@ -2534,20 +2557,30 @@ an active or pending factor, so it already resets staff accounts; only the
 `platform.mfa.reset` permission description changes ("administrator or
 staff").
 
-**Locks.** `ACCESS EXCLUSIVE` on `auth.mfa_login_challenges` while the columns
-and checks are added, until commit. The columns need no table rewrite; the
-checks scan the table, whose rows are kept (until now one per platform
-password step). Everything else replaces functions, sets
-comments or updates one `auth.permissions` row. No grant changes: the Identity
-runtime's table grants on the two tables (`runtime-grants.sql`) cover the new
-columns, and `runtime-roles.integration.sql` passes unchanged.
+**Locks.** `ACCESS EXCLUSIVE` on `auth.mfa_login_challenges` and then on
+`auth.mfa_factors` while their columns, checks and (on `auth.mfa_factors`) the
+new trigger are added, until commit; Identity also locks a challenge before a
+factor. The columns need no table rewrite; the checks scan the tables, whose
+rows are kept (until now written by platform sign-in only). Everything else
+replaces functions, sets comments or updates one `auth.permissions` row. No
+grant changes: the Identity runtime's table grants on the three tables
+(`runtime-grants.sql`) cover the new columns, the new trigger function is
+revoked from `PUBLIC` in the migration, and `runtime-roles.integration.sql`
+passes unchanged.
 
 Tests:
 
 - `staff-mfa.integration.sql` (new, rollback-only) as
-  `hid_identity_api_runtime`: assurance accepted for a staff session and
-  refused for a patient session, another account's factor and a stepped-up
-  row, and a staff assurance row is not step-up evidence; challenge shapes
+  `hid_identity_api_runtime`: assurance accepted for a staff session on a
+  factor with a staff proof and refused for a patient session, another
+  account's factor, a stepped-up row and a factor without a staff proof (a
+  platform-enrolled factor of a security auditor who is also a doctor, which
+  still verifies that account's platform session), and a staff assurance row
+  is not step-up evidence; a factor records a proof only from a live, verified
+  staff enrolment challenge of its own account of that method (refused for an
+  unverified, platform, other account's, other method's, consumed or missing
+  challenge, and for an inconsistent pair), the record never changes, and an
+  activated factor with a proof verifies the staff session; challenge shapes
   outside the three allowed are refused; a staff enrolment challenge cannot be
   consumed without a proof or with a sent but unverified code, a resend
   replaces the digest, a verified proof is final, a `provider_activation`
@@ -2562,11 +2595,14 @@ Tests:
   names staff. On a database built to 0086 it fails with
   `SESSION_ASSURANCE_INVALID` at its first staff assurance insert; with the
   guard's proof check removed it fails with "a staff enrolment was completed
-  without a proof".
+  without a proof"; with the assurance guard's staff proof check removed it
+  fails with "a factor enrolled without a staff proof verified a staff
+  session".
 - `platform-mfa-approval.integration.sql`: the case that expected a staff
-  session to be refused assurance now expects it to be accepted (and is
-  undone). On a database built to 0086 it fails with
-  `SESSION_ASSURANCE_INVALID`.
+  session to be refused assurance now expects `STAFF_MFA_FACTOR_UNPROVEN`: that
+  Super Admin's factor was enrolled by platform sign-in. With the assurance
+  guard's staff proof check removed it fails with "a platform-enrolled factor
+  verified a staff session".
 - Runtime verifiers (`hid_identity_api_runtime`, real HTTP):
   `verify-staff-mfa-runtime.mjs` (new: the password step sets only the
   challenge cookie and creates no session; enrolment refused without the
@@ -2575,7 +2611,13 @@ Tests:
   reuse refused; a staff challenge refused by the platform steps; a staff
   session without assurance refused by cookie and bearer and ended on
   refresh, but able to sign out; staff Google exchange refused; OTP recovery
-  keeps the factor; a two-person reset of a staff account and re-enrolment).
+  keeps the factor; a two-person reset of a staff account and re-enrolment;
+  the platform first enrolment of a security auditor who is also a doctor
+  refused with `409 MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED`, then enrolled at
+  staff sign-in and used for platform sign-in; a platform-enrolled factor
+  refused at staff sign-in with `403 STAFF_MFA_FACTOR_UNPROVEN` and by the
+  database as the runtime role, then reset by two Super Admins and enrolled
+  again with the proof).
   Every verifier that signs staff in now does it with password and
   authenticator through `staff-session-client.mjs`, and
   `verify-delegated-cookie-read-runtime.mjs` checks that the EHR refuses an

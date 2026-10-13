@@ -73,7 +73,9 @@ its refresh-cookie path never matches a platform refresh token
   shared `consumeRateLimit` (OTP recovery now calls the same function).
   - The fifth failed code within 15 minutes blocks the account for 15 minutes,
     even for a correct code.
-  - 20 failures from one IP block that IP.
+  - 20 failures from one IP block that IP for platform sign-in. Since 0088
+    staff sign-in counts its failures per IP in a bucket of its own, which
+    blocks at 100 (§10).
   - Enrollment starts and regenerations are limited to five per 15 minutes.
   - Each challenge also allows only five attempts.
   - Password lockout (`auth.login_attempts`) is unchanged.
@@ -199,8 +201,8 @@ data or write approval rows directly.
 | SQL (`platform-mfa-approval.integration.sql`) | Session ceilings, event/rate-limit/assurance constraints (email OTP rejected), factor/recovery/challenge/assurance immutability, runtime privileges, step-up evidence, one-step grant refusal, two-person elevation (self, ineligible, no-MFA, no step-up, exactly once), expiry, reject, cancel, MFA reset execution, session-family revocation, membership-free reachability. Killed by nine mutants: 0068 commands, membership reachability, no factor guard, stale step-up accepted, no self-approval check, decision without step-up, any admin approves, no assurance guard, no platform lifetime check. |
 | HTTP (`verify-platform-security-runtime.mjs`) | Exact runtime role, real guard/interceptor/services/database: sign-in and enrollment, session-kind separation, TOTP replay, rate limiting, step-up and policy, direct Super Admin grant refusal, two-person elevation including concurrent approvals and expiry, MFA reset, recovery codes, session list/revocation, idle/rotation/absolute limits, export, no secrets in evidence. It fails when the guard's session-kind check, both replay checks or the step-up freshness check is removed. |
 | HTTP (`verify-platform-admin-runtime.mjs`) | Stage 1 boundaries re-run with platform sessions. |
-| SQL (`staff-mfa.integration.sql`, 0088) | Staff session assurance accepted, patient refused, staff assurance not step-up evidence; challenge kind and proof shapes; a staff enrolment challenge is not consumable without a verified proof; a verified proof and the kind are immutable; `auth.complete_recovery_otp` keeps the factor and recovery codes; a two-person MFA reset of a staff target. |
-| HTTP (`verify-staff-mfa-runtime.mjs`, 0088) | §10 over HTTP as the Identity runtime role. Every other verifier that signs staff in now does it through `staff-session-client.mjs` (password, emailed enrolment code, TOTP or recovery code). |
+| SQL (`staff-mfa.integration.sql`, 0088) | Staff session assurance accepted on a factor with a staff proof, refused on a platform-enrolled factor (which still verifies the platform session) and for a patient, staff assurance not step-up evidence; challenge kind and proof shapes; a staff enrolment challenge is not consumable without a verified proof; a verified proof and the kind are immutable; a factor records a proof only from a live, verified staff enrolment challenge of its account, and never changes it; `auth.complete_recovery_otp` keeps the factor and recovery codes; a two-person MFA reset of a staff target. |
+| HTTP (`verify-staff-mfa-runtime.mjs`, 0088) | §10 over HTTP as the Identity runtime role, including the dual-role cases (platform enrolment refused for a staff member, a platform-enrolled factor refused at staff sign-in and reset). Every other verifier that signs staff in now does it through `staff-session-client.mjs` (password, emailed enrolment code, TOTP or recovery code); administrators who also hold staff memberships enrol at staff sign-in first. |
 
 The rehearsal runs the new SQL suite automatically and records
 `platform_security_runtime`; container acceptance runs the SQL suite and reports
@@ -211,7 +213,7 @@ The rehearsal runs the new SQL suite automatically and records
 | Item | Status |
 |---|---|
 | Super Admin **revocation** | One step with step-up and last-Super-Admin protection. Whether it also needs two-person approval is an open policy decision. |
-| First-factor enrollment | An administrator without a factor enrolls at their next sign-in, protected only by the password (trust on first use). Alternatives: invitation-bound enrollment, or forcing a password reset with every MFA reset. Policy decision. Staff enrolment (0088) is not trust on first use: it needs a code emailed to the account address, or the provider activation that opened it (§10). |
+| First-factor enrollment | An administrator without a factor enrolls at their next sign-in, protected only by the password (trust on first use). Alternatives: invitation-bound enrollment, or forcing a password reset with every MFA reset. Policy decision. Staff enrolment (0088) is not trust on first use: it needs a code emailed to the account address, or the provider activation that opened it, and a factor enrolled on the password alone never verifies a staff sign-in; an account with a staff membership therefore cannot enrol at platform sign-in (§10). |
 | MFA reset and password | A reset does not change the password or account status. For a suspected compromise, also suspend the account or require a password reset. Policy decision. |
 | Legacy `platform_admin` (S6) | Still holds `role.manage`/`principal.manage` and counts for last-Super-Admin reachability; cannot approve (approver must be `platform_super_admin`). |
 | `platform_operations_admin` controls (S5) | Still holds `control.manage`, now critical with step-up. |
@@ -230,10 +232,10 @@ contract. Not deployed.
 
 | Step | Route | Result |
 |---|---|---|
-| Password | `POST /api/v1/auth/login` (`turnstileAction: staff-login`) | Valid password **and** an eligible staff membership → `{ status: mfa_required \| mfa_enrollment_required, expiresAt }` and an httpOnly `hid_access_mfa` challenge cookie (path `/api/v1/auth/mfa`; 5 minutes, 10 for enrolment; 5 attempts). No session cookie. Anything else → the same `401` as a wrong password. |
+| Password | `POST /api/v1/auth/login` (`turnstileAction: staff-login`) | Valid password **and** an eligible staff membership → `{ status: mfa_required \| mfa_enrollment_required, expiresAt }` and an httpOnly `hid_access_mfa` challenge cookie (path `/api/v1/auth/mfa`; 5 minutes, 10 for enrolment; 5 attempts). No session cookie. Anything else → the same `401` as a wrong password. An account whose factor was enrolled at platform sign-in → `403 STAFF_MFA_FACTOR_UNPROVEN`, no challenge. |
 | Second factor | `POST /auth/mfa/verify` `{ code }` or `{ recoveryCode }` | Staff session (standard lifetimes) with its `auth.session_assurance` row. |
-| Enrolment proof | `POST /auth/mfa/enroll/email-code` | A six-digit code to the account's email; only an HMAC digest bound to the challenge is stored (`proof_method = 'email_code'`). |
-| First sign-in | `POST /auth/mfa/enroll/start` `{ emailCode }` → `{ secret, otpauthUri }` once; `POST /auth/mfa/enroll/activate` `{ code }` | Verifies the proof (a wrong code counts against the challenge), activates the factor, returns 10 recovery codes once, opens the staff session. Without a verified proof: `403 MFA_ENROLLMENT_PROOF_REQUIRED` and no factor. |
+| Enrolment proof | `POST /auth/mfa/enroll/email-code` | A six-digit code to the account's email (`auth.accounts.email`; no staff flow marks it verified, so the code proves it); only an HMAC digest bound to the challenge is stored (`proof_method = 'email_code'`). |
+| First sign-in | `POST /auth/mfa/enroll/start` `{ emailCode }` → `{ secret, otpauthUri }` once; `POST /auth/mfa/enroll/activate` `{ code }` | Verifies the proof (a wrong code counts against the challenge), creates the factor with the proof recorded on it (`enrollment_proof`), activates it, returns 10 recovery codes once, opens the staff session. Without a verified proof: `403 MFA_ENROLLMENT_PROOF_REQUIRED` and no factor. |
 | Provider activation | `POST /identity/provider-enrollments/activate` | Sets the password and returns a staff enrolment challenge whose proof is the activation (`proof_method = 'provider_activation'`), not a session. |
 
 - **Issuance.** `TokenService.issueStaffSession` is the only path to a staff
@@ -258,8 +260,26 @@ contract. Not deployed.
   `staff`, immutable) keeps a challenge to its own sign-in; the proof columns
   and their check constraint carry the enrolment proof; the guard trigger
   refuses to consume a staff enrolment challenge without a verified proof
-  (`MFA_ENROLLMENT_PROOF_REQUIRED`) and keeps a verified proof final;
-  `auth.guard_session_assurance_change` accepts staff session families.
+  (`MFA_ENROLLMENT_PROOF_REQUIRED`) and keeps a verified proof final.
+  `auth.mfa_factors.enrollment_proof` and `enrollment_challenge_id` record the
+  proof a factor was enrolled with; a trigger accepts them only from a live,
+  verified staff enrolment challenge of the same account and never lets them
+  change. `auth.guard_session_assurance_change` accepts staff session
+  families, but only on a factor that records a proof
+  (`STAFF_MFA_FACTOR_UNPROVEN`). The database cannot check the emailed code;
+  Identity does.
+- **One factor, two sign-ins.** A factor enrolled at staff sign-in verifies
+  platform sign-in too. A factor enrolled at platform sign-in (trust on first
+  use, §9) verifies platform sign-in only: staff sign-in answers `403
+  STAFF_MFA_FACTOR_UNPROVEN` until a two-person reset. So a platform first
+  enrolment of an account with an eligible staff membership is refused (`409
+  MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED`), and the account enrols at staff
+  sign-in. Every factor enrolled before 0088 is a platform one.
+- **Rate limits.** The per-account failure budget (the fifth failed code in 15
+  minutes) is shared by both sign-ins. Per source address, staff codes count
+  in a bucket of their own that blocks at the 100th failure in 15 minutes,
+  because a facility's clinicians often share one address; platform sign-in
+  keeps its bucket of 20 (§2).
 - **Recovery and reset.** OTP password recovery (`auth.complete_recovery_otp`,
   0086, unchanged) revokes sessions and leaves the factor and recovery codes,
   so a recovered staff account still needs its authenticator. A lost
@@ -271,7 +291,13 @@ contract. Not deployed.
   optional `MFA_NOTICE_SINK`; the notification route that delivers them is a
   follow-up, so today they are audited only.
 - **Residual risk.** An account without an authenticator is as strong as its
-  mailbox until it enrols: whoever holds the password and the mailbox enrols
-  first. Enrol every clinical account (or provision through provider
-  activation) before granting clinical roles, and treat an unexpected
-  `auth.staff.mfa.enrolled` as an incident.
+  mailbox until it enrols. The mailbox alone is enough: staff password
+  recovery (`staff-reset`) sets a new password from a code sent to the same
+  address as the enrolment code, and accounts provisioned without a password
+  (0046 onboarding, 0087 workforce provisioning) set their first one that
+  way. Once an account has a factor, a mailbox alone never yields a staff
+  session. Enrol every clinical account (or provision through provider
+  activation) before granting clinical roles, review enrolments that followed
+  a recovery (release checklist P11, `MIGRATION_RUNBOOK.md` §6), and treat an
+  unexpected `auth.staff.mfa.enrolled` as an incident. A second enrolment
+  channel that does not rest on the mailbox is an open decision (D14).

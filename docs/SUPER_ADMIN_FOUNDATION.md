@@ -73,7 +73,10 @@ still requires an active facility membership; platform routes never use it.
 Since Phase 4 Stage 2A (ADR-038, `docs/PHASE_4_STAGE_2A_BACKEND_SECURITY.md`)
 the Admin browser signs in through `/api/v1/auth/admin/login` (password), then
 `/auth/admin/mfa/verify` (TOTP or a one-time recovery code) or, on first sign-in,
-`/auth/admin/mfa/enroll/start` and `/enroll/activate`. That issues a separate
+`/auth/admin/mfa/enroll/start` and `/enroll/activate` (an administrator who
+also holds a staff membership is refused there with `409
+MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED` and enrols at staff sign-in instead,
+MFA-1, 0088). That issues a separate
 platform session (`hid_access_admin*` cookies) with a 15-minute idle and 8-hour
 absolute lifetime; it needs no facility membership. Staff, patient and facility
 sessions are refused on every `/admin` route, and a platform session is refused

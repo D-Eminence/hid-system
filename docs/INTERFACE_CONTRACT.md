@@ -81,7 +81,10 @@ code (RFC 6238, SHA-1, six digits, 30-second steps) or one unused recovery
 code, as a platform session is (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1).
 The account has one factor whichever kind of session it signs in to, so an
 administrator who also works at a facility uses the same authenticator for
-both. There is no permission or role allowlist: every staff sign-in needs it.
+both, provided it was enrolled at staff sign-in: only a factor that records a
+staff enrolment proof (below) verifies a staff sign-in. A factor enrolled at
+platform sign-in, on the password alone, verifies platform sign-in only. There
+is no permission or role allowlist: every staff sign-in needs it.
 
 | Route | Body | Answer |
 |---|---|---|
@@ -99,8 +102,9 @@ platform challenge by no staff step. Refusals:
 
 | Code | When |
 |---|---|
-| `401 MFA_INVALID_CODE` | A wrong, reused (the same 30-second step twice) or already used code; a wrong email code. Each counts against the challenge (five attempts) and the account's MFA failure budget |
-| `429 MFA_RATE_LIMITED` | The account's MFA failure budget is spent (after four failed codes within 15 minutes every code is refused, a correct one too, until the window passes; also per source IP), or more than five enrolment-code sends or enrolment starts in 15 minutes |
+| `403 STAFF_MFA_FACTOR_UNPROVEN` | `POST /auth/login` with the right password, but the account's authenticator was enrolled at platform sign-in on the password alone (before 0088, or before the account held a staff membership), so it records no staff proof. No challenge or cookie is issued; a denied `login_failed` session event (reason `staff_mfa_factor_unproven`) is recorded. The remedy is a two-person MFA reset (0070), after which the account enrols at staff sign-in; the new factor then verifies platform sign-in too. The same answer at `/auth/mfa/verify` if such a factor is met there |
+| `401 MFA_INVALID_CODE` | A wrong, reused (the same 30-second step twice) or already used code; a wrong email code. Each counts against the challenge (five attempts), the account's MFA failure budget and the source address's staff budget |
+| `429 MFA_RATE_LIMITED` | A failure budget is spent, and while it is every code is refused, a correct one too, until its 15-minute window passes: the account's (the fifth failed code within 15 minutes, staff and platform together), or the source address's staff budget (the 100th failed staff code from one address within 15 minutes; it is the staff sign-in's own, apart from platform sign-in's per-address budget of 20, and sized for a facility whose staff share one address). Also more than five enrolment-code sends or enrolment starts in 15 minutes |
 | `403 MFA_ENROLLMENT_PROOF_REQUIRED` | Enrolment start or activation without a verified proof (no email code, and the challenge was not opened by provider activation). No factor is created |
 | `409 MFA_ENROLLMENT_PROOF_COMPLETE` | An email code asked for once the proof is verified |
 | `409 MFA_ENROLLMENT_PROOF_UNAVAILABLE` | The account has no email address |
@@ -109,10 +113,38 @@ platform challenge by no staff step. Refusals:
 | `400 MFA_CODE_REQUIRED` | `verify` with neither or both of `code` and `recoveryCode` |
 
 Only a keyed digest of the email code is stored, bound to its challenge. The
-code is the fresh proof of a first enrolment: a password alone never enrols an
-authenticator, so a stolen password cannot be turned into a session on an
-account that has none. The database enforces it (0088): a staff enrolment
-challenge cannot be consumed without a verified proof.
+code goes to the account's email address (`auth.accounts.email`) whether or
+not `email_verified_at` is set: no flow marks a staff address verified (it is
+the work address that provisioning or onboarding set, as for staff password
+recovery), so the code itself proves control of that address. The code, or
+the provider activation, is the fresh proof of a first enrolment, and the new
+factor records it (`enrollment_proof`). So the password alone never enrols a
+staff authenticator, and a stolen password cannot be turned into a staff
+session on an account that has none. The database enforces what it can see
+(0088): a staff enrolment challenge is consumed only once it records a
+verified proof, a factor records a proof only from such a challenge of its own
+account, and a staff session's MFA assurance must name a factor that records
+one. It cannot check the emailed code itself; Identity does.
+
+The email code proves the same mailbox that staff password recovery uses. For
+an account without a factor, control of that mailbox is therefore enough on
+its own: `staff-reset` recovery sets a new password and the enrolment code
+goes to the same address. Accounts provisioned without a password
+(organization onboarding, 0046, and governed workforce provisioning, 0087) set
+their first password that way, by design. Once an account has a factor,
+recovery keeps it, and a mailbox alone never yields a staff session. Until a
+second enrolment channel exists (an open decision, D14 in
+`PHASE_3_LAUNCH_DECISIONS.md`), existing clinical accounts enrol before
+clinical roles are enabled, and operators review enrolments that followed a
+recovery (`PHASE_4_STAGE_5_RELEASE_READINESS.md` P11, `MIGRATION_RUNBOOK.md`
+§6).
+
+A platform first enrolment (`POST /api/v1/auth/admin/mfa/enroll/start`) of an
+account that holds an eligible staff membership answers `409
+MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED` and creates no factor: such an account
+enrols at staff sign-in, with the proof, and then uses that factor for
+platform sign-in. A platform administrator without a staff membership enrols
+at platform sign-in as before (`PHASE_4_STAGE_2A_BACKEND_SECURITY.md` §1).
 
 `POST /api/v1/identity/provider-enrollments/activate` sets the administrator's
 password and answers `200 { activated: true, organizationId, facilityId,
@@ -428,9 +460,11 @@ commands answer `GOOGLE_IDENTITY_ALREADY_LINKED` for any subject ever linked),
 so after a recovery the owner can link only a different Google account.
 Recovery never touches the account's authenticator: the TOTP factor and its
 recovery codes stay, so a staff or platform account that recovered its
-password still needs its authenticator at the next sign-in, and a mailbox alone
-never yields a staff session (MFA-1, pinned by `staff-mfa.integration.sql` and
-`verify-staff-mfa-runtime.mjs`). A lost authenticator is reset only by the
+password still needs its authenticator at the next sign-in, and for an account
+with a factor a mailbox alone never yields a staff session (MFA-1, pinned by
+`staff-mfa.integration.sql` and `verify-staff-mfa-runtime.mjs`). An account
+without a factor enrols on a code sent to the same mailbox, so for it the
+mailbox is enough (staff sign-in, above). A lost authenticator is reset only by the
 two-person MFA reset (0070), for staff accounts as for administrators.
 Disabled, stale, expired and replayed credentials fail closed. Completion
 returns to login rather than opening a session.

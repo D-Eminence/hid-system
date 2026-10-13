@@ -2361,8 +2361,32 @@ Decision:
 - A first enrolment needs a fresh proof, never the password alone: a code
   emailed to the account address (keyed digest bound to the challenge), or the
   provider enrollment activation that opened the challenge in the same request
-  (its email was verified by that enrollment). The database refuses to consume
-  a staff enrolment challenge without a verified proof.
+  (its email was verified by that enrollment). The email code goes to
+  `auth.accounts.email` without requiring `email_verified_at`: no flow marks a
+  staff address verified (provisioning and onboarding set the work address,
+  and staff password recovery already sends to it), so the code proves
+  control of that address. Requiring a verified address would refuse every
+  staff enrolment that provider activation does not open.
+- The proof belongs to the factor: staff enrolment records it on the new
+  factor (`enrollment_proof`, `enrollment_challenge_id`), and only a factor
+  that records one verifies a staff sign-in. The database refuses to consume
+  a staff enrolment challenge that records no verified proof, to record a
+  proof on a factor without such a challenge of its account, and to give a
+  staff session assurance on a factor without one
+  (`STAFF_MFA_FACTOR_UNPROVEN`). It cannot check the emailed code; Identity
+  does.
+- Platform first enrolment stays trust on first use (ADR-038) for an
+  administrator without a staff membership, and its factor verifies platform
+  sign-in only. A platform first enrolment of an account with an eligible
+  staff membership is refused (`409 MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED`):
+  it enrols at staff sign-in with the proof and uses that factor for both. A
+  factor enrolled at platform sign-in before 0088, or before the account held
+  a staff membership, is refused at staff sign-in (`403
+  STAFF_MFA_FACTOR_UNPROVEN`) until a two-person MFA reset.
+- Staff second-factor failures count, per source address, in a budget of
+  their own: the 100th failed staff code from one address in 15 minutes
+  blocks staff codes from it, apart from platform sign-in's 20. The
+  per-account budget (the fifth failure) is unchanged and shared.
 - A staff session without live assurance is authorized for nothing:
   `SecurityGuard` answers `403 STAFF_MFA_REQUIRED` and refresh ends the
   sign-in. Every staff session issued before the deploy is therefore
@@ -2383,6 +2407,19 @@ Alternatives not taken:
   session reaches patient data through some route, and an allowlist drifts.
 - Trust on first use for staff enrolment, as platform enrolment still is: a
   stolen password would then become a staff session on any unenrolled account.
+  For the same reason a platform-enrolled factor never verifies a staff
+  sign-in.
+- Accepting the email code at staff sign-in to upgrade a platform-enrolled
+  factor: one more sign-in state in the staff portal for a few administrators,
+  when the two-person reset already covers them.
+- Refusing the email-code proof after a mailbox password recovery of an
+  account without a factor: accounts provisioned without a password
+  (organization onboarding, 0046; governed workforce provisioning, 0087) set
+  their first password by that recovery, and no other enrolment channel
+  exists, so every newly provisioned clinician would be locked out.
+- The platform per-address budget (20) for staff sign-in: the clinicians of a
+  facility often share one address, so a few accounts' failures would refuse
+  every correct code from that facility for 15 minutes.
 - Letting existing sessions finish their lifetime: they would keep reaching
   patient data for up to 24 hours without MFA.
 
@@ -2397,9 +2434,16 @@ Consequences:
   frontends.
 - `MFA_SECRET_KEY_B64` is now required for staff sign-in as well
   (`503 MFA_UNAVAILABLE` without it); operator plan I1 must run first.
-- Residual risk: an unenrolled account is as strong as its mailbox until it
-  enrols. Enrol every clinical account (or provision it by provider
-  activation) before it holds a clinical role.
+- Residual risk: for an account without a factor, the mailbox alone is
+  enough. Staff password recovery (`staff-reset`) and the enrolment code use
+  the same address, so whoever controls the mailbox can set a password and
+  enrol; accounts provisioned without a password set their first one that
+  way. Once an account has a factor, a mailbox alone never yields a staff
+  session. Notices to that mailbox cannot warn of its compromise. Until a
+  second enrolment channel exists (an open decision under D14, for example
+  an out-of-band code issued by the provisioning administrator), existing
+  clinical accounts enrol before clinical roles are enabled and operators
+  review enrolments that followed a recovery (release checklist P11).
 - Evidence is local and synthetic: unit specs, `staff-mfa.integration.sql`,
   `verify-staff-mfa-runtime.mjs` and every runtime verifier that signs staff
   in (release checklist §8). Nothing has been run on staging or production.

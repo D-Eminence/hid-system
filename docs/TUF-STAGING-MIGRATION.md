@@ -120,8 +120,15 @@ The executable covers:
    issued before 0088) to be refused `403 STAFF_MFA_REQUIRED` by cookie and
    bearer and ended on refresh while it can still sign out, a staff Google
    exchange to be refused `403 GOOGLE_STAFF_SIGN_IN_DISABLED`, an OTP recovery
-   to keep the factor, and a two-person reset of a staff account to revoke it
-   and its sessions; `delegated_cookie_read_runtime` also requires the EHR to
+   to keep the factor, a two-person reset of a staff account to revoke it
+   and its sessions, the platform first enrolment of an administrator who is
+   also a doctor to be refused `409 MFA_ENROLLMENT_STAFF_SIGN_IN_REQUIRED`
+   (that account enrols at staff sign-in and uses the factor for both), and a
+   factor enrolled at platform sign-in to be refused at staff sign-in (`403
+   STAFF_MFA_FACTOR_UNPROVEN`) and by the database as the runtime role, until
+   a two-person reset; `platform_admin_runtime` enrols its auditor and support
+   administrator, who also hold staff memberships, at staff sign-in;
+   `delegated_cookie_read_runtime` also requires the EHR to
    refuse a reader whose assurance is gone (`403 STAFF_MFA_REQUIRED`) and its
    refresh to end the sign-in. The rehearsal also runs the new rollback-only
    `staff-mfa.integration.sql` with the additional suites.
