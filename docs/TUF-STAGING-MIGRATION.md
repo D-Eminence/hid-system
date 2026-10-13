@@ -79,6 +79,17 @@ The executable covers:
    application. It also covers an older rotated token, which ends its sign-in
    whichever application signs out; a sign-out during a timed account
    suspension; and two concurrent sign-outs with one cookie, recorded once.
+   `platform_admin_runtime` (`verify-platform-admin-runtime.mjs`) also
+   provisions a clinician through the workforce routes of migration 0087
+   (launch decision D14, BRANCH:launch/staff-workforce-provisioning): a new
+   staff identity is attached to a verified facility as a pending membership,
+   one Super Admin records the credential attestation, the same administrator
+   is refused the grant (`WORKFORCE_SECOND_PERSON_REQUIRED`) and a second one
+   grants `doctor`; the clinician then signs in, is refused the patient lookup
+   before consent, creates access requests (`201`), and after the patient's
+   approval the lookup succeeds; the facility's `org_admin` is refused it
+   (`PERMISSION_DENIED`); ending the membership revokes the grant, expires the
+   other pending request and signs the clinician out (`401`).
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

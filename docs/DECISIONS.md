@@ -2329,3 +2329,132 @@ Consequences:
 Related: ADR-025; ADR-043; `INTERFACE_CONTRACT.md` (Extracted Identity
 boundary; Outreach registration boundary); release checklist §2, §3, §7, §8
 and §9.
+
+# ADR-049: Clinicians Are Provisioned Only by Platform Governance; One Active Membership per Facility
+
+Status: Accepted for launch with the owner's default policy (launch decision
+D14, workforce part, and N5), in BRANCH:launch/staff-workforce-provisioning,
+migration 0087. Not merged or deployed. The number may move when the launch
+branches merge.
+
+Date: 2026-10-13
+
+Context:
+
+- The only code that created staff, memberships and facility roles was the
+  organization onboarding (0046, 0048, 0061), and each created one
+  `org_admin`. `org_admin` holds `organization.manage`, `workforce.manage`,
+  `audit.read`, registration and Outreach permissions, and no
+  `identity.patient.read`, `identity.consent.write` or `ehr.*`. No route
+  granted a clinical role, and `workforce.manage` was used nowhere. A facility
+  onboarded through the product therefore had no clinician, and the only ways
+  to create one were the legacy promotion (for hid-1.0 clinicians, under an
+  operator's cutover authorization) or SQL, which is a production bypass
+  (launch register WF-1).
+- The facility administrator is provisioned self-service on a CAC lookup and
+  an administrator email only. Letting that administrator grant clinical roles
+  would let it invite a second address it controls and make it a doctor.
+- `staff_memberships_scoped_uq` (0002) allowed one active membership per role
+  at a facility, so one account could hold two active memberships there (for
+  example `org_admin` and `doctor`). The staff context listed both, ordered
+  them with no tie-break, and every guard bound the first match, so the bound
+  membership, its permissions and its consent grants could change from one
+  request to the next (N5). Every disagreement failed closed, but a clinician
+  in that state could not work reliably. Only the legacy promotion or SQL can
+  create such rows; whether any exist (operator plan I4) is unknown.
+
+Decision:
+
+- Clinical facility roles are granted only by platform-governed commands
+  (0087), run by a platform administrator holding the new permission
+  `platform.workforce.manage`. Like the other high-risk platform permissions
+  added since 0069 (`platform.principal.export`, `platform.mfa.reset`), it is
+  granted to `platform_super_admin` only. `org_admin` stays non-clinical, keeps
+  no route that grants a role, and a membership holding `org_admin` or `admin`
+  cannot also receive a clinical role (`WORKFORCE_ROLE_CONFLICT`). Facility
+  self-service workforce management is deferred; the facility-scoped
+  `workforce.manage` still authorizes nothing.
+- Every command needs an MFA-verified platform session, a TOTP step-up from
+  the last five minutes, a reason and an `Idempotency-Key`; those that change
+  an existing staff record or membership need `If-Match`. Each is a SECURITY
+  DEFINER function that repeats the permission, MFA and step-up checks, so the
+  Identity runtime cannot skip them, and each new command is audited with
+  platform scope.
+- Attach: an existing staff identity, or a new one created by email and name,
+  is attached to a verified facility. The membership is created inactive
+  (`pending`) and grants nothing. A new account is `pending_reset` with no
+  password and a new staff record is `pending`: nobody but the clinician ever
+  knows the password, which they set through the staff account recovery flow.
+- Attest: a platform reviewer records a professional-credential attestation
+  for a staff identity: the clinical roles the reviewed licence supports (of
+  `doctor`, `clinician`, `nurse`), the licence reference, the issuing
+  authority, the method, the evidence reference, the reviewer and a lapse date
+  at most three years ahead. The only method at launch is `manual_review`, a
+  documented manual review of the practitioner's licence. A `pending` staff
+  record becomes `verified`. Attestations are append-only.
+- Grant: exactly one clinical role on exactly one membership, named with its
+  facility. It needs a current attestation for that role by a reviewer who is
+  not the target, has no active membership at that facility (so not its
+  `org_admin`) and is not the granting administrator. A clinical role
+  therefore always takes two platform administrators, the two-person
+  pattern of 0070 (ADR-038) without a separate request table: the
+  attestation is the first person's act and the grant the second's. The
+  grant is refused for the
+  caller's own membership, by a caller who works at that facility, and for a
+  membership at another facility than the one named. The first grant activates
+  a pending membership. Granting is limited to `doctor`, `clinician` and
+  `nurse`; `lab` and `pharmacist` stay withheld with their modules at launch
+  (D17) and can still be revoked.
+- A role granted on an attestation is effective only while the attestation is
+  current: when it lapses the staff context and
+  `auth.membership_has_permission` stop counting the role
+  (`auth.facility_role_is_effective`). Roles granted by onboarding or the
+  legacy promotion are unaffected.
+- End: a membership is deactivated for good. Its facility roles and every
+  active consent grant bound to it are revoked, its pending access requests
+  expire, and, when it was active, every staff session of the account is
+  revoked (a staff session is not bound to a facility in the schema). An
+  ended membership can never be changed again, so a grant still bound to it
+  can never become usable; to give the person access again, attach them
+  again.
+- N5: one active, unheld membership per account and facility, enforced by a
+  unique partial index. Several roles at one facility are several role rows
+  on that one membership. If a database already holds duplicates the
+  migration stops, changes nothing and names operator plan I4: the migration
+  administrator lists them, the facility confirms which to keep, and the
+  extras are deactivated by a reviewed change, never deleted and never by
+  moving their consent grants (that would change whom a patient's consent
+  covers). This rejects "pick the oldest". The staff context also fails
+  closed with `409 FACILITY_MEMBERSHIP_AMBIGUOUS` if two memberships of one
+  facility are ever read, and orders by membership id last. The legacy
+  promotion refuses duplicates before it writes anything.
+
+Consequences:
+
+- A new facility has only its `org_admin` until two platform administrators
+  provision its clinicians. Launch therefore needs at least two MFA-enrolled
+  Super Admins (as 0070 already does for Super Admin elevation).
+- Granting a clinical role does not give PHI by itself: the clinician still
+  needs a patient's consent (request and approval, or the patient's PIN) for
+  each patient.
+- Staff MFA is not part of this decision; a separate change adds it. Until it
+  ships, a clinician's sign-in is single-factor (launch register MFA-1).
+- External dependencies: product and legal owners decide which verification
+  source counts (the regulator's registry or documented manual review) and who
+  may act as reviewer; adding a registry method needs a later migration. If
+  launch relies on migrated hid-1.0 clinicians, an operator authorization for
+  the legacy cutover is still needed, and I4 must be run before 0087 on any
+  database the promotion has written.
+- Patients whose consent grants sit on a membership deactivated under I4 must
+  consent again.
+- The evidence is local and synthetic: `workforce-provisioning.integration.sql`
+  (with mutation checks), `runtime-roles.integration.sql`, the Identity specs,
+  `membership-duplicates.test.mjs` and the workforce path of
+  `verify-platform-admin-runtime.mjs` (release checklist §8). Nothing has been
+  run on staging or production.
+
+Related: ADR-037 (platform administration scope); ADR-038 (platform MFA,
+step-up and two-person elevation); `INTERFACE_CONTRACT.md` §19 (Workforce
+provisioning) and the auth session contract (Staff facility binding);
+`DATABASE.md` (Governed workforce provisioning (0087)); release checklist §2,
+§5, §8 and §9; `PHASE_3_LAUNCH_DECISIONS.md` D14 and N5.

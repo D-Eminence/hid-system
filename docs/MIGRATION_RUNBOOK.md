@@ -79,10 +79,11 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0080_pharmacy_source_prescription_guards.sql` | Replaces `pharmacy.validate_work_item()` and `pharmacy.validate_dispensing()` (same signature, `SECURITY DEFINER` attribute, `search_path`, volatility, owner and 0077 checks) so that each also reads the EHR prescription with a share lock: an acceptance must equal the exact active prescription version (every snapshot field except the prescription time and the start and end dates, which a later release will compare), and a dispensing needs its prescription still active at the accepted version. Each refusal is `23514` with its own constraint name, which the Pharmacy API answers with `409`. Before, Pharmacy accepted cancelled or nonexistent prescriptions and dispensed work whose prescription had been cancelled. Function replacement only; no table, grant or data change, no table lock. Deploy the Pharmacy API with the `409` mapping before or with 0080; earlier EHR builds keep working (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §3, §5, §6) |
 | `database/migrations/0081_uniform_recovery_start_cooldown.sql` | New table `auth.otp_start_cooldowns`: the recovery start cooldown per purpose and keyed identifier, kept whether or not the identifier has an account, so a repeat start inside the cooldown is answered with the same challenge id for a known and an unknown identifier (before, only a real account's repeat got its live id back). No foreign key, no row-level security; the role bootstrap grants `SELECT`, `INSERT` and `UPDATE` to the Identity runtime and the schema-test runtime, and `DELETE` to none. A new table: no lock on an existing table, no window. Run `db:bootstrap` and `db:verify-roles` after it, and only then deploy the Identity build of this change, whose every recovery start fails (`500`) without the table and the grant (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3, §5, §6) |
 | `database/migrations/0082_purpose_of_use_vocabulary.sql` | Seeds `identity.purpose_of_use_codes` with `direct-care` ("Direct patient care", active, source `hid`), `ON CONFLICT (code) DO NOTHING`, so a row already inserted or deactivated by an operator is kept as it is. 0003 created the table empty and nothing inserted a row, while every consent decision requires an active code, so on a database built only from migrations every staff consent check, access request, grant close, PIN and break-glass failed closed. `emergency` and `healthcare-operations` are not seeded: each waits for a product decision (§5). `ROW EXCLUSIVE` lock on that table only; no grant or service change |
+| `database/migrations/0087_governed_workforce_provisioning.sql` | Launch D14 (workforce) and N5 (ADR-049). A unique partial index allows one active, unheld membership per account and facility; if a database already holds duplicates the migration stops with `23505 MEMBERSHIP_DUPLICATES_FOUND` and changes nothing, so run operator plan I4 first (`PHASE_3_LAUNCH_DECISIONS.md` §3) on any database the legacy promotion or SQL has written. `staff_memberships_scoped_uq` is narrowed to active rows (drop and recreate: a brief `ACCESS EXCLUSIVE` lock on `identity.staff_facility_memberships`, which every staff request reads, so apply it in the migration window). New permission `platform.workforce.manage` (`platform_super_admin` only); tables for credential attestations, the workforce membership lifecycle and attested role grants (row-level security, no runtime grant); SECURITY DEFINER commands to attach staff, record an attestation, grant or revoke a clinical role and end a membership, plus a profile read; `auth.membership_has_permission` ignores a role whose attestation lapsed. Run `db:bootstrap` and `db:verify-roles` immediately after it: the Identity build of this change calls `auth.facility_role_is_effective` on every staff sign-in and request, which fails until the bootstrap grants it (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, §6, §9) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
-| `scripts/promote-legacy-identity.mjs` | Explicit dependency ordering, UUID/HID preservation, encryption/HMAC, holds and conflict evidence |
+| `scripts/promote-legacy-identity.mjs` | Explicit dependency ordering, UUID/HID preservation, encryption/HMAC, holds and conflict evidence; refuses, before any write, staged memberships that would give one staff identity two active memberships at one facility, or one beside a membership the target already holds (N5, `membership-duplicates.mjs`) |
 | `scripts/reconcile-legacy-identity.mjs` | Independent destination read-back, counts, decryption and checksums |
 | `scripts/verify-legacy-migration.mjs` | Offline determinism, preservation, idempotency and blocking-contract verification |
 | `scripts/rekey-patient-contact-lookups.mjs` | Dry-run-default, conflict-checked canonical contact lookup rekey with an atomic completion marker |
@@ -236,7 +237,7 @@ npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0082`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0087`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task.
@@ -324,8 +325,10 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0082`, runtime grants, RLS and purpose/deny behavior, and list the
-   purpose-of-use codes (release checklist P10).
+6. Verify `0087`, runtime grants, RLS and purpose/deny behavior, and list the
+   purpose-of-use codes (release checklist P10). Run I4 before applying 0087
+   to a database the promotion has written: 0087 refuses duplicate active
+   memberships at one facility.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.
