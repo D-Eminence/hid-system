@@ -2410,13 +2410,45 @@ Decision:
   `auth.membership_has_permission` stop counting the role
   (`auth.facility_role_is_effective`). Roles granted by onboarding or the
   legacy promotion are unaffected.
-- End: a membership is deactivated for good. Its facility roles and every
-  active consent grant bound to it are revoked, its pending access requests
-  expire, and, when it was active, every staff session of the account is
-  revoked (a staff session is not bound to a facility in the schema). An
-  ended membership can never be changed again, so a grant still bound to it
-  can never become usable; to give the person access again, attach them
-  again.
+- Renewal: a role rests on the one attestation it was granted on, and a later
+  attestation does not extend it by itself. To keep a clinician effective, a
+  reviewer records a new attestation and a second administrator grants the
+  role again. That grant renews the role when its attestation has lapsed, or
+  before the lapse when the new attestation lasts longer: the old assignment
+  is revoked with the grant's reason and a new one rests on the new
+  attestation (`renewed: true`), with the same two-person and facility rules.
+  Otherwise a grant of a held role is still `WORKFORCE_ROLE_ALREADY_ACTIVE`; a
+  role granted by onboarding or the legacy promotion never lapses and is never
+  renewed. This rejects letting any later attestation keep a role effective,
+  which would let the granting administrator, or an administrator who works at
+  the facility, extend a role by attesting alone.
+- The staff actor's facility roles (`actor.facilities[].roles`, the token's
+  `roles` claim, the Health-id staff badges) are the codes of the
+  membership's live, effective role assignments, the same rows its
+  permissions come from. A revoked or lapsed role disappears from both. The
+  stored `membership_role` and `app_role` labels are no longer read for the
+  actor; they keep the role the membership was activated with and still show
+  in the principals list.
+- End: a membership is deactivated for good. Its facility roles are revoked,
+  its pending access requests expire, every active consent grant bound to it
+  is revoked (requests before grants, so an approval that commits while the
+  end waits on its request has its new grant revoked too), and, when it was
+  active, every staff session of the account is revoked (a staff session is
+  not bound to a facility in the schema). An ended membership can never be
+  changed again, so a grant still bound to it can never become usable; to give
+  the person access again, attach them again. An access request created and
+  committed concurrently, after the end has read the pending requests, stays
+  pending on the ended membership and authorizes nothing, and neither does a
+  grant approved from it.
+- Lock order: every command locks the target's and the actor's account rows
+  FOR UPDATE in id order (0073), then the membership or staff row it changes
+  FOR NO KEY UPDATE. Those updates change no key column, and a foreign-key
+  insert that references the row (an approval's consent grant, an access
+  request) takes FOR KEY SHARE, which FOR NO KEY UPDATE does not block. A
+  FOR UPDATE membership lock deadlocked with an approval waiting on its
+  request and with a staff transaction that went on to reference its own
+  account (found in review; both races now run in the platform admin
+  verifier).
 - N5: one active, unheld membership per account and facility, enforced by a
   unique partial index. Several roles at one facility are several role rows
   on that one membership. If a database already holds duplicates the
@@ -2427,7 +2459,9 @@ Decision:
   covers). This rejects "pick the oldest". The staff context also fails
   closed with `409 FACILITY_MEMBERSHIP_AMBIGUOUS` if two memberships of one
   facility are ever read, and orders by membership id last. The legacy
-  promotion refuses duplicates before it writes anything.
+  promotion refuses duplicates before it writes anything, whether the other
+  binding is another staged row or an active, unheld membership the target
+  already holds.
 
 Consequences:
 
@@ -2447,11 +2481,15 @@ Consequences:
   database the promotion has written.
 - Patients whose consent grants sit on a membership deactivated under I4 must
   consent again.
+- A clinician whose attestation lapses loses the role's permissions until an
+  administrator renews it; administrators should renew before the lapse date
+  that the workforce profile shows.
 - The evidence is local and synthetic: `workforce-provisioning.integration.sql`
   (with mutation checks), `runtime-roles.integration.sql`, the Identity specs,
-  `membership-duplicates.test.mjs` and the workforce path of
-  `verify-platform-admin-runtime.mjs` (release checklist §8). Nothing has been
-  run on staging or production.
+  `membership-duplicates.test.mjs`, `verify-membership-duplicates-runtime.mjs`
+  and the workforce path of `verify-platform-admin-runtime.mjs`, including the
+  two-connection lock races (release checklist §8). Nothing has been run on
+  staging or production.
 
 Related: ADR-037 (platform administration scope); ADR-038 (platform MFA,
 step-up and two-person elevation); `INTERFACE_CONTRACT.md` §19 (Workforce

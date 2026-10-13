@@ -2328,7 +2328,12 @@ false only for a role granted on an attestation that has lapsed. The Identity
 staff context joins facility roles through it, and
 `auth.membership_has_permission` (0010, same signature, owner and grants) now
 calls it too. Roles granted by onboarding or the legacy promotion have no
-attestation and are unaffected.
+attestation and are unaffected. The staff context lists as a membership's
+roles the codes of exactly those effective, unrevoked assignments (with an
+active `auth.roles` row), the rows its permissions come from; it no longer
+reads `membership_role` and `app_role`. Those labels keep the role the
+membership was activated with (`pending` until then) and are shown only in the
+principals list.
 
 **Commands.** Each is SECURITY DEFINER, executable by the Identity runtime
 only, and checks, in order: `platform.workforce.manage` for the session's
@@ -2338,7 +2343,16 @@ step-up from the last five minutes on the session's platform session
 (`ADMIN_STEP_UP_REQUIRED`), then its idempotency record
 (`auth.admin_command_idempotency`, replay or `ADMIN_IDEMPOTENCY_CONFLICT`). It
 locks the target's and the caller's account rows in id order before anything
-else, as 0073 requires of every session revocation.
+else, as 0073 requires of every session revocation, and then locks the
+membership or staff row it works on FOR NO KEY UPDATE. Those updates change no
+key column (the keys are `id`, `account_id`, `staff_id` and `facility_id`), and
+every insert that references the row through a foreign key (an approval's
+consent grant, an access request) takes FOR KEY SHARE on it, which FOR NO KEY
+UPDATE does not block. A FOR UPDATE lock there deadlocked: with an approval
+that held its access request FOR UPDATE and then inserted the grant, while the
+end held the membership and waited on that request; and with a staff
+transaction that referenced the membership and then its own account, while
+the end held the account and waited on the membership.
 
 - `identity.admin_attach_workforce_member(facility, account, email,
   full_name, reason, key, digest)`: exactly one of an existing account, or an
@@ -2372,25 +2386,37 @@ else, as 0073 requires of every session revocation.
   facility, a caller with no active membership there, an active or pending
   membership (`WORKFORCE_MEMBERSHIP_INACTIVE` for any other inactive one), an
   eligible account, a membership holding no `org_admin` or `admin` role or
-  label (`WORKFORCE_ROLE_CONFLICT`), a role not already held
-  (`WORKFORCE_ROLE_ALREADY_ACTIVE`), and a current attestation for the role
+  label (`WORKFORCE_ROLE_CONFLICT`), and a current attestation for the role
   whose reviewer has no active membership at the facility and is not the
   caller: `WORKFORCE_SECOND_PERSON_REQUIRED` when only the caller's own
-  attestation would do, `WORKFORCE_ATTESTATION_REQUIRED` otherwise. The role
-  is inserted with `granted_by` and `grant_reason`, with its
+  attestation would do, `WORKFORCE_ATTESTATION_REQUIRED` otherwise. A role the
+  membership already holds (its live assignment is locked FOR NO KEY UPDATE)
+  is `WORKFORCE_ROLE_ALREADY_ACTIVE` when it was not granted on an
+  attestation, or when its attestation is current and the chosen one does not
+  last longer; otherwise the grant renews it: the old assignment is revoked
+  (`revoked_by` the caller, the grant's reason) and the new one rests on the
+  chosen attestation, and the command returns `renewed` true. The role is
+  inserted with `granted_by` and `grant_reason`, with its
   `workforce_role_grants` row. The first grant on a pending membership
   activates it and labels it with the role. A revoke sets `revoked_at`,
   `revoked_by` and the reason (`WORKFORCE_ROLE_NOT_ACTIVE` when not held).
   Either way the membership's row version increases.
 - `identity.admin_end_workforce_membership(membership, facility,
   membership_version, reason, key, digest)`: same membership checks. It
-  deactivates the membership; revokes its facility roles; revokes every
-  `active` consent grant bound to it (`revoked_by` the caller,
-  `revoked_reason` the reason); expires its `pending` access requests; and,
-  when the membership was active, revokes every unrevoked `staff` session of
-  the account (reason `workforce_membership_ended`) with one `revoked`
-  session event. It records the `ended` lifecycle row (inserting one for a
-  membership the commands never attached) and returns the counts.
+  deactivates the membership; revokes its facility roles; expires its
+  `pending` access requests; revokes every `active` consent grant bound to it
+  (`revoked_by` the caller, `revoked_reason` the reason); and, when the
+  membership was active, revokes every unrevoked `staff` session of the
+  account (reason `workforce_membership_ended`) with one `revoked` session
+  event. It records the `ended` lifecycle row (inserting one for a membership
+  the commands never attached) and returns the counts. Requests come before
+  grants: an approval holding a request's row lock makes the request update
+  wait, and once the approval commits the grant update, with a new snapshot,
+  revokes the grant it made. An access request inserted by a transaction that
+  commits after the request update has read the pending requests stays
+  pending on the ended membership; it, and any grant later approved from it,
+  authorizes nothing, because every authorization requires an active
+  membership and an ended one is never reactivated.
 - `identity.admin_workforce_profile(account)`: the account, staff record,
   attestations and memberships with their state, version and active roles
   (with whether each is effective), for the administration UI.
@@ -2408,7 +2434,12 @@ Tests:
   attestation, the grant by a second administrator and its activation, the
   pending account's lack of authority until it has a password, a lapsed
   attestation, revoke, the end of a membership with its grant, request and
-  sessions, terminal ended state, re-attachment, and the profile. Six mutants
+  sessions, terminal ended state, re-attachment, the profile, the lock modes
+  and the end's statement order (section 13, read from the function
+  definitions), and renewal (section 14: a lapsed role renewed by a second
+  administrator, the reviewer and an administrator at the facility refused,
+  no renewal without a longer attestation, a legacy role never renewed, a
+  renewal before the lapse, and a first grant of another role). Six mutants
   of the migration (no two-person check, no insider check on grants, no
   session revocation, no lapse check, no grant revocation, no request
   expiry) each fail it. On a database without 0087 it fails at its first
@@ -2422,3 +2453,18 @@ Tests:
 - `ocr-job-source-and-publication.integration.sql` gave account A two active
   memberships at one clinic; the second is now inactive, which keeps its
   "the session account's other membership" case.
+- `services/identity-api/scripts/verify-platform-admin-runtime.mjs` runs the
+  workforce routes end to end as the Identity runtime, including a revoke
+  that leaves the clinician's actor with no role and no permission, and the
+  end of the membership while a patient approval holds its request FOR
+  UPDATE and a staff transaction holds the membership's KEY SHARE and then
+  asks for its account's: no deadlock, the end waits for the approval, the
+  approval's grant is revoked and the other pending request expires.
+- `services/ehr-api/scripts/verify-membership-duplicates-runtime.mjs` (in the
+  rehearsal) runs the legacy promotion's membership uniqueness check
+  (`membershipUniquenessConflict`) against a disposable copy of the rehearsal
+  schema: refused beside an active, unheld target membership (and that row
+  would break the N5 index); accepted for an exact re-promotion and beside an
+  inactive, held or other facility's membership; staged duplicates refused.
+  Dropping `active`, `migration_hold_reason is null` or `id <> $3` from its
+  query each fails it.

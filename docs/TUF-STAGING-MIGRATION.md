@@ -87,9 +87,22 @@ The executable covers:
    is refused the grant (`WORKFORCE_SECOND_PERSON_REQUIRED`) and a second one
    grants `doctor`; the clinician then signs in, is refused the patient lookup
    before consent, creates access requests (`201`), and after the patient's
-   approval the lookup succeeds; the facility's `org_admin` is refused it
-   (`PERMISSION_DENIED`); ending the membership revokes the grant, expires the
-   other pending request and signs the clinician out (`401`).
+   approval the lookup succeeds (with the status the route declares: `201`
+   until 0086 and `200` with it); the facility's `org_admin` is refused it
+   (`PERMISSION_DENIED`). A revoke leaves the clinician's actor with no role
+   and no permission, and a new grant restores `doctor`. The membership is
+   then ended while a patient approval holds its access request FOR UPDATE
+   and a staff transaction holds the membership's KEY SHARE and then asks for
+   its account's: neither deadlocks, the end waits for the approval, revokes
+   both grants (the new one included), expires the other pending request and
+   signs the clinician out (`401`). The verifier provides `StaffSearchBudget`
+   whenever the source has it, so it runs before and after 0086.
+   `membership_duplicates_runtime` (`verify-membership-duplicates-runtime.mjs`,
+   N5) runs the legacy promotion's membership uniqueness check against a
+   disposable copy of the rehearsal schema: a staged membership beside an
+   active, unheld membership the target holds is refused (and would break the
+   N5 index); an exact re-promotion and memberships beside inactive, held or
+   other facilities' ones are accepted; staged duplicates are refused.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

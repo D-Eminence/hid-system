@@ -210,11 +210,20 @@ anyway, Identity refuses to resolve the actor at all: sign-in, refresh,
 every staff request answer `409 FACILITY_MEMBERSHIP_AMBIGUOUS` until a platform
 administrator ends one of them. Nothing is bound by row order.
 
-A facility role granted through workforce provisioning (§19) gives its
-permissions only while the credential attestation it was granted on is
-current. When the attestation lapses the role stays listed in the
-administration views but its permissions disappear from `actor.facilities` at
-the next request.
+A facility entry's `roles` are the codes of the membership's live, effective
+facility role assignments, the same assignments its `permissions` come from;
+the actor's `roles` and `role` and the access token's `roles` claim are those
+of the bound entry. A membership with no effective role is still listed, with
+`roles: []` and `permissions: []`. From 0087 the stored membership labels
+(`membership_role`, `app_role`) are not read for the actor. A facility role
+granted through workforce provisioning (§19) is effective only while the
+credential attestation it was granted on is current: when the attestation
+lapses, or the role is revoked, the role and its permissions disappear from
+`actor.facilities` at the next request (and from the token's `roles` claim
+when it is next issued). The workforce profile still lists a lapsed role, with
+`effective: false`. The principals list (`GET /admin/principals`) shows each
+membership's stored labels as `role` and `appRole`: the role it was activated
+with, which later grants and revokes do not change.
 
 ### Patient sessions and self service
 
@@ -1592,17 +1601,35 @@ reviewer who is not the target, has no active membership at the facility and
 is not the administrator granting it, so a clinical role always takes two
 platform administrators. The first grant activates a pending membership. The
 answer is `{ membershipId, facilityId, roleCode, roleActive, membershipActive,
-state, version, attestationId, replayed }`.
+state, version, attestationId, renewed, replayed }`; `attestationId` is null for
+a revoke.
+
+Renewal: a granted role rests on the attestation it was granted on, and a
+later attestation does not extend it by itself. To keep a clinician's role,
+record a new attestation (one administrator) and grant the role again (a
+second administrator, under the same rules). The grant renews the role, with
+`renewed: true`, when the role's attestation has lapsed, or before the lapse
+when the best current attestation lasts longer: the old assignment is revoked
+with the grant's reason and the new one rests on the new attestation, so the
+role stays effective without a gap. Otherwise a grant of a held role is
+`WORKFORCE_ROLE_ALREADY_ACTIVE`. A role granted by onboarding or the legacy
+promotion never lapses and is never renewed. The audit event of a grant
+carries `renewed` in `details`.
 
 `POST .../memberships/:membershipId/end` ends a membership for good:
 `{ facilityId, reason }` with `If-Match` the membership version. It
-deactivates the membership, revokes its facility roles and every active
-consent grant bound to it, expires its pending access requests and, when the
+deactivates the membership, revokes its facility roles, expires its pending
+access requests, revokes every active consent grant bound to it and, when the
 membership was active, revokes all the account's staff sessions (a staff
-session is not bound to one facility). The answer is `{ membershipId,
-facilityId, accountId, state: "ended", revokedRoles, revokedGrants,
-expiredRequests, revokedSessions, version, replayed }`. To give the person
-access again, attach them again: a new membership starts pending.
+session is not bound to one facility). A patient approval that commits while
+the end runs is counted in `revokedGrants`, not `expiredRequests`. An access
+request created and committed concurrently, after the end has read the
+pending requests, stays pending on the ended membership; it, and any grant
+approved from it, authorizes nothing, because every authorization needs an
+active membership. The answer is `{ membershipId, facilityId, accountId,
+state: "ended", revokedRoles, revokedGrants, expiredRequests, revokedSessions,
+version, replayed }`. To give the person access again, attach them again: a
+new membership starts pending.
 
 | Status and code | When |
 |---|---|
@@ -1614,7 +1641,7 @@ access again, attach them again: a new membership starts pending.
 | `404 WORKFORCE_ACCOUNT_NOT_FOUND`, `WORKFORCE_STAFF_NOT_FOUND`, `WORKFORCE_FACILITY_NOT_FOUND`, `WORKFORCE_MEMBERSHIP_NOT_FOUND` | The named record does not exist |
 | `409 WORKFORCE_ATTESTATION_REQUIRED` | No current attestation for the role by an independent reviewer |
 | `409 WORKFORCE_ROLE_CONFLICT` | The membership holds `org_admin` or `admin`; an administering membership stays non-clinical |
-| `409 WORKFORCE_ROLE_ALREADY_ACTIVE`, `WORKFORCE_ROLE_NOT_ACTIVE` | Granting a held role, or revoking one the membership does not hold |
+| `409 WORKFORCE_ROLE_ALREADY_ACTIVE`, `WORKFORCE_ROLE_NOT_ACTIVE` | Granting a held role that is not due for renewal (its attestation is current and no current attestation lasts longer, or it was not granted on an attestation), or revoking one the membership does not hold |
 | `409 WORKFORCE_MEMBERSHIP_EXISTS` | The account already has an active or pending membership at the facility |
 | `409 WORKFORCE_MEMBERSHIP_ENDED`, `WORKFORCE_MEMBERSHIP_INACTIVE`, `WORKFORCE_MEMBERSHIP_HELD` | The membership has ended, is inactive and was not attached by these commands, or is held for migration review |
 | `409 WORKFORCE_FACILITY_MISMATCH` | `facilityId` is not the membership's facility |
