@@ -2,31 +2,33 @@
 -- REC-AUDIENCE, REC-NOTIFY, PSEARCH-1). Applied migrations 0001 through 0085
 -- are immutable.
 --
--- 1. auth.complete_recovery_otp (0029) also revokes every external identity
---    (Google link) of the account that is not already revoked, and records how
---    many in the audit event. Before, a Google link made by whoever once held
---    the password survived the owner's reset, and Google sign-in issues a
---    session at the current token version. Replaced with CREATE OR REPLACE,
---    which keeps its owner and ACL; signature, result, SECURITY DEFINER and
---    search_path are restated exactly as in 0029.
+-- 1. auth.complete_recovery_otp (0029) also revokes every external sign-in
+--    identity of the account (today only Google links) that is not already
+--    revoked, and records how many in the audit event. Before, a Google link
+--    made by whoever once held the password survived the owner's reset, and
+--    Google sign-in issues a session at the current token version. The legacy
+--    importer's provenance record (issuer 'legacy-identity') is not a sign-in
+--    and is kept. Replaced with CREATE OR REPLACE, which keeps its owner and
+--    ACL; signature, result, SECURITY DEFINER and search_path are restated
+--    exactly as in 0029.
 -- 2. auth.recovery_account_audience(account, audience): whether an account is
 --    of the kind a recovery start reaches (a patient record, a staff record or
 --    a platform administrator assignment), for Identity's system context only.
 --    A start for another kind is answered like an unknown identifier.
--- 3. otp_challenges_account_consumed_idx serves the 24-hour hold Identity
---    applies after an OTP recovery (access-PIN set, emergency-contact changes,
---    new access approvals). It is built inside the migration transaction and
---    holds a SHARE lock on auth.otp_challenges while it builds.
--- 4. auth.otp_rate_limits accepts four staff search budgets: patient lookups
---    and access-request creation, each per actor account and per facility.
--- 5. patients_registration_read (0011) no longer admits a registration-role
+-- 3. patients_registration_read (0011) no longer admits a registration-role
 --    membership to every identity.patients row. It admits only patients linked
 --    at the current facility to a registration case (its resolved patient or a
 --    review candidate) and the patient an approve-new review is creating.
 --    Governed registration reads the rest through two narrow commands,
 --    identity.registration_nin_holder and identity.registration_candidates,
---    which return minimum fields. ALTER POLICY keeps the policy's name, table,
---    command and role.
+--    which return minimum fields. The policy is dropped and created again with
+--    the same name, table, command and role (PUBLIC) and the narrower
+--    expression, in this transaction, so no other session sees it absent.
+-- 4. auth.otp_rate_limits accepts four staff search budgets: patient lookups
+--    and access-request creation, each per actor account and per facility.
+-- 5. otp_challenges_account_consumed_idx serves the 24-hour hold Identity
+--    applies after an OTP recovery (access-PIN set, emergency-contact changes,
+--    new access approvals).
 -- 6. identity.patient_lookup_audit_subject names, for the audit only, the
 --    patient a refused HID lookup was about; the API answers every refusal
 --    alike.
@@ -36,6 +38,28 @@
 --    event. Nothing is persisted for any patient. Replaced with CREATE OR
 --    REPLACE; signature, result, SECURITY DEFINER and search_path are restated
 --    exactly as in 0010.
+-- 8. identity.list_my_staff_access_requests (0074) returns patient_id only
+--    while the grant made from the request is active (effective status
+--    'active'); for every other request it is NULL, so a request for a
+--    guessed HID never yields the patient id without the patient's consent.
+--    Replaced with CREATE OR REPLACE; everything else is restated exactly as
+--    in 0074, which keeps its owner and ACL.
+--
+-- Locks, in the order taken: ACCESS EXCLUSIVE on identity.patients (3), ACCESS
+-- EXCLUSIVE on auth.otp_rate_limits (4), then SHARE on auth.otp_challenges
+-- while the index builds (5), each held until commit. Every other statement
+-- changes functions only. The OTP start of the Identity build that serves
+-- during the migration reads identity.patients, then writes
+-- auth.otp_rate_limits, then auth.otp_challenges, the same order, so it waits
+-- for the migration or the migration waits for it, without a cycle (taking
+-- the index first deadlocked that start, reproduced locally). Its completion
+-- writes auth.otp_challenges and then reads identity.patients within one
+-- function call, the opposite order, so a completion caught between those
+-- two statements can still deadlock with this migration. PostgreSQL then
+-- cancels one of the two (40P01): either that completion fails and the
+-- owner submits it again while its verification is valid, or this migration
+-- rolls back whole and is run again. The runner's 5 s lock_timeout bounds
+-- every wait (55P03 also rolls the migration back whole).
 --
 -- The new functions are revoked from PUBLIC here; their EXECUTE grants come
 -- only with the role bootstrap (runtime-grants.sql). Run db:bootstrap and
@@ -107,10 +131,12 @@ begin
     revocation_reason = 'password_recovered_with_otp', row_version = row_version + 1
     where account_id = target_account_id and revoked_at is null;
   -- A recovered account keeps no sign-in another party may have linked: every
-  -- external identity not already revoked (active or disabled) is revoked.
+  -- external sign-in identity not already revoked (active or disabled) is
+  -- revoked. The legacy importer's provenance record is not a sign-in.
   update auth.external_identities as identity_row
      set status = 'revoked', revoked_at = coalesce(identity_row.revoked_at, clock_timestamp())
-   where identity_row.account_id = target_account_id and identity_row.status <> 'revoked';
+   where identity_row.account_id = target_account_id and identity_row.status <> 'revoked'
+     and identity_row.issuer <> 'legacy-identity';
   get diagnostics identities_revoked = row_count;
   update auth.otp_challenges set consumed_at = clock_timestamp(), row_version = row_version + 1
     where id = requested_challenge_id;
@@ -140,7 +166,7 @@ end;
 $$;
 
 comment on function auth.complete_recovery_otp(uuid, text, text, text) is
-  'Atomic one-time verified OTP recovery bound to current account token version; cannot enable disabled accounts; revokes every session and every external identity of the account (0086). No OTP/token/password plaintext is persisted or audited.';
+  'Atomic one-time verified OTP recovery bound to current account token version; cannot enable disabled accounts; revokes every session and every external sign-in identity of the account, keeping the legacy importer provenance record (0086). No OTP/token/password plaintext is persisted or audited.';
 
 create function auth.recovery_account_audience(
   requested_account_id uuid,
@@ -190,18 +216,9 @@ revoke all on function auth.recovery_account_audience(uuid, text) from public;
 comment on function auth.recovery_account_audience(uuid, text) is
   'Whether an account is of the kind a recovery start reaches: patient (an active patient record), staff (an active staff record) or platform (an unrevoked platform.admin.access assignment). Identity system context only (0086).';
 
-create index otp_challenges_account_consumed_idx
-  on auth.otp_challenges (account_id, consumed_at desc)
-  where consumed_at is not null;
-
-alter table auth.otp_rate_limits drop constraint otp_rate_limits_scope_check;
-alter table auth.otp_rate_limits add constraint otp_rate_limits_scope_check check (scope in (
-  'ip', 'account', 'recipient', 'mfa_failure_account', 'mfa_failure_ip', 'mfa_request_account',
-  'patient_lookup_actor', 'patient_lookup_facility', 'access_request_actor', 'access_request_facility'
-));
-
-alter policy patients_registration_read on identity.patients
-  using (
+drop policy patients_registration_read on identity.patients;
+create policy patients_registration_read on identity.patients
+  for select using (
     (
       auth.membership_has_permission(
         platform.current_actor_subject(), platform.current_membership_id(),
@@ -247,6 +264,16 @@ alter policy patients_registration_read on identity.patients
       )
     )
   );
+
+alter table auth.otp_rate_limits drop constraint otp_rate_limits_scope_check;
+alter table auth.otp_rate_limits add constraint otp_rate_limits_scope_check check (scope in (
+  'ip', 'account', 'recipient', 'mfa_failure_account', 'mfa_failure_ip', 'mfa_request_account',
+  'patient_lookup_actor', 'patient_lookup_facility', 'access_request_actor', 'access_request_facility'
+));
+
+create index otp_challenges_account_consumed_idx
+  on auth.otp_challenges (account_id, consumed_at desc)
+  where consumed_at is not null;
 
 create function identity.registration_nin_holder(requested_lookup_hmac text)
 returns table (patient_id uuid, hid_code text, patient_status text)
@@ -513,3 +540,118 @@ $$;
 
 comment on function identity.create_access_request(text, text, text, integer) is
   'Creates or reuses an exact-HID pending request after revalidating the current staff membership and permission; an unknown HID is answered alike with no patient, audited as refused and persisted nowhere else (0086).';
+
+create or replace function identity.list_my_staff_access_requests(
+  requested_status text default null
+)
+returns table (
+  access_request_id uuid,
+  patient_id uuid,
+  scope text,
+  purpose_of_use text,
+  reason text,
+  status text,
+  requested_duration_minutes integer,
+  requested_at timestamptz,
+  approved_at timestamptz,
+  denied_at timestamptz,
+  denied_reason text,
+  consent_grant_id uuid,
+  grant_expires_at timestamptz,
+  effective_status text,
+  authorization_method text
+)
+language plpgsql
+security definer
+set search_path = identity, auth, platform, pg_catalog, pg_temp
+as $$
+declare
+  actor_subject_value text := platform.current_actor_subject();
+  actor_account_id uuid := auth.account_id_for_subject(actor_subject_value);
+  actor_membership_id uuid := platform.current_membership_id();
+  actor_facility_id uuid := platform.current_facility_id();
+begin
+  if actor_account_id is null
+     or actor_membership_id is null
+     or actor_facility_id is null
+     or not auth.membership_has_permission(
+       actor_subject_value, actor_membership_id, actor_facility_id, 'identity.consent.write'
+     ) then
+    raise exception using errcode = '42501', message = 'Authorized consent read context is required';
+  end if;
+
+  if requested_status is not null
+     and requested_status not in ('pending', 'approved', 'denied', 'revoked', 'expired', 'active', 'closed') then
+    raise exception using errcode = '22023', message = 'Invalid access request status';
+  end if;
+
+  return query
+  -- The patient is named only while the grant made from the request is
+  -- active, so a request for a guessed HID never yields the patient id
+  -- without the patient's consent (PSEARCH-1, 0086).
+  select outcome.request_id,
+         case when outcome.outcome_status = 'active' then outcome.request_patient_id end,
+         outcome.request_scope, outcome.request_purpose,
+         outcome.request_reason, outcome.request_status, outcome.request_duration, outcome.request_created_at,
+         outcome.request_approved_at, outcome.request_denied_at, outcome.request_denied_reason,
+         outcome.grant_id, outcome.grant_expiry, outcome.outcome_status, outcome.grant_method
+    from (
+      select request_row.id as request_id,
+             request_row.patient_id as request_patient_id,
+             request_row.scope as request_scope,
+             request_row.purpose_of_use as request_purpose,
+             request_row.reason as request_reason,
+             request_row.status as request_status,
+             request_row.requested_duration_minutes as request_duration,
+             request_row.created_at as request_created_at,
+             request_row.approved_at as request_approved_at,
+             request_row.denied_at as request_denied_at,
+             request_row.denied_reason as request_denied_reason,
+             grant_row.id as grant_id,
+             grant_row.expires_at as grant_expiry,
+             case
+               when request_row.status <> 'approved' or grant_row.id is null then request_row.status
+               when grant_row.status = 'active' and grant_row.expires_at > clock_timestamp() then 'active'
+               -- Only a revocation before the grant lapsed ends it; a later sweep
+               -- (a PIN change, account deletion) does not change its outcome.
+               when grant_row.status = 'revoked' and grant_row.revoked_at < grant_row.expires_at
+                    and grant_row.revoked_by = grant_row.account_id then 'closed'
+               when grant_row.status = 'revoked' and grant_row.revoked_at < grant_row.expires_at then 'revoked'
+               else 'expired'
+             end as outcome_status,
+             case
+               when grant_row.id is null then null
+               when grant_row.authorization_method = 'patient_access_pin' then 'patient_access_pin'
+               else 'patient_approval'
+             end as grant_method
+        from identity.access_requests request_row
+        left join lateral (
+          select candidate.id, candidate.status, candidate.expires_at, candidate.revoked_at,
+                 candidate.revoked_by, candidate.account_id, candidate.authorization_method
+            from identity.consent_grants candidate
+           where candidate.request_id = request_row.id
+           order by candidate.created_at desc
+           limit 1
+        ) grant_row on true
+       where request_row.staff_id = (
+               select membership.staff_id
+                 from identity.staff_facility_memberships membership
+                where membership.id = actor_membership_id
+                  and membership.account_id = actor_account_id
+                  and membership.facility_id = actor_facility_id
+             )
+         and request_row.membership_id = actor_membership_id
+         and request_row.facility_id = actor_facility_id
+         and request_row.break_glass = false
+         and request_row.migration_hold_reason is null
+    ) outcome
+   where requested_status is null
+      or outcome.request_status = requested_status
+      or outcome.outcome_status = requested_status
+   order by outcome.request_created_at desc, outcome.request_id desc
+   limit 100;
+end;
+$$;
+
+comment on function identity.list_my_staff_access_requests(text) is
+  'The calling clinician''s own non-break-glass access requests at the current facility, with the outcome of each approval (0074); the patient id only while the grant made from the request is active (0086).';

@@ -12,8 +12,10 @@ import type { ListStaffAccessRequestsDto } from './dto/list-staff-access-request
 import type { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
 
 /**
- * A recorded access request as the requesting clinician sees it. It names no
- * patient, and an unknown HID is answered in the same shape (PSEARCH-1, 0086).
+ * The answer to an access request as the requesting clinician sees it. It
+ * names no patient, and an unknown HID is answered in the same shape; the
+ * clinician's list names the patient only once a grant made from the request
+ * is active (PSEARCH-1, 0086).
  */
 export interface AccessRequestRow extends QueryResultRow {
   accessRequestId: string;
@@ -102,6 +104,13 @@ export class ConsentService {
   }
 
 
+  /**
+   * The clinician's own requests. A request names its patient only while the
+   * grant made from it is active (effective status 'active'): the database
+   * command returns no patient id otherwise (0086), and this projection keeps
+   * it that way, so a request for a guessed HID never yields the patient id
+   * before the patient consents (PSEARCH-1).
+   */
   async listMyStaffAccessRequests(context: DataAccessContext, query: ListStaffAccessRequestsDto) {
     try {
       return await this.database.withTransaction(context, async (client) => {
@@ -116,7 +125,9 @@ export class ConsentService {
            from identity.list_my_staff_access_requests($1)`,
           [query.status ?? null],
         );
-        return result.rows;
+        return result.rows.map((row): Record<string, unknown> => ({
+          ...row, patientId: row.effectiveStatus === 'active' ? row.patientId ?? null : null,
+        }));
       }, { readOnly: true });
     } catch (error) {
       throw this.translate(error);
