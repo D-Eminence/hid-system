@@ -168,7 +168,7 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
   const database = { withSystemTransaction: jest.fn(async (_correlation: string,
     work: (client: PoolClient) => Promise<unknown>) => work(client)) } as unknown as DatabaseService;
   const provider = { assertAvailable: jest.fn().mockResolvedValue(undefined),
-    verifyNin: jest.fn().mockResolvedValue(identity) };
+    isAvailable: jest.fn().mockResolvedValue(true), verifyNin: jest.fn().mockResolvedValue(identity) };
   const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
   const protector = { lookup: jest.fn().mockReturnValue('a'.repeat(64)) };
   const hidCodes = { generate: jest.fn().mockReturnValue('HID-TEST-00000001') };
@@ -901,18 +901,15 @@ describe('PatientEnrollmentService', () => {
     // FE-4: GET /identity/patient-enrollments/availability answers from the
     // checks start makes before it reads a NIN, so a client can say that
     // registration is not open before it asks for one.
-    type Availability = { availability(): Promise<{ open: boolean }> };
-    const availabilityOf = (service: PatientEnrollmentService) =>
-      (service as unknown as Availability).availability();
 
     it.each(closures)('answers availability closed while %s, as start refuses, reading and charging nothing',
       async (_label, closed, pause, status, code) => {
         Object.assign(process.env, open); resetEnvironmentForTests();
         const { f, adapter, integrations, pause: pauseQoreId } = gated();
-        await expect(availabilityOf(f.service)).resolves.toEqual({ open: true });
+        await expect(f.service.availability()).resolves.toEqual({ open: true });
         Object.assign(process.env, closed); resetEnvironmentForTests();
         if (pause) pauseQoreId();
-        await expect(availabilityOf(f.service)).resolves.toEqual({ open: false });
+        await expect(f.service.availability()).resolves.toEqual({ open: false });
         expect(f.queries).toEqual([]);
         await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
           .rejects.toMatchObject({ status, code });
@@ -925,7 +922,7 @@ describe('PatientEnrollmentService', () => {
       Object.assign(process.env, open); resetEnvironmentForTests();
       delete process.env.NIN_ENCRYPTION_KEY_B64; resetEnvironmentForTests();
       const { f, integrations } = gated();
-      await expect(availabilityOf(f.service)).resolves.toEqual({ open: false });
+      await expect(f.service.availability()).resolves.toEqual({ open: false });
       await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
         .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_CONFIGURATION_UNAVAILABLE' });
       expect(integrations.assertAvailable).not.toHaveBeenCalled();
@@ -937,7 +934,7 @@ describe('PatientEnrollmentService', () => {
       const { f, integrations } = gated();
       integrations.assertAvailable.mockRejectedValueOnce(new DomainProblem(503, 'INTEGRATION_UNAVAILABLE',
         'Delivery provider is temporarily unavailable'));
-      await expect(availabilityOf(f.service)).rejects.toMatchObject({ status: 503, code: 'INTEGRATION_UNAVAILABLE' });
+      await expect(f.service.availability()).rejects.toMatchObject({ status: 503, code: 'INTEGRATION_UNAVAILABLE' });
     });
   });
 

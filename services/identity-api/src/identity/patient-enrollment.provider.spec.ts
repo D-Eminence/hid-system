@@ -11,7 +11,6 @@ const originalEnvironment = { ...process.env };
 const nin = '12345678901';
 /** What a patient reads while registration is closed (FE-4); Health-id shows the detail as sent. */
 const NOT_OPEN = 'New Health ID registration is not open yet. If you already have a Health ID, sign in.';
-type AvailabilityGate = { isAvailable(): Promise<boolean> };
 
 /** The problem body Identity sends for an error, through its own filter. */
 function answered(error: unknown): { status: number; code: string; detail: string } {
@@ -214,18 +213,18 @@ describe('QoreID public patient identity provider', () => {
 
     it('reports availability from the same gate, asking QoreID nothing and charging nothing', async () => {
       const closed = provider({});
-      await expect((closed.service as unknown as AvailabilityGate).isAvailable()).resolves.toBe(false);
+      await expect(closed.service.isAvailable()).resolves.toBe(false);
       expect(closed.integrations.assertAvailable).not.toHaveBeenCalled();
       enable(false);
       const ninOnlyOff = provider({});
-      await expect((ninOnlyOff.service as unknown as AvailabilityGate).isAvailable()).resolves.toBe(false);
+      await expect(ninOnlyOff.service.isAvailable()).resolves.toBe(false);
       expect(ninOnlyOff.integrations.assertAvailable).not.toHaveBeenCalled();
       enable();
       const f = provider({});
       f.integrations.assertAvailable.mockRejectedValueOnce(new DomainProblem(503, 'INTEGRATION_PAUSED',
         'External verification is temporarily unavailable'));
-      await expect((f.service as unknown as AvailabilityGate).isAvailable()).resolves.toBe(false);
-      await expect((f.service as unknown as AvailabilityGate).isAvailable()).resolves.toBe(true);
+      await expect(f.service.isAvailable()).resolves.toBe(false);
+      await expect(f.service.isAvailable()).resolves.toBe(true);
       expect(f.integrations.assertAvailable).toHaveBeenCalledWith('qoreid', 'patient_nin');
       expect(f.adapter.verifyNinEnrollment).not.toHaveBeenCalled();
       expect(f.integrations.consumePublicPatientNinQuota).not.toHaveBeenCalled();
@@ -236,7 +235,7 @@ describe('QoreID public patient identity provider', () => {
       const f = provider({});
       f.integrations.assertAvailable.mockRejectedValueOnce(new DomainProblem(503, 'INTEGRATION_UNAVAILABLE',
         'Delivery provider is temporarily unavailable'));
-      await expect((f.service as unknown as AvailabilityGate).isAvailable())
+      await expect(f.service.isAvailable())
         .rejects.toMatchObject({ status: 503, code: 'INTEGRATION_UNAVAILABLE' });
     });
   });
