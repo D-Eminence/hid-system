@@ -2886,7 +2886,7 @@ and §9.
 # ADR-049: Clinicians Are Provisioned Only by Platform Governance; One Active Membership per Facility
 
 Status: Accepted for launch with the owner's default policy (launch decision
-D14, workforce part, and N5), in BRANCH:launch/staff-workforce-provisioning,
+D14, workforce part, and N5), in D-Eminence/hid-system#70,
 migration 0087. Not merged or deployed. The number may move when the launch
 branches merge.
 

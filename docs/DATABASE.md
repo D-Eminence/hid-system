@@ -2936,7 +2936,7 @@ Tests:
 ## Governed workforce provisioning and one membership per facility (0087)
 
 `0087_governed_workforce_provisioning.sql` implements launch decision D14
-(workforce part) and N5 (ADR-049; BRANCH:launch/staff-workforce-provisioning).
+(workforce part) and N5 (ADR-049; D-Eminence/hid-system#70).
 
 **One active membership per facility (N5).** A unique partial index,
 `staff_memberships_one_active_per_facility_uq`, allows one active membership

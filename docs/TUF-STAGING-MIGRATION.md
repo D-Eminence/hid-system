@@ -134,7 +134,7 @@ The executable covers:
    suites.
    `platform_admin_runtime` (`verify-platform-admin-runtime.mjs`) also
    provisions a clinician through the workforce routes of migration 0087
-   (launch decision D14, BRANCH:launch/staff-workforce-provisioning): a new
+   (launch decision D14, D-Eminence/hid-system#70): a new
    staff identity is attached to a verified facility as a pending membership,
    one Super Admin records the credential attestation, the same administrator
    is refused the grant (`WORKFORCE_SECOND_PERSON_REQUIRED`) and a second one
