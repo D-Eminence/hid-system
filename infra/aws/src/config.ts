@@ -69,6 +69,27 @@ export interface HidEnvironmentConfig {
   // The gateway's HID_ENABLED_API_ROUTES (deny by default). Synth input
   // HID_ENABLED_API_ROUTES; production accepts only the launch set.
   readonly enabledApiRoutes: readonly ApiRouteModule[];
+  // Identity's QOREID_NIN_ONLY_ENROLLMENT_ENABLED. Synth input
+  // HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED, default false, refused unless
+  // QoreID is enabled, and refused in production until the change that ships
+  // the registry-phone holder step (N1) lifts this refusal and Identity's.
+  readonly qoreIdNinOnlyEnrollmentEnabled: boolean;
+  // Whether the Novu notification worker may run. Synth input
+  // HID_NOTIFICATION_WORKER_ENABLED; production is fixed to false (D17)
+  // until a Novu account and region are approved.
+  readonly notificationWorkerEnabled: boolean;
+  // The exact ARN of the operator-created, KMS-encrypted SNS topic
+  // hid-<env>-operational-alerts that every alarm notifies (D4, ADR-053).
+  // Synth input HID_OPERATIONAL_ALARM_TOPIC_ARN; the regional stack requires
+  // it in production and it is optional elsewhere.
+  readonly operationalAlarmTopicArn?: string;
+}
+
+/** Synth inputs beyond the environment, staging mode, QoreID and route switches. */
+export interface SynthOptions {
+  readonly qoreIdNinOnlyEnrollmentEnabled?: string;
+  readonly notificationWorkerEnabled?: string;
+  readonly operationalAlarmTopicArn?: string;
 }
 
 interface ProfileValues {
@@ -199,6 +220,57 @@ export function enabledApiRoutes(name: EnvironmentName, value: string | undefine
   return selected;
 }
 
+/** The operator-created alarm topic of an environment (D4, ADR-053). */
+export function operationalAlarmTopicName(name: EnvironmentName): string {
+  return `hid-${name}-operational-alerts`;
+}
+
+const operationalAlarmTopicPattern = /^arn:(aws|aws-cn|aws-us-gov):sns:([a-z]{2}(?:-gov)?-[a-z]+-[0-9]):([0-9]{12}):([a-z-]+)$/;
+
+export interface OperationalAlarmTopic {
+  readonly arn: string;
+  readonly partition: string;
+  readonly region: string;
+  readonly account: string;
+}
+
+/**
+ * Parses the synth input HID_OPERATIONAL_ALARM_TOPIC_ARN: the exact ARN of
+ * this environment's topic hid-<env>-operational-alerts, named literally (no
+ * wildcard, token or surrounding text). Absent input returns undefined; the
+ * regional stack decides whether that is allowed.
+ */
+export function operationalAlarmTopic(name: EnvironmentName, value: string | undefined): OperationalAlarmTopic | undefined {
+  if (value === undefined) return undefined;
+  const match = operationalAlarmTopicPattern.exec(value);
+  if (!match || match[4] !== operationalAlarmTopicName(name)) {
+    throw new Error(`HID_OPERATIONAL_ALARM_TOPIC_ARN must be the exact ARN of the operator-created SNS topic `
+      + `${operationalAlarmTopicName(name)} in this environment's account and region; received ${JSON.stringify(value)}`);
+  }
+  return { arn: value, partition: match[1]!, region: match[2]!, account: match[3]! };
+}
+
+const routeGatedWorkloads: Readonly<Record<string, ApiRouteModule>> = {
+  'lab-api': 'lab', 'pharmacy-api': 'pharmacy', 'ocr-api': 'ocr', 'ocr-worker': 'ocr', 'outreach-api': 'outreach',
+};
+
+/**
+ * Whether a workload belongs to an enabled module. A disabled module's tasks
+ * stay at zero, do not autoscale and raise no alarm (D17, MOD-1).
+ */
+export function workloadEnabled(configuration: Pick<HidEnvironmentConfig, 'enabledApiRoutes' | 'notificationWorkerEnabled'>,
+  name: string): boolean {
+  if (name === 'notification-worker') return configuration.notificationWorkerEnabled;
+  const routeModule = routeGatedWorkloads[name];
+  return routeModule === undefined || configuration.enabledApiRoutes.includes(routeModule);
+}
+
+function booleanInput(variable: string, value: string | undefined, fallback: 'true' | 'false'): boolean {
+  const input = value ?? fallback;
+  if (!['true', 'false'].includes(input)) throw new Error(`${variable} must be true or false when supplied`);
+  return input === 'true';
+}
+
 /** The Amazon-provided DNS server of an IPv4 VPC: the CIDR's base address plus two. */
 export function vpcDnsResolver(vpcCidr: string): string {
   const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(vpcCidr);
@@ -219,6 +291,7 @@ export function environmentConfig(
   stagingModeValue?: string,
   qoreIdEnabledValue?: string,
   enabledApiRoutesValue?: string,
+  options: SynthOptions = {},
 ): HidEnvironmentConfig {
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
@@ -236,15 +309,34 @@ export function environmentConfig(
   } else if (stagingModeValue) {
     throw new Error('HID_STAGING_MODE is valid only when HID_INFRA_ENV=staging');
   }
-  const qoreIdEnabledInput = qoreIdEnabledValue ?? 'false';
-  if (!['true', 'false'].includes(qoreIdEnabledInput)) {
-    throw new Error('HID_QOREID_ENABLED must be true or false when supplied');
+  const qoreIdEnabled = booleanInput('HID_QOREID_ENABLED', qoreIdEnabledValue, 'false');
+  const qoreIdNinOnlyEnrollmentEnabled = booleanInput('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED',
+    options.qoreIdNinOnlyEnrollmentEnabled, 'false');
+  if (qoreIdNinOnlyEnrollmentEnabled && !qoreIdEnabled) {
+    throw new Error('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true requires HID_QOREID_ENABLED=true');
   }
+  // CFG-PROD, N1: NIN-only enrollment proves that a NIN exists, not that the
+  // caller holds it. Deny by default in production, independent of Identity's
+  // own refusal, until the registry-phone holder step ships.
+  if (qoreIdNinOnlyEnrollmentEnabled && name === 'production') {
+    throw new Error('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production until NIN-only enrollment '
+      + 'proves that the caller holds the registry phone (N1)');
+  }
+  const notificationWorkerEnabled = booleanInput('HID_NOTIFICATION_WORKER_ENABLED', options.notificationWorkerEnabled,
+    name === 'production' ? 'false' : 'true');
+  if (name === 'production' && notificationWorkerEnabled) {
+    throw new Error('HID_NOTIFICATION_WORKER_ENABLED is fixed to false in production (the launch module set, D17): '
+      + 'the notification worker needs an approved Novu account and region and its own decision');
+  }
+  const topic = operationalAlarmTopic(name, options.operationalAlarmTopicArn);
   return {
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
-    qoreIdEnabled: qoreIdEnabledInput === 'true',
+    qoreIdEnabled,
     enabledApiRoutes: enabledApiRoutes(name, enabledApiRoutesValue),
+    qoreIdNinOnlyEnrollmentEnabled,
+    notificationWorkerEnabled,
+    ...(topic ? { operationalAlarmTopicArn: topic.arn } : {}),
   };
 }
 

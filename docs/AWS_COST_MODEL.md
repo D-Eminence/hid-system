@@ -40,9 +40,20 @@ staging economy, staging fidelity, and production.
 | Profile | AZ | NAT | Interface endpoint/AZ attachments | ALBs | RDS | Default runtime |
 |---|---:|---:|---:|---:|---|---|
 | staging sleep | 2 | 0 | 0 | 0 | `db.t4g.small`, single-AZ, operator-stopped | all 11 services at 0 |
-| staging economy | 2 | 1 | 7 | 2 | `db.t4g.small`, single-AZ, 100 GiB | request services/Gateway 1; workers 0 |
-| staging fidelity | 2 | 2 | 16 | 2 | `db.t4g.medium`, Multi-AZ, 100 GiB | request services/Gateway 2; workers 1 |
-| production | 3 | 2 | 24 | 2 | `db.r6g.large`, Multi-AZ, 200 GiB | every service 2 |
+| staging economy | 2 | 1 | 7 | 2 | `db.t4g.small`, single-AZ, 100 GiB | Identity, EHR, Notification API and Gateway 1; workers 0; modules that are off 0 |
+| staging fidelity | 2 | 2 | 16 | 2 | `db.t4g.medium`, Multi-AZ, 100 GiB | Identity, EHR, Notification API and Gateway 2; Notification Worker and Event Dispatcher 1; modules that are off 0 |
+| production | 3 | 2 | 24 | 2 | `db.r6g.large`, Multi-AZ, 200 GiB | all 11 services at 0 until the reviewed I6 parameter file raises the enabled ones (recommended 2 each); modules that are off pinned at 0 |
+
+"Modules that are off" are Lab, Pharmacy, OCR (API and worker) and Outreach
+unless the synth input `HID_ENABLED_API_ROUTES` names them, and in production
+also the Notification Worker (`HID_NOTIFICATION_WORKER_ENABLED` is fixed to
+`false`). Their desired count and scaling ceiling allow only 0 in every
+profile (D17, ADR-053; development too). A staging acceptance run that names
+them gets the profile's count back (economy 1, fidelity 2 and the fidelity OCR
+worker 1). Production's default of 0 follows ADR-032 and the I6 rollout: the
+inventory's `recommended` and `minimumLive` columns, not its
+`cloudFormationDefault`, are the running production estimate once the enabled
+services are scaled; the modules that are off cost no task-hours.
 
 Sleep is **not zero cost**. It retains the protected RDS instance/storage,
 automated backups/PITR, snapshots, versioned S3 objects, KMS keys, secret
@@ -117,7 +128,8 @@ text, NIN, tokens, or high-cardinality identifiers as metrics.
 
 Every workload owns typed CPU, memory, scaling signal, target, cooldown, pool
 size, normal ceiling, and separately reviewed emergency ceiling. Production
-does not scale to zero. Request APIs use ALB request count plus latency, 5xx,
+does not scale an enabled service to zero once it is rolled out (it starts at
+zero until the I6 parameter file raises it, ADR-053). Request APIs use ALB request count plus latency, 5xx,
 CPU, and memory visibility. Notification Worker uses SQS visible/oldest/deleted
 signals; OCR Worker uses queue depth, age, claims, pages, failures, retries, and
 duplicate-avoidance signals; Event Dispatcher uses outbox depth, age and drain

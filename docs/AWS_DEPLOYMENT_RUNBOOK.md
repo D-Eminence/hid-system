@@ -33,7 +33,26 @@ Notification Worker separately requires `novuApiKey`. SES remains live, workload
 authentication and TLS remain required, and SES failures are preserved. Termii,
 Meta and Brevo fields must not be filled with placeholders. Their accounts and
 full-channel profile are deferred unless explicitly included in a later reviewed
-acceptance scope. Production retains the existing full profile.
+acceptance scope.
+
+## Production OTP profile (ADR-053)
+
+Production (and development) select `NOTIFICATION_DELIVERY_PROFILE=otp-email-sms`
+(D-Eminence/hid-system#66): email OTP through SES and SMS OTP through
+Termii. The Notification API reads exactly `sesFromAddress`, `termiiBaseUrl`,
+`termiiApiKey` and `termiiSenderId` from `/hid/production/notification-provider`,
+and the secret must hold exactly those four fields: no Meta, WhatsApp, Brevo or
+Novu field (the production preflight, §13, fails on any other). Production
+refuses the `full` and `email-only` profiles, any WhatsApp configuration and a
+local service token. The Notification Worker (Novu) is off in production
+(`HID_NOTIFICATION_WORKER_ENABLED` is fixed to `false`) and reads no
+`novuApiKey`. Every OTP send writes one PHI-free `notification.otp.outcome` log
+line, and `OtpDefinitiveFailures` alarms on its `definitive_failure` count.
+When the fallback ran, the line also names the primary provider and its safe
+code (`primaryProvider`, `primarySafeCode`); read those for why SES or Termii
+failed. Migration 0047 seeds Brevo as an enabled email and SMS fallback, and
+production gives it no key, so it answers `not_configured`: before ingress a
+platform administrator pauses it (§13 step 5, release checklist P21).
 
 Novu also needs the configured workflow, canonical synthetic patient subscriber
 mapping and approved delivery integration. See
@@ -69,9 +88,18 @@ Record and approve:
   `mfaSecretKeyB64` (below); legacy NIN material remains
   excluded from current staging requirements. If QoreID staging activation is
   separately approved, add its distinct `clientId`/`secret` envelope only;
-- for staging email acceptance, SES sender and Novu secret material only; the
-  existing full profile additionally uses Termii, Meta and Brevo. FCM is not
-  instantiated by the current worker and is outside this acceptance scope; and
+- for staging email acceptance, SES sender and Novu secret material only; for
+  production the four `otp-email-sms` fields only (SES sender and Termii base
+  URL, key and approved sender ID; above). FCM is not instantiated by the
+  current worker and is outside this acceptance scope;
+- the exact ARN of the environment's operator-created alarm topic
+  `hid-<env>-operational-alerts` (synth input `HID_OPERATIONAL_ALARM_TOPIC_ARN`,
+  required for production, ADR-053, §13) and the on-call recipients the
+  operations owner names for it;
+- for production, the reviewed I6 parameter file: every `*DesiredCount` is 0 by
+  default and is raised there, enabled services only, to at least the live
+  minimum in its description; Lab, Pharmacy, OCR (API and worker), Outreach and
+  the Notification Worker are pinned at 0 (launch module set D17); and
 - one independently generated origin secret per environment, stored only in
   that environment's Cloudflare Worker secret binding and its matching AWS WAF
   parameter; staging and production values must differ.
@@ -105,7 +133,11 @@ add both, each 32 bytes in canonical padded base64, before its first deployment.
 For staging, the [external preflight](STAGING_EXTERNAL_PREFLIGHT.md) reports
 whether `otpHmacKeyB64`, `contactLookupHmacKeyB64` and `mfaSecretKeyB64` are
 present and whether each has the format Identity accepts
-(`canonical_32_byte_base64`); it does not check the NIN keys.
+(`canonical_32_byte_base64`); with `--qoreid` it also checks
+`ninLookupHmacKeyB64`, `ninEncryptionKeyB64` and the QoreID credential field
+names. It reports `google_sign_in_enabled` and accepts an empty
+`googleOidcClientIds`. It is staging-only; production uses
+`scripts/production-external-preflight.py` (§13).
 
 For staging, `RdsCaBundleBase64` accepts at most 4096 base64 characters, the
 CloudFormation parameter-value limit. Independently verify the staging region
@@ -182,6 +214,31 @@ bytes) and fidelity
 bytes). `verify:synth` and `verify:policy` pass for all five. The production
 row above stays `main`'s until this branch merges; then this hash replaces it.
 
+**Under ADR-053 (D-Eminence/hid-system#66).** The same offline
+synthesis (AWS credential variables removed, `AWS_CONFIG_FILE` and
+`AWS_SHARED_CREDENTIALS_FILE` pointing at no file, no `HID_AWS_ACCOUNT`, no
+`HID_ENABLED_API_ROUTES`) gives production
+`86d181b0f1a33d418148e5392e1c5cdd2b63a227a6b02b42fbf90399cf148c94` (547,992
+bytes, 407 resources, 54 parameters, 31 alarms, 16 metric filters), development
+`5aa6316de24a67c36ccd3572023f352dd879d5fbd3c8de764340976b3b9e5be1` (478,747
+bytes), staging sleep
+`c1c018c79f403100bb221774d80eba07ec3c7822b508ac6a8d3467247c2c88e9` (325,081
+bytes), economy
+`58e7ebad9bb1eccb598771a3771fb3ee244f63f8a88afaeeb246174c76749018` (529,196
+bytes) and fidelity
+`4bba6856bdf2acbbfcaa6a4540c6162376f7c1d768bdae2c41d7b14220dde5d8` (533,045
+bytes). Production was synthesized with a synthetic
+`HID_OPERATIONAL_ALARM_TOPIC_ARN`; the template does not contain it (the alarm
+action is built from the deploying account, region and partition), so any
+valid input gives the same template. Why it changed: every production
+`*DesiredCount` defaults to 0; the modules that are off are pinned at 0 with
+no scaling policy and lose their alarms; every production alarm has the topic
+as its alarm and OK action; the issuer, renewal and OTP alarms and their metric
+filters are new; notification-api runs `otp-email-sms` with four provider
+fields; Identity gets `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=false`. The base
+templates after D-Eminence/hid-system#65 were not re-recorded here. Record the
+production baseline again from the approved SHA (§12 step 2).
+
 ## 2. Local source gates
 
 From a locked checkout:
@@ -208,10 +265,21 @@ npm --prefix infra/aws run synth:staging:economy
 HID_INFRA_ENV=staging HID_STAGING_MODE=economy npm --prefix infra/aws run verify:synth
 npm --prefix infra/aws run synth:staging:fidelity
 HID_INFRA_ENV=staging HID_STAGING_MODE=fidelity npm --prefix infra/aws run verify:synth
-npm --prefix infra/aws run synth:prod
+HID_OPERATIONAL_ALARM_TOPIC_ARN=<exact production topic ARN> npm --prefix infra/aws run synth:prod
 HID_INFRA_ENV=production npm --prefix infra/aws run verify:synth
 npm --prefix infra/aws run verify:policy
 ```
+
+A production synth refuses to run without `HID_OPERATIONAL_ALARM_TOPIC_ARN`
+(ADR-053). For an offline check with no topic yet, any ARN of the form
+`arn:aws:sns:<region>:<12 digits>:hid-production-operational-alerts` gives the
+same template; a deployment must use the real topic's ARN with
+`HID_AWS_ACCOUNT` and `HID_AWS_REGION` set, so that a topic in another account
+or region is refused at synth. `verify:synth` checks that every production
+`*DesiredCount` defaults to 0, that the modules that are off are pinned at 0
+with no scaling policy or alarm, that every alarm notifies the topic on ALARM
+and OK, the issuer, renewal and OTP alarms, and the notification-api provider
+fields.
 
 Expected topology is one regional stack, eleven ECS services, eleven ECR
 repositories, twelve task definitions/image inputs including migration, the
@@ -568,6 +636,21 @@ Worker back while such a gateway runs.
 Raise minimum dependencies first: Identity and Notification API, then owner
 APIs and Gateway, then OCR Worker, Event Dispatcher, and Notification Worker.
 Use small desired counts and alarms before reaching the environment profile.
+In production every `*DesiredCount` defaults to 0 and is raised only through
+the reviewed I6 parameter file, each enabled service to at least the live
+minimum in its description (ADR-053); the modules that are off (Lab, Pharmacy,
+OCR API and worker, Outreach and the Notification Worker at launch) are pinned
+at 0, and a parameter file that raises one fails CloudFormation validation.
+Every production alarm notifies the operational topic (§13); confirm a
+recipient received the topic's test message before scaling up. While an
+enabled service runs 0 tasks its running-task alarm (missing data is
+breaching) is in `ALARM`: on the first production deploy
+`GatewayRunningTaskAlarm`, `IdentityApiRunningTaskAlarm`,
+`EhrApiRunningTaskAlarm`, `NotificationApiRunningTaskAlarm` and
+`EventDispatcherRunningTaskAlarm` each notify the topic, and notify again on
+`OK` once the service runs its live minimum. Tell the on-call recipients
+before the deploy; a running-task alarm still in `ALARM` after its service
+was scaled is a real failure.
 
 The gateway proxies only the modules in its `HID_ENABLED_API_ROUTES`
 (`identity,ehr` unless a staging synth sets the synth input of that name; a
@@ -624,7 +707,7 @@ rollback is not a down migration: use additive correction or the approved
 PITR/incident path. Preserve deployment parameters, manifest, approvals,
 redacted test evidence, reconciliation totals, and rollback decision.
 
-Local implementation leaves every operation in sections 3–12 externally
+Local implementation leaves every operation in sections 3–13 externally
 pending; no account, DNS, provider, database, or production state is mutated by
 repository acceptance.
 
@@ -654,7 +737,9 @@ Steps:
    from `IdentityApiImageUri`. Record its digest. An earlier image's agent
    refuses `production`, so a token task with it never starts its application.
 2. From the approved SHA, run the §2 gates, including
-   `npm --prefix infra/aws run synth:prod`,
+   `HID_OPERATIONAL_ALARM_TOPIC_ARN=<exact ARN of the §13 topic> HID_AWS_ACCOUNT=<approved account> HID_AWS_REGION=<approved region> npm --prefix infra/aws run synth:prod`
+   (a production synth without the topic ARN fails, ADR-053, so §13 step 1
+   comes first),
    `HID_INFRA_ENV=production npm --prefix infra/aws run verify:synth`,
    `npm --prefix infra/aws run verify:policy` and
    `npm --prefix infra/aws run cost:inventory:check`. Record as a new evidence
@@ -671,6 +756,10 @@ Steps:
 3. In the production account and region, read-only:
    - confirm the CDK bootstrap version (`/cdk-bootstrap/hnb659fds/version`)
      and its asset bucket; the deploy publishes the issuer asset there;
+   - run §13 first: the production preflight's launch profile must pass, which
+     includes the operational alarm topic; synthesize with that topic's exact
+     ARN in `HID_OPERATIONAL_ALARM_TOPIC_ARN` and with `HID_AWS_ACCOUNT` and
+     `HID_AWS_REGION` set;
    - run `cdk diff Hid-production-Regional --no-lookups` with the reviewed
      parameter file. Expect exactly:
      - additions: the `ProductionWorkloadIdentity` key (`Retain`, with the
@@ -691,12 +780,23 @@ Steps:
        stack), eight in all;
      - `DependsOn` changes on services, scaling targets and policies and
        service-discovery services;
-     - removal of the eight workload parameters.
+     - removal of the eight workload parameters;
+     - under ADR-053 (D-Eminence/hid-system#66), if the stack was
+       last deployed without it: the alarm and OK actions on every alarm, the
+       four issuer alarms, the renewal and OTP metric filters and alarms, the
+       removal of the alarms and scaling policies of the modules that are off,
+       new `*DesiredCount` defaults and ranges, new Notification API and
+       Identity API task-definition revisions (the `otp-email-sms` profile and
+       four provider fields; `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=false`), and
+       the `OperationalAlarmTopicArn` output.
    - Stop on any replacement or deletion of RDS, S3, the data KMS keys, ECR
      repositories or log groups, or on any other change.
 4. Deploy with every `*DesiredCount` at `0` and the eight workload parameters
    removed from the parameter file. Record the `IssuerUrl` and `JwksUrl`
-   outputs and the signing key ARN. Never record a token.
+   outputs and the signing key ARN. Never record a token. Expect the five
+   running-task alarms of the enabled services to enter `ALARM` and notify the
+   on-call recipients, who were told beforehand (§9); each returns to `OK` in
+   steps 6 and 7 or in §9.
 5. With no task running, verify the issuer:
    - from an operator workstation, `GET <JwksUrl>` and an unsigned
      `POST <IssuerUrl>/token` answer `403` from the web ACL, and its
@@ -720,13 +820,19 @@ Steps:
    `notification_workload_token_unavailable` line may appear; an OTP start for
    a synthetic account must not end with `safeCode` `http_401` or
    `workload_token_unavailable`.
-7. Scale the EHR, Lab, Pharmacy, OCR and Outreach APIs. On synthetic data: an
-   EHR request authenticates through Identity's service session, Lab accepts
-   an EHR order, and OCR publishes to EHR, Lab and Pharmacy.
+7. Scale the EHR API. On synthetic data an EHR request authenticates through
+   Identity's service session. Lab, Pharmacy, OCR and Outreach are off at
+   launch (D17) and pinned at 0 tasks (ADR-053); their checks (Lab accepts an
+   EHR order, OCR publishes to EHR, Lab and Pharmacy) belong to the reviewed
+   change that enables each module.
 8. Watch renewals (about every 90 seconds), task health (including any
    `workload-token-agent` container `STOPPED` in a running task, §7 "Agent
-   stopped"), issuer Lambda errors and API `5XX` for at least 15 minutes
-   before continuing with §9.
+   stopped"; no alarm covers it), issuer Lambda errors and API `5XX` for at
+   least 15 minutes before continuing with §9. The issuer, renewal and OTP
+   alarms (ADR-053) must stay `OK`, the running-task alarms of the services
+   scaled so far must have returned to `OK`, and their notifications must
+   have reached the on-call recipients. The running-task alarms of the
+   services not yet scaled stay in `ALARM` until §9.
 
 Record commands, outputs, the template SHA-256, the asset hash, the image
 digest, the key ARN and the time window. Record no token, credential or
@@ -765,3 +871,81 @@ Rollback:
   irreversible after its waiting period.
 - The key and the issuer log group are retained if the construct or stack is
   removed. Deleting them is a separate, approved action.
+
+## 13. Production launch preflight and alarm topic (ADR-053): operator plan, not approved
+
+**NOT APPROVED. Do not execute.** Prepared in D-Eminence/hid-system#66.
+Nothing here has been run: no production account was read, no topic, key,
+subscription or secret exists, and nothing was deployed. Each step needs the
+production deployment authorization of §12.
+
+External dependencies: the operations owner names the on-call recipients of
+`hid-production-operational-alerts`; SES production access and a DKIM-verified
+domain in the production account; a Termii account with an approved Nigerian
+sender ID; the security owner's production keys (launch plan I1).
+
+1. **Alarm topic.** In the production account and region, create a
+   customer-managed KMS key whose key policy keeps the account root statement
+   and lets `cloudwatch.amazonaws.com` call `kms:GenerateDataKey*` and
+   `kms:Decrypt` (CloudWatch cannot publish through the AWS-managed
+   `alias/aws/sns` key), then the standard SNS topic
+   `hid-production-operational-alerts` encrypted with it. Subscribe each named
+   recipient and have each confirm. Publish one test message and record that
+   every recipient received it. Record the topic ARN for
+   `HID_OPERATIONAL_ALARM_TOPIC_ARN`; it is not a secret.
+2. **Identity sensitive secret** (launch plan I1, REC-GOOGLE): five independent
+   32-byte keys (`mfaSecretKeyB64`, `otpHmacKeyB64`, `contactLookupHmacKeyB64`,
+   `ninLookupHmacKeyB64`, `ninEncryptionKeyB64`) in canonical padded base64,
+   `turnstileSecretKey`, and `googleOidcClientIds` present with an empty value
+   (Google sign-in off), merged through `jq` from standard input. Never print a
+   value or reuse a staging value.
+3. **Notification provider secret:** exactly `sesFromAddress` (an address on
+   the DKIM-verified domain), `termiiBaseUrl`, `termiiApiKey` and
+   `termiiSenderId` (the approved sender ID), and nothing else.
+4. **Preflight.** With an existing read-only session in the production
+   account:
+
+   ```bash
+   HID_AWS_ACCOUNT=<approved production account> HID_AWS_REGION=<approved region> \
+     python3 scripts/production-external-preflight.py --cloud-read-only \
+     --output release/local/production-external-preflight.json
+   ```
+
+   It refuses the staging account, reads only (`sts get-caller-identity`,
+   `secretsmanager get-secret-value` for the three production secrets,
+   `sesv2 get-account`, `sesv2 get-email-identity`,
+   `sns get-topic-attributes`, `kms describe-key` and `kms get-key-policy` for
+   the topic's key; the session needs `kms:DescribeKey` and
+   `kms:GetKeyPolicy` on it) and writes a value-free receipt: field presence,
+   a canonical-format boolean per key, `google_sign_in_enabled`, whether the
+   notification secret holds exactly the four fields, SES production access,
+   sending and DKIM, and for the topic whether its key is customer managed,
+   enabled and in the topic's account and region, whether the key policy
+   lets `cloudwatch.amazonaws.com` call `kms:Decrypt` and
+   `kms:GenerateDataKey`, and the confirmed subscriptions. Any spelling of
+   the AWS-managed `alias/aws/sns` key (alias, alias ARN, key id or key ARN)
+   fails. It exits 1 unless `launch_profile.passed` is true. The Termii
+   sender-ID approval and the recipients' receipt are not readable from AWS:
+   record them separately (release checklist P18, P16).
+5. **Brevo fallback paused** (release checklist P21). After migration 0047
+   is applied in production (it seeds Brevo enabled as the email and SMS
+   fallback) and before ingress, a platform administrator with
+   `platform.integration.manage` pauses Brevo with the audited
+   `POST /api/v1/admin/integrations/brevo/pause` (a critical action: MFA
+   platform session, TOTP step-up, a reason, `If-Match` and
+   `Idempotency-Key`), which records the actor in the integration audit. Identity then plans no fallback, and a definitive SES
+   or Termii failure is reported as the primary's. `GET /api/v1/admin/integrations/brevo`
+   must show it paused.
+6. Synthesize with `HID_OPERATIONAL_ALARM_TOPIC_ARN`, `HID_AWS_ACCOUNT` and
+   `HID_AWS_REGION` (§2) and continue with §12.
+
+After deployment, confirm in CloudWatch that every alarm of the stack lists the
+topic as its alarm and OK action, then run a synthetic signup OTP over email
+and over SMS and a recovery OTP, and check that each wrote one
+`notification.otp.outcome` line with outcome `accepted` and no recipient, code
+or message. A line with `fallbackUsed: true` means Brevo was not paused (step
+5); its `primaryProvider` and `primarySafeCode` give the primary's result.
+
+Rollback: the topic, key and subscriptions are retained; removing them makes
+alarms notify nothing. To stop notifications without hiding alarm state,
+unsubscribe a recipient rather than editing the stack.

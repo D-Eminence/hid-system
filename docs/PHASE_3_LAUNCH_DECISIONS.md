@@ -1,7 +1,8 @@
 # Phase 3 launch decisions and operator plans
 
 Date: 2026-10-12. Status: open. D1, D2 and D3 were decided on 2026-10-13 with
-the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), and FE-HOST
+the proposed owner defaults (ADR-047, D-Eminence/hid-system#54), D4 with
+the owner policy defaults (ADR-053, D-Eminence/hid-system#66), and FE-HOST
 (§1, ADR-052, BRANCH:launch/frontend-host-healthid) with the owner's defaults;
 nothing else in this document has been decided, and nothing has been deployed
 or executed.
@@ -162,7 +163,7 @@ separate deployment authorization. None of them has been run.
 | D1 | Production workload issuer and key custody (DEP-4, DEP-4-KEY; ADR-047 accepted 2026-10-13, D-Eminence/hid-system#54) | **Decided (default):** the staging mechanism with an independent production key, API, stage and `hid:production:` subjects; the key policy keeps the root statement and denies `kms:Sign` to every principal but the issuer role, to any algorithm but `ECDSA_SHA_256` and to any message type but `RAW`; receivers accept only ES256 tokens with `exp`, `iat` at most 300 s old and `token_use: workload`; no local-secret fallback | Same-account key custody (an administrator can still change the key policy or the function); a single issuer for six services; receivers trust a withdrawn key for up to 10 minutes | Every service-to-service call in production; deployment still needs I5 and I6 |
 | D2 | Behaviour during an issuer outage (DEP-4-RES) | **Decided (default):** the agent is `essential: false` with an ECS container restart policy and keeps the `HEALTHY` start gate (ADR-047) | During an outage longer than a token's lifetime, service-to-service calls fail closed (OTP delivery, EHR records, Lab, Pharmacy, OCR, Outreach) while sign-in keeps working; nothing pages anyone until D4 | DEP-4 rollout |
 | D3 | Edge protection for the issuer (DEP-4-DOS) | **Decided (default, deny by default):** separate method throttles for `POST /token` and the JWKS `GET`, a REGIONAL web ACL on the issuer stage that blocks every source except the VPC's NAT gateway Elastic IPs (none in staging sleep), and an agent that caches its verified JWKS by `kid` (ADR-047) | A future caller outside the VPC (such as a D5 scanner) must leave through NAT or be allowlisted by a reviewed change; per-request WAF charges during a flood | DEP-4 rollout |
-| D4 | Alert routing | Dashboards only until an alerting workflow exists (ADR-032 forbids an SNS topic without one) | Nothing pages anyone | Every mitigation that relies on an alarm |
+| D4 | Alert routing | **Decided (owner policy default, ADR-053, D-Eminence/hid-system#66):** every production alarm notifies, on ALARM and on OK, an operator-created SNS topic `hid-<env>-operational-alerts` encrypted with a customer-managed KMS key and named by its exact ARN (synth input `HID_OPERATIONAL_ALARM_TOPIC_ARN`, required in production, in the stack's own account and region). New alarms: issuer Lambda errors and throttles, issuer stage `5XXError` and `4XXError` (429s count there), token renewal (`Workload token renewal unavailable`) and OTP `definitive_failure`. "Dashboards only" is rejected: the CDK defines no dashboard, so it would mean nobody is told | The operations owner must name the on-call recipients, and an operator must create the topic and confirm each subscription (release checklist P15, P16) before production. A stopped token agent and Identity's `notification_workload_token_unavailable` line still raise no alarm. The five enabled services' running-task alarms are in ALARM, and notify, while production runs zero tasks before the I6 scale-up (P20); the recipients are told beforehand | Every mitigation that relies on an alarm |
 | D5 | Malware scanner engine and credential (DOC-3, DEP-4-SCAN) | An in-account scanner role as a seventh issuer rule with subject `hid:<env>:document-scanner`, and a governed provisioning step for the `document_scanner` account | Until decided, no document becomes downloadable and no OCR job can start | Documents, OCR |
 | D6 | Recovery and enrollment code guess budgets (REC-4, ENR-6) | 5 failures per 15 minutes per account or recipient, never per IP (the budget holds whatever network a guess comes from; until D-Eminence/hid-system#65 the edge also discarded client IPs); no daily cap | A daily cap makes denial of recovery cheap | Implemented as the default in D-Eminence/hid-system#55 (recovery codes) and D-Eminence/hid-system#61 (enrollment contact codes); thresholds are environment values |
 | D7 | Patient record release categories (PREC-1 Phase B) | Completed-encounter items only; never draft or entered in error; confirmed diagnoses only; documents only once a patient download route exists | Docs are silent | Phase B of the record summaries |
@@ -189,8 +190,16 @@ Cloudflare, DNS, IAM, secrets or live data until an operator runs it.
    `mfaSecretKeyB64` through `jq` from standard input, then
    `aws secretsmanager put-secret-value`. Never put the value on a command line
    or in a log.
-3. Run `scripts/staging-external-preflight.py` and confirm the field is
-   present and in canonical 32-byte base64.
+3. Confirm the field is present and in canonical 32-byte base64 with the
+   environment's own preflight. `scripts/staging-external-preflight.py` is
+   staging-only: it is fixed to the staging account and refuses any other. In
+   production run `scripts/production-external-preflight.py --cloud-read-only`
+   with the approved `HID_AWS_ACCOUNT` and `HID_AWS_REGION` (it refuses the
+   staging account): its launch profile must pass, which also requires the
+   NIN lookup and encryption, OTP and contact lookup keys canonical,
+   `googleOidcClientIds` present and empty (REC-GOOGLE), the notification
+   secret to hold exactly the `otp-email-sms` fields, SES production access
+   and the operational alarm topic (release checklist P15).
 4. Only then deploy the task definition with `MFA_KEY_VERSION=aws-v1`. If the
    field is missing, no Identity task starts.
 5. Verify platform-admin TOTP enrolment answers without `503 MFA_UNAVAILABLE`.
