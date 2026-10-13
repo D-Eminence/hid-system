@@ -56,9 +56,12 @@ export class RemoteSecurityGuard implements CanActivate {
       }
       return true;
     } catch (error) {
+      // A fault with no status of its own is not a refusal of the credential:
+      // the guard could not decide. It answers 503, which clients retry, never
+      // the 401 that ends the browser's sign-in (A4, ADR-059).
       const refusal = error instanceof DomainProblem
         ? error
-        : new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+        : new DomainProblem(503, 'AUTHENTICATION_UNAVAILABLE', 'Authentication is temporarily unavailable');
       await this.recordDenied(request, refusal);
       throw refusal;
     }
@@ -67,8 +70,8 @@ export class RemoteSecurityGuard implements CanActivate {
   private async enforceRuntimeControls(request: HidRequest): Promise<void> {
     const actor = request.actor;
     if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
-    const isPlatformAdmin = actor.platformPermissions?.includes('platform.admin.access') ?? false;
-    if (isPlatformAdmin) return;
+    // No EHR request is exempt: platform sessions never authenticate here, and
+    // a platform grant does not exempt its holder's clinical session (A16).
 
     const maintenance = await this.controlEnabled('maintenance_mode');
     if (maintenance) {

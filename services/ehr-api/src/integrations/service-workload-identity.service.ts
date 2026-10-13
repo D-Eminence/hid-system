@@ -1,12 +1,42 @@
 import { readFile, stat } from 'node:fs/promises';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 
 export type ClinicalService = 'lab' | 'pharmacy';
 
+/**
+ * True only for a JWT whose payload carries an `exp` that has passed. The
+ * token is not verified here; Identity verifies it. Anything that does not
+ * parse is left for Identity to judge.
+ */
+function workloadTokenExpired(token: string, now: number): boolean {
+  const parts = token.split('.');
+  const payload = parts[1];
+  if (parts.length !== 3 || payload === undefined) return false;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: unknown } | null;
+    return typeof claims?.exp === 'number' && Number.isFinite(claims.exp) && claims.exp * 1000 <= now;
+  } catch {
+    return false;
+  }
+}
+
 @Injectable()
 export class ServiceWorkloadIdentityService {
+  private readonly logger = new Logger(ServiceWorkloadIdentityService.name);
+  private expiredTokens = 0;
+
+  /**
+   * Identity calls this process refused because the Identity workload token
+   * file held an expired token: the token agent stopped renewing it (ADR-047
+   * D2). Each is also logged, without the token, as
+   * `identity_workload_token_expired`.
+   */
+  get expiredTokenRefusals(): number {
+    return this.expiredTokens;
+  }
+
   async authorization(service: ClinicalService): Promise<string> {
     const environment = getEnvironment();
     const mode = service === 'lab'
@@ -58,9 +88,19 @@ export class ServiceWorkloadIdentityService {
         'Identity workload token source is not configured',
       );
     }
-    return {
-      'x-hid-service-authorization': `Bearer ${await this.readToken(environment.IDENTITY_EHR_WORKLOAD_TOKEN_FILE)}`,
-    };
+    const token = await this.readToken(environment.IDENTITY_EHR_WORKLOAD_TOKEN_FILE);
+    // An expired token is refused here rather than sent: Identity would refuse
+    // it 401, and the request fails as the outage it is (A5).
+    if (workloadTokenExpired(token, Date.now())) {
+      this.expiredTokens += 1;
+      this.logger.warn({ event: 'identity_workload_token_expired', refusals: this.expiredTokens });
+      throw new DomainProblem(
+        503,
+        'IDENTITY_WORKLOAD_IDENTITY_UNAVAILABLE',
+        'The Identity workload token has expired',
+      );
+    }
+    return { 'x-hid-service-authorization': `Bearer ${token}` };
   }
 
   private async readToken(path: string): Promise<string> {

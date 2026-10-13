@@ -1,14 +1,15 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
-import { AuditAction, AuditFailuresOnly, FacilityOptional, PatientAllowed } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, PatientOnly } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { PatientSelfService } from './patient-self.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { SetPatientAccessPinDto } from './dto/set-patient-access-pin.dto';
 
+// Patient-only (A9): a staff or platform session is refused by the guard with
+// 403 PATIENT_SESSION_REQUIRED and that refusal is audited.
 @Controller('identity')
-@PatientAllowed()
-@FacilityOptional()
+@PatientOnly()
 @AuditFailuresOnly()
 export class PatientSelfController {
   constructor(private readonly self: PatientSelfService, private readonly workload: WorkloadAuthService) {}

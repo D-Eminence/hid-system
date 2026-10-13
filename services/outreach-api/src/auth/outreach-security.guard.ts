@@ -76,9 +76,9 @@ export class OutreachSecurityGuard implements CanActivate {
   private async enforceRuntimeControls(request: HidRequest): Promise<void> {
     const actor = request.actor;
     if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
-    const isPlatformAdmin = actor.platformPermissions?.includes('platform.admin.access') ?? false;
-    if (isPlatformAdmin) return;
-
+    // No Outreach request is exempt: a platform grant does not exempt its
+    // holder's staff session from maintenance or from outreach_portal_enabled,
+    // the control that keeps Outreach off (A16).
     if (await this.controlEnabled('maintenance_mode')) {
       throw new DomainProblem(503, 'PLATFORM_MAINTENANCE', 'HID is temporarily in maintenance mode');
     }
@@ -95,11 +95,10 @@ export class OutreachSecurityGuard implements CanActivate {
       );
       return result.rows[0]?.enabled === true;
     } catch (error) {
-      if (isDatabaseError(error) && error.code === '55000') {
-        if (String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) return false;
-        throw new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
-      }
-      throw error;
+      if (isDatabaseError(error) && error.code === '55000'
+        && String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) return false;
+      // Any other fault leaves the control unknown: 503, never a raw 500 (A4).
+      throw new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
     }
   }
 

@@ -111,6 +111,27 @@ export class IdentityApiProblem extends Error {
   }
 }
 
+/**
+ * The codes with which Identity (and EHR, Lab and Pharmacy) refuse the calling
+ * service's own workload credential, not the user's session or request:
+ * Identity's 401 WORKLOAD_AUTHENTICATION_FAILED, 403 WORKLOAD_CALLER_DENIED,
+ * 503 WORKLOAD_IDENTITY_UNAVAILABLE and 401/403 WORKLOAD_AUTHENTICATION_REQUIRED,
+ * and the other services' INTERNAL_SERVICE_AUTH_REQUIRED and
+ * INVALID_WORKLOAD_IDENTITY. Such a refusal is a fault between services: a
+ * caller answers it as 503 <SERVICE>_SERVICE_AUTH_UNAVAILABLE, never as a 401
+ * a browser reads as "signed out" (A5).
+ */
+export const WORKLOAD_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  'INTERNAL_SERVICE_AUTH_REQUIRED', 'INVALID_WORKLOAD_IDENTITY', 'WORKLOAD_AUTHENTICATION_FAILED',
+  'WORKLOAD_AUTHENTICATION_REQUIRED', 'WORKLOAD_CALLER_DENIED', 'WORKLOAD_IDENTITY_UNAVAILABLE',
+]);
+
+/** True when an owning service refused the calling service's own workload credential (WORKLOAD_REFUSAL_CODES). */
+export function isWorkloadRefusal(problem: { status: number; code: string | null }): boolean {
+  return (problem.status === 401 || problem.status === 403 || problem.status === 503)
+    && problem.code !== null && WORKLOAD_REFUSAL_CODES.has(problem.code);
+}
+
 export class IdentityApiClient {
   constructor(private readonly options: IdentityClientOptions) {}
 

@@ -1,6 +1,7 @@
 import {
   CallHandler,
   ExecutionContext,
+  HttpException,
   Injectable,
   NestInterceptor,
 } from '@nestjs/common';
@@ -61,7 +62,8 @@ export class AuditInterceptor implements NestInterceptor {
       })).pipe(mergeMap(() => [result]))),
     );
     return successAudited.pipe(
-      catchError((error: unknown) => from(this.audit.record({
+      catchError((error: unknown) => from(this.audit.record(this.unboundStaffFailure(request, error, action,
+        Boolean(sessionEvent), startedAt) ?? {
         correlationId: request.correlationId,
         ...this.actorFields(request, Boolean(sessionEvent)),
         patientId: this.patientId(request),
@@ -73,6 +75,37 @@ export class AuditInterceptor implements NestInterceptor {
         details: { method: request.method, route: request.route?.path, durationMs: Date.now() - startedAt },
       })).pipe(mergeMap(() => throwError(() => error)))),
     );
+  }
+
+  /**
+   * A failed request of a staff actor with no facility bound, on a route that
+   * is neither a session event nor platform administration. A staff row
+   * without a facility is accepted only as an auth.* event (AuditService, the
+   * 0067 CHECKs), so recorded as its api.* request the refusal's own audit
+   * failed and the answer became 503 with nothing recorded (A9). It is
+   * recorded as an auth event of the authentication, with no membership or
+   * organization, and the request's action kept in its details.
+   */
+  private unboundStaffFailure(request: HidRequest, error: unknown, action: string, sessionEvent: boolean,
+    startedAt: number) {
+    const actor = request.actor;
+    if (!actor || actor.kind === 'patient' || sessionEvent || request.accessScope === 'platform' || request.facilityId) {
+      return undefined;
+    }
+    const status = error instanceof HttpException ? error.getStatus() : 500;
+    return {
+      correlationId: request.correlationId,
+      actorType: 'staff' as const,
+      actorSubject: actor.subject,
+      actorAccountId: actor.accountId,
+      action: status < 500 ? 'auth.authorization.denied' : 'auth.request.failed',
+      resourceType: 'authentication',
+      outcome: status < 500 ? 'denied' as const : 'failure' as const,
+      sourceIp: request.ip,
+      userAgent: request.header('user-agent'),
+      details: { method: request.method, route: request.route?.path, status, requestAction: `api.${action}`,
+        durationMs: Date.now() - startedAt },
+    };
   }
 
   // Platform administration is recorded as platform scope with no facility;

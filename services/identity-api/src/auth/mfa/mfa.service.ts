@@ -205,8 +205,18 @@ export class MfaService {
             and (account.disabled_until is null or account.disabled_until <= clock_timestamp())`,
         kind === 'platform' ? [identity.accountId] : [identity.accountId, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
       )).rows[0];
-      // Not eligible for this sign-in: the same answer as a wrong password.
-      if (!account?.eligible) return null;
+      // Not eligible for this sign-in: the same answer as a wrong password,
+      // unless the account is an active staff account (a staff record or a
+      // facility membership, none of them active): its password is correct,
+      // and it is refused as having no active facility membership (A10). No
+      // challenge is issued, nothing counts toward the sign-in lockout, and the
+      // refusal is recorded against the account.
+      if (!account?.eligible) {
+        if (!account || kind !== 'staff' || !(await this.workforceRecord(client, identity.accountId!))) return null;
+        await this.sessionEvent(client, 'login_failed', 'denied', identity.accountId!, event,
+          { reason: 'no_active_membership', session_kind: kind });
+        return { kind: 'no_membership' } as const;
+      }
       if (identity.passwordUpgrade) {
         const upgraded = await client.query<{ upgraded: boolean }>(
           'select auth.upgrade_legacy_password($1, $2, $3, $4) as upgraded',
@@ -250,6 +260,10 @@ export class MfaService {
     });
     if (!result) throw new UnauthorizedException('Invalid credentials');
     if (result.kind === 'unproven') throw this.unprovenFactor();
+    if (result.kind === 'no_membership') {
+      throw new DomainProblem(403, 'NO_ACTIVE_FACILITY_MEMBERSHIP',
+        'Your account has no active facility membership. Ask your organization administrator for access.');
+    }
     return { purpose: result.purpose, expiresAt: result.expiresAt, token };
   }
 
@@ -777,6 +791,17 @@ export class MfaService {
    * The account holds a staff membership that staff sign-in accepts: the
    * same membership joins and verification statuses as staff beginLogin.
    */
+  /** The account has a staff record or a facility membership, active or not (A10). */
+  private async workforceRecord(client: PoolClient, accountId: string): Promise<boolean> {
+    const result = await client.query<{ workforce_record: boolean }>(
+      `select (exists (select 1 from identity.staff staff where staff.account_id = $1)
+            or exists (select 1 from identity.staff_facility_memberships membership
+                        where membership.account_id = $1)) as workforce_record`,
+      [accountId],
+    );
+    return result.rows[0]?.workforce_record === true;
+  }
+
   private async staffEligible(client: PoolClient, accountId: string): Promise<boolean> {
     const result = await client.query<{ staff_eligible: boolean }>(
       `select exists (select 1 from auth.accounts eligible ${eligibleStaffMembershipJoins('eligible', '$2')}

@@ -45,16 +45,21 @@ const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
 const { ProblemDetailsFilter } = load('common/problem.ts');
 const { getEnvironment } = load('config/environment.ts');
 const pool = new Pool({ host: socket, user: process.env.PGUSER, database: process.env.PGDATABASE, max: 5 });
+// A database fault the service can meet: while `faults.lockTimeout` is set,
+// each runtime transaction gives up waiting for a lock after that long.
+const faults = { lockTimeout: null };
 const database = {
   query: async (sql, values) => {
     const client = await pool.connect();
     try { await client.query('begin'); await client.query('set local role hid_identity_api_runtime');
+      if (faults.lockTimeout) await client.query(`set local lock_timeout = '${faults.lockTimeout}'`);
       const result = await client.query(sql, values); await client.query('commit'); return result;
     } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
   },
   withSystemTransaction: async (correlation, operation) => {
     const client = await pool.connect();
     try { await client.query('begin'); await client.query('set local role hid_identity_api_runtime');
+      if (faults.lockTimeout) await client.query(`set local lock_timeout = '${faults.lockTimeout}'`);
       await client.query("select set_config('app.actor_subject','system:auth',true),set_config('app.correlation_id',$1,true)", [correlation]);
       const result = await operation(client); await client.query('commit'); return result;
     } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
@@ -108,6 +113,26 @@ try {
   assert(!first.body.accessToken && !first.body.refreshToken, 'Tokens must not be serialized into browser JSON');
   const firstCookie = cookieHeader(first);
   await http.get('/api/v1/auth/session').set('Cookie', firstCookie).expect(200);
+  // A4: a database fault in the runtime controls (platform.control_settings
+  // held by another transaction past the lock timeout) is 503
+  // PLATFORM_CONTROL_UNAVAILABLE, never the 401 that signs a patient out; the
+  // session is untouched and answers 200 once the fault clears.
+  const controlHolder = await pool.connect();
+  let faultedSession;
+  try {
+    await controlHolder.query('begin');
+    await controlHolder.query('lock table platform.control_settings in access exclusive mode');
+    faults.lockTimeout = '300ms';
+    faultedSession = await http.get('/api/v1/auth/session').set('Cookie', firstCookie);
+  } finally {
+    faults.lockTimeout = null;
+    await controlHolder.query('rollback');
+    controlHolder.release();
+  }
+  assert.equal(faultedSession.status, 503, `a control fault must not sign the patient out: ${JSON.stringify(faultedSession.body)}`);
+  assert.equal(faultedSession.body.code, 'PLATFORM_CONTROL_UNAVAILABLE');
+  assert.equal(faultedSession.headers['set-cookie'], undefined, 'a fault changes no cookie');
+  await http.get('/api/v1/auth/session').set('Cookie', firstCookie).expect(200);
   const profile = await http.get('/api/v1/identity/me').set('Cookie', firstCookie);
   assert.equal(profile.status, 200, `patient profile failed: ${JSON.stringify(profile.body)}`);
   assert.equal(profile.body.patientId, patientId); assert.equal(profile.body.hid, 'HID-RUNTMESELF');
@@ -149,6 +174,7 @@ try {
     http_login_profile_history: 'passed', host_only_secure_cookies: true, empty_workforce_authority: true,
     csrf_denials: true, refresh_rotation_reuse_family_revocation: true, logout_revocation: true,
     current_account_token_version_enforced: true, pending_reset_login_denied: true,
-    internal_self_authorization_workload_protected: true, patient_audit_count: auditCount,
+    internal_self_authorization_workload_protected: true, control_fault_is_503_not_sign_out: true,
+    patient_audit_count: auditCount,
     turnstile: 'disabled-only-in-local-test-no-external-call' }) + '\n');
 } finally { if (app) await app.close(); await pool.end(); }

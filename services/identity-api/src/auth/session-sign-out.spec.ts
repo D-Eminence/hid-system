@@ -358,7 +358,8 @@ describe('POST /auth/refresh with X-HID-Client', () => {
   ])('rotates when %s refreshes %s', async (client, refresh) => {
     const { controller, auth, tokens } = harness();
     await controller.refresh(refreshing(client, refresh), response() as unknown as Response);
-    expect(auth.refresh).toHaveBeenCalledWith(refresh, expect.anything());
+    // The third argument writes the refresh's audit inside the rotation (A6).
+    expect(auth.refresh).toHaveBeenCalledWith(refresh, expect.anything(), expect.any(Function));
     expect(tokens.refreshSessionKind).toHaveBeenCalledTimes(client === 'patient-web' || client === 'staff-web' ? 1 : 0);
   });
 

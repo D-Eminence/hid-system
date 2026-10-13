@@ -134,7 +134,7 @@ export type {
   OutreachRegistrationCase,
   OutreachRequestContext,
 } from './outreach';
-export { IdentityApiClient, IdentityApiProblem } from './identity';
+export { IdentityApiClient, IdentityApiProblem, isWorkloadRefusal, WORKLOAD_REFUSAL_CODES } from './identity';
 export type {
   IdentityActorContext,
   IdentityAuthorizationDecision,

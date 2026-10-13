@@ -164,3 +164,49 @@ describe('Outreach route permissions', () => {
     }
   });
 });
+
+// A4: a runtime-control fault other than a disabled control (a timeout, a lost
+// connection, a missing grant) escaped the guard as a raw error and answered
+// 500. A16: a platform administration grant exempted that person's staff
+// session from maintenance mode and from outreach_portal_enabled, the D17
+// control that keeps Outreach off.
+describe('OutreachSecurityGuard runtime controls (A4, A16)', () => {
+  function guardWith(query: (sql: string, parameters: unknown[]) => Promise<unknown>) {
+    const reflector = { getAllAndOverride: jest.fn().mockReturnValueOnce(false)
+      .mockReturnValueOnce(['outreach.registration.read']) } as unknown as Reflector;
+    const workload = { headers: jest.fn().mockResolvedValue({ 'x-hid-service-token': 'unused-in-this-test' }) };
+    return new OutreachSecurityGuard(reflector, workload as never, { query: jest.fn(query) } as unknown as DatabaseService);
+  }
+  function administratorAuthorized() {
+    return jest.spyOn(IdentityApiClient.prototype, 'authorizeOutreachPermission').mockResolvedValue({
+      id: 'staff:admin', subject: 'staff:admin', accountId: '123e4567-e89b-42d3-a456-426614174019', kind: 'staff',
+      roles: ['doctor'], permissions: ['outreach.registration.read'], platformRoles: ['platform_super_admin'],
+      platformPermissions: ['platform.admin.access'], facilityIds: [facilityId], authenticationMethod: 'local',
+      facilities: [{ id: facilityId, membershipId: '123e4567-e89b-42d3-a456-426614174018',
+        organizationId: '123e4567-e89b-42d3-a456-426614174007', name: 'Facility A', roles: ['doctor'],
+        permissions: ['outreach.registration.read'], isPrimary: true }],
+    } as never);
+  }
+  const read = () => execution({ 'x-facility-id': facilityId, cookie }, 'GET');
+
+  it.each([
+    ['a statement timeout', Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })],
+    ['a pool timeout', new Error('timeout exceeded when trying to connect')],
+  ])('answers %s reading the controls with 503 PLATFORM_CONTROL_UNAVAILABLE, not 500', async (_label, fault) => {
+    identityAuthorizes('outreach.registration.read');
+    await expect(guardWith(async () => { throw fault; }).canActivate(read()))
+      .rejects.toMatchObject({ status: 503, code: 'PLATFORM_CONTROL_UNAVAILABLE' });
+  });
+
+  it('answers a platform administrator\'s staff session 503 PLATFORM_MAINTENANCE in maintenance mode', async () => {
+    administratorAuthorized();
+    await expect(guardWith(async () => ({ rows: [{ enabled: true }] })).canActivate(read()))
+      .rejects.toMatchObject({ status: 503, code: 'PLATFORM_MAINTENANCE' });
+  });
+
+  it('answers it 423 PLATFORM_PORTAL_DISABLED while outreach_portal_enabled is off', async () => {
+    administratorAuthorized();
+    await expect(guardWith(async () => ({ rows: [{ enabled: false }] })).canActivate(read()))
+      .rejects.toMatchObject({ status: 423, code: 'PLATFORM_PORTAL_DISABLED' });
+  });
+});

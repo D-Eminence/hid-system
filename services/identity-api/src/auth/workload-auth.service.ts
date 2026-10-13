@@ -1,8 +1,10 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { ForbiddenException, Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyOptions } from 'jose';
+import { DomainProblem } from '../common/problem';
 import { getEnvironment, type Environment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
+import { jwksUnavailable } from './jwks-fault';
 
 export type IdentityCaller = 'ehr-api' | 'lab-api' | 'pharmacy-api' | 'ocr-api' | 'outreach-api';
 
@@ -38,6 +40,23 @@ const SUBJECT_KEYS: Readonly<Record<IdentityCaller, keyof Environment>> = {
   'outreach-api': 'OUTREACH_CALLER_SUBJECT',
 };
 
+/**
+ * Workload (service-to-service) refusals carry their own codes, never a user
+ * refusal's (A5): a calling service tells "Identity refused my workload
+ * credential", a fault between services it answers 503, apart from "Identity
+ * refused the user's session", which it relays.
+ *  - 503 WORKLOAD_IDENTITY_UNAVAILABLE: the issuer's JWKS cannot be fetched or
+ *    used, or workload authentication is not configured;
+ *  - 401 WORKLOAD_AUTHENTICATION_FAILED: no, or an invalid, workload credential;
+ *  - 403 WORKLOAD_CALLER_DENIED: a valid workload token of another caller.
+ * A document scanner token is the EHR caller's own credential, not EHR's, so
+ * its refusal is 401 DOCUMENT_SCANNER_AUTHENTICATION_FAILED, which EHR relays.
+ */
+const unavailable = (detail: string) => new DomainProblem(503, 'WORKLOAD_IDENTITY_UNAVAILABLE', detail);
+const workloadFailed = () => new DomainProblem(401, 'WORKLOAD_AUTHENTICATION_FAILED', 'Workload authentication failed');
+const scannerFailed = () => new DomainProblem(401, 'DOCUMENT_SCANNER_AUTHENTICATION_FAILED',
+  'Document scanner authentication failed');
+
 @Injectable()
 export class WorkloadAuthService {
   private readonly environment = getEnvironment();
@@ -48,10 +67,10 @@ export class WorkloadAuthService {
 
   async authenticateScanner(authorization: string | undefined): Promise<WorkloadActor> {
     if (!this.jwks || !this.environment.WORKLOAD_ISSUER_URL) {
-      throw new ServiceUnavailableException('Workload authentication is not configured');
+      throw unavailable('Workload authentication is not configured');
     }
-    const payload = await this.verify(this.bearerToken(authorization));
-    if (!payload.sub) throw new UnauthorizedException('Workload token subject is missing');
+    const payload = await this.verify(this.bearerToken(authorization, scannerFailed), scannerFailed);
+    if (!payload.sub) throw scannerFailed();
     const account = await this.database.query<{ account_id: string }>(
       `select account.id::text as account_id
          from auth.accounts account
@@ -62,7 +81,7 @@ export class WorkloadAuthService {
       [payload.sub],
     );
     const accountId = account.rows[0]?.account_id;
-    if (!accountId) throw new UnauthorizedException('Workload is not authorized as a document scanner');
+    if (!accountId) throw scannerFailed();
     return { subject: payload.sub, accountId };
   }
 
@@ -71,24 +90,24 @@ export class WorkloadAuthService {
     authorization: string | undefined,
     localToken: string | undefined,
   ): Promise<WorkloadActor> {
-    if (!isIdentityCaller(callerValue)) throw new UnauthorizedException('Approved workload identity is required');
+    if (!isIdentityCaller(callerValue)) throw workloadFailed();
     if (this.environment.IDENTITY_SERVICE_IDENTITY_MODE === 'local-secret') {
       if (this.environment.NODE_ENV === 'production') {
-        throw new ServiceUnavailableException('Local workload authentication is disabled in production');
+        throw unavailable('Local workload authentication is disabled in production');
       }
       const expected = this.environment[LOCAL_TOKEN_KEYS[callerValue]];
       if (typeof expected !== 'string' || !localToken || !this.equal(localToken, expected)) {
-        throw new UnauthorizedException('Approved workload identity is required');
+        throw workloadFailed();
       }
       return { subject: `local:${callerValue}`, accountId: `local:${callerValue}` };
     }
     if (!this.jwks || !this.environment.WORKLOAD_ISSUER_URL) {
-      throw new ServiceUnavailableException('Workload authentication is not configured');
+      throw unavailable('Workload authentication is not configured');
     }
-    const payload = await this.verify(this.bearerToken(authorization));
+    const payload = await this.verify(this.bearerToken(authorization, workloadFailed), workloadFailed);
     const expectedSubject = this.environment[SUBJECT_KEYS[callerValue]];
     if (typeof expectedSubject !== 'string' || payload.sub !== expectedSubject) {
-      throw new ForbiddenException('Workload caller subject is not authorized');
+      throw new DomainProblem(403, 'WORKLOAD_CALLER_DENIED', 'This workload is not an approved caller of this route');
     }
     return { subject: payload.sub, accountId: payload.sub };
   }
@@ -98,20 +117,28 @@ export class WorkloadAuthService {
     authorization: string | undefined,
     localToken: string | undefined,
   ): Promise<WorkloadActor> {
-    if (caller !== 'outreach-api') return Promise.reject(new UnauthorizedException('Outreach workload identity is required'));
+    if (caller !== 'outreach-api') return Promise.reject(workloadFailed());
     return this.authenticateService(caller, authorization, localToken);
   }
 
-  private async verify(token: string): Promise<JWTPayload> {
+  /**
+   * Verifies a workload token. A JWKS that cannot be fetched or used is the
+   * issuer's outage (503); every other verification failure refuses the token
+   * with `refused`.
+   */
+  private async verify(token: string, refused: () => DomainProblem): Promise<JWTPayload> {
     if (!this.jwks || !this.environment.WORKLOAD_ISSUER_URL) {
-      throw new ServiceUnavailableException('Workload authentication is not configured');
+      throw unavailable('Workload authentication is not configured');
     }
     const { payload } = await jwtVerify(token, this.jwks, {
       issuer: this.environment.WORKLOAD_ISSUER_URL,
       audience: this.environment.WORKLOAD_AUDIENCE,
       ...WORKLOAD_TOKEN_POLICY,
-    }).catch(() => { throw new UnauthorizedException('Invalid workload token'); });
-    if (payload.token_use !== 'workload') throw new UnauthorizedException('Invalid workload token');
+    }).catch((error: unknown) => {
+      if (jwksUnavailable(error)) throw unavailable('Workload identity verification is temporarily unavailable');
+      throw refused();
+    });
+    if (payload.token_use !== 'workload') throw refused();
     return payload;
   }
 
@@ -122,14 +149,10 @@ export class WorkloadAuthService {
     );
   }
 
-  private bearerToken(authorization: string | undefined): string {
-    if (!authorization?.startsWith('Bearer ')) {
-      throw new UnauthorizedException('Workload bearer token is required');
-    }
+  private bearerToken(authorization: string | undefined, refused: () => DomainProblem): string {
+    if (!authorization?.startsWith('Bearer ')) throw refused();
     const token = authorization.slice('Bearer '.length).trim();
-    if (!token || token.length > MAX_WORKLOAD_TOKEN_LENGTH || /\s/.test(token)) {
-      throw new UnauthorizedException('Invalid workload token');
-    }
+    if (!token || token.length > MAX_WORKLOAD_TOKEN_LENGTH || /\s/.test(token)) throw refused();
     return token;
   }
 }

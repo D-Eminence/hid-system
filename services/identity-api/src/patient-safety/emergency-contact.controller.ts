@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
-import { AuditAction, AuditFailuresOnly, FacilityOptional, PatientAllowed } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, PatientOnly } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import {
   AddEmergencyContactDto, ConfirmEmergencyContactVerificationDto, UpdateEmergencyContactDto,
@@ -12,8 +12,7 @@ import { EmergencyContactService } from './emergency-contact.service';
  * own success audit and the interceptor records failures.
  */
 @Controller('identity/me/emergency-contacts')
-@PatientAllowed()
-@FacilityOptional()
+@PatientOnly()
 @AuditFailuresOnly()
 export class EmergencyContactController {
   constructor(private readonly contacts: EmergencyContactService) {}

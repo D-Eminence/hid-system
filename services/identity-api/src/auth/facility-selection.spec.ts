@@ -154,8 +154,11 @@ describe('staff facility selection per sign-in', () => {
           csrfToken: signIn.csrfToken, expiresAt: new Date(Date.now() + 900_000),
           refreshExpiresAt: new Date(Date.now() + 28_800_000) };
       }),
-      refresh: jest.fn(async (refreshToken: string) => {
+      // The rotation hook runs inside the rotation transaction, as TokenService runs it.
+      refresh: jest.fn(async (refreshToken: string, _event: unknown,
+        onRotated?: (client: unknown, actor: ReturnType<typeof store.actor>) => Promise<void>) => {
         const rotated = store.rotate(refreshToken);
+        await onRotated?.({ rotation: rotated.sessionId }, store.actor(rotated.sessionId));
         return { actor: store.actor(rotated.sessionId), accessToken: rotated.accessToken,
           refreshToken: rotated.refreshToken, csrfToken: rotated.csrfToken,
           expiresAt: new Date(Date.now() + 900_000), refreshExpiresAt: new Date(Date.now() + 28_800_000) };
@@ -418,9 +421,11 @@ describe('staff facility selection per sign-in', () => {
     expect(issued).toEqual({ hid_access: `access-${rotatedSession}`, hid_access_refresh: `refresh-${rotatedSession}`,
       hid_access_csrf: `csrf-refresh-${rotatedSession}` });
     expect(refreshed.headers['x-csrf-token']).toBe(`csrf-refresh-${rotatedSession}`);
-    // The refresh happened and is audited, at the facility the response reports.
-    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.refresh', outcome: 'success',
-      resourceId: rotatedSession, facilityId: primary.id }));
+    // The refresh happened and is audited in the rotation's own transaction,
+    // at the facility the rotation resolved (the default, as reported).
+    expect(audit.recordWithClient).toHaveBeenCalledWith({ rotation: rotatedSession }, expect.objectContaining({
+      action: 'auth.refresh', outcome: 'success', resourceId: rotatedSession, facilityId: primary.id }));
+    expect(audit.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.refresh' }));
     // The stored choice is untouched: once it can be read again the rotated
     // session reports it.
     expect(store.sessions.get(signIn.sessionId)?.live).toBe(false);

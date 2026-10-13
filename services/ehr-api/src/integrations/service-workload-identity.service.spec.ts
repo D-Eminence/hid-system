@@ -38,3 +38,44 @@ describe('ServiceWorkloadIdentityService', () => {
       .rejects.toMatchObject({ status: 503, code: 'SERVICE_WORKLOAD_IDENTITY_UNAVAILABLE' });
   });
 });
+
+// A5: the workload token agent rewrites the token file well before each token
+// expires; when it stops (ADR-047 D2), the file keeps an expired token. EHR
+// sent it and Identity refused it 401, which reached the browser as
+// "signed out". An expired token is now refused here, before any request.
+describe('ServiceWorkloadIdentityService: an expired Identity workload token is not sent (A5)', () => {
+  const jwt = (claims: Record<string, unknown>) => [{ alg: 'ES256', typ: 'JWT' }, claims]
+    .map((part) => Buffer.from(JSON.stringify(part)).toString('base64url')).concat('c2lnbmF0dXJl').join('.');
+
+  beforeEach(() => {
+    Object.assign(process.env, { IDENTITY_SERVICE_IDENTITY_MODE: 'jwt',
+      IDENTITY_EHR_WORKLOAD_TOKEN_FILE: '/run/secrets/identity-ehr.jwt' });
+    resetEnvironmentForTests();
+  });
+  afterEach(() => {
+    delete process.env.IDENTITY_SERVICE_IDENTITY_MODE;
+    delete process.env.IDENTITY_EHR_WORKLOAD_TOKEN_FILE;
+    resetEnvironmentForTests();
+  });
+
+  it('answers 503 IDENTITY_WORKLOAD_IDENTITY_UNAVAILABLE for a token whose exp has passed, and counts it', async () => {
+    jest.mocked(readFile).mockResolvedValue(`${jwt({ sub: 'workload:ehr-api', exp: Math.floor(Date.now() / 1000) - 5 })}\n`);
+    const service = new ServiceWorkloadIdentityService();
+    await expect(service.identityHeaders()).rejects.toMatchObject({ status: 503,
+      code: 'IDENTITY_WORKLOAD_IDENTITY_UNAVAILABLE' });
+    expect((service as unknown as { expiredTokenRefusals: number }).expiredTokenRefusals).toBe(1);
+  });
+
+  it('sends a token that has not expired', async () => {
+    const token = jwt({ sub: 'workload:ehr-api', exp: Math.floor(Date.now() / 1000) + 240 });
+    jest.mocked(readFile).mockResolvedValue(`${token}\n`);
+    await expect(new ServiceWorkloadIdentityService().identityHeaders())
+      .resolves.toEqual({ 'x-hid-service-authorization': `Bearer ${token}` });
+  });
+
+  it('leaves a token it cannot read as a JWT for Identity to judge', async () => {
+    jest.mocked(readFile).mockResolvedValue('opaque.workload.token-value\n');
+    await expect(new ServiceWorkloadIdentityService().identityHeaders())
+      .resolves.toEqual({ 'x-hid-service-authorization': 'Bearer opaque.workload.token-value' });
+  });
+});

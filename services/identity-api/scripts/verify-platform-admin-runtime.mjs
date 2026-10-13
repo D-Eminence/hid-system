@@ -274,6 +274,13 @@ try {
   expectStatus(principals, 200);
   assert(principals.body.items.some(item => item.id === auditor.id));
   assert.equal(principals.body.page, 1);
+  // A24: the same search with the term in a POST body, so names and emails stay out of URLs and access logs.
+  const searched = await platform.command(superSession, '/admin/principals/search', { query: 'admin-runtime', pageSize: 10 });
+  expectStatus(searched, 200);
+  assert.deepEqual(searched.body, principals.body, 'POST /admin/principals/search answers what GET /admin/principals does');
+  expectStatus(await platform.command(auditorSession, '/admin/principals/search', { query: 'admin-runtime' }), 403,
+    'PERMISSION_DENIED');
+  expectStatus(await platform.command(superSession, '/admin/principals/search', { query: 'a' }), 400, 'VALIDATION_FAILED');
   // A supplied facility header is ignored on platform routes: same result, no facility bound.
   expectStatus(await get(superSession, '/admin/overview', { 'X-Facility-ID': facilityA }), 200);
   boundaries.platform_admin_without_facility = 200;
@@ -726,7 +733,9 @@ try {
   [attached.body.membershipId, requestB])).rows[0];
   assert.deepEqual(left, { active_grants: 0, pending_requests: 0, request_b: 'approved' });
   expectStatus(await lookup(clinicianSession), 401);
-  expectStatus(await clinicianLogin(), 401);
+  // A10: the password is still correct but no facility membership is active:
+  // refused as such at the password step, with no MFA challenge (owner default (a)).
+  expectStatus(await clinicianLogin(), 403, 'NO_ACTIVE_FACILITY_MEMBERSHIP');
   const workforceAudit = (await owner.query(`select action, access_scope, facility_id from audit.events
     where action like 'admin.workforce.%' and outcome = 'success' and actor_account_id = any($1::uuid[])
     order by sequence_id`, [[reviewer.id, superAdmin.id]])).rows;

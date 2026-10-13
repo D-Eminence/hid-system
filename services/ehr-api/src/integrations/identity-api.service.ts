@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { IdentityApiClient, IdentityApiProblem } from '@hid/api-client';
+import { IdentityApiClient, IdentityApiProblem, isWorkloadRefusal } from '@hid/api-client';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -65,10 +65,22 @@ export class IdentityApiService {
     return this.translate(this.client.authorizeDocumentScanner(scannerAuthorization, correlationId));
   }
 
+  /**
+   * Identity's answer as EHR's. A refusal of EHR's own workload credential
+   * (isWorkloadRefusal: a JWKS outage, an expired or refused workload token,
+   * a wrong caller) is a fault between services, answered 503
+   * IDENTITY_SERVICE_AUTH_UNAVAILABLE so the browser never reads it as its
+   * session ending (A5). A refusal of the user's session or request keeps
+   * Identity's status and code.
+   */
   private async translate<Value>(operation: Promise<Value>): Promise<Value> {
     try {
       return await operation;
     } catch (error) {
+      if (error instanceof IdentityApiProblem && isWorkloadRefusal(error)) {
+        throw new DomainProblem(503, 'IDENTITY_SERVICE_AUTH_UNAVAILABLE',
+          'Identity refused the EHR service identity; the request could not be authorized');
+      }
       if (error instanceof IdentityApiProblem) {
         throw new DomainProblem(
           error.status,
