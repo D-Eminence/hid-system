@@ -103,6 +103,14 @@ insert into identity.patients (
 
 -- 0082 seeds direct-care, so that row is kept as migrated; emergency and
 -- healthcare-operations are not seeded (pending product decisions).
+-- Break-glass (D9) and Outreach (D17) are off at launch: 0091 withdraws
+-- identity.break-glass.write and every Outreach permission from every role.
+-- This rollback-only suite exercises both as a reviewed re-grant would enable
+-- them again for the doctor role (ADR-058).
+insert into auth.role_permissions (role_code, permission_code)
+select 'doctor', code from unnest(array['identity.break-glass.write', 'outreach.registration.read',
+  'outreach.registration.write', 'outreach.campaign.read', 'outreach.campaign.write']) code
+on conflict do nothing;
 insert into identity.purpose_of_use_codes (code, display, source_system) values
   ('direct-care', 'Direct patient care', 'schema-test'),
   ('emergency', 'Emergency treatment', 'schema-test'),

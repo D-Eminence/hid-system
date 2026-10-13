@@ -1210,6 +1210,14 @@ revoke all on identity.staff_credential_attestations, identity.workforce_members
   from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
     hid_ehr_api_runtime, hid_schema_test_runtime;
 
+-- Launch (0091, ADR-058). ehr.patient_self_context is now a security-definer
+-- binding check; its EXECUTE grant to hid_ehr_runtime is above (Phase 3 patient
+-- self-service). 0091 recreates identity.list_my_patient_access_requests with
+-- the requesting clinician's name and role, so its Identity grant above
+-- returns with this run; the internal list stays revoked. The PIN-use inbox
+-- trigger function runs only as its trigger.
+revoke all on function notification.on_identity_pin_outbox_created() from public;
+
 -- End the temporary memberships granted after the role check above. A
 -- creator's ADMIN OPTION, which PostgreSQL 16 gives a CREATEROLE
 -- administrator in every role it creates, is a separate grant and stays; it

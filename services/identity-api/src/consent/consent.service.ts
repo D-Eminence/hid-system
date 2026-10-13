@@ -144,12 +144,18 @@ export class ConsentService {
     }
   }
 
+  /**
+   * The patient's own access requests. Approval grants one clinician access,
+   * so each request names that clinician (display name and membership role)
+   * next to the facility (CONSENT-GRANTEE, 0091).
+   */
   async listMyAccessRequests(request: HidRequest) {
     const actor = requirePatient(request.actor);
     try {
       return await this.asPatient(request, actor.subject, async (client) => (await client.query<Record<string, unknown> & QueryResultRow>(
         `select access_request_id as "accessRequestId", facility_id as "facilityId",
-           facility_name as "facilityName", scope, reason, status,
+           facility_name as "facilityName", requester_display_name as "requesterDisplayName",
+           requester_role as "requesterRole", scope, reason, status,
            requested_duration_minutes as "requestedDurationMinutes",
            requested_at as "requestedAt", approved_at as "approvedAt",
            denied_at as "deniedAt", denied_reason as "deniedReason"

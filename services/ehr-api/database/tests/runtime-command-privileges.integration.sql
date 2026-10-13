@@ -212,7 +212,10 @@ end $$;
 -- Case 4: a campaign-linked Outreach registration share-locks its campaign,
 -- which passes only the campaign UPDATE policy (outreach.campaign.write). A role
 -- that may register without that permission would have every campaign-linked
--- registration refused, so every such role must hold it.
+-- registration refused, so every such role must hold it. Outreach is off at
+-- launch: 0091 withdraws both from every role (runtime-roles.integration.sql
+-- asserts it), so the check holds with no role; the reviewed re-grant that
+-- enables Outreach again must restore them together.
 do $$
 declare missing text := (
   select string_agg(registration.role_code, ', ' order by registration.role_code)
@@ -223,9 +226,6 @@ declare missing text := (
 begin
   if missing is not null then
     raise exception 'Roles with outreach.registration.write but not outreach.campaign.write: %', missing;
-  end if;
-  if not exists (select 1 from auth.role_permissions where permission_code = 'outreach.registration.write') then
-    raise exception 'No role holds outreach.registration.write';
   end if;
 end $$;
 

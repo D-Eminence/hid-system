@@ -113,7 +113,8 @@ try {
   assert.equal(profile.body.patientId, patientId); assert.equal(profile.body.hid, 'HID-RUNTMESELF');
   assert(!('accountId' in profile.body) && !('nin' in profile.body));
   const history = await http.get('/api/v1/identity/me/access-history').set('Cookie', firstCookie).expect(200);
-  assert.deepEqual(history.body, { items: [] });
+  // An empty history is complete (0091 adds `truncated`).
+  assert.deepEqual(history.body, { items: [], truncated: false });
   await http.get('/api/v1/identity/service/patient-self-authorization').set('Cookie', firstCookie).expect(403);
   const authorized = await http.get('/api/v1/identity/service/patient-self-authorization').set('Cookie', firstCookie)
     .set('x-hid-internal-caller', 'ehr-api').set('x-hid-service-token', process.env.IDENTITY_EHR_INTERNAL_SERVICE_TOKEN).expect(200);

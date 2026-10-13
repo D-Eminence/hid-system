@@ -95,6 +95,11 @@ insert into identity.patients (
 
 -- 0082 seeds direct-care, so that row is kept as migrated; emergency and
 -- healthcare-operations are not seeded (pending product decisions).
+-- Break-glass is off at launch (D9): 0091 withdraws identity.break-glass.write
+-- from every role. This rollback-only suite exercises the command as a
+-- reviewed re-grant would enable it again (ADR-058).
+insert into auth.role_permissions (role_code, permission_code) values ('doctor', 'identity.break-glass.write')
+on conflict do nothing;
 insert into identity.purpose_of_use_codes (code, display, source_system) values
   ('direct-care', 'Direct patient care', 'schema-test'),
   ('emergency', 'Emergency treatment', 'schema-test'),

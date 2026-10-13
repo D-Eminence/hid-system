@@ -94,8 +94,14 @@ insert into identity.facilities (id, organization_id, name, code, timezone, acti
 -- Doctors A (e8e1...01) and B (...02) are active; C's account (...03) is
 -- disabled and D's (...04) is disabled until tomorrow. Member n has staff
 -- e8e2...0n, one membership e8e3...0n in the clinic, and a facility-scoped
--- doctor role e8e4...0n, which carries the Outreach registration and campaign
--- permissions that outreach.context_allows requires.
+-- doctor role e8e4...0n. Outreach is off at launch (D17): 0091 withdraws every
+-- Outreach permission from every role, so this rollback-only suite grants the
+-- doctor role the registration and campaign permissions that
+-- outreach.context_allows requires, as a reviewed re-grant would (ADR-058).
+insert into auth.role_permissions (role_code, permission_code)
+select 'doctor', code from unnest(array['outreach.registration.read', 'outreach.registration.write',
+  'outreach.campaign.read', 'outreach.campaign.write']) code
+on conflict do nothing;
 insert into auth.accounts (id, subject, email, display_name, status, disabled_until)
 select ('e8e10000-0000-4000-8000-00000000000' || n)::uuid, 'synthetic:outreach-guard-' || x,
        'outreach-guard-' || x || '@example.invalid', 'Outreach Guard ' || upper(x),
