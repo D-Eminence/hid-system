@@ -248,6 +248,11 @@ select ('e9c00000-0000-4000-8000-0000000000' || suffix)::uuid, 'e9600000-0000-40
        repeat('c', 64), 'phi', status, 'clinical_record'
   from (values ('10', 'synthetic-version-10', 'entered_in_error'), ('11', null, 'initiated'))
        existing(suffix, version, status);
+-- 0091 withdraws ehr.document.write from every role while uploads are off; the
+-- nurse holds it again here, in this rollback-only fixture, so the case below
+-- still proves that a holder of the record's write permission may retract it.
+insert into auth.role_permissions (role_code, permission_code) values ('nurse', 'ehr.document.write')
+on conflict do nothing;
 set local session_replication_role = origin;
 
 -- Runs a statement as the current role and undoes it: 'ok', or 'SQLSTATE: message'.
@@ -314,6 +319,8 @@ select pg_temp.retraction_case('retraction', format('%s %s encounter %s (%s)', a
     (8, 'nurse', 'entered_in_error', 'a completed prescription', '42501: ENCOUNTER_RETRACTION_NOT_PERMITTED'),
     (9, 'nurse', 'entered_in_error', 'an uploaded document', 'ok'),
     (9, 'receptionist', 'entered_in_error', 'an uploaded document', '42501: ENCOUNTER_RETRACTION_NOT_PERMITTED'),
+    -- Since 0091 the doctor holds no ehr.document.write either.
+    (9, 'doctor', 'entered_in_error', 'an uploaded document', '42501: ENCOUNTER_RETRACTION_NOT_PERMITTED'),
     -- Holding, resuming and completing close nothing and need no record permission.
     (1, 'receptionist', 'on_hold', 'a diagnosis and a draft prescription', 'ok'),
     (4, 'receptionist', 'completed', 'an active prescription', 'ok'))
@@ -454,7 +461,7 @@ do $$
 declare
   mismatches text;
 begin
-  if (select count(*) from encounter_retraction_cases) <> 97
+  if (select count(*) from encounter_retraction_cases) <> 98
      or exists (select 1 from encounter_retraction_cases where actual is null) then
     raise exception 'the encounter retraction suite did not run every case (% recorded)',
       (select count(*) from encounter_retraction_cases);

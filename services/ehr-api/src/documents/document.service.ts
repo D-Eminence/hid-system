@@ -189,6 +189,9 @@ export class DocumentService {
   }
 
   async complete(documentId: string, context: DataAccessContext) {
+    // An upload started before uploads were turned off must not complete
+    // either; checked first, as for an upload intent (0091).
+    await this.requirePlatformControl('uploads_enabled');
     const initial = await this.database.withTransaction(
       context,
       (client) => this.findById(client, documentId, context.facilityId),

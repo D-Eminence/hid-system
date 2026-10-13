@@ -279,6 +279,12 @@ try {
       where permission_code = any($1::text[])`, [['ehr.lab-request.write', 'lab.work-item.accept',
       'lab.accession.create', 'pharmacy.work-item.accept', 'pharmacy.dispensing.create']])).rows, [],
     'Upgrade must leave no role holding a launch-withdrawn write permission');
+    // 0091 (launch module set, ADR-058) withdraws every Lab, Pharmacy, OCR and
+    // Outreach permission, break-glass and document upload from every role.
+    assert.deepEqual((await client.query(`select role_code, permission_code from auth.role_permissions
+      where permission_code ~ '^(lab|pharmacy|ocr|outreach)\\.'
+         or permission_code in ('identity.break-glass.write', 'ehr.document.write')`)).rows, [],
+    'Upgrade must leave no role holding a permission of a module that is off at launch');
     // The 0028 baseline holds no purpose-of-use code; 0082 seeds only
     // direct-care (emergency and healthcare-operations await product decisions).
     assert.deepEqual((await client.query(`select code, display, active, source_system
@@ -334,6 +340,7 @@ try {
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
     purpose_of_use_seeded:['direct-care'],launch_write_permissions_withdrawn:true,retraction_guards_installed:true,
+    launch_module_permissions_withdrawn:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);
@@ -464,13 +471,14 @@ try {
       {rolsuper:false,rolbypassrls:false,rolcanlogin:false});
     assert.equal((await client.query(`select count(*)::integer n from pg_proc p join pg_roles r on r.oid=p.proowner
       where p.proname in ('complete_recovery_otp','current_patient_account','patient_self_session','patient_self_profile',
-        'authorize_patient_self','patient_self_access_history','activate_break_glass','enroll_registered_patient')
-        and r.rolname=$1`, [owner])).rows[0].n,8);
+        'authorize_patient_self','patient_self_access_history','activate_break_glass','enroll_registered_patient',
+        'patient_self_context')
+        and p.prosecdef and r.rolname=$1`, [owner])).rows[0].n,9);
   });
   for (const name of additionalSuites) command(`non-superuser definer ownership integration ${name}`, join(pgBindir, 'psql'),
     ['-X', '-d', 'hid_owner_check', '-v', 'ON_ERROR_STOP=1', '-f', join(service, 'database/tests', name)]);
   evidence.checks.non_superuser_definer_owner = {role:'hid_synthetic_schema_owner',login:false,superuser:false,
-    bypass_rls:false,definer_commands_checked:8,runtime_callers:'exact service roles',suites:additionalSuites};
+    bypass_rls:false,definer_commands_checked:9,runtime_callers:'exact service roles',suites:additionalSuites};
   // As RDS runs it, on a second disposable cluster whose roles a non-superuser
   // creates: a NOSUPERUSER NOBYPASSRLS CREATEROLE administrator migrates 0001
   // to the latest migration (SET ON PARAMETER held only for that run), runs the

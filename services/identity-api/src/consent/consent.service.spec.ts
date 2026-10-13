@@ -345,6 +345,33 @@ describe('ConsentService', () => {
       expect.stringContaining('identity.list_my_patient_access_requests($1, $2)'), patientSession);
   });
 
+  it('names the requesting clinician and role on each patient access request (CONSENT-GRANTEE, 0091)', async () => {
+    const row = {
+      accessRequestId: '40000000-0000-4000-8000-000000000016',
+      facilityId: '10000000-0000-4000-8000-000000000006',
+      facilityName: 'Example Facility',
+      requesterDisplayName: 'Dr Example Clinician',
+      requesterRole: 'doctor',
+      scope: 'read_records',
+      reason: 'Continuity of care',
+      status: 'pending',
+      requestedDurationMinutes: 60,
+      requestedAt: new Date('2026-09-29T12:00:00.000Z'),
+      approvedAt: null,
+      deniedAt: null,
+      deniedReason: null,
+    };
+    query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [row] });
+    await expect(service.listMyAccessRequests(patientRequest)).resolves.toStrictEqual([row]);
+    const listing = query.mock.calls.map(([sql]) => String(sql))
+      .find((sql) => sql.includes('identity.list_my_patient_access_requests($1, $2)'));
+    // The new columns are mapped next to the facility; the earlier fields keep their names.
+    expect(listing).toContain('requester_display_name as "requesterDisplayName"');
+    expect(listing).toContain('requester_role as "requesterRole"');
+    expect(listing).toContain('facility_name as "facilityName"');
+    expect(listing).toContain('denied_reason as "deniedReason"');
+  });
+
   it('returns the patient approval result from the governed consent command', async () => {
     patientDecision({ result: approvalResult });
     await expect(service.approveAccessRequest(patientRequest, '40000000-0000-4000-8000-000000000004'))

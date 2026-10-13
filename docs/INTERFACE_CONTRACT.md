@@ -546,8 +546,13 @@ revocation. The server rechecks account eligibility, token version, session and
 patient mapping on use.
 
 `GET /api/v1/identity/me` returns the authenticated patient's profile and HID.
-`GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
-grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
+`GET /api/v1/identity/me/access-history` returns `{ items, truncated }`: the
+latest 50 safe grant summaries, newest first, and `truncated` (`true` when the
+patient has more than 50 grants; since 0091, additive). Since 0091 each item
+also names who holds the grant: `requesterDisplayName` (the display name of the
+clinician's account, or `null`) and `requesterRole` (the membership role at the
+facility, for example `doctor`, or `null`), next to `facilityName`. Grant
+status does not assert notification delivery. `GET /api/v1/ehr/me/records`
 returns at most 50 completed encounters and 50 current signed/amended note
 revisions of completed encounters (since 0084), after fresh Identity
 authorization through the EHR workload caller.
@@ -582,13 +587,22 @@ It also requires an active `emergency` purpose of use, which no migration seeds
 (0082 seeds only `direct-care`); without it activation also returns
 `423 BREAK_GLASS_DISABLED` ("Emergency access is not enabled on this
 platform"), where it returned `400 INVALID_CONSENT_COMMAND`. Break-glass is off
-at launch (owner default, deny by default; release checklist P10 and P11): `break_glass_enabled`
-is false and no `emergency` code exists.
+at launch (owner default, deny by default; release checklist P10 and P11): since
+0091 no role holds `identity.break-glass.write`, so `POST
+/api/v1/identity/break-glass` answers `403 PERMISSION_DENIED` before the
+control or purpose check, and
+Health-id 82b474e disables its Emergency method with the permission
+explanation; `break_glass_enabled` starts false (0091) and no `emergency` code
+exists. Re-enabling it takes decision D9, a reviewed migration granting the
+permission again, the `emergency` code and the control.
 The summary's sections, the read permission each needs, its limits and audit
 counts are in §11, "Record summaries".
 
 Patient access-request decisions are session-bound patient commands:
-`GET /api/v1/identity/me/access-requests`,
+`GET /api/v1/identity/me/access-requests` (at most 100, newest first; since
+0091 each item also carries `requesterDisplayName` and `requesterRole`, the
+requesting clinician's display name and membership role, next to
+`facilityName`: approval grants that one clinician access; additive),
 `POST /api/v1/identity/access-requests/:requestId/approve` and
 `POST /api/v1/identity/access-requests/:requestId/deny` (`{ "reason" }`) require
 a patient session and no facility context. Since 0086 an approval grants
@@ -606,7 +620,16 @@ again does not end it. A denial or a revocation is never held. `POST
 grant the patient authorized (patient-approved or PIN-derived); break-glass and
 workforce grants return `409`. Access-history items include `breakGlass` and
 `patientRevocable`. `GET /api/v1/identity/me/notifications` and
-`POST /api/v1/identity/me/notifications/:id/read` serve the patient inbox.
+`POST /api/v1/identity/me/notifications/:id/read` serve the patient inbox. Its
+`notificationCode` values are `ACCESS_REQUEST_RECEIVED` (resource
+`access-request`), `EMERGENCY_ACCESS_ACTIVATED` and, since 0091,
+`PATIENT_ACCESS_PIN_USED` (both resource `consent-grant`, `resourceId` the
+grant, `metadata` `{ consentGrantId, reviewRequired: true }`): one item each
+time a clinician opens the patient's record with the patient's access PIN
+(`POST /api/v1/identity/standard-access/pin` creating a grant; a replay of an
+existing grant adds none), written in the PIN transaction without the
+notification worker. Health-id 82b474e shows an unknown code with its generic
+title ("An update about your Health ID account").
 
 The requesting clinician's own list is `GET /api/v1/identity/access-requests`
 (optional `?status=pending|approved|denied|revoked|expired`). It needs
@@ -1362,8 +1385,19 @@ All writes require:
 
 ### Launch module set
 
-Lab, Pharmacy, OCR and Outreach are off at launch (decision D17); EHR
-prescriptions and lab requests are records only. Migration 0084 withdrew
+Lab, Pharmacy, OCR and Outreach are off at launch (decision D17), and so are
+break-glass (D9) and document uploads; EHR prescriptions and lab requests are
+records only. Since 0091 no role holds any `lab.*`, `pharmacy.*`, `ocr.*` or
+`outreach.*` permission, `identity.break-glass.write` or `ehr.document.write`
+(ADR-058): the staff session's and staff context's permission lists no longer
+carry them, every route that needs one answers `403 PERMISSION_DENIED` before
+any write or call to another service (where the gateway routes it at all; in
+production it answers `404 API_ROUTE_NOT_FOUND` for the Lab, Pharmacy, OCR and
+Outreach APIs), and Health-id 82b474e hides Laboratory, Pharmacy, Document OCR
+and Outreach, their dashboard tiles, released Lab results, Extract with OCR and
+the upload card, and disables emergency access. Its ungated "Health ID Migrate"
+dashboard card still links to a page the gateway refuses (cosmetic). The EHR
+reads, `ehr.document.read` included, stay. Before 0091, migration 0084 withdrew
 `ehr.lab-request.write`, `lab.work-item.accept`, `lab.accession.create`,
 `pharmacy.work-item.accept` and `pharmacy.dispensing.create` from every role,
 so these routes answer `403 PERMISSION_DENIED` before any write or call to Lab
@@ -1374,17 +1408,31 @@ or Pharmacy:
 - Lab's EHR-order acceptance and accession creation, and Pharmacy's
   acceptance and dispensing.
 
-The read permissions stay, so existing lab requests, prescriptions and Lab and
-Pharmacy records remain readable. Prescriptions are still created and changed
-in the EHR. No lab request can be created or changed at launch. Since 0090 an
-encounter's cancellation or retraction needs the write permission of every
-kind of record it changes, so an encounter that still holds a lab request
-cannot be cancelled or retracted either (`403
+0084 kept the read permissions; 0091 withdraws the Lab and Pharmacy reads too
+(the EHR's own `ehr.lab-request.read` and `ehr.prescription.read` stay), so
+existing lab requests and prescriptions remain readable in the EHR, and a
+production database built at launch holds no Lab or Pharmacy records. The
+platform controls `uploads_enabled`, `outreach_portal_enabled` and
+`break_glass_enabled` start off (0091, where still seeded). Prescriptions are
+still created and changed in the EHR. No lab request can be created or changed
+at launch. Since 0090 an encounter's cancellation or retraction needs the write
+permission of every kind of record it changes, so an encounter that still holds
+a lab request cannot be cancelled or retracted either (`403
 ENCOUNTER_RETRACTION_NOT_PERMITTED`) until Lab ordering is enabled again
-("Encounter status and its records"). Re-enabling a module takes its own decision, its fixes, a
-staging acceptance run and a reviewed migration granting the permissions
-again; the sections on the Lab and Pharmacy handoffs below describe the routes
-as they work then.
+("Encounter status and its records"). Re-enabling a module takes its own
+decision, its fixes and a reviewed migration granting the permissions again,
+which applies to every environment (the role bootstrap refuses a permission
+granted by hand), and then a staging acceptance run; the sections on the Lab
+and Pharmacy handoffs below describe the routes as they work then.
+
+With 0090 (D-Eminence/hid-system#74, ADR-056), marking an
+encounter entered in error needs the write permission of each record it
+retracts, `ehr.document.write` for a linked document whose upload was started
+or completed. Since no role holds it after 0091, `PATCH
+.../encounters/:encounterId` to `entered_in_error` for such an encounter
+answers `403 ENCOUNTER_RETRACTION_NOT_PERMITTED` for every role and changes
+nothing, until uploads are re-enabled; cancelling it is not affected. A
+database on which no upload was ever started holds no such encounter.
 
 ### Encounter status and its records
 
@@ -1951,6 +1999,17 @@ Use:
 * short-lived signed access where appropriate
 
 ### Document upload completion
+
+Document uploads are off at launch (0091, ADR-058): no role holds
+`ehr.document.write`, so `POST /api/v1/ehr/documents/upload-intents` and
+`POST /api/v1/ehr/documents/:id/complete` answer `403 PERMISSION_DENIED` (where
+they answered `201`, `200` or `409 CONFLICT`) before any write, and Health-id
+82b474e hides the upload card. `uploads_enabled` also starts off, and since
+0091 completion checks it first, as an upload intent does: with the control off
+it answers `409 CONFLICT` ("Document uploads are temporarily disabled") before
+Identity, the storage read or any write, so an upload started before the
+control was turned off cannot complete either. The rules below apply once a
+reviewed migration grants `ehr.document.write` again and the control is on.
 
 `POST /api/v1/ehr/documents/:id/complete` confirms an upload. Only the
 account that created the upload intent (`created_by`) may complete it, at the

@@ -102,6 +102,7 @@ const acceptedMigrations = new Map([
   ['0088_staff_mfa_sessions.sql', 'a4c07736768147bc24d0d374f8a002791faa7323e6fd96706fd79b89ef1f3ed8'],
   ['0089_session_facility_selection.sql', 'a90b3a60f21df3e5b6233302ed7f7ab67cb320f89c5b883a22dea3982ca3c5cf'],
   ['0090_ehr_retraction_integrity.sql', 'dbde76ea8cfcd237653a4d776bb195d19fa66eb411f732d8d8191a3c5241e3c7'],
+  ['0091_launch_module_withdrawal_and_patient_access_transparency.sql', 'ddf4ae3a333f8345de9a7da37b73e91318279b06caaee9b866b1b5150f279f94'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
