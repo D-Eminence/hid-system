@@ -1,23 +1,33 @@
 #!/usr/bin/env node
-// A staff member's chosen working facility, kept per sign-in (0089), over HTTP
-// with every query as hid_identity_api_runtime. Selecting a facility stores it
-// for the sign-in family, so a reload (GET /auth/session) or a refresh reports
-// it instead of the primary facility; a membership that has since ended asks
-// the user again (reselect); another sign-in of the same account is not
-// affected; a refused selection writes nothing. The selection is only the
-// default the session reports: X-Facility-ID still authorizes each request.
-// Executes only against the owned disposable synthetic rehearsal.
+// A staff member's chosen working facility, kept per sign-in (0089, ADR-046),
+// over HTTP with every query as hid_identity_api_runtime. A staff sign-in is
+// the session issued after its second factor (MFA-1, 0088): staff sign in
+// through staff-session-client.mjs (password, then enrolment or TOTP), and the
+// password step itself reports and stores nothing. Selecting a facility stores
+// it for the sign-in family, so a reload (GET /auth/session) or a refresh
+// reports it instead of the primary facility; a membership that has since
+// ended asks the user again (reselect); another sign-in of the same account is
+// not affected; a refused selection writes nothing. When the selection cannot
+// be read, a session read answers 503 and a refresh, whose rotation has
+// committed, answers 200 with the rotated cookies and facilitySelection
+// 'unavailable'. The selection is only the default the session reports:
+// X-Facility-ID still authorizes each request. Executes only against the owned
+// disposable synthetic rehearsal.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
+import { createTotpClock } from './platform-session-client.mjs';
+import { enrollmentCodeOutbox, setCookies, staffClient, supertestTransport, SYNTHETIC_STAFF_MFA_KEY_B64 }
+  from './staff-session-client.mjs';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
 assert(process.env.NODE_ENV === 'test' && socket?.startsWith('/tmp/hid-tuf-migration.')
   && process.env.PGDATABASE === 'hid_rehearsal', 'Only the owned synthetic rehearsal is supported');
 Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'staging',
-  NIN_PROVIDER_MODE: 'deferred', TURNSTILE_MODE: 'disabled' });
+  NIN_PROVIDER_MODE: 'deferred', TURNSTILE_MODE: 'disabled', MFA_SECRET_KEY_B64: SYNTHETIC_STAFF_MFA_KEY_B64,
+  MFA_KEY_VERSION: 'facility-selection-runtime-v1' });
 require('ts-node').register({ project: join(service, 'tsconfig.json'), transpileOnly: true });
 require('reflect-metadata');
 const load = path => require(join(service, 'src', path));
@@ -40,6 +50,9 @@ const { AuditInterceptor } = load('audit/audit.interceptor.ts');
 const { SecurityGuard } = load('auth/security.guard.ts');
 const { WorkloadAuthService } = load('auth/workload-auth.service.ts');
 const { TurnstileService } = load('auth/turnstile.service.ts');
+const { MfaService, MFA_TOTP_CLOCK } = load('auth/mfa/mfa.service.ts');
+const { MfaSecretProtector } = load('auth/mfa/mfa-secret-protector.ts');
+const { NotificationOtpClient } = load('auth/notification-otp.client.ts');
 const { ProblemDetailsFilter } = load('common/problem.ts');
 const { getEnvironment } = load('config/environment.ts');
 const pool = new Pool({ host: socket, user: process.env.PGUSER, database: process.env.PGDATABASE, max: 6 });
@@ -59,11 +72,15 @@ const database = {
   },
 };
 let app;
+let selectionReadRevoked = false;
 try {
+  const clock = createTotpClock();
+  const outbox = enrollmentCodeOutbox();
   const module = await Test.createTestingModule({ controllers: [AuthController],
     providers: [{ provide: DatabaseService, useValue: database }, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
-      AuditService, WorkloadAuthService, TurnstileService,
+      AuditService, WorkloadAuthService, TurnstileService, MfaService, MfaSecretProtector,
+      { provide: MFA_TOTP_CLOCK, useValue: clock.now }, { provide: NotificationOtpClient, useValue: outbox.client },
       { provide: GoogleAuthenticationService, useValue: {} }] }).compile();
   app = module.createNestApplication({ logger: false });
   app.use(require('cookie-parser')());
@@ -125,10 +142,20 @@ try {
   // HID codes use the unambiguous alphabet (no I, O, 0 or 1).
   [randomUUID(), patientAccount.id, `HID-SEL${Array.from(randomBytes(8), (byte) => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[byte % 32]).join('')}`]);
 
-  const jar = response => Object.fromEntries(response.headers['set-cookie'].map(value => value.split(';')[0].split('=')));
+  // The cookies a response sets, without the ones it expires (every sign-in
+  // and refresh also expires the public patient enrollment cookie).
+  const jar = response => setCookies({ setCookie: response.headers['set-cookie'] ?? [] });
   const cookie = cookies => Object.entries(cookies).map(([key, value]) => `${key}=${value}`).join('; ');
+  const staffSignIns = staffClient({ send: supertestTransport(http), origin, password, outbox, now: clock.next,
+    cookieName: name });
   const signIn = async (who, kind = 'staff') => {
-    const response = await http.post(kind === 'patient' ? '/api/v1/auth/patient/login' : '/api/v1/auth/login')
+    if (kind === 'staff') {
+      // Password, then the authenticator (enrolled on the account's first
+      // sign-in): the session and its facilitySelection come with that step.
+      const signedIn = await staffSignIns.signIn(who.email);
+      return { cookies: signedIn.cookies, sessionId: signedIn.sessionId, body: signedIn.response.body };
+    }
+    const response = await http.post('/api/v1/auth/patient/login')
       .set('Origin', origin).send({ email: who.email, password, turnstileAction: `${kind}-login` });
     assert.equal(response.status, 200, `${kind} sign-in: ${JSON.stringify(response.body)}`);
     return { cookies: jar(response), sessionId: response.body.actor.sessionId, body: response.body };
@@ -158,11 +185,18 @@ try {
   };
   const checks = [];
 
-  // 1. A new staff sign-in reports its default (primary) facility.
-  const first = await signIn(doctor);
-  assert.equal(first.body.facilitySelection, 'default'); assert.equal(first.body.actor.facility.id, alpha);
+  // 1. The password step issues no session and reports no selection; the
+  // session issued by the first enrolment reports the default (primary) facility.
+  const passwordOnly = await staffSignIns.passwordStep(doctor.email);
+  assert.equal(passwordOnly.status, 'mfa_enrollment_required');
+  assert.equal('facilitySelection' in passwordOnly.response.body, false, JSON.stringify(passwordOnly.response.body));
+  assert.equal((await rows(doctor.id)).length, 0);
+  const first = await staffSignIns.enroll(doctor.email, passwordOnly.challengeCookie)
+    .then(signedIn => ({ cookies: signedIn.cookies, sessionId: signedIn.sessionId, body: signedIn.response.body }));
+  assert.equal(first.body.facilitySelection, 'default', JSON.stringify(first.body));
+  assert.equal(first.body.actor.facility.id, alpha); assert.equal(first.body.recoveryCodes?.length, 10);
   reports(await session(first), alpha, 'default');
-  checks.push('a new staff sign-in and its session read report the primary facility with facilitySelection default');
+  checks.push('the staff password step answers mfa_enrollment_required with no facilitySelection and no row; the session issued by POST /auth/mfa/enroll/activate and its session read report the primary facility with facilitySelection default');
 
   // 2. Selecting Beta stores it for the sign-in and audits it once; a reload reports it.
   const selected = await select(first, beta);
@@ -186,13 +220,49 @@ try {
   assert.deepEqual((await rows(doctor.id)).map(row => [row.family_id, row.facility_id, row.row_version]), [[first.sessionId, beta, 1]]);
   checks.push('refresh reports the selected facility, the rotated session reads it on reload, and the stored row is unchanged (keyed by the family)');
 
-  // 4. A second sign-in of the same account is not affected, and its own refresh neither.
+  // 3b. The selection cannot be read (SELECT revoked from the Identity runtime
+  // for this step only): the session read is 503 with the cookies untouched,
+  // and the refresh, whose rotation commits first, answers 200 with the
+  // rotated cookies and 'unavailable', never the default as a choice.
+  await pool.query('revoke select on auth.session_facility_selection from hid_identity_runtime');
+  selectionReadRevoked = true;
+  let unreadable;
+  let unavailable;
+  try {
+    unreadable = await session(rotated.held);
+    unavailable = await refresh(rotated.held);
+  } finally {
+    await pool.query('grant select on auth.session_facility_selection to hid_identity_runtime');
+    selectionReadRevoked = false;
+  }
+  assert.equal(unreadable.status, 503, JSON.stringify(unreadable.body));
+  assert.equal(unreadable.body.code, 'DEPENDENCY_UNAVAILABLE');
+  assert.equal(unreadable.headers['set-cookie'], undefined, 'a failed session read changes no cookie');
+  assert.equal(unavailable.response.status, 200, JSON.stringify(unavailable.response.body));
+  assert.equal(unavailable.response.body.facilitySelection, 'unavailable');
+  assert.equal(unavailable.response.body.actor.facility.id, alpha, 'the default is reported, labelled unavailable');
+  const rotatedCookies = (unavailable.response.headers['set-cookie'] ?? [])
+    .filter(value => [name, `${name}_refresh`, `${name}_csrf`].includes(value.split('=')[0]));
+  assert.equal(rotatedCookies.length, 3, `rotated session cookies: ${unavailable.response.headers['set-cookie']}`);
+  assert(rotatedCookies.every(value => !/Expires=Thu, 01 Jan 1970/i.test(value)), 'no session cookie is cleared');
+  assert.equal(unavailable.response.headers['x-csrf-token'], unavailable.held.cookies[`${name}_csrf`]);
+  assert.notEqual(unavailable.held.sessionId, rotated.held.sessionId);
+  assert.equal((await session(rotated.held)).status, 401, 'the rotation committed');
+  const current = unavailable.held;
+  reports(await session(current), beta, 'selected');
+  assert.deepEqual((await rows(doctor.id)).map(row => [row.family_id, row.facility_id, row.row_version]), [[first.sessionId, beta, 1]]);
+  checks.push('with the selection unreadable by the runtime, GET /auth/session is 503 DEPENDENCY_UNAVAILABLE with no Set-Cookie, and POST /auth/refresh is 200 with the three rotated session cookies, the rotated X-CSRF-Token and facilitySelection unavailable; once readable, the rotated session reports the stored selection again');
+
+  // 4. A second sign-in of the same account (TOTP this time) is not affected,
+  // and its own refresh neither.
   const second = await signIn(doctor);
+  assert.equal(second.body.facilitySelection, 'default', JSON.stringify(second.body));
+  assert.equal(second.body.actor.facility.id, alpha);
   reports(await session(second), alpha, 'default');
   const secondRotated = await refresh(second);
   reports(secondRotated.response, alpha, 'default');
   assert.equal((await rows(doctor.id)).length, 1);
-  checks.push('a second sign-in of the same account reports its own default facility, before and after its refresh, with no row of its own');
+  checks.push('a second sign-in of the same account, issued by POST /auth/mfa/verify, reports facilitySelection default and its own default facility, before and after its refresh, with no row of its own');
 
   // 5. An invalid selection is refused and writes nothing, nor does a malformed one.
   const auditsBefore = (await selectionAudits(secondRotated.held.sessionId)).length;
@@ -216,17 +286,17 @@ try {
   checks.push('selecting another account\'s or an unknown facility is 403 FACILITY_ACCESS_DENIED and a malformed id 400, each writing no row and no selection audit, and each recorded once as a failed auth.facility.select staff session event with no facility, membership or organization');
 
   // 6. X-Facility-ID still authorizes each request, whatever is selected.
-  const header = await session(rotated.held).set('X-Facility-ID', alpha);
+  const header = await session(current).set('X-Facility-ID', alpha);
   assert.equal(header.status, 200); assert.equal(header.body.actor.facility.id, alpha);
   checks.push('a valid X-Facility-ID on GET /auth/session binds the reported facility, as before; the selection is only the default');
 
   // 7. The selected membership ends: the sign-in is asked to choose again.
   await pool.query('update identity.staff_facility_memberships set active = false, row_version = row_version + 1 where id = $1',
     [doctor.memberships[beta]]);
-  const ended = await session(rotated.held);
+  const ended = await session(current);
   reports(ended, alpha, 'reselect');
   assert.deepEqual(ended.body.actor.facilityIds, [alpha]);
-  const endedRefresh = await refresh(rotated.held);
+  const endedRefresh = await refresh(current);
   reports(endedRefresh.response, alpha, 'reselect');
   assert.equal((await rows(doctor.id))[0]?.facility_id, beta, 'the stored selection is left for the user to replace');
   const refusedEnded = await select(endedRefresh.held, beta);
@@ -311,4 +381,9 @@ try {
   checks.push('sign-out leaves the row in place; the signed-out sign-in can neither read the session nor select (401), and the guard refuses any change to its row');
 
   process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: 'hid_identity_api_runtime', checks })}\n`);
-} finally { if (app) await app.close(); await pool.end(); }
+} finally {
+  // Never leave the Identity runtime without its read grant.
+  if (selectionReadRevoked) await pool.query('grant select on auth.session_facility_selection to hid_identity_runtime');
+  if (app) await app.close();
+  await pool.end();
+}

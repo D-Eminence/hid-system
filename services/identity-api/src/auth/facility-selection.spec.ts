@@ -96,6 +96,7 @@ describe('staff facility selection per sign-in', () => {
   let tokens: { verify: jest.Mock; verifyCsrf: jest.Mock; verifyRefreshCsrf: jest.Mock; refreshSessionKind: jest.Mock;
     selectedFacilityId: jest.Mock; recordFacilitySelection: jest.Mock };
   let audit: { record: jest.Mock; recordWithClient: jest.Mock };
+  let mfa: { beginLogin: jest.Mock; completeLogin: jest.Mock; activateEnrollment: jest.Mock };
   const auditClient = { query: jest.fn() };
   const accountId = randomUUID();
   const primary = facility('Alpha General', true, 'doctor');
@@ -161,6 +162,20 @@ describe('staff facility selection per sign-in', () => {
       }),
     };
     audit = { record: jest.fn().mockResolvedValue(undefined), recordWithClient: jest.fn().mockResolvedValue(undefined) };
+    // Staff sign-in (0088): the password step yields only a challenge; the
+    // session is issued by the second factor or by the first enrolment.
+    const staffSession = () => {
+      const signIn = store.signIn(accountId);
+      return { actor: store.actor(signIn.sessionId), accessToken: signIn.accessToken, refreshToken: signIn.refreshToken,
+        csrfToken: signIn.csrfToken, expiresAt: new Date(Date.now() + 900_000),
+        refreshExpiresAt: new Date(Date.now() + 28_800_000) };
+    };
+    mfa = {
+      beginLogin: jest.fn(async () => ({ token: 'synthetic-staff-challenge', purpose: 'verify',
+        expiresAt: new Date(Date.now() + 300_000) })),
+      completeLogin: jest.fn(async () => staffSession()),
+      activateEnrollment: jest.fn(async () => ({ session: staffSession(), recoveryCodes: ['synthetic-recovery-a'] })),
+    };
     // Runtime controls: the portals are enabled and maintenance mode is off.
     const database = { query: jest.fn(async (_sql: string, values: unknown[]) =>
       ({ rows: [{ enabled: values[0] !== 'maintenance_mode' }] })) };
@@ -172,7 +187,7 @@ describe('staff facility selection per sign-in', () => {
       { provide: WorkloadAuthService, useValue: { authenticateService: jest.fn().mockResolvedValue({}) } },
       { provide: TurnstileService, useValue: { verifyLogin: jest.fn().mockResolvedValue(undefined) } },
       { provide: GoogleAuthenticationService, useValue: {} },
-      { provide: MfaService, useValue: {} },
+      { provide: MfaService, useValue: mfa },
       { provide: DatabaseService, useValue: database },
     ] }).compile();
     app = module.createNestApplication({ logger: false });
@@ -204,6 +219,11 @@ describe('staff facility selection per sign-in', () => {
     .set('Origin', ORIGIN).set('x-csrf-token', signIn.csrfToken)
     .set('Cookie', `hid_access_refresh=${signIn.refreshToken}; hid_access_csrf=${signIn.csrfToken}`);
   const selectionAudits = () => audit.recordWithClient.mock.calls.filter(([, event]) => event.action === 'auth.facility.select');
+  const challenge = 'hid_access_mfa=synthetic-staff-challenge';
+  const mfaStep = (path: string, body: object) => http().post(`/api/v1/auth/mfa/${path}`).set('Origin', ORIGIN)
+    .set('Cookie', challenge).send(body);
+  const issuedAccess = (response: request.Response) => ((response.headers['set-cookie'] as unknown as string[]) ?? [])
+    .find((cookie) => cookie.startsWith('hid_access='))!.split(';')[0]!.slice('hid_access='.length);
 
   it('persists the selection for the sign-in, audits it in the same transaction, and reports selected', async () => {
     const signIn = store.signIn(accountId);
@@ -373,37 +393,41 @@ describe('staff facility selection per sign-in', () => {
     expect(tokens.selectedFacilityId).not.toHaveBeenCalled();
   });
 
-  it('keeps the browser on the rotated session when the selection cannot be read after rotation: 503, new cookies, nothing cleared', async () => {
+  it('answers a refresh whose selection read fails after the rotation with 200, the rotated cookies and facilitySelection unavailable, and clears nothing', async () => {
     const signIn = store.signIn(accountId);
     expect((await select(signIn.accessToken, secondary.id)).status).toBe(200);
     tokens.selectedFacilityId.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: '08006' }));
 
     const refreshed = await refresh(signIn);
 
-    expect(refreshed.status).toBe(503);
-    expect(refreshed.body.code).toBe('DEPENDENCY_UNAVAILABLE');
-    // No actor at all: neither a facility the user did not choose nor the old session.
-    expect(refreshed.body).not.toHaveProperty('actor');
-    expect(refreshed.body).not.toHaveProperty('facilitySelection');
+    // Not a 5xx: behind the gateway a 5xx loses its Set-Cookie, and the
+    // browser would keep the spent refresh token. The rotation has committed,
+    // so the rotated session is answered, with a state that is not a choice:
+    // the client asks where the user is working (it never takes the default
+    // facility reported here as chosen).
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.facilitySelection).toBe('unavailable');
+    expect(refreshed.body.actor.facility.id).toBe(primary.id);
     const setCookies: string[] = refreshed.headers['set-cookie'] as unknown as string[];
     const sessionCookies = setCookies.filter((cookie) => /^hid_access(_refresh|_csrf)?=/.test(cookie));
-    // The session cookies are replaced, never expired (setCookies also expires
-    // the public patient enrollment cookie, as every sign-in and refresh does).
     expect(sessionCookies.filter((cookie) => /Expires=Thu, 01 Jan 1970/i.test(cookie))).toEqual([]);
     const issued = Object.fromEntries(sessionCookies.map((cookie) => cookie.split(';')[0]!.split('=') as [string, string]));
     const rotatedSession = issued.hid_access!.slice('access-'.length);
     expect(rotatedSession).not.toBe(signIn.sessionId);
+    expect(refreshed.body.actor.sessionId).toBe(rotatedSession);
     expect(issued).toEqual({ hid_access: `access-${rotatedSession}`, hid_access_refresh: `refresh-${rotatedSession}`,
       hid_access_csrf: `csrf-refresh-${rotatedSession}` });
     expect(refreshed.headers['x-csrf-token']).toBe(`csrf-refresh-${rotatedSession}`);
-    // The rotation committed: the old session is not live, the rotated one is,
-    // and it still reports the sign-in's selection once the read succeeds.
+    // The refresh happened and is audited, at the facility the response reports.
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.refresh', outcome: 'success',
+      resourceId: rotatedSession, facilityId: primary.id }));
+    // The stored choice is untouched: once it can be read again the rotated
+    // session reports it.
     expect(store.sessions.get(signIn.sessionId)?.live).toBe(false);
-    expect((await session(signIn.accessToken)).status).toBe(401);
+    expect(store.selections.get(signIn.sessionId)?.facilityId).toBe(secondary.id);
     const reloaded = await session(issued.hid_access!);
     expect(reloaded.body).toMatchObject({ facilitySelection: 'selected', actor: { sessionId: rotatedSession,
       facility: { id: secondary.id } } });
-    expect(audit.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.refresh' }));
   });
 
   it('answers GET /auth/session with 503 and keeps the cookies when the selection cannot be read', async () => {
@@ -418,6 +442,42 @@ describe('staff facility selection per sign-in', () => {
     expect(read.body).not.toHaveProperty('actor');
     expect(read.headers['set-cookie']).toBeUndefined();
     expect(store.sessions.get(signIn.sessionId)?.live).toBe(true);
+  });
+
+  it('reports no facilitySelection and no actor at the password step, which issues no session (0088)', async () => {
+    const step = await http().post('/api/v1/auth/login').set('Origin', ORIGIN)
+      .send({ email: 'staff@example.test', password: 'synthetic-password', turnstileAction: 'staff-login' });
+
+    expect(step.status).toBe(200);
+    expect(step.body).toEqual({ status: 'mfa_required', expiresAt: expect.any(String) });
+    expect(tokens.selectedFacilityId).not.toHaveBeenCalled();
+    expect(tokens.recordFacilitySelection).not.toHaveBeenCalled();
+  });
+
+  it('reports facilitySelection default on the staff session issued after the second factor (POST /auth/mfa/verify)', async () => {
+    const verified = await mfaStep('verify', { code: '123456' });
+
+    expect(verified.status).toBe(200);
+    expect(verified.body).toMatchObject({ facilitySelection: 'default', actor: { facility: { id: primary.id } } });
+    expect(mfa.completeLogin).toHaveBeenCalledWith('synthetic-staff-challenge', { code: '123456' },
+      expect.objectContaining({ correlationId: expect.any(String) }), 'staff');
+    // A new sign-in has no selection to read.
+    expect(tokens.selectedFacilityId).not.toHaveBeenCalled();
+
+    // The selection applies to that session: chosen, then kept on a reload.
+    const access = issuedAccess(verified);
+    expect((await select(access, secondary.id)).body.facilitySelection).toBe('selected');
+    expect((await session(access)).body).toMatchObject({ facilitySelection: 'selected',
+      actor: { facility: { id: secondary.id } } });
+  });
+
+  it('reports facilitySelection default on the staff session issued by the first enrolment (POST /auth/mfa/enroll/activate)', async () => {
+    const activated = await mfaStep('enroll/activate', { code: '654321' });
+
+    expect(activated.status).toBe(200);
+    expect(activated.body).toMatchObject({ facilitySelection: 'default', actor: { facility: { id: primary.id } },
+      recoveryCodes: ['synthetic-recovery-a'] });
+    expect(tokens.selectedFacilityId).not.toHaveBeenCalled();
   });
 
   it('refuses an external OIDC bearer token (no MFA assurance) before any selection is read or stored', async () => {

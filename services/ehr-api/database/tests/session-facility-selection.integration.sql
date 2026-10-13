@@ -189,6 +189,26 @@ begin
               where relation.oid = 'auth.session_facility_selection'::regclass and privilege.grantee = 0) then
     raise exception 'PUBLIC has a privilege on auth.session_facility_selection';
   end if;
+  -- Every other platform role, including those added after 0089 was written
+  -- (hid_schema_test_runtime, hid_platform_control_reader and the rest): only
+  -- the Identity runtime, its members and the table owner hold a privilege.
+  for role_name in
+    select role_row.rolname from pg_roles role_row
+     where role_row.rolname like 'hid\_%' and not role_row.rolsuper
+       and not pg_has_role(role_row.oid, 'hid_identity_runtime', 'USAGE')
+       and not pg_has_role(role_row.oid, (select relation.relowner from pg_class relation
+         where relation.oid = 'auth.session_facility_selection'::regclass), 'USAGE')
+  loop
+    if has_table_privilege(role_name, 'auth.session_facility_selection',
+        'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+      raise exception '% has a privilege on auth.session_facility_selection', role_name;
+    end if;
+  end loop;
+  if not exists (select 1 from pg_roles where rolname = 'hid_schema_test_runtime')
+     or has_table_privilege('hid_schema_test_runtime', 'auth.session_facility_selection',
+       'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+    raise exception 'hid_schema_test_runtime must exist and hold no privilege on auth.session_facility_selection';
+  end if;
 end $$;
 
 -- 3. As the Identity API runtime: the API's own upsert (TokenService) records
