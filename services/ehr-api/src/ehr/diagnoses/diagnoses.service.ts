@@ -3,7 +3,7 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
-import { CreateDiagnosisDto, TimelineQueryDto, UpdateDiagnosisDto } from '../shared/clinical.dto';
+import { CreateDiagnosisDto, DiagnosisVerificationStatus, TimelineQueryDto, UpdateDiagnosisDto } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
 
 export interface DiagnosisRow extends QueryResultRow {
@@ -75,6 +75,7 @@ export class DiagnosesService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'diagnosis',
         async () => {
+          await this.repository.requireOpenEncounter(client, encounterId, patientId, context.facilityId, 'record');
           const result = await client.query<DiagnosisRow>(
             `insert into ehr.diagnoses (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
@@ -111,7 +112,11 @@ export class DiagnosesService {
       context, patientId, 'write_records',
       { action: 'ehr.diagnosis.update', resourceType: 'diagnosis', resourceId: diagnosisId },
       async (client) => {
-        await this.lock(client, context, patientId, encounterId, diagnosisId);
+        const current = await this.lock(client, context, patientId, encounterId, diagnosisId);
+        // A diagnosis entered in error stays so (CLIN-EIE; 0084 refuses the update as well).
+        if (current.verificationStatus === DiagnosisVerificationStatus.EnteredInError) {
+          throw new DomainProblem(409, 'DIAGNOSIS_NOT_AMENDABLE', 'A diagnosis entered in error cannot be changed');
+        }
         await this.repository.setChangeReason(client, input.changeReason);
         const result = await client.query<DiagnosisRow>(
           `update ehr.diagnoses set
