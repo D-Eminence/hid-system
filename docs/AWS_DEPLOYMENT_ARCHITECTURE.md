@@ -34,7 +34,33 @@ history. The Cloudflare-to-AWS request carries an independent
 `x-hid-origin-authorization` secret. The regional WAF rejects a missing or
 incorrect value before the ALB target path. This is defense in depth and does
 not replace browser authentication, CSRF, authorization, or owner-service
-checks.
+checks. The Gateway does not forward that secret to any backend.
+
+The public API web ACL evaluates, in order (ADR-055):
+
+| Priority | Rule | Action |
+|---|---|---|
+| 0 | `RequireCloudflareOriginSecret` | Blocks a request without the Worker's `x-hid-origin-authorization` value |
+| 10 | `AwsCommonRules` (`AWSManagedRulesCommonRuleSet`) | Every rule blocks except `SizeRestrictions_BODY`, which only counts and labels (`awswaf:managed:aws:core-rule-set:SizeRestrictions_Body`) |
+| 11 | `AwsCommonRulesBodySize` | Blocks a labelled request (body over 8 KB) unless it is a `POST` or `PATCH` whose raw path is an encounter-scoped clinical write: `/api/v1/ehr/patients/<uuid>/encounters`, `/<uuid>`, and its `clinical-notes` (with `/<uuid>/revisions`), `diagnoses`, `prescriptions` and `lab-requests` (with `/<uuid>`); lowercase UUIDs, no transformation, so an encoded, dot-segment or case variant keeps the limit (WAF-CRS-BODY) |
+| 20 | `AwsKnownBadInputs` | Blocks |
+| 30 | `ApiOriginRateLimit` | Blocks a client address over 2,000 requests per 5 minutes, keyed on `X-Real-IP` (`FORWARDED_IP`); an invalid address matches and is blocked; a request without the header is not counted here and the Gateway refuses it (A7) |
+| 31 | `ApiOriginEdgeRateLimit` | Blocks a connecting address over 50,000 requests per 5 minutes: the backstop for a leaked origin secret or a request without `X-Real-IP` |
+
+The WAF's body inspection on an ALB covers the first 8 KB, so the other Core
+Rule Set body rules inspect only that part of a long clinical note. The body
+bound for the exempt routes is the Gateway's `client_max_body_size 512k`
+(`413 PAYLOAD_TOO_LARGE`) and ehr-api's own 512 KiB JSON limit. Because every
+connection to the ALB comes from the Cloudflare Worker, a limit keyed on the
+connecting address would throttle all users behind one Cloudflare egress
+address together; the per-client rule keys on the address the Worker took from
+`CF-Connecting-IP`, which rule 0 guarantees came from the Worker. A facility or
+carrier-grade NAT address counts as one client: watch the
+`hid-<env>-origin-rate` metric and raise `API_ORIGIN_CLIENT_RATE_LIMIT`
+(`infra/aws/src/hid-regional-stack.ts`) if legitimate clients are blocked
+(IP-THRESHOLDS in the release checklist). Keep Cloudflare's Pseudo IPv4 setting
+off or in "add header" mode, never "overwrite headers", so `CF-Connecting-IP`
+stays the client's real address.
 
 ## Client address and gateway routing
 
@@ -67,7 +93,13 @@ The Gateway resolves its upstream Cloud Map names per request through the
 Amazon-provided VPC resolver (`GATEWAY_DNS_RESOLVER`, the VPC CIDR base plus
 two; answers cached for 10 seconds). It follows task replacements without a
 restart and starts even when a module runs no task; requests to such a module
-answer `503 UPSTREAM_UNAVAILABLE`.
+answer `503 UPSTREAM_UNAVAILABLE`, as do requests to a service that refuses,
+resets, times out or closes without answering. A service's own answer, 5xx
+included, passes through unchanged with its code, `Set-Cookie` and
+`Retry-After` (ADR-055, A8). The Gateway logs one JSON line per request to
+stdout (format `hid_api`): the path without its query string, method, status,
+timings and request ids, never the request line, query, cookies or
+credentials (D7).
 
 `HID_ENABLED_API_ROUTES` lists the modules whose `/api/v1/*` prefixes the
 Gateway proxies. Any other module answers `404 API_ROUTE_NOT_FOUND` before
@@ -76,8 +108,9 @@ staging synth may opt more modules in with the synth input
 `HID_ENABLED_API_ROUTES`, and a production synth refuses any module beyond the
 launch set. Service-to-service routes (`/api/v1/auth/service-session`,
 `/api/v1/identity/service/*`, `/api/v1/identity/outreach/*`,
-`/api/v1/ehr/internal/*`, and the Lab and Pharmacy `accept-ehr-*` and
-`imports/from-ocr` routes) answer `404 API_ROUTE_NOT_FOUND` at the Gateway in
+`/api/v1/ehr/internal/*`, `/api/v1/ehr/documents/scan-events`, and the Lab and
+Pharmacy `accept-ehr-*` and `imports/from-ocr` routes) answer
+`404 API_ROUTE_NOT_FOUND` at the Gateway in
 any letter case, with a trailing slash, dot segments, repeated slashes or
 percent-encodings, because callers use the private service names. Every
 proxied location also refuses a request target with a backslash before the

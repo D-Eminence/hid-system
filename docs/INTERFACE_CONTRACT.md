@@ -22,9 +22,11 @@ Identity (`/api/v1/auth`, `/identity`, `/audit`, `/admin`, `/commercial`) and
 EHR (`/api/v1/ehr`). Lab, Pharmacy, OCR and Outreach prefixes answer
 `404 API_ROUTE_NOT_FOUND`, as do the service-to-service routes
 (`/api/v1/auth/service-session`, `/api/v1/identity/service/*`,
-`/api/v1/identity/outreach/*`, `/api/v1/ehr/internal/*`, and the Lab and
-Pharmacy `accept-ehr-*` and `imports/from-ocr` routes) in any letter case or
-spelling nginx normalizes. Public IP-keyed limits (recovery start, patient
+`/api/v1/identity/outreach/*`, `/api/v1/ehr/internal/*`, the document
+scanner's callback `POST /api/v1/ehr/documents/scan-events` (ADR-055; the
+scanner calls ehr-api on its private service name when uploads ship), and the
+Lab and Pharmacy `accept-ehr-*` and `imports/from-ocr` routes) in any letter
+case or spelling nginx normalizes. Public IP-keyed limits (recovery start, patient
 enrollment start and contact, provider enrollment, organization application
 intake and profile completion) count per client network: an IPv4 address or an
 IPv6 /64. Without a usable client address, or, in production, with an address
@@ -32,10 +34,47 @@ of one of the platform's own proxies, they answer their 503
 (`OTP_RATE_LIMIT_UNAVAILABLE` for recovery start,
 `ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
 `PROVIDER_ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
-`APPLICATION_RATE_LIMIT_UNAVAILABLE`) instead of sharing one bucket. The
-gateway passes a backend `503` to the browser as `503 UPSTREAM_UNAVAILABLE`
-(its `error_page` intercepts backend 502, 503 and 504), so clients must treat
-any 503 as unavailable rather than rely on the backend code.
+`APPLICATION_RATE_LIMIT_UNAVAILABLE`) instead of sharing one bucket.
+
+The gateway passes every backend answer through unchanged, 5xx included
+(ADR-055, A8): the status, the Problem Details body with its `code`,
+`Set-Cookie`, `Retry-After` and `X-Correlation-ID`. Clients see the service's
+own code (for example `503 PLATFORM_MAINTENANCE`, `503 MFA_UNAVAILABLE`,
+`503 TURNSTILE_UNAVAILABLE`, `503 OTP_DELIVERY_UNAVAILABLE`,
+`503 QOREID_DISABLED`) and any `502`. Only when the gateway gets no answer at
+all (the service refuses or resets the connection, times out, has no running
+task or closes without responding) does it answer
+`503 UPSTREAM_UNAVAILABLE` with `Cache-Control: no-store`; the Worker answers
+`502 API_ORIGIN_UNAVAILABLE` when it cannot reach the AWS origin. Clients
+should branch on the codes they know and treat any other 5xx as unavailable.
+A `POST /api/v1/auth/refresh` that fails with a 5xx clears the session cookies
+(table below); before this change the gateway dropped that `Set-Cookie` on a
+`503`, so the browser kept a refresh token that rotation may already have
+spent. Keeping the cookies on a 5xx is register item A6 (Identity, open).
+
+The gateway refuses a request body over 512 KiB with
+`413 PAYLOAD_TOO_LARGE` Problem Details before any service sees it (the
+largest JSON body a launch service accepts; Identity refuses more than
+256 KiB with the same code). The public API WAF limits each client address
+(the `X-Real-IP` the Worker sets) to 2,000 requests per 5 minutes and answers
+a request over the limit with `403` and the WAF's own non-JSON body; clients
+should treat it as rate limiting. The WAF's 8 KB request-body rule does not
+apply to `POST` and `PATCH` on the encounter-scoped clinical writes
+(`/api/v1/ehr/patients/:patientId/encounters`, `/:encounterId`, and its
+`clinical-notes` with `/:noteId/revisions`, `diagnoses`, `prescriptions` and
+`lab-requests`), so a note up to the 100,000-character limit is accepted;
+any other request with a body over 8 KB is refused by the WAF with `403`
+(ADR-055, WAF-CRS-BODY).
+
+The Health-id hosts (www, the staging web host and admin.*) answer with
+`Strict-Transport-Security: max-age=31536000` and a Content-Security-Policy
+that allows script only from the page's own origin and
+`https://challenges.cloudflare.com` (Turnstile), frames and connections only to
+that origin besides its own, styles, fonts and images (plus `data:` images)
+only from its own origin, and no inline script, `eval`, plugins, workers or
+framing by another site. Every `/api/v1` and edge answer carries
+`Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and the
+same HSTS (ADR-055, D6).
 
 Authentication OTP commands are purpose-bound and use three stages: start
 returns a generic challenge, verify accepts exactly six digits and returns an

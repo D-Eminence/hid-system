@@ -114,7 +114,9 @@ All eight host builds were also run by root `npm run build`: `LOCALLY EXECUTED`.
 | API ownership | Identity owns auth/identity/audit/admin; EHR owns ehr and legacy `/api` fallback; Lab, Pharmacy, OCR, Outreach own exact prefixes | STATICALLY VERIFIED |
 | Dispatcher exposure | No browser route to 3010 | STATICALLY VERIFIED |
 | Forwarding boundary | Host/proto/forwarded-for are overwritten; Origin, CSRF, and correlation are explicitly relayed | STATICALLY VERIFIED |
-| Failure response | 502/503/504 become bounded Problem Details `UPSTREAM_UNAVAILABLE` | STATICALLY VERIFIED |
+| Failure response | When nginx gets no answer from a backend (refused, reset, timed out, unresolved, closed without a response) it answers bounded Problem Details `503 UPSTREAM_UNAVAILABLE`; a backend's own 502/503/504 passes through with its code, `Set-Cookie` and `Retry-After` (ADR-055) | STATICALLY VERIFIED; LOCALLY VERIFIED with nginx 1.29.8 (`scripts/verify-gateway-runtime.mjs`) |
+| Request body bound | Bodies over 512 KiB answer `413 PAYLOAD_TOO_LARGE` Problem Details before any backend | STATICALLY VERIFIED; LOCALLY VERIFIED with nginx 1.29.8 |
+| Access log | JSON format `hid_api`: path without the query string, method, status, timings, request ids; never the request line | STATICALLY VERIFIED; LOCALLY VERIFIED with nginx 1.29.8 |
 | Static cache policy | workers are no-store; hashed assets immutable | STATICALLY VERIFIED |
 | Running Nginx gateway | No container engine was present | EXTERNALLY PENDING |
 

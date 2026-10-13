@@ -536,6 +536,31 @@ Implement the correction now rather than only reporting it.
 * secure errors
 * correlation IDs
 
+### Edge controls at launch (ADR-055)
+
+* **Browser headers.** Every Cloudflare frontend Worker response carries
+  `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains` until
+  every subdomain is confirmed HTTPS-only). The Health-id hosts (www, the
+  staging web host, admin.*) send a Content-Security-Policy that allows script
+  only from the page's origin and `https://challenges.cloudflare.com`
+  (Turnstile), with `default-src 'none'`, no inline script or `eval`, no
+  plugins or workers, and `frame-ancestors 'none'`; API and edge answers send
+  `default-src 'none'; frame-ancestors 'none'`. The Health-id artefact
+  verifier keeps the build to its Vite shell with no inline script. The
+  undeployed legacy product hosts get no page policy and need their own before
+  they are deployed. www grants no camera, microphone or location.
+* **WAF.** The origin secret first; the AWS Core Rule Set with every rule
+  blocking except the 8 KB body rule, which is lifted only for `POST`/`PATCH`
+  on the encounter-scoped clinical write routes (raw-path match); known bad
+  inputs; a rate limit per client address (`X-Real-IP` from the Worker) and a
+  high backstop per connecting address. Bodies stay bounded by the gateway
+  (512 KiB, `413 PAYLOAD_TOO_LARGE`) and by each service.
+* **Gateway.** Service-to-service routes, including the document scanner's
+  callback, answer `404` at the public gateway. Upstream error answers pass
+  through with their codes. The access log records the path without its query
+  string and never the request line, cookies or credentials; the Worker's
+  origin secret is not forwarded to any backend.
+
 ## 15. Secrets
 
 Secrets must not be committed.

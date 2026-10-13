@@ -2691,7 +2691,8 @@ Risks accepted:
   also loses `WorkloadIssuerUrl` and `WorkloadJwksUrl`. So, as in staging, no
   scan callback can authenticate: no document becomes `available` and
   `clean`, every download is refused and OCR cannot claim a job (DEP-4-SCAN,
-  DOC-3, D5).
+  DOC-3, D5). (Later: ADR-055 closes the callback at the public gateway; the
+  scanner calls ehr-api on its private service name.)
 - Never run live: staging is not deployed, so no token has been minted against
   real IAM, KMS, WAF or API Gateway.
 - The issuer code is a CDK file asset, not a TUF-admitted image digest
@@ -3086,3 +3087,137 @@ refuse to start. The outcome line gains `primaryProvider` and
 `primarySafeCode` when the fallback ran; its other fields are unchanged.
 
 Related ADRs: ADR-032, ADR-033, ADR-034, ADR-035, ADR-047.
+
+# ADR-055: Edge and Gateway Hardening for Launch: Scoped WAF Body Rule, Per-Client WAF Rate Limit, Upstream Errors Passed Through, Portal CSP and HSTS, Query-Free Access Log, Scanner Callback Closed
+
+Status: Accepted (owner policy defaults: deny by default, least privilege,
+auditable actions, no production bypasses); not deployed
+
+Date: 2026-10-13
+
+Change: BRANCH:launch/edge-hardening-2 (register WAF-CRS-BODY, the
+non-Identity part of A7, A8, D6, D7, SCAN-EDGE/EDGE-DOCS; IP-THRESHOLDS
+documented). ADR-054 is taken by the unmerged launch/staff-mfa branch.
+
+Context:
+
+- **WAF-CRS-BODY.** The public API web ACL ran `AWSManagedRulesCommonRuleSet`
+  with its defaults. Its `SizeRestrictions_BODY` rule blocks every body over
+  8 KB, but ehr-api accepts clinical note content up to 100,000 characters
+  (512 KiB JSON) and Health-id's note editor allows 100,000. A clinician
+  saving a long note got a WAF `403` with a non-JSON body and the note was
+  not saved.
+- **A7 (WAF part).** The rate rule aggregated by the connecting address. Every
+  connection to the ALB comes from the Cloudflare Worker, so all users behind
+  one Cloudflare egress address shared 2,000 requests per 5 minutes: one
+  script through the Worker could block sign-in, EHR and OTP for everyone on
+  that address. The application path was fixed by #65 (`X-Real-IP`).
+- **A8.** With `proxy_intercept_errors on`, the gateway's `error_page 502 503
+  504` replaced every backend 502/503/504 with `503 UPSTREAM_UNAVAILABLE`,
+  dropping the code, `Set-Cookie`, `Retry-After` and `X-Correlation-ID`, so
+  Health-id could not tell maintenance, MFA, Turnstile, enrollment or
+  delivery outages apart.
+- **D6.** The portal hosts sent no Content-Security-Policy and no HSTS.
+- **D7.** The gateway inherited the image's `main` access-log format, which
+  logs `$request`: the whole request line, so administrator search terms
+  (names, emails, HIDs) in query strings reached CloudWatch for a year.
+- **SCAN-EDGE/EDGE-DOCS.** `POST /api/v1/ehr/documents/scan-events`, the
+  document scanner's workload-authenticated callback, was public through the
+  gateway while uploads and the scanner are off; each anonymous call cost an
+  EHR-to-Identity call and audit rows.
+
+Decision:
+
+1. **Scoped WAF body rule (WAF-CRS-BODY).** `SizeRestrictions_BODY` counts
+   (and labels) instead of blocking. A rule right after the group,
+   `AwsCommonRulesBodySize`, blocks a labelled request unless it is a `POST`
+   or `PATCH` whose raw path (no transformation) is an encounter-scoped
+   clinical write: `/api/v1/ehr/patients/<uuid>/encounters`, `/<uuid>`, and
+   its `clinical-notes` (with `/<uuid>/revisions`), `diagnoses`,
+   `prescriptions` and `lab-requests` (with `/<uuid>`), lowercase UUIDs only.
+   These carry 100,000-character notes or 4,000-character fields that exceed
+   8 KB in multi-byte text; vitals carry no free text and keep the limit.
+   Every other Core Rule Set rule keeps blocking. The bound for the exempt
+   routes is the gateway's `client_max_body_size 512k` with a Problem Details
+   `413 PAYLOAD_TOO_LARGE` (the ehr-api JSON limit; identity-api refuses more
+   than 256 KiB itself).
+2. **Per-client WAF rate limit (A7).** `ApiOriginRateLimit` aggregates on
+   `X-Real-IP` (`FORWARDED_IP`, fallback `MATCH`): rule 0 has already refused
+   anything without the Worker's origin secret, and the Worker always replaces
+   `X-Real-IP` with `CF-Connecting-IP`. The limit stays 2,000 per 5 minutes,
+   now per client address. `ApiOriginEdgeRateLimit` (50,000 per 5 minutes per
+   connecting address) is the backstop for a leaked secret or a request
+   without the header. The gateway no longer forwards the origin secret to
+   any backend. Identity's MFA bucket (the other part of A7) is a separate
+   change.
+3. **Upstream answers pass through (A8).** `proxy_intercept_errors` is removed.
+   `error_page 502 503 504 = @upstream_unavailable` still answers bounded
+   `503 UPSTREAM_UNAVAILABLE` when nginx itself gets no answer (refused,
+   reset, timed out, unresolved, closed without a response).
+4. **Portal CSP and HSTS (D6).** Every frontend Worker response carries
+   `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains` or
+   preload until every subdomain is confirmed HTTPS-only). `hid-web` and
+   `hid-admin` (the Health-id build) send `default-src 'none'; script-src
+   'self' https://challenges.cloudflare.com; style-src 'self'; img-src 'self'
+   data:; font-src 'self'; connect-src 'self'
+   https://challenges.cloudflare.com; frame-src
+   https://challenges.cloudflare.com; worker-src 'none'; object-src 'none';
+   base-uri 'none'; form-action 'self'; frame-ancestors 'none';
+   upgrade-insecure-requests`, derived from the 82b474e build output and
+   Turnstile's `api.js`. API and edge answers send `default-src 'none';
+   frame-ancestors 'none'`. The policy is enforced, not report-only: the
+   build was run through the Worker in headless Chromium with no violation.
+   The undeployed legacy product hosts get no page policy until they have
+   their own. `hid-web` grants no camera or microphone.
+5. **Query-free access log (D7).** The gateway logs its own JSON format
+   (`hid_api`, `escape=json`) to the image's access-log path: time, client
+   address, method, path (`$uri`), status, bytes, request and upstream timing,
+   upstream status, `request_id` and `X-Correlation-ID`. It never records the
+   request line, arguments, referrer, cookies or credentials.
+6. **Scanner callback closed (SCAN-EDGE).** The gateway answers
+   `/api/v1/ehr/documents/scan-events` with `404 API_ROUTE_NOT_FOUND` in every
+   spelling, like the other service-to-service routes. The scanner (D5, I7)
+   calls ehr-api on its private service name when uploads ship.
+7. **IP-THRESHOLDS** stays a documented decision: the Identity per-network
+   limits (5 per 15 minutes) and the WAF per-client limit are unchanged at
+   launch and are raised by configuration if the `ip`-scope 429 rate or the
+   `hid-<env>-origin-rate` metric shows NAT collisions.
+
+Consequences:
+
+- Clinicians can save notes up to the service limit through the edge; a body
+  over 512 KiB answers `413 PAYLOAD_TOO_LARGE` Problem Details. The other CRS
+  body rules inspect only the first 8 KB of a long note (an ALB limit).
+- One client over the rate limit is blocked alone; a busy facility or carrier
+  NAT address counts as one client.
+- Browsers now see a service's own 5xx code and any `502`. A refresh that
+  fails with a 5xx now reaches the browser with its cookie-clearing
+  `Set-Cookie`; before, a `503` dropped it, the browser kept a possibly spent
+  refresh token, and the next refresh could revoke the sign-in as reuse. A
+  refresh `500` already passed through. Keeping cookies on a 5xx is A6
+  (Identity), still open; this change adds no new sign-out path.
+- A Health-id release that loads a new script, frame or connection origin
+  (Sentry, Google sign-in, analytics) must change the policy in the same
+  release, or the browser blocks it.
+- Gateway logs can no longer answer "which query did this request carry";
+  audit rows remain the record of administrative reads.
+
+Migration Impact: none.
+
+Security Impact: deny by default. The body exemption is limited to the
+clinical write routes by method and raw path; the rate limit no longer lets
+one client exhaust an egress address; a portal XSS has no script, frame or
+connection origin beyond the site and Turnstile; administrator search terms
+leave the logs; the origin secret stays at the edge; one more service route
+is closed at the edge. Authentication, authorization, CSRF and Origin checks,
+RLS and audit are unchanged.
+
+Compatibility Impact: Health-id 82b474e needs no change: it loads only its
+own assets and Turnstile, calls only its own origin, never calls
+`scan-events`, and already branches on specific codes and treats other 5xx
+generically. Operators keep Cloudflare Pseudo IPv4 off or in "add header"
+mode. Staging confirms the WAF behaviour (a 20,000-character note answers
+`201`; 2,100 requests from one client block only that client) and a browser
+sign-in with the real Turnstile widget and no CSP violation.
+
+Related ADRs: ADR-033, ADR-047, ADR-052, ADR-053.
