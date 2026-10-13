@@ -658,6 +658,8 @@ try {
   const patientTransaction = await owner.connect();
   const staffTransaction = await owner.connect();
   let ended;
+  let endElapsed;
+  let staffAccountWait;
   try {
     await patientTransaction.query('begin');
     await patientTransaction.query('select id from identity.access_requests where id = $1 for update', [requestB]);
@@ -671,12 +673,16 @@ try {
     })();
     const staffWork = (async () => {
       await pause(700);
+      const asked = performance.now();
       await staffTransaction.query('select id from auth.accounts where id = $1 for key share', [clinician.id]);
+      staffAccountWait = Math.round(performance.now() - asked);
       await staffTransaction.query('rollback');
     })();
+    const endStarted = performance.now();
     const ending = command(superSession, `/admin/workforce/memberships/${attached.body.membershipId}/end`,
       { facilityId: facilityC, reason: 'Clinician left facility C' },
-      { 'If-Match': String(endVersion), 'Idempotency-Key': workforceKey() }).then(response => response);
+      { 'If-Match': String(endVersion), 'Idempotency-Key': workforceKey() })
+      .then(response => { endElapsed = Math.round(performance.now() - endStarted); return response; });
     const [approvalOutcome, staffOutcome, endOutcome] = await Promise.allSettled([approval, staffWork, ending]);
     assert.equal(approvalOutcome.status, 'fulfilled', `the racing approval failed: ${approvalOutcome.reason?.message}`);
     assert.equal(staffOutcome.status, 'fulfilled', `the racing staff transaction failed: ${staffOutcome.reason?.message}`);
@@ -688,6 +694,8 @@ try {
     patientTransaction.release(); staffTransaction.release();
   }
   expectStatus(ended, 201);
+  // The end really waited on the approval's request lock (the approval commits after 1.5 s).
+  assert(endElapsed >= 1000, `the end did not wait on the approval's lock (${endElapsed} ms)`);
   assert.equal(ended.body.state, 'ended');
   assert.equal(ended.body.revokedRoles, 1);
   assert.equal(ended.body.revokedGrants, 2);
@@ -718,7 +726,8 @@ try {
     lookup_before_consent: beforeConsent.status, access_request: 201, lookup_after_approval: lookupStatus,
     org_admin_lookup: 'PERMISSION_DENIED', after_revoke: { roles: [], lookup: 'PERMISSION_DENIED' },
     after_regrant: { roles: ['doctor'] },
-    end_during_approval_and_key_share: { deadlocks: raceDeadlocks, revokedGrants: 2, expiredRequests: 1,
+    end_during_approval_and_key_share: { deadlocks: raceDeadlocks, end_waited_ms: endElapsed,
+      staff_account_lock_waited_ms: staffAccountWait, revokedGrants: 2, expiredRequests: 1,
       approved_request_grant: 'revoked', signed_out: 401 } };
 
   process.stdout.write(JSON.stringify({ status: 'passed', runtimeRole,

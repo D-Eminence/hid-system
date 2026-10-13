@@ -121,6 +121,13 @@ export class CurrentStaffContextService {
     };
   }
 
+  /**
+   * One row per active, unheld membership. Its roles are the codes of the
+   * membership's live, effective facility role assignments, the same rows its
+   * permissions come from: a revoked role, or one whose credential attestation
+   * has lapsed (D14), is neither listed nor counted. The membership's stored
+   * membership_role and app_role labels are not read.
+   */
   private async resolvePostgres(
     subject: string,
     authenticationMethod: 'local' | 'oidc',
@@ -135,7 +142,7 @@ export class CurrentStaffContextService {
               membership.organization_id::text,
               facility.name as facility_name,
               facility.code as facility_code,
-              array_remove(array[membership.membership_role, membership.app_role], null) as roles,
+              coalesce(array_agg(distinct role.code) filter (where role.code is not null), array[]::text[]) as roles,
               coalesce(array_agg(distinct permission.code) filter (where permission.code is not null), array[]::text[]) as permissions,
               membership.is_primary
          from auth.accounts account
@@ -158,8 +165,7 @@ export class CurrentStaffContextService {
           and account.status = 'active'
           and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
         group by account.id, account.subject, account.email, account.display_name,
-                 membership.id, membership.facility_id, membership.organization_id,
-                 membership.membership_role, membership.app_role, membership.is_primary,
+                 membership.id, membership.facility_id, membership.organization_id, membership.is_primary,
                  facility.name, facility.code
         order by membership.is_primary desc, facility.name, membership.facility_id, membership.id`,
       [subject, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],

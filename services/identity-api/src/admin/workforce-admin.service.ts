@@ -24,7 +24,7 @@ interface AttestationRow extends CommandRow {
 }
 interface RoleRow extends CommandRow {
   membership_id: string; facility_id: string; role_code: string; role_active: boolean; membership_active: boolean;
-  membership_state: string; membership_version: string; attestation_id: string | null;
+  membership_state: string; membership_version: string; attestation_id: string | null; renewed: boolean;
 }
 interface EndRow extends CommandRow {
   membership_id: string; facility_id: string; account_id: string; revoked_roles: number; revoked_grants: number;
@@ -46,7 +46,9 @@ interface CommandResult<T> {
  * action, then calls its SECURITY DEFINER command, which repeats the
  * permission, MFA, step-up, version, reason and idempotency checks and the
  * workforce rules (no self-provisioning, no administrator who works at the
- * facility, an independent reviewer's current attestation for a role). A new
+ * facility, an independent reviewer's current attestation for a role). A grant
+ * of a role the membership already holds renews it on a newer attestation
+ * (`renewed: true`) when its own has lapsed or the newer one lasts longer. A new
  * command (not a replay) is recorded as a platform-scoped semantic audit event
  * in the same transaction.
  */
@@ -123,11 +125,12 @@ export class WorkforceAdminService {
         const row = this.single(result.rows);
         return { row, response: { membershipId: row.membership_id, facilityId: row.facility_id, roleCode: row.role_code,
             roleActive: row.role_active, membershipActive: row.membership_active, state: row.membership_state,
-            version: Number(row.membership_version), attestationId: row.attestation_id, replayed: row.replayed },
+            version: Number(row.membership_version), attestationId: row.attestation_id, renewed: row.renewed === true,
+            replayed: row.replayed },
           action: `admin.workforce.role.${input.action === 'grant' ? 'granted' : 'revoked'}`,
           resourceType: 'staff-membership', resourceId: row.membership_id,
           details: { facilityId: row.facility_id, roleCode: row.role_code, membershipActive: row.membership_active,
-            attestationId: row.attestation_id } };
+            attestationId: row.attestation_id, renewed: row.renewed === true } };
       });
   }
 

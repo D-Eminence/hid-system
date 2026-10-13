@@ -33,12 +33,21 @@
 --   (org_admin stays non-clinical). Granting is limited to doctor, clinician
 --   and nurse; lab and pharmacist are withheld with their modules at launch
 --   (D17) but can be revoked. The first grant activates a pending membership.
+--   A grant of a role the membership already holds renews it when the role's
+--   attestation has lapsed, or when a current attestation lasts longer: the old
+--   assignment is revoked with the grant's reason and a new one rests on the
+--   newer attestation, with the same two-administrator rule.
 -- * identity.admin_end_workforce_membership ends one membership: it is
---   deactivated for good, its facility roles are revoked, the consent grants
---   bound to it are revoked, its pending access requests expire, and the
+--   deactivated for good, its facility roles are revoked, its pending access
+--   requests expire, the consent grants bound to it are revoked, and the
 --   account's staff sessions are revoked (a staff session is not bound to a
 --   facility in the schema, so all of them; a pending membership never
---   authorized one, so ending it revokes none).
+--   authorized one, so ending it revokes none). An approval that commits while
+--   the end runs has its grant revoked too. An access request that another
+--   transaction creates and commits after the end has read the pending
+--   requests stays pending on the ended membership; it, and any grant later
+--   approved from it, authorizes nothing, because every authorization needs an
+--   active membership and an ended one is never reactivated.
 -- * identity.admin_workforce_profile reads one account's staff record,
 --   attestations and memberships for the administration UI.
 --
@@ -46,6 +55,15 @@
 -- its attestation is current: the staff context and auth.membership_has_permission
 -- ignore a role whose attestation has lapsed (auth.facility_role_is_effective).
 -- Roles granted by onboarding or the legacy promotion are unchanged.
+--
+-- Lock order: every command locks the target's and the actor's account rows
+-- FOR UPDATE, in id order (0073), and then the membership or staff row it
+-- changes FOR NO KEY UPDATE. Those updates change no key column, and every
+-- insert that references the membership or staff row (a consent grant, an
+-- access request) takes FOR KEY SHARE on it, which FOR NO KEY UPDATE does not
+-- block; a FOR UPDATE membership lock deadlocked with an approval waiting on
+-- its request and with a staff transaction that went on to reference its own
+-- account.
 --
 -- N5: staff_memberships_scoped_uq allowed one active membership per role at a
 -- facility, so one account could hold two (org_admin and doctor, for
@@ -104,8 +122,10 @@ insert into auth.role_permissions (role_code, permission_code) values
   ('platform_super_admin', 'platform.workforce.manage')
 on conflict (role_code, permission_code) do nothing;
 
--- 3. Credential attestations. Append-only evidence; a later attestation
--- supersedes an earlier one by lasting longer, never by editing it.
+-- 3. Credential attestations. Append-only evidence, never edited. A granted
+-- role rests on the one attestation it was granted on (section 5); a later
+-- attestation keeps a role effective only through a new grant that renews the
+-- role on it (section 10).
 create table identity.staff_credential_attestations (
   id uuid primary key,
   staff_id uuid not null,
@@ -461,7 +481,7 @@ begin
       raise exception using errcode = 'P0002', message = 'WORKFORCE_ACCOUNT_NOT_FOUND';
     end if;
     select * into target_staff from identity.staff staff_row
-     where staff_row.account_id = target.id for update;
+     where staff_row.account_id = target.id for no key update;
     if not found or not target_staff.active or not identity.workforce_target_eligible(target) then
       raise exception using errcode = '23514', message = 'WORKFORCE_ACCOUNT_INELIGIBLE';
     end if;
@@ -593,7 +613,8 @@ begin
   if not found then
     raise exception using errcode = 'P0002', message = 'WORKFORCE_ACCOUNT_NOT_FOUND';
   end if;
-  select * into target_staff from identity.staff staff_row where staff_row.account_id = target.id for update;
+  select * into target_staff from identity.staff staff_row
+   where staff_row.account_id = target.id for no key update;
   if not found then
     raise exception using errcode = 'P0002', message = 'WORKFORCE_STAFF_NOT_FOUND';
   end if;
@@ -648,7 +669,7 @@ create function identity.admin_change_workforce_role(
   requested_sha256 char(64)
 ) returns table (membership_id uuid, facility_id uuid, role_code text, role_active boolean,
   membership_active boolean, membership_state text, membership_version bigint, attestation_id uuid,
-  replayed boolean)
+  renewed boolean, replayed boolean)
 language plpgsql
 security definer
 set search_path = pg_catalog, identity, auth, platform, pg_temp
@@ -664,6 +685,10 @@ declare
   target auth.accounts%rowtype;
   target_staff identity.staff%rowtype;
   chosen_attestation uuid;
+  chosen_until timestamptz;
+  live_role uuid;
+  live_until timestamptz;
+  role_renewed boolean := false;
   new_role uuid;
   revoked_role uuid;
   response jsonb;
@@ -691,7 +716,8 @@ begin
     return query select (prior.response->>'membershipId')::uuid, (prior.response->>'facilityId')::uuid,
       prior.response->>'roleCode', (prior.response->>'roleActive')::boolean,
       (prior.response->>'membershipActive')::boolean, prior.response->>'membershipState',
-      (prior.response->>'membershipVersion')::bigint, (prior.response->>'attestationId')::uuid, true;
+      (prior.response->>'membershipVersion')::bigint, (prior.response->>'attestationId')::uuid,
+      coalesce((prior.response->>'renewed')::boolean, false), true;
     return;
   end if;
 
@@ -711,7 +737,7 @@ begin
    order by account_row.id
    for update;
   select * into membership_row from identity.staff_facility_memberships membership
-   where membership.id = requested_membership_id for update;
+   where membership.id = requested_membership_id for no key update;
   if membership_row.row_version <> expected_membership_version then
     raise exception using errcode = '40001', message = 'ADMIN_VERSION_CONFLICT';
   end if;
@@ -752,15 +778,24 @@ begin
            and assignment.revoked_at is null and assignment.role_code in ('org_admin', 'admin')) then
       raise exception using errcode = '23514', message = 'WORKFORCE_ROLE_CONFLICT';
     end if;
-    if exists (select 1 from auth.account_roles assignment
-        where assignment.membership_id = membership_row.id and assignment.scope_type = 'facility'
-          and assignment.role_code = requested_role_code and assignment.revoked_at is null) then
+    -- The live assignment of this role, if any, and when the attestation it
+    -- rests on lapses. A role granted any other way (onboarding, the legacy
+    -- promotion) rests on no attestation and never lapses, so it is never
+    -- renewed.
+    select assignment.id, attestation.valid_until into live_role, live_until
+    from auth.account_roles assignment
+    left join identity.workforce_role_grants role_grant on role_grant.account_role_id = assignment.id
+    left join identity.staff_credential_attestations attestation on attestation.id = role_grant.attestation_id
+    where assignment.membership_id = membership_row.id and assignment.scope_type = 'facility'
+      and assignment.role_code = requested_role_code and assignment.revoked_at is null
+    for no key update of assignment;
+    if live_role is not null and live_until is null then
       raise exception using errcode = '23505', message = 'WORKFORCE_ROLE_ALREADY_ACTIVE';
     end if;
     -- A current attestation for this role by an independent reviewer: not the
     -- target (a table constraint), not working at this facility, and not the
     -- administrator granting the role.
-    select attestation.id into chosen_attestation
+    select attestation.id, attestation.valid_until into chosen_attestation, chosen_until
     from identity.staff_credential_attestations attestation
     where attestation.account_id = target.id
       and attestation.valid_until > clock_timestamp()
@@ -769,6 +804,13 @@ begin
       and not identity.workforce_works_at(attestation.reviewer_account_id, facility_row.id)
     order by attestation.valid_until desc, attestation.recorded_at desc, attestation.id
     limit 1;
+    -- A role whose attestation is still current is renewed only by an
+    -- attestation that lasts longer; one whose attestation has lapsed by any
+    -- current one.
+    if live_role is not null and live_until > clock_timestamp()
+       and (chosen_attestation is null or chosen_until <= live_until) then
+      raise exception using errcode = '23505', message = 'WORKFORCE_ROLE_ALREADY_ACTIVE';
+    end if;
     if chosen_attestation is null then
       if exists (select 1 from identity.staff_credential_attestations attestation
           where attestation.account_id = target.id
@@ -784,6 +826,14 @@ begin
       raise exception using errcode = '23514', message = 'WORKFORCE_STAFF_INELIGIBLE';
     end if;
 
+    -- Renewal: the old assignment is revoked, never edited, before the new one.
+    if live_role is not null then
+      update auth.account_roles as assignment
+         set revoked_at = clock_timestamp(), revoked_by = actor_account,
+             revocation_reason = btrim(requested_reason), row_version = assignment.row_version + 1
+       where assignment.id = live_role;
+      role_renewed := true;
+    end if;
     insert into auth.account_roles (
       id, account_id, role_code, scope_type, membership_id, facility_id, granted_by, grant_reason
     ) values (
@@ -839,13 +889,14 @@ begin
     'roleCode', requested_role_code, 'roleActive', requested_action = 'grant',
     'membershipActive', membership_row.active,
     'membershipState', coalesce(lifecycle_state, case when membership_row.active then 'active' else 'inactive' end),
-    'membershipVersion', membership_row.row_version, 'attestationId', chosen_attestation);
+    'membershipVersion', membership_row.row_version, 'attestationId', chosen_attestation,
+    'renewed', role_renewed);
   insert into auth.admin_command_idempotency (
     actor_account_id, operation, idempotency_key, request_sha256, response
   ) values (actor_account, 'workforce.role.change', requested_idempotency_key, requested_sha256, response);
   return query select membership_row.id, membership_row.facility_id, requested_role_code,
     requested_action = 'grant', membership_row.active, response->>'membershipState', membership_row.row_version,
-    chosen_attestation, false;
+    chosen_attestation, role_renewed, false;
 end
 $$;
 revoke all on function identity.admin_change_workforce_role(uuid, uuid, bigint, text, text, text, text, character)
@@ -917,7 +968,7 @@ begin
    order by account_row.id
    for update;
   select * into membership_row from identity.staff_facility_memberships membership
-   where membership.id = requested_membership_id for update;
+   where membership.id = requested_membership_id for no key update;
   if membership_row.row_version <> expected_membership_version then
     raise exception using errcode = '40001', message = 'ADMIN_VERSION_CONFLICT';
   end if;
@@ -937,16 +988,20 @@ begin
    where assignment.membership_id = membership_row.id and assignment.scope_type = 'facility'
      and assignment.revoked_at is null;
   get diagnostics roles_revoked = row_count;
+  -- Pending requests first, then grants. An approval that holds a request's
+  -- row lock makes this statement wait; once it commits, the request is no
+  -- longer pending, and the next statement, with a new snapshot, revokes the
+  -- grant it made. An approval that comes later finds the request expired.
+  update identity.access_requests as request_row
+     set status = 'expired', updated_at = clock_timestamp(), row_version = request_row.row_version + 1
+   where request_row.membership_id = membership_row.id and request_row.status = 'pending';
+  get diagnostics requests_expired = row_count;
   update identity.consent_grants as grant_row
      set status = 'revoked', revoked_at = clock_timestamp(), revoked_by = actor_account,
          revoked_reason = btrim(requested_reason), updated_at = clock_timestamp(),
          row_version = grant_row.row_version + 1
    where grant_row.membership_id = membership_row.id and grant_row.status = 'active';
   get diagnostics grants_revoked = row_count;
-  update identity.access_requests as request_row
-     set status = 'expired', updated_at = clock_timestamp(), row_version = request_row.row_version + 1
-   where request_row.membership_id = membership_row.id and request_row.status = 'pending';
-  get diagnostics requests_expired = row_count;
   -- A membership that was active may have authorized a staff session; a
   -- pending one never did, so ending it leaves the account's other work alone.
   sessions_revoked := 0;
@@ -1045,6 +1100,6 @@ $$;
 revoke all on function identity.admin_workforce_profile(uuid) from public;
 
 comment on function identity.admin_change_workforce_role(uuid, uuid, bigint, text, text, text, text, character) is
-  'D14: grant or revoke one clinical facility role on one membership. A grant needs a current attestation by another platform reviewer who does not work at that facility.';
+  'D14: grant or revoke one clinical facility role on one membership. A grant needs a current attestation by another platform reviewer who does not work at that facility; a grant of a held role renews it on a newer attestation when its own has lapsed or the newer one lasts longer.';
 comment on function identity.admin_end_workforce_membership(uuid, uuid, bigint, text, text, character) is
   'D14: end one membership; revokes its roles and consent grants, expires its pending access requests and revokes the account''s staff sessions.';

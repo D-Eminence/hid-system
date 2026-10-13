@@ -13,7 +13,7 @@ import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
 import { normalizeContactForLookup, contactLookupHmac } from './contact-lookup.mjs';
 import { validLegacyPinHash } from './legacy-pin-hash.mjs';
-import { bindingMembership, duplicateFacilityMemberships } from './membership-duplicates.mjs';
+import { membershipUniquenessConflict } from './membership-duplicates.mjs';
 
 const { Client } = pg;
 const targetUrl = process.env.DATABASE_URL;
@@ -333,27 +333,11 @@ async function validateMembershipUniqueness(client) {
       staged.push(row);
     }
   }
-  const [duplicate] = duplicateFacilityMemberships(staged);
-  if (duplicate) {
-    const row = staged.find((candidate) => candidate.source_pk === duplicate.sourcePks[1]);
-    throw new PromotionConflict('memberships', row.source_pk, 'invalid_source_value', row.payload_sha256.trim(), null,
-      { field: 'membership', reason: 'duplicate_active_facility_membership', sourcePks: duplicate.sourcePks,
-        operatorPlan: 'I4' });
-  }
-  for (const row of staged) {
-    const source = row.payload;
-    if (!bindingMembership(source)) continue;
-    const existing = await client.query(
-      `select id::text from identity.staff_facility_memberships
-        where staff_id = $1 and facility_id = $2 and id <> $3
-          and active and migration_hold_reason is null
-        limit 1`,
-      [source.staff_account_id, source.facility_id, source.id],
-    );
-    if (existing.rows.length > 0) {
-      throw new PromotionConflict('memberships', row.source_pk, 'target_content_mismatch', row.payload_sha256.trim(), null,
-        { field: 'membership', reason: 'duplicate_active_facility_membership', operatorPlan: 'I4' });
-    }
+  // Tested against the real schema by verify-membership-duplicates-runtime.mjs.
+  const conflict = await membershipUniquenessConflict(client, staged);
+  if (conflict) {
+    throw new PromotionConflict('memberships', conflict.row.source_pk, conflict.conflictType,
+      conflict.row.payload_sha256.trim(), null, conflict.details);
   }
 }
 

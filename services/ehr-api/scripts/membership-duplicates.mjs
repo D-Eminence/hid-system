@@ -34,3 +34,42 @@ export function duplicateFacilityMemberships(stagedRows) {
     .filter((group) => group.sourcePks.length > 1)
     .map((group) => ({ ...group, sourcePks: [...group.sourcePks].sort() }));
 }
+
+/**
+ * The first reason the staged memberships of a run cannot be promoted under
+ * N5, or null. `stagedRows` is every staged membership row of the run
+ * ({ source_pk, payload_sha256, payload }); `client` reads the target, where
+ * the promotion has written nothing yet. A conflict names the staged row it is
+ * recorded against: the later of two staged bindings of one staff identity at
+ * one facility, or a staged binding beside an active, unheld membership the
+ * target already holds there. Re-promoting the very membership the target
+ * holds (same id) is not a duplicate, and neither is a target membership that
+ * is inactive, held for migration review or at another facility.
+ */
+export async function membershipUniquenessConflict(client, stagedRows) {
+  const [duplicate] = duplicateFacilityMemberships(stagedRows);
+  if (duplicate) {
+    const row = stagedRows.find((candidate) => candidate.source_pk === duplicate.sourcePks[1]);
+    return { row, conflictType: 'invalid_source_value',
+      details: { field: 'membership', reason: 'duplicate_active_facility_membership', sourcePks: duplicate.sourcePks,
+        operatorPlan: 'I4' } };
+  }
+  for (const row of stagedRows) {
+    const source = row.payload;
+    if (!bindingMembership(source)) continue;
+    const existing = await client.query(
+      `select id::text from identity.staff_facility_memberships
+        where staff_id = $1 and facility_id = $2 and id <> $3
+          and active and migration_hold_reason is null
+        order by id
+        limit 1`,
+      [source.staff_account_id, source.facility_id, source.id],
+    );
+    if (existing.rows.length > 0) {
+      return { row, conflictType: 'target_content_mismatch',
+        details: { field: 'membership', reason: 'duplicate_active_facility_membership', operatorPlan: 'I4',
+          targetMembershipId: existing.rows[0].id } };
+    }
+  }
+  return null;
+}
