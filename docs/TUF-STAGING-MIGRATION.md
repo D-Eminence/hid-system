@@ -45,11 +45,12 @@ The executable covers:
    `patient_enrollment_runtime`, `patient_safety_runtime`,
    `delegated_cookie_read_runtime`, `outreach_cookie_read_runtime`,
    `provider_enrollment_runtime`, `platform_admin_runtime`,
-   `session_sign_out_runtime`, `platform_security_runtime`,
-   `registration_review_runtime` and `patient_search_runtime` (the patient
-   enrollment, patient safety, delegated cookie-read, Outreach cookie-read,
-   provider enrollment, platform admin, platform security, registration review
-   and patient search verifiers on a disposable copy of the rehearsal
+   `session_sign_out_runtime`, `facility_selection_runtime`,
+   `platform_security_runtime`, `registration_review_runtime` and
+   `patient_search_runtime` (the patient enrollment, patient safety, delegated
+   cookie-read, Outreach cookie-read, provider enrollment, platform admin,
+   session sign-out, facility selection, platform security, registration
+   review and patient search verifiers on a disposable copy of the rehearsal
    database). Each is in
    `services/identity-api/scripts/` and runs Identity as
    `hid_identity_api_runtime`, except `delegated_cookie_read_runtime`
@@ -182,6 +183,20 @@ The executable covers:
    refuse a reader whose assurance is gone (`403 STAFF_MFA_REQUIRED`) and its
    refresh to end the sign-in. The rehearsal also runs the new rollback-only
    `staff-mfa.integration.sql` with the additional suites.
+   `facility_selection_runtime` (`verify-facility-selection-runtime.mjs`,
+   migration 0089, ADR-046) signs staff in with password and authenticator
+   (`staff-session-client.mjs`) and covers the password step storing and
+   reporting nothing, `default` on the enrolment activation and second-factor
+   responses, a staff member's selected facility kept for the sign-in across
+   a session read and refresh, the selection made unreadable for one step
+   (`SELECT` revoked from the Identity runtime and restored): the session read
+   `503` with no `Set-Cookie` and the refresh `200` with the rotated cookies
+   and `unavailable`, `reselect` once the selected membership ends, another
+   sign-in of the account unaffected, refused selections writing no selection
+   and only their failed `auth.facility.select` audit row (the global
+   `AuditInterceptor` registered as `AppModule` registers it), the 0089 guard
+   as the runtime, and a selection waiting at the account lock while a
+   sign-out ends the sign-in.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
