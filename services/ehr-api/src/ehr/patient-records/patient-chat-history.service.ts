@@ -1,23 +1,27 @@
 import { Injectable } from '@nestjs/common';
 import type { PoolClient } from 'pg';
-import { randomUUID } from 'node:crypto';
+import { createHash,randomUUID } from 'node:crypto';
 import { DatabaseService } from '../../database/database.service';
 import { AuditService } from '../../audit/audit.service';
 import { DomainProblem } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
 import { PatientRecordsService } from './patient-records.service';
 
+import { PatientEvidenceService } from './patient-evidence.service';
+import { binding,evidenceKey,type Evidence,type EvidenceBinding,type EvidenceReference,type Coverage } from './patient-evidence.types';
+
 type Authorization = Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>;
 export interface ChatReply {
   status: 'ready' | 'preparing'; answer: string;
-  sources: Array<{ number: number; noteId: string; revisionNo: number; title: string; signedAt: Date | string }>;
+  sources: Array<EvidenceReference | { number:number;noteId:string;revisionNo:number;title:string;signedAt:Date|string }>;
+  coverage?:Coverage;
 }
-export interface ContextBinding { noteId: string; revisionNo: number; hash: string }
+export type ContextBinding = EvidenceBinding | { noteId:string;revisionNo:number;hash:string };
 interface HistoryRow { id: string; question: string; reply: ChatReply; createdAt: Date; sourceBindings: ContextBinding[] }
 @Injectable()
 export class PatientChatHistoryService {
   constructor(private readonly database: DatabaseService, private readonly records: PatientRecordsService,
-    private readonly audit: AuditService) {}
+    private readonly audit: AuditService,private readonly evidence:PatientEvidenceService) {}
 
   private async lock(client: PoolClient, patientId: string): Promise<string> {
     await client.query('insert into ehr.patient_chat_state(patient_id) values ($1) on conflict do nothing', [patientId]);
@@ -30,6 +34,14 @@ export class PatientChatHistoryService {
       (created_at <= statement_timestamp()-interval '30 days' or id in
         (select id from ehr.patient_chat_messages where patient_id=$1 order by created_at desc,id desc offset 10))`, [patientId]);
   }
+  private async documentBindings(request:HidRequest):Promise<string[]> {
+    const auth=await this.records.authorizeSelf(request);
+    return this.database.withPatientTransaction(auth,request.correlationId,async client=>{
+      const rows=(await client.query(`select source_bindings as bindings from ehr.patient_chat_messages where patient_id=$1
+       and created_at>statement_timestamp()-interval '30 days' order by created_at desc,id desc limit 10`,[auth.patientId])).rows;
+      return [...new Set(rows.flatMap(r=>(r.bindings as ContextBinding[]).filter(b=>'kind' in b&&['document','attachment'].includes(b.kind)).map(b=>(b as EvidenceBinding).id)))];
+    });
+  }
   async start(request: HidRequest, authorization: Authorization): Promise<string> {
     return this.database.withPatientTransaction(authorization, request.correlationId,
       client => this.lock(client, authorization.patientId));
@@ -39,42 +51,36 @@ export class PatientChatHistoryService {
     if (!reply.answer.trim() || reply.answer.length > 4000) {
       throw new DomainProblem(503, 'PATIENT_CHAT_UNAVAILABLE', 'Patient chat is temporarily unavailable');
     }
-    const auth = await this.records.authorizeSelf(request);
+    await this.records.authorizeSelf(request);
+    const snapshot=await this.evidence.snapshot(request,undefined,[...new Set([...await this.documentBindings(request),
+      ...contextBindings.filter(b=>'kind' in b&&['document','attachment'].includes(b.kind)).map(b=>(b as EvidenceBinding).id),
+      ...reply.sources.filter(s=>'kind' in s&&['document','attachment'].includes(s.kind)).map(s=>(s as EvidenceBinding).id)])]);
+    const auth=await this.records.authorizeSelf(request);
+    const current=new Map(snapshot.records.map(r=>[evidenceKey(r),r]));
     await this.database.withPatientTransaction(auth, request.correlationId, async client => {
       if (await this.lock(client, auth.patientId) !== generation) {
         throw new DomainProblem(409, 'CHAT_CONVERSATION_CHANGED', 'The conversation was cleared. Please ask again.');
       }
-      const bindings: Array<{ noteId: string; revisionNo: number; hash: string }> = [];
-      // A follow-up can depend on prior evidence even if it has no new citations.
-      // Recheck hashes before saving/returning and inherit bindings for later reads.
-      for (const binding of contextBindings) {
-        const found = await client.query<{ hash: string }>(`select r.content_sha256 as hash from ehr.clinical_notes n
-          join ehr.clinical_note_revisions r on r.clinical_note_id=n.id and r.revision_no=n.current_revision_no
-          and r.patient_id=n.patient_id and r.facility_id=n.facility_id
-          where n.id=$1 and n.patient_id=$2 and n.current_revision_no=$3 and n.status in ('signed','amended')`,
-        [binding.noteId, auth.patientId, binding.revisionNo]);
-        if (found.rows[0]?.hash !== binding.hash) {
-          throw new DomainProblem(409, 'CHAT_SOURCES_CHANGED', 'The source records changed during this request');
-        }
-        if (!bindings.some(value => value.noteId === binding.noteId)) bindings.push(binding);
+      const bindings:EvidenceBinding[]=[];
+      for(const previous of contextBindings) {
+        const resolved=this.resolve(previous,current);
+        if(!resolved)throw new DomainProblem(409,'CHAT_SOURCES_CHANGED','The source records changed during this request');
+        if(!bindings.some(b=>evidenceKey(b)===evidenceKey(resolved)))bindings.push(resolved);
       }
-      for (const source of reply.sources) {
-        const found = await client.query<{ hash: string }>(`select r.content_sha256 as hash from ehr.clinical_notes n
-          join ehr.clinical_note_revisions r on r.clinical_note_id=n.id and r.revision_no=n.current_revision_no
-          and r.patient_id=n.patient_id and r.facility_id=n.facility_id
-          where n.id=$1 and n.patient_id=$2 and n.current_revision_no=$3 and n.status in ('signed','amended')`,
-        [source.noteId, auth.patientId, source.revisionNo]);
-        if (!found.rows[0]) throw new DomainProblem(409, 'CHAT_SOURCES_CHANGED', 'The source records changed during this request');
-        const inherited = bindings.find(value => value.noteId === source.noteId);
-        if (inherited && (inherited.revisionNo !== source.revisionNo || inherited.hash !== found.rows[0].hash)) {
-          throw new DomainProblem(409, 'CHAT_SOURCES_CHANGED', 'The source records changed during this request');
-        }
-        if (!inherited) {
-          bindings.push({ noteId: source.noteId, revisionNo: source.revisionNo, hash: found.rows[0].hash });
-        }
+      for(const source of reply.sources) {
+        const kind='noteId' in source?'note':source.kind;
+        const id='noteId' in source?source.noteId:source.id;
+        const version='noteId' in source?String(source.revisionNo):source.version;
+        const r=current.get(`${kind}:${id}`);
+        if(!r||r.version!==version||('hash' in source&&source.hash!==r.hash))
+          throw new DomainProblem(409,'CHAT_SOURCES_CHANGED','The source records changed during this request');
+        const prior=bindings.find(b=>evidenceKey(b)===evidenceKey(r));
+        if(prior&&prior.hash!==r.hash)throw new DomainProblem(409,'CHAT_SOURCES_CHANGED','The source records changed during this request');
+        if(!prior)bindings.push(binding(r));
       }
+      const storedReply={...reply,sources:reply.sources.map(source=>{const {hash:_hash,...safe}=source as unknown as Record<string,unknown>;return safe;})};
       await client.query(`insert into ehr.patient_chat_messages(patient_id,generation,question,reply,source_bindings)
-        values ($1,$2,$3,$4::jsonb,$5::jsonb)`, [auth.patientId, generation, question, JSON.stringify(reply), JSON.stringify(bindings)]);
+        values ($1,$2,$3,$4::jsonb,$5::jsonb)`, [auth.patientId, generation, question, JSON.stringify(storedReply), JSON.stringify(bindings)]);
       await this.prune(client, auth.patientId);
       await this.audit.recordWithClient(client, { correlationId: request.correlationId, actorType: 'patient',
         actorSubject: auth.subject, actorAccountId: auth.accountId, patientId: auth.patientId,
@@ -83,11 +89,13 @@ export class PatientChatHistoryService {
     });
   }
   async read(request: HidRequest) {
-    const auth = await this.records.authorizeSelf(request);
+    await this.records.authorizeSelf(request);
+    const snapshot=await this.evidence.snapshot(request,undefined,await this.documentBindings(request));
+    const auth=await this.records.authorizeSelf(request);
     return this.database.withPatientTransaction(auth, request.correlationId, async client => {
       await this.lock(client, auth.patientId);
       await this.prune(client, auth.patientId);
-      const exchanges = await this.readCurrent(client, auth.patientId);
+      const exchanges = await this.readCurrent(client, auth.patientId,snapshot.records,snapshot.coverage.unavailable);
       await this.audit.recordWithClient(client, { correlationId: request.correlationId, actorType: 'patient',
         actorSubject: auth.subject, actorAccountId: auth.accountId, patientId: auth.patientId,
         action: 'ehr.patient.chat.history.read', resourceType: 'patient-chat-history', outcome: 'success',
@@ -95,31 +103,36 @@ export class PatientChatHistoryService {
       return { exchanges: exchanges.map(({ sourceBindings: _bindings, ...exchange }) => exchange), retentionDays: 30, limit: 10 };
     });
   }
-  private async readCurrent(client: PoolClient, patientId: string): Promise<HistoryRow[]> {
-    const result = await client.query<HistoryRow>(
-        `select h.id,h.question,h.reply,h.created_at as "createdAt",h.source_bindings as "sourceBindings" from ehr.patient_chat_messages h
-         where h.patient_id=$1 and h.created_at > statement_timestamp()-interval '30 days'
-         and not exists (
-           select 1 from jsonb_array_elements(h.source_bindings) b where not exists (
-             select 1 from ehr.clinical_notes n join ehr.clinical_note_revisions r
-               on r.clinical_note_id=n.id and r.revision_no=n.current_revision_no
-               and r.patient_id=n.patient_id and r.facility_id=n.facility_id
-             where n.patient_id=h.patient_id and n.id::text=b->>'noteId'
-               and n.current_revision_no=(b->>'revisionNo')::integer
-               and r.content_sha256=b->>'hash' and n.status in ('signed','amended')))
-         order by h.created_at desc,h.id desc limit 10`, [patientId]);
-    return result.rows.reverse();
+  private resolve(raw:ContextBinding,current:Map<string,Evidence>):EvidenceBinding|null {
+    const kind='noteId' in raw?'note':raw.kind,id='noteId' in raw?raw.noteId:raw.id;
+    const version='noteId' in raw?String(raw.revisionNo):raw.version;
+    const r=current.get(`${kind}:${id}`);
+    if(!r||r.version!==version)return null;
+    const hash='noteId' in raw?createHash('sha256').update(String(r.fields.text??'')).digest('hex'):r.hash;
+    return raw.hash===hash?binding(r):null;
+  }
+  private async readCurrent(client:PoolClient,patientId:string,records:Evidence[],unavailable:readonly string[]=[]):Promise<HistoryRow[]> {
+    const result=await client.query<HistoryRow>(`select h.id,h.question,h.reply,h.created_at as "createdAt",h.source_bindings as "sourceBindings"
+      from ehr.patient_chat_messages h where h.patient_id=$1 and h.created_at>statement_timestamp()-interval '30 days'
+      order by h.created_at desc,h.id desc limit 10`,[patientId]);
+    const current=new Map(records.map(r=>[evidenceKey(r),r]));
+    if(unavailable.length && result.rows.some(row=>row.sourceBindings.some(b=>'kind' in b&&b.kind==='lab_result')))
+      throw new DomainProblem(503,'CHAT_HISTORY_SOURCE_UNAVAILABLE','Saved conversation evidence is temporarily unavailable. Please try again.');
+    return result.rows.filter(row=>Array.isArray(row.sourceBindings)&&row.sourceBindings.every(b=>this.resolve(b,current)))
+      .map(row=>({...row,sourceBindings:row.sourceBindings.map(b=>this.resolve(b,current)!)})).reverse();
   }
   async context(request: HidRequest, generation: string) {
-    const auth = await this.records.authorizeSelf(request);
+    await this.records.authorizeSelf(request);
+    const snapshot=await this.evidence.snapshot(request,undefined,await this.documentBindings(request));
+    const auth=await this.records.authorizeSelf(request);
     return this.database.withPatientTransaction(auth, request.correlationId, async client => {
       if (await this.lock(client, auth.patientId) !== generation) {
         throw new DomainProblem(409, 'CHAT_CONVERSATION_CHANGED', 'The conversation was cleared. Please ask again.');
       }
       await this.prune(client, auth.patientId);
-      const exchanges = (await this.readCurrent(client, auth.patientId)).filter(exchange => exchange.reply.status === 'ready').slice(-4);
+      const exchanges = (await this.readCurrent(client, auth.patientId,snapshot.records,snapshot.coverage.unavailable)).filter(exchange => exchange.reply.status === 'ready').slice(-4);
       const bindings = new Map<string, ContextBinding>();
-      for (const exchange of exchanges) for (const binding of exchange.sourceBindings) bindings.set(binding.noteId, binding);
+      for (const exchange of exchanges) for (const binding of exchange.sourceBindings) bindings.set(evidenceKey(binding as EvidenceBinding), binding);
       await this.audit.recordWithClient(client, { correlationId: request.correlationId, actorType: 'patient',
         actorSubject: auth.subject, actorAccountId: auth.accountId, patientId: auth.patientId,
         action: 'ehr.patient.chat.context.read', resourceType: 'patient-chat-history', outcome: 'success',

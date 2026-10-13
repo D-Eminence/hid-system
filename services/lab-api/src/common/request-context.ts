@@ -12,6 +12,8 @@ export interface FacilityAssignment {
 }
 
 export interface ActorContext {
+  kind?: 'patient' | 'staff';
+  patientId?: string;
   id: string;
   subject: string;
   accountId: string;

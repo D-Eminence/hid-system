@@ -23,6 +23,11 @@ export interface LabResourceReference {
   id: string;
 }
 
+export interface PatientLabPage {
+  records: Array<{id:string;version:string;title:string;recordedAt:string;effectiveAt:string|null;fields:Record<string,unknown>}>;
+  nextCursor: string | null;
+}
+
 export class LabApiProblem extends Error {
   constructor(readonly status: number, readonly payload: unknown) {
     super(typeof payload === 'object' && payload !== null && 'detail' in payload
@@ -33,6 +38,19 @@ export class LabApiProblem extends Error {
 
 export class LabApiClient {
   constructor(private readonly options: LabClientOptions) {}
+
+  async patientReleasedResults(context: LabRequestContext, cursor?: string, signal?: AbortSignal): Promise<PatientLabPage> {
+    const value = await this.request('/api/v1/lab/internal/me/released-results'
+      + (cursor ? '?cursor='+encodeURIComponent(cursor) : ''), 'GET', undefined, context, undefined, 'ehr-api', signal);
+    const page=value as PatientLabPage;
+    if (!page || !Array.isArray(page.records) || page.records.length>200
+      || (page.nextCursor!==null && (typeof page.nextCursor!=='string' || !/^[a-f0-9-]{36}$/i.test(page.nextCursor)))
+      || page.records.some(r=> !r || !/^[a-f0-9-]{36}$/i.test(r.id) || typeof r.version!=='string'
+        || typeof r.title!=='string' || typeof r.recordedAt!=='string' || !Number.isFinite(Date.parse(r.recordedAt))
+        || (r.effectiveAt!==null && (typeof r.effectiveAt!=='string' || !Number.isFinite(Date.parse(r.effectiveAt))))
+        || !r.fields || typeof r.fields!=='object' || Array.isArray(r.fields))) throw new LabApiProblem(502,{code:'INVALID_PATIENT_RESULT_RESPONSE'});
+    return page;
+  }
 
   acceptEhrOrder(
     input: unknown,

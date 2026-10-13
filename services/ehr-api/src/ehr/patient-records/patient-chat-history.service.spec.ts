@@ -1,94 +1,57 @@
-import type { PoolClient } from 'pg';
-import type { DatabaseService } from '../../database/database.service';
-import type { PatientRecordsService } from './patient-records.service';
-import type { AuditService } from '../../audit/audit.service';
-import type { HidRequest } from '../../common/request-context';
-import { PatientChatHistoryService } from './patient-chat-history.service';
-
-const auth = { patientId: 'patient-a', subject: 'subject-a', accountId: 'account-a', sessionId: 'session-a', expiresAt: new Date(Date.now() + 30000).toISOString() };
-const request = { correlationId: 'history-test' } as HidRequest;
-const reply = { status: 'ready' as const, answer: 'Private answer [1].', sources: [{ number: 1, noteId: 'note-a', revisionNo: 1, title: 'Visit', signedAt: new Date().toISOString() }] };
+import {createHash} from 'node:crypto';
+import {PatientChatHistoryService} from './patient-chat-history.service';
+import {evidence,binding} from './patient-evidence.types';
+const note=evidence({kind:'note',id:'note-a',version:'1',title:'Visit',recordedAt:null,effectiveAt:null,provenance:'Signed note',quality:'released',fields:{text:'Synthetic note'}});
+const prescription=evidence({...note,kind:'prescription',id:'rx-a',fields:{medication:'Synthetic medicine'}});
+const auth={patientId:'patient-a',subject:'subject-a',accountId:'account-a',sessionId:'session-a',expiresAt:new Date(Date.now()+30000).toISOString()};
+const request={correlationId:'synthetic-history'} as never;
+const reply={status:'ready' as const,answer:'Medicine [1].',sources:[{...binding(prescription),number:1,title:prescription.title,recordedAt:null,effectiveAt:null,provenance:prescription.provenance,quality:prescription.quality}]};
 function setup() {
-  const query = jest.fn(async (sql: string, _params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> => {
-    if (sql.includes('for update')) return { rows: [{ generation: 'generation-a' }] };
-    if (sql.includes('content_sha256 as hash')) return { rows: [{ hash: 'a'.repeat(64) }] };
-    return { rows: [] };
-  });
-  const authorizeSelf = jest.fn().mockResolvedValue(auth);
-  const audit = jest.fn().mockResolvedValue(undefined);
-  const transaction = jest.fn(async (_auth: unknown, _id: string, work: (c: PoolClient) => Promise<unknown>) => work({ query } as unknown as PoolClient));
-  const history = new PatientChatHistoryService({ withPatientTransaction: transaction } as unknown as DatabaseService,
-    { authorizeSelf } as unknown as PatientRecordsService, { recordWithClient: audit } as unknown as AuditService);
-  return { history, query, authorizeSelf, audit, transaction };
+ let records=[note,prescription];const rows:Record<string,unknown>[]=[];
+ const query=jest.fn(async(sql:string,params?:unknown[])=>{
+  if(sql.includes('for update'))return {rows:[{generation:'generation-a'}]};
+  if(sql.includes('select h.id'))return {rows};
+  if(sql.includes('insert into ehr.patient_chat_messages'))rows.push({id:'message-a',question:params?.[2],reply:JSON.parse(String(params?.[3])),createdAt:new Date(),sourceBindings:JSON.parse(String(params?.[4]))});
+  return {rows:[]};
+ });
+ const transaction=jest.fn(async(_a:unknown,_id:string,work:(c:unknown)=>Promise<unknown>)=>work({query}));
+ const authorizeSelf=jest.fn().mockResolvedValue(auth),audit=jest.fn();
+ const snapshot=jest.fn(async()=>({records,coverage:{unavailable:[]}}));
+ const history=new PatientChatHistoryService({withPatientTransaction:transaction} as never,{authorizeSelf} as never,{recordWithClient:audit} as never,{snapshot} as never);
+ return {history,query,rows,authorizeSelf,audit,transaction,setRecords:(r:typeof records)=>{records=r;}};
 }
-describe('Patient-owned saved history', () => {
-  it('loads at most four ready exchanges using the same patient/source-filtered query and hides source hashes in browser reads', async () => {
-    const { history, query } = setup();
-    const original = query.getMockImplementation()!;
-    const rows = Array.from({ length: 6 }, (_, index) => ({ id: `id-${index}`, question: `Question ${index}`, reply,
-      createdAt: new Date(), sourceBindings: [{ noteId: 'note-a', revisionNo: 1, hash: 'a'.repeat(64) }] }));
-    query.mockImplementation((sql, params) => sql.includes('select h.id') ? Promise.resolve({ rows }) : original(sql, params));
-    const context = await history.context(request, 'generation-a');
-    expect(context.exchanges).toHaveLength(4);
-    expect(context.bindings).toEqual([{ noteId: 'note-a', revisionNo: 1, hash: 'a'.repeat(64) }]);
-    const read = await history.read(request);
-    expect(JSON.stringify(read)).not.toContain('sourceBindings');
-    const selection = query.mock.calls.find(([sql]) => sql.includes('select h.id'))!;
-    expect(selection[0]).toContain('jsonb_array_elements(h.source_bindings)');
-    expect(selection[0]).toContain("interval '30 days'");
-    expect(selection[1]).toEqual([auth.patientId]);
-  });
-  it('rejects context loaded for a cleared conversation', async () => {
-    await expect(setup().history.context(request, 'cleared-generation')).rejects.toThrow('conversation was cleared');
-  });
-  it('inherits prior source bindings for a follow-up with no new citation', async () => {
-    const { history, query } = setup();
-    const binding = { noteId: 'note-a', revisionNo: 1, hash: 'a'.repeat(64) };
-    await history.save(request, 'generation-a', 'Follow-up', { ...reply, sources: [] }, [binding]);
-    const insert = query.mock.calls.find(([sql]) => sql.includes('insert into ehr.patient_chat_messages'))!;
-    expect(JSON.parse(String(insert[1]?.[4]))).toEqual([binding]);
-  });
-  it('rejects changed context evidence before inserting or returning a new answer', async () => {
-    const { history, query } = setup();
-    await expect(history.save(request, 'generation-a', 'Follow-up', { ...reply, sources: [] },
-      [{ noteId: 'note-a', revisionNo: 1, hash: 'b'.repeat(64) }])).rejects.toThrow('source records changed');
-    expect(query.mock.calls.some(([sql]) => sql.includes('insert into ehr.patient_chat_messages'))).toBe(false);
-  });
-  it('rejects an old generation before saving any conversation text', async () => {
-    const { history, query } = setup();
-    await expect(history.save(request, 'old-generation', 'Private question', reply)).rejects.toThrow('conversation was cleared');
-    expect(query.mock.calls.some(([sql]) => sql.includes('insert into ehr.patient_chat_messages'))).toBe(false);
-  });
-  it('does not save a reply whose source is no longer available', async () => {
-    const { history, query } = setup();
-    const original = query.getMockImplementation()!;
-    query.mockImplementation((sql, params) => sql.includes('content_sha256 as hash') ? Promise.resolve({ rows: [] }) : original(sql, params));
-    await expect(history.save(request, 'generation-a', 'Private question', reply)).rejects.toThrow('source records changed');
-    expect(query.mock.calls.some(([sql]) => sql.includes('insert into ehr.patient_chat_messages'))).toBe(false);
-  });
-  it('binds stored sources and pruning to the freshly authorized patient without auditing message text', async () => {
-    const { history, query, audit } = setup();
-    await history.save(request, 'generation-a', 'Private question', reply);
-    const insert = query.mock.calls.find(([sql]) => sql.includes('insert into ehr.patient_chat_messages'))!;
-    expect(insert[1]?.slice(0, 3)).toEqual([auth.patientId, 'generation-a', 'Private question']);
-    expect(insert[1]?.[4]).toContain('a'.repeat(64));
-    expect(query.mock.calls.some(([sql, params]) => sql.includes('offset 10') && params?.[0] === auth.patientId)).toBe(true);
-    expect(JSON.stringify(audit.mock.calls)).not.toContain('Private question');
-    expect(JSON.stringify(audit.mock.calls)).not.toContain('Private answer');
-  });
-  it('reauthorizes history reads and never touches the database after revocation', async () => {
-    const { history, authorizeSelf, transaction } = setup();
-    authorizeSelf.mockRejectedValue(new Error('revoked'));
-    await expect(history.read(request)).rejects.toThrow('revoked');
-    expect(transaction).not.toHaveBeenCalled();
-  });
-  it('deletes only the authorized patient messages and changes the generation after deleting', async () => {
-    const { history, query } = setup();
-    await expect(history.clear(request)).resolves.toEqual({ cleared: true });
-    const deletion = query.mock.calls.findIndex(([sql]) => sql === 'delete from ehr.patient_chat_messages where patient_id=$1');
-    const generation = query.mock.calls.findIndex(([sql]) => sql.includes('update ehr.patient_chat_state'));
-    expect(deletion).toBeGreaterThan(-1);
-    expect(generation).toBeGreaterThan(deletion);
-    expect(query.mock.calls[deletion]?.[1]).toEqual([auth.patientId]);
-  });
+describe('Source-aware patient chat history',()=>{
+ it('restores typed prescription evidence after a fresh login and hides private bindings/hashes',async()=>{
+  const s=setup();await s.history.save(request,'generation-a','Which medicine?',reply);
+  const read=await s.history.read(request);expect(read.exchanges).toHaveLength(1);expect(JSON.stringify(read)).not.toContain('hash');
+  expect((await s.history.context(request,'generation-a')).bindings).toEqual([binding(prescription)]);
+ });
+ it('rejects cleared generations before storing a reply',async()=>{
+  const s=setup();await expect(s.history.save(request,'cleared','Question',reply)).rejects.toThrow('conversation was cleared');expect(s.rows).toHaveLength(0);
+ });
+ it('withholds answers and inherited follow-ups after an authoritative source changes',async()=>{
+  const s=setup();await s.history.save(request,'generation-a','Medicine',reply);
+  await s.history.save(request,'generation-a','Follow-up',{...reply,sources:[]},[binding(prescription)]);
+  s.setRecords([note,evidence({...prescription,fields:{medication:'Changed medicine'}})]);
+  expect((await s.history.read(request)).exchanges).toEqual([]);
+  await expect(s.history.save(request,'generation-a','Stale',{...reply,sources:[]},[binding(prescription)])).rejects.toThrow('source records changed');
+ });
+ it('hides revoked, deleted or invalidated sources across all supported source kinds',async()=>{
+  const s=setup();await s.history.save(request,'generation-a','Medicine',reply);s.setRecords([note]);
+  expect((await s.history.read(request)).exchanges).toEqual([]);
+ });
+ it('keeps existing note-only saved history compatible and converts its bindings to current evidence',async()=>{
+  const s=setup();s.rows.push({id:'legacy',question:'Old note',reply:{...reply,sources:[]},createdAt:new Date(),sourceBindings:[{noteId:note.id,revisionNo:1,hash:createHash('sha256').update('Synthetic note').digest('hex')}]});
+  expect((await s.history.read(request)).exchanges).toHaveLength(1);expect((await s.history.context(request,'generation-a')).bindings).toEqual([binding(note)]);
+ });
+ it('bounds prior model context to four ready exchanges and scopes the SQL to the authorized patient',async()=>{
+  const s=setup();for(let i=0;i<6;i++)await s.history.save(request,'generation-a','Question '+i,reply);
+  expect((await s.history.context(request,'generation-a')).exchanges).toHaveLength(4);
+  const call=s.query.mock.calls.find(([sql])=>sql.includes('select h.id'));expect(call?.[1]).toEqual([auth.patientId]);expect(call?.[0]).toContain("interval '30 days'");
+ });
+ it('never audits clinical chat text or reads history after revocation',async()=>{
+  const s=setup();await s.history.save(request,'generation-a','Private clinical question',reply);
+  expect(JSON.stringify(s.audit.mock.calls)).not.toContain('Private clinical question');
+  s.authorizeSelf.mockRejectedValue(new Error('revoked'));await expect(s.history.read(request)).rejects.toThrow('revoked');
+ });
 });

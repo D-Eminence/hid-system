@@ -909,3 +909,9 @@ grant execute on function identity.list_my_imported_notifications(integer,intege
 -- Saved chat text is accessible only through EHR's patient self context.
 grant select, insert, update on ehr.patient_chat_state to hid_ehr_runtime;
 grant select, insert, delete on ehr.patient_chat_messages to hid_ehr_runtime;
+grant select,insert,delete on ehr.patient_evidence_chunks to hid_ehr_runtime;
+grant select,insert,update on ehr.patient_attachment_extractions to hid_ehr_runtime;
+grant select,insert,update on ehr.patient_document_extractions to hid_ehr_runtime;
+grant usage on schema ehr to hid_lab_runtime;
+grant execute on function ehr.patient_self_context(uuid),lab.patient_self_context(uuid) to hid_lab_runtime;
+grant execute on function lab.patient_self_context(uuid) to hid_schema_test_runtime;

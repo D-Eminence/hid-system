@@ -106,10 +106,10 @@ export class S3StorageProvider implements StorageProvider {
     };
   }
 
-  async inspectVersion(key: string, versionId: string): Promise<StoredObjectMetadata> {
+  async inspectVersion(key: string, versionId: string,signal?:AbortSignal): Promise<StoredObjectMetadata> {
     const result = await this.client.send(new HeadObjectCommand({
       Bucket: this.bucket(), Key: key, VersionId: versionId, ChecksumMode: 'ENABLED',
-    }));
+    }),{abortSignal:AbortSignal.any([AbortSignal.timeout(5000),...(signal?[signal]:[])])});
     const checksum = Buffer.from(result.ChecksumSHA256 ?? '', 'base64');
     if (result.VersionId !== versionId || checksum.length !== 32
       || typeof result.ContentLength !== 'number' || result.ServerSideEncryption !== 'aws:kms'

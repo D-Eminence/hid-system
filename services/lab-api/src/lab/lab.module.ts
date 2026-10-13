@@ -8,6 +8,8 @@ import { LabAccessionsController } from './lab-accessions.controller';
 import { LabAccessionsService } from './lab-accessions.service';
 import { LabExecutionsController } from './lab-executions.controller';
 import { LabExecutionsService } from './lab-executions.service';
+import { PatientResultsController } from './patient-results.controller';
+import { PatientResultsService } from './patient-results.service';
 
 /**
  * Laboratory bounded-context composition point.
@@ -15,7 +17,7 @@ import { LabExecutionsService } from './lab-executions.service';
  * Imported external evidence is Lab-owned and deliberately separate from
  * native accession/specimen/execution workflows, which remain future work.
  */
-@Module({ imports: [LabIdentityAuthorizationModule], controllers: [LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController],
-  providers: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService],
+@Module({ imports: [LabIdentityAuthorizationModule], controllers: [LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController],
+  providers: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService, PatientResultsService],
   exports: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService] })
 export class LabModule {}

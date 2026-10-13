@@ -34,6 +34,21 @@ export class DatabaseService implements OnApplicationShutdown {
     return this.pool.query<Row>(text, [...values]);
   }
 
+  async withPatientTransaction<T>(auth:{subject:string;accountId:string;patientId:string;sessionId:string;expiresAt:string},correlationId:string,operation:(client:PoolClient)=>Promise<T>):Promise<T> {
+    const expiry=Date.parse(auth.expiresAt);
+    if (!Number.isFinite(expiry) || expiry<=Date.now() || expiry>Date.now()+60_000) throw new Error('Patient authorization is stale');
+    const client=await this.pool.connect();
+    try {
+      await client.query('begin');
+      await client.query(`select set_config('app.actor_subject',$1,true),set_config('app.account_id',$2,true),
+        set_config('app.patient_id',$3,true),set_config('app.session_id',$4,true),set_config('app.self_authorized_until',$5,true),
+        set_config('app.correlation_id',$6,true),set_config('app.purpose_of_use','patient-self',true),
+        set_config('app.facility_id','',true),set_config('app.membership_id','',true)`,
+        [auth.subject,auth.accountId,auth.patientId,auth.sessionId,auth.expiresAt,correlationId]);
+      const result=await operation(client);await client.query('commit');return result;
+    } catch(error) {await client.query('rollback');throw error;} finally {client.release();}
+  }
+
   async withTransaction<Result>(
     context: DataAccessContext,
     operation: (client: PoolClient) => Promise<Result>,

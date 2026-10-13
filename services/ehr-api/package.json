@@ -45,6 +45,7 @@
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "3.1139.0",
     "@aws-sdk/client-s3": "^3.850.0",
+    "@aws-sdk/client-textract": "3.1139.0",
     "@aws-sdk/s3-request-presigner": "^3.850.0",
     "@hid/api-client": "file:../../packages/api-client",
     "@nestjs/common": "^11.1.0",

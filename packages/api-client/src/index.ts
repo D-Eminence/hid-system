@@ -102,6 +102,7 @@ export type {
   LabInternalCaller,
   LabRequestContext,
   LabResourceReference,
+  PatientLabPage,
 } from './lab';
 export { PharmacyApiClient, PharmacyApiProblem } from './pharmacy';
 export type {

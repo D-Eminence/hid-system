@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../../audit/audit.service';
 import { DomainProblem } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
@@ -8,28 +7,10 @@ import { DatabaseService } from '../../database/database.service';
 import { BedrockAiService } from './bedrock-ai.service';
 import { ClaudeAiService, type ConversationExchange } from './claude-ai.service';
 import { PatientRecordsService } from './patient-records.service';
+import { PatientEvidenceService } from './patient-evidence.service';
+import { binding,chunks,evidenceKey,type Evidence } from './patient-evidence.types';
+import { selectEvidence,answerCoverage,boundEvidence } from './patient-evidence.selection';
 import { PatientChatHistoryService, type ChatReply } from './patient-chat-history.service';
-
-interface NoteRow extends QueryResultRow {
-  noteId: string;
-  revisionNo: number;
-  title: string;
-  content: string;
-  contentLength: number;
-  contentSha256: string;
-  signedAt: Date;
-  indexed: boolean;
-  facilityId: string;
-}
-
-interface SourceRow extends QueryResultRow {
-  noteId: string;
-  revisionNo: number;
-  title: string;
-  content: string;
-  contentSha256: string;
-  signedAt: Date;
-}
 
 const NO_GROUNDED_ANSWER = 'I could not verify an answer from the available records.';
 
@@ -46,6 +27,7 @@ export class PatientChatService {
     private readonly claude: ClaudeAiService,
     private readonly audit: AuditService,
     private readonly history: PatientChatHistoryService,
+    private readonly evidence:PatientEvidenceService,
   ) {}
 
   async answer(request: HidRequest, rawQuestion: string) {
@@ -60,13 +42,13 @@ export class PatientChatService {
     try {
       const generation = await this.history.start(request, authorization);
       const context = await this.history.context(request, generation);
-      const signal = AbortSignal.timeout(35_000);
+      const signal = AbortSignal.timeout(60_000);
       const plan = await this.claude.plan(question, context.exchanges, signal);
       const reply: ChatReply = plan.intent === 'conversation'
         ? { status: 'ready', answer: plan.answer, sources: [] }
-        : await this.answerAuthorized(request, question, plan.query, context.exchanges, authorization, environment, signal);
+        : await this.answerAuthorized(request, question, plan.query, context.exchanges, environment, signal,plan.recordIntent);
       await this.history.save(request, generation, question, reply, context.bindings);
-      return reply;
+      return { ...reply,sources:reply.sources.map(source=>{const {hash:_hash,...safe}=source as unknown as Record<string,unknown>;return safe;}) };
     } catch (error) {
       if (error instanceof DomainProblem) throw error;
       throw new DomainProblem(503, 'PATIENT_CHAT_UNAVAILABLE', 'Patient chat is temporarily unavailable');
@@ -89,138 +71,81 @@ export class PatientChatService {
     return () => { value.busy = false; this.globalWindow.busy -= 1; };
   }
 
-  private async answerAuthorized(request: HidRequest, question: string, searchQuestion: string,
-    history: readonly ConversationExchange[],
-    authorization: Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>,
-    environment: ReturnType<typeof getEnvironment>, signal: AbortSignal): Promise<ChatReply> {
-    const notes = await this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
-      const result = await client.query<NoteRow>(
-        `select note.id as "noteId", note.current_revision_no as "revisionNo", note.title,
-           left(revision.content, 6000) as content, char_length(revision.content) as "contentLength",
-           revision.content_sha256 as "contentSha256", note.signed_at as "signedAt",
-           note.facility_id as "facilityId", (embedding.note_id is not null) as indexed
-         from ehr.clinical_notes note
-         join ehr.clinical_note_revisions revision
-           on revision.clinical_note_id = note.id and revision.revision_no = note.current_revision_no
-           and revision.patient_id = note.patient_id and revision.facility_id = note.facility_id
-         left join ehr.patient_record_embeddings embedding
-           on embedding.note_id = note.id and embedding.revision_no = note.current_revision_no
-           and embedding.patient_id = note.patient_id and embedding.facility_id = note.facility_id
-           and embedding.content_sha256 = revision.content_sha256 and embedding.model_id = $2
-         where note.patient_id = $1 and note.status in ('signed', 'amended')
-         order by note.signed_at desc, note.id desc limit 51`,
-        [authorization.patientId, environment.AI_EMBEDDING_MODEL_ID],
-      );
-      await this.audit.recordWithClient(client, {
-        correlationId: request.correlationId, actorType: 'patient', actorSubject: authorization.subject,
-        actorAccountId: authorization.accountId, patientId: authorization.patientId,
-        action: 'ehr.patient.chat.records.read', resourceType: 'clinical-note-collection',
-        outcome: 'success', purposeOfUse: 'patient-self', details: { noteCount: result.rows.length },
-      });
-      return result.rows;
-    });
-    if (notes.length === 0) return this.answerWithoutSources(question, history, signal);
-    if (notes.length > 50 || notes.some((note) => note.contentLength > 6000)) {
-      throw new DomainProblem(409, 'CHAT_RECORD_SCOPE_EXCEEDED', 'These records need preparation before chat can answer safely');
-    }
-
-    const missing = notes.filter((note) => !note.indexed);
-    const indexed = await Promise.all(missing.slice(0, 4).map(async (note) => ({
-      note,
-      vector: await this.bedrock.embed(`${note.title}\n${note.content}`, signal),
-    })));
-    if (indexed.length) {
-      const refreshed = await this.records.authorizeSelf(request);
-      await this.database.withPatientTransaction(refreshed, request.correlationId, async (client) => {
-        for (const { note, vector } of indexed) {
-          await client.query(
-            `insert into ehr.patient_record_embeddings
-               (note_id, revision_no, patient_id, facility_id, content_sha256, model_id, embedding)
-             values ($1, $2, $3, $4, $5, $6, $7::vector)
-             on conflict (note_id, revision_no, model_id) do nothing`,
-            [note.noteId, note.revisionNo, refreshed.patientId, note.facilityId,
-              note.contentSha256, environment.AI_EMBEDDING_MODEL_ID, JSON.stringify(vector)],
-          );
-        }
-      });
-    }
-    if (missing.length > indexed.length) {
-      return { status: 'preparing', answer: 'Preparing your records. Please try again shortly.', sources: [] };
-    }
-
-    signal.throwIfAborted();
-    const questionVector = await this.bedrock.embed(searchQuestion, signal);
-    const current = await this.records.authorizeSelf(request);
-    const sources = await this.database.withPatientTransaction(current, request.correlationId, async (client) => {
-      const result = await client.query<SourceRow>(
-        `select note.id as "noteId", note.current_revision_no as "revisionNo", note.title,
-           left(revision.content, 6000) as content, revision.content_sha256 as "contentSha256",
-           note.signed_at as "signedAt"
-         from ehr.patient_record_embeddings embedding
-         join ehr.clinical_notes note on note.id = embedding.note_id
-           and note.patient_id = embedding.patient_id and note.facility_id = embedding.facility_id
-         join ehr.clinical_note_revisions revision
-           on revision.clinical_note_id = note.id and revision.revision_no = note.current_revision_no
-           and revision.patient_id = note.patient_id and revision.facility_id = note.facility_id
-         where embedding.patient_id = $1 and embedding.model_id = $2
-           and note.status in ('signed', 'amended')
-           and embedding.revision_no = note.current_revision_no
-           and embedding.content_sha256 = revision.content_sha256
-         order by embedding.embedding <=> $3::vector limit 5`,
-        [current.patientId, environment.AI_EMBEDDING_MODEL_ID, JSON.stringify(questionVector)],
-      );
-      return result.rows;
-    });
-    if (!sources.length) return this.answerWithoutSources(question, history, signal);
-
-    signal.throwIfAborted();
-    const generated = await this.claude.answer(question, sources, history, signal);
-    const citations = [...generated.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
-    // This validates citation references, not the factual support of a claim.
-    // Real answer evaluation remains an activation gate for the selected model.
-    const citationsValid = citations.length > 0 && citations.every((number) => number >= 1 && number <= sources.length);
-    const finalAuthorization = await this.records.authorizeSelf(request);
-    await this.database.withPatientTransaction(finalAuthorization, request.correlationId, async (client) => {
-      await this.assertSourcesCurrent(client, finalAuthorization.patientId, sources);
-      await this.audit.recordWithClient(client, {
-        correlationId: request.correlationId, actorType: 'patient', actorSubject: finalAuthorization.subject,
-        actorAccountId: finalAuthorization.accountId, patientId: finalAuthorization.patientId,
-        action: 'ehr.patient.chat.answer', resourceType: 'clinical-note-collection',
-        outcome: citationsValid ? 'success' : 'failure', purposeOfUse: 'patient-self',
-        details: { sourceCount: sources.length, citationsValid },
-      });
-    });
-    return {
-      status: 'ready',
-      answer: citationsValid ? generated : NO_GROUNDED_ANSWER,
-      sources: citationsValid ? sources.map((source, index) => ({
-        number: index + 1, noteId: source.noteId, revisionNo: source.revisionNo,
-        title: source.title, signedAt: source.signedAt,
-      })) : [],
-    };
+  private async answerAuthorized(request:HidRequest,question:string,searchQuestion:string,
+    history:readonly ConversationExchange[],
+    environment:ReturnType<typeof getEnvironment>,signal:AbortSignal,recordIntent:import('./patient-evidence.types').RecordIntent='search'):Promise<ChatReply> {
+    const extractionWarnings=await this.evidence.prepareDocuments(request,signal);
+    const snapshot=await this.evidence.snapshot(request,signal);
+    snapshot.coverage.unavailable.push(...extractionWarnings);
+    if(extractionWarnings.length)snapshot.coverage.complete=false;
+    let selection=selectEvidence(snapshot.records,recordIntent,searchQuestion);
+    if(recordIntent==='search'&&snapshot.records.length)selection=await this.semantic(request,snapshot.records,searchQuestion,environment,signal);
+    const coverage=answerCoverage(snapshot.coverage,selection.sources.length,selection.partial);
+    await this.records.authorizeSelf(request);signal.throwIfAborted();
+    const generated=await this.claude.answer(question,selection.sources,history,signal,coverage);
+    const citations=[...generated.matchAll(/\[(\d+)\]/g)].map(match=>Number(match[1]));
+    const valid=selection.sources.length?citations.length>0&&citations.every(n=>n>=1&&n<=selection.sources.length):citations.length===0;
+    // Currentness/authorization is checked before save and return; an index is
+    // never evidence by itself. Citation validation does not prove model fidelity.
+    await this.evidence.assertCurrent(request,selection.sources.map(binding));
+    const auth=await this.records.authorizeSelf(request);
+    await this.database.withPatientTransaction(auth,request.correlationId,client=>this.audit.recordWithClient(client,{
+      correlationId:request.correlationId,actorType:'patient',actorSubject:auth.subject,actorAccountId:auth.accountId,
+      patientId:auth.patientId,action:'ehr.patient.chat.answer',resourceType:'patient-evidence',outcome:valid?'success':'failure',
+      purposeOfUse:'patient-self',details:{sourceCount:selection.sources.length,citationsValid:valid,complete:coverage.complete}}));
+    return {status:'ready',answer:valid?generated:NO_GROUNDED_ANSWER,coverage,
+      sources:valid?selection.sources.map((source,index)=>({...binding(source),number:index+1,title:source.title,
+        recordedAt:source.recordedAt,effectiveAt:source.effectiveAt,provenance:source.provenance,quality:source.quality})):[]};
   }
 
-  private async answerWithoutSources(question: string, history: readonly ConversationExchange[], signal: AbortSignal): Promise<ChatReply> {
-    const answer = await this.claude.answer(question, [], history, signal);
-    // No-record replies can explain availability and capabilities but cannot
-    // pretend to cite record evidence. Semantic behaviour is evaluated separately.
-    return { status: 'ready', answer: /\[\d+\]/.test(answer) ? NO_GROUNDED_ANSWER : answer, sources: [] };
-  }
-
-  private async assertSourcesCurrent(client: PoolClient, patientId: string, sources: readonly SourceRow[]) {
-    const result = await client.query<{ count: string }>(
-      `select count(*)::text as count from ehr.clinical_notes note
-       join ehr.clinical_note_revisions revision
-         on revision.clinical_note_id = note.id and revision.revision_no = note.current_revision_no
-         and revision.patient_id = note.patient_id and revision.facility_id = note.facility_id
-       where note.patient_id = $1 and note.status in ('signed', 'amended')
-         and (note.id, note.current_revision_no, revision.content_sha256) in (
-           select * from unnest($2::uuid[], $3::integer[], $4::text[]))`,
-      [patientId, sources.map((source) => source.noteId), sources.map((source) => source.revisionNo),
-        sources.map((source) => source.contentSha256)],
-    );
-    if (Number(result.rows[0]?.count) !== sources.length) {
-      throw new DomainProblem(409, 'CHAT_SOURCES_CHANGED', 'The source records changed during this request');
+  private async semantic(request:HidRequest,records:Evidence[],question:string,
+    env:ReturnType<typeof getEnvironment>,signal:AbortSignal) {
+    const auth=await this.records.authorizeSelf(request);
+    const currentKeys=records.map(r=>`${evidenceKey(r)}:${r.version}:${r.hash}`);
+    const existing=await this.database.withPatientTransaction(auth,request.correlationId,async client=>(await client.query(
+      `select source_kind,source_id,source_version,source_hash,chunk_no from ehr.patient_evidence_chunks
+       where patient_id=$1 and model_id=$2 and normalizer_version=1
+       and source_kind||':'||source_id::text||':'||source_version||':'||source_hash=any($3::text[])`,
+      [auth.patientId,env.AI_EMBEDDING_MODEL_ID,currentKeys])).rows);
+    const keys=new Set(existing.map(r=>`${r.source_kind}:${r.source_id}:${r.source_version}:${String(r.source_hash).trim()}:${r.chunk_no}`));
+    const missing=records.flatMap(source=>chunks(source).slice(0,1000).map((text,no)=>({source,text,no})))
+      .filter(c=>!keys.has(`${evidenceKey(c.source)}:${c.source.version}:${c.source.hash}:${c.no}`));
+    const fresh=await Promise.all(missing.slice(0,4).map(async c=>({...c,vector:await this.bedrock.embed(c.text,signal)})));
+    if(fresh.length) {
+      await this.evidence.assertCurrent(request,fresh.map(c=>binding(c.source)));
+      const refreshed=await this.records.authorizeSelf(request);
+      await this.database.withPatientTransaction(refreshed,request.correlationId,async client=>{
+        for(const c of fresh)await client.query(`insert into ehr.patient_evidence_chunks
+          (patient_id,source_kind,source_id,source_version,source_hash,chunk_no,model_id,embedding)
+          values($1,$2,$3,$4,$5,$6,$7,$8::vector) on conflict do nothing`,
+          [refreshed.patientId,c.source.kind,c.source.id,c.source.version,c.source.hash,c.no,env.AI_EMBEDDING_MODEL_ID,JSON.stringify(c.vector)]);
+        // Remove obsolete derived vectors only; authoritative clinical rows stay intact.
+        await client.query(`delete from ehr.patient_evidence_chunks where patient_id=$1 and
+          source_kind||':'||source_id::text=any($3::text[]) and
+          not(source_kind||':'||source_id::text||':'||source_version||':'||source_hash=any($2::text[]))`,[refreshed.patientId,currentKeys,records.map(evidenceKey)]);
+      });
     }
+    const vector=await this.bedrock.embed(question,signal);
+    const current=await this.records.authorizeSelf(request);
+    const ranked=await this.database.withPatientTransaction(current,request.correlationId,async client=>(await client.query(
+      `select source_kind,source_id,chunk_no from ehr.patient_evidence_chunks
+       where patient_id=$1 and model_id=$2 and normalizer_version=1
+       and source_kind||':'||source_id::text||':'||source_version||':'||source_hash=any($3::text[])
+       order by embedding<=>$4::vector limit 12`,[current.patientId,env.AI_EMBEDDING_MODEL_ID,currentKeys,JSON.stringify(vector)])).rows);
+    const byKey=new Map(records.map(r=>[evidenceKey(r),r]));const selected=new Map<string,Evidence>();
+    for(const row of ranked) {
+      const r=byKey.get(`${row.source_kind}:${row.source_id}`);if(!r)continue;
+      const text=chunks(r)[row.chunk_no];if(!text)continue;
+      const prior=selected.get(evidenceKey(r));selected.set(evidenceKey(r),{...r,content:prior?prior.content+'\n'+text:text});
+    }
+    // Unindexed current sources remain searchable through literal evidence
+    // matching. Never describe a partially indexed collection as complete.
+    const terms=question.toLowerCase().match(/[\p{L}\p{N}]+/gu)?.filter(t=>t.length>3)??[];
+    for(const r of records.filter(r=>terms.some(t=>r.content.toLowerCase().includes(t))).slice(0,5)) {
+      if(!selected.has(evidenceKey(r)))selected.set(evidenceKey(r),{...r,content:r.content.slice(0,12000)});
+    }
+    const bounded=boundEvidence([...selected.values()],12);
+    const sources=bounded.sources;
+    return {sources,partial:bounded.partial||missing.length>fresh.length||sources.length<records.length||sources.some(r=>r.content!==byKey.get(evidenceKey(r))!.content)};
   }
 }

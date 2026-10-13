@@ -1,198 +1,94 @@
-import type { PoolClient } from 'pg';
-import type { AuditService } from '../../audit/audit.service';
-import type { HidRequest } from '../../common/request-context';
-import type { DatabaseService } from '../../database/database.service';
-import type { ClaudeAiService, ChatPlan } from './claude-ai.service';
-import type { BedrockAiService } from './bedrock-ai.service';
-import { PatientChatService } from './patient-chat.service';
-import type { PatientChatHistoryService } from './patient-chat-history.service';
-import type { PatientRecordsService } from './patient-records.service';
-
-jest.mock('../../config/environment', () => ({
-  getEnvironment: () => ({
-    AI_ENABLED: true,
-    AI_EMBEDDING_MODEL_ID: 'amazon.titan-embed-text-v2:0',
-    AI_GENERATION_MODEL_ID: 'eu.anthropic.claude-sonnet-4-6',
-  }),
-}));
-
-const patientId = '11111111-1111-4111-8111-111111111111';
-const auth = { patientId, subject: 'patient-subject', accountId: 'account-id', sessionId: 'session-id', expiresAt: new Date(Date.now() + 30_000).toISOString() };
-const request = { actor: { kind: 'patient', patientId }, correlationId: 'chat-test' } as HidRequest;
-const note = {
-  noteId: '22222222-2222-4222-8222-222222222222', revisionNo: 1, title: 'Visit note',
-  content: 'Blood pressure was recorded.', contentLength: 28, contentSha256: 'a'.repeat(64),
-  signedAt: new Date(), facilityId: '33333333-3333-4333-8333-333333333333', indexed: false,
-};
-
-function setup(initialNotes: typeof note[] = [note]) {
-  const query = jest.fn(async (sql: string, _params?: readonly unknown[]) => {
-    if (sql.includes('limit 51')) return { rows: initialNotes };
-    if (sql.includes('order by embedding.embedding')) return { rows: initialNotes.map(({ indexed, facilityId, contentLength, ...source }) => source) };
-    if (sql.includes('select count(*)')) return { rows: [{ count: String(initialNotes.length) }] };
-    return { rows: [] };
-  });
-  const transaction = jest.fn(async (_authorization: unknown, _correlationId: string,
-    work: (client: PoolClient) => Promise<unknown>) => work({ query } as unknown as PoolClient));
-  const authorizeSelf = jest.fn().mockResolvedValue(auth);
-  const embed = jest.fn().mockResolvedValue(Array(1024).fill(0));
-  const plan = jest.fn(async (question: string): Promise<ChatPlan> => ({ intent: 'records', query: question }));
-  const answer = jest.fn(async (_question: string, sources: unknown[]): Promise<string> => sources.length ? 'Your note records blood pressure [1].' : 'I cannot verify your medicines without released notes. I can explain them once they are available.');
-  const context = jest.fn().mockResolvedValue({ exchanges: [], bindings: [] });
-  const audit = jest.fn().mockResolvedValue(undefined);
-  const start = jest.fn().mockResolvedValue('generation-a');
-  const save = jest.fn().mockResolvedValue(undefined);
-  const service = new PatientChatService(
-    { withPatientTransaction: transaction } as unknown as DatabaseService,
-    { authorizeSelf } as unknown as PatientRecordsService,
-    { embed } as unknown as BedrockAiService,
-    { plan, answer } as unknown as ClaudeAiService,
-    { recordWithClient: audit } as unknown as AuditService,
-    { start, save, context } as unknown as PatientChatHistoryService,
-  );
-  return { service, query, transaction, authorizeSelf, embed, answer, plan, context, audit, start, save };
+import type {PoolClient} from 'pg';
+import {PatientChatService} from './patient-chat.service';
+import {evidence,binding,type Evidence} from './patient-evidence.types';
+jest.mock('../../config/environment',()=>({getEnvironment:()=>({AI_ENABLED:true,AI_EMBEDDING_MODEL_ID:'amazon.titan-embed-text-v2:0'})}));
+const patientId='11111111-1111-4111-8111-111111111111';
+const auth={patientId,subject:'subject-a',accountId:'account-a',sessionId:'session-a',expiresAt:new Date(Date.now()+30000).toISOString()};
+const request={actor:{kind:'patient',patientId},correlationId:'synthetic-chat'} as never;
+const item=(kind:Evidence['kind'],n:number,fields:Record<string,unknown>={text:'Synthetic history'})=>evidence({kind,
+ id:`22222222-2222-4222-8222-${String(n).padStart(12,'0')}`,version:'1',title:`Synthetic ${kind} ${n}`,
+ recordedAt:`2026-10-${String(n%28+1).padStart(2,'0')}T10:00:00Z`,effectiveAt:null,provenance:'Synthetic source',quality:'recorded',fields});
+function setup(records:Evidence[]=[item('prescription',1)]) {
+ const query=jest.fn(async(sql:string)=>({rows:sql.includes('order by embedding<=>')?[{source_kind:records[0]?.kind,source_id:records[0]?.id,chunk_no:0}]:[]}));
+ const transaction=jest.fn(async(_a:unknown,_c:string,work:(c:PoolClient)=>Promise<unknown>)=>work({query} as unknown as PoolClient));
+ const authorizeSelf=jest.fn().mockResolvedValue(auth),embed=jest.fn().mockResolvedValue(Array(1024).fill(0));
+ const plan=jest.fn().mockResolvedValue({intent:'records',recordIntent:'medications',query:'previous and latest medication'});
+ const answer=jest.fn().mockResolvedValue('The source records a prescribed medicine [1].');
+ const save=jest.fn().mockResolvedValue(undefined),context=jest.fn().mockResolvedValue({exchanges:[],bindings:[]});
+ const snapshot=jest.fn().mockResolvedValue({records,coverage:{complete:true,recordCount:records.length,selectedCount:0,pendingDocuments:0,unavailable:[]}});
+ const assertCurrent=jest.fn().mockResolvedValue(undefined),prepareDocuments=jest.fn().mockResolvedValue([]);
+ const service=new PatientChatService({withPatientTransaction:transaction} as never,{authorizeSelf} as never,{embed} as never,
+  {plan,answer} as never,{recordWithClient:jest.fn()} as never,{start:jest.fn().mockResolvedValue('generation'),context,save} as never,
+  {snapshot,assertCurrent,prepareDocuments} as never);
+ return {service,query,transaction,authorizeSelf,embed,plan,answer,save,context,snapshot,assertCurrent,prepareDocuments};
 }
-
-describe('Patient chat authorization and grounding', () => {
-  it('handles the reported natural purpose question through Claude and passes conversation bindings into the save', async () => {
-    const { service, plan, context, query, embed, save } = setup([]);
-    const exchanges = [{ question: 'What are you?', answer: 'I can explain released notes.' }];
-    const bindings = [{ noteId: note.noteId, revisionNo: 1, hash: note.contentSha256 }];
-    context.mockResolvedValue({ exchanges, bindings });
-    plan.mockResolvedValue({ intent: 'conversation', answer: 'I help you understand the notes released to your account.' });
-    const reply = await service.answer(request, 'What are you meant to do?');
-    expect(plan).toHaveBeenCalledWith('What are you meant to do?', exchanges, expect.any(AbortSignal));
-    expect(query).not.toHaveBeenCalled(); expect(embed).not.toHaveBeenCalled();
-    expect(save).toHaveBeenCalledWith(request, 'generation-a', 'What are you meant to do?', reply, bindings);
-  });
-  it('embeds a resolved follow-up query while answering the actual user question with context', async () => {
-    const { service, plan, context, embed, answer } = setup([{ ...note, indexed: true }]);
-    const exchanges = [{ question: 'What follow-up?', answer: 'Your note records a review [1].' }];
-    context.mockResolvedValue({ exchanges, bindings: [] });
-    plan.mockResolvedValue({ intent: 'records', query: 'Explain the recorded review appointment.' });
-    await service.answer(request, 'What does that mean?');
-    expect(embed).toHaveBeenCalledWith('Explain the recorded review appointment.', expect.any(AbortSignal));
-    expect(answer).toHaveBeenCalledWith('What does that mean?', expect.any(Array), exchanges, expect.any(AbortSignal));
-  });
-  it('uses Claude to explain the reported follow-up when no notes exist', async () => {
-    const { service, context, answer, embed } = setup([]);
-    const exchanges = [{ question: 'What are you meant to do?', answer: 'I can summarise released notes.' }];
-    context.mockResolvedValue({ exchanges, bindings: [] });
-    answer.mockResolvedValue('Yes, I could summarise released notes once they are available to this account.');
-    await expect(service.answer(request, 'So if there were clinical notes, you would find something?'))
-      .resolves.toMatchObject({ answer: 'Yes, I could summarise released notes once they are available to this account.', sources: [] });
-    expect(embed).not.toHaveBeenCalled();
-    expect(answer.mock.calls[0]?.[1]).toEqual([]);
-  });
-  it('does not expose a reply when the context recheck fails during save', async () => {
-    const { service, plan, save } = setup([]);
-    plan.mockResolvedValue({ intent: 'conversation', answer: 'Context-dependent reply.' });
-    save.mockRejectedValue(new Error('prior source revoked'));
-    await expect(service.answer(request, 'Can you explain that?')).rejects.toThrow('temporarily unavailable');
-  });
-  it.each(['hello', 'what are you?', 'is there anything you can help me with?', 'how can you help me?'])('answers capability question %s through Claude without searching notes or calling Titan', async question => {
-    const { service, transaction, embed, answer, plan, save } = setup([]);
-    plan.mockResolvedValue({ intent: 'conversation', answer: 'I am the Health ID record assistant.' });
-    const reply = await service.answer(request, question);
-    expect(reply.answer).toContain('Health ID record assistant');
-    expect(reply.sources).toEqual([]);
-    expect(transaction).not.toHaveBeenCalled();
-    expect(embed).not.toHaveBeenCalled();
-    expect(answer).not.toHaveBeenCalled();
-    expect(plan).toHaveBeenCalledWith(question, [], expect.any(AbortSignal));
-    expect(save).toHaveBeenCalledWith(request, 'generation-a', question, reply, []);
-  });
-
-  it('keeps medical questions containing greeting words on the record path', async () => {
-    const { service, transaction, answer } = setup();
-    await service.answer(request, 'Hello, what does my note say?');
-    expect(transaction).toHaveBeenCalled();
-    expect(answer).toHaveBeenCalled();
-  });
-  it('queries and indexes only the freshly authorized patient, then returns source references', async () => {
-    const { service, query, authorizeSelf, answer } = setup();
-    const result = await service.answer(request, 'What does my note say?');
-    expect(result).toMatchObject({ status: 'ready', answer: 'Your note records blood pressure [1].',
-      sources: [{ number: 1, noteId: note.noteId }] });
-    expect(authorizeSelf).toHaveBeenCalledTimes(4);
-    for (const [sql, params] of query.mock.calls) {
-      if (sql.includes('ehr.patient_record_embeddings') && params) {
-        expect(params).toContain(patientId);
-      }
-    }
-    expect(answer).toHaveBeenCalledWith('What does my note say?', expect.arrayContaining([expect.objectContaining({ content: note.content })]), [], expect.any(AbortSignal));
-  });
-
-  it('never calls Bedrock when patient authorization fails', async () => {
-    const { service, authorizeSelf, transaction, embed } = setup();
-    authorizeSelf.mockRejectedValue(new Error('Patient authorization changed'));
-    await expect(service.answer(request, 'What does my note say?')).rejects.toThrow('Patient authorization changed');
-    expect(transaction).not.toHaveBeenCalled();
-    expect(embed).not.toHaveBeenCalled();
-  });
-
-  it('does not invent an answer when no released records exist', async () => {
-    const { service, embed, answer } = setup([]);
-    const result = await service.answer(request, 'What medicine am I taking?');
-    expect(result).toMatchObject({ status: 'ready', sources: [] });
-    expect(embed).not.toHaveBeenCalled();
-    expect(answer).toHaveBeenCalledWith('What medicine am I taking?', [], [], expect.any(AbortSignal));
-    expect(result.answer).toContain('cannot verify');
-  });
-
-  it('rejects model citations outside the retrieved source set', async () => {
-    const { service, answer } = setup();
-    answer.mockResolvedValue('An unsupported claim [2].');
-    const result = await service.answer(request, 'What does my note say?');
-    expect(result).toMatchObject({ status: 'ready', sources: [] });
-    expect(result.answer).not.toContain('unsupported claim');
-  });
-
-  it('withholds a generated answer if the source revision changes', async () => {
-    const { service, query } = setup();
-    const original = query.getMockImplementation()!;
-    query.mockImplementation(async (sql, params) => sql.includes('select count(*)')
-      ? { rows: [{ count: '0' }] } : original(sql, params));
-    await expect(service.answer(request, 'What does my note say?')).rejects.toThrow('source records changed');
-  });
-
-  it('withholds the answer if self authorization is revoked after generation', async () => {
-    const { service, authorizeSelf, answer } = setup();
-    authorizeSelf.mockResolvedValueOnce(auth).mockResolvedValueOnce(auth).mockResolvedValueOnce(auth)
-      .mockRejectedValueOnce(new Error('revoked'));
-    await expect(service.answer(request, 'What does my note say?')).rejects.toThrow('temporarily unavailable');
-    expect(answer).toHaveBeenCalledTimes(1);
-  });
-
-  it('bounds indexing to four notes before returning preparation status', async () => {
-    const notes = Array.from({ length: 5 }, (_, index) => ({ ...note, noteId: `22222222-2222-4222-8222-${String(index).padStart(12, '0')}` }));
-    const { service, embed, answer } = setup(notes);
-    await expect(service.answer(request, 'What does my note say?')).resolves.toMatchObject({ status: 'preparing', sources: [] });
-    expect(embed).toHaveBeenCalledTimes(4); expect(answer).not.toHaveBeenCalled();
-  });
-
-  it('bounds repeated requests for a patient before any provider call', async () => {
-    const { service, embed } = setup([]);
-    for (let i = 0; i < 10; i += 1) await service.answer(request, 'What does my note say?');
-    await expect(service.answer(request, 'What does my note say?')).rejects.toThrow('wait before asking');
-    expect(embed).not.toHaveBeenCalled();
-  });
-
-  it('does not expose provider error details', async () => {
-    const { service, embed } = setup();
-    embed.mockRejectedValue(new Error('private provider payload'));
-    await expect(service.answer(request, 'What does my note say?')).rejects.toThrow('temporarily unavailable');
-  });
-
-  it('bounds provider concurrency across distinct patients', async () => {
-    const { service, authorizeSelf, transaction, embed } = setup();
-    let finish!: () => void;
-    const waiting = new Promise<void>(resolve => { finish = resolve; });
-    transaction.mockImplementation(async () => { await waiting; return []; });
-    for (let i = 0; i < 5; i += 1) authorizeSelf.mockResolvedValueOnce({ ...auth, patientId: `patient-${i}` });
-    const pending = Array.from({ length: 4 }, () => service.answer(request, 'What does my note say?'));
-    await expect(service.answer(request, 'What does my note say?')).rejects.toThrow('wait before asking');
-    finish(); await Promise.all(pending);
-    expect(embed).not.toHaveBeenCalled();
-  });
+describe('Patient evidence chat',()=>{
+ it('bounds ranked chunks plus long literal matches and declares excerpted context',async()=>{
+  const records=Array.from({length:7},(_,i)=>item('import',i+1,{text:'target '+ 'x'.repeat(i?15000:35000)}));
+  const s=setup(records);s.plan.mockResolvedValue({intent:'records',recordIntent:'search',query:'target'});
+  s.query.mockImplementation(async(sql:string)=>({rows:sql.includes('order by embedding<=>')?
+   Array.from({length:12},(_,chunk_no)=>({source_kind:records[0]!.kind,source_id:records[0]!.id,chunk_no})):[]}));
+  await s.service.answer(request,'Find target');
+  const sources=s.answer.mock.calls[0][1];
+  expect(sources.reduce((sum:number,r:Evidence)=>sum+r.content.length,0)).toBeLessThanOrEqual(90000);
+  expect(sources.length).toBeLessThanOrEqual(12);
+  expect(s.answer.mock.calls[0][4].complete).toBe(false);
+ });
+ it('answers latest prescription questions through current structured evidence, without depending on note/vector availability',async()=>{
+  const s=setup();const reply=await s.service.answer(request,'What is my last prescription?');
+  expect(s.embed).not.toHaveBeenCalled();expect(reply.sources[0]).toMatchObject({kind:'prescription'});
+  expect(s.assertCurrent).toHaveBeenCalledWith(request,[binding(item('prescription',1))]);
+  expect(JSON.stringify(reply.sources)).not.toContain('hash');expect(s.answer.mock.calls[0][1][0].kind).toBe('prescription');
+ });
+ it.each(['summary','condition','labs'])('retrieves %s evidence rather than redirecting the record question to support',async recordIntent=>{
+  const s=setup([item('lab_result',1),item('diagnosis',2),item('import',3,{category:'medication'})]);
+  s.plan.mockResolvedValue({intent:'records',recordIntent,query:recordIntent==='condition'?'Synthetic':'history'});
+  await s.service.answer(request,'Explain my records');expect(s.snapshot).toHaveBeenCalled();expect(s.answer).toHaveBeenCalled();
+ });
+ it('preserves conversation context and saves inherited evidence',async()=>{
+  const s=setup();const previous=[{question:'What medicine?',answer:'A recorded prescription [1].'}];
+  const bindings=[binding(item('prescription',1))];s.context.mockResolvedValue({exchanges:previous,bindings});
+  s.plan.mockResolvedValue({intent:'conversation',answer:'I can help you understand your records.'});
+  await s.service.answer(request,'What are you?');expect(s.embed).not.toHaveBeenCalled();expect(s.prepareDocuments).not.toHaveBeenCalled();
+  expect(s.plan).toHaveBeenCalledWith('What are you?',previous,expect.any(AbortSignal));expect(s.save.mock.calls[0][4]).toEqual(bindings);
+ });
+ it('declares incomplete selection when medication history exceeds the model context budget',async()=>{
+  const s=setup(Array.from({length:75},(_,i)=>item('prescription',i+1)));
+  const reply=await s.service.answer(request,'List all medicines');expect(reply.coverage).toMatchObject({complete:false,recordCount:75,selectedCount:60});
+ });
+ it('revalidates selected records before returning generated patient facts',async()=>{
+  const s=setup();s.assertCurrent.mockRejectedValue(new Error('revoked'));
+  await expect(s.service.answer(request,'Medication history')).rejects.toThrow('temporarily unavailable');expect(s.save).not.toHaveBeenCalled();
+ });
+ it('withholds a generated answer if history was cleared during the request',async()=>{
+  const s=setup();s.save.mockRejectedValue(new Error('generation changed'));
+  await expect(s.service.answer(request,'Medication')).rejects.toThrow('temporarily unavailable');
+ });
+ it('never retrieves patient evidence or calls a model after initial authorization fails',async()=>{
+  const s=setup();s.authorizeSelf.mockRejectedValue(new Error('revoked'));
+  await expect(s.service.answer(request,'Medication')).rejects.toThrow('revoked');expect(s.plan).not.toHaveBeenCalled();expect(s.snapshot).not.toHaveBeenCalled();
+ });
+ it('withholds references outside the supplied evidence',async()=>{
+  const s=setup();s.answer.mockResolvedValue('Unsupported claim [99].');const reply=await s.service.answer(request,'Medicine');
+  expect(reply.sources).toEqual([]);expect(reply.answer).not.toContain('Unsupported');
+ });
+ it('does not produce record citations for missing matching evidence',async()=>{
+  const s=setup([]);s.answer.mockResolvedValue('I cannot verify a prescription from the available records.');
+  expect((await s.service.answer(request,'Medicine')).sources).toEqual([]);
+ });
+ it('searches generalized current-source vectors and retains a patient parameter on every index operation',async()=>{
+  const s=setup([item('note',1)]);s.plan.mockResolvedValue({intent:'records',recordIntent:'search',query:'Synthetic history'});
+  await s.service.answer(request,'What does this history mean?');expect(s.embed).toHaveBeenCalled();
+  for(const [sql,args] of s.query.mock.calls as unknown as Array<[string,unknown[]]>)if(sql.includes('patient_evidence_chunks'))expect(args?.[0]).toBe(patientId);
+ });
+ it('declares an extraction availability failure instead of assuming empty documents',async()=>{
+  const s=setup();s.prepareDocuments.mockResolvedValue(['Document extraction unavailable']);
+  expect((await s.service.answer(request,'History')).coverage).toMatchObject({complete:false,unavailable:['Document extraction unavailable']});
+ });
+ it('rejects overlapping patient requests and releases admission after failure',async()=>{
+  const s=setup();let release!:()=>void;s.answer.mockImplementation(()=>new Promise<string>(r=>{release=()=>r('Medicine [1].')}));
+  const running=s.service.answer(request,'Medicine');await new Promise(r=>setImmediate(r));
+  await expect(s.service.answer(request,'Medicine')).rejects.toThrow('wait');release();await running;
+ });
+ it.each(['','x'.repeat(501)])('rejects invalid question length',async q=>{await expect(setup().service.answer(request,q)).rejects.toThrow('characters');});
 });

@@ -135,6 +135,12 @@ export class IdentityApiClient {
     return value as PatientSelfAuthorization;
   }
 
+  async patientProfile(context:IdentityDelegatedContext):Promise<Record<string,unknown>> {
+    const value=await this.request('/api/v1/identity/me','GET',undefined,context);
+    if(!value||typeof value!=='object'||Array.isArray(value))throw new IdentityApiProblem(502,{code:'INVALID_PATIENT_PROFILE'});
+    return value as Record<string,unknown>;
+  }
+
   async authorizePatient(
     patientId: string,
     scope: 'read_records' | 'write_records',

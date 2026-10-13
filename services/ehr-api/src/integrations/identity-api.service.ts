@@ -40,6 +40,11 @@ export class IdentityApiService {
     }));
   }
 
+  patientProfile(request:HidRequest) {
+    return this.translate(this.client.patientProfile({correlationId:request.correlationId,
+      authorization:request.header('authorization'),cookie:request.header('cookie'),origin:request.header('origin')}));
+  }
+
   authorize(
     patientId: string,
     scope: 'read_records' | 'write_records',

@@ -25,7 +25,7 @@ export interface StorageProvider {
   checkReadiness(): Promise<void>;
   createUpload(intent: UploadIntent): Promise<PresignedUpload>;
   inspect(key: string): Promise<StoredObjectMetadata>;
-  inspectVersion(key: string, versionId: string): Promise<StoredObjectMetadata>;
+  inspectVersion(key: string, versionId: string,signal?:AbortSignal): Promise<StoredObjectMetadata>;
   createDownload(key: string, versionId: string, attachment?: { fileName: string; mediaType: string }): Promise<{ url: string; expiresInSeconds: number }>;
 }
 

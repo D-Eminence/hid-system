@@ -7,12 +7,20 @@ import { ImportedAttachmentService } from './imported-attachment.service';
 import { PatientChatService } from './patient-chat.service';
 import { PatientChatDto } from './patient-chat.dto';
 import { PatientChatHistoryService } from './patient-chat-history.service';
+import { PatientEvidenceService } from './patient-evidence.service';
 
 @Controller('ehr')
 @AuditFailuresOnly()
 export class PatientRecordsController {
   constructor(private readonly records: PatientRecordsService, private readonly attachments: ImportedAttachmentService,
-    private readonly chat: PatientChatService, private readonly history: PatientChatHistoryService) {}
+    private readonly chat: PatientChatService, private readonly history: PatientChatHistoryService,
+    private readonly evidence:PatientEvidenceService) {}
+
+  @Get('me/chat/sources/:kind/:sourceId')
+  @Header('Cache-Control','no-store') @FacilityOptional() @PatientAllowed()
+  source(@Param('kind') kind:string,@Param('sourceId',new ParseUUIDPipe()) id:string,@Req() request:HidRequest) {
+    return this.evidence.source(request,kind,id);
+  }
 
   @Get('me/chat/history')
   @Header('Cache-Control', 'no-store')

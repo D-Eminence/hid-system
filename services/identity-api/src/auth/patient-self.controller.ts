@@ -67,8 +67,8 @@ export class PatientSelfController {
 
   @Get('service/patient-self-authorization')
   async authorize(@Req() request: HidRequest) {
-    if (request.header('x-hid-internal-caller') !== 'ehr-api') {
-      throw new DomainProblem(403, 'WORKLOAD_AUTHENTICATION_REQUIRED', 'The EHR service is required');
+    if (!['ehr-api','lab-api'].includes(request.header('x-hid-internal-caller') ?? '')) {
+      throw new DomainProblem(403, 'WORKLOAD_AUTHENTICATION_REQUIRED', 'An authorized patient record service is required');
     }
     await this.workload.authenticateService(request.header('x-hid-internal-caller'),
       request.header('x-hid-service-authorization'), request.header('x-hid-service-token'));

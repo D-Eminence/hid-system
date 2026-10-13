@@ -8,6 +8,7 @@ import path from 'node:path';
 import pg from 'pg';
 const require = createRequire(import.meta.url);
 const { PatientChatHistoryService } = require('../dist/ehr/patient-records/patient-chat-history.service.js');
+const { PatientEvidenceService } = require('../dist/ehr/patient-records/patient-evidence.service.js');
 const { AuditService } = require('../dist/audit/audit.service.js');
 const container = `hid-chat-history-test-${randomUUID()}`;
 const password = randomBytes(24).toString('hex');
@@ -41,7 +42,9 @@ try {
       const value=await operation(runtime);await runtime.query('commit');return value;
     } catch(error) {await runtime.query('rollback');throw error;}
   }};
-  const history=new PatientChatHistoryService(database,{authorizeSelf:async()=>authorization},new AuditService(database));
+  const records={authorizeSelf:async()=>({...authorization,expiresAt:new Date(Date.now()+30000).toISOString()})};
+  const evidence=new PatientEvidenceService(database,records,{patientReleasedResults:async()=>({records:[],nextCursor:null})},new AuditService(database),{read:async()=>({records:[],pending:0,complete:true})},{patientProfile:async()=>({patientId:authorization.patientId,version:1})});
+  const history=new PatientChatHistoryService(database,records,new AuditService(database),evidence);
   const request={correlationId:'synthetic-history-test'};
   const reply={status:'ready',answer:'Synthetic capability answer.',sources:[]};
   assert.equal((await history.read(request)).exchanges.length,0);
@@ -101,7 +104,7 @@ try {
   const evidenceReply={status:'ready',answer:'Synthetic clinical content [1].',sources:[{number:1,noteId,revisionNo:1,title:'Synthetic note',signedAt:new Date().toISOString()}]};
   await history.save(request,noteGeneration,'Explain the synthetic note',evidenceReply);
   const context=await history.context(request,noteGeneration);
-  assert.equal(context.bindings[0].noteId,noteId);
+  assert.equal(context.bindings[0].id,noteId);
   await history.save(request,noteGeneration,'A follow-up',reply,context.bindings);
   assert.equal((await history.read(request)).exchanges.length,2);
   await assert.rejects(history.save(request,noteGeneration,'Stale follow-up',reply,[{...context.bindings[0],hash:'f'.repeat(64)}]),/source records changed/);

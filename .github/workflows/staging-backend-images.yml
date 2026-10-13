@@ -72,8 +72,11 @@ jobs:
         if: matrix.component == 'database-migration'
         run: |
           npm --prefix services/ehr-api ci
+          services/ehr-api/node_modules/.bin/tsc -p packages/api-client/tsconfig.json
           node services/ehr-api/scripts/test-notification-recipient.mjs
           node services/ehr-api/scripts/test-platform-administration.mjs
+          npm --prefix services/ehr-api run build
+          node services/ehr-api/scripts/test-patient-evidence-runtime.mjs
       - name: Build ARM64 image without cloud credentials
         run: node scripts/staging-backend-build.mjs build "$COMPONENT"
       - name: Install checksum-verified official Syft and Grype binaries
