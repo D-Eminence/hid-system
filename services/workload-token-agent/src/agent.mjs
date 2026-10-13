@@ -224,7 +224,14 @@ export class TokenAgent {
       const response = await boundedJson(await request(signed.url, signed));
       const kid = mintedKeyId(response);
       const jwks = await this.keySetFor(kid, request);
-      next.push({ ...entry, ...verifyMintedToken(response, jwks, this.configuration, entry.audience, this.now()) });
+      try {
+        next.push({ ...entry, ...verifyMintedToken(response, jwks, this.configuration, entry.audience, this.now()) });
+      } catch (error) {
+        // A key that no longer verifies the issuer's tokens is not trusted
+        // again: the next renewal fetches the JWKS (still at most every 30 s).
+        if (/JWT key|signature is invalid/.test(error.message)) { this.verifiedKeys.delete(kid); this.fetchedKeys = undefined; }
+        throw error;
+      }
       if (!this.verifiedKeys.has(kid)) this.verifiedKeys.set(kid, signingKeys(jwks, kid)[0]);
     }
     for (const entry of next) {
