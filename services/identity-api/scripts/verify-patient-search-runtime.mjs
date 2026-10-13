@@ -7,7 +7,10 @@
 // * Lookup answers one 404 PATIENT_NOT_AVAILABLE for an unknown HID, a
 //   patient without a grant and a grant held at another facility; a grant at
 //   this facility answers 200; a wrong purpose 400; the audit keeps the true
-//   outcome. Lookups are counted per actor and per facility (429).
+//   outcome. Refused lookups, and only they, are counted per actor and per
+//   facility (FE-10): a lookup that returns a granted patient counts nothing,
+//   however often it is repeated; the refusal that crosses a maximum is 429,
+//   and while either budget is blocked every lookup is 429.
 // * Access-request creation never names the patient and answers an unknown
 //   HID in the same shape, persisting nothing; it has budgets of its own (429).
 // * Searching or requesting never grants access by itself.
@@ -64,7 +67,7 @@ const { IdentityController } = load('identity/identity.controller.ts');
 const { IdentityService } = load('identity/identity.service.ts');
 const { PostgresIdentityProvider } = load('identity/postgres-identity.provider.ts');
 const { IDENTITY_PROVIDER } = load('identity/identity.types.ts');
-const { StaffSearchBudget } = load('identity/staff-search-budget.ts');
+const { StaffSearchBudget, staffSearchBucket } = load('identity/staff-search-budget.ts');
 const { ConsentController } = load('consent/consent.controller.ts');
 const { ConsentService } = load('consent/consent.service.ts');
 const { ProblemDetailsFilter } = load('common/problem.ts');
@@ -232,19 +235,86 @@ try {
   expectStatus(await requestAccess(first, 'HID-SRCHRTUNKNWC'), 429, 'ACCESS_REQUEST_RATE_LIMITED');
   check(`access-request creation: the request after ${LIMITS.requestActor} per actor in the window is 429 ACCESS_REQUEST_RATE_LIMITED`);
 
-  // 4. Lookup budgets: per actor (across facilities), then per facility.
-  // The first doctor has made 5 counted lookups (the 400 was refused before counting).
-  expectStatus(await lookup(first, unknownHid), 404, 'PATIENT_NOT_AVAILABLE');
-  expectStatus(await lookup(first, unknownHid), 429, 'PATIENT_LOOKUP_RATE_LIMITED');
-  expectStatus(await lookup(first, 'hid-srchrtgranted'), 429, 'PATIENT_LOOKUP_RATE_LIMITED');
-  check(`lookup: the lookup after ${LIMITS.lookupActor} per actor (at any facility) in the window is 429 PATIENT_LOOKUP_RATE_LIMITED, even for a granted patient`);
-  // The main facility has counted the first doctor's 5 lookups at it; the two
-  // refused once its own budget was spent cost the facility nothing.
-  for (let allowedLookup = 6; allowedLookup <= LIMITS.lookupFacility; allowedLookup++) {
-    expectStatus(await lookup(second, unknownHid), 404, 'PATIENT_NOT_AVAILABLE');
+  // 4. Lookup budgets (FE-10): only refusals count, alike, per actor (across
+  // facilities) and per facility; while a budget is blocked every lookup is 429.
+  const budgetRow = async (scope, id) => (await pool.query(`select request_count,
+      coalesce(blocked_until > clock_timestamp(), false) as blocked
+    from auth.otp_rate_limits where scope = $1 and bucket_hmac = $2`,
+  [`patient_lookup_${scope}`, staffSearchBucket('patient_lookup', scope, id)])).rows[0] ?? { request_count: 0, blocked: false };
+  const lookupEvents = async (who, action) => Number((await pool.query(`select count(*) from audit.events
+    where action = $1 and actor_account_id = $2`, [action, who.account])).rows[0].count);
+  // (i) The first doctor's four refusals (no grant twice, unknown, another
+  // facility) were counted; its granted lookups were not.
+  const counted = async () => ({ actor: await budgetRow('actor', first.account), facility: await budgetRow('facility', ids.facility) });
+  const before = await counted();
+  assert.equal(before.actor.request_count, 4, 'only the four refused lookups may count against the actor, not the granted one');
+  assert.equal(before.facility.request_count, 3, 'only the three refusals at the main facility may count against it');
+  for (let repeat = 0; repeat <= LIMITS.lookupFacility; repeat++) {
+    const repeated = await lookup(first, 'HID-SRCHRTGRANTED');
+    expectStatus(repeated, 200);
+    assert.equal(repeated.body.patient.patientId, granted);
   }
-  expectStatus(await lookup(second, unknownHid), 429, 'PATIENT_LOOKUP_RATE_LIMITED');
-  check(`lookup: once a facility has counted ${LIMITS.lookupFacility} lookups in the window, another member of it is refused 429 although its own budget is unspent; lookups refused for the actor's own budget do not count for the facility`);
+  assert.deepEqual(await counted(), before, 'a lookup that returns a granted patient must count against no budget');
+  check(`lookup: ${LIMITS.lookupFacility + 1} more lookups of a granted patient, beyond the actor's ${LIMITS.lookupActor} and the facility's ${LIMITS.lookupFacility}, all answer 200 and count nothing`);
+
+  // (ii) Refusals, unknown and unauthorized alike, spend the actor's budget.
+  for (let refusal = before.actor.request_count + 1; refusal <= LIMITS.lookupActor; refusal++) {
+    expectStatus(await (refusal % 2 ? lookup(first, unknownHid) : lookup(first, 'HID-SRCHRTGRANTED', ids.otherFacility)),
+      404, 'PATIENT_NOT_AVAILABLE');
+  }
+  assert.deepEqual(await budgetRow('actor', first.account), { request_count: LIMITS.lookupActor, blocked: false });
+  // At its maximum but not over it, the doctor still reads its granted patient, for free.
+  expectStatus(await lookup(first, 'HID-SRCHRTGRANTED'), 200);
+  const mainBeforeCrossing = (await budgetRow('facility', ids.facility)).request_count;
+  const recordedBeforeCrossing = await lookupEvents(first, 'identity.patient.lookup');
+  // The refusal that crosses the maximum (a patient without a grant) is 429, not 404.
+  const crossing = await lookup(first, 'HID-SRCHRTNGRNT');
+  expectStatus(crossing, 429, 'PATIENT_LOOKUP_RATE_LIMITED');
+  assert.deepEqual(await budgetRow('actor', first.account), { request_count: LIMITS.lookupActor + 1, blocked: true });
+  assert.equal((await budgetRow('facility', ids.facility)).request_count, mainBeforeCrossing,
+    'a refusal that crosses the actor\'s maximum must not count for the facility');
+  assert.equal(await lookupEvents(first, 'identity.patient.lookup'), recordedBeforeCrossing + 1);
+  assert.deepEqual((await pool.query(`select patient_id::text as patient, outcome, details->>'reason' as reason
+    from audit.events where action = 'identity.patient.lookup' and actor_account_id = $1
+    order by sequence_id desc limit 1`, [first.account])).rows,
+  [{ patient: ungranted, outcome: 'denied', reason: 'not_authorized' }], 'the crossing refusal keeps its true outcome in the audit');
+  // While the block lasts, every lookup of this doctor is 429, a granted patient's included, and reads nothing.
+  const refusedRequests = await lookupEvents(first, 'api.identity.patient.lookup.request');
+  const blocked = [await lookup(first, 'HID-SRCHRTGRANTED'), await lookup(first, unknownHid),
+    await lookup(first, 'HID-SRCHRTNGRNT'), await lookup(first, 'HID-SRCHRTGRANTED', ids.otherFacility)];
+  for (const response of blocked) {
+    expectStatus(response, 429, 'PATIENT_LOOKUP_RATE_LIMITED');
+    assert.deepEqual(answer(response), answer(crossing), 'every lookup of a blocked actor must get one answer');
+  }
+  assert.equal(await lookupEvents(first, 'identity.patient.lookup'), recordedBeforeCrossing + 1,
+    'a lookup refused for a blocked budget must read no patient');
+  assert.equal(await lookupEvents(first, 'api.identity.patient.lookup.request'), refusedRequests + blocked.length,
+    'every lookup refused for a blocked budget must be audited as a refused request');
+  assert.deepEqual(await budgetRow('actor', first.account), { request_count: LIMITS.lookupActor + 1, blocked: true });
+  check(`lookup: refusals (unknown HID, no grant, grant at another facility) count alike; the one after ${LIMITS.lookupActor} per actor in the window is 429 PATIENT_LOOKUP_RATE_LIMITED, and while the actor is blocked every lookup of it, a granted patient's included, is the same 429, reads nothing and counts nothing`);
+  // As the owner, end the block as its window would: the granted patient is 200 again.
+  await pool.query(`update auth.otp_rate_limits set blocked_until = clock_timestamp() - interval '1 second',
+      window_started_at = window_started_at - interval '1 day'
+    where scope = 'patient_lookup_actor' and bucket_hmac = $1`, [staffSearchBucket('patient_lookup', 'actor', first.account)]);
+  expectStatus(await lookup(first, 'HID-SRCHRTGRANTED'), 200);
+  check('lookup: once the actor\'s block ends, its granted patient answers 200 again');
+
+  // (iii) The facility budget counts every member's refusals at it.
+  for (let refusal = mainBeforeCrossing + 1; refusal <= LIMITS.lookupFacility; refusal++) {
+    // The first doctor's grant does not cover the second: a refusal too.
+    expectStatus(await lookup(second, refusal % 2 ? unknownHid : 'HID-SRCHRTGRANTED'), 404, 'PATIENT_NOT_AVAILABLE');
+  }
+  const facilityCrossing = await lookup(second, unknownHid);
+  expectStatus(facilityCrossing, 429, 'PATIENT_LOOKUP_RATE_LIMITED');
+  assert.deepEqual(answer(facilityCrossing), answer(crossing));
+  assert.equal((await budgetRow('actor', second.account)).blocked, false, 'the second doctor\'s own budget is not spent');
+  assert.deepEqual(await budgetRow('facility', ids.facility), { request_count: LIMITS.lookupFacility + 1, blocked: true });
+  // While the facility is blocked, every lookup at it is 429, the first doctor's granted patient included.
+  expectStatus(await lookup(first, 'HID-SRCHRTGRANTED'), 429, 'PATIENT_LOOKUP_RATE_LIMITED');
+  expectStatus(await lookup(second, 'HID-SRCHRTGRANTED'), 429, 'PATIENT_LOOKUP_RATE_LIMITED');
+  // Another facility keeps a budget of its own.
+  expectStatus(await lookup(first, unknownHid, ids.otherFacility), 404, 'PATIENT_NOT_AVAILABLE');
+  check(`lookup: once a facility has counted ${LIMITS.lookupFacility} refusals in the window, the next refusal is 429 for a member whose own budget is unspent, and every lookup at that facility is 429 while it is blocked, a granted patient's included; a refusal that crosses an actor's maximum does not count for the facility, and another facility keeps its own budget`);
   const buckets = (await pool.query(`select scope, count(*)::int as n from auth.otp_rate_limits
     where scope like 'patient_lookup_%' or scope like 'access_request_%' group by scope order by scope`)).rows;
   assert.deepEqual(buckets, [

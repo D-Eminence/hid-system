@@ -328,8 +328,10 @@ describe('ConsentService', () => {
 
   it('requires a recent sign-in to approve, checked in the decision transaction before the command (REC-NOTIFY)', async () => {
     patientDecision({ recent: false, result: approvalResult });
+    // Health-id shows the detail as it is on Approve, so it says what to do (FE-8).
     await expect(service.approveAccessRequest(patientRequest, '40000000-0000-4000-8000-000000000004'))
-      .rejects.toMatchObject({ status: 403, code: 'PATIENT_RECENT_AUTH_REQUIRED' });
+      .rejects.toMatchObject({ status: 403, code: 'PATIENT_RECENT_AUTH_REQUIRED',
+        message: 'For your security, sign out, sign in again, and approve within 10 minutes.' });
     expect(statements().some((sql) => sql.includes('identity.approve_my_access_request'))).toBe(false);
     const recent = query.mock.calls.find(([sql]) => String(sql).includes('as recent'));
     expect(recent?.[1]).toEqual(['80000000-0000-4000-8000-000000000001', '70000000-0000-4000-8000-000000000001',
