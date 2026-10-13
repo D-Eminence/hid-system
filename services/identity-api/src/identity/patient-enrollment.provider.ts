@@ -11,8 +11,22 @@ export interface VerifiedPublicPatientIdentity extends QoreIdNinEnrollmentBindin
   providerReference: string;
 }
 
+/** What one NIN lookup is charged to (0085): the request and the keyed client network. */
+export interface PublicPatientLookupCharge {
+  correlationId: string;
+  /** HMAC of the client network (an IPv4 address or an IPv6 /64), 64 hex characters. */
+  networkDigest: string;
+}
+
 export interface PublicPatientIdentityProvider {
-  verifyNin(nin: string): Promise<VerifiedPublicPatientIdentity>;
+  /**
+   * The enrollment gate: refuses with 503 unless QoreID and NIN-only enrollment
+   * are enabled and QoreID is not paused at runtime. It reads no NIN, so every
+   * NIN gets the same answer while the gate is closed (ENR-4).
+   */
+  assertAvailable(): Promise<void>;
+  /** Checks the gate again, charges the lookup (429 when refused), then asks QoreID. */
+  verifyNin(nin: string, charge: PublicPatientLookupCharge): Promise<VerifiedPublicPatientIdentity>;
 }
 
 /** Production adapter. Unit tests inject a fixture provider through the token. */
@@ -21,7 +35,7 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
   constructor(private readonly adapter: QoreIdVerificationAdapter,
     private readonly integrations: IntegrationRuntimeService) {}
 
-  async verifyNin(nin: string): Promise<VerifiedPublicPatientIdentity> {
+  async assertAvailable(): Promise<void> {
     const environment = getEnvironment();
     if (!environment.QOREID_ENABLED) {
       throw new DomainProblem(503, 'QOREID_DISABLED', 'Patient identity enrollment is temporarily unavailable');
@@ -31,6 +45,13 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
         'Patient identity enrollment is temporarily unavailable');
     }
     await this.integrations.assertAvailable('qoreid', 'patient_nin');
+  }
+
+  async verifyNin(nin: string, charge: PublicPatientLookupCharge): Promise<VerifiedPublicPatientIdentity> {
+    await this.assertAvailable();
+    // Charged only here, on the path that calls QoreID; a refusal is committed
+    // with its audit event and answered 429 before any request leaves.
+    await this.integrations.consumePublicPatientNinQuota(charge.correlationId, charge.networkDigest);
     const result = await this.adapter.verifyNinEnrollment(nin);
     if (result.state !== 'verified') {
       throw new DomainProblem(422, 'NIN_NOT_VERIFIED', 'The NIN could not be verified');

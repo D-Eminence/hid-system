@@ -1,10 +1,19 @@
 import { Injectable } from '@nestjs/common';
 import { readFile, stat } from 'node:fs/promises';
-import type { JWTVerifyGetKey } from 'jose';
+import type { JWTVerifyGetKey, JWTVerifyOptions } from 'jose';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 
 const MAX_WORKLOAD_TOKEN_LENGTH = 16_384;
+
+// The workload token contract (ADR-047): the issuer signs ES256 tokens with
+// iat = nbf, exp = iat + 300 s and token_use 'workload'. A token without exp
+// or iat, older than 300 s, issued in the future, signed with any other
+// algorithm or meant for another use is refused. The 5 s clock tolerance
+// matches the agent's own allowance for an iat ahead of its clock.
+const WORKLOAD_TOKEN_POLICY = {
+  algorithms: ['ES256'], requiredClaims: ['exp', 'iat'], maxTokenAge: 300, clockTolerance: 5,
+} satisfies JWTVerifyOptions;
 
 @Injectable()
 export class PharmacyWorkloadIdentityService {
@@ -34,9 +43,11 @@ export class PharmacyWorkloadIdentityService {
     const { payload } = await jwtVerify(token, jwks, {
       issuer: this.environment.PHARMACY_WORKLOAD_ISSUER_URL,
       audience: this.environment.PHARMACY_WORKLOAD_AUDIENCE,
-      algorithms: ['RS256', 'ES256'],
+      ...WORKLOAD_TOKEN_POLICY,
     }).catch(() => { throw new DomainProblem(401, 'INVALID_WORKLOAD_IDENTITY',
       'Workload identity is invalid or expired'); });
+    if (payload.token_use !== 'workload') throw new DomainProblem(401, 'INVALID_WORKLOAD_IDENTITY',
+      'Workload identity is invalid or expired');
     if (!expectedSubject || payload.sub !== expectedSubject) throw new DomainProblem(403,
       'WORKLOAD_CALLER_DENIED', 'Workload identity is not authorized for this caller');
   }

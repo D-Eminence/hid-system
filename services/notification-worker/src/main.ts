@@ -16,6 +16,7 @@ async function main(): Promise<void> {
     return;
   }
   const repository = new NotificationRepository(config);
+  await repository.verifyRuntimeRole();
   const orchestrator = new NovuOrchestrator(config);
   const worker = new NotificationWorker(config, repository, orchestrator);
   const status = new StatusServer(config, worker, repository, orchestrator);

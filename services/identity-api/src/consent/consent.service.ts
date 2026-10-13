@@ -233,8 +233,24 @@ export class ConsentService {
         return this.requireRow(result.rows[0]);
       });
     } catch (error) {
-      throw this.translate(error);
+      throw this.translateBreakGlass(error);
     }
+  }
+
+  /**
+   * identity.activate_break_glass (0031) refuses with 22023 and this message
+   * when no active 'emergency' purpose of use exists. The route always runs it
+   * with the emergency purpose, so here the refusal means emergency access is
+   * not enabled on the platform: 0082 seeds only direct-care, and 'emergency'
+   * is to be added only by a reviewed migration after the D9 and N3 decisions
+   * (P10). It is answered like the disabled platform control.
+   */
+  private translateBreakGlass(error: unknown): unknown {
+    if (isDatabaseError(error) && error.code === '22023'
+      && (error as unknown as { message?: unknown }).message === 'Break-glass requires the emergency purpose of use') {
+      return new DomainProblem(423, 'BREAK_GLASS_DISABLED', 'Emergency access is not enabled on this platform');
+    }
+    return this.translate(error);
   }
 
   /**

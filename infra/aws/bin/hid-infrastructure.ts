@@ -9,6 +9,12 @@ const configuration = environmentConfig(
   process.env.HID_INFRA_ENV,
   process.env.HID_STAGING_MODE,
   process.env.HID_QOREID_ENABLED,
+  process.env.HID_ENABLED_API_ROUTES,
+  {
+    qoreIdNinOnlyEnrollmentEnabled: process.env.HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED,
+    notificationWorkerEnabled: process.env.HID_NOTIFICATION_WORKER_ENABLED,
+    operationalAlarmTopicArn: process.env.HID_OPERATIONAL_ALARM_TOPIC_ARN,
+  },
 );
 const regionalEnvironment = externalAwsEnvironment(process.env.HID_AWS_ACCOUNT, process.env.HID_AWS_REGION);
 

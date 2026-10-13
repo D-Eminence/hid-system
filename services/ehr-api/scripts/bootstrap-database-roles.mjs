@@ -44,11 +44,17 @@ async function main() {
   try {
     await client.query("select pg_advisory_lock(hashtextextended('hid-runtime-role-bootstrap', 0))");
     if (!verifyOnly) {
-      // CREATE ROLE is cluster-level administration on some PostgreSQL/RDS
-      // versions and must not be wrapped in an application transaction block.
+      // client.query(grantSql) has no parameters, so it sends the whole file
+      // as one simple-query batch, which PostgreSQL runs as one implicit
+      // transaction. runtime-grants.sql relies on that: its temporary SET and
+      // INHERIT memberships in the technical owners and their schema CREATE
+      // grants never become visible to another session, and a failed run
+      // leaves none of them behind. Never split the file into separate
+      // statements or run it in autocommit (with psql, only `psql -1`).
       // The SQL is idempotent, the advisory lock serializes concurrent runs,
-      // and a failed run can be safely retried after the reported error is
-      // corrected.
+      // and a failed run rolls back completely and can be retried after the
+      // reported error is corrected. lock_timeout applies to each statement
+      // of this session only; locks taken are held until the batch commits.
       await client.query("set lock_timeout = '5s'");
       await client.query("set statement_timeout = '120s'");
       await client.query(grantSql);

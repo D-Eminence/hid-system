@@ -55,6 +55,10 @@ const schema = z.object({
   if (Boolean(env.AWS_ACCESS_KEY_ID) !== Boolean(env.AWS_SECRET_ACCESS_KEY)) {
     context.addIssue({ code: 'custom', path: ['AWS_ACCESS_KEY_ID'], message: 'AWS access key and secret must be provided together' });
   }
+  // CFG-PROD: production reaches S3 and Textract only with the ECS task role.
+  if (env.NODE_ENV === 'production' && (env.AWS_ACCESS_KEY_ID || env.AWS_SECRET_ACCESS_KEY)) {
+    context.addIssue({ code: 'custom', path: ['AWS_ACCESS_KEY_ID'], message: 'Static AWS credentials are forbidden in production; use the ECS task role' });
+  }
   if (env.NODE_ENV === 'production' && env.AWS_ENDPOINT_URL && new URL(env.AWS_ENDPOINT_URL).protocol !== 'https:') {
     context.addIssue({ code: 'custom', path: ['AWS_ENDPOINT_URL'], message: 'Production AWS endpoint must use HTTPS' });
   }

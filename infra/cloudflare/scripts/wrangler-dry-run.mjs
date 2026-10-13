@@ -4,6 +4,8 @@ import { accessSync, constants, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
+import { launchWorkers, readLaunchManifest, verifyLaunchDeployment } from './launch-deployment.mjs'
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const pinnedWranglerVersion = '4.149.0'
 const localWrangler = resolve(root, 'node_modules', '.bin', process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler')
@@ -16,18 +18,20 @@ function assertPinnedLocalWrangler() {
   assert.equal(installedManifest.version, pinnedWranglerVersion, 'installed Wrangler must match the audited package.json pin')
 }
 
-export function runWranglerDryRun(deployment, options = {}) {
+// Dry-runs exactly the Workers the launch manifest deploys in this environment
+// (ADR-052), after verifying their staged Health-id artefacts. Workers marked
+// not deployed are never built or dry-run here.
+export async function runWranglerDryRun(deployment, options = {}) {
   if (!['production', 'staging'].includes(deployment)) {
     throw new Error('Usage: node scripts/wrangler-dry-run.mjs <production|staging>')
   }
 
+  const verifyLaunch = options.verifyLaunch
+    ?? ((environment) => verifyLaunchDeployment({ cloudflareRoot: root, environment, requireStaged: true }))
+  await verifyLaunch(deployment)
   assertPinnedLocalWrangler()
   const spawn = options.spawn ?? spawnSync
-  const workers = [
-    'hid-web', 'hid-ehr', 'hid-lab', 'hid-pharmacy', 'hid-ocr', 'hid-outreach', 'hid-admin',
-    'hid-ocr-redirect',
-    ...(deployment === 'production' ? ['hid-apex-redirect'] : []),
-  ]
+  const workers = launchWorkers(await readLaunchManifest(root), deployment)
 
   for (const worker of workers) {
     const config = resolve(root, 'workers', worker, 'wrangler.json')
@@ -42,10 +46,10 @@ export function runWranglerDryRun(deployment, options = {}) {
     }
   }
 
-  process.stdout.write(`Wrangler ${deployment} dry-run passed for ${workers.length} Workers without deployment.\n`)
+  process.stdout.write(`Wrangler ${deployment} dry-run passed for the ${workers.length} launch Workers (${workers.join(', ')}) without deployment.\n`)
   return workers
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runWranglerDryRun(process.argv[2])
+  await runWranglerDryRun(process.argv[2])
 }

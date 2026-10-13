@@ -4,21 +4,36 @@ import { join } from 'node:path';
 
 const audienceFiles = { 'hid-identity-api': 'identity.jwt', 'hid-ehr-api': 'ehr.jwt', 'hid-lab-api': 'lab.jwt',
   'hid-pharmacy-api': 'pharmacy.jwt', 'hid-notification-api': 'notification.jwt' };
+// One allowlisted deployment environment names the issuer path and the subject
+// prefix together; the issuer binds the same value to the API stage.
+const stages = new Set(['staging', 'production']);
+// DEP-4-DOS: the agent keeps keys that verified a minted token, by kid, and
+// fetches the JWKS only at start, for an unknown kid and after a cached key
+// stops verifying, at most this often once a token has verified. A JWKS outage
+// or flood then does not stop renewal under a known kid.
+export const jwksRefetchIntervalMs = 30_000;
+// A failed renewal is retried after this long (main.mjs). The agent health
+// check (start period 30 s, interval 10 s, three retries) turns an agent
+// without ready.json UNHEALTHY about 60 s after start, and the application
+// starts only on HEALTHY; so until its first token verifies, the agent may
+// fetch the JWKS on every renewal retry, never faster.
+export const renewalRetryMs = 10_000;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const hmac = (key, value) => createHmac('sha256', key).update(value).digest();
 
 export function agentConfiguration(environment) {
-  if (environment.HID_DEPLOYMENT_ENV !== 'staging') throw new Error('Workload token agent is staging only');
+  const stage = environment.HID_DEPLOYMENT_ENV;
+  if (!stages.has(stage)) throw new Error('Workload token agent environment is not allowed');
   const region = environment.AWS_REGION;
   if (!/^[a-z]{2}-[a-z]+-\d$/.test(region ?? '')) throw new Error('Invalid agent AWS region');
   const issuer = new URL(environment.WORKLOAD_ISSUER_URL);
   if (issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.port || issuer.search || issuer.hash
-    || issuer.pathname !== '/staging' || !new RegExp(`^[a-z0-9]+\\.execute-api\\.${region}\\.amazonaws\\.com$`).test(issuer.hostname)) {
-    throw new Error('Invalid staging issuer URL');
+    || issuer.pathname !== `/${stage}` || !new RegExp(`^[a-z0-9]+\\.execute-api\\.${region}\\.amazonaws\\.com$`).test(issuer.hostname)) {
+    throw new Error('Invalid workload issuer URL');
   }
   if (environment.WORKLOAD_JWKS_URL !== `${issuer.href}/.well-known/jwks.json`) throw new Error('JWKS must belong to the configured issuer');
   const subject = environment.WORKLOAD_SUBJECT;
-  if (!/^hid:staging:[a-z-]+$/.test(subject ?? '')) throw new Error('Invalid workload subject');
+  if (!new RegExp(`^hid:${stage}:[a-z-]+$`).test(subject ?? '')) throw new Error('Invalid workload subject');
   const directory = environment.WORKLOAD_TOKEN_DIRECTORY ?? '/var/run/hid/workload-tokens';
   if (directory !== '/var/run/hid/workload-tokens') throw new Error('Token volume path must match the admitted image');
   const files = JSON.parse(environment.WORKLOAD_TOKEN_FILES_JSON ?? 'null');
@@ -33,7 +48,7 @@ export function agentConfiguration(environment) {
   }
   const credentialPath = environment.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;
   if (!/^\/v2\/credentials\/[A-Za-z0-9-]{1,100}$/.test(credentialPath ?? '')) throw new Error('ECS task credential source is unavailable');
-  return { region, issuer: issuer.href, jwks: environment.WORKLOAD_JWKS_URL, subject, directory, files,
+  return { stage, region, issuer: issuer.href, jwks: environment.WORKLOAD_JWKS_URL, subject, directory, files,
     credentialUrl: `http://169.254.170.2${credentialPath}` };
 }
 
@@ -53,11 +68,13 @@ export async function boundedJson(response, limit = 32768) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-// Narrow SigV4 implementation: POST to a fixed API Gateway /staging/token
+// Narrow SigV4 implementation: POST to the fixed API Gateway /<stage>/token
 // endpoint with no query, encoded path segments, redirects or arbitrary headers.
 export function signTokenRequest(configuration, credentials, audience, now = new Date()) {
   const endpoint = new URL(`${configuration.issuer}/token`);
-  if (endpoint.pathname !== '/staging/token' || endpoint.search || endpoint.hash) throw new Error('Invalid token endpoint');
+  if (!stages.has(configuration.stage) || endpoint.pathname !== `/${configuration.stage}/token` || endpoint.search || endpoint.hash) {
+    throw new Error('Invalid token endpoint');
+  }
   if (!/^ASIA[A-Z0-9]{16}$/.test(credentials.AccessKeyId ?? '')
     || typeof credentials.SecretAccessKey !== 'string' || credentials.SecretAccessKey.length < 32
     || typeof credentials.Token !== 'string' || credentials.Token.length < 16
@@ -88,6 +105,20 @@ function segment(value) {
   return buffer;
 }
 
+/** The public ES256 signing keys of a key set under one kid; a valid token needs exactly one. */
+const signingKeys = (jwks, kid) => jwks.keys.filter(key => key?.kid === kid && key.kty === 'EC' && key.crv === 'P-256'
+  && key.alg === 'ES256' && key.use === 'sig' && !key.d);
+
+/** The kid in a minted token's header, read before the key set is chosen; verifyMintedToken checks the rest. */
+export function mintedKeyId(response) {
+  if (!response || typeof response.token !== 'string' || response.token.length > 16_384) throw new Error('Invalid minted workload token');
+  const parts = response.token.split('.');
+  if (parts.length !== 3) throw new Error('Invalid workload JWT');
+  const header = JSON.parse(segment(parts[0]).toString());
+  if (typeof header?.kid !== 'string' || !header.kid || header.kid.length > 256) throw new Error('Invalid workload JWT');
+  return header.kid;
+}
+
 export function verifyMintedToken(response, jwks, configuration, audience, now = Date.now()) {
   if (!response || typeof response.token !== 'string' || response.token.length > 16_384
     || typeof response.expiresAt !== 'string' || !Array.isArray(jwks?.keys) || jwks.keys.length < 1 || jwks.keys.length > 3) {
@@ -105,8 +136,7 @@ export function verifyMintedToken(response, jwks, configuration, audience, now =
     || claims.nbf !== claims.iat || claims.iat * 1000 > now + 5_000 || claims.iat * 1000 < now - 60_000
     || claims.exp <= claims.iat || claims.exp - claims.iat > 300 || claims.exp * 1000 <= now + 30_000
     || claims.exp * 1000 !== Date.parse(response.expiresAt)) throw new Error('Workload JWT claims are invalid');
-  const keys = jwks.keys.filter(key => key.kid === header.kid && key.kty === 'EC' && key.crv === 'P-256'
-    && key.alg === 'ES256' && key.use === 'sig' && !key.d);
+  const keys = signingKeys(jwks, header.kid);
   if (keys.length !== 1 || segment(parts[2]).length !== 64) throw new Error('Invalid workload JWT key');
   const key = createPublicKey({ key: keys[0], format: 'jwk' });
   if (!verify('sha256', Buffer.from(`${parts[0]}.${parts[1]}`), { key, dsaEncoding: 'ieee-p1363' }, segment(parts[2]))) {
@@ -142,6 +172,10 @@ export class TokenAgent {
     this.fetch = dependencies.fetch ?? fetch;
     this.now = dependencies.now ?? Date.now;
     this.expirations = new Map();
+    this.verifiedKeys = new Map();
+    this.fetchedKeys = undefined;
+    this.lastJwksFetch = undefined;
+    this.tokenVerified = false;
   }
   async start() {
     await prepareDirectory(this.configuration.directory);
@@ -164,17 +198,51 @@ export class TokenAgent {
     }
     if (expired) await unlink(join(this.configuration.directory, 'ready.json')).catch(error => { if (error.code !== 'ENOENT') throw error; });
   }
+  async refreshKeys(request) {
+    const now = this.now();
+    const interval = this.tokenVerified ? jwksRefetchIntervalMs : renewalRetryMs;
+    if (this.lastJwksFetch !== undefined && now - this.lastJwksFetch < interval) {
+      throw new Error('Workload JWKS refresh is rate limited');
+    }
+    this.lastJwksFetch = now;
+    const jwks = await boundedJson(await request(this.configuration.jwks));
+    if (!Array.isArray(jwks?.keys) || jwks.keys.length < 1 || jwks.keys.length > 3) throw new Error('Invalid workload JWKS');
+    // Forget every key the issuer no longer publishes, or publishes differently.
+    for (const [kid, key] of this.verifiedKeys) {
+      if (!jwks.keys.some(candidate => candidate?.kid === kid && candidate.kty === key.kty && candidate.crv === key.crv
+        && candidate.x === key.x && candidate.y === key.y)) this.verifiedKeys.delete(kid);
+    }
+    this.fetchedKeys = jwks;
+  }
+  async keySetFor(kid, request) {
+    const verified = this.verifiedKeys.get(kid);
+    if (verified) return { keys: [verified] };
+    if (!this.fetchedKeys?.keys.some(key => key?.kid === kid)) await this.refreshKeys(request);
+    return this.fetchedKeys;
+  }
   async renew() {
     const request = (url, options = {}) => this.fetch(url, { redirect: 'error', ...options, signal: AbortSignal.timeout(5000) });
     const credentials = await boundedJson(await request(this.configuration.credentialUrl), 16384);
-    const jwks = await boundedJson(await request(this.configuration.jwks));
+    // At start there is no key to verify with; fetch before minting anything.
+    if (this.verifiedKeys.size === 0 && !this.fetchedKeys) await this.refreshKeys(request);
     // Validate every audience before updating files. Existing fresh files remain
     // usable on a transient issuer failure, only until their strict expiry.
     const next = [];
     for (const entry of this.configuration.files) {
       const signed = signTokenRequest(this.configuration, credentials, entry.audience, new Date(this.now()));
       const response = await boundedJson(await request(signed.url, signed));
-      next.push({ ...entry, ...verifyMintedToken(response, jwks, this.configuration, entry.audience, this.now()) });
+      const kid = mintedKeyId(response);
+      const jwks = await this.keySetFor(kid, request);
+      try {
+        next.push({ ...entry, ...verifyMintedToken(response, jwks, this.configuration, entry.audience, this.now()) });
+      } catch (error) {
+        // A key that no longer verifies the issuer's tokens is not trusted
+        // again: the next renewal fetches the JWKS (still at most every 30 s).
+        if (/JWT key|signature is invalid/.test(error.message)) { this.verifiedKeys.delete(kid); this.fetchedKeys = undefined; }
+        throw error;
+      }
+      if (!this.verifiedKeys.has(kid)) this.verifiedKeys.set(kid, signingKeys(jwks, kid)[0]);
+      this.tokenVerified = true;
     }
     for (const entry of next) {
       await atomicToken(this.configuration.directory, entry.file, entry.token);

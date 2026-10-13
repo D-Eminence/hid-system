@@ -5,6 +5,8 @@ import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
+import type { EncounterStatus } from './clinical.dto';
+import { type EncounterChange, lockEncounterStatus, refuseClosedEncounter } from './encounter-status';
 
 export type ClinicalAccess = 'read_records' | 'write_records';
 
@@ -191,6 +193,39 @@ export class ClinicalRepository {
     return this.exists(client, 'encounters', encounterId, patientId, facilityId);
   }
 
+  /**
+   * Share-locks the encounter, as ehr.require_open_encounter() does (0084),
+   * and returns its status. Call it before locking any record of the
+   * encounter. 404 when the writer cannot see or lock it.
+   */
+  async lockEncounterStatus(
+    client: PoolClient,
+    encounterId: string,
+    patientId: string,
+    facilityId: string,
+  ): Promise<EncounterStatus> {
+    const status = await lockEncounterStatus(client, encounterId, patientId, facilityId);
+    if (!status) throw new DomainProblem(404, 'ENCOUNTER_NOT_FOUND', 'Encounter was not found');
+    return status;
+  }
+
+  /**
+   * Share-locks the encounter and refuses a closed one before a record or
+   * order is added (409 ENCOUNTER_NOT_OPEN; CLIN-EIE). An idempotent replay
+   * returns its earlier result without this check.
+   */
+  async requireOpenEncounter(
+    client: PoolClient,
+    encounterId: string,
+    patientId: string,
+    facilityId: string,
+    change: EncounterChange,
+  ): Promise<EncounterStatus> {
+    const status = await this.lockEncounterStatus(client, encounterId, patientId, facilityId);
+    refuseClosedEncounter(status, change);
+    return status;
+  }
+
   private async record(
     client: PoolClient,
     context: DataAccessContext,
@@ -220,6 +255,19 @@ export class ClinicalRepository {
   private translate(error: unknown): unknown {
     if (error instanceof DomainProblem) return error;
     if (!isDatabaseError(error)) return error;
+    // The 0084 guards, behind the services' own checks.
+    if (error.code === '55000') {
+      const message = (error as { message?: unknown }).message;
+      if (message === 'ENCOUNTER_NOT_OPEN') {
+        return new DomainProblem(409, 'ENCOUNTER_NOT_OPEN', 'The encounter takes no further clinical records of this kind');
+      }
+      if (message === 'DIAGNOSIS_ENTERED_IN_ERROR') {
+        return new DomainProblem(409, 'DIAGNOSIS_NOT_AMENDABLE', 'A diagnosis entered in error cannot be changed');
+      }
+      if (message === 'VITAL_RECORD_IMMUTABLE') {
+        return new DomainProblem(409, 'VITAL_RECORD_IMMUTABLE', 'Recorded vitals are corrected only by a correction');
+      }
+    }
     switch (error.code) {
       case '42501':
         return new DomainProblem(403, 'ACCESS_DENIED', 'Clinical access was denied');

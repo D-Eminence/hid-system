@@ -1,10 +1,10 @@
 import { type BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
 import { createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
-import { isIP } from 'node:net';
 import type { QueryResultRow } from 'pg';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
 import * as argon2 from 'argon2';
 import { AFTER_RESPONSE_SHUTDOWN_GRACE_MS, AfterResponseTasks } from '../common/after-response-tasks';
+import { publicClientNetwork } from '../common/client-network';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
@@ -59,12 +59,12 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
     const registrationNumber = input.cacRegistrationNumber.replace(/\s+/g, '').toUpperCase();
     const email = input.administratorEmail.trim().toLowerCase();
+    // Derived before any database work: without a client network nothing is charged.
+    const networkDigest = this.networkDigest(remoteIp);
     let recipient: string | null;
     try {
       recipient = await this.database.withSystemTransaction(correlationId, async (client) => {
-        await client.query('select platform.consume_public_application_quota($1)', [
-          this.networkDigest(remoteIp),
-        ]);
+        await client.query('select platform.consume_public_application_quota($1)', [networkDigest]);
         const found = await client.query<{ recipient_email: string | null }>(
           'select identity.begin_organization_profile_completion($1,$2,$3,$4,$5) as recipient_email',
           [registrationNumber, email, input.productCode, challengeId,
@@ -198,11 +198,14 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
   }
 
   private networkDigest(remoteIp: string | undefined): string {
-    if (!remoteIp || isIP(remoteIp) === 0) {
+    // The client network (IPv4 address or IPv6 /64); in production never one
+    // of our own proxies, which every client would share (IP-1).
+    const network = publicClientNetwork(remoteIp, this.environment);
+    if (!network) {
       throw new DomainProblem(503, 'APPLICATION_RATE_LIMIT_UNAVAILABLE',
         'Organization profile completion is temporarily unavailable');
     }
-    return this.hmac('ip', remoteIp);
+    return this.hmac('ip', network);
   }
 
   private hmac(label: string, ...parts: string[]): string {

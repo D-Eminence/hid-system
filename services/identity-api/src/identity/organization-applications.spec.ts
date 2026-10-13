@@ -68,6 +68,27 @@ describe('organization onboarding boundary', () => {
       'Ada Admin', 'ada@example.invalid']);
   });
 
+  it('keys the public intake quota on the client network and, in production, refuses our own proxies (IP-1)', async () => {
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NODE_ENV: 'production',
+      OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64'), TRUST_PROXY_CIDRS: '10.40.0.0/16' } as environment.Environment);
+    const query = jest.fn().mockResolvedValue({ rows: [] });
+    const database = { withSystemTransaction: jest.fn(async (_correlation, work) => work(assured(query))) };
+    const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
+      {} as QoreIdVerificationAdapter, {} as IntegrationRuntimeService);
+    for (const ip of ['10.40.1.10', '::ffff:10.40.9.9']) {
+      await expect(service.submit(input, { ...request, ip } as unknown as HidRequest))
+        .rejects.toMatchObject({ status: 503, code: 'APPLICATION_RATE_LIMIT_UNAVAILABLE' });
+    }
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    const digests: unknown[] = [];
+    for (const ip of ['2001:db8:1:2::10', '2001:db8:1:2:abcd::99', '2001:db8:1:3::10']) {
+      await service.submit(input, { ...request, ip } as unknown as HidRequest);
+      digests.push(query.mock.calls.filter(([sql]) => String(sql).includes('consume_public_application_quota')).at(-1)?.[1]);
+    }
+    expect(digests[0]).toEqual(digests[1]);
+    expect(digests[2]).not.toEqual(digests[0]);
+  });
+
   it('returns 429 before public application persistence when a network bucket is exhausted', async () => {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NODE_ENV: 'test',
       OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64') } as environment.Environment);

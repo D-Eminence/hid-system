@@ -12,19 +12,25 @@ const localWrangler = resolve(
   process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler',
 )
 
-test('frontend dry-runs use only the pinned local Wrangler executable', () => {
+test('frontend dry-runs cover only the launch Workers and use only the pinned local Wrangler executable', async () => {
   for (const [deployment, expectedWorkers] of [
-    ['staging', ['hid-web', 'hid-ehr', 'hid-lab', 'hid-pharmacy', 'hid-ocr', 'hid-outreach', 'hid-admin', 'hid-ocr-redirect']],
-    ['production', ['hid-web', 'hid-ehr', 'hid-lab', 'hid-pharmacy', 'hid-ocr', 'hid-outreach', 'hid-admin', 'hid-ocr-redirect', 'hid-apex-redirect']],
+    ['staging', ['hid-web', 'hid-admin']],
+    ['production', ['hid-web', 'hid-admin', 'hid-apex-redirect']],
   ]) {
     const invocations = []
-    const workers = runWranglerDryRun(deployment, {
+    const verified = []
+    const workers = await runWranglerDryRun(deployment, {
+      async verifyLaunch(environment) {
+        verified.push(environment)
+        return { deploy: expectedWorkers }
+      },
       spawn(binary, args, options) {
         invocations.push({ binary, args, options })
         return { status: 0 }
       },
     })
 
+    assert.deepEqual(verified, [deployment], 'the staged launch artefacts are verified before Wrangler runs')
     assert.deepEqual(workers, expectedWorkers)
     assert.equal(invocations.length, expectedWorkers.length)
     for (const [index, invocation] of invocations.entries()) {
@@ -40,17 +46,27 @@ test('frontend dry-runs use only the pinned local Wrangler executable', () => {
       assert.equal(invocation.options.cwd, cloudflareRoot)
       assert.equal(invocation.options.stdio, 'inherit')
     }
+    for (const deferred of ['hid-ehr', 'hid-lab', 'hid-pharmacy', 'hid-ocr', 'hid-outreach', 'hid-ocr-redirect']) {
+      assert.ok(!workers.includes(deferred), `${deferred} is not deployed at launch`)
+    }
   }
 })
 
-test('frontend dry-run wrapper rejects unknown environments and failed Wrangler checks', () => {
-  assert.throws(() => runWranglerDryRun('development'), /Usage:/)
-  assert.throws(
-    () => runWranglerDryRun('staging', { spawn: () => ({ status: 1 }) }),
+test('frontend dry-run wrapper rejects unknown environments, unverified artefacts and failed Wrangler checks', async () => {
+  const verifyLaunch = async () => ({})
+  await assert.rejects(runWranglerDryRun('development', { verifyLaunch }), /Usage:/)
+  let spawned = false
+  await assert.rejects(runWranglerDryRun('staging', {
+    verifyLaunch: async () => { throw new Error('hid-web staging artefact is not staged') },
+    spawn: () => { spawned = true; return { status: 0 } },
+  }), /not staged/)
+  assert.equal(spawned, false, 'Wrangler must not run before the launch artefacts verify')
+  await assert.rejects(
+    runWranglerDryRun('staging', { verifyLaunch, spawn: () => ({ status: 1 }) }),
     /staging dry-run failed for hid-web/,
   )
-  assert.throws(
-    () => runWranglerDryRun('production', { spawn: () => ({ status: null, error: new Error('unavailable') }) }),
+  await assert.rejects(
+    runWranglerDryRun('production', { verifyLaunch, spawn: () => ({ status: null, error: new Error('unavailable') }) }),
     /Could not run pinned local Wrangler for hid-web: unavailable/,
   )
 })

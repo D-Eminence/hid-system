@@ -163,14 +163,17 @@ export class ClinicalNotesService {
         digest,
         'clinical-note',
         async () => {
+          await this.repository.requireOpenEncounter(client, encounterId, patientId, context.facilityId, 'record');
           const signed = input.status === NoteStatus.Signed;
+          // $4 is both the creator and, for a note created signed, the signer: without the cast PostgreSQL
+          // deduces text for it inside the CASE and uuid for created_by, and refuses the statement (42P08).
           const result = await client.query<ClinicalNoteRow>(
             `insert into ehr.clinical_notes (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
                note_type, title, status, signed_at, signed_by
              ) values ($1, $2, $3, $4, $5, $6, $7, $8,
                case when $9 then clock_timestamp() else null end,
-               case when $9 then $4 else null end)
+               case when $9 then $4::uuid else null end)
              returning ${NOTE_COLUMNS}`,
             [
               encounterId,
@@ -217,6 +220,7 @@ export class ClinicalNotesService {
       (client) => this.repository.executeCreate(
         client, context, patientId, idempotencyKey, operation, digest, 'clinical-note',
         async () => {
+          await this.repository.requireOpenEncounter(client, input.encounterId, patientId, context.facilityId, 'record');
           const result = await client.query<ClinicalNoteRow>(
             `insert into ehr.clinical_notes (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
