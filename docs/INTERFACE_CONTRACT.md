@@ -269,7 +269,12 @@ approval with a grant, whichever ended it first, `active`, `expired` (also when
 it was revoked only after it lapsed), `closed` (by the requesting clinician) or
 `revoked` (by anyone else); otherwise the request `status` (0074). The `status`
 filter accepts `pending`, `approved`, `denied`, `revoked`, `expired`, `active`
-and `closed`, and matches the request status or the effective status. Until the role bootstrap of this
+and `closed`, and matches the request status or the effective status. Since
+0086 (PSEARCH-1) an item's `patientId` is the patient's id only while its
+`effectiveStatus` is `active`, and `null` for every other item (pending,
+denied, expired, closed, revoked); before, every item named its patient, so
+one request for a guessed HID and one list call disclosed the patient id
+before the patient answered. Until the role bootstrap of this
 fix, the Identity runtime could not execute `identity.list_my_staff_access_requests`,
 and every caller got `403 CONSENT_COMMAND_DENIED`.
 
@@ -279,7 +284,7 @@ grants access by itself, and its answers do not tell whether an HID exists:
 | Route | Contract |
 |---|---|
 | `POST /api/v1/identity/patient-lookup` | `identity.patient.read` at the `X-Facility-ID` facility; body `{ hid, purpose }` (`direct-care`, `emergency` or `healthcare-operations`; anything else `400`). `200 { patient: { patientId, hid, firstName, lastName, fullName, dateOfBirth, gender, version }, authorization: { decision: 'allow', facilityId, membershipId, scope, purpose, consentGrantId, expiresAt, breakGlass } }` only with an active grant for this account, membership, facility and purpose (before 0086 a success answered `201`). Every refusal, whether the HID is unknown, the patient has no grant, or the grant is held at another facility or for another purpose, is the same `404 PATIENT_NOT_AVAILABLE` ("The patient is not available"); before 0086 a patient visible to the caller without a grant (any patient, for a registration member) answered `403`, and an unknown or hidden one `404`. The audit event `identity.patient.lookup` keeps the true outcome: `success`, or `denied` with `details.reason` `not_found` or `not_authorized` and, for the latter, the patient |
-| `POST /api/v1/identity/access-requests` | `identity.consent.write` at the `X-Facility-ID` facility, `X-Purpose-Of-Use` `direct-care` or `healthcare-operations`; body `{ hid, scope: read_records\|write_records, reason (8–500), durationMinutes (5–1440) }`. `201 { accessRequestId, status: 'pending', scope, purpose, durationMinutes, requestedAt, existingRequest }`, which no longer carries `patientId`. An unknown HID gets the same `201` shape (a new `accessRequestId`, `existingRequest: false`) instead of `404 CONSENT_RESOURCE_NOT_FOUND`; nothing is persisted for it, and the audit records `identity.access-request.refused` (`denied`, no patient, `details.reason: patient_not_available`) under that `accessRequestId`. The clinician's own list (above) shows only recorded requests |
+| `POST /api/v1/identity/access-requests` | `identity.consent.write` at the `X-Facility-ID` facility, `X-Purpose-Of-Use` `direct-care` or `healthcare-operations`; body `{ hid, scope: read_records\|write_records, reason (8–500), durationMinutes (5–1440) }`. `201 { accessRequestId, status: 'pending', scope, purpose, durationMinutes, requestedAt, existingRequest }`, which no longer carries `patientId`. An unknown HID gets the same `201` shape (a new `accessRequestId`, `existingRequest: false`) instead of `404 CONSENT_RESOURCE_NOT_FOUND`; nothing is persisted for it, and the audit records `identity.access-request.refused` (`denied`, no patient, `details.reason: patient_not_available`) under that `accessRequestId`. The clinician's own list (above) shows only recorded requests, and names the patient only once a grant made from the request is active |
 
 Both commands are counted in `auth.otp_rate_limits` before they run, whatever
 their outcome, per actor account (across facilities) and per facility.
@@ -326,11 +331,16 @@ Deactivating a contact, verifying one already added and removing the PIN
 
 Recovery completion atomically consumes the account/token-bound OTP credential,
 sets an Argon2 password and revokes every session of the account (patient,
-staff and platform). Since 0086 it also revokes every external identity (Google
-link) of the account not already revoked, so a link another party made stops
-signing in; the audit event `auth.otp.recovery.completed` records how many
-(`details.external_identities_revoked`). Disabled, stale, expired and replayed
-credentials fail closed. Completion returns to login rather than opening a session.
+staff and platform). Since 0086 it also revokes every external sign-in identity
+(today only Google links) of the account not already revoked, so a link another
+party made stops signing in; the audit event `auth.otp.recovery.completed`
+records how many (`details.external_identities_revoked`). The legacy importer's
+provenance record (issuer `legacy-identity`) is not a sign-in: it is kept and
+not counted. The revoked Google subject cannot be linked again (the link
+commands answer `GOOGLE_IDENTITY_ALREADY_LINKED` for any subject ever linked),
+so after a recovery the owner can link only a different Google account.
+Disabled, stale, expired and replayed credentials fail closed. Completion
+returns to login rather than opening a session.
 The owner notice of a completed recovery ("your password was changed", to every
 verified contact, with an inbox entry) is not sent yet: Identity offers each
 completion, after commit, to a bound `ACCOUNT_RECOVERY_NOTICE_SINK`, which the

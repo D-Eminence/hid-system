@@ -142,18 +142,22 @@ proposal; that change is the place to alter it.
   (b) A patient's code goes to the account email only once it is verified,
   else to the verified phone of the account's active public enrollment, else
   nowhere. Staff and administrator codes go to the provisioned work email.
-  (c) A completed recovery revokes every Google link of the account, and the
-  owner links Google again after signing in.
+  (c) A completed recovery revokes every external sign-in identity of the
+  account (today Google links); the legacy importer's provenance record is not
+  a sign-in and is kept. The revoked row stays, and the Google link commands
+  (0059) refuse any subject that was ever linked, so the owner cannot link the
+  same Google account again, only a different one.
   (d) Both: five failures within 15 minutes lock the identifier and, shared
   by its email and HID, the account, for 15 minutes; while the account is
   locked the correct password is refused too, with the same `401`.
   (e) Every refused lookup is one `404 PATIENT_NOT_AVAILABLE`; an access
   request for an unknown HID is answered like a recorded one; neither answer
-  names a patient id. Budgets per actor and per facility: 60 and 600 lookups
-  per 5 minutes, 20 and 200 access requests per 15 minutes (environment
-  values). A registration member reads only patients linked to a case or
-  candidate at its facility; duplicate checks go through two functions that
-  return minimum fields.
+  names a patient id, and the clinician's own request list names the patient
+  only while a grant made from the request is active. Budgets per actor and
+  per facility: 60 and 600 lookups per 5 minutes, 20 and 200 access requests
+  per 15 minutes (environment values). A registration member reads only
+  patients linked to a case or candidate at its facility; duplicate checks go
+  through two functions that return minimum fields.
   (f) Approving an access request needs a sign-in within 10 minutes, as the
   access PIN does. For 24 hours after any OTP recovery of the account,
   approvals, access-PIN set and emergency-contact add or update are refused
@@ -165,18 +169,27 @@ proposal; that change is the place to alter it.
   (b) Imported legacy patients whose source never confirmed their email and
   who have no verified enrollment phone can no longer activate by code; the
   release checklist §10 counts them. They need an approved route (for
-  example assisted verification) before launch.
-  (c) Patients who sign in with Google must link it again after every
-  recovery.
+  example assisted verification) before launch. Facility-assisted (governed)
+  enrollment, `POST /identity/registration-cases/:caseId/enroll`
+  (`identity.enroll_registered_patient`, 0032), creates a `pending_reset`
+  account whose email is not verified and that has no public enrollment
+  phone, so its owner can never receive an activation or recovery code. It
+  is off at launch (D17); enabling it needs an email verification step
+  before activation.
+  (c) After a recovery the patient cannot link the same Google account
+  again, only a different one, until a later change lets the owner re-link a
+  subject that the owner's own recovery revoked. Google sign-in is off at
+  launch (D17).
   (d) Anyone who knows a patient's email or HID can keep the account locked,
   15 minutes at a time, as they already could per identifier; there is no
   per-IP budget because the edge discards client IPs (D6).
   (e) A busy facility can reach its facility budget; the values are
   environment settings. A clinician can still tell a known HID from their
-  own request list and from a repeated request (the pending request comes
-  back), bounded by the budgets and audited. The candidate search still reads
-  names and dates of birth across facilities for verified registry
-  demographics, as registration did before.
+  own request list (a recorded request appears there, without the patient
+  id, and an unknown HID's does not) and from a repeated request (the
+  pending request comes back), bounded by the budgets and audited. The
+  candidate search still reads names and dates of birth across facilities
+  for verified registry demographics, as registration did before.
   (f) A patient who has just recovered cannot approve access for 24 hours;
   clinicians use the access PIN the patient already set, or break-glass
   (when enabled).
@@ -185,7 +198,10 @@ proposal; that change is the place to alter it.
   offers each completed recovery to `ACCOUNT_RECOVERY_NOTICE_SINK` after
   commit; the notification route change binds a sink and sends the notice.
   Health-id copy and error handling for the new answers (release checklist
-  §3).
+  §3). Before Google sign-in is enabled: a way to re-link a Google subject
+  revoked by the owner's own recovery (risk (c)). Before facility-assisted
+  enrollment is enabled: verifying the enrollment email before activation
+  (risk (b)).
 
 ## 2. Other open decisions
 

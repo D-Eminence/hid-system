@@ -2288,13 +2288,22 @@ launch blockers REC-GOOGLE, REC-AUDIENCE, REC-NOTIFY and PSEARCH-1 (change
 **Recovery.** `auth.complete_recovery_otp` (0029) is replaced with `CREATE OR
 REPLACE`, so it keeps its owner and ACL; its signature, result, `SECURITY
 DEFINER` and `search_path` are restated as in 0029. After it revokes the
-account's sessions it now sets every `auth.external_identities` row of the
-account whose status is not `revoked` (active or disabled) to `revoked`, with
+account's sessions it now sets every external sign-in identity of the account
+(`auth.external_identities` rows whose issuer is not `legacy-identity` and
+whose status is not `revoked`, active or disabled) to `revoked`, with
 `revoked_at` kept if already set, and its `auth.otp.recovery.completed` audit
-event adds `details.external_identities_revoked`, the count. Before, a Google
+event adds `details.external_identities_revoked`, the count. Today the only
+sign-in issuer is Google (`https://accounts.google.com`). The legacy
+importer's provenance record (issuer `legacy-identity`,
+`promote-legacy-identity.mjs`) is not a sign-in: it is kept and not counted,
+so legacy reconciliation still matches it after a recovery. Before, a Google
 link made by whoever once held the password survived the owner's reset, and
 Google sign-in issues a session at the current token version. An audit failure
-rolls the revocation back with the rest of the completion.
+rolls the revocation back with the rest of the completion. The revoked row
+stays, and the Google link commands (0059) refuse any subject that was ever
+linked (`GOOGLE_IDENTITY_ALREADY_LINKED`), so the owner cannot link the same
+Google account again after a recovery, only a different one; re-linking needs
+a later change before Google sign-in is enabled.
 
 `auth.recovery_account_audience(account_id uuid, audience text) returns
 boolean` (stable, `SECURITY DEFINER`, pinned `search_path`) tells Identity's
@@ -2316,8 +2325,9 @@ Identity applies after any consumed recovery challenge of the account (access
 PIN set, emergency-contact add and update, new access approvals; `403
 PATIENT_RECENT_RECOVERY_HOLD`). The hold reads the table and writes nothing.
 The index is built inside the migration transaction under a `SHARE` lock on
-`auth.otp_challenges`, which blocks recovery starts and verifications while it
-builds; the table holds one row per recovery challenge.
+`auth.otp_challenges`, held to commit, which blocks recovery starts,
+verifications and completions; the table holds one row per recovery
+challenge.
 
 **Staff search budgets.** `otp_rate_limits_scope_check` is dropped and re-added
 with four more scopes: `patient_lookup_actor`, `patient_lookup_facility`,
@@ -2330,11 +2340,15 @@ check validates the existing rows under an `ACCESS EXCLUSIVE` lock on
 **Registration reads (PSEARCH-1, ENUM-1, DB-RLS-PATIENTS).** Before 0086 the
 policy `patients_registration_read` (0011) admitted a membership holding
 `identity.registration.write` or `identity.registration.approve` at its
-current facility to every `identity.patients` row, of every facility. `ALTER
-POLICY` (name, table, command and role unchanged) keeps the permission check
-and adds that the row is the resolved patient of a registration case at the
-current facility, a duplicate candidate a case at the current facility lists,
-or the patient an approve-new review is creating in its transaction
+current facility to every `identity.patients` row, of every facility. 0086
+drops the policy and creates it again in the same transaction, with the same
+name, table, command (`SELECT`) and role (`PUBLIC`), so no other session sees
+it absent. (`ALTER POLICY` would do the same, but the static privilege replay
+`scripts/verify-runtime-locking-privileges.mjs` does not follow that form.)
+The new expression keeps the permission check and adds that the row is the
+resolved patient of a registration case at the current facility, a duplicate
+candidate a case at the current facility lists, or the patient an approve-new
+review is creating in its transaction
 (`source_system` `hid-nin-registration`, no account, and a
 `pending_new_identity_approval` case at the facility with the same
 demographics and no resolved patient yet). The other `identity.patients`
@@ -2369,6 +2383,37 @@ resource id the returned request id, details scope, duration and `reason`
 check and result is as in 0010. Identity no longer returns the patient id of a
 created request.
 
+`identity.list_my_staff_access_requests` (0074) is replaced with `CREATE OR
+REPLACE` (argument, result, caller checks, filter, order and limit restated
+as in 0074; owner and ACL kept). Its `patient_id` is now the request's
+patient only while the grant made from the request is active
+(`effective_status` `active`), and NULL for every other request: pending,
+denied, expired, closed and revoked. Before, one request for a guessed HID
+and one list call gave the clinician the patient id of any active patient
+before the patient answered. Identity's projection of the list applies the
+same rule.
+
+**Locks.** In the order taken, each held to commit: `ACCESS EXCLUSIVE` on
+`identity.patients` (the policy), which holds back every HID sign-in,
+recovery start, registration read, patient lookup and access request until
+commit; `ACCESS EXCLUSIVE` on `auth.otp_rate_limits` (the check); `SHARE` on
+`auth.otp_challenges` (the index). The policy also takes `ACCESS SHARE` on
+`identity.registration_cases` and `identity.registration_case_candidates`.
+The other statements change functions only. An OTP start of the Identity
+build serving during the migration reads `identity.patients`, then writes
+`auth.otp_rate_limits` and `auth.otp_challenges`, the same order, so it and
+the migration wait for each other without a cycle. With the index first (the
+first version of this change) such a start deadlocked with the migration and
+PostgreSQL cancelled the start; reproduced locally. An OTP completion writes
+`auth.otp_challenges` and then reads `identity.patients` inside
+`auth.complete_recovery_otp`, the opposite order, so a completion caught
+between those two statements can still deadlock with the migration
+(reproduced locally with a pause inserted between them). PostgreSQL then
+cancels one of the two (`40P01`): that completion fails and the owner submits
+it again while the verification is valid, or the migration rolls back whole
+and `migrate` is run again. The runner's 5 s `lock_timeout` bounds every wait
+(`55P03` also rolls it back whole).
+
 The four new functions are revoked from `PUBLIC`; the role bootstrap
 (`runtime-grants.sql`) grants `EXECUTE` on them to `hid_identity_runtime` and
 `hid_schema_test_runtime` only. Run `db:bootstrap` and `db:verify-roles`
@@ -2379,8 +2424,8 @@ reads miss every patient not linked to a case at the facility, so the two must
 be deployed together.
 
 Rollback: the migration is forward-only. Restoring the old behaviour means a
-later migration restoring the 0011 policy expression, the 0029 and 0010
-function bodies and the old scope check (after deleting rows of the four new
+later migration restoring the 0011 policy expression, the 0029, 0010 and
+0074 function bodies and the old scope check (after deleting rows of the four new
 scopes); the index and the new functions may stay. Do not restore the policy
 without also returning to the previous Identity build.
 
@@ -2403,24 +2448,34 @@ Tests:
   fixture patients).
 - `otp-recovery.integration.sql` adds: completion revokes the account's
   active and disabled Google links, and
-  `auth.resolve_google_identity` finds nothing for it afterwards; the audit
+  `auth.resolve_google_identity` finds nothing for it afterwards; the
+  account's `legacy-identity` provenance record stays active; the audit
   event counts `2` (and `0` for an account without links); an audit failure
   rolls the revocation back; a staff reset ends staff and platform sessions;
   the audience matrix for patient, staff, platform,
   dual, inactive-staff and revoked-role accounts, `22023` and `42501`.
   Without 0086 it fails with "Recovery left an external identity (Google
-  link) of the account usable".
+  link) of the account usable"; with the first version of 0086, which
+  revoked every external identity, with "Recovery revoked the legacy
+  importer provenance record, which is not a sign-in".
+- `staff-access-request-outcome.integration.sql` adds: the list names the
+  patient for the two requests with an active grant and for no other
+  (pending, denied, expired, revoked, closed). Without the 0086 list change
+  it fails with "the list must name the patient of an active grant only".
 - `runtime-roles.integration.sql` requires `EXECUTE` on the four functions
   for the Identity and schema-test runtimes and for no other runtime or
   `PUBLIC`.
 - Runtime verifiers (`hid_identity_api_runtime`, real HTTP):
-  `verify-otp-recovery-runtime.mjs` (Google link revoked by recovery,
+  `verify-otp-recovery-runtime.mjs` (Google link revoked by recovery and
+  legacy provenance record kept,
   audience mismatch answered alike with no code, staff reset ends staff and
   platform sessions, unverified patient email gets no code until verified),
   `verify-patient-enrollment-runtime.mjs` (staff and administrator pages send
   a patient no code; five wrong passwords across the email and the HID lock
   the account), `verify-patient-safety-runtime.mjs` (recent sign-in and the
-  recovery hold on approval, PIN and emergency contacts),
+  recovery hold on approval, PIN and emergency contacts; the staff list
+  names the patient of the active approval only, not of the pending or the
+  revoked one),
   `verify-patient-search-runtime.mjs` (new: lookup `200`, three identical
   `404`s, `400`, audit reasons, uniform access-request answer, `429`s) and
   `verify-registration-review-runtime.mjs` (registration review, unchanged,

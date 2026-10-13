@@ -82,7 +82,8 @@ The executable covers:
    whichever application signs out; a sign-out during a timed account
    suspension; and two concurrent sign-outs with one cookie, recorded once.
    With 0086 (`BRANCH:launch/identity-recovery-search`): `otp_runtime` also
-   requires a completed recovery to revoke the account's Google link, a start
+   requires a completed recovery to revoke the account's Google link and keep
+   its `legacy-identity` provenance record, a start
    from another account kind's page and a patient start with only an
    unverified email to send no code, and a staff reset to end the account's
    staff and platform sessions; `patient_enrollment_runtime` requires the
@@ -92,7 +93,9 @@ The executable covers:
    `patient_safety_runtime` requires a recent sign-in for an access approval
    and refuses an approval, an access-PIN set and a new emergency contact for
    24 hours after an OTP recovery (`403 PATIENT_RECENT_RECOVERY_HOLD`), while a
-   denial and a PIN removal succeed; `registration_review_runtime` runs
+   denial and a PIN removal succeed, and requires the clinician's request list
+   to name the patient of the active approval only, not of a pending or
+   revoked one; `registration_review_runtime` runs
    unchanged against the narrowed `patients_registration_read` policy; and
    `patient_search_runtime` (`verify-patient-search-runtime.mjs`, new) requires
    a lookup with a grant to answer `200`, an unknown HID, a patient without a
