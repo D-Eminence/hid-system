@@ -267,8 +267,9 @@ in an owned mode-0700 task volume. Each application mounts that volume
 read-only and starts only once the agent's health check passes (`HEALTHY`).
 Agents renew about every 90 seconds, retry failures after 10 seconds, and
 remove expiring files. An agent keeps the keys that verified its tokens by
-`kid` and fetches the JWKS only at start and for an unknown `kid`, at most once
-every 30 seconds, so a JWKS outage or flood does not stop renewal. The agent
+`kid` and fetches the JWKS only at start, for an unknown `kid` and after a
+cached key stops verifying, at most once every 30 seconds, so a JWKS outage or
+flood does not stop renewal. The agent
 is not essential and has an ECS container restart policy (D2): its health
 check keeps running, but an unhealthy agent no longer stops the task. During an
 issuer outage longer than a token's lifetime, the task's service-to-service
