@@ -273,6 +273,12 @@ try {
       { role_code:'doctor', permission_code:'identity.patient-access-pin.verify' },
       { role_code:'nurse', permission_code:'identity.patient-access-pin.verify' },
     ]);
+    // 0084 (launch module set) withdraws the EHR lab-ordering, Lab and
+    // Pharmacy write permissions the baseline roles held from every role.
+    assert.deepEqual((await client.query(`select role_code, permission_code from auth.role_permissions
+      where permission_code = any($1::text[])`, [['ehr.lab-request.write', 'lab.work-item.accept',
+      'lab.accession.create', 'pharmacy.work-item.accept', 'pharmacy.dispensing.create']])).rows, [],
+    'Upgrade must leave no role holding a launch-withdrawn write permission');
     // The 0028 baseline holds no purpose-of-use code; 0082 seeds only
     // direct-care (emergency and healthcare-operations await product decisions).
     assert.deepEqual((await client.query(`select code, display, active, source_system
@@ -291,7 +297,8 @@ try {
     } finally { await client.query('rollback'); }
   });
   const upgradeAfter = await snapshot('hid_upgrade');
-  // identity.purpose_of_use_codes gains 0082's seed, checked exactly above.
+  // identity.purpose_of_use_codes gains 0082's seed, and auth.role_permissions
+  // loses 0084's launch-withdrawn write permissions, both checked above.
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
     'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes',
@@ -308,7 +315,7 @@ try {
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
-    purpose_of_use_seeded:['direct-care'],
+    purpose_of_use_seeded:['direct-care'],launch_write_permissions_withdrawn:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);
