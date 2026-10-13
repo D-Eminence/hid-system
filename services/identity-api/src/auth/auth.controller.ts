@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { Body, Controller, Get, HttpCode, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, MethodNotAllowedException, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuditService } from '../audit/audit.service';
 import { AuditFailuresOnly, AuditSessionEvent, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
@@ -12,9 +12,11 @@ import { AuthSessionAuditService } from './auth-session-audit.service';
 import { GoogleLinkDto, GoogleLoginDto } from './dto/google-login.dto';
 import { LoginDto } from './dto/login.dto';
 import { PatientLoginDto } from './dto/patient-login.dto';
+import { PlatformMfaVerifyDto, StaffMfaEnrollmentStartDto, TotpCodeDto } from './dto/platform-auth.dto';
 import { SelectFacilityDto } from './dto/select-facility.dto';
 import { GoogleAuthenticationService } from './google-authentication.service';
 import type { LoginResult } from './auth.types';
+import { MfaService } from './mfa/mfa.service';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
@@ -34,8 +36,17 @@ export class AuthController {
     private readonly workloadAuth: WorkloadAuthService,
     private readonly turnstile: TurnstileService,
     private readonly google: GoogleAuthenticationService,
+    private readonly mfa: MfaService,
   ) {}
 
+  /**
+   * Password step of staff sign-in (MFA-1, 0088). As platform sign-in does, a
+   * password alone never yields a session: a valid password of an account
+   * with an eligible staff membership yields only an httpOnly challenge cookie
+   * that the /auth/mfa steps accept, and the session is issued after a TOTP
+   * code or a recovery code (or, on the first sign-in, after enrolment). No
+   * session cookie is set or changed here.
+   */
   @Post('login')
   @Public()
   @HttpCode(200)
@@ -47,7 +58,80 @@ export class AuthController {
     if (input.turnstileAction === 'patient-login') {
       throw new DomainProblem(400, 'INVALID_LOGIN_ACTION', 'A workforce login action is required');
     }
-    return this.performLogin(input, request, response, 'staff');
+    this.assertAllowedOrigin(request);
+    await this.turnstile.verifyLogin({
+      token: input.turnstileToken,
+      action: input.turnstileAction,
+      origin: request.header('origin'),
+      remoteIp: request.ip,
+    });
+    if (this.environment.AUTH_MODE === 'oidc') {
+      throw new MethodNotAllowedException('Password login is disabled; use the configured OIDC authorization flow');
+    }
+    try {
+      const challenge = await this.mfa.beginLogin(input.email, input.password, this.event(request), 'staff');
+      this.setStaffChallengeCookie(response, challenge.token, challenge.expiresAt);
+      response.setHeader('Cache-Control', 'no-store');
+      return {
+        status: challenge.purpose === 'verify' ? 'mfa_required' as const : 'mfa_enrollment_required' as const,
+        expiresAt: challenge.expiresAt.toISOString(),
+      };
+    } catch (error) {
+      await this.recordLoginFailure(error, input.email, request);
+      throw error;
+    }
+  }
+
+  /** Second step of staff sign-in: an authenticator code or one unused recovery code. */
+  @Post('mfa/verify')
+  @Public()
+  @HttpCode(200)
+  async verifyStaffMfa(@Body() input: PlatformMfaVerifyDto, @Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response) {
+    this.assertAllowedOrigin(request);
+    const result = await this.mfa.completeLogin(this.staffChallengeToken(request), input, this.event(request), 'staff');
+    this.clearStaffChallengeCookie(response);
+    return this.staffSessionResponse(response, result);
+  }
+
+  /**
+   * First staff sign-in without an authenticator: sends the fresh proof of the
+   * enrolment, a six-digit code to the account's email address.
+   */
+  @Post('mfa/enroll/email-code')
+  @Public()
+  @HttpCode(200)
+  async sendStaffEnrollmentCode(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
+    this.assertAllowedOrigin(request);
+    const sent = await this.mfa.sendEnrollmentCode(this.staffChallengeToken(request), this.event(request));
+    response.setHeader('Cache-Control', 'no-store');
+    return { ...sent, expiresAt: sent.expiresAt.toISOString() };
+  }
+
+  /** Verifies the enrolment proof and returns the new TOTP secret, once. */
+  @Post('mfa/enroll/start')
+  @Public()
+  @HttpCode(200)
+  async startStaffEnrollment(@Body() input: StaffMfaEnrollmentStartDto, @Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response) {
+    this.assertAllowedOrigin(request);
+    const enrollment = await this.mfa.startEnrollment(this.staffChallengeToken(request), this.event(request), 'staff',
+      { emailCode: input.emailCode });
+    response.setHeader('Cache-Control', 'no-store');
+    return { ...enrollment, expiresAt: enrollment.expiresAt.toISOString() };
+  }
+
+  /** Confirms the authenticator with its first code, issues recovery codes (once) and the staff session. */
+  @Post('mfa/enroll/activate')
+  @Public()
+  @HttpCode(200)
+  async activateStaffEnrollment(@Body() input: TotpCodeDto, @Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response) {
+    this.assertAllowedOrigin(request);
+    const { session, recoveryCodes } = await this.mfa.activateEnrollment(this.staffChallengeToken(request), input.code,
+      this.event(request), 'staff');
+    this.clearStaffChallengeCookie(response);
+    return { ...this.staffSessionResponse(response, session), recoveryCodes };
   }
 
   @Post('patient/login')
@@ -98,6 +182,12 @@ export class AuthController {
         'Sign out before starting a new Health ID enrollment');
     }
     try {
+      // Only patient sign-in uses Google (MFA-1). A staff session needs a
+      // password and an authenticator code, which a Google ID token is not.
+      if (input.turnstileAction !== 'patient-login') {
+        throw new DomainProblem(403, 'GOOGLE_STAFF_SIGN_IN_DISABLED',
+          'Staff sign-in needs your password and authenticator code; Google sign-in is for patients only');
+      }
       await this.turnstile.verifyLogin({
         token: input.turnstileToken,
         action: input.turnstileAction,
@@ -108,11 +198,10 @@ export class AuthController {
       if (!nonce) {
         throw new DomainProblem(401, 'GOOGLE_SIGN_IN_DENIED', 'Google sign-in could not be completed for this HID account');
       }
-      const actorKind = input.turnstileAction === 'patient-login' ? 'patient' : 'staff';
       const exchanged = input.intent === 'enroll'
-        ? await this.google.exchange(input.idToken, nonce, actorKind, 'enroll', this.event(request))
+        ? await this.google.exchange(input.idToken, nonce, 'patient', 'enroll', this.event(request))
         : { kind: 'session' as const,
-          session: await this.google.login(input.idToken, nonce, actorKind, this.event(request)) };
+          session: await this.google.login(input.idToken, nonce, 'patient', this.event(request)) };
       if (exchanged.kind === 'pending') {
         response.cookie(this.google.onboardingCookieName, exchanged.cookie, {
           secure: this.environment.AUTH_COOKIE_SECURE,
@@ -182,7 +271,8 @@ export class AuthController {
     }
   }
 
-  private async performLogin(input: LoginDto | PatientLoginDto, request: HidRequest, response: Response, kind: 'staff' | 'patient') {
+  /** Patient password sign-in. Staff sign-in is two-step (login, then the /auth/mfa steps). */
+  private async performLogin(input: PatientLoginDto, request: HidRequest, response: Response, kind: 'patient') {
     this.assertAllowedOrigin(request);
     await this.turnstile.verifyLogin({
       token: input.turnstileToken,
@@ -197,19 +287,51 @@ export class AuthController {
       response.setHeader('x-csrf-token', result.csrfToken);
       return this.sessionResponse(result.actor, result.expiresAt);
     } catch (error) {
-      if (error instanceof UnauthorizedException) {
-        await this.sessionAudit.recordLoginFailure(input.email, this.event(request));
-      } else {
-        await this.sessionAudit.record({
-          correlationId: request.correlationId,
-          eventType: 'login_failed',
-          outcome: 'failure',
-          sourceIp: request.ip,
-          userAgent: request.header('user-agent'),
-        });
-      }
+      await this.recordLoginFailure(error, input.email, request);
       throw error;
     }
+  }
+
+  private async recordLoginFailure(error: unknown, principal: string, request: HidRequest): Promise<void> {
+    if (error instanceof UnauthorizedException) {
+      await this.sessionAudit.recordLoginFailure(principal, this.event(request));
+    } else {
+      await this.sessionAudit.record({
+        correlationId: request.correlationId,
+        eventType: 'login_failed',
+        outcome: 'failure',
+        sourceIp: request.ip,
+        userAgent: request.header('user-agent'),
+      });
+    }
+  }
+
+  /** A staff session issued after its second factor: the session cookies, as a sign-in always set them. */
+  private staffSessionResponse(response: Response, result: LoginResult) {
+    this.setCookies(response, result);
+    response.setHeader('x-csrf-token', result.csrfToken);
+    response.setHeader('Cache-Control', 'no-store');
+    return this.sessionResponse(result.actor, result.expiresAt);
+  }
+
+  private staffChallengeCookieName(): string {
+    return `${this.environment.AUTH_COOKIE_NAME}_mfa`;
+  }
+
+  private setStaffChallengeCookie(response: Response, token: string, expiresAt: Date): void {
+    response.cookie(this.staffChallengeCookieName(), token, { secure: this.environment.AUTH_COOKIE_SECURE,
+      sameSite: 'strict', httpOnly: true, path: '/api/v1/auth/mfa', expires: expiresAt });
+  }
+
+  private clearStaffChallengeCookie(response: Response): void {
+    response.clearCookie(this.staffChallengeCookieName(), { secure: this.environment.AUTH_COOKIE_SECURE,
+      sameSite: 'strict', httpOnly: true, path: '/api/v1/auth/mfa' });
+  }
+
+  private staffChallengeToken(request: HidRequest): string {
+    const token = this.cookies(request)[this.staffChallengeCookieName()];
+    if (!token) throw new DomainProblem(401, 'MFA_CHALLENGE_INVALID', 'Sign in again to continue');
+    return token;
   }
 
   @Post('refresh')

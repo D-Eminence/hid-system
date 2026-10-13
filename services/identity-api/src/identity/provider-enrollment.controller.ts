@@ -1,18 +1,16 @@
 import { Body, Controller, HttpCode, Post, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
-import { AuthService } from '../auth/auth.service';
+import { MfaService } from '../auth/mfa/mfa.service';
 import { TurnstileService } from '../auth/turnstile.service';
 import { AuditAction, AuditFailuresOnly, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
-import type { LoginDto } from '../auth/dto/login.dto';
 import { ActivateProviderEnrollmentDto, StartProviderEnrollmentDto,
   VerifyProviderEnrollmentDto } from './dto/provider-enrollment.dto';
 import { clearEnrollmentCookie } from './enrollment-cookie';
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
 import { ProviderEnrollmentService } from './provider-enrollment.service';
-import type { LoginResult } from '../auth/auth.types';
 
 const COOKIE_NAME = 'hid_provider_enrollment';
 
@@ -28,7 +26,7 @@ export class ProviderEnrollmentController {
     private readonly enrollments: ProviderEnrollmentService,
     private readonly completion: OrganizationProfileCompletionService,
     private readonly turnstile: TurnstileService,
-    private readonly auth: AuthService,
+    private readonly mfa: MfaService,
   ) {}
 
   @Post()
@@ -62,6 +60,14 @@ export class ProviderEnrollmentController {
     return { verified: true as const };
   }
 
+  /**
+   * Sets the administrator's password and opens the first staff sign-in
+   * (MFA-1, 0088): no session is issued here. The response carries the staff
+   * MFA challenge cookie of an enrolment whose fresh proof is this activation
+   * (the administrator's email was verified for this enrollment), so the
+   * client continues with POST /auth/mfa/enroll/start (no email code) and
+   * /auth/mfa/enroll/activate, which issues the session.
+   */
   @Post('activate')
   @HttpCode(200)
   @AuditAction('identity.provider-enrollment.activate')
@@ -71,26 +77,32 @@ export class ProviderEnrollmentController {
     this.assertAccountless(request);
     const cookie = this.enrollmentCookie(request);
     const activated = await this.completion.activate(cookie, input.password, request.correlationId);
-    const result = await this.auth.login(
-      { email: activated.email, password: input.password } as LoginDto,
+    const challenge = await this.mfa.beginLogin(activated.email, input.password,
       { correlationId: request.correlationId, sourceIp: request.ip, userAgent: request.header('user-agent') },
-      'staff',
-    );
-    this.setAuthCookies(response, result);
-    response.setHeader('x-csrf-token', result.csrfToken);
+      'staff', { activationProof: true });
+    response.cookie(`${this.environment.AUTH_COOKIE_NAME}_mfa`, challenge.token, {
+      secure: this.environment.AUTH_COOKIE_SECURE,
+      sameSite: 'strict',
+      httpOnly: true,
+      path: '/api/v1/auth/mfa',
+      expires: challenge.expiresAt,
+    });
+    response.setHeader('Cache-Control', 'no-store');
     response.clearCookie(COOKIE_NAME, {
       secure: this.environment.AUTH_COOKIE_SECURE,
       sameSite: 'strict',
       httpOnly: true,
       path: '/api/v1/identity/provider-enrollments',
     });
+    // The device's public patient enrollment cookie is expired, as at any sign-in.
+    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
     return {
       activated: true as const,
       organizationId: activated.organizationId,
       facilityId: activated.facilityId,
       accountId: activated.accountId,
-      actor: result.actor,
-      expiresAt: result.expiresAt.toISOString(),
+      status: challenge.purpose === 'verify' ? 'mfa_required' as const : 'mfa_enrollment_required' as const,
+      expiresAt: challenge.expiresAt.toISOString(),
     };
   }
 
@@ -125,24 +137,5 @@ export class ProviderEnrollmentController {
       path: '/api/v1/identity/provider-enrollments',
       maxAge: 60 * 60 * 1000,
     };
-  }
-
-  private setAuthCookies(response: Response, result: LoginResult): void {
-    const common = {
-      secure: this.environment.AUTH_COOKIE_SECURE,
-      sameSite: 'strict' as const,
-    };
-    response.cookie(this.environment.AUTH_COOKIE_NAME, result.accessToken, {
-      ...common, httpOnly: true, path: '/', expires: result.expiresAt,
-    });
-    response.cookie(`${this.environment.AUTH_COOKIE_NAME}_refresh`, result.refreshToken, {
-      ...common, httpOnly: true, path: '/api/v1/auth', expires: result.refreshExpiresAt,
-    });
-    response.cookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, result.csrfToken, {
-      ...common, httpOnly: false, path: '/', expires: result.refreshExpiresAt,
-    });
-    // A sign-in, as AuthController's: the device's public patient enrollment
-    // cookie is expired with it.
-    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
   }
 }

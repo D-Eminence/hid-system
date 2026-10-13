@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0086",
-    "count": 86,
+    "last": "0088",
+    "count": 88,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -429,6 +429,10 @@
       {
         "name": "0086_recovery_and_patient_search_hardening.sql",
         "sha256": "5b88e307d85095b8b9cca94211fc03ebfe5560ba04ace1772fa1208ae24ab10d"
+      },
+      {
+        "name": "0088_staff_mfa_sessions.sql",
+        "sha256": "481c20201735a4d40f7865dd109e753e5a95b256757ec1ee5a785cd432489537"
       }
     ]
   },
