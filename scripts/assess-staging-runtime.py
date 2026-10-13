@@ -17,7 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def policy_path(component):
     return ROOT / 'security' / ('staging-identity-runtime-assessment.json'
-        if component == 'identity-api' else 'staging-ehr-runtime-assessment.json' if component == 'ehr-api' else 'staging-novu-runtime-assessment.json')
+        if component == 'identity-api' else 'staging-ehr-runtime-assessment.json' if component == 'ehr-api' else 'staging-lab-runtime-assessment.json' if component == 'lab-api' else 'staging-novu-runtime-assessment.json')
 
 def run(*args):
     return subprocess.check_output(args, text=True).strip()
