@@ -2332,8 +2332,11 @@ challenge.
 **Staff search budgets.** `otp_rate_limits_scope_check` is dropped and re-added
 with four more scopes: `patient_lookup_actor`, `patient_lookup_facility`,
 `access_request_actor` and `access_request_facility`. Identity counts every
-patient lookup and every access-request creation there (bucket: SHA-256 of a
-labelled actor account or facility id), before the command runs. Re-adding the
+access-request creation there before the command runs, and every refused
+patient lookup after its audit event (bucket: SHA-256 of a labelled actor
+account or facility id); a lookup reads its two buckets first and is refused
+while either is blocked, and one that returns a granted patient is not counted
+(FE-10). Re-adding the
 check validates the existing rows under an `ACCESS EXCLUSIVE` lock on
 `auth.otp_rate_limits`; every existing scope stays allowed.
 
