@@ -251,8 +251,11 @@ try {
     const call = http.get(`/api/v1/identity/access-requests${query}`).set('Cookie', who.cookie).set('X-Facility-ID', ids.facility);
     return purpose ? call.set('X-Purpose-Of-Use', purpose) : call;
   };
-  assert((await staffRequests(clinician).expect(200)).body
-    .some((item) => item.accessRequestId === accessRequestId && item.status === 'pending'), 'the clinician sees their pending request');
+  const pendingListed = (await staffRequests(clinician).expect(200)).body
+    .find((item) => item.accessRequestId === accessRequestId && item.status === 'pending');
+  assert(pendingListed, 'the clinician sees their pending request');
+  // PSEARCH-1 (0086): a request names its patient only while its grant is active.
+  assert.equal(pendingListed.patientId, null, 'a pending request in the staff list must not name the patient');
   assert.equal((await staffRequests(clinician, '', null).expect(400)).body.code, 'PURPOSE_OF_USE_REQUIRED');
   // A facility member without identity.consent.write is refused.
   const orgAdmin = { account: randomUUID(), staff: randomUUID(), membership: randomUUID() };
@@ -279,6 +282,7 @@ try {
   const activeOutcome = await ownOutcome();
   assert.deepEqual([activeOutcome.effectiveStatus, activeOutcome.consentGrantId, activeOutcome.authorizationMethod],
     ['active', approved.body.consentGrantId, 'patient_approval'], 'an approval reports its active grant');
+  assert.equal(activeOutcome.patientId, a.patientId, 'an active grant names its patient in the staff list');
   assert(Date.parse(activeOutcome.grantExpiresAt) > Date.now(), 'an active grant reports its expiry');
   assert((await staffRequests(clinician, '?status=active').expect(200)).body
     .some((item) => item.accessRequestId === accessRequestId), 'the outcome filter finds the active approval');
@@ -291,7 +295,9 @@ try {
   await post(sb, `/identity/me/consent-grants/${approved.body.consentGrantId}/revoke`, { reason: 'Not mine' }).expect(404);
   assert.equal((await post(sa, `/identity/me/consent-grants/${approved.body.consentGrantId}/revoke`, { reason: 'No longer needed' })
     .expect(200)).body.status, 'revoked');
-  assert.equal((await ownOutcome()).effectiveStatus, 'revoked', 'the clinician sees the patient revoked the approval');
+  const revokedOutcome = await ownOutcome();
+  assert.equal(revokedOutcome.effectiveStatus, 'revoked', 'the clinician sees the patient revoked the approval');
+  assert.equal(revokedOutcome.patientId, null, 'a revoked approval no longer names the patient in the staff list');
   assert((await staffRequests(clinician, '?status=revoked').expect(200)).body
     .some((item) => item.accessRequestId === accessRequestId), 'the outcome filter finds the revoked approval');
   assert(!(await staffRequests(clinician, '?status=active').expect(200)).body
@@ -356,7 +362,7 @@ try {
     delivery: 'local-stub-only', account_deletion: 'request-confirm-replay-cancel-complete', csrf_required: true,
     deleted_login_unusable: true, patient_identity_retained: true, emergency_contacts: 'encrypted-owned-verified-deactivated',
     break_glass_contact_alert: 'intent-created-stub-delivered-once', patient_inbox_runtime: true,
-    patient_access_requests_runtime: 'list-approve-revoke', staff_access_requests_runtime: 'own-list-status-filter-purpose-permission', staff_access_request_outcome: 'active-then-revoked', staff_close_route_denied_to_patient: true, audit_source_identity_api: true,
+    patient_access_requests_runtime: 'list-approve-revoke', staff_access_requests_runtime: 'own-list-status-filter-purpose-permission', staff_access_request_outcome: 'active-then-revoked', staff_list_patient_id: 'active-grant-only', staff_close_route_denied_to_patient: true, audit_source_identity_api: true,
     approval_requires_recent_sign_in: true, recovery_hold: 'approve-pin-contact-refused-deny-revoke-allowed-lifted-after-24h',
     emergency_contact_delivery_enabled_for_this_rehearsal_only: getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED,
     isolated_database_dropped: true }) + '\n');

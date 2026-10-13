@@ -249,6 +249,42 @@ describe('ConsentService', () => {
     }
   });
 
+  it('names the patient of a listed request only while its grant is active (PSEARCH-1)', async () => {
+    const listed = (accessRequestId: string, status: string, effectiveStatus: string) => ({
+      accessRequestId,
+      patientId: '50000000-0000-4000-8000-000000000007',
+      scope: 'read_records',
+      purposeOfUse: 'direct-care',
+      reason: 'Continuity of care',
+      status,
+      requestedDurationMinutes: 60,
+      requestedAt: new Date('2026-09-29T12:00:00.000Z'),
+      approvedAt: null,
+      deniedAt: null,
+      deniedReason: null,
+      consentGrantId: null,
+      grantExpiresAt: null,
+      effectiveStatus,
+      authorizationMethod: null,
+    });
+    // Rows as a database before 0086 returns them: every row names the patient.
+    query.mockResolvedValueOnce({
+      rows: [
+        listed('40000000-0000-4000-8000-000000000001', 'pending', 'pending'),
+        listed('40000000-0000-4000-8000-000000000002', 'denied', 'denied'),
+        listed('40000000-0000-4000-8000-000000000003', 'approved', 'expired'),
+        listed('40000000-0000-4000-8000-000000000004', 'approved', 'closed'),
+        listed('40000000-0000-4000-8000-000000000005', 'approved', 'revoked'),
+        listed('40000000-0000-4000-8000-000000000006', 'approved', 'active'),
+      ],
+    });
+    const rows = await service.listMyStaffAccessRequests(context, {});
+    expect(rows.map((row) => [row.effectiveStatus, row.patientId])).toEqual([
+      ['pending', null], ['denied', null], ['expired', null], ['closed', null], ['revoked', null],
+      ['active', '50000000-0000-4000-8000-000000000007'],
+    ]);
+  });
+
   it('lists the authenticated patient access request inbox without unrelated identity data', async () => {
     query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({
       rows: [{

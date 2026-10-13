@@ -51,6 +51,10 @@ try {
   // A Google link of the account: a completed recovery must revoke it (0086).
   await pool.query(`insert into auth.external_identities(id,account_id,issuer,subject,status,source_system)
     values($1,$2,'https://accounts.google.com',$3,'active','synthetic')`,[randomUUID(),id,`synthetic-google-${id}`]);
+  // The legacy importer's provenance record (issuer 'legacy-identity') is not a
+  // sign-in: a recovery keeps it and does not count it.
+  await pool.query(`insert into auth.external_identities(id,account_id,issuer,subject,status,source_system)
+    values($1,$2,'legacy-identity',$3,'active','legacy_identity')`,[randomUUID(),id,id]);
   const started=await otp.start({audience:'patient',identifier:email,purpose:'PASSWORD_RESET',remoteIp:'192.0.2.219',correlationId:'otp-runtime-start-001'});
   assert.equal(delivered.challengeId,started.challengeId);
   assert.match(delivered.code,/^\d{6}$/);
@@ -64,8 +68,10 @@ try {
   assert.equal(current.token_version,2);assert.equal(current.password_algorithm,'argon2id');
   assert(await require('argon2').verify(current.password_hash,completion.newPassword));
   assert.equal((await pool.query("select count(*)::integer as n from audit.events where actor_account_id=$1 and action='auth.otp.recovery.completed'",[id])).rows[0].n,1);
-  assert.deepEqual((await pool.query(`select status,revoked_at is not null as revoked from auth.external_identities where account_id=$1`,[id])).rows,
-    [{status:'revoked',revoked:true}],'A completed recovery must revoke the account\'s Google link');
+  assert.deepEqual((await pool.query(`select issuer,status,revoked_at is not null as revoked from auth.external_identities
+    where account_id=$1 order by issuer`,[id])).rows,
+    [{issuer:'https://accounts.google.com',status:'revoked',revoked:true},{issuer:'legacy-identity',status:'active',revoked:false}],
+    'A completed recovery must revoke the account\'s Google link and keep its legacy provenance record');
   assert.equal((await pool.query(`select details->>'external_identities_revoked' as n from audit.events
     where actor_account_id=$1 and action='auth.otp.recovery.completed'`,[id])).rows[0].n,'1');
   const disabledId=randomUUID(), disabledEmail=`synthetic-${disabledId}@example.invalid`;
@@ -173,7 +179,7 @@ try {
   await otp.settleDeliveries();
   assert.deepEqual([delivered.challengeId,delivered.recipient],[verifiedStart.challengeId,unverifiedEmail]);
   process.stdout.write(JSON.stringify({status:'passed',scope:'local-synthetic-only',role:'hid_identity_api_runtime',otp_start_verify_complete:'passed',provider:'test-double-no-delivery',concurrent_completion_successes:1,concurrent_completion_denials:1,argon2_password_verified:true,semantic_audit_count:1,disabled_after_verification_denied:true,reenabled_old_challenge_denied:true,concurrent_rate_allowed:5,concurrent_rate_denied:3,concurrent_unknown_start_challenge_ids:rateIds.size,failure_budget_correct_code_denied:true,failure_budget_two_purpose_denials:2,failure_budget_suspended_start_codes:0,failure_budget_recovered_after_block:true,
-    recovery_revoked_google_link:true,audience_mismatch_codes:0,audience_mismatch_uniform:true,staff_reset_ended_staff_and_platform_sessions:true,
+    recovery_revoked_google_link:true,recovery_kept_legacy_provenance:true,audience_mismatch_codes:0,audience_mismatch_uniform:true,staff_reset_ended_staff_and_platform_sessions:true,
     unverified_patient_email_codes:0,verified_patient_email_delivered:true})+'\n');
 } finally {
   // Deliveries and their bookkeeping run after start() answers; let them finish before the pool ends.

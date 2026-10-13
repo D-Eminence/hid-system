@@ -47,6 +47,12 @@ insert into auth.external_identities(id,account_id,issuer,subject,status,source_
    'https://accounts.google.com','synthetic-google-subject-2','disabled','synthetic'),
   ('97000000-0000-4000-8000-000000000010','92000000-0000-4000-8000-000000000010',
    'https://accounts.google.com','synthetic-google-subject-10','active','synthetic');
+-- The legacy importer's provenance record of account 1 (issuer
+-- 'legacy-identity', promote-legacy-identity.mjs): not a sign-in, so a
+-- recovery keeps it and does not count it.
+insert into auth.external_identities(id,account_id,issuer,subject,status,source_system) values
+  ('97000000-0000-4000-8000-000000000003','92000000-0000-4000-8000-000000000001',
+   'legacy-identity','92000000-0000-4000-8000-000000000001','active','legacy_identity');
 -- Account 2 completes a staff reset: its staff and platform sessions end too.
 insert into auth.sessions(id,account_id,family_id,refresh_token_sha256,access_jti,
   account_token_version,authentication_method,issued_at,expires_at,absolute_expires_at,session_kind)
@@ -142,8 +148,12 @@ begin
     raise exception 'A completed staff reset left a staff or platform session open';
   end if;
   if exists (select 1 from auth.external_identities where account_id='92000000-0000-4000-8000-000000000001'
-               and (status <> 'revoked' or revoked_at is null)) then
+               and issuer <> 'legacy-identity' and (status <> 'revoked' or revoked_at is null)) then
     raise exception 'Recovery left an external identity (Google link) of the account usable';
+  end if;
+  if (select status from auth.external_identities where id='97000000-0000-4000-8000-000000000003') <> 'active'
+     or (select revoked_at from auth.external_identities where id='97000000-0000-4000-8000-000000000003') is not null then
+    raise exception 'Recovery revoked the legacy importer provenance record, which is not a sign-in';
   end if;
   if exists (select 1 from auth.resolve_google_identity('synthetic-google-subject-1')) then
     raise exception 'Google sign-in still resolves the recovered account';
