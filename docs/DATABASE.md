@@ -72,6 +72,10 @@ server-observed client network (IPv4 address or IPv6 /64; 5 an hour, 15 a day)
 and the application's existing daily `application_cac` target limit (3, shared
 with the reviewer path). A refusal changes no counter; every decision is
 audited. Reviewer `application_cac` quotas are unchanged.
+Migration `0085_public_enrollment_windows_and_nin_lookup_quota.sql` does the
+same for the accountless QoreID NIN lookup of public patient enrollment
+(`platform.consume_public_patient_nin_quota`; "Public enrollment windows and
+NIN lookup quota (0085)" below).
 Migration `0050_patient_nin_evidence_binding.sql` removes the unbound
 five-argument patient evidence command. A verified result now requires the
 submitted NIN's keyed lookup HMAC to match an existing verified, unrevoked NIN
@@ -2596,3 +2600,128 @@ Tests:
 - `verify-delegated-cookie-read-runtime.mjs` (steps 7 and 8): the two summaries'
   note release, and `403 PERMISSION_DENIED` for the seeded doctor on the
   withdrawn write routes, with no row written.
+
+## Public enrollment windows and NIN lookup quota (0085)
+
+`0085_public_enrollment_windows_and_nin_lookup_quota.sql`
+(D-Eminence/hid-system#68) implements decisions N2(b) and
+N2(c) in the activation command and caps QoreID NIN lookups of public patient
+enrollment (IP-1). It replaces two functions and adds one table and one
+function; no existing table is changed.
+
+**Activation windows.** `identity.activate_public_patient_enrollment`
+(0058) is replaced with the same signature, result columns, `SECURITY
+DEFINER` attribute, `search_path`, owner and grants. Two refusals are added;
+the rest of the body is 0058's:
+
+- a replay of an active enrollment whose `activated_at` is null or more than
+  15 minutes old raises `P0002` (`no_data_found`)
+  `PATIENT_ENROLLMENT_REPLAY_EXPIRED` and returns no HID. Identity answers it
+  `404 ENROLLMENT_NOT_FOUND`; it also refuses such an enrollment itself on
+  every enrollment route before calling the command, so the command's check
+  matters only for a request that crosses the 15 minutes in flight;
+- a first activation whose `contact_verified_at` is more than 30 minutes old
+  raises `23514` (`check_violation`) `PATIENT_CONTACT_REVERIFY_REQUIRED`
+  after the token check and before any write. Identity then clears the proof
+  and sends the enrollment back to the contact step:
+  `update identity.public_patient_enrollments set state='verify_contact'`,
+  with `contact_channel`, `contact_hmac`, `contact_lookup_hmac`,
+  `contact_ciphertext`, `contact_verified_at` and `verified_challenge_id`
+  null, only where the row is still `set_password` and the proof is more than
+  30 minutes old by `clock_timestamp()`. It does the same before calling the
+  command when its own clock already finds the proof too old, and answers
+  `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED` only when the update changed the
+  row or the command refused. The 0051 checks allow that state
+  (`set_password` exactly when `contact_verified_at` is set and
+  `activated_at` is not). No grant changes: the Identity runtime already
+  updates these rows.
+
+Both windows use `clock_timestamp()`. The replay window is shorter than the
+enrollment's `expires_at` (24 hours after start), which still bounds pending
+enrollments and the prune.
+
+**NIN lookup quota.** `platform.public_patient_nin_quota_counters` holds one
+row per `(scope, scope_key, bucket_period, bucket_start)`:
+
+- `scope` `network`: `scope_key` is a keyed HMAC of the client network
+  (lower-case hex, 64 characters) that the Identity API computes with its
+  server-only OTP HMAC key in its own domain (`patient-enrollment-qoreid-network`)
+  over an IPv4 address or the /64 prefix of an IPv6 address (IPv4-mapped IPv6
+  counts as IPv4; `quotaNetwork`, as for 0063); `bucket_period` `hour` or
+  `day`;
+- `scope` `platform`: `scope_key` `all`, `bucket_period` `day` only.
+
+No NIN, raw address or provider payload is stored. Row-level security is
+forced and its policies admit only the definer command's own reads and
+writes, as in 0049 and 0063; no runtime role has a table privilege.
+`platform.consume_public_patient_nin_quota(char, integer, integer, integer)`
+takes the network digest and the hourly network, daily network and daily
+platform limits that Identity reads from `PATIENT_ENROLLMENT_QOREID_*`
+(defaults 5, 15 and 200). It:
+
+1. refuses (`42501`) any caller but the accountless system context (actor
+   `system:auth`, a correlation id, no account) and a malformed digest, and
+   (`22023`) a missing limit or one outside its bounds: 1–100 an hour, from
+   the hourly limit to 1,000 a day per network, and 1–100,000 a day in all;
+2. deletes up to 100 counter rows whose bucket started more than 48 hours
+   ago;
+3. counts the lookup in the network's hour and day buckets and the platform's
+   day bucket, in that order, each `INSERT ... ON CONFLICT DO UPDATE` only
+   while the count is below its limit. The first bucket at its limit ends the
+   charge, and leaving its subtransaction rolls back the increments already
+   made, so a refusal changes no counter;
+4. inserts one `audit.events` row (`identity.public-patient-enrollment.nin-lookup-quota`,
+   actor `system`, resource `qoreid-lookup-quota`/`patient_nin`, outcome
+   `success` or `denied`, details `operation`, `exhaustedLimit`
+   (`network_hour`, `network_day` or `platform_day`, or null) and
+   `networkDigest`), and returns whether the lookup may proceed. A refusal
+   returns false instead of raising, so its audit event commits.
+
+Buckets are calendar hours and days by `date_trunc` in the session time zone,
+as in 0049 and 0063. The role bootstrap grants `EXECUTE` to
+`hid_identity_runtime` and `hid_schema_test_runtime` only, and
+`runtime-roles.integration.sql` asserts that no other required runtime role
+can execute it or reach the counters. `platform.prune_verification_quotas()`
+(0063) is replaced to drain these counters too, hourly, from the Identity
+runtime.
+
+Identity calls the command in `QoreIdPublicPatientIdentityProvider.verifyNin`,
+after the enrollment gate and immediately before the QoreID request, in its
+own system transaction. A resume, a duplicate and every earlier refusal of a
+start never reach it. `false` is answered `429 VERIFICATION_QUOTA_EXCEEDED`;
+any error, or no row, `503 VERIFICATION_QUOTA_UNAVAILABLE`, and QoreID is not
+called. A denial's network digest is in the audit event; the address is not.
+
+Locks: `CREATE OR REPLACE` takes no table lock; the new table and its index
+lock nothing else. At run time the command locks only the counter rows it
+increments, for the length of its own transaction; the activation command's
+locking is unchanged.
+
+Tests:
+
+- `public-patient-enrollment-windows.integration.sql` (rollback-only, as
+  `hid_identity_api_runtime`): a wrong token is still `42501`; a contact
+  proved 31 minutes earlier is refused `23514
+  PATIENT_CONTACT_REVERIFY_REQUIRED` and changes nothing; one proved 29
+  minutes earlier activates and replays; a replay 14 minutes after activation
+  returns the HID and one 16 minutes after is refused `P0002
+  PATIENT_ENROLLMENT_REPLAY_EXPIRED`; the command keeps its signature,
+  definer rights and grants. On 0082 it fails at "A contact proof 31 minutes
+  old activated a patient".
+- `public-patient-nin-quota.integration.sql` (rollback-only, as
+  `hid_identity_api_runtime`): only the Identity runtime can execute the
+  command and no runtime role can read the counters; with limits 2, 3 and 10
+  a network's third lookup in an hour and its fourth in a day are refused and
+  change no counter; with a platform cap of 5 another network is refused once
+  the platform has 5, without a network row; malformed digests, missing or
+  out-of-bounds limits, a missing correlation id and another actor are
+  refused and write nothing; five successes and three denials
+  (`network_hour`, `network_day`, `platform_day`) are audited exactly; the
+  prune drains the counters. Without 0085 it fails at its first statement
+  (the command does not exist).
+- `runtime-roles.integration.sql` asserts the grant.
+- `services/identity-api/scripts/verify-patient-enrollment-runtime.mjs`
+  checks both windows and the quota over HTTP (QoreID verification contract).
+  The container acceptance runs both new suites after
+  `purpose-of-use-vocabulary.integration.sql`, and the rehearsal runs them
+  with the additional suites.

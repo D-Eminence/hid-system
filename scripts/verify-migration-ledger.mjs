@@ -96,6 +96,7 @@ const acceptedMigrations = new Map([
   ['0082_purpose_of_use_vocabulary.sql', 'bd3c730051405860fd4cb4feacb5bde259eb627b45724433e44196c9403f9351'],
   ['0083_ocr_claim_in_body_variable_conflict.sql', '0c9e0c70cb643877e31c0b831a41960e3f23cb7c6120a9a431bc96e068502583'],
   ['0084_ehr_clinical_safety_and_launch_modules.sql', 'f2cb745300e3487ca42c9dcb396a93dfa777b503e421b2e221cee5181bcec323'],
+  ['0085_public_enrollment_windows_and_nin_lookup_quota.sql', 'e752dc338d78d9183ad937628a1fe53b31c28a60f664bd6479617e6664cc0e8e'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

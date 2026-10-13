@@ -75,7 +75,14 @@ The executable covers:
    (`verify-patient-enrollment-runtime.mjs`) runs public NIN enrollment through
    activation, sign-in, refresh, recovery and sign-out, with QoreID (behind the
    real adapter), Siteverify and delivery stubbed (see
-   [QoreID verification](QOREID_VERIFICATION_CONTRACT.md)).
+   [QoreID verification](QOREID_VERIFICATION_CONTRACT.md)); with migration
+   0085 it also checks that the enrollment gate answers bound, pending and
+   unknown NINs alike while closed, the 15-minute HID re-display and
+   30-minute contact proof windows, and the QoreID lookup quota per IPv6 /64
+   and per day across the platform. The rehearsal runs 0085's two SQL suites
+   (`public-patient-enrollment-windows.integration.sql`,
+   `public-patient-nin-quota.integration.sql`) with the additional suites;
+   0085 changes no row of a table the 0028 upgrade check compares.
    `session_sign_out_runtime` (`verify-session-sign-out-runtime.mjs`,
    D-Eminence/hid-system#39) covers sign-out by refresh cookie after the access
    cookie has expired, and refresh and sign-out refused with

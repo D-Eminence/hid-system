@@ -2,13 +2,13 @@ import { Body, Controller, Get, Headers, HttpCode, Post, Req, Res } from '@nestj
 import type { Response } from 'express';
 import { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import { TurnstileService } from '../auth/turnstile.service';
-import { AuditAction, Public } from '../common/decorators';
+import { AuditAction, NoAudit, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { ActivatePatientEnrollmentDto, PatientEnrollmentContactDto,
   StartPatientEnrollmentDto, VerifyPatientEnrollmentContactDto } from './dto/patient-enrollment.dto';
-import { ENROLLMENT_COOKIE_NAME, enrollmentCookieOptions } from './enrollment-cookie';
+import { ENROLLMENT_COOKIE_NAME, clearEnrollmentCookie, enrollmentCookieOptions } from './enrollment-cookie';
 import { PatientEnrollmentService } from './patient-enrollment.service';
 
 @Controller('identity/patient-enrollments')
@@ -39,6 +39,22 @@ export class PatientEnrollmentController {
     response.cookie(ENROLLMENT_COOKIE_NAME, result.cookie,
       enrollmentCookieOptions(this.environment.AUTH_COOKIE_SECURE));
     return result.progress;
+  }
+
+  /**
+   * Whether patient self-enrollment is open (FE-4), from the checks start
+   * makes before it reads a NIN, so a client can say so before it asks for
+   * one. Public and without input: every caller gets the same answer and it
+   * carries no PHI, so, as GET /commercial/pricing, it writes no audit row
+   * and may be cached briefly. A failure keeps main.ts's no-store default.
+   */
+  @Get('availability')
+  @NoAudit()
+  async availability(@Res({ passthrough: true }) response: Response) {
+    const result = await this.enrollments.availability();
+    response.setHeader('Cache-Control', 'public, max-age=30');
+    for (const name of ['Pragma', 'Expires', 'Surrogate-Control']) response.removeHeader(name);
+    return result;
   }
 
   @Get('current')
@@ -93,8 +109,11 @@ export class PatientEnrollmentController {
     this.assertAccountlessEnrollment(request, googleCookie);
     const result = await this.enrollments.activate(this.cookie(request), input.password,
       request.correlationId, googleCookie);
-    // The enrollment cookie is kept, so a lost response can be replayed; a
-    // sign-in, refresh or sign-out on this device expires it (AuthController).
+    // The response that carries the HID expires the enrollment cookie (N2(b)),
+    // a replay's too. If it is lost, the cookie it would have expired can
+    // replay the activation for 15 minutes; a sign-in, refresh or sign-out on
+    // this device also expires it (AuthController).
+    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
     if (googleCookie) response.clearCookie(this.google.onboardingCookieName, {
       secure: this.environment.AUTH_COOKIE_SECURE,
       sameSite: 'strict', httpOnly: true, path: '/api/v1',

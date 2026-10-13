@@ -1064,6 +1064,11 @@ grant execute on function identity.public_patient_nin_already_bound(char),
   identity.prune_expired_public_patient_enrollments(),
   identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)
   to hid_identity_runtime, hid_schema_test_runtime;
+-- Each QoreID NIN lookup of public enrollment is charged, before any account
+-- exists, through the network and platform quota command (0085); the runtime
+-- has no privilege on its counters.
+grant execute on function platform.consume_public_patient_nin_quota(char,integer,integer,integer)
+  to hid_identity_runtime, hid_schema_test_runtime;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.

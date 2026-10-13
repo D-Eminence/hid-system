@@ -161,6 +161,33 @@ begin
       raise exception 'Runtime role % can access recovery start cooldowns', role_name;
     end if;
   end loop;
+  -- Public enrollment NIN lookup quota (0085): the Identity runtime charges it
+  -- only through its definer command and holds no privilege on the counters;
+  -- every other required runtime role can do neither. The schema-test runtime
+  -- is granted as the Identity runtime is.
+  if not has_function_privilege('hid_identity_runtime',
+       'platform.consume_public_patient_nin_quota(char,integer,integer,integer)', 'EXECUTE')
+     or has_function_privilege('public',
+       'platform.consume_public_patient_nin_quota(char,integer,integer,integer)', 'EXECUTE')
+     or has_table_privilege('hid_identity_runtime', 'platform.public_patient_nin_quota_counters',
+       'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+    raise exception 'Identity public enrollment NIN lookup quota privileges are inconsistent';
+  end if;
+  foreach role_name in array array[
+    'hid_ehr_runtime', 'hid_api_runtime', 'hid_ehr_api_runtime', 'hid_ocr_api_runtime',
+    'hid_audit_writer', 'hid_document_scanner', 'hid_ocr_runtime', 'hid_ocr_worker',
+    'hid_lab_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_runtime',
+    'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
+    'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
+    'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics'
+  ] loop
+    if has_function_privilege(role_name,
+         'platform.consume_public_patient_nin_quota(char,integer,integer,integer)', 'EXECUTE')
+       or has_table_privilege(role_name, 'platform.public_patient_nin_quota_counters',
+         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+      raise exception 'Runtime role % can reach the public enrollment NIN lookup quota', role_name;
+    end if;
+  end loop;
   if not has_table_privilege('hid_notification_runtime', 'notification.device_registrations', 'SELECT,INSERT,UPDATE')
      or not has_table_privilege('hid_notification_runtime', 'notification.delivery_attempts', 'SELECT,INSERT')
      or has_table_privilege('hid_notification_runtime', 'auth.otp_challenges', 'SELECT')

@@ -2773,6 +2773,115 @@ application. Receivers from this change refuse RS256 tokens, tokens without
 
 Related ADRs: ADR-025, ADR-032, ADR-033, ADR-034, ADR-035, ADR-043, ADR-045.
 
+
+# ADR-048: Public Enrollment Checks Its Gate First, Bounds the HID Re-display and the Contact Proof, and Caps QoreID Lookups
+
+Status: Proposed for source implementation
+(D-Eminence/hid-system#68, migration 0085). Not merged or
+deployed. The number may need renumbering when the parallel launch branches
+merge.
+
+Date: 2026-10-13
+
+Context:
+
+- Public enrollment start read whether a NIN was bound or pending, and
+  answered `409 NIN_ALREADY_REGISTERED`, before it asked whether QoreID and
+  NIN-only enrollment were enabled or QoreID was paused; those checks sat
+  inside the provider's `verifyNin`. A bound or pending NIN therefore got
+  `409` and every other NIN `503`, whatever the gate's state (ENR-4). A unit
+  test pinned that order.
+- The enrollment cookie let `GET /current` and an activation replay show the
+  HID until it expired, 24 hours after start, on the enrolling device,
+  including a shared one (ENR-3 Part B). A verified contact could wait up to
+  24 hours before the password step (ENR-3b).
+- QoreID NIN lookups are paid. The account-scoped 0049 quota cannot charge an
+  enrollee with no account, and nothing else bounded them (IP-1).
+- Production accepted `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` whenever QoreID was
+  on, although decision N1 requires proof that the caller holds the NIN's
+  registry phone before a NIN is bound, and that step is not built (CFG-PROD).
+
+Decision (owner defaults: deny by default, least exposure; decisions N1 and
+N2 in `PHASE_3_LAUNCH_DECISIONS.md`):
+
+- Start asks the gate (`PublicPatientIdentityProvider.assertAvailable`: both
+  flags, then the runtime pause of `qoreid`/`patient_nin`) after the Origin,
+  Turnstile, signed-in-session and input checks and before any rate bucket or
+  registration read. The gate reads no NIN, so while it is closed every NIN,
+  and a same-key resume, gets the same `503`. `verifyNin` keeps the checks.
+  Telling only a proven holder that a NIN is registered is step 2 of ENR-4,
+  with N1.
+- The HID is re-displayed for 15 minutes after activation (N2(b)). Every
+  successful activation response expires the enrollment cookie; Identity
+  treats an active enrollment activated more than 15 minutes ago (or with no
+  activation time) as unknown (`404 ENROLLMENT_NOT_FOUND`) on every
+  enrollment route, and the activation command refuses such a replay
+  (`P0002 PATIENT_ENROLLMENT_REPLAY_EXPIRED`).
+- A contact proof is valid for 30 minutes (N2(c)). With an older one,
+  activation clears the proof and the contact by the database clock, returns
+  the enrollment to `verify_contact` and answers
+  `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED`; the activation command refuses
+  it too (`23514 PATIENT_CONTACT_REVERIFY_REQUIRED`), and Identity resets and
+  answers the same way.
+- Each QoreID NIN lookup of public enrollment is charged, after the gate and
+  immediately before the request, by `platform.consume_public_patient_nin_quota`,
+  an accountless `SECURITY DEFINER` command modelled on 0063: a keyed digest
+  of the client network (IPv4 address or IPv6 /64) per hour and per day, and
+  a platform-wide daily cap. The limits are environment values
+  (`PATIENT_ENROLLMENT_QOREID_*`, defaults 5, 15 and 200) bounded by the
+  command; the owner sets the cap from the QoreID contract. A refusal is
+  committed with its audit event and answered `429
+  VERIFICATION_QUOTA_EXCEEDED`; any fault is `503`. A resume, a duplicate and
+  any earlier refusal cost nothing.
+- Identity refuses to start with `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true`
+  in production (`HID_DEPLOYMENT_ENV=production`, or `NODE_ENV=production`
+  outside the staging profile) until the N1 holder step ships; that change
+  lifts the refusal.
+
+Consequences:
+
+- While the gate is closed the NIN oracle is closed. While it is open, a
+  bound or pending NIN is still revealed to anyone who knows it, and each
+  probe of an unbound NIN costs a QoreID lookup, bounded by the quota; this is
+  why NIN-only enrollment stays refused in production until N1.
+- A patient whose activation response is lost and who returns after 15
+  minutes cannot see the HID through the enrollment again. Until HID delivery
+  (N2(a)) ships, the HID is shown only in the activation response, and
+  Health-id must keep it on screen.
+- A patient who waits more than 30 minutes at the password step proves the
+  contact again. Health-id must route
+  `409 ENROLLMENT_CONTACT_REVERIFY_REQUIRED` to the contact step; a reload
+  already lands there, because `GET /current` answers `verify_contact`.
+- Until the edge delivers the real client address (IP-1), every client behind
+  one load balancer node shares one network budget, so the per-network limits
+  can deny real enrollments; the platform cap bounds cost either way. A
+  carrier-grade NAT address is one network too.
+- The platform cap bounds cost, not availability. Every lookup counts toward
+  it, whatever QoreID answers, so with the defaults 14 networks (IPv4
+  addresses or IPv6 /64s) passing Turnstile can spend the day's 200 lookups
+  with unregistered NINs, and 40 networks can do it within one calendar hour.
+  Every enrollment start that needs a lookup then answers
+  `429 VERIFICATION_QUOTA_EXCEEDED` until the next day bucket; resumes and
+  the later enrollment steps are unaffected. The owner sizes the cap with that
+  in mind, and operations alert on audit events
+  `identity.public-patient-enrollment.nin-lookup-quota` with outcome `denied`
+  and `exhaustedLimit` `platform_day` (release checklist §10).
+- The Identity build needs 0085 and the role bootstrap first: without the
+  command and its grant every start that reaches QoreID answers `503`. An
+  earlier Identity running with 0085 (between the migration and the Identity
+  rollout, or after an Identity rollback) cannot handle the stale-proof
+  refusal: it answers `409 ENROLLMENT_STAGE_INVALID` and has no way back to
+  the contact step, so that patient cannot activate until the enrollment
+  expires, 24 hours after its start. Identity is deployed right after 0085
+  and the bootstrap to keep that window short.
+- Evidence is local and synthetic: unit specs, the two new SQL suites,
+  `runtime-roles.integration.sql` and `verify-patient-enrollment-runtime.mjs`
+  (release checklist §8). Nothing has been run on staging or production.
+
+Related: ADR-008; ADR-023; `INTERFACE_CONTRACT.md`;
+`QOREID_VERIFICATION_CONTRACT.md`; `DATABASE.md` ("Public enrollment
+windows and NIN lookup quota (0085)"); release checklist §2, §3, §5, §6, §8
+and §9.
 # ADR-052: Health-id Is the Single Launch Frontend; Only Its Hosts Are Deployed
 
 Status: Accepted (2026-10-13) with the owner's defaults (deny by default, least
@@ -3086,3 +3195,87 @@ refuse to start. The outcome line gains `primaryProvider` and
 `primarySafeCode` when the fallback ran; its other fields are unchanged.
 
 Related ADRs: ADR-032, ADR-033, ADR-034, ADR-035, ADR-047.
+
+# ADR-057: Closed Registration Says So, and a Public Read Tells Clients Before They Ask for a NIN
+
+Status: Proposed for source implementation
+(D-Eminence/hid-system#68, FE-4, no migration). Not merged or
+deployed. It builds on ADR-048 (the enrollment gate). The number may need
+renumbering when the parallel launch branches merge (ADR-054 to ADR-056 and
+ADR-058 are taken on other launch branches).
+
+Date: 2026-10-13
+
+Context:
+
+- Under N1 Identity refuses `QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true` in
+  production, and infrastructure leaves QoreID off by default, so every
+  production enrollment start answers `503 QOREID_NIN_ONLY_DISABLED` or
+  `503 QOREID_DISABLED`. Facility-assisted registration is off at launch
+  (D17), so no new patient can get a Health ID; legacy-migrated patients
+  sign in.
+- Health-id 82b474e links to `/enroll` from sign-in and learns this only
+  after the patient types a NIN and spends a Turnstile token. It shows a
+  problem's `detail` as sent, but the authored "temporarily unavailable"
+  text never reached it: Identity's problem filter replaced every 5xx
+  detail with "The service could not complete the request.", and the
+  gateway (on main and on this branch) replaces every upstream 502/503/504
+  with `503 UPSTREAM_UNAVAILABLE` "A required platform service is
+  temporarily unavailable.", which is what the patient saw. Either text is
+  wrong for this case: the closure is a decision, not an outage.
+
+Decision (owner defaults: deny by default, least exposure, no production
+bypass):
+
+- `503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED` keep their status
+  and codes and carry "New Health ID registration is not open yet. If you
+  already have a Health ID, sign in." They are raised as
+  `PublicDetailProblem`, the only 5xx whose detail the filter keeps; every
+  other 5xx detail is still replaced.
+- `GET /api/v1/identity/patient-enrollments/availability` answers
+  `{ "open": boolean }` from the checks start makes before it reads a NIN
+  (enrollment keys, both flags, the runtime pause), through the same
+  provider method, so the two cannot disagree. A fault reading the runtime
+  state is a `503`, not `false`; a client treats anything but
+  `200 { "open": true }` as not open.
+- It is public and takes no input. Every caller that reaches it gets the
+  same answer and it carries no PHI, so it writes no audit row (as
+  `GET /commercial/pricing`): a row per anonymous read would let anyone
+  grow the audit log without bound and records nothing about a person.
+  For the same reason Identity keeps no per-network counter for it; the WAF
+  rate rule covers it as every API request. It may be cached for 30 seconds (`public, max-age=30`); the
+  Cloudflare Worker still makes every API response `no-store` at the edge,
+  which this change does not relax. Identity's CORS policy is unchanged and
+  applies first, as on every route: a request with no `Origin` or one in
+  `CORS_ORIGINS` is answered, and a foreign `Origin` is refused by the CORS
+  middleware (`500`, no CORS permission) before the route.
+- `PublicDetailProblem` is the one exception to Identity's 5xx detail
+  masking. It takes only a fixed sentence written for the person using the
+  client, never a message built from an error or from request data; any
+  new use needs its own decision.
+
+Consequences:
+
+- Enrollment stays closed in production; this changes what the patient is
+  told, not who may enroll. Opening it needs N1's holder step (ENR-4 step 2)
+  or an owner decision to the contrary.
+- Until Health-id reads availability, each production start attempt is a
+  target 5xx on the gateway's load balancer target group (the gateway
+  reaches Identity by its Cloud Map name), counted by the gateway's
+  `TargetErrorAlarm` (at least 5 in 5 minutes, two periods), which routes to
+  a person under ADR-053 (infra on main). Health-id should read availability
+  before it shows the NIN step and the "Get your Health ID" link.
+- On main the gateway replaces every upstream 502/503/504 with
+  `503 UPSTREAM_UNAVAILABLE`, so the new detail reaches a browser only once
+  ADR-055 (BRANCH:launch/edge-hardening-2) passes upstream errors through.
+  The availability read is a `200` and works either way.
+- Health-id follow-up (ENR-2): on completion, ask the patient to save the
+  Health ID, because the activation response expires the enrollment cookie
+  and `GET .../current` re-displays the HID for 15 minutes only.
+- Evidence is local and synthetic: unit specs and step 19 of
+  `verify-patient-enrollment-runtime.mjs` (release checklist §8); the gateway
+  route was checked against main's gateway model in a scratch copy.
+
+Related: ADR-048; ADR-053; ADR-055; `INTERFACE_CONTRACT.md` (section 6;
+section 8, "Public patient enrollment"); `QOREID_VERIFICATION_CONTRACT.md`;
+`PHASE_3_LAUNCH_DECISIONS.md` (N1); release checklist §2, §3 and §8.
