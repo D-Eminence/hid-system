@@ -547,9 +547,12 @@ grant execute on function platform.current_actor_subject(),
   audit.list_platform_events(integer, bigint, text, uuid, text, text, text, timestamptz, timestamptz, text, text)
   to hid_identity_runtime;
 
--- EHR owns only clinical persistence. Its single Identity capability is the
--- security-definer authorization decision needed by the current transaction
--- boundary; it receives no Identity table or sequence privilege.
+-- EHR owns only clinical persistence. Its Identity capabilities are the
+-- security-definer authorization decisions needed by the current transaction
+-- boundary: the consent decision row-level security uses and, since 0090, the
+-- membership permission decision the encounter retraction guard uses
+-- (ehr.require_retraction_permission). It receives no Identity table or
+-- sequence privilege.
 grant usage on schema platform, auth, ehr, identity to hid_ehr_runtime;
 grant select, insert, update on ehr.encounters, ehr.clinical_notes, ehr.vitals,
   ehr.diagnoses, ehr.prescriptions, ehr.lab_requests, ehr.documents,
@@ -568,6 +571,7 @@ grant execute on function platform.current_actor_subject(),
   platform.current_purpose_of_use(),
   auth.account_id_for_subject(text),
   auth.account_has_active_role(uuid, text),
+  auth.membership_has_permission(text, uuid, uuid, text),
   identity.has_active_consent_grant(uuid, text, uuid, uuid, text, text, timestamptz),
   ehr.context_allows(uuid, uuid, text) to hid_ehr_runtime;
 

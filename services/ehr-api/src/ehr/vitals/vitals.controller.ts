@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Q
 import { RequirePermissions } from '../../common/decorators';
 import type { HidRequest } from '../../common/request-context';
 import { clinicalContext, requireIdempotencyKey } from '../shared/clinical-context';
-import { CreateVitalCorrectionDto, CreateVitalDto, TimelineQueryDto } from '../shared/clinical.dto';
+import { CreateVitalCorrectionDto, CreateVitalDto, MarkVitalEnteredInErrorDto, TimelineQueryDto } from '../shared/clinical.dto';
 import { VitalsService } from './vitals.service';
 
 @Controller('ehr/patients/:patientId/encounters/:encounterId/vitals')
@@ -39,6 +39,16 @@ export class VitalsController {
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string,
     @Headers('idempotency-key') key: string | undefined, @Body() input: CreateVitalDto) {
     return this.vitals.create(clinicalContext(request), patientId, encounterId, input, requireIdempotencyKey(key));
+  }
+
+  /** Retracts a vital recorded on the wrong patient or never measured (ENC-RETRACT-2). */
+  @Post(':vitalId/entered-in-error')
+  @HttpCode(200)
+  @RequirePermissions('ehr.vital.write')
+  markEnteredInError(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
+    @Param('encounterId', new ParseUUIDPipe()) encounterId: string,
+    @Param('vitalId', new ParseUUIDPipe()) vitalId: string, @Body() input: MarkVitalEnteredInErrorDto) {
+    return this.vitals.markEnteredInError(clinicalContext(request), patientId, encounterId, vitalId, input);
   }
 
   @Post(':vitalId/corrections')

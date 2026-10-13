@@ -139,12 +139,13 @@ export class PatientRecordsService {
       notesSql(' and n.facility_id=$2', "e.status<>'entered_in_error'"), values);
 
     // Vitals as first recorded; corrections are not applied, pending the decision on correction semantics.
+    // A vital entered in error is not a measurement of this patient and is left out (ENC-RETRACT-2, 0090).
     const vitals = await read('vitals', `select id,encounter_id as "encounterId",facility_id as "facilityId",
       recorded_at as "recordedAt",height_cm as "heightCm",weight_kg as "weightKg",
       temperature_c as "temperatureC",pulse_bpm as "pulseBpm",respiratory_rate as "respiratoryRate",
       systolic_mmhg as "systolicMmhg",diastolic_mmhg as "diastolicMmhg",
       oxygen_saturation_percent as "oxygenSaturationPercent",source
-      from ehr.vitals where patient_id=$1 and facility_id=$2
+      from ehr.vitals where patient_id=$1 and facility_id=$2 and status='final'
       order by recorded_at desc,id desc`);
 
     const diagnoses = await read('diagnoses', `select id,encounter_id as "encounterId",

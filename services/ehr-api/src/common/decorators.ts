@@ -1,4 +1,4 @@
-import { SetMetadata } from '@nestjs/common';
+import { applyDecorators, SetMetadata } from '@nestjs/common';
 
 export const PUBLIC_ROUTE = Symbol('PUBLIC_ROUTE');
 export const PATIENT_ALLOWED = Symbol('PATIENT_ALLOWED');
@@ -16,3 +16,13 @@ export const RequirePermissions = (...permissions: string[]): MethodDecorator & 
 export const AuditAction = (action: string): MethodDecorator & ClassDecorator => SetMetadata(AUDIT_ACTION, action);
 export const NoAudit = (): MethodDecorator & ClassDecorator => SetMetadata(NO_AUDIT, true);
 export const AuditFailuresOnly = (): MethodDecorator & ClassDecorator => SetMetadata(AUDIT_FAILURES_ONLY, true);
+
+export const PATIENT_ONLY = Symbol('PATIENT_ONLY');
+/**
+ * A route only a patient session may use: patient allowed, facility optional,
+ * and any other actor refused by the guard with 403 PATIENT_SESSION_REQUIRED
+ * before the handler runs, audited as a refusal before a facility is bound
+ * (A9-EHR).
+ */
+export const PatientOnly = (): MethodDecorator & ClassDecorator =>
+  applyDecorators(SetMetadata(PATIENT_ONLY, true), PatientAllowed(), FacilityOptional());
