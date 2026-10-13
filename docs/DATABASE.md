@@ -2639,7 +2639,7 @@ Tests:
 ## EHR retraction integrity (0090)
 
 `0090_ehr_retraction_integrity.sql` (BRANCH:launch/ehr-retraction-integrity)
-adds one column, four trigger functions (one of them replacing 0084's) and four
+adds one column, six trigger functions (one of them replacing 0084's) and six
 triggers, and one runtime grant (`runtime-grants.sql`). It changes no row.
 Migrations 0085 to 0089 belong to other changes.
 
@@ -2654,8 +2654,9 @@ cannot read. `ehr.require_retraction_permission()` (`BEFORE UPDATE OF status`
 on `ehr.encounters`, trigger `encounters_retraction_permission`) runs when the
 status becomes `cancelled` or `entered_in_error`. It looks, under the writer's
 row-level security, for each kind of record the close changes, and refuses
-with `42501` `ENCOUNTER_RETRACTION_NOT_PERMITTED` (detail: the missing
-permission codes) unless the writing membership holds that kind's write
+with `42501` `ENCOUNTER_RETRACTION_NOT_PERMITTED` (PostgreSQL detail: the
+missing permission codes; the EHR answers a fixed detail and never passes them
+on) unless the writing membership holds that kind's write
 permission, as `auth.membership_has_permission(subject, membership, the
 encounter's facility, permission)` answers it from the membership's role
 assignments:
@@ -2672,15 +2673,30 @@ assignments:
 | cancelled | lab requests `draft`, `active`, `on_hold` | `ehr.lab-request.write` |
 
 An encounter that holds none of these needs no record permission, and holding,
-resuming or completing an encounter needs none. With the seeded roles (0006),
-doctors and clinicians may cancel or retract any encounter that holds no lab
-request; nurses one holding only notes, vitals and documents; receptionists
-only one holding none of these. No role holds `ehr.lab-request.write` since
-0084, so no one can cancel or retract an encounter that still holds an open
-or completed lab request until Lab ordering is enabled again; no lab request
-can be created at launch, and the release checklist retracts open ones before
-0084 (P12). The EHR API refuses the same close itself, before writing anything,
-with the same code.
+resuming or completing an encounter needs none. Only the statuses in the table
+count: a record already entered in error, a cancelled order or a rejected
+document blocks nothing. With the seeded roles (0006, 0084):
+
+- marking entered in error: doctors and clinicians may retract any encounter
+  unless it holds a `draft`, `active`, `on_hold` or `completed` lab request;
+  nurses unless it holds a diagnosis not yet `entered_in_error`, or such a
+  prescription or lab request; receptionists only one that holds none of the
+  records in the table;
+- cancelling: anyone holding `ehr.encounter.write` (receptionists included),
+  whatever notes, vitals, diagnoses and documents it holds, unless it holds a
+  `draft`, `active` or `on_hold` prescription (then doctors and clinicians
+  only) or lab request.
+
+No role holds `ehr.lab-request.write` since 0084, so no one can cancel or
+retract an encounter that still holds an open (or, for a retraction,
+completed) lab request until Lab ordering is enabled again; no lab request can
+be created at launch, and the release checklist retracts open ones before 0084
+(P12). The EHR API refuses the same close itself, before writing anything,
+with the same code and a fixed detail ("Cancelling or retracting this
+encounter changes records you may not write"); the missing permissions go to
+the refusal's audit row only, because only a kind the encounter holds is
+checked and naming it would tell the caller which kinds of record the
+encounter holds.
 
 `auth.membership_has_permission` is the existing `SECURITY DEFINER`
 permission decision (0010) that Identity's commands use; `hid_ehr_runtime`
@@ -2733,22 +2749,51 @@ lists it with its status, and the emergency summary leaves it out. The
 retraction of an encounter now also marks its final vitals, its completed
 orders and its linked documents entered in error, in the same transaction.
 
+`ehr.require_final_vital()` (`BEFORE INSERT` on `ehr.vital_corrections`,
+trigger `vital_corrections_vital_final`) refuses a correction row of a vital
+entered in error with `55000` `VITAL_ENTERED_IN_ERROR` (the EHR answers
+`409 VITAL_NOT_AMENDABLE`). Without it a writer could add a correction row to
+a retracted vital as long as it left the vital's correction number alone; the
+corrections list would show it. It reads the vital `FOR SHARE`, which waits
+for an uncommitted retraction of that vital and then sees it, so a correction
+never commits beside a retraction it did not see (the foreign key's own
+`FOR KEY SHARE` does not conflict with a status update). A vital it cannot
+read under the writer's row-level security is refused with `42501`
+`VITAL_NOT_AVAILABLE`. The EHR's correction already holds the vital
+`FOR UPDATE` when it inserts the row, so it takes no new lock.
+
+**A retracted document stays retracted (ENC-RETRACT-2).**
+`ehr.keep_retracted_document()` (`BEFORE UPDATE` on `ehr.documents`, trigger
+`documents_retracted_final`) refuses any update of a document whose status is
+`entered_in_error` with `55000` `DOCUMENT_ENTERED_IN_ERROR`. Without it a
+writer could set a retracted wrong-patient document back to `uploaded`;
+`ehr.documents_effective` would then show it as `available` again if its scan
+was clean, and the emergency summary and the download route would serve it.
+Upload completion (`initiated` to `uploaded`) and the retraction itself
+(`initiated` or `uploaded` to `entered_in_error`) select only those statuses
+and are unchanged; no EHR route changes a retracted document, so no new error
+reaches a client.
+
 **Order of checks and locks.** Each trigger's name sorts before the table's
-`*_versioned` trigger, so a refused write records no version; on
-`ehr.encounters` the closed check runs before the permission check. The
+`*_versioned` trigger, so a refused write records no version
+(`ehr.vital_corrections` is append-only and has none); on `ehr.encounters` the
+closed check runs before the permission check. The
 functions are `SECURITY INVOKER` with `search_path = pg_catalog, pg_temp`,
 qualify every name, and are not executable by `PUBLIC`. The permission check
 reads the encounter's records while the update holds the encounter's row lock,
 which every record create and order activation waits for (0084), so no record
 can join a category during the check. A vital, order or document changes
 status on its own route under its own row lock, never under the encounter's,
-so no new lock order arises.
+so no new lock order arises. The correction guard's share lock is on the
+corrected vital only; it takes no encounter lock, so it cannot wait on a
+retraction that waits on it.
 
 **Locks.** `ALTER TABLE ... ADD COLUMN` takes `ACCESS EXCLUSIVE` on
 `ehr.vitals` for the catalog change (no rewrite: the default is constant, and
 the check constraint is validated by a scan of the table under that lock).
 `CREATE TRIGGER` takes `SHARE ROW EXCLUSIVE` on `ehr.encounters`,
-`ehr.prescriptions` and `ehr.lab_requests`. Each waits for the transactions in
+`ehr.prescriptions`, `ehr.lab_requests`, `ehr.vital_corrections` and
+`ehr.documents`. Each waits for the transactions in
 flight on its table within the runner's 5 s `lock_timeout`; a timeout rolls
 0090 back whole, and it can be run again.
 
@@ -2756,25 +2801,32 @@ Tests:
 
 - `encounter-retraction.integration.sql` (rollback-only; in the rehearsal's
   additional suites and in `scripts/run-container-database-acceptance.sh`):
-  11 property cases (the four functions' security, the five triggers' events,
+  15 property cases (the six functions' security, the seven triggers' events,
   columns, functions and order before the version trigger, the vital status
-  column, and the runtime's `EXECUTE` on the permission decision), then 75
+  column, and the runtime's `EXECUTE` on the permission decision), then 82
   cases as `hid_ehr_api_runtime` with the session the EHR API sets for a
   doctor, nurse and receptionist of one clinic, each holding the seeded role:
   retraction and cancellation by role and by the records held, closed
   encounters, the cascade's statements on vitals, completed orders and
-  documents, every order transition for both order tables, and vital
-  retraction. On 0084 it fails with 55 mismatches.
+  documents, every order transition for both order tables, vital retraction,
+  correction rows of a final and a retracted vital, and a retracted document
+  set back to uploaded, renamed, sent its own status, or retracted and
+  restored in one transaction (refused), beside an upload completion
+  (allowed). On 0084 (with this branch's role bootstrap) it fails with 63
+  mismatches.
 - `encounter-lifecycle.integration.sql` (0084) passes unchanged.
 - `verify-encounter-lifecycle-runtime.mjs` (in the rehearsal): over HTTP as
   `hid_ehr_api_runtime`, a nurse refused retracting a doctor's diagnosis and
-  prescription with nothing changed and the refusal audited, a nurse
-  retracting her own notes and vitals, the cascade over vitals and a completed
-  prescription with `cascade` in the response, the vital route, a closed
+  prescription with nothing changed, a fixed detail and the refusal audited
+  with the missing permissions, a nurse retracting her own notes and vitals,
+  the cascade over vitals and a completed prescription with `cascade` in the
+  response, the vital route, a direct runtime-role correction that waits for
+  an uncommitted retraction of its vital and is then refused (with the
+  guard's `FOR SHARE` removed it does not wait and the step fails), a closed
   prescription and a closed encounter refused, and a staff session refused on
   `GET /ehr/me/records`. Its fixture now gives the doctor and nurse role
   assignments, and grants the copy's doctor role `ehr.lab-request.write`,
   which its fake Identity session has always carried, so that it keeps
   exercising lab requests as when Lab ordering is enabled again.
-- `scripts/tuf-staging-migration-rehearsal.mjs`: the 0028 upgrade has the four
+- `scripts/tuf-staging-migration-rehearsal.mjs`: the 0028 upgrade has the six
   triggers, the vital status, and the runtime grant after the role bootstrap.

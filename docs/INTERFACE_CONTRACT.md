@@ -922,14 +922,33 @@ the close changes (ENC-RETRACT-1, ADR-056, BRANCH:launch/ehr-retraction-integrit
 `ehr.diagnosis.write` for diagnoses, `ehr.vital.write` for vitals,
 `ehr.prescription.write` for prescriptions, `ehr.lab-request.write` for lab
 requests and `ehr.document.write` for documents. Without one of them the
-`PATCH` answers `403 ENCOUNTER_RETRACTION_NOT_PERMITTED`, naming the missing
-permissions in its detail, writes nothing, and is audited (§7). An encounter
-that holds none of these records needs only `ehr.encounter.write`, as the
-route always did; holding, resuming and completing need no record permission.
-With the seeded roles, doctors and clinicians may close any encounter that
-holds no lab request, nurses one holding only notes, vitals and documents,
-and receptionists only one holding none of these. The database refuses the
-same close (`ehr.require_retraction_permission`, 0090).
+`PATCH` answers `403 ENCOUNTER_RETRACTION_NOT_PERMITTED` with the fixed detail
+"Cancelling or retracting this encounter changes records you may not write",
+writes nothing, and is audited (§7) with the missing permission codes as
+`missingPermissions`. The response does not name them: only a kind of record
+the encounter holds is checked, so the names would tell a caller which kinds
+of record it holds, records the caller's role may not read (a receptionist
+reads none of them). An encounter that holds none of these records needs only
+`ehr.encounter.write`, as the route always did; holding, resuming and
+completing need no record permission. Only records the close would change
+count: a note, diagnosis or order already entered in error, a cancelled
+order, a rejected document and a vital entered in error do not. With the
+seeded roles:
+
+- **Marking entered in error.** Doctors and clinicians may retract any
+  encounter unless it holds a draft, active, on-hold or completed lab request
+  (no role holds `ehr.lab-request.write` since 0084). Nurses may retract one
+  unless it holds a diagnosis not yet entered in error, or a draft, active,
+  on-hold or completed prescription or lab request. Receptionists may retract
+  only one that holds none of the records listed above (no note, diagnosis,
+  final vital, open or completed order, or initiated or uploaded document).
+- **Cancelling.** Anyone holding `ehr.encounter.write` may cancel an encounter
+  whatever notes, vitals, diagnoses and documents it holds, unless it holds a
+  draft, active or on-hold prescription (then only doctors and clinicians) or
+  lab request (then no one, until Lab ordering is enabled again).
+
+The database refuses the same close (`ehr.require_retraction_permission`,
+0090); the EHR answers it the same `403` with the same detail.
 
 A cancelled or entered-in-error encounter takes no further change: any
 `PATCH` of one that is not a refused transition (which keeps
@@ -983,8 +1002,15 @@ entered in error and answers `200` with the vital at its next `rowVersion`.
 It is versioned with the reason and audited as `ehr.vital.entered-in-error`.
 A stale `expectedRowVersion` answers `412 VERSION_CONFLICT`. A vital entered in
 error keeps its values and takes no further change: the route again, or a
-correction, answers `409 VITAL_NOT_AMENDABLE`. The emergency summary leaves it
-out. A vital is never deleted.
+correction, answers `409 VITAL_NOT_AMENDABLE`, and it gains no correction
+(`GET .../vitals/:vitalId/corrections` lists only those made before its
+retraction). The emergency summary leaves it out. A vital is never deleted.
+
+A document linked to an encounter that is marked entered in error becomes
+`entered_in_error` (ENC-RETRACT-2) and stays so: it is never `available` again,
+so the emergency summary does not list it and `GET
+/api/v1/ehr/documents/:id/download` answers `409` for it. The EHR routes
+never change such a document; the database refuses it too (0090).
 
 The database enforces each of these rules too, so a writer that bypasses the
 API gets the same refusal (`DATABASE.md`, "EHR clinical safety and launch

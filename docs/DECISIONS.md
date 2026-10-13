@@ -3125,7 +3125,10 @@ Decision:
    do only what the actor could do record by record. No new permission is
    introduced. The EHR API refuses with `403 ENCOUNTER_RETRACTION_NOT_PERMITTED`
    before writing anything and audits the refusal with the missing permission
-   codes; the database refuses the same close (`42501`) through
+   codes. The response carries a fixed detail and does not name them: only a
+   kind of record the encounter holds is checked, so the names would tell a
+   caller (a receptionist reads none of these records) which kinds of record
+   the encounter holds. The database refuses the same close (`42501`) through
    `auth.membership_has_permission`, which the EHR runtime may now execute.
    An encounter holding none of these records may be cancelled or retracted
    with `ehr.encounter.write` alone. The proposal of a new
@@ -3139,8 +3142,13 @@ Decision:
    (`POST .../vitals/:vitalId/entered-in-error`, `ehr.vital.write`, with a
    version, a reason and an audit event), and a completed prescription or lab
    request may move to `entered_in_error`. Nothing is deleted. A vital entered
-   in error takes no further change and is left out of the emergency summary;
-   the patient summary releases neither vitals nor orders.
+   in error takes no further change, not even a new correction row, and is
+   left out of the emergency summary; a document entered in error takes no
+   further change, so it is never available or served again; the patient
+   summary releases neither vitals nor orders. The database enforces both
+   (`ehr.require_final_vital`, which reads the vital `FOR SHARE` so a
+   correction cannot commit beside a retraction it did not see, and
+   `ehr.keep_retracted_document`).
 3. **Closed records are final (RX-FINAL, ORDER-CLOSED-EDIT).** A completed,
    cancelled or entered-in-error prescription or lab request takes no change
    except completed to `entered_in_error`; status changes follow the order
@@ -3159,12 +3167,18 @@ Decision:
 
 Consequences:
 
-- A nurse or receptionist who opened an encounter on the wrong patient asks a
-  doctor or clinician to retract it once it holds a diagnosis or a
-  prescription; a nurse may still retract one holding only notes, vitals and
-  documents. Health-id `82b474e` still offers the actions to every
-  `ehr.encounter.write` holder and shows the refusal's detail (frontend
-  follow-up: offer them by permission, and correct `ORDERS_NOT_CANCELLED`).
+- Marking entered in error: a nurse or receptionist who opened an encounter
+  on the wrong patient asks a doctor or clinician to retract it once it holds
+  a diagnosis or an open or completed prescription; a nurse may still retract
+  one holding only notes, vitals and documents, and a receptionist only one
+  holding none of the records a retraction changes. Cancelling: anyone with
+  `ehr.encounter.write` may cancel an encounter whatever notes, vitals,
+  diagnoses and documents it holds, unless it holds an open prescription
+  (then doctors and clinicians only) or an open lab request. Records already
+  entered in error and cancelled orders block nothing. Health-id `82b474e`
+  still offers the actions to every `ehr.encounter.write` holder and shows
+  the refusal's detail, now a fixed sentence (frontend follow-up: offer them
+  by permission, and correct `ORDERS_NOT_CANCELLED`).
 - No role holds `ehr.lab-request.write` (0084), so an encounter that still
   holds a lab request cannot be cancelled or retracted until Lab ordering is
   enabled again by its own migration; none can be created at launch.

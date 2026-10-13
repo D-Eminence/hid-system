@@ -286,13 +286,16 @@ try {
     [{ code:'direct-care', display:'Direct patient care', active:true, source_system:'hid' }],
     'Upgrade must seed exactly the active direct-care purpose of use');
     // 0090 (BRANCH:launch/ehr-retraction-integrity) adds the retraction,
-    // closed-encounter and closed-order guards and the vital status, and the
-    // upgraded role bootstrap lets the EHR runtime ask the membership
-    // permission decision the retraction guard uses. It changes no row.
+    // closed-encounter, closed-order, retracted-vital-correction and
+    // retracted-document guards and the vital status, and the upgraded role
+    // bootstrap lets the EHR runtime ask the membership permission decision
+    // the retraction guard uses. It changes no row.
     assert.equal((await client.query(`select string_agg(tgname, ',' order by tgname) as triggers from pg_trigger
       where not tgisinternal and tgname = any($1::name[])`, [['encounters_closed_final', 'encounters_retraction_permission',
-      'prescriptions_closed_final', 'lab_requests_closed_final']])).rows[0].triggers,
-    'encounters_closed_final,encounters_retraction_permission,lab_requests_closed_final,prescriptions_closed_final',
+      'prescriptions_closed_final', 'lab_requests_closed_final', 'vital_corrections_vital_final',
+      'documents_retracted_final']])).rows[0].triggers,
+    'documents_retracted_final,encounters_closed_final,encounters_retraction_permission,lab_requests_closed_final,'
+      + 'prescriptions_closed_final,vital_corrections_vital_final',
     'Upgrade must install the 0090 retraction and closed-record guards');
     assert.deepEqual((await client.query(`select column_default, is_nullable from information_schema.columns
       where table_schema = 'ehr' and table_name = 'vitals' and column_name = 'status'`)).rows,
