@@ -153,7 +153,8 @@ proposal; that change is the place to alter it.
   (e) Every refused lookup is one `404 PATIENT_NOT_AVAILABLE`; an access
   request for an unknown HID is answered like a recorded one; neither answer
   names a patient id, and the clinician's own request list names the patient
-  only while a grant made from the request is active. Budgets per actor and
+  only while a grant made from the request is active (otherwise a
+  non-identifying `withheld-…` string, so Health-id's list keeps rendering). Budgets per actor and
   per facility: 60 and 600 lookups per 5 minutes, 20 and 200 access requests
   per 15 minutes (environment values). A registration member reads only
   patients linked to a case or candidate at its facility; duplicate checks go

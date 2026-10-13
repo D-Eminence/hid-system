@@ -109,7 +109,9 @@ export class ConsentService {
    * grant made from it is active (effective status 'active'): the database
    * command returns no patient id otherwise (0086), and this projection keeps
    * it that way, so a request for a guessed HID never yields the patient id
-   * before the patient consents (PSEARCH-1).
+   * before the patient consents (PSEARCH-1). A withheld id is answered as
+   * `withheld-<last four characters of the request id>` with
+   * `patientIdWithheld: true`, never null.
    */
   async listMyStaffAccessRequests(context: DataAccessContext, query: ListStaffAccessRequestsDto) {
     try {
@@ -125,9 +127,17 @@ export class ConsentService {
            from identity.list_my_staff_access_requests($1)`,
           [query.status ?? null],
         );
-        return result.rows.map((row): Record<string, unknown> => ({
-          ...row, patientId: row.effectiveStatus === 'active' ? row.patientId ?? null : null,
-        }));
+        return result.rows.map((row): Record<string, unknown> => {
+          const named = row.effectiveStatus === 'active' && typeof row.patientId === 'string';
+          return {
+            ...row,
+            // A withheld id stays a string so that clients rendering its last
+            // characters keep working; it is derived from the request, never
+            // from the patient.
+            patientId: named ? row.patientId : `withheld-${String(row.accessRequestId).slice(-4)}`,
+            patientIdWithheld: !named,
+          };
+        });
       }, { readOnly: true });
     } catch (error) {
       throw this.translate(error);

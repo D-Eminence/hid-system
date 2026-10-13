@@ -271,10 +271,15 @@ it was revoked only after it lapsed), `closed` (by the requesting clinician) or
 filter accepts `pending`, `approved`, `denied`, `revoked`, `expired`, `active`
 and `closed`, and matches the request status or the effective status. Since
 0086 (PSEARCH-1) an item's `patientId` is the patient's id only while its
-`effectiveStatus` is `active`, and `null` for every other item (pending,
-denied, expired, closed, revoked); before, every item named its patient, so
-one request for a guessed HID and one list call disclosed the patient id
-before the patient answered. Until the role bootstrap of this
+`effectiveStatus` is `active`; for every other item (pending, denied, expired,
+closed, revoked) it is the non-identifying string
+`withheld-<last four characters of accessRequestId>`, and each item carries
+`patientIdWithheld` (`true` when withheld). The withheld value is derived from
+the request, never from the patient, and is a string rather than `null` so
+that a client rendering its last characters keeps working (Health-id
+`AccessRequests.tsx`). Before 0086, every item named its patient, so one
+request for a guessed HID and one list call disclosed the patient id before
+the patient answered. Until the role bootstrap of this
 fix, the Identity runtime could not execute `identity.list_my_staff_access_requests`,
 and every caller got `403 CONSENT_COMMAND_DENIED`.
 
