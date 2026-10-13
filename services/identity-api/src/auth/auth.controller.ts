@@ -1,7 +1,9 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { Body, Controller, Get, HttpCode, MethodNotAllowedException, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, MethodNotAllowedException, Post, Req, Res, ServiceUnavailableException,
+  UnauthorizedException } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { AuditService } from '../audit/audit.service';
+import type { PoolClient } from 'pg';
+import { AuditService, type AuditEventInput } from '../audit/audit.service';
 import { AuditFailuresOnly, AuditSessionEvent, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
@@ -17,9 +19,26 @@ import { SelectFacilityDto } from './dto/select-facility.dto';
 import { GoogleAuthenticationService } from './google-authentication.service';
 import type { LoginResult } from './auth.types';
 import { MfaService } from './mfa/mfa.service';
+import { refreshRefused } from './refresh-refusal';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
+
+/**
+ * The one answer to a refused credential at sign-in (LOGIN-DETAIL-ORACLE). A
+ * refusal raised after the password was verified (an account that is not a
+ * patient, deactivated or changed during sign-in) gets the same 401 detail as
+ * a wrong password, so the answer never confirms a correct password; the
+ * internal reason stays out of the response. Other refusals keep their answer.
+ */
+function credentialRefusal(error: unknown): unknown {
+  return error instanceof UnauthorizedException ? new UnauthorizedException('Invalid credentials') : error;
+}
+
+/** A10: a correct staff password without an active facility membership; MfaService recorded it. */
+function noActiveMembership(error: unknown): boolean {
+  return error instanceof DomainProblem && error.code === 'NO_ACTIVE_FACILITY_MEMBERSHIP';
+}
 
 @Controller('auth')
 @AuditFailuresOnly()
@@ -45,7 +64,10 @@ export class AuthController {
    * with an eligible staff membership yields only an httpOnly challenge cookie
    * that the /auth/mfa steps accept, and the session is issued after a TOTP
    * code or a recovery code (or, on the first sign-in, after enrolment). No
-   * session cookie is set or changed here.
+   * session cookie is set or changed here. A correct password of a staff
+   * account with no active facility membership is refused with 403
+   * NO_ACTIVE_FACILITY_MEMBERSHIP before any challenge (A10); every refused
+   * credential gets the one generic 401 (LOGIN-DETAIL-ORACLE).
    */
   @Post('login')
   @Public()
@@ -78,7 +100,7 @@ export class AuthController {
       };
     } catch (error) {
       await this.recordLoginFailure(error, input.email, request);
-      throw error;
+      throw credentialRefusal(error);
     }
   }
 
@@ -227,6 +249,12 @@ export class AuthController {
         userAgent: request.header('user-agent'),
         details: { authentication_method: 'oidc', identity_provider: 'google' },
       });
+      // A refusal raised while issuing the session (an account that is not a
+      // patient, deactivated meanwhile) gets the one Google denial, not its
+      // internal reason (LOGIN-DETAIL-ORACLE).
+      if (error instanceof UnauthorizedException) {
+        throw new DomainProblem(401, 'GOOGLE_SIGN_IN_DENIED', 'Google sign-in could not be completed for this HID account');
+      }
       throw error;
     } finally {
       this.clearGoogleNonceCookie(response);
@@ -288,11 +316,18 @@ export class AuthController {
       return this.sessionResponse(result.actor, result.expiresAt);
     } catch (error) {
       await this.recordLoginFailure(error, input.email, request);
-      throw error;
+      throw credentialRefusal(error);
     }
   }
 
+  /**
+   * A refused credential counts toward the sign-in lockout; any other failure
+   * is recorded without counting. A staff password without an active facility
+   * membership was correct: MfaService recorded that refusal against the
+   * account in its own transaction, and it is not counted (A10).
+   */
   private async recordLoginFailure(error: unknown, principal: string, request: HidRequest): Promise<void> {
+    if (noActiveMembership(error)) return;
     if (error instanceof UnauthorizedException) {
       await this.sessionAudit.recordLoginFailure(principal, this.event(request));
     } else {
@@ -354,15 +389,28 @@ export class AuthController {
       const kind = await this.tokens.refreshSessionKind(refreshToken);
       if (kind && kind !== expectedKind) throw this.clientMismatch(kind, request);
     }
+    // The rotation commits with its audit event or not at all, and the
+    // cookies are cleared only when the refresh token was refused (4xx). A
+    // fault (5xx, or any other error) leaves the cookies the browser holds,
+    // which still refresh, so the client may retry (A6).
     try {
-      const result = await this.auth.refresh(refreshToken, this.event(request));
-      await this.recordSuccess('auth.refresh', result.actor, request);
+      const result = await this.auth.refresh(refreshToken, this.event(request),
+        (client, actor) => this.recordRotation(client, actor, request));
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
       return this.sessionResponse(result.actor, result.expiresAt);
     } catch (error) {
-      this.clearCookies(response);
+      if (refreshRefused(error)) this.clearCookies(response);
       throw error;
+    }
+  }
+
+  /** The auth.refresh audit event, written in the rotation's transaction: a failed write rolls the rotation back. */
+  private async recordRotation(client: PoolClient, actor: ActorContext, request: HidRequest): Promise<void> {
+    try {
+      await this.audit.recordWithClient(client, this.successEvent('auth.refresh', actor, request));
+    } catch {
+      throw new ServiceUnavailableException('Audit persistence is unavailable; request was denied');
     }
   }
 
@@ -597,7 +645,11 @@ export class AuthController {
   }
 
   private recordSuccess(action: string, actor: ActorContext, request: HidRequest): Promise<void> {
-    return this.audit.record({
+    return this.audit.record(this.successEvent(action, actor, request));
+  }
+
+  private successEvent(action: string, actor: ActorContext, request: HidRequest): AuditEventInput {
+    return {
       correlationId: request.correlationId,
       actorType: actor.kind === 'patient' ? 'patient' : 'staff',
       actorSubject: actor.subject,
@@ -611,7 +663,7 @@ export class AuthController {
       outcome: 'success',
       sourceIp: request.ip,
       userAgent: request.header('user-agent'),
-    });
+    };
   }
 
   /**

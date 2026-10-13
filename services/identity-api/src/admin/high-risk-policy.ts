@@ -77,6 +77,10 @@ export const PLATFORM_ACTION_POLICIES = {
     ifMatch: true, idempotencyKey: true, approval: 'none' },
   'platform.integration.test': { ...high, permissions: ['platform.integration.test'], reason: true,
     ifMatch: true, idempotencyKey: true, approval: 'none' },
+  // A principal search with its terms (names, email addresses) in a POST body,
+  // out of URLs and request-line access logs (A24). It changes nothing.
+  'platform.principals.search': { ...standard, permissions: ['platform.principal.read'], reason: false,
+    ifMatch: false, idempotencyKey: false, approval: 'none' },
   // Exports leave the platform's control once downloaded.
   'platform.principals.export': { ...critical, permissions: ['platform.principal.export'], ifMatch: false,
     idempotencyKey: false, approval: 'none' },

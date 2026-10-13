@@ -57,8 +57,8 @@ export class RemoteSecurityGuard implements CanActivate {
   private async enforceRuntimeControls(request: HidRequest): Promise<void> {
     const actor = request.actor;
     if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
-    const isPlatformAdmin = actor.platformPermissions?.includes('platform.admin.access') ?? false;
-    if (isPlatformAdmin) return;
+    // No EHR request is exempt: platform sessions never authenticate here, and
+    // a platform grant does not exempt its holder's clinical session (A16).
 
     const maintenance = await this.controlEnabled('maintenance_mode');
     if (maintenance) {

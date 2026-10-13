@@ -3,7 +3,7 @@ import { getEnvironment } from '../config/environment';
 import type { LoginDto } from './dto/login.dto';
 import type { PatientLoginDto } from './dto/patient-login.dto';
 import { LocalAuthProvider } from './local-auth.provider';
-import { TokenService, type SessionEventMetadata } from './token.service';
+import { TokenService, type RefreshRotationHook, type SessionEventMetadata } from './token.service';
 import type { LoginResult } from './auth.types';
 
 @Injectable()
@@ -28,8 +28,9 @@ export class AuthService {
     });
   }
 
-  refresh(refreshToken: string, event: SessionEventMetadata): Promise<LoginResult> {
-    return this.tokens.refresh(refreshToken, event);
+  /** `onRotated` runs inside the rotation's transaction (TokenService.refresh, A6). */
+  refresh(refreshToken: string, event: SessionEventMetadata, onRotated?: RefreshRotationHook): Promise<LoginResult> {
+    return this.tokens.refresh(refreshToken, event, 'standard', onRotated);
   }
 
   revoke(

@@ -1,4 +1,5 @@
 import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
+import { DomainProblem } from '../common/problem';
 
 /** Metadata headers of the principal CSV export (GET /admin/principals/export). */
 export const EXPORT_RESPONSE_HEADERS = {
@@ -15,12 +16,19 @@ export const EXPORT_RESPONSE_HEADERS = {
 export const CORS_EXPOSED_HEADERS: readonly string[] = ['etag', 'location', 'x-correlation-id', 'x-csrf-token',
   ...Object.values(EXPORT_RESPONSE_HEADERS).map((name) => name.toLowerCase())];
 
+/**
+ * A request without Origin (a same-origin GET) or from an allowed origin gets
+ * the CORS headers. One from any other origin is refused before routing with
+ * 403 ORIGIN_DENIED and no CORS headers: a deliberate refusal, never the 500 a
+ * plain Error became, which raised the 5xx alarms for anyone who forged an
+ * Origin and made a missing portal origin look like a server fault (A19).
+ */
 export function corsOptions(corsOrigins: string): CorsOptions {
   const allowedOrigins = new Set(corsOrigins.split(',').map((origin) => origin.trim()));
   return {
     origin: (origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) => {
       if (!origin || allowedOrigins.has(origin)) callback(null, true);
-      else callback(new Error('Origin is not permitted'), false);
+      else callback(new DomainProblem(403, 'ORIGIN_DENIED', 'Request origin is not allowed'), false);
     },
     credentials: true,
     // PATCH: organization profile completion (/identity/organization-applications/completion/profile).

@@ -8,6 +8,7 @@ import { AuthSessionAuditService } from './auth-session-audit.service';
 import type { LoginResult } from './auth.types';
 import { PlatformLoginDto, PlatformMfaVerifyDto, TotpCodeDto } from './dto/platform-auth.dto';
 import { MfaService } from './mfa/mfa.service';
+import { refreshRefused } from './refresh-refusal';
 import { TokenService, type SessionEventMetadata } from './token.service';
 import { TurnstileService } from './turnstile.service';
 
@@ -101,7 +102,9 @@ export class PlatformAuthController {
     try {
       return this.sessionResponse(response, await this.tokens.refresh(refreshToken, this.event(request), 'platform'));
     } catch (error) {
-      this.clearSessionCookies(response);
+      // Cleared only when the refresh token was refused; a fault keeps the
+      // cookies, which still refresh (A6).
+      if (refreshRefused(error)) this.clearSessionCookies(response);
       throw error;
     }
   }

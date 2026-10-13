@@ -10,6 +10,7 @@ import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
 import { CurrentStaffContextService, eligibleStaffMembershipJoins } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
+import { jwksUnavailable } from './jwks-fault';
 import { classifyPlatformSessionEnd, platformSessionEnded, type StoredPlatformSessionState } from './platform-session-end';
 
 type SessionKind = 'staff' | 'patient' | 'platform';
@@ -74,6 +75,14 @@ export type StaffSessionAssurance = PlatformSessionAssurance;
 export function staffMfaRequired(): DomainProblem {
   return new DomainProblem(403, 'STAFF_MFA_REQUIRED', 'Sign in again with your authenticator code to continue');
 }
+
+/**
+ * Work that must commit with a refresh rotation or not at all (A6): called
+ * inside the rotation's transaction, after the rotated session event, with the
+ * rotated actor (its sessionId the new session). If it throws, the rotation
+ * rolls back and the presented refresh token stays the live one.
+ */
+export type RefreshRotationHook = (client: PoolClient, actor: ActorContext) => Promise<void>;
 
 /** The sign-in a refresh-cookie sign-out ended. */
 export interface RefreshSignOut {
@@ -318,9 +327,11 @@ export class TokenService {
    * Rotates a refresh token. Platform sessions refresh only through the
    * platform endpoint and staff/patient sessions only through the standard
    * one, so a session of one kind can never be exchanged for the other.
+   * `onRotated` (the refresh's own audit event) runs inside the rotation's
+   * transaction, so the rotation commits with it or not at all (A6).
    */
   async refresh(refreshToken: string, event: SessionEventMetadata,
-    scope: 'standard' | 'platform' = 'standard'): Promise<LoginResult> {
+    scope: 'standard' | 'platform' = 'standard', onRotated?: RefreshRotationHook): Promise<LoginResult> {
     const refreshHash = this.sha256(refreshToken);
     const existing = await this.database.query<SessionRow>(
       `select session.id::text, session.account_id::text,
@@ -443,6 +454,7 @@ export class TokenService {
           eventType: 'rotated', outcome: 'success', accountId: oldSession.account_id,
           sessionId: oldSession.id, event,
         });
+        if (onRotated) await onRotated(client, { ...actor, sessionId: newSessionId });
       });
     } catch (error) {
       if (!(error instanceof RefreshRotationConflict)) throw error;
@@ -653,7 +665,13 @@ export class TokenService {
       issuer: this.environment.OIDC_ISSUER_URL,
       audience: this.environment.OIDC_AUDIENCE,
       algorithms: ['RS256', 'ES256'],
-    }).catch(() => { throw new UnauthorizedException('Invalid or expired access token'); });
+    }).catch((error: unknown) => {
+      // The issuer's key set cannot be fetched: an outage, not a refused token (A4).
+      if (jwksUnavailable(error)) {
+        throw new DomainProblem(503, 'AUTHENTICATION_UNAVAILABLE', 'Authentication is temporarily unavailable');
+      }
+      throw new UnauthorizedException('Invalid or expired access token');
+    });
     if (!payload.sub) throw new UnauthorizedException('Token subject is missing');
     return { claims: payload, actor: await this.currentStaff.resolve(payload.sub, 'oidc') };
   }

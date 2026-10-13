@@ -76,7 +76,10 @@ describe('explicitly deferred staging NIN', () => {
     };
     resetEnvironmentForTests();
     jest.resetAllMocks();
-    database.query.mockResolvedValue({ rows: [{ enabled: true }] });
+    // Runtime controls open (maintenance off, portals on): a platform grant no
+    // longer exempts a staff or patient session from reading them (A16).
+    database.query.mockImplementation(async (sql: string, values?: unknown[]) =>
+      ({ rows: [{ enabled: !(String(sql).includes('platform.control_enabled') && values?.[0] === 'maintenance_mode') }] }));
     jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('External transport is forbidden in this fixture'));
   });
 
@@ -245,7 +248,8 @@ describe('explicitly deferred staging NIN', () => {
     else expect(tokens.verify).toHaveBeenCalledWith('synthetic-token');
     expect(database.withTransaction).not.toHaveBeenCalled();
     expect(database.withSystemTransaction).not.toHaveBeenCalled();
-    expect(database.query).not.toHaveBeenCalled();
+    // Only the guard's runtime controls were read: a platform grant no longer exempts this session from them (A16).
+    expect(database.query.mock.calls.every(([sql]) => String(sql).includes('platform.control_enabled'))).toBe(true);
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 

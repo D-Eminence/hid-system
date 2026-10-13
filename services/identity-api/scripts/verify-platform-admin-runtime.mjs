@@ -733,7 +733,9 @@ try {
   [attached.body.membershipId, requestB])).rows[0];
   assert.deepEqual(left, { active_grants: 0, pending_requests: 0, request_b: 'approved' });
   expectStatus(await lookup(clinicianSession), 401);
-  expectStatus(await clinicianLogin(), 401);
+  // A10: the password is still correct but no facility membership is active:
+  // refused as such at the password step, with no MFA challenge (owner default (a)).
+  expectStatus(await clinicianLogin(), 403, 'NO_ACTIVE_FACILITY_MEMBERSHIP');
   const workforceAudit = (await owner.query(`select action, access_scope, facility_id from audit.events
     where action like 'admin.workforce.%' and outcome = 'success' and actor_account_id = any($1::uuid[])
     order by sequence_id`, [[reviewer.id, superAdmin.id]])).rows;

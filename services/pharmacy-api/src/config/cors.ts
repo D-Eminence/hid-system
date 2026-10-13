@@ -1,4 +1,5 @@
 import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
+import { DomainProblem } from '../common/problem';
 
 /**
  * Cross-origin settings for browser callers on an allowed origin. A cookie
@@ -11,7 +12,8 @@ export function corsOptions(corsOrigins: string): CorsOptions {
     origin: (origin: string | undefined,
       callback: (error: Error | null, allow?: boolean) => void) => {
       if (!origin || allowedOrigins.has(origin)) callback(null, true);
-      else callback(new Error('Origin is not permitted'), false);
+      // A deliberate refusal, never the 500 a plain Error became (A19).
+      else callback(new DomainProblem(403, 'ORIGIN_DENIED', 'Request origin is not allowed'), false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'OPTIONS'],

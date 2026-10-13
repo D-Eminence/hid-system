@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
-import { AuditAction, FacilityOptional, PatientAllowed, RequirePermissions } from '../common/decorators';
+import { AuditAction, FacilityOptional, PatientAllowed, PatientOnly, RequirePermissions } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import { consentContext } from './consent-context';
 import { ConsentService } from './consent.service';
@@ -18,6 +18,7 @@ export class ConsentController {
   @Get('me/access-requests')
   @PatientAllowed()
   @FacilityOptional()
+  @PatientOnly()
   @AuditAction('identity.access-request.list.request')
   listMyAccessRequests(@Req() request: HidRequest) {
     // Patient decisions are bound to the authenticated patient session, not
@@ -50,6 +51,7 @@ export class ConsentController {
   @HttpCode(200)
   @PatientAllowed()
   @FacilityOptional()
+  @PatientOnly()
   @AuditAction('identity.access-request.approve.command')
   approveAccessRequest(
     @Req() request: HidRequest,
@@ -62,6 +64,7 @@ export class ConsentController {
   @HttpCode(200)
   @PatientAllowed()
   @FacilityOptional()
+  @PatientOnly()
   @AuditAction('identity.access-request.deny.command')
   denyAccessRequest(
     @Req() request: HidRequest,
@@ -75,6 +78,7 @@ export class ConsentController {
   @HttpCode(200)
   @PatientAllowed()
   @FacilityOptional()
+  @PatientOnly()
   @AuditAction('identity.consent-grant.patient-revoke.command')
   revokeMyConsentGrant(
     @Req() request: HidRequest,

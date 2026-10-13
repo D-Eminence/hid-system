@@ -1,5 +1,5 @@
 import { Body, Controller, HttpCode, Param, Post, Req } from '@nestjs/common';
-import { PatientAllowed, FacilityOptional, AuditAction, AuditFailuresOnly, RequirePermissions } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, PatientOnly, RequirePermissions } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { VerifyCacDto } from './dto/verify-cac.dto';
@@ -15,8 +15,7 @@ export class QoreIdVerificationController {
 
   @Post('me/verification/nin')
   @HttpCode(200)
-  @PatientAllowed()
-  @FacilityOptional()
+  @PatientOnly()
   @AuditFailuresOnly()
   @AuditAction('identity.patient.nin-verification.command')
   verifyMyNin(@Body() input: VerifyNinDto, @Req() request: HidRequest) {

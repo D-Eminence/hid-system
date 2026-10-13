@@ -1,8 +1,10 @@
 import {
   CanActivate,
   ExecutionContext,
+  HttpException,
   Injectable,
   Optional,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
@@ -17,6 +19,7 @@ import {
   PLATFORM_SCOPE,
   PUBLIC_ROUTE,
   PATIENT_ALLOWED,
+  PATIENT_ONLY,
   REQUIRED_PERMISSIONS,
 } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
@@ -58,6 +61,11 @@ export class SecurityGuard implements CanActivate {
       await this.enforceRuntimeControls(request);
       if (verified.actor.kind === 'patient' && !this.metadata<boolean>(PATIENT_ALLOWED, context)) {
         throw new DomainProblem(403, 'PATIENT_SCOPE_DENIED', 'This operation requires workforce authorization');
+      }
+      // A patient-only route refuses any other session here, before a handler
+      // runs, so the refusal is answered and audited as one (A9).
+      if (verified.actor.kind !== 'patient' && this.metadata<boolean>(PATIENT_ONLY, context)) {
+        throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
       }
       // Platform administration requires an MFA-verified platform session; a
       // staff, patient or facility session never satisfies it, and a platform
@@ -145,6 +153,7 @@ export class SecurityGuard implements CanActivate {
       if (platformScope) await this.enforceHighRiskPolicy(request, context);
       return true;
     } catch (error) {
+      const refusal = authenticationRefusal(error);
       if (platformScope && request.actor && request.actor.kind !== 'patient') {
         await this.audit.record({
           correlationId: request.correlationId,
@@ -158,7 +167,7 @@ export class SecurityGuard implements CanActivate {
           sourceIp: request.ip,
           userAgent: request.header('user-agent'),
           details: { method: request.method, route: this.routeTemplate(request),
-            ...(error instanceof DomainProblem ? { code: error.code } : {}),
+            ...(refusal instanceof DomainProblem ? { code: refusal.code } : {}),
             ...(request.highRiskAction ? { highRiskAction: request.highRiskAction } : {}) },
         });
       } else if (request.actor && request.facilityId) {
@@ -203,8 +212,7 @@ export class SecurityGuard implements CanActivate {
           provenance: 'system',
         });
       }
-      if (error instanceof DomainProblem) throw error;
-      throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+      throw refusal;
     }
   }
 
@@ -252,8 +260,11 @@ export class SecurityGuard implements CanActivate {
     const actor = request.actor;
     if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
 
-    const isPlatformAdmin = actor.platformPermissions?.includes('platform.admin.access') ?? false;
-    if (isPlatformAdmin) return;
+    // Only a platform administration session (platform routes, the console)
+    // works during maintenance and while a portal is off. A staff or patient
+    // session is held to the controls even when its account also holds a
+    // platform grant: that grant does not make clinical access exempt (A16).
+    if (actor.kind === 'platform') return;
 
     const maintenance = await this.controlEnabled('maintenance_mode');
     if (maintenance) {
@@ -276,11 +287,12 @@ export class SecurityGuard implements CanActivate {
       );
       return result.rows[0]?.enabled === true;
     } catch (error) {
-      if (isDatabaseError(error) && error.code === '55000') {
-        if (String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) return false;
-        throw new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
-      }
-      throw error;
+      if (isDatabaseError(error) && error.code === '55000'
+        && String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) return false;
+      // Any other fault (a statement or pool timeout, a lost connection, a
+      // missing grant) leaves the control unknown: answered as such, never as
+      // the caller's 401 (A4).
+      throw new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
     }
   }
 
@@ -308,6 +320,9 @@ export class SecurityGuard implements CanActivate {
    * an unauthenticated caller, an unsafe or missing method, or any failure
    * leaves the write check in force. A skip is recorded on the request so the
    * route can refuse to authorize a write on the strength of a reported read.
+   * Only an unavailable workload issuer (503 WORKLOAD_IDENTITY_UNAVAILABLE) is
+   * answered as itself: the request is then refused as a fault between
+   * services, which the caller reports as one, not as the browser's 403.
    */
   private async delegatedSafeBrowserRequest(request: HidRequest, context: ExecutionContext): Promise<boolean> {
     const reported = request.header('x-hid-original-method');
@@ -318,7 +333,8 @@ export class SecurityGuard implements CanActivate {
         request.header('x-hid-service-authorization'), request.header('x-hid-service-token'));
       request.delegatedBrowserMethod = reported;
       return true;
-    } catch {
+    } catch (error) {
+      if (error instanceof DomainProblem && error.code === 'WORKLOAD_IDENTITY_UNAVAILABLE') throw error;
       return false;
     }
   }
@@ -357,6 +373,25 @@ export class SecurityGuard implements CanActivate {
   private routeTemplate(request: HidRequest): string {
     return typeof request.route?.path === 'string' ? request.route.path : 'unresolved';
   }
+}
+
+/**
+ * The answer to a request the guard refused (A4). A DomainProblem keeps its
+ * status and code (403 refusals, 423 and 503 runtime controls, 409). A
+ * refused credential (UnauthorizedException) is the generic 401 a client reads
+ * as "sign in again", and any other HTTP exception keeps its status. Anything
+ * else is a fault of a dependency (a pg error, a pool timeout, a failed read
+ * of the platform assurance), never a refusal of the caller's credential: it
+ * is 503 AUTHENTICATION_UNAVAILABLE, so a partial outage does not sign every
+ * patient and provider out.
+ */
+export function authenticationRefusal(error: unknown): HttpException {
+  if (error instanceof DomainProblem) return error;
+  if (error instanceof UnauthorizedException) {
+    return new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+  }
+  if (error instanceof HttpException) return error;
+  return new DomainProblem(503, 'AUTHENTICATION_UNAVAILABLE', 'Authentication is temporarily unavailable');
 }
 
 function isDatabaseError(value: unknown): value is { code: string; message?: string } {

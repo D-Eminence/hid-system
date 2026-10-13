@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Query, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Query, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { AuditAction, AuditFailuresOnly, HighRiskAction, PlatformScope, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
@@ -73,6 +73,11 @@ export class AdminController {
       input, requireIdempotencyKey(key));
   }
 
+  /**
+   * Deprecated (A24): the search term (a name or an email address) travels in
+   * the URL, which request-line access logs keep. Kept for one release so the
+   * Health-id 82b474e admin console keeps working; use POST principals/search.
+   */
   @Get('principals')
   @RequirePermissions('platform.principal.read')
   @AuditAction('admin.principals.list.request')
@@ -80,12 +85,41 @@ export class AdminController {
     return this.admin.listPrincipals(requireAdminContext(request), query);
   }
 
+  /** The principal search with its terms in the body, out of URLs and access logs (A24). */
+  @Post('principals/search')
+  @HttpCode(200)
+  @RequirePermissions('platform.principal.read')
+  @HighRiskAction('platform.principals.search')
+  @AuditAction('admin.principals.list.request')
+  searchPrincipals(@Body() input: ListPrincipalsDto, @Req() request: HidRequest) {
+    return this.admin.listPrincipals(requireAdminContext(request), input);
+  }
+
+  /**
+   * Deprecated (A24): the search terms and the audited reason travel in the
+   * URL. Kept for one release for the Health-id 82b474e admin console; use
+   * POST principals/export.
+   */
   @Get('principals/export')
   @RequirePermissions('platform.principal.export')
   @HighRiskAction('platform.principals.export')
   @AuditAction('admin.principals.export.request')
-  async exportPrincipals(@Query() query: ExportPrincipalsDto, @Req() request: HidRequest, @Res() response: Response) {
-    const exported = await this.admin.exportPrincipals(requireAdminContext(request), query);
+  exportPrincipals(@Query() query: ExportPrincipalsDto, @Req() request: HidRequest, @Res() response: Response) {
+    return this.sendPrincipalExport(query, request, response);
+  }
+
+  /** The principal export with its terms and reason in the body; the guard reads that reason (A24). */
+  @Post('principals/export')
+  @HttpCode(200)
+  @RequirePermissions('platform.principal.export')
+  @HighRiskAction('platform.principals.export')
+  @AuditAction('admin.principals.export.request')
+  exportPrincipalsByBody(@Body() input: ExportPrincipalsDto, @Req() request: HidRequest, @Res() response: Response) {
+    return this.sendPrincipalExport(input, request, response);
+  }
+
+  private async sendPrincipalExport(input: ExportPrincipalsDto, request: HidRequest, response: Response): Promise<void> {
+    const exported = await this.admin.exportPrincipals(requireAdminContext(request), input);
     response.status(200)
       .setHeader('Content-Type', 'text/csv; charset=utf-8; header=present')
       .setHeader('Content-Disposition', 'attachment; filename="hid-principals.csv"')

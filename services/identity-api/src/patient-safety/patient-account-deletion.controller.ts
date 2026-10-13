@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, Post, Req } from '@nestjs/common';
-import { AuditAction, AuditFailuresOnly, FacilityOptional, PatientAllowed } from '../common/decorators';
+import { AuditAction, AuditFailuresOnly, PatientOnly } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import { CancelAccountDeletionDto, ConfirmAccountDeletionDto } from './dto/account-deletion.dto';
 import { PatientAccountDeletionService } from './patient-account-deletion.service';
@@ -9,8 +9,7 @@ import { PatientAccountDeletionService } from './patient-account-deletion.servic
  * success audit for every state change; the interceptor records failures.
  */
 @Controller('identity/me/account-deletion')
-@PatientAllowed()
-@FacilityOptional()
+@PatientOnly()
 @AuditFailuresOnly()
 export class PatientAccountDeletionController {
   constructor(private readonly deletion: PatientAccountDeletionService) {}

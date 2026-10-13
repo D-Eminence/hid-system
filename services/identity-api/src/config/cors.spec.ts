@@ -93,8 +93,11 @@ describe('Identity CORS preflight (Stage 5)', () => {
 /** Sends a plain browser request (no preflight) with the given Origin and returns its status, headers and body. */
 function plain(port: number, path: string, origin: string | undefined, method: string) {
   return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
-    const outgoing = httpRequest({ host: '127.0.0.1', port, path, method,
-      headers: { ...(origin ? { Origin: origin } : {}), 'content-type': 'application/json' } },
+    const withBody = method !== 'GET' && method !== 'OPTIONS';
+    // A fresh connection each time: a refused request's unread body ends the connection it came on.
+    const outgoing = httpRequest({ host: '127.0.0.1', port, path, method, agent: false,
+      headers: { ...(origin ? { Origin: origin } : {}), ...(withBody ? { 'content-type': 'application/json' } : {}),
+        ...(method === 'OPTIONS' ? { 'Access-Control-Request-Method': 'DELETE' } : {}) } },
     (response) => {
       let body = '';
       response.setEncoding('utf8');
@@ -102,7 +105,7 @@ function plain(port: number, path: string, origin: string | undefined, method: s
       response.on('end', () => resolve({ status: response.statusCode ?? 0, headers: response.headers, body }));
     });
     outgoing.on('error', reject);
-    outgoing.end(method === 'GET' ? undefined : '{}');
+    outgoing.end(withBody ? '{}' : undefined);
   });
 }
 
