@@ -72,6 +72,17 @@ export class PatientEnrollmentService {
     private readonly hidCodes: HidCodeGenerator,
     private readonly google: GoogleAuthenticationService) {}
 
+  /**
+   * Whether a start would now pass the checks it makes before it reads a NIN:
+   * the enrollment keys and the QoreID gate (FE-4). It reads no NIN, cookie
+   * or rate bucket and writes nothing; per-request refusals (rate limits, the
+   * lookup quota, a registered NIN) are not predicted.
+   */
+  async availability(): Promise<{ open: boolean }> {
+    if (!this.configured()) return { open: false };
+    return { open: await this.provider.isAvailable() };
+  }
+
   async start(nin: string, idempotencyKey: string, remoteIp: string | undefined,
     correlationId: string, googleCookie?: string) {
     this.assertConfigured();
@@ -610,9 +621,13 @@ export class PatientEnrollmentService {
     return this.hmac('patient-enrollment-qoreid-network', network);
   }
 
+  private configured(): boolean {
+    return Boolean(this.env.NIN_LOOKUP_HMAC_KEY_B64 && this.env.NIN_ENCRYPTION_KEY_B64
+      && (this.env.NODE_ENV !== 'production' || this.env.OTP_HMAC_KEY_B64));
+  }
+
   private assertConfigured() {
-    if (!this.env.NIN_LOOKUP_HMAC_KEY_B64 || !this.env.NIN_ENCRYPTION_KEY_B64
-      || (this.env.NODE_ENV === 'production' && !this.env.OTP_HMAC_KEY_B64)) {
+    if (!this.configured()) {
       throw new DomainProblem(503, 'ENROLLMENT_CONFIGURATION_UNAVAILABLE',
         'Patient identity enrollment is temporarily unavailable');
     }
