@@ -4,9 +4,9 @@
 // policy, and a role with the privileges of a table's owner skips the
 // policies of every table that does not force them (the Identity patient and
 // consent tables among them). Each runtime credential must be its own
-// non-owner LOGIN in one aggregate role; `npm run db:verify-logins` in
-// services/ehr-api checks the rest. This file is identical in every service
-// that connects to the database.
+// non-owner LOGIN in one aggregate role; `npm run db:verify-logins` (the
+// database tooling of the EHR service) checks the rest. This file is identical
+// in every service that connects to the database.
 
 /** Schemas whose objects belong to the migration administrator or a technical owner. */
 export const APPLICATION_SCHEMAS = Object.freeze([
