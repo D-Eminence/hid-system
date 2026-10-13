@@ -80,7 +80,7 @@
     "test:event-dispatcher": "npm --prefix services/event-dispatcher test",
     "test:notification-api": "npm --prefix services/notification-api test",
     "test:notification-worker": "npm --prefix services/notification-worker test",
-    "test:staging-preparation": "node --test scripts/tests/*.test.mjs && python3 -m unittest discover -s scripts/tests -p 'test_staging_*.py'",
+    "test:staging-preparation": "node --test scripts/tests/*.test.mjs && python3 -m unittest discover -s scripts/tests -p 'test_staging_*.py' && python3 -m unittest discover -s scripts/tests -p 'test_production_*.py'",
     "test:cloudflare": "npm --prefix infra/cloudflare test",
     "test:infra": "npm --prefix infra/aws test",
     "verify:platform-graph": "node scripts/verify-platform-graph.mjs",

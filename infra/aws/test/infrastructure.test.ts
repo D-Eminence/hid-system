@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
@@ -7,7 +8,7 @@ import { HidCostGovernanceStack } from '../src/cost-governance-stack.js';
 import { HidRegionalStack } from '../src/hid-regional-stack.js';
 import { costInventory } from '../src/cost-inventory.js';
 import { browserPaths, databaseConnectionDemand, validateDatabaseConnectionBudget,
-  workloadNames, workloadScale } from '../src/workloads.js';
+  workloadNames, workloads, workloadScale } from '../src/workloads.js';
 
 interface Resource {
   readonly Type: string;
@@ -16,8 +17,12 @@ interface Resource {
   readonly UpdateReplacePolicy?: string;
 }
 
+// The exact ARN of the operator-created production alarm topic (synthetic
+// account; D4 / ADR-053). Production refuses to synthesize without one.
+const productionTopicArn = 'arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts';
 const application = new App();
-const configuration = environmentConfig('production');
+const configuration = environmentConfig('production', undefined, undefined, undefined,
+  { operationalAlarmTopicArn: productionTopicArn });
 const regionalStack = new HidRegionalStack(application, 'RegionalTest', { configuration });
 const regional = Template.fromStack(regionalStack).toJSON() as {
   readonly Parameters: Record<string, Record<string, unknown>>;
@@ -630,10 +635,13 @@ test('staging email OTP injects only its SES sender while ordinary delivery reta
   }
   const productionApi = container(regional, 'notification-api');
   const productionEnvironment = Object.fromEntries(productionApi.Environment.map(item => [item.Name, item.Value]));
-  assert.equal(productionEnvironment.NOTIFICATION_DELIVERY_PROFILE, undefined);
-  assert.equal(productionEnvironment.HID_DEPLOYMENT_ENV, undefined);
-  for (const name of ['SES_FROM_ADDRESS', 'TERMII_API_KEY', 'META_ACCESS_TOKEN', 'BREVO_API_KEY']) {
+  assert.equal(productionEnvironment.NOTIFICATION_DELIVERY_PROFILE, 'otp-email-sms');
+  assert.equal(productionEnvironment.HID_DEPLOYMENT_ENV, 'production');
+  for (const name of ['SES_FROM_ADDRESS', 'TERMII_API_KEY']) {
     assert.ok(productionApi.Secrets.some(item => item.Name === name));
+  }
+  for (const name of ['META_ACCESS_TOKEN', 'BREVO_API_KEY']) {
+    assert.equal(productionApi.Secrets.some(item => item.Name === name), false);
   }
 });
 
@@ -646,9 +654,15 @@ test('production takes its workload issuer from the stack; development keeps the
   }
 });
 
-test('monitoring is focused on RDS, task health, OCR, and event delivery', () => {
-  assert.equal(properties(regional, 'AWS::CloudWatch::Alarm').length, 47);
-  assert.equal(properties(regional, 'AWS::Logs::MetricFilter').length, 13);
+test('monitoring is focused on RDS, task health, the enabled modules, the issuer, OTP delivery and event delivery', () => {
+  // 4 RDS, 5 running-task, 8 request-signal (gateway, Identity, EHR and
+  // Notification targets), 3 event delivery, 5 log-volume, 4 issuer, 1 token
+  // renewal and 1 OTP delivery alarm; the disabled modules (Lab, Pharmacy,
+  // OCR, Outreach, notification worker) have none.
+  assert.equal(properties(regional, 'AWS::CloudWatch::Alarm').length, 31);
+  // 13 OCR and event-delivery filters, 2 token-renewal filters (Identity and
+  // EHR, the enabled token tasks) and 1 OTP outcome filter.
+  assert.equal(properties(regional, 'AWS::Logs::MetricFilter').length, 16);
   assert.doesNotMatch(JSON.stringify(properties(regional, 'AWS::CloudWatch::Alarm')), /patient|\bnin\b|document_text/i);
 });
 
@@ -701,7 +715,9 @@ test('economy and fidelity are explicit, bounded staging modes', () => {
   assert.equal(resources(fidelityRegional, 'AWS::EC2::VPCEndpoint')
     .filter(([, item]) => String(item.Properties?.VpcEndpointType) === 'Interface').length, 8);
   assert.equal(fidelityRegional.Parameters.GatewayDesiredCount!.Default, 2);
-  assert.equal(fidelityRegional.Parameters.OcrWorkerDesiredCount!.Default, 1);
+  // OCR is outside the default enabled module set, so its worker stays at 0.
+  assert.equal(fidelityRegional.Parameters.OcrWorkerDesiredCount!.Default, 0);
+  assert.equal(fidelityRegional.Parameters.OcrWorkerDesiredCount!.MaxValue, 0);
   assert.equal(properties(fidelityRegional, 'AWS::RDS::DBInstance')[0]!.MultiAZ, true);
 });
 
@@ -785,8 +801,11 @@ test('production and development templates respect CloudFormation quotas', () =>
 });
 
 test('every live workload has typed resource and autoscaling boundaries', () => {
+  // Every workload keeps a scaling target; only the five enabled production
+  // workloads have scaling policies (D17): gateway, Identity, EHR,
+  // Notification API and the event dispatcher.
   assert.equal(resources(regional, 'AWS::ApplicationAutoScaling::ScalableTarget').length, workloadNames.length);
-  assert.equal(resources(regional, 'AWS::ApplicationAutoScaling::ScalingPolicy').length, 33);
+  assert.equal(resources(regional, 'AWS::ApplicationAutoScaling::ScalingPolicy').length, 15);
   for (const name of workloadNames) {
     const scale = workloadScale('production', name);
     assert.ok(scale.minimumLiveTasks >= 2);
@@ -925,4 +944,254 @@ test('the gateway resolver is the Amazon-provided DNS server of the VPC', () => 
   for (const value of ['10.40.0.0', '10.40.0.0/8', '10.40.0.0/29', '300.1.0.0/16', 'fd00::/56']) {
     assert.throws(() => vpcDnsResolver(value), /VPC CIDR/, value);
   }
+});
+
+// Production launch configuration (INFRA-COUNT, D4, NOTIF-PROD, CFG-PROD, I1).
+const pascalName = (name: string) => name.split('-').map(part => `${part[0]!.toUpperCase()}${part.slice(1)}`).join('');
+const disabledAtLaunch = ['lab-api', 'pharmacy-api', 'ocr-api', 'ocr-worker', 'outreach-api', 'notification-worker'];
+const productionTopic = { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':sns:', { Ref: 'AWS::Region' }, ':',
+  { Ref: 'AWS::AccountId' }, ':hid-production-operational-alerts']] };
+const stagingTopicArn = 'arn:aws:sns:eu-west-1:000000000000:hid-staging-operational-alerts';
+
+function alarmsById(template: typeof regional): Map<string, Record<string, unknown>> {
+  return new Map(resources(template, 'AWS::CloudWatch::Alarm').map(([id, alarm]) => [id, alarm.Properties ?? {}]));
+}
+
+function containerOf(template: typeof regional, name: string) {
+  const task = properties(template, 'AWS::ECS::TaskDefinition').find(item => JSON.stringify(item.Family).endsWith(`-${name}"`));
+  assert.ok(task, `missing ${name} task definition`);
+  const container = (task.ContainerDefinitions as Array<{
+    Name: string; Environment?: Array<{ Name: string; Value: unknown }>; Secrets?: Array<{ Name: string; ValueFrom: unknown }>;
+  }>).find(item => item.Name === name);
+  assert.ok(container, `missing ${name} container`);
+  return { environment: Object.fromEntries((container.Environment ?? []).map(item => [item.Name, item.Value])),
+    secrets: container.Secrets ?? [] };
+}
+
+test('every production task count defaults to zero and keeps the recommended count in its description', () => {
+  for (const name of workloadNames) {
+    const parameter = regional.Parameters[`${pascalName(name)}DesiredCount`];
+    assert.ok(parameter, `missing ${name} desired count`);
+    assert.equal(parameter.Default, 0, `production ${name} must default to zero tasks (ADR-032, I6)`);
+    assert.equal(parameter.MinValue, 0);
+    const scale = workloadScale('production', name);
+    assert.match(String(parameter.Description), new RegExp(`recommended ${scale.recommendedTasks}\\b`),
+      `${name}: the description keeps the recommended count`);
+    if (disabledAtLaunch.includes(name)) {
+      assert.equal(parameter.MaxValue, 0, `${name} is outside the launch module set and cannot be scaled up`);
+      assert.match(String(parameter.Description), /launch module set/);
+    } else {
+      assert.equal(parameter.MaxValue, scale.normalMaxTasks);
+      assert.match(String(parameter.Description), /reviewed parameter file/);
+    }
+  }
+  // The autoscaling floor follows the desired count, so nothing runs until the
+  // reviewed parameter file raises it. A disabled module's target is pinned at
+  // 0..0 and has no scaling policy, so not even a queue backlog can start it.
+  const targets = resources(regional, 'AWS::ApplicationAutoScaling::ScalableTarget');
+  const policies = properties(regional, 'AWS::ApplicationAutoScaling::ScalingPolicy');
+  for (const name of workloadNames) {
+    const id = pascalName(name);
+    const [targetId, target] = targets.find(([, item]) =>
+      JSON.stringify(item.Properties?.MinCapacity) === JSON.stringify({ Ref: `${id}DesiredCount` }))!;
+    assert.deepEqual(target.Properties?.MaxCapacity, { Ref: `${id}ScalingCeiling` });
+    const ceiling = regional.Parameters[`${id}ScalingCeiling`]!;
+    const scaled = policies.filter(policy => JSON.stringify(policy.ScalingTargetId).includes(targetId)).length;
+    if (disabledAtLaunch.includes(name)) {
+      assert.deepEqual([ceiling.Default, ceiling.MinValue, ceiling.MaxValue], [0, 0, 0], `${name} ceiling is pinned at 0`);
+      assert.equal(scaled, 0, `${name} must have no scaling policy`);
+    } else {
+      assert.ok(scaled >= 2, `${name} keeps its scaling policies`);
+    }
+  }
+  // Staging keeps its profile defaults for enabled workloads.
+  assert.equal(stagingRegional.Parameters.IdentityApiDesiredCount!.Default, 1);
+  assert.equal(fidelityRegional.Parameters.IdentityApiDesiredCount!.Default, 2);
+  assert.equal(stagingRegional.Parameters.LabApiDesiredCount!.MaxValue, 0, 'Lab is not routed by default');
+});
+
+test('the operational alarm topic is an exact, validated input that production requires', () => {
+  assert.throws(() => new HidRegionalStack(new App(), 'NoTopicProduction', { configuration: environmentConfig('production') }),
+    /HID_OPERATIONAL_ALARM_TOPIC_ARN/);
+  const config = (value: string, name: 'production' | 'staging' = 'production') => environmentConfig(
+    name, name === 'staging' ? 'economy' : undefined, undefined, undefined, { operationalAlarmTopicArn: value });
+  assert.equal(config(productionTopicArn).operationalAlarmTopicArn, productionTopicArn);
+  assert.equal(config('arn:aws-us-gov:sns:us-gov-west-1:123456789012:hid-production-operational-alerts')
+    .operationalAlarmTopicArn, 'arn:aws-us-gov:sns:us-gov-west-1:123456789012:hid-production-operational-alerts');
+  assert.equal(config(stagingTopicArn, 'staging').operationalAlarmTopicArn, stagingTopicArn);
+  assert.equal(environmentConfig('staging', 'economy').operationalAlarmTopicArn, undefined);
+  for (const value of [
+    stagingTopicArn,
+    'arn:aws:sns:eu-west-1:000000000000:hid-production-release-trust-alerts',
+    'arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts-copy',
+    'arn:aws:sqs:eu-west-1:000000000000:hid-production-operational-alerts',
+    'arn:aws:sns:eu-west-1:00000000000:hid-production-operational-alerts',
+    'arn:aws:sns:*:000000000000:hid-production-operational-alerts',
+    'arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts\n',
+    ' arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts',
+    'arn:other:sns:eu-west-1:000000000000:hid-production-operational-alerts',
+    '${Token[TOKEN.1]}',
+    '',
+  ]) {
+    assert.throws(() => config(value), /HID_OPERATIONAL_ALARM_TOPIC_ARN/, JSON.stringify(value));
+  }
+  // A stack bound to an account and region accepts only a topic in that
+  // account and region.
+  assert.throws(() => new HidRegionalStack(new App(), 'WrongAccount', { configuration,
+    env: { account: '111111111111', region: 'eu-west-1' } }), /operational alarm topic.*account/i);
+  assert.throws(() => new HidRegionalStack(new App(), 'WrongRegion', { configuration,
+    env: { account: '000000000000', region: 'eu-west-2' } }), /operational alarm topic.*region/i);
+  assert.doesNotThrow(() => new HidRegionalStack(new App(), 'BoundTopic', { configuration,
+    env: { account: '000000000000', region: 'eu-west-1' } }));
+});
+
+test('every production alarm notifies the operational topic on alarm and on recovery', () => {
+  const alarms = alarmsById(regional);
+  assert.ok(alarms.size > 0);
+  for (const [id, alarm] of alarms) {
+    assert.deepEqual(alarm.AlarmActions, [productionTopic], `${id} must notify the operational topic`);
+    assert.deepEqual(alarm.OKActions, [productionTopic], `${id} must notify the operational topic on recovery`);
+  }
+  const outputs = (regional as unknown as { Outputs: Record<string, { Value: unknown }> }).Outputs;
+  assert.deepEqual(outputs.OperationalAlarmTopicArn?.Value, productionTopic);
+  // Staging routes its alarms only when the operator supplies its own topic.
+  for (const [, alarm] of alarmsById(stagingRegional)) {
+    assert.equal(alarm.AlarmActions, undefined);
+    assert.equal(alarm.OKActions, undefined);
+  }
+  const stagingWithTopic = Template.fromStack(new HidRegionalStack(new App(), 'StagingTopicTest', {
+    configuration: environmentConfig('staging', 'economy', undefined, undefined, { operationalAlarmTopicArn: stagingTopicArn }),
+  })).toJSON() as typeof regional;
+  for (const [id, alarm] of alarmsById(stagingWithTopic)) {
+    assert.equal(JSON.stringify(alarm.AlarmActions).includes('hid-staging-operational-alerts'), true, id);
+    assert.equal(JSON.stringify(alarm.OKActions).includes('hid-staging-operational-alerts'), true, id);
+  }
+});
+
+test('the workload issuer, token renewal and OTP delivery each raise an alarm', () => {
+  for (const template of [regional, stagingRegional]) {
+    const alarms = [...alarmsById(template).values()];
+    const metric = (namespace: string, name: string) => alarms.filter(alarm => alarm.Namespace === namespace && alarm.MetricName === name);
+    for (const name of ['Errors', 'Throttles']) {
+      const [alarm] = metric('AWS/Lambda', name);
+      assert.ok(alarm, `missing issuer Lambda ${name} alarm`);
+      assert.match(JSON.stringify(alarm.Dimensions), /WorkloadIdentityIssuer/);
+    }
+    for (const name of ['5XXError', '4XXError']) {
+      const [alarm] = metric('AWS/ApiGateway', name);
+      assert.ok(alarm, `missing issuer API ${name} alarm`);
+      const dimensions = alarm.Dimensions as Array<{ Name: string; Value: unknown }>;
+      assert.deepEqual(dimensions.map(item => item.Name).sort(), ['ApiName', 'Stage']);
+      // A Ref to an API Gateway stage resolves to its stage name.
+      const stage = dimensions.find(item => item.Name === 'Stage')!.Value as { Ref: string };
+      assert.equal(template.Resources[stage.Ref]?.Type, 'AWS::ApiGateway::Stage');
+      assert.equal(template.Resources[stage.Ref]!.Properties!.StageName, template === regional ? 'production' : 'staging');
+    }
+    assert.equal(metric('HID/WorkloadIdentity', 'TokenRenewalUnavailable').length, 1);
+    assert.equal(metric('HID/Notification', 'OtpDefinitiveFailures').length, 1);
+  }
+  // The agent's stderr line is plain text: the filter matches its exact words.
+  const agent = readFileSync(new URL('../../../services/workload-token-agent/src/main.mjs', import.meta.url), 'utf8');
+  const line = /process\.stderr\.write\('([^'\\]+)\\n'\)/.exec(agent)?.[1];
+  assert.equal(line, 'Workload token renewal unavailable');
+  const filters = properties(regional, 'AWS::Logs::MetricFilter');
+  const renewal = filters.filter(filter => JSON.stringify(filter.MetricTransformations).includes('TokenRenewalUnavailable'));
+  const tokenTasks = workloadNames.filter(name => Object.keys(workloads[name].tokenFiles).length > 0
+    && !disabledAtLaunch.includes(name));
+  assert.deepEqual(tokenTasks, ['identity-api', 'ehr-api']);
+  assert.equal(renewal.length, tokenTasks.length);
+  for (const filter of renewal) assert.equal(filter.FilterPattern, `"${line}"`);
+  assert.deepEqual(renewal.map(filter => JSON.stringify(filter.LogGroupName)).sort(),
+    tokenTasks.map(name => JSON.stringify({ Ref: resources(regional, 'AWS::Logs::LogGroup')
+      .find(([, group]) => group.Properties?.LogGroupName === `/hid/production/${name}`)![0] })).sort());
+  const otp = filters.filter(filter => JSON.stringify(filter.MetricTransformations).includes('OtpDefinitiveFailures'));
+  assert.equal(otp.length, 1);
+  assert.equal(otp[0]!.FilterPattern, '{ ($.event = "notification.otp.outcome") && ($.outcome = "definitive_failure") }');
+});
+
+test('disabled modules have no running-task or module alarms, and the notification worker is off in production', () => {
+  const production = [...alarmsById(regional).keys()];
+  for (const prefix of ['OcrWorkerRunningTask', 'NotificationWorkerRunningTask', 'OcrWorkerFailure', 'OcrQueueAge',
+    'OcrDrainRate', 'NotificationQueueAge', 'NotificationQueueBacklog', 'NotificationQueueDrain',
+    'LabApi', 'PharmacyApi', 'OcrApi', 'OutreachApi', 'OcrWorker', 'NotificationWorker']) {
+    assert.equal(production.some(id => id.startsWith(prefix)), false, `production must not alarm on ${prefix}`);
+  }
+  for (const prefix of ['GatewayRunningTask', 'IdentityApiRunningTask', 'EhrApiRunningTask', 'NotificationApiRunningTask',
+    'EventDispatcherRunningTask', 'DispatcherTerminalFailure']) {
+    assert.ok(production.some(id => id.startsWith(prefix)), `production must alarm on ${prefix}`);
+  }
+  // Staging keeps its notification worker; OCR alarms follow the OCR route.
+  const staging = [...alarmsById(stagingRegional).keys()];
+  assert.ok(staging.some(id => id.startsWith('NotificationWorkerRunningTask')));
+  assert.ok(staging.some(id => id.startsWith('NotificationQueueAge')));
+  assert.equal(staging.some(id => id.startsWith('OcrWorkerRunningTask')), false);
+  const ocrStaging = [...alarmsById(Template.fromStack(new HidRegionalStack(new App(), 'OcrStagingAlarms', {
+    configuration: environmentConfig('staging', 'economy', undefined, 'identity,ehr,ocr'),
+  })).toJSON() as typeof regional).keys()];
+  for (const prefix of ['OcrWorkerRunningTask', 'OcrWorkerFailure', 'OcrQueueAge', 'OcrDrainRate']) {
+    assert.ok(ocrStaging.some(id => id.startsWith(prefix)), `an OCR-enabled staging synth alarms on ${prefix}`);
+  }
+  assert.equal(environmentConfig('production').notificationWorkerEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy').notificationWorkerEnabled, true);
+  assert.equal(environmentConfig('development').notificationWorkerEnabled, true);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined,
+    { notificationWorkerEnabled: 'false' }).notificationWorkerEnabled, false);
+  assert.throws(() => environmentConfig('production', undefined, undefined, undefined, { notificationWorkerEnabled: 'true' }),
+    /HID_NOTIFICATION_WORKER_ENABLED/);
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { notificationWorkerEnabled: 'yes' }),
+    /HID_NOTIFICATION_WORKER_ENABLED/);
+});
+
+test('production OTP delivery injects only the otp-email-sms provider fields', () => {
+  const developmentTemplate = Template.fromStack(new HidRegionalStack(new App(), 'DevelopmentOtpProfile', {
+    configuration: environmentConfig('development'),
+  })).toJSON() as typeof regional;
+  for (const template of [regional, developmentTemplate]) {
+    const api = containerOf(template, 'notification-api');
+    assert.equal(api.environment.NOTIFICATION_DELIVERY_PROFILE, 'otp-email-sms');
+    assert.deepEqual(api.secrets.map(item => item.Name).sort(),
+      ['SES_FROM_ADDRESS', 'TERMII_API_KEY', 'TERMII_BASE_URL', 'TERMII_SENDER_ID']);
+    assert.deepEqual(api.secrets.map(item => /:([A-Za-z]+)::$/.exec(String((item.ValueFrom as { 'Fn::Join': [string, unknown[]] })
+      ['Fn::Join'][1][1]))?.[1]).sort(), ['sesFromAddress', 'termiiApiKey', 'termiiBaseUrl', 'termiiSenderId']);
+    assert.doesNotMatch(JSON.stringify(containerOf(template, 'notification-api')), /META_|BREVO|WHATSAPP|meta[A-Z]|brevo[A-Z]/);
+  }
+  assert.equal(containerOf(regional, 'notification-api').environment.HID_DEPLOYMENT_ENV, 'production');
+  const description = String(regional.Parameters.NotificationProviderSecretArn!.Description);
+  for (const field of ['sesFromAddress', 'termiiBaseUrl', 'termiiApiKey', 'termiiSenderId']) assert.match(description, new RegExp(field));
+  assert.doesNotMatch(description, /Meta|Brevo|novuApiKey|WhatsApp/);
+  // The disabled notification worker reads nothing from the provider secret.
+  assert.equal(containerOf(regional, 'notification-worker').secrets.some(item => item.Name === 'NOVU_API_KEY'), false);
+  assert.ok(containerOf(stagingRegional, 'notification-worker').secrets.some(item => item.Name === 'NOVU_API_KEY'));
+});
+
+test('NIN-only enrollment is an explicit synth input that defaults to false and requires QoreID', () => {
+  assert.equal(environmentConfig('production').qoreIdNinOnlyEnrollmentEnabled, false);
+  assert.equal(containerOf(regional, 'identity-api').environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED, 'false');
+  assert.equal(containerOf(stagingRegional, 'identity-api').environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED, 'false');
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { qoreIdNinOnlyEnrollmentEnabled: 'true' }),
+    /HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED.*HID_QOREID_ENABLED/);
+  assert.throws(() => environmentConfig('staging', 'economy', 'true', undefined, { qoreIdNinOnlyEnrollmentEnabled: 'yes' }),
+    /HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED/);
+  const enabled = environmentConfig('staging', 'economy', 'true', undefined, { qoreIdNinOnlyEnrollmentEnabled: 'true' });
+  assert.equal(enabled.qoreIdNinOnlyEnrollmentEnabled, true);
+  const template = Template.fromStack(new HidRegionalStack(new App(), 'NinOnlyStaging', { configuration: enabled }))
+    .toJSON() as typeof regional;
+  assert.equal(containerOf(template, 'identity-api').environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED, 'true');
+  for (const name of workloadNames.filter(item => item !== 'identity-api')) {
+    assert.doesNotMatch(JSON.stringify(containerOf(template, name)), /QOREID_NIN_ONLY/);
+  }
+});
+
+test('the production preflight checks exactly the secret fields and alarm topic the production template uses', () => {
+  const script = readFileSync(new URL('../../../scripts/production-external-preflight.py', import.meta.url), 'utf8');
+  const list = (name: string) => JSON.parse((new RegExp(`^${name} = (\\[[^\\]]*\\])`, 'm').exec(script)?.[1] ?? 'null')
+    .replace(/'/g, '"'));
+  const fields = (secret: string, container: string) => containerOf(regional, container).secrets
+    .map(item => (item.ValueFrom as { 'Fn::Join': [string, unknown[]] })['Fn::Join'][1])
+    .filter(parts => JSON.stringify(parts[0]) === JSON.stringify({ Ref: secret }))
+    .map(parts => /^:([A-Za-z0-9]+)::$/.exec(String(parts[1]))?.[1]).sort();
+  assert.deepEqual([...list('IDENTITY_SENSITIVE_FIELDS')].sort(), fields('IdentitySensitiveSecretArn', 'identity-api'));
+  assert.deepEqual([...list('NOTIFICATION_PROVIDER_FIELDS')].sort(), fields('NotificationProviderSecretArn', 'notification-api'));
+  assert.deepEqual([...list('AUTH_FIELDS')].sort(), fields('AuthSecretArn', 'identity-api'));
+  assert.match(script, /^ALARM_TOPIC_NAME = "hid-production-operational-alerts"$/m);
 });
