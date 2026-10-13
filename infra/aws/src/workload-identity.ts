@@ -4,14 +4,14 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { Construct } from 'constructs';
 import { fileURLToPath } from 'node:url';
 import type { WorkloadName } from './workloads.js';
 
 /**
- * Environments with an in-stack issuer. Development keeps the external issuer,
- * JWKS and subject inputs. Production is proposed in ADR-047 and is not
- * accepted until that decision is made.
+ * Environments with an in-stack issuer (ADR-047). Development keeps the
+ * external issuer, JWKS and subject inputs.
  */
 export type WorkloadIssuerEnvironment = 'staging' | 'production';
 
@@ -36,7 +36,23 @@ export interface WorkloadCaller {
 export interface WorkloadIdentityProps {
   readonly environment: WorkloadIssuerEnvironment;
   readonly logRetention: logs.RetentionDays;
+  /**
+   * IPv4 /32 addresses through which every caller of the issuer leaves the
+   * VPC (its NAT gateway Elastic IPs). When given, a REGIONAL web ACL on the
+   * stage blocks every other source (D3). Omitted only where no NAT gateway
+   * and no running task exist (staging sleep).
+   */
+  readonly allowedSourceAddresses?: readonly string[];
 }
+
+// Per-method limits (DEP-4-DOS). POST /token: at production normal maximum the
+// six token services renew 74 caller/audience pairs every 90 s (148 at the
+// reviewed emergency maximum), about 15 requests per second at worst on the
+// 10 s retry cadence. The JWKS limit is never below it. Each method has its
+// own bucket, so a flood of one cannot throttle the other.
+const tokenThrottle = { throttlingRateLimit: 30, throttlingBurstLimit: 60 } as const;
+const jwksThrottle = { throttlingRateLimit: 30, throttlingBurstLimit: 60 } as const;
+const methodDefaults = { dataTraceEnabled: false, loggingLevel: apigateway.MethodLoggingLevel.OFF, metricsEnabled: true } as const;
 
 /**
  * IAM-authenticated issuer bound to one environment: its own key, API, stage
@@ -78,13 +94,35 @@ export class WorkloadIdentity extends Construct {
       conditions: { StringEquals: { 'kms:SigningAlgorithm': 'ECDSA_SHA_256' } },
     }));
     this.issuer.addToRolePolicy(new iam.PolicyStatement({ actions: ['kms:GetPublicKey'], resources: [key.keyArn] }));
+    // DEP-4-KEY (D1): the default root statement stays, so the account keeps
+    // key administration and the key can never be locked out. These Deny
+    // statements override any IAM grant: only the issuer role may sign, and
+    // only ES256 over a RAW message, as index.mjs does. An account
+    // administrator can still change this policy or the function; that
+    // same-account custody risk is accepted in ADR-047.
+    const issuerRole = this.issuer.role!;
+    for (const [sid, condition] of [
+      ['DenySigningFromEveryOtherPrincipal', { ArnNotEquals: { 'aws:PrincipalArn': issuerRole.roleArn } }],
+      ['DenyEveryOtherSigningAlgorithm', { StringNotEquals: { 'kms:SigningAlgorithm': 'ECDSA_SHA_256' } }],
+      ['DenyEveryOtherMessageType', { StringNotEquals: { 'kms:MessageType': 'RAW' } }],
+    ] as const) {
+      key.addToResourcePolicy(new iam.PolicyStatement({
+        sid, effect: iam.Effect.DENY, principals: [new iam.AnyPrincipal()], actions: ['kms:Sign'], resources: ['*'],
+        conditions: condition,
+      }));
+    }
     this.api = new apigateway.RestApi(this, 'Api', {
       restApiName: `hid-${environment}-workload-identity`,
       description: `IAM-bound short-lived ${environment} workload tokens and public verification keys`,
       endpointTypes: [apigateway.EndpointType.REGIONAL], cloudWatchRole: false,
+      // No stage-wide ('/*/*') setting: each method carries its own logging
+      // and throttle settings.
       deployOptions: {
-        stageName: environment, dataTraceEnabled: false, loggingLevel: apigateway.MethodLoggingLevel.OFF,
-        throttlingRateLimit: 30, throttlingBurstLimit: 60, metricsEnabled: true,
+        stageName: environment,
+        methodOptions: {
+          '/token/POST': { ...methodDefaults, ...tokenThrottle },
+          '/.well-known/jwks.json/GET': { ...methodDefaults, ...jwksThrottle },
+        },
       },
     });
     const integration = new apigateway.LambdaIntegration(this.issuer, { proxy: true, allowTestInvoke: false });
@@ -96,8 +134,39 @@ export class WorkloadIdentity extends Construct {
     this.jwksUrl = `${this.issuerUrl}/.well-known/jwks.json`;
     this.issuer.addEnvironment('WORKLOAD_ISSUER_URL', this.issuerUrl);
     this.issuer.addEnvironment('WORKLOAD_API_ID', this.api.restApiId);
+    if (props.allowedSourceAddresses) this.allowOnly(environment, props.allowedSourceAddresses);
     new CfnOutput(this, 'IssuerUrl', { value: this.issuerUrl });
     new CfnOutput(this, 'JwksUrl', { value: this.jwksUrl });
+  }
+
+  /**
+   * D3: deny by default at the edge. Every agent and receiver reaches the
+   * issuer through the VPC's NAT gateways (there is no execute-api endpoint),
+   * so the stage accepts only those addresses. WAF matches the connection
+   * source, never a forwarded header.
+   */
+  private allowOnly(environment: WorkloadIssuerEnvironment, addresses: readonly string[]): void {
+    if (addresses.length === 0) throw new Error('A workload issuer allowlist needs at least one NAT address');
+    const allowlist = new wafv2.CfnIPSet(this, 'IssuerAllowlist', {
+      scope: 'REGIONAL', ipAddressVersion: 'IPV4', addresses: [...addresses],
+      description: `NAT gateway addresses of the ${environment} VPC, the only callers of its workload issuer`,
+    });
+    const acl = new wafv2.CfnWebACL(this, 'IssuerWebAcl', {
+      scope: 'REGIONAL',
+      defaultAction: { block: {} },
+      description: `Blocks every source except the ${environment} VPC NAT gateways`,
+      visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: `hid-${environment}-workload-issuer`,
+        sampledRequestsEnabled: false },
+      rules: [{
+        name: 'AllowVpcNatEgress', priority: 0, action: { allow: {} },
+        statement: { ipSetReferenceStatement: { arn: allowlist.attrArn } },
+        visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: `hid-${environment}-workload-issuer-nat`,
+          sampledRequestsEnabled: false },
+      }],
+    });
+    new wafv2.CfnWebACLAssociation(this, 'IssuerWebAclAssociation', {
+      resourceArn: this.api.deploymentStage.stageArn, webAclArn: acl.attrArn,
+    });
   }
 
   /** The exact JWT subject of a caller in this environment. */

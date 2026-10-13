@@ -60,7 +60,9 @@ export function costInventory(configuration: HidEnvironmentConfig): CostInventor
     // Staging and production add the workload signing key; development keeps the external issuer.
     kmsKeys: configuration.name === 'development' ? 3 : 4,
     secretInterfaces: workloadNames.filter((name) => workloads[name].hasDatabase).length + 5,
-    wafs: ingress ? 1 : 0,
+    // The public API web ACL, plus the workload issuer's NAT allowlist where an
+    // in-stack issuer runs behind NAT gateways (ADR-047, D3).
+    wafs: ingress ? 1 + (configuration.name !== 'development' && configuration.natGateways > 0 ? 1 : 0) : 0,
     sqsQueuesAndDlqs: 2,
     s3Buckets: 1,
   };

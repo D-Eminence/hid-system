@@ -353,13 +353,15 @@ export class HidRegionalStack extends Stack {
       `https://${label}.${privateZone.zoneName}`,
     ])) as Partial<Record<WorkloadName, string>>;
 
-    // Staging and production (proposed in ADR-047) carry their own issuer;
-    // development keeps the external issuer, JWKS and subject inputs.
+    // Staging and production carry their own issuer (ADR-047); development
+    // keeps the external issuer, JWKS and subject inputs. Where tasks can run
+    // (NAT gateways exist), the issuer accepts only this VPC's NAT addresses.
     const issuerEnvironment = workloadIssuerEnvironment(this.configuration.name);
     if (issuerEnvironment) {
       this.workloadIdentity = new WorkloadIdentity(this, workloadIdentityConstructId(issuerEnvironment), {
         environment: issuerEnvironment,
         logRetention: issuerEnvironment === 'staging' ? logs.RetentionDays.TWO_WEEKS : this.configuration.logRetention,
+        allowedSourceAddresses: this.configuration.natGateways > 0 ? this.natEgressAddresses(vpc) : undefined,
       });
     }
     const resources = new Map<WorkloadName, RuntimeResource>();
@@ -696,7 +698,11 @@ export class HidRegionalStack extends Stack {
           containerName: 'workload-token-agent',
           image: ecs.ContainerImage.fromRegistry(this.parameter('IdentityApiImageUri').valueAsString),
           command: ['/app/services/workload-token-agent/src/main.mjs'],
-          user: '65532:65532', readonlyRootFilesystem: true, essential: true, memoryReservationMiB: 64,
+          // D2 (ADR-047): not essential, so an issuer outage stops only this
+          // task's service-to-service calls, which fail closed, and not the
+          // task; ECS restarts an agent that exits after running 60 s.
+          user: '65532:65532', readonlyRootFilesystem: true, essential: false, memoryReservationMiB: 64,
+          enableRestartPolicy: true, restartAttemptPeriod: Duration.seconds(60),
           environment: {
             HID_DEPLOYMENT_ENV: this.workloadIdentity.environment, AWS_REGION: Aws.REGION,
             WORKLOAD_ISSUER_URL: this.workloadIdentity.issuerUrl,
@@ -750,6 +756,22 @@ export class HidRegionalStack extends Stack {
       input.securityGroup.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'Approved HTTPS issuer/provider egress through NAT');
     }
     return { definition, taskDefinition, service, container, logGroup, securityGroup: input.securityGroup };
+  }
+
+  /**
+   * The /32 Elastic IP of each NAT gateway of this VPC. CDK's NAT gateway
+   * provider allocates one AWS::EC2::EIP per gateway; synthesis fails if any
+   * gateway uses an address this stack does not own.
+   */
+  private natEgressAddresses(vpc: ec2.Vpc): string[] {
+    const eips = vpc.node.findAll().filter((child): child is ec2.CfnEIP => child instanceof ec2.CfnEIP);
+    const gateways = vpc.node.findAll().filter((child): child is ec2.CfnNatGateway => child instanceof ec2.CfnNatGateway);
+    const used = gateways.map(gateway => eips.find(eip => gateway.allocationId === eip.attrAllocationId));
+    if (gateways.length !== this.configuration.natGateways || used.some(eip => !eip)
+        || new Set(used).size !== gateways.length) {
+      throw new Error('Every NAT gateway must use exactly one Elastic IP allocated by this VPC');
+    }
+    return used.map(eip => `${eip!.attrPublicIp}/32`);
   }
 
   /**
