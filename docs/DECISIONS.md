@@ -4260,15 +4260,15 @@ Alternatives not taken:
 - Mapping workload refusals to `503` in Lab, Pharmacy, OCR and Outreach now:
   they are off at launch (D17), and the shared helper makes it a small
   follow-up.
-- Rewriting the EHR and OCR guard `catch` (any non-HTTP fault to `503`): the
-  EHR guard's `catch` is rewritten on `BRANCH:launch/ehr-retraction-integrity`,
-  and its Identity and runtime-control calls already answer `503`; OCR is off
-  at launch. Left as a follow-up to avoid a conflicting change.
+- Rewriting the OCR guard `catch` (any fault with no status to `503`) now:
+  OCR is off at launch (D17). EHR's guard answers such a fault
+  `503 AUTHENTICATION_UNAVAILABLE`, once this change contained the EHR
+  retraction branch that also edits that guard.
 - An audited maintenance exemption for clinical sessions of administrators:
   no decision asks for one; it would need its own control and review.
 - Removing the `GET` admin routes now: the Health-id `82b474e` console would
-  fail. The gateway's access log already omits query strings
-  (`BRANCH:launch/edge-hardening-2`, ADR-055).
+  fail. The gateway's access log omits query strings since
+  D-Eminence/hid-system#72 (ADR-055).
 
 Consequences:
 
