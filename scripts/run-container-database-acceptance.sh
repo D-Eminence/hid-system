@@ -69,6 +69,30 @@ env NODE_ENV=test DATABASE_ADMIN_URL="$acceptance_admin_url" DATABASE_SSL=true \
 env NODE_ENV=test DATABASE_ADMIN_URL="$acceptance_admin_url" DATABASE_SSL=true \
   DATABASE_SSL_ROOT_CERT_BASE64="$acceptance_ca_base64" \
   npm --prefix "$acceptance_repository/services/ehr-api" run db:verify-roles
+# A superuser records every role grant as made by the bootstrap superuser. An
+# ADMIN OPTION membership of a runtime role in a technical owner, even without
+# INHERIT or SET, lets that role's login grant itself the owner and SET ROLE to
+# it, so db:verify-roles must refuse it here, where no creator row exists.
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -qc 'grant hid_ocr_queue_metrics to hid_ocr_worker with admin true, inherit false, set false' >/dev/null
+if acceptance_misgrant_output="$(env NODE_ENV=test DATABASE_ADMIN_URL="$acceptance_admin_url" DATABASE_SSL=true \
+  DATABASE_SSL_ROOT_CERT_BASE64="$acceptance_ca_base64" \
+  npm --prefix "$acceptance_repository/services/ehr-api" run -s db:verify-roles 2>&1)"; then
+  echo 'db:verify-roles accepted an ADMIN OPTION membership of hid_ocr_worker in hid_ocr_queue_metrics' >&2
+  exit 1
+fi
+if ! grep -q 'technical owner hid_ocr_queue_metrics has a member, a membership or schema CREATE privilege' \
+  <<<"$acceptance_misgrant_output"; then
+  printf 'db:verify-roles failed for another reason:\n%s\n' "$acceptance_misgrant_output" >&2
+  exit 1
+fi
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -qc 'revoke hid_ocr_queue_metrics from hid_ocr_worker' >/dev/null
+env NODE_ENV=test DATABASE_ADMIN_URL="$acceptance_admin_url" DATABASE_SSL=true \
+  DATABASE_SSL_ROOT_CERT_BASE64="$acceptance_ca_base64" \
+  npm --prefix "$acceptance_repository/services/ehr-api" run db:verify-roles
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/schema.integration.sql" >/dev/null
@@ -165,6 +189,12 @@ PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/purpose-of-use-vocabulary.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/function-parameter-settings.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/platform-control-owner.integration.sql" >/dev/null
 env NODE_ENV=test DATABASE_URL="$acceptance_admin_url" DATABASE_SSL=true \
   DATABASE_SSL_ROOT_CERT_BASE64="$acceptance_ca_base64" \
   npm --prefix "$acceptance_repository/services/ehr-api" run db:plan
@@ -404,4 +434,4 @@ acceptance_postgresql_version="$(PGSSLMODE=verify-full PGSSLROOTCERT="$acceptanc
 acceptance_started=false
 rm -rf -- "$acceptance_root"
 trap - EXIT INT TERM
-printf '{"status":"passed","postgresql":"%s","migrations":"0001-0082","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}\n' "$acceptance_postgresql_version"
+printf '{"status":"passed","postgresql":"%s","migrations":"0001-0083","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}\n' "$acceptance_postgresql_version"

@@ -79,7 +79,9 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0080_pharmacy_source_prescription_guards.sql` | Replaces `pharmacy.validate_work_item()` and `pharmacy.validate_dispensing()` (same signature, `SECURITY DEFINER` attribute, `search_path`, volatility, owner and 0077 checks) so that each also reads the EHR prescription with a share lock: an acceptance must equal the exact active prescription version (every snapshot field except the prescription time and the start and end dates, which a later release will compare), and a dispensing needs its prescription still active at the accepted version. Each refusal is `23514` with its own constraint name, which the Pharmacy API answers with `409`. Before, Pharmacy accepted cancelled or nonexistent prescriptions and dispensed work whose prescription had been cancelled. Function replacement only; no table, grant or data change, no table lock. Deploy the Pharmacy API with the `409` mapping before or with 0080; earlier EHR builds keep working (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §3, §5, §6) |
 | `database/migrations/0081_uniform_recovery_start_cooldown.sql` | New table `auth.otp_start_cooldowns`: the recovery start cooldown per purpose and keyed identifier, kept whether or not the identifier has an account, so a repeat start inside the cooldown is answered with the same challenge id for a known and an unknown identifier (before, only a real account's repeat got its live id back). No foreign key, no row-level security; the role bootstrap grants `SELECT`, `INSERT` and `UPDATE` to the Identity runtime and the schema-test runtime, and `DELETE` to none. A new table: no lock on an existing table, no window. Run `db:bootstrap` and `db:verify-roles` after it, and only then deploy the Identity build of this change, whose every recovery start fails (`500`) without the table and the grant (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3, §5, §6) |
 | `database/migrations/0082_purpose_of_use_vocabulary.sql` | Seeds `identity.purpose_of_use_codes` with `direct-care` ("Direct patient care", active, source `hid`), `ON CONFLICT (code) DO NOTHING`, so a row already inserted or deactivated by an operator is kept as it is. 0003 created the table empty and nothing inserted a row, while every consent decision requires an active code, so on a database built only from migrations every staff consent check, access request, grant close, PIN and break-glass failed closed. `emergency` and `healthcare-operations` are not seeded: each waits for a product decision (§5). `ROW EXCLUSIVE` lock on that table only; no grant or service change |
-| `database/runtime-grants.sql` | Idempotent least-privilege runtime roles |
+| `database/migrations/0083_ocr_claim_in_body_variable_conflict.sql` | Replaces `ocr.claim_worker_job(text, integer)` (`CREATE OR REPLACE`; same signature, result columns, `SECURITY DEFINER`, `search_path` and body) with `#variable_conflict use_column` as the first line of its body instead of 0015's `SET plpgsql.variable_conflict = 'use_column'`. That parameter has superuser context: on RDS, where no role is a superuser, a fresh chain stops at 0015 unless the migration administrator holds `SET ON PARAMETER plpgsql.variable_conflict`, and the definer applied the setting as its owner on every claim, so the privilege was needed for good. After 0083 no function needs it, and the operator revokes it (§6). The option resolves the same names to columns, so claims behave as before; owner, grants and comment are kept. Function replacement only; no table lock, grant or data change (`DATABASE.md`, "Non-superuser database chain on RDS (0083)") |
+| `database/runtime-grants.sql` | Idempotent least-privilege runtime roles. Runs as a superuser or as the non-superuser administrator that created the roles (RDS); checks the roles' attributes instead of re-asserting them (§6) |
+| `database/runtime-login-assertions.sql` and `scripts/verify-runtime-logins.mjs` | `npm run db:verify-logins`: checks each runtime credential's own LOGIN, connected with that credential's URL (§6) |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
 | `scripts/promote-legacy-identity.mjs` | Explicit dependency ordering, UUID/HID preservation, encryption/HMAC, holds and conflict evidence |
@@ -207,8 +209,11 @@ Before a real source read:
   counts, and timezone mappings against the extraction contract;
 - provision private PostgreSQL 16 with TLS, encryption, backups, logs and
   deletion controls;
-- verify no runtime LOGIN owns schemas or has superuser, `CREATEROLE`,
-  `BYPASSRLS`, or migration inheritance;
+- verify with `npm run db:verify-logins` (§6), connected with each runtime
+  credential's own URL, that no runtime LOGIN is the migration administrator
+  or the RDS master, owns or has an owner's privileges on any application
+  object, has superuser, `CREATEROLE`, `CREATEDB`, `REPLICATION` or
+  `BYPASSRLS`, or has any membership but its aggregate role;
 - approve the purpose-of-use vocabulary, consent/deny precedence and RLS
   tests. Migration `0082` seeds only `direct-care` (active), and keeps any
   row already present as it is; list the codes before and after it (release
@@ -226,20 +231,166 @@ rehearsal; never patch an already-applied migration checksum.
 
 ## 6. Target schema and roles
 
-From `services/ehr-api` with the migration administrator:
+On RDS no role is a PostgreSQL superuser. The migration administrator is a
+deployment-only LOGIN, `NOSUPERUSER NOBYPASSRLS CREATEROLE`, created by the RDS
+master (`hid_platform_bootstrap`) with `CREATE` on the target database, and it
+owns every schema and object the migrations create. No runtime LOGIN may be
+it, be a member of it, or hold `BYPASSRLS`, and the release does not rely on
+the owner bypassing row-level security (release checklist P8).
+
+### 6.1 Migrations
+
+A database that has not applied 0015 needs one temporary privilege. 0015 sets
+`plpgsql.variable_conflict` on `ocr.claim_worker_job`, a parameter with
+superuser context, which a non-superuser may set only with
+`SET ON PARAMETER` on it. 0083 moves that option into the function body, after
+which no function needs the privilege. As the RDS master, immediately before
+the migration run:
+
+```sql
+grant set on parameter plpgsql.variable_conflict to <migration administrator>;
+```
+
+From `services/ehr-api`, as the migration administrator:
 
 ```bash
 npm run db:plan
-npm run db:dry-run
+npm run db:dry-run   # runs 0015 too before rolling back, so it needs the grant as well
 npm run db:migrate
+```
+
+Once the ledger shows `0083` applied, as the RDS master:
+
+```sql
+revoke set on parameter plpgsql.variable_conflict from <migration administrator>;
+select has_parameter_privilege('<migration administrator>',
+  'plpgsql.variable_conflict', 'SET');  -- false
+```
+
+Without the grant `db:migrate` stops at 0015 with `permission denied to set
+parameter "plpgsql.variable_conflict"`. 0001 to 0014 stay committed, and a
+rerun after the grant continues from 0015. A database that already applied
+0015 needs no grant for 0083. The grant is cluster-wide; keep it only for the
+run, and record both statements and the check in the release evidence.
+
+Whether the RDS master may grant this privilege is unverified. If RDS refuses
+it, do not work around it with a superuser-like role or `BYPASSRLS`. Stop and
+take a reviewed ledger exception instead: no staging or production database
+has applied 0015, so one reviewed change can replace 0015's statement with the
+in-body option and update its pinned checksum in
+`scripts/verify-migration-ledger.mjs` and `release/config/components.json`,
+after which local and development databases are rebuilt. That exception is
+not made in this repository.
+
+### 6.2 Role bootstrap
+
+As the same migration administrator. It must be the role that creates the HID
+group roles, because every membership grant needs `ADMIN OPTION` on them:
+
+```bash
+export DATABASE_ADMIN_URL=<migration administrator URL>
 npm run db:bootstrap
 npm run db:verify-roles
 ```
 
-Confirm the candidate ledger reaches `0082`, no unexpected constraint remains
+Run it only with `npm run db:bootstrap`, which sends `runtime-grants.sql` as
+one transaction (with `psql`, only as `psql -1 -v ON_ERROR_STOP=1 -f`): its
+temporary memberships below must never outlive or leave that transaction. The
+bootstrap may run again at any time. A run that transfers a function to its
+technical owner leaves that owner an `EXECUTE` entry on it, which the next
+run's `REVOKE ALL` removes; from then on a run changes nothing. It creates
+each role with its attributes and then checks them. It refuses a HID group
+role with `SUPERUSER`, `BYPASSRLS` or `REPLICATION`, and a runner that is
+neither a superuser nor holds `ADMIN OPTION` on every HID role; neither can
+happen to roles this administrator created. Inside its own transaction it
+holds `SET` and `INHERIT` membership in the three technical owners
+(`hid_event_delivery_commands`, `hid_ocr_queue_metrics`,
+`hid_platform_control_reader`), and each of them holds `CREATE` on one schema
+only around its function transfer; it revokes both before it commits.
+PostgreSQL 16 records, for a non-superuser that creates a role, an `ADMIN
+OPTION`-only membership granted by the bootstrap superuser. It carries no
+privilege and no `SET ROLE`, and the administrator cannot revoke it.
+`db:verify-roles` allows that row on a technical owner only when its member is
+the role running the check, so run `db:verify-roles` as the same
+administrator; any other membership in a technical owner, `ADMIN OPTION` alone
+included, fails it.
+
+Locks. Every lock the bootstrap takes is held until its transaction commits.
+`lock_timeout` (5 s) and `statement_timeout` (120 s) apply to the bootstrap's
+own statements only. The run that first creates
+`platform_controls_definer_read` (the first run of
+D-Eminence/hid-system#63, or one after the policy was removed or
+changed) takes an `ACCESS EXCLUSIVE` lock on `platform.control_settings`,
+before any other table lock. Until it commits, every control read of the
+Identity, EHR and Outreach guards, that is every request that is not a
+platform administrator's, waits behind it, within the services' 15 s statement
+timeout; locally, on a synthetic database, the rest of the transaction took
+about 0.1 s. Run that first bootstrap with traffic low. Because that lock
+comes first, a break-glass activation (which reads the controls and then
+writes `identity.outbox_events` in one transaction) waits for the bootstrap or
+the bootstrap waits for it; they do not deadlock. A later run finds the policy
+and takes no lock on `platform.control_settings`. Every run still recreates
+the `ocr.jobs` and outbox delivery policies under brief `ACCESS EXCLUSIVE`
+locks, as before.
+
+A later migration that replaces a function a technical role owns
+(`ocr.worker_queue_metrics()`, the `integration` delivery commands,
+`platform.control_enabled(text)`) needs that owner's privileges. Run it, as
+the bootstrap does, with a temporary membership in that role, or change the
+function's owner back and rerun the bootstrap afterwards.
+
+### 6.3 Runtime LOGINs
+
+Create one LOGIN per runtime credential, `LOGIN NOSUPERUSER NOBYPASSRLS
+NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT`, granted exactly its aggregate
+role, and store its URL in that service's secret (`url`; the EHR scanner
+pool's in `scannerUrl`). Only a role with `ADMIN OPTION` on the aggregate may
+grant it, which in PostgreSQL 16 is the migration administrator that created
+the HID roles; the RDS master is refused (`permission denied to grant role`).
+Create the LOGINs as that administrator too, so one role does both steps. If
+the master creates a LOGIN, the administrator still issues the grant.
+
+| Credential | Variable for `db:verify-logins` | Aggregate role |
+| --- | --- | --- |
+| Identity API | `DATABASE_LOGIN_URL_IDENTITY_API` | `hid_identity_api_runtime` |
+| EHR API | `DATABASE_LOGIN_URL_EHR_API` | `hid_ehr_api_runtime` |
+| EHR scanner pool (`WORKLOAD_DATABASE_URL`) | `DATABASE_LOGIN_URL_EHR_API_SCANNER` | `hid_document_scanner` |
+| Lab API | `DATABASE_LOGIN_URL_LAB_API` | `hid_lab_api_runtime` |
+| Pharmacy API | `DATABASE_LOGIN_URL_PHARMACY_API` | `hid_pharmacy_api_runtime` |
+| OCR API | `DATABASE_LOGIN_URL_OCR_API` | `hid_ocr_api_runtime` |
+| OCR worker | `DATABASE_LOGIN_URL_OCR_WORKER` | `hid_ocr_worker` |
+| Outreach API | `DATABASE_LOGIN_URL_OUTREACH_API` | `hid_outreach_api_runtime` |
+| Event dispatcher | `DATABASE_LOGIN_URL_EVENT_DISPATCHER` | `hid_event_dispatcher` |
+| Notification worker | `DATABASE_LOGIN_URL_NOTIFICATION_WORKER` | `hid_notification_worker` |
+
+Then verify every credential, each over its own connection:
+
+```bash
+export DATABASE_SSL=true DATABASE_SSL_ROOT_CERT_BASE64=<RDS CA bundle, base64>
+export DATABASE_FORBIDDEN_LOGINS=hid_platform_bootstrap,<migration administrator>
+export DATABASE_LOGIN_URL_IDENTITY_API=...   # and the other nine
+npm run db:verify-logins
+```
+
+It must report `"status": "passed"` with ten verified credentials. It refuses
+a login that authenticates as one role and runs as another, is named in
+`DATABASE_FORBIDDEN_LOGINS`, has `SUPERUSER`, `BYPASSRLS`, `CREATEROLE`,
+`CREATEDB` or `REPLICATION`, has a direct membership other than its aggregate
+(inherited, without `ADMIN OPTION`) or reaches any role its aggregate does not,
+has the privileges of the owner of the database or of any application schema,
+relation or function, is named by a direct grant, or may create objects; and
+two credentials that share a login. It prints role names only, never a URL or
+password. Run it again after every credential rotation (`--partial` with only
+the rotated credentials). Clear the variables afterwards. In production every
+service that connects to the database also refuses to start over a superuser,
+`BYPASSRLS` or owner connection.
+
+Confirm the candidate ledger reaches `0083`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
-service or place administrator credentials in a steady-state task.
+service or place administrator credentials in a steady-state task. The
+migration image also carries `scripts/bootstrap-database-roles.mjs` and
+`scripts/verify-runtime-logins.mjs`.
 
 ## 7. Stage a controlled snapshot
 
@@ -324,7 +475,8 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify `0082`, runtime grants, RLS and purpose/deny behavior, and list the
+6. Verify the ledger at `0083`, runtime grants (`db:verify-roles`) and logins
+   (`db:verify-logins`), RLS and purpose/deny behavior, and list the
    purpose-of-use codes (release checklist P10).
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.

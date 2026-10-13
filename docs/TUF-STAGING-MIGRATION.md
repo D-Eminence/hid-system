@@ -89,6 +89,30 @@ The executable covers:
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites
    with exact runtime callers so superuser function ownership cannot hide RLS failures.
+   Then `scripts/verify-non-superuser-database.mjs` runs the chain as RDS runs
+   it, on a second disposable Unix-socket cluster of its own whose cluster
+   superuser acts only where the RDS master would. That superuser creates a
+   `NOSUPERUSER NOBYPASSRLS CREATEROLE NOCREATEDB` LOGIN administrator and a
+   database it owns. As that administrator the script checks that a migration
+   run without `SET ON PARAMETER plpgsql.variable_conflict` stops at 0015 with
+   0001-0014 committed; with the grant it applies 0015 to the latest migration,
+   and the grant is revoked afterwards. It then runs the role bootstrap twice,
+   each run overlapping a transaction that holds a lock on
+   `platform.control_settings` and then locks `identity.outbox_events`, as a
+   break-glass activation does: the first run must wait for the control table
+   holding no application table lock, the second must take no lock on it. It
+   runs `db:verify-roles`, checks that it refuses an `ADMIN OPTION`-only grant
+   of `hid_ocr_queue_metrics` to `hid_ocr_worker`, creates one LOGIN per
+   runtime credential as the administrator and passes
+   `db:verify-logins` for all ten, and checks that `db:verify-logins` refuses
+   the administrator's URL, a login with an extra role and another service's
+   login. `platform.control_enabled` must answer the Identity, EHR and
+   Outreach logins from the control rows, and the OCR worker login's claim
+   must reach the function's own authorization check without the parameter
+   privilege. It also runs `platform-control-owner.integration.sql` and
+   `function-parameter-settings.integration.sql`, removes its cluster, and is
+   recorded under `evidence.checks` as `non_superuser_database` (about 5 s
+   locally).
 2. Seed a separate synthetic canonical patient/account/facility/membership,
    encounter, clinical note/revision and audit event before backup. Record
    per-table counts and deterministic sorted-row SHA-256 plus sequence state.

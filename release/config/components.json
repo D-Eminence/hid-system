@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0082",
-    "count": 82,
+    "last": "0083",
+    "count": 83,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -425,6 +425,10 @@
       {
         "name": "0082_purpose_of_use_vocabulary.sql",
         "sha256": "bd3c730051405860fd4cb4feacb5bde259eb627b45724433e44196c9403f9351"
+      },
+      {
+        "name": "0083_ocr_claim_in_body_variable_conflict.sql",
+        "sha256": "0c9e0c70cb643877e31c0b831a41960e3f23cb7c6120a9a431bc96e068502583"
       }
     ]
   },

@@ -1,6 +1,7 @@
-import { Injectable, OnApplicationShutdown } from '@nestjs/common';
+import { Injectable, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from 'pg';
 import { getEnvironment } from '../config/environment';
+import { assertRuntimeDatabaseRole } from './runtime-role-guard';
 import type { DataAccessContext } from '../common/request-context';
 
 export interface TransactionOptions {
@@ -38,11 +39,13 @@ function sqlState(error: unknown): unknown {
 }
 
 @Injectable()
-export class DatabaseService implements OnApplicationShutdown {
+export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
   private readonly pool: Pool;
+  private readonly verifyRuntimeRole: boolean;
 
   constructor() {
     const environment = getEnvironment();
+    this.verifyRuntimeRole = environment.NODE_ENV === 'production';
     const ssl: PoolConfig['ssl'] = environment.DATABASE_SSL
       ? {
           rejectUnauthorized: true,
@@ -160,6 +163,12 @@ export class DatabaseService implements OnApplicationShutdown {
 
   async healthCheck(): Promise<void> {
     await this.pool.query('select 1');
+  }
+
+  /** In production, refuse to start over a superuser, BYPASSRLS or owner connection (runtime-role-guard.ts). */
+  async onModuleInit(): Promise<void> {
+    if (!this.verifyRuntimeRole) return;
+    await assertRuntimeDatabaseRole(this.pool);
   }
 
   async onApplicationShutdown(): Promise<void> {
