@@ -360,8 +360,17 @@ module set").
   then hides those surfaces and disables emergency access. The launch
   database starts with `uploads_enabled`, `outreach_portal_enabled` and
   `break_glass_enabled` off where they are still as seeded, so P11 becomes a
-  check, not a manual step. Re-enabling a module, staging included, is a
-  reviewed migration that grants its permissions again.
+  check, not a manual step. Re-enabling a module, on staging too, takes its
+  own reviewed migration that grants its permissions again and changes the
+  bootstrap's role assertions with it, because the bootstrap refuses any role
+  holding a withdrawn permission. A ledger migration applies in every
+  environment, so that migration is a production decision as well:
+  production then stays closed for Lab, Pharmacy, OCR and Outreach by the
+  gateway route switches and desired counts of 0 (and the Outreach control),
+  and for uploads and break-glass only by their controls (and, for
+  break-glass, the absent `emergency` purpose). No staging-only exception is
+  made in the assertion: it would be a production bypass carried by
+  configuration.
 - **Also decided.** The patient-self database context is bound to the
   patient's own live session (PSELF-RLS). Patients see the requesting
   clinician's display name and role next to the facility when they approve
@@ -379,7 +388,13 @@ module set").
 - **Risks.** Lab and Pharmacy data become unreadable through Health-id until
   re-granted (a launch database holds none). Staff display names are shown
   to patients for requests and grants about them. The patient's request list
-  answers `403` between 0091 and the role bootstrap that follows it.
+  answers `403` between 0091 and the role bootstrap that follows it. With
+  0090 (ADR-056, `BRANCH:launch/ehr-retraction-integrity`), which requires
+  `ehr.document.write` to mark an encounter entered in error while it holds
+  an initiated or uploaded document, no role can do so until uploads are
+  re-enabled; cancelling such an encounter is unaffected. A database on which
+  no upload was ever started, as the launch production database is expected
+  to be, holds no such document; a staging database might.
 - **Waits on it.** Enabling any of the off modules; a specific Health-id
   title for `PATIENT_ACCESS_PIN_USED` and showing the clinician's name
   (optional Health-id changes, release checklist §3).
@@ -400,7 +415,7 @@ module set").
 | D10 | Pharmacy and Lab lifecycle after acceptance (CLIN-2-POLICY, CLIN-3b) | Strict version equality for dispensing (D-Eminence/hid-system#48); Lab refuses new accession and execution for cancelled or entered-in-error orders; released results stay | Stranded queue items: a changed prescription leaves its work item `accepted` and undispensable | Queue cleanup, re-acceptance |
 | D11 | Lab result detail for clinicians | No "unreleased correction pending" flag (D-Eminence/hid-system#51) | Clinicians cannot see that a correction is coming | Result retraction API |
 | D12 | OCR publication after an authorization lapse | Terminal, as today | — | — |
-| D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (implemented in D-Eminence/hid-system#59). Uploads are off at launch: since 0091 no role holds `ehr.document.write`, `uploads_enabled` starts off and completion also checks the control (ADR-058) | No delegated completion | Re-enabling uploads (D5, I7, a reviewed re-grant) |
+| D13 | Upload completion actor (DOC-1) | Only the uploader's account may complete an upload (implemented in D-Eminence/hid-system#59). Uploads are off at launch: since 0091 no role holds `ehr.document.write`, `uploads_enabled` starts off and completion also checks the control (ADR-058) | No delegated completion | Re-enabling uploads (D5, I7, and a reviewed migration granting `ehr.document.write` again, which applies to production too) |
 | D14 | Workforce administration (WF-1, WF-2, MFA-1) | Decided for the workforce part on 2026-10-13 (ADR-049, BRANCH:launch/staff-workforce-provisioning, migration 0087): clinical facility roles are granted only by platform-governed commands under the new `platform.workforce.manage` (`platform_super_admin` only), with step-up, `If-Match`, `Idempotency-Key` and a reason; a grant needs a current professional-credential attestation by another platform reviewer who is neither the target nor working at that facility (so not its `org_admin`); `org_admin` stays non-clinical and has no role-granting route; ending a membership revokes its roles and consent grants, expires its pending access requests and revokes the account's staff sessions; a role lapses with its attestation and is renewed by a new attestation and a second administrator's grant, never by the attestation alone. Facility self-service is deferred. **Staff MFA: decided, yes** (MFA-1, "Staff MFA" in §1, ADR-054, `BRANCH:launch/staff-mfa`, migration 0088): every staff session that can reach patient data is TOTP-verified, with no permission allowlist; a second enrolment channel (beyond the account mailbox) is open | An unenrolled staff account is as strong as its mailbox until it enrols. Which credential source counts (regulator registry or documented manual review) and who may review are product and legal decisions; until then the only method is documented manual review | Workforce management; the Health-id staff sign-in (release checklist §3) |
 | D15 | Launch scope of EHR-to-Lab ordering and in-system result return | In scope (the EHR already sends orders) | If in scope, the Lab handoff is launch-blocking; it merged as D-Eminence/hid-system#56 | Lab handoff |
 | D16 | Health-id OCR publication retry | Persist the publication key per validation; offer Retry for retryable failures | Frontend change | OCR publication retry |

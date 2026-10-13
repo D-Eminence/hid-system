@@ -54,9 +54,10 @@ try {
       values ($1,$2,'Outreach Verifier Clinic',$3,'Africa/Lagos',true,'verified')`, [f.facility, f.org, `OR-${f.facility.slice(0, 8)}`]);
     // Outreach is off at launch (D17): 0091 withdraws every Outreach permission
     // from every role and starts outreach_portal_enabled off. This copy opts in
-    // as a reviewed staging opt-in would: the doctor role regains the Outreach
-    // permissions it held before 0091 (0024, 0038), which the row-level
-    // security of outreach.context_allows checks, and the portal is turned on.
+    // as Outreach's re-enabling migration would (ADR-058): the doctor role
+    // regains the Outreach permissions it held before 0091 (0024, 0038), which
+    // the row-level security of outreach.context_allows checks, and the portal
+    // is turned on.
     await client.query(`insert into auth.role_permissions(role_code,permission_code)
       select 'doctor',code from unnest($1::text[]) code on conflict do nothing`,
     [['outreach.registration.read', 'outreach.registration.write', 'outreach.campaign.read', 'outreach.campaign.write']]);

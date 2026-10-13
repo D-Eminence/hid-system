@@ -3518,10 +3518,22 @@ Decision:
   `identity.break-glass.write` and `ehr.document.write` from every role,
   `ocr_worker` included, reversing 0084's choice to keep reads. The EHR's
   own permissions stay. The bootstrap role assertions require it.
-  Re-enabling a module, staging included, is a reviewed migration that grants
-  its permissions again (with its decision, fixes and staging acceptance) and
-  changes the assertions with it; break-glass also needs the `emergency`
-  purpose and its control (D9).
+  Re-enabling a module, on staging too, is a reviewed migration that grants
+  its permissions again (with its decision and fixes) and changes the
+  assertions with it; break-glass also needs the `emergency` purpose and its
+  control (D9). There is no staging-only re-grant: the bootstrap runs the
+  assertions on every run and refuses a role holding a withdrawn permission,
+  so a permission granted by hand on staging stops every later staging
+  bootstrap; and a ledger migration applies in every environment, so the
+  re-enabling migration is a production decision too. Production then stays
+  closed for Lab, Pharmacy, OCR and Outreach by the gateway route switches
+  (`HID_ENABLED_API_ROUTES`, `identity,ehr` in production) and desired counts
+  of 0 (ADR-053), and for Outreach also by `outreach_portal_enabled`; uploads
+  and break-glass live in modules that are on, so there only their controls
+  (and, for break-glass, the absent `emergency` purpose) keep them closed. A
+  module's staging acceptance (release checklist S4b, S4c, S4g) therefore runs
+  after its re-enabling migration; until then the runtime verifiers exercise
+  it by granting the permissions inside their disposable copies.
 - Document uploads are off by the permission, not only by the control:
   upload intent and completion answer `403` for every role, and completion
   now also checks `uploads_enabled` (`409`), so an upload in flight when the
@@ -3569,7 +3581,13 @@ Alternatives not taken:
   off.
 - Only the operator step P11 for the controls: the launch would depend on a
   manual action by a platform administrator holding an MFA session; P11 now
-  checks the state instead.
+  checks the state instead. The check reads the controls through
+  `platform.control_enabled`, as every guard does, because the table's forced
+  row-level security hides its rows from the migration administrator on RDS.
+- An environment-scoped exception in the bootstrap's role assertion (staging
+  may hold a withdrawn permission): a switch that lets a database hold the
+  permissions of an off module is a production bypass carried by
+  configuration, against the owner default.
 
 Consequences:
 
@@ -3582,7 +3600,20 @@ Consequences:
   session's roles and permissions from the database on every request, so a
   session issued before 0091 loses them on its next request.
 - The patient's access-request list is unavailable (`403`) between 0091 and
-  the role bootstrap that follows it.
+  the role bootstrap that follows it. An Identity build of this change needs
+  0091's request-list columns: it must not start before 0091 and the
+  bootstrap, and a restore of a pre-0091 backup takes Identity back to the
+  previous build (otherwise the list answers `500`).
+- With 0090 (ADR-056, `BRANCH:launch/ehr-retraction-integrity`), whose
+  retraction guard requires `ehr.document.write` to mark an encounter entered
+  in error while it holds an initiated or uploaded document, no role can do
+  that until uploads are re-enabled (`403 ENCOUNTER_RETRACTION_NOT_PERMITTED`);
+  cancelling such an encounter is unaffected. A database on which no upload
+  was ever started, as the launch production database is expected to be,
+  holds no such document; a staging database might. 0090's
+  `encounter-retraction.integration.sql` grants the nurse role
+  `ehr.document.write` in its rollback-only transaction once both changes are
+  on one branch (release checklist §2).
 - Staff display names become visible to patients for requests and grants
   about them.
 - Evidence is local and synthetic: SQL suites, unit specs and the runtime

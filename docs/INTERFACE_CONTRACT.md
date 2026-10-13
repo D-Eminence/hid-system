@@ -1162,10 +1162,20 @@ encounter: cancelling the encounter cancels its open lab requests, and marking
 it entered in error marks them entered in error ("Encounter status and its
 records"). An open lab request of a completed encounter that is not
 retracted, or of an encounter that was already cancelled or entered in error,
-stays as it is. Re-enabling a module takes its own decision, its fixes, a
-staging acceptance run and a reviewed migration granting the permissions
-again; the sections on the Lab and Pharmacy handoffs below describe the routes
-as they work then.
+stays as it is. Re-enabling a module takes its own decision, its fixes and a
+reviewed migration granting the permissions again, which applies to every
+environment (the role bootstrap refuses a permission granted by hand), and
+then a staging acceptance run; the sections on the Lab and Pharmacy handoffs
+below describe the routes as they work then.
+
+With 0090 (`BRANCH:launch/ehr-retraction-integrity`, ADR-056), marking an
+encounter entered in error needs the write permission of each record it
+retracts, `ehr.document.write` for a linked document whose upload was started
+or completed. Since no role holds it after 0091, `PATCH
+.../encounters/:encounterId` to `entered_in_error` for such an encounter
+answers `403 ENCOUNTER_RETRACTION_NOT_PERMITTED` for every role and changes
+nothing, until uploads are re-enabled; cancelling it is not affected. A
+database on which no upload was ever started holds no such encounter.
 
 ### Encounter status and its records
 

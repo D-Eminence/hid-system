@@ -326,7 +326,7 @@ try {
   };
   const p10 = await checklistCheck('P10 check (read-only)');
   assert.deepEqual(p10.map((line) => line.split('|').slice(0, 4).join('|')),
-    ['direct-care|Direct patient care|t|hid', 'break_glass_enabled|f'], `P10 check: ${p10.join('; ')}`);
+    ['break_glass_enabled|f', 'direct-care|Direct patient care|t|hid'], `P10 check: ${p10.join('; ')}`);
   // After 0091 and the bootstrap: the three launch controls off, no emergency or
   // healthcare-operations purpose, no withdrawn permission, no control event.
   const p11 = await checklistCheck('P11 check (read-only)');

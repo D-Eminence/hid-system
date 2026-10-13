@@ -111,9 +111,10 @@ if (process.argv[2] === '--identity-child') {
   try {
     // Fixture: a doctor at one facility and a patient account. Outreach is off
     // at launch (D17): 0091 withdraws every Outreach permission from every
-    // role and starts outreach_portal_enabled off. This copy opts in as a
-    // reviewed staging opt-in would: it grants the doctor role the Outreach
-    // permissions it held before 0091 (0024, 0038) and turns the portal on.
+    // role and starts outreach_portal_enabled off. This copy opts in as
+    // Outreach's re-enabling migration would (ADR-058): it grants the doctor
+    // role the Outreach permissions it held before 0091 (0024, 0038) and turns
+    // the portal on.
     // Outreach has no password hashing of its own; hash the synthetic password with Identity's argon2.
     const argon2 = createRequire(join(identityService, 'package.json'))('argon2');
     const password = 'Synthetic-Outreach-Password-2026';

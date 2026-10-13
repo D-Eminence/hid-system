@@ -191,12 +191,21 @@ The executable covers:
    `patient_runtime` expects the history's additive `truncated`;
    `outreach_runtime` and `outreach_cookie_read_runtime` opt their disposable
    copies into Outreach (the doctor role's Outreach permissions and the
-   portal control), as a reviewed staging opt-in would; the non-superuser
-   database check requires the three launch controls to read off after a
-   `NOSUPERUSER NOBYPASSRLS` administrator migrates; and the P8 owner check
+   portal control), as the module's re-enabling migration would (a
+   permission granted by hand on a staging database stops its next bootstrap,
+   ADR-058); the non-superuser database check requires the three launch
+   controls to read off after a `NOSUPERUSER NOBYPASSRLS` administrator
+   migrates, and runs the release checklist's read-only P10 and P11 checks,
+   taken from `PHASE_4_STAGE_5_RELEASE_READINESS.md`, as that administrator
+   (they read the controls through `platform.control_enabled`, because the
+   table's forced row-level security hides its rows from it); and the P8 owner check
    counts `ehr.patient_self_context` among its nine security-definer
    commands. The additional suites now include the patient-self binding cases
-   and the launch-control state.
+   and the launch-control state. Once 0090
+   (`BRANCH:launch/ehr-retraction-integrity`) and 0091 are on one branch,
+   0090's `encounter-retraction.integration.sql` needs the merge change in the
+   release checklist §2 (the nurse role's `ehr.document.write` inside its
+   rollback-only transaction); without it the rehearsal fails on that suite.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

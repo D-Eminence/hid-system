@@ -3283,7 +3283,12 @@ migration administrator, which owns the table and is no superuser on RDS,
 would update no row (probed locally under a `NOSUPERUSER NOBYPASSRLS` owner:
 0 rows): the migration runs `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY`,
 the update and `FORCE ROW LEVEL SECURITY` in its transaction, so no other
-session ever sees the table unforced.
+session ever sees the table unforced. For the same reason the release
+checklist's read-only P10 and P11 checks, which that administrator runs, read
+the controls through `platform.control_enabled` (owned by
+`hid_platform_control_reader`, admitted by its own policy), not from the
+table; `verify-non-superuser-database.mjs` runs both checks as a
+`NOSUPERUSER NOBYPASSRLS` administrator.
 
 **Launch module permissions.** Every row of `auth.role_permissions` whose
 permission is `lab.*`, `pharmacy.*`, `ocr.*`, `outreach.*`,
@@ -3298,7 +3303,27 @@ permissions. `ocr_worker` loses `ocr.job.process`, which nothing checks (the
 worker commands check the `ocr_worker` role). The EHR's own permissions,
 `ehr.lab-request.read`, `ehr.prescription.*` and `ehr.document.read`
 included, stay. `runtime-roles.integration.sql` (the bootstrap assertions)
-fails if any role holds a withdrawn permission or loses a kept one.
+fails if any role holds a withdrawn permission or loses a kept one, on every
+bootstrap. Re-enabling a module is therefore a reviewed migration that grants
+the permissions again and changes these assertions; like every ledger
+migration it applies to every environment (ADR-058). A permission granted by
+hand on one database stops that database's next bootstrap.
+
+**With 0090.** 0090 (`BRANCH:launch/ehr-retraction-integrity`, ADR-056)
+makes marking an encounter entered in error require the write permission of
+each record it retracts, `ehr.document.write` for a linked document in status
+`initiated` or `uploaded` (`ehr.require_retraction_permission`). Once both
+are applied no role holds it, so such an encounter cannot be marked entered
+in error (`42501 ENCOUNTER_RETRACTION_NOT_PERMITTED`) until uploads are
+re-enabled; cancelling it is not affected (that rule asks only for the open
+orders' permissions). A database on which no upload was ever started, as the
+launch production database is expected to be, holds no such document; a
+staging database might. 0090's `encounter-retraction.integration.sql`
+expects the seeded nurse to hold `ehr.document.write`, so the merge that
+brings both together grants it to the nurse role inside that suite's
+rollback-only transaction and adds the doctor's refusal (release checklist
+§2); verified locally on a database built from empty through the real 0089,
+0090 and 0091 (98 cases).
 
 **Patient-self binding (PSELF-RLS).** `ehr.patient_self_context(uuid)` keeps
 its signature, so the 0030/0084 policies on `ehr.encounters`,
@@ -3381,8 +3406,8 @@ Tests:
   the other three keep their launch state.
 - Suites that exercise break-glass or Outreach (`schema`, `emergency`,
   `emergency-contacts`, `outreach-session-guards`) grant those permissions to
-  the doctor role inside their rollback-only transaction, as a reviewed
-  re-grant would; `runtime-command-privileges` keeps its Outreach
+  the doctor role inside their rollback-only transaction, as the module's
+  re-enabling migration would; `runtime-command-privileges` keeps its Outreach
   registration/campaign invariant without requiring a holder.
 - All 45 SQL suites pass on a database built from empty to 0091, and the 44
   additional suites again with every schema, table and function owned by a

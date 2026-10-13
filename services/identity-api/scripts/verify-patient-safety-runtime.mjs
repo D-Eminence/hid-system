@@ -221,7 +221,8 @@ try {
   await pool.query("insert into identity.purpose_of_use_codes(code,display,source_system) values('emergency','Emergency treatment','patient-safety-rehearsal') on conflict(code) do nothing");
   // Break-glass is off at launch (D9): 0091 withdraws identity.break-glass.write
   // from every role. This copy grants it to the doctor role for the activation
-  // alone, as a reviewed staging opt-in would, and withdraws it again below.
+  // alone, as break-glass's re-enabling migration would (ADR-058), and
+  // withdraws it again below.
   await pool.query("insert into auth.role_permissions(role_code,permission_code) values('doctor','identity.break-glass.write') on conflict do nothing");
   const grant = await asRuntime(null, async (client) => {
     await client.query(`select set_config('app.actor_subject',$1,true), set_config('app.membership_id',$2,true),
