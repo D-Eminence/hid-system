@@ -325,7 +325,11 @@ try {
   };
   // As the owner, make the first sign-in of the session family eleven minutes old.
   await pool.query("update auth.sessions set issued_at=issued_at-interval '11 minutes' where account_id=$1", [a.accountId]);
-  problem(await post(sa, `/identity/access-requests/${toApprove}/approve`), 403, 'PATIENT_RECENT_AUTH_REQUIRED');
+  const stale = await post(sa, `/identity/access-requests/${toApprove}/approve`);
+  problem(stale, 403, 'PATIENT_RECENT_AUTH_REQUIRED');
+  // Health-id shows the detail as it is on Approve (FE-8): it must say what to do.
+  assert.equal(stale.body.detail, 'For your security, sign out, sign in again, and approve within 10 minutes.',
+    'a stale approval must tell the patient how to approve');
   const fresh = await session(a.email);
   // As the owner, record an OTP account recovery completed a moment ago.
   const recoveryId = randomUUID();
