@@ -59,7 +59,11 @@ The executable covers:
    refused (with D-Eminence/hid-system#52 it also reads the
    patient's record summary and two break-glass emergency summaries, a reader
    lacking four category read permissions and the doctor, with their audit
-   events); and `outreach_cookie_read_runtime`
+   events; with 0084 it also checks that the patient receives a signed note
+   only with its completed encounter and that the emergency summary leaves out
+   the notes of an encounter entered in error, and that the seeded doctor is
+   refused `403 PERMISSION_DENIED` on the lab-request write, send-to-Lab and
+   send-to-Pharmacy routes the launch module set withdrew); and `outreach_cookie_read_runtime`
    (`services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs`,
    D-Eminence/hid-system#43), which runs Outreach as
    `hid_outreach_api_runtime` and Identity as `hid_identity_api_runtime`: a
@@ -79,12 +83,26 @@ The executable covers:
    application. It also covers an older rotated token, which ends its sign-in
    whichever application signs out; a sign-out during a timed account
    suspension; and two concurrent sign-outs with one cookie, recorded once.
+   After them the module verifiers run on disposable copies with the other
+   services faked, among them `encounter_lifecycle_runtime`
+   (`services/ehr-api/scripts/verify-encounter-lifecycle-runtime.mjs`, 0084):
+   EHR as `hid_ehr_api_runtime` refuses new orders on a completed encounter
+   and every record on one entered in error (`409 ENCOUNTER_NOT_OPEN`),
+   retracts an encounter's notes, diagnoses and open orders when it is marked
+   entered in error (versions and audit included), cancels open orders with
+   the encounter, makes a retraction wait for a child create holding the
+   encounter, and lets activations race retractions without a deadlock. The
+   Lab, Pharmacy, OCR and EHR-to-Lab verifiers give their actors the Lab and
+   Pharmacy write permissions through their fake Identity, so 0084's
+   withdrawal of those permissions from the seeded roles does not affect them.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
    verified OTP challenges and registration outbox records; back it up, dry-run
    and apply `0029`–`0034`, verify preservation, fail-closed old OTP behavior,
-   the new cutover controls, and minimal verification-evidence boundaries, then
+   the new cutover controls, and minimal verification-evidence boundaries (and,
+   since 0084, that no role holds a launch-withdrawn Lab, Pharmacy or EHR
+   lab-ordering write permission), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

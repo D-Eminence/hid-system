@@ -727,6 +727,37 @@ begin
 end
 $$;
 
+-- The launch module set (0084, decision D17): Lab, Pharmacy and EHR lab
+-- ordering are off, so no role holds their write permissions; the routes that
+-- need them answer 403 before any write or call to Lab or Pharmacy. Their read
+-- permissions stay. Re-enabling a module takes its own reviewed migration.
+do $$
+declare
+  holders text;
+begin
+  select string_agg(format('%s holds %s', role_code, permission_code), ', ' order by role_code, permission_code)
+    into holders
+    from auth.role_permissions
+   where permission_code in ('ehr.lab-request.write', 'lab.work-item.accept', 'lab.accession.create',
+                             'pharmacy.work-item.accept', 'pharmacy.dispensing.create');
+  if holders is not null then
+    raise exception 'a role holds a write permission withdrawn by the launch module set: %', holders;
+  end if;
+  select string_agg(format('%s lacks %s', expected.role_code, expected.permission_code), ', ')
+    into holders
+    from (values ('doctor', 'ehr.lab-request.read'), ('clinician', 'ehr.lab-request.read'),
+                 ('lab', 'ehr.lab-request.read'), ('doctor', 'lab.work-item.read'), ('lab', 'lab.work-item.read'),
+                 ('lab', 'lab.accession.read'), ('pharmacist', 'pharmacy.work-item.read'),
+                 ('pharmacist', 'pharmacy.dispensing.read'), ('doctor', 'ehr.prescription.write'))
+         expected(role_code, permission_code)
+   where not exists (select 1 from auth.role_permissions held
+                      where held.role_code = expected.role_code and held.permission_code = expected.permission_code);
+  if holders is not null then
+    raise exception 'the launch module set withdrew a permission it must keep: %', holders;
+  end if;
+end
+$$;
+
 select
   rolname,
   rolcanlogin,

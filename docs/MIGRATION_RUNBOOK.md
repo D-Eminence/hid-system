@@ -80,6 +80,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0081_uniform_recovery_start_cooldown.sql` | New table `auth.otp_start_cooldowns`: the recovery start cooldown per purpose and keyed identifier, kept whether or not the identifier has an account, so a repeat start inside the cooldown is answered with the same challenge id for a known and an unknown identifier (before, only a real account's repeat got its live id back). No foreign key, no row-level security; the role bootstrap grants `SELECT`, `INSERT` and `UPDATE` to the Identity runtime and the schema-test runtime, and `DELETE` to none. A new table: no lock on an existing table, no window. Run `db:bootstrap` and `db:verify-roles` after it, and only then deploy the Identity build of this change, whose every recovery start fails (`500`) without the table and the grant (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3, §5, §6) |
 | `database/migrations/0082_purpose_of_use_vocabulary.sql` | Seeds `identity.purpose_of_use_codes` with `direct-care` ("Direct patient care", active, source `hid`), `ON CONFLICT (code) DO NOTHING`, so a row already inserted or deactivated by an operator is kept as it is. 0003 created the table empty and nothing inserted a row, while every consent decision requires an active code, so on a database built only from migrations every staff consent check, access request, grant close, PIN and break-glass failed closed. `emergency` and `healthcare-operations` are not seeded: each waits for a product decision (§5). `ROW EXCLUSIVE` lock on that table only; no grant or service change |
 | `database/migrations/0083_ocr_claim_in_body_variable_conflict.sql` | Replaces `ocr.claim_worker_job(text, integer)` (`CREATE OR REPLACE`; same signature, result columns, `SECURITY DEFINER`, `search_path` and body) with `#variable_conflict use_column` as the first line of its body instead of 0015's `SET plpgsql.variable_conflict = 'use_column'`. That parameter has superuser context: on RDS, where no role is a superuser, a fresh chain stops at 0015 unless the migration administrator holds `SET ON PARAMETER plpgsql.variable_conflict`, and the definer applied the setting as its owner on every claim, so the privilege was needed for good. After 0083 no function needs it, and the operator revokes it (§6). The option resolves the same names to columns, so claims behave as before; owner, grants and comment are kept. Function replacement only; no table lock, grant or data change (`DATABASE.md`, "Non-superuser database chain on RDS (0083)") |
+| `database/migrations/0084_ehr_clinical_safety_and_launch_modules.sql` | EHR clinical safety and the launch module set (D-Eminence/hid-system#64). Deletes `ehr.lab-request.write`, `lab.work-item.accept`, `lab.accession.create`, `pharmacy.work-item.accept` and `pharmacy.dispensing.create` from every role in `auth.role_permissions` (decision D17: Lab and Pharmacy off at launch; the routes answer `403`); reads stay. Adds `SECURITY INVOKER` triggers that share-lock the encounter and refuse a note, vital, diagnosis, document, prescription or lab request on a cancelled or entered-in-error encounter, and a new or activated order on a completed one (`55000 ENCOUNTER_NOT_OPEN`); refuse any update of a diagnosis entered in error; and refuse an update of a recorded vital other than its current correction number. Recreates the two patient-self note policies to require a completed encounter. No table, column or grant change, no scan. `CREATE TRIGGER` takes a brief `SHARE ROW EXCLUSIVE` lock on six clinical tables and the policy change a brief `ACCESS EXCLUSIVE` lock on `ehr.clinical_notes` and `ehr.clinical_note_revisions`, each within the 5 s lock timeout. Existing rows are not changed; retract the open lab requests of closed encounters that the clinical owner does not keep before it, while the permission is still held (P12). Run `db:bootstrap` and `db:verify-roles` after it: the role assertions require that no role holds the five permissions. The platform controls are set by an operator, not by the migration (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, P11, P12) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles. Runs as a superuser or as the non-superuser administrator that created the roles (RDS); checks the roles' attributes instead of re-asserting them (§6) |
 | `database/runtime-login-assertions.sql` and `scripts/verify-runtime-logins.mjs` | `npm run db:verify-logins`: checks each runtime credential's own LOGIN, connected with that credential's URL (§6) |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
@@ -219,7 +220,8 @@ Before a real source read:
   row already present as it is; list the codes before and after it (release
   checklist P10). Operators still approve, and insert by a reviewed change,
   `emergency` (only once `break_glass_enabled` is set to its intended launch
-  state, because the code makes break-glass usable at once) and
+  state, because the code makes break-glass usable at once; break-glass is off
+  at launch by owner default, so `emergency` stays absent) and
   `healthcare-operations` (with the OCR purpose-of-use decision). Retire a
   code with `active = false`, never by deleting it;
 - establish private object export/import paths and checksum inventory; and
@@ -385,7 +387,7 @@ the rotated credentials). Clear the variables afterwards. In production every
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
-Confirm the candidate ledger reaches `0083`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0084`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task. The
@@ -475,9 +477,11 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify the ledger at `0083`, runtime grants (`db:verify-roles`) and logins
+6. Verify the ledger at `0084`, runtime grants (`db:verify-roles`) and logins
    (`db:verify-logins`), RLS and purpose/deny behavior, and list the
-   purpose-of-use codes (release checklist P10).
+   purpose-of-use codes (release checklist P10). After `0084`, confirm the
+   launch platform controls and the launch module set (P11) and review the
+   open records of closed encounters (P12).
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts.
 8. Prove patient UUID/HID links from EHR/Lab/Pharmacy/OCR/Outreach remain exact.

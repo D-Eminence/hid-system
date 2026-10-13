@@ -2154,7 +2154,8 @@ the schema, policies or grants changes.
   `app.purpose_of_use = 'patient-self'` and empty facility and membership, so
   the staff policies (`ehr.context_allows`) never pass, and only the 0030
   patient-self policies release rows: completed encounters, signed or amended
-  notes and their current revisions. The other clinical tables have `SELECT`
+  notes and their current revisions (since 0084 only those of completed
+  encounters; "EHR clinical safety and launch module set (0084)"). The other clinical tables have `SELECT`
   but no patient-self policy, so a patient read of them returns no rows and no
   error. The service now reads only the two released categories and names the
   other five as withheld; before, it read all seven and returned five arrays
@@ -2169,14 +2170,12 @@ the schema, policies or grants changes.
     the whole current set, as Health-id's clinician chart applies it); the
     implementation is preserved in commit `7401193` for when the decision
     lands. No EHR API route updates the measurement columns (a correction
-    updates only `current_correction_no`), but the database does not refuse
-    it: `hid_ehr_runtime` holds `UPDATE` on `ehr.vitals` (`runtime-grants.sql`),
-    `vitals_update` allows it under `write_records` (0005), and
-    `ehr.capture_record_version` (0004) guards only the ownership and
-    attribution columns and requires a change reason, recording the prior row
-    in `ehr.record_versions`. A guard refusing changes to the measurement
-    columns (a trigger, or column-level `UPDATE` limited to
-    `current_correction_no`) is a follow-up migration.
+    updates only `current_correction_no`). Until 0084 the database did not
+    refuse it either: `hid_ehr_runtime` holds `UPDATE` on `ehr.vitals`
+    (`runtime-grants.sql`), `vitals_update` allows it under `write_records`
+    (0005), and `ehr.capture_record_version` (0004) guards only the ownership
+    and attribution columns. Since 0084 `ehr.keep_recorded_vital()` refuses
+    every update of a vital except of `current_correction_no`.
   - Documents: read from `ehr.documents_effective` (0009, `security_invoker`,
     `security_barrier`) where `status = 'available'`, so `documents_read` and
     `document_scan_events_staff_read` apply to the view's reads. The raw
@@ -2237,8 +2236,12 @@ repository; the release checklist's P10 records them before and after 0082.
   active. Seeding it would make break-glass usable at once wherever
   `platform.control_settings` `break_glass_enabled` is on, which is its 0039
   default. Until it is approved and inserted, break-glass answers `423
-  BREAK_GLASS_DISABLED` when the control is off and `400
-  INVALID_CONSENT_COMMAND` when it is on.
+  BREAK_GLASS_DISABLED` when the control is off and, since the change that
+  added 0084, also when it is on: Identity answers the function's
+  emergency-purpose refusal (`22023`) as `423 BREAK_GLASS_DISABLED` instead of
+  `400 INVALID_CONSENT_COMMAND`. Break-glass is off at launch (owner default, deny by default): the
+  control is set false and no `emergency` row exists (release checklist P10
+  and P11).
 - `healthcare-operations` is not seeded. Identity access requests
   (`consent.controller.ts`), Lab and Pharmacy reads and the OCR commands
   accept it as a purpose, and it belongs to the open OCR purpose-of-use
@@ -2448,3 +2451,148 @@ Tests:
 - The start-up check has a unit spec in each of the nine services, and
   `scripts/tests` checks `db:verify-logins`'s credential map and that the nine
   copies of the check are identical.
+
+## EHR clinical safety and launch module set (0084)
+
+`0084_ehr_clinical_safety_and_launch_modules.sql` (D-Eminence/hid-system#64)
+changes no table, column or grant. It deletes rows of `auth.role_permissions`,
+adds three trigger functions and eight triggers, and replaces two row-level
+security policies.
+
+**Launch module set (decision D17).** Lab, Pharmacy, OCR and Outreach are off
+at launch; EHR prescriptions and lab requests are records only. The migration
+deletes, for every role, the write permissions that EHR lab ordering, Lab and
+Pharmacy need. The seeded holders were:
+
+| Permission | Seeded holders |
+|---|---|
+| `ehr.lab-request.write` | doctor, clinician, lab (0006) |
+| `lab.work-item.accept` | doctor, clinician, nurse, lab (0018) |
+| `lab.accession.create` | lab (0019) |
+| `pharmacy.work-item.accept` | pharmacist (0023) |
+| `pharmacy.dispensing.create` | pharmacist (0023) |
+
+No SQL function or policy checks these codes: Identity derives an actor's
+permissions from `auth.role_permissions`, and the API guards refuse a route
+whose permission is missing with `403 PERMISSION_DENIED` before any write or
+call to Lab or Pharmacy. The read permissions (`ehr.lab-request.read`,
+`lab.work-item.read`, `lab.accession.read`, `pharmacy.work-item.read`,
+`pharmacy.dispensing.read` and the others) stay. `runtime-roles.integration.sql`,
+which the role bootstrap runs, now fails if any role holds one of the five, or
+if a seeded role lost one of those reads. The Lab, Pharmacy, OCR and EHR-to-Lab
+runtime verifiers supply their actors' permissions through their own fake
+Identity, so they keep exercising the module logic with these permissions.
+Re-enabling a module takes a reviewed migration that grants them again, and
+that migration must change the assertion.
+
+The platform controls `outreach_portal_enabled`, `uploads_enabled` and
+`break_glass_enabled` are not changed by the migration. A change through the
+audited structure writes a `platform.control_events` row whose
+`actor_account_id` is `NOT NULL` and references `auth.accounts`, and a
+migration has no acting account; 0041 changed `maintenance_mode` without an
+event, which this migration does not repeat. An operator sets the three to
+false with `POST /admin/controls` before ingress (release checklist P11).
+
+**Records follow their encounter (CLIN-EIE).** `ehr.require_open_encounter()`
+is a `SECURITY INVOKER` trigger function with `search_path = pg_catalog,
+pg_temp`. It fires `BEFORE INSERT` on `ehr.clinical_notes`, `ehr.vitals`,
+`ehr.diagnoses` and `ehr.documents`, and `BEFORE INSERT OR UPDATE OF status` on
+`ehr.prescriptions` and `ehr.lab_requests`. On an update it checks only an
+order's activation (`status` becoming `active` from another status). A
+document without an encounter is not checked. It reads the encounter, matched
+on `(id, patient_id, facility_id)`, with `FOR SHARE`, and refuses with SQLSTATE
+`55000` and message `ENCOUNTER_NOT_OPEN`:
+
+- any of these records, and any activation, on a `cancelled` or
+  `entered_in_error` encounter;
+- a new prescription or lab request, and the activation of a draft one, on a
+  `completed` encounter. Late notes, vitals, diagnoses and documents on a
+  completed encounter stay allowed, and so does resuming an on-hold order.
+
+An encounter the writer cannot lock reads as missing and is refused with
+`42501` (`ENCOUNTER_NOT_AVAILABLE`): under row-level security `FOR SHARE`
+needs both the encounter's `SELECT` and `UPDATE` policies, that is a
+`write_records` consent, which the child row's own insert policy requires
+anyway. `hid_ehr_runtime` already holds `UPDATE` on `ehr.encounters`; no
+other role inserts these records (`hid_schema_test_runtime` also holds it).
+
+The EHR's retraction of an encounter (`EncountersService.update`) holds the
+encounter `FOR UPDATE` while it marks its records. A child create that holds
+the share lock is waited for and then retracted with the rest; one that
+comes later waits for the retraction and then sees the closed encounter.
+Every path takes the encounter's lock before any lock on a record of it: the
+services share-lock the encounter (`ehr/shared/encounter-status.ts`) before an
+insert and before locking an order row for activation, so the trigger's own
+share lock is then already held. A writer that locked an order row first and
+then activated it would invert that order and can deadlock with a retraction
+(PostgreSQL cancels one of the two, `40P01`). With a temporary service mutant
+that locked the order row first, the lifecycle verifier's race produced
+`40P01`; the committed verifier checks that the services' order produces
+none.
+
+**Diagnoses entered in error.** `ehr.keep_entered_in_error_diagnosis()`
+(`SECURITY INVOKER`, `BEFORE UPDATE` on `ehr.diagnoses`) refuses any update of
+a diagnosis whose `verification_status` is `entered_in_error` (`55000`
+`DIAGNOSIS_ENTERED_IN_ERROR`).
+
+**Recorded vitals (D8).** `ehr.keep_recorded_vital()` (`SECURITY INVOKER`,
+`BEFORE UPDATE` on `ehr.vitals`) refuses an update that changes any column
+other than `current_correction_no` (and `row_version` and `updated_at`, which
+the version trigger maintains), with `55000` `VITAL_RECORD_IMMUTABLE`. A
+correction is a row of `ehr.vital_corrections` and the current correction
+number on the vital; the API never changed the recorded values in place. What
+the emergency summary shows of a corrected vital is unchanged (as first
+recorded, pending the correction-semantics decision).
+
+Each trigger's name sorts before the table's `*_versioned` trigger, so a
+refused write records no version. The three functions are not executable by
+`PUBLIC` and take no privilege of their own.
+
+**Patient release of notes (PREC-NOTES, D7).** The 0030 policies
+`clinical_notes_patient_self_read` and `note_revisions_patient_self_read`
+released a signed or amended note, and its current revision, whatever its
+encounter's status, while `encounters_patient_self_read` released an
+encounter only once completed; a signed note of a wrong-patient encounter
+stayed visible to that patient after the encounter was cancelled or marked
+entered in error. Both policies are dropped and recreated: each also requires
+the note's encounter, matched on encounter, patient and facility, to be
+`completed`. The subquery reads `ehr.encounters` under the patient session's
+own policies, which release only completed encounters of that patient anyway.
+The EHR service applies the same rule in its SQL (`patient-records.service.ts`).
+
+**Existing rows are not changed.** The version trigger needs an acting
+member, which a migration does not have, and open records of closed
+encounters are a clinical review. The release checklist lists them (P12) for
+review before and after the migration; until then they stay open. Open lab
+requests among them are retracted before the migration, while
+`ehr.lab-request.write` is still held: after it no role can change a lab
+request's status, and their encounter, already closed, has no transition left
+to cascade from. The guards apply from the migration's commit.
+
+**Locks.** The `DELETE` takes `ROW EXCLUSIVE` on `auth.role_permissions`.
+`CREATE TRIGGER` takes `SHARE ROW EXCLUSIVE` on each of the six clinical
+tables for the catalog change, and `DROP POLICY` and `CREATE POLICY` take
+`ACCESS EXCLUSIVE` on `ehr.clinical_notes` and `ehr.clinical_note_revisions`
+for the catalog change; none scans a table. Each waits for the transactions
+in flight on its table within the runner's 5 s `lock_timeout`.
+
+Tests:
+
+- `encounter-lifecycle.integration.sql` (rollback-only; in the rehearsal's
+  additional suites and in `scripts/run-container-database-acceptance.sh`):
+  the guards' security properties and triggers (12 cases), then 71 cases as
+  `hid_ehr_api_runtime` with the EHR session: every record kind on an encounter
+  in each of the six statuses, order activation and resumption by encounter
+  status, the diagnosis and vital updates. Before 0084 it fails, listing each
+  case whose write it expected refused but which succeeded.
+- `patient-self.integration.sql`: signed notes of encounters in progress,
+  cancelled, entered in error, and completed then entered in error are not
+  visible to the patient, nor their revisions.
+- `runtime-roles.integration.sql`: the launch module set assertions above.
+- `verify-encounter-lifecycle-runtime.mjs` (in the rehearsal): the retraction
+  cascade and cancellation over HTTP as `hid_ehr_api_runtime`, a retraction
+  waiting for a child create that holds the encounter, and eight activations
+  racing their encounter's retraction with no deadlock.
+- `verify-delegated-cookie-read-runtime.mjs` (steps 7 and 8): the two summaries'
+  note release, and `403 PERMISSION_DENIED` for the seeded doctor on the
+  withdrawn write routes, with no row written.

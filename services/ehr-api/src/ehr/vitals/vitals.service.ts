@@ -128,6 +128,7 @@ export class VitalsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'vital',
         async () => {
+          await this.repository.requireOpenEncounter(client, encounterId, patientId, context.facilityId, 'record');
           const result = await client.query<VitalRow>(
             `insert into ehr.vitals (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
