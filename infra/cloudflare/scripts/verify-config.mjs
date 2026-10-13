@@ -4,12 +4,16 @@ import { access, readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import duplicateKeyJson from 'json-dup-key-validator'
 
-import { HEALTH_ID_WORKERS, assertHealthIdWorkerConfig, verifyLaunchDeployment } from './launch-deployment.mjs'
+import { HEALTH_ID_WORKERS, LAUNCH_DECISION, assertHealthIdWorkerConfig, verifyLaunchDeployment } from './launch-deployment.mjs'
 
 // `--launch <environment>` is the pre-deployment check: every Worker the launch
 // manifest deploys there must have a verified staged Health-id artefact.
 // Without it (repository mode, as the root `npm run verify` runs it) staged
-// artefacts are optional, but any that is present must verify.
+// artefacts are optional, but any that is present must verify. Repository mode
+// also checks the legacy apps/<app>/dist build of every other frontend Worker;
+// launch mode keeps their configuration checks but skips the builds of the
+// Workers the launch decision does not deploy in that environment, so an
+// operator needs only the Health-id builds (P14).
 const USAGE = 'Usage: node scripts/verify-config.mjs [--launch <staging|production>]'
 function parseArguments(argv) {
   if (argv.length === 0) return null
@@ -112,6 +116,9 @@ const applications = [
   ['hid-admin', 'admin', 'admin.healthidentitydirectory.com', 'admin.staging.healthidentitydirectory.com'],
 ]
 
+const notDeployedAtLaunch = new Set(launchEnvironment === null ? [] : LAUNCH_DECISION[launchEnvironment].not_deployed)
+const skippedLegacyBuilds = []
+
 const deployments = [
   ['production', 'https://api.healthidentitydirectory.com'],
   ['staging', 'https://api.staging.healthidentitydirectory.com'],
@@ -157,6 +164,10 @@ for (const [worker, app, productionHost, stagingHost] of applications) {
   // clinical data in browser storage); its rules and provenance are checked by
   // verifyLaunchDeployment below. The legacy applications keep these checks.
   if (healthId) continue
+  if (notDeployedAtLaunch.has(worker)) {
+    skippedLegacyBuilds.push(worker)
+    continue
+  }
 
   const dist = resolve(root, 'apps', app, 'dist')
   const html = await readFile(resolve(dist, 'index.html'), 'utf8')
@@ -273,4 +284,5 @@ process.stdout.write(
 )
 process.stdout.write(launchEnvironment === null
   ? `Staged Health-id artefacts verified: ${launch.artifacts.length === 0 ? 'none present' : launch.artifacts.map((artifact) => `${artifact.worker}/${artifact.environment} at ${artifact.source_commit}`).join(', ')}.\n`
-  : `Launch ${launchEnvironment} verified: deploy ${launch.deploy.join(', ')}; not deployed ${launch.not_deployed.join(', ')}; artefacts ${launch.artifacts.map((artifact) => `${artifact.worker} ${artifact.host} at ${artifact.source_commit} (tree ${artifact.tree_sha256})`).join(', ')}.\n`)
+  : `Launch ${launchEnvironment} verified: deploy ${launch.deploy.join(', ')}; not deployed ${launch.not_deployed.join(', ')}; artefacts ${launch.artifacts.map((artifact) => `${artifact.worker} ${artifact.host} at ${artifact.source_commit} (tree ${artifact.tree_sha256})`).join(', ')}. `
+    + `The apps/*/dist builds of the Workers not deployed in ${launchEnvironment} were not required (${skippedLegacyBuilds.join(', ')}); their configurations were checked.\n`)

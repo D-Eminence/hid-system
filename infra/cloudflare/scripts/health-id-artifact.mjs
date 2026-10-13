@@ -28,14 +28,29 @@ const MAX_FILES = 500
 // Cloudflare Workers Static Assets refuses larger files.
 const MAX_FILE_BYTES = 25 * 1024 * 1024
 
-/** Keys of Health-id's inlined public environment (apps/patient-web/src/publicEnvironment.ts). */
+/**
+ * The keys of Health-id's public environment record
+ * (apps/patient-web/src/publicEnvironment.ts), which Vite inlines as one
+ * object literal with its values. The provenance records exactly these.
+ */
 const RECORD_KEYS = Object.freeze([
   'VITE_HID_ENVIRONMENT', 'VITE_HID_API_BASE_URL', 'VITE_HID_APP_ORIGIN',
-  'VITE_HID_TURNSTILE_SITE_KEY', 'VITE_HID_SENTRY_DSN', 'VITE_HID_GOOGLE_CLIENT_ID',
+  'VITE_HID_TURNSTILE_SITE_KEY', 'VITE_HID_SENTRY_DSN',
 ])
 const REQUIRED_RECORD_KEYS = Object.freeze([
   'VITE_HID_ENVIRONMENT', 'VITE_HID_API_BASE_URL', 'VITE_HID_APP_ORIGIN', 'VITE_HID_TURNSTILE_SITE_KEY',
 ])
+/**
+ * Google sign-in in a build. VITE_HID_GOOGLE_CLIENT_ID is not part of the
+ * record: Health-id reads it where it is used (GoogleButton.tsx and the sign-in,
+ * enrollment and portal routes), so a build with it set carries the id as a
+ * bare literal of any value, with no key beside it, together with the Google
+ * Identity Services loader and calls; with it unset, Vite drops all of them.
+ * These markers, not the variable's name, are therefore the check.
+ */
+const GOOGLE_SIGN_IN = /accounts\.google\.com|\.apps\.googleusercontent\.com|\bgoogle\.accounts\.id\b|\/gsi\/client\b/
+/** A build that inlines the whole env object would name the variable beside its value. */
+const GOOGLE_CLIENT_ID_KEY = /(?:^|[{,\s])["']?VITE_HID_GOOGLE_CLIENT_ID["']?\s*:\s*/g
 const NON_LITERAL = Symbol('non-literal')
 const LITERAL_VALUE = /^(?:"([^"\\]*)"|'([^'\\]*)'|`([^`\\$]*)`|(void 0|undefined)\b)/
 
@@ -125,26 +140,143 @@ function collectRecord(path, source, occurrences) {
   }
 }
 
-function inspectIndexHtml(html, files, issues) {
-  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
-    const source = /\bsrc\s*=\s*["']?([^"'\s>]+)/i.exec(match[1])?.[1]
-    if (source === undefined) {
-      if (match[2].trim() !== '') issues.push('index.html has an inline script; the build must load code only from /assets/')
-    } else if (!source.startsWith('/assets/') || !files.includes(source.slice(1))) {
-      issues.push(`index.html loads ${source} from outside its own /assets/ files`)
+// index.html is allow-listed, not scanned for known-bad markup: with no edge
+// CSP (ADR-052), this is what keeps it to the shell Vite writes for Health-id
+// (doctype, html, head with meta charset/viewport/robots, title, one module
+// entry script, modulepreload and stylesheet links, comments, and a body with
+// the root div), loading code and styles only from the build's own /assets/.
+// Anything it cannot parse exactly is refused.
+const SHELL_TOKEN = new RegExp([
+  '(?<comment><!--(?:[^<>!-]|-(?!-))*-->)',
+  '(?<doctype><!doctype html>)',
+  '<\\/(?<close>[a-z][a-z0-9]*)\\s*>',
+  '<(?<open>[a-z][a-z0-9]*)(?<attributes>(?:\\s+[^\\s"\'<>\\/=]+(?:\\s*=\\s*(?:"[^"]*"|\'[^\']*\'|[^\\s"\'=<>`]+))?)*)\\s*(?<selfClosing>\\/?)>',
+  '(?<text>[^<]+)',
+].join('|'), 'iy')
+const SHELL_ATTRIBUTE = /\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/y
+const CROSS_ORIGIN = /^(?:|anonymous)$/
+const SHELL_ELEMENTS = Object.freeze({
+  html: Object.freeze({ allowed: { lang: /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/ }, required: [] }),
+  head: Object.freeze({ allowed: {}, required: [] }),
+  title: Object.freeze({ allowed: {}, required: [] }),
+  body: Object.freeze({ allowed: {}, required: [] }),
+  div: Object.freeze({ allowed: { id: /^root$/ }, required: ['id'] }),
+  meta: Object.freeze({ allowed: { charset: /^utf-8$/i, name: /^(?:viewport|robots)$/, content: /^[^<>]*$/ }, required: [] }),
+  script: Object.freeze({ allowed: { type: /^module$/, crossorigin: CROSS_ORIGIN, src: 'asset' }, required: ['type', 'src'] }),
+  link: Object.freeze({ allowed: { rel: /^(?:modulepreload|stylesheet)$/, crossorigin: CROSS_ORIGIN, href: 'asset' }, required: ['rel', 'href'] }),
+})
+const VOID_ELEMENTS = new Set(['meta', 'link'])
+const CLOSED_ELEMENTS = new Set(['html', 'head', 'title', 'body', 'div', 'script'])
+const ASSET_EXTENSION = Object.freeze({ script: '.js', modulepreload: '.js', stylesheet: '.css' })
+
+function parseShellAttributes(source) {
+  const attributes = new Map()
+  const duplicates = []
+  let position = 0
+  while (position < source.length) {
+    SHELL_ATTRIBUTE.lastIndex = position
+    const match = SHELL_ATTRIBUTE.exec(source)
+    if (!match) return { attributes, duplicates, unparsed: source.slice(position) }
+    const name = match[1].toLowerCase()
+    if (attributes.has(name)) duplicates.push(name)
+    else attributes.set(name, match[2] ?? match[3] ?? match[4] ?? '')
+    position = SHELL_ATTRIBUTE.lastIndex
+  }
+  return { attributes, duplicates, unparsed: '' }
+}
+
+function checkShellElement(name, attributes, files, refuse) {
+  const rule = SHELL_ELEMENTS[name]
+  for (const [attribute, value] of attributes) {
+    const allowed = rule.allowed[attribute]
+    if (allowed === undefined) {
+      refuse(`has <${name} ${attribute}=…>; the ${attribute} attribute is not part of the Vite shell`)
+    } else if (allowed !== 'asset' && !allowed.test(value)) {
+      refuse(`has <${name} ${attribute}=${JSON.stringify(value)}>, which the Vite shell does not use`)
     }
   }
-  for (const match of html.matchAll(/<link\b([^>]*)>/gi)) {
-    const rel = /\brel\s*=\s*["']?([^"'>]+)/i.exec(match[1])?.[1] ?? ''
-    if (/\bmanifest\b/i.test(rel)) {
-      issues.push('index.html links a web app manifest; the Health-id portal is not installable')
+  for (const attribute of rule.required) {
+    if (!attributes.has(attribute)) refuse(`has a <${name}> without ${attribute}`)
+  }
+  if (name === 'meta') {
+    const keys = [...attributes.keys()].sort().join(',')
+    if (keys !== 'charset' && keys !== 'content,name') refuse(`has a <meta> that is neither a charset nor a viewport or robots name`)
+  }
+  const reference = name === 'script' ? attributes.get('src') : name === 'link' ? attributes.get('href') : undefined
+  if (reference === undefined) return
+  const extension = ASSET_EXTENSION[name === 'script' ? 'script' : attributes.get('rel')]
+  if (!reference.startsWith('/assets/') || !files.includes(reference.slice(1))) {
+    refuse(`loads ${reference} from outside its own /assets/ files`)
+  } else if (extension !== undefined && !reference.endsWith(extension)) {
+    refuse(`loads ${reference} as a ${name === 'script' ? 'script' : attributes.get('rel')}, which must be a ${extension} file`)
+  }
+}
+
+function inspectIndexHtml(html, files, issues) {
+  const refuse = (reason) => issues.push(`index.html ${reason}`)
+  let doctype = false
+  let scripts = 0
+  let position = 0
+  while (position < html.length) {
+    SHELL_TOKEN.lastIndex = position
+    const match = SHELL_TOKEN.exec(html)
+    if (!match) {
+      refuse(`has markup outside the Vite shell at offset ${position} (${JSON.stringify(html.slice(position, position + 40))})`)
+      return
+    }
+    position = SHELL_TOKEN.lastIndex
+    const { comment, close, open, attributes: attributeSource, selfClosing, text } = match.groups
+    if (match.groups.doctype !== undefined) {
+      if (doctype || html.slice(0, match.index).trim() !== '') refuse('has a doctype that is not its first token')
+      doctype = true
       continue
     }
-    const href = /\bhref\s*=\s*["']?([^"'\s>]+)/i.exec(match[1])?.[1]
-    if (href !== undefined && (!href.startsWith('/assets/') || !files.includes(href.slice(1)))) {
-      issues.push(`index.html loads ${href} from outside its own /assets/ files`)
+    if (text !== undefined) {
+      if (text.trim() !== '') refuse(`has text outside <title> (${JSON.stringify(text.trim().slice(0, 40))})`)
+      continue
+    }
+    if (!doctype) {
+      refuse('must start with <!doctype html>')
+      return
+    }
+    if (comment !== undefined) continue
+    if (close !== undefined) {
+      if (!CLOSED_ELEMENTS.has(close.toLowerCase())) refuse(`has an unexpected end tag </${close}>`)
+      continue
+    }
+    const name = open.toLowerCase()
+    if (!Object.hasOwn(SHELL_ELEMENTS, name)) {
+      refuse(`has a <${name}> element, which is not part of the Vite shell`)
+      continue
+    }
+    const { attributes, duplicates, unparsed } = parseShellAttributes(attributeSource)
+    if (unparsed !== '') refuse(`has a <${name}> whose attributes cannot be parsed (${JSON.stringify(unparsed.slice(0, 40))})`)
+    for (const duplicate of duplicates) refuse(`has a <${name}> with a duplicate ${duplicate} attribute`)
+    if (selfClosing !== '' && !VOID_ELEMENTS.has(name)) refuse(`has a self-closing <${name}/>`)
+    if (name === 'link' && /^manifest$/i.test(attributes.get('rel') ?? '')) {
+      refuse('links a web app manifest; the Health-id portal is not installable')
+      continue
+    }
+    checkShellElement(name, attributes, files, refuse)
+    if (name === 'script' || name === 'title') {
+      // Raw text (script) or escapable raw text (title) runs to the end tag.
+      const end = html.slice(position).search(name === 'script' ? /<\/script[\s/>]/i : /<\/title[\s/>]/i)
+      if (end === -1) {
+        refuse(`has an unclosed <${name}>`)
+        return
+      }
+      const content = html.slice(position, position + end)
+      if (name === 'script') {
+        scripts += 1
+        if (content.trim() !== '') refuse('has an inline script; the build must load code only from /assets/')
+      } else if (content.includes('<')) {
+        refuse('has markup inside <title>')
+      }
+      position += end
     }
   }
+  if (!doctype) refuse('must start with <!doctype html>')
+  if (scripts !== 1) refuse(`must load exactly one entry script (a module script from its own /assets/); it has ${scripts}`)
 }
 
 function checkRecord(occurrences, { environment, host }, issues) {
@@ -189,9 +321,6 @@ function checkRecord(occurrences, { environment, host }, issues) {
   if (summary.VITE_HID_SENTRY_DSN !== null) {
     issues.push('VITE_HID_SENTRY_DSN is set; no error-reporting processor is approved for launch, so build without it')
   }
-  if (summary.VITE_HID_GOOGLE_CLIENT_ID !== null) {
-    issues.push('VITE_HID_GOOGLE_CLIENT_ID is set; Google sign-in is off at launch, so build without it')
-  }
   return summary
 }
 
@@ -221,8 +350,14 @@ export async function inspectHealthIdBuild(directory, { environment, host }) {
     if (path.endsWith('.js') && /\bserviceWorker\b/.test(source)) {
       issues.push(`service worker registration in ${path}: the Health-id portal registers no service worker`)
     }
-    if (/accounts\.google\.com|\.apps\.googleusercontent\.com/.test(source)) {
-      issues.push(`Google sign-in reference in ${path}: Google sign-in is off at launch, so build without VITE_HID_GOOGLE_CLIENT_ID`)
+    if (GOOGLE_SIGN_IN.test(source)) {
+      issues.push(`Google sign-in reference in ${path} (Google Identity Services or a Google OAuth client id): `
+        + 'Google sign-in is off at launch, so build without VITE_HID_GOOGLE_CLIENT_ID')
+    }
+    for (const match of source.matchAll(GOOGLE_CLIENT_ID_KEY)) {
+      if (parseLiteral(source.slice(match.index + match[0].length)) !== null) {
+        issues.push(`${path} inlines VITE_HID_GOOGLE_CLIENT_ID with a value; Google sign-in is off at launch, so build without it`)
+      }
     }
     for (const [label, pattern] of CREDENTIAL_PATTERNS) {
       if (pattern.test(source)) issues.push(`${path} contains a value shaped like ${label}`)
@@ -237,6 +372,42 @@ export async function inspectHealthIdBuild(directory, { environment, host }) {
 
 export function treeSha256(files) {
   return sha256(files.map((file) => `${file.sha256}  ${file.path}\n`).join(''))
+}
+
+/**
+ * Why `destination` may not be replaced by a new artefact for this Worker and
+ * environment, or null when it may: it is missing, an empty directory, or
+ * exactly the site/ directory and provenance.json of an earlier artefact of
+ * this schema staged for the same Worker and environment. Anything else, such
+ * as a mistyped --staged-directory, is left alone.
+ */
+async function destinationRefusal(destination, { worker, environment }) {
+  const kind = await pathKind(destination)
+  if (kind === 'missing') return null
+  const refusal = (reason) => `${destination} is not an earlier staged Health-id artefact for ${worker} ${environment} `
+    + `(${reason}); refusing to replace it: name a new or empty directory, or that artefact's own staged directory`
+  if (kind !== 'directory') return refusal(`it is ${kind === 'symlink' ? 'a symbolic link' : kind === 'file' ? 'a regular file' : 'not a directory'}`)
+  const entries = (await readdir(destination)).sort()
+  if (entries.length === 0) return null
+  if (entries.length !== 2 || entries[0] !== 'provenance.json' || entries[1] !== 'site') {
+    const shown = entries.slice(0, 5).map((entry) => JSON.stringify(entry)).join(', ')
+    return refusal(`it holds ${shown}${entries.length > 5 ? ', …' : ''}, not exactly site/ and provenance.json`)
+  }
+  if ((await pathKind(resolve(destination, 'site'))) !== 'directory') return refusal('its site is not a directory')
+  if ((await pathKind(resolve(destination, 'provenance.json'))) !== 'file') return refusal('its provenance.json is not a regular file')
+  let provenance
+  try {
+    provenance = parseStrictJson(await readFile(resolve(destination, 'provenance.json'), 'utf8'), 'provenance.json')
+  } catch {
+    return refusal('its provenance.json is not valid JSON')
+  }
+  if (provenance === null || typeof provenance !== 'object' || provenance.schema_version !== PROVENANCE_SCHEMA) {
+    return refusal(`its provenance.json is not of schema ${PROVENANCE_SCHEMA}`)
+  }
+  if (provenance.worker !== worker || provenance.environment !== environment) {
+    return refusal(`it was staged for ${JSON.stringify(provenance.worker)} ${JSON.stringify(provenance.environment)}`)
+  }
+  return null
 }
 
 function isInside(parent, child) {
@@ -266,6 +437,8 @@ export async function stageHealthIdBuild({
     issues.push('the build directory and the staged directory must not contain each other')
     throw new HealthIdArtifactError(issues)
   }
+  const refusal = await destinationRefusal(destination, { worker, environment })
+  if (refusal !== null) issues.push(refusal)
 
   let inspected
   try {
@@ -311,6 +484,10 @@ export async function stageHealthIdBuild({
       throw new HealthIdArtifactError(['the build changed while it was being staged'])
     }
     await writeFile(resolve(temporary, 'provenance.json'), `${JSON.stringify(provenance, null, 2)}\n`)
+    // Checked again just before the swap, in case the destination changed
+    // while the build was being copied.
+    const lateRefusal = await destinationRefusal(destination, { worker, environment })
+    if (lateRefusal !== null) throw new HealthIdArtifactError([lateRefusal])
     const hadPrevious = (await pathKind(destination)) !== 'missing'
     if (hadPrevious) await rename(destination, previous)
     await rename(temporary, destination)

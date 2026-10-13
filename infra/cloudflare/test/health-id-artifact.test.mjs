@@ -270,6 +270,10 @@ test('index.html must be the Vite shell only: every other tag, attribute or mark
     html: indexHtml().replace('src="/assets/index-AbCdEf12.js"></script>', 'src="/assets/index-AbCdEf12.js">alert(1)</script>'),
   }, /index\.html/)
   await assertRefused(t, { html: `${indexHtml()}<script src="${evil}/x.js"></script>` }, /index\.html/)
+  // A repeated attribute is refused even when both values are allowed.
+  await assertRefused(t, {
+    html: indexHtml().replace('<script type="module" crossorigin', '<script type="module" type="module" crossorigin'),
+  }, /index\.html has a <script> with a duplicate type attribute/)
   await assertRefused(t, { html: indexHtml().replace('<!doctype html>', '') }, /index\.html/)
 })
 
