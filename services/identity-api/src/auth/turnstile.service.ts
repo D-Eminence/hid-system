@@ -17,11 +17,13 @@ interface SiteverifyResponse {
 }
 
 /**
- * Siteverify error codes that blame the server, not the visitor: a missing or
- * wrong secret, or a Cloudflare fault. They answer 503 like an outage, so a
- * misconfigured secret never reads to users as a rejected check (TS-3).
+ * Siteverify error codes that blame Identity's own request, not the visitor:
+ * a missing or wrong secret, or a malformed request. With Cloudflare's own
+ * `internal-error` they answer 503 like an outage, so a misconfigured secret
+ * never reads to users as a rejected check (TS-3). Cloudflare sends these with
+ * HTTP 400; the visitor's token errors come with HTTP 200.
  */
-const SERVER_ERROR_CODES: ReadonlySet<string> = new Set(['missing-input-secret', 'invalid-input-secret', 'internal-error']);
+const CONFIGURATION_ERROR_CODES: ReadonlySet<string> = new Set(['missing-input-secret', 'invalid-input-secret', 'bad-request']);
 /** Siteverify is asked at most twice per check: once more after a transport failure or 5xx (TS-2). */
 const SITEVERIFY_ATTEMPTS = 2;
 /** What the log may repeat from a request or Cloudflare: lower-case words joined by hyphens. */
@@ -73,19 +75,27 @@ export class TurnstileService {
       idempotency_key: randomUUID(),
     });
     if (!response) throw this.unavailable(expected.action, 'siteverify_unreachable', [], attempts);
-    if (!response.ok) throw this.unavailable(expected.action, `siteverify_http_${response.status}`, [], attempts);
-    let result: SiteverifyResponse;
+    let result: SiteverifyResponse | undefined;
     try {
       result = await response.json() as SiteverifyResponse;
     } catch {
-      throw this.unavailable(expected.action, 'siteverify_unreadable', [], attempts);
+      result = undefined;
     }
-    const errorCodes = Array.isArray(result['error-codes'])
+    const errorCodes = Array.isArray(result?.['error-codes'])
       ? result['error-codes'].filter((value): value is string => typeof value === 'string')
       : [];
+    if (!response.ok) {
+      // A 4xx (but a rate limit) is Siteverify refusing Identity's own request.
+      throw this.unavailable(expected.action, response.status < 500 && response.status !== 429
+        ? 'siteverify_refused_configuration' : `siteverify_http_${response.status}`, errorCodes, attempts);
+    }
+    if (!result) throw this.unavailable(expected.action, 'siteverify_unreadable', [], attempts);
     if (result.success !== true) {
-      if (errorCodes.some((code) => SERVER_ERROR_CODES.has(code))) {
+      if (errorCodes.some((code) => CONFIGURATION_ERROR_CODES.has(code))) {
         throw this.unavailable(expected.action, 'siteverify_refused_configuration', errorCodes, attempts);
+      }
+      if (errorCodes.includes('internal-error')) {
+        throw this.unavailable(expected.action, 'siteverify_internal_error', errorCodes, attempts);
       }
       const replay = errorCodes.includes('timeout-or-duplicate');
       throw this.refused(replay ? 'TURNSTILE_EXPIRED_OR_REPLAYED' : 'TURNSTILE_REJECTED',
@@ -121,6 +131,8 @@ export class TurnstileService {
         continue;
       }
       if (response.status < 500) break;
+      // Release the failed answer's connection before asking again.
+      if (attempts < SITEVERIFY_ATTEMPTS) await response.body?.cancel().catch(() => undefined);
     }
     return { response, attempts };
   }
