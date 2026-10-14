@@ -18,7 +18,7 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
 
 ## 2. What `main` contains
 
-- **Migrations:** 0001 to 0092.
+- **Migrations:** 0001 to 0091.
 - **Launch PRs merged to `main`:**
   - D-Eminence/hid-system#63 to #67: non-superuser database chain, EHR clinical safety, edge and gateway, launch configuration, launch frontend hosts.
   - D-Eminence/hid-system#68 to #71: enrollment gate, recovery and search, workforce provisioning, staff MFA.
@@ -29,7 +29,7 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
   - D-Eminence/hid-system#76: identity error hardening.
   - D-Eminence/hid-system#78: web push proposal (documentation only; nothing built) and checklist corrections.
   - D-Eminence/hid-system#79: Turnstile contract.
-  - BRANCH:launch/patient-self-enrollment: a NIN record without a date of birth or gender can enroll, 0092 (NIN-only enrollment stays off in production, N1).
+- **Pending, not merged:** BRANCH:launch/patient-self-enrollment adds 0092: a NIN record without a date of birth or gender can enroll (NIN-only enrollment stays off in production, N1). The steps in §3 already count 0092.
 
 ## 3. Staging, in order
 

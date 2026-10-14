@@ -241,8 +241,10 @@ The executable covers:
    With 0092 (BRANCH:launch/patient-self-enrollment, ADR-061): the additional
    suites include `public-patient-enrollment-self-reported.integration.sql`
    (a NIN record without a date of birth or gender activates with the values
-   the patient enters, a value the record gives is refused, the authoritative
-   profile is unchanged and the audit event names the entered fields), and
+   the patient enters, from 1900-01-01 to today, a value the record gives is
+   refused, a record date that is not on the calendar is refused as an invalid
+   identity, the authoritative profile is unchanged and the audit event names
+   the entered fields), and
    `patient_enrollment_runtime` also requires a complete record's progress to
    list `requiredProfileFields: []` and refuse an entered date of birth, and
    runs a name-only record from start to sign-in with the date of birth and

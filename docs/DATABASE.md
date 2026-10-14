@@ -3824,18 +3824,25 @@ Tests:
   both entered and stores them, with `selfReportedFields` `["dateOfBirth",
   "gender"]` and the authoritative profile unchanged; a replay with other
   values answers the same HID and changes nothing; a profile with a date of
-  birth but no gender takes only the gender (`["gender"]`); a complete
-  profile activates with the 7-argument call (`[]`). Refused with
+  birth but no gender takes only the gender (`["gender"]`); a profile with a
+  gender but no date of birth takes only the date, 1900-01-01
+  (`["dateOfBirth"]`); a profile without either activates with today's date;
+  a complete profile activates with the 7-argument call (`[]`). Refused with
   `PATIENT_IDENTITY_INVALID`: the 7-argument call, a date alone and a gender
   alone for a profile without either, a date tomorrow, a date before 1900, a
   gender outside the list or empty, and any entered value where the profile
-  has one. The new signature is `SECURITY DEFINER` with 0085's search path,
+  has one. A profile date of birth that is not on the calendar (`2020-02-30`,
+  `0000-01-01`) is refused with `23514` `PATIENT_IDENTITY_INVALID`, not a
+  `22008` cast error, and changes nothing. The new signature is `SECURITY DEFINER` with 0085's search path,
   result and owner and two defaults, executable by the Identity runtime and
   not by `PUBLIC` or the EHR runtime, and the 7-argument signature is gone.
   On 0091 it fails at its first 9-argument call; five mutants of the 0092
   body (an entered date or gender accepted over the profile's, no
   `selfReportedFields`, a future date accepted, the profile date stored
-  instead of the entered one) each make it fail.
+  instead of the entered one) each make it fail, and so do four more added
+  after review (1900-01-01 refused, today refused, the guarded cast removed,
+  a gender-only profile refused), which the first version of the suite
+  passed.
 - `public-patient-enrollment-windows.integration.sql` names the new
   signature in its privilege check; its 7-argument calls are unchanged.
 - All 48 SQL suites pass on a database built from empty to 0092 and

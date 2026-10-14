@@ -1435,8 +1435,9 @@ record lacks when they set their password:
   Each refusal counts toward the activation budget, as every attempt past
   the stage check does, and creates nothing; the enrollment stays at
   `set_password`. The detail is plain and safe to show as sent.
-- A replay of an active enrollment ignores both fields, whatever they are,
-  and answers the HID as before.
+- A replay of an active enrollment ignores well-formed `dateOfBirth` and
+  `gender` values and answers the HID as before. A malformed one is still
+  `400 VALIDATION_FAILED`, as on any call.
 - The database command checks the same rules again. A refusal there that
   the checks above did not catch is `409 ENROLLMENT_STAGE_INVALID`
   ("Enrollment conditions are not complete"), as any other activation
