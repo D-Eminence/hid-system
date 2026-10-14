@@ -27,6 +27,8 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
   - D-Eminence/hid-system#74: EHR retraction integrity, 0090.
   - D-Eminence/hid-system#75: launch module withdrawal, 0091.
   - D-Eminence/hid-system#76: identity error hardening.
+  - D-Eminence/hid-system#78: web push proposal (documentation only; nothing built) and checklist corrections.
+  - D-Eminence/hid-system#79: Turnstile contract.
 
 ## 3. Staging, in order
 
@@ -128,7 +130,7 @@ None of these can be done from the repository. Each needs its owner and, where i
 
 | Level | State |
 |---|---|
-| Committed and merged to `main` | Every change above, through D-Eminence/hid-system#76 |
+| Committed and merged to `main` | Every change above, through D-Eminence/hid-system#79 |
 | Checks run locally | Unit and SQL suites, runtime verifiers over HTTP against PostgreSQL 16 as the runtime roles, and the full workspace gates with the synthetic 0028 to 0091 migration rehearsal on each PR head (each PR's evidence) |
 | CI | Green on each merged PR's head (each PR) |
 | Staging-verified | None yet |
