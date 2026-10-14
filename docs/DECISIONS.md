@@ -4378,6 +4378,11 @@ Context:
   password. QoreID returns only the name, the NIN and its reference. Where a
   field is needed and the NIN record did not provide it, the patient enters
   it.
+- Later the same day the owner instructed that possession of a NIN alone is
+  never proof of ownership: online sign-up proves control of the phone linked
+  to the NIN with a one-time code, or the patient registers in person at a
+  participating facility (decision N1). That ownership step is a separate
+  change; this ADR covers only the missing fields, which both routes need.
 - Until this change a verified NIN record without a date of birth or gender
   could not enroll at all. The adapter required `nin.birthdate` and
   `nin.gender` and answered `502 QOREID_PROVIDER_RESPONSE_INVALID`; the

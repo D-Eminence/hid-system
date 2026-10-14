@@ -68,23 +68,22 @@ separate deployment authorization. None of them has been run.
   `{ "open": boolean }` from the same gate, so Health-id can say so before it
   asks for a NIN (ADR-057; `INTERFACE_CONTRACT.md`). Health-id
   82b474e does not read it yet (release checklist §3).
-- **Note (2026-10-14): the owner's described flow.** The product owner
-  described patient self-enrollment as: the patient enters their NIN and
-  QoreID verifies it; they enter a phone number or email of their own
-  choice; they confirm the code sent to it; they set a password. No code is
-  sent to the registry phone. QoreID returns only the name, the NIN and its
-  reference, and the patient enters a needed field the NIN record lacks.
-  BRANCH:launch/patient-self-enrollment (ADR-061, migration 0092) supports
-  that flow where NIN-only enrollment is enabled: a record without a date of
-  birth or gender can now enroll, and the patient enters them at activation.
-  It does not change the decision above. Production NIN-only enrollment
-  stays refused by configuration until the owner explicitly confirms lifting
-  the refusal and accepts its residual risk: someone who knows another
-  person's NIN could enroll first as them, and there is no dispute or
-  recovery path for the real holder yet. Also open before that: the
-  activation command records `NIN_VERIFIED` assurance (0085, unchanged by
-  0092), while the decision above says enrollment that proves only the
-  patient's own contact records contact assurance.
+- **Note (2026-10-14): manual entry of missing fields; ownership proof
+  confirmed.** Earlier on 2026-10-14 the product owner described
+  self-enrollment with a phone number or email of the patient's own choice
+  and no code to the registry phone, and reported that QoreID returns only
+  the name, the NIN and its reference. Later the same day the owner
+  instructed that possession of a NIN alone is never proof of ownership:
+  online sign-up must prove control of the phone linked to the NIN with a
+  one-time code, and a patient who cannot (lost SIM, changed number, no
+  linked phone) registers in person through a participating facility. That
+  confirms the decision above; the ownership work follows in a separate
+  change. BRANCH:launch/patient-self-enrollment (ADR-061, migration 0092)
+  only lets a NIN record without a date of birth or gender enroll where
+  NIN-only enrollment is enabled (staging): the patient enters them at
+  activation. Production NIN-only enrollment stays refused by configuration
+  until the ownership step ships. The activation command still records
+  `NIN_VERIFIED` assurance (0085, unchanged by 0092).
 - **Launch consequence (open for the owner to confirm).** With N1 as decided
   and facility-assisted registration out of scope (N2(d), D17), no new
   patient can get a Health ID in production at launch; legacy-migrated
