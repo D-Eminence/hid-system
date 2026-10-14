@@ -15,11 +15,15 @@ jest.mock('jose', () => ({
 
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../../audit/audit.service';
+import { DomainProblem } from '../../common/problem';
 import type { PlatformAccessContext } from '../../common/request-context';
 import type { DatabaseService } from '../../database/database.service';
-import { isAssuranceQuery, assuranceResult, platformActor, useTestEnvironment } from '../../testing/platform-assurance';
+import {
+  assuredClient, isAssuranceQuery, assuranceResult, platformActor, useTestEnvironment,
+} from '../../testing/platform-assurance';
 import { CurrentStaffContextService } from '../current-staff-context.service';
 import type { LocalAuthProvider } from '../local-auth.provider';
+import { requirePlatformAssurance } from '../platform-assurance';
 import { TokenService } from '../token.service';
 import type { MfaSecretProtector } from './mfa-secret-protector';
 import { MfaService } from './mfa.service';
@@ -48,6 +52,7 @@ import { totp } from './totp';
  */
 const ACCOUNT = '40000000-0000-4000-8000-0000000000c1';
 const FACTOR = '41000000-0000-4000-8000-0000000000c1';
+const OTHER_FACTOR = '41000000-0000-4000-8000-0000000000c2';
 const CHALLENGE = '42000000-0000-4000-8000-0000000000c1';
 const FAMILY = '43000000-0000-4000-8000-0000000000c1';
 const TOKEN = 'C'.repeat(43);
@@ -58,7 +63,13 @@ const REVOCATION_LOCK = /auth\.lock_account_sessions/;
 const event = { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPT', sourceIp: '192.0.2.10' };
 
 type Statement = { sql: string; values: unknown[] };
-type Options = { activeFactor?: boolean; lockedChallenge?: boolean };
+type Options = {
+  activeFactor?: boolean; lockedChallenge?: boolean;
+  /** The step-up's locked session read: no row (the session rotated or ended), or verified by another factor. */
+  assurance?: 'none' | 'other-factor';
+  /** The second-factor failure budget is blocked. */
+  blocked?: boolean;
+};
 
 /** Any statement that takes a row, advisory or foreign-key lock, or writes. */
 const LOCKING = /\bfor\s+update\b|^\s*(update|insert|delete)\b|pg_advisory_xact_lock|auth\.upgrade_legacy_password/i;
@@ -84,8 +95,13 @@ function harness(options: Options = {}) {
     }
     if (sql.includes('insert into auth.mfa_login_challenges')) return { rowCount: 1, rows: [{ expires_at: new Date() }] };
     if (sql.includes('insert into auth.mfa_factors')) return { rowCount: 1, rows: [{ enrollment_expires_at: new Date() }] };
-    if (/for update of assurance/.test(sql)) return { rowCount: 1, rows: [{ family_id: FAMILY, mfa_factor_id: FACTOR }] };
+    if (/for update of assurance/.test(sql)) {
+      if (options.assurance === 'none') return { rowCount: 0, rows: [] };
+      return { rowCount: 1, rows: [{ family_id: FAMILY,
+        mfa_factor_id: options.assurance === 'other-factor' ? OTHER_FACTOR : FACTOR }] };
+    }
     if (sql.includes('update auth.session_assurance')) return { rowCount: 1, rows: [{ step_up_expires_at: new Date() }] };
+    if (options.blocked && sql.includes('as blocked')) return { rowCount: 1, rows: [{ blocked: true }] };
     if (sql.includes('from auth.otp_rate_limits')) return { rowCount: 0, rows: [] };
     return { rowCount: 1, rows: [] };
   };
@@ -131,7 +147,7 @@ function harness(options: Options = {}) {
     principalHash: () => 'principal-hash',
   } as unknown as LocalAuthProvider;
   const service = new MfaService(database, protector, tokens, localProvider, audit, () => NOW);
-  return { service, transactions };
+  return { service, transactions, database };
 }
 
 /** The account lock must be the first locking statement of the (only) transaction that touches the authenticator. */
@@ -276,5 +292,105 @@ describe('platform MFA lock order (Stage 7A)', () => {
     expect(session.actor).toMatchObject({ kind: 'platform', accountId: ACCOUNT, platformPermissions: ['platform.admin.access'] });
     expect(poolQuery).not.toHaveBeenCalled();
     expect(statements.some((sql) => sql.includes('from auth.account_roles assignment'))).toBe(true);
+  });
+});
+
+/** A well-formed TOTP code that matches no step of the window accepted around NOW. */
+const WRONG = ['000000', '111111', '222222', '333333'].find((code) =>
+  ![-30_000, 0, 30_000].some((offset) => totp(SECRET, NOW + offset) === code))!;
+
+/** The status, code and message a refused call threw. */
+async function refusal(promise: Promise<unknown>) {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof DomainProblem) return { status: error.getStatus(), code: error.code, message: error.message };
+    throw error;
+  }
+  throw new Error('expected a refusal');
+}
+
+const inserts = (statements: Statement[], table: string) =>
+  statements.filter(({ sql }) => sql.startsWith(`insert into ${table}`));
+
+/**
+ * A20: step-up and recovery-code regeneration run on an authenticated platform
+ * route, so a refusal there is never 401, which the console reads as an ended
+ * session (it refreshes and repeats the request). A wrong or replayed code is
+ * 403 MFA_INVALID_CODE and is still counted; a session that lost its MFA
+ * assurance while the request waited for the account lock is 403
+ * PLATFORM_SESSION_REQUIRED, as requirePlatformAssurance answers it. The
+ * unauthenticated sign-in challenge steps keep 401.
+ */
+describe('platform MFA refusals on authenticated routes (A20)', () => {
+  useTestEnvironment();
+
+  it('answers a wrong step-up code 403 MFA_INVALID_CODE after counting the factor failure', async () => {
+    const { service, transactions, database } = harness();
+    await expect(refusal(service.stepUp(platformContext(), WRONG, event)))
+      .resolves.toEqual({ status: 403, code: 'MFA_INVALID_CODE', message: 'The code is not valid' });
+    // The transaction returned its outcome instead of throwing, so the failure it counted commits.
+    await expect((database.withTransaction as jest.Mock).mock.results[0]?.value).resolves.toEqual({ kind: 'failed' });
+    const statements = transactions[0] ?? [];
+    expect(inserts(statements, 'auth.otp_rate_limits').map(({ values }) => values[0]))
+      .toEqual(['mfa_failure_account', 'mfa_failure_ip']);
+    expect(inserts(statements, 'auth.session_events').map(({ values }) => values[1])).toEqual(['step_up_failed']);
+  });
+
+  it.each([
+    ['its session was rotated or ended while it waited', { assurance: 'none' as const }],
+    ['its session was verified by another factor', { assurance: 'other-factor' as const }],
+    ['the account has no active factor', { activeFactor: false }],
+  ])('answers a step-up 403 PLATFORM_SESSION_REQUIRED, as the assurance check does, when %s', async (_case, options) => {
+    const expected = await refusal(requirePlatformAssurance(
+      assuredClient(jest.fn(), { active: false }) as unknown as PoolClient, platformContext(), 'platform.mfa.step-up'));
+    const { service, transactions } = harness(options);
+    await expect(refusal(service.stepUp(platformContext(), totp(SECRET, NOW), event))).resolves.toEqual(expected);
+    expect(expected).toMatchObject({ status: 403, code: 'PLATFORM_SESSION_REQUIRED' });
+    // Not a wrong code: nothing is counted against the failure budgets.
+    const statements = transactions[0] ?? [];
+    expect(inserts(statements, 'auth.otp_rate_limits')).toEqual([]);
+    expect(inserts(statements, 'auth.session_events')).toEqual([]);
+  });
+
+  it('answers a regeneration that finds no active factor 403 PLATFORM_SESSION_REQUIRED and issues no code', async () => {
+    const { service, transactions } = harness({ activeFactor: false });
+    await expect(refusal(service.regenerateRecoveryCodes(platformContext(), event))).resolves.toEqual({
+      status: 403, code: 'PLATFORM_SESSION_REQUIRED',
+      message: 'An MFA-verified platform administration session is required' });
+    expect(inserts(transactions[0] ?? [], 'auth.mfa_recovery_codes')).toEqual([]);
+  });
+
+  it('still answers a step-up while the failure budget is blocked 429 MFA_RATE_LIMITED, without testing the code', async () => {
+    const { service, transactions } = harness({ blocked: true });
+    await expect(refusal(service.stepUp(platformContext(), totp(SECRET, NOW), event)))
+      .resolves.toMatchObject({ status: 429, code: 'MFA_RATE_LIMITED' });
+    expect((transactions[0] ?? []).some(({ sql }) => sql.includes('update auth.mfa_factors'))).toBe(false);
+  });
+
+  describe('the unauthenticated sign-in challenge steps keep 401', () => {
+    it('a wrong sign-in code is 401 MFA_INVALID_CODE', async () => {
+      const { service } = harness();
+      await expect(refusal(service.completeLogin(TOKEN, { code: WRONG }, event)))
+        .resolves.toMatchObject({ status: 401, code: 'MFA_INVALID_CODE' });
+    });
+
+    it('a wrong enrolment activation code is 401 MFA_INVALID_CODE', async () => {
+      const { service } = harness();
+      await expect(refusal(service.activateEnrollment(TOKEN, WRONG, event)))
+        .resolves.toMatchObject({ status: 401, code: 'MFA_INVALID_CODE' });
+    });
+
+    it('a challenge no longer valid is 401 MFA_CHALLENGE_INVALID', async () => {
+      const { service } = harness({ lockedChallenge: false });
+      await expect(refusal(service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event)))
+        .resolves.toMatchObject({ status: 401, code: 'MFA_CHALLENGE_INVALID' });
+    });
+
+    it('starting enrolment over an active factor is 401 MFA_CHALLENGE_INVALID', async () => {
+      const { service } = harness();
+      await expect(refusal(service.startEnrollment(TOKEN, event)))
+        .resolves.toMatchObject({ status: 401, code: 'MFA_CHALLENGE_INVALID' });
+    });
   });
 });

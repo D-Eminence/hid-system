@@ -557,7 +557,7 @@ export class MfaService {
       });
       return { kind: 'verified', expiresAt: updated.rows[0]!.step_up_expires_at } as const;
     });
-    if (outcome.kind !== 'verified') throw this.failure(outcome);
+    if (outcome.kind !== 'verified') throw this.sessionFailure(outcome);
     return { stepUpExpiresAt: outcome.expiresAt.toISOString() };
   }
 
@@ -593,7 +593,7 @@ export class MfaService {
       });
       return { kind: 'regenerated' } as const;
     });
-    if (outcome.kind !== 'regenerated') throw this.failure(outcome);
+    if (outcome.kind !== 'regenerated') throw this.sessionFailure(outcome);
     return { recoveryCodes };
   }
 
@@ -864,5 +864,22 @@ export class MfaService {
     }
     if (outcome.kind === 'failed') return new DomainProblem(401, 'MFA_INVALID_CODE', 'The code is not valid');
     return new DomainProblem(401, 'MFA_CHALLENGE_INVALID', 'Sign in again to continue');
+  }
+
+  /**
+   * The refusal of step-up and recovery-code regeneration (A20). Both run on an
+   * authenticated platform route, where 401 would read as an ended session: a
+   * wrong or replayed code is 403 MFA_INVALID_CODE, and a session that lost its
+   * MFA assurance while the request waited for the account lock is 403
+   * PLATFORM_SESSION_REQUIRED, as requirePlatformAssurance answers it. It is
+   * thrown after the transaction committed, so a counted failure stays counted.
+   * The sign-in challenge steps are unauthenticated and keep failure() and 401.
+   */
+  private sessionFailure(outcome: Failure): DomainProblem {
+    if (outcome.kind === 'failed') return new DomainProblem(403, 'MFA_INVALID_CODE', 'The code is not valid');
+    if (outcome.kind === 'invalid') {
+      return new DomainProblem(403, 'PLATFORM_SESSION_REQUIRED', 'An MFA-verified platform administration session is required');
+    }
+    return this.failure(outcome);
   }
 }

@@ -205,6 +205,8 @@ describe('staff sign-in (MFA-1)', () => {
   it('counts a wrong staff code as a failed attempt and issues nothing', async () => {
     const { service, statements, tokens, audit } = harness({ enrolled: true });
     const refused = await problem(service.completeLogin(TOKEN, { code: '000000' }, event, 'staff'));
+    // An unauthenticated challenge step: the refusal stays 401 (A20 changed only the authenticated platform routes).
+    expect(refused.getStatus()).toBe(401);
     expect(refused.code).toBe('MFA_INVALID_CODE');
     expect(writes(statements, /failed_attempts = failed_attempts \+ 1/)).toHaveLength(1);
     expect(tokens.issueStaffSession).not.toHaveBeenCalled();
@@ -235,6 +237,7 @@ describe('first staff enrolment needs a fresh proof (MFA-1)', () => {
   it('counts a wrong email code as a failed attempt of the challenge', async () => {
     const { service, statements } = harness({ proofMethod: 'email_code', proofCode: '246810' });
     const refused = await problem(service.startEnrollment(TOKEN, event, 'staff', { emailCode: '135790' }));
+    expect(refused.getStatus()).toBe(401);
     expect(refused.code).toBe('MFA_INVALID_CODE');
     expect(writes(statements, /failed_attempts = failed_attempts \+ 1/)).toHaveLength(1);
     expect(writes(statements, /insert into auth\.mfa_factors/)).toHaveLength(0);

@@ -347,7 +347,7 @@ try {
   const superBAdmin = await platform.signIn({ email: superB.email, secret: staff.secretOf(superB.email) });
   expectStatus(await decide(superBAdmin, elevation.body.requestId, 'approve', elevation.body.version, 'no-step-up'),
     403, 'STEP_UP_REQUIRED');
-  expectStatus(await command(superBAdmin, '/admin/mfa/step-up', { code: '000000' }), 401, 'MFA_INVALID_CODE');
+  expectStatus(await command(superBAdmin, '/admin/mfa/step-up', { code: '000000' }), 403, 'MFA_INVALID_CODE');
   await platform.stepUp(superBAdmin);
   // Two concurrent approvals: exactly one grants the role.
   const decisions = await Promise.all([
@@ -1062,7 +1062,7 @@ try {
   const parallelGuesses = { waiting: guesses.waiting,
     responses: guesses.responses.map(response => `${response.status} ${response.body?.code}`).sort(), ...guessEvents };
   assert.deepEqual(parallelGuesses, { waiting: 6,
-    responses: [...Array(5).fill('401 MFA_INVALID_CODE'), '429 MFA_RATE_LIMITED'], failed: 5, limited: 1 },
+    responses: [...Array(5).fill('403 MFA_INVALID_CODE'), '429 MFA_RATE_LIMITED'], failed: 5, limited: 1 },
   `parallel step-ups with a wrong code: ${JSON.stringify(parallelGuesses)}`);
   const serialSignIn = await account('serial-sign-in', { platformRole: 'security_auditor' });
   expectStatus(await post('/auth/admin/login', {}, { email: serialSignIn.email, password: 'Wrong-Password-2026',
