@@ -111,10 +111,12 @@ const turnstile = (action = 'provider-enrollment', host = siteHost) => `ok|${act
 // QoreID HTTP stub behind the real adapter. NOT_VERIFIED returns a negative
 // registry check; SPARSE returns a verified lookup with the sparse legal
 // profile the QoreID sandbox returned for RC and BN numbers
-// (QOREID_VERIFICATION_CONTRACT.md); every other number returns a complete
-// verified CAC record.
+// (QOREID_VERIFICATION_CONTRACT.md); INACTIVE returns a verified lookup with
+// every legal field but a registry status that is not active; every other
+// number returns a complete verified CAC record.
 const NOT_VERIFIED = 'RC9900063299';
 const SPARSE = 'RC9900063298';
+const INACTIVE = 'RC9900063297';
 const qoreidCacLookups = [];
 let qoreidTokens = 0;
 const qoreidFetch = async (url, init) => {
@@ -138,6 +140,13 @@ const qoreidFetch = async (url, init) => {
       cac: { rcNumber: '', companyName: '', companyType: '', registrationDate: '', status: '',
         address: '2 Synthetic Registry Road, Lagos' },
       metadata: { companyType: 'Private Company Limited by Shares' } }), { status: 200 });
+  }
+  if (regNumber === INACTIVE) {
+    return new Response(JSON.stringify({ id: 990000 + qoreidCacLookups.length, summary: { cac_check: 'verified' },
+      status: { state: 'complete', status: 'verified' },
+      cac: { rcNumber: regNumber.replace(/^(RC|BN|IT)/, ''), companyName: `Runtime Clinic ${regNumber} Ltd`,
+        companyType: 'Private Company Limited by Shares', registrationDate: '01-Jan-21',
+        headOfficeAddress: '3 Synthetic Registry Road, Lagos', status: 'Inactive' } }), { status: 200 });
   }
   return new Response(JSON.stringify({ id: 990000 + qoreidCacLookups.length, summary: { cac_check: 'verified' },
     status: { state: 'complete', status: 'verified' },
@@ -386,21 +395,37 @@ try {
   // A verified CAC whose record is too sparse to register automatically is
   // answered 409 PROVIDER_CAC_PROFILE_INCOMPLETE with a detail the browser can
   // show. The one lookup is charged as before; nothing is recorded and no
-  // email code is sent.
+  // email code is sent. The detail is also true for a complete record whose
+  // company is not active, which gets the same answer.
+  const profileIncompleteDetail = 'We could not register your organization automatically from its CAC record.'
+    + ' The record is missing details we need or does not show the company as active.'
+    + ' Contact Health ID support.';
   const SPARSE_NETWORK = '198.51.100.20';
   const lookupsBeforeSparse = qoreidCacLookups.length;
   const deliveriesBeforeSparse = recipients.length;
   const sparse = await start(enrollment({ cacRegistrationNumber: SPARSE, administratorEmail: email('sparse') }),
     SPARSE_NETWORK);
   expectProblem(sparse, 409, 'PROVIDER_CAC_PROFILE_INCOMPLETE');
-  assert.equal(sparse.body.detail, "We could not read your organization's full registration details from the CAC"
-    + ' record, so it cannot be registered automatically. Contact Health ID support.');
+  assert.equal(sparse.body.detail, profileIncompleteDetail);
   assert.deepEqual(qoreidCacLookups.slice(lookupsBeforeSparse), [SPARSE]);
   assert.equal(recipients.length, deliveriesBeforeSparse, 'A sparse CAC record sent an email code');
   assert.deepEqual({ ...(await application(SPARSE)), id: undefined }, { id: undefined,
     status: 'pending_verification', verification_result: null, approval_mode: 'self_service' });
   assert.deepEqual(await networkCounters(SPARSE_NETWORK), { hour: 1, day: 1 });
   security.sparse_cac = 'PROVIDER_CAC_PROFILE_INCOMPLETE';
+  const INACTIVE_NETWORK = '198.51.100.22';
+  const lookupsBeforeInactive = qoreidCacLookups.length;
+  const deliveriesBeforeInactive = recipients.length;
+  const inactive = await start(enrollment({ cacRegistrationNumber: INACTIVE,
+    administratorEmail: email('inactive') }), INACTIVE_NETWORK);
+  expectProblem(inactive, 409, 'PROVIDER_CAC_PROFILE_INCOMPLETE');
+  assert.equal(inactive.body.detail, profileIncompleteDetail);
+  assert.deepEqual(qoreidCacLookups.slice(lookupsBeforeInactive), [INACTIVE]);
+  assert.equal(recipients.length, deliveriesBeforeInactive, 'An inactive CAC record sent an email code');
+  assert.deepEqual({ ...(await application(INACTIVE)), id: undefined }, { id: undefined,
+    status: 'pending_verification', verification_result: null, approval_mode: 'self_service' });
+  assert.deepEqual(await networkCounters(INACTIVE_NETWORK), { hour: 1, day: 1 });
+  security.inactive_cac = 'PROVIDER_CAC_PROFILE_INCOMPLETE';
 
   // An administrator email that already belongs to an account is refused at
   // activation, after the emailed code proved the mailbox, with 409
@@ -437,6 +462,49 @@ try {
   assert.deepEqual({ ...(await application(cacTaken)), id: undefined }, { id: undefined,
     status: 'ready_for_review', verification_result: 'verified', approval_mode: 'self_service' });
   security.activation_email_registered = 'PROVIDER_EMAIL_ALREADY_REGISTERED';
+
+  // Start's only unique violation: a governed organization application for
+  // the same CAC and product, which takes another lock, commits between
+  // start's check and its insert. Start answers 409
+  // PROVIDER_ENROLLMENT_REQUIRES_REVIEW, as a retry does, and makes no claim
+  // about the email. Nothing reaches QoreID and no code is sent.
+  const cacRace = 'RC9900063205';
+  const lookupsBeforeRace = qoreidCacLookups.length;
+  const deliveriesBeforeRace = recipients.length;
+  const governed = await owner.connect();
+  let raced;
+  try {
+    await governed.query('begin');
+    const governedPid = (await governed.query(`select pg_backend_pid() pid,
+        set_config('app.actor_subject', 'system:auth', true), set_config('app.correlation_id', $1, true)`,
+    [randomUUID()])).rows[0].pid;
+    await governed.query(`select identity.submit_organization_application('ehr', 'clinic', $1,
+      'Synthetic Governed Admin', $2)`, [cacRace, email('governed')]);
+    raced = start(enrollment({ cacRegistrationNumber: cacRace, administratorEmail: email('race') }),
+      '198.51.100.23').then(response => response);
+    const deadline = Date.now() + 10_000;
+    while ((await owner.query('select count(*)::int n from pg_stat_activity where $1 = any(pg_blocking_pids(pid))',
+      [governedPid])).rows[0].n === 0) {
+      assert(Date.now() < deadline, 'Start did not wait on the governed application');
+      await new Promise(resolveWait => setTimeout(resolveWait, 25));
+    }
+    await governed.query('commit');
+  } catch (error) {
+    await governed.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    governed.release();
+  }
+  const racedStart = await raced;
+  expectProblem(racedStart, 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  assert.doesNotMatch(JSON.stringify(racedStart.body), /email|account/i, 'A start conflict made an email claim');
+  assert.deepEqual((await owner.query(`select approval_mode, status from identity.organization_applications
+    where cac_registration_number=$1`, [cacRace])).rows, [{ approval_mode: 'admin_review', status: 'pending_verification' }]);
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacRace, administratorEmail: email('race') }),
+    '198.51.100.23'), 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  assert.equal(qoreidCacLookups.length, lookupsBeforeRace, 'A start conflict reached QoreID');
+  assert.equal(recipients.length, deliveriesBeforeRace, 'A start conflict sent an email code');
+  security.start_unique_violation = 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW';
 
   // 11. An expired code cannot verify, even with the right digits. Starting
   // again reuses the verified evidence: no second lookup and no quota charge.
