@@ -5,7 +5,7 @@ import { DomainProblem } from '../common/problem';
 import { DatabaseService } from '../database/database.service';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
-import { verifiedCacBinding } from './organization-applications.service';
+import { matchingCacIncompleteProfile, verifiedCacBinding } from './organization-applications.service';
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
 import type { StartProviderEnrollmentDto } from './dto/provider-enrollment.dto';
 import type { HidRequest } from '../common/request-context';
@@ -20,6 +20,12 @@ interface ApplicationRow {
 }
 
 const localNetworkKey = randomBytes(32);
+
+// Shown to the applicant as it is. The governed organization application has
+// no page in the launch portal (the public site is not deployed at launch),
+// so the applicant is sent to support rather than to it.
+const CAC_PROFILE_INCOMPLETE_DETAIL = "We could not read your organization's full registration details"
+  + ' from the CAC record, so it cannot be registered automatically. Contact Health ID support.';
 
 // The client network an accountless CAC lookup is charged to (an IPv4
 // address or an IPv6 /64), shared with the other public IP-keyed limits.
@@ -106,6 +112,13 @@ export class ProviderEnrollmentService {
 
       const binding = verifiedCacBinding(input.cacRegistrationNumber, providerResult);
       if (!binding || !providerResult.providerReference) {
+        // QoreID verified this CAC but returned too little of its legal
+        // profile to register it without review. Nothing is recorded, as for
+        // a malformed answer.
+        if (!providerResult.cacBinding
+          && matchingCacIncompleteProfile(input.cacRegistrationNumber, providerResult)) {
+          throw new DomainProblem(409, 'PROVIDER_CAC_PROFILE_INCOMPLETE', CAC_PROFILE_INCOMPLETE_DETAIL);
+        }
         throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
           'External verification returned an invalid response');
       }
