@@ -13,8 +13,10 @@ real consumer integration remain external-environment evidence.
 
 The current convergence adds one implemented consumer path: an allowlisted
 subset of ordinary domain events is routed by EventBridge to a KMS-encrypted
-SQS queue/DLQ and consumed by Notification Worker through Novu, with FCM as the
-server-side push boundary. Authentication OTP is explicitly excluded and uses
+SQS queue/DLQ and consumed by Notification Worker through Novu. An FCM push
+adapter exists in the worker but is not constructed, has no credential and
+receives no device token; no push is sent (`WEB_PUSH_PROPOSAL.md`, ADR-060,
+proposed). The worker is off in production (D17). Authentication OTP is explicitly excluded and uses
 Identity -> workload-authenticated Notification API -> SES/Termii/Meta with
 bounded Brevo fallback. The generic inbox remains available for future
 governed consumers; no other product effect or EHR producer is invented.
