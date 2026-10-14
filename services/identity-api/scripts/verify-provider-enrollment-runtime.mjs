@@ -109,8 +109,12 @@ let issuedTokens = 0;
 const turnstile = (action = 'provider-enrollment', host = siteHost) => `ok|${action}|${host}|${++issuedTokens}`;
 
 // QoreID HTTP stub behind the real adapter. NOT_VERIFIED returns a negative
-// registry check; every other number returns a complete verified CAC record.
+// registry check; SPARSE returns a verified lookup with the sparse legal
+// profile the QoreID sandbox returned for RC and BN numbers
+// (QOREID_VERIFICATION_CONTRACT.md); every other number returns a complete
+// verified CAC record.
 const NOT_VERIFIED = 'RC9900063299';
+const SPARSE = 'RC9900063298';
 const qoreidCacLookups = [];
 let qoreidTokens = 0;
 const qoreidFetch = async (url, init) => {
@@ -127,6 +131,13 @@ const qoreidFetch = async (url, init) => {
   if (regNumber === NOT_VERIFIED) {
     return new Response(JSON.stringify({ id: 990001, summary: { cac_check: 'not_verified' },
       status: { state: 'complete', status: 'not_verified' }, cac: {} }), { status: 200 });
+  }
+  if (regNumber === SPARSE) {
+    return new Response(JSON.stringify({ id: 990000 + qoreidCacLookups.length, summary: { cac_check: 'verified' },
+      status: { state: 'complete', status: 'verified' },
+      cac: { rcNumber: '', companyName: '', companyType: '', registrationDate: '', status: '',
+        address: '2 Synthetic Registry Road, Lagos' },
+      metadata: { companyType: 'Private Company Limited by Shares' } }), { status: 200 });
   }
   return new Response(JSON.stringify({ id: 990000 + qoreidCacLookups.length, summary: { cac_check: 'verified' },
     status: { state: 'complete', status: 'verified' },
@@ -371,6 +382,61 @@ try {
     409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
   assert.equal(qoreidCacLookups.length, lookupsBeforeDuplicate, 'A duplicate CAC reached QoreID');
   security.duplicate_cac = 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW';
+
+  // A verified CAC whose record is too sparse to register automatically is
+  // answered 409 PROVIDER_CAC_PROFILE_INCOMPLETE with a detail the browser can
+  // show. The one lookup is charged as before; nothing is recorded and no
+  // email code is sent.
+  const SPARSE_NETWORK = '198.51.100.20';
+  const lookupsBeforeSparse = qoreidCacLookups.length;
+  const deliveriesBeforeSparse = recipients.length;
+  const sparse = await start(enrollment({ cacRegistrationNumber: SPARSE, administratorEmail: email('sparse') }),
+    SPARSE_NETWORK);
+  expectProblem(sparse, 409, 'PROVIDER_CAC_PROFILE_INCOMPLETE');
+  assert.equal(sparse.body.detail, "We could not read your organization's full registration details from the CAC"
+    + ' record, so it cannot be registered automatically. Contact Health ID support.');
+  assert.deepEqual(qoreidCacLookups.slice(lookupsBeforeSparse), [SPARSE]);
+  assert.equal(recipients.length, deliveriesBeforeSparse, 'A sparse CAC record sent an email code');
+  assert.deepEqual({ ...(await application(SPARSE)), id: undefined }, { id: undefined,
+    status: 'pending_verification', verification_result: null, approval_mode: 'self_service' });
+  assert.deepEqual(await networkCounters(SPARSE_NETWORK), { hour: 1, day: 1 });
+  security.sparse_cac = 'PROVIDER_CAC_PROFILE_INCOMPLETE';
+
+  // An administrator email that already belongs to an account is refused at
+  // activation, after the emailed code proved the mailbox, with 409
+  // PROVIDER_EMAIL_ALREADY_REGISTERED; nothing is created or changed. Start
+  // makes no account check, so it cannot be used to test an email.
+  const TAKEN_NETWORK = '198.51.100.21';
+  const cacTaken = 'RC9900063204';
+  const startedTaken = await start(enrollment({ cacRegistrationNumber: cacTaken, administratorEmail: emailA }),
+    TAKEN_NETWORK);
+  assert.equal(startedTaken.status, 200, `start with a registered email failed: ${JSON.stringify(startedTaken.body)}`);
+  const verifiedTaken = await http.post('/api/v1/identity/provider-enrollments/verify').set('Origin', origin)
+    .send({ challengeId: startedTaken.body.challengeId, code: codes.get(startedTaken.body.challengeId) });
+  assert.equal(verifiedTaken.status, 200, `verify with a registered email failed: ${JSON.stringify(verifiedTaken.body)}`);
+  const takenCookie = cookies(verifiedTaken).find(value => value.startsWith('hid_provider_enrollment='));
+  assert(takenCookie, 'OTP verification did not set the enrollment cookie');
+  const footprint = async () => (await owner.query(`select
+      (select count(*)::int from identity.organizations) organizations,
+      (select count(*)::int from identity.facilities) facilities,
+      (select count(*)::int from identity.organization_cac_registrations) cac_bindings,
+      (select count(*)::int from identity.organization_products) products,
+      (select count(*)::int from auth.accounts) accounts,
+      (select count(*)::int from identity.staff) staff,
+      (select count(*)::int from identity.staff_facility_memberships) memberships,
+      (select count(*)::int from auth.account_roles) roles,
+      (select count(*)::int from audit.events where action='identity.organization.self-service.activate') activations,
+      (select password_hash from auth.accounts where id=$1) admin_password`, [accountId])).rows[0];
+  const footprintBefore = await footprint();
+  const refusedTaken = await http.post('/api/v1/identity/provider-enrollments/activate').set('Origin', origin)
+    .set('Cookie', takenCookie).send({ password: 'Synthetic-Provider-Password-2027' });
+  expectProblem(refusedTaken, 409, 'PROVIDER_EMAIL_ALREADY_REGISTERED');
+  assert.equal(refusedTaken.body.detail, 'The administrator email is already associated with an HID account');
+  assert(!cookies(refusedTaken).some(value => value.startsWith(cookieName)), 'A refused activation set a session or MFA cookie');
+  assert.deepEqual(await footprint(), footprintBefore, 'A refused activation created or changed something');
+  assert.deepEqual({ ...(await application(cacTaken)), id: undefined }, { id: undefined,
+    status: 'ready_for_review', verification_result: 'verified', approval_mode: 'self_service' });
+  security.activation_email_registered = 'PROVIDER_EMAIL_ALREADY_REGISTERED';
 
   // 11. An expired code cannot verify, even with the right digits. Starting
   // again reuses the verified evidence: no second lookup and no quota charge.
