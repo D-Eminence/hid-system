@@ -22,7 +22,8 @@ browser
 
 owner outbox -> Event Dispatcher -> EventBridge
   -> ordinary-notification rule -> encrypted SQS + DLQ
-  -> Notification Worker -> Novu / FCM boundary
+  -> Notification Worker -> Novu (off in production, D17; the FCM adapter is
+     not wired and no push is sent: WEB_PUSH_PROPOSAL.md)
 
 Identity -> workload-authenticated Notification API
   -> SES / Termii / Meta, with bounded Brevo fallback

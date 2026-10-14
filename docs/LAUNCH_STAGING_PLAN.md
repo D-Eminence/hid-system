@@ -27,6 +27,8 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
   - D-Eminence/hid-system#74: EHR retraction integrity, 0090.
   - D-Eminence/hid-system#75: launch module withdrawal, 0091.
   - D-Eminence/hid-system#76: identity error hardening.
+  - D-Eminence/hid-system#78: web push proposal (documentation only; nothing built) and checklist corrections.
+  - D-Eminence/hid-system#79: Turnstile contract.
 
 ## 3. Staging, in order
 
@@ -46,7 +48,7 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
    - Database: S1 and S2.
    - Identity runtime verifiers against staging: S3.
    - Browser checks with real authenticators: S4 and S4a.
-   - Launch rows: S4d, S4e, S4f, S4g, S4i, S4j, S4k, S4l, S4m, S4n, S4o, S4p, S4q, S4r, S4s.
+   - Launch rows: S4d, S4e, S4f, S4g, S4i, S4j, S4k, S4l, S4m, S4n, S4o, S4p, S4q, S4r, S4s, S4t.
    - Rollback drill: S6.
    - S4b, S4c and S4h apply only once their module is re-enabled.
    - The provider-portal browser rows (S4a, S4e, S4j, S4o, S4q) need a Health-id build that signs staff in with an authenticator (FE-2, §7). Health-id `82b474e` cannot sign staff in once 0088 is applied, so until FE-2 ships these rows run as scripted API requests and the browser part waits.
@@ -60,6 +62,7 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
 - `GET /ehr/me/records` returns only that patient's completed encounters and signed notes.
 - A refresh rotates the cookies.
 - Sign-out clears them (S4e).
+- A Turnstile token that signed in once is refused the second time, and a sign-in without a token answers `400 TURNSTILE_REQUIRED` (S4t).
 - The patient portal still shows only the patient's own records after 0091's patient-self binding (S4r (6)). Delegated cookie reads answer `200` (S4d).
 
 **Provider**
@@ -98,6 +101,7 @@ Release checklist §9 has the rollback for each change.
 - **Logs:**
   - `notification.otp.outcome` (no recipient, code or message);
   - `identity_workload_token_expired`;
+  - `event=turnstile_verification` (Turnstile refusals and outages; no token, secret or address). Error-level lines with `outcome=TURNSTILE_UNAVAILABLE` and `reason=siteverify_refused_configuration` mean Siteverify refused Identity's own request: `codes=invalid-input-secret` or `missing-input-secret` is a wrong or missing Turnstile secret; `reason=siteverify_internal_error` is a Cloudflare fault, not the secret;
   - the gateway JSON access log (no query strings, #72).
 - **Audit:**
   - `audit.events` refusal rows carry `status` and `code` (A17).
@@ -126,7 +130,7 @@ None of these can be done from the repository. Each needs its owner and, where i
 
 | Level | State |
 |---|---|
-| Committed and merged to `main` | Every change above, through D-Eminence/hid-system#76 |
+| Committed and merged to `main` | Every change above, through D-Eminence/hid-system#79 |
 | Checks run locally | Unit and SQL suites, runtime verifiers over HTTP against PostgreSQL 16 as the runtime roles, and the full workspace gates with the synthetic 0028 to 0091 migration rehearsal on each PR head (each PR's evidence) |
 | CI | Green on each merged PR's head (each PR) |
 | Staging-verified | None yet |

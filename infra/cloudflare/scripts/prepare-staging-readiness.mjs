@@ -15,7 +15,7 @@ const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin'];
 const host = app => app === 'web' ? `staging.${domain}` : app === 'ocr' ? `migrate.staging.${domain}` : `${app}.staging.${domain}`;
 const legacyOcrHost = `ocr.staging.${domain}`;
 const apiHost = `api.staging.${domain}`;
-// Identity's staging Turnstile allowlist (services/identity-api/src/auth/turnstile.service.ts).
+// Identity's staging Turnstile allowlist (services/identity-api/src/auth/turnstile-actions.ts).
 const stagingActions = Object.freeze({
   [host('web')]: ['patient-login', 'staff-login', 'admin-login', 'patient-reset-start', 'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application', 'organization-completion', 'patient-enrollment', 'provider-enrollment'],
   [host('ehr')]: ['ehr-login', 'staff-login'], [host('lab')]: ['lab-login'], [host('pharmacy')]: ['pharmacy-login'],

@@ -4358,3 +4358,64 @@ Related: ADR-038; ADR-043; ADR-045; ADR-047; ADR-054; ADR-055;
 `INTERFACE_CONTRACT.md` (Auth session contract, "Refusals and faults";
 Extracted Identity boundary; §19); `PHASE_3_LAUNCH_DECISIONS.md`
 (NO-MEMBERSHIP-SIGN-IN); release checklist §2, §3 and §8.
+
+# ADR-060: Patient Web Push Is Payload-Free Standard Web Push on the Existing Device Store
+
+Status: Proposed; not approved, not implemented. Design only
+(`WEB_PUSH_PROPOSAL.md`). Nothing is built, configured or deployed, and
+nothing changes at launch.
+
+Date: 2026-10-14
+
+Context:
+
+Patients are told about access requests, emergency access and each use of
+their access PIN only in the in-app inbox (0037, 0091, NOTIF-PIN-NOTICE).
+Browser push does not exist. Migration 0028 prepared
+`notification.device_registrations` (encrypted token, keyed-HMAC lookup,
+revocation) and `delivery_attempts` allows a `push` channel, but no service
+reads or writes a device, the FCM adapter in the notification worker is never
+constructed and has no credential, and that worker is off in production
+(D17). Health-id registers no service worker, and the edge forbids one
+(ADR-052: CSP `worker-src 'none'`, the artefact verifier, release check
+S4l (2)). No decision approves a push channel.
+
+Decision (proposed):
+
+- When web push is approved, it uses standard Web Push with VAPID, not FCM
+  web tokens: no new data processor, no npm dependency in either repository,
+  one new secret (the VAPID private key), and the browser's own push service.
+- Every push is empty. The service worker shows fixed generic text ("You have
+  a new update in HID. Sign in securely to view it.") and opens the signed-in
+  inbox. No name, facility, code, count or clinical information leaves the
+  server, so no payload encryption is needed.
+- Subscriptions use the existing `notification.device_registrations` table,
+  extended by one migration (a transport column, a partial unique lookup on
+  active rows, a delivery queue fed by the inbox trigger, and session-bound
+  security-definer commands for Identity). No second notification system is
+  built.
+- Identity owns subscriptions and dispatch (patient-only routes under
+  `/api/v1/identity/me/web-push`); the Notification API owns the transport
+  (`POST /notifications/web-push`, workload-authenticated), with a push-host
+  allowlist in code as its SSRF control.
+- Both services ship it switched off, and production refuses to switch it on
+  until this ADR is accepted.
+
+Consequences:
+
+- Accepting it also amends ADR-052 for one push-only service worker: the
+  portal CSP gains `worker-src 'self'`, the artefact verifier allows one
+  fixed-name file, and S4l (2) changes with them.
+- iOS delivers web push only to Home-Screen web apps, which need a manifest
+  that ADR-052 also forbids; this is a separate choice.
+- The FCM adapter stays for a future native app.
+- Draft D-Eminence/hid-system#8 (Novu subscriber sync) does not touch devices
+  or push; the migration takes the next free number on `main` when the work
+  starts.
+
+Open for the owner: approve web push as a patient channel; the ADR-052
+amendment; iOS; DPO review of subscription data (an endpoint identifies a
+browser).
+
+Related: ADR-052; ADR-053; ADR-058; `WEB_PUSH_PROPOSAL.md`;
+`PHASE_3_LAUNCH_DECISIONS.md` (NOTIF-PIN-NOTICE, D17).

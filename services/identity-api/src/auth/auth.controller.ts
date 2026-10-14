@@ -12,7 +12,7 @@ import { clearEnrollmentCookie } from '../identity/enrollment-cookie';
 import { AuthService } from './auth.service';
 import { AuthSessionAuditService } from './auth-session-audit.service';
 import { GoogleLinkDto, GoogleLoginDto } from './dto/google-login.dto';
-import { LoginDto } from './dto/login.dto';
+import { LoginDto, WORKFORCE_LOGIN_ACTIONS } from './dto/login.dto';
 import { PatientLoginDto } from './dto/patient-login.dto';
 import { PlatformMfaVerifyDto, StaffMfaEnrollmentStartDto, TotpCodeDto } from './dto/platform-auth.dto';
 import { SelectFacilityDto } from './dto/select-facility.dto';
@@ -83,7 +83,7 @@ export class AuthController {
     @Req() request: HidRequest,
     @Res({ passthrough: true }) response: Response,
   ) {
-    if (input.turnstileAction === 'patient-login') {
+    if (input.turnstileAction && !(WORKFORCE_LOGIN_ACTIONS as readonly string[]).includes(input.turnstileAction)) {
       throw new DomainProblem(400, 'INVALID_LOGIN_ACTION', 'A workforce login action is required');
     }
     this.assertAllowedOrigin(request);

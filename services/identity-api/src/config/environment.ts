@@ -1,5 +1,6 @@
 import { isIP } from 'node:net';
 import { z } from 'zod';
+import { turnstileActionsFor } from '../auth/turnstile-actions';
 
 const emptyToUndefined = (value: unknown): unknown =>
   typeof value === 'string' && value.trim() === '' ? undefined : value;
@@ -290,9 +291,6 @@ const environmentSchema = z.object({
     if (!environment.AUTH_COOKIE_SECURE) context.addIssue({ code: 'custom', path: ['AUTH_COOKIE_SECURE'], message: 'Secure cookies are required in production' });
     if (environment.AUTH_COOKIE_DOMAIN) context.addIssue({ code: 'custom', path: ['AUTH_COOKIE_DOMAIN'], message: 'Production sessions must use host-only cookies; AUTH_COOKIE_DOMAIN must be absent' });
     if (!environment.HID_DEPLOYMENT_ENV) context.addIssue({ code: 'custom', path: ['HID_DEPLOYMENT_ENV'], message: 'A production or staging deployment profile is required' });
-    if (environment.TURNSTILE_MODE !== 'required') context.addIssue({ code: 'custom', path: ['TURNSTILE_MODE'], message: 'Turnstile is required for public production authentication' });
-    if (!environment.TURNSTILE_SECRET_KEY) context.addIssue({ code: 'custom', path: ['TURNSTILE_SECRET_KEY'], message: 'The server-only Turnstile secret is required in production' });
-    if (new URL(environment.TURNSTILE_SITEVERIFY_URL).origin !== 'https://challenges.cloudflare.com') context.addIssue({ code: 'custom', path: ['TURNSTILE_SITEVERIFY_URL'], message: 'Production Turnstile validation must use Cloudflare Siteverify' });
     if (!environment.TRUST_PROXY_CIDRS) context.addIssue({ code: 'custom', path: ['TRUST_PROXY_CIDRS'], message: 'Approved reverse-proxy CIDRs are required in production' });
     else if (environment.TRUST_PROXY_CIDRS.split(',').map((value) => value.trim()).some((value) => !validProxyCidr(value))) context.addIssue({ code: 'custom', path: ['TRUST_PROXY_CIDRS'], message: 'TRUST_PROXY_CIDRS must contain only explicit IP addresses or CIDR ranges' });
     if (!environment.OTP_HMAC_KEY_B64) context.addIssue({ code: 'custom', path: ['OTP_HMAC_KEY_B64'], message: 'The server-only OTP HMAC key is required in production' });
@@ -300,6 +298,33 @@ const environmentSchema = z.object({
     if (environment.NOTIFICATION_SERVICE_IDENTITY_MODE !== 'jwt') context.addIssue({ code: 'custom', path: ['NOTIFICATION_SERVICE_IDENTITY_MODE'], message: 'Production Identity-to-Notification calls require JWT workload identity' });
     if (environment.NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN) context.addIssue({ code: 'custom', path: ['NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN'], message: 'Local Notification service tokens are forbidden in production' });
     if (new URL(environment.NOTIFICATION_API_URL).protocol !== 'https:') context.addIssue({ code: 'custom', path: ['NOTIFICATION_API_URL'], message: 'Production Notification API URL must use HTTPS' });
+  }
+  // Turnstile (TS-10): the production deployment profile keeps these refusals
+  // whatever NODE_ENV says, and every NODE_ENV=production task (AWS staging
+  // included) has them. Only a local or test run of the staging profile, or
+  // one without a profile, may disable Turnstile.
+  if (environment.NODE_ENV === 'production' || environment.HID_DEPLOYMENT_ENV === 'production') {
+    if (environment.TURNSTILE_MODE !== 'required') context.addIssue({ code: 'custom', path: ['TURNSTILE_MODE'], message: 'Turnstile is required for public production authentication' });
+    if (!environment.TURNSTILE_SECRET_KEY) context.addIssue({ code: 'custom', path: ['TURNSTILE_SECRET_KEY'], message: 'The server-only Turnstile secret is required in production' });
+    if (new URL(environment.TURNSTILE_SITEVERIFY_URL).origin !== 'https://challenges.cloudflare.com') context.addIssue({ code: 'custom', path: ['TURNSTILE_SITEVERIFY_URL'], message: 'Production Turnstile validation must use Cloudflare Siteverify' });
+    // TS-9: a browser origin with no Turnstile action for its host could never
+    // pass a check, so every sign-in, recovery and enrolment from it would be
+    // refused at runtime. Refuse to start instead.
+    const deployment = environment.HID_DEPLOYMENT_ENV;
+    if (environment.TURNSTILE_MODE === 'required' && deployment) {
+      for (const origin of environment.CORS_ORIGINS.split(',').map((value) => value.trim())) {
+        let hostname: string;
+        try {
+          hostname = new URL(origin).hostname;
+        } catch {
+          continue;
+        }
+        if (!turnstileActionsFor(deployment, hostname)?.length) {
+          context.addIssue({ code: 'custom', path: ['CORS_ORIGINS'],
+            message: `CORS origin ${origin} has no Turnstile actions in the ${deployment} deployment profile` });
+        }
+      }
+    }
   }
 });
 

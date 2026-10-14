@@ -417,6 +417,27 @@ module set").
   break-glass, the absent `emergency` purpose). No staging-only exception is
   made in the assertion: it would be a production bypass carried by
   configuration.
+- **Before Lab or Pharmacy is re-enabled.** The re-enabling change must
+  also fix what the launch review found in those modules while they are off
+  (none is reachable at launch):
+  - **Queue limits (NF-1).** `GET` on the Lab and Pharmacy work queues
+    returns at most 200 rows, oldest first, with no status filter, paging
+    cursor or truncation flag, and a work item's status never leaves
+    `accepted`. Once a facility has 200 visible items, newer work, urgent Lab
+    orders included, never appears, and the client cannot tell
+    (`services/lab-api/src/lab/lab-work-items.service.ts:128-143`,
+    `services/pharmacy-api/src/pharmacy/pharmacy.service.ts:158-167`). Add
+    status filtering or exclusion of finished work, Lab priority ordering,
+    and a cursor or a truncation flag.
+  - **Lab cancellation and holds (D10).** After acceptance nothing reads the
+    EHR order, so a cancelled, held or entered-in-error lab request can still
+    be accessioned, executed and released. Pharmacy already refuses
+    dispensing unless the prescription is still active at its accepted
+    version (0080).
+  - **Workload refusals (A5 follow-up).** Lab, Pharmacy, OCR and Outreach
+    still relay Identity's refusal of their own workload credential to the
+    browser as the user's `401`, and the OCR guard answers a fault `401`
+    (D-Eminence/hid-system#76, "Not in this change").
 - **Also decided.** The patient-self database context is bound to the
   patient's own live session (PSELF-RLS). Patients see the requesting
   clinician's display name and role next to the facility when they approve

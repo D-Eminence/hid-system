@@ -42,8 +42,8 @@ export class CreateDemoRequestDto {
   @IsString() @IsIn(['book-demo'])
   turnstileAction!: 'book-demo';
 
-  @IsString() @MaxLength(2048)
-  turnstileToken!: string;
+  @IsOptional() @IsString() @MaxLength(2048)
+  turnstileToken?: string;
 }
 
 export class ListDemoRequestsDto {
