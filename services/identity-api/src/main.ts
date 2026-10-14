@@ -1,13 +1,14 @@
 import 'reflect-metadata';
-import { Logger, ValidationPipe } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import type { Express } from 'express';
 import { AppModule } from './app.module';
-import { DomainProblem, ProblemDetailsFilter } from './common/problem';
+import { ProblemDetailsFilter } from './common/problem';
 import { preventResponseCaching } from './common/response-security.middleware';
+import { globalValidationPipe } from './common/validation-problem';
 import { corsOptions } from './config/cors';
 import { getEnvironment } from './config/environment';
 
@@ -29,16 +30,7 @@ async function bootstrap(): Promise<void> {
       ? { maxAge: 31_536_000, includeSubDomains: true, preload: true } : false,
   }));
   app.enableCors(corsOptions(environment.CORS_ORIGINS));
-  app.useGlobalPipes(new ValidationPipe({
-    whitelist: true,
-    forbidNonWhitelisted: true,
-    forbidUnknownValues: true,
-    transform: true,
-    transformOptions: { enableImplicitConversion: false },
-    stopAtFirstError: false,
-    exceptionFactory: (errors) => new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.',
-      errors.map((error) => ({ field: error.property, messages: Object.values(error.constraints ?? {}) }))),
-  }));
+  app.useGlobalPipes(globalValidationPipe());
   app.useGlobalFilters(new ProblemDetailsFilter());
   app.enableShutdownHooks();
   await app.listen(environment.PORT, '0.0.0.0');
