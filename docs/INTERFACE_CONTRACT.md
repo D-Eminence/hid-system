@@ -376,8 +376,8 @@ is):
 | Step | Status and code | Meaning |
 | --- | --- | --- |
 | Start | `422 CAC_NOT_VERIFIED` | QoreID did not verify the CAC number. |
-| Start | `409 PROVIDER_CAC_PROFILE_INCOMPLETE` | QoreID verified the CAC, but its record lacks the company name, type, registration date or address, or the company is not active. It cannot be registered automatically. Detail: "We could not read your organization's full registration details from the CAC record, so it cannot be registered automatically. Contact Health ID support." Nothing is recorded, no email code is sent, and the lookup counts against the CAC lookup quota as any lookup does. |
-| Start | `409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW` | The CAC already has an application with another administrator email, or is already registered. |
+| Start | `409 PROVIDER_CAC_PROFILE_INCOMPLETE` | QoreID verified the CAC, but its record lacks the company name, type, registration date or address, or the company is not active. It cannot be registered automatically. Detail, true in both cases: "We could not register your organization automatically from its CAC record. The record is missing details we need or does not show the company as active. Contact Health ID support." Nothing is recorded, no email code is sent, and the lookup counts against the CAC lookup quota as any lookup does. |
+| Start | `409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW` | The CAC already has another application for this product (a governed one, or one with another administrator email), or is already registered. Also the answer when another application for the same CAC and product is opened at the same moment (a unique violation at start). |
 | Start | `429 VERIFICATION_QUOTA_EXCEEDED`, `429 APPLICATION_RATE_LIMITED` | A lookup or email-code limit was reached; try later. |
 | Start | `502 QOREID_PROVIDER_RESPONSE_INVALID` | QoreID's answer was malformed. Treat as unavailable. |
 | Start | `503 QOREID_DISABLED`, `503 INTEGRATION_PAUSED`, `503 PROVIDER_CAC_VERIFICATION_UNAVAILABLE` | CAC verification is off or unavailable. |
@@ -389,12 +389,16 @@ is):
 
 `PROVIDER_EMAIL_ALREADY_REGISTERED` comes only from activation, after the
 emailed code proved control of that mailbox, so it tells a stranger nothing.
-Start does not check whether an email has an account. The application stays
+Start does not check whether an email has an account. A unique violation at
+start can only be another application for the same CAC and product, so it
+answers `409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW`; before
+BRANCH:launch/provider-signup-answers it answered the email code, which was
+not true. The application stays
 bound to that email: starting again for the same CAC with another email
 answers `409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW`, so the applicant signs in
 with the existing account or asks Health ID support. Whether one person may
 use one email for both a patient account and a provider administrator is an
-open owner decision. Any other unique violation keeps `503
+open owner decision. Any other unique violation at activation keeps `503
 ORGANIZATION_COMPLETION_UNAVAILABLE`.
 
 `PROVIDER_CAC_PROFILE_INCOMPLETE` does not point to the governed organization
