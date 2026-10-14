@@ -67,7 +67,7 @@ type Options = {
   activeFactor?: boolean; lockedChallenge?: boolean;
   /** The step-up's locked session read: no row (the session rotated or ended), or verified by another factor. */
   assurance?: 'none' | 'other-factor';
-  /** The second-factor failure budget is blocked. */
+  /** Every MFA rate-limit bucket is blocked: the failure budgets and the request budget. */
   blocked?: boolean;
 };
 
@@ -102,6 +102,10 @@ function harness(options: Options = {}) {
     }
     if (sql.includes('update auth.session_assurance')) return { rowCount: 1, rows: [{ step_up_expires_at: new Date() }] };
     if (options.blocked && sql.includes('as blocked')) return { rowCount: 1, rows: [{ blocked: true }] };
+    if (options.blocked && sql.includes('from auth.otp_rate_limits')) {
+      return { rowCount: 1, rows: [{ request_count: 6, window_started_at: new Date(Date.now() - 60_000),
+        blocked_until: new Date(Date.now() + 60_000) }] };
+    }
     if (sql.includes('from auth.otp_rate_limits')) return { rowCount: 0, rows: [] };
     return { rowCount: 1, rows: [] };
   };
@@ -392,5 +396,29 @@ describe('platform MFA refusals on authenticated routes (A20)', () => {
       await expect(refusal(service.startEnrollment(TOKEN, event)))
         .resolves.toMatchObject({ status: 401, code: 'MFA_CHALLENGE_INVALID' });
     });
+  });
+});
+
+/**
+ * A21: an MFA lockout is an explicit answer, so it states when to retry. Every
+ * MFA window is 900 seconds (FAILURE_PER_ACCOUNT, FAILURE_PER_IP,
+ * REQUESTS_PER_ACCOUNT), so the value is the same whichever budget refused and
+ * never the time left in one.
+ */
+describe('platform MFA lockout carries Retry-After (A21)', () => {
+  useTestEnvironment();
+
+  it.each([
+    ['a sign-in', {}, (service: MfaService) => service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event)],
+    ['an enrolment activation', {}, (service: MfaService) => service.activateEnrollment(TOKEN, totp(SECRET, NOW), event)],
+    ['a step-up', {}, (service: MfaService) => service.stepUp(platformContext(), totp(SECRET, NOW), event)],
+    ['an enrolment start', { activeFactor: false }, (service: MfaService) => service.startEnrollment(TOKEN, event)],
+    ['a recovery-code regeneration', {}, (service: MfaService) => service.regenerateRecoveryCodes(platformContext(), event)],
+  ])('answers %s over its budget 429 MFA_RATE_LIMITED with Retry-After 900', async (_case, options, call) => {
+    const { service } = harness({ ...options, blocked: true });
+    const refused = await call(service).then(() => undefined, (error: unknown) => error);
+    expect(refused).toBeInstanceOf(DomainProblem);
+    expect(refused).toMatchObject({ code: 'MFA_RATE_LIMITED', retryAfterSeconds: 900 });
+    expect((refused as DomainProblem).getStatus()).toBe(429);
   });
 });

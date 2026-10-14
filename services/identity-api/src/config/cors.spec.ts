@@ -1,8 +1,8 @@
-import { Controller, Delete, Get, Patch, type INestApplication } from '@nestjs/common';
+import { Controller, Delete, Get, Patch, Post, type INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { ProblemDetailsFilter } from '../common/problem';
+import { ProblemDetailsFilter, RetryAfterProblem } from '../common/problem';
 import { corsOptions } from './cors';
 
 const ALLOWED = 'https://admin.example.test';
@@ -46,6 +46,22 @@ function preflight(port: number, path: string, origin: string, method: string, h
     outgoing.on('error', reject);
     outgoing.end();
   });
+}
+
+/** Sends a browser-style request from an origin and returns its status, headers and JSON body. */
+function send(port: number, method: string, path: string, origin: string) {
+  return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Record<string, unknown> }>(
+    (resolve, reject) => {
+      const outgoing = httpRequest({ host: '127.0.0.1', port, path, method, headers: { Origin: origin } }, (response) => {
+        let text = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk: string) => { text += chunk; });
+        response.on('end', () => resolve({ status: response.statusCode ?? 0, headers: response.headers,
+          body: text ? JSON.parse(text) as Record<string, unknown> : {} }));
+      });
+      outgoing.on('error', reject);
+      outgoing.end();
+    });
 }
 
 const list = (value: string | string[] | undefined) => String(value ?? '').toLowerCase().split(',').map((item) => item.trim());
@@ -197,5 +213,48 @@ describe('Identity CORS refusal of a disallowed origin (A19)', () => {
     const allowed = await plain(port, '/api/v1/admin/session', ALLOWED, 'GET');
     expect(allowed.status).toBe(200);
     expect(allowed.headers['access-control-allow-origin']).toBe(ALLOWED);
+  });
+});
+
+/** A route refused as a rate-limited OTP start is, with the limit's whole window. */
+@Controller()
+class RateLimitedProbeController {
+  @Post('auth/otp/start') start() {
+    throw new RetryAfterProblem(429, 'OTP_RATE_LIMITED', 'Too many verification-code requests', 900);
+  }
+}
+
+describe('Identity Retry-After through CORS (A21)', () => {
+  let app: INestApplication;
+  let port: number;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({ controllers: [RateLimitedProbeController] }).compile();
+    app = moduleRef.createNestApplication({ logger: false });
+    app.setGlobalPrefix('api/v1');
+    app.enableCors(corsOptions(ALLOWED));
+    app.useGlobalFilters(new ProblemDetailsFilter());
+    await app.listen(0, '127.0.0.1');
+    port = (app.getHttpServer().address() as AddressInfo).port;
+  });
+  afterAll(() => app.close());
+
+  it('lets an allowed origin read Retry-After', async () => {
+    const response = await preflight(port, '/api/v1/auth/otp/start', ALLOWED, 'POST');
+    expect(response.status).toBe(204);
+    expect(list(response.headers['access-control-expose-headers'])).toEqual(expect.arrayContaining(['retry-after',
+      'etag', 'location', 'x-correlation-id', 'x-csrf-token',
+      'x-hid-export-row-count', 'x-hid-export-row-limit', 'x-hid-export-truncated']));
+  });
+
+  it('sends Retry-After with a rate-limited answer to an allowed origin, and the same Problem Details body', async () => {
+    const response = await send(port, 'POST', '/api/v1/auth/otp/start', ALLOWED);
+    expect(response.status).toBe(429);
+    expect(response.headers['retry-after']).toBe('900');
+    expect(response.headers['access-control-allow-origin']).toBe(ALLOWED);
+    expect(list(response.headers['access-control-expose-headers'])).toContain('retry-after');
+    expect(Object.keys(response.body).sort())
+      .toEqual(['code', 'correlationId', 'detail', 'instance', 'status', 'title', 'type']);
+    expect(response.body).toMatchObject({ status: 429, code: 'OTP_RATE_LIMITED' });
   });
 });

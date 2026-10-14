@@ -433,4 +433,15 @@ describe('per-IP failure budgets (MFA-1)', () => {
     await platform.service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event, 'platform');
     expect(platform.tokens.issuePlatformSession).toHaveBeenCalledTimes(1);
   });
+
+  it('answers a staff sign-in refused for a blocked staff per-IP budget 429 MFA_RATE_LIMITED with Retry-After 900 (A21)',
+    async () => {
+      const probe = new MfaSecretProtector();
+      const blocked = harness({ enrolled: true, blockedBuckets: [probe.rateBucket('staff-ip', event.sourceIp)] });
+      const refused = await problem(blocked.service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event, 'staff'));
+      expect(refused.getStatus()).toBe(429);
+      // Every MFA window, the staff per-IP one included, is 15 minutes: the whole window, never the time left.
+      expect(refused).toMatchObject({ code: 'MFA_RATE_LIMITED', retryAfterSeconds: 900 });
+      expect(blocked.tokens.issueStaffSession).not.toHaveBeenCalled();
+    });
 });

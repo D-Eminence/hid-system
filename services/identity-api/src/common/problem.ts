@@ -39,6 +39,24 @@ export class DomainProblem extends HttpException {
  */
 export class PublicDetailProblem extends DomainProblem {}
 
+/**
+ * A refusal that tells the client when to retry, as the Retry-After header in
+ * whole seconds (A21). The body is the same as any DomainProblem's. Give the
+ * limit's full configured window, an upper bound whichever bucket refused;
+ * never the time left in a bucket keyed by an identifier the caller named,
+ * which would tell another person's activity on it; and never on an answer
+ * that must look like another one (a spent code budget is answered as a wrong
+ * code is, #55 and #61).
+ */
+export class RetryAfterProblem extends DomainProblem {
+  readonly retryAfterSeconds: number;
+
+  constructor(status: 429 | 503, code: string, detail: string, retryAfterSeconds: number) {
+    super(status, code, detail);
+    this.retryAfterSeconds = Math.max(1, Math.ceil(retryAfterSeconds));
+  }
+}
+
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
   private readonly logger = new Logger(ProblemDetailsFilter.name);
@@ -80,6 +98,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       ...(domainProblem?.errors ? { errors: domainProblem.errors } : {}),
     };
 
+    if (exception instanceof RetryAfterProblem) response.setHeader('Retry-After', String(exception.retryAfterSeconds));
     response.status(status).type('application/problem+json').json(problem);
   }
 

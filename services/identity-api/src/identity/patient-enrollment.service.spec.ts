@@ -643,6 +643,45 @@ describe('PatientEnrollmentService', () => {
       expect(f.otpRates.get(`recipient:${bucket}`)?.blocked_until).toBeInstanceOf(Date);
     });
 
+    // A21: the spent budget is answered with the contact step's request-limit
+    // 429 (#61), so every contact-step 429 states one Retry-After, the longer
+    // of the two windows, and the budget stays indistinguishable.
+    it.each([
+      ['the code budget window', { OTP_RATE_WINDOW_SECONDS: '900', PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: '1800' }, 1800],
+      ['the request window', { OTP_RATE_WINDOW_SECONDS: '3600', PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: '900' }, 3600],
+    ])('answers a spent budget and a contact request limit with one 429 and Retry-After, %s when longer', async (_longer, windows, seconds) => {
+      Object.assign(process.env, windows);
+      resetEnvironmentForTests();
+      const answer = (error: unknown) => ({ status: (error as DomainProblem).getStatus(), code: (error as DomainProblem).code,
+        detail: (error as DomainProblem).message, retryAfterSeconds: (error as { retryAfterSeconds?: number }).retryAfterSeconds });
+      // The recipient's code budget is spent.
+      const spent = fixture();
+      const startedSpent = await spent.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const contact = await spent.service.startContact(startedSpent.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      const code = lastCode(spent);
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await refusesCode(spent, startedSpent.cookie, contact.challengeId, wrong(code));
+      }
+      const budget = await spent.service.startContact(startedSpent.cookie, 'email', 'patient@example.test',
+        '198.51.100.7', correlationId).then(() => undefined, (error: unknown) => error);
+      // The recipient's request limit is reached; its code budget is untouched.
+      const busy = fixture();
+      const startedBusy = await busy.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      busy.rateCount = getEnvironment().OTP_RATE_MAX_REQUESTS;
+      const requests = await busy.service.startContact(startedBusy.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId).then(() => undefined, (error: unknown) => error);
+
+      expect(answer(budget)).toEqual({ status: 429, code: 'ENROLLMENT_RATE_LIMITED',
+        detail: 'Too many enrollment requests; try again later', retryAfterSeconds: seconds });
+      expect(answer(requests)).toEqual(answer(budget));
+      // The code itself is still refused as a wrong code is, with no Retry-After.
+      const refusedCode = await spent.service.verifyContact(startedSpent.cookie, contact.challengeId, code, correlationId)
+        .then(() => undefined, (error: unknown) => error);
+      expect(refusedCode).toMatchObject({ status: 422, code: 'OTP_INVALID' });
+      expect(refusedCode).not.toHaveProperty('retryAfterSeconds');
+    });
+
     it('applies a configured budget and window', async () => {
       Object.assign(process.env, { PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX: '3',
         PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: '1800' });
@@ -662,6 +701,24 @@ describe('PatientEnrollmentService', () => {
       expect(remaining).toBeGreaterThan(1_790_000);
       expect(remaining).toBeLessThanOrEqual(1_800_000);
     });
+  });
+
+  // A21: the cooldown of this cookie-proven enrollment's own code, reached only
+  // after the contact step's limits, so the seconds left disclose nothing else.
+  it('tells a resend within the cooldown how many seconds of it remain', async () => {
+    const f = fixture();
+    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+    await f.service.startContact(started.cookie, 'email', 'patient@example.test', '203.0.113.10', correlationId);
+    // The code went out 20 seconds into a 60-second cooldown.
+    f.challenge!.created_at = new Date(Date.now() - 20_000);
+    const refused = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+      '203.0.113.10', correlationId).then(() => undefined, (error: unknown) => error);
+    expect(refused).toMatchObject({ status: 429, code: 'OTP_RESEND_COOLDOWN' });
+    const retryAfter = (refused as { retryAfterSeconds?: number }).retryAfterSeconds;
+    expect(getEnvironment().OTP_RESEND_COOLDOWN_SECONDS).toBe(60);
+    expect(retryAfter).toBeGreaterThanOrEqual(39);
+    expect(retryAfter).toBeLessThanOrEqual(40);
+    expect(f.notification.deliver).toHaveBeenCalledTimes(1);
   });
 
   it('invalidates the old challenge when the applicant changes the selected account contact', async () => {
@@ -782,6 +839,8 @@ describe('PatientEnrollmentService', () => {
       expect(refused).toBeInstanceOf(DomainProblem);
       expect([(refused as DomainProblem).getStatus(), (refused as DomainProblem).code])
         .toEqual([429, 'ENROLLMENT_RATE_LIMITED']);
+      // A21: the enrollment rate window (OTP_RATE_WINDOW_SECONDS), an upper bound.
+      expect(refused).toHaveProperty('retryAfterSeconds', 900);
       expect(passwordHash().mock.calls.length).toBe(before);
       expect(activation(f.queries)).toHaveLength(0);
       expect(rateLookups(f.queries)).toEqual([{ scope: 'enrollment', bucket: expect.any(String) }]);
@@ -877,7 +936,7 @@ describe('PatientEnrollmentService', () => {
       const limited = fixture();
       limited.rateCount = 2;
       await expect(limited.service.start(nin, requestKey, '198.51.100.7', correlationId))
-        .rejects.toMatchObject({ status: 429, code: 'ENROLLMENT_RATE_LIMITED' });
+        .rejects.toMatchObject({ status: 429, code: 'ENROLLMENT_RATE_LIMITED', retryAfterSeconds: 900 });
       expect(limited.provider.verifyNin).not.toHaveBeenCalled();
       const allowed = fixture();
       allowed.rateCount = 1;

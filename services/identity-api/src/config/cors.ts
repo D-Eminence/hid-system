@@ -11,9 +11,10 @@ export const EXPORT_RESPONSE_HEADERS = {
 /**
  * Response headers a browser on an allowed origin may read. The export
  * metadata is included so a console served from another origin can show the
- * row count and truncation (Stage 4A).
+ * row count and truncation (Stage 4A), and Retry-After so a client can tell
+ * when a rate-limited request may be repeated (A21).
  */
-export const CORS_EXPOSED_HEADERS: readonly string[] = ['etag', 'location', 'x-correlation-id', 'x-csrf-token',
+export const CORS_EXPOSED_HEADERS: readonly string[] = ['etag', 'location', 'retry-after', 'x-correlation-id', 'x-csrf-token',
   ...Object.values(EXPORT_RESPONSE_HEADERS).map((name) => name.toLowerCase())];
 
 /**
