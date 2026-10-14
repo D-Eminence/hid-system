@@ -146,6 +146,34 @@ describe('TurnstileService', () => {
     await expect(new TurnstileService().verify(request)).rejects.toMatchObject({ code: 'TURNSTILE_REJECTED', status: 403 });
   });
 
+  // Cloudflare answers a wrong, missing or malformed secret with HTTP 400 and a
+  // JSON body naming the code; the visitor's own token errors come with HTTP 200.
+  it('reads the codes of a 4xx Siteverify answer and logs it as a configuration refusal at error level', async () => {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    jest.spyOn(Logger.prototype, 'error').mockImplementation((message: unknown) => { errors.push(String(message)); });
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation((message: unknown) => { warnings.push(String(message)); });
+    for (const code of ['invalid-input-secret', 'missing-input-secret', 'bad-request']) {
+      result({ success: false, 'error-codes': [code] }, 400);
+      await expect(new TurnstileService().verify(request)).rejects.toMatchObject({ code: 'TURNSTILE_UNAVAILABLE', status: 503 });
+    }
+    result({ success: false, 'error-codes': ['bad-request'] });
+    await expect(new TurnstileService().verify(request)).rejects.toMatchObject({ code: 'TURNSTILE_UNAVAILABLE', status: 503 });
+    expect(warnings).toEqual([]);
+    expect(errors).toHaveLength(4);
+    expect(errors[0]).toMatch(/reason=siteverify_refused_configuration codes=invalid-input-secret attempts=1/);
+    expect(errors[2]).toMatch(/reason=siteverify_refused_configuration codes=bad-request attempts=1/);
+    expect(errors[3]).toMatch(/reason=siteverify_refused_configuration codes=bad-request attempts=1/);
+  });
+
+  it('releases the body of a 5xx answer before retrying', async () => {
+    const failed = new Response('{"success":false}', { status: 503 });
+    global.fetch = jest.fn().mockResolvedValueOnce(failed).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true, hostname: 'admin.healthidentitydirectory.com', action: 'admin-login' })));
+    await expect(new TurnstileService().verify(request)).resolves.toBeUndefined();
+    expect(failed.bodyUsed).toBe(true);
+  });
+
   it('answers 503 for a non-2xx or unreadable Siteverify answer', async () => {
     result({ success: false }, 400);
     await expect(new TurnstileService().verify(request)).rejects.toMatchObject({ code: 'TURNSTILE_UNAVAILABLE', status: 503 });

@@ -100,6 +100,16 @@ describe('Identity production configuration refusals', () => {
       'CORS origin https://portal.healthidentitydirectory.com has no Turnstile actions in the production deployment profile'],
     ['staging hosts under the production profile', { CORS_ORIGINS: 'https://staging.healthidentitydirectory.com' },
       'CORS origin https://staging.healthidentitydirectory.com has no Turnstile actions in the production deployment profile'],
+    // AWS staging runs NODE_ENV=production with the staging profile (TS-10).
+    ['Turnstile disabled on the staging profile under NODE_ENV=production', { HID_DEPLOYMENT_ENV: 'staging',
+      CORS_ORIGINS: 'https://staging.healthidentitydirectory.com', TURNSTILE_MODE: 'disabled' },
+    'Turnstile is required for public production authentication'],
+    ['no Turnstile secret on the staging profile under NODE_ENV=production', { HID_DEPLOYMENT_ENV: 'staging',
+      CORS_ORIGINS: 'https://staging.healthidentitydirectory.com', TURNSTILE_SECRET_KEY: undefined },
+    'server-only Turnstile secret is required'],
+    ['another Turnstile verifier on the staging profile under NODE_ENV=production', { HID_DEPLOYMENT_ENV: 'staging',
+      CORS_ORIGINS: 'https://staging.healthidentitydirectory.com', TURNSTILE_SITEVERIFY_URL: 'https://turnstile.example/siteverify' },
+    'must use Cloudflare Siteverify'],
     ['production hosts under the staging profile', { HID_DEPLOYMENT_ENV: 'staging' },
       'CORS origin https://www.healthidentitydirectory.com has no Turnstile actions in the staging deployment profile'],
   ])('refuses %s', (_label, changes, error) => {
@@ -108,7 +118,10 @@ describe('Identity production configuration refusals', () => {
   });
 
   it('starts with every launch host of each deployment profile', () => {
-    // The browser hosts infra/aws/src/config.ts sets as CORS_ORIGINS.
+    // The browser hosts infra/aws/src/config.ts sets as CORS_ORIGINS for the
+    // staging and production environments. Its development environment runs
+    // the production profile with development.* hosts, which no Turnstile
+    // check could pass, and is refused (release checklist §2).
     const products = ['ehr', 'lab', 'pharmacy', 'migrate', 'outreach', 'admin'];
     configure({ CORS_ORIGINS: ['www', ...products].map((host) => `https://${host}.healthidentitydirectory.com`).join(',') });
     expect(() => getEnvironment()).not.toThrow();
