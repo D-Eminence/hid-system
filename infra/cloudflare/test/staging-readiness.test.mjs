@@ -89,7 +89,7 @@ test('rejects production routes, altered API origin, fallback default environmen
 
 test('widget action plan matches the existing staging Identity validation allowlist for the launch hosts', async () => {
   const plan = await prepareCloudflareReadiness();
-  const identity = await readFile(new URL('../../../services/identity-api/src/auth/turnstile.service.ts', import.meta.url), 'utf8');
+  const identity = await readFile(new URL('../../../services/identity-api/src/auth/turnstile-actions.ts', import.meta.url), 'utf8');
   const block = identity.match(/staging: deploymentActions\(\{([\s\S]*?)\}\),/)[1];
   const actual = Object.fromEntries([...block.matchAll(/'([^']+)': \[([\s\S]*?)\]/g)].map(x => [x[1], [...x[2].matchAll(/'([^']+)'/g)].map(m => m[1])]));
   const launchHosts = plan.frontends.map(frontend => frontend.hostname);
