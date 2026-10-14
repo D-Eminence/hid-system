@@ -44,7 +44,10 @@ A `401` means the credential was refused, and clients sign out on it. In
 Identity and EHR, the launch services, a fault that leaves a service unable to
 decide is a `503` with a stable code, never a `401` (ADR-059,
 D-Eminence/hid-system#76); that includes EHR's own workload
-credential refused by Identity, which EHR answers `503`. Lab, Pharmacy, OCR
+credential refused by Identity, which EHR answers `503`. One fault is still
+a `500`: EHR's document upload intent and completion answer an
+`uploads_enabled` control they cannot read `500 INTERNAL_ERROR` (an open
+follow-up, release checklist §9). Lab, Pharmacy, OCR
 and Outreach still relay Identity's refusal of their workload credential, and
 OCR's guard still answers a fault with no status `401`: all four are off at
 launch (D17), and the mapping is a follow-up before any is enabled. Sign-in refusals carry one detail, "Invalid
@@ -52,7 +55,24 @@ credentials", so the answer never confirms a right password; the reason stays
 in the audit. A disallowed `Origin` is refused `403 ORIGIN_DENIED` by every
 service's CORS layer. No platform grant exempts a staff or patient session
 from maintenance mode or the portal switches; only a platform administration
-session is exempt in Identity.
+session is exempt in Identity. The same holds on the authenticated platform
+MFA routes: a wrong step-up code is `403 MFA_INVALID_CODE` and a session that
+lost its MFA assurance during the request `403 PLATFORM_SESSION_REQUIRED`,
+never `401` (A20, this change); only the unauthenticated sign-in challenge
+steps answer a wrong code `401`.
+
+A rate-limit answer says when to retry only where that discloses nothing
+(A21, this change). A `429` from Identity states, in `Retry-After`, the
+limit's full configured window, an upper bound whichever bucket refused;
+never the time left in a bucket keyed by an identifier the caller named (an
+email, a phone number, an HID), which would tell another person's activity on
+it. A refusal answered like a wrong code (a spent recovery or enrollment
+contact code budget, D-Eminence/hid-system#55 and #61, and the sign-in
+lockout's `401`) carries none, and every `429` of the enrollment contact step
+carries one value, so a spent budget stays indistinguishable from that
+step's request limits. The one value that is not a full window, on
+`429 OTP_RESEND_COOLDOWN`, is the time left on the caller's own enrollment
+code, which its enrollment cookie proves.
 
 ## 3. Authorization
 
@@ -175,6 +195,16 @@ Audit records should contain:
 * safe request context
 
 Never place secrets or unnecessary PHI in audit details.
+
+A refusal or failure row records the status and code answered
+(`details.status`, `details.code`) and never the error's message: Identity's
+`SecurityGuard` and request audit since this change (A17), EHR's guard and
+request audit since D-Eminence/hid-system#74. Codes are fixed constants of
+the services, never a request value, and the same code is already in the
+answer. A patient session's request rows record purpose `patient-self`,
+whatever purpose the client sends, so a patient's own action cannot be
+labelled direct care or emergency in the audit trail; a staff request's
+purpose is still the one it declares and its route checks.
 
 ## 10. Clinical Integrity
 
