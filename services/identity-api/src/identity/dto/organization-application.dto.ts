@@ -25,8 +25,8 @@ export class SubmitOrganizationApplicationDto {
   @IsIn(['organization-application'])
   turnstileAction!: 'organization-application';
 
-  @IsString() @MaxLength(2048)
-  turnstileToken!: string;
+  @IsOptional() @IsString() @MaxLength(2048)
+  turnstileToken?: string;
 }
 
 export class StartOrganizationProfileCompletionDto {
@@ -44,8 +44,8 @@ export class StartOrganizationProfileCompletionDto {
   @IsIn(['organization-completion'])
   turnstileAction!: 'organization-completion';
 
-  @IsString() @MaxLength(2048)
-  turnstileToken!: string;
+  @IsOptional() @IsString() @MaxLength(2048)
+  turnstileToken?: string;
 }
 
 export class VerifyOrganizationProfileCompletionDto {

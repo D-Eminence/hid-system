@@ -26,7 +26,7 @@ The future Health-id frontend can submit its Book Demo form to the Identity API.
 
 Only `contactName`, `contactEmail`, `productCode`, `turnstileAction`, and `turnstileToken` are required. Product codes are `ehr`, `migrate`, `laboratory`, `pharmacy`, `outreach`, `api`, and `general`. The API product remains a demo interest code. Optional source fields must describe the page and CTA without including query strings, tokens, patient data, or other personal information. The existing Health-id form's `facility`, `role`, `service`, and `notes` map to `organizationName`, `contactRole`, `productCode`, and `message`. Its current free-text `service` needs an explicit product-code mapping during the later frontend integration.
 
-The backend validates the exact origin and a single-use Turnstile `book-demo` action in staging and production. A repeated idempotency key returns `{ "accepted": true, "replayed": true }` without creating another request. Contact details remain in the Identity-owned table; semantic audit records only the selected product and request ID.
+The backend validates the exact origin and a single-use Turnstile `book-demo` action in staging and production; a missing token answers `400 TURNSTILE_REQUIRED`, and the other Turnstile answers are in `INTERFACE_CONTRACT.md`, "Turnstile verification". A repeated idempotency key returns `{ "accepted": true, "replayed": true }` without creating another request; the retry needs a new Turnstile token, because a token is good for one request. Contact details remain in the Identity-owned table; semantic audit records only the selected product and request ID.
 
 ## Platform administration
 

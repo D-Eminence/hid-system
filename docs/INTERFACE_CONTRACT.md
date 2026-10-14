@@ -47,10 +47,9 @@ task or closes without responding) does it answer
 `503 UPSTREAM_UNAVAILABLE` with `Cache-Control: no-store`; the Worker answers
 `502 API_ORIGIN_UNAVAILABLE` when it cannot reach the AWS origin. Clients
 should branch on the codes they know and treat any other 5xx as unavailable.
-A `POST /api/v1/auth/refresh` that fails with a 5xx clears the session cookies
-(table below); before this change the gateway dropped that `Set-Cookie` on a
-`503`, so the browser kept a refresh token that rotation may already have
-spent. Keeping the cookies on a 5xx is register item A6 (Identity, open).
+A `POST /api/v1/auth/refresh` that fails with a 5xx keeps the session cookies
+and rotates nothing (ADR-059, A6; table below), and the gateway passes that
+answer through unchanged.
 
 The gateway refuses a request body over 512 KiB with
 `413 PAYLOAD_TOO_LARGE` Problem Details before any service sees it (the
@@ -109,6 +108,129 @@ answers `429 ENROLLMENT_RATE_LIMITED` and sends no code. Both responses are
 the existing ones, unchanged in shape. This comes from
 D-Eminence/hid-system#61, not yet deployed; the threshold is an
 open product decision.
+
+### Turnstile verification
+
+Identity verifies a Cloudflare Turnstile token on eleven public or
+first-step routes (table below), each with its own action. Identity never
+trusts the widget: it sends the token to Cloudflare Siteverify itself, with
+its own secret, and accepts it only if Cloudflare reports success for the
+request's own host and the route's action. A route not in the table does
+not check a token.
+
+The browser sends, in the JSON body:
+
+- `turnstileToken`: the widget's token, at most 2048 characters;
+- `turnstileAction`: the action the widget was rendered with, which must be
+  the route's action (below).
+
+The `Origin` header must be the page's own origin and one of `CORS_ORIGINS`.
+Identity refuses at the first failed check:
+
+1. The body is valid for the route and names the route's action: else
+   `400 VALIDATION_FAILED`, with these exceptions. `POST /auth/login`
+   answers a `patient-login` or `admin-login` action
+   `400 INVALID_LOGIN_ACTION`. `POST /auth/patient/login` and
+   `POST /auth/google/link` answer any action but `patient-login` (for
+   patient sign-in, a missing one too) `400 INVALID_LOGIN_ACTION`.
+   `POST /auth/oidc/exchange` answers `staff-login`
+   `403 GOOGLE_STAFF_SIGN_IN_DISABLED`. The `Origin` is allowed: else
+   `403 ORIGIN_DENIED`. Some routes make their own checks here too, such as
+   the `Idempotency-Key` of a demo request or the signed-out state of a
+   provider enrollment.
+2. A token is present: else `400 TURNSTILE_REQUIRED`. A missing token and an
+   empty one get the same answer on every route.
+3. The host of the `Origin` may present this action in this deployment
+   (table below): else `403 TURNSTILE_CONTEXT_MISMATCH`.
+4. Cloudflare Siteverify accepts the token, and reports the same host and
+   action: else one of the `403` or `503` answers below.
+
+Steps 1 to 3 never call Cloudflare, so the token is not spent and the widget
+can be submitted again. Once step 4 runs, the token is spent (or, after a
+`503`, may be), whatever the route answers afterwards (a wrong password,
+`409`, `429`). **A token is good for one request.** The browser
+resets the widget after every submission and sends a new token with the next
+one, including a retry of the same request under the same `Idempotency-Key`
+and a request repeated after a session refresh.
+
+| Answer | Meaning | What the browser does |
+|---|---|---|
+| `400 TURNSTILE_REQUIRED` | No token, or (`POST /auth/login`) no action | Complete the check and submit |
+| `403 TURNSTILE_CONTEXT_MISMATCH` | This host may not present this action | A build or configuration error: the page uses the wrong action for its host |
+| `403 TURNSTILE_REJECTED` | Cloudflare refused the token | Reset the widget, complete it again |
+| `403 TURNSTILE_EXPIRED_OR_REPLAYED` | The token is over 300 seconds old or was already used | Reset the widget, complete it again |
+| `403 TURNSTILE_HOSTNAME_MISMATCH` | The token was issued on another host | Reset the widget; a configuration error if it repeats |
+| `403 TURNSTILE_ACTION_MISMATCH` | The token was issued for another action | Reset the widget; the page renders the widget with the wrong action if it repeats |
+| `503 TURNSTILE_UNAVAILABLE` | Siteverify was unreachable or failed, or refused Identity's own secret | Reset the widget and let the user try again later |
+
+These are Problem Details with their `code`. The API WAF's own `403` for rate
+limiting has a non-JSON body and no `code`; a client tells the two apart by
+the `code`.
+
+Identity asks Siteverify at most twice per check: once more, with the same
+idempotency key, after a network failure, a timeout (`TURNSTILE_TIMEOUT_MS`,
+3 seconds by default) or a `5xx`. Cloudflare answers that retry with the
+first result, so a token spent by an attempt whose answer was lost is not
+refused as a replay. A new request never reuses another request's key.
+Siteverify refusing Identity's own request (Cloudflare answers HTTP 400 with
+`missing-input-secret`, `invalid-input-secret` or `bad-request`) and
+Cloudflare's `internal-error` are `503`, not a rejection: the fault is the
+server's.
+
+Each refusal at step 3 or 4 and each `503` writes one log line,
+`event=turnstile_verification`. A refusal line has the outcome code, the
+action and Cloudflare's error codes; a `503` line also has a `reason` and
+the number of Siteverify attempts. The reasons are `siteverify_unreachable`,
+`siteverify_http_<status>` (a 5xx or 429), `siteverify_unreadable`,
+`siteverify_internal_error` (Cloudflare's own fault, warning level),
+`siteverify_refused_configuration` and `secret_missing` (Identity's own
+configuration, error level; the `codes` field tells a wrong secret,
+`invalid-input-secret`, from a missing one or a malformed request). A line
+never contains the token, the secret, the `Origin` or the client address.
+
+**Routes and actions.** At launch only the web host (`www`, staging:
+`staging`) and the admin host (`admin`, `admin.staging`) are deployed
+(ADR-052); the other product hosts keep their entries for when they ship.
+
+| Route | `turnstileAction` | Hosts (production; staging adds `.staging`, and the web host is `staging`) |
+|---|---|---|
+| `POST /api/v1/auth/patient/login` | `patient-login` | `www` |
+| `POST /api/v1/auth/login` (staff password step) | `staff-login` | `www`, `ehr` |
+| | `ehr-login`, `lab-login`, `pharmacy-login`, `ocr-login`, `outreach-login` | `ehr`, `lab`, `pharmacy`, `migrate`, `outreach` respectively |
+| `POST /api/v1/auth/admin/login` | `admin-login` | `admin`, `www` |
+| `POST /api/v1/auth/otp/start` | `patient-reset-start`, `legacy-recovery`, `staff-reset` | `www` |
+| | `admin-reset` | `admin`, `www` |
+| `POST /api/v1/auth/oidc/exchange` (Google; off at launch, P19) | `patient-login` | `www` |
+| `POST /api/v1/auth/google/link` (signed-in patient; off at launch) | `patient-login` | `www` |
+| `POST /api/v1/identity/patient-enrollments` | `patient-enrollment` | `www` |
+| `POST /api/v1/identity/provider-enrollments` | `provider-enrollment` | `www` |
+| `POST /api/v1/identity/organization-applications` | `organization-application` | `www` |
+| `POST /api/v1/identity/organization-applications/completion/start` | `organization-completion` | `www` |
+| `POST /api/v1/commercial/demo-requests` | `book-demo` | `www` |
+
+`POST /auth/login` takes only the six workforce actions: a `patient-login`
+or `admin-login` action is `400 INVALID_LOGIN_ACTION` before Cloudflare is
+called, so a token from the patient or platform sign-in page never reaches
+the staff password step.
+
+**Routes without Turnstile, by design.** Each later step of a gated flow is
+bound to the challenge, cookie or session its first step created, and has its
+own attempt and rate limits: the MFA steps (`/auth/mfa/*`,
+`/auth/admin/mfa/*`, including `mfa/enroll/email-code`), `otp/verify` and
+`otp/complete`, the patient enrollment contact, verify, activate, Google and
+current steps, provider enrollment verify and activate, organization
+completion verify and profile, `GET /auth/google/nonce`, and refresh,
+session and logout. `GET /identity/patient-enrollments/availability` is a
+public read with no input.
+
+**Deployments.** In `TURNSTILE_MODE=disabled` (local development and tests
+only) Identity accepts any request without calling Cloudflare. Every
+`NODE_ENV=production` task, and any task with the production deployment
+profile whatever its `NODE_ENV`, refuses to start unless Turnstile is
+required, its secret is set, Siteverify is Cloudflare's, and every
+`CORS_ORIGINS` host has at least one action in the table for the task's
+deployment profile. The Turnstile secret is server-only; the widget's site
+key is the frontend's (`VITE_HID_TURNSTILE_SITE_KEY`, P14).
 
 ### Auth session contract
 

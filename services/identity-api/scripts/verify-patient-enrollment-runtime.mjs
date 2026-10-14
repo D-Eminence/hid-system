@@ -82,19 +82,29 @@ const { DomainProblem, ProblemDetailsFilter } = load('common/problem.ts');
 const { preventResponseCaching } = load('common/response-security.middleware.ts');
 const { getEnvironment, resetEnvironmentForTests } = load('config/environment.ts');
 
-// Cloudflare Siteverify stub: a token is `ok|<action>|<hostname>` or `replayed`.
-// Any other outbound request fails the verifier.
+// Cloudflare Siteverify stub: a token is `ok|<action>|<hostname>|<n>` or
+// `replayed`. As at Cloudflare, a token verifies once: verifying it again under
+// another idempotency key answers timeout-or-duplicate, and a retry under the
+// same key repeats the first answer. Any other outbound request fails the verifier.
 const siteverifyUrl = getEnvironment().TURNSTILE_SITEVERIFY_URL;
+const verifiedTokens = new Map();
 globalThis.fetch = async (input, init) => {
   const url = String(input instanceof Request ? input.url : input);
   assert.equal(url, siteverifyUrl, `Unexpected outbound request to ${url}`);
   const body = JSON.parse(String(init?.body));
   assert.equal(body.secret, 'example-turnstile-secret');
+  const earlier = verifiedTokens.get(body.response);
+  if (earlier) {
+    return Response.json(earlier.key === body.idempotency_key
+      ? earlier.answer : { success: false, 'error-codes': ['timeout-or-duplicate'] });
+  }
   const [kind, action, hostname] = String(body.response).split('|');
-  if (kind !== 'ok') return Response.json({ success: false, 'error-codes': ['timeout-or-duplicate'] });
-  return Response.json({ success: true, action, hostname });
+  const answer = kind === 'ok' ? { success: true, action, hostname } : { success: false, 'error-codes': ['timeout-or-duplicate'] };
+  verifiedTokens.set(body.response, { key: body.idempotency_key, answer });
+  return Response.json(answer);
 };
-const turnstile = (action, host = siteHost) => `ok|${action}|${host}`;
+let issuedTokens = 0;
+const turnstile = (action, host = siteHost) => `ok|${action}|${host}|${++issuedTokens}`;
 
 // QoreID stub behind the real adapter, in the shape of the entitled NIN-only
 // sandbox response. NOT_VERIFIED is a negative registry check; every NIN in
@@ -395,9 +405,9 @@ try {
   check('a phone-only enrollment normalizes 0803... to +234..., delivers by SMS and activates an account without an email and with its own HID');
 
   // 8. Sign-in: identical refusal for a wrong password and an unknown account.
-  const login = (identifier, password, action = 'patient-login') => http.post('/api/v1/auth/patient/login')
+  const login = (identifier, password, action = 'patient-login', token = turnstile(action)) => http.post('/api/v1/auth/patient/login')
     .set('Origin', origin).set('X-Forwarded-For', '198.51.100.30')
-    .send({ email: identifier, password, turnstileAction: 'patient-login', turnstileToken: turnstile(action) });
+    .send({ email: identifier, password, turnstileAction: 'patient-login', turnstileToken: token });
   const wrongPassword = await login(emailA, 'Wrong-Password-000000');
   const unknownAccount = await login(`unknown-${randomUUID().slice(0, 8)}@example.invalid`, 'Wrong-Password-000000');
   expectProblem(wrongPassword, 401); expectProblem(unknownAccount, 401);
@@ -405,8 +415,13 @@ try {
     { ...unknownAccount.body, instance: undefined, correlationId: undefined },
     'A wrong password and an unknown account must be indistinguishable');
   expectProblem(await login(emailA, passwordA, 'staff-login'), 403, 'TURNSTILE_ACTION_MISMATCH');
-  const firstA = await login(emailA.toUpperCase(), passwordA);
+  const spentToken = turnstile('patient-login');
+  const firstA = await login(emailA.toUpperCase(), passwordA, 'patient-login', spentToken);
   expectProblem(firstA, 200);
+  // The token that signed in is spent: the same correct password with it is refused.
+  const replayedSignIn = await login(emailA, passwordA, 'patient-login', spentToken);
+  expectProblem(replayedSignIn, 403, 'TURNSTILE_EXPIRED_OR_REPLAYED');
+  assert.equal(replayedSignIn.headers['set-cookie'], undefined, 'A replayed Turnstile token must not sign in');
   assert.equal(firstA.body.actor.kind, 'patient'); assert.equal(firstA.body.actor.patientId, patientA);
   for (const property of ['roles', 'permissions', 'platformRoles', 'platformPermissions', 'facilities', 'facilityIds']) {
     assert.deepEqual(firstA.body.actor[property], []);
@@ -430,7 +445,7 @@ try {
   expectProblem(byHid, 200); assert.equal(byHid.body.actor.patientId, patientA);
   const firstB = await login(hidB, 'Synthetic-Patient-Pass-B2');
   expectProblem(firstB, 200); assert.equal(firstB.body.actor.patientId, accountB[0].patient_id);
-  check('sign-in refuses a wrong password and an unknown account identically (401), refuses another Turnstile action, and signs the patient in by email (any case) or HID with host-only Secure Strict cookies and no workforce authority, expiring the enrollment cookie on its path');
+  check('sign-in refuses a wrong password and an unknown account identically (401), refuses another Turnstile action and a spent token, and signs the patient in by email (any case) or HID with host-only Secure Strict cookies and no workforce authority, expiring the enrollment cookie on its path');
 
   // 9. Session, self profile and isolation between the two new patients.
   const cookieSessionA = sessionCookies(firstA);
