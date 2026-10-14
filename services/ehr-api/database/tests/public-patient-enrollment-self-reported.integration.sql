@@ -37,7 +37,35 @@ insert into identity.public_patient_enrollments (
    encode(public.digest('{"nin":"12345679203","firstName":"Funke","lastName":"Sample","dateOfBirth":"1993-08-09","providerReference":"self-reported-003"}', 'sha256'),'hex'),
    'fixture', 'self-reported-003', repeat('9c',32), repeat('9d',32),
    'set_password', 'email', repeat('9e',32), repeat('9f',32), decode(repeat('d3',32),'hex'),
-   clock_timestamp() - interval '1 minute', 'b9210000-0000-4000-8000-000000000003');
+   clock_timestamp() - interval '1 minute', 'b9210000-0000-4000-8000-000000000003'),
+  -- D: the record has a gender but no date of birth.
+  ('b9200000-0000-4000-8000-000000000004', repeat('c1',32), '9204', decode(repeat('a4',32),'hex'),
+   decode(repeat('b4',32),'hex'),
+   encode(public.digest('{"nin":"12345679204","firstName":"Aisha","lastName":"Sample","gender":"female","providerReference":"self-reported-004"}', 'sha256'),'hex'),
+   'fixture', 'self-reported-004', repeat('c2',32), repeat('c3',32),
+   'set_password', 'email', repeat('c4',32), repeat('c5',32), decode(repeat('d4',32),'hex'),
+   clock_timestamp() - interval '1 minute', 'b9210000-0000-4000-8000-000000000004'),
+  -- E: the record has neither; the patient enters today's date.
+  ('b9200000-0000-4000-8000-000000000005', repeat('c6',32), '9205', decode(repeat('a5',32),'hex'),
+   decode(repeat('b5',32),'hex'),
+   encode(public.digest('{"nin":"12345679205","firstName":"Tunde","lastName":"Sample","providerReference":"self-reported-005"}', 'sha256'),'hex'),
+   'fixture', 'self-reported-005', repeat('c7',32), repeat('c8',32),
+   'set_password', 'phone', repeat('c9',32), repeat('ca',32), decode(repeat('d5',32),'hex'),
+   clock_timestamp() - interval '1 minute', 'b9210000-0000-4000-8000-000000000005'),
+  -- F and G: the record's date of birth has the right shape but is not on
+  -- the calendar.
+  ('b9200000-0000-4000-8000-000000000006', repeat('cb',32), '9206', decode(repeat('a6',32),'hex'),
+   decode(repeat('b6',32),'hex'),
+   encode(public.digest('{"nin":"12345679206","firstName":"Bola","lastName":"Sample","dateOfBirth":"2020-02-30","gender":"male","providerReference":"self-reported-006"}', 'sha256'),'hex'),
+   'fixture', 'self-reported-006', repeat('cc',32), repeat('cd',32),
+   'set_password', 'email', repeat('ce',32), repeat('cf',32), decode(repeat('d6',32),'hex'),
+   clock_timestamp() - interval '1 minute', 'b9210000-0000-4000-8000-000000000006'),
+  ('b9200000-0000-4000-8000-000000000007', repeat('e1',32), '9207', decode(repeat('a7',32),'hex'),
+   decode(repeat('b7',32),'hex'),
+   encode(public.digest('{"nin":"12345679207","firstName":"Chidi","lastName":"Sample","dateOfBirth":"0000-01-01","gender":"female","providerReference":"self-reported-007"}', 'sha256'),'hex'),
+   'fixture', 'self-reported-007', repeat('e2',32), repeat('e3',32),
+   'set_password', 'email', repeat('e4',32), repeat('e5',32), decode(repeat('d7',32),'hex'),
+   clock_timestamp() - interval '1 minute', 'b9210000-0000-4000-8000-000000000007');
 
 insert into identity.public_patient_enrollment_otps (
   id, enrollment_id, recipient_hmac, channel, verifier_hmac,
@@ -52,6 +80,18 @@ insert into identity.public_patient_enrollment_otps (
    'accepted',clock_timestamp()-interval '1 minute',clock_timestamp()-interval '1 minute'),
   ('b9210000-0000-4000-8000-000000000003','b9200000-0000-4000-8000-000000000003',
    repeat('9e',32),'email',repeat('c',64),'fixture',clock_timestamp()+interval '4 minutes',5,
+   'accepted',clock_timestamp()-interval '1 minute',clock_timestamp()-interval '1 minute'),
+  ('b9210000-0000-4000-8000-000000000004','b9200000-0000-4000-8000-000000000004',
+   repeat('c4',32),'email',repeat('d',64),'fixture',clock_timestamp()+interval '4 minutes',5,
+   'accepted',clock_timestamp()-interval '1 minute',clock_timestamp()-interval '1 minute'),
+  ('b9210000-0000-4000-8000-000000000005','b9200000-0000-4000-8000-000000000005',
+   repeat('c9',32),'phone',repeat('e',64),'fixture',clock_timestamp()+interval '4 minutes',5,
+   'accepted',clock_timestamp()-interval '1 minute',clock_timestamp()-interval '1 minute'),
+  ('b9210000-0000-4000-8000-000000000006','b9200000-0000-4000-8000-000000000006',
+   repeat('ce',32),'email',repeat('f',64),'fixture',clock_timestamp()+interval '4 minutes',5,
+   'accepted',clock_timestamp()-interval '1 minute',clock_timestamp()-interval '1 minute'),
+  ('b9210000-0000-4000-8000-000000000007','b9200000-0000-4000-8000-000000000007',
+   repeat('e4',32),'email',repeat('9',64),'fixture',clock_timestamp()+interval '4 minutes',5,
    'accepted',clock_timestamp()-interval '1 minute',clock_timestamp()-interval '1 minute');
 
 set local role hid_identity_api_runtime;
@@ -64,6 +104,10 @@ declare
   profile_a text := '{"nin":"12345679201","firstName":"Ngozi","lastName":"Sample","providerReference":"self-reported-001"}';
   profile_b text := '{"nin":"12345679202","firstName":"Emeka","lastName":"Sample","dateOfBirth":"1987-04-05","gender":"male","providerReference":"self-reported-002"}';
   profile_c text := '{"nin":"12345679203","firstName":"Funke","lastName":"Sample","dateOfBirth":"1993-08-09","providerReference":"self-reported-003"}';
+  profile_d text := '{"nin":"12345679204","firstName":"Aisha","lastName":"Sample","gender":"female","providerReference":"self-reported-004"}';
+  profile_e text := '{"nin":"12345679205","firstName":"Tunde","lastName":"Sample","providerReference":"self-reported-005"}';
+  profile_f text := '{"nin":"12345679206","firstName":"Bola","lastName":"Sample","dateOfBirth":"2020-02-30","gender":"male","providerReference":"self-reported-006"}';
+  profile_g text := '{"nin":"12345679207","firstName":"Chidi","lastName":"Sample","dateOfBirth":"0000-01-01","gender":"female","providerReference":"self-reported-007"}';
   refused record;
   activated record;
   replayed record;
@@ -128,9 +172,47 @@ begin
     end if;
   end;
 
+  -- A record with a gender only: the gender stays the record's.
+  begin
+    perform identity.activate_public_patient_enrollment(
+      'b9200000-0000-4000-8000-000000000004',repeat('c3',32)::char(64),profile_d,
+      'aisha.sample@example.invalid','HID-SELFRPTE',test_hash,repeat('c5',32)::char(64),
+      date '1950-01-02','male');
+    raise exception 'A gender from the request replaced the record''s';
+  exception when check_violation then
+    if sqlerrm <> 'PATIENT_IDENTITY_INVALID' then
+      raise exception 'A replaced gender was refused with % instead of PATIENT_IDENTITY_INVALID', sqlerrm;
+    end if;
+  end;
+
+  -- A record date of birth that is not on the calendar is refused as an
+  -- invalid identity (23514), not raised as a cast error (22008).
+  begin
+    perform identity.activate_public_patient_enrollment(
+      'b9200000-0000-4000-8000-000000000006',repeat('cd',32)::char(64),profile_f,
+      'bola.sample@example.invalid','HID-SELFRPTG',test_hash,repeat('cf',32)::char(64));
+    raise exception 'A record dated 2020-02-30 activated';
+  exception when others then
+    if sqlstate <> '23514' or sqlerrm <> 'PATIENT_IDENTITY_INVALID' then
+      raise exception 'A record dated 2020-02-30 was refused with % % instead of 23514 PATIENT_IDENTITY_INVALID',
+        sqlstate, sqlerrm;
+    end if;
+  end;
+  begin
+    perform identity.activate_public_patient_enrollment(
+      'b9200000-0000-4000-8000-000000000007',repeat('e3',32)::char(64),profile_g,
+      'chidi.sample@example.invalid','HID-SELFRPTH',test_hash,repeat('e5',32)::char(64));
+    raise exception 'A record dated 0000-01-01 activated';
+  exception when others then
+    if sqlstate <> '23514' or sqlerrm <> 'PATIENT_IDENTITY_INVALID' then
+      raise exception 'A record dated 0000-01-01 was refused with % % instead of 23514 PATIENT_IDENTITY_INVALID',
+        sqlstate, sqlerrm;
+    end if;
+  end;
+
   -- Every refusal above left its enrollment waiting for its password.
   if (select count(*) from identity.public_patient_enrollments
-      where id::text like 'b9200000-0000-4000-8000-00000000000_' and state = 'set_password') <> 3 then
+      where id::text like 'b9200000-0000-4000-8000-00000000000_' and state = 'set_password') <> 7 then
     raise exception 'A refused activation changed an enrollment';
   end if;
 
@@ -168,6 +250,24 @@ begin
   if activated.replayed or activated.hid_code <> 'HID-SELFRPTC' then
     raise exception 'A record without a gender did not activate with the gender entered';
   end if;
+
+  -- D: the date of birth alone from the request, on the first allowed day.
+  select * into activated from identity.activate_public_patient_enrollment(
+    'b9200000-0000-4000-8000-000000000004',repeat('c3',32)::char(64),profile_d,
+    'aisha.sample@example.invalid','HID-SELFRPTE',test_hash,repeat('c5',32)::char(64),
+    date '1900-01-01',null);
+  if activated.replayed or activated.hid_code <> 'HID-SELFRPTE' then
+    raise exception 'A record without a date of birth did not activate with 1900-01-01 entered';
+  end if;
+
+  -- E: both from the request, with today's date (the last allowed day).
+  select * into activated from identity.activate_public_patient_enrollment(
+    'b9200000-0000-4000-8000-000000000005',repeat('c8',32)::char(64),profile_e,
+    '+2348099990005','HID-SELFRPTJ',test_hash,repeat('ca',32)::char(64),
+    current_date,'unknown');
+  if activated.replayed or activated.hid_code <> 'HID-SELFRPTJ' then
+    raise exception 'A record without a date of birth or gender did not activate with today''s date entered';
+  end if;
 end $$;
 reset role;
 
@@ -186,7 +286,11 @@ begin
        '["dateOfBirth", "gender"]'::jsonb),
       ('b9200000-0000-4000-8000-000000000002'::uuid, 'HID-SELFRPTB', date '1987-04-05', 'male', '[]'::jsonb),
       ('b9200000-0000-4000-8000-000000000003'::uuid, 'HID-SELFRPTC', date '1993-08-09', 'intersex',
-       '["gender"]'::jsonb)
+       '["gender"]'::jsonb),
+      ('b9200000-0000-4000-8000-000000000004'::uuid, 'HID-SELFRPTE', date '1900-01-01', 'female',
+       '["dateOfBirth"]'::jsonb),
+      ('b9200000-0000-4000-8000-000000000005'::uuid, 'HID-SELFRPTJ', current_date, 'unknown',
+       '["dateOfBirth", "gender"]'::jsonb)
     ) as expected(enrollment_id, hid_code, dob, gender, self_reported)
   loop
     if not exists (select 1 from identity.public_patient_enrollments enrollment
@@ -221,13 +325,19 @@ begin
   end loop;
   -- Names only: no audit detail carries an entered or recorded value.
   if exists (select 1 from audit.events where correlation_id = 'public-enrollment-self-reported-0001'
-      and (details::text ~ '19[0-9]{2}-[0-9]{2}-[0-9]{2}'
+      and (details::text ~ '[0-9]{4}-[0-9]{2}-[0-9]{2}'
         or details::text ~* '"(female|male|intersex|other|unknown)"')) then
     raise exception 'An activation audit event carries a date of birth or gender value';
   end if;
   if (select count(*) from audit.events where correlation_id = 'public-enrollment-self-reported-0001'
-      and action = 'identity.public-patient-enrollment.activated') <> 3 then
+      and action = 'identity.public-patient-enrollment.activated') <> 5 then
     raise exception 'The replay or a refusal wrote an activation audit event';
+  end if;
+  -- The records whose date of birth is not on the calendar created nothing.
+  if exists (select 1 from identity.public_patient_enrollments
+      where id in ('b9200000-0000-4000-8000-000000000006', 'b9200000-0000-4000-8000-000000000007')
+        and (state <> 'set_password' or patient_id is not null or account_id is not null)) then
+    raise exception 'A record whose date of birth is not on the calendar changed its enrollment';
   end if;
 end $$;
 
