@@ -94,8 +94,44 @@ describe('Identity production configuration refusals', () => {
     ['emergency-contact delivery', { EMERGENCY_CONTACT_DELIVERY_ENABLED: 'true' }, 'emergency-contact delivery is not approved'],
     ['the deterministic NIN provider', { NIN_PROVIDER_MODE: 'test' }, 'deterministic NIN provider is test-only'],
     ['deferred NIN outside staging', { NIN_PROVIDER_MODE: 'deferred' }, 'Deferred NIN mode requires the explicit staging deployment profile'],
+    // TS-9: a browser origin the Turnstile allowlist does not name could never
+    // pass a check, so every sign-in from it would be refused at runtime.
+    ['a CORS origin without Turnstile actions', { CORS_ORIGINS: 'https://www.healthidentitydirectory.com,https://portal.healthidentitydirectory.com' },
+      'CORS origin https://portal.healthidentitydirectory.com has no Turnstile actions in the production deployment profile'],
+    ['staging hosts under the production profile', { CORS_ORIGINS: 'https://staging.healthidentitydirectory.com' },
+      'CORS origin https://staging.healthidentitydirectory.com has no Turnstile actions in the production deployment profile'],
+    ['production hosts under the staging profile', { HID_DEPLOYMENT_ENV: 'staging' },
+      'CORS origin https://www.healthidentitydirectory.com has no Turnstile actions in the staging deployment profile'],
   ])('refuses %s', (_label, changes, error) => {
     configure(changes);
     expect(() => getEnvironment()).toThrow(error);
+  });
+
+  it('starts with every launch host of each deployment profile', () => {
+    // The browser hosts infra/aws/src/config.ts sets as CORS_ORIGINS.
+    const products = ['ehr', 'lab', 'pharmacy', 'migrate', 'outreach', 'admin'];
+    configure({ CORS_ORIGINS: ['www', ...products].map((host) => `https://${host}.healthidentitydirectory.com`).join(',') });
+    expect(() => getEnvironment()).not.toThrow();
+    configure({ HID_DEPLOYMENT_ENV: 'staging', CORS_ORIGINS: ['staging', ...products.map((product) => `${product}.staging`)]
+      .map((host) => `https://${host}.healthidentitydirectory.com`).join(',') });
+    expect(() => getEnvironment()).not.toThrow();
+  });
+
+  // TS-10: the production deployment profile keeps its Turnstile refusals
+  // whatever NODE_ENV says; a local or test run of the staging profile does not.
+  it.each<[string, Record<string, string | undefined>, string]>([
+    ['Turnstile disabled', { TURNSTILE_MODE: 'disabled' }, 'Turnstile is required for public production authentication'],
+    ['no Turnstile secret', { TURNSTILE_SECRET_KEY: undefined }, 'server-only Turnstile secret is required'],
+    ['another Turnstile verifier', { TURNSTILE_SITEVERIFY_URL: 'https://turnstile.example/siteverify' }, 'must use Cloudflare Siteverify'],
+    ['a CORS origin without Turnstile actions', { CORS_ORIGINS: 'https://portal.healthidentitydirectory.com' }, 'has no Turnstile actions'],
+  ])('refuses %s for the production profile outside NODE_ENV=production', (_label, changes, error) => {
+    configure({ NODE_ENV: 'development', ...changes });
+    expect(() => getEnvironment()).toThrow(error);
+  });
+
+  it('starts a local run of the staging profile with Turnstile disabled', () => {
+    configure({ NODE_ENV: 'development', HID_DEPLOYMENT_ENV: 'staging', TURNSTILE_MODE: 'disabled',
+      TURNSTILE_SECRET_KEY: undefined, CORS_ORIGINS: 'http://localhost:5173' });
+    expect(() => getEnvironment()).not.toThrow();
   });
 });

@@ -82,21 +82,31 @@ const { PlatformSecurityService } = load('admin/platform-security.service.ts');
 const totp = load('auth/mfa/totp.ts');
 
 // Cloudflare Siteverify stub. A token encodes the outcome the real service
-// would return: `ok|<action>|<hostname>` or `replayed`. Any other outbound
-// request fails the verifier.
+// would return: `ok|<action>|<hostname>|<n>` or `replayed`. As at Cloudflare, a
+// token verifies once: verifying it again under another idempotency key
+// answers timeout-or-duplicate, and a retry under the same key repeats the
+// first answer. Any other outbound request fails the verifier.
 const siteverifyUrl = getEnvironment().TURNSTILE_SITEVERIFY_URL;
 const siteverifyRequests = [];
+const verifiedTokens = new Map();
 globalThis.fetch = async (input, init) => {
   const url = String(input instanceof Request ? input.url : input);
   assert.equal(url, siteverifyUrl, `Unexpected outbound request to ${url}`);
   const body = JSON.parse(String(init?.body));
   assert.equal(body.secret, 'example-turnstile-secret');
   siteverifyRequests.push(body.response);
+  const earlier = verifiedTokens.get(body.response);
+  if (earlier) {
+    return Response.json(earlier.key === body.idempotency_key
+      ? earlier.answer : { success: false, 'error-codes': ['timeout-or-duplicate'] });
+  }
   const [kind, action, hostname] = String(body.response).split('|');
-  if (kind !== 'ok') return Response.json({ success: false, 'error-codes': ['timeout-or-duplicate'] });
-  return Response.json({ success: true, action, hostname });
+  const answer = kind === 'ok' ? { success: true, action, hostname } : { success: false, 'error-codes': ['timeout-or-duplicate'] };
+  verifiedTokens.set(body.response, { key: body.idempotency_key, answer });
+  return Response.json(answer);
 };
-const turnstile = (action = 'provider-enrollment', host = siteHost) => `ok|${action}|${host}`;
+let issuedTokens = 0;
+const turnstile = (action = 'provider-enrollment', host = siteHost) => `ok|${action}|${host}|${++issuedTokens}`;
 
 // QoreID HTTP stub behind the real adapter. NOT_VERIFIED returns a negative
 // registry check; every other number returns a complete verified CAC record.
