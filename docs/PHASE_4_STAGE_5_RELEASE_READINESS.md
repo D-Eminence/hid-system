@@ -1,5 +1,7 @@
 # Phase 4 Stage 5: platform administration release readiness
 
+The order of work from `main` to staging and production for the EHR and patient portal launch, with its go/no-go smoke tests and the items that block production, is `LAUNCH_STAGING_PLAN.md`.
+
 This is the combined release checklist for the platform administration work
 of Phase 4, the governed-access slice that followed it, the Stage 6 OCR
 audit and queue-metrics slice, Stage 7 (MFA lock order and fail-closed OCR
