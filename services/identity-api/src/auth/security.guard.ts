@@ -23,7 +23,7 @@ import {
   REQUIRED_PERMISSIONS,
 } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
-import { DomainProblem } from '../common/problem';
+import { DomainProblem, problemStatusAndCode } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { readPlatformAssurance, stepUpProblem } from './platform-assurance';
 import { staffMfaRequired, TokenService } from './token.service';
@@ -154,6 +154,9 @@ export class SecurityGuard implements CanActivate {
       return true;
     } catch (error) {
       const refusal = authenticationRefusal(error);
+      // Every refusal row records the status and code the client is answered,
+      // never the message (A17).
+      const evidence = { method: request.method, route: this.routeTemplate(request), ...problemStatusAndCode(refusal) };
       if (platformScope && request.actor && request.actor.kind !== 'patient') {
         await this.audit.record({
           correlationId: request.correlationId,
@@ -166,9 +169,7 @@ export class SecurityGuard implements CanActivate {
           outcome: 'denied',
           sourceIp: request.ip,
           userAgent: request.header('user-agent'),
-          details: { method: request.method, route: this.routeTemplate(request),
-            ...(refusal instanceof DomainProblem ? { code: refusal.code } : {}),
-            ...(request.highRiskAction ? { highRiskAction: request.highRiskAction } : {}) },
+          details: { ...evidence, ...(request.highRiskAction ? { highRiskAction: request.highRiskAction } : {}) },
         });
       } else if (request.actor && request.facilityId) {
         await this.audit.record({
@@ -184,7 +185,7 @@ export class SecurityGuard implements CanActivate {
           outcome: 'denied',
           sourceIp: request.ip,
           userAgent: request.header('user-agent'),
-          details: { method: request.method, route: this.routeTemplate(request) },
+          details: evidence,
         });
       } else if (request.actor) {
         await this.audit.record({
@@ -197,7 +198,7 @@ export class SecurityGuard implements CanActivate {
           outcome: 'denied',
           sourceIp: request.ip,
           userAgent: request.header('user-agent'),
-          details: { method: request.method, route: this.routeTemplate(request) },
+          details: evidence,
         });
       } else {
         await this.audit.record({
@@ -208,7 +209,7 @@ export class SecurityGuard implements CanActivate {
           outcome: 'denied',
           sourceIp: request.ip,
           userAgent: request.header('user-agent'),
-          details: { method: request.method, route: this.routeTemplate(request) },
+          details: evidence,
           provenance: 'system',
         });
       }

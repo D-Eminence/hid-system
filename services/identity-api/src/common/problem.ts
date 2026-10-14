@@ -57,6 +57,34 @@ export class RetryAfterProblem extends DomainProblem {
   }
 }
 
+const DEFAULT_CODES: Readonly<Record<number, string>> = {
+  400: 'BAD_REQUEST',
+  401: 'AUTHENTICATION_REQUIRED',
+  403: 'ACCESS_DENIED',
+  404: 'NOT_FOUND',
+  409: 'CONFLICT',
+  412: 'VERSION_CONFLICT',
+  413: 'PAYLOAD_TOO_LARGE',
+  415: 'UNSUPPORTED_MEDIA_TYPE',
+  429: 'RATE_LIMITED',
+  503: 'DEPENDENCY_UNAVAILABLE',
+};
+
+/** The code the problem filter answers for a status without a DomainProblem code. */
+export function defaultProblemCode(status: number): string {
+  return DEFAULT_CODES[status] ?? 'INTERNAL_ERROR';
+}
+
+/**
+ * The status and code the problem filter answers for an exception (an unknown
+ * one is 500 INTERNAL_ERROR), for the request's audit row (A17). Never the
+ * message: only the status and the code.
+ */
+export function problemStatusAndCode(exception: unknown): { status: number; code: string } {
+  const status = exception instanceof HttpException ? exception.getStatus() : HttpStatus.INTERNAL_SERVER_ERROR;
+  return { status, code: exception instanceof DomainProblem ? exception.code : defaultProblemCode(status) };
+}
+
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
   private readonly logger = new Logger(ProblemDetailsFilter.name);
@@ -119,19 +147,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
   }
 
   private defaultCode(status: number): string {
-    const byStatus: Record<number, string> = {
-      400: 'BAD_REQUEST',
-      401: 'AUTHENTICATION_REQUIRED',
-      403: 'ACCESS_DENIED',
-      404: 'NOT_FOUND',
-      409: 'CONFLICT',
-      412: 'VERSION_CONFLICT',
-      413: 'PAYLOAD_TOO_LARGE',
-      415: 'UNSUPPORTED_MEDIA_TYPE',
-      429: 'RATE_LIMITED',
-      503: 'DEPENDENCY_UNAVAILABLE',
-    };
-    return byStatus[status] ?? 'INTERNAL_ERROR';
+    return defaultProblemCode(status);
   }
 
   private bodyParserStatus(exception: unknown): number | undefined {

@@ -54,7 +54,7 @@ class FacilityOptionalProbeController {
 }
 
 interface Row { actorType: unknown; actorSubject: unknown; actorMembershipId: unknown; organizationId: unknown;
-  facilityId: unknown; action: unknown; resourceType: unknown; outcome: unknown }
+  facilityId: unknown; action: unknown; resourceType: unknown; outcome: unknown; details: Record<string, unknown> }
 
 /** audit.events as 0067 constrains it: a staff row without a facility only as an auth.* authentication or session event. */
 function auditDatabase(rows: Row[]) {
@@ -63,7 +63,8 @@ function auditDatabase(rows: Row[]) {
       if (sql.includes('platform.control_enabled')) return { rows: [{ enabled: values[0] !== 'maintenance_mode' }], rowCount: 1 };
       if (!sql.includes('insert into audit.events')) throw new Error(`unexpected query: ${sql}`);
       const row: Row = { actorType: values[1], actorSubject: values[2], actorMembershipId: values[4], organizationId: values[5],
-        facilityId: values[6], action: values[8], resourceType: values[9], outcome: values[11] };
+        facilityId: values[6], action: values[8], resourceType: values[9], outcome: values[11],
+        details: JSON.parse(values[16] as string) };
       const staffRow = row.actorType === 'staff';
       const authEvent = String(row.action).startsWith('auth.') && ['authentication', 'session'].includes(String(row.resourceType));
       if (staffRow && row.facilityId === null && !authEvent) throw Object.assign(new Error('check violation'), { code: '23514' });
@@ -143,5 +144,24 @@ describe('refusals on facility-optional routes are answered and audited, never 5
     expect(response.status).toBe(500);
     expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'auth.request.failed',
       resourceType: 'authentication', outcome: 'failure', facilityId: null, actorMembershipId: null, organizationId: null })]);
+  });
+
+  it('records the guard\'s refusal with the status and code it answers (A17)', async () => {
+    const response = await request(app.getHttpServer()).get('/api/v1/identity/me').set('Authorization', 'Bearer staff-token');
+    expect([response.status, response.body.code]).toEqual([403, 'PATIENT_SESSION_REQUIRED']);
+    expect(rows.map((row) => row.details)).toEqual([{ method: 'GET', route: '/api/v1/identity/me', status: 403,
+      code: 'PATIENT_SESSION_REQUIRED' }]);
+  });
+
+  it.each([
+    ['refusal', '/api/v1/identity/probe/refusal', 403, 'PROBE_REFUSED'],
+    ['fault', '/api/v1/identity/probe/fault', 500, 'INTERNAL_ERROR'],
+  ])('records the handler %s of a staff request without a facility with its code as well as its status (A17)', async (
+    _case, path, status, code) => {
+    const response = await request(app.getHttpServer()).get(path).set('Authorization', 'Bearer staff-token');
+    expect([response.status, response.body.code]).toEqual([status, code]);
+    expect(rows.map((row) => row.details)).toEqual([{ method: 'GET', route: path, status, code,
+      requestAction: `api.get.${path}`, durationMs: expect.any(Number) }]);
+    expect(JSON.stringify(rows)).not.toContain('synthetic handler fault');
   });
 });

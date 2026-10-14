@@ -47,7 +47,8 @@ const patient = { ...staff, id: 'patient:p', subject: 'patient:p', kind: 'patien
 
 /** The audit row as AuditService writes it, by column. */
 interface Row { actorType: string; actorSubject: string | null; actorMembershipId: string | null; organizationId: string | null;
-  facilityId: string | null; action: string; resourceType: string | null; resourceId: string | null; outcome: string }
+  facilityId: string | null; action: string; resourceType: string | null; resourceId: string | null; outcome: string;
+  purposeOfUse: string | null; details: Record<string, unknown> }
 
 /**
  * A database that keeps the rows written and, like audit.events, refuses a
@@ -58,7 +59,8 @@ function auditDatabase(rows: Row[]) {
   return {
     query: jest.fn(async (_sql: string, values: unknown[]) => {
       const row = { actorType: values[1], actorSubject: values[2], actorMembershipId: values[4], organizationId: values[5],
-        facilityId: values[6], action: values[8], resourceType: values[9], resourceId: values[10], outcome: values[11] } as Row
+        facilityId: values[6], action: values[8], resourceType: values[9], resourceId: values[10], outcome: values[11],
+        purposeOfUse: values[12], details: JSON.parse(values[16] as string) } as Row
       const facilityScope = row.facilityId !== null || row.actorType !== 'staff'
         || (row.action.startsWith('auth.') && ['authentication', 'session'].includes(row.resourceType ?? ''))
       const membershipScope = row.actorType !== 'staff' || row.action.startsWith('auth.')
@@ -99,6 +101,8 @@ class GuardAsDeployed implements CanActivate {
 let app: INestApplication
 let rows: Row[]
 let liveActor: ActorContext
+/** The facility selection store (0089): the outcome of a write and the selection a read finds. */
+let selections: { recordFacilitySelection: jest.Mock; selectedFacilityId: jest.Mock }
 
 beforeEach(async () => {
   Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
@@ -118,6 +122,7 @@ beforeEach(async () => {
       Boolean(cookie) && cookie === header && claims.csrf_hash === `hash-of-${cookie}`),
     verifyRefreshCsrf: jest.fn(() => false),
     refreshSessionKind: jest.fn(async () => undefined),
+    ...(selections = { recordFacilitySelection: jest.fn(async () => 'recorded'), selectedFacilityId: jest.fn(async () => undefined) }),
   }
   const auth = { revoke: jest.fn().mockResolvedValue(true), revokeByRefreshToken: jest.fn() }
   // A workload caller that fails its own authentication, as WorkloadAuthService refuses one.
@@ -238,5 +243,57 @@ describe('refusals on the other session routes, made with a staff session', () =
     expect(response.status).toBe(403)
     expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'auth.facility.select', outcome: 'failure',
       facilityId: SECOND_FACILITY.id, actorMembershipId: SECOND_FACILITY.membershipId, organizationId: SECOND_FACILITY.organizationId })])
+  })
+})
+
+describe('refusal rows on the session routes record the answered status and code (A17)', () => {
+  const select = (body: unknown) => request(app.getHttpServer()).post('/api/v1/auth/facility').set('Origin', ORIGIN).send(body as object)
+
+  it('records a refused sign-out with 403 SESSION_CLIENT_MISMATCH, and no purpose for a staff session', async () => {
+    const response = await signOut({ 'X-CSRF-Token': 'csrf-live', 'X-HID-Client': 'patient-web' })
+    expect({ status: response.status, code: response.body.code }).toEqual({ status: 403, code: 'SESSION_CLIENT_MISMATCH' })
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'auth.logout', purposeOfUse: null })])
+    expect(rows[0]?.details).toEqual({ method: 'POST', route: '/api/v1/auth/logout', status: 403, code: 'SESSION_CLIENT_MISMATCH',
+      durationMs: expect.any(Number) })
+  })
+
+  it('records a patient\'s refused sign-out with its code and purpose patient-self, whatever purpose is sent', async () => {
+    liveActor = patient
+    const response = await signOut({ 'X-CSRF-Token': 'csrf-live', 'X-HID-Client': 'staff-web', 'X-Purpose-Of-Use': 'direct-care' })
+    expect({ status: response.status, code: response.body.code }).toEqual({ status: 403, code: 'SESSION_CLIENT_MISMATCH' })
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'patient', action: 'auth.logout', purposeOfUse: 'patient-self' })])
+    expect(rows[0]?.details).toEqual(expect.objectContaining({ status: 403, code: 'SESSION_CLIENT_MISMATCH' }))
+  })
+
+  it('records a malformed facility id with the 400 and code it is answered', async () => {
+    const response = await select({ facilityId: 'not-a-uuid' })
+    expect(response.status).toBe(400)
+    expect(rows).toEqual([expect.objectContaining({ action: 'auth.facility.select', resourceId: SESSION })])
+    expect(rows[0]?.details).toEqual({ method: 'POST', route: '/api/v1/auth/facility', status: 400, code: response.body.code,
+      durationMs: expect.any(Number) })
+  })
+
+  it.each([
+    ['the sign-in ended while the selection waited (0089)', 'session_ended', 401, 'AUTHENTICATION_REQUIRED'],
+    ['the membership ended while the selection waited (0089)', 'refused', 403, 'FACILITY_ACCESS_DENIED'],
+  ])('records a selection refused because %s with its status and code', async (_case, outcome, status, code) => {
+    selections.recordFacilitySelection.mockResolvedValue(outcome)
+    const response = await select({ facilityId: SECOND_FACILITY.id })
+    expect({ status: response.status, code: response.body.code }).toEqual({ status, code })
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'auth.facility.select', resourceType: 'session',
+      resourceId: SESSION, facilityId: null, actorMembershipId: null })])
+    expect(rows[0]?.details).toEqual({ method: 'POST', route: '/api/v1/auth/facility', status, code,
+      durationMs: expect.any(Number) })
+  })
+
+  it('records GET /auth/session answered 503 when the selection cannot be read, with nothing from the fault', async () => {
+    selections.selectedFacilityId.mockRejectedValue(new Error('permission denied for table session_facility_selection'))
+    const response = await request(app.getHttpServer()).get('/api/v1/auth/session')
+    expect({ status: response.status, code: response.body.code }).toEqual({ status: 503, code: 'DEPENDENCY_UNAVAILABLE' })
+    expect(rows).toEqual([expect.objectContaining({ actorType: 'staff', action: 'auth.session.read', resourceType: 'session',
+      resourceId: SESSION, outcome: 'failure', facilityId: null })])
+    expect(rows[0]?.details).toEqual({ method: 'GET', route: '/api/v1/auth/session', status: 503,
+      code: 'DEPENDENCY_UNAVAILABLE', durationMs: expect.any(Number) })
+    expect(JSON.stringify(rows)).not.toContain('permission denied')
   })
 })
