@@ -189,7 +189,11 @@ export class PatientRecordsService {
       diagnoses: diagnoses?.rows ?? [],
       prescriptions: prescriptions?.rows ?? [],
       labRequests: labRequests?.rows ?? [],
-      documents: documents?.rows ?? [],
+      // size_bytes is a bigint, which pg reads as text; the value is at most 52428800 (0004).
+      documents: (documents?.rows ?? []).map((row) => ({
+        ...row,
+        sizeBytes: row.sizeBytes == null ? null : Number(row.sizeBytes),
+      })),
       released,
       withheld: [...withheld],
       limits: Object.fromEntries(released.map((name) => [name, SECTION_LIMITS[name]])),

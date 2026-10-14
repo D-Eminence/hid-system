@@ -233,6 +233,13 @@ describe('Emergency record summary', () => {
     expect(documents).not.toContain("status='uploaded'");
   });
 
+  it('returns each document\'s sizeBytes as an integer, not as the text pg reads a bigint as', async () => {
+    const { service, operations } = setup({ documents: [{ id: 'doc-1', sizeBytes: '20480' }] });
+    const summary = await service.emergency('patient-id', emergencyContext) as unknown as Summary;
+    expect(summary.documents).toStrictEqual([{ id: 'doc-1', sizeBytes: 20480 }]);
+    expect(operations[0]?.details).toMatchObject({ documentCount: 1 });
+  });
+
   it('records the disclosed count of each category in the emergency audit, counts only', async () => {
     const { service, operations } = setup({
       encounters: rows(4), notes: rows(3),
