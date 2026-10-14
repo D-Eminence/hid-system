@@ -117,7 +117,10 @@ describe('TurnstileService', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
+  // The production profile refuses to start with Turnstile disabled or without
+  // its secret (TS-10), so these two run the staging profile locally.
   it('accepts anything without calling Cloudflare only when Turnstile is disabled', async () => {
+    process.env.HID_DEPLOYMENT_ENV = 'staging';
     process.env.TURNSTILE_MODE = 'disabled';
     resetEnvironmentForTests();
     global.fetch = jest.fn();
@@ -126,6 +129,7 @@ describe('TurnstileService', () => {
   });
 
   it('answers 503 without calling Cloudflare when the secret is missing', async () => {
+    process.env.HID_DEPLOYMENT_ENV = 'staging';
     process.env.TURNSTILE_SECRET_KEY = '';
     resetEnvironmentForTests();
     global.fetch = jest.fn();

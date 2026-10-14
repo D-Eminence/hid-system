@@ -102,7 +102,9 @@ describe('Identity production database transport', () => {
   ])('accepts NIN-only enrollment in %s', (_label, nodeEnvironment, deployment) => {
     production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
       NODE_ENV: nodeEnvironment });
-    if (deployment) process.env.HID_DEPLOYMENT_ENV = deployment; else delete process.env.HID_DEPLOYMENT_ENV;
+    // A staging task serves the staging hosts (Turnstile allowlist, TS-9).
+    if (deployment) Object.assign(process.env, { HID_DEPLOYMENT_ENV: deployment, CORS_ORIGINS: 'https://staging.healthidentitydirectory.com' });
+    else delete process.env.HID_DEPLOYMENT_ENV;
     resetEnvironmentForTests();
     expect(getEnvironment().QOREID_NIN_ONLY_ENROLLMENT_ENABLED).toBe(true);
   });
@@ -122,6 +124,7 @@ describe('Identity production database transport', () => {
 
     production(); Object.assign(process.env, {
       EMERGENCY_CONTACT_DELIVERY_ENABLED: 'true', HID_DEPLOYMENT_ENV: 'staging',
+      CORS_ORIGINS: 'https://staging.healthidentitydirectory.com',
     }); resetEnvironmentForTests();
     expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(true);
   });

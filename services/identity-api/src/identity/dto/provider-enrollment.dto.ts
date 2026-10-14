@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsEmail, IsIn, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsEmail, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
 const products = ['ehr', 'migrate', 'laboratory', 'pharmacy'] as const;
@@ -25,8 +25,8 @@ export class StartProviderEnrollmentDto {
   @IsIn(['provider-enrollment'])
   turnstileAction!: 'provider-enrollment';
 
-  @IsString() @MaxLength(2048)
-  turnstileToken!: string;
+  @IsOptional() @IsString() @MaxLength(2048)
+  turnstileToken?: string;
 }
 
 export class VerifyProviderEnrollmentDto {
