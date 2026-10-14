@@ -68,6 +68,23 @@ separate deployment authorization. None of them has been run.
   `{ "open": boolean }` from the same gate, so Health-id can say so before it
   asks for a NIN (ADR-057; `INTERFACE_CONTRACT.md`). Health-id
   82b474e does not read it yet (release checklist §3).
+- **Note (2026-10-14): the owner's described flow.** The product owner
+  described patient self-enrollment as: the patient enters their NIN and
+  QoreID verifies it; they enter a phone number or email of their own
+  choice; they confirm the code sent to it; they set a password. No code is
+  sent to the registry phone. QoreID returns only the name, the NIN and its
+  reference, and the patient enters a needed field the NIN record lacks.
+  BRANCH:launch/patient-self-enrollment (ADR-061, migration 0092) supports
+  that flow where NIN-only enrollment is enabled: a record without a date of
+  birth or gender can now enroll, and the patient enters them at activation.
+  It does not change the decision above. Production NIN-only enrollment
+  stays refused by configuration until the owner explicitly confirms lifting
+  the refusal and accepts its residual risk: someone who knows another
+  person's NIN could enroll first as them, and there is no dispute or
+  recovery path for the real holder yet. Also open before that: the
+  activation command records `NIN_VERIFIED` assurance (0085, unchanged by
+  0092), while the decision above says enrollment that proves only the
+  patient's own contact records contact assurance.
 - **Launch consequence (open for the owner to confirm).** With N1 as decided
   and facility-assisted registration out of scope (N2(d), D17), no new
   patient can get a Health ID in production at launch; legacy-migrated
@@ -653,3 +670,4 @@ for each merged change and its evidence. Pull requests from this review:
 | ENC-RETRACT-1 (launch blocker), ENC-RETRACT-2, RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT, ALLERGY-1 (EHR retraction integrity) | D-Eminence/hid-system#74, migration 0090, ADR-056 | merged to `main` 2026-10-13, not deployed |
 | MOD-PERM-OCR-OUTREACH, FE-17, FE-15, UPLOADS-DEFAULT-ON, PSELF-RLS, CONSENT-GRANTEE, NOTIF-PIN-NOTICE (launch module permissions, launch controls, patient-self binding, named grantee, PIN-use notice); ACCESS-REQ-STALE deferred | D-Eminence/hid-system#75, migration 0091, ADR-058 | merged to `main` 2026-10-13, not deployed; optional Health-id changes listed in the release checklist §3 |
 | A4, A5, A6, A9, A10, A16, A18, A19, A24, LOGIN-DETAIL-ORACLE (faults answered as sign-outs, workload refusals relayed as the user's, refresh clearing cookies on a fault, patient-only routes failing their audit, no-membership sign-in, administrators' clinical sessions exempt from maintenance, a write decision on a reported read, `500` for a disallowed origin, names and reasons in admin URLs, sign-in details confirming a password) | D-Eminence/hid-system#76, no migration, ADR-059 | merged to `main` 2026-10-13, not deployed (NO-MEMBERSHIP-SIGN-IN decided); the workload refusal mapping of Lab, Pharmacy, OCR and Outreach, the OCR guard `catch` (all off at launch), and the Health-id move to the `POST` admin search and export are follow-ups |
+| A NIN record without a date of birth or gender could not enroll (`502 QOREID_PROVIDER_RESPONSE_INVALID`) | BRANCH:launch/patient-self-enrollment, migration 0092, ADR-061 | not merged, not deployed; production NIN-only enrollment stays refused (N1, note of 2026-10-14); the Health-id change is listed in the release checklist §3 |
