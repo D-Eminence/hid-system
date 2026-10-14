@@ -99,7 +99,7 @@ Release checklist §9 has the rollback for each change.
 - **Logs:**
   - `notification.otp.outcome` (no recipient, code or message);
   - `identity_workload_token_expired`;
-  - `event=turnstile_verification` (Turnstile refusals and outages; no token, secret or address). A run of `outcome=TURNSTILE_UNAVAILABLE reason=siteverify_refused_configuration` means the Turnstile secret is wrong;
+  - `event=turnstile_verification` (Turnstile refusals and outages; no token, secret or address). Error-level lines with `outcome=TURNSTILE_UNAVAILABLE` and `reason=siteverify_refused_configuration` mean Siteverify refused Identity's own request: `codes=invalid-input-secret` or `missing-input-secret` is a wrong or missing Turnstile secret; `reason=siteverify_internal_error` is a Cloudflare fault, not the secret;
   - the gateway JSON access log (no query strings, #72).
 - **Audit:**
   - `audit.events` refusal rows carry `status` and `code` (A17).

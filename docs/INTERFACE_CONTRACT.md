@@ -128,9 +128,13 @@ The `Origin` header must be the page's own origin and one of `CORS_ORIGINS`.
 Identity refuses at the first failed check:
 
 1. The body is valid for the route and names the route's action: else
-   `400 VALIDATION_FAILED` (for `POST /auth/login` and
-   `POST /auth/patient/login`, a sign-in action of another route is
-   `400 INVALID_LOGIN_ACTION`). The `Origin` is allowed: else
+   `400 VALIDATION_FAILED`, with these exceptions. `POST /auth/login`
+   answers a `patient-login` or `admin-login` action
+   `400 INVALID_LOGIN_ACTION`. `POST /auth/patient/login` and
+   `POST /auth/google/link` answer any action but `patient-login` (for
+   patient sign-in, a missing one too) `400 INVALID_LOGIN_ACTION`.
+   `POST /auth/oidc/exchange` answers `staff-login`
+   `403 GOOGLE_STAFF_SIGN_IN_DISABLED`. The `Origin` is allowed: else
    `403 ORIGIN_DENIED`. Some routes make their own checks here too, such as
    the `Idempotency-Key` of a demo request or the signed-out state of a
    provider enrollment.
@@ -167,14 +171,22 @@ Identity asks Siteverify at most twice per check: once more, with the same
 idempotency key, after a network failure, a timeout (`TURNSTILE_TIMEOUT_MS`,
 3 seconds by default) or a `5xx`. Cloudflare answers that retry with the
 first result, so a token spent by an attempt whose answer was lost is not
-refused as a replay. A new request never reuses another request's key. A
-Siteverify answer of `missing-input-secret`, `invalid-input-secret` or
-`internal-error` is `503`, not a rejection: the fault is the server's.
+refused as a replay. A new request never reuses another request's key.
+Siteverify refusing Identity's own request (Cloudflare answers HTTP 400 with
+`missing-input-secret`, `invalid-input-secret` or `bad-request`) and
+Cloudflare's `internal-error` are `503`, not a rejection: the fault is the
+server's.
 
 Each refusal at step 3 or 4 and each `503` writes one log line,
-`event=turnstile_verification`, with the outcome code, the action, a reason
-for a `503`, Cloudflare's error codes and the number of Siteverify attempts.
-It never contains the token, the secret, the `Origin` or the client address.
+`event=turnstile_verification`. A refusal line has the outcome code, the
+action and Cloudflare's error codes; a `503` line also has a `reason` and
+the number of Siteverify attempts. The reasons are `siteverify_unreachable`,
+`siteverify_http_<status>` (a 5xx or 429), `siteverify_unreadable`,
+`siteverify_internal_error` (Cloudflare's own fault, warning level),
+`siteverify_refused_configuration` and `secret_missing` (Identity's own
+configuration, error level; the `codes` field tells a wrong secret,
+`invalid-input-secret`, from a missing one or a malformed request). A line
+never contains the token, the secret, the `Origin` or the client address.
 
 **Routes and actions.** At launch only the web host (`www`, staging:
 `staging`) and the admin host (`admin`, `admin.staging`) are deployed
