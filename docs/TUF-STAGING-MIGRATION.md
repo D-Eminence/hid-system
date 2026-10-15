@@ -238,7 +238,7 @@ The executable covers:
    0090's `encounter-retraction.integration.sql` needs the merge change in the
    release checklist §2 (the nurse role's `ehr.document.write` inside its
    rollback-only transaction); without it the rehearsal fails on that suite.
-   With 0092 (BRANCH:launch/patient-self-enrollment, ADR-061): the additional
+   With 0092 (D-Eminence/hid-system#82, ADR-061): the additional
    suites include `public-patient-enrollment-self-reported.integration.sql`
    (a NIN record without a date of birth or gender activates with the values
    the patient enters, from 1900-01-01 to today, a value the record gives is

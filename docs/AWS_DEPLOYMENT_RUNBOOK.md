@@ -30,7 +30,8 @@ inputs `HID_NIN_HOLDER_SMS_ENABLED`, `HID_ASSISTED_REGISTRATION_ENABLED` and
 `HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED` all default to `false` and set
 the Identity variables of the same names without `HID_`. Synthesis refuses
 NIN-only enrollment without a holder route, the online route on staging
-(email only), the online route in production without the facility route, and
+(email only), the online route in production until the facility route ships
+(ADR-063; `HID_ASSISTED_REGISTRATION_ENABLED` has no effect before then), and
 the signed-in NIN binding in production. Enabling any of them is an operator
 step after the release checklist P23 to P27.
 

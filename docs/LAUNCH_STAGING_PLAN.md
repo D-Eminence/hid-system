@@ -29,8 +29,8 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
   - D-Eminence/hid-system#76: identity error hardening.
   - D-Eminence/hid-system#78: web push proposal (documentation only; nothing built) and checklist corrections.
   - D-Eminence/hid-system#79: Turnstile contract.
-- **Pending, not merged:** BRANCH:launch/patient-self-enrollment adds 0092: a NIN record without a date of birth or gender can enroll (NIN-only enrollment stays off in production, N1). The steps in §3 already count 0092.
-- **Pending, not merged:** BRANCH:launch/nin-ownership-proof adds 0093: a Health ID needs a proof that the person holds the NIN, a code to the phone the NIN record lists (ADR-062). Every new flag is off, and the online route stays closed on staging, which sends email only. The steps in §3 count 0093.
+- **Merged, not deployed:** D-Eminence/hid-system#82 adds 0092: a NIN record without a date of birth or gender can enroll. The steps in §3 count 0092.
+- **Pending, not merged:** BRANCH:launch/nin-ownership-proof adds 0093: a Health ID needs a proof that the person holds the NIN, a code to the phone the NIN record lists (ADR-062). Every new flag is off. The online route stays closed on staging, which sends email only, and production refuses it until the facility route ships (ADR-063). So with 0093 alone public patient enrollment is fully closed on staging: every start answers `503 PATIENT_REGISTRATION_NOT_OPEN`, and the staging acceptance rows that need a working start wait for the facility route (release checklist §7). The steps in §3 count 0093.
 
 ## 3. Staging, in order
 

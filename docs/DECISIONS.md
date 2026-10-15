@@ -4363,10 +4363,9 @@ Related: ADR-052; ADR-053; ADR-058; `WEB_PUSH_PROPOSAL.md`;
 
 # ADR-061: A NIN record without a date of birth or gender: the patient enters them at activation
 
-Status: Proposed for source implementation
-(BRANCH:launch/patient-self-enrollment, migration 0092). Not merged or
-deployed. Production NIN-only enrollment stays refused by configuration
-(decision N1).
+Status: Accepted in source (D-Eminence/hid-system#82, migration 0092).
+Merged to main, not deployed. Production NIN-only enrollment stays refused
+by configuration (decision N1) until ADR-062 replaces that rule.
 
 Date: 2026-10-14
 
@@ -4478,7 +4477,10 @@ Decision:
   a verifier HMAC is stored. Five attempts, single use, a resend cooldown,
   three codes per enrollment. The SMS says why it came and names no NIN,
   person, Health ID or link. The route is closed for a record without a
-  usable phone and for a record that shows an age under 18.
+  usable phone and for a record whose date of birth shows an age under 18.
+  A record without a date of birth is treated as an adult, and its patient
+  may enter any date at activation (ADR-061), an age under 18 included.
+  Whether to refuse that is an owner decision, as minors at a facility are.
 - Facility route: planned (0094, ADR-063). `facility.available` is `false`
   here, and the proof command refuses `facility_in_person`.
 - Deliberate departure from the owner's step order: the existing-Health-ID
@@ -4495,19 +4497,36 @@ Decision:
 - Budgets in `identity.public_patient_holder_events`, counted under advisory
   locks by `SECURITY DEFINER` commands: five sends per phone a day; ten and
   thirty wrong codes per NIN a day and a month; five different NINs proven
-  per phone a year. Send and failure budgets are checked at send; a code
-  already sent keeps its attempts. Spent budgets answer
-  `429 NIN_HOLDER_ROUTE_LIMITED` ("Use a participating facility to
-  register.").
+  per phone a year. Send and failure budgets are checked at send. A code is
+  sent only while the NIN's wrong codes plus the attempts left on all its
+  open holder codes, the new one included, stay within the daily and the
+  monthly budget, so nobody can have more wrong codes in reach than those
+  budgets, across any number of enrollments. A code already sent keeps its
+  attempts. Spent budgets answer `429 NIN_HOLDER_ROUTE_LIMITED` ("Use a
+  participating facility to register.").
 - Lock order: the NIN advisory lock (0092's key) before the enrollment row
-  lock, in Identity, the proof command and the activation command.
+  lock, in Identity (every holder step and activation), the proof command
+  and the activation command. The send and failure commands lock the row
+  and then the holder budget locks; they rely on Identity to hold the NIN
+  lock. The prune at every start locks expired enrollments, skipping any
+  another transaction holds, before it deletes their codes, as the proof
+  does, so the two never deadlock.
+- Audit: `holder-verified` {method, ninDigest}; `existing-identity` {method,
+  ninDigest, existingBinding}; `superseded` or `contested` {count, methods,
+  ninDigest}; `holder-route-closed` {ninDigest, window}. The registry phone's
+  digest is kept only in the holder events, pruned after 31 or 366 days,
+  never in the append-only audit log.
 - Configuration, every flag off by default: `NIN_HOLDER_SMS_ENABLED`,
   `ASSISTED_REGISTRATION_ENABLED` (defined here, used by ADR-063) and
   `QOREID_PATIENT_SELF_NIN_BINDING_ENABLED`. NIN-only enrollment needs a
-  holder route. In production the online route needs the facility route, and
-  the signed-in NIN binding is refused. These rules replace the earlier
-  blanket production refusal of NIN-only enrollment, because activation now
-  requires the proof in the database. Enabling a flag is an operator step.
+  holder route. Production refuses the online route until the facility route
+  ships (ADR-063), in Identity and in infrastructure:
+  `ASSISTED_REGISTRATION_ENABLED` has no effect before then, so it cannot
+  stand in for that route. ADR-063 replaces this refusal with a check for an
+  open facility route. Production also refuses the signed-in NIN binding.
+  These rules replace the earlier blanket production refusal of NIN-only
+  enrollment, because activation now requires the proof in the database.
+  Enabling a flag is an operator step.
 - The signed-in "Verify NIN" (`POST /identity/me/verification/nin`) binds a
   NIN to a legacy patient on a name and date-of-birth match, with no holder
   proof. It answers `503 QOREID_PATIENT_NIN_BINDING_DISABLED` while its flag
@@ -4521,13 +4540,18 @@ Consequences:
 
 - No path creates a Health ID from a NIN alone. A direct call to the
   activation command without a proof is refused by the database.
-- A patient whose record has no usable phone, or who is under 18, cannot
-  register online. Until the facility route ships they cannot register at
-  all.
+- A patient whose record has no usable phone, or whose record shows an age
+  under 18, cannot register online. Until the facility route ships they
+  cannot register at all.
+- With this change alone no deployed environment can open public patient
+  enrollment. Staging refuses the online route (it sends email only),
+  production refuses it until ADR-063, and the facility route is not built.
+  Every start on staging and production answers
+  `503 PATIENT_REGISTRATION_NOT_OPEN` before the QoreID gate. The staging
+  acceptance rows that need a working start cannot run on staging until
+  ADR-063; the synthetic runtime verifier covers them.
 - Health-id 077b85c cannot register a patient on 0093: it does not know the
   holder step and fails closed. Sign-in is unchanged.
-- Staging sends email only, so the online route cannot be tested live there.
-  It stays closed on staging; the synthetic runtime verifier covers it.
 
 Residual risks:
 
@@ -4536,8 +4560,16 @@ Residual risks:
   online step. The SMS warns the holder, and the in-person route is the
   stronger proof.
 - Someone who knows a NIN can spend its failure budget and close the online
-  route for its holder for a day or a month. The facility route is the
-  remedy, so production requires it with the online route.
+  route for its holder for a day or a month. The send budget closes it too:
+  five sends to the registry phone in a day (two starts) close it for 24
+  hours without a single wrong code. The facility route is the remedy, so
+  production keeps the online route off until that route ships.
+- Before any proof, a caller who passes Turnstile and the QoreID gate learns
+  one fact about the registry record: whether the online route is available
+  (start, `GET /current` and the holder send), that is whether the record has
+  a usable phone and does not show an age under 18. No registry value is
+  returned. The owner may choose to answer the minor case only at send, with
+  the same text.
 - The checks in the database stop a compromised Identity runtime from
   writing the holder columns or activating without a proof record. They do
   not stop a compromised runtime from sending itself a code it can read,
@@ -4545,6 +4577,15 @@ Residual risks:
 - Account recovery is unchanged. A holder sent to recovery whose contact is
   lost has no self-service path yet; facility-assisted recovery is an owner
   decision.
+- A holder whose NIN someone else already bound (with the holder's SIM, or
+  before 0093) is told to use account recovery, which cannot work for them.
+  The error table sends them to Health ID support with the reference. A
+  governed contested-identity review (`MANUAL_REVIEW`, a second approver for
+  any re-binding) is an owner decision and is not built.
+- Requirement 5 ("never a duplicate") holds for NIN-keyed bindings only. The
+  bound check reads NIN identifiers and the legacy crosswalk, so a legacy
+  patient without a recorded NIN can get a second Health ID by the online
+  route. Closing that is an open owner decision.
 - Production QoreID responses are unconfirmed (DEP-1): what `nin.phone`
   means, when it was captured, whether a SIM change is flagged, and whether
   HID may text it.
