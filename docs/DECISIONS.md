@@ -3658,10 +3658,12 @@ Context:
   problem's `detail` as sent, but the authored "temporarily unavailable"
   text never reached it: Identity's problem filter replaced every 5xx
   detail with "The service could not complete the request.", and the
-  gateway (on main and on this branch) replaces every upstream 502/503/504
-  with `503 UPSTREAM_UNAVAILABLE` "A required platform service is
-  temporarily unavailable.", which is what the patient saw. Either text is
-  wrong for this case: the closure is a decision, not an outage.
+  gateway then replaced every upstream 502/503/504 with
+  `503 UPSTREAM_UNAVAILABLE` "A required platform service is temporarily
+  unavailable.", which is what the patient saw until ADR-055
+  (D-Eminence/hid-system#72) made the gateway pass upstream errors
+  through. Either text is wrong for this case: the closure is a decision,
+  not an outage.
 
 Decision (owner defaults: deny by default, least exposure, no production
 bypass):
@@ -4550,11 +4552,12 @@ Consequences:
   facility (ADR-063).
 - With 0093 alone no deployed environment could open public patient
   enrollment. Staging refuses the online route (it sends email only),
-  production refuses it until ADR-063, and the facility route is not built.
-  Every start on staging and production answers
+  production refused it until ADR-063, and the facility route was not yet
+  built. Every start on staging and production then answered
   `503 PATIENT_REGISTRATION_NOT_OPEN` before the QoreID gate. The staging
-  acceptance rows that need a working start cannot run on staging until
-  ADR-063; the synthetic runtime verifier covers them.
+  acceptance rows that need a working start could not run on staging until
+  ADR-063 (now release checklist S4v); the synthetic runtime verifier
+  covers them.
 - Health-id 55a50b0 cannot register a patient on 0093: it does not know the
   holder step and fails closed. Sign-in is unchanged (release checklist §3,
   "Health-id alignment").

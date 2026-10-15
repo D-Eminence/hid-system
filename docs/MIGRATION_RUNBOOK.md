@@ -592,7 +592,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
    runtime privilege on the holder events, the designations, their events
    or the checks. No facility is designated and
    `ASSISTED_REGISTRATION_ENABLED` stays off until release checklist P29 to
-   P32.
+   P33.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts. A migrated staff account signs in with
    its password, then enrols an authenticator with the code emailed to it

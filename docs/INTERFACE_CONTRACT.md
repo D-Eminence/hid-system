@@ -1464,8 +1464,11 @@ record lacks when they set their password:
 - Every progress answer after the holder proof and before activation
   carries `requiredProfileFields`: the fields the NIN record did not
   provide, in the order `dateOfBirth`, `gender`. It is `[]` for a complete
-  record. From 0093 (ADR-062) it comes first on the holder proof answer,
-  `200 { "stage": "verify_contact", "requiredProfileFields": [...] }`. It is
+  record. From 0093 (ADR-062) it comes first on the online holder proof
+  answer (`POST .../holder/verify`),
+  `200 { "stage": "verify_contact", "requiredProfileFields": [...] }`. After
+  an in-person check (0094, ADR-063) it comes first on `GET .../current` at
+  `verify_contact`: the staff answer never carries it. It is
   then on `GET .../current` at `verify_contact` and `set_password`, on a
   same-key start that resumes an enrollment at those stages, and on the
   contact proof answer, which is now
@@ -1600,11 +1603,15 @@ Health ID can be activated without a holder proof; the database refuses it.
 - The two `503` refusals of this change, `NIN_HOLDER_ROUTE_UNAVAILABLE` and
   `QOREID_PATIENT_NIN_BINDING_DISABLED`, carry their own fixed `detail`
   (not the generic 5xx text), safe to show as sent; the gateway passes them
-  through (ADR-055). Every other `5xx` of these routes
-  (`OTP_DELIVERY_UNAVAILABLE`, `ENROLLMENT_RECONCILIATION_REQUIRED`,
-  `ENROLLMENT_UNAVAILABLE`, `ENROLLMENT_CONFIGURATION_UNAVAILABLE`,
-  `INTEGRATION_PAUSED`) carries "The service could not complete the
-  request.": a client keys its own text on the `code`.
+  through (ADR-055). So do the others section 6 lists as a
+  `PublicDetailProblem`, such as `503 PATIENT_REGISTRATION_NOT_OPEN` and a
+  NIN lookup that fails with `502`, `503` or `504`. Every other `5xx` of
+  these routes carries "The service could not complete the request.", for
+  example `OTP_DELIVERY_UNAVAILABLE`, `ENROLLMENT_RECONCILIATION_REQUIRED`,
+  `ENROLLMENT_UNAVAILABLE`, `ENROLLMENT_ACTIVATION_UNAVAILABLE`,
+  `ENROLLMENT_EVIDENCE_UNAVAILABLE`, `ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
+  `ENROLLMENT_CONFIGURATION_UNAVAILABLE` and `INTEGRATION_PAUSED`: a client
+  keys its own text on the `code`.
 - `POST /api/v1/identity/me/verification/nin` (the signed-in "Verify NIN")
   answers `503 QOREID_PATIENT_NIN_BINDING_DISABLED` ("Verifying a NIN from
   your account is not available") while
