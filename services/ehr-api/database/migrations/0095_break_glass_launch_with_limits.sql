@@ -1,5 +1,5 @@
 -- Break-glass at launch, with limits (owner decision of 2026-10-14 on D9;
--- ADR-058 addendum). Applied migrations 0001 through 0092 are immutable.
+-- ADR-058 addendum). Applied migrations 0001 through 0094 are immutable.
 --
 -- ADR-058 re-enables a module only through a reviewed migration that grants
 -- its permissions again; for break-glass it also needs the emergency purpose
@@ -67,7 +67,7 @@
 -- The role bootstrap's assertions (runtime-roles.integration.sql) change with
 -- this migration: they require exactly these three holders. The bootstrap of
 -- this release must therefore run after it, and an earlier release's
--- bootstrap refuses a database that holds 0093.
+-- bootstrap refuses a database that holds 0095.
 --
 -- Locks: ACCESS SHARE on platform.control_settings (the control read, taken
 -- first, as an activation and the role bootstrap take that table first),
@@ -75,7 +75,7 @@
 -- identity.purpose_of_use_codes, and the foreign keys' FOR KEY SHARE locks on
 -- the three auth.roles rows and the auth.permissions row; at most four rows
 -- are written and no table is scanned. Each lock waits at most the runner's
--- 5 s lock timeout; a timeout rolls 0093 back whole, and it can be run again.
+-- 5 s lock timeout; a timeout rolls 0095 back whole, and it can be run again.
 
 -- 0. Precondition.
 do $$

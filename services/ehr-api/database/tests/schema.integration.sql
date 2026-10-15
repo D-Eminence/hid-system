@@ -101,9 +101,9 @@ insert into identity.patients (
   'Schema', 'Patient', 'Schema Patient', 'active'
 );
 
--- 0082 and 0093 seed direct-care and emergency, so those rows are kept as
+-- 0082 and 0095 seed direct-care and emergency, so those rows are kept as
 -- migrated; healthcare-operations is not seeded (pending decision N3).
--- Break-glass is on at launch with limits (D9): 0093 grants
+-- Break-glass is on at launch with limits (D9): 0095 grants
 -- identity.break-glass.write to doctor, clinician and nurse again, and this
 -- suite relies on that grant. Outreach is off at launch (D17): 0091 withdraws
 -- every Outreach permission from every role, and this rollback-only suite

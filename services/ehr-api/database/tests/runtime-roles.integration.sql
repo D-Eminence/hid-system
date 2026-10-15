@@ -812,7 +812,7 @@ begin
 end
 $$;
 
--- The launch module set (0084, 0091 and 0093, decision D17, ADR-058): Lab,
+-- The launch module set (0084, 0091 and 0095, decision D17, ADR-058): Lab,
 -- Pharmacy, OCR and Outreach are off, EHR lab ordering is off and document
 -- uploads are off. No role holds a permission of a module that is off (lab.*,
 -- pharmacy.*, ocr.*, outreach.*), the EHR lab-ordering write or
@@ -821,7 +821,7 @@ $$;
 -- writes of the launch set stay. Re-enabling a module takes its own reviewed
 -- migration that grants the permissions again and changes this assertion with
 -- it. Break-glass is the first (D9, owner decision of 2026-10-14, ADR-058
--- addendum): 0093 grants identity.break-glass.write again to exactly the
+-- addendum): 0095 grants identity.break-glass.write again to exactly the
 -- roles 0010 granted it to, doctor, clinician and nurse, and no other role may
 -- hold it; its platform control stays an operator's step.
 do $$

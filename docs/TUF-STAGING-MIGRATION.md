@@ -276,7 +276,7 @@ The executable covers:
    signed in with an authenticator, refused staff, a mismatch, a match,
    activation and sign-in, an existing Health ID, a race with a phone proof,
    both budgets and a suspension, as `hid_identity_api_runtime`.
-   With 0093 (break-glass at launch, with limits; ADR-058 addendum): the role
+   With 0095 (break-glass at launch, with limits; ADR-058 addendum): the role
    assertions require exactly doctor, clinician and nurse to hold
    `identity.break-glass.write`; the additional suites include
    `break-glass-launch.integration.sql` (which sets `break_glass_enabled`
@@ -292,9 +292,9 @@ The executable covers:
    (as P11's operator step would), `423` again once it is off, and `403
    PERMISSION_DENIED` for an org admin; and the non-superuser check's P10 and
    P11 expect `emergency` and the three break-glass holders. The
-   non-superuser check also confirms 0093's precondition: before the first
+   non-superuser check also confirms 0095's precondition: before the first
    bootstrap the administrator cannot read the control
-   (`PLATFORM_CONTROL_UNAVAILABLE`) and 0093 applies; after it, 0093's SQL run
+   (`PLATFORM_CONTROL_UNAVAILABLE`) and 0095 applies; after it, 0095's SQL run
    again as the administrator in rolled-back transactions is refused
    (`55000 BREAK_GLASS_CONTROL_ON`) with the control on and is a no-op with it
    off.
@@ -323,7 +323,7 @@ The executable covers:
    and attestation helpers or `auth.staff_session_is_mfa`, and that the
    permission is held by `clinician`, `doctor` and `nurse` only; the
    bootstrap's own `runtime-roles.integration.sql` checks the 0093 and 0094
-   grants for every runtime role; and since 0093 (break-glass) break-glass
+   grants for every runtime role; and since 0095 break-glass
    held by exactly doctor, clinician and nurse, exactly the `direct-care` and
    `emergency` purposes, and `break_glass_enabled` still off), then
    restore its pre-schema backup to an independent database for exact comparison.

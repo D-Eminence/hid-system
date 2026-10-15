@@ -248,9 +248,9 @@ export class ConsentService {
    * identity.activate_break_glass (0031) refuses with 22023 and this message
    * when no active 'emergency' purpose of use exists. The route always runs it
    * with the emergency purpose, so here the refusal means emergency access is
-   * not enabled on the platform: 0093 seeds 'emergency' (D9), so on a migrated
+   * not enabled on the platform: 0095 seeds 'emergency' (D9), so on a migrated
    * database it means an operator deactivated the code, or the database
-   * predates 0093 (P10). It is answered like the disabled platform control.
+   * predates 0095 (P10). It is answered like the disabled platform control.
    */
   private translateBreakGlass(error: unknown): unknown {
     if (isDatabaseError(error) && error.code === '22023'

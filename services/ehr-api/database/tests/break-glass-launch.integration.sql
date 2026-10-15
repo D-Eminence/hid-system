@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Break-glass at launch, with limits (0093; owner decision of 2026-10-14,
+-- Break-glass at launch, with limits (0095; owner decision of 2026-10-14,
 -- decision D9, ADR-058 addendum). This suite inserts no purpose code and
 -- grants no permission: it requires what the migrations leave, then runs
 -- activation as the exact Identity API runtime role and the emergency read as
@@ -11,9 +11,9 @@
 --    identity.patient.read (the lookup that opens the record) and the
 --    encounter and note reads (the emergency summary route), and no role
 --    holds any other permission 0084 or 0091 withdrew.
--- 2. An active 'emergency' purpose of use exists: 0093's row, or a row an
---    operator inserted earlier, which 0093 keeps as it is (the rehearsal's
---    fresh builds check 0093's exact row). No healthcare-operations row
+-- 2. An active 'emergency' purpose of use exists: 0095's row, or a row an
+--    operator inserted earlier, which 0095 keeps as it is (the rehearsal's
+--    fresh builds check 0095's exact row). No healthcare-operations row
 --    exists, from any source (N3; P11).
 -- 3. The control, whatever this database holds: inside this transaction a
 --    platform administrator sets break_glass_enabled off and then on through
@@ -43,7 +43,7 @@ begin
     from auth.role_permissions
    where permission_code = 'identity.break-glass.write';
   if found is distinct from 'clinician,doctor,nurse' then
-    raise exception 'identity.break-glass.write is not held by exactly clinician, doctor and nurse (0010, 0093): %',
+    raise exception 'identity.break-glass.write is not held by exactly clinician, doctor and nurse (0010, 0095): %',
       coalesce(found, 'no role');
   end if;
   if not exists (select 1 from auth.permissions where code = 'identity.break-glass.write' and active) then
@@ -77,7 +77,7 @@ begin
     from identity.purpose_of_use_codes
    where code = 'emergency';
   if found is null or found not like '%|true|%' then
-    raise exception 'no active emergency purpose of use exists (0093 seeds it and keeps an operator''s row): %',
+    raise exception 'no active emergency purpose of use exists (0095 seeds it and keeps an operator''s row): %',
       coalesce(found, 'missing');
   end if;
   select format('%s|%s|%s', display, active::text, source_system) into found

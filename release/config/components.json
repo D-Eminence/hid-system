@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0094",
+    "last": "0095",
     "count": 95,
     "files": [
       {
@@ -475,8 +475,8 @@
         "sha256": "322f2baa20fbe68764cfed4fd54a278653a367f213aa4fc0418d2b26c4a0aae8"
       },
       {
-        "name": "0093_break_glass_launch_with_limits.sql",
-        "sha256": "e5072a02fa90dc3e894dab3f6a78d7b1d1058719f93a2ac6e26cf67996e5fbee"
+        "name": "0095_break_glass_launch_with_limits.sql",
+        "sha256": "02db04c8f4baface75ba6b09db6a9089ed4654f493ae4b9394330ccdd67d48fb"
       }
     ]
   },
