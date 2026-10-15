@@ -1389,6 +1389,31 @@ do $$ begin
 end $$;
 
 
+-- Facility search with an account capability: a ready one searches (and the
+-- search counts against its own budget); one that still needs the
+-- authenticator, and a spent draft, are refused like a missing one.
+set local role hid_identity_api_runtime;
+select pg_temp.ca_system('search-account');
+do $$ begin
+  if (select count(*) from identity.search_clinician_application_facilities(pg_temp.ca_h('session:p1-account'), 'suite')) <> 4 then
+    raise exception 'a ready capability could not search';
+  end if;
+end $$;
+select pg_temp.ca_refused($c$select * from identity.search_clinician_application_facilities(pg_temp.ca_h('session:p3-enrol'),
+  'suite')$c$, 'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select * from identity.search_clinician_application_facilities(pg_temp.ca_h('session:p2'),
+  'suite')$c$, 'CLINICIAN_APPLICATION_SESSION_INVALID');
+reset role;
+do $$ begin
+  if (select facility_searches from identity.clinician_application_sessions
+       where token_hmac = pg_temp.ca_h('session:p1-account')) <> 1
+     or (select consumed_at from identity.clinician_application_sessions where token_hmac = pg_temp.ca_h('session:p2')) is null
+     or (select expires_at from identity.clinician_application_sessions where token_hmac = pg_temp.ca_h('session:p2'))
+       <= clock_timestamp() then
+    raise exception 'the account capability search was not counted, or the spent draft is not a live spent one';
+  end if;
+end $$;
+
 -- 10. The queue and the detail.
 -- Helpers as the runtime: an applicant whose authenticator is ready (draft,
 -- submission, a proven factor, the ready step), and step 1 by an administrator.
@@ -1857,6 +1882,50 @@ do $$ begin
   end if;
 end $$;
 rollback to savepoint ca_reset;
+-- The approved view's accessState follows the access itself: lapsed when the
+-- role's attestation lapsed, ended when the membership ended (0087), and
+-- account_unavailable when the account is disabled. Each rolled back.
+create function pg_temp.ca_access_state() returns text language sql as $$
+  select identity.clinician_application_view(application)->>'accessState'
+    from identity.clinician_applications application where application.id = (select p1x from ca_step)
+$$;
+savepoint ca_access;
+alter table identity.staff_credential_attestations disable trigger staff_credential_attestations_no_mutation;
+update identity.staff_credential_attestations set recorded_at = clock_timestamp() - interval '2 minutes',
+  valid_until = clock_timestamp() - interval '1 minute' where id = current_setting('ca_suite.p1_attestation')::uuid;
+alter table identity.staff_credential_attestations enable trigger staff_credential_attestations_no_mutation;
+do $$ begin
+  if pg_temp.ca_access_state() is distinct from 'lapsed' then
+    raise exception 'a lapsed attestation is shown as %', pg_temp.ca_access_state();
+  end if;
+end $$;
+rollback to savepoint ca_access;
+savepoint ca_access;
+select pg_temp.ca_as('d');
+select * from identity.admin_end_workforce_membership(current_setting('ca_suite.p1_membership')::uuid,
+  'ca110000-0000-4000-8000-00000000000a', (select row_version from identity.staff_facility_memberships
+    where id = current_setting('ca_suite.p1_membership')::uuid), 'Synthetic end of P1''s membership at X',
+  'clinician-suite-end-p1-x', repeat('e', 64));
+do $$ begin
+  if pg_temp.ca_access_state() is distinct from 'ended' then
+    raise exception 'an ended membership is shown as %', pg_temp.ca_access_state();
+  end if;
+end $$;
+rollback to savepoint ca_access;
+savepoint ca_access;
+update auth.accounts set disabled_until = clock_timestamp() + interval '1 hour'
+ where id = pg_temp.ca_account('doctor1@ca.invalid');
+do $$ begin
+  if pg_temp.ca_access_state() is distinct from 'account_unavailable' then
+    raise exception 'a disabled account is shown as %', pg_temp.ca_access_state();
+  end if;
+end $$;
+rollback to savepoint ca_access;
+do $$ begin
+  if pg_temp.ca_access_state() is distinct from 'active' then
+    raise exception 'the approved access is shown as % after the rolled-back cases', pg_temp.ca_access_state();
+  end if;
+end $$;
 -- The two-person CHECK refuses an approver who recorded step 1, on any write.
 reset role;
 do $$ begin

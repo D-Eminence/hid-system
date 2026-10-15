@@ -600,6 +600,12 @@ try {
   const listed = await call('get', '/current', { cookie: status });
   expectStatus(listed, 200);
   assert.equal(listed.body.applications[0].licenceNumberHint, '0001');
+  // A ready capability searches facilities (to apply again), also beside a
+  // session cookie: only a draft is held to a signed-out browser.
+  const readySearch = await call('post', '/facility-search', { cookie: `${status}; hid_access=other-session`,
+    network: statusNetwork, body: { query: 'Clinician Runtime' } });
+  expectStatus(readySearch, 200);
+  assert.deepEqual(readySearch.body.facilities.map(item => item.facilityId).sort(), [ids.x, ids.y].sort());
   const applyKey = key('apply');
   const applyBody = details(ids.y, { licenceNumber: 'MDCN/R/40001' });
   const appliedY = await call('post', '/current/applications', { cookie: status, network: statusNetwork,
@@ -619,7 +625,7 @@ try {
   assert.equal(withdrawn.body.state, 'withdrawn');
   expectStatus(await call('post', `/${appliedY.body.applicationId}/withdraw`, { cookie: status,
     headers: { 'If-Match': `"${appliedY.body.version}"` } }), 200);
-  checks.push('the status start is an identical 202 for an applicant, a patient, a Super Admin, an org admin and an unknown address, and only the applicant gets a code (a guessed decoy code is 401); a correct code (even beside another session cookie) asks for the authenticator: the list is 403 until then, a wrong TOTP is 401 MFA_INVALID_CODE and counted, the right one makes the capability ready with no session; applying again (Idempotency-Key) is submitted at once and replays, a duplicate is 409 ALREADY_OPEN, withdraw needs If-Match and is idempotent');
+  checks.push('the status start is an identical 202 for an applicant, a patient, a Super Admin, an org admin and an unknown address, and only the applicant gets a code (a guessed decoy code is 401); a correct code (even beside another session cookie) asks for the authenticator: the list is 403 until then, a wrong TOTP is 401 MFA_INVALID_CODE and counted, the right one makes the capability ready with no session; the ready capability searches facilities beside a session cookie (200); applying again (Idempotency-Key) is submitted at once and replays, a duplicate is 409 ALREADY_OPEN, withdraw needs If-Match and is idempotent');
 
   // 10. The queue and the two Super Admins.
   expectStatus(await platform.get(adminSupport, `${ADMIN}?state=open`), 403, 'PERMISSION_DENIED');
