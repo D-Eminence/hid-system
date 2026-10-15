@@ -16,6 +16,12 @@ export class VerifyPatientEnrollmentContactDto {
   @IsString() @Matches(/^\d{6}$/) code!: string;
 }
 
+/** The code sent to the phone the NIN record lists (ADR-062). */
+export class VerifyPatientEnrollmentHolderDto {
+  @IsUUID('4') challengeId!: string;
+  @IsString() @Matches(/^\d{6}$/) code!: string;
+}
+
 export const ENROLLMENT_PROFILE_GENDERS = ['female', 'male', 'intersex', 'other', 'unknown'] as const;
 
 export class ActivatePatientEnrollmentDto {

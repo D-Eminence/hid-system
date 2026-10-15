@@ -3,7 +3,9 @@ begin;
 set constraints all deferred;
 
 -- Synthetic QoreID, OTP, and contact evidence. The whole suite rolls back.
-insert into identity.public_patient_enrollments (
+create temporary table holder_fixture (like identity.public_patient_enrollments including defaults)
+  on commit drop;
+insert into holder_fixture (
   id,nin_lookup_hmac,nin_last4,nin_ciphertext,profile_ciphertext,profile_sha256,
   key_version,provider_reference,request_hmac,token_hmac,state,contact_channel,
   contact_hmac,contact_lookup_hmac,contact_ciphertext,contact_verified_at,
@@ -23,6 +25,57 @@ insert into identity.public_patient_enrollments (
   'email',repeat('8',64),repeat('9',64),decode(repeat('e2',32),'hex'),
   clock_timestamp(),'b9110000-0000-4000-8000-000000000002'
 );
+
+-- 0093 (ADR-062): each enrollment above starts at verify_holder and is proved
+-- through identity.record_public_patient_holder_proof as the Identity runtime;
+-- the owner fixture then gives it the contact state above, with the holder
+-- proof made before the contact proof.
+insert into identity.public_patient_enrollments (id, nin_lookup_hmac, nin_last4, nin_ciphertext,
+  profile_ciphertext, profile_sha256, key_version, provider_reference, request_hmac, token_hmac,
+  holder_recipient_hmac)
+select id, nin_lookup_hmac, nin_last4, nin_ciphertext, profile_ciphertext, profile_sha256, key_version,
+  provider_reference, request_hmac, token_hmac, encode(public.digest('holder-phone:' || id::text, 'sha256'), 'hex')
+  from holder_fixture;
+insert into identity.public_patient_enrollment_otps (id, enrollment_id, recipient_hmac, channel, purpose,
+  verifier_hmac, verifier_key_version, expires_at, max_attempts, delivery_outcome)
+select md5('holder-code:' || id::text)::uuid, id, encode(public.digest('holder-phone:' || id::text, 'sha256'), 'hex'),
+  'phone', 'nin_holder', repeat('ab',32), 'fixture', clock_timestamp() + interval '10 minutes', 5, 'accepted'
+  from holder_fixture;
+do $$
+declare
+  ids uuid[];
+  tokens text[];
+  actor text := current_setting('app.actor_subject', true);
+  correlation text := current_setting('app.correlation_id', true);
+begin
+  select array_agg(id order by id), array_agg(token_hmac::text order by id) into ids, tokens from holder_fixture;
+  set local role hid_identity_api_runtime;
+  perform set_config('app.actor_subject', 'system:auth', true);
+  perform set_config('app.correlation_id', 'holder-fixture-proof-0001', true);
+  for n in 1..coalesce(array_length(ids, 1), 0) loop
+    if identity.record_public_patient_holder_proof(ids[n], tokens[n]::char(64), 'registry_phone_otp',
+        md5('holder-code:' || ids[n]::text)::uuid, null,
+        encode(public.digest('holder-nin:' || ids[n]::text, 'sha256'), 'hex')::char(64), 50) <> 'verified' then
+      raise exception 'The fixture holder proof of % failed', ids[n];
+    end if;
+  end loop;
+  reset role;
+  perform set_config('app.actor_subject', coalesce(actor, ''), true);
+  perform set_config('app.correlation_id', coalesce(correlation, ''), true);
+end $$;
+update identity.public_patient_enrollments enrollment
+   set state = fixture.state, contact_channel = fixture.contact_channel, contact_hmac = fixture.contact_hmac,
+       contact_lookup_hmac = fixture.contact_lookup_hmac, contact_ciphertext = fixture.contact_ciphertext,
+       contact_verified_at = fixture.contact_verified_at, verified_challenge_id = fixture.verified_challenge_id,
+       holder_verified_at = least(enrollment.holder_verified_at, fixture.contact_verified_at - interval '1 minute')
+  from holder_fixture fixture
+ where enrollment.id = fixture.id;
+update identity.public_patient_enrollment_otps holder
+   set created_at = enrollment.holder_verified_at - interval '1 minute',
+       verified_at = enrollment.holder_verified_at, consumed_at = enrollment.holder_verified_at
+  from identity.public_patient_enrollments enrollment, holder_fixture fixture
+ where holder.id = enrollment.holder_challenge_id and enrollment.id = fixture.id;
+
 insert into identity.public_patient_enrollment_otps (
   id,enrollment_id,recipient_hmac,channel,verifier_hmac,verifier_key_version,
   expires_at,max_attempts,delivery_outcome,verified_at,consumed_at

@@ -406,34 +406,50 @@ export class QoreIdVerificationAdapter {
     const rawMiddleName = bio?.middlename;
     const middleName = rawMiddleName === undefined || rawMiddleName === null || rawMiddleName === ''
       ? undefined : this.safeName(rawMiddleName);
-    const phoneNumber = bio?.phone === undefined ? undefined : this.safeName(bio.phone, 30);
+    // ADR-062: the registry phone is the holder route's recipient. Null, '' or
+    // absent is no phone; a value that is not a usable string (a number, an
+    // object, control characters, more than 30 characters) is unusable and
+    // left out, never a 502. Identity normalizes what is kept.
+    const phoneNumber = this.blank(bio?.phone) ? undefined : this.safeName(bio?.phone, 30);
     // Only nin.residence is part of the confirmed NIN-only response contract.
     const residence = this.ninResidence(bio?.residence);
-    const photo = typeof bio?.photo === 'string' && bio.photo.length <= 131_072
+    const photoGiven = !this.blank(bio?.photo);
+    const photo = photoGiven && typeof bio?.photo === 'string' && bio.photo.length <= 131_072
       && /^[A-Za-z0-9+/]+={0,2}$/.test(bio.photo) ? bio.photo : undefined;
     if ((rawMiddleName !== undefined && rawMiddleName !== null && rawMiddleName !== '' && !middleName)
-      || (bio?.phone !== undefined && !phoneNumber)
-      || (bio?.photo !== undefined && !photo)) throw this.invalidProviderResponse();
+      || (photoGiven && !photo)) throw this.invalidProviderResponse();
     return { nin, firstName, lastName,
       ...(dateOfBirth ? { dateOfBirth } : {}),
       ...(gender ? { gender } : {}),
       ...(middleName ? { middleName } : {}),
       ...(phoneNumber ? { phoneNumber } : {}),
-      ...(residence ? { address: residence.address1, residence } : {}),
+      ...(residence?.address1 ? { address: residence.address1 } : {}),
+      ...(residence ? { residence } : {}),
       ...(photo ? { photo } : {}) };
   }
 
+  /**
+   * nin.residence: null, '' or absent is no residence, and each of its fields
+   * the same (ADR-062). A field that is given must be valid text, or the
+   * response is refused. A residence with no field given is left out.
+   */
   private ninResidence(value: unknown): QoreIdNinEnrollmentBinding['residence'] | undefined {
-    if (value === undefined) return undefined;
+    if (this.blank(value)) return undefined;
     const record = this.record(value);
-    const address1 = this.safeName(record?.address1, 1000);
-    const town = record?.town === undefined ? undefined : this.safeName(record.town, 120);
-    const lga = record?.lga === undefined ? undefined : this.safeName(record.lga, 120);
-    const state = record?.state === undefined ? undefined : this.safeName(record.state, 120);
-    if (!address1 || (record?.town !== undefined && !town)
-      || (record?.lga !== undefined && !lga)
-      || (record?.state !== undefined && !state)) throw this.invalidProviderResponse();
-    return { address1, ...(town ? { town } : {}), ...(lga ? { lga } : {}),
+    if (!record) throw this.invalidProviderResponse();
+    const field = (name: string, limit: number) => {
+      const raw = record[name];
+      if (this.blank(raw)) return undefined;
+      const text = this.safeName(raw, limit);
+      if (!text) throw this.invalidProviderResponse();
+      return text;
+    };
+    const address1 = field('address1', 1000);
+    const town = field('town', 120);
+    const lga = field('lga', 120);
+    const state = field('state', 120);
+    if (!address1 && !town && !lga && !state) return undefined;
+    return { ...(address1 ? { address1 } : {}), ...(town ? { town } : {}), ...(lga ? { lga } : {}),
       ...(state ? { state } : {}) };
   }
 

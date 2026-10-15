@@ -104,8 +104,10 @@ const acceptedMigrations = new Map([
   ['0090_ehr_retraction_integrity.sql', 'dbde76ea8cfcd237653a4d776bb195d19fa66eb411f732d8d8191a3c5241e3c7'],
   ['0091_launch_module_withdrawal_and_patient_access_transparency.sql', 'ddf4ae3a333f8345de9a7da37b73e91318279b06caaee9b866b1b5150f279f94'],
   ['0092_patient_self_reported_enrollment_profile.sql', '66e1d84b871b7a52b57aac2cdb4a2e9cdcef518b7ebe40f97192c1857dbcabe7'],
-  ['0093_break_glass_launch_with_limits.sql', 'e5072a02fa90dc3e894dab3f6a78d7b1d1058719f93a2ac6e26cf67996e5fbee'],
+  ['0093_nin_holder_ownership_proof.sql', 'ab163a3ddbbf9d9da1a326de7a6cb7a7d31412dc0de4e1a536ea9f5b33eae594'],
   ['0094_clinician_self_signup.sql', '4dd29ff814af54e5fef4fc45d124c8e9eca9e59ade6865715da7d88668c9ed60'],
+  ['0094_facility_assisted_registration.sql', '322f2baa20fbe68764cfed4fd54a278653a367f213aa4fc0418d2b26c4a0aae8'],
+  ['0095_break_glass_launch_with_limits.sql', '02db04c8f4baface75ba6b09db6a9089ed4654f493ae4b9394330ccdd67d48fb'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

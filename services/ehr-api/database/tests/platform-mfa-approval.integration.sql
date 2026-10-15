@@ -260,18 +260,20 @@ do $$ begin
     raise exception 'platform MFA runtime privileges are inconsistent';
   end if;
   -- MFA state changes only in the 0069/0070 functions and guards: no OTP,
-  -- recovery or patient command touches a factor. Clinician self sign-up
-  -- (0094, ADR-064) reads factors in exactly these functions (the stage of an
-  -- application capability, whether step 1 confirmed the applicant's own
-  -- staff-proven factor in this transaction, whether it is still the active
-  -- one at step 2, and the administrator's detail); none of them writes one.
+  -- recovery or patient command touches a factor. auth.staff_session_is_mfa
+  -- (0094) reads a factor's status, as platform_step_up_is_fresh does.
+  -- Clinician self sign-up (0094, ADR-064) reads factors in exactly these
+  -- functions (the stage of an application capability, whether step 1
+  -- confirmed the applicant's own staff-proven factor in this transaction,
+  -- whether it is still the active one at step 2, and the administrator's
+  -- detail); none of them writes one.
   if exists (
     select 1 from pg_proc proc join pg_namespace ns on ns.oid = proc.pronamespace
     where ns.nspname in ('auth', 'identity', 'platform')
       and proc.prosrc ilike '%mfa_factors%'
       and proc.proname not in ('guard_mfa_factor_change', 'guard_session_assurance_change',
         'account_has_active_mfa', 'platform_step_up_is_fresh', 'admin_request_approval',
-        'admin_decide_approval')
+        'admin_decide_approval', 'staff_session_is_mfa')
       and proc.oid not in (
         'identity.clinician_application_account_stage(uuid)'::regprocedure,
         'identity.clinician_application_account_refusal(uuid)'::regprocedure,

@@ -26,7 +26,7 @@
 // - the release checklist's read-only P10 and P11 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
-// - break-glass's migration (0093) run again as the administrator in
+// - break-glass's migration (0095) run again as the administrator in
 //   rolled-back transactions: refused while break_glass_enabled is on, a
 //   no-op while it is off;
 // - the upgrade path of clinician self sign-up (ADR-064): a second database
@@ -350,11 +350,11 @@ try {
   assert.deepEqual(p10.map((line) => line.split('|').slice(0, 4).join('|')),
     ['break_glass_enabled|f', 'direct-care|Direct patient care|t|hid', 'emergency|Emergency treatment|t|hid'],
     `P10 check: ${p10.join('; ')}`);
-  // After 0093, clinician self sign-up's migration and the bootstrap: the four
+  // After 0095, clinician self sign-up's migration and the bootstrap: the four
   // launch controls off (break-glass until the operator turns it on, P11;
   // clinician sign-up until P25), no healthcare-operations purpose, no
   // permission 0084 or 0091 withdrew, break-glass granted to exactly the three
-  // roles 0093 names, and no control event.
+  // roles 0095 names, and no control event.
   const p11 = await checklistCheck('P11 check (read-only)');
   assert.deepEqual(p11, ['break_glass_enabled|f', 'clinician_signup_enabled|f', 'outreach_portal_enabled|f',
     'uploads_enabled|f',
@@ -363,7 +363,7 @@ try {
   evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
     p11 };
 
-  // Break-glass's migration (0093, D9, ADR-058 addendum) refuses to run while
+  // Break-glass's migration (0095, D9, ADR-058 addendum) refuses to run while
   // break_glass_enabled is on: 0091 turned the control off only where 0039's
   // seed was untouched, and granting the permission with the control on would
   // make break-glass live at the migration's commit, before staff MFA ships

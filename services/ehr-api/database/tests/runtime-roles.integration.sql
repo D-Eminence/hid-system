@@ -896,7 +896,7 @@ begin
 end
 $$;
 
--- The launch module set (0084, 0091 and 0093, decision D17, ADR-058): Lab,
+-- The launch module set (0084, 0091 and 0095, decision D17, ADR-058): Lab,
 -- Pharmacy, OCR and Outreach are off, EHR lab ordering is off and document
 -- uploads are off. No role holds a permission of a module that is off (lab.*,
 -- pharmacy.*, ocr.*, outreach.*), the EHR lab-ordering write or
@@ -905,7 +905,7 @@ $$;
 -- writes of the launch set stay. Re-enabling a module takes its own reviewed
 -- migration that grants the permissions again and changes this assertion with
 -- it. Break-glass is the first (D9, owner decision of 2026-10-14, ADR-058
--- addendum): 0093 grants identity.break-glass.write again to exactly the
+-- addendum): 0095 grants identity.break-glass.write again to exactly the
 -- roles 0010 granted it to, doctor, clinician and nurse, and no other role may
 -- hold it; its platform control stays an operator's step.
 do $$
@@ -981,6 +981,93 @@ begin
      or has_function_privilege('hid_identity_runtime', 'identity.list_my_access_requests()', 'EXECUTE')
      or has_function_privilege('public', 'identity.list_my_access_requests()', 'EXECUTE') then
     raise exception 'the patient access-request list must be reachable only through its session-bound wrapper';
+  end if;
+end
+$$;
+
+-- 0093 and 0094 (ADR-062, ADR-063). The Identity runtime runs the three
+-- holder commands, the facility list, the in-person check command and the two
+-- designation commands; no other runtime role and not PUBLIC. The
+-- participation, attestation and staff-session helpers and the check guard
+-- run for no role but their owner. No runtime role reaches the holder
+-- events, the designations, their events or the in-person checks directly.
+-- The runtime inserts only an enrollment's start columns, so it always
+-- begins at verify_holder, and never writes its holder columns.
+do $$
+declare
+  other_runtimes text[] := array[
+    'hid_ehr_runtime', 'hid_api_runtime', 'hid_ehr_api_runtime', 'hid_ocr_api_runtime',
+    'hid_audit_writer', 'hid_document_scanner', 'hid_ocr_runtime', 'hid_ocr_worker',
+    'hid_lab_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_runtime',
+    'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
+    'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
+    'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
+    'hid_platform_control_reader'];
+  every_role text[] := array['public', 'hid_identity_runtime', 'hid_identity_api_runtime',
+    'hid_schema_test_runtime', 'hid_migration_admin'] || other_runtimes;
+begin
+  if exists (
+       select 1 from unnest(array[
+         'identity.record_public_patient_holder_send(uuid,char,char,integer,integer,integer)',
+         'identity.record_public_patient_holder_failure(uuid,char,uuid,char,integer,integer)',
+         'identity.record_public_patient_holder_proof(uuid,char,text,uuid,uuid,char,integer)',
+         'identity.list_participating_facilities()',
+         'identity.record_assisted_verification(uuid,char,char,text,text,text,text,text,text,char,char,integer,integer)',
+         'identity.admin_facility_assisted_registration(uuid)',
+         'identity.admin_set_facility_assisted_registration(uuid,bigint,text,text,text,text,text,text,text,text,char)'
+       ]) command(signature)
+       where not has_function_privilege('hid_identity_runtime', command.signature, 'EXECUTE')
+          or not has_function_privilege('hid_identity_api_runtime', command.signature, 'EXECUTE')
+          or has_function_privilege('public', command.signature, 'EXECUTE')
+          or exists (select 1 from unnest(other_runtimes) runtime(role_name)
+                     where has_function_privilege(runtime.role_name, command.signature, 'EXECUTE'))
+     ) then
+    raise exception 'the NIN holder and facility-assisted commands must be executable by the Identity runtime only';
+  end if;
+  if exists (
+       select 1
+       from unnest(array['identity.facility_assisted_registration_participating(uuid)',
+         'identity.assisted_registration_actor_attested(text,uuid,uuid)', 'auth.staff_session_is_mfa()',
+         'identity.guard_assisted_verification_change()']) helper(signature),
+         unnest(every_role) runtime(role_name)
+       where has_function_privilege(runtime.role_name, helper.signature, 'EXECUTE')
+     ) then
+    raise exception 'the facility-assisted helpers must run only inside their commands';
+  end if;
+  if exists (
+       select 1
+       from unnest(array['identity.public_patient_holder_events', 'identity.facility_assisted_registration',
+         'identity.facility_assisted_registration_events', 'identity.assisted_registration_verifications'])
+           evidence(table_name),
+         unnest(every_role) runtime(role_name)
+       where has_table_privilege(runtime.role_name, evidence.table_name,
+         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          or has_any_column_privilege(runtime.role_name, evidence.table_name, 'SELECT,INSERT,UPDATE,REFERENCES')
+     ) then
+    raise exception 'a runtime role can reach the holder events, the designations or the in-person checks';
+  end if;
+  if has_table_privilege('hid_identity_runtime', 'identity.public_patient_enrollments', 'INSERT,UPDATE')
+     or exists (
+       select 1 from unnest(array['state', 'holder_method', 'holder_verified_at', 'holder_challenge_id',
+         'holder_verification_id', 'desk_code_hmac', 'desk_code_salt', 'desk_code_issues']) column_row(name)
+       where has_column_privilege('hid_identity_runtime', 'identity.public_patient_enrollments', column_row.name,
+         'INSERT'))
+     or exists (
+       select 1 from unnest(array['holder_method', 'holder_verified_at', 'holder_challenge_id',
+         'holder_verification_id']) column_row(name)
+       where has_column_privilege('hid_identity_runtime', 'identity.public_patient_enrollments', column_row.name,
+         'UPDATE'))
+     or exists (
+       select 1 from unnest(array['holder_recipient_hmac', 'desk_code_hmac', 'desk_code_expires_at', 'desk_code_salt',
+         'desk_code_issues']) column_row(name)
+       where not has_column_privilege('hid_identity_runtime', 'identity.public_patient_enrollments', column_row.name,
+         'UPDATE')) then
+    raise exception 'the Identity runtime must insert only the start columns of an enrollment and never write its holder columns';
+  end if;
+  if (select array_agg(role_code::text order by role_code) from auth.role_permissions
+      where permission_code = 'identity.patient.assisted_registration')
+     is distinct from array['clinician', 'doctor', 'nurse'] then
+    raise exception 'identity.patient.assisted_registration must be held by doctor, clinician and nurse only';
   end if;
 end
 $$;

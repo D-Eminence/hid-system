@@ -1074,16 +1074,40 @@ grant execute on function identity.submit_self_service_organization_application(
 -- 0092 dropped and recreated the command with the two self-reported profile
 -- arguments (ADR-061); a dropped function loses its grants, so this file, run
 -- after every migration, grants the new signature.
-grant select, insert, update, delete on identity.public_patient_enrollments,
-  identity.public_patient_enrollment_otps,
+-- 0093 (ADR-062): the runtime inserts an enrollment with the start columns
+-- only, so it always begins at the verify_holder default, and updates only
+-- the contact, holder-recipient and desk-code columns. holder_method,
+-- holder_verified_at, holder_challenge_id and holder_verification_id are
+-- written only by identity.record_public_patient_holder_proof. The blanket
+-- revocations at the top of this file remove the table-wide INSERT and
+-- UPDATE a bootstrap before 0093 granted, column privileges included.
+grant select, delete on identity.public_patient_enrollments
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant insert (id, nin_lookup_hmac, nin_last4, nin_ciphertext, profile_ciphertext, profile_sha256,
+    key_version, provider_reference, request_hmac, token_hmac)
+  on identity.public_patient_enrollments to hid_identity_runtime, hid_schema_test_runtime;
+-- 0094 (ADR-063) adds the desk code's salt and issue count to the columns
+-- the runtime updates.
+grant update (state, contact_channel, contact_hmac, contact_lookup_hmac, contact_ciphertext,
+    contact_verified_at, verified_challenge_id, holder_recipient_hmac, desk_code_hmac,
+    desk_code_expires_at, desk_code_salt, desk_code_issues, updated_at, row_version)
+  on identity.public_patient_enrollments to hid_identity_runtime, hid_schema_test_runtime;
+grant select, insert, update, delete on identity.public_patient_enrollment_otps,
   identity.public_patient_enrollment_rates to hid_identity_runtime, hid_schema_test_runtime;
 grant select on identity.patient_authoritative_profiles to hid_schema_test_runtime;
 grant execute on function identity.public_patient_nin_already_bound(char),
   identity.public_patient_enrollment_ready(),
   identity.public_patient_contact_already_bound(text,char),
   identity.prune_expired_public_patient_enrollments(),
-  identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char,date,text)
+  identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char,date,text),
+  identity.record_public_patient_holder_send(uuid,char,char,integer,integer,integer),
+  identity.record_public_patient_holder_failure(uuid,char,uuid,char,integer,integer),
+  identity.record_public_patient_holder_proof(uuid,char,text,uuid,uuid,char,integer)
   to hid_identity_runtime, hid_schema_test_runtime;
+-- The holder budget events are written and counted only by those commands.
+revoke all on identity.public_patient_holder_events
+  from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
+    hid_ehr_api_runtime, hid_schema_test_runtime;
 -- Each QoreID NIN lookup of public enrollment is charged, before any account
 -- exists, through the network and platform quota command (0085); the runtime
 -- has no privilege on its counters.
@@ -1236,7 +1260,30 @@ revoke all on identity.staff_credential_attestations, identity.workforce_members
 -- trigger function runs only as its trigger.
 revoke all on function notification.on_identity_pin_outbox_created() from public;
 
--- Break-glass at launch, with limits (0093, D9, ADR-058 addendum). 0093
+-- Facility-assisted registration (0094, ADR-063). The Identity runtime calls
+-- the public facility list and the holder proof in system context, the
+-- in-person check command in staff context and the designation commands in
+-- platform context; each command authorizes its caller itself. The
+-- participation, attestation and staff-session helpers run only inside
+-- them. No runtime role reads or writes the designation, its events or the
+-- checks directly.
+grant execute on function identity.list_participating_facilities(),
+  identity.record_assisted_verification(uuid, char, char, text, text, text, text, text, text, char, char, integer,
+    integer),
+  identity.admin_facility_assisted_registration(uuid),
+  identity.admin_set_facility_assisted_registration(uuid, bigint, text, text, text, text, text, text, text, text, char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.facility_assisted_registration_participating(uuid),
+  identity.assisted_registration_actor_attested(text, uuid, uuid),
+  auth.staff_session_is_mfa(),
+  identity.guard_assisted_verification_change()
+  from public;
+revoke all on identity.facility_assisted_registration, identity.facility_assisted_registration_events,
+  identity.assisted_registration_verifications
+  from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
+    hid_ehr_api_runtime, hid_schema_test_runtime;
+
+-- Break-glass at launch, with limits (0095, D9, ADR-058 addendum). 0095
 -- creates no object and changes no database grant: it inserts the
 -- identity.break-glass.write rows of doctor, clinician and nurse into
 -- auth.role_permissions and the emergency purpose of use. The Identity

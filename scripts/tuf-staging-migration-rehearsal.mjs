@@ -285,19 +285,19 @@ try {
       where permission_code ~ '^(lab|pharmacy|ocr|outreach)\\.'
          or permission_code = 'ehr.document.write'`)).rows, [],
     'Upgrade must leave no role holding a permission of a module that is off at launch');
-    // 0093 (break-glass at launch with limits, D9) grants break-glass again to
+    // 0095 (break-glass at launch with limits, D9) grants break-glass again to
     // exactly the roles 0010 granted it to, and to no other role.
     assert.deepEqual((await client.query(`select role_code from auth.role_permissions
       where permission_code = 'identity.break-glass.write' order by role_code`)).rows.map((row) => row.role_code),
     ['clinician', 'doctor', 'nurse'], 'Upgrade must grant break-glass to exactly doctor, clinician and nurse');
     // The 0028 baseline holds no purpose-of-use code; 0082 seeds direct-care
-    // and 0093 emergency (healthcare-operations awaits decision N3).
+    // and 0095 emergency (healthcare-operations awaits decision N3).
     assert.deepEqual((await client.query(`select code, display, active, source_system
       from identity.purpose_of_use_codes order by code`)).rows,
     [{ code:'direct-care', display:'Direct patient care', active:true, source_system:'hid' },
       { code:'emergency', display:'Emergency treatment', active:true, source_system:'hid' }],
     'Upgrade must seed exactly the active direct-care and emergency purposes of use');
-    // 0093 leaves the platform control to an operator: break-glass stays off.
+    // 0095 leaves the platform control to an operator: break-glass stays off.
     assert.equal((await client.query(`select platform.control_enabled('break_glass_enabled') as enabled`)).rows[0].enabled,
       false, 'Upgrade must leave break_glass_enabled off for the operator');
     // 0090 (D-Eminence/hid-system#74) adds the retraction,
@@ -333,6 +333,61 @@ try {
           as public_execute`)).rows[0],
     { seven_argument_dropped: true, identity_runtime: true, public_execute: false },
     'The upgraded role bootstrap must grant only the Identity runtime the 0092 activation command');
+    // 0093 (ADR-062): the holder commands run for the Identity runtime only.
+    // The runtime cannot write the holder columns, insert a state or read the
+    // holder events; a new enrollment starts at verify_holder.
+    assert.deepEqual((await client.query(`select
+        has_function_privilege('hid_identity_runtime',
+          'identity.record_public_patient_holder_proof(uuid,char,text,uuid,uuid,char,integer)', 'execute') as proof,
+        has_function_privilege('hid_identity_runtime',
+          'identity.record_public_patient_holder_send(uuid,char,char,integer,integer,integer)', 'execute') as send,
+        has_function_privilege('hid_identity_runtime',
+          'identity.record_public_patient_holder_failure(uuid,char,uuid,char,integer,integer)', 'execute') as failure,
+        has_function_privilege('public',
+          'identity.record_public_patient_holder_proof(uuid,char,text,uuid,uuid,char,integer)', 'execute') as public_proof,
+        has_table_privilege('hid_identity_runtime', 'identity.public_patient_holder_events',
+          'select,insert,update,delete') as holder_events,
+        has_table_privilege('hid_identity_runtime', 'identity.public_patient_enrollments', 'insert,update') as table_write,
+        has_column_privilege('hid_identity_runtime', 'identity.public_patient_enrollments', 'holder_method', 'update')
+          as holder_update,
+        has_column_privilege('hid_identity_runtime', 'identity.public_patient_enrollments', 'state', 'insert')
+          as state_insert,
+        (select column_default from information_schema.columns where table_schema = 'identity'
+          and table_name = 'public_patient_enrollments' and column_name = 'state') as state_default`)).rows[0],
+    { proof: true, send: true, failure: true, public_proof: false, holder_events: false, table_write: false,
+      holder_update: false, state_insert: false, state_default: "'verify_holder'::text" },
+    'The upgraded role bootstrap must give the Identity runtime the 0093 holder commands and no holder column');
+    // 0094 (ADR-063): the facility-assisted commands run for the Identity
+    // runtime only; their helpers for no runtime role; no runtime role reaches
+    // the designations, their events or the in-person checks; doctor,
+    // clinician and nurse hold the permission.
+    assert.deepEqual((await client.query(`select
+        has_function_privilege('hid_identity_runtime', 'identity.record_assisted_verification(uuid,char,char,text,text,'
+          || 'text,text,text,text,char,char,integer,integer)', 'execute') as record,
+        has_function_privilege('hid_identity_runtime', 'identity.list_participating_facilities()', 'execute') as list,
+        has_function_privilege('hid_identity_runtime', 'identity.admin_set_facility_assisted_registration(uuid,bigint,'
+          || 'text,text,text,text,text,text,text,text,char)', 'execute') as designate,
+        has_function_privilege('hid_identity_runtime', 'identity.admin_facility_assisted_registration(uuid)', 'execute')
+          as designation_read,
+        has_function_privilege('public', 'identity.record_assisted_verification(uuid,char,char,text,text,text,text,text,'
+          || 'text,char,char,integer,integer)', 'execute') as public_record,
+        has_function_privilege('hid_identity_runtime', 'auth.staff_session_is_mfa()', 'execute') as staff_mfa,
+        has_function_privilege('hid_identity_runtime', 'identity.assisted_registration_actor_attested(text,uuid,uuid)',
+          'execute') as attested,
+        has_function_privilege('hid_identity_runtime', 'identity.facility_assisted_registration_participating(uuid)',
+          'execute') as participating,
+        has_table_privilege('hid_identity_runtime', 'identity.assisted_registration_verifications',
+          'select,insert,update,delete') as checks,
+        has_table_privilege('hid_identity_runtime', 'identity.facility_assisted_registration',
+          'select,insert,update,delete') as designations,
+        has_table_privilege('hid_identity_runtime', 'identity.facility_assisted_registration_events',
+          'select,insert,update,delete') as designation_events,
+        (select array_agg(role_code::text order by role_code) from auth.role_permissions
+          where permission_code = 'identity.patient.assisted_registration') as holders`)).rows[0],
+    { record: true, list: true, designate: true, designation_read: true, public_record: false, staff_mfa: false,
+      attested: false, participating: false, checks: false, designations: false, designation_events: false,
+      holders: ['clinician', 'doctor', 'nurse'] },
+    'The upgraded role bootstrap must give the Identity runtime the 0094 commands and no assisted-registration table');
     await client.query('begin');
     try {
       await client.query('set local role hid_identity_api_runtime');
@@ -345,9 +400,9 @@ try {
     } finally { await client.query('rollback'); }
   });
   const upgradeAfter = await snapshot('hid_upgrade');
-  // identity.purpose_of_use_codes gains 0082's and 0093's seeds, and
+  // identity.purpose_of_use_codes gains 0082's and 0095's seeds, and
   // auth.role_permissions loses 0084's and 0091's launch-withdrawn permissions
-  // and regains 0093's break-glass rows, all checked above.
+  // and regains 0095's break-glass rows, all checked above.
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
     'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes',
@@ -367,8 +422,23 @@ try {
     purpose_of_use_seeded:['direct-care','emergency'],launch_write_permissions_withdrawn:true,retraction_guards_installed:true,
     launch_module_permissions_withdrawn:true,patient_activation_command_regranted:true,
     break_glass_granted_to:['clinician','doctor','nurse'],break_glass_control_left_off:true,
+    holder_commands_runtime_only:true,holder_columns_not_runtime_writable:true,
+    assisted_registration_commands_runtime_only:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
+  // 0093 (ADR-062) on a database at 0092 that holds public enrollments in
+  // every state: the rollback-only upgrade suite seeds them, applies 0093
+  // itself and checks the backfill, then rolls everything back.
+  command('create synthetic 0092 database', join(pgBindir, 'createdb'), ['hid_upgrade_holder']);
+  migration('schema apply through 0092', 'apply-migrations.mjs', 'hid_upgrade_holder', {}, 0,
+    ['--through=0092_patient_self_reported_enrollment_profile.sql']);
+  command('0092 to 0093 public enrollment holder backfill (rollback-only)', join(pgBindir, 'psql'),
+    ['-X', '-d', 'hid_upgrade_holder', '-v', 'ON_ERROR_STOP=1',
+      '-f', join(service, 'database/tests/upgrade/0093-public-patient-holder-backfill.sql')]);
+  command('drop synthetic 0092 database', join(pgBindir, 'dropdb'), ['hid_upgrade_holder']);
+  evidence.checks.holder_backfill_upgrade = { from: '0092', to: '0093',
+    suite: 'upgrade/0093-public-patient-holder-backfill.sql', seeded_states: ['verify_contact', 'set_password', 'active'],
+    rolled_back: true };
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);
   migration('schema dry run', 'apply-migrations.mjs', database, {}, 0, ['--dry-run']);
   const rolledBack = await withClient(database, async (client) =>
@@ -404,6 +474,11 @@ try {
   evidence.checks.patient_enrollment_runtime = JSON.parse(command(
     'exact-role patient enrollment to sign-in HTTP lifecycle', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-patient-enrollment-runtime.mjs')], workflowEnvironment));
+  // ADR-063 (0094): the facility-assisted registration journey over HTTP.
+  evidence.checks.assisted_registration_runtime = JSON.parse(command(
+    'exact-role facility-assisted registration: designation, desk code, staff check, activation and sign-in over HTTP',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-assisted-registration-runtime.mjs')],
+    workflowEnvironment));
   evidence.checks.patient_safety_runtime = JSON.parse(command('exact-role patient safety HTTP workflow', process.execPath,
     [join(repository, 'services/identity-api/scripts/verify-patient-safety-runtime.mjs')], workflowEnvironment));
   evidence.checks.delegated_cookie_read_runtime = JSON.parse(command(

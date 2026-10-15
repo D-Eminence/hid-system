@@ -106,6 +106,9 @@ export const PLATFORM_ACTION_POLICIES = {
   // Facility, provider onboarding and pricing.
   'platform.facility.status': { ...high, permissions: ['platform.facility.manage'], reason: true, ifMatch: true,
     idempotencyKey: true, approval: 'none' },
+  // ADR-063: designate or suspend a facility for assisted registration.
+  'platform.facility.assisted-registration': { ...high, permissions: ['platform.facility.manage'], reason: true,
+    ifMatch: true, idempotencyKey: true, approval: 'none' },
   'platform.organization-application.verify-cac': { ...high, permissions: ['platform.facility.manage'],
     reason: false, ifMatch: true, idempotencyKey: false, approval: 'none' },
   'platform.organization-application.approve': { ...high,

@@ -54,6 +54,9 @@ export function adminCommandError(error: unknown): Error {
     ['WORKFORCE_ACCOUNT_NOT_FOUND', 404, 'WORKFORCE_ACCOUNT_NOT_FOUND', 'The account was not found'],
     ['WORKFORCE_STAFF_NOT_FOUND', 404, 'WORKFORCE_STAFF_NOT_FOUND', 'The account has no staff record'],
     ['WORKFORCE_INVALID_COMMAND', 400, 'WORKFORCE_COMMAND_INVALID', 'The workforce command is invalid'],
+    // ADR-063 assisted registration designations (0094).
+    ['ASSISTED_REGISTRATION_FACILITY_INACTIVE', 409, 'FACILITY_NOT_ACTIVE',
+      'Only a verified, active facility of an active organization can register patients in person'],
   ];
   for (const [marker, status, code, detail] of problems) {
     if (message.includes(marker)) return new DomainProblem(status, code, detail);

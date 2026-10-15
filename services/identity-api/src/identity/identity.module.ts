@@ -27,6 +27,9 @@ import { AdminOrganizationApplicationsController, PublicOrganizationApplications
   PublicOrganizationProfileCompletionController } from './organization-applications.controller';
 import { OrganizationApplicationsService } from './organization-applications.service';
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
+import { AssistedRegistrationEnabledGuard } from './assisted-registration.guard';
+import { AssistedVerificationController } from './assisted-verification.controller';
+import { AssistedVerificationService } from './assisted-verification.service';
 import { ClinicianApplicationController } from './clinician-application.controller';
 import { ClinicianApplicationService } from './clinician-application.service';
 import { ClinicianApplicationSweeper } from './clinician-application.sweeper';
@@ -41,10 +44,13 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider }
   controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
     PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
     AdminOrganizationApplicationsController,
-    PatientEnrollmentController, ProviderEnrollmentController, ClinicianApplicationController],
+    PatientEnrollmentController, ProviderEnrollmentController, AssistedVerificationController,
+    ClinicianApplicationController],
   providers: [
     IdentityService,
     StaffSearchBudget,
+    AssistedVerificationService,
+    AssistedRegistrationEnabledGuard,
     NinRegistrationService,
     NinIdentifierProtector,
     HidCodeGenerator,

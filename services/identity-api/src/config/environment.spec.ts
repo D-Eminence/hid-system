@@ -72,9 +72,16 @@ describe('Identity production database transport', () => {
   // Each production refusal, one case per unsafe setting (CFG-PROD).
   const qoreId = { QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'synthetic-client', QOREID_CLIENT_SECRET: 'synthetic-secret' };
   it.each<[string, Record<string, string>, RegExp]>([
-    ['NIN-only enrollment, until its NIN holder possession step (N1) ships',
+    ['NIN-only enrollment without a route to prove the NIN holder (N1, ADR-062)',
       { ...qoreId, QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true' },
-      /QOREID_NIN_ONLY_ENROLLMENT_ENABLED: NIN-only enrollment is refused in production until the NIN holder possession step \(N1\) ships/],
+      /QOREID_NIN_ONLY_ENROLLMENT_ENABLED: NIN-only enrollment requires NIN_HOLDER_SMS_ENABLED or ASSISTED_REGISTRATION_ENABLED/],
+    // ADR-063: the facility route is the remedy when someone who knows a NIN
+    // closes its online route, and the only route without a usable registry phone.
+    ['the online NIN holder route without the facility route that remedies its lockout',
+      { ...qoreId, QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true' },
+      /NIN_HOLDER_SMS_ENABLED: The online NIN holder route needs ASSISTED_REGISTRATION_ENABLED in production/],
+    ['the signed-in NIN binding, which proves no holder', { ...qoreId, QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true' },
+      /QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: The signed-in NIN binding is refused in production/],
     ['Turnstile disabled', { TURNSTILE_MODE: 'disabled' }, /TURNSTILE_MODE: Turnstile is required/],
     ['insecure cookies', { AUTH_COOKIE_SECURE: 'false' }, /AUTH_COOKIE_SECURE: Secure cookies are required/],
     ['a wildcard CORS origin', { CORS_ORIGINS: '*' }, /CORS_ORIGINS: Production CORS origins must be exact HTTPS origins/],
@@ -95,24 +102,104 @@ describe('Identity production database transport', () => {
     expect(() => getEnvironment()).toThrow(message);
   });
 
+  it('keeps every NIN holder route flag off by default, with the default holder and in-person budgets', () => {
+    production(); resetEnvironmentForTests();
+    expect(getEnvironment()).toMatchObject({ QOREID_NIN_ONLY_ENROLLMENT_ENABLED: false, NIN_HOLDER_SMS_ENABLED: false,
+      ASSISTED_REGISTRATION_ENABLED: false, QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: false,
+      NIN_HOLDER_SMS_DAILY_MAX: 5, NIN_HOLDER_FAILURES_DAILY_MAX: 10, NIN_HOLDER_FAILURES_MONTHLY_MAX: 30,
+      NIN_HOLDER_DISTINCT_NINS_MAX: 5, ASSISTED_VERIFICATION_STAFF_DAILY_MAX: 20,
+      ASSISTED_VERIFICATION_FACILITY_DAILY_MAX: 100 });
+  });
+
+  // ADR-063: in-person checks per staff member and per facility over a
+  // sliding 24 hours, every outcome counted.
+  it('bounds the in-person check budgets and keeps the facility budget at or above the staff one', () => {
+    production(); Object.assign(process.env, { ASSISTED_VERIFICATION_STAFF_DAILY_MAX: '50',
+      ASSISTED_VERIFICATION_FACILITY_DAILY_MAX: '40' });
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(
+      /ASSISTED_VERIFICATION_FACILITY_DAILY_MAX: The facility budget of in-person checks cannot be below the staff budget/);
+    for (const [name, value] of [['ASSISTED_VERIFICATION_STAFF_DAILY_MAX', '0'],
+      ['ASSISTED_VERIFICATION_STAFF_DAILY_MAX', '201'], ['ASSISTED_VERIFICATION_FACILITY_DAILY_MAX', '1001']] as const) {
+      production(); delete process.env.ASSISTED_VERIFICATION_STAFF_DAILY_MAX;
+      delete process.env.ASSISTED_VERIFICATION_FACILITY_DAILY_MAX;
+      Object.assign(process.env, { [name]: value }); resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow(new RegExp(name));
+    }
+  });
+
+  it('accepts the online NIN holder route in production only with the facility route', () => {
+    production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
+      NIN_HOLDER_SMS_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true' });
+    resetEnvironmentForTests();
+    expect(getEnvironment()).toMatchObject({ NIN_HOLDER_SMS_ENABLED: true, ASSISTED_REGISTRATION_ENABLED: true });
+  });
+
   it.each<[string, string, string | undefined]>([
     ['the staging deployment profile', 'production', 'staging'],
     ['local development', 'development', undefined],
     ['tests', 'test', undefined],
-  ])('accepts NIN-only enrollment in %s', (_label, nodeEnvironment, deployment) => {
+  ])('accepts NIN-only enrollment with the online holder route in %s', (_label, nodeEnvironment, deployment) => {
     production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
-      NODE_ENV: nodeEnvironment });
+      NIN_HOLDER_SMS_ENABLED: 'true', NODE_ENV: nodeEnvironment });
     // A staging task serves the staging hosts (Turnstile allowlist, TS-9).
     if (deployment) Object.assign(process.env, { HID_DEPLOYMENT_ENV: deployment, CORS_ORIGINS: 'https://staging.healthidentitydirectory.com' });
     else delete process.env.HID_DEPLOYMENT_ENV;
     resetEnvironmentForTests();
-    expect(getEnvironment().QOREID_NIN_ONLY_ENROLLMENT_ENABLED).toBe(true);
+    expect(getEnvironment()).toMatchObject({ QOREID_NIN_ONLY_ENROLLMENT_ENABLED: true, NIN_HOLDER_SMS_ENABLED: true });
   });
 
-  it('refuses NIN-only enrollment under the production deployment profile whatever NODE_ENV says', () => {
-    production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NODE_ENV: 'test' });
+  it('accepts NIN-only enrollment in production with the facility route alone', () => {
+    // ADR-063: the facility route opens only while an active designation
+    // exists; until then every start answers PATIENT_REGISTRATION_NOT_OPEN.
+    production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
+      ASSISTED_REGISTRATION_ENABLED: 'true' });
     resetEnvironmentForTests();
-    expect(() => getEnvironment()).toThrow(/NIN-only enrollment is refused in production/);
+    expect(getEnvironment()).toMatchObject({ QOREID_NIN_ONLY_ENROLLMENT_ENABLED: true, NIN_HOLDER_SMS_ENABLED: false });
+  });
+
+  it('refuses NIN-only enrollment without a holder route anywhere, and without QoreID', () => {
+    production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NODE_ENV: 'test' });
+    delete process.env.HID_DEPLOYMENT_ENV; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/NIN-only enrollment requires NIN_HOLDER_SMS_ENABLED or ASSISTED_REGISTRATION_ENABLED/);
+    production(); Object.assign(process.env, { QOREID_ENABLED: 'false', QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
+      NIN_HOLDER_SMS_ENABLED: 'true', HID_DEPLOYMENT_ENV: 'staging', CORS_ORIGINS: 'https://staging.healthidentitydirectory.com' });
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/NIN-only enrollment requires enabled QoreID verification/);
+  });
+
+  it('applies the production holder rules under the production deployment profile whatever NODE_ENV says', () => {
+    production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
+      NIN_HOLDER_SMS_ENABLED: 'true', NODE_ENV: 'test' });
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/online NIN holder route needs ASSISTED_REGISTRATION_ENABLED in production/);
+    production(); Object.assign(process.env, { QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true', NODE_ENV: 'test' });
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/signed-in NIN binding is refused in production/);
+  });
+
+  it('allows the signed-in NIN binding outside production only when set, and checks the holder budgets', () => {
+    production(); Object.assign(process.env, { QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true',
+      HID_DEPLOYMENT_ENV: 'staging', CORS_ORIGINS: 'https://staging.healthidentitydirectory.com' });
+    resetEnvironmentForTests();
+    expect(getEnvironment().QOREID_PATIENT_SELF_NIN_BINDING_ENABLED).toBe(true);
+    production(); Object.assign(process.env, { NIN_HOLDER_FAILURES_DAILY_MAX: '20', NIN_HOLDER_FAILURES_MONTHLY_MAX: '19' });
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/monthly holder failure budget cannot be below the daily one/);
+    // A code's attempts count against the daily failure budget before it is
+    // sent (ADR-062): a budget below one code's attempts would send nothing.
+    delete process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED; delete process.env.NIN_HOLDER_FAILURES_MONTHLY_MAX;
+    production(); Object.assign(process.env, { NIN_HOLDER_FAILURES_DAILY_MAX: '4', OTP_MAX_ATTEMPTS: '5' });
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/NIN_HOLDER_FAILURES_DAILY_MAX: The daily holder failure budget cannot be below OTP_MAX_ATTEMPTS/);
+    production(); Object.assign(process.env, { NIN_HOLDER_FAILURES_DAILY_MAX: '5', OTP_MAX_ATTEMPTS: '5' });
+    resetEnvironmentForTests();
+    expect(getEnvironment().NIN_HOLDER_FAILURES_DAILY_MAX).toBe(5);
+    for (const [key, value] of [['NIN_HOLDER_SMS_DAILY_MAX', '0'], ['NIN_HOLDER_SMS_DAILY_MAX', '51'],
+      ['NIN_HOLDER_FAILURES_DAILY_MAX', '101'], ['NIN_HOLDER_DISTINCT_NINS_MAX', '0']] as const) {
+      production(); process.env[key] = value; resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow(new RegExp(key));
+    }
   });
 
   it('keeps emergency-contact delivery disabled by default and refuses it in production', () => {

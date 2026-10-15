@@ -3698,10 +3698,12 @@ Context:
   problem's `detail` as sent, but the authored "temporarily unavailable"
   text never reached it: Identity's problem filter replaced every 5xx
   detail with "The service could not complete the request.", and the
-  gateway (on main and on this branch) replaces every upstream 502/503/504
-  with `503 UPSTREAM_UNAVAILABLE` "A required platform service is
-  temporarily unavailable.", which is what the patient saw. Either text is
-  wrong for this case: the closure is a decision, not an outage.
+  gateway then replaced every upstream 502/503/504 with
+  `503 UPSTREAM_UNAVAILABLE` "A required platform service is temporarily
+  unavailable.", which is what the patient saw until ADR-055
+  (D-Eminence/hid-system#72) made the gateway pass upstream errors
+  through. Either text is wrong for this case: the closure is a decision,
+  not an outage.
 
 Decision (owner defaults: deny by default, least exposure, no production
 bypass):
@@ -3747,9 +3749,10 @@ Consequences:
   `TargetErrorAlarm` (at least 5 in 5 minutes, two periods), which routes to
   a person under ADR-053 (infra on main). Health-id should read availability
   before it shows the NIN step and the "Get your Health ID" link.
-- On main the gateway replaces every upstream 502/503/504 with
-  `503 UPSTREAM_UNAVAILABLE`, so the new detail reaches a browser only once
-  ADR-055 (D-Eminence/hid-system#72) passes upstream errors through.
+- When this was decided the gateway replaced every upstream 502/503/504
+  with `503 UPSTREAM_UNAVAILABLE`. Since ADR-055 (D-Eminence/hid-system#72,
+  merged) it passes upstream errors through, so the new detail reaches the
+  browser.
   The availability read is a `200` and works either way.
 - Health-id follow-up (ENR-2): on completion, ask the patient to save the
   Health ID, because the activation response expires the enrollment cookie
@@ -4214,11 +4217,15 @@ records the refusal with `details.code` `UPLOADS_DISABLED` and outcome
 `423` is reached only once a reviewed migration grants the permission again
 while the control is still off.
 
-## ADR-058 addendum: break-glass permitted at launch with limits (0093); on only after the P11 operator step
+## ADR-058 addendum: break-glass permitted at launch with limits (0095); on only after the P11 operator step
 
 Status: Decided by the owner on 2026-10-14 (D9, "turn on with limits").
-Source implementation proposed (migration 0093, branch
-`claude/break-glass-launch`); not merged or deployed. The platform control is
+Source implementation proposed (migration 0095, branch
+`claude/break-glass-launch`, D-Eminence/hid-system#83); not merged or
+deployed. Written as 0092 and then 0093, it is numbered 0095, after 0093 and
+0094 of D-Eminence/hid-system#84 and #85 (ADR-062, ADR-063), which change
+neither the break-glass permission, the purpose-of-use vocabulary nor the
+platform controls. The platform control is
 production configuration and is not changed here: it is an operator step.
 
 Date: 2026-10-14
@@ -4238,7 +4245,7 @@ is unaffected.
 
 Decision:
 
-- 0093 grants `identity.break-glass.write` to exactly the roles that held it
+- 0095 grants `identity.break-glass.write` to exactly the roles that held it
   before 0091: doctor, clinician and nurse (0010; no other migration granted
   it to another role). It seeds `emergency` ("Emergency treatment", active,
   source `hid`) with `ON CONFLICT (code) DO NOTHING`, as 0082 seeded
@@ -4249,16 +4256,16 @@ Decision:
 - The role assertions change with it: exactly those three roles hold
   `identity.break-glass.write`. Any other holder, a missing one, or any other
   permission 0084 or 0091 withdrew still stops the bootstrap.
-- The control stays the operator's. 0093 leaves `break_glass_enabled` as 0091
+- The control stays the operator's. 0095 leaves `break_glass_enabled` as 0091
   left it (off where still seeded; a migration has no actor for a control
   event), and refuses to run while it is on (`55000 BREAK_GLASS_CONTROL_ON`,
   nothing changed): 0091 kept a value an administrator had set, and granting
-  the permission with the control on would make break-glass live at 0093's
+  the permission with the control on would make break-glass live at 0095's
   commit, before staff MFA. The administrator sets it off with
   `POST /admin/controls` and `migrate` runs again. Before the first role
   bootstrap the migration administrator cannot read the control (forced
   row-level security, `PLATFORM_CONTROL_UNAVAILABLE`); no runtime role exists
-  then, so the control is as 0091 left it, and 0093 goes on. A platform
+  then, so the control is as 0091 left it, and 0095 goes on. A platform
   administrator turns it on with the audited
   `POST /admin/controls` (MFA platform session, TOTP step-up, reason,
   `If-Match`) once staff MFA has shipped: Identity runs with 0088 in that
@@ -4309,13 +4316,13 @@ Alternatives not taken:
 - Refusing the emergency purpose on the document routes now: it would decide
   N3's document question, which the owner has not decided, and N3's proposed
   default keeps today's reads; no document exists at launch.
-- Checking the control only in the release checklist before 0093: 0093's own
+- Checking the control only in the release checklist before 0095: 0095's own
   precondition also covers a database the checklist does not reach (a
   long-lived development or pre-launch copy).
 
 Consequences:
 
-- From 0093's commit, doctors', clinicians' and nurses' sessions list
+- From 0095's commit, doctors', clinicians' and nurses' sessions list
   `identity.break-glass.write` on their next request (Identity reads
   permissions per request), and Health-id `077b85c` enables its Emergency
   method for them. While the control is off the activation answers
@@ -4325,7 +4332,7 @@ Consequences:
 - After the operator step, activation is live: grant, audit, emergency-contact
   alert intent (delivered only where emergency-contact delivery is enabled)
   and inbox item, and the summary as above.
-- An earlier release's bootstrap refuses a database that holds 0093 (its
+- An earlier release's bootstrap refuses a database that holds 0095 (its
   assertion forbids the permission). Break-glass is turned off again with the
   control (or by deactivating `emergency`); taking the permission away again
   is a new reviewed migration, never a hand-made delete, which would stop the
@@ -4339,15 +4346,15 @@ Consequences:
 - Evidence is local and synthetic: the rollback-only suite
   `break-glass-launch.integration.sql` (which sets the control itself through
   the administrator command, so it does not depend on the environment's
-  control), the role assertions, 0093's precondition run again by
+  control), the role assertions, 0095's precondition run again by
   `verify-non-superuser-database.mjs`, and the patient-safety runtime verifier
   over HTTP with the control off, on and off again (release checklist §8).
   Nothing has been run on staging or production.
 
 Related: ADR-054 (staff MFA); ADR-058; `PHASE_3_LAUNCH_DECISIONS.md` (D9, N3);
 `INTERFACE_CONTRACT.md` (break-glass, launch module set); `DATABASE.md`
-("Break-glass at launch, with limits (0093)"); release checklist §1, §2, §3,
-P10, P11, §5, S4v, §8, §9, §10.
+("Break-glass at launch, with limits (0095)"); release checklist §1, §2, §3,
+P10, P11, §5, S4w, §8, §9, §10.
 
 # ADR-059: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
 
@@ -4564,10 +4571,9 @@ Related: ADR-052; ADR-053; ADR-058; `WEB_PUSH_PROPOSAL.md`;
 
 # ADR-061: A NIN record without a date of birth or gender: the patient enters them at activation
 
-Status: Proposed for source implementation
-(BRANCH:launch/patient-self-enrollment, migration 0092). Not merged or
-deployed. Production NIN-only enrollment stays refused by configuration
-(decision N1).
+Status: Accepted in source (D-Eminence/hid-system#82, migration 0092).
+Merged to main, not deployed. Production NIN-only enrollment stays refused
+by configuration (decision N1) until ADR-062 replaces that rule.
 
 Date: 2026-10-14
 
@@ -4597,10 +4603,10 @@ Decision:
   required from QoreID. A date of birth or gender that is absent, null or
   empty is left out of the stored profile. One that is present but does not
   parse still fails closed.
-- Progress answers before activation name the missing fields in
-  `requiredProfileFields` (`dateOfBirth`, `gender`, in that order; `[]` for a
-  complete record). Identity computes it from the stored profile and never
-  returns a profile value.
+- Progress answers after the holder proof (ADR-062) and before activation
+  name the missing fields in `requiredProfileFields` (`dateOfBirth`,
+  `gender`, in that order; `[]` for a complete record). Identity computes it
+  from the stored profile and never returns a profile value.
 - The patient enters the missing fields with the password
   (`POST .../activate` with `dateOfBirth` as `YYYY-MM-DD` and `gender` from
   the existing list). Identity checks them after the stage, contact-age and
@@ -4642,6 +4648,321 @@ Related: ADR-048; ADR-057; `PHASE_3_LAUNCH_DECISIONS.md` N1;
 `QOREID_VERIFICATION_CONTRACT.md`; `INTERFACE_CONTRACT.md`; `DATABASE.md`,
 "Self-reported enrollment profile (0092)".
 
+# ADR-062: A Health ID needs proof that the person holds the NIN
+
+Status: Accepted in source (D-Eminence/hid-system#84, migration 0093).
+Merged to main, not deployed. Every new flag is off. ADR-063
+(D-Eminence/hid-system#85, 0094) builds the facility route and replaces the
+production refusal of the online route below.
+
+Date: 2026-10-15
+
+Context:
+
+- On 2026-10-14 the product owner instructed that possession of a NIN alone
+  is never proof of ownership. Online, the patient proves control of the
+  phone linked to the NIN with a one-time code, and the Health ID comes only
+  after. A patient who cannot (lost SIM, changed number, no linked phone)
+  registers at a participating facility. After the proof, a NIN that has a
+  Health ID is directed to account recovery, never given a duplicate.
+- QoreID offers HID no OTP, consent, phone-ownership, SIM-swap or face-match
+  product. The body-free NIN lookup returns the record; the sandbox record
+  carried `nin.phone`. Whether production records carry a usable phone is
+  not confirmed (DEP-1). HID generates the code; Termii carries the SMS.
+- Before this change a QoreID lookup and a contact of the patient's choice
+  were enough to create a Health ID. Anyone who knew a NIN could create one.
+  Start also answered `409 NIN_ALREADY_REGISTERED` to anyone, which told a
+  caller whether a NIN had a Health ID.
+
+Decision:
+
+- A new state `verify_holder` comes between the NIN lookup and the contact
+  step. A public enrollment reaches the contact step only through
+  `identity.record_public_patient_holder_proof`, the only writer of the
+  holder columns. The activation command requires a valid holder proof for a
+  first activation. The Identity runtime cannot write the holder columns.
+- Online route (this change): a six-digit code from a secure random source,
+  sent by SMS to the record's phone, normalized to `+234` and 10 digits. Only
+  a verifier HMAC is stored. Five attempts, single use, a resend cooldown,
+  three codes per enrollment. The SMS says why it came and names no NIN,
+  person, Health ID or link. The route is closed for a record without a
+  usable phone and for a record whose date of birth shows an age under 18.
+  A record without a date of birth is treated as an adult, and its patient
+  may enter any date at activation (ADR-061), an age under 18 included.
+  Whether to refuse that is an owner decision, as minors at a facility are.
+- Facility route: ADR-063 (0094). With 0093 alone `facility.available` was
+  `false` and the proof command refused `facility_in_person`.
+- Deliberate departure from the owner's step order: the existing-Health-ID
+  check runs after the holder proof, not before. Start never says whether a
+  NIN is bound or pending. Only a correct code answers
+  `409 NIN_ALREADY_REGISTERED` ("This NIN already has a Health ID. Use
+  account recovery to sign in."), and that enrollment is deleted. The cost:
+  an existing holder spends a lookup and an SMS before being sent to
+  recovery.
+- Each start is a new enrollment. A proof removes the NIN's other unfinished
+  enrollments, unproven or proven by an earlier code; an unexpired in-person
+  proof is displaced only by another in-person proof. One proven enrollment
+  per NIN is enforced by a unique index.
+- Budgets in `identity.public_patient_holder_events`, counted under advisory
+  locks by `SECURITY DEFINER` commands: five sends per phone a day; ten and
+  thirty wrong codes per NIN a day and a month; five different NINs proven
+  per phone a year. Send and failure budgets are checked at send. A code is
+  sent only while the NIN's wrong codes plus the attempts left on all its
+  open holder codes, the new one included, stay within the daily and the
+  monthly budget, so nobody can have more wrong codes in reach than those
+  budgets, across any number of enrollments. A code already sent keeps its
+  attempts. Spent budgets answer `429 NIN_HOLDER_ROUTE_LIMITED` ("Use a
+  participating facility to register.").
+- Lock order: the NIN advisory lock (0092's key) before the enrollment row
+  lock, in Identity (every holder step and activation), the proof command
+  and the activation command. The send and failure commands lock the row
+  and then the holder budget locks; they rely on Identity to hold the NIN
+  lock. The prune at every start locks expired enrollments, skipping any
+  another transaction holds, before it deletes their codes, as the proof
+  does, so the two never deadlock.
+- Audit: `holder-verified` {method, ninDigest}; `existing-identity` {method,
+  ninDigest, existingBinding}; `superseded` or `contested` {count, methods,
+  ninDigest}; `holder-route-closed` {ninDigest, window}. The registry phone's
+  digest is kept only in the holder events, pruned after 31 or 366 days,
+  never in the append-only audit log.
+- Configuration, every flag off by default: `NIN_HOLDER_SMS_ENABLED`,
+  `ASSISTED_REGISTRATION_ENABLED` (defined here, used by ADR-063) and
+  `QOREID_PATIENT_SELF_NIN_BINDING_ENABLED`. NIN-only enrollment needs a
+  holder route. Production refuses the online route until the facility route
+  ships (ADR-063), in Identity and in infrastructure:
+  `ASSISTED_REGISTRATION_ENABLED` has no effect before then, so it cannot
+  stand in for that route. ADR-063 (D-Eminence/hid-system#85)
+  replaces this refusal: production needs `ASSISTED_REGISTRATION_ENABLED`
+  with the online flag, and Identity opens the online route in production
+  only while at least one facility takes part. Production also refuses the
+  signed-in NIN binding.
+  These rules replace the earlier blanket production refusal of NIN-only
+  enrollment, because activation now requires the proof in the database.
+  Enabling a flag is an operator step.
+- The signed-in "Verify NIN" (`POST /identity/me/verification/nin`) binds a
+  NIN to a legacy patient on a name and date-of-birth match, with no holder
+  proof. It answers `503 QOREID_PATIENT_NIN_BINDING_DISABLED` while its flag
+  is off, before any lookup or charge. Whether N1 covers it is the owner's
+  decision.
+- The 0093 backfill sends every unfinished enrollment back to
+  `verify_holder` and marks active ones `none_before_0093`. The release
+  preflight requires zero active public enrollments in production first.
+
+Consequences:
+
+- No path creates a Health ID from a NIN alone. A direct call to the
+  activation command without a proof is refused by the database.
+- A patient whose record has no usable phone, or whose record shows an age
+  under 18, cannot register online. They register at a participating
+  facility (ADR-063).
+- With 0093 alone no deployed environment could open public patient
+  enrollment. Staging refuses the online route (it sends email only),
+  production refused it until ADR-063, and the facility route was not yet
+  built. Every start on staging and production then answered
+  `503 PATIENT_REGISTRATION_NOT_OPEN` before the QoreID gate. The staging
+  acceptance rows that need a working start could not run on staging until
+  ADR-063 (now release checklist S4v); the synthetic runtime verifier
+  covers them.
+- Health-id 55a50b0 cannot register a patient on 0093: it does not know the
+  holder step and fails closed. Sign-in is unchanged (release checklist §3,
+  "Health-id alignment").
+
+Residual risks:
+
+- The registry phone may not be the person's: a SIM swap, a recycled
+  number, or a family member's phone. Whoever holds that phone can pass the
+  online step. The SMS warns the holder, and the in-person route is the
+  stronger proof.
+- Someone who knows a NIN can spend its failure budget and close the online
+  route for its holder for a day or a month. The send budget closes it too:
+  five sends to the registry phone in a day (two starts) close it for 24
+  hours without a single wrong code. The facility route is the remedy, so
+  production runs the online route only while that route is open (ADR-063).
+- Before any proof, a caller who passes Turnstile and the QoreID gate learns
+  one fact about the registry record: whether the online route is available
+  (start, `GET /current` and the holder send), that is whether the record has
+  a usable phone and does not show an age under 18. No registry value is
+  returned. The owner may choose to answer the minor case only at send, with
+  the same text.
+- The checks in the database stop a compromised Identity runtime from
+  writing the holder columns or activating without a proof record. They do
+  not stop a compromised runtime from sending itself a code it can read,
+  since it generates the code.
+- Account recovery is unchanged. A holder sent to recovery whose contact is
+  lost has no self-service path yet; facility-assisted recovery is an owner
+  decision. A phone-only patient who keeps the phone but loses the HID cannot
+  sign in or start recovery either, since both take an email or an HID
+  (`PHASE_3_LAUNCH_DECISIONS.md` §2, ENR-2-LAUNCH).
+- A holder whose NIN someone else already bound (with the holder's SIM, or
+  before 0093) is told to use account recovery, which cannot work for them.
+  The error table sends them to Health ID support with the reference. A
+  governed contested-identity review (`MANUAL_REVIEW`, a second approver for
+  any re-binding) is an owner decision and is not built.
+- Requirement 5 ("never a duplicate") holds for NIN-keyed bindings only. The
+  bound check reads NIN identifiers and the legacy crosswalk, so a legacy
+  patient without a recorded NIN can get a second Health ID by the online
+  route. Closing that is an open owner decision.
+- Production QoreID responses are unconfirmed (DEP-1): what `nin.phone`
+  means, when it was captured, whether a SIM change is flagged, and whether
+  HID may text it.
+
+Related: ADR-048; ADR-061; ADR-063;
+`PHASE_3_LAUNCH_DECISIONS.md` N1; `QOREID_VERIFICATION_CONTRACT.md`;
+`INTERFACE_CONTRACT.md`; `DATABASE.md`, "NIN holder proof (0093)".
+
+# ADR-063: Facility-assisted registration
+
+Status: Accepted in source (D-Eminence/hid-system#85, migration 0094).
+Merged to main, not deployed. Every flag is off and no facility is
+designated.
+
+Date: 2026-10-15
+
+Context:
+
+- ADR-062 requires a proof that the person holds the NIN before any Health
+  ID. Its online route needs a usable registry phone of an adult. A patient
+  without one (lost SIM, changed number, no linked phone) has no route.
+- Anyone who knows a NIN can spend its online budgets and close the online
+  route for its holder. The in-person route is the remedy, so ADR-062 kept
+  the online route off in production until this route exists.
+- QoreID offers HID no document, face-match or in-person product. The
+  in-person check is done by a person at a facility, with an original photo
+  ID, and recorded by HID.
+
+Decision:
+
+- Participating facilities. The platform designates a facility
+  (`identity.facility_assisted_registration`, append-only events, FORCE row
+  level security). Only `identity.admin_set_facility_assisted_registration`
+  writes it: `platform.facility.manage`, a fresh step-up, a reason, the
+  expected version (0 creates) and an idempotency key, through
+  `POST /admin/facilities/:id/assisted-registration`. A facility takes part
+  while its designation is active, the facility is verified and active, and
+  its organization is active. Only an active facility can be made active.
+- Public list. `GET /identity/patient-enrollments/participating-facilities`
+  lists facilities by name and location only (no ids), with three fixed
+  "what to bring" lines. Public, unaudited, cacheable for five minutes.
+  Empty while `ASSISTED_REGISTRATION_ENABLED` is false.
+- The patient starts on their own device, as online. At the desk the device
+  shows a desk code (`POST .../facility-code`): 10 Crockford base32
+  characters, 50 bits. The database keeps only its keyed digest
+  (`patient-enrollment-desk-code`), a random salt and an issue count. The
+  code is derived from the cookie token and the salt, so only the cookie
+  holder can be shown it again. A new code replaces the last one; five per
+  enrollment; it expires with the enrollment.
+- Who may check. The permission `identity.patient.assisted_registration` on
+  doctor, clinician and nurse; not org_admin, admin or receptionist. The
+  staff member also needs a role grant at that facility backed by a current
+  credential attestation (0087; legacy and onboarding roles never qualify),
+  a staff session with MFA assurance (checked in SQL by
+  `auth.staff_session_is_mfa` as well as by the guard), and a participating
+  facility.
+- The approved procedure (pending owner and legal sign-off): one method,
+  `government_photo_id_in_person`; one original photo ID of four types
+  (national ID card, international passport, driver's licence, voter's
+  card; no NIN slip); five attestations, each true (patient present,
+  original seen, photo matches the person, code shown on the patient's own
+  device, patient consents).
+- The staff check, `POST /identity/assisted-verifications`, in this order:
+  the guard (staff session with MFA, Origin and CSRF, facility, permission),
+  the route switch (503 before the body is read), the body (400), a read of
+  the enrollment the code names and a blind compare in system context, the
+  staff command, then the holder proof in system context.
+- Blind compare. Names are normalized (NFKD, combining marks dropped, upper
+  case, only A-Z and single spaces). Hyphens and apostrophes are removed but
+  a space is kept, so "Synthetic-Okafor" and "Synthetic Okafor" do not
+  match. First and last name match the record's in either order. The date
+  of birth is compared only when the record has one. The answer per field is `match`, `no_match` or `not_in_record`. Staff
+  never see the NIN, a registry value, the contact, the Health ID or the
+  missing profile fields. The typed values are never stored.
+- `identity.record_assisted_verification` (staff context) records every
+  check, matched, not matched or code not found, in
+  `identity.assisted_registration_verifications`: digests and per-field
+  outcomes only. It charges two sliding 24-hour budgets, every outcome
+  counted: 20 checks per staff member across facilities, 100 per facility
+  (`ASSISTED_VERIFICATION_STAFF_DAILY_MAX`,
+  `ASSISTED_VERIFICATION_FACILITY_DAILY_MAX`). It writes a staff audit row
+  {method, documentType, outcome, ninDigest}. The same idempotency key
+  replays the stored outcome.
+- The holder proof accepts `facility_in_person` for a matched check of the
+  same enrollment and its current desk code, under 10 minutes old, not used
+  by another enrollment, by a staff member still authorized at a
+  participating facility. It clears the desk code and closes any open
+  registry-phone code. It writes the proof outcome on the check once.
+  Activation re-checks the check, the designation and the staff member, and
+  records the NIN as verified at the time of the check.
+- A NIN that already has a Health ID is answered to staff only after a
+  match: `409 NIN_ALREADY_REGISTERED` with a staff text and the check's
+  reference, never the Health ID or the person.
+- One verifying staff member at launch. A second approver and a notice to
+  the registry phone after activation are owner decisions, not built.
+- In production the online route runs only while the facility route is
+  open. The Identity environment, `infra/aws` and `verify-synth` refuse
+  `NIN_HOLDER_SMS_ENABLED` without `ASSISTED_REGISTRATION_ENABLED`. Identity
+  also closes the online route in production (availability, start,
+  progress, the code send and the code check) while no facility takes part,
+  so suspending the last designation closes both routes. Staging and
+  development keep the flag alone. This replaces ADR-062's refusal.
+- The patient may start, or start again, at the facility: a registration
+  lasts 24 hours.
+- Operators review checks per staff member and per facility from the
+  verification rows (`DATABASE.md`, "Facility-assisted registration
+  (0094)").
+
+Consequences:
+
+- A patient without a usable registry phone can register, at a
+  participating facility, after one in-person check.
+- With every flag off and no designation the facility route stays closed:
+  availability answers `facility: false`, the list is empty, a desk code is
+  `409 ASSISTED_REGISTRATION_UNAVAILABLE` and the staff check
+  `503 ASSISTED_REGISTRATION_DISABLED`.
+- Health-id 55a50b0 has none of the new screens (facility list, desk code,
+  staff check, designation); it cannot use the route (release checklist §3,
+  "Health-id alignment"; P31, P33).
+- The facility route needs the staff MFA sign-in (FE-2) and attested
+  clinical grants (FE-3 or a written procedure) before it can be switched
+  on.
+
+Residual risks:
+
+- One staff member can approve an impostor with a forged or borrowed photo
+  ID. The attestations, the audit row, the budgets and the review query
+  bound and expose this; they do not prevent it.
+- HID checks only what staff type against the record. No document data is
+  captured, and the photo-ID check is the staff member's own attestation.
+  With a record that has no date of birth (the shape the owner reported for
+  production QoreID: name, NIN and reference only), the system checks the
+  two names only. One staff member who knows a NIN holder's name can then
+  create that holder's Health ID with no document, starting the
+  registration on their own phone.
+- The per-field `422` results let a staff member who holds a live desk code,
+  including one they issued on their own phone, test guesses of the
+  record's names and date of birth within the budgets (20 checks a day per
+  staff member, 100 per facility). Each guess is a check with an audit row
+  and appears in the review query.
+- Identity reads the enrollment and runs the blind compare before the staff
+  command authorizes the actor in SQL. An actor the command refuses always
+  gets `403` with no field results, but the time to answer can differ.
+- These rest on the existing mitigations: the budgets, the staff audit row,
+  the weekly review query (release checklist §10) and the sign-off of the
+  procedure (P29). A second approver stays an owner decision.
+- Minors at a facility are not refused (owner decision).
+- A NIN-keyed duplicate is refused; a legacy patient without a recorded NIN
+  can still get a second Health ID (ADR-062, open owner decision).
+- Facility-assisted account recovery and a contested-identity review are
+  owner decisions and are not built.
+- A registry-phone proof recorded before the in-person check removes the
+  desk code's enrollment: the staff check then answers `404` or `409
+  ASSISTED_VERIFICATION_STALE` and the patient continues on the proven
+  enrollment. An in-person proof displaces a phone proof (contested).
+
+Related: ADR-062; ADR-054 (staff MFA); ADR-049 (workforce provisioning);
+`PHASE_3_LAUNCH_DECISIONS.md` N2(d) and D17; `INTERFACE_CONTRACT.md`,
+"Facility-assisted registration"; `DATABASE.md`, "Facility-assisted
+registration (0094)".
+
 # ADR-064: Doctors and Nurses Apply by Themselves; They Set Up an Authenticator Before Review, and Two Platform Administrators Still Verify and Grant Every Clinical Role
 
 Status: Proposed; needs owner approval (owner decision 2 of 2026-10-14,
@@ -4675,7 +4996,7 @@ Context:
   `WORKFORCE_ROLE_CONFLICT`; anti-enumeration; ADR-057 (a new
   `PublicDetailProblem` needs a decision); ADR-058 (off starts off in the
   database).
-- With 0093, doctor, clinician and nurse hold `identity.break-glass.write`
+- With 0095, doctor, clinician and nurse hold `identity.break-glass.write`
   again: once `break_glass_enabled` is on, any approved clinician can make
   emergency reads at their facility.
 

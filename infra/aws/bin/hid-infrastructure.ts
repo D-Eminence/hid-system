@@ -12,6 +12,9 @@ const configuration = environmentConfig(
   process.env.HID_ENABLED_API_ROUTES,
   {
     qoreIdNinOnlyEnrollmentEnabled: process.env.HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED,
+    ninHolderSmsEnabled: process.env.HID_NIN_HOLDER_SMS_ENABLED,
+    assistedRegistrationEnabled: process.env.HID_ASSISTED_REGISTRATION_ENABLED,
+    qoreIdPatientSelfNinBindingEnabled: process.env.HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED,
     notificationWorkerEnabled: process.env.HID_NOTIFICATION_WORKER_ENABLED,
     operationalAlarmTopicArn: process.env.HID_OPERATIONAL_ALARM_TOPIC_ARN,
   },

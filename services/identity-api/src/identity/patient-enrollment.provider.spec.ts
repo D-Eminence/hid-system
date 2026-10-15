@@ -35,7 +35,7 @@ describe('QoreID public patient identity provider', () => {
       CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
       AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
       AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456', QOREID_ENABLED: 'false',
-      QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false',
+      QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false', NIN_HOLDER_SMS_ENABLED: 'true',
     });
     resetEnvironmentForTests();
   });

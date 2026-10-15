@@ -121,9 +121,37 @@ const environmentSchema = z.object({
   // change the governed NIN-registration provider mode above.
   QOREID_ENABLED: booleanString,
   // The public NIN documentation still requires name claims. This separate
-  // gate must remain false until QoreID confirms the NIN-only contract.
-  // Production refuses it until the NIN holder possession step ships (below).
+  // gate must remain false until QoreID confirms the NIN-only contract
+  // (DEP-1). It needs a route to prove that the person holds the NIN (below).
   QOREID_NIN_ONLY_ENROLLMENT_ENABLED: booleanString,
+  // ADR-062: the routes by which a person proves that they hold a NIN before
+  // any Health ID is made. The online route sends a one-time code to the
+  // phone the NIN record lists; the facility route is an in-person check at a
+  // participating facility (0094, ADR-063), open only while a facility is
+  // designated. Both default to false; enabling either is an operator step.
+  NIN_HOLDER_SMS_ENABLED: booleanString,
+  ASSISTED_REGISTRATION_ENABLED: booleanString,
+  // The signed-in "Verify NIN" route binds a NIN to a patient on a name and
+  // date-of-birth match, without a holder proof. False answers 503 before any
+  // lookup or quota charge; production refuses true until the owner decides
+  // whether decision N1 covers it.
+  QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: booleanString,
+  // Holder budgets (ADR-062), counted from identity.public_patient_holder_events
+  // over sliding windows: codes sent to one registry phone in 24 hours; wrong
+  // codes for one NIN in 24 hours and in 30 days (both checked before a code
+  // is sent, counting the attempts left on the NIN's open codes with the new
+  // code's, so the daily budget cannot be below OTP_MAX_ATTEMPTS); other NINs
+  // one registry phone may prove in 365 days.
+  NIN_HOLDER_SMS_DAILY_MAX: z.coerce.number().int().min(1).max(50).default(5),
+  NIN_HOLDER_FAILURES_DAILY_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  NIN_HOLDER_FAILURES_MONTHLY_MAX: z.coerce.number().int().min(1).max(1000).default(30),
+  NIN_HOLDER_DISTINCT_NINS_MAX: z.coerce.number().int().min(1).max(50).default(5),
+  // ADR-063: in-person checks of facility-assisted registration over a
+  // sliding 24 hours, every outcome counted, per staff member (across
+  // facilities) and per facility. The facility budget cannot be below the
+  // staff budget.
+  ASSISTED_VERIFICATION_STAFF_DAILY_MAX: z.coerce.number().int().min(1).max(200).default(20),
+  ASSISTED_VERIFICATION_FACILITY_DAILY_MAX: z.coerce.number().int().min(1).max(1000).default(100),
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,
@@ -239,14 +267,41 @@ const environmentSchema = z.object({
     context.addIssue({ code: 'custom', path: ['QOREID_NIN_ONLY_ENROLLMENT_ENABLED'],
       message: 'NIN-only enrollment requires enabled QoreID verification' });
   }
-  // N1: binding a NIN requires proof that the caller holds the phone the NIN
-  // registry lists for it. That step is not built yet, so production refuses
-  // NIN-only enrollment until it ships; the change that adds it lifts this.
+  // N1, ADR-062: a NIN lookup proves only that the NIN exists. NIN-only
+  // enrollment needs a route to prove that the person holds it; activation
+  // requires that proof in the database. These rules replace the earlier
+  // blanket production refusal.
   if (environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED
-      && (environment.HID_DEPLOYMENT_ENV === 'production'
-        || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging'))) {
+      && !environment.NIN_HOLDER_SMS_ENABLED && !environment.ASSISTED_REGISTRATION_ENABLED) {
     context.addIssue({ code: 'custom', path: ['QOREID_NIN_ONLY_ENROLLMENT_ENABLED'],
-      message: 'NIN-only enrollment is refused in production until the NIN holder possession step (N1) ships' });
+      message: 'NIN-only enrollment requires NIN_HOLDER_SMS_ENABLED or ASSISTED_REGISTRATION_ENABLED' });
+  }
+  if (environment.NIN_HOLDER_FAILURES_MONTHLY_MAX < environment.NIN_HOLDER_FAILURES_DAILY_MAX) {
+    context.addIssue({ code: 'custom', path: ['NIN_HOLDER_FAILURES_MONTHLY_MAX'],
+      message: 'The monthly holder failure budget cannot be below the daily one' });
+  }
+  if (environment.NIN_HOLDER_FAILURES_DAILY_MAX < environment.OTP_MAX_ATTEMPTS) {
+    context.addIssue({ code: 'custom', path: ['NIN_HOLDER_FAILURES_DAILY_MAX'],
+      message: 'The daily holder failure budget cannot be below OTP_MAX_ATTEMPTS: no code could be sent' });
+  }
+  const productionProfile = isProductionProfile(environment);
+  // Anyone who knows a NIN can spend its budgets and close the online route
+  // for its holder, and a person without a usable registry phone has no
+  // online route at all; the facility route (0094, ADR-063) is the remedy,
+  // so production needs the facility flag with the online route. The
+  // enrollment service also closes the online route in production while no
+  // facility takes part.
+  if (productionProfile && environment.NIN_HOLDER_SMS_ENABLED && !environment.ASSISTED_REGISTRATION_ENABLED) {
+    context.addIssue({ code: 'custom', path: ['NIN_HOLDER_SMS_ENABLED'],
+      message: 'The online NIN holder route needs ASSISTED_REGISTRATION_ENABLED in production (ADR-063)' });
+  }
+  if (environment.ASSISTED_VERIFICATION_FACILITY_DAILY_MAX < environment.ASSISTED_VERIFICATION_STAFF_DAILY_MAX) {
+    context.addIssue({ code: 'custom', path: ['ASSISTED_VERIFICATION_FACILITY_DAILY_MAX'],
+      message: 'The facility budget of in-person checks cannot be below the staff budget' });
+  }
+  if (productionProfile && environment.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED) {
+    context.addIssue({ code: 'custom', path: ['QOREID_PATIENT_SELF_NIN_BINDING_ENABLED'],
+      message: 'The signed-in NIN binding is refused in production until the owner decides whether N1 covers it' });
   }
   if (environment.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX > environment.PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX) {
     context.addIssue({ code: 'custom', path: ['PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX'],
@@ -365,6 +420,15 @@ function isBase64Key(value: string, requiredBytes: number): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The production profile: the production deployment, or NODE_ENV production
+ * outside staging. Staging and development never take the production rules.
+ */
+export function isProductionProfile(environment: { HID_DEPLOYMENT_ENV?: string; NODE_ENV?: string }): boolean {
+  return environment.HID_DEPLOYMENT_ENV === 'production'
+    || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging');
 }
 
 export type Environment = z.infer<typeof environmentSchema>;
