@@ -4148,6 +4148,108 @@ Related: ADR-041 (P8 owners); ADR-045 (Outreach campaign governance);
 module set, patient self-service, document upload completion);
 `DATABASE.md` (0091); release checklist §1, §2, §3, P10, P11, §5, §8, §9.
 
+## ADR-058 addendum: break-glass is on at launch, with limits (0093)
+
+Status: Decided by the owner on 2026-10-14 (D9, "turn on with limits").
+Source implementation proposed (migration 0093, branch
+`claude/break-glass-launch`); not merged or deployed. The platform control is
+production configuration and is not changed here: it is an operator step.
+
+Date: 2026-10-14
+
+Context:
+
+ADR-058 kept break-glass off at launch: 0091 withdrew
+`identity.break-glass.write` from every role and started `break_glass_enabled`
+off, and no `emergency` purpose of use existed (0082 seeded only
+`direct-care`). It also set how a module comes back: a reviewed migration that
+grants its permissions again and changes the role assertions with it, applying
+to every environment; for break-glass, also the `emergency` purpose and the
+control. The owner has now decided D9 for launch: break-glass is on, with
+limits. One reviewed migration grants the permission again and seeds the
+purpose; an operator turns the control on after staff MFA ships. Direct care
+is unaffected.
+
+Decision:
+
+- 0093 grants `identity.break-glass.write` to exactly the roles that held it
+  before 0091: doctor, clinician and nurse (0010; no other migration granted
+  it to another role). It seeds `emergency` ("Emergency treatment", active,
+  source `hid`) with `ON CONFLICT (code) DO NOTHING`, as 0082 seeded
+  `direct-care`, so an operator's row, active or not, is kept. Nothing else
+  0084 or 0091 withdrew is granted, and `healthcare-operations` stays unseeded
+  (N3). The rest of the activation and summary path was never withdrawn:
+  `identity.consent.write`, `identity.patient.read` and the EHR reads.
+- The role assertions change with it: exactly those three roles hold
+  `identity.break-glass.write`. Any other holder, a missing one, or any other
+  permission 0084 or 0091 withdrew still stops the bootstrap.
+- The control stays the operator's. 0093 leaves `break_glass_enabled` as 0091
+  left it (off where still seeded; a migration has no actor for a control
+  event). A platform administrator turns it on with the audited
+  `POST /admin/controls` (MFA platform session, TOTP step-up, reason,
+  `If-Match`) once staff MFA has shipped: Identity runs with 0088 in that
+  environment and Health-id signs staff in with an authenticator (FE-2), so
+  every session that can activate break-glass is MFA-verified (ADR-054), and
+  P22 is done. Until then activation answers `423 BREAK_GLASS_DISABLED` and
+  writes nothing (release checklist P11).
+- Limits, unchanged here and accepted for launch:
+  - the emergency summary covers the activating facility only, and the chart
+    routes stay closed to the emergency purpose: break-glass cannot open the
+    full chart, and an emergency room that never treated the patient sees an
+    empty summary (Health-id hand-off B1);
+  - the summary's vitals are as first recorded; corrections are not applied
+    (D8; hand-off A11(a));
+  - the clinician's access-request list leaves break-glass grants out (0074),
+    so after a reload a grant is found again only by activating again, which
+    replays the same grant without extending it (hand-off B11);
+  - as since 0010, 0012 and 0031: a reason of 8 to 500 characters, 5 to 240
+    minutes, read only, at most ten new activations per account per rolling
+    hour, the audit row and the patient notification intent in the activation
+    transaction, an in-app inbox item for the patient, and no revocation by
+    the patient (the clinician closes the grant).
+
+Alternatives not taken:
+
+- Turning the control on in the migration: a control event needs an acting
+  account (ADR-058), and the owner keeps production configuration an
+  operator's action.
+- Granting the permission or seeding the purpose alone: activation needs both,
+  so either alone changes nothing a user sees, and the other half would need
+  a second reviewed migration.
+- Granting break-glass to further roles (lab, pharmacist, receptionist,
+  admin, org admin): none held it before 0091; widening it is a new decision.
+- A database check of the control inside `identity.activate_break_glass`:
+  Identity checks it in the activation transaction, and only the Identity
+  runtime may execute the command. It would be defence in depth for a later
+  change, not part of this decision.
+
+Consequences:
+
+- From 0093's commit, doctors', clinicians' and nurses' sessions list
+  `identity.break-glass.write` on their next request (Identity reads
+  permissions per request), and Health-id `077b85c` enables its Emergency
+  method for them. While the control is off the activation answers
+  `423 BREAK_GLASS_DISABLED` ("Emergency access is currently disabled by the
+  platform administrator"), which Health-id shows as the error; every other
+  role still gets `403 PERMISSION_DENIED`.
+- After the operator step, activation is live: grant, audit, emergency-contact
+  alert intent (delivered only where emergency-contact delivery is enabled)
+  and inbox item, and the summary as above.
+- An earlier release's bootstrap refuses a database that holds 0093 (its
+  assertion forbids the permission). Break-glass is turned off again with the
+  control (or by deactivating `emergency`); taking the permission away again
+  is a new reviewed migration, never a hand-made delete, which would stop the
+  next bootstrap.
+- Evidence is local and synthetic: the rollback-only suite
+  `break-glass-launch.integration.sql`, the role assertions, and the
+  patient-safety runtime verifier over HTTP with the control off, on and off
+  again (release checklist §8). Nothing has been run on staging or production.
+
+Related: ADR-054 (staff MFA); ADR-058; `PHASE_3_LAUNCH_DECISIONS.md` (D9, N3);
+`INTERFACE_CONTRACT.md` (break-glass, launch module set); `DATABASE.md`
+("Break-glass at launch, with limits (0093)"); release checklist §1, §2, §3,
+P10, P11, §5, S4v, §8, §9, §10.
+
 # ADR-059: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
 
 Status: Proposed for source implementation

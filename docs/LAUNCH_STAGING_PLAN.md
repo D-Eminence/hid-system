@@ -11,14 +11,15 @@ Nothing in this plan has been run on staging or production. Every step that touc
 | On at launch | Off at launch (route switch off, desired count 0, permissions withdrawn by 0091) |
 |---|---|
 | Identity API: patient sign-in (HIDCode and password), staff sign-in with a password and an authenticator (0088), platform administration, consent and access requests, patient self-service | Lab API, Pharmacy API, OCR API and worker, Outreach API, notification worker |
-| EHR API: encounters, notes, diagnoses, vitals, prescriptions recorded in the EHR, the patient's own records | Document uploads (`uploads_enabled` off), break-glass (`break_glass_enabled` off, no role holds `identity.break-glass.write`), the Outreach portal |
+| EHR API: encounters, notes, diagnoses, vitals, prescriptions recorded in the EHR, the patient's own records | Document uploads (`uploads_enabled` off), the Outreach portal |
 | Notification API (SES email, Termii SMS after P18), event dispatcher, gateway | Google sign-in (P19), facility-assisted registration, NIN-only self-enrollment in production (until N1) |
+| Break-glass with limits (D9, 0093): doctors, clinicians and nurses hold `identity.break-glass.write` and `emergency` is seeded; `break_glass_enabled` is turned on by an operator after staff MFA ships (P11), and answers `423 BREAK_GLASS_DISABLED` until then. Read only, facility-local emergency summary, no chart, vitals as first recorded, grants not listed after a reload | |
 
-Re-enabling an off module takes its own reviewed migration (ADR-058). It is never a hand-made grant.
+Re-enabling an off module takes its own reviewed migration (ADR-058). It is never a hand-made grant. Break-glass came back that way: 0093 grants the permission again and seeds the purpose, and only its platform control is left to the operator (ADR-058 addendum).
 
 ## 2. What `main` contains
 
-- **Migrations:** 0001 to 0091.
+- **Migrations:** 0001 to 0092 on `main`; 0093 (break-glass at launch, with limits) on branch `claude/break-glass-launch`, not merged.
 - **Launch PRs merged to `main`:**
   - D-Eminence/hid-system#63 to #67: non-superuser database chain, EHR clinical safety, edge and gateway, launch configuration, launch frontend hosts.
   - D-Eminence/hid-system#68 to #71: enrollment gate, recovery and search, workforce provisioning, staff MFA.
@@ -37,9 +38,9 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
    - Run against staging: the database, secret and artefact rows, P1 to P5 and P8 to P14. P11 and P12 run again after the migration.
    - P22 (staff enrolment before clinical roles) applies to every environment that enables clinical roles.
    - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21.
-2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0092 in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
+2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0092 (0093 once merged) in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
 3. **Migrate staging.** Follow release checklist §5 in ledger order.
-   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 25 for 0085 to 0092, the estimate check at 26 and the role bootstrap at 27.
+   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 26 for 0085 to 0093, the estimate check at 27 and the role bootstrap at 28.
    - Run the bootstrap after the last migration and before any new build starts.
 4. **Deploy in the order of release checklist §6.**
    - Identity and EHR builds go out only after their migrations and the bootstrap.
@@ -49,7 +50,7 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
    - Database: S1 and S2.
    - Identity runtime verifiers against staging: S3.
    - Browser checks with real authenticators: S4 and S4a.
-   - Launch rows: S4d, S4e, S4f, S4g, S4i, S4j, S4k, S4l, S4m, S4n, S4o, S4p, S4q, S4r, S4s, S4t.
+   - Launch rows: S4d, S4e, S4f, S4g, S4i, S4j, S4k, S4l, S4m, S4n, S4o, S4p, S4q, S4r, S4s, S4t, and S4v (break-glass) after FE-2 ships and P11's operator step.
    - Rollback drill: S6.
    - S4b, S4c and S4h apply only once their module is re-enabled.
    - The provider-portal browser rows (S4a, S4e, S4j, S4o, S4q) need a Health-id build that signs staff in with an authenticator (FE-2, §7). Health-id `82b474e` cannot sign staff in once 0088 is applied, so until FE-2 ships these rows run as scripted API requests and the browser part waits.
@@ -72,6 +73,7 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
 - The governed-access loop: a clinician requests access, the patient approves, the clinician reads and writes, closes access, requests again, and the patient revokes (S4a). Search never grants chart access; locally this is covered by the patient search verifier (§8), with no staging row of its own.
 - An encounter's lifecycle and the retraction rules: a nurse cannot retract a doctor's records (S4j, S4q).
 - Lab, Pharmacy, OCR and Outreach routes answer `404 API_ROUTE_NOT_FOUND` at the gateway or `403 PERMISSION_DENIED` (S4g, S4l, S4r).
+- Break-glass: `423 BREAK_GLASS_DISABLED` before the operator turns its control on; after it, a doctor's activation, the facility-local emergency summary, the patient's inbox item, the replay and the close; a receptionist `403` (S4v).
 
 **Administration**
 - The §8 console checks by hand with real authenticators (S4), the platform admin runtime verifier against staging Identity, which includes workforce provisioning (S3), and principal search and export through `POST` (S4s (5)).
@@ -106,7 +108,7 @@ Release checklist §9 has the rollback for each change.
   - the gateway JSON access log (no query strings, #72).
 - **Audit:**
   - `audit.events` refusal rows carry `status` and `code` (A17).
-  - Access requests, approvals, PIN uses (inbox notice) and break-glass (off) are audited per patient.
+  - Access requests, approvals, PIN uses (inbox notice) and break-glass (activations and replays, with an inbox item for the patient) are audited per patient. Watch `identity.break-glass.activate` once the control is on.
 
 ## 7. Operator and external items that block production
 
@@ -126,12 +128,13 @@ None of these can be done from the repository. Each needs its owner and, where i
    Until FE-2 ships, staff cannot sign in to the EHR from Health-id.
 8. N1: QoreID holder confirmation and DPO sign-off before NIN-only self-enrollment opens in production. Until then, enrollment answers "not open" (FE-4).
 9. The clinical owner's review of open records of closed encounters (P12) and staff MFA enrolment before clinical roles (P22).
+10. Break-glass on (D9, ADR-058 addendum): after 0093 and once staff MFA has shipped (FE-2 deployed, P22 done), a platform administrator turns `break_glass_enabled` on with `POST /admin/controls`, then P10 and P11 again (P11 operator step). Production configuration: no change in this repository does it.
 
 ## 8. Evidence levels
 
 | Level | State |
 |---|---|
-| Committed and merged to `main` | Every change above, through D-Eminence/hid-system#79 |
+| Committed and merged to `main` | Every change above, through D-Eminence/hid-system#79; 0093 (break-glass) is on a branch |
 | Checks run locally | Unit and SQL suites, runtime verifiers over HTTP against PostgreSQL 16 as the runtime roles, and the full workspace gates with the synthetic 0028 to 0091 migration rehearsal on each PR head (each PR's evidence) |
 | CI | Green on each merged PR's head (each PR) |
 | Staging-verified | None yet |
