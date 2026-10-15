@@ -235,10 +235,13 @@ try {
   };
   const application = async cac => (await owner.query(`select id, status, verification_result,
       approval_mode from identity.organization_applications where cac_registration_number=$1`, [cac])).rows[0];
+  // Every charge to the network in this run, whichever hour or day bucket it
+  // landed in. A run that crosses an hour or midnight (UTC) splits its charges
+  // across buckets; the isolated database holds no charges from other runs.
   const networkCounters = async network => Object.fromEntries((await owner.query(
-    `select bucket_period, attempt_count from platform.self_service_cac_quota_counters
-      where network_digest=$1 and bucket_start >= date_trunc('day', statement_timestamp())
-        and (bucket_period='day' or bucket_start=date_trunc('hour', statement_timestamp()))`,
+    `select bucket_period, sum(attempt_count)::int as attempt_count
+       from platform.self_service_cac_quota_counters
+      where network_digest=$1 group by bucket_period`,
     [digest(network)])).rows.map(row => [row.bucket_period, row.attempt_count]));
   const email = label => `provider-${label}-${randomUUID().slice(0, 8)}@example.invalid`;
   const security = {};
