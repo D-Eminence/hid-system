@@ -801,7 +801,8 @@ set local lock_timeout = '5s';
 -- with row_security off. platform.control_enabled reads the flag as its
 -- technical owner, as every guard does, and raises an error for a missing row.
 select control_key, platform.control_enabled(control_key) as enabled
-  from (values ('break_glass_enabled'), ('outreach_portal_enabled'), ('uploads_enabled')) launch(control_key)
+  from (values ('break_glass_enabled'), ('clinician_signup_enabled'), ('outreach_portal_enabled'),
+    ('uploads_enabled')) launch(control_key)
  order by control_key;
 -- No forced row-level security below: row_security off makes the check fail
 -- instead of hiding rows if that ever changes.
