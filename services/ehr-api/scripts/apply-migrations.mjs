@@ -25,7 +25,17 @@ if (configuredNodeEnvironment !== 'production') loadLocalEnvironment(localEnviro
 const migrationDirectory = path.resolve(scriptDirectory, '../database/migrations');
 const dryRun = process.argv.includes('--dry-run');
 const planOnly = process.argv.includes('--plan');
+// `--through <file>` plans, dry-runs or applies the pending migrations up to
+// and including that migration, in the usual order, and nothing after it (an
+// upgrade rehearsal, e.g. verify-non-superuser-database.mjs). Without the flag
+// every pending migration is taken, as before.
+const throughIndex = process.argv.indexOf('--through');
+const through = throughIndex === -1 ? undefined : process.argv[throughIndex + 1];
 const databaseUrl = process.env.DATABASE_URL;
+
+if (throughIndex !== -1 && (!through || !/^\d{4}_[a-z0-9_]+\.sql$/.test(through))) {
+  throw new Error('--through needs a migration file name such as 0093_break_glass_launch_with_limits.sql');
+}
 
 if (!databaseUrl) {
   throw new Error('DATABASE_URL is required');
@@ -96,6 +106,10 @@ async function appliedMigrations(client) {
 
 async function main() {
   const migrations = await loadMigrations();
+  // Refused before connecting, so an unknown name changes nothing.
+  if (through !== undefined && !migrations.some((migration) => migration.version === through)) {
+    throw new Error(`--through names no migration file: ${through}`);
+  }
   const client = new Client(databaseOptions(databaseUrl, 'hid-schema-migrator'));
   await client.connect();
 
@@ -113,7 +127,9 @@ async function main() {
       }
     }
 
-    const pending = orderMigrations(migrations).filter((migration) => !applied.has(migration.version));
+    const ordered = orderMigrations(migrations);
+    const last = through === undefined ? ordered.length - 1 : ordered.findIndex((migration) => migration.version === through);
+    const pending = ordered.slice(0, last + 1).filter((migration) => !applied.has(migration.version));
     process.stdout.write(`${pending.length} pending migration(s)\n`);
     for (const migration of pending) {
       process.stdout.write(`${migration.version} ${migration.checksum}\n`);

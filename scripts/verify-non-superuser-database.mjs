@@ -30,8 +30,9 @@
 //   rolled-back transactions: refused while break_glass_enabled is on, a
 //   no-op while it is off;
 // - the upgrade path of clinician self sign-up (ADR-064): a second database
-//   migrated through the migration before it and bootstrapped, so
-//   platform.control_enabled already has its technical owner, then that
+//   migrated through the migration before it, where the previous release's
+//   bootstrap statements for platform.control_enabled (P8-CONTROL) give the
+//   function its technical owner, then that
 //   migration applied as the administrator without SET ON PARAMETER (it
 //   replaces the function under a membership it takes and revokes in its own
 //   transaction), the bootstrap again and db:verify-roles; the function keeps
@@ -428,7 +429,23 @@ try {
   assert.equal(psql('upgrade database before the upgrade', admin,
     'select count(*) || \':\' || max(version) from migration.schema_migrations', 0, upgrade).stdout.trim(),
   `${files.indexOf(signupMigration)}:${previousHead}`);
-  assert.equal(bootstrap('role bootstrap before the upgrade', [], upgrade), 'Runtime database roles provisioned and verified');
+  // The previous release's bootstrap left platform.control_enabled to its
+  // technical owner. This release's bootstrap cannot run before this
+  // migration (it grants the new commands), so the previous one's P8-CONTROL
+  // statements, which this release does not change, run here as it ran them:
+  // in one transaction, under a temporary membership revoked at its end.
+  const grantsSql = await readFile(join(service, 'database/runtime-grants.sql'), 'utf8');
+  const controlStart = grantsSql.indexOf('-- Launch (P8-CONTROL)');
+  const controlEndMarker = 'revoke create on schema platform from hid_platform_control_reader;';
+  const controlEnd = grantsSql.indexOf(controlEndMarker, controlStart);
+  assert(controlStart > 0 && controlEnd > controlStart, 'runtime-grants.sql has no P8-CONTROL block');
+  const previousBootstrap = join(temporary, 'previous-control-bootstrap.sql');
+  await writeFile(previousBootstrap, ["set createrole_self_grant = '';",
+    'grant hid_platform_control_reader to current_user with inherit true, set true;',
+    grantsSql.slice(controlStart, controlEnd + controlEndMarker.length),
+    'revoke hid_platform_control_reader from current_user;', ''].join('\n'), { mode: 0o600 });
+  run('the previous bootstrap of platform.control_enabled', join(pgBindir, 'psql'), ['-X', '-q', '-1', '-v',
+    'ON_ERROR_STOP=1', '-h', temporary, '-U', admin, '-d', upgrade, '-f', previousBootstrap]);
   const ownerBefore = psql('control owner before the upgrade', superuser,
     `select proowner::regrole from pg_proc where oid = 'platform.control_enabled(text)'::regprocedure`, 0, upgrade).stdout.trim();
   assert.equal(ownerBefore, 'hid_platform_control_reader');
@@ -457,6 +474,7 @@ try {
   }
   evidence.steps.clinician_signup_upgrade_path = { database: upgrade, migrated_through: previousHead,
     applied: signupMigration, run_as: admin, set_on_parameter: 'not held for the upgrade',
+    before_upgrade: 'the previous bootstrap\'s P8-CONTROL statements (owner transfer, reader policy and column grant)',
     control_owner: { before: ownerBefore, after: ownerAfter },
     administrator_inherit_or_set_memberships_after: 0, control_read_as: upgradeReads };
 
