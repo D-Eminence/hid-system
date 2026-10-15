@@ -441,6 +441,8 @@ create table identity.clinician_application_sessions (
   consumed_at timestamptz,
   ended_at timestamptz,
   facility_searches integer not null default 0 check (facility_searches between 0 and 30),
+  -- Submissions of this draft that Identity hashed a password for (at most five).
+  submit_attempts integer not null default 0 check (submit_attempts between 0 and 5),
   submit_idempotency_key text check (submit_idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$'),
   submit_sha256 char(64) check (submit_sha256 ~ '^[0-9a-f]{64}$'),
   submit_response jsonb,
@@ -452,6 +454,7 @@ create table identity.clinician_application_sessions (
     expires_at > created_at
     and expires_at <= created_at + case kind when 'draft' then interval '60 minutes' else interval '30 minutes' end),
   constraint clinician_application_sessions_consumed_check check (consumed_at is null or kind = 'draft'),
+  constraint clinician_application_sessions_attempts_check check (submit_attempts = 0 or kind = 'draft'),
   constraint clinician_application_sessions_submit_check check (
     (submit_idempotency_key is null) = (submit_sha256 is null)
     and (submit_sha256 is null) = (submit_response is null)
@@ -523,6 +526,29 @@ as $$
       and requested_expires_at <= clock_timestamp() then 'expired' else requested_state end
 $$;
 revoke all on function identity.clinician_application_displayed_state(text, timestamptz) from public;
+
+-- The licence details C8, C13 and the submit probe check alike: a doctor with
+-- an MDCN licence or a nurse with an NMCN one, a licence number of the
+-- accepted form (upper-cased, single spaces), and an expiry date after today
+-- and within five years in Africa/Lagos. Never null.
+create function identity.clinician_application_licence_valid(requested_role text, requested_regulator_code text,
+  requested_licence_number text, requested_licence_valid_until date)
+returns boolean
+language sql
+stable
+set search_path = pg_catalog, pg_temp
+as $$
+  select coalesce(
+    ((requested_role = 'doctor' and requested_regulator_code = 'MDCN')
+      or (requested_role = 'nurse' and requested_regulator_code = 'NMCN'))
+    and normalized.licence ~ '^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$'
+    and identity.clinician_licence_key(requested_regulator_code, normalized.licence) ~ '^(MDCN|NMCN):[A-Z0-9]{1,100}$'
+    and requested_licence_valid_until > normalized.lagos_today
+    and requested_licence_valid_until <= normalized.lagos_today + interval '5 years', false)
+  from (select upper(btrim(regexp_replace(coalesce(requested_licence_number, ''), '\s+', ' ', 'g'))) as licence,
+    (clock_timestamp() at time zone 'Africa/Lagos')::date as lagos_today) normalized
+$$;
+revoke all on function identity.clinician_application_licence_valid(text, text, text, date) from public;
 
 -- Reserved attestations. True unless an application that is not approved
 -- holds this attestation, except that application's own pinned step 2 while it
@@ -1659,13 +1685,25 @@ begin
 end
 $$;
 
--- The submit's capability check, before Identity charges the submit quota and
--- hashes the password (P4): 'new' for a live, unconsumed draft of this
--- address, 'replay' for a live draft that this key and request already
--- consumed; anything else is CLINICIAN_APPLICATION_SESSION_INVALID, as C8
--- would answer. A read only; C8 checks everything again.
+-- The submit's check before Identity charges the submit quota and hashes the
+-- password (P4). Raised, so nothing is charged: a forged, unknown, expired or
+-- ended capability, an account capability, a draft of another address, a
+-- spent draft with another key or request, and a draft whose five password
+-- hashes are spent are CLINICIAN_APPLICATION_SESSION_INVALID, as C8 would
+-- answer. Answered: 'replay' for a draft this key and request spent (C8
+-- answers it from the draft without the password, so Identity hashes
+-- nothing); for a live, unspent draft, C8's first refusal that needs no
+-- password, as its marker (Identity charges the quota, then answers it
+-- without hashing): CLINICIAN_APPLICATION_INVALID,
+-- CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE,
+-- CLINICIAN_APPLICATION_FACILITY_BUSY or CLINICIAN_EMAIL_IN_USE; else 'new'.
+-- A read only; C8 checks everything again (the facility's count under its
+-- lock).
 create function identity.clinician_application_submit_probe(requested_session_hmac char(64),
-  requested_email_hmac char(64), requested_idempotency_key text, requested_sha256 char(64))
+  requested_email_hmac char(64), requested_idempotency_key text, requested_sha256 char(64),
+  requested_email text, requested_full_name text, requested_role text, requested_regulator_code text,
+  requested_licence_number text, requested_licence_valid_until date, requested_facility_id uuid,
+  facility_open_limit integer)
 returns text
 language plpgsql
 stable
@@ -1674,6 +1712,9 @@ set search_path = pg_catalog, identity, auth, platform, audit, pg_temp
 as $$
 declare
   draft identity.clinician_application_sessions%rowtype;
+  normalized_email text := lower(btrim(requested_email));
+  full_name text := btrim(regexp_replace(coalesce(requested_full_name, ''), '\s+', ' ', 'g'));
+  facility_row identity.facilities%rowtype;
 begin
   perform identity.clinician_application_require_system();
   if requested_session_hmac is not null and requested_session_hmac ~ '^[0-9a-f]{64}$' then
@@ -1690,10 +1731,66 @@ begin
     end if;
     raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_SESSION_INVALID';
   end if;
-  if draft.email_hmac is distinct from requested_email_hmac then
+  if draft.email_hmac is distinct from requested_email_hmac or draft.submit_attempts >= 5 then
     raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_SESSION_INVALID';
   end if;
+
+  -- C8's refusals that need no password, in C8's order.
+  if requested_idempotency_key is null or requested_idempotency_key !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$'
+     or requested_sha256 is null or requested_sha256 !~ '^[0-9a-f]{64}$'
+     or normalized_email is null or length(normalized_email) > 254
+     or normalized_email !~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
+     or length(full_name) not between 2 and 200
+     or not identity.clinician_application_licence_valid(requested_role, requested_regulator_code,
+       requested_licence_number, requested_licence_valid_until)
+     or requested_facility_id is null
+     or facility_open_limit is null or facility_open_limit not between 1 and 500 then
+    return 'CLINICIAN_APPLICATION_INVALID';
+  end if;
+  select * into facility_row from identity.facilities facility where facility.id = requested_facility_id;
+  if facility_row.id is null or facility_row.lifecycle_status <> 'verified' or not facility_row.active
+     or not exists (select 1 from identity.organizations organization
+                     where organization.id = facility_row.organization_id and organization.active) then
+    return 'CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE';
+  end if;
+  if (select count(*) from identity.clinician_applications application
+       where application.facility_id = facility_row.id
+         and application.state in ('awaiting_authenticator', 'submitted', 'under_review')
+         and application.expires_at > clock_timestamp()) >= facility_open_limit then
+    return 'CLINICIAN_APPLICATION_FACILITY_BUSY';
+  end if;
+  if exists (select 1 from auth.accounts account_row
+              where lower(account_row.email) = normalized_email and account_row.status <> 'deleted')
+     or exists (select 1 from identity.staff staff_row where lower(staff_row.email) = normalized_email) then
+    return 'CLINICIAN_EMAIL_IN_USE';
+  end if;
   return 'new';
+end
+$$;
+
+-- Counts one submission that Identity will hash a password for (after the
+-- charge; never a refusal or a replay) against its draft's budget of five,
+-- so one draft never makes P4 run argon2id more than five times, however many
+-- networks or concurrent requests it is sent from. Only a live, unspent
+-- draft counts; over its budget, or for anything else,
+-- CLINICIAN_APPLICATION_SESSION_INVALID (the draft can no longer submit: the
+-- applicant verifies the address again).
+create function identity.count_clinician_application_submit_attempt(requested_session_hmac char(64))
+returns void
+language plpgsql
+security definer
+set search_path = pg_catalog, identity, auth, platform, audit, pg_temp
+as $$
+begin
+  perform identity.clinician_application_require_system();
+  update identity.clinician_application_sessions counted
+     set submit_attempts = counted.submit_attempts + 1
+   where counted.token_hmac = requested_session_hmac and counted.kind = 'draft'
+     and counted.consumed_at is null and counted.ended_at is null and counted.expires_at > clock_timestamp()
+     and counted.submit_attempts < 5;
+  if not found then
+    raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_SESSION_INVALID';
+  end if;
 end
 $$;
 
@@ -1772,7 +1869,6 @@ as $$
 #variable_conflict use_column
 declare
   now_value timestamptz := clock_timestamp();
-  lagos_today date := (clock_timestamp() at time zone 'Africa/Lagos')::date;
   normalized_email text := lower(btrim(requested_email));
   full_name text := btrim(regexp_replace(coalesce(requested_full_name, ''), '\s+', ' ', 'g'));
   licence text := upper(btrim(regexp_replace(coalesce(requested_licence_number, ''), '\s+', ' ', 'g')));
@@ -1796,13 +1892,8 @@ begin
      or normalized_email !~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
      or length(full_name) not between 2 and 200
      or requested_password_hash is null or requested_password_hash !~ '^\$argon2id\$v=19\$m=65536,t=3,p=1\$'
-     or requested_role is null or requested_regulator_code is null
-     or not ((requested_role = 'doctor' and requested_regulator_code = 'MDCN')
-       or (requested_role = 'nurse' and requested_regulator_code = 'NMCN'))
-     or licence !~ '^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$'
-     or identity.clinician_licence_key(requested_regulator_code, licence) !~ '^(MDCN|NMCN):[A-Z0-9]{1,100}$'
-     or requested_licence_valid_until is null or requested_licence_valid_until <= lagos_today
-     or requested_licence_valid_until > lagos_today + interval '5 years'
+     or not identity.clinician_application_licence_valid(requested_role, requested_regulator_code,
+       requested_licence_number, requested_licence_valid_until)
      or requested_facility_id is null
      or facility_open_limit is null or facility_open_limit not between 1 and 500
      or platform_daily_limit is null or platform_daily_limit not between 1 and 100000 then
@@ -2106,7 +2197,6 @@ as $$
 #variable_conflict use_column
 declare
   now_value timestamptz := clock_timestamp();
-  lagos_today date := (clock_timestamp() at time zone 'Africa/Lagos')::date;
   licence text := upper(btrim(regexp_replace(coalesce(requested_licence_number, ''), '\s+', ' ', 'g')));
   capability identity.clinician_application_sessions%rowtype;
   prior identity.clinician_application_idempotency%rowtype;
@@ -2120,13 +2210,8 @@ begin
   perform identity.clinician_application_require_system();
   if requested_idempotency_key is null or requested_idempotency_key !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$'
      or requested_sha256 is null or requested_sha256 !~ '^[0-9a-f]{64}$'
-     or requested_role is null or requested_regulator_code is null
-     or not ((requested_role = 'doctor' and requested_regulator_code = 'MDCN')
-       or (requested_role = 'nurse' and requested_regulator_code = 'NMCN'))
-     or licence !~ '^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$'
-     or identity.clinician_licence_key(requested_regulator_code, licence) !~ '^(MDCN|NMCN):[A-Z0-9]{1,100}$'
-     or requested_licence_valid_until is null or requested_licence_valid_until <= lagos_today
-     or requested_licence_valid_until > lagos_today + interval '5 years'
+     or not identity.clinician_application_licence_valid(requested_role, requested_regulator_code,
+       requested_licence_number, requested_licence_valid_until)
      or requested_facility_id is null
      or facility_open_limit is null or facility_open_limit not between 1 and 500
      or platform_daily_limit is null or platform_daily_limit not between 1 and 100000 then
@@ -3064,7 +3149,9 @@ revoke all on function identity.clinician_signup_open(),
   identity.verify_clinician_application_signup_code(uuid, character, text, character, character),
   identity.verify_clinician_application_status_code(uuid, character, character, character),
   identity.clinician_application_session(character),
-  identity.clinician_application_submit_probe(character, character, text, character),
+  identity.clinician_application_submit_probe(character, character, text, character, text, text, text, text, text,
+    date, uuid, integer),
+  identity.count_clinician_application_submit_attempt(character),
   identity.search_clinician_application_facilities(character, text),
   identity.submit_clinician_application(character, character, text, character, text, character, text, text, text,
     text, text, date, uuid, integer, integer),

@@ -61,6 +61,34 @@ const FACTOR_UNPROVEN_DETAIL = 'Your authenticator was set up at platform sign-i
 const STAFF_SIGN_IN_DETAIL = 'Your authenticator was reset. Sign in to the provider portal to set it up again,'
   + ' or contact HID support.';
 
+/**
+ * The submit probe's answers for C8's refusals that need no password, with
+ * the SQLSTATE C8 raises them with: P4 charges the quota, then answers them
+ * as C8 would, without hashing the password.
+ */
+const SUBMIT_PROBE_REFUSALS: Readonly<Record<string, string>> = Object.freeze({
+  CLINICIAN_APPLICATION_INVALID: '22023',
+  CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE: '23514',
+  CLINICIAN_APPLICATION_FACILITY_BUSY: '23514',
+  CLINICIAN_EMAIL_IN_USE: '23505',
+});
+
+let replayPlaceholder: Promise<string> | undefined;
+/**
+ * What a submit replay passes as its password hash. C8 answers a replay from
+ * the spent draft before it reads the hash and stores nothing, so a replay
+ * costs no argon2id run of the applicant's password. A real argon2id hash of
+ * random bytes, in the format C8 checks, computed once per process and never
+ * stored.
+ */
+function replayPlaceholderHash(): Promise<string> {
+  replayPlaceholder ??= hashAccountPassword(randomBytes(32).toString('base64url')).catch((error: unknown) => {
+    replayPlaceholder = undefined;
+    throw error;
+  });
+  return replayPlaceholder;
+}
+
 /** 409 answers of the database's conflict markers (23505 and 23514), with their fixed details. */
 const CONFLICTS: Readonly<Record<string, string>> = Object.freeze({
   CLINICIAN_APPLICATION_ALREADY_OPEN: 'You already have an open application at this facility',
@@ -213,13 +241,17 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
   /**
    * P4: the sign-up. The draft is checked first (a live draft of this
    * address, or one this key and request already spent), so a forged or
-   * spent capability is refused before anything is charged or hashed; then
-   * the quota is charged and committed, and the password hashed; then one
-   * transaction creates the account, the pending staff record and the
-   * application (C8, which counts it against the platform's daily cap and
-   * refuses it at the cap, under the counter's lock), opens the 0088
-   * enrolment challenge on a token derived from the next capability, and
-   * binds it (C9).
+   * spent capability is refused before anything is charged or hashed; with
+   * it, the probe answers C8's refusals that need no password. Then the
+   * quota is charged and committed (a submission that will be hashed counts
+   * against its draft's five hashes in the same transaction). A refusal is
+   * answered without hashing; a replay passes a placeholder (C8 answers it
+   * from the spent draft); only a submission C8 may create hashes the
+   * password, with argon2id. Then one transaction creates the account, the
+   * pending staff record and the application (C8, which counts it against
+   * the platform's daily cap and refuses it at the cap, under the counter's
+   * lock), opens the 0088 enrolment challenge on a token derived from the
+   * next capability, and binds it (C9).
    */
   async submit(token: string | undefined, idempotencyKey: string, input: SubmitClinicianApplicationDto,
     request: ClinicianRequest) {
@@ -229,13 +261,26 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
     const networkDigest = this.networkDigest(request.ip);
     const { password: _password, ...withoutPassword } = input;
     const digest = requestDigest('clinician-application.submit', withoutPassword);
+    let outcome = '';
     await this.chargeQuota(networkDigest, 'submit', request, async (client) => {
-      const outcome = (await client.query<{ outcome: string }>(
-        'select identity.clinician_application_submit_probe($1,$2,$3,$4) as outcome',
-        [sessionHmac, this.hmac('email', input.email), idempotencyKey, digest])).rows[0]?.outcome;
-      if (outcome !== 'new' && outcome !== 'replay') throw this.unavailable();
+      outcome = (await client.query<{ outcome: string }>(
+        'select identity.clinician_application_submit_probe($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) as outcome',
+        [sessionHmac, this.hmac('email', input.email), idempotencyKey, digest, input.email, input.fullName,
+          input.profession, input.regulator, input.licenceNumber, input.licenceValidUntil, input.facilityId,
+          this.environment.CLINICIAN_APPLICATION_FACILITY_OPEN_LIMIT])).rows[0]?.outcome ?? '';
+      if (outcome !== 'new' && outcome !== 'replay' && !Object.hasOwn(SUBMIT_PROBE_REFUSALS, outcome)) {
+        throw this.unavailable();
+      }
+    }, async (client) => {
+      // A submission that will hash the password counts against its draft's five hashes.
+      if (outcome === 'new') {
+        await client.query('select identity.count_clinician_application_submit_attempt($1)', [sessionHmac]);
+      }
     });
-    const passwordHash = await hashAccountPassword(input.password);
+    if (outcome !== 'new' && outcome !== 'replay') {
+      throw this.databaseProblem({ code: SUBMIT_PROBE_REFUSALS[outcome], message: outcome });
+    }
+    const passwordHash = outcome === 'replay' ? await replayPlaceholderHash() : await hashAccountPassword(input.password);
     const next = this.newToken();
     const result = await this.run(request, async (client) => {
       const row = (await client.query<{
@@ -534,13 +579,17 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
    * Charges a network's quota in its own transaction (the gate first), so a
    * refusal and a charge both commit. `precheck` runs after the gate and
    * before the charge (a read): a request it refuses charges nothing.
+   * `afterCharge` runs only when the quota allowed the request; a refusal it
+   * raises rolls the charge back.
    */
   private async chargeQuota(networkDigest: string, operation: QuotaOperation, request: ClinicianRequest,
-    precheck?: (client: PoolClient) => Promise<void>) {
+    precheck?: (client: PoolClient) => Promise<void>, afterCharge?: (client: PoolClient) => Promise<void>) {
     const allowed = await this.run(request, async (client) => {
       await this.gate(client, 'intake');
       await precheck?.(client);
-      return this.quota(client, networkDigest, operation);
+      const charged = await this.quota(client, networkDigest, operation);
+      if (charged) await afterCharge?.(client);
+      return charged;
     });
     if (!allowed) throw this.rateLimited(QUOTA_RETRY_AFTER_SECONDS);
   }

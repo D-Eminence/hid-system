@@ -310,7 +310,8 @@ begin
     'identity.clinician_intake_require_open()', 'identity.clinician_application_require_not_maintenance()',
     'identity.clinician_application_require_system()', 'identity.clinician_application_audit(text,text,text,text,jsonb)',
     'identity.clinician_application_account_session(character,text[],text,boolean)',
-    'platform.count_clinician_application_submission(integer)'] loop
+    'platform.count_clinician_application_submission(integer)',
+    'identity.clinician_application_licence_valid(text,text,text,date)'] loop
     foreach runtime in array array['public', 'hid_identity_api_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime',
         'hid_outreach_api_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_api_runtime', 'hid_ocr_api_runtime'] loop
       if has_function_privilege(runtime, signature, 'EXECUTE') then

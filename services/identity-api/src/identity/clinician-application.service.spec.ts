@@ -66,6 +66,7 @@ function harness(overrides: Record<string, Handler> = {}): Harness {
       account_id: accountId, mfa_challenge_id: mfaChallengeId, expires_at: new Date('2026-10-15T10:30:00Z') }] }),
     'bind_clinician_application_mfa_challenge': () => ({ rows: [] }),
     'clinician_application_submit_probe': () => ({ rows: [{ outcome: 'new' }] }),
+    'count_clinician_application_submit_attempt': () => ({ rows: [] }),
     ...overrides,
   }));
   const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
@@ -285,17 +286,23 @@ describe('the submit', () => {
     facility_id: submitInput.facilityId, facility_name: 'Synthetic Clinic', application_version: '1',
     session_stage: 'enrolment_required', replayed: false };
 
-  it('checks the draft, then charges the quota in its own transaction, hashes with argon2id, and opens the enrolment in the submit transaction', async () => {
+  it('checks the draft, then charges the quota and counts a hash in its own transaction, hashes with argon2id, and opens the enrolment in the submit transaction', async () => {
     const h = harness({ 'submit_clinician_application': () => ({ rows: [row] }) });
+    const hashing = jest.spyOn(passwordHash, 'hashAccountPassword');
     const result = await h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request);
     expect(h.transactions).toEqual([{ committed: true }, { committed: true }]);
     expect(h.calls.filter(({ transaction }) => transaction === 0).map(({ sql }) => sql))
       .toEqual([expect.stringContaining('platform.control_enabled'), expect.stringContaining('clinician_application_submit_probe'),
-        expect.stringContaining('consume_clinician_application_quota')]);
+        expect.stringContaining('consume_clinician_application_quota'),
+        expect.stringContaining('count_clinician_application_submit_attempt')]);
     const { password: _unused, ...unhashed } = submitInput;
+    // The probe gets the details C8 would refuse without the password.
     expect(h.calls[1]!.values).toEqual([expected('session', TOKEN), expected('email', email), 'clinician-submit-0000000001',
-      requestDigest('clinician-application.submit', unhashed)]);
+      requestDigest('clinician-application.submit', unhashed), email, 'Ada Synthetic', 'doctor', 'MDCN', 'MDCN/12345',
+      '2027-06-30', submitInput.facilityId, 30]);
     expect(h.calls[2]!.values).toEqual([expected('ip', '203.0.113.71'), 'submit', 5, 10, 200]);
+    expect(h.calls[3]!.values).toEqual([expected('session', TOKEN)]);
+    expect(hashing).toHaveBeenCalledWith(submitInput.password);
     const submit = h.calls.find(({ sql }) => sql.includes('submit_clinician_application'))!;
     expect(submit.transaction).toBe(1);
     const values = submit.values as unknown[];
@@ -349,12 +356,54 @@ describe('the submit', () => {
     expect(hashing).not.toHaveBeenCalled();
   });
 
-  it('charges a replay of a spent draft (same key and request) and lets C8 answer it', async () => {
+  it('charges a replay of a spent draft (same key and request) and lets C8 answer it, without hashing the password', async () => {
+    const hashing = jest.spyOn(passwordHash, 'hashAccountPassword');
     const h = harness({ 'clinician_application_submit_probe': () => ({ rows: [{ outcome: 'replay' }] }),
       'submit_clinician_application': () => ({ rows: [{ ...row, replayed: true }] }) });
     const result = await h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request);
     expect(result.answer.replayed).toBe(true);
     expect(indexOf(h, 'consume_clinician_application_quota')).toBeGreaterThan(indexOf(h, 'clinician_application_submit_probe'));
+    // A replay counts no hash against the draft, and C8 gets a placeholder in its format, not the password's hash.
+    expect(indexOf(h, 'count_clinician_application_submit_attempt')).toBe(-1);
+    expect(hashing).not.toHaveBeenCalledWith(submitInput.password);
+    const placeholder = h.calls.find(({ sql }) => sql.includes('submit_clinician_application('))!.values[7];
+    expect(placeholder).toMatch(/^\$argon2id\$v=19\$m=65536,t=3,p=1\$/);
+    await h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request);
+    expect(h.calls.filter(({ sql }) => sql.includes('submit_clinician_application(')).at(-1)!.values[7]).toBe(placeholder);
+    expect(hashing.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  it.each([
+    ['CLINICIAN_APPLICATION_INVALID', 400], ['CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE', 409],
+    ['CLINICIAN_APPLICATION_FACILITY_BUSY', 409], ['CLINICIAN_EMAIL_IN_USE', 409],
+  ] as const)('charges the quota and answers %s as C8 would, without hashing the password or calling C8', async (marker, status) => {
+    const hashing = jest.spyOn(passwordHash, 'hashAccountPassword');
+    const h = harness({ 'clinician_application_submit_probe': () => ({ rows: [{ outcome: marker }] }) });
+    const problem = await refusal(h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request));
+    expect([problem.getStatus(), problem.code]).toEqual([status, marker]);
+    expect(h.transactions).toEqual([{ committed: true }]);
+    expect(indexOf(h, 'consume_clinician_application_quota')).toBeGreaterThan(-1);
+    expect(indexOf(h, 'count_clinician_application_submit_attempt')).toBe(-1);
+    expect(indexOf(h, 'submit_clinician_application(')).toBe(-1);
+    expect(hashing).not.toHaveBeenCalled();
+  });
+
+  it('answers a draft whose five hashes are spent with 401, rolling the charge back, without hashing', async () => {
+    const hashing = jest.spyOn(passwordHash, 'hashAccountPassword');
+    const h = harness({ 'count_clinician_application_submit_attempt': () => {
+      throw Object.assign(new Error('CLINICIAN_APPLICATION_SESSION_INVALID'), { code: '42501' });
+    } });
+    const problem = await refusal(h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request));
+    expect([problem.getStatus(), problem.code]).toEqual([401, 'CLINICIAN_APPLICATION_SESSION_INVALID']);
+    expect(h.transactions).toEqual([{ committed: false }]);
+    expect(hashing).not.toHaveBeenCalled();
+  });
+
+  it('counts no hash when the quota refuses, and answers 429', async () => {
+    const h = harness({ 'consume_clinician_application_quota': () => ({ rows: [{ allowed: false }] }) });
+    const problem = await refusal(h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request));
+    expect([problem.getStatus(), problem.code]).toEqual([429, 'CLINICIAN_APPLICATION_RATE_LIMITED']);
+    expect(indexOf(h, 'count_clinician_application_submit_attempt')).toBe(-1);
   });
 
   it('answers a creation refused at the platform\'s daily cap (C8, under the counter\'s lock) with 429 and nothing committed', async () => {
