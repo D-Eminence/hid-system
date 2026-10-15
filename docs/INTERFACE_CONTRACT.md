@@ -611,6 +611,15 @@ neither (the facility-less staff row had the status), so a refused
 credential (`401 AUTHENTICATION_REQUIRED`), a refusal (`403`, `409`, `429`)
 and a fault (`503 AUTHENTICATION_UNAVAILABLE`, `500 INTERNAL_ERROR`) read
 alike. Only the status and the code are recorded, never the message. The
+routes of 0093 and 0094 (`/patient-enrollments/holder`, `/holder/verify`,
+`/facility-code`, `POST /identity/assisted-verifications` and the admin
+designation `/admin/facilities/:facilityId/assisted-registration`) record
+their refusals through the same guard and request audit, so their rows carry
+the status and code too (never `422 ASSISTED_VERIFICATION_NOT_MATCHED`'s
+`fields`). One of their answers has no row: `503 ASSISTED_REGISTRATION_DISABLED`
+on `/identity/assisted-verifications` comes from a route guard, which runs
+after `SecurityGuard` has passed and before the request audit, so the
+switched-off route is answered without an audit row. The
 outcomes are unchanged: a guard row is `denied`, a `503` fault included; a
 request-audit failure row is `failure` whatever its status; the
 facility-less staff row is `denied` below `500` and `failure` from `500`.
@@ -1223,21 +1232,31 @@ whichever bucket refused, never the time left in a bucket:
 | Answer | Where | `Retry-After` |
 |---|---|---|
 | `429 OTP_RATE_LIMITED` | `POST /api/v1/auth/otp/start` | `OTP_RATE_WINDOW_SECONDS` (default 900) |
-| `429 ENROLLMENT_RATE_LIMITED` | patient enrollment start and activation | `OTP_RATE_WINDOW_SECONDS` |
+| `429 ENROLLMENT_RATE_LIMITED` | patient enrollment start, the holder code send (`POST .../holder`, from 0093; the network budget it shares with start and the contact step) and activation | `OTP_RATE_WINDOW_SECONDS` |
 | `429 ENROLLMENT_RATE_LIMITED` | patient enrollment contact step, every refusal (its request limits and a spent contact-code budget alike) | the larger of `OTP_RATE_WINDOW_SECONDS` and `PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS` |
-| `429 OTP_RESEND_COOLDOWN` | patient enrollment contact step | the seconds left of the cooldown of this enrollment's own last code (`OTP_RESEND_COOLDOWN_SECONDS`) |
+| `429 OTP_RESEND_COOLDOWN` | patient enrollment holder code send (from 0093) and contact step | the seconds left of the cooldown of this enrollment's own last code of that step (`OTP_RESEND_COOLDOWN_SECONDS`) |
 | `429 MFA_RATE_LIMITED` | platform and staff sign-in, enrolment and its email code, step-up and recovery-code regeneration | 900, the length of every MFA window |
 | `429 PATIENT_LOOKUP_RATE_LIMITED` | `POST /api/v1/identity/patient-lookup` | `PATIENT_LOOKUP_RATE_WINDOW_SECONDS` (default 300) |
 | `429 ACCESS_REQUEST_RATE_LIMITED` | `POST /api/v1/identity/access-requests` | `ACCESS_REQUEST_RATE_WINDOW_SECONDS` (default 900) |
 
 No other answer carries it. A refusal answered like a wrong code carries
 none: a spent recovery or contact code budget (`403 OTP_INVALID_OR_EXPIRED`,
-`422 OTP_INVALID`) and the sign-in lockout (`401`). Neither do the limits
-counted in SQL (`VERIFICATION_QUOTA_EXCEEDED`, `APPLICATION_RATE_LIMITED`,
+`422 OTP_INVALID`), a wrong or spent holder code (`422 OTP_INVALID`) and the
+sign-in lockout (`401`). Neither do the limits counted in SQL
+(`VERIFICATION_QUOTA_EXCEEDED`, `APPLICATION_RATE_LIMITED`,
 `EMERGENCY_CONTACT_VERIFICATION_RATE_LIMITED`,
-`ACCOUNT_DELETION_RATE_LIMITED`, `EMERGENCY_RATE_LIMITED`), whose command
-does not report which window refused, `QOREID_RATE_LIMITED`, or
-`503 PLATFORM_MAINTENANCE`, for which no end time is recorded. EHR, Lab,
+`ACCOUNT_DELETION_RATE_LIMITED`, `EMERGENCY_RATE_LIMITED`, and from 0094
+`ASSISTED_VERIFICATION_LIMITED`, the staff and facility checks of the last
+24 hours), whose command does not report which window refused,
+`QOREID_RATE_LIMITED`, or `503 PLATFORM_MAINTENANCE`, for which no end time
+is recorded. Two `429`s of the sign-up routes are not "try again later"
+answers and carry none either: `NIN_HOLDER_ROUTE_LIMITED` (0093) sends the
+patient to a participating facility, and its budgets are the enrollment's
+three codes, which never come back, and the phone's and the NIN's, counted in
+SQL over 24 hours, 30 days or a year (a bound kept for a NIN would also tell
+of other people's attempts on it); `ASSISTED_DESK_CODE_LIMITED` (0094) is
+the enrollment's five desk codes, which never come back, so the patient
+starts again. EHR, Lab,
 Pharmacy, OCR and Outreach set none. Identity's CORS policy exposes
 `retry-after` to allowed origins. Before this change no answer carried the
 header and CORS did not expose it.
@@ -1756,14 +1775,14 @@ Health ID can be activated without a holder proof; the database refuses it.
 | `POST .../patient-enrollments` | `502`, `503` or `504` (QoreID code kept) | The NIN lookup could not be completed | Try again later |
 | `POST .../holder` | `409 NIN_HOLDER_ROUTE_UNAVAILABLE` | No usable phone on the record, an age under 18, or not at the holder step | Register at a participating facility |
 | `POST .../holder` | `503 NIN_HOLDER_ROUTE_UNAVAILABLE` | The online route is off (in production from 0094, also while no facility takes part) | Register at a participating facility, or try later |
-| `POST .../holder` | `429 OTP_RESEND_COOLDOWN` | A code was sent less than `resendAfterSeconds` ago | Wait, then ask again |
-| `POST .../holder` | `429 NIN_HOLDER_ROUTE_LIMITED` | A send or failure budget is spent, or three codes were sent | Register at a participating facility |
-| `POST .../holder` | `429 ENROLLMENT_RATE_LIMITED` | The network's request budget is spent | Try again later |
+| `POST .../holder` | `429 OTP_RESEND_COOLDOWN` | A code was sent less than `resendAfterSeconds` ago | Wait the `Retry-After` seconds (what is left of the cooldown, §6), then ask again |
+| `POST .../holder` | `429 NIN_HOLDER_ROUTE_LIMITED` | A send or failure budget is spent, or three codes were sent | Register at a participating facility (no `Retry-After`, §6) |
+| `POST .../holder` | `429 ENROLLMENT_RATE_LIMITED` | The network's request budget is spent | Try again after `Retry-After` (`OTP_RATE_WINDOW_SECONDS`, §6) |
 | `POST .../holder` | `503 OTP_DELIVERY_UNAVAILABLE` | The SMS provider refused the code | Try again later; the attempt counts toward the phone's five sends a day and the enrollment's three codes |
 | `POST .../holder/verify` | `422 OTP_INVALID` | Wrong, expired, used or closed code | Check the code, or ask for a new one |
 | `POST .../holder/verify` | `409 NIN_ALREADY_REGISTERED` | The NIN already has a Health ID | Use account recovery to sign in. If they never registered, contact Health ID support quoting the `correlationId` |
 | `POST .../holder/verify` | `409 NIN_HOLDER_PROOF_CONFLICT` | An in-person proof of this NIN is open at a facility | Finish at the facility |
-| `POST .../holder/verify` | `429 NIN_HOLDER_ROUTE_LIMITED` | The phone already proved five other NINs this year | Register at a participating facility |
+| `POST .../holder/verify` | `429 NIN_HOLDER_ROUTE_LIMITED` | The phone already proved five other NINs this year | Register at a participating facility (no `Retry-After`, §6) |
 | `POST .../holder/verify` | `503 ENROLLMENT_RECONCILIATION_REQUIRED` | Enrollment is paused for reconciliation | Try again later |
 | `POST .../holder/verify` | `503 NIN_HOLDER_ROUTE_UNAVAILABLE` | The online route was turned off after the code was sent | Register at a participating facility, or try again later |
 | `POST .../holder`, `/holder/verify` | `404 ENROLLMENT_NOT_FOUND` | No, a forged or a removed enrollment cookie (for example after a later proof of the same NIN) | Start again |
@@ -1848,14 +1867,14 @@ is designated, so the route is closed until an operator opens it.
 | --- | --- | --- | --- |
 | `POST .../facility-code` | `409 ASSISTED_REGISTRATION_UNAVAILABLE` | The facility route is closed (flag off or no participating facility) | Use the online route, or try later |
 | `POST .../facility-code` | `409 ENROLLMENT_STAGE_INVALID` | The holder step is done | Continue with the contact step |
-| `POST .../facility-code` | `429 ASSISTED_DESK_CODE_LIMITED` | Five codes were issued for this enrollment | Start again |
+| `POST .../facility-code` | `429 ASSISTED_DESK_CODE_LIMITED` | Five codes were issued for this enrollment | Start again (no `Retry-After`, §6) |
 | `POST .../facility-code` | `404 ENROLLMENT_NOT_FOUND` | No, a forged, an expired or a removed enrollment cookie | Start again, on the patient's own device |
 | `POST .../facility-code` | `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` | Enrollment keys are not configured | Try later |
 | `GET .../current` (patient's device) | `200`, `stage: verify_contact` | Staff recorded a match | Continue on the device: contact, password, activation |
 | `GET .../current` (patient's device) | `404 ENROLLMENT_NOT_FOUND` | Staff were told the NIN has a Health ID (the registration is deleted), or the registration expired | Follow the staff member's direction: account recovery when the NIN has a Health ID; otherwise start again |
 | `POST .../activate` (patient's device) | `409 ENROLLMENT_HOLDER_PROOF_REQUIRED` | After the check, the facility stopped taking part or the verifying staff member lost the permission, the attested grant, an active membership or an active account | Start again and check in person at a participating facility |
 | `POST .../assisted-verifications` | `503 ASSISTED_REGISTRATION_DISABLED` | The route is off | None; the route is closed |
-| `POST .../assisted-verifications` | `400 VALIDATION_FAILED` | The body is malformed: a desk code shorter than 10 or longer than 20 characters or with characters other than letters, digits, spaces and hyphens, a missing field, or an attestation that is not `true` | Correct the entry |
+| `POST .../assisted-verifications` | `400 VALIDATION_FAILED` | The body is malformed: a desk code shorter than 10 or longer than 20 characters or with characters other than letters, digits, spaces and hyphens, a missing field, or an attestation that is not `true`. `errors` names a refused `document` or `attestations` field by its dotted path, for example `document.dateOfBirth` or `attestations.patientConsents` (A23, §6) | Correct the entry |
 | `POST .../assisted-verifications` | `400 DESK_CODE_INVALID` | The code passes the form check but is not 10 Crockford characters once spaces and hyphens are removed (for example a `U`) | Ask the patient for the code again |
 | `POST .../assisted-verifications` | `404 DESK_CODE_NOT_FOUND` | No enrollment waits for this code | Ask the patient to show the code on their phone again |
 | `POST .../assisted-verifications` | `422 ASSISTED_VERIFICATION_NOT_MATCHED` | A field differs from the NIN record | Check the document. If only spelling or spacing differs (a hyphen or a space in a name), retry with the form the document allows, within the budget. Otherwise do not register |
@@ -1863,7 +1882,7 @@ is designated, so the route is closed until an operator opens it.
 | `POST .../assisted-verifications` | `409 NIN_ALREADY_REGISTERED` | The NIN already has a Health ID | Direct the patient to account recovery; if they never registered, Health ID support with the reference in `detail` |
 | `POST .../assisted-verifications` | `409 ASSISTED_VERIFICATION_STALE` | The check can no longer prove the enrollment (another proof came first, or a new desk code) | Ask for a new desk code and check again |
 | `POST .../assisted-verifications` | `409 IDEMPOTENCY_KEY_REUSED` | The key was used for another request | Use a new key |
-| `POST .../assisted-verifications` | `429 ASSISTED_VERIFICATION_LIMITED` | A staff or facility budget is spent | Try again later |
+| `POST .../assisted-verifications` | `429 ASSISTED_VERIFICATION_LIMITED` | A staff or facility budget is spent | Try again later (no `Retry-After`: counted in SQL, §6) |
 | `POST .../assisted-verifications` | `503 ASSISTED_VERIFICATION_UNAVAILABLE` | The check could not be recorded, or its proof could not be completed | Retry with the same `Idempotency-Key`: it replays the stored check and completes the proof, and is not charged again |
 | `POST .../assisted-verifications` | `503 ENROLLMENT_RECONCILIATION_REQUIRED` or `503 ENROLLMENT_UNAVAILABLE` | The check is recorded and charged, but the proof step could not run | Retry with the same `Idempotency-Key` within 10 minutes of the check |
 | `GET /admin/facilities/:id/assisted-registration` | `404 ADMIN_FACILITY_NOT_FOUND` | No such facility | Check the facility id |

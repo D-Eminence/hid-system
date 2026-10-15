@@ -4,7 +4,10 @@ import { ListAuditEventsDto } from '../audit/dto/list-audit-events.dto';
 import { DomainProblem } from './problem';
 import { globalValidationPipe, MAX_FIELD_ERRORS } from './validation-problem';
 
-/** Identity has no nested DTO today; this one stands for the first. */
+/**
+ * Generic nested shapes. Identity's own nested body, the in-person check of
+ * ADR-063, is pinned in identity/assisted-registration.spec.ts.
+ */
 class Inner {
   @IsInt()
   @Max(5)

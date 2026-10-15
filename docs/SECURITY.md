@@ -72,7 +72,11 @@ lockout's `401`) carries none, and every `429` of the enrollment contact step
 carries one value, so a spent budget stays indistinguishable from that
 step's request limits. The one value that is not a full window, on
 `429 OTP_RESEND_COOLDOWN`, is the time left on the caller's own enrollment
-code, which its enrollment cookie proves.
+code, which its enrollment cookie proves (at the contact step and, from 0093,
+the holder step). The holder step's `429 NIN_HOLDER_ROUTE_LIMITED` carries
+none: its budgets are kept per phone and per NIN, so a time left would tell
+of other people's attempts on that NIN, and the answer sends the patient to a
+participating facility rather than to wait.
 
 ## 3. Authorization
 
