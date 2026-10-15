@@ -74,6 +74,19 @@ step's request limits. The one value that is not a full window, on
 `429 OTP_RESEND_COOLDOWN`, is the time left on the caller's own enrollment
 code, which its enrollment cookie proves.
 
+A clinician applicant (ADR-064) holds an application capability, not a
+session: an HttpOnly, `SameSite=Strict`, host-only cookie scoped to
+`/api/v1/identity/clinician-applications` whose keyed digest is all the
+database stores, opened by the submission or by an emailed code followed by
+the account's authenticator once one exists, and never by a password. It
+reaches no patient data. The 0088 challenge it drives for the authenticator
+is opened on a token Identity derives and never sends, so nothing the
+browser holds works at `/auth/mfa/*`, and that challenge never yields a
+session. Issuing any staff session re-checks that the account has an
+eligible membership (`403 NO_ACTIVE_FACILITY_MEMBERSHIP`, no session), so an
+applicant, or a membership that ended between the password step and the
+code, never gets one. NO-MEMBERSHIP-SIGN-IN is unchanged.
+
 ## 3. Authorization
 
 Use RBAC and domain permissions.
@@ -103,6 +116,25 @@ Identity is the single source of patient identity.
 No service may create an alternative patient authority.
 
 Patient lookup must expose the minimum information required.
+
+Clinician self sign-up (ADR-064) answers every address alike: both email-code
+starts return the same `202` whether or not the address is in use or belongs
+to an applicant, deliver after the answer, and only a code's holder learns
+that an address is in use (`409 CLINICIAN_EMAIL_IN_USE` after a correct
+code); a status code is sent only to an applicant, and a decoy challenge
+never verifies. Applying grants nothing. Two different Super Admins who do not
+work at the facility decide: step 1 checks the regulator's register, confirms
+identity by a live video call or in person with a government photo ID while
+the applicant reads a current code from their own authenticator (verified by
+Identity against that factor), and confirms employment through a channel
+independent of the facility administrator (the facility's public phone number
+or a visit); step 2 grants the role pinned to step 1's attestation. Until its
+application is approved, that attestation supports no other grant. The
+standard, the reviewer list and the register source are owner decisions
+(release checklist P25). Residual risks: the manual identity check (a
+deepfaked call, a forged ID) and, once break-glass is on, emergency reads by
+an approved fraudster at their facility; P25 requires a daily review of
+break-glass use by accounts approved in the last 90 days.
 
 ## 6. NIN Security
 
@@ -205,6 +237,15 @@ answer. A patient session's request rows record purpose `patient-self`,
 whatever purpose the client sends, so a patient's own action cannot be
 labelled direct care or emergency in the audit trail; a staff request's
 purpose is still the one it declares and its route checks.
+
+Clinician applications (ADR-064) are audited inside their commands as
+`system:auth` (`identity.clinician-application.quota`, `.email-verified`,
+`.status-code-verified`, `.submitted`, `.authenticator-ready`,
+`.authenticator.verified`, `.withdrawn`, `.expired`) and their review as
+platform-scoped events with the administrator's reason
+(`admin.clinician-application.attested`, `.approved`, `.rejected`, beside
+0087's attestation, attach and grant events). No detail carries an email, a
+name, a licence number, a password, a code or a token.
 
 ## 10. Clinical Integrity
 

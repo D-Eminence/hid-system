@@ -46,7 +46,8 @@ The executable covers:
    `delegated_cookie_read_runtime`, `outreach_cookie_read_runtime`,
    `provider_enrollment_runtime`, `platform_admin_runtime`,
    `session_sign_out_runtime`, `facility_selection_runtime`,
-   `platform_security_runtime`, `registration_review_runtime` and
+   `platform_security_runtime`, `staff_mfa_runtime`,
+   `clinician_application_runtime`, `registration_review_runtime` and
    `patient_search_runtime` (the patient enrollment, patient safety, delegated
    cookie-read, Outreach cookie-read, provider enrollment, platform admin,
    session sign-out, facility selection, platform security, registration
@@ -270,6 +271,46 @@ The executable covers:
    again as the administrator in rolled-back transactions is refused
    (`55000 BREAK_GLASS_CONTROL_ON`) with the control on and is a no-op with it
    off.
+   With 0094 (clinician self sign-up, ADR-064): the additional suites include
+   `clinician-applications.integration.sql`, the role assertions cover the
+   new commands and keep `identity.workforce_change_role` from every runtime,
+   and P11's read-only check expects `clinician_signup_enabled` off.
+   `clinician_application_runtime` (`verify-clinician-application-runtime.mjs`,
+   new, after `staff_mfa_runtime`) runs the real controllers, services,
+   Turnstile verifier, MfaService and commands as `hid_identity_api_runtime`
+   on a disposable copy, with only Siteverify and delivery stubbed and a
+   virtual TOTP clock. It requires intake closed by default (`503
+   CLINICIAN_SIGNUP_CLOSED` with its fixed sentence, availability false, the
+   status start not gated) and opened only through `POST /admin/controls`,
+   and closed again by the provider portal or maintenance; Turnstile, Origin
+   and the signed-out rule to refuse before the service; identical start
+   answers for a fresh, a staff-held and a patient-held address and for an
+   applicant and four decoys, with a code only where one is due; the draft
+   cookie's attributes, the search's verified facilities and its 30-search
+   budget; submit to create an account, a pending staff record and an
+   application with no membership or session, to rotate the capability and
+   to replay; the applicant's sign-in to stay `403
+   NO_ACTIVE_FACILITY_MEMBERSHIP`; the authenticator set up before review
+   with no session, and neither the capability nor the draft to work at
+   `/auth/mfa/*`; no audit row to carry the email, name or licence; the
+   status page's authenticator step; the queue's permission and step-up,
+   the applicant's live code at step 1 (a wrong one counted), the second
+   Super Admin and the insider refusal, and five platform-scoped audit
+   events; the first staff sign-in after approval; a grant pinned to its own
+   application's attestation across two applications, and a rejection that
+   revokes nothing; a reserved attestation refused for a generic 0087 grant,
+   also overdue and unswept, until approval; expiry read before the sweep
+   and the sweeper skipping a locked row; races (a double submit, concurrent
+   starts, two approvals at once beside a sign-in, withdraw against approve);
+   and faults (a revoked grant, a missing function) answered `503`, never
+   `401`. The non-superuser check gains an upgrade stage
+   (`clinician_signup_upgrade_path`): on a second database it migrates
+   through 0093 with `apply-migrations.mjs --through`, runs the previous
+   release's control-owner bootstrap block so `platform.control_enabled` is
+   owned by `hid_platform_control_reader` and the administrator holds only
+   its ADMIN OPTION, applies 0094 as that administrator, bootstraps and
+   verifies, and requires the function's owner unchanged, no INHERIT or SET
+   membership left, and the control read `false` by the runtime logins.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

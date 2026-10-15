@@ -90,6 +90,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0091_launch_module_withdrawal_and_patient_access_transparency.sql` | Launch module set, patient-self binding and patient access transparency (D-Eminence/hid-system#75, ADR-058; numbered after 0089 and 0090 on other branches). Sets `uploads_enabled`, `outreach_portal_enabled` and `break_glass_enabled` off where each is still exactly as 0039 seeded it (no control event: no actor; a control an administrator changed keeps its value), with forced row-level security lifted on `platform.control_settings` for that update only (`ACCESS EXCLUSIVE` on that table first, held to commit: control reads wait). Deletes every `lab.*`, `pharmacy.*`, `ocr.*` and `outreach.*` role permission, `identity.break-glass.write` and `ehr.document.write` from every role. `CREATE OR REPLACE` of `ehr.patient_self_context` as a security-definer check bound to `identity.patient_self_session` (owner and ACL kept) and of `identity.patient_self_access_history` (requester and `truncated`); drops and recreates `identity.list_my_access_requests` and `identity.list_my_patient_access_requests` with the requester columns; new trigger `pin_use_notification_inbox` on `identity.outbox_events` (`SHARE ROW EXCLUSIVE` until commit: outbox writers wait). Run `db:bootstrap` and `db:verify-roles` immediately after it: until then the Identity runtime cannot execute the recreated patient request list (`403` to patients), and the role assertions it carries fail on any database where a withdrawn permission was granted again outside a reviewed migration. Deploy the EHR and Identity builds of the same change after it and the bootstrap: that Identity reads the new list columns and answers a patient's request list with `500` on an earlier schema, so a restore of a pre-0091 backup takes Identity back to the previous build too. Earlier builds keep working on 0091 (the new list columns are additional; an earlier EHR build completes uploads without the control check, but no role can reach the route). With 0090 applied, no role can mark an encounter holding an initiated or uploaded document entered in error until uploads are re-enabled (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, §9) |
 | `database/migrations/0092_patient_self_reported_enrollment_profile.sql` | Self-reported enrollment profile (BRANCH:launch/patient-self-enrollment, ADR-061; numbered after 0091). Drops `identity.activate_public_patient_enrollment(uuid,char(64),text,text,text,text,char(64))` and creates it again with `requested_date_of_birth date` and `requested_gender text`, both default null (a 7-argument call still resolves to it), with 0085's owner, `SECURITY DEFINER`, `search_path`, result and body apart from the profile check: a date of birth or gender the profile gives cannot come from the request, one it lacks must, and any failure is `23514 PATIENT_IDENTITY_INVALID`. The patient row takes the profile's or the entered value; the authoritative profile stays what QoreID returned; the activation audit event gains `selfReportedFields` (names only). No table lock, no window. Dropping the function drops its grants: run `db:bootstrap` and `db:verify-roles` immediately after it (the bootstrap grants the new signature to the Identity runtime); until then every Identity build answers an enrollment activation `403 ENROLLMENT_DENIED`. Deploy the Identity build of this change only after both: it calls the 9-argument form, which an earlier schema lacks (`503 ENROLLMENT_UNAVAILABLE`). An earlier Identity build works on 0092 unchanged. Production NIN-only enrollment stays refused by configuration (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §3, §5 step 25, §9) |
 | `database/migrations/0093_break_glass_launch_with_limits.sql` | Break-glass at launch, with limits (decision D9 as the owner decided it on 2026-10-14; ADR-058 addendum; branch `claude/break-glass-launch`). Inserts `identity.break-glass.write` for doctor, clinician and nurse into `auth.role_permissions` (the roles 0010 granted it to before 0091 withdrew it; no other role, no other withdrawn permission) and `emergency` ("Emergency treatment", active, `hid`) into `identity.purpose_of_use_codes`, both `ON CONFLICT DO NOTHING`, so an operator's earlier row is kept. First it refuses to run while `break_glass_enabled` is on (`55000 BREAK_GLASS_CONTROL_ON`, nothing changed): 0091 kept a value an administrator had set, and the grant would make break-glass live at once; set the control off with `POST /admin/controls` and run `migrate` again. Before the first role bootstrap a non-superuser administrator cannot read the control (`PLATFORM_CONTROL_UNAVAILABLE`), which 0093 takes as off. `ACCESS SHARE` on `platform.control_settings` (that read, first), `ROW EXCLUSIVE` on the two tables and `FOR KEY SHARE` on the referenced role and permission rows; at most four rows, no scan, no window. No object, function, policy or database grant changes, and `break_glass_enabled` is not changed (off since 0091): break-glass answers `423 BREAK_GLASS_DISABLED` until a platform administrator turns the control on with `POST /admin/controls` after staff MFA ships (`PHASE_4_STAGE_5_RELEASE_READINESS.md` P11). Run `db:bootstrap` and `db:verify-roles` of the same release after it: their role assertions require exactly the three holders, so an earlier release's bootstrap refuses a database holding 0093, and this release's bootstrap refuses one without it. From its commit, doctors', clinicians' and nurses' sessions list the permission on their next request (every build); Identity and EHR builds are unchanged by it (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §3, §5, §9) |
+| `database/migrations/0094_clinician_self_signup.sql` | Clinician self sign-up with two-admin approval (owner decision 2 of 2026-10-14; ADR-064, CLIN-SIGNUP; branch `claude/clinician-self-signup`). Adds the control `clinician_signup_enabled` (seeded off), the application, challenge, capability, idempotency and quota tables (RLS, no runtime privilege), the reserved-attestation predicate, the internal pinned grant `identity.workforce_change_role` (0087's body plus the pin; `identity.admin_change_workforce_role` delegates with no pin) and the public and administration commands (`DATABASE.md`, "Clinician self sign-up applications (0094)"). It replaces `platform.control_enabled` (0040's body plus the key) while keeping its technical owner `hid_platform_control_reader`: a runner that does not own it grants itself that role (`INHERIT`, no `SET`) for the transaction with the ADMIN OPTION it holds as the role's creator (the bootstrap's administrator), revokes it, and fails closed if it cannot or if the owner would change (§6.1). Locks, in order, under the runner's 5 s lock timeout: `ACCESS EXCLUSIVE` on `platform.control_settings` (every guard's control read waits), then `SHARE ROW EXCLUSIVE` on `auth.accounts`, `identity.facilities`, `identity.staff`, `identity.staff_facility_memberships` and `identity.staff_credential_attestations` (the new foreign keys; writes to them wait). A transaction that holds a row lock on one of those and then reads a control can deadlock with it; PostgreSQL aborts one, and an aborted 0094 rolls back whole and is run again. Run it off-peak. Run `db:bootstrap` and `db:verify-roles` of the same release after it: the bootstrap grants the new commands. An older Identity runs on it unchanged; the new Identity on a database without it answers the new routes 503 (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, P25) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles. Runs as a superuser or as the non-superuser administrator that created the roles (RDS); checks the roles' attributes instead of re-asserting them (§6) |
 | `database/runtime-login-assertions.sql` and `scripts/verify-runtime-logins.mjs` | `npm run db:verify-logins`: checks each runtime credential's own LOGIN, connected with that credential's URL (§6) |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
@@ -293,6 +294,21 @@ in-body option and update its pinned checksum in
 after which local and development databases are rebuilt. That exception is
 not made in this repository.
 
+0094 replaces `platform.control_enabled`, which the role bootstrap gave to
+`hid_platform_control_reader` (0083). The migration administrator neither owns
+it nor holds that role's privileges, so 0094 grants itself the role for its
+own transaction only (`grant hid_platform_control_reader to current_user with
+inherit true, set false`, which needs the ADMIN OPTION the administrator holds
+as the role's creator), replaces the function, revokes the membership, and
+raises if the function's owner changed or a membership is left; nothing is
+kept on failure. An administrator without that ADMIN OPTION (one that did not
+run the bootstrap) gets `0094 needs ADMIN OPTION on hid_platform_control_reader to replace platform.control_enabled` and the run
+stops at 0093; run it as the bootstrap's administrator. Check afterwards:
+`select proowner::regrole from pg_proc where oid =
+'platform.control_enabled(text)'::regprocedure` is `hid_platform_control_reader`.
+`apply-migrations.mjs --through <file>` plans, dry-runs or applies up to and
+including one migration (the non-superuser verifier's upgrade stage uses it).
+
 ### 6.2 Role bootstrap
 
 As the same migration administrator. It must be the role that creates the HID
@@ -396,7 +412,7 @@ the rotated credentials). Clear the variables afterwards. In production every
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
-Confirm the candidate ledger reaches `0093`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0094`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 After the legacy import, record (read-only, counts only, no identifiers) how
 many imported patient accounts have `email_verified_at` null and no verified
@@ -473,6 +489,43 @@ select enrolled.actor_account_id as account_id, enrolled.occurred_at as enrolled
                       and earlier.event_id <> enrolled.event_id)
  group by enrolled.actor_account_id, enrolled.occurred_at
  order by enrolled.occurred_at desc;
+rollback;
+```
+
+After 0094 (ADR-064), query (4) of P22: every approved clinician application
+must still rest on a staff-proven authenticator. Expected: no rows, or each
+one reviewed:
+
+```sql
+begin transaction isolation level repeatable read read only;
+set local row_security = off;
+select application.id, application.account_id, application.approved_at
+  from identity.clinician_applications application
+ where application.state = 'approved'
+   and not exists (select 1 from auth.mfa_factors factor
+     where factor.id = application.factor_id and factor.status = 'active'
+       and factor.enrollment_proof is not null)
+ order by application.approved_at;
+rollback;
+```
+
+While `break_glass_enabled` is on, review daily (P25) the break-glass
+activations of accounts approved through a clinician application in the last
+90 days:
+
+```sql
+begin transaction isolation level repeatable read read only;
+set local row_security = off;
+select activation.actor_account_id, activation.occurred_at, activation.resource_id,
+       application.facility_id, application.approved_at
+  from audit.events activation
+  join identity.clinician_applications application
+    on application.account_id = activation.actor_account_id
+   and application.state = 'approved'
+   and application.approved_at > now() - interval '90 days'
+ where activation.action = 'identity.break-glass.activate'
+   and activation.occurred_at > now() - interval '7 days'
+ order by activation.occurred_at desc;
 rollback;
 ```
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
@@ -563,7 +616,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify the ledger at `0093`, runtime grants (`db:verify-roles`) and logins
+6. Verify the ledger at `0094`, runtime grants (`db:verify-roles`) and logins
    (`db:verify-logins`), RLS and purpose/deny behavior, and list the
    purpose-of-use codes (release checklist P10; after `0093` `direct-care` and
    `emergency`). After `0093`, confirm the

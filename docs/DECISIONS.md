@@ -3235,6 +3235,8 @@ step-up and two-person elevation); `INTERFACE_CONTRACT.md` §19 (Workforce
 provisioning) and the auth session contract (Staff facility binding);
 `DATABASE.md` (Governed workforce provisioning (0087)); release checklist §2,
 §5, §8 and §9; `PHASE_3_LAUNCH_DECISIONS.md` D14 and N5.
+Extended by ADR-064 (clinician self sign-up with two-admin approval;
+reserved attestations; grants pinned to the step-1 attestation).
 # ADR-052: Health-id Is the Single Launch Frontend; Only Its Hosts Are Deployed
 
 Status: Accepted (2026-10-13) with the owner's defaults (deny by default, least
@@ -3662,6 +3664,9 @@ Consequences:
   an out-of-band code issued by the provisioning administrator), existing
   clinical accounts enrol before clinical roles are enabled and operators
   review enrolments that followed a recovery (release checklist P22).
+- Self-signed-up clinicians (ADR-064) enrol before review, and step 1 of
+  their review confirms the authenticator outside the mailbox: the applicant
+  reads a live code to the reviewing Super Admin during the identity call.
 - Evidence is local and synthetic: unit specs, `staff-mfa.integration.sql`,
   `verify-staff-mfa-runtime.mjs` and every runtime verifier that signs staff
   in (release checklist §8). Nothing has been run on staging or production.
@@ -3728,6 +3733,8 @@ bypass):
   masking. It takes only a fixed sentence written for the person using the
   client, never a message built from an error or from request data; any
   new use needs its own decision.
+  ADR-064 adds `503 CLINICIAN_SIGNUP_CLOSED` ("Clinician sign-up is not open
+  yet. If you already have a Health ID provider account, sign in.").
 
 Consequences:
 
@@ -4634,3 +4641,180 @@ Consequences:
 Related: ADR-048; ADR-057; `PHASE_3_LAUNCH_DECISIONS.md` N1;
 `QOREID_VERIFICATION_CONTRACT.md`; `INTERFACE_CONTRACT.md`; `DATABASE.md`,
 "Self-reported enrollment profile (0092)".
+
+# ADR-064: Doctors and Nurses Apply by Themselves; They Set Up an Authenticator Before Review, and Two Platform Administrators Still Verify and Grant Every Clinical Role
+
+Status: Proposed; needs owner approval (owner decision 2 of 2026-10-14,
+"self sign-up + admin approval"; launch decision CLIN-SIGNUP; migration
+0094). Not merged or deployed; the numbers may move when the launch branches
+merge. It extends ADR-049. It does not supersede ADR-049 and does not change
+ADR-054, ADR-059 or NO-MEMBERSHIP-SIGN-IN. Three points are implemented with
+the design default and stay open for the owner (release checklist P25):
+the step-1 identity-assurance standard and the reviewer list; the service
+level stated to applicants (the default is a 30-day expiry with no promise);
+and the licence register check's source (the default is a manual check of
+the regulator's public register, recorded by reference).
+
+Date: 2026-10-15
+
+Context:
+
+- ADR-049 (0087) grants clinical facility roles only through
+  platform-governed commands, under a two-person rule: one reviewer attests
+  the credential and another administrator grants. It deferred facility
+  self-service; a clinician got access only by being provisioned by two
+  Super Admins. The self-service `org_admin` (CAC and email only) is
+  untrusted for clinical authority.
+- The owner decided on 2026-10-14 that clinicians sign up themselves and
+  land in a verification queue, and that two platform administrators approve.
+- Constraints: NO-MEMBERSHIP-SIGN-IN (ADR-059: no MFA challenge and no
+  session on the password of an account without an eligible membership);
+  ADR-054 and P22 (a clinical account holds a staff-proven authenticator
+  before its clinical role is enabled, each enrolment confirmed outside the
+  mailbox); an account is not a patient identity; N5 and
+  `WORKFORCE_ROLE_CONFLICT`; anti-enumeration; ADR-057 (a new
+  `PublicDetailProblem` needs a decision); ADR-058 (off starts off in the
+  database).
+- With 0093, doctor, clinician and nurse hold `identity.break-glass.write`
+  again: once `break_glass_enabled` is on, any approved clinician can make
+  emergency reads at their facility.
+
+Decision:
+
+- Who may apply at launch: doctors registered with MDCN and nurses or
+  midwives registered with NMCN, one verified facility per application. A
+  table CHECK, the commands and the API enforce the pair. The prescribing
+  `clinician` role and other regulators are not offered; the 0087 governed
+  path still grants `clinician`.
+- Self sign-up files an application and grants nothing. The applicant proves
+  an email address with a six-digit code (the code is sent whether or not
+  the address is in use; only its holder learns that it is), sets a password
+  and gives their name, licence number and licence expiry. This creates an
+  active account with a pending staff record and an application; no
+  membership and no role. The applicant then sets up an authenticator app
+  through the unchanged 0088 staff enrolment (a second email code bound to
+  the factor's challenge). The application is not reviewable until then
+  (`awaiting_authenticator` → `submitted`). Staff sign-in still answers
+  `403 NO_ACTIVE_FACILITY_MEMBERSHIP` until approval.
+- The applicant reads and changes an application through an application
+  capability: an HttpOnly, SameSite=Strict, host-only cookie scoped to the
+  application routes and bound to a server-side row (60 minutes for a draft,
+  30 for an account capability). It is opened by the submission itself, or
+  later by a code emailed to an account that holds a clinician application
+  followed by its authenticator; never by a password. It is not a session and
+  reaches no patient data. The 0088 challenge it drives is opened by the
+  server on a token derived from the capability and the challenge id, which
+  never reaches the browser, so no value the browser holds works at
+  `/auth/mfa/*`; it never yields a session. Staff-session issuance re-checks
+  eligibility (`403 NO_ACTIVE_FACILITY_MEMBERSHIP`). NO-MEMBERSHIP-SIGN-IN
+  is therefore unchanged.
+- Intake starts closed. The platform control `clinician_signup_enabled` is
+  seeded off; an administrator opens it with the audited
+  `POST /admin/controls` after release gate P25. Intake also closes while
+  `provider_portal_enabled` is off or `maintenance_mode` is on. While it is
+  closed, starts answer `503 CLINICIAN_SIGNUP_CLOSED` with the fixed public
+  sentence "Clinician sign-up is not open yet. If you already have a Health
+  ID provider account, sign in." This is the decision ADR-057 requires for a
+  new `PublicDetailProblem`. The status page and the admin queue work
+  whatever the control's state (maintenance aside). 0094 replaces
+  `platform.control_enabled` while preserving its technical owner
+  (`hid_platform_control_reader`) by taking that role's membership only for
+  its own transaction, and fails closed when it cannot.
+- Two people, through the 0087 commands. Every step needs
+  `platform.workforce.manage` (Super Admin only), an MFA platform session, a
+  step-up from the last five minutes, a reason, If-Match and an
+  Idempotency-Key; no Super Admin who works at the facility may take a step.
+  Step 1: a Super Admin who is not the applicant checks the regulator's
+  register; confirms identity by a live video call or in person with a
+  government photo ID, during which the applicant reads a current code from
+  their authenticator, which Identity verifies against the applicant's own
+  factor; confirms employment through a channel independent of the facility
+  administrator's account (the facility's phone number from a public record,
+  or an in-person visit); and records the 0087 credential attestation for
+  exactly the requested role, valid no later than the end of the licence's
+  expiry date (Africa/Lagos) and at most three years. Step 2: a different
+  Super Admin attaches the account by id and grants the role in one
+  transaction, pinned to the step-1 attestation; 0087's independent-reviewer
+  rule still applies; the approval is refused if the authenticator confirmed
+  at step 1 is no longer the account's active factor; a table CHECK refuses
+  an approver who was the attester. When the role becomes effective the
+  account already holds a staff-proven authenticator a platform administrator
+  confirmed outside the mailbox: P22 as written.
+- Reserved attestations: until its application is approved, a step-1
+  attestation supports only that application's own pinned step 2, while the
+  application is under review and not overdue, computed at read time (no
+  sweeper is waited for). No role rests on it before approval; rejecting,
+  withdrawing or expiring an application revokes nothing anywhere. After
+  approval it behaves as any 0087 attestation.
+  `identity.admin_change_workforce_role` keeps its signature and delegates to
+  an internal `identity.workforce_change_role` whose body is 0087's with only
+  the reservation and the pin added (a node test holds the copy to 0087);
+  `auth.facility_role_is_effective` is not changed.
+- Endings: any eligible Super Admin may reject an open application with one
+  of nine fixed reasons shown to the applicant plus an internal reason. After
+  `identity_not_confirmed` the account can file no new application and its
+  other open applications cannot pass step 1. The applicant may withdraw. An
+  application not decided within 30 days expires.
+- Abuse limits: Turnstile on both email starts (main site only);
+  per-network and platform quotas on codes, search and submissions;
+  per-address cooldowns; at most 3 open applications per account, 10 in 30
+  days, and 30 open per facility.
+- Facility self-service workforce management stays deferred; the
+  `org_admin` gets no route and is never the employment confirmation.
+- Every step is audited: public steps inside their commands, admin steps
+  platform-scoped in the same transaction with the reason. No email, name,
+  licence number, password or code appears in audit details, logs or URLs.
+
+Alternatives not taken:
+
+- The `org_admin` approves or confirms employment by itself: ADR-049's
+  threat.
+- A password-opened status page: the token NO-MEMBERSHIP-SIGN-IN refused.
+- Enrolment at first sign-in after approval: it would activate a clinical
+  membership with no factor, against P22.
+- A new 0088 proof method so the sign-up code doubles as the enrolment
+  proof: it widens a 0088 CHECK; a second code is the price.
+- Withdrawing attestations when an application ends: it would revoke
+  legitimate roles resting on them and depend on a sweeper.
+- Redefining `auth.facility_role_is_effective`: not needed once attestations
+  are reserved.
+- A regulator registry lookup as step 1: the source is undecided (D14).
+- `clinician` or free-text regulators at launch: prescriber permissions with
+  no mapped regulator.
+- A break-glass probation for self-signed-up clinicians: the approval
+  assurance here exceeds a 0087 grant; a daily review of break-glass use by
+  recent approvals is required instead (P25).
+- An environment flag instead of a control: switching it off would need a
+  redeploy.
+
+Consequences:
+
+- Every approval needs two MFA-enrolled Super Admins who do not work at the
+  facility, a video call and an independent call to the facility; the queue's
+  speed depends on them, and applications expire after 30 days.
+- The applicant receives two email codes (address proof, then authenticator
+  proof).
+- Identity confirmation rests on the reviewer's call and photo-ID check;
+  that checklist and the employment channels need product and legal
+  approval before the control opens (P25). Uploads are off, so evidence stays
+  outside the platform and is named by reference.
+- Approved clinicians can use break-glass once it is on; P25 requires the
+  break-glass decision and a daily review of break-glass use by accounts
+  approved through an application in the last 90 days.
+- Rejected, withdrawn and expired applicants keep an active account with no
+  membership, plus their application rows; a retention period is a legal
+  follow-up.
+- A wrong step-1 code counts against the applicant's authenticator budget.
+- No notice sink is bound: applicants learn decisions from the status page
+  and facilities are not notified.
+- Evidence is local and synthetic: `clinician-applications.integration.sql`,
+  `workforce-role-change-body.test.mjs`, the Identity specs,
+  `verify-clinician-application-runtime.mjs`, the non-superuser upgrade
+  stage and the rehearsal (release checklist §8). Nothing has run on staging
+  or production.
+
+Related: ADR-049, ADR-054, ADR-057, ADR-058, ADR-059;
+`PHASE_3_LAUNCH_DECISIONS.md` (D14, NO-MEMBERSHIP-SIGN-IN, CLIN-SIGNUP);
+`INTERFACE_CONTRACT.md` (Turnstile verification; Clinician self sign-up;
+§19 Clinician applications); `DATABASE.md` (Clinician self sign-up
+applications (0094)); release checklist §1-§3, §5, §8, P11, P22, P25, S4y.

@@ -14,12 +14,13 @@ Nothing in this plan has been run on staging or production. Every step that touc
 | EHR API: encounters, notes, diagnoses, vitals, prescriptions recorded in the EHR, the patient's own records | Document uploads (`uploads_enabled` off), the Outreach portal |
 | Notification API (SES email, Termii SMS after P18), event dispatcher, gateway | Google sign-in (P19), facility-assisted registration, NIN-only self-enrollment in production (until N1) |
 | Break-glass permitted with limits (D9, 0093); on only after the P11 operator step: doctors, clinicians and nurses hold `identity.break-glass.write` and `emergency` is seeded; an operator turns `break_glass_enabled` on after staff MFA ships (P11), and break-glass answers `423 BREAK_GLASS_DISABLED` until then (0093 refuses to run while the control is on). Read only, facility-local emergency summary, no chart, vitals as first recorded, grants not listed after a reload; document reads under emergency unchanged until N3 decides them (none exist at launch) | |
+| | Clinician self sign-up (doctors with MDCN, nurses with NMCN; ADR-064, 0094): built, off at launch (`clinician_signup_enabled` seeded off); an operator opens it only after release gate P25. Applying grants nothing; two different Super Admins verify and grant every clinical role; the status page and the admin queue work while intake is closed |
 
 Re-enabling an off module takes its own reviewed migration (ADR-058). It is never a hand-made grant. Break-glass came back that way: 0093 grants the permission again and seeds the purpose, and only its platform control is left to the operator (ADR-058 addendum).
 
 ## 2. What `main` contains
 
-- **Migrations:** 0001 to 0092 on `main`; 0093 (break-glass at launch, with limits) on branch `claude/break-glass-launch`, not merged.
+- **Migrations:** 0001 to 0092 on `main`; 0093 (break-glass at launch, with limits) on branch `claude/break-glass-launch`, not merged; 0094 (clinician self sign-up, ADR-064; renumbered at merge) on branch `claude/clinician-self-signup`, not merged.
 - **Launch PRs merged to `main`:**
   - D-Eminence/hid-system#63 to #67: non-superuser database chain, EHR clinical safety, edge and gateway, launch configuration, launch frontend hosts.
   - D-Eminence/hid-system#68 to #71: enrollment gate, recovery and search, workforce provisioning, staff MFA.

@@ -114,7 +114,7 @@ open product decision.
 
 ### Turnstile verification
 
-Identity verifies a Cloudflare Turnstile token on eleven public or
+Identity verifies a Cloudflare Turnstile token on thirteen public or
 first-step routes (table below), each with its own action. Identity never
 trusts the widget: it sends the token to Cloudflare Siteverify itself, with
 its own secret, and accepts it only if Cloudflare reports success for the
@@ -140,7 +140,7 @@ Identity refuses at the first failed check:
    `403 GOOGLE_STAFF_SIGN_IN_DISABLED`. The `Origin` is allowed: else
    `403 ORIGIN_DENIED`. Some routes make their own checks here too, such as
    the `Idempotency-Key` of a demo request or the signed-out state of a
-   provider enrollment.
+   provider enrollment or a clinician sign-up.
 2. A token is present: else `400 TURNSTILE_REQUIRED`. A missing token and an
    empty one get the same answer on every route.
 3. The host of the `Origin` may present this action in this deployment
@@ -210,6 +210,8 @@ never contains the token, the secret, the `Origin` or the client address.
 | `POST /api/v1/identity/organization-applications` | `organization-application` | `www` |
 | `POST /api/v1/identity/organization-applications/completion/start` | `organization-completion` | `www` |
 | `POST /api/v1/commercial/demo-requests` | `book-demo` | `www` |
+| `POST /api/v1/identity/clinician-applications/email-code` | `clinician-application` | `www` |
+| `POST /api/v1/identity/clinician-applications/status/email-code` | `clinician-application-status` | `www` |
 
 `POST /auth/login` takes only the six workforce actions: a `patient-login`
 or `admin-login` action is `400 INVALID_LOGIN_ACTION` before Cloudflare is
@@ -222,9 +224,13 @@ own attempt and rate limits: the MFA steps (`/auth/mfa/*`,
 `/auth/admin/mfa/*`, including `mfa/enroll/email-code`), `otp/verify` and
 `otp/complete`, the patient enrollment contact, verify, activate, Google and
 current steps, provider enrollment verify and activate, organization
-completion verify and profile, `GET /auth/google/nonce`, and refresh,
-session and logout. `GET /identity/patient-enrollments/availability` is a
-public read with no input.
+completion verify and profile, the clinician application steps after an
+email-code start (code verification, facility search, submit, the
+authenticator steps, current, withdraw, apply again and session end; ADR-064),
+`GET /auth/google/nonce`, and refresh, session and logout.
+`GET /identity/patient-enrollments/availability` and
+`GET /identity/clinician-applications/availability` are public reads with no
+input.
 
 **Deployments.** In `TURNSTILE_MODE=disabled` (local development and tests
 only) Identity accepts any request without calling Cloudflare. Every
@@ -318,7 +324,7 @@ platform challenge by no staff step. Refusals:
 | Code | When |
 |---|---|
 | `403 STAFF_MFA_FACTOR_UNPROVEN` | `POST /auth/login` with the right password, but the account's authenticator was enrolled at platform sign-in on the password alone (before 0088, or before the account held a staff membership), so it records no staff proof. No challenge or cookie is issued; a denied `login_failed` session event (reason `staff_mfa_factor_unproven`) is recorded. The remedy is a two-person MFA reset (0070), after which the account enrols at staff sign-in; the new factor then verifies platform sign-in too. The same answer at `/auth/mfa/verify` if such a factor is met there |
-| `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | `POST /auth/login` with the right password of an active, enabled account that has a staff record or a facility membership but no membership eligible for staff sign-in: every one ended, suspended or held, the staff record not active or its verification not accepted, or the organization or facility not active (`eligibleStaffMembershipJoins`). Launch decision NO-MEMBERSHIP-SIGN-IN, owner default (a), ADR-059. No challenge or cookie and no session. A denied `login_failed` session event (reason `no_active_membership`) is recorded. It is not counted as a failed sign-in. Like any right password it ends the account's own failure window (SIGNIN-LOCKOUT); the window of the identifier typed is unchanged. The detail asks the user to contact their organization administrator. Checked before the factor, so it answers the same with or without an authenticator. An account with neither (a patient or a platform-only account) keeps the uniform `401` |
+| `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | Also at `/auth/mfa/verify` and `/auth/mfa/enroll/activate` since ADR-064: issuing a staff session re-checks eligibility, so a membership that ended between the two steps gets this answer and no session. `POST /auth/login` with the right password of an active, enabled account that has a staff record or a facility membership but no membership eligible for staff sign-in: every one ended, suspended or held, the staff record not active or its verification not accepted, or the organization or facility not active (`eligibleStaffMembershipJoins`). Launch decision NO-MEMBERSHIP-SIGN-IN, owner default (a), ADR-059. No challenge or cookie and no session. A denied `login_failed` session event (reason `no_active_membership`) is recorded. It is not counted as a failed sign-in. Like any right password it ends the account's own failure window (SIGNIN-LOCKOUT); the window of the identifier typed is unchanged. The detail asks the user to contact their organization administrator. Checked before the factor, so it answers the same with or without an authenticator. An account with neither (a patient or a platform-only account) keeps the uniform `401` |
 | `401 MFA_INVALID_CODE` | A wrong, reused (the same 30-second step twice) or already used code; a wrong email code. Each counts against the challenge (five attempts), the account's MFA failure budget and the source address's staff budget |
 | `429 MFA_RATE_LIMITED` | A failure budget is spent, and while it is every code is refused, a correct one too, until its 15-minute window passes: the account's (the fifth failed code within 15 minutes, staff and platform together), or the source address's staff budget (the 100th failed staff code from one address within 15 minutes; it is the staff sign-in's own, apart from platform sign-in's per-address budget of 20, and sized for a facility whose staff share one address). Also more than five enrolment-code sends or enrolment starts in 15 minutes. Since this change (A21) it carries `Retry-After: 900`, the whole window, whichever budget refused (§6) |
 | `403 MFA_ENROLLMENT_PROOF_REQUIRED` | Enrolment start or activation without a verified proof (no email code, and the challenge was not opened by provider activation). No factor is created |
@@ -1642,6 +1648,102 @@ record lacks when they set their password:
   working unchanged. A record without a date of birth or gender gets
   `400 ENROLLMENT_PROFILE_REQUIRED` and cannot activate until Health-id asks
   for the fields (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3).
+
+### Clinician self sign-up (ADR-064, migration 0094)
+
+A doctor (MDCN) or a nurse or midwife (NMCN) applies to work at one verified
+facility; two platform administrators verify and grant later (§19, Clinician
+applications). Sign-up files an application and grants nothing: no
+membership, no role, no session. Until approval the applicant's
+`POST /auth/login` is `403 NO_ACTIVE_FACILITY_MEMBERSHIP`. Every route is
+public (no session) under `/api/v1/identity/clinician-applications`.
+
+**The application capability.** The browser holds only the cookie
+`hid_clinician_application`: HttpOnly, `Secure` (`AUTH_COOKIE_SECURE`),
+`SameSite=Strict`, host-only, path `/api/v1/identity/clinician-applications`,
+a 43-character token whose keyed digest is all the database stores. A
+*draft* (after the sign-up code) lives 60 minutes (`Max-Age=3600`) and can
+search and submit once; an *account capability* (after submitting, or after
+the status code) lives 30 minutes (`Max-Age=1800`) and has a stage:
+`enrolment_required` (no authenticator yet: current, the authenticator
+enrolment, withdraw, end), `authenticator_required` (an authenticator exists:
+only the authenticator verify and challenge steps and end) or `ready`
+(everything). It is not a session, reaches no patient data and is never
+opened by a password. The 0088 staff challenge the authenticator steps drive
+is opened by Identity on a token it derives from the capability and never
+sends, so no value the browser holds works at `/auth/mfa/*`
+(`401 MFA_CHALLENGE_INVALID`). A cookie sent twice counts as none. Every
+answer that carries data has `Cache-Control: no-store`; no route sets a
+session cookie.
+
+**Refusal order.** (1) the body: `400 VALIDATION_FAILED`; (2) the `Origin`
+is one of `CORS_ORIGINS`: else `403 ORIGIN_DENIED` (not on the two `GET`s);
+(3) on the intake routes (email-code, its verify, submit, and a search with a
+draft) no `hid_access` or `hid_access_refresh` cookie and no `Authorization`
+header: else `409 CLINICIAN_APPLICATION_REQUIRES_SIGN_OUT`; (4) Turnstile
+where the route has it (Turnstile verification, above); (5) the gate:
+production without `OTP_HMAC_KEY_B64` is `503 CLINICIAN_APPLICATION_UNAVAILABLE`;
+on the intake routes a closed intake (`clinician_signup_enabled` off, or
+`provider_portal_enabled` off) is `503 CLINICIAN_SIGNUP_CLOSED` with the fixed
+detail "Clinician sign-up is not open yet. If you already have a Health ID
+provider account, sign in." (a `PublicDetailProblem`, ADR-057); maintenance
+is `503 PLATFORM_MAINTENANCE` on every route but availability (`open: false`)
+and session end; (6) the
+quota; (7) the command. A fault is never a `401` (ADR-059): a missing grant or
+function is `503 CLINICIAN_APPLICATION_UNAVAILABLE`.
+
+| Route | Body and headers | Answer |
+|---|---|---|
+| `GET .../availability` (P0) | none; not audited | `200 { open }` (`Cache-Control: public, max-age=30`); `open` is false while intake is closed or in maintenance, and in production without `OTP_HMAC_KEY_B64`. A fault is `503 PLATFORM_CONTROL_UNAVAILABLE`; treat anything but `200 { open: true }` as not open |
+| `POST .../email-code` (P1) | `{ email, turnstileAction: 'clinician-application', turnstileToken }` | `202 { accepted: true, challengeId, expiresInSeconds: 600, resendAfterSeconds: 60 }`, the same for every address; the code is delivered after the answer |
+| `POST .../email-code/verify` (P2) | `{ challengeId, email, code }` | `200 { verified: true, expiresAt }` and a draft cookie. `401 CLINICIAN_APPLICATION_CODE_INVALID` ("The code is wrong or has expired.") for a wrong, expired, spent or invalidated code; the fifth wrong code invalidates the challenge. Only after a correct code: `409 CLINICIAN_EMAIL_IN_USE` ("This email address already has a Health ID account. Sign in, reset your password, or use a different email address for your clinician account.") |
+| `POST .../facility-search` (P3) | `{ query }` (3-80 characters); a draft or a `ready` capability | `200 { facilities: [{ facilityId, name, organizationName }] }`, at most 10, verified and active facilities of active organizations matching the facility or organization name (`%` and `_` match literally). 30 searches per capability, then `429 CLINICIAN_APPLICATION_RATE_LIMITED` with `Retry-After: 3600` |
+| `POST .../` (P4, submit) | `Idempotency-Key`; `{ email, fullName (2-200), password (12-256), profession: 'doctor' \| 'nurse', regulator: 'MDCN' \| 'NMCN', licenceNumber, licenceValidUntil (YYYY-MM-DD, after today and within five years, Africa/Lagos), facilityId, declarations: { accurate: true, verificationConsent: true } }`; a draft | `201 { applicationId, state: 'awaiting_authenticator', submittedAt, expiresAt, facility: { id, name }, profession, version, replayed, next: 'authenticator', authenticator: { purpose: 'enroll' \| 'verify', expiresAt } \| null }` and an account capability (stage `enrolment_required`). `authenticator` is null only when the account's challenge budget is spent (use P9). The licence number is upper-cased with single spaces and must match `^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$`. A doctor applies with MDCN and a nurse with NMCN, else `400 CLINICIAN_APPLICATION_INVALID`. The same key and body with the same (spent) draft replays the application with `replayed: true` and a fresh capability; anything else on a spent draft is `401 CLINICIAN_APPLICATION_SESSION_INVALID` |
+| `POST .../authenticator/email-code` (P5) | an account capability at `enrolment_required` | `200 { accepted: true, channel: 'email', expiresAt }` (the 0088 enrolment proof, a second code to the same address) |
+| `POST .../authenticator/start` (P6) | `{ emailCode }` | `200 { secret, otpauthUri, algorithm, digits, periodSeconds, expiresAt }`, once |
+| `POST .../authenticator/activate` (P7) | `{ code }` (the first TOTP code) | `200 { recoveryCodes, account, stage: 'ready', applications, canApply, applyRefusal? }` (ten recovery codes, shown once); the account's applications awaiting the authenticator are submitted for review. No session |
+| `POST .../authenticator/verify` (P8) | `{ code }` or `{ recoveryCode }`, exactly one (`400 MFA_CODE_REQUIRED`) | `200 { account, stage: 'ready', applications, canApply, applyRefusal? }`. No session |
+| `POST .../authenticator/challenge` (P9) | an account capability not yet `ready` | `200 { purpose: 'enroll' \| 'verify', expiresAt }`: a new 0088 challenge (the earlier one is superseded) after a step expired (`401 MFA_CHALLENGE_INVALID`). Five per account in 15 minutes, then `429 MFA_RATE_LIMITED` with `Retry-After: 900` |
+| `POST .../status/email-code` (P10) | `{ email, turnstileAction: 'clinician-application-status', turnstileToken }`; not signed-out-only; not gated by `clinician_signup_enabled` | `202`, as P1, the same for every address; a code is delivered only to an active account that holds a clinician application and has no platform role or patient record |
+| `POST .../status/email-code/verify` (P11) | `{ challengeId, email, code }` | `200 { next: 'authenticator_verify' \| 'authenticator_setup', expiresAt }` and an account capability; `401 CLINICIAN_APPLICATION_CODE_INVALID` for a wrong, expired or decoy code; `403 STAFF_MFA_FACTOR_UNPROVEN` ("Your authenticator was set up at platform sign-in. Contact HID support to reset it.") only after a correct code |
+| `GET .../current` (P12) | a capability at `ready` or `enrolment_required` | `200 { account: { email, fullName }, stage, applications: [view], canApply, applyRefusal? }`; `403 CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED` at `authenticator_required` |
+| `POST .../:applicationId/withdraw` (P13) | `If-Match: "<version>"` (`428 IF_MATCH_REQUIRED`); no body | `200 view` (`state: 'withdrawn'`); a repeat is the same `200`. `404 CLINICIAN_APPLICATION_NOT_FOUND` for another account's id, `409 CLINICIAN_APPLICATION_STATE_INVALID` once decided or expired, `409 VERSION_CONFLICT` for a stale version |
+| `POST .../current/applications` (P14, apply again) | `Idempotency-Key`; the P4 body without `email`, `fullName` and `password`; a `ready` capability; intake open | `201 { ...view, replayed }`, `state: 'submitted'` at once. `403 CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE` (a patient account, no staff record, a disabled account, no staff-proven authenticator, or an `identity_not_confirmed` rejection), `409 CLINICIAN_APPLICATION_ALREADY_OPEN`, `CLINICIAN_APPLICATION_MEMBERSHIP_EXISTS`, `CLINICIAN_APPLICATION_ROLE_CONFLICT`, `CLINICIAN_APPLICATION_LIMIT_REACHED` (3 open, or 10 in 30 days), `CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE`, `CLINICIAN_APPLICATION_FACILITY_BUSY` (30 open at the facility), `IDEMPOTENCY_CONFLICT` |
+| `POST .../session/end` (P15) | none | `204`, always (with an allowed `Origin`): ends the capability and the 0088 challenge it drives, and clears the cookie |
+
+The application *view* is `{ applicationId, state, version, facility: { id,
+name }, profession, regulator: { code, name }, licenceNumberHint (the last
+four characters), submittedAt, expiresAt, decidedAt, decisionCode (rejected
+only), accessState (approved only: 'active' | 'lapsed' | 'ended' |
+'account_unavailable'), canWithdraw }`. `state` is `awaiting_authenticator`,
+`submitted`, `under_review`, `approved`, `rejected`, `withdrawn` or `expired`;
+an open application past its `expiresAt` (30 days after submission) reads as
+`expired` before any sweep. `decisionCode` is one of `licence_not_verified`,
+`licence_not_current`, `details_mismatch`, `identity_not_confirmed`,
+`employment_not_confirmed`, `facility_not_available`, `duplicate`,
+`existing_account`, `other`; the client shows its own fixed sentence for each
+and never an administrator's text.
+
+Other answers on these routes: `401 CLINICIAN_APPLICATION_SESSION_INVALID`
+(no, a malformed, an expired, an ended or a spent capability; a draft where an
+account capability is needed); `409 CLINICIAN_APPLICATION_AUTHENTICATOR_READY`
+(an authenticator step on a `ready` capability); `429
+CLINICIAN_APPLICATION_RATE_LIMITED` with `Retry-After: 86400` when a
+per-network (hourly or daily) or platform (daily) quota of the email-code,
+status-code, search or submit operation is spent (bounded settings
+`CLINICIAN_APPLICATION_{SIGNUP,STATUS,SEARCH,SUBMIT}_{NETWORK_HOURLY,NETWORK_DAILY,PLATFORM_DAILY}_LIMIT`);
+an address gets at most one code a minute, five an hour and fifteen a day per
+purpose (over it the start answers the same `202` and sends nothing). The
+0088 answers keep their codes and statuses: `401 MFA_CHALLENGE_INVALID`
+(the step expired: reopen with P9), `401 MFA_INVALID_CODE`, `429
+MFA_RATE_LIMITED`, `403 MFA_ENROLLMENT_PROOF_REQUIRED`, `409
+MFA_ENROLLMENT_PROOF_COMPLETE`, `503 MFA_ENROLLMENT_CODE_UNDELIVERABLE`,
+`403 STAFF_MFA_FACTOR_UNPROVEN`, `503 MFA_UNAVAILABLE`. On these routes they
+are step-level messages, never a sign-out.
+
+After approval the clinician signs in at `POST /auth/login` with the password
+and the authenticator set up before review (`mfa_required`, no second
+enrolment).
 
 ### HID Resolution
 
@@ -2992,7 +3094,7 @@ new membership starts pending.
 | `403 WORKFORCE_FACILITY_CONFLICT` | The caller has an active membership at the facility (its `org_admin` included) and attaches or grants there |
 | `403 WORKFORCE_SECOND_PERSON_REQUIRED` | The only current attestation for the role was recorded by the caller |
 | `404 WORKFORCE_ACCOUNT_NOT_FOUND`, `WORKFORCE_STAFF_NOT_FOUND`, `WORKFORCE_FACILITY_NOT_FOUND`, `WORKFORCE_MEMBERSHIP_NOT_FOUND` | The named record does not exist |
-| `409 WORKFORCE_ATTESTATION_REQUIRED` | No current attestation for the role by an independent reviewer |
+| `409 WORKFORCE_ATTESTATION_REQUIRED` | No current attestation for the role by an independent reviewer. An attestation recorded by step 1 of a clinician application (ADR-064) supports no grant here until its application is approved, also once the application is rejected, withdrawn or overdue; the profile's attestations carry `clinicianApplication: { id, state } \| null` and `usableForGrant` |
 | `409 WORKFORCE_ROLE_CONFLICT` | The membership holds `org_admin` or `admin`; an administering membership stays non-clinical |
 | `409 WORKFORCE_ROLE_ALREADY_ACTIVE`, `WORKFORCE_ROLE_NOT_ACTIVE` | Granting a held role that is not due for renewal (its attestation is current and no current attestation lasts longer, or it was not granted on an attestation), or revoking one the membership does not hold |
 | `409 WORKFORCE_MEMBERSHIP_EXISTS` | The account already has an active or pending membership at the facility |
@@ -3001,6 +3103,100 @@ new membership starts pending.
 | `409 WORKFORCE_FACILITY_NOT_VERIFIED` | The facility or its organization is not verified and active |
 | `409 WORKFORCE_ACCOUNT_INELIGIBLE`, `WORKFORCE_STAFF_INELIGIBLE` | The account is disabled, locked, deleted or a patient's own account, the staff record is inactive, or its verification status cannot be attested or granted |
 | `409 WORKFORCE_EMAIL_IN_USE` | A new identity's email is already used by an account or staff record |
+
+### Clinician applications (ADR-064, migration 0094)
+
+The verification queue of clinician self sign-up. Every route needs an
+MFA-verified platform session and `platform.workforce.manage`
+(`PLATFORM_SESSION_REQUIRED`, `PERMISSION_DENIED`). The three commands also
+need a TOTP step-up from the last five minutes (`STEP_UP_REQUIRED`,
+`STEP_UP_EXPIRED`), `If-Match` with the application version (`428
+IF_MATCH_REQUIRED`, `409 VERSION_CONFLICT`), an `Idempotency-Key` (`400
+IDEMPOTENCY_KEY_REQUIRED`, `409 IDEMPOTENCY_CONFLICT`) and a `reason` of 8 to
+500 characters (never shown to the applicant). Commands answer `201`; an exact
+replay returns the first answer with `replayed: true` and writes nothing.
+No Super Admin who works at the facility may take a step (`403
+WORKFORCE_FACILITY_CONFLICT`), and nobody acts on their own application (`403
+WORKFORCE_SELF_CHANGE_DENIED`).
+
+```text
+GET  /api/v1/admin/clinician-applications?state=&cursor=&limit=
+GET  /api/v1/admin/clinician-applications/:applicationId
+POST /api/v1/admin/clinician-applications/:applicationId/attest
+POST /api/v1/admin/clinician-applications/:applicationId/approve
+POST /api/v1/admin/clinician-applications/:applicationId/reject
+```
+
+- List (A1): `state` is `open` (default: the three open states, not overdue,
+  oldest first) or one state (newest first; `expired` includes overdue open
+  ones); `limit` 1-50 (default 20); `cursor` the previous `nextCursor` (bound
+  to the state; `400 ADMIN_INVALID_CURSOR`). `200 { items: [{ applicationId,
+  state, version, submittedAt, expiresAt, applicant: { accountId, fullName,
+  email }, profession, regulator: { code, name }, licenceNumber,
+  licenceValidUntil, facility: { id, name, organizationName },
+  authenticatorReady, step1: { by: { accountId, displayName }, at } | null }],
+  nextCursor }`. A full 50-row page always offers a next page, which may be
+  empty.
+- Detail (A2): everything both steps need, including the applicant account
+  and staff record, the authenticator (`enrolled`, `factorId`, `activatedAt`,
+  `enrolledAfterRecovery`), other memberships, the facility with a masked CAC
+  hint and its `org_admin` contacts (not sufficient alone for employment),
+  the attestation, approval and decision, `accessState`, the role's
+  permissions, duplicate-licence and name-match flags, and `callerHints`
+  (`attest`, `approve`, `reject`, each `{ allowed, reason }`; the commands
+  check again). `404 CLINICIAN_APPLICATION_NOT_FOUND`.
+- Step 1, attest (A3, `platform.clinician-application.attest`, critical):
+  `{ validUntil (ISO 8601, after now, at most three years, and not after the
+  end of the licence's expiry date in Africa/Lagos), evidenceReference (8-500,
+  a ticket reference, never a document), checklist: { registerChecked: true,
+  licenceCurrentUntilRecorded: true, identityMethod: 'video_call_photo_id' |
+  'in_person_photo_id', identityConfirmed: true, employmentChannel:
+  'facility_public_phone' | 'in_person_visit', employmentConfirmed: true },
+  authenticatorCode (six digits the applicant reads from their authenticator
+  during the identity call), reason }`. Identity checks the code against the
+  applicant's staff-proven factor in the same transaction; it is never
+  stored, audited or part of the request digest, so a replay needs no new
+  code. A refused code is committed against the applicant's 0088 failure
+  budget and answered `403 CLINICIAN_APPLICATION_AUTHENTICATOR_CODE_INVALID`,
+  `429 CLINICIAN_APPLICATION_AUTHENTICATOR_RATE_LIMITED` (`Retry-After: 900`)
+  or, with no staff-proven factor, `409
+  CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED`. The application must be
+  `submitted`. It records the 0087 attestation for exactly the requested role
+  (reserved for this application until approval). `201 { applicationId,
+  state: 'under_review', attestationId, attestedRoles, verificationMethod:
+  'manual_review', validUntil, version, replayed }`.
+- Step 2, approve (A4, `platform.clinician-application.approve`, critical,
+  `independent-attestation`): `{ reason }`. A different Super Admin from step
+  1 (`403 CLINICIAN_APPLICATION_SECOND_ADMIN_REQUIRED`); the application must
+  be `under_review` and not overdue; the factor confirmed at step 1 must still
+  be the account's active one (`409 CLINICIAN_APPLICATION_AUTHENTICATOR_CHANGED`).
+  It attaches the account by id and grants the role pinned to the step-1
+  attestation in one transaction (the 0087 rules apply:
+  `WORKFORCE_MEMBERSHIP_EXISTS`, `WORKFORCE_ROLE_CONFLICT`,
+  `WORKFORCE_FACILITY_NOT_VERIFIED`, ...). `201 { applicationId, state:
+  'approved', accountId, facilityId, membershipId, roleCode, attestationId,
+  version, replayed }`.
+- Reject (A5, `platform.clinician-application.reject`, high): `{ decisionCode,
+  reason }`, one of the nine codes (Clinician self sign-up, §8), from any
+  open state. Nothing else changes: no attestation, membership or role.
+  `identity_not_confirmed` blocks the account from applying again and its
+  other open applications from step 1. `201 { applicationId, state:
+  'rejected', decisionCode, version, replayed }`.
+
+Other codes: `400 CLINICIAN_APPLICATION_COMMAND_INVALID` (a field out of
+range, the checklist not exactly as above), `409
+CLINICIAN_APPLICATION_STATE_INVALID` ("This application is no longer at this
+step; reload it"), `409 CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE` (an
+`identity_not_confirmed` rejection on the account), `503
+ADMIN_COMMAND_UNAVAILABLE`. Audit, platform-scoped with the reason, in the
+command's transaction: `admin.clinician-application.attested` and
+`admin.workforce.credential.attested` (step 1);
+`admin.clinician-application.approved`, `admin.workforce.membership.attached`
+and `admin.workforce.role.granted` (step 2);
+`admin.clinician-application.rejected`; reads as
+`admin.clinician-application.list.request` and `.read.request`. The control
+`clinician_signup_enabled` is set through `POST /admin/controls` like the
+other controls.
 
 ## 20. Browser gateway and application contract
 
