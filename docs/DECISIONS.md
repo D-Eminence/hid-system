@@ -4707,15 +4707,29 @@ Decision:
   never reaches the browser, so no value the browser holds works at
   `/auth/mfa/*`; it never yields a session. Staff-session issuance re-checks
   eligibility (`403 NO_ACTIVE_FACILITY_MEMBERSHIP`). NO-MEMBERSHIP-SIGN-IN
-  is therefore unchanged.
+  is therefore unchanged. A capability is checked against its account at
+  every step (review fix): `enrolment_required` ends once the account holds
+  an authenticator, and a disabled or inactive account's capability serves
+  nothing (`403 CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE`). An account that
+  holds an approved clinician application, or an active or pending staff
+  membership, sets an authenticator up again (after a two-person MFA reset)
+  only through staff sign-in, the password then the emailed enrolment code
+  that P22's query (3) reviews; the status page refuses it after a correct
+  code (`403 CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED`), so the mailbox
+  alone never enrols a clinician's factor.
 - Intake starts closed. The platform control `clinician_signup_enabled` is
   seeded off; an administrator opens it with the audited
   `POST /admin/controls` after release gate P25. Intake also closes while
-  `provider_portal_enabled` is off or `maintenance_mode` is on. While it is
-  closed, starts answer `503 CLINICIAN_SIGNUP_CLOSED` with the fixed public
-  sentence "Clinician sign-up is not open yet. If you already have a Health
-  ID provider account, sign in." This is the decision ADR-057 requires for a
-  new `PublicDetailProblem`. The status page and the admin queue work
+  `provider_portal_enabled` is off or `maintenance_mode` is on. While the
+  control or the provider portal is off, the intake routes (the sign-up
+  start and its verify, facility search, submit and apply-again) answer
+  `503 CLINICIAN_SIGNUP_CLOSED` with the fixed public sentence "Clinician
+  sign-up is not open yet. If you already have a Health ID provider account,
+  sign in." This is the decision ADR-057 requires for a new
+  `PublicDetailProblem`. In maintenance with both on, every route but
+  availability and session end answers `503 PLATFORM_MAINTENANCE` (the
+  generic maintenance answer, not the sentence). Availability answers
+  `{ open: false }` in all three cases. The status page and the admin queue work
   whatever the control's state (maintenance aside). 0094 replaces
   `platform.control_enabled` while preserving its technical owner
   (`hid_platform_control_reader`) by taking that role's membership only for
@@ -4728,7 +4742,11 @@ Decision:
   register; confirms identity by a live video call or in person with a
   government photo ID, during which the applicant reads a current code from
   their authenticator, which Identity verifies against the applicant's own
-  factor; confirms employment through a channel independent of the facility
+  factor (before that code is checked, step 1 refuses whatever it would
+  refuse anyway, an insider's call included, so no such call counts against
+  the applicant's failure budget, and a concurrent duplicate is answered
+  from the first one's result); confirms employment through a channel
+  independent of the facility
   administrator's account (the facility's phone number from a public record,
   or an in-person visit); and records the 0087 credential attestation for
   exactly the requested role, valid no later than the end of the licence's
@@ -4741,9 +4759,11 @@ Decision:
   account already holds a staff-proven authenticator a platform administrator
   confirmed outside the mailbox: P22 as written.
 - Reserved attestations: until its application is approved, a step-1
-  attestation supports only that application's own pinned step 2, while the
-  application is under review and not overdue, computed at read time (no
-  sweeper is waited for). No role rests on it before approval; rejecting,
+  attestation supports only that application's own pinned step 2 (a grant
+  to that application's account at that application's facility; review
+  fix: the predicate itself binds the pin, not only its single caller),
+  while the application is under review and not overdue, computed at read
+  time (no sweeper is waited for). No role rests on it before approval; rejecting,
   withdrawing or expiring an application revokes nothing anywhere. After
   approval it behaves as any 0087 attestation.
   `identity.admin_change_workforce_role` keeps its signature and delegates to
@@ -4760,7 +4780,14 @@ Decision:
 - Abuse limits: Turnstile on both email starts (main site only);
   per-network and platform quotas on codes, search and submissions;
   per-address cooldowns; at most 3 open applications per account, 10 in 30
-  days, and 30 open per facility.
+  days, and 30 open per facility. Submit and apply-again check the
+  capability before they charge the submit quota, and the platform's daily
+  submit cap counts created applications, not attempts, refusals or
+  replays (review fix: a forged cookie could otherwise use up the cap with
+  no email or account). Applicants' wrong authenticator codes count against
+  the account's 0088 budget and a per-address bucket of the applicants' own,
+  never staff sign-in's per-address bucket (review fix: throwaway
+  applicants could otherwise block staff sign-in from a shared address).
 - Facility self-service workforce management stays deferred; the
   `org_admin` gets no route and is never the employment confirmation.
 - Every step is audited: public steps inside their commands, admin steps
@@ -4806,14 +4833,18 @@ Consequences:
 - Rejected, withdrawn and expired applicants keep an active account with no
   membership, plus their application rows; a retention period is a legal
   follow-up.
-- A wrong step-1 code counts against the applicant's authenticator budget.
+- A wrong step-1 code counts against the applicant's authenticator budget;
+  a step-1 call that would be refused anyway does not.
+- An approved clinician whose authenticator was reset, and whose membership
+  has since ended, cannot set one up through the status page and needs HID
+  support (the conservative side of the staff-sign-in-only rule).
 - No notice sink is bound: applicants learn decisions from the status page
   and facilities are not notified.
 - Evidence is local and synthetic: `clinician-applications.integration.sql`,
   `workforce-role-change-body.test.mjs`, the Identity specs,
   `verify-clinician-application-runtime.mjs`, the non-superuser upgrade
-  stage and the rehearsal (release checklist §8). Nothing has run on staging
-  or production.
+  stage (with a quoted administrator name) and the rehearsal (release
+  checklist §8). Nothing has run on staging or production.
 
 Related: ADR-049, ADR-054, ADR-057, ADR-058, ADR-059;
 `PHASE_3_LAUNCH_DECISIONS.md` (D14, NO-MEMBERSHIP-SIGN-IN, CLIN-SIGNUP);

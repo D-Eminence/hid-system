@@ -492,6 +492,13 @@ select enrolled.actor_account_id as account_id, enrolled.occurred_at as enrolled
 rollback;
 ```
 
+After 0094 (ADR-064), an account that holds an approved clinician
+application, or an active or pending staff membership, cannot set up an
+authenticator through the application status page (0094 refuses the
+enrolment and audits `identity.clinician-application.status-code-verified`
+as denied), so a re-enrolment after a reset goes through staff sign-in and
+the query above lists it when it follows a recovery.
+
 After 0094 (ADR-064), query (4) of P22: every approved clinician application
 must still rest on a staff-proven authenticator. Expected: no rows, or each
 one reviewed:

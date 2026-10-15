@@ -85,7 +85,17 @@ browser holds works at `/auth/mfa/*`, and that challenge never yields a
 session. Issuing any staff session re-checks that the account has an
 eligible membership (`403 NO_ACTIVE_FACILITY_MEMBERSHIP`, no session), so an
 applicant, or a membership that ended between the password step and the
-code, never gets one. NO-MEMBERSHIP-SIGN-IN is unchanged.
+code, never gets one. NO-MEMBERSHIP-SIGN-IN is unchanged. A capability is
+checked against its account at every step (an `enrolment_required` one needs
+the code once the account holds an authenticator; a disabled account's
+serves nothing), and an account that holds an approved application or a
+staff membership sets an authenticator up again only through staff sign-in,
+never through a capability the mailbox alone opened. An applicant's wrong
+authenticator codes count against the account's 0088 budget and a
+per-address bucket of the applicants' own, never staff sign-in's, so
+throwaway applicant accounts cannot block staff sign-in from a shared
+address. A public flow that creates an account treats the `hid_access_csrf`
+cookie, which outlives the 15-minute access cookie, as a sign-in.
 
 ## 3. Authorization
 
@@ -129,7 +139,11 @@ the applicant reads a current code from their own authenticator (verified by
 Identity against that factor), and confirms employment through a channel
 independent of the facility administrator (the facility's public phone number
 or a visit); step 2 grants the role pinned to step 1's attestation. Until its
-application is approved, that attestation supports no other grant. The
+application is approved, that attestation supports no other grant (the pin
+is bound to the application's own account and facility). Step 1 refuses
+whatever it would refuse anyway before it checks the applicant's code, so no
+administrator, an insider included, can spend an applicant's failure budget
+that way. The
 standard, the reviewer list and the register source are owner decisions
 (release checklist P25). Residual risks: the manual identity check (a
 deepfaked call, a forged ID) and, once break-glass is on, emergency reads by

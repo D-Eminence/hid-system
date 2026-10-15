@@ -294,15 +294,21 @@ The executable covers:
    with no session, and neither the capability nor the draft to work at
    `/auth/mfa/*`; no audit row to carry the email, name or licence; the
    status page's authenticator step; the queue's permission and step-up,
-   the applicant's live code at step 1 (a wrong one counted), the second
-   Super Admin and the insider refusal, and five platform-scoped audit
-   events; the first staff sign-in after approval; a grant pinned to its own
+   the applicant's live code at step 1 (a wrong one counted; an insider, a
+   stale version and an approved application refused before the code, none
+   counted), the second Super Admin and the insider refusal, and five
+   platform-scoped audit events; the first staff sign-in after approval; a grant pinned to its own
    application's attestation across two applications, and a rejection that
    revokes nothing; a reserved attestation refused for a generic 0087 grant,
    also overdue and unswept, until approval; expiry read before the sweep
    and the sweeper skipping a locked row; races (a double submit, concurrent
-   starts, two approvals at once beside a sign-in, withdraw against approve);
-   and faults (a revoked grant, a missing function) answered `503`, never
+   starts, two approvals at once beside a sign-in, a double-submitted step 1
+   waiting on the applicant's account, withdraw against approve); a forged
+   capability refused on submit and apply-again with no quota charged, and
+   the platform cap counting the created application once; a ready
+   capability searching beside a session cookie; an approved clinician
+   whose authenticator was reset refused enrolment at the status page; and
+   faults (a revoked grant, a missing function) answered `503`, never
    `401`. The non-superuser check gains an upgrade stage
    (`clinician_signup_upgrade_path`): on a second database it migrates
    through 0093 with `apply-migrations.mjs --through`, runs the previous
@@ -311,6 +317,10 @@ The executable covers:
    its ADMIN OPTION, applies 0094 as that administrator, bootstraps and
    verifies, and requires the function's owner unchanged, no INHERIT or SET
    membership left, and the control read `false` by the runtime logins.
+   Before that, on the same database, 0094 runs in a rolled-back
+   transaction as an administrator named `HidAdmin` (a name that needs
+   quoting) that still owns the function, and must apply with no membership
+   taken (`clinician_signup_quoted_owner`).
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
