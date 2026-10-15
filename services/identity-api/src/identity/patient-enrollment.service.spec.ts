@@ -200,6 +200,18 @@ async function verifiedEnrollment(f: ReturnType<typeof fixture>) {
   return started.cookie;
 }
 
+/** The fields activation may carry for a NIN record that lacks them (ADR-061). */
+type SelfReportedProfile = { dateOfBirth?: string;
+  gender?: 'female' | 'male' | 'intersex' | 'other' | 'unknown' };
+/** Activation with self-reported fields, through the service's own method. */
+function activateWith(f: ReturnType<typeof fixture>, cookie: string, profile: SelfReportedProfile,
+  password = 'a-strong-test-password') {
+  const activate = f.service.activate as (cookie: string | undefined, password: string,
+    correlationId: string, googleCookie: string | undefined,
+    profile: SelfReportedProfile) => Promise<{ stage: 'active'; hidCode: string }>;
+  return activate.call(f.service, cookie, password, correlationId, undefined, profile);
+}
+
 const rateLookups = (queries: RecordedQuery[]) => queries
   .filter(({ sql }) => sql.includes('from identity.public_patient_enrollment_rates'))
   .map(({ values }) => ({ scope: values[0], bucket: values[1] }));
@@ -386,7 +398,7 @@ describe('PatientEnrollmentService', () => {
       .rejects.toMatchObject({ code: 'OTP_INVALID' });
     expect(f.challenge?.failed_attempts).toBe(1);
     await expect(f.service.verifyContact(started.cookie, contact.challengeId, deliveredCode, correlationId))
-      .resolves.toEqual({ stage: 'set_password' });
+      .resolves.toEqual({ stage: 'set_password', requiredProfileFields: [] });
     await expect(f.service.activate(started.cookie, 'a-strong-test-password', correlationId))
       .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
     const activation = f.queries.find(({ sql }) => sql.includes('identity.activate_public_patient_enrollment'))!;
@@ -423,7 +435,7 @@ describe('PatientEnrollmentService', () => {
     expect(f.google.consumePendingInTransaction).toHaveBeenCalledWith(f.client,
       googleCookie, f.enrollment?.id, 'account-7');
     expect(f.client.query).toHaveBeenCalledWith(
-      'select * from identity.activate_public_patient_enrollment($1,$2,$3,$4,$5,$6,$7)',
+      'select * from identity.activate_public_patient_enrollment($1,$2,$3,$4,$5,$6,$7,$8,$9)',
       expect.any(Array));
   });
 
@@ -535,7 +547,7 @@ describe('PatientEnrollmentService', () => {
       // The block lasts one window; once it has passed, the same challenge's code verifies.
       for (const row of f.otpRates.values()) row.blocked_until = new Date(Date.now() - 1000);
       await expect(f.service.verifyContact(started.cookie, second.challengeId, secondCode, correlationId))
-        .resolves.toEqual({ stage: 'set_password' });
+        .resolves.toEqual({ stage: 'set_password', requiredProfileFields: [] });
     });
 
     it('keys one budget on the recipient alone, across enrollments and networks, never on the client IP', async () => {
@@ -563,7 +575,7 @@ describe('PatientEnrollmentService', () => {
       const contactOther = await other.service.startContact(startedOther.cookie, 'email',
         'someone-else@example.test', '203.0.113.10', correlationId);
       await expect(other.service.verifyContact(startedOther.cookie, contactOther.challengeId,
-        lastCode(other), correlationId)).resolves.toEqual({ stage: 'set_password' });
+        lastCode(other), correlationId)).resolves.toEqual({ stage: 'set_password', requiredProfileFields: [] });
 
       const rows = [...a.queries, ...b.queries].filter(({ sql }) => sql.includes('auth.otp_rate_limits'));
       expect(new Set(rows.map(({ values }) => `${values[0]}:${values[1]}`)).size).toBe(1);
@@ -738,7 +750,7 @@ describe('PatientEnrollmentService', () => {
     await expect(f.service.verifyContact(started.cookie, phone.challengeId, phoneCode, correlationId))
       .rejects.toMatchObject({ code: 'OTP_INVALID' });
     await expect(f.service.verifyContact(started.cookie, email.challengeId, emailCode, correlationId))
-      .resolves.toEqual({ stage: 'set_password' });
+      .resolves.toEqual({ stage: 'set_password', requiredProfileFields: [] });
     expect(f.enrollment?.contact_channel).toBe('email');
     await expect(f.service.activate(started.cookie, 'a-strong-test-password', correlationId))
       .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
@@ -754,7 +766,7 @@ describe('PatientEnrollmentService', () => {
     const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
 
     await expect(f.service.verifyContact(started.cookie, contact.challengeId, deliveredCode, correlationId))
-      .resolves.toEqual({ stage: 'set_password' });
+      .resolves.toEqual({ stage: 'set_password', requiredProfileFields: [] });
     await expect(f.service.verifyContact(started.cookie, contact.challengeId, deliveredCode, correlationId))
       .rejects.toMatchObject({ code: 'OTP_INVALID' });
     expect(f.challenge?.consumed_at).toBeInstanceOf(Date);
@@ -1215,6 +1227,214 @@ describe('PatientEnrollmentService', () => {
       await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
         .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
       expect(f.enrollment?.state).toBe('active');
+    });
+  });
+
+  // ADR-061: QoreID may return only the name, the NIN and its reference. The
+  // patient enters a missing date of birth or gender at activation; a field the
+  // NIN record provided can never be replaced.
+  describe('a NIN record without a date of birth or gender', () => {
+    const { dateOfBirth: _dateOfBirth, gender: _gender, ...withoutBoth } = identity;
+    const { dateOfBirth: _onlyDate, ...withoutDate } = identity;
+    const { gender: _onlyGender, ...withoutGender } = identity;
+    const activation = (queries: RecordedQuery[]) => queries
+      .filter(({ sql }) => sql.includes('identity.activate_public_patient_enrollment'));
+
+    async function sparseEnrollment(record: Record<string, unknown> = withoutBoth) {
+      const f = fixture();
+      f.provider.verifyNin.mockResolvedValue(record);
+      const cookie = await verifiedEnrollment(f);
+      f.queries.length = 0;
+      return { f, cookie };
+    }
+
+    async function refusal(promise: Promise<unknown>) {
+      const error = await promise.then(() => undefined, (failure: unknown) => failure);
+      expect(error).toBeInstanceOf(DomainProblem);
+      const problem = error as DomainProblem;
+      return { status: problem.getStatus(), code: problem.code, detail: problem.message };
+    }
+
+    it.each([
+      ['a complete record', identity, []],
+      ['a record without either', withoutBoth, ['dateOfBirth', 'gender']],
+      ['a record without a date of birth', withoutDate, ['dateOfBirth']],
+      ['a record without a gender', withoutGender, ['gender']],
+    ] as const)('starts %s and answers the fields it lacks, never a profile value', async (_label, record, required) => {
+      const f = fixture();
+      f.provider.verifyNin.mockResolvedValue(record);
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(started.progress).toMatchObject({ stage: 'verify_contact', requiredProfileFields: required });
+      for (const value of ['Amina', 'Okafor', '1990-01-02', 'female', nin]) {
+        expect(JSON.stringify(started.progress)).not.toContain(value);
+      }
+      // The resumed start, GET /current at each stage before activation and the
+      // contact proof all answer the same list, read from the stored profile.
+      const resumed = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(resumed.progress).toMatchObject({ stage: 'verify_contact', requiredProfileFields: required });
+      expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'verify_contact', requiredProfileFields: required });
+      const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      const code = f.notification.deliver.mock.calls[0]?.[0].code as string;
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'verify_contact', challengeId: contact.challengeId,
+          requiredProfileFields: required });
+      await expect(f.service.verifyContact(started.cookie, contact.challengeId, code, correlationId))
+        .resolves.toEqual({ stage: 'set_password', requiredProfileFields: required });
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'set_password', requiredProfileFields: required });
+    });
+
+    it('stores the record as QoreID returned it, without the missing keys and without null', async () => {
+      const { f, cookie } = await sparseEnrollment();
+      await activateWith(f, cookie, { dateOfBirth: '1990-01-02', gender: 'female' });
+      const profile = JSON.parse(activation(f.queries).at(-1)?.values[2] as string) as Record<string, unknown>;
+      expect(profile).not.toHaveProperty('dateOfBirth');
+      expect(profile).not.toHaveProperty('gender');
+      expect(profile).toMatchObject({ nin, firstName: 'Amina', lastName: 'Okafor' });
+    });
+
+    it('never answers requiredProfileFields once the enrollment is active', async () => {
+      const { f, cookie } = await sparseEnrollment();
+      await activateWith(f, cookie, { dateOfBirth: '1990-01-02', gender: 'female' });
+      Object.assign(f.enrollment!, { state: 'active', patient_id: 'patient-7', account_id: 'account-7' });
+      const progress = await f.service.current(cookie, correlationId);
+      expect(progress).toMatchObject({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      expect(progress).not.toHaveProperty('requiredProfileFields');
+    });
+
+    it.each([
+      ['a malformed date', { dateOfBirth: '01-02-1990' }],
+      ['an impossible date', { dateOfBirth: '1990-02-30' }],
+      ['a date before 1900', { dateOfBirth: '1899-12-31' }],
+      ['a null date', { dateOfBirth: null }],
+      ['a gender outside the list', { gender: 'F' }],
+      ['a null gender', { gender: null }],
+    ])('still refuses a record whose date of birth or gender is present but invalid: %s', async (_label, field) => {
+      const f = fixture();
+      f.provider.verifyNin.mockResolvedValue({ ...identity, ...field });
+      await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+      expect(f.queries.some(({ sql }) => sql.includes('insert into identity.public_patient_enrollments'))).toBe(false);
+    });
+
+    it.each([
+      [withoutBoth, {}, 'Enter your date of birth and gender'],
+      [withoutBoth, { dateOfBirth: '1990-01-02' }, 'Enter your gender'],
+      [withoutBoth, { gender: 'female' }, 'Enter your date of birth'],
+      [withoutDate, {}, 'Enter your date of birth'],
+      [withoutGender, {}, 'Enter your gender'],
+    ] as const)('refuses a missing field with 400 ENROLLMENT_PROFILE_REQUIRED, before argon2id or the command (%#)',
+      async (record, profile, detail) => {
+        const { f, cookie } = await sparseEnrollment(record);
+        const before = passwordHash().mock.calls.length;
+        expect(await refusal(activateWith(f, cookie, profile)))
+          .toEqual({ status: 400, code: 'ENROLLMENT_PROFILE_REQUIRED', detail });
+        expect(passwordHash().mock.calls.length).toBe(before);
+        expect(activation(f.queries)).toHaveLength(0);
+        // Charged to the activation budget, as every attempt past the stage check is.
+        expect(rateLookups(f.queries)).toEqual([{ scope: 'enrollment', bucket: expect.any(String) }]);
+        expect(f.enrollment?.state).toBe('set_password');
+      });
+
+    it.each([
+      [identity, { dateOfBirth: '1990-01-02' }, 'Your date of birth comes from your NIN record and cannot be changed here'],
+      [identity, { gender: 'male' }, 'Your gender comes from your NIN record and cannot be changed here'],
+      [identity, { dateOfBirth: '1990-01-02', gender: 'female' },
+        'Your date of birth and gender come from your NIN record and cannot be changed here'],
+      [withoutDate, { dateOfBirth: '1990-01-02', gender: 'female' },
+        'Your gender comes from your NIN record and cannot be changed here'],
+      [withoutGender, { dateOfBirth: '1985-06-07', gender: 'male' },
+        'Your date of birth comes from your NIN record and cannot be changed here'],
+    ] as const)('refuses a field the NIN record provided with 400 ENROLLMENT_PROFILE_FIELD_VERIFIED (%#)',
+      async (record, profile, detail) => {
+        const { f, cookie } = await sparseEnrollment(record);
+        const before = passwordHash().mock.calls.length;
+        expect(await refusal(activateWith(f, cookie, profile)))
+          .toEqual({ status: 400, code: 'ENROLLMENT_PROFILE_FIELD_VERIFIED', detail });
+        expect(passwordHash().mock.calls.length).toBe(before);
+        expect(activation(f.queries)).toHaveLength(0);
+      });
+
+    it.each(['1899-12-31', '1990-02-30', '1990-13-01', '0000-00-00', 'not-a-date'])
+    ('refuses a date of birth that is not a real date from 1900-01-01 to today: %s', async (dateOfBirth) => {
+      const { f, cookie } = await sparseEnrollment();
+      const before = passwordHash().mock.calls.length;
+      expect(await refusal(activateWith(f, cookie, { dateOfBirth, gender: 'female' }))).toEqual({
+        status: 400, code: 'DATE_OF_BIRTH_INVALID',
+        detail: 'Enter a real date of birth. It cannot be before 1 January 1900 or in the future.' });
+      expect(passwordHash().mock.calls.length).toBe(before);
+      expect(activation(f.queries)).toHaveLength(0);
+    });
+
+    it('refuses tomorrow and accepts today and 1900-01-01', async () => {
+      const day = (offset: number) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+      const { f, cookie } = await sparseEnrollment();
+      expect((await refusal(activateWith(f, cookie, { dateOfBirth: day(1), gender: 'other' }))).code)
+        .toBe('DATE_OF_BIRTH_INVALID');
+      for (const dateOfBirth of [day(0), '1900-01-01']) {
+        const accepted = await sparseEnrollment();
+        await expect(activateWith(accepted.f, accepted.cookie, { dateOfBirth, gender: 'other' }))
+          .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+        expect(activation(accepted.f.queries).at(-1)?.values.slice(7)).toEqual([dateOfBirth, 'other']);
+      }
+    });
+
+    it('passes the entered fields to the activation command as $8 and $9', async () => {
+      const { f, cookie } = await sparseEnrollment();
+      await expect(activateWith(f, cookie, { dateOfBirth: '1990-01-02', gender: 'female' }))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      const command = activation(f.queries);
+      expect(command).toHaveLength(1);
+      expect(command[0]?.sql).toBe('select * from identity.activate_public_patient_enrollment($1,$2,$3,$4,$5,$6,$7,$8,$9)');
+      expect(command[0]?.values.slice(7)).toEqual(['1990-01-02', 'female']);
+      expect(command[0]?.values[5]).toBe(PASSWORD_HASH);
+    });
+
+    it.each([
+      [withoutDate, { dateOfBirth: '1990-01-02' }, ['1990-01-02', null]],
+      [withoutGender, { gender: 'intersex' }, [null, 'intersex']],
+      [identity, {}, [null, null]],
+    ] as const)('passes null for a field the NIN record provided (%#)', async (record, profile, passed) => {
+      const { f, cookie } = await sparseEnrollment(record);
+      await activateWith(f, cookie, profile);
+      expect(activation(f.queries).at(-1)?.values.slice(7)).toEqual(passed);
+    });
+
+    it('passes null for both when the password is sent alone for a complete record', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      await f.service.activate(cookie, 'a-strong-test-password', correlationId);
+      expect(activation(f.queries).at(-1)?.values.slice(7)).toEqual([null, null]);
+    });
+
+    it('lets a replay of an active enrollment ignore the fields, whatever they are', async () => {
+      const { f, cookie } = await sparseEnrollment();
+      await activateWith(f, cookie, { dateOfBirth: '1990-01-02', gender: 'female' });
+      Object.assign(f.enrollment!, { state: 'active', patient_id: 'patient-7', account_id: 'account-7' });
+      for (const profile of [{}, { dateOfBirth: '2999-01-01' }, { dateOfBirth: '1991-03-04', gender: 'male' as const }]) {
+        f.queries.length = 0;
+        await expect(activateWith(f, cookie, profile))
+          .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+        expect(activation(f.queries).at(-1)?.values.slice(7)).toEqual([null, null]);
+      }
+    });
+
+    it('checks the password, stage, contact proof and budget first', async () => {
+      const { f, cookie } = await sparseEnrollment();
+      await expect(activateWith(f, cookie, {}, 'short')).rejects.toMatchObject({ code: 'PASSWORD_INVALID' });
+      f.rateCount = getEnvironment().OTP_RATE_MAX_REQUESTS * 3;
+      await expect(activateWith(f, cookie, {})).rejects.toMatchObject({ status: 429, code: 'ENROLLMENT_RATE_LIMITED' });
+      f.rateCount = 0;
+      f.enrollment!.contact_verified_at = new Date(Date.now() - 31 * 60_000);
+      await expect(activateWith(f, cookie, {}))
+        .rejects.toMatchObject({ status: 409, code: 'ENROLLMENT_CONTACT_REVERIFY_REQUIRED' });
+      // Back at the contact step, the stage refusal comes first.
+      await expect(activateWith(f, cookie, {}))
+        .rejects.toMatchObject({ status: 409, code: 'ENROLLMENT_STAGE_INVALID' });
+      expect(activation(f.queries)).toHaveLength(0);
     });
   });
 });

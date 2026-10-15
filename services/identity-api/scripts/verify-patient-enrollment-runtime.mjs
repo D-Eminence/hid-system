@@ -7,14 +7,16 @@
 // enrollment gate before any registration lookup, the 15-minute HID re-display
 // window, the 30-minute contact proof and the QoreID lookup quota (0085); and
 // the public availability read, from the same gate, with the
-// registration-not-open answer start gives while it is closed (FE-4).
+// registration-not-open answer start gives while it is closed (FE-4); and a
+// NIN record with only the name, the NIN and its reference, whose patient
+// enters the missing date of birth and gender at activation (ADR-061, 0092).
 // External services are replaced, never called: QoreID behind the real adapter
 // by a local HTTP stub, Cloudflare Siteverify by a stub that encodes the
 // outcome in the token, and Notification delivery by a stub that captures the
 // code. Every NIN, name, contact and password here is invented.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createDecipheriv, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
 const service = resolve(import.meta.dirname, '..');
 const require = createRequire(join(service, 'package.json'));
@@ -108,12 +110,16 @@ const turnstile = (action, host = siteHost) => `ok|${action}|${host}|${++issuedT
 
 // QoreID stub behind the real adapter, in the shape of the entitled NIN-only
 // sandbox response. NOT_VERIFIED is a negative registry check; every NIN in
-// `people` is a complete verified record; any other request fails the run.
+// `people` is a verified record, complete except NAME_ONLY, which has only the
+// name (and the NIN and its reference), as QoreID may return (ADR-061); any
+// other request fails the run.
 const NOT_VERIFIED = '90000000009';
+const NAME_ONLY = '90000000005';
 const people = new Map([
   ['90000000001', { firstname: 'Ada', lastname: 'Synthetic', birthdate: '01-02-1990', gender: 'F' }],
   ['90000000002', { firstname: 'Bayo', lastname: 'Synthetic', birthdate: '15-07-1985', gender: 'M' }],
   ['90000000003', { firstname: 'Chidi', lastname: 'Synthetic', birthdate: '30-11-2001', gender: 'M' }],
+  [NAME_ONLY, { firstname: 'Dami', lastname: 'Synthetic' }],
 ]);
 const ninLookups = [];
 const qoreidFetch = async (url, init) => {
@@ -272,6 +278,8 @@ try {
   expectProblem(startedA, 200);
   assert.equal(startedA.body.stage, 'verify_contact'); assert.equal(startedA.body.googleOnboardingRequired, false);
   assert(Date.parse(startedA.body.expiresAt) > Date.now());
+  // A complete NIN record asks for nothing at activation (ADR-061).
+  assert.deepEqual(startedA.body.requiredProfileFields, [], 'a complete NIN record must require no profile field');
   for (const field of ['nin', 'firstName', 'lastName', 'dateOfBirth', 'patientId', 'hidCode']) {
     assert(!(field in startedA.body), `enrollment start must not return ${field}`);
   }
@@ -280,6 +288,7 @@ try {
   const replayA = await post('/identity/patient-enrollments', startBody(ninA), { key: keyA });
   expectProblem(replayA, 200);
   assert.equal(replayA.body.stage, 'verify_contact'); assert.equal(enrollmentCookie(replayA), cookieA);
+  assert.deepEqual(replayA.body.requiredProfileFields, []);
   expectProblem(await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID() }), 409, 'NIN_ALREADY_REGISTERED');
   expectProblem(await post('/identity/patient-enrollments', startBody('90000000002'), { key: keyA }), 409, 'IDEMPOTENCY_KEY_REUSED');
   assert.equal(ninLookups.filter(nin => nin === ninA).length, 1, 'A replay or duplicate asked QoreID again');
@@ -293,10 +302,11 @@ try {
        or position(convert_to($1, 'UTF8') in profile_ciphertext) > 0`, [ninA]), 0, 'the NIN is stored in clear');
   const current = await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieA);
   expectProblem(current, 200); assert.equal(current.body.stage, 'verify_contact');
+  assert.deepEqual(current.body.requiredProfileFields, []);
   expectProblem(await http.get('/api/v1/identity/patient-enrollments/current'), 404, 'ENROLLMENT_NOT_FOUND');
   expectProblem(await http.get('/api/v1/identity/patient-enrollments/current')
     .set('Cookie', cookieA.replace(/.$/, c => (c === 'A' ? 'B' : 'A'))), 404, 'ENROLLMENT_NOT_FOUND');
-  check('enrollment start verifies the NIN once, stores it encrypted, returns only the stage and a host-only HttpOnly Strict cookie; a same-key replay asks QoreID nothing; another key for the same NIN is 409 NIN_ALREADY_REGISTERED; the same key for another NIN is 409 IDEMPOTENCY_KEY_REUSED; a forged cookie is 404');
+  check('enrollment start verifies the NIN once, stores it encrypted, returns only the stage, requiredProfileFields [] for a complete record, and a host-only HttpOnly Strict cookie; a same-key replay asks QoreID nothing; another key for the same NIN is 409 NIN_ALREADY_REGISTERED; the same key for another NIN is 409 IDEMPOTENCY_KEY_REUSED; a forged cookie is 404');
 
   // 4. Contact verification.
   const emailA = `patient-a-${randomUUID().slice(0, 8)}@example.invalid`;
@@ -320,7 +330,8 @@ try {
     { cookie: cookieA }), 409, 'ENROLLMENT_STAGE_INVALID');
   const verifiedA = await post('/identity/patient-enrollments/contact/verify',
     { challengeId: contactA.body.challengeId, code: deliveredA.code }, { cookie: cookieA });
-  expectProblem(verifiedA, 200); assert.equal(verifiedA.body.stage, 'set_password');
+  expectProblem(verifiedA, 200);
+  assert.deepEqual(verifiedA.body, { stage: 'set_password', requiredProfileFields: [] });
   expectProblem(await post('/identity/patient-enrollments/contact/verify',
     { challengeId: contactA.body.challengeId, code: deliveredA.code }, { cookie: cookieA }), 422, 'OTP_INVALID');
   check('contact verification normalizes the email, delivers one SIGNUP_VERIFY code, enforces the resend cooldown, masks the contact, refuses a wrong code and activation before verification, and accepts the code once');
@@ -329,6 +340,14 @@ try {
   const passwordA = 'Synthetic-Patient-Pass-01';
   expectProblem(await post('/identity/patient-enrollments/activate', { password: 'short' }, { cookie: cookieA }),
     400, 'VALIDATION_FAILED');
+  // A value the NIN record provided cannot be replaced (ADR-061). The refusal
+  // counts toward the activation budget, as every attempt past the stage check.
+  const verifiedField = await post('/identity/patient-enrollments/activate',
+    { password: passwordA, dateOfBirth: '1991-01-01' }, { cookie: cookieA });
+  expectProblem(verifiedField, 400, 'ENROLLMENT_PROFILE_FIELD_VERIFIED');
+  assert.equal(verifiedField.body.detail, 'Your date of birth comes from your NIN record and cannot be changed here');
+  assert.equal(await count(`select count(*) from identity.patients where source_system = $1`,
+    ['hid-public-qoreid-enrollment']), 0, 'a refused activation must create no patient');
   const activatedA = await post('/identity/patient-enrollments/activate', { password: passwordA }, { cookie: cookieA });
   expectProblem(activatedA, 200);
   assert.equal(activatedA.body.stage, 'active'); assert.match(activatedA.body.hidCode, /^HID-[A-HJ-NP-Z2-9]{6,32}$/);
@@ -342,8 +361,10 @@ try {
   // after the cookie and stage checks counts, whatever its outcome, up to
   // OTP_RATE_MAX_REQUESTS * 3 per window (the contact step's enrollment
   // budget). Then 429, without another argon2id run or activation command.
+  // The refused attempt with a verified field, the activation and its replay
+  // were the first three.
   const activationBudget = getEnvironment().OTP_RATE_MAX_REQUESTS * 3;
-  for (let call = 3; call <= activationBudget; call += 1) {
+  for (let call = 4; call <= activationBudget; call += 1) {
     const withinBudget = await post('/identity/patient-enrollments/activate',
       { password: `A-Different-Password-0${call}` }, { cookie: cookieA });
     assert.equal(withinBudget.status, 200,
@@ -371,7 +392,7 @@ try {
   const patientA = accountA[0].patient_id;
   assert.equal(await count(`select count(*) from identity.patients where hid_code = $1`, [hidA]), 1);
   assert.equal((await owner.query('select state, patient_id from identity.public_patient_enrollments')).rows[0].patient_id, patientA);
-  check('activation creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID, and its response expires the enrollment cookie; a replay returns the same HID, ignores the second password and expires the cookie too; activation attempts of one enrollment beyond OTP_RATE_MAX_REQUESTS * 3 per window are 429 ENROLLMENT_RATE_LIMITED without the HID');
+  check('activation refuses a date of birth the complete NIN record already gives (400 ENROLLMENT_PROFILE_FIELD_VERIFIED), then creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID, and its response expires the enrollment cookie; a replay returns the same HID, ignores the second password and expires the cookie too; activation attempts of one enrollment beyond OTP_RATE_MAX_REQUESTS * 3 per window are 429 ENROLLMENT_RATE_LIMITED without the HID');
 
   // 6. The same identity or contact cannot enroll twice.
   expectProblem(await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID(),
@@ -589,23 +610,131 @@ try {
   // 13. Durable evidence. Every successful start (A, its replay, B) and
   // activation (A and its replays within the budget, B) is audited as a
   // success, refusals as failures, and the database records each new
-  // patient's activation once.
+  // patient's activation once, naming no self-reported field.
   const audited = (action, outcome) => count(`select count(*) from audit.events
     where action = $1 and outcome = $2 and ($2 <> 'success' or details->>'status' = '200')`, [action, outcome]);
   for (const [action, successes] of [['api.identity.patient-enrollment.start', 3],
-    ['api.identity.patient-enrollment.activate', activationBudget + 1]]) {
+    ['api.identity.patient-enrollment.activate', activationBudget]]) {
     assert.equal(await audited(action, 'success'), successes, `${action}: every successful call is audited`);
     assert(await audited(action, 'failure') >= 1, `${action}: refusals are audited`);
   }
   assert.equal(await count(`select count(*) from audit.events
     where action = 'identity.public-patient-enrollment.activated' and outcome = 'success'`), 2);
+  assert.equal(await count(`select count(*) from audit.events
+    where action = 'identity.public-patient-enrollment.activated' and outcome = 'success'
+      and details -> 'selfReportedFields' = '[]'::jsonb`), 2,
+  'an activation from a complete NIN record must audit selfReportedFields []');
   const auditText = (await owner.query(`select coalesce(string_agg(details::text, ' '), '') as text from audit.events`)).rows[0].text;
   for (const secret of [ninA, '90000000002', passwordA, newPassword, deliveredA.code]) {
     assert(!auditText.includes(secret), 'audit details must not contain a NIN, password or code');
   }
   assert.equal(await count('select count(*) from identity.patients where source_system = $1',
     ['hid-public-qoreid-enrollment']), 2);
-  check('every successful enrollment start (three) and activation (one per patient and each replay within the budget) is audited as a success and refusals as failures, each new patient\'s activation is recorded once, and no audit detail contains a NIN, password or code');
+  check('every successful enrollment start (three) and activation (one per patient and each replay within the budget) is audited as a success and refusals as failures, each new patient\'s activation is recorded once with selfReportedFields [], and no audit detail contains a NIN, password or code');
+
+  // 13b. A NIN record with only the name, the NIN and its reference (ADR-061,
+  // 0092): start names the fields the patient must enter; the contact and its
+  // code work as for any record; activation refuses a missing field and a date
+  // of birth that is not a real date up to today, then stores what the patient
+  // entered, audits only the field names and keeps the authoritative profile
+  // as QoreID returned it; and the patient signs in with the new HID or contact.
+  const networkD = '198.51.100.60';
+  const startedD = await post('/identity/patient-enrollments', startBody(NAME_ONLY), { key: randomUUID(),
+    network: networkD });
+  expectProblem(startedD, 200);
+  assert.equal(startedD.body.stage, 'verify_contact');
+  assert.deepEqual(startedD.body.requiredProfileFields, ['dateOfBirth', 'gender'],
+    'a NIN record without a date of birth or gender must ask for both');
+  for (const field of ['nin', 'firstName', 'lastName', 'dateOfBirth', 'gender', 'patientId', 'hidCode']) {
+    assert(!(field in startedD.body), `enrollment start must not return ${field}`);
+  }
+  const cookieD = enrollmentCookie(startedD);
+  const currentD = await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieD);
+  expectProblem(currentD, 200);
+  assert.deepEqual(currentD.body.requiredProfileFields, ['dateOfBirth', 'gender']);
+  // A contact of its own, not the first journey's.
+  const emailD = `patient-d-${randomUUID().slice(0, 8)}@example.invalid`;
+  const contactD = await post('/identity/patient-enrollments/contact', { channel: 'email', contact: emailD },
+    { cookie: cookieD, network: networkD });
+  expectProblem(contactD, 200);
+  const deliveredD = lastCode('SIGNUP_VERIFY', emailD);
+  assert.equal(deliveredD.challengeId, contactD.body.challengeId);
+  const verifiedD = await post('/identity/patient-enrollments/contact/verify',
+    { challengeId: contactD.body.challengeId, code: deliveredD.code }, { cookie: cookieD, network: networkD });
+  expectProblem(verifiedD, 200);
+  assert.deepEqual(verifiedD.body, { stage: 'set_password', requiredProfileFields: ['dateOfBirth', 'gender'] });
+  const passwordD = 'Synthetic-Patient-Pass-D4';
+  const activateD = body => post('/identity/patient-enrollments/activate', body, { cookie: cookieD, network: networkD });
+  const patientsBeforeD = await count('select count(*) from identity.patients where source_system = $1',
+    ['hid-public-qoreid-enrollment']);
+  const missingD = await activateD({ password: passwordD });
+  expectProblem(missingD, 400, 'ENROLLMENT_PROFILE_REQUIRED');
+  assert.equal(missingD.body.detail, 'Enter your date of birth and gender');
+  const genderMissingD = await activateD({ password: passwordD, dateOfBirth: '1994-05-06' });
+  expectProblem(genderMissingD, 400, 'ENROLLMENT_PROFILE_REQUIRED');
+  assert.equal(genderMissingD.body.detail, 'Enter your gender');
+  const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+  expectProblem(await activateD({ password: passwordD, dateOfBirth: tomorrow, gender: 'female' }),
+    400, 'DATE_OF_BIRTH_INVALID');
+  expectProblem(await activateD({ password: passwordD, dateOfBirth: '1899-12-31', gender: 'female' }),
+    400, 'DATE_OF_BIRTH_INVALID');
+  expectProblem(await activateD({ password: passwordD, dateOfBirth: '06/05/1994', gender: 'female' }),
+    400, 'VALIDATION_FAILED');
+  expectProblem(await activateD({ password: passwordD, dateOfBirth: '1994-05-06', gender: 'F' }),
+    400, 'VALIDATION_FAILED');
+  assert.equal(await count('select count(*) from identity.patients where source_system = $1',
+    ['hid-public-qoreid-enrollment']), patientsBeforeD, 'a refused activation must create no patient');
+  assert.equal((await owner.query(`select state from identity.public_patient_enrollments where nin_last4 = '0005'`))
+    .rows[0].state, 'set_password', 'a refused activation must leave the enrollment waiting for its password');
+  const activatedD = await activateD({ password: passwordD, dateOfBirth: '1994-05-06', gender: 'female' });
+  expectProblem(activatedD, 200);
+  assert.equal(activatedD.body.stage, 'active'); assert.match(activatedD.body.hidCode, /^HID-[A-HJ-NP-Z2-9]{6,32}$/);
+  expiresEnrollmentCookie(activatedD, 'a self-reported activation');
+  const hidD = activatedD.body.hidCode;
+  const storedD = (await owner.query(`select patient.id, patient.first_name, patient.last_name,
+      patient.dob::text as dob, patient.gender, enrollment.id as enrollment_id
+    from identity.patients patient join identity.public_patient_enrollments enrollment
+      on enrollment.patient_id = patient.id where patient.hid_code = $1`, [hidD])).rows;
+  assert.equal(storedD.length, 1, 'a self-reported activation must create exactly one patient');
+  assert.deepEqual({ ...storedD[0], id: undefined, enrollment_id: undefined }, { id: undefined, enrollment_id: undefined,
+    first_name: 'Dami', last_name: 'Synthetic', dob: '1994-05-06', gender: 'female' });
+  const patientD = storedD[0].id;
+  const activationEventD = (await owner.query(`select details from audit.events
+    where action = 'identity.public-patient-enrollment.activated' and outcome = 'success' and patient_id = $1`,
+  [patientD])).rows;
+  assert.equal(activationEventD.length, 1);
+  assert.deepEqual(activationEventD[0].details.selfReportedFields, ['dateOfBirth', 'gender']);
+  for (const value of ['1994-05-06', 'female', NAME_ONLY, passwordD]) {
+    assert(!JSON.stringify(activationEventD[0].details).includes(value), 'the activation audit names fields, never values');
+  }
+  // The authoritative profile is the NIN record as QoreID returned it, with no
+  // date of birth or gender: a value in identity.patients it lacks was entered.
+  const authoritativeD = (await owner.query(`select profile_ciphertext from identity.patient_authoritative_profiles
+    where patient_id = $1 and enrollment_id = $2`, [patientD, storedD[0].enrollment_id])).rows;
+  assert.equal(authoritativeD.length, 1);
+  const sealed = authoritativeD[0].profile_ciphertext;
+  const decipher = createDecipheriv('aes-256-gcm', Buffer.from(process.env.NIN_ENCRYPTION_KEY_B64, 'base64'),
+    sealed.subarray(1, 13));
+  decipher.setAAD(Buffer.from(`identity:public-patient-enrollment:${storedD[0].enrollment_id}:profile`));
+  decipher.setAuthTag(sealed.subarray(sealed.length - 16));
+  const recordD = JSON.parse(Buffer.concat([decipher.update(sealed.subarray(13, sealed.length - 16)),
+    decipher.final()]).toString('utf8'));
+  assert.deepEqual(Object.keys(recordD).sort(), ['firstName', 'lastName', 'nin', 'providerReference'],
+    'the authoritative profile must be the NIN record as returned, without the entered fields');
+  // The new patient signs in with the HID and with the contact, a fresh Turnstile token each time.
+  const loginD = identifier => http.post('/api/v1/auth/patient/login').set('Origin', origin)
+    .set('X-Forwarded-For', networkD).send({ email: identifier, password: passwordD,
+      turnstileAction: 'patient-login', turnstileToken: turnstile('patient-login') });
+  for (const identifier of [hidD, emailD]) {
+    const signedIn = await loginD(identifier);
+    expectProblem(signedIn, 200);
+    assert.equal(signedIn.body.actor.kind, 'patient'); assert.equal(signedIn.body.actor.patientId, patientD);
+    const profileD = await http.get('/api/v1/identity/me').set('Cookie', sessionCookies(signedIn));
+    expectProblem(profileD, 200);
+    assert.equal(profileD.body.hid, hidD);
+    assert.equal(profileD.body.dateOfBirth, '1994-05-06'); assert.equal(profileD.body.gender, 'female');
+  }
+  check('a NIN record with only the name: start, GET /current and the contact proof answer requiredProfileFields ["dateOfBirth","gender"]; activation without them is 400 ENROLLMENT_PROFILE_REQUIRED, with a date of birth tomorrow or before 1900 400 DATE_OF_BIRTH_INVALID (a malformed date or gender 400 VALIDATION_FAILED), none of which creates a patient; with both it activates, stores them on the patient, audits selfReportedFields ["dateOfBirth","gender"] without values, keeps the authoritative profile as QoreID returned it, and the patient signs in by HID and by contact and reads them on its profile');
 
   // 14. One contact-code failure budget per recipient, across its challenges
   // and whatever network each guess comes from (in production every client

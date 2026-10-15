@@ -68,6 +68,22 @@ separate deployment authorization. None of them has been run.
   `{ "open": boolean }` from the same gate, so Health-id can say so before it
   asks for a NIN (ADR-057; `INTERFACE_CONTRACT.md`). Health-id
   82b474e does not read it yet (release checklist §3).
+- **Note (2026-10-14): manual entry of missing fields; ownership proof
+  confirmed.** Earlier on 2026-10-14 the product owner described
+  self-enrollment with a phone number or email of the patient's own choice
+  and no code to the registry phone, and reported that QoreID returns only
+  the name, the NIN and its reference. Later the same day the owner
+  instructed that possession of a NIN alone is never proof of ownership:
+  online sign-up must prove control of the phone linked to the NIN with a
+  one-time code, and a patient who cannot (lost SIM, changed number, no
+  linked phone) registers in person through a participating facility. That
+  confirms the decision above; the ownership work follows in a separate
+  change. BRANCH:launch/patient-self-enrollment (ADR-061, migration 0092)
+  only lets a NIN record without a date of birth or gender enroll where
+  NIN-only enrollment is enabled (staging): the patient enters them at
+  activation. Production NIN-only enrollment stays refused by configuration
+  until the ownership step ships. The activation command still records
+  `NIN_VERIFIED` assurance (0085, unchanged by 0092).
 - **Launch consequence (open for the owner to confirm).** With N1 as decided
   and facility-assisted registration out of scope (N2(d), D17), no new
   patient can get a Health ID in production at launch; legacy-migrated
@@ -659,4 +675,5 @@ for each merged change and its evidence. Pull requests from this review:
 | ENC-RETRACT-1 (launch blocker), ENC-RETRACT-2, RX-FINAL, ORDER-CLOSED-EDIT, A9-EHR, A17-EHR-AUDIT, ALLERGY-1 (EHR retraction integrity) | D-Eminence/hid-system#74, migration 0090, ADR-056 | merged to `main` 2026-10-13, not deployed |
 | MOD-PERM-OCR-OUTREACH, FE-17, FE-15, UPLOADS-DEFAULT-ON, PSELF-RLS, CONSENT-GRANTEE, NOTIF-PIN-NOTICE (launch module permissions, launch controls, patient-self binding, named grantee, PIN-use notice); ACCESS-REQ-STALE deferred | D-Eminence/hid-system#75, migration 0091, ADR-058 | merged to `main` 2026-10-13, not deployed; optional Health-id changes listed in the release checklist §3 |
 | A4, A5, A6, A9, A10, A16, A18, A19, A24, LOGIN-DETAIL-ORACLE (faults answered as sign-outs, workload refusals relayed as the user's, refresh clearing cookies on a fault, patient-only routes failing their audit, no-membership sign-in, administrators' clinical sessions exempt from maintenance, a write decision on a reported read, `500` for a disallowed origin, names and reasons in admin URLs, sign-in details confirming a password) | D-Eminence/hid-system#76, no migration, ADR-059 | merged to `main` 2026-10-13, not deployed (NO-MEMBERSHIP-SIGN-IN decided); the workload refusal mapping of Lab, Pharmacy, OCR and Outreach, the OCR guard `catch` (all off at launch), and the Health-id move to the `POST` admin search and export are follow-ups |
+| A NIN record without a date of birth or gender could not enroll (`502 QOREID_PROVIDER_RESPONSE_INVALID`) | BRANCH:launch/patient-self-enrollment, migration 0092, ADR-061 | not merged, not deployed; production NIN-only enrollment stays refused (N1, note of 2026-10-14); the Health-id change is listed in the release checklist §3 |
 | A6 residual (the refresh audited at the default facility while it reported the selected one), A15 and BE-EHR-DOCUMENTS-CONTRACT (document refusals answered generic codes; sizes as text), A17 (Identity guard and request audit rows without the answered status and code; a patient's rows recording the client's purpose), A20 (refused platform step-ups and recovery-code regenerations answered `401`, read as a sign-out), A21 (no `Retry-After` on Identity's rate-limit `429`s, and CORS did not expose it), A23 (a nested validation refusal named only its parent, with no message), and test coverage for A9 and A5 | This change, no migration; ADR-046 and ADR-058 addenda (ADR-059 applied) | open, not merged or deployed (release checklist §2); open owner questions AUDIT-OUTCOME, RETRY-AFTER-SQL, VALIDATION-PATHS-MODULES, STEP-UP-REFRESH-RACE, SUCCESS-AUDIT-COMMIT and DOC-CONTROL-FAULT (§2); the completion binding's database backstop needs a migration (follow-up) |

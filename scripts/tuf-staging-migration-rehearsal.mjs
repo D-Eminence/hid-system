@@ -309,6 +309,21 @@ try {
     assert.equal((await client.query(`select has_function_privilege('hid_ehr_runtime',
       'auth.membership_has_permission(text, uuid, uuid, text)', 'execute') as allowed`)).rows[0].allowed, true,
     'The upgraded role bootstrap must let the EHR runtime ask the retraction permission decision');
+    // 0092 (ADR-061) drops the 7-argument activation command and creates it
+    // again with the two self-reported profile arguments. A dropped function
+    // loses its grants: as after 0058, the upgraded role bootstrap must give
+    // the Identity runtime EXECUTE on the new signature, and no one else.
+    assert.deepEqual((await client.query(`select
+        to_regprocedure('identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)') is null
+          as seven_argument_dropped,
+        has_function_privilege('hid_identity_runtime',
+          'identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char,date,text)', 'execute')
+          as identity_runtime,
+        has_function_privilege('public',
+          'identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char,date,text)', 'execute')
+          as public_execute`)).rows[0],
+    { seven_argument_dropped: true, identity_runtime: true, public_execute: false },
+    'The upgraded role bootstrap must grant only the Identity runtime the 0092 activation command');
     await client.query('begin');
     try {
       await client.query('set local role hid_identity_api_runtime');
@@ -340,7 +355,7 @@ try {
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
     purpose_of_use_seeded:['direct-care'],launch_write_permissions_withdrawn:true,retraction_guards_installed:true,
-    launch_module_permissions_withdrawn:true,
+    launch_module_permissions_withdrawn:true,patient_activation_command_regranted:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);

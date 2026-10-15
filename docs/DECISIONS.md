@@ -4419,3 +4419,83 @@ browser).
 
 Related: ADR-052; ADR-053; ADR-058; `WEB_PUSH_PROPOSAL.md`;
 `PHASE_3_LAUNCH_DECISIONS.md` (NOTIF-PIN-NOTICE, D17).
+
+# ADR-061: A NIN record without a date of birth or gender: the patient enters them at activation
+
+Status: Proposed for source implementation
+(BRANCH:launch/patient-self-enrollment, migration 0092). Not merged or
+deployed. Production NIN-only enrollment stays refused by configuration
+(decision N1).
+
+Date: 2026-10-14
+
+Context:
+
+- On 2026-10-14 the product owner described patient self-enrollment: the
+  patient enters their NIN and QoreID verifies it; they enter a phone number
+  or email of their choice; they confirm the code sent to it; they set a
+  password. QoreID returns only the name, the NIN and its reference. Where a
+  field is needed and the NIN record did not provide it, the patient enters
+  it.
+- Later the same day the owner instructed that possession of a NIN alone is
+  never proof of ownership: online sign-up proves control of the phone linked
+  to the NIN with a one-time code, or the patient registers in person at a
+  participating facility (decision N1). That ownership step is a separate
+  change; this ADR covers only the missing fields, which both routes need.
+- Until this change a verified NIN record without a date of birth or gender
+  could not enroll at all. The adapter required `nin.birthdate` and
+  `nin.gender` and answered `502 QOREID_PROVIDER_RESPONSE_INVALID`; the
+  service required both; and the activation command (0085) required both in
+  the profile, whose JSON must hash to the enrollment's `profile_sha256`, so
+  the Identity API could not add them.
+
+Decision:
+
+- Only the NIN (equal to the one submitted), first name and last name are
+  required from QoreID. A date of birth or gender that is absent, null or
+  empty is left out of the stored profile. One that is present but does not
+  parse still fails closed.
+- Progress answers before activation name the missing fields in
+  `requiredProfileFields` (`dateOfBirth`, `gender`, in that order; `[]` for a
+  complete record). Identity computes it from the stored profile and never
+  returns a profile value.
+- The patient enters the missing fields with the password
+  (`POST .../activate` with `dateOfBirth` as `YYYY-MM-DD` and `gender` from
+  the existing list). Identity checks them after the stage, contact-age and
+  budget checks and before hashing the password: a missing field is
+  `400 ENROLLMENT_PROFILE_REQUIRED`; a field the record gives is
+  `400 ENROLLMENT_PROFILE_FIELD_VERIFIED`; a date that is not a real date
+  from 1900-01-01 to today is `400 DATE_OF_BIRTH_INVALID`. A replay of an
+  active enrollment ignores them.
+- The activation command (0092) takes the two values as new arguments and
+  checks the same rules again. A value the NIN record provided can never be
+  overridden, by Identity or by a direct call.
+- The values are self-reported. Their provenance is kept two ways: the
+  authoritative profile (`identity.patient_authoritative_profiles`) stays
+  exactly what QoreID returned, so a value in `identity.patients` that it
+  lacks was entered by the patient; and the activation audit event records
+  `selfReportedFields`, the names of the fields taken from the request,
+  never their values.
+- Nothing else changes: the contact is still the patient's own phone or
+  email, proved by a code (no code is sent to the registry phone); Turnstile,
+  rate limits, the QoreID lookup quota, RLS, the audit and the production
+  refusal of `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` are unchanged.
+
+Consequences:
+
+- A patient whose NIN record lacks a date of birth or gender can enroll
+  wherever NIN-only enrollment is enabled (staging). In production it stays
+  off until the owner lifts the refusal (N1).
+- A self-reported date of birth is not verified. It is marked as such by the
+  provenance above; a later reader that needs a verified date must check the
+  authoritative profile.
+- Health-id must ask for the missing fields on the password step; until it
+  does, such a record gets `400 ENROLLMENT_PROFILE_REQUIRED` and cannot
+  activate. A complete record keeps working unchanged.
+- Open follow-up: the signed-in progressive NIN binding (Portal "Verify
+  NIN", `QoreIdNinBinding`) still compares the patient's date of birth with
+  the registry's and refuses when QoreID returns none.
+
+Related: ADR-048; ADR-057; `PHASE_3_LAUNCH_DECISIONS.md` N1;
+`QOREID_VERIFICATION_CONTRACT.md`; `INTERFACE_CONTRACT.md`; `DATABASE.md`,
+"Self-reported enrollment profile (0092)".

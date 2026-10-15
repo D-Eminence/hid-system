@@ -1535,6 +1535,58 @@ D-Eminence/hid-system#68; no migration; not deployed):
   cookie is expired by the activation response and `GET .../current` shows
   the HID for 15 minutes only.
 
+A NIN record without a date of birth or gender (ADR-061,
+BRANCH:launch/patient-self-enrollment, migration 0092; not deployed). QoreID
+may return only the name, the NIN and its reference. Before this change such
+a record could not enroll: start answered
+`502 QOREID_PROVIDER_RESPONSE_INVALID`. Now the patient enters what the
+record lacks when they set their password:
+
+- Every progress answer before activation carries
+  `requiredProfileFields`: the fields the NIN record did not provide, in the
+  order `dateOfBirth`, `gender`. It is `[]` for a complete record. It is on
+  the start answer (new and resumed), `GET .../current` at `verify_contact`
+  and `set_password`, and the contact proof answer, which is now
+  `200 { "stage": "set_password", "requiredProfileFields": [...] }`. It is
+  never on an `active` answer. Identity reads it from the stored profile and
+  never returns a profile value.
+- `POST .../activate` takes
+  `{ "password", "dateOfBirth"?: "YYYY-MM-DD", "gender"?: "female" | "male" | "intersex" | "other" | "unknown" }`.
+  A date that is not `YYYY-MM-DD`, or another gender, is
+  `400 VALIDATION_FAILED`. A `null` field counts as not sent.
+- For a first activation, after the stage, contact-age and budget checks
+  and before the password is hashed:
+
+  | Status and code | When | `detail` |
+  | --- | --- | --- |
+  | `400 ENROLLMENT_PROFILE_FIELD_VERIFIED` | A field the NIN record provided is sent | "Your date of birth comes from your NIN record and cannot be changed here" (or "Your gender comes…", or "Your date of birth and gender come…") |
+  | `400 ENROLLMENT_PROFILE_REQUIRED` | A field in `requiredProfileFields` is not sent | "Enter your date of birth and gender", "Enter your date of birth" or "Enter your gender" |
+  | `400 DATE_OF_BIRTH_INVALID` | The date is not a real calendar date, is before 1900-01-01 or is after today (UTC) | "Enter a real date of birth. It cannot be before 1 January 1900 or in the future." |
+
+  Each refusal counts toward the activation budget, as every attempt past
+  the stage check does, and creates nothing; the enrollment stays at
+  `set_password`. The detail is plain and safe to show as sent.
+- A replay of an active enrollment ignores well-formed `dateOfBirth` and
+  `gender` values and answers the HID as before. A malformed one is still
+  `400 VALIDATION_FAILED`, as on any call.
+- The database command checks the same rules again. A refusal there that
+  the checks above did not catch is `409 ENROLLMENT_STAGE_INVALID`
+  ("Enrollment conditions are not complete"), as any other activation
+  condition the database refuses.
+- The patient's `dob` and `gender` are the record's value or the one
+  entered. `GET /identity/me` returns them as for any patient. The
+  authoritative profile stays what QoreID returned, and the activation audit
+  event (`identity.public-patient-enrollment.activated`) records
+  `selfReportedFields`: the names of the fields taken from the request,
+  never their values (`[]` for a complete record).
+- Production still refuses NIN-only enrollment by configuration
+  (`QOREID_NIN_ONLY_ENROLLMENT_ENABLED`); this change does not lift it
+  (`PHASE_3_LAUNCH_DECISIONS.md` N1).
+- Health-id 077b85c sends only the password. A complete record keeps
+  working unchanged. A record without a date of birth or gender gets
+  `400 ENROLLMENT_PROFILE_REQUIRED` and cannot activate until Health-id asks
+  for the fields (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3).
+
 ### HID Resolution
 
 Input:

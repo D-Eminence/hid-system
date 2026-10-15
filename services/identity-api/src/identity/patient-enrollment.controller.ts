@@ -107,8 +107,13 @@ export class PatientEnrollmentController {
     this.assertOrigin(request);
     const googleCookie = this.namedCookie(request, this.google.onboardingCookieName);
     this.assertAccountlessEnrollment(request, googleCookie);
+    // A date of birth or gender only when sent (ADR-061; a null is not sent);
+    // the service decides whether the NIN record requires or refuses each.
     const result = await this.enrollments.activate(this.cookie(request), input.password,
-      request.correlationId, googleCookie);
+      request.correlationId, googleCookie, {
+        ...(typeof input.dateOfBirth === 'string' ? { dateOfBirth: input.dateOfBirth } : {}),
+        ...(typeof input.gender === 'string' ? { gender: input.gender } : {}),
+      });
     // The response that carries the HID expires the enrollment cookie (N2(b)),
     // a replay's too. If it is lost, the cookie it would have expired can
     // replay the activation for 15 minutes; a sign-in, refresh or sign-out on
