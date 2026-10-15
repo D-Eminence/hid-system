@@ -3852,13 +3852,13 @@ Tests:
 
 ## NIN holder proof (0093)
 
-`0093_nin_holder_ownership_proof.sql` (BRANCH:launch/nin-ownership-proof,
+`0093_nin_holder_ownership_proof.sql` (D-Eminence/hid-system#84,
 ADR-062) requires a proof that the person holds the NIN before a public
 enrollment reaches the contact step. A QoreID lookup proves only that the NIN
 exists. The proof in this change is a one-time code sent by SMS to the phone
-the NIN record lists (`registry_phone_otp`). An in-person check
-(`facility_in_person`) is planned for 0094; until then the proof command
-refuses it. 0094 adds it ("Facility-assisted registration (0094)" below).
+the NIN record lists (`registry_phone_otp`). In 0093 the proof command
+refused an in-person check (`facility_in_person`); 0094 adds it
+("Facility-assisted registration (0094)" below).
 
 **State machine.** `identity.public_patient_enrollments.state` gains
 `verify_holder`, now the default: `verify_holder` -> (holder proof) ->
@@ -4061,7 +4061,7 @@ Tests:
 ## Facility-assisted registration (0094)
 
 `0094_facility_assisted_registration.sql`
-(BRANCH:launch/facility-assisted-registration, ADR-063, numbered after 0093)
+(D-Eminence/hid-system#85, ADR-063, numbered after 0093)
 adds the in-person holder route. A patient starts on their own device and
 shows a desk code at a participating facility. A staff member checks one
 original photo ID and records the outcome. The holder proof then accepts

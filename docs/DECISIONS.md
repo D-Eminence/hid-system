@@ -3658,10 +3658,12 @@ Context:
   problem's `detail` as sent, but the authored "temporarily unavailable"
   text never reached it: Identity's problem filter replaced every 5xx
   detail with "The service could not complete the request.", and the
-  gateway (on main and on this branch) replaces every upstream 502/503/504
-  with `503 UPSTREAM_UNAVAILABLE` "A required platform service is
-  temporarily unavailable.", which is what the patient saw. Either text is
-  wrong for this case: the closure is a decision, not an outage.
+  gateway then replaced every upstream 502/503/504 with
+  `503 UPSTREAM_UNAVAILABLE` "A required platform service is temporarily
+  unavailable.", which is what the patient saw until ADR-055
+  (D-Eminence/hid-system#72) made the gateway pass upstream errors
+  through. Either text is wrong for this case: the closure is a decision,
+  not an outage.
 
 Decision (owner defaults: deny by default, least exposure, no production
 bypass):
@@ -3704,9 +3706,10 @@ Consequences:
   `TargetErrorAlarm` (at least 5 in 5 minutes, two periods), which routes to
   a person under ADR-053 (infra on main). Health-id should read availability
   before it shows the NIN step and the "Get your Health ID" link.
-- On main the gateway replaces every upstream 502/503/504 with
-  `503 UPSTREAM_UNAVAILABLE`, so the new detail reaches a browser only once
-  ADR-055 (D-Eminence/hid-system#72) passes upstream errors through.
+- When this was decided the gateway replaced every upstream 502/503/504
+  with `503 UPSTREAM_UNAVAILABLE`. Since ADR-055 (D-Eminence/hid-system#72,
+  merged) it passes upstream errors through, so the new detail reaches the
+  browser.
   The availability read is a `200` and works either way.
 - Health-id follow-up (ENR-2): on completion, ask the patient to save the
   Health ID, because the activation response expires the enrollment cookie
@@ -4395,10 +4398,10 @@ Decision:
   required from QoreID. A date of birth or gender that is absent, null or
   empty is left out of the stored profile. One that is present but does not
   parse still fails closed.
-- Progress answers before activation name the missing fields in
-  `requiredProfileFields` (`dateOfBirth`, `gender`, in that order; `[]` for a
-  complete record). Identity computes it from the stored profile and never
-  returns a profile value.
+- Progress answers after the holder proof (ADR-062) and before activation
+  name the missing fields in `requiredProfileFields` (`dateOfBirth`,
+  `gender`, in that order; `[]` for a complete record). Identity computes it
+  from the stored profile and never returns a profile value.
 - The patient enters the missing fields with the password
   (`POST .../activate` with `dateOfBirth` as `YYYY-MM-DD` and `gender` from
   the existing list). Identity checks them after the stage, contact-age and
@@ -4442,11 +4445,10 @@ Related: ADR-048; ADR-057; `PHASE_3_LAUNCH_DECISIONS.md` N1;
 
 # ADR-062: A Health ID needs proof that the person holds the NIN
 
-Status: Proposed for source implementation
-(BRANCH:launch/nin-ownership-proof, migration 0093). Not merged or deployed.
-Every new flag is off. ADR-063 (BRANCH:launch/facility-assisted-registration,
-0094) builds the facility route and replaces the production refusal of the
-online route below.
+Status: Accepted in source (D-Eminence/hid-system#84, migration 0093).
+Merged to main, not deployed. Every new flag is off. ADR-063
+(D-Eminence/hid-system#85, 0094) builds the facility route and replaces the
+production refusal of the online route below.
 
 Date: 2026-10-15
 
@@ -4483,8 +4485,8 @@ Decision:
   A record without a date of birth is treated as an adult, and its patient
   may enter any date at activation (ADR-061), an age under 18 included.
   Whether to refuse that is an owner decision, as minors at a facility are.
-- Facility route: planned (0094, ADR-063). `facility.available` is `false`
-  here, and the proof command refuses `facility_in_person`.
+- Facility route: ADR-063 (0094). With 0093 alone `facility.available` was
+  `false` and the proof command refused `facility_in_person`.
 - Deliberate departure from the owner's step order: the existing-Health-ID
   check runs after the holder proof, not before. Start never says whether a
   NIN is bound or pending. Only a correct code answers
@@ -4524,7 +4526,7 @@ Decision:
   holder route. Production refuses the online route until the facility route
   ships (ADR-063), in Identity and in infrastructure:
   `ASSISTED_REGISTRATION_ENABLED` has no effect before then, so it cannot
-  stand in for that route. ADR-063 (BRANCH:launch/facility-assisted-registration)
+  stand in for that route. ADR-063 (D-Eminence/hid-system#85)
   replaces this refusal: production needs `ASSISTED_REGISTRATION_ENABLED`
   with the online flag, and Identity opens the online route in production
   only while at least one facility takes part. Production also refuses the
@@ -4546,17 +4548,19 @@ Consequences:
 - No path creates a Health ID from a NIN alone. A direct call to the
   activation command without a proof is refused by the database.
 - A patient whose record has no usable phone, or whose record shows an age
-  under 18, cannot register online. Until the facility route ships they
-  cannot register at all.
-- With this change alone no deployed environment can open public patient
+  under 18, cannot register online. They register at a participating
+  facility (ADR-063).
+- With 0093 alone no deployed environment could open public patient
   enrollment. Staging refuses the online route (it sends email only),
-  production refuses it until ADR-063, and the facility route is not built.
-  Every start on staging and production answers
+  production refused it until ADR-063, and the facility route was not yet
+  built. Every start on staging and production then answered
   `503 PATIENT_REGISTRATION_NOT_OPEN` before the QoreID gate. The staging
-  acceptance rows that need a working start cannot run on staging until
-  ADR-063; the synthetic runtime verifier covers them.
-- Health-id 077b85c cannot register a patient on 0093: it does not know the
-  holder step and fails closed. Sign-in is unchanged.
+  acceptance rows that need a working start could not run on staging until
+  ADR-063 (now release checklist S4v); the synthetic runtime verifier
+  covers them.
+- Health-id 55a50b0 cannot register a patient on 0093: it does not know the
+  holder step and fails closed. Sign-in is unchanged (release checklist §3,
+  "Health-id alignment").
 
 Residual risks:
 
@@ -4568,7 +4572,7 @@ Residual risks:
   route for its holder for a day or a month. The send budget closes it too:
   five sends to the registry phone in a day (two starts) close it for 24
   hours without a single wrong code. The facility route is the remedy, so
-  production keeps the online route off until that route ships.
+  production runs the online route only while that route is open (ADR-063).
 - Before any proof, a caller who passes Turnstile and the QoreID gate learns
   one fact about the registry record: whether the online route is available
   (start, `GET /current` and the holder send), that is whether the record has
@@ -4581,7 +4585,9 @@ Residual risks:
   since it generates the code.
 - Account recovery is unchanged. A holder sent to recovery whose contact is
   lost has no self-service path yet; facility-assisted recovery is an owner
-  decision.
+  decision. A phone-only patient who keeps the phone but loses the HID cannot
+  sign in or start recovery either, since both take an email or an HID
+  (`PHASE_3_LAUNCH_DECISIONS.md` §2, ENR-2-LAUNCH).
 - A holder whose NIN someone else already bound (with the holder's SIM, or
   before 0093) is told to use account recovery, which cannot work for them.
   The error table sends them to Health ID support with the reference. A
@@ -4601,10 +4607,9 @@ Related: ADR-048; ADR-061; ADR-063;
 
 # ADR-063: Facility-assisted registration
 
-Status: Proposed for source implementation
-(BRANCH:launch/facility-assisted-registration, migration 0094, stacked on
-BRANCH:launch/nin-ownership-proof). Not merged or deployed. Every flag is
-off and no facility is designated.
+Status: Accepted in source (D-Eminence/hid-system#85, migration 0094).
+Merged to main, not deployed. Every flag is off and no facility is
+designated.
 
 Date: 2026-10-15
 
@@ -4708,8 +4713,9 @@ Consequences:
   availability answers `facility: false`, the list is empty, a desk code is
   `409 ASSISTED_REGISTRATION_UNAVAILABLE` and the staff check
   `503 ASSISTED_REGISTRATION_DISABLED`.
-- Health-id 077b85c has none of the new screens (facility list, desk code,
-  staff check, designation); it cannot use the route.
+- Health-id 55a50b0 has none of the new screens (facility list, desk code,
+  staff check, designation); it cannot use the route (release checklist §3,
+  "Health-id alignment"; P31, P33).
 - The facility route needs the staff MFA sign-in (FE-2) and attested
   clinical grants (FE-3 or a written procedure) before it can be switched
   on.

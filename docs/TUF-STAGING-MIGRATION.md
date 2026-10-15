@@ -249,7 +249,7 @@ The executable covers:
    list `requiredProfileFields: []` and refuse an entered date of birth, and
    runs a name-only record from start to sign-in with the date of birth and
    gender entered at activation.
-   With 0093 (BRANCH:launch/nin-ownership-proof, ADR-062): the additional
+   With 0093 (D-Eminence/hid-system#84, ADR-062): the additional
    suites include `public-patient-holder-proof.integration.sql` (the holder
    commands' catalogue and lock order, the runtime's refused writes, refused
    and accepted proofs, supersession, the facility rule, a bound NIN, the send,
@@ -267,7 +267,7 @@ The executable covers:
    runs `upgrade/0093-public-patient-holder-backfill.sql` (rollback-only):
    enrollments at `verify_contact`, `set_password` and `active`, then 0093 and
    its backfill.
-   With 0094 (BRANCH:launch/facility-assisted-registration, ADR-063): the
+   With 0094 (D-Eminence/hid-system#85, ADR-063): the
    additional suites include `facility-assisted-registration.integration.sql`
    (designations, the facility list, the staff command and its refusals,
    budgets and audit, the in-person proof and activation), run in both

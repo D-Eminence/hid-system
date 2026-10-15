@@ -392,7 +392,7 @@ emailed code proved control of that mailbox, so it tells a stranger nothing.
 Start does not check whether an email has an account. A unique violation at
 start can only be another application for the same CAC and product, so it
 answers `409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW`; before
-BRANCH:launch/provider-signup-answers it answered the email code, which was
+D-Eminence/hid-system#81 it answered the email code, which was
 not true. The application stays
 bound to that email: starting again for the same CAC with another email
 answers `409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW`, so the applicant signs in
@@ -1117,11 +1117,11 @@ a fixed sentence written for the person using the client, which keeps its
 `detail` whatever its status. The closed public enrollment gate uses it
 (`503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED`, section 8,
 "Public patient enrollment"; D-Eminence/hid-system#68, FE-4). So do, from
-0093 (BRANCH:launch/nin-ownership-proof), `503 PATIENT_REGISTRATION_NOT_OPEN`,
+0093 (D-Eminence/hid-system#84), `503 PATIENT_REGISTRATION_NOT_OPEN`,
 `409` and `503 NIN_HOLDER_ROUTE_UNAVAILABLE`,
 `503 QOREID_PATIENT_NIN_BINDING_DISABLED` and a NIN lookup that fails with
 `502`, `503` or `504`; and, from 0094
-(BRANCH:launch/facility-assisted-registration),
+(D-Eminence/hid-system#85),
 `503 ASSISTED_REGISTRATION_DISABLED` and
 `503 ASSISTED_VERIFICATION_UNAVAILABLE`.
 
@@ -1440,21 +1440,19 @@ D-Eminence/hid-system#68; no migration; not deployed):
   From 0093 (ADR-062) a start with no holder route open answers
   `503 PATIENT_REGISTRATION_NOT_OPEN` with the same detail before these
   gates, which with every flag at its default is every start. `503 INTEGRATION_PAUSED` (a runtime pause) and
-  `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` keep the generic detail. A
-  patient on Health-id sees neither detail yet: the gateway, on this branch
-  and on main (#65), replaces every upstream `502/503/504` with
-  `503 UPSTREAM_UNAVAILABLE` ("A required platform service is temporarily
-  unavailable.") and drops the `QOREID_*` code, before this change and
-  after it. The new detail and codes reach a browser only once the gateway
-  passes upstream errors through (ADR-055, D-Eminence/hid-system#72).
-  The availability read is a `200` and is not affected.
-- Health-id follow-up (not in Health-id 82b474e, which keeps working
-  unchanged): read availability before showing the NIN step and the
-  "Get your Health ID" link, and show a "registration is not open" notice
-  instead when it is not `200 { "open": true }`; on the completion screen,
-  ask the patient to save the Health ID (ENR-2), because the enrollment
-  cookie is expired by the activation response and `GET .../current` shows
-  the HID for 15 minutes only.
+  `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` keep the generic detail. The
+  gateway passes every upstream answer through, `5xx` included, with its
+  status, code, `detail`, `Set-Cookie` and `Retry-After` (ADR-055,
+  D-Eminence/hid-system#72; `proxy_intercept_errors` stays off in
+  `gateway/nginx.conf.template`), and so does the Cloudflare Worker. A
+  browser gets these codes and details as Identity sends them. The gateway
+  answers `503 UPSTREAM_UNAVAILABLE` ("A required platform service is
+  temporarily unavailable.") only when Identity gives no answer (refused,
+  reset, timed out or not resolved). The availability read is a `200` and
+  is not affected.
+- Health-id 55a50b0 reads availability before the NIN step and shows the
+  not-open notice (`routes/Enrollment.tsx:155-158`), and its completion
+  screen asks the patient to save the Health ID (`:78`, `:382`).
 
 A NIN record without a date of birth or gender (ADR-061,
 D-Eminence/hid-system#82, migration 0092; merged to main, not deployed). QoreID
@@ -1463,14 +1461,21 @@ a record could not enroll: start answered
 `502 QOREID_PROVIDER_RESPONSE_INVALID`. Now the patient enters what the
 record lacks when they set their password:
 
-- Every progress answer before activation carries
-  `requiredProfileFields`: the fields the NIN record did not provide, in the
-  order `dateOfBirth`, `gender`. It is `[]` for a complete record. It is on
-  the start answer (new and resumed), `GET .../current` at `verify_contact`
-  and `set_password`, and the contact proof answer, which is now
+- Every progress answer after the holder proof and before activation
+  carries `requiredProfileFields`: the fields the NIN record did not
+  provide, in the order `dateOfBirth`, `gender`. It is `[]` for a complete
+  record. From 0093 (ADR-062) it comes first on the online holder proof
+  answer (`POST .../holder/verify`),
+  `200 { "stage": "verify_contact", "requiredProfileFields": [...] }`. After
+  an in-person check (0094, ADR-063) it comes first on `GET .../current` at
+  `verify_contact`: the staff answer never carries it. It is
+  then on `GET .../current` at `verify_contact` and `set_password`, on a
+  same-key start that resumes an enrollment at those stages, and on the
+  contact proof answer, which is now
   `200 { "stage": "set_password", "requiredProfileFields": [...] }`. It is
-  never on an `active` answer. Identity reads it from the stored profile and
-  never returns a profile value.
+  never on a new start, on any answer at `verify_holder` or on an `active`
+  answer. Identity reads it from the stored profile and never returns a
+  profile value.
 - `POST .../activate` takes
   `{ "password", "dateOfBirth"?: "YYYY-MM-DD", "gender"?: "female" | "male" | "intersex" | "other" | "unknown" }`.
   A date that is not `YYYY-MM-DD`, or another gender, is
@@ -1504,22 +1509,24 @@ record lacks when they set their password:
   (`QOREID_NIN_ONLY_ENROLLMENT_ENABLED`); this change does not lift it
   (`PHASE_3_LAUNCH_DECISIONS.md` N1). 0093 replaces that refusal with the
   holder route rules below (ADR-062).
-- Health-id 077b85c sends only the password. A complete record keeps
+- Health-id 55a50b0 sends only the password. A complete record keeps
   working unchanged. A record without a date of birth or gender gets
   `400 ENROLLMENT_PROFILE_REQUIRED` and cannot activate until Health-id asks
   for the fields (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3).
 
-The NIN holder step (ADR-062, BRANCH:launch/nin-ownership-proof, migration
-0093; not deployed). A NIN lookup proves only that the NIN exists. Before a
-contact or a password, the patient now proves that they hold the NIN. In
-this change the only route is online: a code sent by SMS to the phone the NIN
-record lists. A facility route is planned (`facility.available` stays
-`false`). No Health ID can be activated without a holder proof; the database
-refuses it. BRANCH:launch/facility-assisted-registration (0094, ADR-063)
-adds the facility route: see "Facility-assisted registration" below.
+The NIN holder step (ADR-062, D-Eminence/hid-system#84, migration 0093;
+merged to main, not deployed). A NIN lookup proves only that the NIN exists.
+Before a contact or a password, the patient now proves that they hold the
+NIN. The online route is a code sent by SMS to the phone the NIN record
+lists. The facility route (ADR-063, D-Eminence/hid-system#85, migration
+0094; merged to main, not deployed) is an in-person check at a
+participating facility: see "Facility-assisted registration" below. No
+Health ID can be activated without a holder proof; the database refuses it.
 
 - `POST /api/v1/identity/patient-enrollments` answers
-  `200 { "stage": "verify_holder", "expiresAt", "googleOnboardingRequired", "online": { "available": boolean }, "facility": { "available": false } }`.
+  `200 { "stage": "verify_holder", "expiresAt", "googleOnboardingRequired", "online": { "available": boolean }, "facility": { "available": boolean } }`.
+  `facility.available` is `true` while the facility route is open
+  (`ASSISTED_REGISTRATION_ENABLED` and at least one participating facility).
   It never answers `409 NIN_ALREADY_REGISTERED` and never reads whether the
   NIN is bound or pending. A start with another `Idempotency-Key` for the
   same NIN is a new enrollment with its own cookie. The same key resumes as
@@ -1533,12 +1540,10 @@ adds the facility route: see "Facility-assisted registration" below.
   after the gate, so a closed gate answers first. With every flag at its
   default no holder route is open, so every start answers
   `503 PATIENT_REGISTRATION_NOT_OPEN`. Staging cannot open the online route
-  (it sends email only), production refuses it until the facility route
-  ships (ADR-063), and the facility route is not built: with this change
-  every start on staging and production answers this way. From 0094
-  (BRANCH:launch/facility-assisted-registration) production opens the online
-  route only while the facility route is open: `ASSISTED_REGISTRATION_ENABLED`
-  is on and at least one facility takes part. Suspending the last
+  (it sends email only). Production opens the online route only while the
+  facility route is open: `ASSISTED_REGISTRATION_ENABLED` is on and at least
+  one facility takes part (ADR-063). So until a facility is designated every
+  start on staging and production answers this way, and suspending the last
   designation closes both routes in production.
 - A QoreID lookup that fails with `502`, `503` or `504` keeps its code and
   shows one fixed `detail`: "We could not check your NIN now. Try again
@@ -1591,13 +1596,22 @@ adds the facility route: see "Facility-assisted registration" below.
 - `GET /api/v1/identity/patient-enrollments/availability` now answers
   `200 { "open": boolean, "online": boolean, "facility": boolean }`.
   `online` is `NIN_HOLDER_SMS_ENABLED`; in production from 0094 it is also
-  `false` while `facility` is `false`. `facility` is `false` in this change;
-  from 0094 it is `ASSISTED_REGISTRATION_ENABLED` with at least one
-  participating facility. `open` is `true` only when the gate is open and a
+  `false` while `facility` is `false`. `facility` is
+  `ASSISTED_REGISTRATION_ENABLED` with at least one participating facility
+  (0094). `open` is `true` only when the gate is open and a
   holder route is on.
 - The two `503` refusals of this change, `NIN_HOLDER_ROUTE_UNAVAILABLE` and
   `QOREID_PATIENT_NIN_BINDING_DISABLED`, carry their own fixed `detail`
-  (not the generic 5xx text), safe to show as sent.
+  (not the generic 5xx text), safe to show as sent; the gateway passes them
+  through (ADR-055). So do the others section 6 lists as a
+  `PublicDetailProblem`, such as `503 PATIENT_REGISTRATION_NOT_OPEN` and a
+  NIN lookup that fails with `502`, `503` or `504`. Every other `5xx` of
+  these routes carries "The service could not complete the request.", for
+  example `OTP_DELIVERY_UNAVAILABLE`, `ENROLLMENT_RECONCILIATION_REQUIRED`,
+  `ENROLLMENT_UNAVAILABLE`, `ENROLLMENT_ACTIVATION_UNAVAILABLE`,
+  `ENROLLMENT_EVIDENCE_UNAVAILABLE`, `ENROLLMENT_RATE_LIMIT_UNAVAILABLE`,
+  `ENROLLMENT_CONFIGURATION_UNAVAILABLE` and `INTEGRATION_PAUSED`: a client
+  keys its own text on the `code`.
 - `POST /api/v1/identity/me/verification/nin` (the signed-in "Verify NIN")
   answers `503 QOREID_PATIENT_NIN_BINDING_DISABLED` ("Verifying a NIN from
   your account is not available") while
@@ -1627,13 +1641,15 @@ adds the facility route: see "Facility-assisted registration" below.
 | `POST .../activate` | `409 NIN_ALREADY_REGISTERED` | The NIN was bound since the holder proof | Use account recovery to sign in. If they never registered, contact Health ID support quoting the `correlationId` |
 | `POST /identity/me/verification/nin` | `503 QOREID_PATIENT_NIN_BINDING_DISABLED` | The signed-in binding is off | None; the route is closed |
 
-Health-id 077b85c does not know the holder step. On 0093 it cannot
+Health-id 55a50b0 does not know the holder step. On 0093 it cannot
 register a new patient: its start expects `verify_contact` and its contact
 step is refused `409 ENROLLMENT_STAGE_INVALID`. It fails closed; sign-in is
-unchanged (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3).
+unchanged (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3). What Health-id needs
+is listed in `PHASE_4_STAGE_5_RELEASE_READINESS.md` §3, "Health-id
+alignment".
 
 Facility-assisted registration (ADR-063,
-BRANCH:launch/facility-assisted-registration, migration 0094; not deployed).
+D-Eminence/hid-system#85, migration 0094; merged to main, not deployed).
 A patient without a usable registry phone proves at a participating
 facility that they hold the NIN. They start on their own device, show a
 desk code at the desk, and a staff member checks one original photo ID.
@@ -1732,7 +1748,7 @@ is designated, so the route is closed until an operator opens it.
 | `POST /admin/facilities/:id/assisted-registration` | `409 IDEMPOTENCY_CONFLICT` | The key was used for another designation | Use a new key |
 | `POST /admin/facilities/:id/assisted-registration` | `428 IF_MATCH_REQUIRED` | No `If-Match`, or not a whole number | Send the version, or `0` to create |
 
-Health-id 077b85c has none of these screens (facility list, desk code,
+Health-id 55a50b0 has none of these screens (facility list, desk code,
 staff check, designation). It cannot use the facility route.
 
 ### HID Resolution

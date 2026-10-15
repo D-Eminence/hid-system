@@ -18,6 +18,7 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, type PublicPatientIdentityProvider,
 import { quotaNetwork } from './provider-enrollment.service';
 import { matchDocument, type DocumentDetails, type DocumentMatch } from './assisted-match';
 import { deskCodeFromDigest } from './desk-code';
+import { enrollmentKeysConfigured, facilityRouteOpen, onlineRouteOpen, ownershipRoutes } from './ownership-routes';
 import { PATIENT_REGISTRATION_NOT_OPEN } from './qoreid-verification.adapter';
 import type { QoreIdNinGender } from './qoreid-verification.types';
 
@@ -846,29 +847,20 @@ export class PatientEnrollmentService {
    * a person without a usable registry phone.
    */
   private async ownershipRoutes(correlationId: string) {
-    const facility = await this.facilityRouteOpen(correlationId);
-    return { online: this.onlineRouteWith(facility), facility };
+    return ownershipRoutes(this.database, correlationId);
   }
 
   /** The online route, read on every request as the QoreID gate reads its flags. */
   private async onlineRoute(correlationId: string) {
     const environment = getEnvironment();
     if (!environment.NIN_HOLDER_SMS_ENABLED) return false;
-    return !isProductionProfile(environment) || this.facilityRouteOpen(correlationId);
-  }
-
-  /** The online flag, and in production an open facility route too. */
-  private onlineRouteWith(facilityOpen: boolean) {
-    const environment = getEnvironment();
-    return environment.NIN_HOLDER_SMS_ENABLED && (facilityOpen || !isProductionProfile(environment));
+    // Outside production the online route needs no facility: no read.
+    return onlineRouteOpen(environment, isProductionProfile(environment) && await this.facilityRouteOpen(correlationId));
   }
 
   /** ADR-063: the flag, then whether any facility takes part; no read while the flag is off. */
   private async facilityRouteOpen(correlationId: string) {
-    if (!getEnvironment().ASSISTED_REGISTRATION_ENABLED) return false;
-    const open = await this.database.withSystemTransaction(correlationId, (client) =>
-      client.query<{ open: boolean }>('select exists(select 1 from identity.list_participating_facilities()) as open'));
-    return open.rows[0]?.open === true;
+    return facilityRouteOpen(this.database, correlationId);
   }
 
   /** The desk code for an enrollment, its cookie token and a salt (ADR-063). */
@@ -1166,8 +1158,7 @@ export class PatientEnrollmentService {
   }
 
   private configured(): boolean {
-    return Boolean(this.env.NIN_LOOKUP_HMAC_KEY_B64 && this.env.NIN_ENCRYPTION_KEY_B64
-      && (this.env.NODE_ENV !== 'production' || this.env.OTP_HMAC_KEY_B64));
+    return enrollmentKeysConfigured(this.env);
   }
 
   private assertConfigured() {

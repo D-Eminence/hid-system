@@ -62,8 +62,9 @@ separate deployment authorization. None of them has been run.
 - **Implemented now (D-Eminence/hid-system#68), FE-4.** While
   the gate is closed by configuration, start answers its `503` with "New
   Health ID registration is not open yet. If you already have a Health ID,
-  sign in." instead of the generic 5xx detail (the gateway on main still
-  replaces it with `503 UPSTREAM_UNAVAILABLE` until ADR-055), and
+  sign in." instead of the generic 5xx detail (until ADR-055,
+  D-Eminence/hid-system#72, the gateway replaced it with
+  `503 UPSTREAM_UNAVAILABLE`; it now passes it through), and
   `GET /api/v1/identity/patient-enrollments/availability` answers
   `{ "open": boolean }` from the same gate, so Health-id can say so before it
   asks for a NIN (ADR-057; `INTERFACE_CONTRACT.md`). Health-id
@@ -84,8 +85,8 @@ separate deployment authorization. None of them has been run.
   activation. Production NIN-only enrollment stays refused by configuration
   until the ownership step ships. The activation command still records
   `NIN_VERIFIED` assurance (0085, unchanged by 0092).
-- **Update (2026-10-15): the holder step, BRANCH:launch/nin-ownership-proof
-  (ADR-062, migration 0093; not merged or deployed), ENR-4 step 2.** A
+- **Update (2026-10-15): the holder step, D-Eminence/hid-system#84
+  (ADR-062, migration 0093; merged to main, not deployed), ENR-4 step 2.** A
   public enrollment now starts at `verify_holder`. The online route sends a
   six-digit code by SMS to the phone the NIN record lists; a correct code is
   the holder proof, recorded only by
@@ -94,21 +95,21 @@ separate deployment authorization. None of them has been run.
   proof in the database. Start no longer answers
   `409 NIN_ALREADY_REGISTERED`; only a correct code does, and the
   enrollment is then deleted. `NIN_VERIFIED` assurance is recorded with the
-  proof's time. The facility route is planned (ADR-063, 0094); until it
-  ships, a patient without a usable registry phone, or whose record shows
-  an age under 18, cannot register. A record without a date of birth is
+  proof's time. The facility route followed in 0094 (ADR-063, update
+  below); with 0093 alone, a patient without a usable registry phone, or
+  whose record shows an age under 18, could not register. A record without
+  a date of birth is
   treated as an adult, and its patient may enter any date at activation;
   refusing an under-18 date there is an owner decision. The blanket
   production refusal above is replaced by these rules: NIN-only enrollment
   needs a holder route (`NIN_HOLDER_SMS_ENABLED` or
-  `ASSISTED_REGISTRATION_ENABLED`); production refuses the online route
-  until the facility route ships (ADR-063), because
-  `ASSISTED_REGISTRATION_ENABLED` has no effect before then; and the
-  signed-in NIN binding (`QOREID_PATIENT_SELF_NIN_BINDING_ENABLED`) is
+  `ASSISTED_REGISTRATION_ENABLED`); with 0093 production refused the online
+  route (ADR-063 replaced that refusal, update below); and the signed-in NIN
+  binding (`QOREID_PATIENT_SELF_NIN_BINDING_ENABLED`) is
   refused in production and off by default elsewhere, because it binds on a
-  name and date-of-birth match without a holder proof. With this change
-  alone no deployed environment opens public patient enrollment: staging
-  sends email only, and production waits for the facility route. A holder
+  name and date-of-birth match without a holder proof. With 0093
+  alone no deployed environment could open public patient enrollment: staging
+  sends email only, and production waited for the facility route. A holder
   whose NIN someone else bound is sent to recovery, which cannot work for
   them; a governed contested-identity review is an owner decision, not
   built. "Never a duplicate" holds for NIN-keyed bindings only: a legacy
@@ -116,23 +117,26 @@ separate deployment authorization. None of them has been run.
   off; enabling one is an operator step after the release checklist P-rows
   (DEP-1, P18, the facility designation). The history above is kept as
   decided.
-- **Update of 2026-10-15 (ADR-063; BRANCH:launch/facility-assisted-registration,
-  migration 0094; not merged or deployed).** The facility route is built. A
-  patient starts on their own device and shows a desk code at a
+- **Update of 2026-10-15 (ADR-063; D-Eminence/hid-system#85,
+  migration 0094; merged to main, not deployed).** The facility route is
+  built. A patient starts on their own device and shows a desk code at a
   participating facility; a doctor, clinician or nurse with MFA and an
   attested grant checks one original photo ID and records the outcome; the
   patient finishes on their own device. A NIN alone still never creates a
   Health ID. Production now needs the facility flag with the online route,
   and Identity opens the online route in production only while at least
   one facility takes part. Both routes stay off until the operator steps
-  (release checklist P23 to P32).
-- **Launch consequence (open for the owner to confirm).** With N1 as decided
-  and facility-assisted registration out of scope (N2(d), D17), no new
-  patient can get a Health ID in production at launch (N2(d) is revised
-  below: the facility route is built and off by default); legacy-migrated
-  patients sign in. The owner confirms launching with registration closed,
-  or prioritises ENR-4 step 2 (the registry-phone code), which needs a QoreID
+  (release checklist P23 to P33). Patient sign-up also needs the Health-id
+  screens of P31 and P33; Health-id `55a50b0` has none of them (release
+  checklist §3, "Health-id alignment").
+- **Launch consequence (open for the owner to confirm).** Both holder
+  routes are built (0093, 0094) and off. No new patient can get a Health ID
+  in production until a facility is designated and the release checklist
+  rows P23 to P34 are done: production opens sign-up only through a
+  participating facility (P25), and the online route also needs a QoreID
   contract that exposes the registry phone (DEP-1, unconfirmed).
+  Legacy-migrated patients sign in. The owner confirms launching with
+  registration closed, or opens it after those rows.
 - **Risks.** Patients without a reachable registry phone cannot self-enroll
   with a NIN. A registry phone OTP depends on what the provider contract
   exposes (`QOREID_VERIFICATION_CONTRACT.md`), which nobody has confirmed;
@@ -165,14 +169,14 @@ separate deployment authorization. None of them has been run.
     activation command refuses it as well (0085).
   - (d) Facility-assisted registration is out of launch scope (D17); walk-in
     patients self-enroll.
-  - (d) revised 2026-10-15 (ADR-063, BRANCH:launch/facility-assisted-registration,
+  - (d) revised 2026-10-15 (ADR-063, D-Eminence/hid-system#85,
     0094): facility-assisted registration is in launch scope as the
     in-person holder route of N1, off by default. It is not staff-led
     enrollment: the patient registers on their own device, and staff only
     record an in-person check of one original photo ID. It opens only with
     `ASSISTED_REGISTRATION_ENABLED` and a designated facility, after the
     procedure sign-off, the staff MFA screens (FE-2) and attested clinical
-    grants (FE-3 or a written procedure) (release checklist P29 to P32).
+    grants (FE-3 or a written procedure) (release checklist P29 to P33).
     One staff member verifies; a second approver, a notice to the registry
     phone, refusing minors at a facility, facility-assisted recovery and a
     contested-identity review are owner decisions, not built. D17's other
@@ -188,8 +192,10 @@ separate deployment authorization. None of them has been run.
   VERIFICATION_QUOTA_EXCEEDED` and is audited.
 - **Risks.** (b) and (c) need Health-id handling of the new `409` (route it
   to the contact step). Without (a), a phone-only patient who loses the HID
-  cannot reach the account. The per-network quota counts a carrier-grade NAT
-  address as one network, so a busy mobile network can reach 15 lookups a day;
+  cannot reach the account. Since 0093 registering again does not help: after
+  the holder proof the NIN answers `409 NIN_ALREADY_REGISTERED`, which points
+  to recovery (ENR-2-LAUNCH, §2). The per-network quota counts a
+  carrier-grade NAT address as one network, so a busy mobile network can reach 15 lookups a day;
   the limits are environment values. The platform cap bounds cost, not
   availability: every lookup counts, whatever QoreID answers, so at the
   defaults 14 networks passing Turnstile can spend it with unregistered NINs
@@ -562,6 +568,8 @@ module set").
 | ENC-RETRACT-1 | Who may cancel or retract an encounter's records through the encounter | **Decided (owner policy default, least privilege, ADR-056, D-Eminence/hid-system#74):** only a member holding the write permission of every kind of record the close changes (`ehr.note.write`, `ehr.diagnosis.write`, `ehr.vital.write`, `ehr.prescription.write`, `ehr.lab-request.write`, `ehr.document.write`); an encounter holding none of them needs `ehr.encounter.write` alone. Refused with `403 ENCOUNTER_RETRACTION_NOT_PERMITTED` and a fixed detail (the missing permissions go to the audit row only, so the refusal does not reveal which kinds of record the encounter holds), nothing written, audited; the database refuses it too (0090). Cancelling changes only open orders, so it needs only the order write permissions; retracting needs every kind's. Records already entered in error and cancelled orders block nothing. The proposed `ehr.encounter.retract` permission was not taken | A nurse or receptionist who opened an encounter on the wrong patient must ask a doctor or clinician to retract it once it holds a diagnosis or an open or completed prescription, and to cancel it once it holds an open prescription. No role holds `ehr.lab-request.write` (0084), so an encounter holding an open (or, to retract, completed) lab request cannot be closed until Lab ordering returns. The rule follows record kinds, not authorship | Health-id offering the actions by permission (frontend follow-up) |
 | ENC-RETRACT-2 | Retraction of wrong-patient vitals, completed orders and documents | **Decided (owner policy default, ADR-056, D-Eminence/hid-system#74):** completed orders, final vitals and linked documents of an encounter entered in error become `entered_in_error` with it; a vital can be entered in error on its own (versioned, audited, with a reason) and then takes no change or correction; a retracted document takes no change, so it is never served again; the database enforces both (0090); the emergency summary leaves retracted vitals out; nothing is deleted | Health-id `82b474e` shows a retracted vital without a marker (frontend follow-up) | — |
 | ALLERGY-1 | Allergies at launch | **Decided (owner policy default, ADR-056, D-Eminence/hid-system#74): allergies are not recorded at launch.** No allergy table, route or prescribing check; a clinician records an allergy as a diagnosis (ICD-10 `Z88.x`) or in a note. `DATABASE.md` §7 now lists only implemented tables | Prescribers get no structured allergy check: a prescription for a drug the patient is allergic to is not flagged | Structured allergy capture (table with forced row-level security, versioning, the open-encounter guard, routes and audit; effort L) and Health-id saying so on the prescription form |
+| ENR-2-LAUNCH | Whether patient sign-up may open before N2(a) is built (a phone-only patient who loses the Health ID) | **Open.** Sign-in (`POST /auth/patient/login`) and recovery (`POST /auth/otp/start`) take an email or an HID only (`auth/dto/patient-login.dto.ts`, `auth/dto/otp.dto.ts`), and N2(a) is not built: the HID sent to the verified contact after activation, and the public HID reminder by SMS. Proposed default (deny by default): build N2(a) before patient sign-up opens in production. Until it ships, the owner keeps sign-up closed or accepts the gap in writing; Health-id already asks the patient to save the HID at activation. A phone number as a sign-in or recovery identifier is not proposed: it would need its own enumeration and SIM-change review | A phone-only patient who loses the HID has no self-service way back. Registering again does not help: after the holder proof the NIN answers `409 NIN_ALREADY_REGISTERED` ("Use account recovery to sign in"), and recovery cannot find the account without the HID. Only support can help (SUPPORT-CONTACT) | Opening patient sign-up in production (release checklist P34) |
+| SUPPORT-CONTACT | Where "Health ID support" is, who owns it and what it may do | **Open.** Several answers send people to Health ID support with a reference: `409 NIN_ALREADY_REGISTERED` for a person who never registered (patient and staff answers), `409 PROVIDER_CAC_PROFILE_INCOMPLETE` ("Contact Health ID support."), and `409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW` or `409 PROVIDER_EMAIL_ALREADY_REGISTERED` when sign-in is not the answer (`INTERFACE_CONTRACT.md`, "Provider enrollment answers a client should handle", "The NIN holder step" and "Facility-assisted registration"). No document names the channel. Proposed default: the owner names one published channel (an address or form on the public site, not a personal mailbox) and its owner. Support checks identity before it acts, never confirms by phone or email whether a NIN or email has a Health ID, and re-binds or changes nothing without a governed procedure; the contested-identity review stays an owner decision (ADR-062). Health-id shows the channel next to these refusals | Without it these answers are dead ends: people are told to contact support and cannot | Health-id copy for release checklist §3 "Health-id alignment" rows 8, 11 and 12; opening patient and provider self-sign-up (P34) |
 
 ## 3. Operator plans (prepared, not executed)
 
@@ -725,4 +733,6 @@ for each merged change and its evidence. Pull requests from this review:
 | MOD-PERM-OCR-OUTREACH, FE-17, FE-15, UPLOADS-DEFAULT-ON, PSELF-RLS, CONSENT-GRANTEE, NOTIF-PIN-NOTICE (launch module permissions, launch controls, patient-self binding, named grantee, PIN-use notice); ACCESS-REQ-STALE deferred | D-Eminence/hid-system#75, migration 0091, ADR-058 | merged to `main` 2026-10-13, not deployed; optional Health-id changes listed in the release checklist §3 |
 | A4, A5, A6, A9, A10, A16, A18, A19, A24, LOGIN-DETAIL-ORACLE (faults answered as sign-outs, workload refusals relayed as the user's, refresh clearing cookies on a fault, patient-only routes failing their audit, no-membership sign-in, administrators' clinical sessions exempt from maintenance, a write decision on a reported read, `500` for a disallowed origin, names and reasons in admin URLs, sign-in details confirming a password) | D-Eminence/hid-system#76, no migration, ADR-059 | merged to `main` 2026-10-13, not deployed (NO-MEMBERSHIP-SIGN-IN decided); the workload refusal mapping of Lab, Pharmacy, OCR and Outreach, the OCR guard `catch` (all off at launch), and the Health-id move to the `POST` admin search and export are follow-ups |
 | A NIN record without a date of birth or gender could not enroll (`502 QOREID_PROVIDER_RESPONSE_INVALID`) | D-Eminence/hid-system#82, migration 0092, ADR-061 | merged to main, not deployed; production NIN-only enrollment stayed refused (N1, note of 2026-10-14) until ADR-062 replaced that rule; the Health-id change is listed in the release checklist §3 |
-| ENR-1, ENR-4 step 2 (a NIN alone created a Health ID; start told anyone whether a NIN had one; the signed-in binding proves no holder) | BRANCH:launch/nin-ownership-proof, migration 0093, ADR-062 | not merged, not deployed; every new flag off (N1, update of 2026-10-15); the facility route is planned (ADR-063); the Health-id change is listed in the release checklist §3 |
+| ENR-1, ENR-4 step 2 (a NIN alone created a Health ID; start told anyone whether a NIN had one; the signed-in binding proves no holder) | D-Eminence/hid-system#84, migration 0093, ADR-062 | merged to main, not deployed; every new flag off (N1, update of 2026-10-15); the Health-id change is listed in the release checklist §3, "Health-id alignment" |
+| FAC-2, REG-1 (no holder route for a patient without a usable registry phone; production refused the online route) | D-Eminence/hid-system#85, migration 0094, ADR-063 | merged to main, not deployed; every flag off and no facility designated (N1 update of 2026-10-15, N2(d)); release checklist P29 to P33; the Health-id screens are listed in the release checklist §3, "Health-id alignment" |
+| Provider self-sign-up answered a taken administrator email `503` and a sparse CAC record `502` | D-Eminence/hid-system#81, no migration | merged to main, not deployed; Health-id copy and the support contact are open (release checklist §3; §2 SUPPORT-CONTACT) |
