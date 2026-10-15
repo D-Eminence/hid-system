@@ -101,14 +101,16 @@ insert into identity.patients (
   'Schema', 'Patient', 'Schema Patient', 'active'
 );
 
--- 0082 seeds direct-care, so that row is kept as migrated; emergency and
--- healthcare-operations are not seeded (pending product decisions).
--- Break-glass (D9) and Outreach (D17) are off at launch: 0091 withdraws
--- identity.break-glass.write and every Outreach permission from every role.
--- This rollback-only suite exercises both as a reviewed re-grant would enable
--- them again for the doctor role (ADR-058).
+-- 0082 and 0093 seed direct-care and emergency, so those rows are kept as
+-- migrated; healthcare-operations is not seeded (pending decision N3).
+-- Break-glass is on at launch with limits (D9): 0093 grants
+-- identity.break-glass.write to doctor, clinician and nurse again, and this
+-- suite relies on that grant. Outreach is off at launch (D17): 0091 withdraws
+-- every Outreach permission from every role, and this rollback-only suite
+-- exercises it as a reviewed re-grant would enable it again for the doctor
+-- role (ADR-058).
 insert into auth.role_permissions (role_code, permission_code)
-select 'doctor', code from unnest(array['identity.break-glass.write', 'outreach.registration.read',
+select 'doctor', code from unnest(array['outreach.registration.read',
   'outreach.registration.write', 'outreach.campaign.read', 'outreach.campaign.write']) code
 on conflict do nothing;
 insert into identity.purpose_of_use_codes (code, display, source_system) values

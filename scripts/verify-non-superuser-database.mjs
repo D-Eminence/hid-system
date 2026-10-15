@@ -326,12 +326,16 @@ try {
   };
   const p10 = await checklistCheck('P10 check (read-only)');
   assert.deepEqual(p10.map((line) => line.split('|').slice(0, 4).join('|')),
-    ['break_glass_enabled|f', 'direct-care|Direct patient care|t|hid'], `P10 check: ${p10.join('; ')}`);
-  // After 0091 and the bootstrap: the three launch controls off, no emergency or
-  // healthcare-operations purpose, no withdrawn permission, no control event.
+    ['break_glass_enabled|f', 'direct-care|Direct patient care|t|hid', 'emergency|Emergency treatment|t|hid'],
+    `P10 check: ${p10.join('; ')}`);
+  // After 0093 and the bootstrap: the three launch controls off (break-glass
+  // until the operator turns it on, P11), no healthcare-operations purpose, no
+  // permission 0084 or 0091 withdrew, break-glass granted to exactly the three
+  // roles 0093 names, and no control event.
   const p11 = await checklistCheck('P11 check (read-only)');
-  assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f'],
-    `P11 check: ${p11.join('; ')}`);
+  assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f',
+    'clinician|identity.break-glass.write', 'doctor|identity.break-glass.write', 'nurse|identity.break-glass.write'],
+  `P11 check: ${p11.join('; ')}`);
   evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
     p11 };
 

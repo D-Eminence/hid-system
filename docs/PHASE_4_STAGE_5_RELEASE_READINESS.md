@@ -734,14 +734,20 @@ select control_key, platform.control_enabled(control_key) as enabled
 set local row_security = off;
 select code, active, source_system, created_at
   from identity.purpose_of_use_codes
- where code in ('emergency', 'healthcare-operations')
+ where code = 'healthcare-operations'
  order by code;
+-- Withdrawn by 0084 and 0091 and not granted again: no row.
 select role_code, permission_code
   from auth.role_permissions
  where permission_code like 'lab.%' or permission_code like 'pharmacy.%'
     or permission_code like 'ocr.%' or permission_code like 'outreach.%'
-    or permission_code in ('ehr.lab-request.write', 'identity.break-glass.write', 'ehr.document.write')
+    or permission_code in ('ehr.lab-request.write', 'ehr.document.write')
  order by role_code, permission_code;
+-- Granted again by 0093: exactly clinician, doctor and nurse.
+select role_code, permission_code
+  from auth.role_permissions
+ where permission_code = 'identity.break-glass.write'
+ order by role_code;
 select control_key, previous_enabled, enabled, actor_account_id, correlation_id, occurred_at
   from platform.control_events
  where control_key in ('outreach_portal_enabled', 'uploads_enabled', 'break_glass_enabled')

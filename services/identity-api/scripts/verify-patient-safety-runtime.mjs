@@ -203,8 +203,14 @@ try {
   assert.equal(renamed.body.name, 'Chidi O.'); assert.equal(renamed.body.status, 'verified');
   await post(sa, `/identity/me/emergency-contacts/${added.body.contactId}`, { expectedVersion: listed[0].version, name: 'Stale' }).expect(409);
 
-  // Break-glass (unchanged authorization) creates an alert intent for the verified
-  // contact; the leased dispatcher delivers minimum-necessary fields to the stub.
+  // Break-glass at launch, with limits (0093, D9, ADR-058 addendum), through
+  // POST /identity/break-glass as a doctor signed in with an authenticator: the
+  // migrations grant identity.break-glass.write and seed the emergency purpose,
+  // and the platform control decides. With break_glass_enabled off, as 0091
+  // leaves it and 0093 keeps it, the route answers 423 BREAK_GLASS_DISABLED
+  // and writes nothing; once an operator turns it on, activation creates an
+  // alert intent for the verified contact, and the leased dispatcher delivers
+  // minimum-necessary fields to the stub; turned off again, it refuses again.
   const ids = { org: randomUUID(), facility: randomUUID(), staffAccount: randomUUID(), staff: randomUUID(),
     membership: randomUUID() };
   await pool.query("insert into identity.organizations(id,name,slug) values($1,'Safety Rehearsal Org',$2)", [ids.org, `safety-${ids.org}`]);
@@ -218,20 +224,58 @@ try {
     [ids.membership, ids.staff, ids.staffAccount, ids.org, ids.facility]);
   await pool.query("insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason) values($1,$2,'doctor','facility',$3,$4,'Synthetic rehearsal role')",
     [randomUUID(), ids.staffAccount, ids.membership, ids.facility]);
-  await pool.query("insert into identity.purpose_of_use_codes(code,display,source_system) values('emergency','Emergency treatment','patient-safety-rehearsal') on conflict(code) do nothing");
-  // Break-glass is off at launch (D9): 0091 withdraws identity.break-glass.write
-  // from every role. This copy grants it to the doctor role for the activation
-  // alone, as break-glass's re-enabling migration would (ADR-058), and
-  // withdraws it again below.
-  await pool.query("insert into auth.role_permissions(role_code,permission_code) values('doctor','identity.break-glass.write') on conflict do nothing");
-  const grant = await asRuntime(null, async (client) => {
-    await client.query(`select set_config('app.actor_subject',$1,true), set_config('app.membership_id',$2,true),
-      set_config('app.facility_id',$3,true), set_config('app.purpose_of_use','emergency',true),
-      set_config('app.correlation_id',$4,true)`, [`synthetic:clinician:${ids.staffAccount}`, ids.membership, ids.facility, `breakglass-${randomUUID()}`]);
-    return (await client.query("select * from identity.activate_break_glass('HID-SAFETYAA','Unconscious patient emergency access',15)")).rows[0];
-  });
-  assert.equal(grant.grant_status, 'active');
-  await pool.query("delete from auth.role_permissions where role_code='doctor' and permission_code='identity.break-glass.write'");
+  // Nothing here inserts the emergency purpose or grants a permission: both are the migrations' (0093).
+  assert.deepEqual((await pool.query(`select display, active, source_system from identity.purpose_of_use_codes
+    where code='emergency'`)).rows, [{ display: 'Emergency treatment', active: true, source_system: 'hid' }],
+  'the migrations seed the active emergency purpose of use (0093)');
+  assert.deepEqual((await pool.query(`select string_agg(role_code, ',' order by role_code) as roles
+    from auth.role_permissions where permission_code='identity.break-glass.write'`)).rows[0].roles, 'clinician,doctor,nurse',
+  'the migrations grant identity.break-glass.write to exactly doctor, clinician and nurse (0010, 0093)');
+  const staff = staffClient({ send: supertestTransport(http), origin, password, outbox: staffEnrollmentCodes,
+    now: clock.next });
+  const staffSession = async (accountId) => {
+    await pool.query("update auth.accounts set password_hash=$2, password_algorithm='argon2id' where id=$1", [accountId, passwordHash]);
+    const email = (await pool.query('select email from auth.accounts where id=$1', [accountId])).rows[0].email;
+    // Password, then the authenticator (MFA-1): enrolled with an emailed code on the first sign-in.
+    const signedIn = await staff.signIn(email);
+    return { cookie: signedIn.cookie, csrf: signedIn.csrf };
+  };
+  const clinician = await staffSession(ids.staffAccount);
+  const emergencyAccess = { hid: 'HID-SAFETYAA', reason: 'Unconscious patient emergency access', durationMinutes: 15 };
+  const breakGlass = (who, body = emergencyAccess) => http.post('/api/v1/identity/break-glass').set('Cookie', who.cookie)
+    .set('Origin', origin).set('x-csrf-token', who.csrf).set('X-Facility-ID', ids.facility)
+    .set('X-Purpose-Of-Use', 'emergency').send(body);
+  const breakGlassRefused = async (who, status, code, label) => {
+    const response = await breakGlass(who);
+    assert.equal(response.status, status, `${label}: ${JSON.stringify(response.body)}`);
+    assert.equal(response.body.code, code, label);
+  };
+  // The operator's switch, here set by the owner in this isolated copy (in an
+  // environment a platform administrator uses the audited POST /admin/controls).
+  const breakGlassControl = (enabled) => pool.query(`update platform.control_settings set enabled=$1,
+    reason=$2, row_version=row_version+1, updated_at=clock_timestamp()
+    where control_key='break_glass_enabled' and enabled<>$1`, [enabled, `Patient-safety verifier sets break-glass ${enabled ? 'on' : 'off'}`]);
+  const breakGlassWrites = async () => (await pool.query(`select
+      (select count(*)::integer from identity.consent_grants where patient_id=$1 and break_glass) as grants,
+      (select count(*)::integer from audit.events where patient_id=$1 and action like 'identity.break-glass.%') as audits`,
+  [a.patientId])).rows[0];
+  await breakGlassRefused(clinician, 423, 'BREAK_GLASS_DISABLED', 'break-glass with the control off as migrated');
+  assert.deepEqual(await breakGlassWrites(), { grants: 0, audits: 0 }, 'a refused break-glass writes no grant and no audit row');
+  await breakGlassControl(true);
+  const activated = (await breakGlass(clinician).expect(201)).body;
+  assert.deepEqual([activated.status, activated.patientId, activated.existingGrant], ['active', a.patientId, false],
+    'break-glass activates with the control on');
+  const replayed = (await breakGlass(clinician, { ...emergencyAccess, durationMinutes: 240 }).expect(201)).body;
+  assert.deepEqual([replayed.consentGrantId, replayed.existingGrant, replayed.expiresAt],
+    [activated.consentGrantId, true, activated.expiresAt], 'a second activation replays the grant without extending it');
+  assert.deepEqual(await breakGlassWrites(), { grants: 1, audits: 2 }, 'one grant, audited on activation and on replay');
+  assert((await get(sa, '/identity/me/notifications').expect(200)).body.some((item) =>
+    item.notificationCode === 'EMERGENCY_ACCESS_ACTIVATED' && item.resourceId === activated.consentGrantId),
+  'the patient\'s inbox is told of the emergency access');
+  await breakGlassControl(false);
+  await breakGlassRefused(clinician, 423, 'BREAK_GLASS_DISABLED', 'break-glass after the control is turned off again');
+  assert.deepEqual(await breakGlassWrites(), { grants: 1, audits: 2 }, 'the refusal after the control is off writes nothing');
+  const grant = { consent_grant_id: activated.consentGrantId };
   const intents = (await pool.query('select status from identity.emergency_contact_notifications where consent_grant_id=$1', [grant.consent_grant_id])).rows;
   assert.deepEqual(intents, [{ status: 'pending' }]);
   const summary = await module.get(EmergencyContactNotificationDispatcher).dispatch(`patient-safety-${randomUUID()}`);
@@ -261,25 +305,17 @@ try {
     ['Safety Rehearsal Hospital', 'Synthetic clinician', 'doctor'], 'the access request names the requesting clinician and role');
   // The requesting clinician lists their own requests through
   // identity.list_my_staff_access_requests as the Identity runtime role.
-  const staff = staffClient({ send: supertestTransport(http), origin, password, outbox: staffEnrollmentCodes,
-    now: clock.next });
-  const staffSession = async (accountId) => {
-    await pool.query("update auth.accounts set password_hash=$2, password_algorithm='argon2id' where id=$1", [accountId, passwordHash]);
-    const email = (await pool.query('select email from auth.accounts where id=$1', [accountId])).rows[0].email;
-    // Password, then the authenticator (MFA-1): enrolled with an emailed code on the first sign-in.
-    const signedIn = await staff.signIn(email);
-    return { cookie: signedIn.cookie, csrf: signedIn.csrf };
-  };
-  const clinician = await staffSession(ids.staffAccount);
-  // The launch module set (0091, D17, ADR-058): a doctor's session lists no
-  // permission of a module that is off, nor break-glass or document upload,
-  // and keeps the EHR reads, access requests and the patient PIN.
+  // The launch module set (0091, D17, ADR-058) with break-glass back (0093):
+  // a doctor's session lists no permission of a module that is off, nor
+  // document upload, holds identity.break-glass.write again, and keeps the EHR
+  // reads, access requests and the patient PIN.
   const clinicianSession = (await http.get('/api/v1/auth/session').set('Cookie', clinician.cookie).expect(200)).body;
   const clinicianPermissions = clinicianSession.actor.facilities.find((item) => item.id === ids.facility)?.permissions ?? [];
   assert.deepEqual(clinicianPermissions.filter((permission) => /^(lab|pharmacy|ocr|outreach)\./.test(permission)
-    || ['identity.break-glass.write', 'ehr.document.write', 'ehr.lab-request.write'].includes(permission)), [],
+    || ['ehr.document.write', 'ehr.lab-request.write'].includes(permission)), [],
   'a doctor holds no permission the launch module set withdraws');
-  for (const kept of ['identity.consent.write', 'identity.patient-access-pin.verify', 'ehr.encounter.read', 'ehr.document.read']) {
+  for (const kept of ['identity.consent.write', 'identity.break-glass.write', 'identity.patient-access-pin.verify',
+    'ehr.encounter.read', 'ehr.document.read']) {
     assert(clinicianPermissions.includes(kept), `a doctor keeps ${kept}`);
   }
   const staffRequests = (who, query = '', purpose = 'direct-care') => {
@@ -304,7 +340,10 @@ try {
     [orgAdmin.membership, orgAdmin.staff, orgAdmin.account, ids.org, ids.facility]);
   await pool.query("insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason) values($1,$2,'org_admin','facility',$3,$4,'Synthetic rehearsal role')",
     [randomUUID(), orgAdmin.account, orgAdmin.membership, ids.facility]);
-  await staffRequests(await staffSession(orgAdmin.account)).expect(403);
+  const orgAdminSession = await staffSession(orgAdmin.account);
+  await staffRequests(orgAdminSession).expect(403);
+  // A role without identity.break-glass.write (org_admin) is refused before the control or the command.
+  await breakGlassRefused(orgAdminSession, 403, 'PERMISSION_DENIED', 'break-glass by an org admin');
   assert((await get(sa, '/identity/me/notifications').expect(200)).body.some((item) => item.resourceId === accessRequestId));
   await post(sb, `/identity/access-requests/${accessRequestId}/approve`).expect(404);
   const approved = await post(sa, `/identity/access-requests/${accessRequestId}/approve`).expect(200);
@@ -428,6 +467,7 @@ try {
     delivery: 'local-stub-only', account_deletion: 'request-confirm-replay-cancel-complete', csrf_required: true,
     deleted_login_unusable: true, patient_identity_retained: true, emergency_contacts: 'encrypted-owned-verified-deactivated',
     break_glass_contact_alert: 'intent-created-stub-delivered-once', patient_inbox_runtime: true,
+    break_glass_http: 'control-off-423-on-201-replay-201-off-423-no-permission-403', break_glass_migrated: true,
     requester_named: true, pin_use_inbox_notice: 'once-per-grant', launch_permissions_withdrawn: true,
     patient_access_requests_runtime: 'list-approve-revoke', staff_access_requests_runtime: 'own-list-status-filter-purpose-permission', staff_access_request_outcome: 'active-then-revoked', staff_list_patient_id: 'active-grant-only', staff_close_route_denied_to_patient: true, audit_source_identity_api: true,
     approval_requires_recent_sign_in: true, recovery_hold: 'approve-pin-contact-refused-deny-revoke-allowed-lifted-after-24h',
