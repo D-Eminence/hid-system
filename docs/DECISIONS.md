@@ -4752,9 +4752,11 @@ Decision:
   `auth.facility_role_is_effective` is not changed.
 - Endings: any eligible Super Admin may reject an open application with one
   of nine fixed reasons shown to the applicant plus an internal reason. After
-  `identity_not_confirmed` the account can file no new application and its
-  other open applications cannot pass step 1. The applicant may withdraw. An
-  application not decided within 30 days expires.
+  `identity_not_confirmed` the account can file no new application, its
+  other open applications cannot pass step 1, and one that already passed
+  step 1 cannot be approved (a conservative addition to the design: the
+  person behind the account could not be confirmed). The applicant may
+  withdraw. An application not decided within 30 days expires.
 - Abuse limits: Turnstile on both email starts (main site only);
   per-network and platform quotas on codes, search and submissions;
   per-address cooldowns; at most 3 open applications per account, 10 in 30

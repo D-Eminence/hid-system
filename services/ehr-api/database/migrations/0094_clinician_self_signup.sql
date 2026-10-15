@@ -2292,7 +2292,7 @@ begin
     when actor_account = application.attested_by then 'STEP1_BY_YOU'
     when factor_row.id is null or factor_row.id is distinct from application.factor_id
       or factor_row.enrollment_proof is null then 'AUTHENTICATOR_REQUIRED'
-    when not identity.workforce_target_eligible(account_row) then 'ACCOUNT_INELIGIBLE'
+    when refused_identity or not identity.workforce_target_eligible(account_row) then 'ACCOUNT_INELIGIBLE'
     end;
   reject_reason := case
     when actor_account = application.account_id then 'SELF'
@@ -2624,7 +2624,9 @@ $$;
 
 -- C21. Step 2 by a different Super Admin: attach the account by id and grant
 -- the role pinned to the step-1 attestation, in one transaction. The
--- authenticator confirmed at step 1 must still be the account's active one.
+-- authenticator confirmed at step 1 must still be the account's active one,
+-- and no application of the account may have been rejected since with
+-- identity_not_confirmed.
 create function identity.admin_approve_clinician_application(
   requested_application_id uuid,
   expected_version bigint,
@@ -2690,6 +2692,11 @@ begin
   end if;
   if identity.workforce_works_at(actor_account, application.facility_id) then
     raise exception using errcode = '42501', message = 'WORKFORCE_FACILITY_CONFLICT';
+  end if;
+  -- An identity_not_confirmed rejection of any application of the account
+  -- since step 1: no grant may rest on the earlier check.
+  if identity.clinician_application_identity_refused(application.account_id) then
+    raise exception using errcode = '23514', message = 'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE';
   end if;
   if not exists (select 1 from auth.mfa_factors factor
                   where factor.id = application.factor_id and factor.account_id = application.account_id

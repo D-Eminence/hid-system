@@ -4089,8 +4089,9 @@ account's active staff-proven one and used in this transaction),
 the requested role, capped at the end of the licence's expiry date in
 Africa/Lagos and three years; the staff record becomes verified),
 `identity.admin_approve_clinician_application` (a different administrator;
-0087's attach by account id and the grant pinned to the step-1 attestation,
-in one transaction) and `identity.admin_reject_clinician_application`.
+refused after an `identity_not_confirmed` rejection of any of the account's
+applications; 0087's attach by account id and the grant pinned to the step-1
+attestation, in one transaction) and `identity.admin_reject_clinician_application`.
 
 **Lock order.** Accounts first (in id order when two are involved, 0073),
 then the capability or 0088 challenge, then the application; a command that

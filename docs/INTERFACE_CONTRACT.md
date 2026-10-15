@@ -3179,8 +3179,10 @@ POST /api/v1/admin/clinician-applications/:applicationId/reject
 - Reject (A5, `platform.clinician-application.reject`, high): `{ decisionCode,
   reason }`, one of the nine codes (Clinician self sign-up, §8), from any
   open state. Nothing else changes: no attestation, membership or role.
-  `identity_not_confirmed` blocks the account from applying again and its
-  other open applications from step 1. `201 { applicationId, state:
+  `identity_not_confirmed` blocks the account from applying again, its
+  other open applications from step 1 and one already past step 1 from
+  step 2 (`409 CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE`). `201 {
+  applicationId, state:
   'rejected', decisionCode, version, replayed }`.
 
 Other codes: `400 CLINICIAN_APPLICATION_COMMAND_INVALID` (a field out of
