@@ -1282,9 +1282,10 @@ $$;
 -- unchanged; it is audited (with the success of every operation but the
 -- facility search). The platform's daily submit cap is the exception: it
 -- counts created applications (C8 and C13 add one each through
--- platform.count_clinician_application_submission), not attempts, so a
--- submission refused after the charge, a forged or spent capability, or a
--- replay never uses it; C2 only refuses once the day's count reaches it.
+-- platform.count_clinician_application_submission, which enforces the cap
+-- under the counter's row lock), not attempts, so a submission refused after
+-- the charge, a forged or spent capability, or a replay never uses it; C2
+-- only refuses early, once the day's count has reached it.
 create function platform.consume_clinician_application_quota(
   requested_network_digest char(64),
   requested_operation text,
@@ -1368,21 +1369,35 @@ end
 $$;
 
 -- One created clinician application, counted against the platform's daily
--- submit cap (C2 checks the count; C8 and C13 call this once per application
--- they create, never for a refusal or a replay). Internal.
-create function platform.count_clinician_application_submission()
+-- submit cap in the transaction that creates it (C8 and C13 call this once
+-- per application they create, never for a refusal or a replay). The count
+-- and the check are one statement under the counter row's lock: at the cap it
+-- is refused (P4290 CLINICIAN_APPLICATION_QUOTA_EXCEEDED, and the creation
+-- rolls back), so creations whose C2 checks all passed while the count was
+-- under the cap take the last slots in turn and never go past it. C2's check
+-- (a read) only refuses early. Internal.
+create function platform.count_clinician_application_submission(platform_daily_limit integer)
 returns void
-language sql
+language plpgsql
 security definer
 set search_path = pg_catalog, identity, auth, platform, audit, pg_temp
 as $$
+begin
+  if platform_daily_limit is null or platform_daily_limit not between 1 and 100000 then
+    raise exception using errcode = '22023', message = 'CLINICIAN_APPLICATION_QUOTA_INVALID';
+  end if;
   insert into platform.clinician_application_quota_counters as counter
     (scope, operation, scope_key, bucket_period, bucket_start, attempt_count)
   values ('platform', 'submit', 'all', 'day', date_trunc('day', statement_timestamp()), 1)
   on conflict (scope, operation, scope_key, bucket_period, bucket_start)
   do update set attempt_count = counter.attempt_count + 1, updated_at = clock_timestamp()
+    where counter.attempt_count < platform_daily_limit;
+  if not found then
+    raise exception using errcode = 'P4290', message = 'CLINICIAN_APPLICATION_QUOTA_EXCEEDED';
+  end if;
+end
 $$;
-revoke all on function platform.count_clinician_application_submission() from public;
+revoke all on function platform.count_clinician_application_submission(integer) from public;
 
 -- C3. Starts an email-code challenge of sign-up or of the status page. Every
 -- address gets a row; a status challenge for an address that is not an
@@ -1746,7 +1761,8 @@ create function identity.submit_clinician_application(
   requested_licence_number text,
   requested_licence_valid_until date,
   requested_facility_id uuid,
-  facility_open_limit integer
+  facility_open_limit integer,
+  platform_daily_limit integer
 ) returns table (application_id uuid, account_id uuid, state text, submitted_at timestamptz, expires_at timestamptz,
   facility_id uuid, facility_name text, application_version bigint, session_stage text, replayed boolean)
 language plpgsql
@@ -1788,7 +1804,8 @@ begin
      or requested_licence_valid_until is null or requested_licence_valid_until <= lagos_today
      or requested_licence_valid_until > lagos_today + interval '5 years'
      or requested_facility_id is null
-     or facility_open_limit is null or facility_open_limit not between 1 and 500 then
+     or facility_open_limit is null or facility_open_limit not between 1 and 500
+     or platform_daily_limit is null or platform_daily_limit not between 1 and 100000 then
     raise exception using errcode = '22023', message = 'CLINICIAN_APPLICATION_INVALID';
   end if;
   perform identity.clinician_intake_require_open();
@@ -1833,6 +1850,10 @@ begin
      or organization_name is null then
     raise exception using errcode = '23514', message = 'CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE';
   end if;
+  -- The facility's open applications are counted under its lock (C13 takes
+  -- the same one), held to the end of this transaction: two submissions to
+  -- one facility count in turn and never both take its last slot.
+  perform pg_advisory_xact_lock(hashtextextended('clinician-application-facility:' || facility_row.id::text, 0));
   if (select count(*) from identity.clinician_applications application
        where application.facility_id = facility_row.id
          and application.state in ('awaiting_authenticator', 'submitted', 'under_review')
@@ -1879,7 +1900,7 @@ begin
   insert into identity.clinician_application_sessions (id, token_hmac, kind, account_id, stage, created_at, expires_at)
   values (gen_random_uuid(), requested_next_session_hmac, 'account', new_account, 'enrolment_required', now_value,
     now_value + interval '30 minutes');
-  perform platform.count_clinician_application_submission();
+  perform platform.count_clinician_application_submission(platform_daily_limit);
   return query select created.id, new_account, created.state, created.submitted_at, created.expires_at,
     facility_row.id, facility_row.name, created.row_version, 'enrolment_required'::text, false;
 end
@@ -2075,7 +2096,8 @@ create function identity.file_clinician_application(
   requested_licence_number text,
   requested_licence_valid_until date,
   requested_facility_id uuid,
-  facility_open_limit integer
+  facility_open_limit integer,
+  platform_daily_limit integer
 ) returns table (application jsonb, replayed boolean)
 language plpgsql
 security definer
@@ -2106,7 +2128,8 @@ begin
      or requested_licence_valid_until is null or requested_licence_valid_until <= lagos_today
      or requested_licence_valid_until > lagos_today + interval '5 years'
      or requested_facility_id is null
-     or facility_open_limit is null or facility_open_limit not between 1 and 500 then
+     or facility_open_limit is null or facility_open_limit not between 1 and 500
+     or platform_daily_limit is null or platform_daily_limit not between 1 and 100000 then
     raise exception using errcode = '22023', message = 'CLINICIAN_APPLICATION_INVALID';
   end if;
   perform identity.clinician_intake_require_open();
@@ -2139,6 +2162,8 @@ begin
                      where organization.id = facility_row.organization_id and organization.active) then
     raise exception using errcode = '23514', message = 'CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE';
   end if;
+  -- Counted under the facility's lock, as in C8.
+  perform pg_advisory_xact_lock(hashtextextended('clinician-application-facility:' || facility_row.id::text, 0));
   if (select count(*) from identity.clinician_applications open_application
        where open_application.facility_id = facility_row.id
          and open_application.state in ('awaiting_authenticator', 'submitted', 'under_review')
@@ -2210,7 +2235,7 @@ begin
   insert into identity.clinician_application_idempotency (account_id, idempotency_key, request_sha256, response)
   values (capability.account_id, requested_idempotency_key, requested_sha256,
     jsonb_build_object('applicationId', created.id));
-  perform platform.count_clinician_application_submission();
+  perform platform.count_clinician_application_submission(platform_daily_limit);
   return query select identity.clinician_application_view(created), false;
 end
 $$;
@@ -3042,12 +3067,12 @@ revoke all on function identity.clinician_signup_open(),
   identity.clinician_application_submit_probe(character, character, text, character),
   identity.search_clinician_application_facilities(character, text),
   identity.submit_clinician_application(character, character, text, character, text, character, text, text, text,
-    text, text, date, uuid, integer),
+    text, text, date, uuid, integer, integer),
   identity.bind_clinician_application_mfa_challenge(character, uuid),
   identity.clinician_application_authenticator_ready(character, uuid, text),
   identity.current_clinician_applications(character),
   identity.withdraw_clinician_application(character, uuid, bigint),
-  identity.file_clinician_application(character, text, character, text, text, text, date, uuid, integer),
+  identity.file_clinician_application(character, text, character, text, text, text, date, uuid, integer, integer),
   identity.end_clinician_application_session(character),
   identity.expire_clinician_applications(integer),
   identity.prune_clinician_application_artifacts(),

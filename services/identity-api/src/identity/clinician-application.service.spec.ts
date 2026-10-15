@@ -306,7 +306,8 @@ describe('the submit', () => {
     expect(values[3]).toBe(requestDigest('clinician-application.submit', withoutPassword));
     expect(values.slice(4, 7)).toEqual([email, expected('email', email), 'Ada Synthetic']);
     expect(values[7]).toMatch(/^\$argon2id\$v=19\$m=65536,t=3,p=1\$/);
-    expect(values.slice(8)).toEqual(['doctor', 'MDCN', 'MDCN/12345', '2027-06-30', submitInput.facilityId, 30]);
+    // The facility's open limit and the platform's daily limit, which C8 enforces where it creates the application.
+    expect(values.slice(8)).toEqual(['doctor', 'MDCN', 'MDCN/12345', '2027-06-30', submitInput.facilityId, 30, 200]);
     expect(JSON.stringify(h.calls)).not.toContain(submitInput.password);
     const [client, opened, challenge] = h.mfa.openApplicantChallenge!.mock.calls[0]! as [unknown, string,
       { id: string; token: string }];
@@ -356,6 +357,18 @@ describe('the submit', () => {
     expect(indexOf(h, 'consume_clinician_application_quota')).toBeGreaterThan(indexOf(h, 'clinician_application_submit_probe'));
   });
 
+  it('answers a creation refused at the platform\'s daily cap (C8, under the counter\'s lock) with 429 and nothing committed', async () => {
+    const h = harness({ 'submit_clinician_application': () => {
+      throw Object.assign(new Error('CLINICIAN_APPLICATION_QUOTA_EXCEEDED'), { code: 'P4290' });
+    } });
+    const problem = await refusal(h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request));
+    expect(problem).toBeInstanceOf(RetryAfterProblem);
+    expect([problem.getStatus(), problem.code, (problem as RetryAfterProblem).retryAfterSeconds])
+      .toEqual([429, 'CLINICIAN_APPLICATION_RATE_LIMITED', 86_400]);
+    expect(h.transactions.at(-1)).toEqual({ committed: false });
+    expect(h.mfa.openApplicantChallenge).not.toHaveBeenCalled();
+  });
+
   it('still answers the application when the account challenge budget is spent (P9 opens it later)', async () => {
     const h = harness({ 'submit_clinician_application': () => ({ rows: [row] }) });
     h.mfa.openApplicantChallenge!.mockResolvedValue({ kind: 'rate_limited' });
@@ -392,6 +405,9 @@ describe('applying again (P14)', () => {
       replayed: false }] }) });
     await expect(h.service.apply(TOKEN, 'clinician-apply-00000000001', details as never, request))
       .resolves.toEqual({ applicationId: 'a2', state: 'submitted', replayed: false });
+    // The facility's open limit and the platform's daily limit, which C13 enforces where it creates the application.
+    expect(h.calls.find(({ sql }) => sql.includes('file_clinician_application'))!.values.slice(7))
+      .toEqual([submitInput.facilityId, 30, 200]);
     expect(indexOf(h, 'clinician_application_session(')).toBeLessThan(indexOf(h, 'consume_clinician_application_quota'));
     expect(indexOf(h, 'consume_clinician_application_quota')).toBeLessThan(indexOf(h, 'file_clinician_application'));
   });

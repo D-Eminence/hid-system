@@ -216,9 +216,10 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
    * spent capability is refused before anything is charged or hashed; then
    * the quota is charged and committed, and the password hashed; then one
    * transaction creates the account, the pending staff record and the
-   * application (C8, which counts it against the platform's daily cap),
-   * opens the 0088 enrolment challenge on a token derived from the next
-   * capability, and binds it (C9).
+   * application (C8, which counts it against the platform's daily cap and
+   * refuses it at the cap, under the counter's lock), opens the 0088
+   * enrolment challenge on a token derived from the next capability, and
+   * binds it (C9).
    */
   async submit(token: string | undefined, idempotencyKey: string, input: SubmitClinicianApplicationDto,
     request: ClinicianRequest) {
@@ -244,10 +245,11 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
       }>(
         `select application_id::text, account_id::text, state, submitted_at, expires_at, facility_id::text,
                 facility_name, application_version::text, session_stage, replayed
-           from identity.submit_clinician_application($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+           from identity.submit_clinician_application($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
         [sessionHmac, this.hmac('session', next), idempotencyKey, digest, input.email, this.hmac('email', input.email),
           input.fullName, passwordHash, input.profession, input.regulator, input.licenceNumber,
-          input.licenceValidUntil, input.facilityId, this.environment.CLINICIAN_APPLICATION_FACILITY_OPEN_LIMIT],
+          input.licenceValidUntil, input.facilityId, this.environment.CLINICIAN_APPLICATION_FACILITY_OPEN_LIMIT,
+          this.environment.CLINICIAN_APPLICATION_SUBMIT_PLATFORM_DAILY_LIMIT],
       )).rows[0];
       if (!row) throw this.unavailable();
       const authenticator = await this.openChallenge(client, next, row.account_id, request);
@@ -373,9 +375,10 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
   }
 
   /**
-   * P14: a ready account applies to another facility (C13); the quota is the
-   * submit one, charged only once the capability is a live account
-   * capability at ready.
+   * P14: a ready account applies to another facility (C13, which counts it
+   * against the platform's daily cap as C8 does); the quota is the submit
+   * one, charged only once the capability is a live account capability at
+   * ready.
    */
   async apply(token: string | undefined, idempotencyKey: string, input: ClinicianApplicationDetailsDto,
     request: ClinicianRequest): Promise<ClinicianApplicationView & { replayed: boolean }> {
@@ -390,9 +393,10 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
     const digest = requestDigest('clinician-application.apply', input);
     return this.run(request, async (client) => {
       const row = (await client.query<{ application: ClinicianApplicationView; replayed: boolean }>(
-        'select application, replayed from identity.file_clinician_application($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        'select application, replayed from identity.file_clinician_application($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
         [sessionHmac, idempotencyKey, digest, input.profession, input.regulator, input.licenceNumber,
-          input.licenceValidUntil, input.facilityId, this.environment.CLINICIAN_APPLICATION_FACILITY_OPEN_LIMIT],
+          input.licenceValidUntil, input.facilityId, this.environment.CLINICIAN_APPLICATION_FACILITY_OPEN_LIMIT,
+          this.environment.CLINICIAN_APPLICATION_SUBMIT_PLATFORM_DAILY_LIMIT],
       )).rows[0];
       if (!row?.application) throw this.unavailable();
       return { ...row.application, replayed: row.replayed };
