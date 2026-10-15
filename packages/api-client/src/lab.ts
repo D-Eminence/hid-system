@@ -40,8 +40,15 @@ export class LabApiClient {
   constructor(private readonly options: LabClientOptions) {}
 
   async patientReleasedResults(context: LabRequestContext, cursor?: string, signal?: AbortSignal): Promise<PatientLabPage> {
-    const value = await this.request('/api/v1/lab/internal/me/released-results'
-      + (cursor ? '?cursor='+encodeURIComponent(cursor) : ''), 'GET', undefined, context, undefined, 'ehr-api', signal);
+    return this.releasedPage('/api/v1/lab/internal/me/released-results',context,cursor,signal);
+  }
+
+  async staffReleasedResults(patientId:string,context:LabRequestContext,cursor?:string,signal?:AbortSignal):Promise<PatientLabPage> {
+    return this.releasedPage('/api/v1/lab/internal/patients/'+encodeURIComponent(patientId)+'/released-results',context,cursor,signal);
+  }
+
+  private async releasedPage(path:string,context:LabRequestContext,cursor?:string,signal?:AbortSignal):Promise<PatientLabPage> {
+    const value=await this.request(path+(cursor?'?cursor='+encodeURIComponent(cursor):''),'GET',undefined,context,undefined,'ehr-api',signal);
     const page=value as PatientLabPage;
     if (!page || !Array.isArray(page.records) || page.records.length>200
       || (page.nextCursor!==null && (typeof page.nextCursor!=='string' || !/^[a-f0-9-]{36}$/i.test(page.nextCursor)))

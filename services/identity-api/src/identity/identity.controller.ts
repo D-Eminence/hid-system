@@ -1,4 +1,4 @@
-import { Body, Controller, Post, Req } from '@nestjs/common';
+import { Body, Controller, Post, Req,Get,Param,ParseUUIDPipe,Header } from '@nestjs/common';
 import { AuditAction, Public, RequirePermissions } from '../common/decorators';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { AuthorizationCheckDto } from './dto/authorization-check.dto';
@@ -15,6 +15,26 @@ export class IdentityController {
     private readonly identity: IdentityService,
     private readonly workloadAuth: WorkloadAuthService,
   ) {}
+
+  @Get('service/patients/:patientId/record-read-authorization')
+  @Header('Cache-Control','no-store')
+  @RequirePermissions('identity.authorization.check')
+  async staffRecordRead(@Param('patientId',new ParseUUIDPipe()) patientId:string,@Req() request:HidRequest) {
+    if(!['ehr-api','lab-api'].includes(request.header('x-hid-internal-caller')??''))throw new DomainProblem(401,'WORKLOAD_AUTHENTICATION_REQUIRED','Approved clinical workload identity is required');
+    await this.workloadAuth.authenticateService(request.header('x-hid-internal-caller'),request.header('x-hid-service-authorization'),request.header('x-hid-service-token'));
+    if(request.actor?.kind==='patient'||request.header('x-purpose-of-use')!=='direct-care')throw new DomainProblem(403,'STAFF_DIRECT_CARE_REQUIRED','Staff direct-care access is required');
+    return this.identity.authorize(patientId,'read_records','direct-care',requireRequestContext(request,'direct-care'));
+  }
+
+  @Get('service/patients/:patientId/chat-profile')
+  @Header('Cache-Control','no-store')
+  @RequirePermissions('identity.patient.read')
+  async staffChatProfile(@Param('patientId',new ParseUUIDPipe()) patientId:string,@Req() request:HidRequest) {
+    if(request.header('x-hid-internal-caller')!=='ehr-api')throw new DomainProblem(401,'WORKLOAD_AUTHENTICATION_REQUIRED','EHR workload identity is required');
+    await this.workloadAuth.authenticateService(request.header('x-hid-internal-caller'),request.header('x-hid-service-authorization'),request.header('x-hid-service-token'));
+    if(request.header('x-purpose-of-use')!=='direct-care')throw new DomainProblem(400,'PURPOSE_OF_USE_REQUIRED','Direct care is required');
+    return this.identity.staffPatientProfile(patientId,requireRequestContext(request,'direct-care'));
+  }
 
   @Post('patient-lookup')
   @RequirePermissions('identity.patient.read')

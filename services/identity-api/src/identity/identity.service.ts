@@ -1,4 +1,4 @@
-import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable, NotFoundException,ServiceUnavailableException } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service';
 import type { DataAccessContext, PurposeOfUse } from '../common/request-context';
 import type {
@@ -16,6 +16,19 @@ export class IdentityService {
     @Inject(IDENTITY_PROVIDER) private readonly provider: IdentityProvider,
     private readonly audit: AuditService,
   ) {}
+
+  async staffPatientProfile(patientId:string,context:DataAccessContext) {
+    if(context.actor.kind==='patient'||context.purposeOfUse!=='direct-care'||!context.actor.permissions.includes('identity.patient.read'))
+      throw new ForbiddenException('Staff direct-care profile access is required');
+    const decision=await this.authorize(patientId,'read_records','direct-care',context);
+    if(!decision.allowed||decision.breakGlass)throw new ForbiddenException('Patient access is not authorized');
+    if(!this.provider.lookupPatientId)throw new ServiceUnavailableException('Staff patient profile is unavailable');
+    const patient=await this.provider.lookupPatientId(patientId,context);
+    if(!patient||patient.id!==patientId)throw new NotFoundException('Patient was not found or is not available');
+    await this.record(context,'identity.staff.chat.profile.read','success',patientId,'direct-care');
+    return {patientId:patient.id,version:patient.rowVersion,firstName:patient.firstName,lastName:patient.lastName,
+      fullName:patient.fullName,dateOfBirth:patient.dateOfBirth,gender:patient.gender};
+  }
 
   async lookupPatient(hid: string, purpose: PurposeOfUse, context: DataAccessContext) {
     let patient: IdentityPatient | null;

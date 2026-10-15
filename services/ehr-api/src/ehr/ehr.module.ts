@@ -1,3 +1,7 @@
+import { StaffPatientChatController } from './patient-records/staff-patient-chat.controller';
+import { StaffChatHistoryService } from './patient-records/staff-chat-history.service';
+import { StaffEvidenceService } from './patient-records/staff-evidence.service';
+import { StaffChatScopeService } from './patient-records/staff-chat-scope.service';
 import { Module } from '@nestjs/common';
 import { ClinicalNotesModule } from './clinical-notes/clinical-notes.module';
 import { DiagnosesModule } from './diagnoses/diagnoses.module';
@@ -30,7 +34,7 @@ import { PatientAttachmentTextService } from './patient-records/patient-attachme
     PrescriptionsModule,
     LabRequestsModule,
   ],
-  controllers: [PatientRecordsController],
-  providers: [PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService],
+  controllers: [PatientRecordsController,StaffPatientChatController],
+  providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService],
 })
 export class EhrModule {}

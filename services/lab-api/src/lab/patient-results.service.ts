@@ -5,6 +5,7 @@ import { LabWorkloadIdentityService } from '../auth/lab-workload-identity.servic
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { DomainProblem } from '../common/problem';
+import { requireRequestContext } from '../common/request-context';
 import type { HidRequest } from '../common/request-context';
 
 export const PATIENT_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.id::text version,t.name title,
@@ -32,6 +33,30 @@ export class PatientResultsService {
   private readonly identity:IdentityApiClient;
   constructor(private readonly database:DatabaseService,workload:LabWorkloadIdentityService,private readonly audit:AuditService) {
     this.identity=new IdentityApiClient({baseUrl:getEnvironment().IDENTITY_API_URL,caller:'lab-api',timeoutMs:5000,workloadHeaders:()=>workload.identityHeaders()});
+  }
+  async readStaff(request:HidRequest,patientId:string,cursor='') {
+    if(cursor&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(cursor))
+      throw new DomainProblem(400,'INVALID_CURSOR','Invalid record cursor');
+    if(request.actor?.kind==='patient'||!request.actor?.sessionId||!request.actor.permissions.includes('lab.result.released.read'))
+      throw new DomainProblem(403,'PERMISSION_DENIED','Required Lab permission is missing');
+    if(request.header('x-purpose-of-use')!=='direct-care') throw new DomainProblem(400,'PURPOSE_OF_USE_REQUIRED','Direct care is required');
+    const context=requireRequestContext(request,'direct-care');
+    const decision=await this.identity.authorizeStaffRecordRead(patientId,{
+      correlationId:request.correlationId,facilityId:context.facilityId,purposeOfUse:'direct-care',
+      authorization:context.authorization,cookie:context.userCookie,csrfToken:context.csrfToken,origin:context.origin,
+    }).catch(error=>{if(error instanceof IdentityApiProblem)throw new DomainProblem(error.status,error.code??'PATIENT_ACCESS_DENIED',error.message);
+      throw new DomainProblem(503,'IDENTITY_SERVICE_UNAVAILABLE','Patient authorization is unavailable');});
+    if(!decision.allowed||decision.breakGlass||decision.patientId!==patientId||decision.facilityId!==context.facilityId
+      ||decision.membershipId!==context.membershipId) throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient access is not authorized');
+    return this.database.withTransaction(context,async client=>{
+      const rows=(await client.query(PATIENT_LAB_QUERY,[patientId,cursor])).rows;
+      const records=rows.slice(0,200);
+      await this.audit.recordWithClient(client,{correlationId:request.correlationId,actorType:'staff',actorSubject:context.actor.subject,
+        actorAccountId:context.actor.accountId,actorMembershipId:context.membershipId,facilityId:context.facilityId,
+        organizationId:context.actor.facility?.organizationId,patientId,action:'lab.staff.chat.released-results.read',
+        resourceType:'released-result-collection',outcome:'success',purposeOfUse:'direct-care',details:{recordCount:records.length}});
+      return {records,nextCursor:rows.length>200?records.at(-1)!.id:null};
+    });
   }
   async read(request:HidRequest,cursor='') {
     if (cursor && !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(cursor)) throw new DomainProblem(400,'INVALID_CURSOR','Invalid record cursor');

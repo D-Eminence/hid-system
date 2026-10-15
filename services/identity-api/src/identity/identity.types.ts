@@ -42,6 +42,7 @@ export interface ConsentStatus {
 }
 
 export interface IdentityProvider {
+  lookupPatientId?(patientId:string,context:DataAccessContext):Promise<IdentityPatient|null>;
   lookupExactHid(hid: string, context: DataAccessContext): Promise<IdentityPatient | null>;
   authorize(request: AuthorizationRequest): Promise<AuthorizationDecision>;
   consentStatus(patientId: string, purpose: PurposeOfUse, context: DataAccessContext): Promise<ConsentStatus>;

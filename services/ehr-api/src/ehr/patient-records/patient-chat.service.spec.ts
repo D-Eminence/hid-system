@@ -92,3 +92,27 @@ describe('Patient evidence chat',()=>{
  });
  it.each(['','x'.repeat(501)])('rejects invalid question length',async q=>{await expect(setup().service.answer(request,q)).rejects.toThrow('characters');});
 });
+
+describe('Shared engine with explicit staff access',()=>{
+ it('uses only the supplied staff evidence/history/transaction strategy, without fabricating a patient session',async()=>{
+  const s=setup([item('prescription',1)]);
+  const authorize=jest.fn().mockResolvedValue({...auth,subject:'staff-a',accountId:'staff-account'});
+  const staffSnapshot=jest.fn().mockResolvedValue({records:[item('prescription',2)],coverage:{complete:true,recordCount:1,selectedCount:0,pendingDocuments:0,unavailable:[]}});
+  const transaction=jest.fn(async(_auth:unknown,_correlation:string,work:(client:unknown)=>Promise<unknown>)=>work({query:jest.fn()}));
+  const access={authorize,transaction,admissionKey:'staff:staff-account:facility-a',chunksTable:'ehr.staff_evidence_chunks',
+    audit:{actorType:'staff',facilityId:'facility-a',actorMembershipId:'member-a',purposeOfUse:'direct-care'},
+    evidence:{snapshot:staffSnapshot,assertCurrent:jest.fn(),prepareDocuments:jest.fn().mockResolvedValue([])},
+    history:{start:jest.fn().mockResolvedValue('staff-generation'),context:s.context,save:s.save}} as never;
+  const reply=await s.service.answer(request,'Latest medicine for this patient',access);
+  expect(reply.sources[0]).toMatchObject({id:item('prescription',2).id});
+  expect(s.authorizeSelf).not.toHaveBeenCalled();expect(s.snapshot).not.toHaveBeenCalled();expect(transaction).toHaveBeenCalled();
+ });
+ it('shares the per-clinician admission key across different selected patients',async()=>{
+  const s=setup();let finish!:(value:unknown)=>void;s.plan.mockImplementation(()=>new Promise(resolve=>{finish=resolve}));
+  const access={authorize:async()=>auth,admissionKey:'staff:staff-a:facility-a',history:{start:async()=> 'generation',context:s.context,save:s.save}} as never;
+  const first=s.service.answer(request,'First patient',access);
+  while(!finish)await Promise.resolve();
+  await expect(s.service.answer(request,'Other patient',access)).rejects.toMatchObject({code:'PATIENT_CHAT_RATE_LIMITED'});
+  finish({intent:'conversation',answer:'I can summarize authorized records.'});await first;
+ });
+});

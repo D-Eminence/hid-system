@@ -915,3 +915,9 @@ grant select,insert,update on ehr.patient_document_extractions to hid_ehr_runtim
 grant usage on schema ehr to hid_lab_runtime;
 grant execute on function ehr.patient_self_context(uuid),lab.patient_self_context(uuid) to hid_lab_runtime;
 grant execute on function lab.patient_self_context(uuid) to hid_schema_test_runtime;
+
+-- Staff conversation storage is isolated from patient-self chat.
+grant execute on function ehr.staff_chat_context(uuid,uuid,uuid,uuid) to hid_ehr_runtime;
+grant select,insert,update on ehr.staff_chat_state to hid_ehr_runtime;
+grant select,insert,delete on ehr.staff_chat_messages,ehr.staff_evidence_chunks to hid_ehr_runtime;
+grant select,insert,update on ehr.staff_attachment_extractions,ehr.staff_document_extractions to hid_ehr_runtime;

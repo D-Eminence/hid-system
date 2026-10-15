@@ -47,6 +47,14 @@ export class PostgresIdentityProvider implements IdentityProvider {
     }, { readOnly: true });
   }
 
+  async lookupPatientId(patientId:string,context:DataAccessContext):Promise<IdentityPatient|null> {
+    return this.database.withTransaction(context,async client=>{
+      const row=(await client.query<PatientRow>(`select id::text,hid_code,first_name,last_name,full_name,
+        dob::text,gender,row_version::text from identity.patients where id=$1 and status='active' limit 1`,[patientId])).rows[0];
+      return row?this.patient(row):null;
+    },{readOnly:true});
+  }
+
   async authorize(request: AuthorizationRequest): Promise<AuthorizationDecision> {
     return this.database.withTransaction(request.context, async (client) => {
       const policyResult = await client.query<{ allowed: boolean }>(

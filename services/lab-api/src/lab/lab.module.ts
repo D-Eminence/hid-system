@@ -8,7 +8,7 @@ import { LabAccessionsController } from './lab-accessions.controller';
 import { LabAccessionsService } from './lab-accessions.service';
 import { LabExecutionsController } from './lab-executions.controller';
 import { LabExecutionsService } from './lab-executions.service';
-import { PatientResultsController } from './patient-results.controller';
+import { PatientResultsController,StaffResultsController } from './patient-results.controller';
 import { PatientResultsService } from './patient-results.service';
 
 /**
@@ -17,7 +17,7 @@ import { PatientResultsService } from './patient-results.service';
  * Imported external evidence is Lab-owned and deliberately separate from
  * native accession/specimen/execution workflows, which remain future work.
  */
-@Module({ imports: [LabIdentityAuthorizationModule], controllers: [LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController],
+@Module({ imports: [LabIdentityAuthorizationModule], controllers: [StaffResultsController,LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController],
   providers: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService, PatientResultsService],
   exports: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService] })
 export class LabModule {}

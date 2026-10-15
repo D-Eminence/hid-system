@@ -141,6 +141,20 @@ export class IdentityApiClient {
     return value as Record<string,unknown>;
   }
 
+  async authorizeStaffRecordRead(patientId:string,context:IdentityDelegatedContext):Promise<IdentityAuthorizationDecision> {
+    const payload=await this.request('/api/v1/identity/service/patients/'+encodeURIComponent(patientId)+'/record-read-authorization',
+      'GET',undefined,{...context,purposeOfUse:'direct-care'});
+    if(!validDecision(payload,patientId,'read_records','direct-care',context.facilityId))throw new IdentityApiProblem(502,payload);
+    return payload;
+  }
+
+  async staffPatientProfile(patientId:string,context:IdentityDelegatedContext):Promise<Record<string,unknown>> {
+    const value=await this.request('/api/v1/identity/service/patients/'+encodeURIComponent(patientId)+'/chat-profile','GET',undefined,context);
+    if(!value||typeof value!=='object'||Array.isArray(value)||(value as Record<string,unknown>).patientId!==patientId
+      ||!Number.isSafeInteger((value as Record<string,unknown>).version))throw new IdentityApiProblem(502,{code:'INVALID_PATIENT_PROFILE'});
+    return value as Record<string,unknown>;
+  }
+
   async authorizePatient(
     patientId: string,
     scope: 'read_records' | 'write_records',

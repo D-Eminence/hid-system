@@ -197,6 +197,19 @@ try {
   const labRuntime=await connect('lab_evidence_test');
   try {
     const {PATIENT_LAB_QUERY}=require('../../lab-api/dist/lab/patient-results.service.js');
+    const staffLabRead=async(patient,facility='10000000-0000-4000-8000-000000000002')=>{
+      await labRuntime.query('begin');
+      try {
+        await labRuntime.query(`select set_config('app.actor_subject','staff:test-clinician',true),
+          set_config('app.facility_id',$1,true),set_config('app.membership_id','40000000-0000-4000-8000-000000000001',true),
+          set_config('app.purpose_of_use','direct-care',true),set_config('app.correlation_id','synthetic-staff-lab-evidence',true),
+          set_config('app.patient_id','',true),set_config('app.self_authorized_until','',true)`,[facility]);
+        return (await labRuntime.query(PATIENT_LAB_QUERY,[patient,''])).rows;
+      } finally {await labRuntime.query('rollback');}
+    };
+    assert.equal((await staffLabRead('50000000-0000-4000-8000-000000000001')).length,1,'Restricted Lab role reads authorized staff released results');
+    assert.equal((await staffLabRead(a)).length,0,'Staff Lab collection excludes another patient without consent');
+    assert.equal((await staffLabRead('50000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000003')).length,0,'Staff Lab collection retains facility isolation');
     await labRuntime.query('begin');
     await labRuntime.query(`select set_config('app.actor_subject','patient:test-person',true),set_config('app.account_id','20000000-0000-4000-8000-000000000002',true),
       set_config('app.patient_id','50000000-0000-4000-8000-000000000001',true),set_config('app.session_id',$1,true),
@@ -221,6 +234,7 @@ try {
       set_config('app.purpose_of_use','patient-self',true)`,[randomUUID(),new Date(Date.now()+30000).toISOString()]);
     assert.equal((await labRuntime.query(PATIENT_LAB_QUERY,['50000000-0000-4000-8000-000000000001',''])).rows.length,0,'Invalidated current version withheld');
     await labRuntime.query('rollback');
+    assert.equal((await staffLabRead('50000000-0000-4000-8000-000000000001')).length,0,'Invalidated current version withheld from staff');
   } finally {await labRuntime.end();}
   // Positive native clinical adapters use an attributed synthetic clinician,
   // then complete the encounter before exposing observations to patient self.
@@ -247,8 +261,10 @@ try {
   const denied=await database.withPatientTransaction(await records.authorizeSelf(request),'synthetic-forbidden-clinical-write',client=>
     client.query("update ehr.prescriptions set status='cancelled' where patient_id=$1",[a]));
   assert.equal(denied.rowCount,0,'Patient self cannot mutate clinician prescriptions');
+  const {staffChatRuntimeChecks}=await import('./staff-chat-runtime-checks.mjs');
+  await staffChatRuntimeChecks({admin,runtime,patientA:a,patientB:b,staffAccount});
   console.log(JSON.stringify({passed:true,restricted_login:true,legacy_checks:15,
-    evidence_checks:['typed imports','patient-reported provenance','draft exclusion','cross-patient vectors','restricted Lab released results','exact result invalidation'],
+    evidence_checks:['typed imports','patient-reported provenance','draft exclusion','cross-patient vectors','restricted Lab released results','staff Lab patient and facility isolation','exact result invalidation'],
     conversation_checks:['bounded context','patient isolation','clear generation','current source bindings','stale inherited reply withheld'],customer_data:false}));
 } finally {
   await runtime?.end().catch(()=>{}); await admin?.end().catch(()=>{});

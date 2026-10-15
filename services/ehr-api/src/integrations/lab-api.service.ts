@@ -15,6 +15,9 @@ export class LabApiService {
     return this.translate(this.client.patientReleasedResults({correlationId:request.correlationId,facilityId:'',purposeOfUse:'patient-self',
       authorization:request.header('authorization'),cookie:request.header('cookie'),origin:request.header('origin')},cursor,signal));
   }
+  staffReleasedResults(context:DataAccessContext,patientId:string,cursor?:string,signal?:AbortSignal) {
+    return this.translate(this.client.staffReleasedResults(patientId,this.context(context),cursor,signal));
+  }
   private context(context:DataAccessContext) {
     if(!context.authorization&&!context.userCookie) throw new DomainProblem(503,'LAB_SERVICE_AUTH_UNAVAILABLE','Authenticated Lab service delegation is unavailable');
     return {authorization:context.authorization,cookie:context.userCookie,csrfToken:context.csrfToken,

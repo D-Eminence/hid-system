@@ -45,6 +45,16 @@ export class IdentityApiService {
       authorization:request.header('authorization'),cookie:request.header('cookie'),origin:request.header('origin')}));
   }
 
+  staffRecordRead(patientId:string,context:DataAccessContext) {
+    return this.translate(this.client.authorizeStaffRecordRead(patientId,{correlationId:context.correlationId,facilityId:context.facilityId,
+      purposeOfUse:'direct-care',authorization:context.authorization,cookie:context.userCookie,csrfToken:context.csrfToken,origin:context.origin}));
+  }
+
+  staffPatientProfile(patientId:string,context:DataAccessContext) {
+    return this.translate(this.client.staffPatientProfile(patientId,{correlationId:context.correlationId,facilityId:context.facilityId,
+      purposeOfUse:'direct-care',authorization:context.authorization,cookie:context.userCookie,csrfToken:context.csrfToken,origin:context.origin}));
+  }
+
   authorize(
     patientId: string,
     scope: 'read_records' | 'write_records',

@@ -1,3 +1,4 @@
+import type { ChatAccess } from './chat-access';
 import { Injectable } from '@nestjs/common';
 import { AuditService } from '../../audit/audit.service';
 import { DomainProblem } from '../../common/problem';
@@ -30,29 +31,43 @@ export class PatientChatService {
     private readonly evidence:PatientEvidenceService,
   ) {}
 
-  async answer(request: HidRequest, rawQuestion: string) {
+  async answer(request: HidRequest, rawQuestion: string, access: ChatAccess = this.selfAccess()) {
     const environment = getEnvironment();
     if (!environment.AI_ENABLED) throw new DomainProblem(503, 'PATIENT_CHAT_DISABLED', 'Patient chat is not enabled');
     const question = rawQuestion.trim();
     if (!question || question.length > 500) {
       throw new DomainProblem(400, 'INVALID_QUESTION', 'A question of 1 to 500 characters is required');
     }
-    const authorization = await this.records.authorizeSelf(request);
-    const release = this.admit(authorization.patientId);
+    const authorization = await access.authorize(request);
+    const release = this.admit(access.admissionKey || authorization.patientId);
     try {
-      const generation = await this.history.start(request, authorization);
-      const context = await this.history.context(request, generation);
+      const generation = await access.history.start(request, authorization);
+      const context = await access.history.context(request, generation);
       const signal = AbortSignal.timeout(60_000);
       const plan = await this.claude.plan(question, context.exchanges, signal);
       const reply: ChatReply = plan.intent === 'conversation'
         ? { status: 'ready', answer: plan.answer, sources: [] }
-        : await this.answerAuthorized(request, question, plan.query, context.exchanges, environment, signal,plan.recordIntent);
-      await this.history.save(request, generation, question, reply, context.bindings);
+        : await this.answerAuthorized(request, question, plan.query, context.exchanges, environment, signal,plan.recordIntent,access);
+      await access.history.save(request, generation, question, reply, context.bindings);
+      await access.authorize(request);
       return { ...reply,sources:reply.sources.map(source=>{const {hash:_hash,...safe}=source as unknown as Record<string,unknown>;return safe;}) };
     } catch (error) {
       if (error instanceof DomainProblem) throw error;
       throw new DomainProblem(503, 'PATIENT_CHAT_UNAVAILABLE', 'Patient chat is temporarily unavailable');
     } finally { release(); }
+  }
+
+  private selfAccess(): ChatAccess {
+    return {
+      admissionKey: '', chunksTable: 'ehr.patient_evidence_chunks',
+      audit: { actorType: 'patient', purposeOfUse: 'patient-self' },
+      authorize: request => this.records.authorizeSelf(request),
+      transaction: (auth, correlationId, operation) => this.database.withPatientTransaction(
+        auth as Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>, correlationId, operation),
+      evidence: this.evidence,
+      history: { context: this.history.context.bind(this.history), save: this.history.save.bind(this.history),
+        start: (request, auth) => this.history.start(request, auth as Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>) },
+    };
   }
 
   private admit(patientId: string): () => void {
@@ -73,37 +88,37 @@ export class PatientChatService {
 
   private async answerAuthorized(request:HidRequest,question:string,searchQuestion:string,
     history:readonly ConversationExchange[],
-    environment:ReturnType<typeof getEnvironment>,signal:AbortSignal,recordIntent:import('./patient-evidence.types').RecordIntent='search'):Promise<ChatReply> {
-    const extractionWarnings=await this.evidence.prepareDocuments(request,signal);
-    const snapshot=await this.evidence.snapshot(request,signal);
+    environment:ReturnType<typeof getEnvironment>,signal:AbortSignal,recordIntent:import('./patient-evidence.types').RecordIntent='search',access:ChatAccess=this.selfAccess()):Promise<ChatReply> {
+    const extractionWarnings=await access.evidence.prepareDocuments(request,signal);
+    const snapshot=await access.evidence.snapshot(request,signal);
     snapshot.coverage.unavailable.push(...extractionWarnings);
     if(extractionWarnings.length)snapshot.coverage.complete=false;
     let selection=selectEvidence(snapshot.records,recordIntent,searchQuestion);
-    if(recordIntent==='search'&&snapshot.records.length)selection=await this.semantic(request,snapshot.records,searchQuestion,environment,signal);
+    if(recordIntent==='search'&&snapshot.records.length)selection=await this.semantic(request,snapshot.records,searchQuestion,environment,signal,access);
     const coverage=answerCoverage(snapshot.coverage,selection.sources.length,selection.partial);
-    await this.records.authorizeSelf(request);signal.throwIfAborted();
+    await access.authorize(request);signal.throwIfAborted();
     const generated=await this.claude.answer(question,selection.sources,history,signal,coverage);
     const citations=[...generated.matchAll(/\[(\d+)\]/g)].map(match=>Number(match[1]));
     const valid=selection.sources.length?citations.length>0&&citations.every(n=>n>=1&&n<=selection.sources.length):citations.length===0;
     // Currentness/authorization is checked before save and return; an index is
     // never evidence by itself. Citation validation does not prove model fidelity.
-    await this.evidence.assertCurrent(request,selection.sources.map(binding));
-    const auth=await this.records.authorizeSelf(request);
-    await this.database.withPatientTransaction(auth,request.correlationId,client=>this.audit.recordWithClient(client,{
-      correlationId:request.correlationId,actorType:'patient',actorSubject:auth.subject,actorAccountId:auth.accountId,
+    await access.evidence.assertCurrent(request,selection.sources.map(binding));
+    const auth=await access.authorize(request);
+    await access.transaction(auth,request.correlationId,client=>this.audit.recordWithClient(client,{
+      correlationId:request.correlationId,...access.audit,actorSubject:auth.subject,actorAccountId:auth.accountId,
       patientId:auth.patientId,action:'ehr.patient.chat.answer',resourceType:'patient-evidence',outcome:valid?'success':'failure',
-      purposeOfUse:'patient-self',details:{sourceCount:selection.sources.length,citationsValid:valid,complete:coverage.complete}}));
+      details:{sourceCount:selection.sources.length,citationsValid:valid,complete:coverage.complete}}));
     return {status:'ready',answer:valid?generated:NO_GROUNDED_ANSWER,coverage,
       sources:valid?selection.sources.map((source,index)=>({...binding(source),number:index+1,title:source.title,
         recordedAt:source.recordedAt,effectiveAt:source.effectiveAt,provenance:source.provenance,quality:source.quality})):[]};
   }
 
   private async semantic(request:HidRequest,records:Evidence[],question:string,
-    env:ReturnType<typeof getEnvironment>,signal:AbortSignal) {
-    const auth=await this.records.authorizeSelf(request);
+    env:ReturnType<typeof getEnvironment>,signal:AbortSignal,access:ChatAccess=this.selfAccess()) {
+    const auth=await access.authorize(request);
     const currentKeys=records.map(r=>`${evidenceKey(r)}:${r.version}:${r.hash}`);
-    const existing=await this.database.withPatientTransaction(auth,request.correlationId,async client=>(await client.query(
-      `select source_kind,source_id,source_version,source_hash,chunk_no from ehr.patient_evidence_chunks
+    const existing=await access.transaction(auth,request.correlationId,async client=>(await client.query(
+      `select source_kind,source_id,source_version,source_hash,chunk_no from ${access.chunksTable}
        where patient_id=$1 and model_id=$2 and normalizer_version=1
        and source_kind||':'||source_id::text||':'||source_version||':'||source_hash=any($3::text[])`,
       [auth.patientId,env.AI_EMBEDDING_MODEL_ID,currentKeys])).rows);
@@ -112,23 +127,23 @@ export class PatientChatService {
       .filter(c=>!keys.has(`${evidenceKey(c.source)}:${c.source.version}:${c.source.hash}:${c.no}`));
     const fresh=await Promise.all(missing.slice(0,4).map(async c=>({...c,vector:await this.bedrock.embed(c.text,signal)})));
     if(fresh.length) {
-      await this.evidence.assertCurrent(request,fresh.map(c=>binding(c.source)));
-      const refreshed=await this.records.authorizeSelf(request);
-      await this.database.withPatientTransaction(refreshed,request.correlationId,async client=>{
-        for(const c of fresh)await client.query(`insert into ehr.patient_evidence_chunks
+      await access.evidence.assertCurrent(request,fresh.map(c=>binding(c.source)));
+      const refreshed=await access.authorize(request);
+      await access.transaction(refreshed,request.correlationId,async client=>{
+        for(const c of fresh)await client.query(`insert into ${access.chunksTable}
           (patient_id,source_kind,source_id,source_version,source_hash,chunk_no,model_id,embedding)
           values($1,$2,$3,$4,$5,$6,$7,$8::vector) on conflict do nothing`,
           [refreshed.patientId,c.source.kind,c.source.id,c.source.version,c.source.hash,c.no,env.AI_EMBEDDING_MODEL_ID,JSON.stringify(c.vector)]);
         // Remove obsolete derived vectors only; authoritative clinical rows stay intact.
-        await client.query(`delete from ehr.patient_evidence_chunks where patient_id=$1 and
+        await client.query(`delete from ${access.chunksTable} where patient_id=$1 and
           source_kind||':'||source_id::text=any($3::text[]) and
           not(source_kind||':'||source_id::text||':'||source_version||':'||source_hash=any($2::text[]))`,[refreshed.patientId,currentKeys,records.map(evidenceKey)]);
       });
     }
     const vector=await this.bedrock.embed(question,signal);
-    const current=await this.records.authorizeSelf(request);
-    const ranked=await this.database.withPatientTransaction(current,request.correlationId,async client=>(await client.query(
-      `select source_kind,source_id,chunk_no from ehr.patient_evidence_chunks
+    const current=await access.authorize(request);
+    const ranked=await access.transaction(current,request.correlationId,async client=>(await client.query(
+      `select source_kind,source_id,chunk_no from ${access.chunksTable}
        where patient_id=$1 and model_id=$2 and normalizer_version=1
        and source_kind||':'||source_id::text||':'||source_version||':'||source_hash=any($3::text[])
        order by embedding<=>$4::vector limit 12`,[current.patientId,env.AI_EMBEDDING_MODEL_ID,currentKeys,JSON.stringify(vector)])).rows);
