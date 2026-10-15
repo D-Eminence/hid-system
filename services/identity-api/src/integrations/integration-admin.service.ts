@@ -238,11 +238,12 @@ export class IntegrationAdminService {
           : routing.some((route) => route.capability === capability &&
             (route.active_provider === row.provider || route.fallback_provider === row.provider))));
       const operationGates = row.provider === 'qoreid' ? [
-        { operation: 'existing_patient_nin', state: qoreidOpen ? 'open' : 'closed',
-          detail: 'Existing-patient NIN evidence requires the general QoreID gate and an enabled provider.' },
+        { operation: 'existing_patient_nin',
+          state: qoreidOpen && env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED ? 'open' : 'closed',
+          detail: 'Existing-patient NIN binding requires the general QoreID gate, an enabled provider and its separate deployment gate, which production refuses (ADR-062).' },
         { operation: 'patient_nin_enrollment',
-          state: qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED ? 'open' : 'closed',
-          detail: 'NIN-only enrollment also requires its separate deployment gate.' },
+          state: qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED && env.NIN_HOLDER_SMS_ENABLED ? 'open' : 'closed',
+          detail: 'NIN-only enrollment also requires its separate deployment gate and a route to prove the NIN holder (ADR-062).' },
         { operation: 'provider_cac', state: qoreidOpen ? 'open' : 'closed',
           detail: 'CAC Basic V2 requires the general QoreID gate and an enabled provider. OAuth connection tests do not prove legal-profile completeness or staging readiness.' },
       ] : [];

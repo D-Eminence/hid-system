@@ -50,17 +50,36 @@ export function emergencyContactVerificationText(code: string): string {
     + 'It expires shortly. If you were not expecting this, ignore this message.';
 }
 
+/**
+ * The code to the phone a NIN record lists (ADR-062). Whoever holds that
+ * phone may not be the person registering, so the message says why it came
+ * and what to do if it was not them. It names no NIN, person, Health ID or
+ * link.
+ */
+export function ninHolderVerificationText(code: string): string {
+  return `Your Health ID code is ${code}. Someone is registering for a Health ID with your NIN. `
+    + 'If this was not you, ignore this message. Do not share this code. '
+    + 'Health ID will never call or message you to ask for it.';
+}
+
 export function messageContent(message: OtpMessage): MessageContent {
   if (message.content) return message.content;
   if (message.purpose === 'EMERGENCY_CONTACT_VERIFY') {
     return { subject: 'HID emergency contact verification', text: emergencyContactVerificationText(message.code) };
   }
+  if (message.purpose === 'NIN_HOLDER_VERIFY') {
+    return { subject: 'Your Health ID code', text: ninHolderVerificationText(message.code) };
+  }
   return { subject: 'Your HID verification code', text: genericOtpText(message.code) };
 }
 
-/** WhatsApp delivery uses a pre-approved OTP template only. */
+/**
+ * WhatsApp delivery uses a pre-approved OTP template only. Purposes with
+ * their own wording never go through it.
+ */
 export function isTemplateOtp(message: OtpMessage): boolean {
-  return !message.content && message.purpose !== 'EMERGENCY_CONTACT_VERIFY';
+  return !message.content && message.purpose !== 'EMERGENCY_CONTACT_VERIFY'
+    && message.purpose !== 'NIN_HOLDER_VERIFY';
 }
 
 const ALERT_TIME = new Intl.DateTimeFormat('en-GB', {

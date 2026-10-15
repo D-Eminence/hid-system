@@ -40,6 +40,7 @@ import {
   workloadIssuerEnvironment,
 } from './workload-identity.js';
 import {
+  assertNinOwnershipRoutes,
   type HidEnvironmentConfig,
   operationalAlarmTopic,
   operationalAlarmTopicName,
@@ -125,11 +126,8 @@ export class HidRegionalStack extends Stack {
       throw new Error(`The operational alarm topic must be in this stack's region ${this.region}; `
         + `HID_OPERATIONAL_ALARM_TOPIC_ARN names region ${alarmTopic.region}`);
     }
-    // CFG-PROD, N1: also for a configuration not built by environmentConfig.
-    if (this.configuration.name === 'production' && this.configuration.qoreIdNinOnlyEnrollmentEnabled) {
-      throw new Error('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production until NIN-only enrollment '
-        + 'proves that the caller holds the registry phone (N1)');
-    }
+    // CFG-PROD, N1, ADR-062: also for a configuration not built by environmentConfig.
+    assertNinOwnershipRoutes(this.configuration);
 
     validateDatabaseConnectionBudget(
       this.configuration.profile,
@@ -915,6 +913,10 @@ export class HidRegionalStack extends Stack {
           NIN_PROVIDER_MODE: this.configuration.name === 'staging' ? 'deferred' : 'unavailable', NIN_KEY_VERSION: 'aws-v1', IDENTITY_SERVICE_IDENTITY_MODE: 'jwt',
           QOREID_ENABLED: this.configuration.qoreIdEnabled ? 'true' : 'false',
           QOREID_NIN_ONLY_ENROLLMENT_ENABLED: this.configuration.qoreIdNinOnlyEnrollmentEnabled ? 'true' : 'false',
+          NIN_HOLDER_SMS_ENABLED: this.configuration.ninHolderSmsEnabled ? 'true' : 'false',
+          ASSISTED_REGISTRATION_ENABLED: this.configuration.assistedRegistrationEnabled ? 'true' : 'false',
+          QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: this.configuration.qoreIdPatientSelfNinBindingEnabled
+            ? 'true' : 'false',
           QOREID_BASE_URL: 'https://api.qoreid.com', QOREID_TIMEOUT_MS: '5000', QOREID_MAX_RETRIES: '0',
           WORKLOAD_ISSUER_URL: issuer, WORKLOAD_JWKS_URL: jwks, WORKLOAD_AUDIENCE: 'hid-identity-api',
           IDENTITY_EHR_CALLER_SUBJECT: subjects.ehr, IDENTITY_LAB_CALLER_SUBJECT: subjects.lab,

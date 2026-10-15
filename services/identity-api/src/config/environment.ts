@@ -121,9 +121,29 @@ const environmentSchema = z.object({
   // change the governed NIN-registration provider mode above.
   QOREID_ENABLED: booleanString,
   // The public NIN documentation still requires name claims. This separate
-  // gate must remain false until QoreID confirms the NIN-only contract.
-  // Production refuses it until the NIN holder possession step ships (below).
+  // gate must remain false until QoreID confirms the NIN-only contract
+  // (DEP-1). It needs a route to prove that the person holds the NIN (below).
   QOREID_NIN_ONLY_ENROLLMENT_ENABLED: booleanString,
+  // ADR-062: the routes by which a person proves that they hold a NIN before
+  // any Health ID is made. The online route sends a one-time code to the
+  // phone the NIN record lists; the facility route is an in-person check at a
+  // participating facility (used from 0094, ADR-063). Both default to false;
+  // enabling either is an operator step.
+  NIN_HOLDER_SMS_ENABLED: booleanString,
+  ASSISTED_REGISTRATION_ENABLED: booleanString,
+  // The signed-in "Verify NIN" route binds a NIN to a patient on a name and
+  // date-of-birth match, without a holder proof. False answers 503 before any
+  // lookup or quota charge; production refuses true until the owner decides
+  // whether decision N1 covers it.
+  QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: booleanString,
+  // Holder budgets (ADR-062), counted from identity.public_patient_holder_events
+  // over sliding windows: codes sent to one registry phone in 24 hours; wrong
+  // codes for one NIN in 24 hours and in 30 days (both checked before a code
+  // is sent); other NINs one registry phone may prove in 365 days.
+  NIN_HOLDER_SMS_DAILY_MAX: z.coerce.number().int().min(1).max(50).default(5),
+  NIN_HOLDER_FAILURES_DAILY_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  NIN_HOLDER_FAILURES_MONTHLY_MAX: z.coerce.number().int().min(1).max(1000).default(30),
+  NIN_HOLDER_DISTINCT_NINS_MAX: z.coerce.number().int().min(1).max(50).default(5),
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,
@@ -216,14 +236,31 @@ const environmentSchema = z.object({
     context.addIssue({ code: 'custom', path: ['QOREID_NIN_ONLY_ENROLLMENT_ENABLED'],
       message: 'NIN-only enrollment requires enabled QoreID verification' });
   }
-  // N1: binding a NIN requires proof that the caller holds the phone the NIN
-  // registry lists for it. That step is not built yet, so production refuses
-  // NIN-only enrollment until it ships; the change that adds it lifts this.
+  // N1, ADR-062: a NIN lookup proves only that the NIN exists. NIN-only
+  // enrollment needs a route to prove that the person holds it; activation
+  // requires that proof in the database. These rules replace the earlier
+  // blanket production refusal.
   if (environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED
-      && (environment.HID_DEPLOYMENT_ENV === 'production'
-        || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging'))) {
+      && !environment.NIN_HOLDER_SMS_ENABLED && !environment.ASSISTED_REGISTRATION_ENABLED) {
     context.addIssue({ code: 'custom', path: ['QOREID_NIN_ONLY_ENROLLMENT_ENABLED'],
-      message: 'NIN-only enrollment is refused in production until the NIN holder possession step (N1) ships' });
+      message: 'NIN-only enrollment requires NIN_HOLDER_SMS_ENABLED or ASSISTED_REGISTRATION_ENABLED' });
+  }
+  if (environment.NIN_HOLDER_FAILURES_MONTHLY_MAX < environment.NIN_HOLDER_FAILURES_DAILY_MAX) {
+    context.addIssue({ code: 'custom', path: ['NIN_HOLDER_FAILURES_MONTHLY_MAX'],
+      message: 'The monthly holder failure budget cannot be below the daily one' });
+  }
+  const productionProfile = environment.HID_DEPLOYMENT_ENV === 'production'
+    || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging');
+  // Anyone who knows a NIN can spend its failure budget and close the online
+  // route for its holder; the facility route is the remedy, so production
+  // has it whenever the online route is on.
+  if (productionProfile && environment.NIN_HOLDER_SMS_ENABLED && !environment.ASSISTED_REGISTRATION_ENABLED) {
+    context.addIssue({ code: 'custom', path: ['NIN_HOLDER_SMS_ENABLED'],
+      message: 'The online NIN holder route requires ASSISTED_REGISTRATION_ENABLED in production' });
+  }
+  if (productionProfile && environment.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED) {
+    context.addIssue({ code: 'custom', path: ['QOREID_PATIENT_SELF_NIN_BINDING_ENABLED'],
+      message: 'The signed-in NIN binding is refused in production until the owner decides whether N1 covers it' });
   }
   if (environment.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX > environment.PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX) {
     context.addIssue({ code: 'custom', path: ['PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX'],
