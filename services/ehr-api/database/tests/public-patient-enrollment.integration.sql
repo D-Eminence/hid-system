@@ -3,35 +3,84 @@ begin;
 
 -- This transaction uses fixture ciphertext bytes and an inert Argon2-shaped
 -- hash. It rolls back every canonical account and patient created below.
+-- 0093 (ADR-062): each enrollment starts at verify_holder and is proved
+-- through identity.record_public_patient_holder_proof as the Identity
+-- runtime; the owner fixture then gives it the contact state it is tested in,
+-- with the holder proof made before the contact proof.
 insert into identity.public_patient_enrollments (
   id, nin_lookup_hmac, nin_last4, nin_ciphertext, profile_ciphertext,
-  profile_sha256, key_version, provider_reference, request_hmac, token_hmac,
-  state, contact_channel, contact_hmac, contact_lookup_hmac, contact_ciphertext,
-  contact_verified_at, verified_challenge_id
+  profile_sha256, key_version, provider_reference, request_hmac, token_hmac, holder_recipient_hmac
 ) values
   ('b5100000-0000-4000-8000-000000000001', repeat('a',64), '8901', decode(repeat('a1',32),'hex'),
    decode(repeat('b1',32),'hex'),
    encode(public.digest('{"nin":"12345678901","firstName":"Amina","lastName":"Okafor","dateOfBirth":"1990-05-12","gender":"female","providerReference":"fixture-email-001"}', 'sha256'),'hex'),
-   'fixture', 'fixture-email-001', repeat('1',64), repeat('2',64),
-   'set_password', 'email', repeat('c',64), repeat('e1',32), decode(repeat('d1',32),'hex'),
-   clock_timestamp(), 'b5200000-0000-4000-8000-000000000001'),
+   'fixture', 'fixture-email-001', repeat('1',64), repeat('2',64), repeat('71',32)),
   ('b5100000-0000-4000-8000-000000000002', repeat('b',64), '8902', decode(repeat('a2',32),'hex'),
    decode(repeat('b2',32),'hex'),
    encode(public.digest('{"nin":"12345678902","firstName":"Bola","lastName":"Uche","dateOfBirth":"1988-03-04","gender":"male","providerReference":"fixture-phone-002"}', 'sha256'),'hex'),
-   'fixture', 'fixture-phone-002', repeat('3',64), repeat('4',64),
-   'set_password', 'phone', repeat('d',64), repeat('e2',32), decode(repeat('d2',32),'hex'),
-   clock_timestamp(), 'b5200000-0000-4000-8000-000000000002'),
+   'fixture', 'fixture-phone-002', repeat('3',64), repeat('4',64), repeat('72',32)),
   ('b5100000-0000-4000-8000-000000000003', repeat('e',64), '8903', decode(repeat('a3',32),'hex'),
    decode(repeat('b3',32),'hex'),
    encode(public.digest('{"nin":"12345678903","firstName":"Chika","lastName":"Eze","dateOfBirth":"1995-07-08","gender":"female","providerReference":"fixture-stage-003"}', 'sha256'),'hex'),
-   'fixture', 'fixture-stage-003', repeat('5',64), repeat('6',64), 'verify_contact',
-   null, null, null, null, null, null),
+   'fixture', 'fixture-stage-003', repeat('5',64), repeat('6',64), repeat('73',32)),
   ('b5100000-0000-4000-8000-000000000004', repeat('f',64), '8904', decode(repeat('a4',32),'hex'),
    decode(repeat('b4',32),'hex'),
    encode(public.digest('{"nin":"12345678904","firstName":"Dayo","lastName":"Ibe","dateOfBirth":"1992-11-09","gender":"other","providerReference":"fixture-duplicate-004"}', 'sha256'),'hex'),
-   'fixture', 'fixture-duplicate-004', repeat('7',64), repeat('8',64),
-   'set_password', 'email', repeat('9',64), repeat('e4',32), decode(repeat('d4',32),'hex'),
-   clock_timestamp(), 'b5200000-0000-4000-8000-000000000004');
+   'fixture', 'fixture-duplicate-004', repeat('7',64), repeat('8',64), repeat('74',32));
+
+insert into identity.public_patient_enrollment_otps (
+  id, enrollment_id, recipient_hmac, channel, purpose, verifier_hmac,
+  verifier_key_version, expires_at, max_attempts, delivery_outcome
+)
+select ('b5600000-0000-4000-8000-00000000000' || n)::uuid, ('b5100000-0000-4000-8000-00000000000' || n)::uuid,
+  repeat('7' || n, 32), 'phone', 'nin_holder', repeat('ab',32), 'fixture',
+  clock_timestamp() + interval '10 minutes', 5, 'accepted'
+  from generate_series(1, 4) n;
+
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+select set_config('app.correlation_id','public-patient-enrollment-holder-0001',true);
+do $$
+declare
+  fixture record;
+begin
+  for fixture in select * from (values
+      ('b5100000-0000-4000-8000-000000000001'::uuid, repeat('2',64)),
+      ('b5100000-0000-4000-8000-000000000002'::uuid, repeat('4',64)),
+      ('b5100000-0000-4000-8000-000000000003'::uuid, repeat('6',64)),
+      ('b5100000-0000-4000-8000-000000000004'::uuid, repeat('8',64))) as item(id, token) loop
+    if identity.record_public_patient_holder_proof(fixture.id, fixture.token::char(64), 'registry_phone_otp',
+        ('b5600000-0000-4000-8000-' || right(fixture.id::text, 12))::uuid, null,
+        encode(public.digest('holder-nin:' || fixture.id::text, 'sha256'), 'hex')::char(64), 50) <> 'verified' then
+      raise exception 'The fixture holder proof of % failed', fixture.id;
+    end if;
+  end loop;
+end $$;
+reset role;
+
+update identity.public_patient_enrollments enrollment
+   set state = fixture.state, contact_channel = fixture.channel, contact_hmac = fixture.recipient,
+       contact_lookup_hmac = fixture.lookup, contact_ciphertext = fixture.ciphertext,
+       contact_verified_at = clock_timestamp(), verified_challenge_id = fixture.challenge
+  from (values
+    ('b5100000-0000-4000-8000-000000000001'::uuid, 'set_password', 'email', repeat('c',64), repeat('e1',32),
+     decode(repeat('d1',32),'hex'), 'b5200000-0000-4000-8000-000000000001'::uuid),
+    ('b5100000-0000-4000-8000-000000000002'::uuid, 'set_password', 'phone', repeat('d',64), repeat('e2',32),
+     decode(repeat('d2',32),'hex'), 'b5200000-0000-4000-8000-000000000002'::uuid),
+    ('b5100000-0000-4000-8000-000000000004'::uuid, 'set_password', 'email', repeat('9',64), repeat('e4',32),
+     decode(repeat('d4',32),'hex'), 'b5200000-0000-4000-8000-000000000004'::uuid))
+    as fixture(id, state, channel, recipient, lookup, ciphertext, challenge)
+ where enrollment.id = fixture.id;
+update identity.public_patient_enrollment_otps holder
+   set created_at = enrollment.contact_verified_at - interval '2 minutes',
+       verified_at = enrollment.contact_verified_at - interval '1 minute',
+       consumed_at = enrollment.contact_verified_at - interval '1 minute'
+  from identity.public_patient_enrollments enrollment
+ where holder.id = enrollment.holder_challenge_id and enrollment.contact_verified_at is not null
+   and enrollment.id::text like 'b5100000-%';
+update identity.public_patient_enrollments
+   set holder_verified_at = contact_verified_at - interval '1 minute'
+ where contact_verified_at is not null and id::text like 'b5100000-%';
 
 insert into identity.public_patient_enrollment_otps (
   id, enrollment_id, recipient_hmac, channel, verifier_hmac,

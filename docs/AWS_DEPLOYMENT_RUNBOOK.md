@@ -25,6 +25,26 @@ and CAC outcomes plus timeout/401/5xx privacy behavior before considering any
 production change. This repository change did not activate or deploy QoreID.
 See [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
 
+NIN holder routes (ADR-062, D-Eminence/hid-system#84): the synth
+inputs `HID_NIN_HOLDER_SMS_ENABLED`, `HID_ASSISTED_REGISTRATION_ENABLED` and
+`HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED` all default to `false` and set
+the Identity variables of the same names without `HID_`. Synthesis refuses
+NIN-only enrollment without a holder route, the online route on staging
+(email only), the online route in production without
+`HID_ASSISTED_REGISTRATION_ENABLED=true` (ADR-063, below), and the signed-in
+NIN binding in production. Enabling any of them is an operator step after
+the release checklist P23 to P27, and P33 for either holder route.
+
+Facility route (ADR-063, D-Eminence/hid-system#85):
+with it, synthesis accepts `HID_NIN_HOLDER_SMS_ENABLED=true` in production
+only with `HID_ASSISTED_REGISTRATION_ENABLED=true`, and `verify-synth`
+checks the same. The flag alone opens nothing: the route opens while a
+facility is designated through the admin API. In production Identity also
+keeps the online route closed while no facility takes part. The in-person budgets
+(`ASSISTED_VERIFICATION_STAFF_DAILY_MAX`, `_FACILITY_DAILY_MAX`) keep
+Identity's defaults (20 and 100); they are not synth inputs. Enabling the
+facility route is an operator step after release checklist P29 to P33.
+
 ## Staging email acceptance profile
 
 Staging selects `NOTIFICATION_DELIVERY_PROFILE=email-only`. Its Notification API
@@ -47,7 +67,11 @@ refuses the `full` and `email-only` profiles, any WhatsApp configuration and a
 local service token. The Notification Worker (Novu) is off in production
 (`HID_NOTIFICATION_WORKER_ENABLED` is fixed to `false`) and reads no
 `novuApiKey`. Every OTP send writes one PHI-free `notification.otp.outcome` log
-line, and `OtpDefinitiveFailures` alarms on its `definitive_failure` count.
+line, and `OtpDefinitiveFailures` alarms on its `definitive_failure` count. The NIN holder code (ADR-062, purpose `NIN_HOLDER_VERIFY`) goes by SMS
+only, through Termii, and counts there too. Before `NIN_HOLDER_SMS_ENABLED`
+is set, add the holder SMS volume and failure ratio alerts of the release
+checklist §10; Termii's sender ID (P18) and QoreID's written confirmation of
+`nin.phone` (P23) come first.
 When the fallback ran, the line also names the primary provider and its safe
 code (`primaryProvider`, `primarySafeCode`); read those for why SES or Termii
 failed. Migration 0047 seeds Brevo as an enabled email and SMS fallback, and

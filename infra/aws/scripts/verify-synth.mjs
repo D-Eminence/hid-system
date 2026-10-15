@@ -384,12 +384,31 @@ assert.deepEqual(providerFields, environment === 'staging' ? ['sesFromAddress']
   : ['sesFromAddress', 'termiiApiKey', 'termiiBaseUrl', 'termiiSenderId'])
 assert.doesNotMatch(text, /:(meta[A-Za-z]+|brevo[A-Za-z]+)::/, 'no Meta, WhatsApp or Brevo provider field is read')
 
-// CFG-PROD: Identity's NIN-only enrollment flag is the explicit synth input,
-// false by default, and always false in production until N1's holder step.
-const ninOnlyEnrollment = identityApis[0].Environment.find(entry => entry.Name === 'QOREID_NIN_ONLY_ENROLLMENT_ENABLED')?.Value
+// CFG-PROD, N1, ADR-062: Identity's NIN-only enrollment flag and the routes
+// that prove a person holds the NIN are the explicit synth inputs, false by
+// default. NIN-only enrollment needs a route; staging sends no holder SMS;
+// production runs the online route only with the facility route (ADR-063)
+// and never the signed-in NIN binding.
+const identityFlag = name => identityApis[0].Environment.find(entry => entry.Name === name)?.Value
+const ninOnlyEnrollment = identityFlag('QOREID_NIN_ONLY_ENROLLMENT_ENABLED')
+const ninHolderSms = identityFlag('NIN_HOLDER_SMS_ENABLED')
+const assistedRegistration = identityFlag('ASSISTED_REGISTRATION_ENABLED')
+const patientSelfNinBinding = identityFlag('QOREID_PATIENT_SELF_NIN_BINDING_ENABLED')
 assert.equal(ninOnlyEnrollment, process.env.HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED ?? 'false')
+assert.equal(ninHolderSms, process.env.HID_NIN_HOLDER_SMS_ENABLED ?? 'false')
+assert.equal(assistedRegistration, process.env.HID_ASSISTED_REGISTRATION_ENABLED ?? 'false')
+assert.equal(patientSelfNinBinding, process.env.HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED ?? 'false')
+if (ninOnlyEnrollment === 'true') {
+  assert.ok(ninHolderSms === 'true' || assistedRegistration === 'true',
+    'NIN-only enrollment needs the online or the facility holder route (ADR-062)')
+}
+if (environment === 'staging') assert.equal(ninHolderSms, 'false', 'staging identity-api must not send holder SMS')
 if (environment === 'production') {
-  assert.equal(ninOnlyEnrollment, 'false', 'production identity-api must not enable NIN-only enrollment (CFG-PROD, N1)')
+  if (ninHolderSms === 'true') {
+    assert.equal(assistedRegistration, 'true',
+      'production identity-api sends holder SMS only with the facility route on (ADR-062, ADR-063)')
+  }
+  assert.equal(patientSelfNinBinding, 'false', 'production identity-api must not enable the signed-in NIN binding')
 }
 
 assert.equal(regional.Parameters.OriginDomainName, undefined)

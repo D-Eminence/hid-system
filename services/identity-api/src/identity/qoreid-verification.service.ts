@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { requirePatient } from '../auth/patient-self.service';
-import { DomainProblem } from '../common/problem';
+import { DomainProblem, PublicDetailProblem } from '../common/problem';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
@@ -49,6 +49,14 @@ export class QoreIdVerificationService {
 
   async verifyPatientNin(request: HidRequest, nin: string): Promise<VerificationResponse> {
     const actor = requirePatient(request.actor);
+    // This route binds a NIN on a name and date-of-birth match, with no proof
+    // that the patient holds the NIN (ADR-062). Off unless configured on, and
+    // refused before any lookup, quota charge or evidence write.
+    if (!getEnvironment().QOREID_PATIENT_SELF_NIN_BINDING_ENABLED) {
+      // A fixed sentence with no request value: the client may show it as sent.
+      throw new PublicDetailProblem(503, 'QOREID_PATIENT_NIN_BINDING_DISABLED',
+        'Verifying a NIN from your account is not available');
+    }
     let verifiedProfile: QoreIdNinBinding | undefined;
     const persist = (result: EvidenceResult, reference?: string, failure?: VerificationFailureCategory) =>
       result === 'verified'

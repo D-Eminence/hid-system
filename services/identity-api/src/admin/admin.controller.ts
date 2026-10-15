@@ -10,8 +10,8 @@ import { AdminOperationsService } from './admin-operations.service';
 import { AdminService, PRINCIPAL_EXPORT_MAX_ROWS } from './admin.service';
 import { PricingService } from './pricing.service';
 import { PricePricingCommandDto, ProductPricingCommandDto } from './dto/pricing-command.dto';
-import { AccountStatusCommandDto, FacilityStatusCommandDto, PlatformControlCommandDto, PlatformRoleCommandDto,
-  RevokeSessionsCommandDto } from './dto/admin-command.dto';
+import { AccountStatusCommandDto, AssistedRegistrationDesignationDto, FacilityStatusCommandDto,
+  PlatformControlCommandDto, PlatformRoleCommandDto, RevokeSessionsCommandDto } from './dto/admin-command.dto';
 import { ExportPrincipalsDto, ListFacilitiesDto, ListIdentityReviewsDto, ListPlatformAuditDto,
   ListPrincipalsDto } from './dto/admin-list.dto';
 
@@ -71,6 +71,30 @@ export class AdminController {
     @Body() input: FacilityStatusCommandDto, @Req() request: HidRequest) {
     return this.admin.transitionFacility(requireAdminContext(request), facilityId, this.expectedVersion(ifMatch),
       input, requireIdempotencyKey(key));
+  }
+
+  /** ADR-063: a facility's designation for assisted registration; version 0 when it has none. */
+  @Get('facilities/:facilityId/assisted-registration')
+  @RequirePermissions('platform.facility.read')
+  @AuditAction('admin.facility.assisted-registration.read.request')
+  assistedRegistration(@Param('facilityId', new ParseUUIDPipe({ version: '4' })) facilityId: string,
+    @Req() request: HidRequest) {
+    return this.admin.assistedRegistration(requireAdminContext(request), facilityId);
+  }
+
+  /**
+   * ADR-063: designates or suspends a facility for assisted registration.
+   * If-Match carries the expected version; 0 creates the first designation.
+   */
+  @Post('facilities/:facilityId/assisted-registration')
+  @RequirePermissions('platform.facility.manage')
+  @HighRiskAction('platform.facility.assisted-registration')
+  @AuditAction('admin.facility.assisted-registration.request')
+  async setAssistedRegistration(@Param('facilityId', new ParseUUIDPipe({ version: '4' })) facilityId: string,
+    @Headers('if-match') ifMatch: string | undefined, @Headers('idempotency-key') key: string | undefined,
+    @Body() input: AssistedRegistrationDesignationDto, @Req() request: HidRequest) {
+    return this.admin.setAssistedRegistration(requireAdminContext(request), facilityId,
+      this.expectedVersion(ifMatch, { allowZero: true }), input, requireIdempotencyKey(key));
   }
 
   /**
@@ -219,11 +243,14 @@ export class AdminController {
       this.expectedVersion(ifMatch), input, requireIdempotencyKey(key));
   }
 
-  private expectedVersion(value: string | undefined): number {
+  /** The expected version from If-Match; 0 only where a command creates its resource (ADR-063). */
+  private expectedVersion(value: string | undefined, options: { allowZero?: boolean } = {}): number {
     const normalized = value?.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
     const version = normalized ? Number(normalized) : Number.NaN;
-    if (!Number.isSafeInteger(version) || version < 1) {
-      throw new DomainProblem(428, 'IF_MATCH_REQUIRED', 'If-Match must contain the expected positive version');
+    if (!Number.isSafeInteger(version) || version < (options.allowZero ? 0 : 1)) {
+      throw new DomainProblem(428, 'IF_MATCH_REQUIRED', options.allowZero
+        ? 'If-Match must contain the expected version, or 0 to create'
+        : 'If-Match must contain the expected positive version');
     }
     return version;
   }

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
@@ -9,6 +9,7 @@ import type { PlatformAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { QoreIdVerificationAdapter } from '../identity/qoreid-verification.adapter';
+import { enrollmentKeysConfigured, ownershipRoutes, type OwnershipRoutes } from '../identity/ownership-routes';
 import { IntegrationRuntimeService } from './integration-runtime.service';
 import { requirePlatformAssurance } from '../auth/platform-assurance';
 
@@ -48,20 +49,46 @@ const publicSettings: Record<string, Record<string, RegExp>> = {
     smsSender: /^[A-Za-z0-9]{3,20}$/, whatsappSender: /^\+[1-9]\d{7,14}$/ },
 };
 
+/** Names the open holder routes, as the public availability read shows them (ADR-062, ADR-063). */
+function holderRoutesDetail(routes: OwnershipRoutes | null): string {
+  if (!routes) return 'The holder routes could not be read.';
+  const open = [...(routes.online ? ['online'] : []), ...(routes.facility ? ['facility'] : [])];
+  return open.length ? `Open holder routes: ${open.join(' and ')}.` : 'No holder route is open.';
+}
+
 @Injectable()
 export class IntegrationAdminService {
+  private readonly logger = new Logger(IntegrationAdminService.name);
+
   constructor(private readonly database: DatabaseService, private readonly audit: AuditService,
     private readonly qoreid: QoreIdVerificationAdapter,
     private readonly runtime: IntegrationRuntimeService) {}
 
   async list(context: PlatformAccessContext) {
     try {
-      return await this.database.withTransaction(context, async (client) => {
+      const { providers, routing } = await this.database.withTransaction(context, async (client) => {
         const providers = await client.query<ProviderRow>('select * from platform.admin_list_integration_providers()');
         const routing = await client.query<RouteRow>('select * from platform.admin_list_integration_routes()');
-        return this.catalog(providers.rows, routing.rows);
+        return { providers: providers.rows, routing: routing.rows };
       }, { readOnly: true });
+      const holderRoutes = providers.some((row) => row.provider === 'qoreid')
+        ? await this.readHolderRoutes(context.correlationId) : null;
+      return this.catalog(providers, routing, holderRoutes);
     } catch (error) { throw this.mapError(error); }
+  }
+
+  /**
+   * The routes a start would see (ADR-062, ADR-063), read as the enrollment
+   * service reads them: after the platform read has checked the caller, in
+   * its own system transaction, because identity.list_participating_facilities()
+   * answers only system context (0094). A failed read shows the gate closed
+   * and keeps the catalog, and pause, available.
+   */
+  private async readHolderRoutes(correlationId: string): Promise<OwnershipRoutes | null> {
+    try { return await ownershipRoutes(this.database, correlationId); } catch {
+      this.logger.warn('NIN holder routes could not be read for the integration status');
+      return null;
+    }
   }
 
   async get(context: PlatformAccessContext, provider: string) {
@@ -223,7 +250,7 @@ export class IntegrationAdminService {
     return null;
   }
 
-  private catalog(providers: ProviderRow[], routing: RouteRow[]) {
+  private catalog(providers: ProviderRow[], routing: RouteRow[], holderRoutes: OwnershipRoutes | null) {
     const env = getEnvironment();
     const items = providers.map((row) => {
       const qoreidOpen = row.provider === 'qoreid' && row.enabled && this.qoreidConfigured();
@@ -232,17 +259,25 @@ export class IntegrationAdminService {
         : row.credential_source === 'none'
           ? { state: 'unsupported', masked: null, rotationSupported: false }
           : { state: 'external', masked: '••••', rotationSupported: false };
-      const activeCapabilities = row.capabilities.filter((capability) =>
-        row.enabled && (capability === 'patient_nin' || capability === 'provider_cac'
-          ? qoreidOpen && (capability === 'provider_cac' || env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED)
-          : routing.some((route) => route.capability === capability &&
-            (route.active_provider === row.provider || route.fallback_provider === row.provider))));
+      const existingPatientNinOpen = qoreidOpen && env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED;
+      // The keys and routes a start and the availability read check (ADR-062, ADR-063).
+      const enrollmentKeys = enrollmentKeysConfigured(env);
+      const enrollmentOpen = qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED && enrollmentKeys
+        && holderRoutes !== null && (holderRoutes.online || holderRoutes.facility);
+      const activeCapabilities = row.capabilities.filter((capability) => row.enabled && (
+        capability === 'patient_nin' ? existingPatientNinOpen || enrollmentOpen
+          : capability === 'provider_cac' ? qoreidOpen
+            : routing.some((route) => route.capability === capability &&
+              (route.active_provider === row.provider || route.fallback_provider === row.provider))));
       const operationGates = row.provider === 'qoreid' ? [
-        { operation: 'existing_patient_nin', state: qoreidOpen ? 'open' : 'closed',
-          detail: 'Existing-patient NIN evidence requires the general QoreID gate and an enabled provider.' },
-        { operation: 'patient_nin_enrollment',
-          state: qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED ? 'open' : 'closed',
-          detail: 'NIN-only enrollment also requires its separate deployment gate.' },
+        { operation: 'existing_patient_nin',
+          state: existingPatientNinOpen ? 'open' : 'closed',
+          detail: 'Existing-patient NIN binding requires the general QoreID gate, an enabled provider and its separate deployment gate, which production refuses (ADR-062).' },
+        { operation: 'patient_nin_enrollment', state: enrollmentOpen ? 'open' : 'closed',
+          detail: 'NIN-only enrollment also requires its separate deployment gate, the enrollment keys and an open route '
+            + 'to prove the NIN holder: the online code, which production opens only while a facility takes part, '
+            + `or a participating facility (ADR-062, ADR-063). ${holderRoutesDetail(holderRoutes)}`
+            + (enrollmentKeys ? '' : ' The enrollment keys are not configured.') },
         { operation: 'provider_cac', state: qoreidOpen ? 'open' : 'closed',
           detail: 'CAC Basic V2 requires the general QoreID gate and an enabled provider. OAuth connection tests do not prove legal-profile completeness or staging readiness.' },
       ] : [];
