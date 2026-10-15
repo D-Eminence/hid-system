@@ -27,6 +27,9 @@ import { AdminOrganizationApplicationsController, PublicOrganizationApplications
   PublicOrganizationProfileCompletionController } from './organization-applications.controller';
 import { OrganizationApplicationsService } from './organization-applications.service';
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
+import { ClinicianApplicationController } from './clinician-application.controller';
+import { ClinicianApplicationService } from './clinician-application.service';
+import { ClinicianApplicationSweeper } from './clinician-application.sweeper';
 import { PatientEnrollmentController } from './patient-enrollment.controller';
 import { PatientEnrollmentService } from './patient-enrollment.service';
 import { ProviderEnrollmentController } from './provider-enrollment.controller';
@@ -38,7 +41,7 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider }
   controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
     PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
     AdminOrganizationApplicationsController,
-    PatientEnrollmentController, ProviderEnrollmentController],
+    PatientEnrollmentController, ProviderEnrollmentController, ClinicianApplicationController],
   providers: [
     IdentityService,
     StaffSearchBudget,
@@ -62,6 +65,7 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider }
     OrganizationProfileCompletionService,
     NotificationOtpClient,
     PatientEnrollmentService, ProviderEnrollmentService,
+    ClinicianApplicationService, ClinicianApplicationSweeper,
     QoreIdPublicPatientIdentityProvider,
     { provide: PUBLIC_PATIENT_IDENTITY_PROVIDER, useExisting: QoreIdPublicPatientIdentityProvider },
     PostgresIdentityProvider,

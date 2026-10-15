@@ -152,7 +152,7 @@ const REQUESTS_PER_ACCOUNT: RateLimitWindow = { windowSeconds: 900, maxRequests:
  * 15 minutes), an upper bound whichever budget refused; a blocked bucket stays
  * blocked for one window. Never the time left in the blocked bucket.
  */
-const MFA_RETRY_AFTER_SECONDS = Math.max(FAILURE_PER_ACCOUNT.windowSeconds, REQUESTS_PER_ACCOUNT.windowSeconds,
+export const MFA_RETRY_AFTER_SECONDS = Math.max(FAILURE_PER_ACCOUNT.windowSeconds, REQUESTS_PER_ACCOUNT.windowSeconds,
   ...Object.values(FAILURE_PER_IP).map((window) => window.windowSeconds));
 const CHALLENGE_TTL_SECONDS: Record<PlatformChallengePurpose, number> = { verify: 300, enroll: 600 };
 const CHALLENGE_MAX_ATTEMPTS = 5;
