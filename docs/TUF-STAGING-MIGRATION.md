@@ -238,7 +238,7 @@ The executable covers:
    0090's `encounter-retraction.integration.sql` needs the merge change in the
    release checklist §2 (the nurse role's `ehr.document.write` inside its
    rollback-only transaction); without it the rehearsal fails on that suite.
-   With 0092 (BRANCH:launch/patient-self-enrollment, ADR-061): the additional
+   With 0092 (D-Eminence/hid-system#82, ADR-061): the additional
    suites include `public-patient-enrollment-self-reported.integration.sql`
    (a NIN record without a date of birth or gender activates with the values
    the patient enters, from 1900-01-01 to today, a value the record gives is
@@ -249,6 +249,34 @@ The executable covers:
    list `requiredProfileFields: []` and refuse an entered date of birth, and
    runs a name-only record from start to sign-in with the date of birth and
    gender entered at activation.
+   With 0093 (D-Eminence/hid-system#84, ADR-062): the additional
+   suites include `public-patient-holder-proof.integration.sql` (the holder
+   commands' catalogue and lock order, the runtime's refused writes, refused
+   and accepted proofs, supersession, the facility rule, a bound NIN, the send,
+   failure and distinct-NIN budgets with aged rows, the prune and activation
+   with and without a proof); the five enrollment suites that activate prove
+   the holder first; and the non-superuser owner pass runs them all.
+   `patient_enrollment_runtime` runs the holder step over HTTP with registry
+   phones `0803...`, `234...`, `+234...` (and with spaces), `null`, `''`,
+   absent and unusable, an under-18 record, a wrong, expired, closed and spent
+   code, the resend cooldown, the three budgets, a bound NIN answered only
+   after a correct code (cookie expired, enrollment deleted), supersession,
+   two deterministic races under a held NIN lock, and `{ open, online,
+   facility }` availability. A database built with
+   `apply-migrations.mjs --through=0092_patient_self_reported_enrollment_profile.sql`
+   runs `upgrade/0093-public-patient-holder-backfill.sql` (rollback-only):
+   enrollments at `verify_contact`, `set_password` and `active`, then 0093 and
+   its backfill.
+   With 0094 (D-Eminence/hid-system#85, ADR-063): the
+   additional suites include `facility-assisted-registration.integration.sql`
+   (designations, the facility list, the staff command and its refusals,
+   budgets and audit, the in-person proof and activation), run in both
+   passes. `assisted_registration_runtime` runs
+   `verify-assisted-registration-runtime.mjs` after the patient enrollment
+   verifier: a platform designation with step-up, the desk code, staff
+   signed in with an authenticator, refused staff, a mismatch, a match,
+   activation and sign-in, an existing Health ID, a race with a phone proof,
+   both budgets and a suspension, as `hid_identity_api_runtime`.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -262,7 +290,19 @@ The executable covers:
    role bootstrap grants the EHR runtime the permission decision they use; since 0091 no Lab, Pharmacy, OCR or
    Outreach permission, break-glass or document upload; and since 0092 that
    the 7-argument enrollment activation command is gone and the upgraded role
-   bootstrap grants the Identity runtime, and not `PUBLIC`, the new one), then
+   bootstrap grants the Identity runtime, and not `PUBLIC`, the new one; and
+   since 0093 that the upgraded bootstrap grants the Identity runtime the
+   three holder commands, no privilege on the holder events, no table-level
+   `INSERT` or `UPDATE` on the enrollment table and no `UPDATE` of
+   `holder_method`, and that a new enrollment defaults to `verify_holder`;
+   and since 0094 that the upgraded bootstrap grants the Identity runtime the
+   facility list, the in-person check command and the two designation
+   commands (the designation read and the designation change), and no
+   privilege on the designation, its events, the checks, the participation
+   and attestation helpers or `auth.staff_session_is_mfa`, and that the
+   permission is held by `clinician`, `doctor` and `nurse` only; the
+   bootstrap's own `runtime-roles.integration.sql` checks the 0093 and 0094
+   grants for every runtime role), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

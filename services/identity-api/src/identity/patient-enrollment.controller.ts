@@ -7,7 +7,8 @@ import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { ActivatePatientEnrollmentDto, PatientEnrollmentContactDto,
-  StartPatientEnrollmentDto, VerifyPatientEnrollmentContactDto } from './dto/patient-enrollment.dto';
+  StartPatientEnrollmentDto, VerifyPatientEnrollmentContactDto,
+  VerifyPatientEnrollmentHolderDto } from './dto/patient-enrollment.dto';
 import { ENROLLMENT_COOKIE_NAME, clearEnrollmentCookie, enrollmentCookieOptions } from './enrollment-cookie';
 import { PatientEnrollmentService } from './patient-enrollment.service';
 
@@ -44,15 +45,32 @@ export class PatientEnrollmentController {
   /**
    * Whether patient self-enrollment is open (FE-4), from the checks start
    * makes before it reads a NIN, so a client can say so before it asks for
-   * one. Public and without input: every caller gets the same answer and it
-   * carries no PHI, so, as GET /commercial/pricing, it writes no audit row
-   * and may be cached briefly. A failure keeps main.ts's no-store default.
+   * one, and which routes to prove that a person holds the NIN are on
+   * (online, facility; ADR-062). Public and without input: every caller gets
+   * the same answer and it carries no PHI, so, as GET /commercial/pricing, it
+   * writes no audit row and may be cached briefly. A failure keeps main.ts's
+   * no-store default.
    */
   @Get('availability')
   @NoAudit()
   async availability(@Res({ passthrough: true }) response: Response) {
     const result = await this.enrollments.availability();
     response.setHeader('Cache-Control', 'public, max-age=30');
+    for (const name of ['Pragma', 'Expires', 'Surrogate-Control']) response.removeHeader(name);
+    return result;
+  }
+
+  /**
+   * The facilities where a patient can prove at the desk that they hold the
+   * NIN (ADR-063), by name and location only, and what to bring. Public and
+   * without input, as availability: no audit row, cacheable for five
+   * minutes. An empty list while the facility route is off.
+   */
+  @Get('participating-facilities')
+  @NoAudit()
+  async participatingFacilities(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
+    const result = await this.enrollments.participatingFacilities(request.correlationId);
+    response.setHeader('Cache-Control', 'public, max-age=300');
     for (const name of ['Pragma', 'Expires', 'Surrogate-Control']) response.removeHeader(name);
     return result;
   }
@@ -74,6 +92,59 @@ export class PatientEnrollmentController {
     this.assertAccountlessEnrollment(request, googleCookie);
     await this.google.onboardingStatus(googleCookie);
     return this.enrollments.bindGoogle(this.cookie(request), googleCookie, request.correlationId);
+  }
+
+  /**
+   * Sends a one-time code to the phone the NIN record lists (ADR-062). No
+   * body: the recipient is the registry phone, never a value the caller gives.
+   */
+  @Post('holder')
+  @HttpCode(200)
+  @AuditAction('identity.patient-enrollment.holder')
+  holder(@Req() request: HidRequest) {
+    this.assertOrigin(request);
+    this.assertAccountlessEnrollment(request,
+      this.namedCookie(request, this.google.onboardingCookieName));
+    return this.enrollments.sendHolderCode(this.cookie(request), request.ip, request.correlationId);
+  }
+
+  /**
+   * Issues the desk code the patient's own device shows at a participating
+   * facility (ADR-063); a new code replaces the last one. No body. Only the
+   * cookie holder sees the code, here and in the progress.
+   */
+  @Post('facility-code')
+  @HttpCode(200)
+  @AuditAction('identity.patient-enrollment.facility-code')
+  async facilityCode(@Req() request: HidRequest) {
+    this.assertOrigin(request);
+    this.assertAccountlessEnrollment(request,
+      this.namedCookie(request, this.google.onboardingCookieName));
+    return this.enrollments.issueDeskCode(this.cookie(request), request.correlationId);
+  }
+
+  /**
+   * Checks the registry-phone code. A NIN that already has a Health ID is
+   * answered here, only after a correct code, with 409 NIN_ALREADY_REGISTERED;
+   * that enrollment is gone, so its cookie is expired with the answer.
+   */
+  @Post('holder/verify')
+  @HttpCode(200)
+  @AuditAction('identity.patient-enrollment.holder-verify')
+  async verifyHolder(@Body() input: VerifyPatientEnrollmentHolderDto,
+    @Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
+    this.assertOrigin(request);
+    this.assertAccountlessEnrollment(request,
+      this.namedCookie(request, this.google.onboardingCookieName));
+    try {
+      return await this.enrollments.verifyHolderCode(this.cookie(request), input.challengeId,
+        input.code, request.correlationId);
+    } catch (error) {
+      if (error instanceof DomainProblem && error.code === 'NIN_ALREADY_REGISTERED') {
+        clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
+      }
+      throw error;
+    }
   }
 
   @Post('contact')

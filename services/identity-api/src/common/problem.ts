@@ -18,6 +18,11 @@ export interface ProblemDetails {
   correlationId: string;
   code: string;
   errors?: readonly { field: string; messages: readonly string[] }[];
+  /**
+   * Per-field outcomes of a comparison, each a fixed word (ADR-063:
+   * match, no_match or not_in_record). Never a request or record value.
+   */
+  fields?: Readonly<Record<string, string>>;
 }
 
 export class DomainProblem extends HttpException {
@@ -26,6 +31,7 @@ export class DomainProblem extends HttpException {
     public readonly code: string,
     detail: string,
     public readonly errors?: ProblemDetails['errors'],
+    public readonly fields?: ProblemDetails['fields'],
   ) {
     super(detail, status);
   }
@@ -124,6 +130,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       correlationId: request.correlationId ?? 'unavailable',
       code,
       ...(domainProblem?.errors ? { errors: domainProblem.errors } : {}),
+      ...(domainProblem?.fields ? { fields: domainProblem.fields } : {}),
     };
 
     if (exception instanceof RetryAfterProblem) response.setHeader('Retry-After', String(exception.retryAfterSeconds));

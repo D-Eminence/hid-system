@@ -3760,7 +3760,7 @@ Tests:
 ## Self-reported enrollment profile (0092)
 
 `0092_patient_self_reported_enrollment_profile.sql`
-(BRANCH:launch/patient-self-enrollment, ADR-061) lets public patient
+(D-Eminence/hid-system#82, ADR-061) lets public patient
 enrollment activate a NIN record without a date of birth or gender. QoreID
 may return only the name, the NIN and its reference. Before 0092 the
 activation command required both in the profile JSON, which must hash to the
@@ -3851,5 +3851,441 @@ Tests:
   signature in its privilege check; its 7-argument calls are unchanged.
 - All 48 SQL suites pass on a database built from empty to 0092 and
   bootstrapped, and the 47 additional suites again with every schema, table
+  and function owned by a `NOSUPERUSER NOBYPASSRLS` role (local evidence,
+  release checklist §8).
+
+## NIN holder proof (0093)
+
+`0093_nin_holder_ownership_proof.sql` (D-Eminence/hid-system#84,
+ADR-062) requires a proof that the person holds the NIN before a public
+enrollment reaches the contact step. A QoreID lookup proves only that the NIN
+exists. The proof in this change is a one-time code sent by SMS to the phone
+the NIN record lists (`registry_phone_otp`). In 0093 the proof command
+refused an in-person check (`facility_in_person`); 0094 adds it
+("Facility-assisted registration (0094)" below).
+
+**State machine.** `identity.public_patient_enrollments.state` gains
+`verify_holder`, now the default: `verify_holder` -> (holder proof) ->
+`verify_contact` -> `set_password` -> `active`.
+
+**Enrollment table.**
+
+- The unique constraint `public_patient_enrollments_nin_lookup_hmac_key` is
+  dropped and replaced by the plain index `public_patient_enrollments_nin_idx`.
+  Each start inserts a row. A proof removes the NIN's other unfinished rows.
+- `public_patient_enrollments_proven_nin_uq`: one row per NIN at
+  `verify_contact` or `set_password`.
+- New columns: `holder_method` (`registry_phone_otp`, `facility_in_person`
+  or `none_before_0093`), `holder_verified_at`, `holder_challenge_id` (no
+  foreign key), `holder_verification_id` (unique, no foreign key, for 0094),
+  `holder_recipient_hmac`, `desk_code_hmac` and `desk_code_expires_at` (for
+  0094).
+- Named checks: `verify_contact` and `set_password` need a proven method and
+  `holder_verified_at`; `active` needs a method; `registry_phone_otp` if and
+  only if `holder_challenge_id`; `facility_in_person` if and only if
+  `holder_verification_id`; `verify_holder` has no method, patient or
+  contact; `none_before_0093` only on an active row.
+
+**Codes.** `identity.public_patient_enrollment_otps.purpose` is `contact`
+(the default) or `nin_holder`. A `nin_holder` code goes to a phone only.
+Every read in Identity filters by purpose. The contact check of the
+activation command now also requires `purpose = 'contact'` and
+`verified_at <= expires_at`.
+
+**Backfill.** With forced row-level security lifted on the two tables for
+the backfill only: open codes of rows that are not active are invalidated
+(`expired`); those rows go back to `verify_holder` with their contact
+cleared and `row_version + 1`; active rows get `none_before_0093`. The
+release preflight requires zero active public enrollments in production
+before 0093 (release checklist §5), so production should mark none.
+
+**Holder events.** `identity.public_patient_holder_events` (`id`, `kind`
+`send`, `failure` or `proof`, `nin_digest`, `phone_digest`, `method`,
+`occurred_at`) holds the counts behind the budgets. Forced row-level
+security admits `system:auth` only, and no runtime role has a table
+privilege. `nin_digest` is HMAC(`patient-enrollment-holder-nin`,
+`nin_lookup_hmac`); `phone_digest` is the enrollment's
+`holder_recipient_hmac` (HMAC `patient-enrollment-holder-phone` of the
+normalized phone). No phone or NIN is stored in clear. The prune command
+removes send and failure rows after 31 days and proof rows after 366 days.
+The phone digest is kept here only: no audit event carries it, because the
+audit log is append-only and outlives these windows.
+
+**Commands.** All `SECURITY DEFINER`, `search_path` fixed, owned by the
+enrollment owner, `system:auth` only, `EXECUTE` for the Identity runtime
+only:
+
+- `identity.record_public_patient_holder_send(uuid, char, char, integer, integer, integer)`
+  needs the enrollment's open code, stored first by the caller: a
+  `nin_holder` code to the enrollment's registry phone, unused and unexpired
+  (0051 allows one open code per enrollment). Without it, `55000`
+  `PATIENT_HOLDER_CODE_REQUIRED`. It returns `false` when a budget is spent:
+  five sends to the phone in 24 hours, or the NIN's failures in 24 hours or
+  30 days plus the attempts left on every open holder code of the NIN, the
+  new one included, above their limits. So the NIN never has more wrong
+  codes in reach than its budgets, across any number of enrollments.
+  Otherwise it records a `send` row and returns `true`. On `false` Identity
+  rolls back the code it stored.
+- `identity.record_public_patient_holder_failure(uuid, char, uuid, char, integer, integer)`
+  records a `failure` row. When a daily or monthly count reaches its limit
+  it writes `identity.public-patient-enrollment.holder-route-closed`
+  (`ninDigest`, `window` `day` or `month`) once.
+- `identity.record_public_patient_holder_proof(uuid, char, text, uuid, uuid, char, integer)`
+  is the only writer of the holder columns after the backfill. It refuses
+  any method but `registry_phone_otp` (`22023`
+  `PATIENT_HOLDER_METHOD_UNAVAILABLE`) and an invalid code (`23514`
+  `PATIENT_HOLDER_PROOF_INVALID`). Then: a NIN that has a Health ID deletes
+  this enrollment and its codes, audits `existing-identity` and returns
+  `existing_identity`; a phone that proved five other NINs this year returns
+  `route_limited`; an unexpired in-person proof of the NIN returns
+  `facility_conflict`; otherwise it deletes the NIN's other unfinished rows
+  and their codes (audited `superseded`, or `contested` when a proof of one
+  method removes one of the other), consumes the code, sets the holder
+  columns and `verify_contact`, records a `proof` row, audits
+  `holder-verified` (`method`, `ninDigest`) and returns `verified`.
+- `identity.prune_expired_public_patient_enrollments()` (replaced) locks the
+  expired enrollments that are not active `FOR UPDATE SKIP LOCKED`, in id
+  order, before it deletes their codes and then them. A proof locks every
+  unfinished enrollment of its NIN, an expired one included, before it
+  deletes their codes, so the prune takes rows in the same order and skips
+  one a proof holds; the next prune removes it. Before this order the two
+  could deadlock (`40P01`, answered `503`).
+
+**Activation.** 0092's 9-argument command, same signature, defaults, owner,
+search path and grants, now requires a holder proof for a first activation:
+`registry_phone_otp`, its code a different one from the contact code, of
+purpose `nin_holder` to the same phone digest, verified before it expired and
+consumed, and `holder_verified_at <= contact_verified_at`. Otherwise `23514`
+`PATIENT_HOLDER_PROOF_INVALID` (Identity: `409 ENROLLMENT_HOLDER_PROOF_REQUIRED`).
+The assurance row's `nin_verified_at` is the holder proof's time. The
+activation audit event gains `holderMethod`.
+
+**Lock order.** The proof command and the activation read
+`nin_lookup_hmac` without a lock and take
+`pg_advisory_xact_lock(hashtextextended('patient-nin:' || nin_lookup_hmac, 0))`
+(0092's key) themselves, then the enrollment row `FOR UPDATE`; the proof
+then takes its code, the NIN's other unfinished rows in id order, and the
+`patient-holder-nin:` and `patient-holder-phone:` locks. The send and
+failure commands take the enrollment row and then the two holder locks; they
+do not take the NIN lock and rely on the caller to hold it. Identity takes
+the NIN lock before the row lock in every holder step and in activation
+(`withNinLock`). Two proofs, or a proof and an activation, of one NIN wait
+for each other and do not deadlock. The prune locks rows before codes too
+(above).
+
+**Grants.** `runtime-grants.sql` replaces the Identity runtime's table-level
+`INSERT` and `UPDATE` on the enrollment table with column lists. `INSERT`
+excludes `state` and every holder column; `UPDATE` excludes `holder_method`,
+`holder_verified_at`, `holder_challenge_id`, `holder_verification_id`,
+`nin_lookup_hmac` and the token. The runtime gets no privilege on the holder
+events table.
+
+**Migration locks.** `ACCESS EXCLUSIVE` on the enrollment and code tables
+for the whole migration, each within the runner's 5 s lock timeout.
+Enrollment requests wait. A timeout rolls 0093 back whole; it can be run
+again.
+
+Tests:
+
+- `public-patient-holder-proof.integration.sql` (new, rollback-only): the
+  command catalogue (definer, search path, owner, `EXECUTE` for the Identity
+  runtime only, the NIN lock before the row lock in the proof and the
+  activation); the schema checks; the runtime's refused writes (holder
+  columns, `nin_lookup_hmac`, the token, an inserted state or method, any
+  read or write of the holder events: `42501`); refused proofs; supersession
+  and the one-proven-row index; a later phone proof replacing an earlier one;
+  an unexpired facility proof answered `facility_conflict` and an expired one
+  removed (`contested`); a bound NIN; the send budget, the daily and monthly
+  failure budgets with rows older than 48 hours and 29 days, and their
+  audits; the attempts left on open codes counted with the failures (a third
+  open code of one NIN, six failures and a new code, 26 a month and a new
+  code are refused); a send without its stored code or with one to another
+  phone (`55000`); no phone digest in any holder audit event; the
+  distinct-NIN budget and its 366-day window; the prune and its lock order;
+  each command's own refusals, called directly as the Identity runtime with
+  the exact SQLSTATE and message (a proof with a code closed by a resend,
+  spent, definitively failed, already verified or sent to another phone, of
+  an expired enrollment, while reconciliation is open; a send for an expired,
+  proven or recipient-less enrollment; a failure on a contact code or a
+  proven enrollment; each command under another actor); and activation cases
+  G1 to G7 (G1 activates with `nin_verified_at` the proof's time and
+  `holderMethod` audited; G2 to G6 are refused `PATIENT_HOLDER_PROOF_INVALID`;
+  G7 `PATIENT_CONTACT_NOT_VERIFIED`) and H1 to H4 (a holder code no longer
+  consumed, closed by a resend or re-purposed as a contact code:
+  `PATIENT_HOLDER_PROOF_INVALID`; a contact code re-purposed as a holder
+  code: `PATIENT_CONTACT_NOT_VERIFIED`).
+- `upgrade/0093-public-patient-holder-backfill.sql` (new, rollback-only,
+  run on a database at exactly 0092): seeds a `verify_contact`, a
+  `set_password` (with a consumed contact code) and an `active` enrollment,
+  applies 0093 and checks the backfill. The rehearsal builds that database
+  with `apply-migrations.mjs --through=0092_patient_self_reported_enrollment_profile.sql`.
+- `public-patient-enrollment`, `-windows`, `-self-reported`,
+  `google-onboarding` and `progressive-patient-nin` now prove the holder
+  through the proof command as `system:auth` before their contact and
+  activation fixtures.
+- Mutants (local evidence), each a `CREATE OR REPLACE` of one 0093 function
+  or one grant on a copy of a database built to 0093 and bootstrapped, then
+  the six enrollment suites. Killed: the activation without its holder
+  check, with a holder proof after the contact proof, or without the NIN
+  lock; the proof without the facility rule, the existing-identity check,
+  the supersession, the distinct-NIN budget or the NIN lock; the send
+  without the phone budget or the monthly failure budget; a table-level
+  `UPDATE` on the enrollment table or a `SELECT` on the holder events for
+  the Identity runtime (the first twelve). Then, from the review: the proof
+  without its closed-code, spent-attempts, failed-delivery, verified-code or
+  recipient check, its expiry check or its readiness check; the activation
+  without the holder code's consumed check or purpose check, or the contact
+  code's purpose check; the send without its state, expiry, recipient or
+  actor check; the failure without its purpose, state or actor check; the
+  send without the open-code attempts (daily or monthly) or the stored-code
+  check, or with a code to another phone; the prune without its row lock;
+  and the proof auditing the phone digest. Three are equivalent and survive
+  by design: the proof without its actor check (the readiness helper refuses
+  any other actor with the same `42501 PATIENT_ENROLLMENT_DENIED`), the
+  proof without its channel check (the table check
+  `public_patient_enrollment_otps_holder_phone_check` keeps a holder code
+  on a phone), and the activation without the holder code's
+  `invalidated_at is null` (the table check
+  `public_patient_enrollment_otps_check2` keeps a consumed code from being
+  closed).
+- Races run over HTTP in `verify-patient-enrollment-runtime.mjs`, with the
+  owner holding the NIN lock until the requests wait on it in a set order:
+  two correct codes for one NIN (one wins, the other is `404`), and a holder
+  proof against an activation in both orders on every run (the proof first:
+  the activation creates nothing; the activation first: the proof answers
+  `409 NIN_ALREADY_REGISTERED` and expires the cookie). A third case runs
+  the prune beside a proof that holds an expired enrollment of its NIN:
+  the prune skips it and the proof answers `verify_contact`; before the
+  row-first prune the proof was aborted for a deadlock.
+- All 50 SQL suites pass on a database built from empty to 0093 and
+  bootstrapped, and the 48 additional suites again with every schema, table
+  and function owned by a `NOSUPERUSER NOBYPASSRLS` role (local evidence,
+  release checklist §8).
+
+## Facility-assisted registration (0094)
+
+`0094_facility_assisted_registration.sql`
+(D-Eminence/hid-system#85, ADR-063, numbered after 0093)
+adds the in-person holder route. A patient starts on their own device and
+shows a desk code at a participating facility. A staff member checks one
+original photo ID and records the outcome. The holder proof then accepts
+`facility_in_person`. A NIN alone never creates a Health ID.
+
+**Permission.** `identity.patient.assisted_registration` on `doctor`,
+`clinician` and `nurse` only (not `org_admin`, `admin` or `receptionist`).
+
+**Participating facilities.**
+
+- `identity.facility_assisted_registration`: `facility_id` (primary key),
+  `status` (`active` or `suspended`), `address_line` (optional, 1 to 200),
+  `town`, `lga`, `state` (1 to 120 each), `hours` (optional, 1 to 200),
+  `reason` (8 to 500), `row_version`, `updated_by`, timestamps. Text is
+  trimmed and has no control characters. The column is `status`, not
+  `state`, because `state` is the location.
+- `identity.facility_assisted_registration_events`: one append-only row per
+  change (`platform.reject_mutation`).
+- Forced row-level security: read in `system:auth`, by the facility's own
+  staff, or by a platform actor with `platform.facility.read`; write only by
+  a platform actor with `platform.facility.manage`. No runtime role has a
+  table privilege.
+- `identity.facility_assisted_registration_participating(uuid)`: the
+  designation is active, the facility is verified and active, and its
+  organization is active.
+- `identity.list_participating_facilities()`: `system:auth` only; name,
+  address line, town, LGA, state and hours of each participating facility,
+  no id, at most 500.
+- `identity.admin_facility_assisted_registration(uuid)` reads one
+  designation (platform).
+- `identity.admin_set_facility_assisted_registration(uuid, bigint, text,
+  text, text, text, text, text, text, text, char)`: the permission, platform
+  scope, a fresh step-up (`auth.require_platform_step_up`), the expected
+  version (0 creates, and only as active), a reason and an idempotency key
+  (operation `facility.assisted-registration`). Refusals:
+  `ADMIN_INVALID_ASSISTED_REGISTRATION`, `ADMIN_FACILITY_NOT_FOUND`,
+  `ADMIN_VERSION_CONFLICT`, `ADMIN_NO_STATE_CHANGE` and
+  `ASSISTED_REGISTRATION_FACILITY_INACTIVE` (making an inactive facility or
+  organization active).
+
+**Who may check.**
+
+- `auth.staff_session_is_mfa()`: the request's session
+  (`platform.current_session_id()`) is the actor's live staff session at
+  its account's token version, with a session assurance row on an active
+  factor. Not granted to any runtime; it runs inside the commands.
+- `identity.assisted_registration_actor_attested(text, uuid, uuid)`: the
+  actor holds, at that membership and facility, an unrevoked role carrying
+  the permission, backed by a workforce role grant (0087) and a current
+  credential attestation for that role. Legacy and onboarding roles never
+  qualify.
+
+**In-person checks.** `identity.assisted_registration_verifications`: one
+row per check, `matched`, `not_matched` or `code_not_found`. It holds the
+enrollment id (no foreign key), the NIN's holder digest, the desk code's
+keyed digest, the method, the document type, the per-field results, the
+staff account, membership and facility, the request key and request digests,
+the correlation id, `verified_at`, and a write-once `proof_outcome`
+(`verified` or `existing_identity`) and `proof_recorded_at`. Never a name,
+date, document number, contact or free text. Checks tie outcome, results and
+enrollment together; a proof outcome is only on a matched check. The guard
+trigger refuses every update and delete except writing the proof outcome
+once (`55000 ASSISTED_VERIFICATION_IMMUTABLE`). Forced row-level security:
+staff insert only for their own facility, membership and account; staff read
+their facility's rows and their own; `system:auth` reads and writes the
+proof outcome. No runtime role has a table privilege.
+
+**Staff command.**
+`identity.record_assisted_verification(uuid, char, char, text, text, text,
+text, text, text, char, char, integer, integer)`, staff context, in this
+order:
+
+- `42501 ASSISTED_REGISTRATION_NOT_AUTHORIZED` unless the staff session has
+  MFA in SQL, the membership has the permission, the grant is attested and
+  the facility takes part.
+- `22023 ASSISTED_VERIFICATION_INVALID` for a bad argument or limit.
+- The staff advisory lock, then the facility advisory lock.
+- The same staff member and key replays the stored row (audit `.replay`);
+  another request under that key is `23505 ASSISTED_VERIFICATION_KEY_REUSED`.
+- `54000 ASSISTED_VERIFICATION_LIMITED` when the staff member's checks
+  (across facilities) or the facility's checks in the last 24 hours reach
+  their limit; every outcome counts.
+- It inserts the row and writes a staff audit row
+  `identity.assisted-verification.record` (`success` for a match,
+  `denied` otherwise) with `method`, `documentType`, `outcome` and
+  `ninDigest` only.
+
+**Desk codes.** `identity.public_patient_enrollments` gains `desk_code_salt`
+(32 hex characters) and `desk_code_issues` (0 to 5). Checks: salt with
+digest; a desk code only at `verify_holder` and not after the enrollment
+expires. Identity derives the code from the cookie token and the salt and
+stores only its keyed digest (`desk_code_hmac`, unique since 0093).
+
+**Holder proof (replaced, same signature, owner and grants).** For
+`facility_in_person` with a check id and no code: the check exists, matched,
+of this enrollment and NIN digest, of the current desk code, recorded in the
+last 10 minutes, with no proof outcome, and not used by another enrollment
+(`23514 PATIENT_HOLDER_PROOF_INVALID` otherwise). The verifying staff member
+must still hold the permission and the attested grant at a participating
+facility (`42501 ASSISTED_REGISTRATION_NOT_AUTHORIZED`): through
+`auth.membership_has_permission` an active account, staff record and
+membership, and through `identity.assisted_registration_actor_attested` the
+attested role. Then, as in 0093:
+the existing-Health-ID check (it writes `existing_identity` on the check),
+supersession (an in-person proof removes a phone-proven enrollment:
+`contested`), and the proof: `verify_contact`, the desk code cleared, any
+open holder code closed (`expired`), the proof outcome written once. A
+phone proof also clears the desk code. `facility_conflict` stays
+phone-only.
+
+**Activation (replaced, same signature).** A `facility_in_person` proof
+needs its matched check of the same enrollment with proof outcome
+`verified`, and the verifying staff member still authorized at a
+participating facility, by the same two checks as the proof.
+`nin_verified_at` is the check's time.
+
+**Grants.** `runtime-grants.sql` grants the Identity runtime (and the
+schema-test runtime) `EXECUTE` on the facility list, the staff command and
+the two designation commands, adds `desk_code_salt` and `desk_code_issues`
+to its `UPDATE` column list, revokes the helpers from `PUBLIC`, and gives no
+role a privilege on the three new tables.
+
+**Migration locks.** `ACCESS EXCLUSIVE` on
+`identity.public_patient_enrollments` while the two columns and three checks
+are added (no rewrite; the checks scan the table), within the runner's 5 s
+lock timeout. Everything else creates new objects or replaces functions. A
+timeout rolls 0094 back whole; it can be run again.
+
+**Review query.** Release checklist §10, "In-person checks per staff member
+and facility (0094)": per facility and staff member over 7 days, the
+checks by outcome and proof outcome, run by the migration administrator in
+a read-only transaction as `system:auth`. No runtime or monitoring role can
+read the checks. Ids and counts only.
+
+Tests:
+
+- `facility-assisted-registration.integration.sql` (new, rollback-only):
+  the catalogue (definer, search path, grants, forced row-level security);
+  direct DML refused for every runtime role; designations (permission,
+  step-up, version 0, idempotency, inactive facility refused, append-only
+  events); the facility list; `auth.staff_session_is_mfa` (false for
+  another account's assured session, a revoked or expired session, a session
+  without assurance, a platform session, no session, an old token version,
+  and a session whose factor was revoked after it was assured); the staff
+  command refused without MFA assurance, at another facility, at an
+  undesignated facility, without the permission, for `org_admin`, for a
+  legacy nurse, for a lapsed attestation, for another account's assured
+  session, a revoked or expired session or a revoked factor, for a
+  deactivated membership that keeps its role and attested grant, and in
+  system context; replay, key reuse and the staff audit row; both budgets
+  over 24 hours; append-only checks; the proof's in-person method (no check,
+  a code with a check, not matched, another enrollment's check, a check
+  naming another enrollment with this NIN and desk code, another NIN, a
+  wrong token, a new desk code, older than 10 minutes, a suspended
+  designation, a revoked role, the verifier's account locked or membership
+  deactivated after the check, and the attested role revoked while a legacy
+  role keeps the permission); a proof (`verify_contact`, desk code cleared,
+  open holder code closed, a phone-proven enrollment displaced as
+  `contested`); a phone proof answered `facility_conflict`; a second
+  in-person proof superseding the first; an existing Health ID; activation
+  after an in-person proof and refused after the designation is suspended,
+  the role revoked, the verifier's account disabled, its membership
+  deactivated, or the attested role revoked while a legacy role keeps the
+  permission; the desk-code checks. Fixture assertions show that each
+  verifier case leaves only one of the two checks able to refuse.
+- `runtime-roles.integration.sql` (the bootstrap and `db:verify-roles`):
+  the 0093 holder commands and the four 0094 commands are executable by the
+  Identity runtime only, not `PUBLIC` or another runtime; the participation,
+  attestation and staff-session helpers and the check guard by no role but
+  their owner; no runtime role has a privilege on the holder events, the
+  designations, their events or the checks; the runtime inserts only an
+  enrollment's start columns, never writes its holder columns, and updates
+  the desk-code columns; the permission is held by doctor, clinician and
+  nurse only.
+- `public-patient-holder-proof.integration.sql`: an in-person proof without
+  a check is `23514 PATIENT_HOLDER_PROOF_INVALID`; one with a code is
+  `22023`.
+- `platform-mfa-approval.integration.sql`: `auth.staff_session_is_mfa` may
+  read a factor's status.
+- Mutants (local evidence), each one change to 0094 applied with the role
+  grants on a database built to 0093, then the new suite. Killed: the staff
+  command without the MFA check, the attested check or the participation
+  check; participation that ignores the designation status; the proof
+  without the 10-minute bound, the desk-code match, the re-check of the
+  verifying staff member, the enrollment match (killed once the suite added
+  a check naming another enrollment with this NIN and desk code) or the
+  matched-outcome check (refused by the table check instead of the proof's
+  own refusal, which the suite tells apart); activation without the
+  designation re-check; the designation command without step-up; the checks
+  table without forced row-level security; the facility budget ignored; the
+  facility list for any caller. Fourteen in all. After review, nine more,
+  each of which the earlier suite let through: `auth.staff_session_is_mfa`
+  without the revoked-session check, the expiry checks, the active-factor
+  check or the actor's own account; the staff command without
+  `auth.membership_has_permission`; the proof and activation each without
+  `auth.membership_has_permission` or without the attested re-check. All
+  nine are killed, and the four session mutants are killed again by the
+  staff-command cases alone. Twenty-three in all.
+- Grant mutants of `runtime-roles.integration.sql` (local evidence), each a
+  grant or revoke inside a rolled-back transaction on the bootstrapped
+  database: `EXECUTE` on `auth.staff_session_is_mfa` or the participation
+  helper given to a runtime, `EXECUTE` on the check command or the holder
+  proof taken from the Identity runtime, the designation read given to the
+  EHR runtime, `SELECT` on the designation events or a holder-events column
+  given to the Identity runtime, `UPDATE (holder_method)` given and
+  `UPDATE (desk_code_salt)` taken. The earlier file passes all nine; the new
+  one fails each.
+- Identity mutants: the staff route without its enabled guard, the service
+  without its route check, a desk code issued with the route closed, and a
+  mismatch treated as a match (refused by the type check) are killed by the
+  unit specs. The progress showing a desk code without re-checking its
+  digest is equivalent: the cookie token is checked first, so the derived
+  code always matches.
+- `verify-assisted-registration-runtime.mjs` (12 checks, as
+  `hid_identity_api_runtime`): designation over HTTP with step-up and
+  If-Match `0`, availability and the list, the desk code, who may check and
+  the guard order, `404`, `422` with fields, replay and key reuse, the
+  match, activation and sign-in, an existing Health ID, a record without a
+  date of birth, the race with a phone proof, both budgets and suspension.
+- All 51 SQL suites pass on a database built from empty to 0094 and
+  bootstrapped, and the 49 additional suites again with every schema, table
   and function owned by a `NOSUPERUSER NOBYPASSRLS` role (local evidence,
   release checklist §8).
