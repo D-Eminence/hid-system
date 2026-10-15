@@ -34,8 +34,9 @@
 //     overdue and unswept.
 // 14. Expiry before and after the sweep.
 // 15. Races: a double-clicked submit, concurrent starts, concurrent
-//     approvals, withdraw against approve, approve against sign-in, the
-//     sweeper against a locked row.
+//     approvals, a double-submitted step 1, the platform's last daily slot
+//     and a facility's last open slot taken twice at once, withdraw against
+//     approve, approve against sign-in, the sweeper against a locked row.
 // 16. Faults are never a 401: a missing grant and a missing function are 503.
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -870,6 +871,95 @@ try {
   assert.equal(doubleAttests[0].body.attestationId, doubleAttests[1].body.attestationId);
   assert.equal(await factorFailures(doubleAttest.accountId), failuresBeforeDouble,
     'a replayed step 1 counted a failure against the applicant');
+  //   Two creations held before they count, at the platform's last daily
+  //   slot and at a facility's last open slot. The owner holds the platform's
+  //   submit counter row, so both requests pass their quota checks and reach
+  //   the creation before either commits; then it is released.
+  const environment = getEnvironment();
+  const platformCounter = async () => one(`select attempt_count::int as n, bucket_start
+    from platform.clinician_application_quota_counters where scope = 'platform' and operation = 'submit'
+    order by bucket_start desc limit 1`);
+  async function heldAtTheCounter(requests) {
+    const holder = await owner.connect();
+    try {
+      await holder.query('begin');
+      await holder.query(`select 1 from platform.clinician_application_quota_counters
+        where scope = 'platform' and operation = 'submit' order by bucket_start desc limit 1 for update`);
+      const pending = Promise.all(requests.map((send) => send()));
+      for (let waited = 0; ; waited += 1) {
+        const waiting = await count(`select count(*)::int as n from pg_stat_activity where datname = current_database()
+          and backend_type = 'client backend' and wait_event_type = 'Lock' and pid <> pg_backend_pid()`);
+        if (waiting >= requests.length) break;
+        assert(waited < 800, 'the creations did not both wait before committing');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await holder.query('commit');
+      return await pending;
+    } finally {
+      await holder.query('rollback').catch(() => undefined);
+      holder.release();
+    }
+  }
+  //   The platform's last slot: one sign-up is created, the other is 429 and
+  //   creates nothing; the count ends at the cap.
+  const platformLimit = environment.CLINICIAN_APPLICATION_SUBMIT_PLATFORM_DAILY_LIMIT;
+  const counterBefore = await platformCounter();
+  await owner.query(`update platform.clinician_application_quota_counters set attempt_count = $1
+    where scope = 'platform' and operation = 'submit' and bucket_start = $2`, [platformLimit - 1, counterBefore.bucket_start]);
+  const lastSlot = [];
+  for (const [label, facilityId] of [['last-a', ids.x], ['last-b', ids.y]]) {
+    const email = `clinician-${label}-${randomUUID().slice(0, 8)}@example.invalid`;
+    const network = newNetwork();
+    const { cookie } = await draftFor(email, network);
+    lastSlot.push({ email, send: () => call('post', '', { cookie, network, headers: { 'Idempotency-Key': key(label) },
+      body: { ...details(facilityId, { licenceNumber: `MDCN/R/${label.toUpperCase()}` }), email,
+        fullName: `Runtime ${label} Clinician`, password } }) });
+  }
+  const atTheCap = await heldAtTheCounter(lastSlot.map((entry) => entry.send));
+  assert.deepEqual(atTheCap.map((response) => response.status).sort(), [201, 429],
+    `two submissions at the platform's last slot: ${JSON.stringify(atTheCap.map((response) => response.body))}`);
+  const capRefusal = atTheCap.find((response) => response.status === 429);
+  assert.deepEqual([capRefusal.body.code, capRefusal.headers['retry-after']], ['CLINICIAN_APPLICATION_RATE_LIMITED', '86400']);
+  assert.equal(await count('select count(*)::int as n from auth.accounts where email = any($1)',
+    [lastSlot.map((entry) => entry.email)]), 1, 'the refused submission created an account');
+  assert.equal((await platformCounter()).n, platformLimit, 'the platform counted past its daily cap');
+  await owner.query(`update platform.clinician_application_quota_counters set attempt_count = $1
+    where scope = 'platform' and operation = 'submit' and bucket_start = $2`, [counterBefore.n + 1, counterBefore.bucket_start]);
+  //   A facility's last open slot: a sign-up (C8) and an apply-again (C13) to
+  //   one facility; the one that counts second sees the first and is 409
+  //   CLINICIAN_APPLICATION_FACILITY_BUSY.
+  const openLimit = environment.CLINICIAN_APPLICATION_FACILITY_OPEN_LIMIT;
+  const crowded = randomUUID();
+  await owner.query(`insert into identity.facilities (id, organization_id, name, code, timezone, active, lifecycle_status)
+    values ($1, $2, 'Crowded Race Facility', $3, 'Africa/Lagos', true, 'verified')`,
+  [crowded, ids.org, `CRC-${crowded.slice(0, 6)}`]);
+  for (let filled = 1; filled < openLimit; filled += 1) {
+    const filler = await account(`filler-${filled}`, { staffOnly: true });
+    await owner.query(`insert into identity.clinician_applications (id, account_id, staff_id, facility_id, requested_role,
+        regulator_code, issuing_authority, licence_number, licence_valid_until, applicant_full_name, state, submitted_at,
+        expires_at, correlation_id, updated_at)
+      select gen_random_uuid(), staff.account_id, staff.id, $2, 'doctor', 'MDCN', 'Medical and Dental Council of Nigeria',
+        $3, current_date + 400, staff.full_name, 'awaiting_authenticator', now(), now() + interval '30 days',
+        'clinician-runtime-filler', now()
+      from identity.staff staff where staff.account_id = $1`, [filler.id, crowded, `MDCN/FILL/${filled}`]);
+  }
+  const crowdedOpen = async () => count(`select count(*)::int as n from identity.clinician_applications
+    where facility_id = $1 and state in ('awaiting_authenticator', 'submitted', 'under_review') and expires_at > now()`,
+  [crowded]);
+  assert.equal(await crowdedOpen(), openLimit - 1);
+  const crowdedEmail = `clinician-crowded-${randomUUID().slice(0, 8)}@example.invalid`;
+  const crowdedNetwork = newNetwork();
+  const crowdedDraft = await draftFor(crowdedEmail, crowdedNetwork);
+  const lastOpen = await heldAtTheCounter([
+    () => call('post', '', { cookie: crowdedDraft.cookie, network: crowdedNetwork,
+      headers: { 'Idempotency-Key': key('crowded') }, body: { ...details(crowded, { licenceNumber: 'MDCN/R/40008' }),
+        email: crowdedEmail, fullName: 'Runtime Crowded Clinician', password } }),
+    () => call('post', '/current/applications', { cookie: doubleAttest.cookie, network: doubleAttest.network,
+      headers: { 'Idempotency-Key': key('crowded-apply') }, body: details(crowded, { licenceNumber: 'MDCN/R/40007' }) })]);
+  assert.deepEqual(lastOpen.map((response) => response.status).sort(), [201, 409],
+    `a sign-up and an apply-again at a facility's last slot: ${JSON.stringify(lastOpen.map((response) => response.body))}`);
+  assert.equal(lastOpen.find((response) => response.status === 409).body.code, 'CLINICIAN_APPLICATION_FACILITY_BUSY');
+  assert.equal(await crowdedOpen(), openLimit, 'a facility holds more open applications than its cap');
   //   Withdraw against approve: one wins, and the result is consistent.
   const torn = await applicant('torn', ids.x, 'MDCN/R/40006');
   await platform.stepUp(adminA);
@@ -887,7 +977,7 @@ try {
   } else {
     assert.deepEqual([withdrawRace.status, approveRace.status, tornState, tornMemberships], [409, 201, 'approved', 1]);
   }
-  checks.push('races: a double-clicked submit yields one account and application (201 and 201 replayed); two concurrent starts for one address send one code; two Super Admins approving at once yield one 201 and one 409, beside the applicant\'s sign-in, with no deadlock; a double-submitted step 1 that waits for the applicant\'s account yields one attestation and its replay (201 and 201 replayed), with no failure counted; withdraw against approve leaves either a withdrawn application and no membership or an approved one with its membership');
+  checks.push('races: a double-clicked submit yields one account and application (201 and 201 replayed); two concurrent starts for one address send one code; two Super Admins approving at once yield one 201 and one 409, beside the applicant\'s sign-in, with no deadlock; a double-submitted step 1 that waits for the applicant\'s account yields one attestation and its replay (201 and 201 replayed), with no failure counted; two sign-ups held before they count at the platform\'s last daily slot yield one 201 and one 429 (nothing created, the count ends at the cap); a sign-up and an apply-again held before they count at a facility\'s last open slot yield one 201 and one 409 CLINICIAN_APPLICATION_FACILITY_BUSY (the facility ends at its cap); withdraw against approve leaves either a withdrawn application and no membership or an approved one with its membership');
 
   // 16. Faults are 503, never 401.
   await owner.query('revoke execute on function identity.current_clinician_applications(character) from hid_identity_runtime');

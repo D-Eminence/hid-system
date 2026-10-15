@@ -158,7 +158,8 @@ begin
 end $$;
 -- A submission through a draft; the next capability is session:<tag>-account.
 create function pg_temp.ca_submit(tag text, email text, full_name text, role_code text, regulator text,
-  licence text, valid_until date, facility uuid, open_limit integer default 30) returns uuid language plpgsql as $$
+  licence text, valid_until date, facility uuid, open_limit integer default 30, platform_limit integer default 100000)
+returns uuid language plpgsql as $$
 declare
   created uuid;
 begin
@@ -166,7 +167,7 @@ begin
     pg_temp.ca_h('session:' || tag || '-account'), 'clinician-suite-key-' || tag, pg_temp.ca_h('sha:' || tag), email,
     pg_temp.ca_h('email:' || lower(email)), full_name,
     '$argon2id$v=19$m=65536,t=3,p=1$c3ludGhldGljc2FsdA$c3ludGhldGljaGFzaA', role_code, regulator, licence,
-    valid_until, facility, open_limit);
+    valid_until, facility, open_limit, platform_limit);
   return created;
 end $$;
 create function pg_temp.ca_account(email text) returns uuid language sql as $$
@@ -235,7 +236,7 @@ begin
 end $$;
 grant execute on function pg_temp.ca_h(text), pg_temp.ca_system(text), pg_temp.ca_as(text),
   pg_temp.ca_refused(text, text), pg_temp.ca_refused_with(text, text, text), pg_temp.ca_draft(text, text),
-  pg_temp.ca_submit(text, text, text, text, text, text, date, uuid, integer), pg_temp.ca_account(text),
+  pg_temp.ca_submit(text, text, text, text, text, text, date, uuid, integer, integer), pg_temp.ca_account(text),
   pg_temp.ca_application(text, uuid) to public;
 
 create temporary table ca_dates on commit drop as
@@ -259,12 +260,12 @@ begin
     'identity.clinician_application_session(character)',
     'identity.clinician_application_submit_probe(character,character,text,character)',
     'identity.search_clinician_application_facilities(character,text)',
-    'identity.submit_clinician_application(character,character,text,character,text,character,text,text,text,text,text,date,uuid,integer)',
+    'identity.submit_clinician_application(character,character,text,character,text,character,text,text,text,text,text,date,uuid,integer,integer)',
     'identity.bind_clinician_application_mfa_challenge(character,uuid)',
     'identity.clinician_application_authenticator_ready(character,uuid,text)',
     'identity.current_clinician_applications(character)',
     'identity.withdraw_clinician_application(character,uuid,bigint)',
-    'identity.file_clinician_application(character,text,character,text,text,text,date,uuid,integer)',
+    'identity.file_clinician_application(character,text,character,text,text,text,date,uuid,integer,integer)',
     'identity.end_clinician_application_session(character)',
     'identity.expire_clinician_applications(integer)',
     'identity.prune_clinician_application_artifacts()'] loop
@@ -296,7 +297,8 @@ begin
     'identity.guard_clinician_application_change()', 'identity.clinician_application_view(identity.clinician_applications)',
     'identity.clinician_intake_require_open()', 'identity.clinician_application_require_not_maintenance()',
     'identity.clinician_application_require_system()', 'identity.clinician_application_audit(text,text,text,text,jsonb)',
-    'identity.clinician_application_account_session(character,text[],text,boolean)'] loop
+    'identity.clinician_application_account_session(character,text[],text,boolean)',
+    'platform.count_clinician_application_submission(integer)'] loop
     foreach runtime in array array['public', 'hid_identity_api_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime',
         'hid_outreach_api_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_api_runtime', 'hid_ocr_api_runtime'] loop
       if has_function_privilege(runtime, signature, 'EXECUTE') then
@@ -390,7 +392,7 @@ select pg_temp.ca_refused($c$select pg_temp.ca_submit('closed', 'closed@ca.inval
   'PLATFORM_CONTROL_DISABLED:clinician_signup_enabled');
 select pg_temp.ca_refused($c$select * from identity.file_clinician_application(pg_temp.ca_h('session:closed'),
   'clinician-suite-key-closed', pg_temp.ca_h('sha:closed'), 'doctor', 'MDCN', 'MDCN/1', (select licence_400 from ca_dates),
-  'ca110000-0000-4000-8000-00000000000a', 30)$c$, 'PLATFORM_CONTROL_DISABLED:clinician_signup_enabled');
+  'ca110000-0000-4000-8000-00000000000a', 30, 100000)$c$, 'PLATFORM_CONTROL_DISABLED:clinician_signup_enabled');
 select pg_temp.ca_refused($c$select * from identity.search_clinician_application_facilities(pg_temp.ca_h('session:closed'),
   'suite')$c$, 'PLATFORM_CONTROL_DISABLED:clinician_signup_enabled');
 -- The status start is not gated by the control: an unknown address gets a decoy.
@@ -847,7 +849,7 @@ from (values (array['doctor', 'NMCN']), (array['nurse', 'MDCN']), (array['clinic
 select pg_temp.ca_refused(format($c$select * from identity.submit_clinician_application(pg_temp.ca_h('session:p1'),
   pg_temp.ca_h('session:p1-account'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'), 'doctor1@ca.invalid',
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'Doctor One', %L, 'doctor', 'MDCN', 'MDCN/12345',
-  (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30)$c$, hash), 'CLINICIAN_APPLICATION_INVALID')
+  (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30, 100000)$c$, hash), 'CLINICIAN_APPLICATION_INVALID')
 from unnest(array['Synthetic-Plaintext-Password-1', '$2b$12$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyz012',
   '$argon2id$v=19$m=4096,t=3,p=1$c2FsdA$aGFzaA', '$argon2i$v=19$m=65536,t=3,p=1$c2FsdA$aGFzaA']) hash;
 select pg_temp.ca_refused(format($c$select pg_temp.ca_submit('p1', 'doctor1@ca.invalid', 'Doctor One', 'doctor', 'MDCN',
@@ -882,6 +884,16 @@ do $$ begin
   if pg_temp.ca_platform_submits() <> current_setting('ca_suite.submits_before')::integer + 1 then
     raise exception 'the platform counted % created applications, not one', pg_temp.ca_platform_submits()
       - current_setting('ca_suite.submits_before')::integer;
+  end if;
+  -- C8 counts a facility's open applications under the facility's lock, held
+  -- to the end of its transaction, so two submissions to one facility count
+  -- in turn and never both take its last slot (the runtime verifier races two).
+  if not exists (select 1 from pg_locks lock_row
+       where lock_row.locktype = 'advisory' and lock_row.pid = pg_backend_pid() and lock_row.granted
+         and lock_row.mode = 'ExclusiveLock'
+         and ((lock_row.classid::bigint << 32) | lock_row.objid::bigint)
+           = hashtextextended('clinician-application-facility:ca110000-0000-4000-8000-00000000000a', 0)) then
+    raise exception 'the submission did not take its facility''s lock before counting its open applications';
   end if;
 end $$;
 do $$
@@ -964,7 +976,7 @@ begin
     pg_temp.ca_h('session:p1-replay'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'), 'doctor1@ca.invalid',
     pg_temp.ca_h('email:doctor1@ca.invalid'), 'Doctor One',
     '$argon2id$v=19$m=65536,t=3,p=1$c3ludGhldGljc2FsdA$c3ludGhldGljaGFzaA', 'doctor', 'MDCN', 'MDCN/12345',
-    (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30);
+    (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30, 100000);
   if not replay.replayed or replay.application_id <> current_setting('ca_suite.p1_application')::uuid
      or replay.session_stage <> 'enrolment_required' or replay.state <> 'awaiting_authenticator' then
     raise exception 'a submission replay was not answered with the same application: %', row_to_json(replay);
@@ -988,12 +1000,12 @@ select pg_temp.ca_refused($c$select * from identity.submit_clinician_application
   pg_temp.ca_h('session:p1-other'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1-other'), 'doctor1@ca.invalid',
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'Doctor One',
   '$argon2id$v=19$m=65536,t=3,p=1$c3ludGhldGljc2FsdA$c3ludGhldGljaGFzaA', 'doctor', 'MDCN', 'MDCN/12345',
-  (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30)$c$, 'CLINICIAN_APPLICATION_SESSION_INVALID');
+  (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30, 100000)$c$, 'CLINICIAN_APPLICATION_SESSION_INVALID');
 select pg_temp.ca_refused($c$select * from identity.submit_clinician_application(pg_temp.ca_h('session:p1'),
   pg_temp.ca_h('session:p1-other'), 'clinician-suite-key-p1-other', pg_temp.ca_h('sha:p1'), 'doctor1@ca.invalid',
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'Doctor One',
   '$argon2id$v=19$m=65536,t=3,p=1$c3ludGhldGljc2FsdA$c3ludGhldGljaGFzaA', 'doctor', 'MDCN', 'MDCN/12345',
-  (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30)$c$, 'CLINICIAN_APPLICATION_SESSION_INVALID');
+  (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30, 100000)$c$, 'CLINICIAN_APPLICATION_SESSION_INVALID');
 reset role;
 do $$ begin
   if not exists (select 1 from identity.clinician_application_sessions where token_hmac = pg_temp.ca_h('session:p1-replay')
@@ -1014,7 +1026,7 @@ select pg_temp.ca_refused($c$select * from identity.submit_clinician_application
   pg_temp.ca_h('session:p1-late'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'), 'doctor1@ca.invalid',
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'Doctor One',
   '$argon2id$v=19$m=65536,t=3,p=1$c3ludGhldGljc2FsdA$c3ludGhldGljaGFzaA', 'doctor', 'MDCN', 'MDCN/12345',
-  (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30)$c$, 'CLINICIAN_APPLICATION_SESSION_INVALID');
+  (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30, 100000)$c$, 'CLINICIAN_APPLICATION_SESSION_INVALID');
 -- An address taken between its verification and the submission; a full facility.
 select pg_temp.ca_draft('race', 'race@ca.invalid');
 select pg_temp.ca_draft('busy', 'busy@ca.invalid');
@@ -1027,6 +1039,27 @@ select pg_temp.ca_refused($c$select pg_temp.ca_submit('race', 'race@ca.invalid',
   (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a')$c$, 'CLINICIAN_EMAIL_IN_USE');
 select pg_temp.ca_refused($c$select pg_temp.ca_submit('busy', 'busy@ca.invalid', 'Busy Applicant', 'doctor', 'MDCN', 'MDCN/7002',
   (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 1)$c$, 'CLINICIAN_APPLICATION_FACILITY_BUSY');
+-- The platform's daily cap is enforced where the application is created, under
+-- the counter's row lock: a submission whose C2 check passed while the count
+-- was under the cap, but which reaches C8 once the cap is reached (another
+-- creation committed meanwhile), is refused there and creates nothing.
+reset role;
+select set_config('ca_suite.submits_now', pg_temp.ca_platform_submits()::text, true);
+set local role hid_identity_api_runtime;
+select pg_temp.ca_refused_with($c$select pg_temp.ca_submit('busy', 'busy@ca.invalid', 'Busy Applicant', 'doctor', 'MDCN',
+  'MDCN/7002', (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a', 30,
+  current_setting('ca_suite.submits_now')::integer)$c$, 'P4290', 'CLINICIAN_APPLICATION_QUOTA_EXCEEDED');
+reset role;
+do $$ begin
+  if pg_temp.ca_platform_submits() <> current_setting('ca_suite.submits_now')::integer
+     or pg_temp.ca_account('busy@ca.invalid') is not null
+     or (select consumed_at from identity.clinician_application_sessions where token_hmac = pg_temp.ca_h('session:busy'))
+       is not null then
+    raise exception 'a submission at the platform''s cap was counted, created an account or spent its draft';
+  end if;
+end $$;
+set local role hid_identity_api_runtime;
+select pg_temp.ca_system('submit-more');
 -- More applicants: P2 a nurse at Y; P3 a doctor at W; P4 at U; P5 'mdcn 12345' at Y.
 do $$ begin
   perform pg_temp.ca_draft('p2', 'nurse2@ca.invalid');
@@ -1299,11 +1332,12 @@ select pg_temp.ca_capability('p3-enrol', pg_temp.ca_account('doctor3@ca.invalid'
 select set_config('ca_suite.files_before', pg_temp.ca_platform_submits()::text, true);
 set local role hid_identity_api_runtime;
 select pg_temp.ca_system('file');
-create function pg_temp.ca_file(tag text, session_tag text, facility uuid, key_suffix text default '') returns jsonb
+create function pg_temp.ca_file(tag text, session_tag text, facility uuid, key_suffix text default '',
+  platform_limit integer default 100000) returns jsonb
 language sql as $$
   select application from identity.file_clinician_application(pg_temp.ca_h('session:' || session_tag),
     'clinician-suite-file-' || tag || key_suffix, pg_temp.ca_h('file:' || tag), 'doctor', 'MDCN', 'MDCN/12345',
-    (select licence_400 from ca_dates), facility, 30)
+    (select licence_400 from ca_dates), facility, 30, platform_limit)
 $$;
 select pg_temp.ca_refused($c$select pg_temp.ca_file('p1-x', 'p1-account', 'ca110000-0000-4000-8000-00000000000a')$c$,
   'CLINICIAN_APPLICATION_ALREADY_OPEN');
@@ -1330,15 +1364,21 @@ begin
   end if;
   select * into replay from identity.file_clinician_application(pg_temp.ca_h('session:p1-account'),
     'clinician-suite-file-p1-y', pg_temp.ca_h('file:p1-y'), 'doctor', 'MDCN', 'MDCN/12345',
-    (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000b', 30);
+    (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000b', 30, 100000);
   if not replay.replayed or replay.application->>'applicationId' <> filed->>'applicationId' then
     raise exception 'applying again was not replayed: %', row_to_json(replay);
   end if;
-  perform pg_temp.ca_file('p1-w', 'p1-account', 'ca110000-0000-4000-8000-00000000000d');
 end $$;
+-- C13 enforces the platform's daily cap where it creates the application, as C8 does.
+reset role;
+select set_config('ca_suite.submits_now', pg_temp.ca_platform_submits()::text, true);
+set local role hid_identity_api_runtime;
+select pg_temp.ca_refused_with($c$select pg_temp.ca_file('p1-w', 'p1-account', 'ca110000-0000-4000-8000-00000000000d', '',
+  current_setting('ca_suite.submits_now')::integer)$c$, 'P4290', 'CLINICIAN_APPLICATION_QUOTA_EXCEEDED');
+select pg_temp.ca_file('p1-w', 'p1-account', 'ca110000-0000-4000-8000-00000000000d');
 select pg_temp.ca_refused($c$select * from identity.file_clinician_application(pg_temp.ca_h('session:p1-account'),
   'clinician-suite-file-p1-y', pg_temp.ca_h('file:other'), 'doctor', 'MDCN', 'MDCN/12345',
-  (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000b', 30)$c$,
+  (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000b', 30, 100000)$c$,
   'CLINICIAN_APPLICATION_IDEMPOTENCY_CONFLICT');
 -- Three open applications: the next one is refused.
 select pg_temp.ca_refused($c$select pg_temp.ca_file('p1-u', 'p1-account', 'ca110000-0000-4000-8000-00000000000f')$c$,
@@ -1362,7 +1402,7 @@ set local role hid_identity_api_runtime;
 select pg_temp.ca_system('file-3');
 select pg_temp.ca_refused($c$select application from identity.file_clinician_application(pg_temp.ca_h('session:p2-status'),
   'clinician-suite-file-p2-x', pg_temp.ca_h('file:p2-x'), 'nurse', 'NMCN', 'NMCN 777', (select licence_400 from ca_dates),
-  'ca110000-0000-4000-8000-00000000000a', 30)$c$, 'CLINICIAN_APPLICATION_LIMIT_REACHED');
+  'ca110000-0000-4000-8000-00000000000a', 30, 100000)$c$, 'CLINICIAN_APPLICATION_LIMIT_REACHED');
 select pg_temp.ca_refused($c$select pg_temp.ca_file('orgadmin-y', 'orgadmin-ready', 'ca110000-0000-4000-8000-00000000000d')$c$,
   'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE');
 reset role;
@@ -1990,7 +2030,7 @@ select pg_temp.ca_ready('p9', 'doctor9@ca.invalid', 'Doctor Nine', 'ca110000-000
 select pg_temp.ca_system('p9-file');
 select application from identity.file_clinician_application(pg_temp.ca_h('session:p9-account'), 'clinician-suite-file-p9-w',
   pg_temp.ca_h('file:p9-w'), 'doctor', 'MDCN', 'MDCN/P9', (select licence_4y from ca_dates),
-  'ca110000-0000-4000-8000-00000000000d', 30);
+  'ca110000-0000-4000-8000-00000000000d', 30, 100000);
 select set_config('ca_suite.p9_y_attestation', pg_temp.ca_attest('a', (pg_temp.ca_application('doctor9@ca.invalid',
   'ca110000-0000-4000-8000-00000000000b')).id, now() + interval '3 years' - interval '1 hour', 'p9-y')::text, true);
 select set_config('ca_suite.p9_w_attestation', pg_temp.ca_attest('c', (pg_temp.ca_application('doctor9@ca.invalid',
