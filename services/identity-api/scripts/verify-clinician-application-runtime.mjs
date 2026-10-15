@@ -665,6 +665,21 @@ try {
   const failuresBeforeRefusals = await factorFailures(freshAccount.id);
   expectStatus(await attest(adminInsider, freshApplication, '000000'), 403, 'WORKFORCE_FACILITY_CONFLICT');
   expectStatus(await attest(adminA, freshApplication, '000000', { version: 1 }), 409, 'VERSION_CONFLICT');
+  // Also what step 1 refuses only after the code: a validity past the end of
+  // the licence's expiry date (the licence ends in 730 days), a blank reason,
+  // and an applicant account 0087's attestation refuses (disabled for now).
+  expectStatus(await attest(adminA, freshApplication, '000000', { validDays: 1000 }), 400,
+    'CLINICIAN_APPLICATION_COMMAND_INVALID');
+  expectStatus(await platform.command(adminA, `${ADMIN}/${freshApplication}/attest`,
+    { ...attestBody('000000'), reason: '          ' },
+    { 'If-Match': String((await detail(adminA, freshApplication)).version), 'Idempotency-Key': key('attest-blank') }),
+  400, 'CLINICIAN_APPLICATION_COMMAND_INVALID');
+  await owner.query(`update auth.accounts set disabled_until = now() + interval '1 hour' where id = $1`, [freshAccount.id]);
+  try {
+    expectStatus(await attest(adminA, freshApplication, '000000'), 409, 'WORKFORCE_ACCOUNT_INELIGIBLE');
+  } finally {
+    await owner.query('update auth.accounts set disabled_until = null where id = $1', [freshAccount.id]);
+  }
   assert.equal(await factorFailures(freshAccount.id), failuresBeforeRefusals,
     'a step 1 refused anyway counted a failure against the applicant');
   const failuresBeforeReview = await count(`select count(*)::int as n from auth.session_events where account_id = $1
@@ -699,7 +714,7 @@ try {
     'admin.workforce.credential.attested', 'admin.clinician-application.approved', 'admin.workforce.membership.attached',
     'admin.workforce.role.granted']);
   assert(trail.every(row => row.access_scope === 'platform'));
-  checks.push('the queue needs platform.workforce.manage (a support admin is 403) and lists the application with its authenticator ready; step 1 needs a fresh step-up, refuses an insider (403 WORKFORCE_FACILITY_CONFLICT), a stale version (409) and an approved application (409 STATE_INVALID) before the applicant\'s code is checked, so none counts a failure, refuses a wrong applicant code (403, counted against the applicant) and records the attestation on the applicant\'s live code; the same Super Admin cannot approve (403 SECOND_ADMIN_REQUIRED), an insider is 403 WORKFORCE_FACILITY_CONFLICT, a second Super Admin approves on step 1\'s attestation; five platform-scoped audit events');
+  checks.push('the queue needs platform.workforce.manage (a support admin is 403) and lists the application with its authenticator ready; step 1 needs a fresh step-up, refuses an insider (403 WORKFORCE_FACILITY_CONFLICT), a stale version (409), a validity past the licence\'s end and a blank reason (400 COMMAND_INVALID), a disabled applicant account (409 WORKFORCE_ACCOUNT_INELIGIBLE) and an approved application (409 STATE_INVALID) before the applicant\'s code is checked, so none counts a failure, refuses a wrong applicant code (403, counted against the applicant) and records the attestation on the applicant\'s live code; the same Super Admin cannot approve (403 SECOND_ADMIN_REQUIRED), an insider is 403 WORKFORCE_FACILITY_CONFLICT, a second Super Admin approves on step 1\'s attestation; five platform-scoped audit events');
 
   // 11. The first staff sign-in after approval.
   const firstStep = await staff.passwordStep(fresh);
