@@ -8,7 +8,7 @@ import { DatabaseService } from '../database/database.service';
 import type { ActorContext } from '../common/request-context';
 import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
-import { CurrentStaffContextService, eligibleStaffMembershipJoins } from './current-staff-context.service';
+import { CurrentStaffContextService, eligibleStaffMembershipJoins, StaffMembershipInactiveError } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
 import { jwksUnavailable } from './jwks-fault';
 import { databaseMessage, isDatabaseError } from '../patient-safety/database-error';
@@ -293,12 +293,31 @@ export class TokenService {
     return this.issueAssuredSession(client, 'staff', assurance, event);
   }
 
+  /**
+   * The staff actor of a new staff session. Eligibility is re-checked here
+   * (ADR-064, defence in depth): an account whose membership ended after its
+   * password step, or a clinician applicant whose application is not
+   * approved, gets the password step's 403 NO_ACTIVE_FACILITY_MEMBERSHIP and
+   * no session, never a 401, which reads as a refused credential (ADR-059).
+   */
+  private async resolveEligibleStaff(subject: string, client: PoolClient): Promise<ActorContext> {
+    try {
+      return await this.currentStaff.resolve(subject, 'local', undefined, undefined, client);
+    } catch (error) {
+      if (error instanceof StaffMembershipInactiveError) {
+        throw new DomainProblem(403, 'NO_ACTIVE_FACILITY_MEMBERSHIP',
+          'Your account has no active facility membership. Ask your organization administrator for access.');
+      }
+      throw error;
+    }
+  }
+
   private async issueAssuredSession(client: PoolClient, kind: 'platform' | 'staff',
     assurance: PlatformSessionAssurance, event: SessionEventMetadata): Promise<LoginResult> {
     // On this transaction's client: the caller holds the account row lock (Stage 7A).
     const resolved = kind === 'platform'
       ? await this.currentStaff.resolvePlatform(assurance.subject, undefined, client)
-      : await this.currentStaff.resolve(assurance.subject, 'local', undefined, undefined, client);
+      : await this.resolveEligibleStaff(assurance.subject, client);
     if (resolved.accountId !== assurance.accountId) {
       throw new UnauthorizedException('Resolved account does not match the authenticated identity');
     }

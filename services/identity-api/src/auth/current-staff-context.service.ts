@@ -55,6 +55,18 @@ export function eligibleStaffMembershipJoins(account: string, statuses: string):
           and facility.active`;
 }
 
+/**
+ * The account has no eligible staff membership (or is inactive): no row of
+ * the eligible membership joins. Answered as before (401) everywhere it was;
+ * staff-session issuance answers it 403 NO_ACTIVE_FACILITY_MEMBERSHIP
+ * (TokenService, ADR-064).
+ */
+export class StaffMembershipInactiveError extends UnauthorizedException {
+  constructor() {
+    super('Staff account or facility membership is inactive');
+  }
+}
+
 @Injectable()
 export class CurrentStaffContextService {
   constructor(private readonly database: DatabaseService) {}
@@ -178,7 +190,7 @@ export class CurrentStaffContextService {
       [subject, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
     );
     const first = result.rows[0];
-    if (!first) throw new UnauthorizedException('Staff account or facility membership is inactive');
+    if (!first) throw new StaffMembershipInactiveError();
     return {
       subject: first.subject,
       accountId: first.account_id,

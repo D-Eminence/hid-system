@@ -67,6 +67,46 @@ export interface MfaNoticeSink {
 }
 export const MFA_NOTICE_SINK = Symbol('MFA_NOTICE_SINK');
 
+/**
+ * A clinician applicant's 0088 staff challenge (ADR-064). Identity opens it
+ * for the application capability with a token it derives itself and never
+ * sends to the browser, so it can be presented at no /auth/mfa route, and it
+ * never yields a session.
+ */
+export type ApplicantChallengeOutcome =
+  | { kind: 'opened'; purpose: PlatformChallengePurpose; expiresAt: Date }
+  | { kind: 'unproven' } | { kind: 'rate_limited' } | { kind: 'invalid' };
+
+/** Verifies an applicant's authenticator on its challenge without a session; `onVerified` runs in the same transaction. */
+export interface ApplicantVerifyOptions<R> {
+  issue: 'none';
+  onVerified(client: PoolClient, verified: { factorId: string; method: 'totp' | 'recovery_code' }): Promise<R>;
+}
+export interface ApplicantVerification<R> {
+  factorId: string;
+  method: 'totp' | 'recovery_code';
+  result: R;
+}
+
+/** Activates an applicant's enrolment without a session; `onActivated` runs in the same transaction. */
+export interface ApplicantActivateOptions<R> {
+  issue: 'none';
+  onActivated(client: PoolClient, factorId: string): Promise<R>;
+}
+export interface ApplicantActivation<R> {
+  factorId: string;
+  recoveryCodes: string[];
+  result: R;
+}
+
+/** Step 1 of an application review: a code the applicant reads aloud, checked against their own factor. */
+export type ApplicantFactorConfirmation =
+  | { kind: 'confirmed'; factorId: string }
+  | { kind: 'invalid' } | { kind: 'rate_limited' } | { kind: 'no_factor' };
+
+/** The origin recorded on the 0088 session events and audit of a clinician application (ADR-064). */
+const APPLICANT_ORIGIN = 'clinician_application';
+
 interface ChallengeRow {
   id: string;
   account_id: string;
@@ -242,28 +282,12 @@ export class MfaService {
       }
       const purpose: PlatformChallengePurpose = account.enrolled ? 'verify' : 'enroll';
       const activationProof = kind === 'staff' && purpose === 'enroll' && options.activationProof === true;
-      await client.query(
-        `update auth.mfa_login_challenges set invalidated_at = clock_timestamp(),
-            invalidation_reason = 'superseded', row_version = row_version + 1
-          where account_id = $1 and session_kind = $2 and consumed_at is null and invalidated_at is null`,
-        [identity.accountId, kind],
-      );
-      const inserted = await client.query<{ expires_at: Date }>(
-        `insert into auth.mfa_login_challenges (
-           id, account_id, purpose, token_sha256, account_token_version, created_at, expires_at,
-           max_attempts, source_ip, user_agent_sha256, session_kind, proof_method, proof_verified_at
-         ) select $1, $2, $3, $4, $5, issued.at, issued.at + ($6 * interval '1 second'), $7, $8, $9, $10,
-             case when $11 then 'provider_activation' end, case when $11 then issued.at end
-             from (select clock_timestamp() as at) issued
-         returning expires_at`,
-        [randomUUID(), identity.accountId, purpose, this.protector.tokenDigest(token), account.token_version,
-          CHALLENGE_TTL_SECONDS[purpose], CHALLENGE_MAX_ATTEMPTS, event.sourceIp ?? null,
-          event.userAgent ? this.protector.tokenDigest(event.userAgent) : null, kind, activationProof],
-      );
+      const expiresAt = await this.insertChallenge(client, { id: randomUUID(), accountId: identity.accountId!, purpose,
+        token, tokenVersion: account.token_version, kind, activationProof }, event);
       await this.sessionEvent(client, 'mfa_challenge_issued', 'success', identity.accountId!, event,
         kind === 'platform' ? { purpose } : { purpose, session_kind: kind,
           ...(activationProof ? { proof: 'provider_activation' } : {}) });
-      return { kind: 'challenge', purpose, expiresAt: inserted.rows[0]!.expires_at } as const;
+      return { kind: 'challenge', purpose, expiresAt } as const;
     });
     if (!result) throw new UnauthorizedException('Invalid credentials');
     if (result.kind === 'unproven') throw this.unprovenFactor();
@@ -274,10 +298,21 @@ export class MfaService {
     return { purpose: result.purpose, expiresAt: result.expiresAt, token };
   }
 
-  /** Second-factor step of sign-in: a TOTP code or one unused recovery code. */
+  /**
+   * Second-factor step of sign-in: a TOTP code or one unused recovery code.
+   * With `options` (a clinician applicant's challenge, ADR-064) no session is
+   * issued: the code is checked and the challenge consumed exactly as for a
+   * sign-in, then `onVerified` runs in the same transaction.
+   */
   async completeLogin(token: string, input: { code?: string; recoveryCode?: string },
-    event: SessionEventMetadata, kind: MfaSessionKind = 'platform'): Promise<LoginResult> {
+    event: SessionEventMetadata, kind?: MfaSessionKind): Promise<LoginResult>;
+  async completeLogin<R>(token: string, input: { code?: string; recoveryCode?: string },
+    event: SessionEventMetadata, kind: 'staff', options: ApplicantVerifyOptions<R>): Promise<ApplicantVerification<R>>;
+  async completeLogin<R>(token: string, input: { code?: string; recoveryCode?: string },
+    event: SessionEventMetadata, kind: MfaSessionKind = 'platform',
+    options?: ApplicantVerifyOptions<R>): Promise<LoginResult | ApplicantVerification<R>> {
     this.protector.assertConfigured();
+    if (options && kind !== 'staff') throw new Error('Only a staff challenge can be verified without a session');
     if (Boolean(input.code) === Boolean(input.recoveryCode)) {
       throw new DomainProblem(400, 'MFA_CODE_REQUIRED', 'Provide either an authenticator code or a recovery code');
     }
@@ -301,6 +336,20 @@ export class MfaService {
       await client.query(
         `update auth.mfa_login_challenges set consumed_at = clock_timestamp(), row_version = row_version + 1
           where id = $1`, [challenge.id]);
+      if (options) {
+        await this.sessionEvent(client, method === 'totp' ? 'mfa_verified' : 'mfa_recovery_code_used', 'success',
+          challenge.account_id, event, { method, session_kind: kind, origin: APPLICANT_ORIGIN });
+        let applicantRemaining: number | undefined;
+        if (method === 'recovery_code') {
+          applicantRemaining = await this.remainingRecoveryCodes(client, challenge.account_id, factor.id);
+          await this.audit.recordWithClient(client, this.authAudit(kind, challenge, undefined, event,
+            `${AUDIT_PREFIX[kind]}.mfa.recovery-code.used`,
+            { recoveryCodesRemaining: applicantRemaining, origin: APPLICANT_ORIGIN }));
+        }
+        const result = await options.onVerified(client, { factorId: factor.id, method });
+        return { kind: 'verified', accountId: challenge.account_id, factorId: factor.id, method, result,
+          remaining: applicantRemaining } as const;
+      }
       await this.sessionEvent(client, method === 'totp' ? 'mfa_verified' : 'mfa_recovery_code_used', 'success',
         challenge.account_id, event, { method });
       const session = await this.issueSession(client, kind,
@@ -316,6 +365,13 @@ export class MfaService {
       return { kind: 'session', session, remaining } as const;
     });
     if (outcome.kind === 'unproven') throw this.unprovenFactor();
+    if (outcome.kind === 'verified') {
+      if (outcome.remaining !== undefined) {
+        this.notify({ accountId: outcome.accountId, kind, event: 'recovery_code_used',
+          correlationId: event.correlationId, recoveryCodesRemaining: outcome.remaining });
+      }
+      return { factorId: outcome.factorId, method: outcome.method, result: outcome.result };
+    }
     if (outcome.kind !== 'session') throw this.failure(outcome);
     if (outcome.remaining !== undefined) {
       this.notify({ accountId: outcome.session.actor.accountId, kind, event: 'recovery_code_used',
@@ -461,11 +517,20 @@ export class MfaService {
   /**
    * Confirms enrollment with a first TOTP code, activates the factor, issues
    * one-time recovery codes (returned once) and opens the platform or staff
-   * session.
+   * session. With `options` (a clinician applicant's challenge, ADR-064) no
+   * session is issued: the factor, its recovery codes and the enrolment audit
+   * are written exactly as for a sign-in, then `onActivated` runs in the same
+   * transaction.
    */
   async activateEnrollment(token: string, code: string, event: SessionEventMetadata,
-    kind: MfaSessionKind = 'platform'): Promise<{ session: LoginResult; recoveryCodes: string[] }> {
+    kind?: MfaSessionKind): Promise<{ session: LoginResult; recoveryCodes: string[] }>;
+  async activateEnrollment<R>(token: string, code: string, event: SessionEventMetadata,
+    kind: 'staff', options: ApplicantActivateOptions<R>): Promise<ApplicantActivation<R>>;
+  async activateEnrollment<R>(token: string, code: string, event: SessionEventMetadata,
+    kind: MfaSessionKind = 'platform', options?: ApplicantActivateOptions<R>):
+    Promise<{ session: LoginResult; recoveryCodes: string[] } | ApplicantActivation<R>> {
     this.protector.assertConfigured();
+    if (options && kind !== 'staff') throw new Error('Only a staff enrolment can be activated without a session');
     const recoveryCodes = this.newRecoveryCodes();
     const outcome = await this.database.withSystemTransaction(event.correlationId, async (client) => {
       const challenge = await this.lockChallenge(client, token, 'enroll', kind);
@@ -495,6 +560,16 @@ export class MfaService {
       await client.query(
         `update auth.mfa_login_challenges set consumed_at = clock_timestamp(), row_version = row_version + 1
           where id = $1`, [challenge.id]);
+      if (options) {
+        await this.sessionEvent(client, 'mfa_enrolled', 'success', challenge.account_id, event,
+          { recoveryCodes: recoveryCodes.length, session_kind: kind, proof: challenge.proof_method,
+            origin: APPLICANT_ORIGIN });
+        await this.audit.recordWithClient(client, this.authAudit(kind, challenge, undefined, event,
+          `${AUDIT_PREFIX[kind]}.mfa.enrolled`,
+          { recoveryCodes: recoveryCodes.length, proofMethod: challenge.proof_method, origin: APPLICANT_ORIGIN }));
+        const result = await options.onActivated(client, factor.id);
+        return { kind: 'activated', accountId: challenge.account_id, factorId: factor.id, result } as const;
+      }
       await this.sessionEvent(client, 'mfa_enrolled', 'success', challenge.account_id, event,
         kind === 'platform' ? { recoveryCodes: recoveryCodes.length }
           : { recoveryCodes: recoveryCodes.length, session_kind: kind, proof: challenge.proof_method });
@@ -513,10 +588,83 @@ export class MfaService {
       throw new DomainProblem(403, 'MFA_ENROLLMENT_PROOF_REQUIRED',
         'Enter the code sent to your email address to set up your authenticator');
     }
+    if (outcome.kind === 'activated') {
+      this.notify({ accountId: outcome.accountId, kind, event: 'factor_enrolled', correlationId: event.correlationId });
+      return { factorId: outcome.factorId, recoveryCodes, result: outcome.result };
+    }
     if (outcome.kind !== 'session') throw this.failure(outcome);
     this.notify({ accountId: outcome.session.actor.accountId, kind, event: 'factor_enrolled',
       correlationId: event.correlationId });
     return { session: outcome.session, recoveryCodes };
+  }
+
+  /**
+   * Opens the 0088 staff challenge a clinician application capability drives
+   * (ADR-064), inside the caller's transaction and after the account lock, as
+   * the password step opens one: an enrolment challenge for an account with
+   * no factor, a verification challenge for one with a staff-proven factor.
+   * There is no password step: the capability was opened by an emailed code.
+   * Its token is derived by the caller and never leaves Identity. Each opening
+   * counts against the account's request budget; over it, nothing is opened.
+   * An account whose only factor platform sign-in enrolled opens none.
+   */
+  async openApplicantChallenge(client: PoolClient, accountId: string, challenge: { id: string; token: string },
+    event: SessionEventMetadata): Promise<ApplicantChallengeOutcome> {
+    this.protector.assertConfigured();
+    if (!/^[A-Za-z0-9_-]{43}$/.test(challenge.token)) throw new Error('An applicant challenge token is malformed');
+    await this.lockAccount(client, accountId);
+    const account = (await client.query<{ enrolled: boolean; unproven: boolean; token_version: string }>(
+      `select auth.account_has_active_mfa(account.id) as enrolled,
+              exists (select 1 from auth.mfa_factors factor
+                       where factor.account_id = account.id and factor.status = 'active'
+                         and factor.enrollment_proof is null) as unproven,
+              account.token_version::text
+         from auth.accounts account
+        where account.id = $1 and account.status = 'active'
+          and (account.disabled_until is null or account.disabled_until <= clock_timestamp())`,
+      [accountId],
+    )).rows[0];
+    if (!account) return { kind: 'invalid' };
+    if (account.enrolled && account.unproven) return { kind: 'unproven' };
+    if (await consumeRateLimit(client, 'mfa_request_account',
+      this.protector.rateBucket('applicant-challenge', accountId), REQUESTS_PER_ACCOUNT)) {
+      await this.sessionEvent(client, 'mfa_rate_limited', 'denied', accountId, event, { operation: 'applicant-challenge' });
+      return { kind: 'rate_limited' };
+    }
+    const purpose: PlatformChallengePurpose = account.enrolled ? 'verify' : 'enroll';
+    const expiresAt = await this.insertChallenge(client, { id: challenge.id, accountId, purpose, token: challenge.token,
+      tokenVersion: account.token_version, kind: 'staff', activationProof: false }, event);
+    await this.sessionEvent(client, 'mfa_challenge_issued', 'success', accountId, event,
+      { purpose, session_kind: 'staff', origin: APPLICANT_ORIGIN });
+    return { kind: 'opened', purpose, expiresAt };
+  }
+
+  /**
+   * Step 1 of a clinician application review (ADR-064): during the identity
+   * call the applicant reads a current code from their authenticator and a
+   * Super Admin types it. It is checked against the applicant's active
+   * staff-proven factor and accepted once (the factor's last step advances),
+   * inside the administrator's transaction, after both account rows are
+   * locked in id order (0073), before the factor. Recovery codes are not
+   * accepted. A wrong code counts against the applicant's failure budget,
+   * which the caller commits before it answers.
+   */
+  async confirmApplicantFactor(client: PoolClient, accounts: { applicantAccountId: string; actorAccountId: string },
+    code: string, event: SessionEventMetadata): Promise<ApplicantFactorConfirmation> {
+    this.protector.assertConfigured();
+    for (const accountId of [...new Set([accounts.applicantAccountId, accounts.actorAccountId])].sort()) {
+      await client.query('select auth.lock_account_sessions($1)', [accountId]);
+    }
+    const factor = await this.lockActiveFactor(client, accounts.applicantAccountId);
+    if (!factor || !factor.enrollment_proof) return { kind: 'no_factor' };
+    if (await this.blocked(client, accounts.applicantAccountId, event, 'staff')) return { kind: 'rate_limited' };
+    if (!/^[0-9]{6}$/.test(code) || !(await this.acceptTotp(client, accounts.applicantAccountId, factor, code))) {
+      await this.recordFactorFailure(client, accounts.applicantAccountId, event, 'mfa_failed', 'staff');
+      return { kind: 'invalid' };
+    }
+    await this.sessionEvent(client, 'mfa_verified', 'success', accounts.applicantAccountId, event,
+      { method: 'totp', session_kind: 'staff', origin: 'clinician_application_review' });
+    return { kind: 'confirmed', factorId: factor.id };
   }
 
   /**
@@ -688,6 +836,36 @@ export class MfaService {
       return null;
     }
     return challenge;
+  }
+
+  /**
+   * Supersedes the account's live challenges of this sign-in kind and inserts
+   * a new one (the password step's, and a clinician applicant's, ADR-064).
+   * Only the token's digest is stored.
+   */
+  private async insertChallenge(client: PoolClient, challenge: { id: string; accountId: string;
+    purpose: PlatformChallengePurpose; token: string; tokenVersion: string; kind: MfaSessionKind;
+    activationProof: boolean }, event: SessionEventMetadata): Promise<Date> {
+    await client.query(
+      `update auth.mfa_login_challenges set invalidated_at = clock_timestamp(),
+          invalidation_reason = 'superseded', row_version = row_version + 1
+        where account_id = $1 and session_kind = $2 and consumed_at is null and invalidated_at is null`,
+      [challenge.accountId, challenge.kind],
+    );
+    const inserted = await client.query<{ expires_at: Date }>(
+      `insert into auth.mfa_login_challenges (
+         id, account_id, purpose, token_sha256, account_token_version, created_at, expires_at,
+         max_attempts, source_ip, user_agent_sha256, session_kind, proof_method, proof_verified_at
+       ) select $1, $2, $3, $4, $5, issued.at, issued.at + ($6 * interval '1 second'), $7, $8, $9, $10,
+           case when $11 then 'provider_activation' end, case when $11 then issued.at end
+           from (select clock_timestamp() as at) issued
+       returning expires_at`,
+      [challenge.id, challenge.accountId, challenge.purpose, this.protector.tokenDigest(challenge.token),
+        challenge.tokenVersion, CHALLENGE_TTL_SECONDS[challenge.purpose], CHALLENGE_MAX_ATTEMPTS,
+        event.sourceIp ?? null, event.userAgent ? this.protector.tokenDigest(event.userAgent) : null, challenge.kind,
+        challenge.activationProof],
+    );
+    return inserted.rows[0]!.expires_at;
   }
 
   /** The supplied enrolment email code matches the one sent for this challenge, under the current key. */
