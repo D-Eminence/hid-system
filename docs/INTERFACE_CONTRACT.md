@@ -625,7 +625,14 @@ the status and code too (never `422 ASSISTED_VERIFICATION_NOT_MATCHED`'s
 `fields`). One of their answers has no row: `503 ASSISTED_REGISTRATION_DISABLED`
 on `/identity/assisted-verifications` comes from a route guard, which runs
 after `SecurityGuard` has passed and before the request audit, so the
-switched-off route is answered without an audit row. The
+switched-off route is answered without an audit row. The clinician
+application routes of 0096 do the same: the public routes
+(`/identity/clinician-applications/*`, whose `SecurityGuard` does not run)
+write a request-audit failure row for every refusal, with the status and
+code and never the email, name, licence, code or detail (their successes
+are audited by the database commands; availability writes no row), and the
+administration routes (`/admin/clinician-applications/*`) write their
+platform guard and request rows as every platform route does. The
 outcomes are unchanged: a guard row is `denied`, a `503` fault included; a
 request-audit failure row is `failure` whatever its status; the
 facility-less staff row is `denied` below `500` and `failure` from `500`.
@@ -1215,7 +1222,12 @@ this change a nested refusal named only the top-level property, with
 Top-level entries and their order, the code, the status and the detail are
 unchanged. `field` is a DTO property name, or the unknown key the client
 sent; `messages` are the validators' own and never contain a submitted
-value. Lab, Pharmacy, OCR and Outreach, off at launch (D17), still name only
+value. Identity's nested bodies are the in-person check (ADR-063:
+`document.dateOfBirth`, `attestations.patientConsents`) and clinician self
+sign-up's (ADR-064, 0096): the submit and apply-again `declarations`
+(`declarations.accurate`, `declarations.verificationConsent`) and step 1's
+`checklist` (`checklist.identityMethod`); an unknown nested key is named
+the same way (`declarations.extra`). Lab, Pharmacy, OCR and Outreach, off at launch (D17), still name only
 the top-level property.
 
 Do not leak:
@@ -1240,7 +1252,9 @@ a fixed sentence written for the person using the client, which keeps its
 `502`, `503` or `504`; and, from 0094
 (D-Eminence/hid-system#85),
 `503 ASSISTED_REGISTRATION_DISABLED` and
-`503 ASSISTED_VERIFICATION_UNAVAILABLE`.
+`503 ASSISTED_VERIFICATION_UNAVAILABLE`; and, from 0096 (clinician self
+sign-up, ADR-064), `503 CLINICIAN_SIGNUP_CLOSED` ("Clinician sign-up is not
+open yet. If you already have a Health ID provider account, sign in.").
 
 A problem may carry an optional `fields` member: an object of field names to
 short result codes, never a submitted or stored value. From 0094 only
@@ -1262,6 +1276,9 @@ whichever bucket refused, never the time left in a bucket:
 | `429 MFA_RATE_LIMITED` | platform and staff sign-in, enrolment and its email code, step-up and recovery-code regeneration | 900, the length of every MFA window |
 | `429 PATIENT_LOOKUP_RATE_LIMITED` | `POST /api/v1/identity/patient-lookup` | `PATIENT_LOOKUP_RATE_WINDOW_SECONDS` (default 300) |
 | `429 ACCESS_REQUEST_RATE_LIMITED` | `POST /api/v1/identity/access-requests` | `ACCESS_REQUEST_RATE_WINDOW_SECONDS` (default 900) |
+| `429 CLINICIAN_APPLICATION_RATE_LIMITED` | clinician self sign-up (ADR-064, 0096): a per-network (hourly or daily) or platform (daily) quota of the email-code, status-code, search, submit or apply-again operation, and the platform's daily submit cap reached while P4 or P14 creates the application | 86400, the longest quota window, an upper bound whichever window refused (the quotas are counted in SQL; RETRY-AFTER-SQL) |
+| `429 MFA_RATE_LIMITED` | clinician self sign-up's authenticator steps (P5-P9: the account's 0088 budgets and the applicants' own per-address bucket) | 900 |
+| `429 CLINICIAN_APPLICATION_AUTHENTICATOR_RATE_LIMITED` | admin step 1, the applicant's authenticator code (`POST /api/v1/admin/clinician-applications/:applicationId/attest`) | 900 |
 
 No other answer carries it. A refusal answered like a wrong code carries
 none: a spent recovery or contact code budget (`403 OTP_INVALID_OR_EXPIRED`,
@@ -1280,7 +1297,10 @@ three codes, which never come back, and the phone's and the NIN's, counted in
 SQL over 24 hours, 30 days or a year (a bound kept for a NIN would also tell
 of other people's attempts on it); `ASSISTED_DESK_CODE_LIMITED` (0094) is
 the enrollment's five desk codes, which never come back, so the patient
-starts again. EHR, Lab,
+starts again. For the same reason clinician self sign-up's
+`CLINICIAN_APPLICATION_SEARCH_LIMITED` (0096, P3) carries none: a
+capability's 30 searches never come back, and the applicant verifies the
+address again. EHR, Lab,
 Pharmacy, OCR and Outreach set none. Identity's CORS policy exposes
 `retry-after` to allowed origins. Before this change no answer carried the
 header and CORS did not expose it.
@@ -1996,7 +2016,7 @@ CLINICIAN_APPLICATION_UNAVAILABLE`.
 | `GET .../availability` (P0) | none; not audited | `200 { open }` (`Cache-Control: public, max-age=30`); `open` is false while intake is closed or in maintenance, and in production without `OTP_HMAC_KEY_B64`. A fault is `503 PLATFORM_CONTROL_UNAVAILABLE`; treat anything but `200 { open: true }` as not open |
 | `POST .../email-code` (P1) | `{ email, turnstileAction: 'clinician-application', turnstileToken }` | `202 { accepted: true, challengeId, expiresInSeconds: 600, resendAfterSeconds: 60 }`, the same for every address; the code is delivered after the answer |
 | `POST .../email-code/verify` (P2) | `{ challengeId, email, code }` | `200 { verified: true, expiresAt }` and a draft cookie. `401 CLINICIAN_APPLICATION_CODE_INVALID` ("The code is wrong or has expired.") for a wrong, expired, spent or invalidated code; the fifth wrong code invalidates the challenge. Only after a correct code: `409 CLINICIAN_EMAIL_IN_USE` ("This email address already has a Health ID account. Sign in, reset your password, or use a different email address for your clinician account.") |
-| `POST .../facility-search` (P3) | `{ query }` (3-80 characters); a draft or a `ready` capability | `200 { facilities: [{ facilityId, name, organizationName }] }`, at most 10, verified and active facilities of active organizations matching the facility or organization name (`%` and `_` match literally). 30 searches per capability, then `429 CLINICIAN_APPLICATION_RATE_LIMITED` with `Retry-After: 3600` |
+| `POST .../facility-search` (P3) | `{ query }` (3-80 characters); a draft or a `ready` capability | `200 { facilities: [{ facilityId, name, organizationName }] }`, at most 10, verified and active facilities of active organizations matching the facility or organization name (`%` and `_` match literally). 30 searches per capability, then `429 CLINICIAN_APPLICATION_SEARCH_LIMITED` ("Too many searches in this session. Verify your email address again to continue.") with no `Retry-After`: the searches never come back, so verify the address again for a new capability (A21; until the merge with D-Eminence/hid-system#80 this was `429 CLINICIAN_APPLICATION_RATE_LIMITED` with `Retry-After: 3600`) |
 | `POST .../` (P4, submit) | `Idempotency-Key` (16-128 URL-safe characters; else `400 IDEMPOTENCY_KEY_REQUIRED`); `{ email, fullName (2-200), password (12-256, else `400 PASSWORD_INVALID`), profession: 'doctor' \| 'nurse', regulator: 'MDCN' \| 'NMCN', licenceNumber, licenceValidUntil (YYYY-MM-DD, after today and within five years, Africa/Lagos), facilityId, declarations: { accurate: true, verificationConsent: true } }`; a draft | `201 { applicationId, state, submittedAt, expiresAt, facility: { id, name }, profession, version, replayed, next: 'authenticator', authenticator: { purpose: 'enroll' \| 'verify', expiresAt } \| null }` and an account capability at the account's current stage (`enrolment_required` on a first submit). `state` is `awaiting_authenticator` on a first submit; a replay answers the application's current state and version. `authenticator` is null only when the account's challenge budget is spent (use P9). The licence number is upper-cased with single spaces and must match `^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$`. `400 CLINICIAN_APPLICATION_INVALID`: a doctor without MDCN or a nurse without NMCN, a licence number or date out of range. `401 CLINICIAN_APPLICATION_SESSION_INVALID`: no live draft of this address (before anything is charged), or a draft that has already had five submissions hashed (verify the address again). `409 CLINICIAN_EMAIL_IN_USE` (the address was taken after its code was verified), `409 CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE` (not verified and active in an active organization), `409 CLINICIAN_APPLICATION_FACILITY_BUSY` (30 open applications at the facility), `409 CLINICIAN_APPLICATION_REQUIRES_SIGN_OUT`, `429 CLINICIAN_APPLICATION_RATE_LIMITED` also when the platform's daily cap is reached while the application is being created (nothing is created). These `400` and `409` refusals are answered after the quota is charged and without hashing the password; the draft stays usable. The same key and body with the same (spent, unexpired) draft replays the application with `replayed: true` and a fresh capability (the password is not hashed again); anything else on a spent draft is `401 CLINICIAN_APPLICATION_SESSION_INVALID` |
 | `POST .../authenticator/email-code` (P5) | an account capability at `enrolment_required` | `200 { accepted: true, channel: 'email', expiresAt }` (the 0088 enrolment proof, a second code to the same address) |
 | `POST .../authenticator/start` (P6) | `{ emailCode }` | `200 { secret, otpauthUri, algorithm, digits, periodSeconds, expiresAt }`, once |
@@ -2038,6 +2058,8 @@ account capability is needed); `403 CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE`
 (the capability's account is disabled or no longer active); `409
 CLINICIAN_APPLICATION_AUTHENTICATOR_READY` (an authenticator step on a live
 `ready` capability, never a `401`); `429
+CLINICIAN_APPLICATION_SEARCH_LIMITED` with no `Retry-After` when a
+capability's 30 searches are spent (P3); `429
 CLINICIAN_APPLICATION_RATE_LIMITED` with `Retry-After: 86400` when a
 per-network (hourly or daily) or platform (daily) quota of the email-code,
 status-code, search or submit operation is spent (bounded settings

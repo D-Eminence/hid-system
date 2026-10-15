@@ -5178,6 +5178,17 @@ Consequences:
   support (the conservative side of the staff-sign-in-only rule).
 - No notice sink is bound: applicants learn decisions from the status page
   and facilities are not notified.
+- Merged with main's 0093 and 0094 (D-Eminence/hid-system#84 and #85),
+  break-glass's 0095 (#83) and the launch alignment fixes (#80), the
+  migration is 0096 and holds to #80's A17, A21 and A23: every refusal's
+  audit row records its status and code; a rate-limit `429` that means "try
+  again later" carries `Retry-After` (86400 for the quotas, 900 for the
+  authenticator budgets), while a capability's spent search budget, which
+  never comes back, answers its own `429 CLINICIAN_APPLICATION_SEARCH_LIMITED`
+  with none (it was `429 CLINICIAN_APPLICATION_RATE_LIMITED` with
+  `Retry-After: 3600`); and a refused `declarations` or `checklist` field is
+  named by its dotted path. `503 CLINICIAN_SIGNUP_CLOSED` is listed with the
+  other `PublicDetailProblem` answers.
 - Evidence is local and synthetic: `clinician-applications.integration.sql`,
   `workforce-role-change-body.test.mjs`, the Identity specs,
   `verify-clinician-application-runtime.mjs`, the non-superuser upgrade

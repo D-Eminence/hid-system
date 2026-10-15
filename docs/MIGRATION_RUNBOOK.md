@@ -658,7 +658,12 @@ continuity with synthetic or authorized minimum-necessary identifiers.
    runtime privilege on the holder events, the designations, their events
    or the checks. No facility is designated and
    `ASSISTED_REGISTRATION_ENABLED` stays off until release checklist P29 to
-   P33.
+   P33. After `0096`, likewise: it grants the Identity runtime the clinician
+   application commands and keeps their helpers and tables from every
+   runtime; until it runs the clinician routes answer `503`. 0096 also needs
+   the bootstrap's administrator (the ADMIN OPTION on
+   `hid_platform_control_reader`, §6.1). `clinician_signup_enabled` stays off
+   until release checklist P35.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts. A migrated staff account signs in with
    its password, then enrols an authenticator with the code emailed to it

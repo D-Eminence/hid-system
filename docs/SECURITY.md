@@ -76,7 +76,13 @@ code, which its enrollment cookie proves (at the contact step and, from 0093,
 the holder step). The holder step's `429 NIN_HOLDER_ROUTE_LIMITED` carries
 none: its budgets are kept per phone and per NIN, so a time left would tell
 of other people's attempts on that NIN, and the answer sends the patient to a
-participating facility rather than to wait.
+participating facility rather than to wait. Clinician self sign-up (ADR-064,
+0096) follows the same rule: its quotas, counted per client network and for
+the platform, state the longest quota window (`86400`), which tells nothing
+of any address; its authenticator steps and admin step 1 state the 15-minute
+MFA window; and a capability's spent search budget,
+`429 CLINICIAN_APPLICATION_SEARCH_LIMITED`, carries none, because those 30
+searches never come back (the applicant verifies the address again).
 
 A clinician applicant (ADR-064) holds an application capability, not a
 session: an HttpOnly, `SameSite=Strict`, host-only cookie scoped to
