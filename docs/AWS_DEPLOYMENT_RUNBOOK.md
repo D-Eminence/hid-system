@@ -25,17 +25,17 @@ and CAC outcomes plus timeout/401/5xx privacy behavior before considering any
 production change. This repository change did not activate or deploy QoreID.
 See [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
 
-NIN holder routes (ADR-062, BRANCH:launch/nin-ownership-proof): the synth
+NIN holder routes (ADR-062, D-Eminence/hid-system#84): the synth
 inputs `HID_NIN_HOLDER_SMS_ENABLED`, `HID_ASSISTED_REGISTRATION_ENABLED` and
 `HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED` all default to `false` and set
 the Identity variables of the same names without `HID_`. Synthesis refuses
 NIN-only enrollment without a holder route, the online route on staging
-(email only), the online route in production until the facility route ships
-(ADR-063; `HID_ASSISTED_REGISTRATION_ENABLED` has no effect before then), and
-the signed-in NIN binding in production. Enabling any of them is an operator
-step after the release checklist P23 to P27.
+(email only), the online route in production without
+`HID_ASSISTED_REGISTRATION_ENABLED=true` (ADR-063, below), and the signed-in
+NIN binding in production. Enabling any of them is an operator step after
+the release checklist P23 to P27, and P33 for either holder route.
 
-Facility route (ADR-063, BRANCH:launch/facility-assisted-registration):
+Facility route (ADR-063, D-Eminence/hid-system#85):
 with it, synthesis accepts `HID_NIN_HOLDER_SMS_ENABLED=true` in production
 only with `HID_ASSISTED_REGISTRATION_ENABLED=true`, and `verify-synth`
 checks the same. The flag alone opens nothing: the route opens while a
@@ -43,7 +43,7 @@ facility is designated through the admin API. In production Identity also
 keeps the online route closed while no facility takes part. The in-person budgets
 (`ASSISTED_VERIFICATION_STAFF_DAILY_MAX`, `_FACILITY_DAILY_MAX`) keep
 Identity's defaults (20 and 100); they are not synth inputs. Enabling the
-facility route is an operator step after release checklist P29 to P32.
+facility route is an operator step after release checklist P29 to P33.
 
 ## Staging email acceptance profile
 
