@@ -34,7 +34,7 @@ test('SigV4 matches the AWS Smithy signer reference with temporary ECS credentia
   assert.equal(result.redirect, 'error'); assert.equal(result.body, '{"audience":"hid-identity-api"}');
   assert.throws(() => signTokenRequest(configuration, { ...credentials, Expiration: new Date(now).toISOString() }, 'hid-identity-api', new Date(now)));
 });
-test('configuration permits only staging, the exact HTTPS issuer/JWKS and fixed audience filenames', () => {
+test('configuration requires matching environment, exact HTTPS issuer/JWKS and fixed audience filenames', () => {
   for (const changed of [{ HID_DEPLOYMENT_ENV: 'production' }, { WORKLOAD_JWKS_URL: 'https://attacker.invalid/jwks' },
     { WORKLOAD_ISSUER_URL: 'http://abc123.execute-api.eu-west-2.amazonaws.com/staging' },
     { WORKLOAD_TOKEN_FILES_JSON: '[{"audience":"hid-identity-api","file":"../../outside"}]' },
@@ -100,3 +100,26 @@ test('startup removes stale files, renewal verifies before writing, outages reta
     await assert.rejects(readFile(join(directory, 'ready.json')), { code: 'ENOENT' });
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+for (const deployment of ['staging', 'production']) {
+  test(`${deployment} agent binds issuer path, subject and signed endpoint to its environment`, () => {
+    const issuer = `https://abc123.execute-api.eu-west-2.amazonaws.com/${deployment}`;
+    const env = { ...environment, HID_DEPLOYMENT_ENV: deployment, WORKLOAD_ISSUER_URL: issuer,
+      WORKLOAD_JWKS_URL: `${issuer}/.well-known/jwks.json`, WORKLOAD_SUBJECT: `hid:${deployment}:ehr-api` };
+    const config = agentConfiguration(env);
+    const request = signTokenRequest(config, credentials, 'hid-identity-api', new Date(now));
+    assert.equal(request.url, `${issuer}/token`);
+    assert.equal(request.redirect, 'error');
+    assert.match(request.headers.authorization, /^AWS4-HMAC-SHA256 /);
+    const other = deployment === 'production' ? 'staging' : 'production';
+    assert.throws(() => agentConfiguration({ ...env, WORKLOAD_SUBJECT: `hid:${other}:ehr-api` }));
+    assert.throws(() => agentConfiguration({ ...env, WORKLOAD_ISSUER_URL: issuer.replace(deployment, other),
+      WORKLOAD_JWKS_URL: `${issuer.replace(deployment, other)}/.well-known/jwks.json` }));
+    assert.throws(() => signTokenRequest({ ...config, deployment: other }, credentials, 'hid-identity-api', new Date(now)));
+    assert.throws(() => signTokenRequest({ ...config, deployment: undefined }, credentials, 'hid-identity-api', new Date(now)));
+    const response = minted({ iss: issuer, sub: env.WORKLOAD_SUBJECT });
+    assert.equal(verifyMintedToken(response, jwks, config, 'hid-identity-api', now).expiresAt, now + 300_000);
+    assert.throws(() => verifyMintedToken(minted({ iss: issuer, sub: `hid:${other}:ehr-api` }), jwks, config, 'hid-identity-api', now));
+    assert.throws(() => verifyMintedToken(minted({ iss: issuer.replace(deployment, other), sub: env.WORKLOAD_SUBJECT }), jwks, config, 'hid-identity-api', now));
+  });
+}

@@ -8,17 +8,18 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const hmac = (key, value) => createHmac('sha256', key).update(value).digest();
 
 export function agentConfiguration(environment) {
-  if (environment.HID_DEPLOYMENT_ENV !== 'staging') throw new Error('Workload token agent is staging only');
+  const deployment = environment.HID_DEPLOYMENT_ENV;
+  if (!['staging', 'production'].includes(deployment)) throw new Error('Invalid workload token agent environment');
   const region = environment.AWS_REGION;
   if (!/^[a-z]{2}-[a-z]+-\d$/.test(region ?? '')) throw new Error('Invalid agent AWS region');
   const issuer = new URL(environment.WORKLOAD_ISSUER_URL);
   if (issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.port || issuer.search || issuer.hash
-    || issuer.pathname !== '/staging' || !new RegExp(`^[a-z0-9]+\\.execute-api\\.${region}\\.amazonaws\\.com$`).test(issuer.hostname)) {
-    throw new Error('Invalid staging issuer URL');
+    || issuer.pathname !== `/${deployment}` || !new RegExp(`^[a-z0-9]+\\.execute-api\\.${region}\\.amazonaws\\.com$`).test(issuer.hostname)) {
+    throw new Error('Invalid workload issuer URL');
   }
   if (environment.WORKLOAD_JWKS_URL !== `${issuer.href}/.well-known/jwks.json`) throw new Error('JWKS must belong to the configured issuer');
   const subject = environment.WORKLOAD_SUBJECT;
-  if (!/^hid:staging:[a-z-]+$/.test(subject ?? '')) throw new Error('Invalid workload subject');
+  if (!new RegExp(`^hid:${deployment}:[a-z-]+$`).test(subject ?? '')) throw new Error('Invalid workload subject');
   const directory = environment.WORKLOAD_TOKEN_DIRECTORY ?? '/var/run/hid/workload-tokens';
   if (directory !== '/var/run/hid/workload-tokens') throw new Error('Token volume path must match the admitted image');
   const files = JSON.parse(environment.WORKLOAD_TOKEN_FILES_JSON ?? 'null');
@@ -33,7 +34,7 @@ export function agentConfiguration(environment) {
   }
   const credentialPath = environment.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;
   if (!/^\/v2\/credentials\/[A-Za-z0-9-]{1,100}$/.test(credentialPath ?? '')) throw new Error('ECS task credential source is unavailable');
-  return { region, issuer: issuer.href, jwks: environment.WORKLOAD_JWKS_URL, subject, directory, files,
+  return { deployment, region, issuer: issuer.href, jwks: environment.WORKLOAD_JWKS_URL, subject, directory, files,
     credentialUrl: `http://169.254.170.2${credentialPath}` };
 }
 
@@ -53,11 +54,11 @@ export async function boundedJson(response, limit = 32768) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-// Narrow SigV4 implementation: POST to a fixed API Gateway /staging/token
+// Narrow SigV4 implementation: POST to the configured environment API token
 // endpoint with no query, encoded path segments, redirects or arbitrary headers.
 export function signTokenRequest(configuration, credentials, audience, now = new Date()) {
   const endpoint = new URL(`${configuration.issuer}/token`);
-  if (endpoint.pathname !== '/staging/token' || endpoint.search || endpoint.hash) throw new Error('Invalid token endpoint');
+  if (!['staging', 'production'].includes(configuration.deployment) || endpoint.pathname !== `/${configuration.deployment}/token` || endpoint.search || endpoint.hash) throw new Error('Invalid token endpoint');
   if (!/^ASIA[A-Z0-9]{16}$/.test(credentials.AccessKeyId ?? '')
     || typeof credentials.SecretAccessKey !== 'string' || credentials.SecretAccessKey.length < 32
     || typeof credentials.Token !== 'string' || credentials.Token.length < 16
