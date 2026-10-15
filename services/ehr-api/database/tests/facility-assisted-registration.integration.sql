@@ -645,6 +645,10 @@ select set_config('suite.check_e2_not_matched', (select id::text from pg_temp.re
 select set_config('suite.check_e1_for_e2', (select id::text from pg_temp.record_check('check-e1-matched',
   'f94a0000-0000-4000-8000-000000000001', repeat('c1',32), 'desk-001', 'matched')
   as (id uuid, outcome text, replayed boolean, proof text)), true);
+-- A check that names another enrollment, with this enrollment's NIN digest and desk code.
+select set_config('suite.check_e1_named', (select id::text from pg_temp.record_check('check-e1-named',
+  'f94a0000-0000-4000-8000-000000000001', repeat('c2',32), 'desk-002', 'matched')
+  as (id uuid, outcome text, replayed boolean, proof text)), true);
 select pg_temp.as_system('assisted-suite-system-0004');
 -- Argument shapes: a challenge is never an in-person proof.
 select pg_temp.expect_refusal(format($sql$select identity.record_public_patient_holder_proof(
@@ -663,6 +667,10 @@ select pg_temp.expect_refusal(format($sql$select identity.record_public_patient_
   'f94a0000-0000-4000-8000-000000000002', repeat('b2',32), 'facility_in_person', null, %L::uuid,
   repeat('c2',32), 5)$sql$, current_setting('suite.check_e1_for_e2')),
   '23514', 'PATIENT_HOLDER_PROOF_INVALID', 'another enrollment''s check');
+select pg_temp.expect_refusal(format($sql$select identity.record_public_patient_holder_proof(
+  'f94a0000-0000-4000-8000-000000000002', repeat('b2',32), 'facility_in_person', null, %L::uuid,
+  repeat('c2',32), 5)$sql$, current_setting('suite.check_e1_named')),
+  '23514', 'PATIENT_HOLDER_PROOF_INVALID', 'a check that names another enrollment, with this NIN and desk code');
 select pg_temp.expect_refusal(format($sql$select identity.record_public_patient_holder_proof(
   'f94a0000-0000-4000-8000-000000000002', repeat('b2',32), 'facility_in_person', null, %L::uuid,
   repeat('cf',32), 5)$sql$, current_setting('suite.check_e2')),

@@ -76,11 +76,12 @@ export interface HidEnvironmentConfig {
   readonly qoreIdNinOnlyEnrollmentEnabled: boolean;
   // Identity's NIN_HOLDER_SMS_ENABLED (ADR-062): a one-time code to the phone
   // a NIN record lists. Synth input HID_NIN_HOLDER_SMS_ENABLED, default false;
-  // refused on staging (its notification-api sends email only) and in
-  // production until the facility route ships (ADR-063).
+  // refused on staging (its notification-api sends email only) and, in
+  // production, unless the facility route is on too (ADR-063).
   readonly ninHolderSmsEnabled: boolean;
-  // Identity's ASSISTED_REGISTRATION_ENABLED (ADR-062, used from 0094). Synth
-  // input HID_ASSISTED_REGISTRATION_ENABLED, default false.
+  // Identity's ASSISTED_REGISTRATION_ENABLED: the facility route, an
+  // in-person check at a participating facility (0094, ADR-063). Synth input
+  // HID_ASSISTED_REGISTRATION_ENABLED, default false.
   readonly assistedRegistrationEnabled: boolean;
   // Identity's QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: the signed-in NIN
   // binding on a name and date-of-birth match. Synth input
@@ -285,12 +286,10 @@ export function workloadEnabled(configuration: Pick<HidEnvironmentConfig, 'enabl
  * CFG-PROD, N1, ADR-062: a NIN lookup proves that a NIN exists, not that the
  * person holds it. NIN-only enrollment needs a route to prove that (the
  * activation command requires the proof); staging sends no SMS; production
- * refuses the online route until the facility route ships (ADR-063), the
+ * runs the online route only with the facility route (0094, ADR-063), the
  * remedy when someone who knows a NIN closes its online route and the only
- * route for a person without a usable registry phone:
- * HID_ASSISTED_REGISTRATION_ENABLED has no effect before then, so it cannot
- * stand in for it. The signed-in NIN binding has no holder proof and stays
- * off in production. The regional stack repeats this for a configuration
+ * route for a person without a usable registry phone. The signed-in NIN
+ * binding has no holder proof and stays off in production. The regional stack repeats this for a configuration
  * not built by environmentConfig.
  */
 export function assertNinOwnershipRoutes(configuration: {
@@ -306,8 +305,9 @@ export function assertNinOwnershipRoutes(configuration: {
   if (configuration.name === 'staging' && configuration.ninHolderSmsEnabled) {
     throw new Error('HID_NIN_HOLDER_SMS_ENABLED=true is refused on staging: its notification-api sends email only');
   }
-  if (configuration.name === 'production' && configuration.ninHolderSmsEnabled) {
-    throw new Error('HID_NIN_HOLDER_SMS_ENABLED=true is refused in production until the facility route ships '
+  if (configuration.name === 'production' && configuration.ninHolderSmsEnabled
+    && !configuration.assistedRegistrationEnabled) {
+    throw new Error('HID_NIN_HOLDER_SMS_ENABLED=true needs HID_ASSISTED_REGISTRATION_ENABLED=true in production '
       + '(ADR-062, ADR-063)');
   }
   if (configuration.name === 'production' && configuration.qoreIdPatientSelfNinBindingEnabled) {

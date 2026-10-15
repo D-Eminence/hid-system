@@ -27,7 +27,8 @@ const designation = { status: 'active' as const, addressLine: '1 Synthetic Road'
   state: 'Lagos', hours: 'Mon-Fri 08:00-16:00', reason: 'Synthetic designation for the clinic' };
 
 function harness(rows: (sql: string) => Record<string, unknown>[], assurance: AssuranceOptions = {}) {
-  const command = jest.fn(async (sql: string) => { const result = rows(sql); return { rows: result, rowCount: result.length }; });
+  const command = jest.fn(async (sql: string, _values?: unknown[]) => {
+    const result = rows(sql); return { rows: result, rowCount: result.length }; });
   const client = assuredClient(command as unknown as jest.Mock, assurance);
   const database = { withTransaction: jest.fn(async (_context, operation) => operation(client as unknown as PoolClient)) };
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };

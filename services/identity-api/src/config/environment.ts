@@ -127,8 +127,8 @@ const environmentSchema = z.object({
   // ADR-062: the routes by which a person proves that they hold a NIN before
   // any Health ID is made. The online route sends a one-time code to the
   // phone the NIN record lists; the facility route is an in-person check at a
-  // participating facility (used from 0094, ADR-063). Both default to false;
-  // enabling either is an operator step.
+  // participating facility (0094, ADR-063), open only while a facility is
+  // designated. Both default to false; enabling either is an operator step.
   NIN_HOLDER_SMS_ENABLED: booleanString,
   ASSISTED_REGISTRATION_ENABLED: booleanString,
   // The signed-in "Verify NIN" route binds a NIN to a patient on a name and
@@ -146,6 +146,12 @@ const environmentSchema = z.object({
   NIN_HOLDER_FAILURES_DAILY_MAX: z.coerce.number().int().min(1).max(100).default(10),
   NIN_HOLDER_FAILURES_MONTHLY_MAX: z.coerce.number().int().min(1).max(1000).default(30),
   NIN_HOLDER_DISTINCT_NINS_MAX: z.coerce.number().int().min(1).max(50).default(5),
+  // ADR-063: in-person checks of facility-assisted registration over a
+  // sliding 24 hours, every outcome counted, per staff member (across
+  // facilities) and per facility. The facility budget cannot be below the
+  // staff budget.
+  ASSISTED_VERIFICATION_STAFF_DAILY_MAX: z.coerce.number().int().min(1).max(200).default(20),
+  ASSISTED_VERIFICATION_FACILITY_DAILY_MAX: z.coerce.number().int().min(1).max(1000).default(100),
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,
@@ -259,13 +265,15 @@ const environmentSchema = z.object({
     || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging');
   // Anyone who knows a NIN can spend its budgets and close the online route
   // for its holder, and a person without a usable registry phone has no
-  // online route at all; the facility route (0094, ADR-063) is the remedy.
-  // ASSISTED_REGISTRATION_ENABLED has no effect before it ships, so the
-  // online route stays refused in production until then; ADR-063 replaces
-  // this with a check for the facility route itself.
-  if (productionProfile && environment.NIN_HOLDER_SMS_ENABLED) {
+  // online route at all; the facility route (0094, ADR-063) is the remedy,
+  // so production runs the online route only with the facility route on.
+  if (productionProfile && environment.NIN_HOLDER_SMS_ENABLED && !environment.ASSISTED_REGISTRATION_ENABLED) {
     context.addIssue({ code: 'custom', path: ['NIN_HOLDER_SMS_ENABLED'],
-      message: 'The online NIN holder route is refused in production until the facility route ships (ADR-063)' });
+      message: 'The online NIN holder route needs ASSISTED_REGISTRATION_ENABLED in production (ADR-063)' });
+  }
+  if (environment.ASSISTED_VERIFICATION_FACILITY_DAILY_MAX < environment.ASSISTED_VERIFICATION_STAFF_DAILY_MAX) {
+    context.addIssue({ code: 'custom', path: ['ASSISTED_VERIFICATION_FACILITY_DAILY_MAX'],
+      message: 'The facility budget of in-person checks cannot be below the staff budget' });
   }
   if (productionProfile && environment.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED) {
     context.addIssue({ code: 'custom', path: ['QOREID_PATIENT_SELF_NIN_BINDING_ENABLED'],

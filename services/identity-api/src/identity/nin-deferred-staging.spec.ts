@@ -242,9 +242,8 @@ describe('explicitly deferred staging NIN', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  // Production refuses the online route until the facility route ships
-  // (ADR-063), so this is the most production accepts: QoreID, NIN-only
-  // enrollment and the facility flag.
+  // Production runs the online route only with the facility route (ADR-063);
+  // this case has QoreID, NIN-only enrollment and the facility flag only.
   it('keeps the staff NIN provider unavailable in production with QoreID and NIN-only enrollment enabled', async () => {
     Object.assign(process.env, qoreIdAndHolderRoutes, { NIN_HOLDER_SMS_ENABLED: 'false', HID_DEPLOYMENT_ENV: 'production',
       NIN_PROVIDER_MODE: 'unavailable', CORS_ORIGINS: 'https://www.healthidentitydirectory.com' });

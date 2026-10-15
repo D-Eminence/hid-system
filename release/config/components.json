@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0093",
-    "count": 93,
+    "last": "0094",
+    "count": 94,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -469,6 +469,10 @@
       {
         "name": "0093_nin_holder_ownership_proof.sql",
         "sha256": "ab163a3ddbbf9d9da1a326de7a6cb7a7d31412dc0de4e1a536ea9f5b33eae594"
+      },
+      {
+        "name": "0094_facility_assisted_registration.sql",
+        "sha256": "322f2baa20fbe68764cfed4fd54a278653a367f213aa4fc0418d2b26c4a0aae8"
       }
     ]
   },

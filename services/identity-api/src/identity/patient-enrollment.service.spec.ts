@@ -1917,7 +1917,7 @@ describe('PatientEnrollmentService', () => {
       const issued = await f.service.issueDeskCode(started.cookie, correlationId);
       expect(issued).toMatchObject({ stage: 'verify_holder', facility: { available: true,
         deskCode: expect.stringMatching(/^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{10}$/),
-        deskCodeExpiresAt: f.enrollment!.expires_at.toISOString() } });
+        deskCodeExpiresAt: (f.enrollment!.expires_at as Date).toISOString() } });
       const code = issued.facility.deskCode as string;
       expect(f.enrollment!.desk_code_hmac).toBe(keyed('patient-enrollment-desk-code', code));
       expect(f.enrollment!.desk_code_salt).toMatch(/^[0-9a-f]{32}$/);

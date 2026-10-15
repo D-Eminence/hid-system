@@ -1086,9 +1086,11 @@ grant select, delete on identity.public_patient_enrollments
 grant insert (id, nin_lookup_hmac, nin_last4, nin_ciphertext, profile_ciphertext, profile_sha256,
     key_version, provider_reference, request_hmac, token_hmac)
   on identity.public_patient_enrollments to hid_identity_runtime, hid_schema_test_runtime;
+-- 0094 (ADR-063) adds the desk code's salt and issue count to the columns
+-- the runtime updates.
 grant update (state, contact_channel, contact_hmac, contact_lookup_hmac, contact_ciphertext,
     contact_verified_at, verified_challenge_id, holder_recipient_hmac, desk_code_hmac,
-    desk_code_expires_at, updated_at, row_version)
+    desk_code_expires_at, desk_code_salt, desk_code_issues, updated_at, row_version)
   on identity.public_patient_enrollments to hid_identity_runtime, hid_schema_test_runtime;
 grant select, insert, update, delete on identity.public_patient_enrollment_otps,
   identity.public_patient_enrollment_rates to hid_identity_runtime, hid_schema_test_runtime;
@@ -1257,6 +1259,29 @@ revoke all on identity.staff_credential_attestations, identity.workforce_members
 -- returns with this run; the internal list stays revoked. The PIN-use inbox
 -- trigger function runs only as its trigger.
 revoke all on function notification.on_identity_pin_outbox_created() from public;
+
+-- Facility-assisted registration (0094, ADR-063). The Identity runtime calls
+-- the public facility list and the holder proof in system context, the
+-- in-person check command in staff context and the designation commands in
+-- platform context; each command authorizes its caller itself. The
+-- participation, attestation and staff-session helpers run only inside
+-- them. No runtime role reads or writes the designation, its events or the
+-- checks directly.
+grant execute on function identity.list_participating_facilities(),
+  identity.record_assisted_verification(uuid, char, char, text, text, text, text, text, text, char, char, integer,
+    integer),
+  identity.admin_facility_assisted_registration(uuid),
+  identity.admin_set_facility_assisted_registration(uuid, bigint, text, text, text, text, text, text, text, text, char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.facility_assisted_registration_participating(uuid),
+  identity.assisted_registration_actor_attested(text, uuid, uuid),
+  auth.staff_session_is_mfa(),
+  identity.guard_assisted_verification_change()
+  from public;
+revoke all on identity.facility_assisted_registration, identity.facility_assisted_registration_events,
+  identity.assisted_registration_verifications
+  from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
+    hid_ehr_api_runtime, hid_schema_test_runtime;
 
 -- End the temporary memberships granted after the role check above. A
 -- creator's ADMIN OPTION, which PostgreSQL 16 gives a CREATEROLE

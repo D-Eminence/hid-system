@@ -413,11 +413,12 @@ try {
   expectProblem(await verifyAtDesk(nurseSession, checkBody(deskCode, document), { facility: clinicB }), 403,
     'FACILITY_ACCESS_DENIED');
   expectProblem(await verifyAtDesk(nurseSession, checkBody(deskCode, document), { csrf: false }), 403);
-  setEnvironment({ ASSISTED_REGISTRATION_ENABLED: 'false' });
+  // NIN-only enrollment needs a holder route, so it is switched off with the facility route.
+  setEnvironment({ ASSISTED_REGISTRATION_ENABLED: 'false', QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false' });
   const disabled = await verifyAtDesk(nurseSession, { deskCode, method: 'nin_slip' });
   expectProblem(disabled, 503, 'ASSISTED_REGISTRATION_DISABLED');
   assert.equal(disabled.body.detail, 'Registration at a facility is not available.');
-  setEnvironment({ ASSISTED_REGISTRATION_ENABLED: 'true' });
+  setEnvironment({ ASSISTED_REGISTRATION_ENABLED: 'true', QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true' });
   expectProblem(await verifyAtDesk(nurseSession, { ...checkBody(deskCode, document), documentType: 'nin_slip' }), 400,
     'VALIDATION_FAILED');
   expectProblem(await verifyAtDesk(nurseSession, { ...checkBody(deskCode, document),
@@ -546,11 +547,13 @@ try {
     where document_type = 'voters_card'`)).rows[0].date_of_birth_result, 'not_in_record');
   check('a NIN record without a date of birth matches on the names alone (dateOfBirth not_in_record, the typed date never stored), and the patient still enters the missing fields at activation');
 
-  // 10. An in-person proof races a registry-phone proof of the same NIN: one
-  // proven enrollment remains, the in-person one.
+  // 10. An in-person check races a registry-phone proof of the same NIN.
+  // Both take the NIN lock; whichever proof is recorded first removes the
+  // other, still unproven, enrollment (ADR-062). One proven enrollment remains.
   setEnvironment({ NIN_HOLDER_SMS_ENABLED: 'true' });
   const byPhone = await startEnrollment(RACING, '198.51.100.125');
   const atDesk = await startEnrollment(RACING, '198.51.100.126');
+  const [byPhoneId, atDeskId] = [(await enrollmentRow(byPhone.cookie)).id, (await enrollmentRow(atDesk.cookie)).id];
   const sentPhone = await post('/identity/patient-enrollments/holder', {}, { cookie: byPhone.cookie, network: '198.51.100.125' });
   expectProblem(sentPhone, 200);
   const phoneCode = lastCode('NIN_HOLDER_VERIFY', '+2348031110102');
@@ -562,26 +565,28 @@ try {
     verifyAtDesk(nurseSession, checkBody(raceCode.body.facility.deskCode,
       { firstName: 'Bolaji', lastName: 'Synthetic', dateOfBirth: '1985-04-03' }, 'international_passport')),
   ]);
-  expectProblem(deskAnswer, 200);
-  // Whichever proof takes the NIN lock first, the in-person proof ends as the
-  // one proven enrollment: after a phone proof it displaces it (contested);
-  // before one it removes the unproven enrollment, whose code then finds no
-  // enrollment (superseded).
-  const displaced = async (action) => count(`select count(*) from audit.events where action = $1`, [action]);
-  if (phoneAnswer.status === 200) {
-    assert.equal(phoneAnswer.body.stage, 'verify_contact');
-    assert.equal(await displaced('identity.public-patient-enrollment.contested'), 1,
-      'the in-person proof that displaced a phone proof was not audited as contested');
-  } else {
+  const superseded = await count(`select count(*) from audit.events
+    where action = 'identity.public-patient-enrollment.superseded' and details->>'ninDigest' is not null
+      and resource_id = any($1::text[])`, [[byPhoneId, atDeskId]]);
+  let raceWinner;
+  if (deskAnswer.status === 200) {
+    // The in-person proof came first: the phone enrollment is gone.
     expectProblem(phoneAnswer, 404, 'ENROLLMENT_NOT_FOUND');
-    assert.equal(await displaced('identity.public-patient-enrollment.contested'), 0);
-    assert(await displaced('identity.public-patient-enrollment.superseded') >= 1);
+    raceWinner = { id: atDeskId, holder_method: 'facility_in_person' };
+  } else {
+    // The phone proof came first: the desk code names no enrollment, or the
+    // check found it just before it was removed and its proof is stale.
+    expectProblem(phoneAnswer, 200);
+    assert.equal(phoneAnswer.body.stage, 'verify_contact');
+    assert(['404:DESK_CODE_NOT_FOUND', '409:ASSISTED_VERIFICATION_STALE'].includes(
+      `${deskAnswer.status}:${deskAnswer.body.code}`), `desk answer ${deskAnswer.status} ${deskAnswer.body.code}`);
+    raceWinner = { id: byPhoneId, holder_method: 'registry_phone_otp' };
   }
+  assert.equal(superseded, 1, 'the losing enrollment was not removed and audited superseded once');
   assert.deepEqual((await owner.query(`select id::text, holder_method from identity.public_patient_enrollments
-    where nin_last4 = '0102' and state <> 'active'`)).rows,
-  [{ id: (await enrollmentRow(atDesk.cookie)).id, holder_method: 'facility_in_person' }]);
+    where nin_last4 = '0102' and state <> 'active'`)).rows, [raceWinner]);
   setEnvironment({ NIN_HOLDER_SMS_ENABLED: 'false' });
-  check(`an in-person proof racing a registry-phone proof of the same NIN serializes on the NIN lock: the in-person proof wins (the phone answer was ${phoneAnswer.status === 200 ? '200, then displaced and audited contested' : '404, its unproven enrollment superseded'}) and one proven enrollment remains`);
+  check(`an in-person check racing a registry-phone proof of the same NIN serializes on the NIN lock: the first proof recorded (here ${raceWinner.holder_method}) removes the other enrollment, audited superseded, and one proven enrollment remains`);
 
   // 11. Budgets over 24 hours, per staff member and per facility; every
   // outcome counts. A second nurse at clinic A has made no check.
