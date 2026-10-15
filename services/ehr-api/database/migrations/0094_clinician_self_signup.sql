@@ -627,10 +627,13 @@ end
 $$;
 revoke all on function identity.clinician_application_session_row(character, boolean) from public;
 
--- A live account capability at one of the allowed stages. A missing, expired,
--- ended or draft capability is CLINICIAN_APPLICATION_SESSION_INVALID (the only
--- refusal Identity answers 401); a live one at another stage is
--- `stage_refusal`.
+-- A live account capability at one of the allowed stages, checked against its
+-- account now. A missing, expired, ended or draft capability is
+-- CLINICIAN_APPLICATION_SESSION_INVALID (the only refusal Identity answers
+-- 401); one whose account is no longer active or is disabled (the fraud
+-- runbook's lock) is CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE; a live one at
+-- another stage (its effective stage) is `stage_refusal`. The row returned
+-- carries the effective stage.
 create function identity.clinician_application_account_session(requested_session_hmac char(64),
   allowed_stages text[], stage_refusal text, lock_row boolean)
 returns identity.clinician_application_sessions
@@ -646,6 +649,10 @@ begin
      or capability.expires_at <= clock_timestamp() then
     raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_SESSION_INVALID';
   end if;
+  if not identity.clinician_application_account_usable(capability.account_id) then
+    raise exception using errcode = '23514', message = 'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE';
+  end if;
+  capability.stage := identity.clinician_application_effective_stage(capability);
   if not (capability.stage = any(allowed_stages)) then
     raise exception using errcode = '42501', message = stage_refusal;
   end if;
@@ -672,6 +679,61 @@ as $$
     else 'enrolment_required' end
 $$;
 revoke all on function identity.clinician_application_account_stage(uuid) from public;
+
+-- The stage a live account capability is at now. A capability keeps the
+-- stage it opened at, except that enrolment_required (no active factor) ends
+-- once the account holds an active factor: it then needs the authenticator's
+-- code (authenticator_required) like a capability opened now. A ready
+-- capability stays ready (its authenticator was verified in it).
+create function identity.clinician_application_effective_stage(capability identity.clinician_application_sessions)
+returns text
+language sql
+stable
+security definer
+set search_path = pg_catalog, identity, auth, platform, audit, pg_temp
+as $$
+  select case when capability.stage = 'enrolment_required'
+    then coalesce(identity.clinician_application_account_stage(capability.account_id), 'authenticator_required')
+    else capability.stage end
+$$;
+revoke all on function identity.clinician_application_effective_stage(identity.clinician_application_sessions) from public;
+
+-- Whether a capability's account can still use it: active and not disabled
+-- (the fraud runbook's lock stops every capability of the account).
+create function identity.clinician_application_account_usable(requested_account_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, identity, auth, platform, audit, pg_temp
+as $$
+  select exists (select 1 from auth.accounts account_row
+                  where account_row.id = requested_account_id and account_row.status = 'active'
+                    and (account_row.disabled_until is null or account_row.disabled_until <= clock_timestamp()))
+$$;
+revoke all on function identity.clinician_application_account_usable(uuid) from public;
+
+-- An account whose authenticator is set up again only through staff sign-in
+-- (the password, then the emailed enrolment code; P22 query (3) reviews it),
+-- never through an application capability that the mailbox alone opened: it
+-- holds an approved clinician application, or a staff membership that is
+-- active or pending. After a two-person MFA reset such an account has no
+-- factor, and the status page must not offer the enrolment.
+create function identity.clinician_application_staff_enrolment_only(requested_account_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, identity, auth, platform, audit, pg_temp
+as $$
+  select exists (select 1 from identity.clinician_applications application
+                  where application.account_id = requested_account_id and application.state = 'approved')
+      or exists (select 1 from identity.staff_facility_memberships membership
+                   left join identity.workforce_memberships lifecycle on lifecycle.membership_id = membership.id
+                  where membership.account_id = requested_account_id
+                    and (membership.active or lifecycle.state = 'pending'))
+$$;
+revoke all on function identity.clinician_application_staff_enrolment_only(uuid) from public;
 
 -- An account the status page serves: active and not disabled, holding a
 -- clinician application, with no platform role and no patient record.
@@ -1450,7 +1512,9 @@ $$;
 -- C6. Verifies a status code. A decoy never verifies and still counts. A
 -- correct code opens a 30-minute account capability at the stage the account's
 -- authenticator requires, or answers factor_unproven (no capability) when its
--- only factor was enrolled by platform sign-in.
+-- only factor was enrolled by platform sign-in, or staff_sign_in_required (no
+-- capability, audited as denied) when the account has no factor but sets one
+-- up only through staff sign-in (an approved clinician after an MFA reset).
 create function identity.verify_clinician_application_status_code(
   requested_challenge_id uuid,
   requested_email_hmac char(64),
@@ -1500,6 +1564,14 @@ begin
     return query select 'factor_unproven'::text, null::uuid, null::text;
     return;
   end if;
+  if opened_stage = 'enrolment_required' and identity.clinician_application_staff_enrolment_only(challenge.account_id) then
+    perform identity.clinician_application_audit('identity.clinician-application.status-code-verified',
+      'clinician-application-session', challenge.id::text, 'denied',
+      jsonb_build_object('challengeId', challenge.id, 'accountId', challenge.account_id,
+        'refusal', 'staff_sign_in_required'));
+    return query select 'staff_sign_in_required'::text, null::uuid, null::text;
+    return;
+  end if;
   insert into identity.clinician_application_sessions (id, token_hmac, kind, account_id, stage, created_at, expires_at)
   values (gen_random_uuid(), requested_session_hmac, 'account', challenge.account_id, opened_stage, now_value,
     now_value + interval '30 minutes');
@@ -1511,7 +1583,10 @@ end
 $$;
 
 -- The live capability a token digest names, for the authenticator routes (the
--- 0088 challenge it drives). Closed in maintenance.
+-- 0088 challenge it drives). Closed in maintenance. An account capability is
+-- checked against its account now (as clinician_application_account_session
+-- does): CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE when the account is no
+-- longer active or is disabled, and otherwise answered at its effective stage.
 create function identity.clinician_application_session(requested_session_hmac char(64))
 returns table (kind text, stage text, account_id uuid, mfa_challenge_id uuid, expires_at timestamptz)
 language plpgsql
@@ -1529,8 +1604,12 @@ begin
      or capability.consumed_at is not null then
     raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_SESSION_INVALID';
   end if;
-  return query select capability.kind, capability.stage, capability.account_id, capability.mfa_challenge_id,
-    capability.expires_at;
+  if capability.kind = 'account' and not identity.clinician_application_account_usable(capability.account_id) then
+    raise exception using errcode = '23514', message = 'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE';
+  end if;
+  return query select capability.kind,
+    case when capability.kind = 'account' then identity.clinician_application_effective_stage(capability) end,
+    capability.account_id, capability.mfa_challenge_id, capability.expires_at;
 end
 $$;
 
@@ -1737,7 +1816,10 @@ end
 $$;
 
 -- C9. Records which 0088 staff challenge (of the capability's own account)
--- the capability drives, and the stage that challenge serves.
+-- the capability drives, and the stage that challenge serves. A capability
+-- that is already ready answers CLINICIAN_APPLICATION_AUTHENTICATOR_READY
+-- (never the 401 marker: it is live), and an enrolment challenge is not bound
+-- for an account that sets its authenticator up only through staff sign-in.
 create function identity.bind_clinician_application_mfa_challenge(requested_session_hmac char(64),
   requested_mfa_challenge_id uuid)
 returns void
@@ -1752,13 +1834,16 @@ begin
   perform identity.clinician_application_require_system();
   perform identity.clinician_application_require_not_maintenance();
   capability := identity.clinician_application_account_session(requested_session_hmac,
-    array['enrolment_required', 'authenticator_required'], 'CLINICIAN_APPLICATION_SESSION_INVALID', true);
+    array['enrolment_required', 'authenticator_required'], 'CLINICIAN_APPLICATION_AUTHENTICATOR_READY', true);
   select challenge.purpose into challenge_purpose from auth.mfa_login_challenges challenge
    where challenge.id = requested_mfa_challenge_id and challenge.account_id = capability.account_id
      and challenge.session_kind = 'staff' and challenge.consumed_at is null and challenge.invalidated_at is null
      and challenge.expires_at > clock_timestamp();
   if challenge_purpose is null then
     raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_PERMISSION_DENIED';
+  end if;
+  if challenge_purpose = 'enroll' and identity.clinician_application_staff_enrolment_only(capability.account_id) then
+    raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED';
   end if;
   update identity.clinician_application_sessions bound
      set mfa_challenge_id = requested_mfa_challenge_id,
@@ -1791,6 +1876,11 @@ begin
   perform identity.clinician_application_require_not_maintenance();
   capability := identity.clinician_application_account_session(requested_session_hmac,
     array['enrolment_required', 'authenticator_required'], 'CLINICIAN_APPLICATION_SESSION_INVALID', true);
+  -- The enrolment of an account that sets its authenticator up only through
+  -- staff sign-in readies nothing (and the enrolment fails with it).
+  if requested_method = 'enrolment' and identity.clinician_application_staff_enrolment_only(capability.account_id) then
+    raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED';
+  end if;
   if not exists (
     select 1 from auth.mfa_factors factor
      where factor.id = requested_factor_id and factor.account_id = capability.account_id

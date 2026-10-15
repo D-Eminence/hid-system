@@ -263,9 +263,10 @@ describe('the code verifications', () => {
     expect(JSON.stringify(result.answer)).not.toContain(challenge.token);
   });
 
-  it('answers a decoy or wrong status code 401, and an unproven factor 403, opening nothing', async () => {
+  it('answers a decoy or wrong status code 401, an unproven factor 403, and an account that re-enrols only at staff sign-in 403, opening nothing', async () => {
     for (const [outcome, status, code] of [['invalid', 401, 'CLINICIAN_APPLICATION_CODE_INVALID'],
-      ['factor_unproven', 403, 'STAFF_MFA_FACTOR_UNPROVEN']] as const) {
+      ['factor_unproven', 403, 'STAFF_MFA_FACTOR_UNPROVEN'],
+      ['staff_sign_in_required', 403, 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED']] as const) {
       const h = harness({ 'verify_clinician_application_status_code': () => ({ rows: [{ outcome, account_id: null,
         stage: null }] }) });
       const problem = await refusal(h.service.verifyStatusCode({ challengeId, email, code: '123456' }, request));
@@ -383,6 +384,14 @@ describe('the authenticator steps', () => {
     }
   });
 
+  it('answers 409 AUTHENTICATOR_READY, not 401, when a concurrent step made the capability ready before the bind', async () => {
+    const h = harness({ 'bind_clinician_application_mfa_challenge': () => {
+      throw Object.assign(new Error('CLINICIAN_APPLICATION_AUTHENTICATOR_READY'), { code: '42501' });
+    } });
+    const problem = await refusal(h.service.reopenAuthenticator(TOKEN, request));
+    expect([problem.getStatus(), problem.code]).toEqual([409, 'CLINICIAN_APPLICATION_AUTHENTICATOR_READY']);
+  });
+
   it('re-opens the challenge of the capability stage, and commits a spent budget before its 429', async () => {
     const h = harness();
     await expect(h.service.reopenAuthenticator(TOKEN, request)).resolves.toEqual({ purpose: 'enroll',
@@ -409,6 +418,8 @@ describe('the database error table', () => {
     ['55000', 'CLINICIAN_APPLICATION_IMMUTABLE', 503, 'CLINICIAN_APPLICATION_UNAVAILABLE'],
     ['42501', 'CLINICIAN_APPLICATION_SESSION_INVALID', 401, 'CLINICIAN_APPLICATION_SESSION_INVALID'],
     ['42501', 'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED', 403, 'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED'],
+    ['42501', 'CLINICIAN_APPLICATION_AUTHENTICATOR_READY', 409, 'CLINICIAN_APPLICATION_AUTHENTICATOR_READY'],
+    ['42501', 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED', 403, 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED'],
     ['42501', 'CLINICIAN_APPLICATION_PERMISSION_DENIED', 503, 'CLINICIAN_APPLICATION_UNAVAILABLE'],
     ['42501', 'permission denied for function submit_clinician_application', 503, 'CLINICIAN_APPLICATION_UNAVAILABLE'],
     ['42501', '', 503, 'CLINICIAN_APPLICATION_UNAVAILABLE'],

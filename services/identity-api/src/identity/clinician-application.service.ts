@@ -58,6 +58,8 @@ const SIGNUP_CLOSED_DETAIL = 'Clinician sign-up is not open yet. If you already 
 const EMAIL_IN_USE_DETAIL = 'This email address already has a Health ID account. Sign in, reset your password,'
   + ' or use a different email address for your clinician account.';
 const FACTOR_UNPROVEN_DETAIL = 'Your authenticator was set up at platform sign-in. Contact HID support to reset it.';
+const STAFF_SIGN_IN_DETAIL = 'Your authenticator was reset. Sign in to the provider portal to set it up again,'
+  + ' or contact HID support.';
 
 /** 409 answers of the database's conflict markers (23505 and 23514), with their fixed details. */
 const CONFLICTS: Readonly<Record<string, string>> = Object.freeze({
@@ -169,7 +171,8 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
           this.hmac('session', token)],
       )).rows[0];
       if (row?.outcome !== 'verified' || !row.account_id) {
-        return { verified: false, unproven: row?.outcome === 'factor_unproven' } as const;
+        return { verified: false, unproven: row?.outcome === 'factor_unproven',
+          staffSignIn: row?.outcome === 'staff_sign_in_required' } as const;
       }
       await this.openChallenge(client, token, row.account_id, request);
       const capability = await this.capability(client, token);
@@ -178,6 +181,7 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
     if (!result.verified && result.unproven) {
       throw new DomainProblem(403, 'STAFF_MFA_FACTOR_UNPROVEN', FACTOR_UNPROVEN_DETAIL);
     }
+    if (!result.verified && result.staffSignIn) throw this.staffSignInRequired();
     if (!result.verified) throw this.codeInvalid();
     return { answer: { next: result.stage === 'authenticator_required' ? 'authenticator_verify' : 'authenticator_setup',
       expiresAt: new Date(result.expiresAt).toISOString() }, token };
@@ -596,6 +600,9 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
         return new DomainProblem(403, 'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED',
           'Verify your authenticator to continue');
       }
+      // A live capability at the wrong stage is never the 401 of an ended one.
+      if (message === 'CLINICIAN_APPLICATION_AUTHENTICATOR_READY') return this.authenticatorReadyProblem();
+      if (message === 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED') return this.staffSignInRequired();
       return this.unavailable();
     }
     if (code === '40001') return new DomainProblem(409, 'VERSION_CONFLICT', 'The application changed; reload it');
@@ -657,6 +664,11 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
   private authenticatorReadyProblem(): DomainProblem {
     return new DomainProblem(409, 'CLINICIAN_APPLICATION_AUTHENTICATOR_READY',
       'Your authenticator is already verified for this session');
+  }
+
+  /** An account that sets its authenticator up again only through staff sign-in (an approved clinician after a reset). */
+  private staffSignInRequired(): DomainProblem {
+    return new DomainProblem(403, 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED', STAFF_SIGN_IN_DETAIL);
   }
 
   private requiresSignOut(): DomainProblem {

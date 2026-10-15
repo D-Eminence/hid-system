@@ -439,6 +439,8 @@ begin
          'identity.clinician_application_session_row(character,boolean)',
          'identity.clinician_application_account_session(character,text[],text,boolean)',
          'identity.clinician_application_account_stage(uuid)', 'identity.clinician_application_status_eligible(uuid)',
+         'identity.clinician_application_effective_stage(identity.clinician_application_sessions)',
+         'identity.clinician_application_account_usable(uuid)', 'identity.clinician_application_staff_enrolment_only(uuid)',
          'identity.clinician_application_identity_refused(uuid)', 'identity.clinician_application_account_refusal(uuid)',
          'identity.clinician_application_access_state(identity.clinician_applications)',
          'identity.clinician_application_view(identity.clinician_applications)',
