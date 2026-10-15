@@ -261,12 +261,13 @@ const environmentSchema = z.object({
     context.addIssue({ code: 'custom', path: ['NIN_HOLDER_FAILURES_DAILY_MAX'],
       message: 'The daily holder failure budget cannot be below OTP_MAX_ATTEMPTS: no code could be sent' });
   }
-  const productionProfile = environment.HID_DEPLOYMENT_ENV === 'production'
-    || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging');
+  const productionProfile = isProductionProfile(environment);
   // Anyone who knows a NIN can spend its budgets and close the online route
   // for its holder, and a person without a usable registry phone has no
   // online route at all; the facility route (0094, ADR-063) is the remedy,
-  // so production runs the online route only with the facility route on.
+  // so production needs the facility flag with the online route. The
+  // enrollment service also closes the online route in production while no
+  // facility takes part.
   if (productionProfile && environment.NIN_HOLDER_SMS_ENABLED && !environment.ASSISTED_REGISTRATION_ENABLED) {
     context.addIssue({ code: 'custom', path: ['NIN_HOLDER_SMS_ENABLED'],
       message: 'The online NIN holder route needs ASSISTED_REGISTRATION_ENABLED in production (ADR-063)' });
@@ -389,6 +390,15 @@ function isBase64Key(value: string, requiredBytes: number): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The production profile: the production deployment, or NODE_ENV production
+ * outside staging. Staging and development never take the production rules.
+ */
+export function isProductionProfile(environment: { HID_DEPLOYMENT_ENV?: string; NODE_ENV?: string }): boolean {
+  return environment.HID_DEPLOYMENT_ENV === 'production'
+    || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging');
 }
 
 export type Environment = z.infer<typeof environmentSchema>;

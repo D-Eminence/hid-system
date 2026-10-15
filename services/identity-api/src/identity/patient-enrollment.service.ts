@@ -8,7 +8,7 @@ import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { consumeRateLimit, rateLimitBlocked, type RateLimitWindow } from '../auth/rate-limit';
 import { publicClientNetwork } from '../common/client-network';
 import { DomainProblem, PublicDetailProblem } from '../common/problem';
-import { getEnvironment } from '../config/environment';
+import { getEnvironment, isProductionProfile } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
@@ -153,8 +153,9 @@ export class PatientEnrollmentService {
    * the enrollment keys, an ownership route and the QoreID gate (FE-4,
    * ADR-062). It reads no NIN, cookie or rate bucket and writes nothing;
    * per-request refusals (rate limits, the lookup quota) are not predicted.
-   * online is NIN_HOLDER_SMS_ENABLED; facility is ASSISTED_REGISTRATION_ENABLED
-   * with at least one participating facility (ADR-063).
+   * online is NIN_HOLDER_SMS_ENABLED, and in production also needs the
+   * facility route open; facility is ASSISTED_REGISTRATION_ENABLED with at
+   * least one participating facility (ADR-063).
    */
   async availability(correlationId: string = randomUUID()): Promise<{ open: boolean; online: boolean;
     facility: boolean }> {
@@ -248,7 +249,7 @@ export class PatientEnrollmentService {
     return { cookie: `${id}.${token}`, progress: { stage: 'verify_holder' as const,
       expiresAt: new Date(Date.now() + ENROLLMENT_TTL_MS).toISOString(),
       googleOnboardingRequired: Boolean(googleCookie),
-      online: { available: this.holderRecipient(verified as unknown as Record<string, unknown>) !== null },
+      online: { available: this.holderRecipient(verified as unknown as Record<string, unknown>, routes.online) !== null },
       facility: { available: routes.facility } } };
   }
 
@@ -423,10 +424,10 @@ export class PatientEnrollmentService {
     // Before any database work: without a client network nothing is charged.
     const ipHmac = this.networkHmac(remoteIp);
     const enrollment = await this.requireEnrollment(cookie, correlationId);
-    if (!this.onlineRoute()) throw this.holderRouteUnavailable(503);
+    if (!(await this.onlineRoute(correlationId))) throw this.holderRouteUnavailable(503);
     if (enrollment.state !== 'verify_holder') throw this.holderRouteUnavailable(409);
     const phone = this.holderRecipient(this.parseProfile(
-      this.decrypt(enrollment.id, 'profile', enrollment.profile_ciphertext)));
+      this.decrypt(enrollment.id, 'profile', enrollment.profile_ciphertext)), true);
     if (!phone) throw this.holderRouteUnavailable(409);
     const recipientHmac = this.hmac('patient-enrollment-holder-phone', phone);
     const ninDigest = this.holderNinDigest(enrollment.nin_lookup_hmac);
@@ -501,7 +502,7 @@ export class PatientEnrollmentService {
     const readiness = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<{ ready: boolean }>('select identity.public_patient_enrollment_ready() as ready'));
     if (readiness.rows[0]?.ready !== true) throw this.reconciliationRequired();
-    if (!this.onlineRoute()) throw this.holderRouteUnavailable(503);
+    if (!(await this.onlineRoute(correlationId))) throw this.holderRouteUnavailable(503);
     let result: { outcome: HolderProofOutcome | 'invalid'; requiredProfileFields?: EnrollmentProfileField[] };
     try {
       result = await this.withNinLock(cookie, correlationId, async (client, row) => {
@@ -815,11 +816,12 @@ export class PatientEnrollmentService {
   private async holderProgress(row: EnrollmentRow, googleProgress: Record<string, unknown>,
     correlationId: string, token?: string) {
     const base = { stage: 'verify_holder' as const, expiresAt: row.expires_at.toISOString(), ...googleProgress };
-    const facility: FacilityProgress = { available: await this.facilityRouteOpen(correlationId) };
+    const routes = await this.ownershipRoutes(correlationId);
+    const facility: FacilityProgress = { available: routes.facility };
     const deskCode = facility.available && token ? this.currentDeskCode(row, token) : null;
     if (deskCode) Object.assign(facility, deskCode);
     const available = this.holderRecipient(this.parseProfile(
-      this.decrypt(row.id, 'profile', row.profile_ciphertext))) !== null;
+      this.decrypt(row.id, 'profile', row.profile_ciphertext)), routes.online) !== null;
     if (!available) return { ...base, online: { available }, facility };
     const open = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<ChallengeRow>(
@@ -838,14 +840,28 @@ export class PatientEnrollmentService {
    * The routes to prove that a person holds a NIN (ADR-062): online, a code
    * to the registry phone (NIN_HOLDER_SMS_ENABLED); facility, an in-person
    * check (ADR-063), open while ASSISTED_REGISTRATION_ENABLED is true and at
-   * least one facility takes part.
+   * least one facility takes part. In production the online route runs only
+   * while the facility route is open: the facility route is the remedy when
+   * someone who knows a NIN closes its online route, and the only route for
+   * a person without a usable registry phone.
    */
   private async ownershipRoutes(correlationId: string) {
-    return { online: this.onlineRoute(), facility: await this.facilityRouteOpen(correlationId) };
+    const facility = await this.facilityRouteOpen(correlationId);
+    return { online: this.onlineRouteWith(facility), facility };
   }
 
-  /** Read on every request, as the QoreID gate reads its flags. */
-  private onlineRoute() { return getEnvironment().NIN_HOLDER_SMS_ENABLED; }
+  /** The online route, read on every request as the QoreID gate reads its flags. */
+  private async onlineRoute(correlationId: string) {
+    const environment = getEnvironment();
+    if (!environment.NIN_HOLDER_SMS_ENABLED) return false;
+    return !isProductionProfile(environment) || this.facilityRouteOpen(correlationId);
+  }
+
+  /** The online flag, and in production an open facility route too. */
+  private onlineRouteWith(facilityOpen: boolean) {
+    const environment = getEnvironment();
+    return environment.NIN_HOLDER_SMS_ENABLED && (facilityOpen || !isProductionProfile(environment));
+  }
 
   /** ADR-063: the flag, then whether any facility takes part; no read while the flag is off. */
   private async facilityRouteOpen(correlationId: string) {
@@ -870,8 +886,8 @@ export class PatientEnrollmentService {
   }
 
   /** The normalized registry phone a holder code may go to, or null: route off, unusable phone or a minor. */
-  private holderRecipient(profile: Record<string, unknown>): string | null {
-    if (!this.onlineRoute() || underEighteen(profile.dateOfBirth)) return null;
+  private holderRecipient(profile: Record<string, unknown>, online: boolean): string | null {
+    if (!online || underEighteen(profile.dateOfBirth)) return null;
     return normalizeRegistryPhone(profile.phoneNumber);
   }
 
