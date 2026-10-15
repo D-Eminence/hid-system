@@ -387,7 +387,7 @@ assert.doesNotMatch(text, /:(meta[A-Za-z]+|brevo[A-Za-z]+)::/, 'no Meta, WhatsAp
 // CFG-PROD, N1, ADR-062: Identity's NIN-only enrollment flag and the routes
 // that prove a person holds the NIN are the explicit synth inputs, false by
 // default. NIN-only enrollment needs a route; staging sends no holder SMS;
-// production has no online route until the facility route ships (ADR-063)
+// production runs the online route only with the facility route (ADR-063)
 // and never the signed-in NIN binding.
 const identityFlag = name => identityApis[0].Environment.find(entry => entry.Name === name)?.Value
 const ninOnlyEnrollment = identityFlag('QOREID_NIN_ONLY_ENROLLMENT_ENABLED')
@@ -404,8 +404,10 @@ if (ninOnlyEnrollment === 'true') {
 }
 if (environment === 'staging') assert.equal(ninHolderSms, 'false', 'staging identity-api must not send holder SMS')
 if (environment === 'production') {
-  assert.equal(ninHolderSms, 'false',
-    'production identity-api must not send holder SMS until the facility route ships (ADR-062, ADR-063)')
+  if (ninHolderSms === 'true') {
+    assert.equal(assistedRegistration, 'true',
+      'production identity-api sends holder SMS only with the facility route on (ADR-062, ADR-063)')
+  }
   assert.equal(patientSelfNinBinding, 'false', 'production identity-api must not enable the signed-in NIN binding')
 }
 

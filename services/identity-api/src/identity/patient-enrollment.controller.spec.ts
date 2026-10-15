@@ -31,6 +31,7 @@ describe('PatientEnrollmentController', () => {
     start: jest.Mock; current: jest.Mock; startContact: jest.Mock;
     verifyContact: jest.Mock; activate: jest.Mock; bindGoogle: jest.Mock; availability: jest.Mock;
     sendHolderCode: jest.Mock; verifyHolderCode: jest.Mock;
+    participatingFacilities: jest.Mock; issueDeskCode: jest.Mock;
   };
   let turnstile: { verify: jest.Mock };
   let google: { onboardingStatus: jest.Mock; onboardingCookieName: string };
@@ -51,7 +52,10 @@ describe('PatientEnrollmentController', () => {
       activate: jest.fn().mockResolvedValue({ stage: 'active', hidCode: 'HID-TEST' }),
       availability: jest.fn().mockResolvedValue({ open: false, online: false, facility: false }),
       sendHolderCode: jest.fn().mockResolvedValue({ challengeId: 'c', expiresInSeconds: 300, resendAfterSeconds: 60 }),
-      verifyHolderCode: jest.fn().mockResolvedValue({ stage: 'verify_contact', requiredProfileFields: [] }) };
+      verifyHolderCode: jest.fn().mockResolvedValue({ stage: 'verify_contact', requiredProfileFields: [] }),
+      participatingFacilities: jest.fn().mockResolvedValue({ facilities: [], whatToBring: [] }),
+      issueDeskCode: jest.fn().mockResolvedValue({ stage: 'verify_holder',
+        facility: { available: true, deskCode: '7KQ2M9XBTR' } }) };
     turnstile = { verify: jest.fn().mockResolvedValue(undefined) };
     google = { onboardingStatus: jest.fn().mockResolvedValue({
       stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY' }),
@@ -89,6 +93,43 @@ describe('PatientEnrollmentController', () => {
     // It reads no input, cookie, Origin or Turnstile token.
     expect(turnstile.verify).not.toHaveBeenCalled();
     expect(service.start).not.toHaveBeenCalled();
+  });
+
+  // ADR-063: where a patient can register in person and what to bring.
+  it('lists participating facilities to anyone, unaudited and cacheable for five minutes', async () => {
+    const route = PatientEnrollmentController.prototype.participatingFacilities;
+    expect(Reflect.getMetadata(PATH_METADATA, route)).toBe('participating-facilities');
+    expect(Reflect.getMetadata(METHOD_METADATA, route)).toBe(RequestMethod.GET);
+    expect(Reflect.getMetadata(NO_AUDIT, route)).toBe(true);
+    const answer = { facilities: [{ name: 'Synthetic Clinic', town: 'Ikeja', lga: 'Ikeja', state: 'Lagos' }],
+      whatToBring: ['Your own phone with this registration open'] };
+    service.participatingFacilities = jest.fn().mockResolvedValue(answer);
+    const response = { setHeader: jest.fn(), removeHeader: jest.fn() };
+    await expect(controller.participatingFacilities(request(), response as unknown as Response)).resolves.toEqual(answer);
+    expect(service.participatingFacilities).toHaveBeenCalledWith(correlationId);
+    expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'public, max-age=300');
+    for (const name of ['Pragma', 'Expires', 'Surrogate-Control']) {
+      expect(response.removeHeader).toHaveBeenCalledWith(name);
+    }
+    expect(turnstile.verify).not.toHaveBeenCalled();
+  });
+
+  it('serves the desk code as an accountless, Origin-checked, audited POST with no body', async () => {
+    const route = PatientEnrollmentController.prototype.facilityCode;
+    expect(Reflect.getMetadata(PATH_METADATA, route)).toBe('facility-code');
+    expect(Reflect.getMetadata(METHOD_METADATA, route)).toBe(RequestMethod.POST);
+    expect(Reflect.getMetadata(NO_AUDIT, route)).toBeUndefined();
+    expect(Reflect.getMetadata(AUDIT_ACTION, route)).toBe('identity.patient-enrollment.facility-code');
+    expect(route.length).toBe(1);
+    const cookie = 'other=value; hid_enrollment=opaque-value';
+    await expect(controller.facilityCode(request(cookie))).resolves.toMatchObject({ facility: { deskCode: '7KQ2M9XBTR' } });
+    expect(service.issueDeskCode).toHaveBeenCalledWith('opaque-value', correlationId);
+    service.issueDeskCode.mockClear();
+    await expect(controller.facilityCode(request(cookie, 'https://attacker.example')))
+      .rejects.toMatchObject({ code: 'ORIGIN_DENIED' });
+    await expect(controller.facilityCode(request(`${cookie}; hid_access=session-token`)))
+      .rejects.toMatchObject({ status: 409 });
+    expect(service.issueDeskCode).not.toHaveBeenCalled();
   });
 
   it('keeps a failed availability read uncacheable', async () => {

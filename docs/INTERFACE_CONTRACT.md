@@ -1114,9 +1114,22 @@ Identity replaces the `detail` of every `5xx` answer with "The service could
 not complete the request.", because an unexpected failure's message can carry
 internal state. The one exception is a problem raised as `PublicDetailProblem`:
 a fixed sentence written for the person using the client, which keeps its
-`detail` whatever its status. Today only the closed public enrollment gate
-uses it (`503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED`, section 8,
-"Public patient enrollment"; D-Eminence/hid-system#68, FE-4).
+`detail` whatever its status. The closed public enrollment gate uses it
+(`503 QOREID_DISABLED` and `503 QOREID_NIN_ONLY_DISABLED`, section 8,
+"Public patient enrollment"; D-Eminence/hid-system#68, FE-4). So do, from
+0093 (BRANCH:launch/nin-ownership-proof), `503 PATIENT_REGISTRATION_NOT_OPEN`,
+`409` and `503 NIN_HOLDER_ROUTE_UNAVAILABLE`,
+`503 QOREID_PATIENT_NIN_BINDING_DISABLED` and a NIN lookup that fails with
+`502`, `503` or `504`; and, from 0094
+(BRANCH:launch/facility-assisted-registration),
+`503 ASSISTED_REGISTRATION_DISABLED` and
+`503 ASSISTED_VERIFICATION_UNAVAILABLE`.
+
+A problem may carry an optional `fields` member: an object of field names to
+short result codes, never a submitted or stored value. From 0094 only
+`422 ASSISTED_VERIFICATION_NOT_MATCHED` sends it
+(`{ "firstName", "lastName", "dateOfBirth" }`, each `match`, `no_match` or
+`not_in_record`).
 
 ## 7. Health Endpoints
 
@@ -1502,7 +1515,8 @@ contact or a password, the patient now proves that they hold the NIN. In
 this change the only route is online: a code sent by SMS to the phone the NIN
 record lists. A facility route is planned (`facility.available` stays
 `false`). No Health ID can be activated without a holder proof; the database
-refuses it.
+refuses it. BRANCH:launch/facility-assisted-registration (0094, ADR-063)
+adds the facility route: see "Facility-assisted registration" below.
 
 - `POST /api/v1/identity/patient-enrollments` answers
   `200 { "stage": "verify_holder", "expiresAt", "googleOnboardingRequired", "online": { "available": boolean }, "facility": { "available": false } }`.
@@ -1521,13 +1535,18 @@ refuses it.
   `503 PATIENT_REGISTRATION_NOT_OPEN`. Staging cannot open the online route
   (it sends email only), production refuses it until the facility route
   ships (ADR-063), and the facility route is not built: with this change
-  every start on staging and production answers this way.
+  every start on staging and production answers this way. From 0094
+  (BRANCH:launch/facility-assisted-registration) production opens the online
+  route only while the facility route is open: `ASSISTED_REGISTRATION_ENABLED`
+  is on and at least one facility takes part. Suspending the last
+  designation closes both routes in production.
 - A QoreID lookup that fails with `502`, `503` or `504` keeps its code and
   shows one fixed `detail`: "We could not check your NIN now. Try again
   later."
-- `online.available` is `false` while `NIN_HOLDER_SMS_ENABLED` is off, when
-  the record has no phone or one Identity cannot use, and when the record's
-  date of birth shows an age under 18. A record without a date of birth is
+- `online.available` is `false` while `NIN_HOLDER_SMS_ENABLED` is off, in
+  production from 0094 while no facility takes part, when the record has no
+  phone or one Identity cannot use, and when the record's date of birth shows
+  an age under 18. A record without a date of birth is
   treated as an adult; its patient enters a date at activation, and an
   under-18 date is not refused there (an owner decision, ADR-062). Before any
   proof this tells a caller one fact about the record: usable phone and not
@@ -1571,9 +1590,11 @@ refuses it.
   text. No answer says "pending" or names a Health ID, patient or contact.
 - `GET /api/v1/identity/patient-enrollments/availability` now answers
   `200 { "open": boolean, "online": boolean, "facility": boolean }`.
-  `online` is `NIN_HOLDER_SMS_ENABLED`. `facility` is `false` in this
-  change. `open` is `true` only when the gate is open and a holder route is
-  on.
+  `online` is `NIN_HOLDER_SMS_ENABLED`; in production from 0094 it is also
+  `false` while `facility` is `false`. `facility` is `false` in this change;
+  from 0094 it is `ASSISTED_REGISTRATION_ENABLED` with at least one
+  participating facility. `open` is `true` only when the gate is open and a
+  holder route is on.
 - The two `503` refusals of this change, `NIN_HOLDER_ROUTE_UNAVAILABLE` and
   `QOREID_PATIENT_NIN_BINDING_DISABLED`, carry their own fixed `detail`
   (not the generic 5xx text), safe to show as sent.
@@ -1589,7 +1610,7 @@ refuses it.
 | `POST .../patient-enrollments` | `503 PATIENT_REGISTRATION_NOT_OPEN` | No holder route is on | Try later, or sign in if they have a Health ID |
 | `POST .../patient-enrollments` | `502`, `503` or `504` (QoreID code kept) | The NIN lookup could not be completed | Try again later |
 | `POST .../holder` | `409 NIN_HOLDER_ROUTE_UNAVAILABLE` | No usable phone on the record, an age under 18, or not at the holder step | Register at a participating facility |
-| `POST .../holder` | `503 NIN_HOLDER_ROUTE_UNAVAILABLE` | The online route is off | Register at a participating facility |
+| `POST .../holder` | `503 NIN_HOLDER_ROUTE_UNAVAILABLE` | The online route is off (in production from 0094, also while no facility takes part) | Register at a participating facility, or try later |
 | `POST .../holder` | `429 OTP_RESEND_COOLDOWN` | A code was sent less than `resendAfterSeconds` ago | Wait, then ask again |
 | `POST .../holder` | `429 NIN_HOLDER_ROUTE_LIMITED` | A send or failure budget is spent, or three codes were sent | Register at a participating facility |
 | `POST .../holder` | `429 ENROLLMENT_RATE_LIMITED` | The network's request budget is spent | Try again later |
@@ -1610,6 +1631,109 @@ Health-id 077b85c does not know the holder step. On 0093 it cannot
 register a new patient: its start expects `verify_contact` and its contact
 step is refused `409 ENROLLMENT_STAGE_INVALID`. It fails closed; sign-in is
 unchanged (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3).
+
+Facility-assisted registration (ADR-063,
+BRANCH:launch/facility-assisted-registration, migration 0094; not deployed).
+A patient without a usable registry phone proves at a participating
+facility that they hold the NIN. They start on their own device, show a
+desk code at the desk, and a staff member checks one original photo ID.
+The patient finishes on their own device. Every flag is off and no facility
+is designated, so the route is closed until an operator opens it.
+
+- `GET /api/v1/identity/patient-enrollments/participating-facilities`
+  (new). Public, no input, no audit row, `Cache-Control: public,
+  max-age=300`. Answers `200 { "facilities": [{ "name", "addressLine"?,
+  "town", "lga", "state", "hours"? }], "whatToBring": [three fixed
+  lines] }`. No ids. The list is empty while `ASSISTED_REGISTRATION_ENABLED`
+  is false. The three lines: "Your own phone with this registration open";
+  "One original photo ID: national ID card, international passport,
+  driver's licence or voter's card"; "A phone number or email that can
+  receive codes now".
+- `POST /api/v1/identity/patient-enrollments/facility-code` (new). The
+  enrollment cookie, an approved `Origin`, no HID session, no body. At
+  `verify_holder` it answers the holder progress with
+  `facility: { "available": true, "deskCode", "deskCodeExpiresAt" }`. The
+  code is 10 Crockford base32 characters (50 bits). A new code replaces the
+  last one; five per enrollment; it expires with the enrollment.
+  `GET .../current` shows the same code to the cookie holder only. The
+  database keeps only the code's keyed digest.
+- `POST /api/v1/identity/assisted-verifications` (new, staff). A staff
+  session with MFA, the `X-Facility-ID` facility, `Origin` and the CSRF
+  token, the permission `identity.patient.assisted_registration` (doctor,
+  clinician, nurse) and `Idempotency-Key`. Body `{ "deskCode", "method":
+  "government_photo_id_in_person", "documentType": "national_id_card" |
+  "international_passport" | "drivers_licence" | "voters_card",
+  "document": { "firstName", "lastName", "dateOfBirth"? },
+  "attestations": { "patientPresent", "originalDocumentSeen",
+  "photoMatchesPerson", "codeShownOnPatientsOwnDevice", "patientConsents" }
+  }`, each attestation `true`. Order: the guard, then
+  `503 ASSISTED_REGISTRATION_DISABLED` while the route is off (before the
+  body is read), then the body (`400`). The same key replays the stored
+  outcome.
+- A match answers `200 { "outcome": "verified" }` and moves the patient's
+  enrollment to `verify_contact`. Names are compared after NFKD, with
+  accents dropped and upper case, keeping only the letters A-Z and single
+  spaces: hyphens and apostrophes are removed, but a space is kept. So
+  "Synthetic-Okafor" matches "SYNTHETICOKAFOR" but not "Synthetic Okafor".
+  First and last name match the record's in either order. The date of birth
+  is compared only when the record has one. Staff never see the NIN, a
+  registry value, the contact, the Health ID or the missing profile fields.
+- The patient may start, or start again, at the facility: a registration
+  lasts 24 hours. After a `200` the patient's device reads
+  `GET .../current` again and continues at `verify_contact` (contact,
+  password, activation), as online.
+- `422 ASSISTED_VERIFICATION_NOT_MATCHED` carries
+  `fields: { "firstName", "lastName", "dateOfBirth" }`, each `match`,
+  `no_match` or `not_in_record`; never a registry value.
+- Admin: `GET /api/v1/admin/facilities/:facilityId/assisted-registration`
+  (`platform.facility.read`) answers `{ facilityId, designated, status,
+  addressLine, town, lga, state, hours, reason, version, updatedAt }`,
+  version `0` without a designation. `POST` the same path
+  (`platform.facility.manage`, step-up, reason, `Idempotency-Key`,
+  `If-Match` with the version, `0` to create) with `{ status: active |
+  suspended, addressLine?, town, lga, state, hours?, reason }` answers
+  `201 { facilityId, status, version, replayed }`.
+- Budgets: 20 checks per staff member and 100 per facility in 24 hours,
+  every outcome counted (`ASSISTED_VERIFICATION_STAFF_DAILY_MAX`,
+  `ASSISTED_VERIFICATION_FACILITY_DAILY_MAX`).
+
+| Route | Status and code | When | Next step |
+| --- | --- | --- | --- |
+| `POST .../facility-code` | `409 ASSISTED_REGISTRATION_UNAVAILABLE` | The facility route is closed (flag off or no participating facility) | Use the online route, or try later |
+| `POST .../facility-code` | `409 ENROLLMENT_STAGE_INVALID` | The holder step is done | Continue with the contact step |
+| `POST .../facility-code` | `429 ASSISTED_DESK_CODE_LIMITED` | Five codes were issued for this enrollment | Start again |
+| `POST .../facility-code` | `404 ENROLLMENT_NOT_FOUND` | No, a forged, an expired or a removed enrollment cookie | Start again, on the patient's own device |
+| `POST .../facility-code` | `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` | Enrollment keys are not configured | Try later |
+| `GET .../current` (patient's device) | `200`, `stage: verify_contact` | Staff recorded a match | Continue on the device: contact, password, activation |
+| `GET .../current` (patient's device) | `404 ENROLLMENT_NOT_FOUND` | Staff were told the NIN has a Health ID (the registration is deleted), or the registration expired | Follow the staff member's direction: account recovery when the NIN has a Health ID; otherwise start again |
+| `POST .../activate` (patient's device) | `409 ENROLLMENT_HOLDER_PROOF_REQUIRED` | After the check, the facility stopped taking part or the verifying staff member lost the permission, the attested grant, an active membership or an active account | Start again and check in person at a participating facility |
+| `POST .../assisted-verifications` | `503 ASSISTED_REGISTRATION_DISABLED` | The route is off | None; the route is closed |
+| `POST .../assisted-verifications` | `400 VALIDATION_FAILED` | The body is malformed: a desk code shorter than 10 or longer than 20 characters or with characters other than letters, digits, spaces and hyphens, a missing field, or an attestation that is not `true` | Correct the entry |
+| `POST .../assisted-verifications` | `400 DESK_CODE_INVALID` | The code passes the form check but is not 10 Crockford characters once spaces and hyphens are removed (for example a `U`) | Ask the patient for the code again |
+| `POST .../assisted-verifications` | `404 DESK_CODE_NOT_FOUND` | No enrollment waits for this code | Ask the patient to show the code on their phone again |
+| `POST .../assisted-verifications` | `422 ASSISTED_VERIFICATION_NOT_MATCHED` | A field differs from the NIN record | Check the document. If only spelling or spacing differs (a hyphen or a space in a name), retry with the form the document allows, within the budget. Otherwise do not register |
+| `POST .../assisted-verifications` | `403 ASSISTED_REGISTRATION_NOT_AUTHORIZED` | No MFA session in SQL, no attested grant, an inactive membership or account, or the facility does not take part | Ask a platform administrator |
+| `POST .../assisted-verifications` | `409 NIN_ALREADY_REGISTERED` | The NIN already has a Health ID | Direct the patient to account recovery; if they never registered, Health ID support with the reference in `detail` |
+| `POST .../assisted-verifications` | `409 ASSISTED_VERIFICATION_STALE` | The check can no longer prove the enrollment (another proof came first, or a new desk code) | Ask for a new desk code and check again |
+| `POST .../assisted-verifications` | `409 IDEMPOTENCY_KEY_REUSED` | The key was used for another request | Use a new key |
+| `POST .../assisted-verifications` | `429 ASSISTED_VERIFICATION_LIMITED` | A staff or facility budget is spent | Try again later |
+| `POST .../assisted-verifications` | `503 ASSISTED_VERIFICATION_UNAVAILABLE` | The check could not be recorded, or its proof could not be completed | Retry with the same `Idempotency-Key`: it replays the stored check and completes the proof, and is not charged again |
+| `POST .../assisted-verifications` | `503 ENROLLMENT_RECONCILIATION_REQUIRED` or `503 ENROLLMENT_UNAVAILABLE` | The check is recorded and charged, but the proof step could not run | Retry with the same `Idempotency-Key` within 10 minutes of the check |
+| `GET /admin/facilities/:id/assisted-registration` | `404 ADMIN_FACILITY_NOT_FOUND` | No such facility | Check the facility id |
+| `POST /admin/facilities/:id/assisted-registration` | `409 FACILITY_NOT_ACTIVE` | Making an inactive facility or organization active | Verify the facility first |
+| `POST /admin/facilities/:id/assisted-registration` | `400 VALIDATION_FAILED` | A malformed body, for example an empty town or a reason under 8 characters | Correct the request |
+| `POST /admin/facilities/:id/assisted-registration` | `400 ADMIN_COMMAND_INVALID` | A designation the command refuses, for example `If-Match: 0` with `status: suspended` | Correct the request |
+| `POST /admin/facilities/:id/assisted-registration` | `400 IDEMPOTENCY_KEY_REQUIRED` | No `Idempotency-Key` of 16 to 128 URL-safe characters | Send one |
+| `POST /admin/facilities/:id/assisted-registration` | `403 STEP_UP_REQUIRED` or `STEP_UP_EXPIRED` | No authenticator step-up in the last five minutes | Confirm with the authenticator code, then retry |
+| `POST /admin/facilities/:id/assisted-registration` | `403 PERMISSION_DENIED` | No `platform.facility.manage` | Ask a Super Admin |
+| `POST /admin/facilities/:id/assisted-registration` | `404 ADMIN_RESOURCE_NOT_FOUND` | No such facility | Check the facility id |
+| `POST /admin/facilities/:id/assisted-registration` | `409 VERSION_CONFLICT` | `If-Match` is not the current version | Read the designation again, then retry with its version |
+| `POST /admin/facilities/:id/assisted-registration` | `409 ADMIN_STATE_CONFLICT` | The designation would not change | None |
+| `POST /admin/facilities/:id/assisted-registration` | `409 IDEMPOTENCY_CONFLICT` | The key was used for another designation | Use a new key |
+| `POST /admin/facilities/:id/assisted-registration` | `428 IF_MATCH_REQUIRED` | No `If-Match`, or not a whole number | Send the version, or `0` to create |
+
+Health-id 077b85c has none of these screens (facility list, desk code,
+staff check, designation). It cannot use the facility route.
 
 ### HID Resolution
 

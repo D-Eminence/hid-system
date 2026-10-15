@@ -75,14 +75,11 @@ describe('Identity production database transport', () => {
     ['NIN-only enrollment without a route to prove the NIN holder (N1, ADR-062)',
       { ...qoreId, QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true' },
       /QOREID_NIN_ONLY_ENROLLMENT_ENABLED: NIN-only enrollment requires NIN_HOLDER_SMS_ENABLED or ASSISTED_REGISTRATION_ENABLED/],
+    // ADR-063: the facility route is the remedy when someone who knows a NIN
+    // closes its online route, and the only route without a usable registry phone.
     ['the online NIN holder route without the facility route that remedies its lockout',
       { ...qoreId, QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true' },
-      /NIN_HOLDER_SMS_ENABLED: The online NIN holder route is refused in production until the facility route ships/],
-    // ASSISTED_REGISTRATION_ENABLED has no effect before 0094 (ADR-063): it cannot stand in for the facility route.
-    ['the online NIN holder route with a facility flag that has no facility route behind it',
-      { ...qoreId, QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
-        ASSISTED_REGISTRATION_ENABLED: 'true' },
-      /NIN_HOLDER_SMS_ENABLED: The online NIN holder route is refused in production until the facility route ships/],
+      /NIN_HOLDER_SMS_ENABLED: The online NIN holder route needs ASSISTED_REGISTRATION_ENABLED in production/],
     ['the signed-in NIN binding, which proves no holder', { ...qoreId, QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true' },
       /QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: The signed-in NIN binding is refused in production/],
     ['Turnstile disabled', { TURNSTILE_MODE: 'disabled' }, /TURNSTILE_MODE: Turnstile is required/],
@@ -105,12 +102,37 @@ describe('Identity production database transport', () => {
     expect(() => getEnvironment()).toThrow(message);
   });
 
-  it('keeps every NIN holder route flag off by default, with the default holder budgets', () => {
+  it('keeps every NIN holder route flag off by default, with the default holder and in-person budgets', () => {
     production(); resetEnvironmentForTests();
     expect(getEnvironment()).toMatchObject({ QOREID_NIN_ONLY_ENROLLMENT_ENABLED: false, NIN_HOLDER_SMS_ENABLED: false,
       ASSISTED_REGISTRATION_ENABLED: false, QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: false,
       NIN_HOLDER_SMS_DAILY_MAX: 5, NIN_HOLDER_FAILURES_DAILY_MAX: 10, NIN_HOLDER_FAILURES_MONTHLY_MAX: 30,
-      NIN_HOLDER_DISTINCT_NINS_MAX: 5 });
+      NIN_HOLDER_DISTINCT_NINS_MAX: 5, ASSISTED_VERIFICATION_STAFF_DAILY_MAX: 20,
+      ASSISTED_VERIFICATION_FACILITY_DAILY_MAX: 100 });
+  });
+
+  // ADR-063: in-person checks per staff member and per facility over a
+  // sliding 24 hours, every outcome counted.
+  it('bounds the in-person check budgets and keeps the facility budget at or above the staff one', () => {
+    production(); Object.assign(process.env, { ASSISTED_VERIFICATION_STAFF_DAILY_MAX: '50',
+      ASSISTED_VERIFICATION_FACILITY_DAILY_MAX: '40' });
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(
+      /ASSISTED_VERIFICATION_FACILITY_DAILY_MAX: The facility budget of in-person checks cannot be below the staff budget/);
+    for (const [name, value] of [['ASSISTED_VERIFICATION_STAFF_DAILY_MAX', '0'],
+      ['ASSISTED_VERIFICATION_STAFF_DAILY_MAX', '201'], ['ASSISTED_VERIFICATION_FACILITY_DAILY_MAX', '1001']] as const) {
+      production(); delete process.env.ASSISTED_VERIFICATION_STAFF_DAILY_MAX;
+      delete process.env.ASSISTED_VERIFICATION_FACILITY_DAILY_MAX;
+      Object.assign(process.env, { [name]: value }); resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow(new RegExp(name));
+    }
+  });
+
+  it('accepts the online NIN holder route in production only with the facility route', () => {
+    production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
+      NIN_HOLDER_SMS_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true' });
+    resetEnvironmentForTests();
+    expect(getEnvironment()).toMatchObject({ NIN_HOLDER_SMS_ENABLED: true, ASSISTED_REGISTRATION_ENABLED: true });
   });
 
   it.each<[string, string, string | undefined]>([
@@ -127,9 +149,9 @@ describe('Identity production database transport', () => {
     expect(getEnvironment()).toMatchObject({ QOREID_NIN_ONLY_ENROLLMENT_ENABLED: true, NIN_HOLDER_SMS_ENABLED: true });
   });
 
-  it('accepts NIN-only enrollment in production with the facility flag alone, which fails closed until 0094', () => {
-    // Activation requires a holder proof, and no holder route is open in
-    // production before ADR-063: every start answers PATIENT_REGISTRATION_NOT_OPEN.
+  it('accepts NIN-only enrollment in production with the facility route alone', () => {
+    // ADR-063: the facility route opens only while an active designation
+    // exists; until then every start answers PATIENT_REGISTRATION_NOT_OPEN.
     production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
       ASSISTED_REGISTRATION_ENABLED: 'true' });
     resetEnvironmentForTests();
@@ -148,9 +170,9 @@ describe('Identity production database transport', () => {
 
   it('applies the production holder rules under the production deployment profile whatever NODE_ENV says', () => {
     production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
-      NIN_HOLDER_SMS_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true', NODE_ENV: 'test' });
+      NIN_HOLDER_SMS_ENABLED: 'true', NODE_ENV: 'test' });
     resetEnvironmentForTests();
-    expect(() => getEnvironment()).toThrow(/online NIN holder route is refused in production until the facility route ships/);
+    expect(() => getEnvironment()).toThrow(/online NIN holder route needs ASSISTED_REGISTRATION_ENABLED in production/);
     production(); Object.assign(process.env, { QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true', NODE_ENV: 'test' });
     resetEnvironmentForTests();
     expect(() => getEnvironment()).toThrow(/signed-in NIN binding is refused in production/);

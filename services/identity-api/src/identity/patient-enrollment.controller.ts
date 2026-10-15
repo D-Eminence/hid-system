@@ -60,6 +60,21 @@ export class PatientEnrollmentController {
     return result;
   }
 
+  /**
+   * The facilities where a patient can prove at the desk that they hold the
+   * NIN (ADR-063), by name and location only, and what to bring. Public and
+   * without input, as availability: no audit row, cacheable for five
+   * minutes. An empty list while the facility route is off.
+   */
+  @Get('participating-facilities')
+  @NoAudit()
+  async participatingFacilities(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
+    const result = await this.enrollments.participatingFacilities(request.correlationId);
+    response.setHeader('Cache-Control', 'public, max-age=300');
+    for (const name of ['Pragma', 'Expires', 'Surrogate-Control']) response.removeHeader(name);
+    return result;
+  }
+
   @Get('current')
   @AuditAction('identity.patient-enrollment.current')
   current(@Req() request: HidRequest) {
@@ -91,6 +106,21 @@ export class PatientEnrollmentController {
     this.assertAccountlessEnrollment(request,
       this.namedCookie(request, this.google.onboardingCookieName));
     return this.enrollments.sendHolderCode(this.cookie(request), request.ip, request.correlationId);
+  }
+
+  /**
+   * Issues the desk code the patient's own device shows at a participating
+   * facility (ADR-063); a new code replaces the last one. No body. Only the
+   * cookie holder sees the code, here and in the progress.
+   */
+  @Post('facility-code')
+  @HttpCode(200)
+  @AuditAction('identity.patient-enrollment.facility-code')
+  async facilityCode(@Req() request: HidRequest) {
+    this.assertOrigin(request);
+    this.assertAccountlessEnrollment(request,
+      this.namedCookie(request, this.google.onboardingCookieName));
+    return this.enrollments.issueDeskCode(this.cookie(request), request.correlationId);
   }
 
   /**

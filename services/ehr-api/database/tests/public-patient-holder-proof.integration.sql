@@ -259,10 +259,19 @@ begin
       'registry_phone_otp', 'b9310000-0000-4000-8000-000000000001', null, repeat('d1',32), 5);
     raise exception 'A wrong enrollment token recorded a holder proof';
   exception when insufficient_privilege then null; end;
+  -- 0094 (ADR-063): an in-person proof needs a matched check of this
+  -- enrollment (facility-assisted-registration.integration.sql).
   begin
     perform identity.record_public_patient_holder_proof('b9300000-0000-4000-8000-000000000001', repeat('01',32),
       'facility_in_person', null, gen_random_uuid(), repeat('d1',32), 5);
-    raise exception 'An in-person proof was recorded before 0094';
+    raise exception 'An in-person proof was recorded without a recorded check';
+  exception when check_violation then
+    if sqlerrm <> 'PATIENT_HOLDER_PROOF_INVALID' then raise; end if;
+  end;
+  begin
+    perform identity.record_public_patient_holder_proof('b9300000-0000-4000-8000-000000000001', repeat('01',32),
+      'facility_in_person', gen_random_uuid(), gen_random_uuid(), repeat('d1',32), 5);
+    raise exception 'An in-person proof that names a code was recorded';
   exception when invalid_parameter_value then null; end;
   begin
     perform identity.record_public_patient_holder_proof('b9300000-0000-4000-8000-000000000001', repeat('01',32),
@@ -978,7 +987,7 @@ update identity.public_patient_enrollments set holder_recipient_hmac = repeat('f
 -- G5: the recorded holder code is the contact code.
 update identity.public_patient_enrollments set holder_challenge_id = verified_challenge_id
   where id = 'b9300000-0000-4000-8000-000000000075';
--- G6: an in-person proof, which 0093 does not accept at activation.
+-- G6: an in-person proof with no recorded check (0094 accepts only a matched one).
 update identity.public_patient_enrollments set holder_method = 'facility_in_person', holder_challenge_id = null,
   holder_verification_id = gen_random_uuid() where id = 'b9300000-0000-4000-8000-000000000076';
 -- G7: the contact code was used after it expired.

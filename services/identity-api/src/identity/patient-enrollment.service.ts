@@ -8,7 +8,7 @@ import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { consumeRateLimit, rateLimitBlocked, type RateLimitWindow } from '../auth/rate-limit';
 import { publicClientNetwork } from '../common/client-network';
 import { DomainProblem, PublicDetailProblem } from '../common/problem';
-import { getEnvironment } from '../config/environment';
+import { getEnvironment, isProductionProfile } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
@@ -16,6 +16,8 @@ import { createContactLookupHmac } from './contact-lookup';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, type PublicPatientIdentityProvider,
   type VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 import { quotaNetwork } from './provider-enrollment.service';
+import { matchDocument, type DocumentDetails, type DocumentMatch } from './assisted-match';
+import { deskCodeFromDigest } from './desk-code';
 import { PATIENT_REGISTRATION_NOT_OPEN } from './qoreid-verification.adapter';
 import type { QoreIdNinGender } from './qoreid-verification.types';
 
@@ -30,6 +32,17 @@ interface EnrollmentRow extends QueryResultRow {
   activated_at: Date | null;
   /** HMAC of the normalized registry phone; written at a holder code send (0093). */
   holder_recipient_hmac: string | null;
+  /** ADR-063 (0094): the keyed digest of the current desk code, its salt, expiry and issue count. */
+  desk_code_hmac?: string | null;
+  desk_code_salt?: string | null;
+  desk_code_expires_at?: Date | null;
+  desk_code_issues?: number;
+}
+/** The facility route at verify_holder (ADR-063): the desk code only for the cookie holder. */
+export interface FacilityProgress { available: boolean; deskCode?: string; deskCodeExpiresAt?: string }
+/** One participating facility as the public list shows it (ADR-063): no id. */
+interface ParticipatingFacilityRow extends QueryResultRow {
+  name: string; address_line: string | null; town: string; lga: string; state: string; hours: string | null;
 }
 interface ChallengeRow extends QueryResultRow {
   id: string; verifier_hmac: string; expires_at: Date; created_at: Date;
@@ -85,6 +98,19 @@ export const HOLDER_ROUTE_UNAVAILABLE =
 export const HOLDER_ROUTE_LIMITED = 'Use a participating facility to register.';
 /** A NIN that already has a Health ID, answered only after a holder proof (ADR-062). */
 export const NIN_ALREADY_REGISTERED_DETAIL = 'This NIN already has a Health ID. Use account recovery to sign in.';
+/** ADR-063: what a patient brings to a participating facility. Fixed; the client shows it as given. */
+export const WHAT_TO_BRING = Object.freeze(['Your own phone with this registration open',
+  'One original photo ID: national ID card, international passport, driver\'s licence or voter\'s card',
+  'A phone number or email that can receive codes now']);
+/** ADR-063: a desk code asked for while the facility route is closed. */
+export const ASSISTED_REGISTRATION_UNAVAILABLE = 'Registration at a facility is not available now.';
+/** ADR-063: an in-person check whose proof can no longer be recorded. */
+export const ASSISTED_VERIFICATION_STALE =
+  'This check can no longer be used. Ask the patient for a new desk code and check again.';
+/** ADR-063: a staff member the database does not let register patients in person here. */
+export const ASSISTED_REGISTRATION_NOT_AUTHORIZED = 'You cannot register patients in person at this facility.';
+/** Desk codes one enrollment may issue (ADR-063; 0094 checks the same bound). */
+const DESK_CODES_PER_ENROLLMENT = 5;
 /**
  * N2(b): how long after activation the enrollment cookie may show the HID
  * again (GET /current, an activation replay). After it the enrollment answers
@@ -127,11 +153,13 @@ export class PatientEnrollmentService {
    * the enrollment keys, an ownership route and the QoreID gate (FE-4,
    * ADR-062). It reads no NIN, cookie or rate bucket and writes nothing;
    * per-request refusals (rate limits, the lookup quota) are not predicted.
-   * online is NIN_HOLDER_SMS_ENABLED; facility is the facility route, which
-   * needs the participating facilities of 0094 and is closed until then.
+   * online is NIN_HOLDER_SMS_ENABLED, and in production also needs the
+   * facility route open; facility is ASSISTED_REGISTRATION_ENABLED with at
+   * least one participating facility (ADR-063).
    */
-  async availability(): Promise<{ open: boolean; online: boolean; facility: boolean }> {
-    const routes = this.ownershipRoutes();
+  async availability(correlationId: string = randomUUID()): Promise<{ open: boolean; online: boolean;
+    facility: boolean }> {
+    const routes = await this.ownershipRoutes(correlationId);
     if (!this.configured() || !(routes.online || routes.facility)) return { open: false, ...routes };
     return { open: await this.provider.isAvailable(), ...routes };
   }
@@ -142,7 +170,7 @@ export class PatientEnrollmentService {
     if (!/^\d{11}$/.test(nin)) throw new DomainProblem(400, 'NIN_INVALID', 'An 11-digit NIN is required');
     // Without a route to prove that the person holds the NIN, a lookup leads
     // nowhere (ADR-062): refused before QoreID, for every NIN alike.
-    const routes = this.ownershipRoutes();
+    const routes = await this.ownershipRoutes(correlationId);
     if (!routes.online && !routes.facility) {
       throw new PublicDetailProblem(503, 'PATIENT_REGISTRATION_NOT_OPEN', PATIENT_REGISTRATION_NOT_OPEN);
     }
@@ -221,7 +249,7 @@ export class PatientEnrollmentService {
     return { cookie: `${id}.${token}`, progress: { stage: 'verify_holder' as const,
       expiresAt: new Date(Date.now() + ENROLLMENT_TTL_MS).toISOString(),
       googleOnboardingRequired: Boolean(googleCookie),
-      online: { available: this.holderRecipient(verified as unknown as Record<string, unknown>) !== null },
+      online: { available: this.holderRecipient(verified as unknown as Record<string, unknown>, routes.online) !== null },
       facility: { available: routes.facility } } };
   }
 
@@ -236,12 +264,137 @@ export class PatientEnrollmentService {
       await this.database.withSystemTransaction(correlationId, (client) =>
         this.google.bindPendingInTransaction(client, googleCookie, keyed.id, keyed.token_hmac));
     }
-    return { cookie: `${keyed.id}.${token}`, progress: await this.progress(keyed, correlationId) };
+    return { cookie: `${keyed.id}.${token}`, progress: await this.progress(keyed, correlationId, token) };
   }
 
   async current(cookie: string | undefined, correlationId: string) {
     const row = await this.requireEnrollment(cookie, correlationId);
-    return this.progress(row, correlationId);
+    return this.progress(row, correlationId, this.parseCookie(cookie).token);
+  }
+
+  /**
+   * The participating facilities (ADR-063), by name and location only, and
+   * what to bring. While ASSISTED_REGISTRATION_ENABLED is false the list is
+   * empty and nothing is read.
+   */
+  async participatingFacilities(correlationId: string) {
+    const whatToBring = [...WHAT_TO_BRING];
+    if (!getEnvironment().ASSISTED_REGISTRATION_ENABLED) return { facilities: [], whatToBring };
+    const listed = await this.database.withSystemTransaction(correlationId, (client) =>
+      client.query<ParticipatingFacilityRow>(
+        'select name, address_line, town, lga, state, hours from identity.list_participating_facilities()'));
+    return { whatToBring, facilities: listed.rows.map((row) => ({ name: row.name,
+      ...(row.address_line ? { addressLine: row.address_line } : {}), town: row.town, lga: row.lga,
+      state: row.state, ...(row.hours ? { hours: row.hours } : {}) })) };
+  }
+
+  /**
+   * Issues the desk code (ADR-063) the patient's own device shows at a
+   * participating facility: 10 Crockford base32 characters (50 bits) from a
+   * keyed digest of the cookie token and a new random salt. Only the keyed
+   * digest of the code and the salt are stored; a new code replaces the last
+   * one and expires with the enrollment. At most five per enrollment.
+   */
+  async issueDeskCode(cookie: string | undefined, correlationId: string) {
+    this.assertConfigured();
+    const row = await this.requireEnrollment(cookie, correlationId);
+    if (!(await this.facilityRouteOpen(correlationId))) {
+      throw new DomainProblem(409, 'ASSISTED_REGISTRATION_UNAVAILABLE', ASSISTED_REGISTRATION_UNAVAILABLE);
+    }
+    if (row.state !== 'verify_holder') throw this.holderStageInvalid();
+    const { token } = this.parseCookie(cookie);
+    for (let attempt = 0; ; attempt += 1) {
+      const salt = randomBytes(16).toString('hex');
+      const code = this.deskCode(row.id, token, salt);
+      let issued: number;
+      try {
+        issued = (await this.database.withSystemTransaction(correlationId, (client) => client.query(
+          `update identity.public_patient_enrollments set desk_code_hmac=$2, desk_code_salt=$3,
+             desk_code_expires_at=expires_at, desk_code_issues=desk_code_issues+1,
+             updated_at=clock_timestamp(), row_version=row_version+1
+           where id=$1 and state='verify_holder' and desk_code_issues < $4 and expires_at > clock_timestamp()`,
+          [row.id, this.hmac('patient-enrollment-desk-code', code), salt, DESK_CODES_PER_ENROLLMENT]))).rowCount ?? 0;
+      } catch (error) {
+        // Another enrollment holds the same 50 bits: draw a new salt.
+        if (attempt < 2 && this.databaseErrorCode(error) === '23505'
+          && this.databaseConstraint(error) === 'public_patient_enrollments_desk_code_uq') continue;
+        throw this.mapDatabaseError(error);
+      }
+      const current = await this.requireEnrollment(cookie, correlationId);
+      if (issued !== 1) {
+        if (current.state !== 'verify_holder') throw this.holderStageInvalid();
+        throw new DomainProblem(429, 'ASSISTED_DESK_CODE_LIMITED',
+          'Too many desk codes were issued for this registration. Start again or try later.');
+      }
+      return this.holderProgress(current, await this.googleProgress(current, correlationId), correlationId, token);
+    }
+  }
+
+  /**
+   * What the staff check of ADR-063 learns from a desk code: the code's keyed
+   * digest and, when it names an enrollment waiting at verify_holder, its id,
+   * the NIN's holder digest and the blind compare of the document with the
+   * NIN record. Never a record value.
+   */
+  async deskLookup(code: string, document: DocumentDetails, correlationId: string): Promise<{
+    deskCodeHmac: string;
+    enrollment: { id: string; ninDigest: string; result: DocumentMatch } | null }> {
+    this.assertConfigured();
+    const deskCodeHmac = this.hmac('patient-enrollment-desk-code', code);
+    const found = await this.database.withSystemTransaction(correlationId, (client) =>
+      client.query<EnrollmentRow>(
+        `select * from identity.public_patient_enrollments where desk_code_hmac=$1 and state='verify_holder'
+           and desk_code_expires_at > clock_timestamp() and expires_at > clock_timestamp()`, [deskCodeHmac]));
+    const row = found.rows[0];
+    if (!row) return { deskCodeHmac, enrollment: null };
+    const profile = this.parseProfile(this.decrypt(row.id, 'profile', row.profile_ciphertext));
+    return { deskCodeHmac, enrollment: { id: row.id, ninDigest: this.holderNinDigest(row.nin_lookup_hmac),
+      result: matchDocument(document, profile) } };
+  }
+
+  /**
+   * Records the in-person holder proof (ADR-063) for a matched check, in
+   * system context, under the NIN lock and then the row lock, with the
+   * enrollment's own token digest. The database command re-checks the check,
+   * the desk code, the 10 minutes and the staff member's authority, and only
+   * then answers whether the NIN already has a Health ID.
+   */
+  async proveAtFacility(enrollmentId: string, verificationId: string,
+    correlationId: string): Promise<'verified' | 'existing_identity'> {
+    try {
+      return await this.database.withSystemTransaction(correlationId, async (client) => {
+        const located = (await client.query<{ nin_lookup_hmac: string }>(
+          'select nin_lookup_hmac from identity.public_patient_enrollments where id=$1', [enrollmentId])).rows[0];
+        if (!located) throw this.assistedVerificationStale();
+        await client.query("select pg_advisory_xact_lock(hashtextextended('patient-nin:' || $1, 0))",
+          [located.nin_lookup_hmac]);
+        const row = (await client.query<EnrollmentRow>(
+          'select * from identity.public_patient_enrollments where id=$1 for update', [enrollmentId])).rows[0];
+        if (!row || row.nin_lookup_hmac !== located.nin_lookup_hmac) throw this.assistedVerificationStale();
+        const proof = await client.query<{ outcome: HolderProofOutcome }>(
+          `select identity.record_public_patient_holder_proof($1,$2,'facility_in_person',null,$3,$4,$5) as outcome`,
+          [row.id, row.token_hmac, verificationId, this.holderNinDigest(row.nin_lookup_hmac),
+            this.env.NIN_HOLDER_DISTINCT_NINS_MAX]);
+        const outcome = proof.rows[0]?.outcome;
+        if (outcome !== 'verified' && outcome !== 'existing_identity') throw this.unavailable();
+        return outcome;
+      });
+    } catch (error) {
+      const code = this.databaseErrorCode(error);
+      const message = error instanceof Error ? error.message : '';
+      if (code === '42501' && message === 'ASSISTED_REGISTRATION_NOT_AUTHORIZED') {
+        throw new DomainProblem(403, 'ASSISTED_REGISTRATION_NOT_AUTHORIZED', ASSISTED_REGISTRATION_NOT_AUTHORIZED);
+      }
+      if ((code === '23514' && message === 'PATIENT_HOLDER_PROOF_INVALID')
+        || (code === '42501' && message === 'PATIENT_ENROLLMENT_DENIED')) throw this.assistedVerificationStale();
+      throw this.mapDatabaseError(error);
+    }
+  }
+
+  /** The keyed digests of a staff check's idempotency key and canonical request (ADR-063). */
+  assistedRequestDigests(idempotencyKey: string, canonicalRequest: string) {
+    return { keyHmac: this.hmac('assisted-verification-key', idempotencyKey),
+      requestHmac: this.hmac('assisted-verification-request', canonicalRequest) };
   }
 
   async bindGoogle(cookie: string | undefined, googleCookie: string | undefined,
@@ -271,10 +424,10 @@ export class PatientEnrollmentService {
     // Before any database work: without a client network nothing is charged.
     const ipHmac = this.networkHmac(remoteIp);
     const enrollment = await this.requireEnrollment(cookie, correlationId);
-    if (!this.ownershipRoutes().online) throw this.holderRouteUnavailable(503);
+    if (!(await this.onlineRoute(correlationId))) throw this.holderRouteUnavailable(503);
     if (enrollment.state !== 'verify_holder') throw this.holderRouteUnavailable(409);
     const phone = this.holderRecipient(this.parseProfile(
-      this.decrypt(enrollment.id, 'profile', enrollment.profile_ciphertext)));
+      this.decrypt(enrollment.id, 'profile', enrollment.profile_ciphertext)), true);
     if (!phone) throw this.holderRouteUnavailable(409);
     const recipientHmac = this.hmac('patient-enrollment-holder-phone', phone);
     const ninDigest = this.holderNinDigest(enrollment.nin_lookup_hmac);
@@ -349,7 +502,7 @@ export class PatientEnrollmentService {
     const readiness = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<{ ready: boolean }>('select identity.public_patient_enrollment_ready() as ready'));
     if (readiness.rows[0]?.ready !== true) throw this.reconciliationRequired();
-    if (!this.ownershipRoutes().online) throw this.holderRouteUnavailable(503);
+    if (!(await this.onlineRoute(correlationId))) throw this.holderRouteUnavailable(503);
     let result: { outcome: HolderProofOutcome | 'invalid'; requiredProfileFields?: EnrollmentProfileField[] };
     try {
       result = await this.withNinLock(cookie, correlationId, async (client, row) => {
@@ -609,18 +762,23 @@ export class PatientEnrollmentService {
       'Health ID activation is unavailable');
   }
 
-  private async progress(row: EnrollmentRow, correlationId: string) {
+  private async googleProgress(row: EnrollmentRow, correlationId: string) {
     const googleRequirement = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<{ required: boolean; capability_expires_at: Date | null }>(
         'select * from auth.google_onboarding_enrollment_requirement($1,$2)',
         [row.id, row.token_hmac]));
     const google = googleRequirement.rows[0];
-    const googleProgress = {
+    return {
       googleOnboardingRequired: google?.required === true,
       ...(google?.capability_expires_at instanceof Date
         ? { googleOnboardingExpiresAt: google.capability_expires_at.toISOString() } : {}),
     };
-    if (row.state === 'verify_holder') return this.holderProgress(row, googleProgress, correlationId);
+  }
+
+  /** The cookie token, when given, lets the holder step show the current desk code (ADR-063). */
+  private async progress(row: EnrollmentRow, correlationId: string, token?: string) {
+    const googleProgress = await this.googleProgress(row, correlationId);
+    if (row.state === 'verify_holder') return this.holderProgress(row, googleProgress, correlationId, token);
     if (row.state === 'active') {
       const result = await this.database.withSystemTransaction(correlationId, (client) =>
         client.query<{ hid_code: string }>(
@@ -652,14 +810,18 @@ export class PatientEnrollmentService {
   /**
    * Progress at verify_holder (ADR-062): whether each ownership route can be
    * used, and an open holder code's timing. No registry value, masked digit
-   * or required profile field before the proof.
+   * or required profile field before the proof. With the facility route open
+   * and the cookie token given, the current desk code (ADR-063).
    */
   private async holderProgress(row: EnrollmentRow, googleProgress: Record<string, unknown>,
-    correlationId: string) {
+    correlationId: string, token?: string) {
     const base = { stage: 'verify_holder' as const, expiresAt: row.expires_at.toISOString(), ...googleProgress };
-    const facility = { available: this.ownershipRoutes().facility };
+    const routes = await this.ownershipRoutes(correlationId);
+    const facility: FacilityProgress = { available: routes.facility };
+    const deskCode = facility.available && token ? this.currentDeskCode(row, token) : null;
+    if (deskCode) Object.assign(facility, deskCode);
     const available = this.holderRecipient(this.parseProfile(
-      this.decrypt(row.id, 'profile', row.profile_ciphertext))) !== null;
+      this.decrypt(row.id, 'profile', row.profile_ciphertext)), routes.online) !== null;
     if (!available) return { ...base, online: { available }, facility };
     const open = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<ChallengeRow>(
@@ -677,17 +839,55 @@ export class PatientEnrollmentService {
   /**
    * The routes to prove that a person holds a NIN (ADR-062): online, a code
    * to the registry phone (NIN_HOLDER_SMS_ENABLED); facility, an in-person
-   * check, which also needs a participating facility (0094) and is closed
-   * here whatever ASSISTED_REGISTRATION_ENABLED says.
+   * check (ADR-063), open while ASSISTED_REGISTRATION_ENABLED is true and at
+   * least one facility takes part. In production the online route runs only
+   * while the facility route is open: the facility route is the remedy when
+   * someone who knows a NIN closes its online route, and the only route for
+   * a person without a usable registry phone.
    */
-  private ownershipRoutes() {
-    // Read on every request, as the QoreID gate reads its flags.
-    return { online: getEnvironment().NIN_HOLDER_SMS_ENABLED, facility: false };
+  private async ownershipRoutes(correlationId: string) {
+    const facility = await this.facilityRouteOpen(correlationId);
+    return { online: this.onlineRouteWith(facility), facility };
+  }
+
+  /** The online route, read on every request as the QoreID gate reads its flags. */
+  private async onlineRoute(correlationId: string) {
+    const environment = getEnvironment();
+    if (!environment.NIN_HOLDER_SMS_ENABLED) return false;
+    return !isProductionProfile(environment) || this.facilityRouteOpen(correlationId);
+  }
+
+  /** The online flag, and in production an open facility route too. */
+  private onlineRouteWith(facilityOpen: boolean) {
+    const environment = getEnvironment();
+    return environment.NIN_HOLDER_SMS_ENABLED && (facilityOpen || !isProductionProfile(environment));
+  }
+
+  /** ADR-063: the flag, then whether any facility takes part; no read while the flag is off. */
+  private async facilityRouteOpen(correlationId: string) {
+    if (!getEnvironment().ASSISTED_REGISTRATION_ENABLED) return false;
+    const open = await this.database.withSystemTransaction(correlationId, (client) =>
+      client.query<{ open: boolean }>('select exists(select 1 from identity.list_participating_facilities()) as open'));
+    return open.rows[0]?.open === true;
+  }
+
+  /** The desk code for an enrollment, its cookie token and a salt (ADR-063). */
+  private deskCode(enrollmentId: string, token: string, salt: string) {
+    return deskCodeFromDigest(this.hmacBuffer('patient-enrollment-desk-code-value', enrollmentId, token, salt));
+  }
+
+  /** The current, unexpired desk code, recomputed from the cookie token and checked against its stored digest. */
+  private currentDeskCode(row: EnrollmentRow, token: string) {
+    if (!row.desk_code_hmac || !row.desk_code_salt || !(row.desk_code_expires_at instanceof Date)
+      || row.desk_code_expires_at.getTime() <= Date.now()) return null;
+    const code = this.deskCode(row.id, token, row.desk_code_salt);
+    if (!this.equalHex(row.desk_code_hmac, this.hmac('patient-enrollment-desk-code', code))) return null;
+    return { deskCode: code, deskCodeExpiresAt: row.desk_code_expires_at.toISOString() };
   }
 
   /** The normalized registry phone a holder code may go to, or null: route off, unusable phone or a minor. */
-  private holderRecipient(profile: Record<string, unknown>): string | null {
-    if (!this.ownershipRoutes().online || underEighteen(profile.dateOfBirth)) return null;
+  private holderRecipient(profile: Record<string, unknown>, online: boolean): string | null {
+    if (!online || underEighteen(profile.dateOfBirth)) return null;
     return normalizeRegistryPhone(profile.phoneNumber);
   }
 
@@ -1023,6 +1223,10 @@ export class PatientEnrollmentService {
   private holderRouteUnavailable(status: 409 | 503) { return new PublicDetailProblem(status,
     'NIN_HOLDER_ROUTE_UNAVAILABLE', HOLDER_ROUTE_UNAVAILABLE); }
   private holderRouteLimited() { return new DomainProblem(429, 'NIN_HOLDER_ROUTE_LIMITED', HOLDER_ROUTE_LIMITED); }
+  private holderStageInvalid() { return new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
+    'This registration is past the step that proves you hold the NIN'); }
+  private assistedVerificationStale() { return new DomainProblem(409, 'ASSISTED_VERIFICATION_STALE',
+    ASSISTED_VERIFICATION_STALE); }
   private unavailable() { return new DomainProblem(503, 'ENROLLMENT_UNAVAILABLE',
     'Enrollment is temporarily unavailable'); }
   /**

@@ -10,7 +10,7 @@ import { DatabaseService } from '../database/database.service';
 import { adminCommandError } from './admin-command-error';
 import { platformAuditActor } from './admin-context';
 import { requiresTwoPersonApproval, type PlatformAction } from './high-risk-policy';
-import type { AccountStatusCommandDto, FacilityStatusCommandDto,
+import type { AccountStatusCommandDto, AssistedRegistrationDesignationDto, FacilityStatusCommandDto,
   PlatformRoleCommandDto, RevokeSessionsCommandDto } from './dto/admin-command.dto';
 import type { ListFacilitiesDto, ListIdentityReviewsDto,
   ListPlatformAuditDto, ListPrincipalsDto } from './dto/admin-list.dto';
@@ -20,6 +20,15 @@ interface FacilityRow extends QueryResultRow {
   id: string; organizationId: string; organizationName: string; name: string; code: string;
   status: string; version: string; statusReason: string | null; statusChangedAt: Date | null;
   createdAt: Date; membershipCount: string;
+}
+
+interface DesignationRow extends QueryResultRow {
+  facility_id: string; status: 'active' | 'suspended'; address_line: string | null; town: string; lga: string;
+  state: string; hours: string | null; reason: string; row_version: string; updated_at: Date;
+}
+
+interface DesignationCommandRow extends QueryResultRow {
+  facility_id: string; status: 'active' | 'suspended'; row_version: string; replayed: boolean;
 }
 
 interface PrincipalRow extends QueryResultRow {
@@ -171,6 +180,59 @@ export class AdminService {
           { status: input.status, version: Number(row.row_version) }));
         return { facilityId: row.facility_id, status: row.lifecycle_status,
           version: Number(row.row_version), replayed: row.replayed };
+      } catch (error) { throw this.commandError(error); }
+    });
+  }
+
+  /**
+   * ADR-063: a facility's designation for assisted registration. A facility
+   * without one answers designated false and version 0, the If-Match that
+   * creates it; an unknown facility answers 404.
+   */
+  async assistedRegistration(context: PlatformAccessContext, facilityId: string) {
+    return this.database.withTransaction(context, async (client) => {
+      const facility = await client.query<{ id: string }>(
+        'select facility.id::text from identity.facilities facility where facility.id = $1', [facilityId]);
+      if (!facility.rows[0]) throw new DomainProblem(404, 'ADMIN_FACILITY_NOT_FOUND', 'Facility was not found');
+      const result = await client.query<DesignationRow>(
+        'select * from identity.admin_facility_assisted_registration($1)', [facilityId]);
+      const row = result.rows[0];
+      if (!row) {
+        return { facilityId, designated: false, status: null, addressLine: null, town: null, lga: null, state: null,
+          hours: null, reason: null, version: 0, updatedAt: null };
+      }
+      return { facilityId, designated: true, status: row.status, addressLine: row.address_line, town: row.town,
+        lga: row.lga, state: row.state, hours: row.hours, reason: row.reason, version: Number(row.row_version),
+        updatedAt: new Date(row.updated_at).toISOString() };
+    }, { readOnly: true });
+  }
+
+  /**
+   * ADR-063: designates or suspends a facility for assisted registration,
+   * under a fresh step-up, with a reason, the expected version (0 creates)
+   * and an idempotency key. Only a verified, active facility of an active
+   * organization can be made active. Audited once; a replay is not.
+   */
+  async setAssistedRegistration(context: PlatformAccessContext, facilityId: string, expectedVersion: number,
+    input: AssistedRegistrationDesignationDto, idempotencyKey: string) {
+    const designation = { status: input.status, addressLine: input.addressLine?.trim() || null,
+      town: input.town.trim(), lga: input.lga.trim(), state: input.state.trim(),
+      hours: input.hours?.trim() || null, reason: input.reason.trim() };
+    const digest = this.digest({ facilityId, expectedVersion, ...designation });
+    return this.database.withTransaction(context, async (client) => {
+      try {
+        await requirePlatformAssurance(client, context, 'platform.facility.assisted-registration');
+        const result = await client.query<DesignationCommandRow>(
+          'select * from identity.admin_set_facility_assisted_registration($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)',
+          [facilityId, expectedVersion, designation.status, designation.addressLine, designation.town,
+            designation.lga, designation.state, designation.hours, designation.reason, idempotencyKey, digest]);
+        const row = result.rows[0];
+        if (!row) throw new DomainProblem(503, 'ADMIN_COMMAND_UNAVAILABLE', 'Facility command is unavailable');
+        if (!row.replayed) await this.audit.recordWithClient(client, this.auditEvent(context,
+          `admin.facility.assisted-registration.${row.status}`, 'facility', facilityId, designation.reason,
+          { status: row.status, version: Number(row.row_version) }));
+        return { facilityId: row.facility_id, status: row.status, version: Number(row.row_version),
+          replayed: row.replayed };
       } catch (error) { throw this.commandError(error); }
     });
   }

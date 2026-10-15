@@ -5,6 +5,7 @@ const PASSWORD_HASH = `$argon2id$v=19$m=65536,t=3,p=1$${'c'.repeat(22)}$${'d'.re
 const PLACEHOLDER_HASH = `$argon2id$v=19$m=65536,t=3,p=1$${'e'.repeat(22)}$${'f'.repeat(43)}`;
 jest.mock('argon2', () => ({ argon2id: 2, hash: jest.fn() }));
 
+import { createHmac } from 'node:crypto';
 import * as argon2 from 'argon2';
 import type { ArgumentsHost } from '@nestjs/common';
 import type { Response } from 'express';
@@ -61,6 +62,10 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
   // What identity.record_public_patient_holder_send and _proof answer (0093).
   let holderSendAllowed = true;
   let holderProofOutcome = 'verified';
+  // The facilities identity.list_participating_facilities lists (0094), the
+  // in-person proof's answer or failure, and the desk code lookups.
+  let participating: Record<string, unknown>[] = [];
+  let facilityProof: unknown = 'verified';
   const holderCalls: { command: string; values: readonly unknown[] }[] = [];
   const challenges: Record<string, unknown>[] = [];
   let bound = false;
@@ -93,6 +98,23 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
         : { request_count: 1, window_started_at: new Date(), blocked_until: null });
       return { rows: [], rowCount: 1 };
     }
+    if (sql.includes('identity.list_participating_facilities()')) {
+      if (sql.includes('exists')) return { rows: [{ open: participating.length > 0 }] };
+      return { rows: participating };
+    }
+    if (sql.includes('from identity.public_patient_enrollments where desk_code_hmac=$1')) {
+      return { rows: [...enrollments.values()].filter((row) => row.desk_code_hmac === values[0]
+        && row.state === 'verify_holder' && (row.desk_code_expires_at as Date) > new Date()) };
+    }
+    if (sql.includes('set desk_code_hmac=$2')) {
+      const row = enrollments.get(String(values[0]));
+      if (!row || row.state !== 'verify_holder' || Number(row.desk_code_issues) >= Number(values[3])) {
+        return { rows: [], rowCount: 0 };
+      }
+      Object.assign(row, { desk_code_hmac: values[1], desk_code_salt: values[2], desk_code_expires_at: row.expires_at,
+        desk_code_issues: Number(row.desk_code_issues) + 1 });
+      return { rows: [], rowCount: 1 };
+    }
     if (sql.includes('from identity.public_patient_enrollments where nin_lookup_hmac')) {
       return { rows: [...enrollments.values()].filter((row) => values[0] === row.nin_lookup_hmac) };
     }
@@ -119,6 +141,7 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
         state: 'verify_holder', expires_at: new Date(Date.now() + 86_400_000),
         contact_channel: null, contact_hmac: null, contact_lookup_hmac: null, contact_ciphertext: null,
         contact_verified_at: null, holder_recipient_hmac: null,
+        desk_code_hmac: null, desk_code_salt: null, desk_code_expires_at: null, desk_code_issues: 0,
       };
       enrollments.set(String(values[0]), enrollment);
       return { rows: [], rowCount: 1 };
@@ -155,6 +178,19 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
     if (sql.includes('identity.record_public_patient_holder_failure')) {
       holderCalls.push({ command: 'failure', values });
       return { rows: [{}] };
+    }
+    if (sql.includes('identity.record_public_patient_holder_proof') && sql.includes("'facility_in_person'")) {
+      holderCalls.push({ command: 'facility-proof', values });
+      if (facilityProof instanceof Error) throw facilityProof;
+      const row = enrollments.get(String(values[0]));
+      if (facilityProof === 'verified' && row) {
+        Object.assign(row, { state: 'verify_contact', holder_method: 'facility_in_person',
+          holder_verification_id: values[2], holder_verified_at: new Date(), desk_code_hmac: null,
+          desk_code_salt: null, desk_code_expires_at: null });
+      } else if (facilityProof === 'existing_identity' && row) {
+        enrollments.delete(String(row.id));
+      }
+      return { rows: [{ outcome: facilityProof }] };
     }
     if (sql.includes('identity.record_public_patient_holder_proof')) {
       holderCalls.push({ command: 'proof', values });
@@ -258,6 +294,8 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
     challenges,
     set holderSendAllowed(value: boolean) { holderSendAllowed = value; },
     set holderProofOutcome(value: string) { holderProofOutcome = value; },
+    set participating(value: Record<string, unknown>[]) { participating = value; },
+    set facilityProof(value: unknown) { facilityProof = value; },
     set bound(value: boolean) { bound = value; },
     set contactBound(value: boolean) { contactBound = value; },
     set ready(value: boolean) { ready = value; },
@@ -451,7 +489,10 @@ describe('PatientEnrollmentService', () => {
       message: 'New Health ID registration is not open yet. If you already have a Health ID, sign in.' });
     expect(f.provider.assertAvailable).not.toHaveBeenCalled();
     expect(f.provider.verifyNin).not.toHaveBeenCalled();
-    expect(f.queries).toEqual([]);
+    // The facility flag is on, but no facility takes part (ADR-063): the one
+    // read asks only that, of no NIN.
+    expect(f.queries.map(({ sql }) => sql)).toEqual([
+      'select exists(select 1 from identity.list_participating_facilities()) as open']);
     await expect(f.service.availability()).resolves.toEqual({ open: false, online: false, facility: false });
   });
 
@@ -978,27 +1019,38 @@ describe('PatientEnrollmentService', () => {
   // the load balancer, inside TRUST_PROXY_CIDRS, and shared by every client.
   describe('client network', () => {
     const vpc = '10.40.0.0/16';
+    // A production profile the environment accepts: the online holder route
+    // with the facility route on (ADR-063), and a facility taking part.
+    const participatingRead = 'select exists(select 1 from identity.list_participating_facilities()) as open';
     function inProduction() {
       const base = getEnvironment();
-      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, NODE_ENV: 'production', TRUST_PROXY_CIDRS: vpc });
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, NODE_ENV: 'production', TRUST_PROXY_CIDRS: vpc,
+        ASSISTED_REGISTRATION_ENABLED: true });
+    }
+    function productionFixture() {
+      const f = fixture();
+      f.participating = [{ name: 'Synthetic Clinic', address_line: null, town: 'Ikeja', lga: 'Ikeja', state: 'Lagos',
+        hours: null }];
+      return f;
     }
     const ipBuckets = (queries: RecordedQuery[]) => rateLookups(queries)
       .filter(({ scope }) => scope === 'ip').map(({ bucket }) => String(bucket));
 
-    it('in production, refuses a start whose client address is missing or one of our proxies, before any database work', async () => {
+    it('in production, refuses a start whose client address is missing or one of our proxies, before any database work but the route read', async () => {
       inProduction();
-      const f = fixture();
+      const f = productionFixture();
       for (const remoteIp of [undefined, 'not-an-address', '10.40.1.10', '::ffff:10.40.200.3']) {
         await expect(f.service.start(nin, requestKey, remoteIp, correlationId))
           .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_RATE_LIMIT_UNAVAILABLE' });
       }
-      expect(f.queries).toEqual([]);
+      // Only whether a facility takes part is read, once per start; nothing is charged or written.
+      expect(f.queries.map(({ sql }) => sql)).toEqual(Array(4).fill(participatingRead));
       expect(f.provider.verifyNin).not.toHaveBeenCalled();
     });
 
     it('in production, refuses a contact step from one of our proxies before charging or sending', async () => {
       inProduction();
-      const f = fixture();
+      const f = productionFixture();
       const started = await f.service.start(nin, requestKey, '198.51.100.40', correlationId);
       f.queries.length = 0;
       await expect(f.service.startContact(started.cookie, 'email', 'patient@example.test', '10.40.1.10', correlationId))
@@ -1012,7 +1064,7 @@ describe('PatientEnrollmentService', () => {
       const buckets: string[] = [];
       for (const remoteIp of ['198.51.100.1', '198.51.100.2', '2001:db8:1:2::10', '2001:db8:1:2:abcd::99',
         '2001:db8:1:3::10']) {
-        const f = fixture();
+        const f = productionFixture();
         await f.service.start(nin, requestKey, remoteIp, correlationId);
         buckets.push(...ipBuckets(f.queries));
       }
@@ -1814,6 +1866,207 @@ describe('PatientEnrollmentService', () => {
         .catch((error: unknown) => error);
       expect(refusal).toMatchObject({ status: 409, code: 'NIN_ALREADY_REGISTERED',
         message: 'This NIN already has a Health ID. Use account recovery to sign in.' });
+    });
+  });
+
+  // ADR-063: the facility route. The patient starts on their own device; at
+  // the desk the phone shows a desk code; staff record an in-person check.
+  describe('facility-assisted registration (ADR-063)', () => {
+    const otpKey = Buffer.alloc(32, 3);
+    const keyed = (...parts: string[]) => createHmac('sha256', otpKey).update(parts.join('\u001f'), 'utf8').digest('hex');
+    const clinic = { name: 'Synthetic Clinic', address_line: '1 Synthetic Road', town: 'Ikeja', lga: 'Ikeja',
+      state: 'Lagos', hours: 'Mon-Fri 08:00-16:00' };
+    const whatToBring = ['Your own phone with this registration open',
+      'One original photo ID: national ID card, international passport, driver\'s licence or voter\'s card',
+      'A phone number or email that can receive codes now'];
+    const facilityOnly = () => {
+      Object.assign(process.env, { NIN_HOLDER_SMS_ENABLED: 'false', ASSISTED_REGISTRATION_ENABLED: 'true' });
+      resetEnvironmentForTests();
+    };
+
+    it('opens the facility route only with the flag and a participating facility', async () => {
+      facilityOnly();
+      const f = fixture();
+      f.participating = [clinic];
+      await expect(f.service.availability()).resolves.toEqual({ open: true, online: false, facility: true });
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(started.progress).toMatchObject({ stage: 'verify_holder', online: { available: false },
+        facility: { available: true } });
+      expect(started.progress).not.toHaveProperty('facility.deskCode');
+      f.participating = [];
+      await expect(f.service.availability()).resolves.toEqual({ open: false, online: false, facility: false });
+      Object.assign(process.env, { ASSISTED_REGISTRATION_ENABLED: 'false', NIN_HOLDER_SMS_ENABLED: 'true' });
+      resetEnvironmentForTests();
+      const off = fixture();
+      off.participating = [clinic];
+      await expect(off.service.availability()).resolves.toEqual({ open: true, online: true, facility: false });
+      expect(off.queries.filter(({ sql }) => sql.includes('list_participating_facilities'))).toEqual([]);
+    });
+
+    // ADR-062 refused production's online route without a remedy for a
+    // person whose online route someone else closed, or who has no usable
+    // registry phone. In production it runs only while the facility route is
+    // open: with both flags on, at least one facility must take part.
+    it('in production runs the online route only while a facility takes part', async () => {
+      Object.assign(process.env, { NIN_HOLDER_SMS_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true' });
+      resetEnvironmentForTests();
+      const base = getEnvironment();
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, HID_DEPLOYMENT_ENV: 'production' });
+      const f = fixture();
+      f.participating = [clinic];
+      await expect(f.service.availability()).resolves.toEqual({ open: true, online: true, facility: true });
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(started.progress).toMatchObject({ online: { available: true }, facility: { available: true } });
+      const sent = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      f.notification.deliver.mockClear();
+      const holderCalls = f.holderCalls.length;
+      // Every designation suspended: the online route closes with the facility route.
+      f.participating = [];
+      await expect(f.service.availability()).resolves.toEqual({ open: false, online: false, facility: false });
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'verify_holder', online: { available: false }, facility: { available: false } });
+      await expect(f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'NIN_HOLDER_ROUTE_UNAVAILABLE' });
+      await expect(f.service.verifyHolderCode(started.cookie, sent.challengeId, '000000', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'NIN_HOLDER_ROUTE_UNAVAILABLE' });
+      await expect(f.service.start(nin, '0d3a6f43-5f0a-4f4b-9a37-2c1f3c8f6b21', '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'PATIENT_REGISTRATION_NOT_OPEN' });
+      expect(f.notification.deliver).not.toHaveBeenCalled();
+      expect(f.holderCalls).toHaveLength(holderCalls);
+      // Staging and development keep the flag alone.
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, HID_DEPLOYMENT_ENV: 'staging' });
+      await expect(f.service.availability()).resolves.toEqual({ open: true, online: true, facility: false });
+    });
+
+    it('lists participating facilities by name and location only, with what to bring', async () => {
+      facilityOnly();
+      const f = fixture();
+      f.participating = [clinic, { name: 'Synthetic Annex', address_line: null, town: 'Yaba', lga: 'Lagos Mainland',
+        state: 'Lagos', hours: null }];
+      await expect(f.service.participatingFacilities(correlationId)).resolves.toEqual({
+        facilities: [{ name: 'Synthetic Clinic', addressLine: '1 Synthetic Road', town: 'Ikeja', lga: 'Ikeja',
+          state: 'Lagos', hours: 'Mon-Fri 08:00-16:00' },
+        { name: 'Synthetic Annex', town: 'Yaba', lga: 'Lagos Mainland', state: 'Lagos' }],
+        whatToBring });
+      Object.assign(process.env, { ASSISTED_REGISTRATION_ENABLED: 'false' }); resetEnvironmentForTests();
+      const off = fixture();
+      off.participating = [clinic];
+      await expect(off.service.participatingFacilities(correlationId)).resolves.toEqual({ facilities: [], whatToBring });
+      expect(off.queries).toEqual([]);
+    });
+
+    it('issues a desk code the cookie holder sees, stored only as its keyed digest', async () => {
+      facilityOnly();
+      const f = fixture();
+      f.participating = [clinic];
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const issued = await f.service.issueDeskCode(started.cookie, correlationId);
+      expect(issued).toMatchObject({ stage: 'verify_holder', facility: { available: true,
+        deskCode: expect.stringMatching(/^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{10}$/),
+        deskCodeExpiresAt: (f.enrollment!.expires_at as Date).toISOString() } });
+      const code = issued.facility.deskCode as string;
+      expect(f.enrollment!.desk_code_hmac).toBe(keyed('patient-enrollment-desk-code', code));
+      expect(f.enrollment!.desk_code_salt).toMatch(/^[0-9a-f]{32}$/);
+      expect(JSON.stringify(f.queries)).not.toContain(code);
+      // The same code again for the cookie holder, from the salt and the cookie; never for another cookie.
+      await expect(f.service.current(started.cookie, correlationId)).resolves.toMatchObject({
+        facility: { available: true, deskCode: code } });
+      const [id] = started.cookie.split('.');
+      await expect(f.service.current(`${id}.${'A'.repeat(43)}`, correlationId))
+        .rejects.toMatchObject({ status: 404, code: 'ENROLLMENT_NOT_FOUND' });
+      // A new code replaces the old one; five per enrollment.
+      const again = await f.service.issueDeskCode(started.cookie, correlationId);
+      expect(again.facility.deskCode).not.toBe(code);
+      expect(f.enrollment!.desk_code_hmac).toBe(keyed('patient-enrollment-desk-code', again.facility.deskCode as string));
+      for (let n = 3; n <= 5; n += 1) await f.service.issueDeskCode(started.cookie, correlationId);
+      await expect(f.service.issueDeskCode(started.cookie, correlationId)).rejects.toMatchObject({ status: 429,
+        code: 'ASSISTED_DESK_CODE_LIMITED' });
+      expect(f.enrollment!.desk_code_issues).toBe(5);
+    });
+
+    it('refuses a desk code while the facility route is closed, and outside the holder step', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      // The flag is on but no facility takes part.
+      Object.assign(process.env, { ASSISTED_REGISTRATION_ENABLED: 'true' }); resetEnvironmentForTests();
+      const closed = fixture();
+      closed.enrollments.set(String(f.enrollment!.id), f.enrollment!);
+      await expect(closed.service.issueDeskCode(started.cookie, correlationId)).rejects.toMatchObject({ status: 409,
+        code: 'ASSISTED_REGISTRATION_UNAVAILABLE', message: 'Registration at a facility is not available now.' });
+      const open = fixture();
+      open.participating = [clinic];
+      open.enrollments.set(String(f.enrollment!.id), f.enrollment!);
+      await proveHolder(open, started.cookie);
+      await expect(open.service.issueDeskCode(started.cookie, correlationId)).rejects.toMatchObject({ status: 409,
+        code: 'ENROLLMENT_STAGE_INVALID' });
+      // After a proof the progress shows no desk code and no route.
+      const progress = await open.service.current(started.cookie, correlationId);
+      expect(progress).not.toHaveProperty('facility');
+    });
+
+    it('finds the enrollment a desk code names and compares the document with the record blindly', async () => {
+      facilityOnly();
+      const f = fixture();
+      f.participating = [clinic];
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const { facility } = await f.service.issueDeskCode(started.cookie, correlationId);
+      const found = await f.service.deskLookup(facility.deskCode as string,
+        { firstName: 'OKAFOR', lastName: 'amina', dateOfBirth: '1990-01-02' }, correlationId);
+      expect(found).toEqual({ deskCodeHmac: keyed('patient-enrollment-desk-code', facility.deskCode as string),
+        enrollment: { id: f.enrollment!.id, ninDigest: keyed('patient-enrollment-holder-nin', 'a'.repeat(64)),
+          result: { matched: true, firstName: 'match', lastName: 'match', dateOfBirth: 'match' } } });
+      const mismatch = await f.service.deskLookup(facility.deskCode as string,
+        { firstName: 'Amina', lastName: 'Okafor', dateOfBirth: '1990-01-03' }, correlationId);
+      expect(mismatch.enrollment?.result).toEqual({ matched: false, firstName: 'match', lastName: 'match',
+        dateOfBirth: 'no_match' });
+      // Nothing of the record is returned, only the comparison.
+      expect(JSON.stringify(mismatch)).not.toMatch(/Amina|Okafor|1990|12345678901/);
+      await expect(f.service.deskLookup('0000000000', { firstName: 'Amina', lastName: 'Okafor' }, correlationId))
+        .resolves.toEqual({ deskCodeHmac: keyed('patient-enrollment-desk-code', '0000000000'), enrollment: null });
+    });
+
+    it('proves the holder at the facility with the enrollment\'s own token and maps the refusals', async () => {
+      facilityOnly();
+      const f = fixture();
+      f.participating = [clinic];
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const verificationId = '7b0d64e4-1d39-4e3a-9a52-6f0c2a7e2001';
+      await expect(f.service.proveAtFacility(String(f.enrollment!.id), verificationId, correlationId))
+        .resolves.toBe('verified');
+      const proof = f.holderCalls.find(({ command }) => command === 'facility-proof')!;
+      expect(proof.values).toEqual([f.enrollment!.id, f.enrollment!.token_hmac, verificationId,
+        keyed('patient-enrollment-holder-nin', 'a'.repeat(64)), 5]);
+      await expect(f.service.current(started.cookie, correlationId)).resolves.toMatchObject({ stage: 'verify_contact' });
+      const other = await f.service.start(nin, '3f6339b5-f06f-474a-9976-105bd99c87dc', '203.0.113.10', correlationId);
+      expect(other.cookie).not.toBe(started.cookie);
+      f.facilityProof = 'existing_identity';
+      await expect(f.service.proveAtFacility(String(f.enrollment!.id), verificationId, correlationId))
+        .resolves.toBe('existing_identity');
+      for (const [error, status, code] of [
+        [Object.assign(new Error('ASSISTED_REGISTRATION_NOT_AUTHORIZED'), { code: '42501' }), 403,
+          'ASSISTED_REGISTRATION_NOT_AUTHORIZED'],
+        [Object.assign(new Error('PATIENT_HOLDER_PROOF_INVALID'), { code: '23514' }), 409, 'ASSISTED_VERIFICATION_STALE'],
+        [Object.assign(new Error('PATIENT_ENROLLMENT_DENIED'), { code: '42501' }), 409, 'ASSISTED_VERIFICATION_STALE'],
+        [Object.assign(new Error('PATIENT_ENROLLMENT_RECONCILIATION_REQUIRED'), { code: '55000' }), 503,
+          'ENROLLMENT_RECONCILIATION_REQUIRED'],
+      ] as const) {
+        const g = fixture();
+        g.participating = [clinic];
+        await g.service.start(nin, requestKey, '203.0.113.10', correlationId);
+        g.facilityProof = error;
+        await expect(g.service.proveAtFacility(String(g.enrollment!.id), verificationId, correlationId))
+          .rejects.toMatchObject({ status, code });
+      }
+      // An enrollment that is gone cannot be proved.
+      await expect(fixture().service.proveAtFacility('7b0d64e4-1d39-4e3a-9a52-6f0c2a7e9999', verificationId,
+        correlationId)).rejects.toMatchObject({ status: 409, code: 'ASSISTED_VERIFICATION_STALE' });
+    });
+
+    it('keys a staff request and its idempotency key with the server key in their own domains', () => {
+      const f = fixture();
+      const digests = f.service.assistedRequestDigests('assisted-check-key-0001', '{"canonical":true}');
+      expect(digests).toEqual({ keyHmac: keyed('assisted-verification-key', 'assisted-check-key-0001'),
+        requestHmac: keyed('assisted-verification-request', '{"canonical":true}') });
     });
   });
 });

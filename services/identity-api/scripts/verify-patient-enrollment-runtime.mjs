@@ -1409,8 +1409,8 @@ try {
   // 19. Availability (FE-4, ADR-062): GET /availability answers { open,
   // online, facility } from the checks start makes before it reads a NIN, to
   // any caller that passes CORS, with no input, audit row or cookie. online is
-  // the holder SMS route; facility stays false until the facility route
-  // exists. While QoreID is disabled, NIN-only enrollment is off (the default
+  // the holder SMS route; facility stays false while no facility takes part
+  // (ADR-063; verify-assisted-registration-runtime.mjs opens it). While QoreID is disabled, NIN-only enrollment is off (the default
   // everywhere) or no holder route is on, it is closed and start answers 503
   // with the registration-not-open copy, which Health-id shows as sent once
   // the gateway passes upstream errors through (ADR-055). A runtime pause
@@ -1462,7 +1462,8 @@ try {
   process.env.NIN_HOLDER_SMS_ENABLED = 'true'; resetEnvironmentForTests();
   await expectAvailability(false, 'NIN-only enrollment off');
   assert.equal(await closedStart('QOREID_NIN_ONLY_DISABLED', 'NIN-only enrollment off'), NOT_OPEN);
-  // No holder route: the online route off and no facility route yet (ADR-062).
+  // No holder route: the online route off and, with the facility flag on, no
+  // participating facility (ADR-063).
   Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'false',
     ASSISTED_REGISTRATION_ENABLED: 'true' }); resetEnvironmentForTests();
   await expectAvailability(false, 'no holder route', {}, false);
