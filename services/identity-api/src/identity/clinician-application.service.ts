@@ -49,8 +49,8 @@ interface CapabilityRow {
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 /** The quota windows are an hour and a day: the longer one bounds every refusal (A21). */
 const QUOTA_RETRY_AFTER_SECONDS = 86_400;
-/** A capability's own search budget lasts as long as the capability, at most an hour. */
-const SEARCH_BUDGET_RETRY_AFTER_SECONDS = 3_600;
+/** A spent search budget of a capability (30 searches): a new capability needs the email code again. */
+const SEARCH_LIMITED_DETAIL = 'Too many searches in this session. Verify your email address again to continue.';
 const CODE_ANSWER = { accepted: true as const, expiresInSeconds: 600, resendAfterSeconds: 60 };
 const localKey = randomBytes(32);
 
@@ -682,8 +682,12 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
     const message = typeof (error as { message?: unknown })?.message === 'string'
       ? (error as { message: string }).message : '';
     if (code === 'P4290') {
-      return this.rateLimited(message === 'CLINICIAN_APPLICATION_SEARCH_BUDGET'
-        ? SEARCH_BUDGET_RETRY_AFTER_SECONDS : QUOTA_RETRY_AFTER_SECONDS);
+      // A capability's 30 searches never come back, so waiting does not help:
+      // its own code and no Retry-After (A21), as ASSISTED_DESK_CODE_LIMITED.
+      if (message === 'CLINICIAN_APPLICATION_SEARCH_BUDGET') {
+        return new DomainProblem(429, 'CLINICIAN_APPLICATION_SEARCH_LIMITED', SEARCH_LIMITED_DETAIL);
+      }
+      return this.rateLimited(QUOTA_RETRY_AFTER_SECONDS);
     }
     if (code === '55000') {
       if (message === 'PLATFORM_CONTROL_DISABLED:clinician_signup_enabled'
