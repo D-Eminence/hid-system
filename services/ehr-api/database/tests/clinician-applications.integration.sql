@@ -118,13 +118,35 @@ create function pg_temp.ca_as(n text) returns void language sql as $$
     set_config('app.purpose_of_use', 'healthcare-operations', true),
     set_config('app.facility_id', '', true), set_config('app.membership_id', '', true);
 $$;
+-- A refusal with its marker. Identity answers the public commands' refusals
+-- by SQLSTATE and marker together (ClinicianApplicationService.databaseProblem:
+-- an unmatched pair is 503 CLINICIAN_APPLICATION_UNAVAILABLE), so for the
+-- markers it maps the SQLSTATE is asserted too. Step 1's own
+-- CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED (23514, mapped by marker by the
+-- administration service) is asserted with ca_refused_with.
 create function pg_temp.ca_refused(command text, expected text) returns void language plpgsql as $$
+declare
+  expected_state text := case
+    when expected in ('CLINICIAN_APPLICATION_SESSION_INVALID', 'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED',
+      'CLINICIAN_APPLICATION_AUTHENTICATOR_READY', 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED') then '42501'
+    when expected in ('CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE', 'CLINICIAN_APPLICATION_FACILITY_BUSY',
+      'CLINICIAN_APPLICATION_ROLE_CONFLICT', 'CLINICIAN_APPLICATION_LIMIT_REACHED', 'CLINICIAN_APPLICATION_STATE_INVALID',
+      'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE') then '23514'
+    when expected in ('CLINICIAN_EMAIL_IN_USE', 'CLINICIAN_APPLICATION_ALREADY_OPEN',
+      'CLINICIAN_APPLICATION_MEMBERSHIP_EXISTS', 'CLINICIAN_APPLICATION_IDEMPOTENCY_CONFLICT') then '23505'
+    when expected = 'CLINICIAN_APPLICATION_NOT_FOUND' then 'P0002'
+    when expected = 'CLINICIAN_APPLICATION_INVALID' then '22023'
+    when expected in ('CLINICIAN_APPLICATION_QUOTA_EXCEEDED', 'CLINICIAN_APPLICATION_SEARCH_BUDGET') then 'P4290'
+    when expected in ('PLATFORM_MAINTENANCE', 'PLATFORM_CONTROL_DISABLED:clinician_signup_enabled',
+      'PLATFORM_CONTROL_DISABLED:provider_portal_enabled') then '55000'
+  end;
 begin
   begin
     execute command;
   exception when others then
-    if sqlerrm = expected then return; end if;
-    raise exception 'expected %, got % (%) from %', expected, sqlerrm, sqlstate, command;
+    if sqlerrm = expected and (expected_state is null or sqlstate = expected_state) then return; end if;
+    raise exception 'expected % (%), got % (%) from %', expected, coalesce(expected_state, 'any SQLSTATE'), sqlerrm,
+      sqlstate, command;
   end;
   raise exception 'expected % but the command succeeded: %', expected, command;
 end $$;
@@ -1841,15 +1863,16 @@ select pg_temp.ca_refused($c$select pg_temp.ca_p1_attest('a', 2, now() - interva
   pg_temp.ca_checklist(), 'ca240000-0000-4000-8000-0000000000f1', 'clinician-suite-p1-attest-7')$c$,
   'CLINICIAN_APPLICATION_COMMAND_INVALID');
 -- The factor must be the applicant's active staff-proven factor, used in this transaction.
-select pg_temp.ca_refused(format($c$select pg_temp.ca_p1_attest('a', 2, (select p1_licence_end from ca_step),
-  pg_temp.ca_checklist(), %L, 'clinician-suite-p1-attest-8')$c$, factor), 'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED')
+select pg_temp.ca_refused_with(format($c$select pg_temp.ca_p1_attest('a', 2, (select p1_licence_end from ca_step),
+  pg_temp.ca_checklist(), %L, 'clinician-suite-p1-attest-8')$c$, factor), '23514',
+  'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED')
 from unnest(array['ca240000-0000-4000-8000-0000000000f2', 'ca240000-0000-4000-8000-0000000000e1',
   'ca240000-0000-4000-8000-0000000000e2', 'ca240000-0000-4000-8000-000000000001']) factor;
 reset role;
 update auth.mfa_factors set last_used_at = now() - interval '1 minute' where id = 'ca240000-0000-4000-8000-0000000000f1';
 set local role hid_identity_api_runtime;
-select pg_temp.ca_refused($c$select pg_temp.ca_p1_attest('a', 2, (select p1_licence_end from ca_step),
-  pg_temp.ca_checklist(), 'ca240000-0000-4000-8000-0000000000f1', 'clinician-suite-p1-attest-9')$c$,
+select pg_temp.ca_refused_with($c$select pg_temp.ca_p1_attest('a', 2, (select p1_licence_end from ca_step),
+  pg_temp.ca_checklist(), 'ca240000-0000-4000-8000-0000000000f1', 'clinician-suite-p1-attest-9')$c$, '23514',
   'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED');
 reset role;
 update auth.mfa_factors set last_used_at = clock_timestamp() where id = 'ca240000-0000-4000-8000-0000000000f1';
