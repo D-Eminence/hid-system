@@ -432,7 +432,7 @@ begin
      ) or exists (
        select 1 from unnest(array[
          'identity.workforce_change_role(uuid,uuid,bigint,text,text,text,text,character,uuid)',
-         'identity.workforce_attestation_usable(uuid,uuid)', 'identity.clinician_licence_key(text,text)',
+         'identity.workforce_attestation_usable(uuid,uuid,uuid,uuid)', 'identity.clinician_licence_key(text,text)',
          'identity.clinician_application_displayed_state(text,timestamptz)',
          'identity.clinician_application_require_system()', 'identity.clinician_intake_require_open()',
          'identity.clinician_application_require_not_maintenance()',

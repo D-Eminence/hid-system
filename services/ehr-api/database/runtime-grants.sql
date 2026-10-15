@@ -1282,7 +1282,7 @@ grant execute on function identity.admin_list_clinician_applications(text, times
   to hid_identity_runtime;
 revoke all on function identity.clinician_licence_key(text, text),
   identity.clinician_application_displayed_state(text, timestamptz),
-  identity.workforce_attestation_usable(uuid, uuid),
+  identity.workforce_attestation_usable(uuid, uuid, uuid, uuid),
   identity.workforce_change_role(uuid, uuid, bigint, text, text, text, text, character, uuid),
   identity.clinician_application_require_system(),
   identity.clinician_intake_require_open(),

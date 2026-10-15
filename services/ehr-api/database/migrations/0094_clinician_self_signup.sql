@@ -31,9 +31,9 @@
 -- reviewer rule runs inside the pinned grant.
 --
 -- Reserved attestations: until its application is approved, a step-1
--- attestation supports only that application's own pinned step 2, while the
--- application is under review and not overdue
--- (identity.workforce_attestation_usable, computed at read time). So no role
+-- attestation supports only that application's own pinned step 2 (its own
+-- account at its own facility), while the application is under review and not
+-- overdue (identity.workforce_attestation_usable, computed at read time). So no role
 -- ever rests on it before approval, and rejecting, withdrawing or expiring an
 -- application revokes nothing anywhere. identity.admin_change_workforce_role
 -- keeps its signature, result, owner and grants and delegates to
@@ -114,12 +114,15 @@ alter table platform.control_settings add constraint control_settings_control_ke
 -- platform.control_enabled keeps its technical owner (P1 of the design). The
 -- membership is taken only when the current user is not the owner and lacks
 -- its privileges: a chain migrated before the first role bootstrap owns the
--- function itself, and a superuser has every role's privileges.
+-- function itself, and a superuser has every role's privileges. The owner's
+-- plain name is read (pg_get_userbyid): a regrole cast quotes a name that
+-- needs quoting, which would then compare unequal to current_user and name no
+-- role in pg_has_role or the grant.
 do $$
 declare
   owner_name name;
 begin
-  select proc.proowner::regrole::name into owner_name
+  select pg_get_userbyid(proc.proowner) into owner_name
     from pg_proc proc where proc.oid = 'platform.control_enabled(text)'::regprocedure;
   perform set_config('hid.m0094_control_owner', owner_name, true);
   perform set_config('hid.m0094_owner_grant', '', true);
@@ -170,7 +173,7 @@ begin
   if granted is not null then
     execute format('revoke %I from current_user', granted);
   end if;
-  if (select proc.proowner::regrole::name from pg_proc proc
+  if (select pg_get_userbyid(proc.proowner) from pg_proc proc
         where proc.oid = 'platform.control_enabled(text)'::regprocedure)
        <> current_setting('hid.m0094_control_owner')
      or exists (
@@ -523,8 +526,11 @@ revoke all on function identity.clinician_application_displayed_state(text, time
 
 -- Reserved attestations. True unless an application that is not approved
 -- holds this attestation, except that application's own pinned step 2 while it
--- is under review and not overdue. A null pin never unlocks a reservation.
-create function identity.workforce_attestation_usable(requested_attestation_id uuid, pinned_attestation_id uuid)
+-- is under review and not overdue: the pin names this attestation and the
+-- grant is for the application's own account at its own facility. A null pin
+-- never unlocks a reservation.
+create function identity.workforce_attestation_usable(requested_attestation_id uuid, pinned_attestation_id uuid,
+  requested_account_id uuid, requested_facility_id uuid)
 returns boolean
 language sql
 stable
@@ -538,9 +544,11 @@ as $$
        and not coalesce(pinned_attestation_id is not null
          and pinned_attestation_id = requested_attestation_id
          and application.state = 'under_review'
-         and application.expires_at > clock_timestamp(), false))
+         and application.expires_at > clock_timestamp()
+         and application.account_id = requested_account_id
+         and application.facility_id = requested_facility_id, false))
 $$;
-revoke all on function identity.workforce_attestation_usable(uuid, uuid) from public;
+revoke all on function identity.workforce_attestation_usable(uuid, uuid, uuid, uuid) from public;
 
 -- Every public, capability and system command runs only in Identity's system
 -- context: the system:auth subject, a correlation id, and no signed-in account.
@@ -992,7 +1000,7 @@ begin
       and requested_role_code = any(attestation.attested_roles)
       and attestation.reviewer_account_id <> actor_account
       and not identity.workforce_works_at(attestation.reviewer_account_id, facility_row.id)
-      and identity.workforce_attestation_usable(attestation.id, pinned_attestation_id)
+      and identity.workforce_attestation_usable(attestation.id, pinned_attestation_id, target.id, facility_row.id)
       and (pinned_attestation_id is null or attestation.id = pinned_attestation_id)
     order by attestation.valid_until desc, attestation.recorded_at desc, attestation.id
     limit 1;
@@ -1010,7 +1018,7 @@ begin
             and requested_role_code = any(attestation.attested_roles)
             and attestation.reviewer_account_id = actor_account
             and not identity.workforce_works_at(attestation.reviewer_account_id, facility_row.id)
-            and identity.workforce_attestation_usable(attestation.id, pinned_attestation_id)
+            and identity.workforce_attestation_usable(attestation.id, pinned_attestation_id, target.id, facility_row.id)
             and (pinned_attestation_id is null or attestation.id = pinned_attestation_id)) then
         raise exception using errcode = '42501', message = 'WORKFORCE_SECOND_PERSON_REQUIRED';
       end if;
@@ -1097,7 +1105,7 @@ $$;
 revoke all on function identity.workforce_change_role(uuid, uuid, bigint, text, text, text, text, character, uuid)
   from public;
 comment on function identity.workforce_change_role(uuid, uuid, bigint, text, text, text, text, character, uuid) is
-  '0094: the body of 0087''s identity.admin_change_workforce_role with exactly three insertions: the pinned attestation parameter, and in the chosen-attestation query and the second-person probe the reservation (identity.workforce_attestation_usable) and the pin. Internal; granted to no runtime.';
+  '0094: the body of 0087''s identity.admin_change_workforce_role with exactly three insertions: the pinned attestation parameter, and in the chosen-attestation query and the second-person probe the reservation (identity.workforce_attestation_usable, bound to the target account and the facility) and the pin. Internal; granted to no runtime.';
 
 -- The 0087 command keeps its signature, result, owner and grants; it is the
 -- workforce_change_role with no pin, so an application's step-1 attestation
@@ -1163,7 +1171,7 @@ begin
               'state', identity.clinician_application_displayed_state(application.state, application.expires_at))
             from identity.clinician_applications application where application.attestation_id = attestation.id),
           'usableForGrant', attestation.valid_until > clock_timestamp()
-            and identity.workforce_attestation_usable(attestation.id, null))
+            and identity.workforce_attestation_usable(attestation.id, null, null, null))
         order by attestation.recorded_at desc, attestation.id)
       from identity.staff_credential_attestations attestation
       where attestation.account_id = account_row.id), '[]'::jsonb),
