@@ -174,7 +174,7 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
         email: row.account_email,
       };
     } catch (error) {
-      throw this.databaseProblem(error);
+      throw this.activationProblem(error);
     }
   }
 
@@ -230,6 +230,22 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
   private invalidSession() {
     return new DomainProblem(401, 'ORGANIZATION_COMPLETION_SESSION_INVALID',
       'Organization profile completion session is invalid or expired');
+  }
+
+  /**
+   * The activation refuses an administrator email that already belongs to an
+   * account or staff record (0061) with this exact unique violation. The
+   * caller has proved control of that mailbox with the emailed code, so the
+   * answer tells a stranger nothing; start makes no such check. Any other
+   * unique violation keeps the general answer.
+   */
+  private activationProblem(error: unknown): DomainProblem {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505'
+      && 'message' in error && error.message === 'Administrator email already belongs to an account') {
+      return new DomainProblem(409, 'PROVIDER_EMAIL_ALREADY_REGISTERED',
+        'The administrator email is already associated with an HID account');
+    }
+    return this.databaseProblem(error);
   }
 
   private databaseProblem(error: unknown): DomainProblem {

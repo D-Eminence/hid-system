@@ -5,7 +5,7 @@ import { DomainProblem } from '../common/problem';
 import { DatabaseService } from '../database/database.service';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
-import { verifiedCacBinding } from './organization-applications.service';
+import { matchingCacIncompleteProfile, verifiedCacBinding } from './organization-applications.service';
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
 import type { StartProviderEnrollmentDto } from './dto/provider-enrollment.dto';
 import type { HidRequest } from '../common/request-context';
@@ -20,6 +20,15 @@ interface ApplicationRow {
 }
 
 const localNetworkKey = randomBytes(32);
+
+// Shown to the applicant as it is. It must be true for both cases the adapter
+// answers with cacIncompleteProfile: a record missing legal fields, and a
+// complete record whose company is not active. The governed organization
+// application has no page in the launch portal (the public site is not
+// deployed at launch), so the applicant is sent to support rather than to it.
+const CAC_PROFILE_INCOMPLETE_DETAIL = 'We could not register your organization automatically from its CAC record.'
+  + ' The record is missing details we need or does not show the company as active.'
+  + ' Contact Health ID support.';
 
 // The client network an accountless CAC lookup is charged to (an IPv4
 // address or an IPv6 /64), shared with the other public IP-keyed limits.
@@ -106,6 +115,13 @@ export class ProviderEnrollmentService {
 
       const binding = verifiedCacBinding(input.cacRegistrationNumber, providerResult);
       if (!binding || !providerResult.providerReference) {
+        // QoreID verified this CAC but returned too little of its legal
+        // profile to register it without review. Nothing is recorded, as for
+        // a malformed answer.
+        if (!providerResult.cacBinding
+          && matchingCacIncompleteProfile(input.cacRegistrationNumber, providerResult)) {
+          throw new DomainProblem(409, 'PROVIDER_CAC_PROFILE_INCOMPLETE', CAC_PROFILE_INCOMPLETE_DETAIL);
+        }
         throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
           'External verification returned an invalid response');
       }
@@ -129,13 +145,13 @@ export class ProviderEnrollmentService {
   private mapDatabaseError(error: unknown): DomainProblem {
     if (error instanceof DomainProblem) return error;
     const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
-    if (code === '23514') {
+    // Start makes no account check, so a unique violation here is never about
+    // the email. The only one is another application opened for the same CAC
+    // and product at the same moment (organization_applications_open_cac_product_uq),
+    // which a retry also answers as requiring review.
+    if (code === '23514' || code === '23505') {
       return new DomainProblem(409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW',
         'This provider organization requires manual resolution');
-    }
-    if (code === '23505') {
-      return new DomainProblem(409, 'PROVIDER_EMAIL_ALREADY_REGISTERED',
-        'The administrator email is already associated with an HID account');
     }
     if (code === '40001') {
       return new DomainProblem(409, 'VERSION_CONFLICT',
