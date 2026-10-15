@@ -1,5 +1,6 @@
+import type { ArgumentsHost } from '@nestjs/common';
 import * as environment from '../config/environment';
-import { DomainProblem } from '../common/problem';
+import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
@@ -131,5 +132,151 @@ describe('accountless provider CAC lookup quota', () => {
       .rejects.toMatchObject({ status: 503, code: 'PROVIDER_ENROLLMENT_RATE_LIMIT_UNAVAILABLE' });
     expect(database.withSystemTransaction).not.toHaveBeenCalled();
     expect(qoreid.verifyCac).not.toHaveBeenCalled();
+  });
+});
+
+describe('a verified CAC lookup without a usable legal profile', () => {
+  beforeEach(() => {
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({
+      NODE_ENV: 'test', QOREID_ENABLED: true, OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64'),
+    } as environment.Environment);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  // True for a sparse record and for a complete record whose company is not
+  // active: the adapter answers both with cacIncompleteProfile.
+  const sparseDetail = 'We could not register your organization automatically from its CAC record.'
+    + ' The record is missing details we need or does not show the company as active.'
+    + ' Contact Health ID support.';
+  const recorded = (query: jest.Mock) =>
+    query.mock.calls.some(([sql]) => String(sql).includes('public_record_organization_cac_result'));
+
+  it('answers a sparse record 409 PROVIDER_CAC_PROFILE_INCOMPLETE, records nothing and sends no code', async () => {
+    const { service, query, integrations, qoreid, completion } = setup();
+    // The QoreID sandbox shape: the lookup is verified, but name, type, date and status are empty.
+    qoreid.verifyCac.mockResolvedValue({ state: 'verified', providerReference: '990072',
+      verifiedRegistrationNumber: input.cacRegistrationNumber,
+      cacIncompleteProfile: { submittedRegistrationNumber: input.cacRegistrationNumber,
+        address: '1 Synthetic Registry Road, Lagos', metadataCompanyType: 'Private' } });
+    const refused = service.start(input, request('203.0.113.44'));
+    await expect(refused).rejects.toBeInstanceOf(DomainProblem);
+    await expect(refused).rejects.toMatchObject({ status: 409, code: 'PROVIDER_CAC_PROFILE_INCOMPLETE',
+      message: sparseDetail });
+    // One lookup, charged once, as before; nothing new is recorded.
+    expect(qoreid.verifyCac).toHaveBeenCalledTimes(1);
+    expect(integrations.consumeSelfServiceCacQuota).toHaveBeenCalledTimes(1);
+    expect(recorded(query)).toBe(false);
+    expect(completion.start).not.toHaveBeenCalled();
+  });
+
+  it('answers a complete record whose company is not active the same way, with a detail true for it', async () => {
+    const { service, query, integrations, qoreid, completion } = setup();
+    // Every legal field is present; only the registry status is not active.
+    qoreid.verifyCac.mockResolvedValue({ state: 'verified', providerReference: '990077',
+      verifiedRegistrationNumber: input.cacRegistrationNumber,
+      cacIncompleteProfile: { submittedRegistrationNumber: input.cacRegistrationNumber,
+        providerRegistrationNumber: '1234567', companyName: 'Synthetic Clinic Ltd',
+        entityType: 'Private Company Limited by Shares', registrationDate: '2021-01-01',
+        address: '1 Synthetic Registry Road, Lagos', registryStatus: 'INACTIVE' } });
+    const refused = service.start(input, request('203.0.113.44'));
+    await expect(refused).rejects.toMatchObject({ status: 409, code: 'PROVIDER_CAC_PROFILE_INCOMPLETE',
+      message: sparseDetail });
+    // The detail does not claim the details could not be read.
+    await expect(refused).rejects.not.toMatchObject({ message: expect.stringMatching(/could not read/i) });
+    expect(qoreid.verifyCac).toHaveBeenCalledTimes(1);
+    expect(integrations.consumeSelfServiceCacQuota).toHaveBeenCalledTimes(1);
+    expect(recorded(query)).toBe(false);
+    expect(completion.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps 502 QOREID_PROVIDER_RESPONSE_INVALID for a verified answer that is malformed', async () => {
+    const malformed = [
+      // Verified, with neither a binding nor a sparse profile.
+      { state: 'verified', providerReference: '990073', verifiedRegistrationNumber: input.cacRegistrationNumber },
+      // A sparse profile for another registration number.
+      { state: 'verified', providerReference: '990074', verifiedRegistrationNumber: 'RC7654321',
+        cacIncompleteProfile: { submittedRegistrationNumber: 'RC7654321', address: '1 Synthetic Registry Road, Lagos' } },
+      // A sparse profile without a numeric provider reference.
+      { state: 'verified', providerReference: 'not-numeric', verifiedRegistrationNumber: input.cacRegistrationNumber,
+        cacIncompleteProfile: { submittedRegistrationNumber: input.cacRegistrationNumber } },
+      // A full binding that does not pass validation (a registration date in the future).
+      { state: 'verified', providerReference: '990075', verifiedRegistrationNumber: input.cacRegistrationNumber,
+        cacBinding: { registrationNumber: input.cacRegistrationNumber, companyName: 'Synthetic Clinic Ltd',
+          entityType: 'Private Company', registrationDate: '2999-01-01',
+          address: '1 Synthetic Registry Road, Lagos', registryStatus: 'active' } },
+    ];
+    for (const answer of malformed) {
+      const { service, query, qoreid, completion } = setup();
+      qoreid.verifyCac.mockResolvedValue(answer);
+      await expect(service.start(input, request('203.0.113.44')))
+        .rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+      expect(recorded(query)).toBe(false);
+      expect(completion.start).not.toHaveBeenCalled();
+    }
+  });
+
+  it('passes the sparse-record detail to the client unchanged', async () => {
+    const { service, qoreid } = setup();
+    qoreid.verifyCac.mockResolvedValue({ state: 'verified', providerReference: '990076',
+      verifiedRegistrationNumber: input.cacRegistrationNumber,
+      cacIncompleteProfile: { submittedRegistrationNumber: input.cacRegistrationNumber } });
+    const problem = await service.start(input, request('203.0.113.44')).catch((error: unknown) => error);
+    const json = jest.fn();
+    const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(), json };
+    const host = { switchToHttp: () => ({ getRequest: () => request('203.0.113.44'), getResponse: () => response }) };
+    new ProblemDetailsFilter().catch(problem, host as unknown as ArgumentsHost);
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ status: 409,
+      code: 'PROVIDER_CAC_PROFILE_INCOMPLETE', detail: sparseDetail }));
+  });
+});
+
+describe('a database refusal when the application is submitted', () => {
+  beforeEach(() => {
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({
+      NODE_ENV: 'test', QOREID_ENABLED: true, OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64'),
+    } as environment.Environment);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const refusing = (code: string, message: string) => {
+    const context = setup();
+    context.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('submit_self_service_organization_application')) {
+        throw Object.assign(new Error(message), { code });
+      }
+      return { rows: [] };
+    });
+    return context;
+  };
+
+  it('answers a unique violation 409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW, never an email answer', async () => {
+    // Start makes no account check. Its only unique violation is another
+    // application opened for the same CAC and product at the same moment
+    // (organization_applications_open_cac_product_uq), for example through the
+    // governed organization application, which takes a different lock.
+    const { service, qoreid, integrations, completion } = refusing('23505',
+      'duplicate key value violates unique constraint "organization_applications_open_cac_product_uq"');
+    const refused = service.start(input, request('203.0.113.44'));
+    await expect(refused).rejects.toMatchObject({ status: 409, code: 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW',
+      message: 'This provider organization requires manual resolution' });
+    await expect(refused).rejects.not.toMatchObject({ message: expect.stringMatching(/email/i) });
+    expect(integrations.consumeSelfServiceCacQuota).not.toHaveBeenCalled();
+    expect(qoreid.verifyCac).not.toHaveBeenCalled();
+    expect(completion.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps the other submit refusals as they were', async () => {
+    const cases: Array<[string, number, string]> = [
+      ['23514', 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW'],
+      ['40001', 409, 'VERSION_CONFLICT'],
+      ['42501', 403, 'PROVIDER_ENROLLMENT_DENIED'],
+      ['22023', 503, 'PROVIDER_ENROLLMENT_UNAVAILABLE'],
+    ];
+    for (const [code, status, answer] of cases) {
+      const { service, qoreid } = refusing(code, 'synthetic refusal');
+      await expect(service.start(input, request('203.0.113.44'))).rejects.toMatchObject({ status, code: answer });
+      expect(qoreid.verifyCac).not.toHaveBeenCalled();
+    }
   });
 });

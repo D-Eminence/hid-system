@@ -372,6 +372,44 @@ provider enrollment cookie and `hid_enrollment`. The client continues with
 which issues the session. If the account already has an authenticator the
 status is `mfa_required` and the client continues with `/auth/mfa/verify`.
 
+**Provider enrollment answers a client should handle** (all Problem Details;
+the `detail` of a `4xx` is written for the applicant and may be shown as it
+is):
+
+| Step | Status and code | Meaning |
+| --- | --- | --- |
+| Start | `422 CAC_NOT_VERIFIED` | QoreID did not verify the CAC number. |
+| Start | `409 PROVIDER_CAC_PROFILE_INCOMPLETE` | QoreID verified the CAC, but its record lacks the company name, type, registration date or address, or the company is not active. It cannot be registered automatically. Detail, true in both cases: "We could not register your organization automatically from its CAC record. The record is missing details we need or does not show the company as active. Contact Health ID support." Nothing is recorded, no email code is sent, and the lookup counts against the CAC lookup quota as any lookup does. |
+| Start | `409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW` | The CAC already has another application for this product (a governed one, or one with another administrator email), or is already registered. Also the answer when another application for the same CAC and product is opened at the same moment (a unique violation at start). |
+| Start | `429 VERIFICATION_QUOTA_EXCEEDED`, `429 APPLICATION_RATE_LIMITED` | A lookup or email-code limit was reached; try later. |
+| Start | `502 QOREID_PROVIDER_RESPONSE_INVALID` | QoreID's answer was malformed. Treat as unavailable. |
+| Start | `503 QOREID_DISABLED`, `503 INTEGRATION_PAUSED`, `503 PROVIDER_CAC_VERIFICATION_UNAVAILABLE` | CAC verification is off or unavailable. |
+| Verify | `401 ORGANIZATION_COMPLETION_CODE_INVALID` | Wrong or expired email code. |
+| Activate | `401 ORGANIZATION_COMPLETION_SESSION_INVALID` | No valid enrollment cookie; start again. |
+| Activate | `409 PROVIDER_EMAIL_ALREADY_REGISTERED` | The administrator email already belongs to a Health ID account or staff record (a patient account counts). Detail: "The administrator email is already associated with an HID account". Nothing is created. |
+| Activate | `409 ORGANIZATION_REVIEW_REQUIRED` | The CAC is already bound to an organization, an organization has the same name, or the application is no longer ready. |
+| Any step | `409 PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT` | A session cookie or bearer token was sent; sign out first. |
+
+`PROVIDER_EMAIL_ALREADY_REGISTERED` comes only from activation, after the
+emailed code proved control of that mailbox, so it tells a stranger nothing.
+Start does not check whether an email has an account. A unique violation at
+start can only be another application for the same CAC and product, so it
+answers `409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW`; before
+BRANCH:launch/provider-signup-answers it answered the email code, which was
+not true. The application stays
+bound to that email: starting again for the same CAC with another email
+answers `409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW`, so the applicant signs in
+with the existing account or asks Health ID support. Whether one person may
+use one email for both a patient account and a provider administrator is an
+open owner decision. Any other unique violation at activation keeps `503
+ORGANIZATION_COMPLETION_UNAVAILABLE`.
+
+`PROVIDER_CAC_PROFILE_INCOMPLETE` does not point to the governed organization
+application (`POST /api/v1/identity/organization-applications` and its
+profile completion), which can take a sparse record: the route is open, but
+no launch page uses it (Health-id's public site, `apps/public-web`, is not
+deployed at launch). A retry repeats the lookup, within the CAC lookup quota.
+
 A staff session is authorized only while its sign-in has live MFA assurance:
 an `auth.session_assurance` row for its family whose factor is still active.
 Without it (every staff sign-in from before this change, or one whose

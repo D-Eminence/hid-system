@@ -110,6 +110,42 @@ describe('organization applicant profile completion', () => {
       expect.stringMatching(/^\$argon2id\$/)]);
   });
 
+  it('answers an administrator email that already has an account 409 PROVIDER_EMAIL_ALREADY_REGISTERED at activation', async () => {
+    // 0061 raises this after the caller proved control of the mailbox with the emailed code.
+    const conflict = Object.assign(new Error('Administrator email already belongs to an account'), { code: '23505' });
+    const query = jest.fn().mockRejectedValue(conflict);
+    const database = { withSystemTransaction: jest.fn(async (_id, work) => work({ query })) };
+    const service = new OrganizationProfileCompletionService(database as unknown as DatabaseService,
+      { deliver: jest.fn() } as unknown as NotificationOtpClient);
+    await expect(service.activate('A'.repeat(43), 'Synthetic-Provider-Password-2026', correlationId))
+      .rejects.toMatchObject({ status: 409, code: 'PROVIDER_EMAIL_ALREADY_REGISTERED',
+        message: 'The administrator email is already associated with an HID account' });
+  });
+
+  it('keeps every other unique violation, and the governed completion steps, at 503', async () => {
+    const otherUnique = Object.assign(new Error('duplicate key value violates unique constraint "accounts_email_key"'),
+      { code: '23505' });
+    const sameMessage = Object.assign(new Error('Administrator email already belongs to an account'), { code: '23505' });
+    const query = jest.fn().mockRejectedValue(otherUnique);
+    const database = { withSystemTransaction: jest.fn(async (_id, work) => work({ query })) };
+    const service = new OrganizationProfileCompletionService(database as unknown as DatabaseService,
+      { deliver: jest.fn() } as unknown as NotificationOtpClient);
+    const unavailable = { status: 503, code: 'ORGANIZATION_COMPLETION_UNAVAILABLE' };
+    // A unique violation without the activation's own message keeps its old answer.
+    await expect(service.activate('A'.repeat(43), 'Synthetic-Provider-Password-2026', correlationId))
+      .rejects.toMatchObject(unavailable);
+    // The governed completion steps never answer with a provider enrollment code.
+    for (const error of [otherUnique, sameMessage]) {
+      query.mockReset().mockRejectedValue(error);
+      await expect(service.start(input, '203.0.113.44', correlationId)).rejects.toMatchObject(unavailable);
+      await expect(service.verify('8ce75fc3-0bda-4300-b198-f5688df65d6c', '123456', correlationId))
+        .rejects.toMatchObject(unavailable);
+      await expect(service.current('A'.repeat(43), correlationId)).rejects.toMatchObject(unavailable);
+      await expect(service.complete('A'.repeat(43), 3, { address: 'Synthetic Registry Office' }, correlationId))
+        .rejects.toMatchObject(unavailable);
+    }
+  });
+
   it('invalidates a challenge after a definite delivery failure', async () => {
     const query = jest.fn().mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ recipient_email: 'stored@example.invalid' }] })
