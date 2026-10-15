@@ -282,12 +282,14 @@ do $$ begin
   ) then
     raise exception 'an unexpected database function references MFA factors';
   end if;
+  -- A write in any form: with or without the schema (the functions' search
+  -- path includes auth), quoted, ONLY, MERGE or TRUNCATE.
   if exists (
     select 1 from pg_proc proc join pg_namespace ns on ns.oid = proc.pronamespace
     where ns.nspname in ('auth', 'identity', 'platform')
       and proc.proname like '%clinician%'
       and regexp_replace(lower(proc.prosrc), '\s+', ' ', 'g')
-        ~ '(update|insert into|delete from) auth\.mfa_(factors|recovery_codes)'
+        ~ '(update( only)?|insert into|delete from( only)?|merge into|truncate( table)?( only)?) ("?auth"? ?\. ?)?"?mfa_(factors|recovery_codes)([^a-z0-9_]|$)'
   ) then
     raise exception 'a clinician application function writes an MFA factor or recovery code';
   end if;
