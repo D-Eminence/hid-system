@@ -9,7 +9,7 @@ import type { PlatformAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { QoreIdVerificationAdapter } from '../identity/qoreid-verification.adapter';
-import { ownershipRoutes, type OwnershipRoutes } from '../identity/ownership-routes';
+import { enrollmentKeysConfigured, ownershipRoutes, type OwnershipRoutes } from '../identity/ownership-routes';
 import { IntegrationRuntimeService } from './integration-runtime.service';
 import { requirePlatformAssurance } from '../auth/platform-assurance';
 
@@ -260,7 +260,9 @@ export class IntegrationAdminService {
           ? { state: 'unsupported', masked: null, rotationSupported: false }
           : { state: 'external', masked: '••••', rotationSupported: false };
       const existingPatientNinOpen = qoreidOpen && env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED;
-      const enrollmentOpen = qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED
+      // The keys and routes a start and the availability read check (ADR-062, ADR-063).
+      const enrollmentKeys = enrollmentKeysConfigured(env);
+      const enrollmentOpen = qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED && enrollmentKeys
         && holderRoutes !== null && (holderRoutes.online || holderRoutes.facility);
       const activeCapabilities = row.capabilities.filter((capability) => row.enabled && (
         capability === 'patient_nin' ? existingPatientNinOpen || enrollmentOpen
@@ -272,9 +274,10 @@ export class IntegrationAdminService {
           state: existingPatientNinOpen ? 'open' : 'closed',
           detail: 'Existing-patient NIN binding requires the general QoreID gate, an enabled provider and its separate deployment gate, which production refuses (ADR-062).' },
         { operation: 'patient_nin_enrollment', state: enrollmentOpen ? 'open' : 'closed',
-          detail: 'NIN-only enrollment also requires its separate deployment gate and an open route to prove the NIN holder: '
-            + 'the online code, which production opens only while a facility takes part, or a participating facility '
-            + `(ADR-062, ADR-063). ${holderRoutesDetail(holderRoutes)}` },
+          detail: 'NIN-only enrollment also requires its separate deployment gate, the enrollment keys and an open route '
+            + 'to prove the NIN holder: the online code, which production opens only while a facility takes part, '
+            + `or a participating facility (ADR-062, ADR-063). ${holderRoutesDetail(holderRoutes)}`
+            + (enrollmentKeys ? '' : ' The enrollment keys are not configured.') },
         { operation: 'provider_cac', state: qoreidOpen ? 'open' : 'closed',
           detail: 'CAC Basic V2 requires the general QoreID gate and an enabled provider. OAuth connection tests do not prove legal-profile completeness or staging readiness.' },
       ] : [];

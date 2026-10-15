@@ -22,6 +22,18 @@ export function onlineRouteOpen(
   return environment.NIN_HOLDER_SMS_ENABLED && (facilityOpen || !isProductionProfile(environment));
 }
 
+/**
+ * The keys a start needs before it reads a NIN: the NIN lookup and encryption
+ * keys, and where NODE_ENV is production the OTP key. Without them a start
+ * answers 503 ENROLLMENT_CONFIGURATION_UNAVAILABLE and availability answers
+ * open: false, whatever the routes say.
+ */
+export function enrollmentKeysConfigured(environment: Pick<Environment,
+  'NIN_LOOKUP_HMAC_KEY_B64' | 'NIN_ENCRYPTION_KEY_B64' | 'OTP_HMAC_KEY_B64' | 'NODE_ENV'>): boolean {
+  return Boolean(environment.NIN_LOOKUP_HMAC_KEY_B64 && environment.NIN_ENCRYPTION_KEY_B64
+    && (environment.NODE_ENV !== 'production' || environment.OTP_HMAC_KEY_B64));
+}
+
 /** ADR-063: the flag, then whether any facility takes part; no read while the flag is off. */
 export async function facilityRouteOpen(database: Pick<DatabaseService, 'withSystemTransaction'>,
   correlationId: string): Promise<boolean> {

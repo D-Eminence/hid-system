@@ -18,7 +18,7 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, type PublicPatientIdentityProvider,
 import { quotaNetwork } from './provider-enrollment.service';
 import { matchDocument, type DocumentDetails, type DocumentMatch } from './assisted-match';
 import { deskCodeFromDigest } from './desk-code';
-import { facilityRouteOpen, onlineRouteOpen, ownershipRoutes } from './ownership-routes';
+import { enrollmentKeysConfigured, facilityRouteOpen, onlineRouteOpen, ownershipRoutes } from './ownership-routes';
 import { PATIENT_REGISTRATION_NOT_OPEN } from './qoreid-verification.adapter';
 import type { QoreIdNinGender } from './qoreid-verification.types';
 
@@ -1158,8 +1158,7 @@ export class PatientEnrollmentService {
   }
 
   private configured(): boolean {
-    return Boolean(this.env.NIN_LOOKUP_HMAC_KEY_B64 && this.env.NIN_ENCRYPTION_KEY_B64
-      && (this.env.NODE_ENV !== 'production' || this.env.OTP_HMAC_KEY_B64));
+    return enrollmentKeysConfigured(this.env);
   }
 
   private assertConfigured() {
