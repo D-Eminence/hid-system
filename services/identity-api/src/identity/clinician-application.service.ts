@@ -273,19 +273,31 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
     };
   }
 
-  /** P5: the emailed proof of the enrolment (0088 sendEnrollmentCode on the derived token). */
+  /**
+   * P5: the emailed proof of the enrolment (0088 sendEnrollmentCode on the
+   * derived token). As on every authenticator step, a database fault is 503
+   * and the 0088 answers keep their codes.
+   */
   async sendAuthenticatorCode(token: string | undefined, request: ClinicianRequest) {
     const derived = await this.authenticatorToken(token, request);
-    const sent = await this.mfa.sendEnrollmentCode(derived, this.event(request));
-    return { ...sent, expiresAt: sent.expiresAt.toISOString() };
+    try {
+      const sent = await this.mfa.sendEnrollmentCode(derived, this.event(request));
+      return { ...sent, expiresAt: sent.expiresAt.toISOString() };
+    } catch (error) {
+      throw this.databaseProblem(error);
+    }
   }
 
   /** P6: verifies the emailed proof and returns the new TOTP secret, once. */
   async startAuthenticator(token: string | undefined, emailCode: string, request: ClinicianRequest) {
     const derived = await this.authenticatorToken(token, request);
-    const enrollment = await this.mfa.startEnrollment(derived, this.event(request), 'staff', { emailCode },
-      { applicant: true });
-    return { ...enrollment, expiresAt: enrollment.expiresAt.toISOString() };
+    try {
+      const enrollment = await this.mfa.startEnrollment(derived, this.event(request), 'staff', { emailCode },
+        { applicant: true });
+      return { ...enrollment, expiresAt: enrollment.expiresAt.toISOString() };
+    } catch (error) {
+      throw this.databaseProblem(error);
+    }
   }
 
   /**

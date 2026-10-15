@@ -437,6 +437,23 @@ describe('the authenticator steps', () => {
       { applicant: true });
   });
 
+  it('answers a database fault in the emailed proof or the enrolment start 503, never 500, and keeps the 0088 codes', async () => {
+    const fault = (code: string, message: string) => Object.assign(new Error(message), { code });
+    const h = harness();
+    h.mfa.sendEnrollmentCode!.mockRejectedValueOnce(fault('57014', 'canceling statement due to statement timeout'));
+    const sent = await refusal(h.service.sendAuthenticatorCode(TOKEN, request));
+    expect([sent.getStatus(), sent.code]).toEqual([503, 'CLINICIAN_APPLICATION_UNAVAILABLE']);
+    h.mfa.startEnrollment!.mockRejectedValueOnce(fault('42501', 'permission denied for table mfa_login_challenges'));
+    const started = await refusal(h.service.startAuthenticator(TOKEN, '246810', request));
+    expect([started.getStatus(), started.code]).toEqual([503, 'CLINICIAN_APPLICATION_UNAVAILABLE']);
+    const limited = new RetryAfterProblem(429, 'MFA_RATE_LIMITED', 'Too many verification attempts; try again later', 900);
+    h.mfa.sendEnrollmentCode!.mockRejectedValueOnce(limited);
+    expect(await refusal(h.service.sendAuthenticatorCode(TOKEN, request))).toBe(limited);
+    const proof = new DomainProblem(403, 'MFA_ENROLLMENT_PROOF_REQUIRED', 'Enter the code sent to your email address');
+    h.mfa.startEnrollment!.mockRejectedValueOnce(proof);
+    expect(await refusal(h.service.startAuthenticator(TOKEN, '246810', request))).toBe(proof);
+  });
+
   it('refuses a draft, a ready capability and an unbound one with their own codes', async () => {
     for (const [capability, status, code] of [
       [{ kind: 'draft', stage: null, account_id: null, mfa_challenge_id: null }, 401, 'CLINICIAN_APPLICATION_SESSION_INVALID'],
