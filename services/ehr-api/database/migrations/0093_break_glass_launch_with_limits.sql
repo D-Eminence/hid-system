@@ -7,6 +7,21 @@
 -- withdrew for break-glass and seeds the purpose; it changes no control,
 -- function, policy or grant to a database role.
 --
+-- 0. Precondition: break_glass_enabled is not on. 0091 set it off only where
+--    the row was still exactly as 0039 seeded it, and kept a value an
+--    administrator had set. Were it on, this migration would make break-glass
+--    live at its commit, before staff MFA ships and the operator turns the
+--    control on (P11). It is refused instead (55000 BREAK_GLASS_CONTROL_ON)
+--    and nothing is changed: a platform administrator sets the control off
+--    with POST /admin/controls and migrate runs again. The flag is read
+--    through platform.control_enabled, as every guard reads it. Before the
+--    first role bootstrap that function cannot see the row (forced row-level
+--    security, an administrator that does not bypass it, as on RDS) and
+--    raises PLATFORM_CONTROL_UNAVAILABLE; no runtime role exists yet, so no
+--    administrator can have changed the control through the API, and it is
+--    as 0091 left it: the migration goes on. A missing row raises the same,
+--    and every activation then fails closed on it.
+--
 -- 1. Permission. 0010 granted identity.break-glass.write to doctor, clinician
 --    and nurse, no later migration granted it to another role, and 0091
 --    deleted it from every role (0084 never held it). Those three rows are
@@ -28,10 +43,11 @@
 --    exactly as it is. healthcare-operations stays unseeded (N3). Standard
 --    access requests and PIN grants still accept only their own purposes.
 --
--- 3. Not changed: the control. break_glass_enabled stays as 0091 left it (off
---    where 0039's seed was untouched). Identity checks it in the activation
---    transaction before the command, so after this migration break-glass
---    still answers 423 BREAK_GLASS_DISABLED until a platform administrator
+-- 3. Not changed: the control. break_glass_enabled stays off (0091 or an
+--    administrator set it so; the precondition above refuses it on).
+--    Identity checks it in the activation transaction before the command, so
+--    after this migration break-glass still answers
+--    423 BREAK_GLASS_DISABLED until a platform administrator
 --    turns the control on with the audited POST /admin/controls, which the
 --    release checklist makes an operator step after staff MFA ships (P11).
 --    A migration has no actor for a control event (0084, 0091). Nor are the
@@ -41,18 +57,48 @@
 --    hand-off B1); the summary's vitals are as first recorded (D8; A11(a));
 --    and the clinician's request list leaves break-glass grants out (0074),
 --    so after a reload a grant is found again only by replaying the
---    activation (B11).
+--    activation (B11). The document list and download are not chart routes
+--    and take the emergency purpose as before, so a break-glass grant reads
+--    the activating facility's documents; whether it should is open (N3,
+--    Health-id hand-off B1(c)) and must be decided before uploads come back.
+--    Uploads are off (0091) and no import writes EHR documents, so a
+--    database built for launch holds none.
 --
 -- The role bootstrap's assertions (runtime-roles.integration.sql) change with
 -- this migration: they require exactly these three holders. The bootstrap of
 -- this release must therefore run after it, and an earlier release's
 -- bootstrap refuses a database that holds 0093.
 --
--- Locks: ROW EXCLUSIVE on auth.role_permissions and on
+-- Locks: ACCESS SHARE on platform.control_settings (the control read, taken
+-- first, as an activation and the role bootstrap take that table first),
+-- ROW EXCLUSIVE on auth.role_permissions and on
 -- identity.purpose_of_use_codes, and the foreign keys' FOR KEY SHARE locks on
 -- the three auth.roles rows and the auth.permissions row; at most four rows
 -- are written and no table is scanned. Each lock waits at most the runner's
 -- 5 s lock timeout; a timeout rolls 0093 back whole, and it can be run again.
+
+-- 0. Precondition.
+do $$
+declare
+  break_glass_on boolean;
+begin
+  begin
+    break_glass_on := platform.control_enabled('break_glass_enabled');
+  exception when sqlstate '55000' then
+    if sqlerrm is distinct from 'PLATFORM_CONTROL_UNAVAILABLE' then
+      raise;
+    end if;
+    break_glass_on := false;
+  end;
+  if break_glass_on then
+    raise exception using errcode = '55000',
+      message = 'BREAK_GLASS_CONTROL_ON: break_glass_enabled must be off before break-glass is granted again; '
+        || 'set it off with POST /admin/controls (release checklist P11) and run migrate again',
+      hint = 'Nothing was changed. 0091 kept a value an administrator had set. Turn the control on again only '
+        || 'with the P11 operator step, after staff MFA ships.';
+  end if;
+end
+$$;
 
 -- 1. Permission.
 insert into auth.role_permissions (role_code, permission_code)
