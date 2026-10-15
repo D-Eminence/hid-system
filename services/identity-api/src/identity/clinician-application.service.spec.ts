@@ -331,7 +331,7 @@ describe('the submit', () => {
     for (const secret of [TOKEN, result.token, challenge.token]) expect(text).not.toContain(secret);
   });
 
-  it('refuses a profession and regulator that do not pair, and a short password, before any work', async () => {
+  it('refuses a profession and regulator that do not pair, and a short password, before any work (with the body checks)', async () => {
     const h = harness();
     const mismatch = await refusal(h.service.submit(TOKEN, 'clinician-submit-0000000001',
       { ...submitInput, regulator: 'NMCN' } as SubmitClinicianApplicationDto, request));
@@ -339,9 +339,16 @@ describe('the submit', () => {
     const short = await refusal(h.service.submit(TOKEN, 'clinician-submit-0000000001',
       { ...submitInput, password: 'short' } as SubmitClinicianApplicationDto, request));
     expect([short.getStatus(), short.code]).toEqual([400, 'PASSWORD_INVALID']);
-    const noCapability = await refusal(h.service.submit(undefined, 'clinician-submit-0000000001', submitInput, request));
-    expect([noCapability.getStatus(), noCapability.code]).toEqual([401, 'CLINICIAN_APPLICATION_SESSION_INVALID']);
     expect(h.calls).toEqual([]);
+  });
+
+  it('refuses a missing or malformed capability after the gate, charging nothing', async () => {
+    for (const token of [undefined, 'not-a-token']) {
+      const h = harness();
+      const problem = await refusal(h.service.submit(token, 'clinician-submit-0000000001', submitInput, request));
+      expect([problem.getStatus(), problem.code]).toEqual([401, 'CLINICIAN_APPLICATION_SESSION_INVALID']);
+      expect(statements(h)).toEqual([expect.stringContaining('platform.control_enabled')]);
+    }
   });
 
   it('refuses a forged or spent draft with 401 before the quota is charged or the password hashed', async () => {
@@ -424,6 +431,61 @@ describe('the submit', () => {
     const result = await h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request);
     expect(result.answer.authenticator).toBeNull();
     expect(indexOf(h, 'bind_clinician_application_mfa_challenge')).toBe(-1);
+  });
+});
+
+describe('the refusal order of the intake routes (P3, P4, P14)', () => {
+  const details = { profession: 'doctor', regulator: 'MDCN', licenceNumber: 'MDCN/12345', licenceValidUntil: '2027-06-30',
+    facilityId: submitInput.facilityId, declarations: { accurate: true, verificationConsent: true } } as const;
+  const routes = (h: Harness, token: string | undefined, signedIn = false) => [
+    () => h.service.searchFacilities(token, 'Synthetic', signedIn, request),
+    () => h.service.submit(token, 'clinician-submit-0000000001', submitInput, request),
+    () => h.service.apply(token, 'clinician-apply-00000000001', details as never, request),
+  ];
+  const forged = () => { throw Object.assign(new Error('CLINICIAN_APPLICATION_SESSION_INVALID'), { code: '42501' }); };
+
+  it.each([
+    ['intake closed', { maintenance: false, signup: false, portal: true }, 'CLINICIAN_SIGNUP_CLOSED'],
+    ['the provider portal off', { maintenance: false, signup: true, portal: false }, 'CLINICIAN_SIGNUP_CLOSED'],
+    ['intake closed in maintenance', { maintenance: true, signup: false, portal: true }, 'CLINICIAN_SIGNUP_CLOSED'],
+    ['maintenance', { maintenance: true, signup: true, portal: true }, 'PLATFORM_MAINTENANCE'],
+  ])('answers %s with 503 before a missing, malformed or forged capability', async (_label, controls, code) => {
+    for (const token of [undefined, 'not-a-token', 'F'.repeat(43)]) {
+      const h = harness({ 'platform.control_enabled': () => ({ rows: [controls] }),
+        'clinician_application_session(': forged, 'clinician_application_submit_probe': forged });
+      for (const route of routes(h, token)) {
+        const problem = await refusal(route());
+        expect([problem.getStatus(), problem.code]).toEqual([503, code]);
+      }
+      expect(statements(h).every((sql) => sql.includes('platform.control_enabled'))).toBe(true);
+    }
+  });
+
+  it('answers a draft in a signed-in browser at P3 after the gate and the capability, and before the quota', async () => {
+    const draft = () => ({ rows: [{ kind: 'draft', stage: null, account_id: null, mfa_challenge_id: null,
+      expires_at: new Date() }] });
+    const maintenance = harness({ 'platform.control_enabled': () => ({ rows: [{ maintenance: true, signup: true,
+      portal: true }] }), 'clinician_application_session(': draft });
+    expect((await refusal(maintenance.service.searchFacilities(TOKEN, 'Synthetic', true, request))).code)
+      .toBe('PLATFORM_MAINTENANCE');
+    const h = harness({ 'clinician_application_session(': draft });
+    const problem = await refusal(h.service.searchFacilities(TOKEN, 'Synthetic', true, request));
+    expect([problem.getStatus(), problem.code]).toEqual([409, 'CLINICIAN_APPLICATION_REQUIRES_SIGN_OUT']);
+    expect(statements(h)).toEqual([expect.stringContaining('platform.control_enabled'),
+      expect.stringContaining('clinician_application_session(')]);
+  });
+
+  it('searches in one transaction: the gate, the capability, the quota, then the search', async () => {
+    const h = harness({ 'search_clinician_application_facilities': () => ({ rows: [{ facility_id: 'f1',
+      facility_name: 'Synthetic Clinic', organization_name: 'Synthetic Health' }] }) });
+    h.route.set('clinician_application_session(', () => ({ rows: [{ kind: 'account', stage: 'ready', account_id: accountId,
+      mfa_challenge_id: null, expires_at: new Date() }] }));
+    await expect(h.service.searchFacilities(TOKEN, 'Synthetic', true, request)).resolves.toEqual({ facilities: [
+      { facilityId: 'f1', name: 'Synthetic Clinic', organizationName: 'Synthetic Health' }] });
+    expect(statements(h).map((sql) => ['platform.control_enabled', 'clinician_application_session(',
+      'consume_clinician_application_quota', 'search_clinician_application_facilities']
+      .findIndex((needle) => sql.includes(needle)))).toEqual([0, 1, 2, 3]);
+    expect(h.transactions).toEqual([{ committed: true }]);
   });
 });
 

@@ -217,16 +217,20 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
 
   /**
    * P3: verified, active facilities of active organizations matching the
-   * query. A draft capability is accountless (`signedIn` refuses it); a ready
-   * account capability may search while signed in elsewhere.
+   * query, in one transaction: the gate (closed intake, then maintenance),
+   * then the capability (a missing, malformed or forged one is 401), then
+   * the accountless rule (a draft is held to a signed-out browser, `signedIn`
+   * refuses it; a ready account capability may search while signed in
+   * elsewhere), then the quota and the search.
    */
   async searchFacilities(token: string | undefined, query: string, signedIn: boolean, request: ClinicianRequest) {
-    const sessionHmac = this.sessionHmac(token);
+    this.assertConfigured();
     const networkDigest = this.networkDigest(request.ip);
-    const capability = await this.run(request, (client) => this.capability(client, token!, sessionHmac));
-    if (capability.kind === 'draft' && signedIn) throw this.requiresSignOut();
     const result = await this.run(request, async (client) => {
       await this.gate(client, 'intake');
+      const sessionHmac = this.sessionHmac(token);
+      const capability = await this.capability(client, token!, sessionHmac);
+      if (capability.kind === 'draft' && signedIn) throw this.requiresSignOut();
       if (!(await this.quota(client, networkDigest, 'facility_search'))) return { kind: 'rate_limited' } as const;
       const rows = (await client.query<{ facility_id: string; facility_name: string; organization_name: string }>(
         'select facility_id::text, facility_name, organization_name from identity.search_clinician_application_facilities($1,$2)',
@@ -239,9 +243,10 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
   }
 
   /**
-   * P4: the sign-up. The draft is checked first (a live draft of this
-   * address, or one this key and request already spent), so a forged or
-   * spent capability is refused before anything is charged or hashed; with
+   * P4: the sign-up. After the gate, the draft is checked (a live draft of
+   * this address, or one this key and request already spent), so a missing,
+   * forged or spent capability is refused before anything is charged or
+   * hashed, and a closed intake is answered as closed whatever the cookie; with
    * it, the probe answers C8's refusals that need no password. Then the
    * quota is charged and committed (a submission that will be hashed counts
    * against its draft's five hashes in the same transaction). A refusal is
@@ -257,12 +262,15 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
     request: ClinicianRequest) {
     assertPasswordLength(input.password);
     this.assertPairing(input);
-    const sessionHmac = this.sessionHmac(token);
+    this.assertConfigured();
     const networkDigest = this.networkDigest(request.ip);
     const { password: _password, ...withoutPassword } = input;
     const digest = requestDigest('clinician-application.submit', withoutPassword);
+    let sessionHmac = '';
     let outcome = '';
     await this.chargeQuota(networkDigest, 'submit', request, async (client) => {
+      // After the gate: a missing or malformed capability is refused as a forged one is.
+      sessionHmac = this.sessionHmac(token);
       outcome = (await client.query<{ outcome: string }>(
         'select identity.clinician_application_submit_probe($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) as outcome',
         [sessionHmac, this.hmac('email', input.email), idempotencyKey, digest, input.email, input.fullName,
@@ -422,15 +430,18 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
   /**
    * P14: a ready account applies to another facility (C13, which counts it
    * against the platform's daily cap as C8 does); the quota is the submit
-   * one, charged only once the capability is a live account capability at
-   * ready.
+   * one, charged only once the capability (checked after the gate) is a live
+   * account capability at ready.
    */
   async apply(token: string | undefined, idempotencyKey: string, input: ClinicianApplicationDetailsDto,
     request: ClinicianRequest): Promise<ClinicianApplicationView & { replayed: boolean }> {
     this.assertPairing(input);
-    const sessionHmac = this.sessionHmac(token);
+    this.assertConfigured();
     const networkDigest = this.networkDigest(request.ip);
+    let sessionHmac = '';
     await this.chargeQuota(networkDigest, 'submit', request, async (client) => {
+      // After the gate: a missing or malformed capability is refused as a forged one is.
+      sessionHmac = this.sessionHmac(token);
       const capability = await this.capability(client, token!, sessionHmac);
       if (capability.kind !== 'account') throw this.sessionInvalid();
       if (capability.stage !== 'ready') throw this.authenticatorRequired();

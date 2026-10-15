@@ -393,6 +393,16 @@ try {
   assert.equal(await availability(), false);
   expectStatus(await startCode('/email-code', 'portal@example.invalid', 'clinician-application', newNetwork()), 503,
     'CLINICIAN_SIGNUP_CLOSED');
+  // The intake routes answer a closed intake before the capability: with no
+  // cookie (one that expired in the browser) search, submit and apply again
+  // are 503 CLINICIAN_SIGNUP_CLOSED, not 401.
+  const closedDetails = details(ids.x, { licenceNumber: 'MDCN/R/CLOSED' });
+  expectStatus(await call('post', '/facility-search', { body: { query: 'Clinician Runtime' } }), 503,
+    'CLINICIAN_SIGNUP_CLOSED');
+  expectStatus(await call('post', '', { headers: { 'Idempotency-Key': key('closed') }, body: { ...closedDetails,
+    email: 'portal@example.invalid', fullName: 'Runtime Closed Clinician', password } }), 503, 'CLINICIAN_SIGNUP_CLOSED');
+  expectStatus(await call('post', '/current/applications', { headers: { 'Idempotency-Key': key('closed-apply') },
+    body: closedDetails }), 503, 'CLINICIAN_SIGNUP_CLOSED');
   await setControl('provider_portal_enabled', true);
   await setControl('maintenance_mode', true);
   assert.equal(await availability(), false);
@@ -404,7 +414,7 @@ try {
   assert.equal(await availability(), true);
   assert.equal(await count(`select count(*)::int as n from platform.control_events
     where control_key = 'clinician_signup_enabled'`), 1);
-  checks.push('a Super Admin opens intake through POST /admin/controls (step-up, If-Match; one control event); with the provider portal off it is closed again (503 CLINICIAN_SIGNUP_CLOSED) and in maintenance both starts are 503 PLATFORM_MAINTENANCE');
+  checks.push('a Super Admin opens intake through POST /admin/controls (step-up, If-Match; one control event); with the provider portal off it is closed again (503 CLINICIAN_SIGNUP_CLOSED, also for search, submit and apply-again with no capability cookie) and in maintenance both starts are 503 PLATFORM_MAINTENANCE');
 
   // 3. Turnstile and the signed-out rule, before the service.
   const challengesBefore = await count('select count(*)::int as n from identity.clinician_application_challenges');
