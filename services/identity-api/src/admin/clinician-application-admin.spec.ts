@@ -1,5 +1,6 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn(), SignJWT: jest.fn() }));
-import { RequestMethod } from '@nestjs/common';
+import { type ArgumentsHost, RequestMethod } from '@nestjs/common';
+import type { Response } from 'express';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -8,7 +9,7 @@ import type { AuditService } from '../audit/audit.service';
 import type { MfaService } from '../auth/mfa/mfa.service';
 import { AUDIT_ACTION, HIGH_RISK_ACTION, PLATFORM_SCOPE, REQUIRED_PERMISSIONS } from '../common/decorators';
 import { requestDigest } from '../common/idempotency';
-import { DomainProblem, RetryAfterProblem } from '../common/problem';
+import { DomainProblem, ProblemDetailsFilter, RetryAfterProblem } from '../common/problem';
 import type { HidRequest, PlatformAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import { assuredClient, isAssuranceQuery, platformActor, useTestEnvironment } from '../testing/platform-assurance';
@@ -89,6 +90,20 @@ async function refusal(promise: Promise<unknown>): Promise<DomainProblem> {
   const error = await promise.then(() => undefined, (failure: unknown) => failure);
   expect(error).toBeInstanceOf(DomainProblem);
   return error as DomainProblem;
+}
+/** The Retry-After header ProblemDetailsFilter answers a refusal with, or undefined (A21). */
+function retryAfterOnTheWire(problem: unknown): string | undefined {
+  const headers = new Map<string, string>();
+  const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(),
+    json: jest.fn().mockReturnThis(),
+    setHeader: jest.fn((name: string, value: string) => { headers.set(name.toLowerCase(), value); }) };
+  const host = { switchToHttp: () => ({
+    getRequest: () => ({ correlationId: event.correlationId, method: 'POST',
+      route: { path: '/admin/clinician-applications/:applicationId/attest' } } as unknown as HidRequest),
+    getResponse: () => response as unknown as Response,
+  }) } as unknown as ArgumentsHost;
+  new ProblemDetailsFilter().catch(problem, host);
+  return headers.get('retry-after');
 }
 
 useTestEnvironment();
@@ -239,6 +254,9 @@ describe('step 1 (attest)', () => {
     const problem = await refusal(h.service.attest(context, APPLICATION, 3, attestInput, KEY, event));
     expect([problem.getStatus(), problem.code]).toEqual([status, code]);
     if (status === 429) expect((problem as RetryAfterProblem).retryAfterSeconds).toBeGreaterThan(0);
+    // A21 on the wire: the applicant's 15-minute MFA window on the 429 only;
+    // a wrong code or a missing authenticator is not a rate limit.
+    expect(retryAfterOnTheWire(problem)).toBe(status === 429 ? '900' : undefined);
     expect(h.transactions).toEqual([{ settled: true }]);
     expect(h.order).not.toContain('admin_attest_clinician_application');
     expect(h.audit.recordWithClient).not.toHaveBeenCalled();

@@ -1,11 +1,13 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn(), SignJWT: jest.fn() }));
-import { Logger } from '@nestjs/common';
+import { type ArgumentsHost, Logger } from '@nestjs/common';
+import type { Response } from 'express';
 import { createHmac } from 'node:crypto';
 import type { MfaService } from '../auth/mfa/mfa.service';
 import type { NotificationOtpClient } from '../auth/notification-otp.client';
 import * as passwordHash from '../auth/password-hash';
 import { requestDigest } from '../common/idempotency';
-import { DomainProblem, PublicDetailProblem, RetryAfterProblem } from '../common/problem';
+import { DomainProblem, ProblemDetailsFilter, PublicDetailProblem, RetryAfterProblem } from '../common/problem';
+import type { HidRequest } from '../common/request-context';
 import * as environment from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import { ClinicianApplicationService } from './clinician-application.service';
@@ -622,7 +624,7 @@ describe('the database error table', () => {
   const error = (code: string, message: string) => Object.assign(new Error(message), { code });
   const cases: Array<[string, string, number, string]> = [
     ['P4290', 'CLINICIAN_APPLICATION_QUOTA_EXCEEDED', 429, 'CLINICIAN_APPLICATION_RATE_LIMITED'],
-    ['P4290', 'CLINICIAN_APPLICATION_SEARCH_BUDGET', 429, 'CLINICIAN_APPLICATION_RATE_LIMITED'],
+    ['P4290', 'CLINICIAN_APPLICATION_SEARCH_BUDGET', 429, 'CLINICIAN_APPLICATION_SEARCH_LIMITED'],
     ['55000', 'PLATFORM_CONTROL_DISABLED:clinician_signup_enabled', 503, 'CLINICIAN_SIGNUP_CLOSED'],
     ['55000', 'PLATFORM_CONTROL_DISABLED:provider_portal_enabled', 503, 'CLINICIAN_SIGNUP_CLOSED'],
     ['55000', 'PLATFORM_MAINTENANCE', 503, 'PLATFORM_MAINTENANCE'],
@@ -664,14 +666,101 @@ describe('the database error table', () => {
   it('gives the rate limits a Retry-After and keeps only the closed-intake 503 sentence public', () => {
     const { service } = harness();
     const quota = service.databaseProblem(error('P4290', 'CLINICIAN_APPLICATION_QUOTA_EXCEEDED')) as RetryAfterProblem;
-    const budget = service.databaseProblem(error('P4290', 'CLINICIAN_APPLICATION_SEARCH_BUDGET')) as RetryAfterProblem;
-    expect([quota.retryAfterSeconds, budget.retryAfterSeconds]).toEqual([86_400, 3_600]);
+    expect(quota.retryAfterSeconds).toBe(86_400);
+    // A capability's 30 searches never come back: not a "try again later" answer (A21).
+    const budget = service.databaseProblem(error('P4290', 'CLINICIAN_APPLICATION_SEARCH_BUDGET'));
+    expect(budget).not.toBeInstanceOf(RetryAfterProblem);
     for (const [code, message] of cases.filter(([, , status]) => status === 503).map(([c, m]) => [c, m] as const)) {
       const problem = service.databaseProblem(error(code, message));
       expect(problem instanceof PublicDetailProblem).toBe(problem.code === 'CLINICIAN_SIGNUP_CLOSED');
     }
     const passthrough = new DomainProblem(401, 'MFA_INVALID_CODE', 'The code is not valid');
     expect(service.databaseProblem(passthrough)).toBe(passthrough);
+  });
+});
+
+/**
+ * What a client receives for a refusal: the status, the Retry-After header
+ * ProblemDetailsFilter sets (undefined when none), and the body.
+ */
+function onTheWire(problem: unknown): { status: number; retryAfter: string | undefined; body: Record<string, unknown> } {
+  const headers = new Map<string, string>();
+  const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(),
+    json: jest.fn().mockReturnThis(),
+    setHeader: jest.fn((name: string, value: string) => { headers.set(name.toLowerCase(), value); }) };
+  const host = { switchToHttp: () => ({
+    getRequest: () => ({ correlationId: request.correlationId, method: 'POST',
+      route: { path: '/identity/clinician-applications' } } as unknown as HidRequest),
+    getResponse: () => response as unknown as Response,
+  }) } as unknown as ArgumentsHost;
+  new ProblemDetailsFilter().catch(problem, host);
+  return { status: response.status.mock.calls[0]![0] as number, retryAfter: headers.get('retry-after'),
+    body: response.json.mock.calls[0]![0] as Record<string, unknown> };
+}
+
+// A21 (D-Eminence/hid-system#80): every rate-limit 429 of these routes tells
+// the client, in Retry-After, the longest window that can have refused it,
+// and nothing else does. The body names no wait.
+describe('Retry-After on the wire (A21)', () => {
+  const failure = (code: string, message: string) => Object.assign(new Error(message), { code });
+  // ProblemDetailsFilter logs every 5xx; these cases need only the answer.
+  beforeEach(() => { jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined); });
+
+  it('states the longest quota window on a quota 429, the platform cap reached in a creation included', () => {
+    const { service } = harness();
+    for (const marker of ['CLINICIAN_APPLICATION_QUOTA_EXCEEDED', '']) {
+      const answer = onTheWire(service.databaseProblem(failure('P4290', marker)));
+      expect([answer.status, answer.body.code, answer.retryAfter])
+        .toEqual([429, 'CLINICIAN_APPLICATION_RATE_LIMITED', '86400']);
+      expect(Object.keys(answer.body).sort())
+        .toEqual(['code', 'correlationId', 'detail', 'instance', 'status', 'title', 'type']);
+    }
+  });
+
+  // A capability's 30 searches never come back, so waiting does not help: as
+  // #80 holds ASSISTED_DESK_CODE_LIMITED, the answer has its own code, says to
+  // verify the address again, and carries no Retry-After.
+  it('answers a spent search budget with its own code and no Retry-After', () => {
+    const answer = onTheWire(harness().service.databaseProblem(failure('P4290', 'CLINICIAN_APPLICATION_SEARCH_BUDGET')));
+    expect([answer.status, answer.body.code, answer.retryAfter]).toEqual([429, 'CLINICIAN_APPLICATION_SEARCH_LIMITED',
+      undefined]);
+    expect(answer.body.detail).toBe('Too many searches in this session. Verify your email address again to continue.');
+  });
+
+  it('answers a spent quota at submit 429 with the header, before any hash', async () => {
+    const h = harness({ 'consume_clinician_application_quota': () => ({ rows: [{ allowed: false }] }) });
+    const hashing = jest.spyOn(passwordHash, 'hashAccountPassword');
+    const problem = await refusal(h.service.submit(TOKEN, 'clinician-submit-0000000002', submitInput, request));
+    const answer = onTheWire(problem);
+    expect([answer.status, answer.body.code, answer.retryAfter]).toEqual([429, 'CLINICIAN_APPLICATION_RATE_LIMITED', '86400']);
+    expect(hashing).not.toHaveBeenCalled();
+  });
+
+  it('states the 15-minute MFA window when P9 finds the account challenge budget spent', async () => {
+    const h = harness();
+    h.mfa.openApplicantChallenge!.mockResolvedValue({ kind: 'rate_limited' });
+    const answer = onTheWire(await refusal(h.service.reopenAuthenticator(TOKEN, request)));
+    expect([answer.status, answer.body.code, answer.retryAfter]).toEqual([429, 'MFA_RATE_LIMITED', '900']);
+  });
+
+  it('passes MfaService\'s own 429 through with its header on the authenticator steps', async () => {
+    const h = harness();
+    h.mfa.sendEnrollmentCode!.mockRejectedValueOnce(
+      new RetryAfterProblem(429, 'MFA_RATE_LIMITED', 'Too many verification attempts; try again later', 900));
+    const answer = onTheWire(await refusal(h.service.sendAuthenticatorCode(TOKEN, request)));
+    expect([answer.status, answer.retryAfter]).toEqual([429, '900']);
+  });
+
+  it.each([
+    ['55000', 'PLATFORM_CONTROL_DISABLED:clinician_signup_enabled', 503],
+    ['55000', 'PLATFORM_MAINTENANCE', 503],
+    ['42501', 'CLINICIAN_APPLICATION_SESSION_INVALID', 401],
+    ['23514', 'CLINICIAN_APPLICATION_LIMIT_REACHED', 409],
+    ['23514', 'CLINICIAN_APPLICATION_FACILITY_BUSY', 409],
+    ['57014', 'canceling statement due to statement timeout', 503],
+  ])('sends no Retry-After with %s %s (%i): not a rate limit', (code, message, status) => {
+    const answer = onTheWire(harness().service.databaseProblem(failure(code, message)));
+    expect([answer.status, answer.retryAfter]).toEqual([status, undefined]);
   });
 });
 

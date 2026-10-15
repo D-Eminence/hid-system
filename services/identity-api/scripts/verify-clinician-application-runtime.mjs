@@ -490,9 +490,10 @@ try {
     expectStatus(await call('post', '/facility-search', { cookie: draft, network: enumeration, body: { query: '100%_x' } }), 200);
   }
   const budget = await call('post', '/facility-search', { cookie: draft, network: enumeration, body: { query: 'Runtime' } });
-  expectStatus(budget, 429, 'CLINICIAN_APPLICATION_RATE_LIMITED');
-  assert.equal(budget.headers['retry-after'], '3600');
-  checks.push('a correct code opens a 60-minute draft (HttpOnly, Secure, SameSite=Strict, host-only, scoped to the routes) and never returns its token; the search finds only verified facilities, refuses a signed-in browser for a draft (409), and the 31st search of a capability is 429 with Retry-After 3600');
+  // A capability's 30 searches never come back: its own code, no Retry-After (A21).
+  expectStatus(budget, 429, 'CLINICIAN_APPLICATION_SEARCH_LIMITED');
+  assert.equal(budget.headers['retry-after'], undefined, 'a spent search budget carries no Retry-After');
+  checks.push('a correct code opens a 60-minute draft (HttpOnly, Secure, SameSite=Strict, host-only, scoped to the routes) and never returns its token; the search finds only verified facilities, refuses a signed-in browser for a draft (409), and the 31st search of a capability is 429 CLINICIAN_APPLICATION_SEARCH_LIMITED with no Retry-After');
 
   // 6. Submit, the rotating capability, no session, replay.
   const submitKey = key('submit');
