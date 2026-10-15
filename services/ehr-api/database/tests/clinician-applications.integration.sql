@@ -1068,6 +1068,11 @@ begin
 end $$;
 select pg_temp.ca_refused($c$select identity.clinician_application_authenticator_ready(pg_temp.ca_h('session:p1-account'),
   'ca240000-0000-4000-8000-0000000000f1', 'enrolment')$c$, 'CLINICIAN_APPLICATION_SESSION_INVALID');
+-- A live capability that is already ready is not an ended one: binding a
+-- challenge to it (a second tab re-opening the step it just finished) is its
+-- own refusal, never the 401 marker.
+select pg_temp.ca_refused($c$select identity.bind_clinician_application_mfa_challenge(pg_temp.ca_h('session:p1-account'),
+  'ca400000-0000-4000-8000-000000000001')$c$, 'CLINICIAN_APPLICATION_AUTHENTICATOR_READY');
 reset role;
 do $$ begin
   if (pg_temp.ca_application('doctor3@ca.invalid', 'ca110000-0000-4000-8000-00000000000d')).state <> 'awaiting_authenticator'
@@ -1720,6 +1725,58 @@ begin
 end $$;
 select pg_temp.ca_refused($c$select pg_temp.ca_file('p1-x2', 'p1-account', 'ca110000-0000-4000-8000-00000000000a')$c$,
   'CLINICIAN_APPLICATION_MEMBERSHIP_EXISTS');
+-- An approved clinician whose authenticator was reset (a two-person MFA
+-- reset) sets it up again only through staff sign-in, never through an
+-- application capability opened by the mailbox alone: a correct status code
+-- opens nothing, a challenge for the enrolment cannot be bound, and no
+-- enrolment readies a capability. All rolled back.
+reset role;
+savepoint ca_reset;
+update auth.mfa_factors set status = 'revoked', revoked_at = clock_timestamp(),
+  revoked_by = 'ca200000-0000-4000-8000-000000000005', revocation_reason = 'admin_reset', row_version = row_version + 1
+ where account_id = pg_temp.ca_account('doctor1@ca.invalid') and status = 'active';
+insert into identity.clinician_application_challenges (id, purpose, email_hmac, account_id, code_hmac, created_at, expires_at)
+values ('ca300000-0000-4000-8000-000000000031', 'status', pg_temp.ca_h('email:doctor1@ca.invalid'),
+  pg_temp.ca_account('doctor1@ca.invalid'), pg_temp.ca_h('code:s31'), now(), now() + interval '10 minutes');
+insert into auth.mfa_login_challenges (id, account_id, purpose, token_sha256, account_token_version, created_at,
+  expires_at, max_attempts, session_kind)
+values ('ca400000-0000-4000-8000-000000000031', pg_temp.ca_account('doctor1@ca.invalid'), 'enroll',
+  pg_temp.ca_h('mfa:p1-reset'), 1, now(), now() + interval '10 minutes', 5, 'staff');
+select pg_temp.ca_capability('p1-reset', pg_temp.ca_account('doctor1@ca.invalid'), 'authenticator_required');
+set local role hid_identity_api_runtime;
+select pg_temp.ca_system('p1-reset');
+do $$
+declare
+  outcome record;
+begin
+  select * into outcome from identity.verify_clinician_application_status_code('ca300000-0000-4000-8000-000000000031',
+    pg_temp.ca_h('email:doctor1@ca.invalid'), pg_temp.ca_h('code:s31'), pg_temp.ca_h('session:p1-reset-status'));
+  if outcome.outcome is distinct from 'staff_sign_in_required' or outcome.account_id is not null
+     or outcome.stage is not null then
+    raise exception 'a reset approved clinician opened an enrolment capability: %', row_to_json(outcome);
+  end if;
+end $$;
+select pg_temp.ca_refused($c$select identity.current_clinician_applications(pg_temp.ca_h('session:p1-reset-status'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select identity.bind_clinician_application_mfa_challenge(pg_temp.ca_h('session:p1-reset'),
+  'ca400000-0000-4000-8000-000000000031')$c$, 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED');
+reset role;
+select pg_temp.ca_proven_factor(pg_temp.ca_account('doctor1@ca.invalid'), 'ca240000-0000-4000-8000-0000000000d1');
+update identity.clinician_application_sessions set stage = 'enrolment_required'
+ where token_hmac = pg_temp.ca_h('session:p1-reset');
+set local role hid_identity_api_runtime;
+select pg_temp.ca_system('p1-reset-ready');
+select pg_temp.ca_refused($c$select identity.clinician_application_authenticator_ready(pg_temp.ca_h('session:p1-reset'),
+  'ca240000-0000-4000-8000-0000000000d1', 'enrolment')$c$, 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED');
+reset role;
+do $$ begin
+  if exists (select 1 from identity.clinician_application_sessions where token_hmac = pg_temp.ca_h('session:p1-reset-status'))
+     or (select consumed_at from identity.clinician_application_challenges
+          where id = 'ca300000-0000-4000-8000-000000000031') is null then
+    raise exception 'the refused status code opened a capability or was not spent';
+  end if;
+end $$;
+rollback to savepoint ca_reset;
 -- The two-person CHECK refuses an approver who recorded step 1, on any write.
 reset role;
 do $$ begin
@@ -2147,6 +2204,34 @@ select pg_temp.ca_refused(format($c$select identity.withdraw_clinician_applicati
 select pg_temp.ca_refused_with(format($c$select identity.withdraw_clinician_application(pg_temp.ca_h('session:p2-status'), %L, 2)$c$,
   (pg_temp.ca_application('nurse2@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).id),
   '40001', 'CLINICIAN_APPLICATION_VERSION_CONFLICT');
+-- A capability's stage is checked again against its account. An
+-- enrolment_required capability of an account that has since set up its
+-- authenticator (P2's, opened at that stage) needs the code before it reads
+-- or withdraws; a capability of an account that has been disabled (the fraud
+-- runbook's lock) serves nothing more (the account cannot use it).
+reset role;
+select pg_temp.ca_capability('p2-stale', pg_temp.ca_account('nurse2@ca.invalid'), 'enrolment_required');
+set local role hid_identity_api_runtime;
+select pg_temp.ca_system('withdraw-stale');
+select pg_temp.ca_refused($c$select identity.current_clinician_applications(pg_temp.ca_h('session:p2-stale'))$c$,
+  'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED');
+select pg_temp.ca_refused(format($c$select identity.withdraw_clinician_application(pg_temp.ca_h('session:p2-stale'), %L, 3)$c$,
+  (pg_temp.ca_application('nurse2@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).id),
+  'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED');
+reset role;
+update auth.accounts set disabled_until = clock_timestamp() + interval '1 hour'
+ where id = pg_temp.ca_account('nurse2@ca.invalid');
+set local role hid_identity_api_runtime;
+select pg_temp.ca_system('withdraw-locked');
+select pg_temp.ca_refused($c$select identity.current_clinician_applications(pg_temp.ca_h('session:p2-status'))$c$,
+  'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE');
+select pg_temp.ca_refused(format($c$select identity.withdraw_clinician_application(pg_temp.ca_h('session:p2-status'), %L, 3)$c$,
+  (pg_temp.ca_application('nurse2@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).id),
+  'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE');
+reset role;
+update auth.accounts set disabled_until = null where id = pg_temp.ca_account('nurse2@ca.invalid');
+set local role hid_identity_api_runtime;
+select pg_temp.ca_system('withdraw');
 do $$
 declare
   view jsonb;

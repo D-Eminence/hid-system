@@ -697,7 +697,19 @@ try {
   expectStatus(await call('post', '/current/applications', { cookie: pinned.cookie, network: pinned.network,
     headers: { 'Idempotency-Key': key('blocked') }, body: details(ids.x, { licenceNumber: 'MDCN/R/40002' }) }), 403,
   'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE');
-  checks.push('with two applications attested by different Super Admins (X for 700 days, Y for 365), approving Y grants on Y\'s own attestation; rejecting X (identity_not_confirmed) leaves Y\'s role effective (staff sign-in at Y) and the account can no longer apply (403 ACCOUNT_INELIGIBLE)');
+  // After a reset of the approved clinician's authenticator (as the
+  // two-person MFA reset leaves it), the status page refuses to set one up
+  // with the mailbox alone: re-enrolment goes through staff sign-in.
+  await owner.query(`update auth.mfa_factors set status = 'revoked', revoked_at = clock_timestamp(), revoked_by = $2,
+    revocation_reason = 'admin_reset', row_version = row_version + 1 where account_id = $1 and status = 'active'`,
+  [pinned.accountId, superB.id]);
+  const resetStart = await startCode('/status/email-code', pinned.email, 'clinician-application-status', newNetwork());
+  expectStatus(resetStart, 202);
+  const resetVerified = await call('post', '/status/email-code/verify', { body: { challengeId: resetStart.body.challengeId,
+    email: pinned.email, code: signupCodes.get(resetStart.body.challengeId)?.code ?? '123456' } });
+  expectStatus(resetVerified, 403, 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED');
+  assert.deepEqual(setCookieValues(resetVerified), [], 'a refused status code set a capability');
+  checks.push('with two applications attested by different Super Admins (X for 700 days, Y for 365), approving Y grants on Y\'s own attestation; rejecting X (identity_not_confirmed) leaves Y\'s role effective (staff sign-in at Y) and the account can no longer apply (403 ACCOUNT_INELIGIBLE); after its authenticator is reset, a correct status code is 403 CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED with no capability');
 
   // 13. A reserved attestation supports no other grant until approval.
   const reserved = await applicant('reserved', ids.x, 'MDCN/R/40003');
