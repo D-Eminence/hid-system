@@ -11,16 +11,22 @@
 --    identity.patient.read (the lookup that opens the record) and the
 --    encounter and note reads (the emergency summary route), and no role
 --    holds any other permission 0084 or 0091 withdrew.
--- 2. The 'emergency' purpose of use is seeded active (source hid), and no
---    migration seeds healthcare-operations (N3).
--- 3. break_glass_enabled is still off (0091; 0093 leaves the control to an
---    operator), so the control check Identity runs before the command
---    refuses; once the control is on in this transaction it passes.
+-- 2. An active 'emergency' purpose of use exists: 0093's row, or a row an
+--    operator inserted earlier, which 0093 keeps as it is (the rehearsal's
+--    fresh builds check 0093's exact row). No healthcare-operations row
+--    exists, from any source (N3; P11).
+-- 3. The control, whatever this database holds: inside this transaction a
+--    platform administrator sets break_glass_enabled off and then on through
+--    platform.admin_set_control, the command behind POST /admin/controls. Off,
+--    the control check Identity runs before the command refuses; on, it
+--    passes.
 -- 4. A doctor, a clinician and a nurse each activate break-glass once (a
 --    second call replays the grant); each grant authorizes the emergency read
 --    of that patient at that facility only: no write, no direct-care read, no
---    other facility, and the EHR runtime reads only that facility's records
---    (B1). The activation is audited, notified and placed in the patient's
+--    other facility. The EHR runtime reads that facility's encounter, note and
+--    document only (B1; document reads under emergency are unchanged pending
+--    N3), and the write predicate of every EHR insert and update policy stays
+--    false. The activation is audited, notified and placed in the patient's
 --    inbox. A lab member, a pharmacist, a receptionist, an admin and an org
 --    admin of the same facility are refused, and nothing is written for them.
 -- 5. Deactivating the emergency code, the operator's switch, refuses
@@ -70,15 +76,15 @@ begin
   select format('%s|%s|%s', display, active::text, source_system) into found
     from identity.purpose_of_use_codes
    where code = 'emergency';
-  if found is distinct from 'Emergency treatment|true|hid' then
-    raise exception 'the migrated emergency purpose of use is not the active 0093 row: %', coalesce(found, 'missing');
+  if found is null or found not like '%|true|%' then
+    raise exception 'no active emergency purpose of use exists (0093 seeds it and keeps an operator''s row): %',
+      coalesce(found, 'missing');
   end if;
-  if exists (select 1 from identity.purpose_of_use_codes
-              where code = 'healthcare-operations' and source_system = 'hid') then
-    raise exception 'a migration seeded healthcare-operations, which waits on decision N3';
-  end if;
-  if platform.control_enabled('break_glass_enabled') then
-    raise exception 'break_glass_enabled is on: 0093 leaves the control to an operator';
+  select format('%s|%s|%s', display, active::text, source_system) into found
+    from identity.purpose_of_use_codes
+   where code = 'healthcare-operations';
+  if found is not null then
+    raise exception 'a healthcare-operations purpose of use exists, which waits on decision N3 (P11): %', found;
   end if;
 end $$;
 
@@ -132,6 +138,13 @@ insert into auth.accounts (id, subject, email, display_name, status) values
 insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name, status) values
   ('b6f00000-0000-4000-8000-000000000001', 'b6b00000-0000-4000-8000-000000000010', 'HID-BGLAUNCH',
    'Launch', 'Patient', 'Launch Patient', 'active');
+-- The platform administrator who sets the control (step 3).
+insert into auth.accounts (id, subject, email, display_name, status) values
+  ('b6b00000-0000-4000-8000-000000000011', 'synthetic:break-glass-launch:platform-admin',
+   'break-glass-launch-platform-admin@example.invalid', 'Break-glass Launch Platform Admin', 'active');
+insert into auth.account_roles (id, account_id, role_code, scope_type, grant_reason) values
+  ('b6e00000-0000-4000-8000-000000000011', 'b6b00000-0000-4000-8000-000000000011', 'platform_super_admin',
+   'platform', 'Break-glass launch suite platform administrator');
 -- One completed encounter at each facility, inserted without triggers (no
 -- version actor is needed for a fixture; CHECK constraints still apply).
 set local session_replication_role = replica;
@@ -145,14 +158,58 @@ insert into ehr.encounters (id, patient_id, facility_id, created_by, created_by_
    'b6a00000-0000-4000-8000-000000000003', 'b6b00000-0000-4000-8000-000000000001',
    'b6d00000-0000-4000-8000-000000000009', 'ambulatory', 'completed',
    clock_timestamp() - interval '2 hours', clock_timestamp() - interval '1 hour');
+-- A signed note and an uploaded document at each facility.
+insert into ehr.clinical_notes (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  note_type, title, status, signed_at, signed_by) values
+  ('b6910000-0000-4000-8000-000000000001', 'b6900000-0000-4000-8000-000000000001',
+   'b6f00000-0000-4000-8000-000000000001', 'b6a00000-0000-4000-8000-000000000002',
+   'b6b00000-0000-4000-8000-000000000001', 'b6d00000-0000-4000-8000-000000000001', 'progress',
+   'Emergency room note', 'signed', clock_timestamp() - interval '1 hour', 'b6b00000-0000-4000-8000-000000000001'),
+  ('b6910000-0000-4000-8000-000000000002', 'b6900000-0000-4000-8000-000000000002',
+   'b6f00000-0000-4000-8000-000000000001', 'b6a00000-0000-4000-8000-000000000003',
+   'b6b00000-0000-4000-8000-000000000001', 'b6d00000-0000-4000-8000-000000000009', 'progress',
+   'Clinic note', 'signed', clock_timestamp() - interval '1 hour', 'b6b00000-0000-4000-8000-000000000001');
+insert into ehr.documents (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  original_file_name, storage_bucket, storage_key, object_version_id, declared_media_type, size_bytes, sha256_hex,
+  retention_class, status) values
+  ('b6920000-0000-4000-8000-000000000001', 'b6900000-0000-4000-8000-000000000001',
+   'b6f00000-0000-4000-8000-000000000001', 'b6a00000-0000-4000-8000-000000000002',
+   'b6b00000-0000-4000-8000-000000000001', 'b6d00000-0000-4000-8000-000000000001', 'referral.pdf',
+   'synthetic-bucket', 'synthetic/break-glass-launch/a', 'v1', 'application/pdf', 1024, repeat('a', 64),
+   'clinical-record', 'uploaded'),
+  ('b6920000-0000-4000-8000-000000000002', 'b6900000-0000-4000-8000-000000000002',
+   'b6f00000-0000-4000-8000-000000000001', 'b6a00000-0000-4000-8000-000000000003',
+   'b6b00000-0000-4000-8000-000000000001', 'b6d00000-0000-4000-8000-000000000009', 'clinic-letter.pdf',
+   'synthetic-bucket', 'synthetic/break-glass-launch/b', 'v1', 'application/pdf', 1024, repeat('b', 64),
+   'clinical-record', 'uploaded');
 set local session_replication_role = origin;
 
--- 3. The control. Identity runs platform.require_control_enabled before the
--- command in the same transaction (consent.service.ts) and answers this
--- refusal 423 BREAK_GLASS_DISABLED.
+-- 3. The control. Whatever this database holds (0091 left it off where 0039's
+-- seed was untouched; an operator may have changed it since), a platform
+-- administrator sets it off and then on inside this transaction through
+-- platform.admin_set_control, the command behind the audited
+-- POST /admin/controls. Identity runs platform.require_control_enabled
+-- before the command in the same transaction (consent.service.ts) and
+-- answers its refusal 423 BREAK_GLASS_DISABLED.
 set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'synthetic:break-glass-launch:platform-admin', true),
+       set_config('app.correlation_id', 'break-glass-launch-control-0001', true),
+       set_config('app.purpose_of_use', 'healthcare-operations', true),
+       set_config('app.facility_id', '', true),
+       set_config('app.membership_id', '', true),
+       set_config('app.access_scope', 'platform', true);
 do $$
+declare
+  current_version bigint;
+  changed record;
 begin
+  select listed.row_version into current_version
+    from platform.admin_list_controls() listed where listed.control_key = 'break_glass_enabled';
+  select * into changed from platform.admin_set_control('break_glass_enabled', false, current_version,
+    'Break-glass launch suite sets the control off');
+  if changed.enabled then
+    raise exception 'the platform administrator could not set break_glass_enabled off: %', row_to_json(changed);
+  end if;
   begin
     perform platform.require_control_enabled('break_glass_enabled');
     raise exception 'the break_glass_enabled check passed with the control off';
@@ -161,15 +218,27 @@ begin
       raise;
     end if;
   end;
+  select * into changed from platform.admin_set_control('break_glass_enabled', true, changed.row_version,
+    'Break-glass launch suite turns the control on (P11 operator step)');
+  if not changed.enabled or changed.replayed then
+    raise exception 'the platform administrator could not turn break_glass_enabled on: %', row_to_json(changed);
+  end if;
 end $$;
--- An operator turns it on with the audited POST /admin/controls; here the
--- suite sets the row directly, inside its own transaction.
-reset role;
-update platform.control_settings
-   set enabled = true, row_version = row_version + 1, updated_at = clock_timestamp()
- where control_key = 'break_glass_enabled';
-set local role hid_identity_api_runtime;
 select platform.require_control_enabled('break_glass_enabled');
+select set_config('app.access_scope', '', true);
+reset role;
+do $$
+begin
+  if (select format('%s|%s', event.enabled::text, account.subject)
+        from platform.control_events event
+        join auth.accounts account on account.id = event.actor_account_id
+       where event.control_key = 'break_glass_enabled'
+       order by event.sequence_id desc limit 1)
+     is distinct from 'true|synthetic:break-glass-launch:platform-admin' then
+    raise exception 'turning break_glass_enabled on left no control event naming the platform administrator';
+  end if;
+end $$;
+set local role hid_identity_api_runtime;
 
 -- 4. Activation by each role that holds the permission, and the refusal of
 -- every other facility role.
@@ -298,21 +367,41 @@ select set_config('app.actor_subject', 'synthetic:break-glass-launch:nurse', tru
        set_config('app.correlation_id', 'break-glass-launch-read-0001', true),
        set_config('app.purpose_of_use', 'emergency', true);
 do $$
+declare
+  patient constant uuid := 'b6f00000-0000-4000-8000-000000000001';
 begin
-  if (select array_agg(id order by id) from ehr.encounters
-       where patient_id = 'b6f00000-0000-4000-8000-000000000001')
+  if (select array_agg(id order by id) from ehr.encounters where patient_id = patient)
      is distinct from array['b6900000-0000-4000-8000-000000000001']::uuid[] then
     raise exception 'the nurse''s emergency read did not return exactly the encounter of the grant''s facility';
   end if;
+  if (select array_agg(id order by id) from ehr.clinical_notes where patient_id = patient)
+     is distinct from array['b6910000-0000-4000-8000-000000000001']::uuid[] then
+    raise exception 'the nurse''s emergency read did not return exactly the note of the grant''s facility';
+  end if;
+  -- Document reads under emergency are unchanged (N3 pending; D9 row): the
+  -- grant's facility's documents only, as the emergency summary lists them and
+  -- as GET /ehr/documents and its download authorize them.
+  if (select array_agg(id order by id) from ehr.documents where patient_id = patient)
+     is distinct from array['b6920000-0000-4000-8000-000000000001']::uuid[] then
+    raise exception 'the nurse''s emergency read did not return exactly the document of the grant''s facility';
+  end if;
+  -- Every EHR insert and update policy (0005) checks this predicate.
+  if ehr.context_allows(patient, 'b6a00000-0000-4000-8000-000000000002', 'write_records') then
+    raise exception 'a break-glass grant passed the EHR write policies';
+  end if;
   perform set_config('app.purpose_of_use', 'direct-care', true);
-  if exists (select 1 from ehr.encounters where patient_id = 'b6f00000-0000-4000-8000-000000000001') then
+  if exists (select 1 from ehr.encounters where patient_id = patient)
+     or exists (select 1 from ehr.clinical_notes where patient_id = patient)
+     or exists (select 1 from ehr.documents where patient_id = patient) then
     raise exception 'a break-glass grant authorized a direct-care read';
   end if;
   perform set_config('app.actor_subject', 'synthetic:break-glass-launch:doctor', true),
           set_config('app.membership_id', 'b6d00000-0000-4000-8000-000000000009', true),
           set_config('app.facility_id', 'b6a00000-0000-4000-8000-000000000003', true),
           set_config('app.purpose_of_use', 'emergency', true);
-  if exists (select 1 from ehr.encounters where patient_id = 'b6f00000-0000-4000-8000-000000000001') then
+  if exists (select 1 from ehr.encounters where patient_id = patient)
+     or exists (select 1 from ehr.clinical_notes where patient_id = patient)
+     or exists (select 1 from ehr.documents where patient_id = patient) then
     raise exception 'the doctor''s break-glass grant at A authorized an emergency read at B';
   end if;
 end $$;
