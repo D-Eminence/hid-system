@@ -30,16 +30,17 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
   - D-Eminence/hid-system#78: web push proposal (documentation only; nothing built) and checklist corrections.
   - D-Eminence/hid-system#79: Turnstile contract.
 - **Pending, not merged:** BRANCH:launch/patient-self-enrollment adds 0092: a NIN record without a date of birth or gender can enroll (NIN-only enrollment stays off in production, N1). The steps in §3 already count 0092.
+- **Pending, not merged:** BRANCH:launch/nin-ownership-proof adds 0093: a Health ID needs a proof that the person holds the NIN, a code to the phone the NIN record lists (ADR-062). Every new flag is off, and the online route stays closed on staging, which sends email only. The steps in §3 count 0093.
 
 ## 3. Staging, in order
 
-1. **Preflight for staging.** Release checklist §4 lists P1 to P22.
+1. **Preflight for staging.** Release checklist §4 lists P1 to P28.
    - Run against staging: the database, secret and artefact rows, P1 to P5 and P8 to P14. P11 and P12 run again after the migration.
    - P22 (staff enrolment before clinical roles) applies to every environment that enables clinical roles.
-   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21.
-2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0092 in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
+   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled.
+2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0093 in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
 3. **Migrate staging.** Follow release checklist §5 in ledger order.
-   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 25 for 0085 to 0092, the estimate check at 26 and the role bootstrap at 27.
+   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 26 for 0085 to 0093, the estimate check at 27 and the role bootstrap at 28.
    - Run the bootstrap after the last migration and before any new build starts.
 4. **Deploy in the order of release checklist §6.**
    - Identity and EHR builds go out only after their migrations and the bootstrap.

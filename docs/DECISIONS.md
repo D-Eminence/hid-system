@@ -4440,3 +4440,115 @@ Consequences:
 Related: ADR-048; ADR-057; `PHASE_3_LAUNCH_DECISIONS.md` N1;
 `QOREID_VERIFICATION_CONTRACT.md`; `INTERFACE_CONTRACT.md`; `DATABASE.md`,
 "Self-reported enrollment profile (0092)".
+
+# ADR-062: A Health ID needs proof that the person holds the NIN
+
+Status: Proposed for source implementation
+(BRANCH:launch/nin-ownership-proof, migration 0093). Not merged or deployed.
+Every new flag is off.
+
+Date: 2026-10-15
+
+Context:
+
+- On 2026-10-14 the product owner instructed that possession of a NIN alone
+  is never proof of ownership. Online, the patient proves control of the
+  phone linked to the NIN with a one-time code, and the Health ID comes only
+  after. A patient who cannot (lost SIM, changed number, no linked phone)
+  registers at a participating facility. After the proof, a NIN that has a
+  Health ID is directed to account recovery, never given a duplicate.
+- QoreID offers HID no OTP, consent, phone-ownership, SIM-swap or face-match
+  product. The body-free NIN lookup returns the record; the sandbox record
+  carried `nin.phone`. Whether production records carry a usable phone is
+  not confirmed (DEP-1). HID generates the code; Termii carries the SMS.
+- Before this change a QoreID lookup and a contact of the patient's choice
+  were enough to create a Health ID. Anyone who knew a NIN could create one.
+  Start also answered `409 NIN_ALREADY_REGISTERED` to anyone, which told a
+  caller whether a NIN had a Health ID.
+
+Decision:
+
+- A new state `verify_holder` comes between the NIN lookup and the contact
+  step. A public enrollment reaches the contact step only through
+  `identity.record_public_patient_holder_proof`, the only writer of the
+  holder columns. The activation command requires a valid holder proof for a
+  first activation. The Identity runtime cannot write the holder columns.
+- Online route (this change): a six-digit code from a secure random source,
+  sent by SMS to the record's phone, normalized to `+234` and 10 digits. Only
+  a verifier HMAC is stored. Five attempts, single use, a resend cooldown,
+  three codes per enrollment. The SMS says why it came and names no NIN,
+  person, Health ID or link. The route is closed for a record without a
+  usable phone and for a record that shows an age under 18.
+- Facility route: planned (0094, ADR-063). `facility.available` is `false`
+  here, and the proof command refuses `facility_in_person`.
+- Deliberate departure from the owner's step order: the existing-Health-ID
+  check runs after the holder proof, not before. Start never says whether a
+  NIN is bound or pending. Only a correct code answers
+  `409 NIN_ALREADY_REGISTERED` ("This NIN already has a Health ID. Use
+  account recovery to sign in."), and that enrollment is deleted. The cost:
+  an existing holder spends a lookup and an SMS before being sent to
+  recovery.
+- Each start is a new enrollment. A proof removes the NIN's other unfinished
+  enrollments, unproven or proven by an earlier code; an unexpired in-person
+  proof is displaced only by another in-person proof. One proven enrollment
+  per NIN is enforced by a unique index.
+- Budgets in `identity.public_patient_holder_events`, counted under advisory
+  locks by `SECURITY DEFINER` commands: five sends per phone a day; ten and
+  thirty wrong codes per NIN a day and a month; five different NINs proven
+  per phone a year. Send and failure budgets are checked at send; a code
+  already sent keeps its attempts. Spent budgets answer
+  `429 NIN_HOLDER_ROUTE_LIMITED` ("Use a participating facility to
+  register.").
+- Lock order: the NIN advisory lock (0092's key) before the enrollment row
+  lock, in Identity, the proof command and the activation command.
+- Configuration, every flag off by default: `NIN_HOLDER_SMS_ENABLED`,
+  `ASSISTED_REGISTRATION_ENABLED` (defined here, used by ADR-063) and
+  `QOREID_PATIENT_SELF_NIN_BINDING_ENABLED`. NIN-only enrollment needs a
+  holder route. In production the online route needs the facility route, and
+  the signed-in NIN binding is refused. These rules replace the earlier
+  blanket production refusal of NIN-only enrollment, because activation now
+  requires the proof in the database. Enabling a flag is an operator step.
+- The signed-in "Verify NIN" (`POST /identity/me/verification/nin`) binds a
+  NIN to a legacy patient on a name and date-of-birth match, with no holder
+  proof. It answers `503 QOREID_PATIENT_NIN_BINDING_DISABLED` while its flag
+  is off, before any lookup or charge. Whether N1 covers it is the owner's
+  decision.
+- The 0093 backfill sends every unfinished enrollment back to
+  `verify_holder` and marks active ones `none_before_0093`. The release
+  preflight requires zero active public enrollments in production first.
+
+Consequences:
+
+- No path creates a Health ID from a NIN alone. A direct call to the
+  activation command without a proof is refused by the database.
+- A patient whose record has no usable phone, or who is under 18, cannot
+  register online. Until the facility route ships they cannot register at
+  all.
+- Health-id 077b85c cannot register a patient on 0093: it does not know the
+  holder step and fails closed. Sign-in is unchanged.
+- Staging sends email only, so the online route cannot be tested live there.
+  It stays closed on staging; the synthetic runtime verifier covers it.
+
+Residual risks:
+
+- The registry phone may not be the person's: a SIM swap, a recycled
+  number, or a family member's phone. Whoever holds that phone can pass the
+  online step. The SMS warns the holder, and the in-person route is the
+  stronger proof.
+- Someone who knows a NIN can spend its failure budget and close the online
+  route for its holder for a day or a month. The facility route is the
+  remedy, so production requires it with the online route.
+- The checks in the database stop a compromised Identity runtime from
+  writing the holder columns or activating without a proof record. They do
+  not stop a compromised runtime from sending itself a code it can read,
+  since it generates the code.
+- Account recovery is unchanged. A holder sent to recovery whose contact is
+  lost has no self-service path yet; facility-assisted recovery is an owner
+  decision.
+- Production QoreID responses are unconfirmed (DEP-1): what `nin.phone`
+  means, when it was captured, whether a SIM change is flagged, and whether
+  HID may text it.
+
+Related: ADR-048; ADR-061; ADR-063 (planned);
+`PHASE_3_LAUNCH_DECISIONS.md` N1; `QOREID_VERIFICATION_CONTRACT.md`;
+`INTERFACE_CONTRACT.md`; `DATABASE.md`, "NIN holder proof (0093)".

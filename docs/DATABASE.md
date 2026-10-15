@@ -3849,3 +3849,157 @@ Tests:
   bootstrapped, and the 47 additional suites again with every schema, table
   and function owned by a `NOSUPERUSER NOBYPASSRLS` role (local evidence,
   release checklist §8).
+
+## NIN holder proof (0093)
+
+`0093_nin_holder_ownership_proof.sql` (BRANCH:launch/nin-ownership-proof,
+ADR-062) requires a proof that the person holds the NIN before a public
+enrollment reaches the contact step. A QoreID lookup proves only that the NIN
+exists. The proof in this change is a one-time code sent by SMS to the phone
+the NIN record lists (`registry_phone_otp`). An in-person check
+(`facility_in_person`) is planned for 0094; until then the proof command
+refuses it.
+
+**State machine.** `identity.public_patient_enrollments.state` gains
+`verify_holder`, now the default: `verify_holder` -> (holder proof) ->
+`verify_contact` -> `set_password` -> `active`.
+
+**Enrollment table.**
+
+- The unique constraint `public_patient_enrollments_nin_lookup_hmac_key` is
+  dropped and replaced by the plain index `public_patient_enrollments_nin_idx`.
+  Each start inserts a row. A proof removes the NIN's other unfinished rows.
+- `public_patient_enrollments_proven_nin_uq`: one row per NIN at
+  `verify_contact` or `set_password`.
+- New columns: `holder_method` (`registry_phone_otp`, `facility_in_person`
+  or `none_before_0093`), `holder_verified_at`, `holder_challenge_id` (no
+  foreign key), `holder_verification_id` (unique, no foreign key, for 0094),
+  `holder_recipient_hmac`, `desk_code_hmac` and `desk_code_expires_at` (for
+  0094).
+- Named checks: `verify_contact` and `set_password` need a proven method and
+  `holder_verified_at`; `active` needs a method; `registry_phone_otp` if and
+  only if `holder_challenge_id`; `facility_in_person` if and only if
+  `holder_verification_id`; `verify_holder` has no method, patient or
+  contact; `none_before_0093` only on an active row.
+
+**Codes.** `identity.public_patient_enrollment_otps.purpose` is `contact`
+(the default) or `nin_holder`. A `nin_holder` code goes to a phone only.
+Every read in Identity filters by purpose. The contact check of the
+activation command now also requires `purpose = 'contact'` and
+`verified_at <= expires_at`.
+
+**Backfill.** With forced row-level security lifted on the two tables for
+the backfill only: open codes of rows that are not active are invalidated
+(`expired`); those rows go back to `verify_holder` with their contact
+cleared and `row_version + 1`; active rows get `none_before_0093`. The
+release preflight requires zero active public enrollments in production
+before 0093 (release checklist §5), so production should mark none.
+
+**Holder events.** `identity.public_patient_holder_events` (`id`, `kind`
+`send`, `failure` or `proof`, `nin_digest`, `phone_digest`, `method`,
+`occurred_at`) holds the counts behind the budgets. Forced row-level
+security admits `system:auth` only, and no runtime role has a table
+privilege. `nin_digest` is HMAC(`patient-enrollment-holder-nin`,
+`nin_lookup_hmac`); `phone_digest` is the enrollment's
+`holder_recipient_hmac` (HMAC `patient-enrollment-holder-phone` of the
+normalized phone). No phone or NIN is stored in clear. The prune command
+removes send and failure rows after 31 days and proof rows after 366 days.
+
+**Commands.** All `SECURITY DEFINER`, `search_path` fixed, owned by the
+enrollment owner, `system:auth` only, `EXECUTE` for the Identity runtime
+only:
+
+- `identity.record_public_patient_holder_send(uuid, char, char, integer, integer, integer)`
+  returns `false` when a budget is spent: five sends to the phone in 24 hours,
+  or the NIN's failures in 24 hours or 30 days at their limits. Otherwise it
+  records a `send` row and returns `true`.
+- `identity.record_public_patient_holder_failure(uuid, char, uuid, char, integer, integer)`
+  records a `failure` row. When a daily or monthly count reaches its limit
+  it writes `identity.public-patient-enrollment.holder-route-closed`
+  (`ninDigest`, `window` `day` or `month`) once.
+- `identity.record_public_patient_holder_proof(uuid, char, text, uuid, uuid, char, integer)`
+  is the only writer of the holder columns after the backfill. It refuses
+  any method but `registry_phone_otp` (`22023`
+  `PATIENT_HOLDER_METHOD_UNAVAILABLE`) and an invalid code (`23514`
+  `PATIENT_HOLDER_PROOF_INVALID`). Then: a NIN that has a Health ID deletes
+  this enrollment and its codes, audits `existing-identity` and returns
+  `existing_identity`; a phone that proved five other NINs this year returns
+  `route_limited`; an unexpired in-person proof of the NIN returns
+  `facility_conflict`; otherwise it deletes the NIN's other unfinished rows
+  and their codes (audited `superseded`, or `contested` when a proof of one
+  method removes one of the other), consumes the code, sets the holder
+  columns and `verify_contact`, records a `proof` row, audits
+  `holder-verified` and returns `verified`.
+
+**Activation.** 0092's 9-argument command, same signature, defaults, owner,
+search path and grants, now requires a holder proof for a first activation:
+`registry_phone_otp`, its code a different one from the contact code, of
+purpose `nin_holder` to the same phone digest, verified before it expired and
+consumed, and `holder_verified_at <= contact_verified_at`. Otherwise `23514`
+`PATIENT_HOLDER_PROOF_INVALID` (Identity: `409 ENROLLMENT_HOLDER_PROOF_REQUIRED`).
+The assurance row's `nin_verified_at` is the holder proof's time. The
+activation audit event gains `holderMethod`.
+
+**Lock order.** Every holder command and the activation read
+`nin_lookup_hmac` without a lock, take
+`pg_advisory_xact_lock(hashtextextended('patient-nin:' || nin_lookup_hmac, 0))`
+(0092's key), then the enrollment row `FOR UPDATE`, then the code, then the
+NIN's other rows in id order, then `patient-holder-nin:` and
+`patient-holder-phone:` locks. Identity takes the NIN lock before the row lock
+in the same transaction. Two proofs, or a proof and an activation, of one NIN
+wait for each other and do not deadlock.
+
+**Grants.** `runtime-grants.sql` replaces the Identity runtime's table-level
+`INSERT` and `UPDATE` on the enrollment table with column lists. `INSERT`
+excludes `state` and every holder column; `UPDATE` excludes `holder_method`,
+`holder_verified_at`, `holder_challenge_id`, `holder_verification_id`,
+`nin_lookup_hmac` and the token. The runtime gets no privilege on the holder
+events table.
+
+**Migration locks.** `ACCESS EXCLUSIVE` on the enrollment and code tables
+for the whole migration, each within the runner's 5 s lock timeout.
+Enrollment requests wait. A timeout rolls 0093 back whole; it can be run
+again.
+
+Tests:
+
+- `public-patient-holder-proof.integration.sql` (new, rollback-only): the
+  command catalogue (definer, search path, owner, `EXECUTE` for the Identity
+  runtime only, the NIN lock before the row lock in the proof and the
+  activation); the schema checks; the runtime's refused writes (holder
+  columns, `nin_lookup_hmac`, the token, an inserted state or method, any
+  read or write of the holder events: `42501`); refused proofs; supersession
+  and the one-proven-row index; a later phone proof replacing an earlier one;
+  an unexpired facility proof answered `facility_conflict` and an expired one
+  removed (`contested`); a bound NIN; the send budget, the daily and monthly
+  failure budgets with rows older than 48 hours and 29 days, and their
+  audits; the distinct-NIN budget and its 366-day window; the prune; and
+  activation cases G1 to G7 (G1 activates with `nin_verified_at` the proof's
+  time and `holderMethod` audited; G2 to G6 are refused
+  `PATIENT_HOLDER_PROOF_INVALID`; G7 `PATIENT_CONTACT_NOT_VERIFIED`).
+- `upgrade/0093-public-patient-holder-backfill.sql` (new, rollback-only,
+  run on a database at exactly 0092): seeds a `verify_contact`, a
+  `set_password` (with a consumed contact code) and an `active` enrollment,
+  applies 0093 and checks the backfill. The rehearsal builds that database
+  with `apply-migrations.mjs --through=0092_patient_self_reported_enrollment_profile.sql`.
+- `public-patient-enrollment`, `-windows`, `-self-reported`,
+  `google-onboarding` and `progressive-patient-nin` now prove the holder
+  through the proof command as `system:auth` before their contact and
+  activation fixtures.
+- Twelve mutants each make the new suite fail (local evidence): the
+  activation without its holder check, with a holder proof after the
+  contact proof, or without the NIN lock; the proof without the facility
+  rule, the existing-identity check, the supersession, the distinct-NIN
+  budget or the NIN lock; the send without the phone budget or the monthly
+  failure budget; and a table-level `UPDATE` on the enrollment table or a
+  `SELECT` on the holder events for the Identity runtime.
+- Races run over HTTP in `verify-patient-enrollment-runtime.mjs`, with the
+  owner holding the NIN lock until both requests wait on it: two correct
+  codes for one NIN (one wins, the other is `404`), and a holder proof
+  against an activation (either the activation wins and the proof answers
+  `409 NIN_ALREADY_REGISTERED`, or the proof wins and the activation creates
+  nothing).
+- All 50 SQL suites pass on a database built from empty to 0093 and
+  bootstrapped, and the 48 additional suites again with every schema, table
+  and function owned by a `NOSUPERUSER NOBYPASSRLS` role (local evidence,
+  release checklist §8).
