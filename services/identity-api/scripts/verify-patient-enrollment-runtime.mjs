@@ -8,8 +8,11 @@
 // window, the 30-minute contact proof and the QoreID lookup quota (0085); and
 // the public availability read, from the same gate, with the
 // registration-not-open answer start gives while it is closed (FE-4); and a
-// NIN record with only the name, the NIN and its reference, whose patient
-// enters the missing date of birth and gender at activation (ADR-061, 0092).
+// NIN record without a date of birth or gender, whose patient enters them at
+// activation (ADR-061, 0092); and the NIN holder step (ADR-062, 0093): a code
+// to the phone the NIN record lists proves that the person holds the NIN
+// before the contact step, with its budgets, supersession, races and the
+// answer for a NIN that already has a Health ID, given only after a correct code.
 // External services are replaced, never called: QoreID behind the real adapter
 // by a local HTTP stub, Cloudflare Siteverify by a stub that encodes the
 // outcome in the token, and Notification delivery by a stub that captures the
@@ -31,7 +34,7 @@ Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'st
   NIN_PROVIDER_MODE: 'deferred', CORS_ORIGINS: origin, IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret',
   IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: 'public-synthetic-ehr-workload-token',
   TURNSTILE_MODE: 'required', TURNSTILE_SECRET_KEY: 'example-turnstile-secret',
-  QOREID_ENABLED: 'true', QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
+  QOREID_ENABLED: 'true', QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
   QOREID_CLIENT_ID: 'example-qoreid-client', QOREID_CLIENT_SECRET: 'example-qoreid-secret',
   // Fresh per run, like the deployment's own server-only keys.
   NIN_LOOKUP_HMAC_KEY_B64: randomBytes(32).toString('base64'),
@@ -111,16 +114,43 @@ const turnstile = (action, host = siteHost) => `ok|${action}|${host}|${++issuedT
 // QoreID stub behind the real adapter, in the shape of the entitled NIN-only
 // sandbox response. NOT_VERIFIED is a negative registry check; every NIN in
 // `people` is a verified record, complete except NAME_ONLY, which has only the
-// name (and the NIN and its reference), as QoreID may return (ADR-061); any
-// other request fails the run.
+// name and a phone (and the NIN and its reference), without the date of birth
+// and gender QoreID may leave out (ADR-061); any other request fails the run.
+// The registry phone (nin.phone) comes in each form the adapter and Identity
+// accept (0803..., 234..., +234..., with spaces), as null, '', absent or
+// unusable, and on a record under 18 (ADR-062). Each NIN has its own phone.
 const NOT_VERIFIED = '90000000009';
 const NAME_ONLY = '90000000005';
+const NULL_PHONE = '90000000006';
+const EMPTY_PHONE = '90000000007';
+const NO_PHONE = '90000000008';
+const MINOR = '90000000010';
+const BAD_PHONE = '90000000011';
+const SEND_BUDGET = '90000000012';
+const FAILURE_BUDGET = '90000000013';
+const SUPERSEDED = '90000000014';
+const RACING = '90000000015';
+const seventeenYearsAgo = (() => {
+  const date = new Date(); date.setUTCFullYear(date.getUTCFullYear() - 17);
+  return `${String(date.getUTCDate()).padStart(2, '0')}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${date.getUTCFullYear()}`;
+})();
 const people = new Map([
-  ['90000000001', { firstname: 'Ada', lastname: 'Synthetic', birthdate: '01-02-1990', gender: 'F' }],
-  ['90000000002', { firstname: 'Bayo', lastname: 'Synthetic', birthdate: '15-07-1985', gender: 'M' }],
-  ['90000000003', { firstname: 'Chidi', lastname: 'Synthetic', birthdate: '30-11-2001', gender: 'M' }],
-  [NAME_ONLY, { firstname: 'Dami', lastname: 'Synthetic' }],
+  ['90000000001', { firstname: 'Ada', lastname: 'Synthetic', birthdate: '01-02-1990', gender: 'F', phone: '08031110001' }],
+  ['90000000002', { firstname: 'Bayo', lastname: 'Synthetic', birthdate: '15-07-1985', gender: 'M', phone: '2348031110002' }],
+  ['90000000003', { firstname: 'Chidi', lastname: 'Synthetic', birthdate: '30-11-2001', gender: 'M', phone: '+2348031110003' }],
+  [NAME_ONLY, { firstname: 'Dami', lastname: 'Synthetic', phone: '0803 111 0005' }],
+  [NULL_PHONE, { firstname: 'Efe', lastname: 'Synthetic', birthdate: '02-03-1980', gender: 'F', phone: null }],
+  [EMPTY_PHONE, { firstname: 'Femi', lastname: 'Synthetic', birthdate: '03-04-1981', gender: 'M', phone: '' }],
+  [NO_PHONE, { firstname: 'Gbenga', lastname: 'Synthetic', birthdate: '04-05-1982', gender: 'M' }],
+  [MINOR, { firstname: 'Halima', lastname: 'Synthetic', birthdate: seventeenYearsAgo, gender: 'F', phone: '08031110010' }],
+  [BAD_PHONE, { firstname: 'Ife', lastname: 'Synthetic', birthdate: '05-06-1983', gender: 'F', phone: '12345' }],
+  [SEND_BUDGET, { firstname: 'Jide', lastname: 'Synthetic', birthdate: '06-07-1984', gender: 'M', phone: '+2348031110012' }],
+  [FAILURE_BUDGET, { firstname: 'Kemi', lastname: 'Synthetic', birthdate: '07-08-1985', gender: 'F', phone: '+2348031110013' }],
+  [SUPERSEDED, { firstname: 'Lara', lastname: 'Synthetic', birthdate: '08-09-1986', gender: 'F', phone: '+2348031110014' }],
+  [RACING, { firstname: 'Musa', lastname: 'Synthetic', birthdate: '09-10-1987', gender: 'M', phone: '+2348031110015' }],
 ]);
+// The registry phone as Identity normalizes it: the holder code's recipient.
+const holderPhone = nin => `+234803111${nin.slice(-4)}`;
 const ninLookups = [];
 const qoreidFetch = async (url, init) => {
   const path = new URL(String(url)).pathname;
@@ -240,6 +270,29 @@ try {
     assert.match(expired[0], /; Path=\/api\/v1\/identity\/patient-enrollments(;|$)/i);
   };
 
+  // The holder step (ADR-062): a code to the registry phone, by SMS, then the
+  // code back. A correct code answers the contact step.
+  const sendHolder = (cookie, network = '198.51.100.20') =>
+    post('/identity/patient-enrollments/holder', {}, { cookie, network });
+  const verifyHolder = (cookie, challengeId, code, network = '198.51.100.20') =>
+    post('/identity/patient-enrollments/holder/verify', { challengeId, code }, { cookie, network });
+  const proveHolder = async (cookie, nin, { network, requiredProfileFields = [] } = {}) => {
+    const sent = await sendHolder(cookie, network);
+    expectProblem(sent, 200);
+    const delivered = lastCode('NIN_HOLDER_VERIFY', holderPhone(nin));
+    assert.equal(delivered.channel, 'sms'); assert.equal(delivered.challengeId, sent.body.challengeId);
+    const proved = await verifyHolder(cookie, sent.body.challengeId, delivered.code, network);
+    expectProblem(proved, 200);
+    assert.deepEqual(proved.body, { stage: 'verify_contact', requiredProfileFields });
+    return delivered;
+  };
+  // Fixture, as the owner: ends a holder code's resend cooldown; its expiry is unchanged.
+  const endHolderCooldown = async challengeId => assert.equal((await owner.query(`update identity.public_patient_enrollment_otps
+    set created_at = created_at - interval '2 minutes' where id = $1 and purpose = 'nin_holder'`, [challengeId])).rowCount, 1);
+  const otherCode = code => (code === '000000' ? '000001' : '000000');
+  const enrollmentState = async cookie => (await owner.query(`select state, holder_method
+    from identity.public_patient_enrollments where id = $1`, [cookie.split('=')[1].split('.')[0]])).rows[0];
+
   // 1. Refusals before QoreID is asked or anything is stored.
   const ninA = '90000000001';
   expectProblem(await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID(), originHeader: null }),
@@ -252,13 +305,12 @@ try {
     403, 'TURNSTILE_ACTION_MISMATCH');
   expectProblem(await post('/identity/patient-enrollments', { ...startBody(ninA), turnstileToken: 'replayed' },
     { key: randomUUID() }), 403, 'TURNSTILE_EXPIRED_OR_REPLAYED');
-  expectProblem(await post('/identity/patient-enrollments', startBody(ninA)), 400, 'IDEMPOTENCY_KEY_INVALID');
   for (const nin of ['1234567890', '123456789012', 'ABCDEFGHIJK']) {
     expectProblem(await post('/identity/patient-enrollments', startBody(nin), { key: randomUUID() }), 400, 'VALIDATION_FAILED');
   }
   assert.equal(ninLookups.length, 0, 'A refused enrollment reached QoreID');
   assert.equal(await enrollmentRows(), 0, 'A refused enrollment was stored');
-  check('enrollment start refuses a missing or foreign Origin, a wrong or replayed Turnstile action, a missing Idempotency-Key and a malformed NIN before QoreID or storage');
+  check('enrollment start refuses a missing or foreign Origin, a wrong or replayed Turnstile action and a malformed NIN before QoreID or storage');
 
   // 2. QoreID switched off by the platform (the default) fails closed without a lookup.
   assert.equal((await owner.query("select enabled from platform.integration_providers where provider='qoreid'")).rows[0].enabled, false);
@@ -266,47 +318,134 @@ try {
   assert.equal(ninLookups.length, 0);
   // Fixture: a platform administrator has enabled QoreID (an admin action outside this verifier).
   await owner.query("update platform.integration_providers set enabled=true, row_version=row_version+1 where provider='qoreid'");
+  // The Idempotency-Key is checked after the QoreID gate (ADR-062 start order), before any lookup.
+  expectProblem(await post('/identity/patient-enrollments', startBody(ninA)), 400, 'IDEMPOTENCY_KEY_INVALID');
+  assert.equal(ninLookups.length, 0);
   expectProblem(await post('/identity/patient-enrollments', startBody(NOT_VERIFIED), { key: randomUUID(),
     network: '198.51.100.21' }), 422, 'NIN_NOT_VERIFIED');
   assert.deepEqual(ninLookups, [NOT_VERIFIED]);
   assert.equal(await enrollmentRows(), 0, 'An unverified NIN was stored');
-  check('enrollment is 503 INTEGRATION_PAUSED while QoreID is disabled and 422 NIN_NOT_VERIFIED for a negative check, storing nothing');
+  check('enrollment is 503 INTEGRATION_PAUSED while QoreID is disabled, 400 IDEMPOTENCY_KEY_INVALID without a key once it is enabled, and 422 NIN_NOT_VERIFIED for a negative check, storing nothing');
 
-  // 3. Start, replay and duplicates.
+  // 3. Start, replay and a second start. Start never reads whether the NIN is
+  // bound or pending (ADR-062): another key for the same NIN is a new
+  // enrollment, and only a correct holder code answers that question.
   const keyA = randomUUID();
   const startedA = await post('/identity/patient-enrollments', startBody(ninA), { key: keyA });
   expectProblem(startedA, 200);
-  assert.equal(startedA.body.stage, 'verify_contact'); assert.equal(startedA.body.googleOnboardingRequired, false);
+  assert.deepEqual({ ...startedA.body, expiresAt: undefined }, { stage: 'verify_holder', expiresAt: undefined,
+    googleOnboardingRequired: false, online: { available: true }, facility: { available: false } });
   assert(Date.parse(startedA.body.expiresAt) > Date.now());
-  // A complete NIN record asks for nothing at activation (ADR-061).
-  assert.deepEqual(startedA.body.requiredProfileFields, [], 'a complete NIN record must require no profile field');
-  for (const field of ['nin', 'firstName', 'lastName', 'dateOfBirth', 'patientId', 'hidCode']) {
+  // Before the holder proof: no registry value, masked digit or profile field.
+  for (const field of ['nin', 'firstName', 'lastName', 'dateOfBirth', 'patientId', 'hidCode', 'requiredProfileFields',
+    'maskedContact', 'phoneNumber']) {
     assert(!(field in startedA.body), `enrollment start must not return ${field}`);
   }
+  assert(!JSON.stringify(startedA.body).includes('1110001'), 'enrollment start must not show the registry phone');
   const cookieA = enrollmentCookie(startedA);
   assert.equal(ninLookups.filter(nin => nin === ninA).length, 1);
   const replayA = await post('/identity/patient-enrollments', startBody(ninA), { key: keyA });
   expectProblem(replayA, 200);
-  assert.equal(replayA.body.stage, 'verify_contact'); assert.equal(enrollmentCookie(replayA), cookieA);
-  assert.deepEqual(replayA.body.requiredProfileFields, []);
-  expectProblem(await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID() }), 409, 'NIN_ALREADY_REGISTERED');
+  assert.equal(replayA.body.stage, 'verify_holder'); assert.equal(enrollmentCookie(replayA), cookieA);
+  assert.equal(ninLookups.filter(nin => nin === ninA).length, 1, 'A same-key replay asked QoreID again');
+  const secondA = await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID(), network: '198.51.100.24' });
+  expectProblem(secondA, 200);
+  assert.equal(secondA.body.stage, 'verify_holder');
+  const cookieA2 = enrollmentCookie(secondA);
+  assert.notEqual(cookieA2, cookieA, 'another key for the same NIN must be another enrollment');
   expectProblem(await post('/identity/patient-enrollments', startBody('90000000002'), { key: keyA }), 409, 'IDEMPOTENCY_KEY_REUSED');
-  assert.equal(ninLookups.filter(nin => nin === ninA).length, 1, 'A replay or duplicate asked QoreID again');
-  assert.equal(await enrollmentRows(), 1);
-  const stored = (await owner.query(`select nin_last4, length(nin_ciphertext) as cipher_length, state
-    from identity.public_patient_enrollments`)).rows[0];
-  assert.deepEqual([stored.nin_last4, stored.state], [ninA.slice(-4), 'verify_contact']);
-  assert(stored.cipher_length > 11, 'the NIN must be stored encrypted');
+  assert.equal(ninLookups.filter(nin => nin === ninA).length, 2, 'a new key is a new lookup');
+  assert.equal(await enrollmentRows(), 2);
+  const storedA = (await owner.query(`select nin_last4, length(nin_ciphertext) as cipher_length, state, holder_method
+    from identity.public_patient_enrollments order by created_at`)).rows;
+  assert.deepEqual(storedA.map(row => [row.nin_last4, row.state, row.holder_method]),
+    [[ninA.slice(-4), 'verify_holder', null], [ninA.slice(-4), 'verify_holder', null]]);
+  assert(storedA.every(row => row.cipher_length > 11), 'the NIN must be stored encrypted');
   assert.equal(await count(`select count(*) from identity.public_patient_enrollments
     where position(convert_to($1, 'UTF8') in nin_ciphertext) > 0
        or position(convert_to($1, 'UTF8') in profile_ciphertext) > 0`, [ninA]), 0, 'the NIN is stored in clear');
   const current = await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieA);
-  expectProblem(current, 200); assert.equal(current.body.stage, 'verify_contact');
-  assert.deepEqual(current.body.requiredProfileFields, []);
+  expectProblem(current, 200); assert.equal(current.body.stage, 'verify_holder');
+  assert(!('requiredProfileFields' in current.body), 'no profile field before the holder proof');
   expectProblem(await http.get('/api/v1/identity/patient-enrollments/current'), 404, 'ENROLLMENT_NOT_FOUND');
   expectProblem(await http.get('/api/v1/identity/patient-enrollments/current')
     .set('Cookie', cookieA.replace(/.$/, c => (c === 'A' ? 'B' : 'A'))), 404, 'ENROLLMENT_NOT_FOUND');
-  check('enrollment start verifies the NIN once, stores it encrypted, returns only the stage, requiredProfileFields [] for a complete record, and a host-only HttpOnly Strict cookie; a same-key replay asks QoreID nothing; another key for the same NIN is 409 NIN_ALREADY_REGISTERED; the same key for another NIN is 409 IDEMPOTENCY_KEY_REUSED; a forged cookie is 404');
+  // Neither the contact step nor activation opens before the holder proof.
+  expectProblem(await post('/identity/patient-enrollments/contact', { channel: 'email', contact: 'early@example.invalid' },
+    { cookie: cookieA }), 409, 'ENROLLMENT_STAGE_INVALID');
+  expectProblem(await post('/identity/patient-enrollments/activate', { password: 'Synthetic-Patient-Pass-01' },
+    { cookie: cookieA }), 409, 'ENROLLMENT_STAGE_INVALID');
+  assert.equal(deliveries.length, 0, 'nothing is sent before the holder step');
+  check('enrollment start verifies the NIN, stores it encrypted and answers verify_holder with online.available true and facility.available false, no registry value, masked digit or profile field, and a host-only HttpOnly Strict cookie; a same-key replay asks QoreID nothing; another key for the same NIN is a new enrollment (never 409 NIN_ALREADY_REGISTERED); the same key for another NIN is 409 IDEMPOTENCY_KEY_REUSED; a forged cookie is 404; the contact step and activation are 409 ENROLLMENT_STAGE_INVALID before the holder proof');
+
+  // 3b. The holder step (ADR-062): a code to the registry phone, normalized
+  // from 0803..., by SMS only; a resend cooldown; a wrong, an expired and a
+  // spent code are refused; a correct one moves to the contact step, keeps no
+  // phone in clear and supersedes the NIN's other unproven enrollment.
+  expectProblem(await post('/identity/patient-enrollments/holder', {}, { cookie: cookieA,
+    originHeader: 'https://attacker.example' }), 403, 'ORIGIN_DENIED');
+  // The route reads no body: a phone the caller sends is ignored.
+  const holderA = await post('/identity/patient-enrollments/holder', { phone: '08039999999' }, { cookie: cookieA });
+  expectProblem(holderA, 200);
+  assert(!deliveries.some(item => item.recipient.includes('8039999999')), 'a phone the caller sends must not receive a code');
+  assert.deepEqual(Object.keys(holderA.body).sort(), ['challengeId', 'expiresInSeconds', 'resendAfterSeconds']);
+  const firstHolderA = lastCode('NIN_HOLDER_VERIFY', holderPhone(ninA));
+  assert.deepEqual([firstHolderA.channel, firstHolderA.recipient, firstHolderA.challengeId],
+    ['sms', '+2348031110001', holderA.body.challengeId]);
+  assert.match(firstHolderA.code, /^\d{6}$/);
+  const holderProgress = await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieA);
+  expectProblem(holderProgress, 200);
+  assert.equal(holderProgress.body.online.challengeId, holderA.body.challengeId);
+  assert(holderProgress.body.online.expiresInSeconds > 0 && holderProgress.body.online.resendAfterSeconds > 0);
+  assert(!JSON.stringify(holderProgress.body).includes('1110001'), 'progress must not show the registry phone');
+  const deliveriesBeforeCooldown = deliveries.length;
+  expectProblem(await sendHolder(cookieA), 429, 'OTP_RESEND_COOLDOWN');
+  assert.equal(deliveries.length, deliveriesBeforeCooldown, 'a resend within the cooldown sends nothing');
+  expectProblem(await verifyHolder(cookieA, holderA.body.challengeId, otherCode(firstHolderA.code)), 422, 'OTP_INVALID');
+  // As the owner, the open code expires: the correct code is then refused.
+  assert.equal((await owner.query(`update identity.public_patient_enrollment_otps set expires_at = clock_timestamp()
+    where id = $1 and purpose = 'nin_holder'`, [holderA.body.challengeId])).rowCount, 1);
+  expectProblem(await verifyHolder(cookieA, holderA.body.challengeId, firstHolderA.code), 422, 'OTP_INVALID');
+  assert.equal((await enrollmentState(cookieA)).state, 'verify_holder', 'an expired code must prove nothing');
+  await endHolderCooldown(holderA.body.challengeId);
+  const resentA = await sendHolder(cookieA);
+  expectProblem(resentA, 200);
+  assert.notEqual(resentA.body.challengeId, holderA.body.challengeId);
+  const secondHolderA = lastCode('NIN_HOLDER_VERIFY', holderPhone(ninA));
+  assert.equal(secondHolderA.challengeId, resentA.body.challengeId);
+  // The first code, though correct, belongs to a closed challenge.
+  expectProblem(await verifyHolder(cookieA, holderA.body.challengeId, firstHolderA.code), 422, 'OTP_INVALID');
+  const provedA = await verifyHolder(cookieA, resentA.body.challengeId, secondHolderA.code);
+  expectProblem(provedA, 200);
+  assert.deepEqual(provedA.body, { stage: 'verify_contact', requiredProfileFields: [] });
+  expectProblem(await verifyHolder(cookieA, resentA.body.challengeId, secondHolderA.code), 422, 'OTP_INVALID');
+  expectProblem(await sendHolder(cookieA), 409, 'NIN_HOLDER_ROUTE_UNAVAILABLE');
+  const holderRowA = (await owner.query(`select state, holder_method, holder_verified_at is not null as proven,
+      holder_challenge_id, holder_recipient_hmac from identity.public_patient_enrollments where id = $1`,
+  [cookieA.split('=')[1].split('.')[0]])).rows[0];
+  assert.deepEqual([holderRowA.state, holderRowA.holder_method, holderRowA.proven, holderRowA.holder_challenge_id],
+    ['verify_contact', 'registry_phone_otp', true, resentA.body.challengeId]);
+  assert.match(holderRowA.holder_recipient_hmac, /^[0-9a-f]{64}$/);
+  // The NIN's other, unproven enrollment is gone with its cookie.
+  expectProblem(await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieA2), 404, 'ENROLLMENT_NOT_FOUND');
+  assert.equal(await enrollmentRows(), 1);
+  assert.deepEqual((await owner.query(`select details->'methods' as methods, details->>'count' as count
+    from audit.events where action = 'identity.public-patient-enrollment.superseded'`)).rows,
+  [{ methods: ['unproven'], count: '1' }], 'the superseded unproven enrollment must be audited once');
+  assert.deepEqual((await owner.query(`select kind, count(*)::integer as count from identity.public_patient_holder_events
+    group by kind order by kind`)).rows,
+  [{ kind: 'failure', count: 1 }, { kind: 'proof', count: 1 }, { kind: 'send', count: 2 }]);
+  assert.equal(await count(`select count(*) from audit.events where action = 'identity.public-patient-enrollment.holder-verified'
+    and details->>'method' = 'registry_phone_otp'`), 1);
+  for (const phone of ['08031110001', '+2348031110001', '2348031110001', '8031110001']) {
+    assert.equal(await count(`select count(*) from (
+        select row_to_json(enrollment)::text as text from identity.public_patient_enrollments enrollment
+        union all select row_to_json(otp)::text from identity.public_patient_enrollment_otps otp
+        union all select row_to_json(event)::text from identity.public_patient_holder_events event
+        union all select details::text from audit.events) stored where stored.text like '%' || $1 || '%'`, [phone]), 0,
+    'the registry phone must not be stored in clear');
+  }
+  check('the holder step sends a six-digit NIN_HOLDER_VERIFY code by SMS to the registry phone normalized from 0803... (never a phone the caller gives), shows only the open code\'s timing, refuses a foreign Origin, a resend within the cooldown (sending nothing), a wrong, an expired, a closed and a spent code with 422 OTP_INVALID, accepts the resent code once (verify_contact, requiredProfileFields []), records registry_phone_otp with its challenge, deletes and audits the NIN\'s other unproven enrollment, counts send, failure and proof events, and stores no phone in clear');
 
   // 4. Contact verification.
   const emailA = `patient-a-${randomUUID().slice(0, 8)}@example.invalid`;
@@ -394,17 +533,39 @@ try {
   assert.equal((await owner.query('select state, patient_id from identity.public_patient_enrollments')).rows[0].patient_id, patientA);
   check('activation refuses a date of birth the complete NIN record already gives (400 ENROLLMENT_PROFILE_FIELD_VERIFIED), then creates one active account (verified email) and one patient with the QoreID name and date of birth and a new HID, and its response expires the enrollment cookie; a replay returns the same HID, ignores the second password and expires the cookie too; activation attempts of one enrollment beyond OTP_RATE_MAX_REQUESTS * 3 per window are 429 ENROLLMENT_RATE_LIMITED without the HID');
 
-  // 6. The same identity or contact cannot enroll twice.
-  expectProblem(await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID(),
-    network: '198.51.100.22' }), 409, 'NIN_ALREADY_REGISTERED');
+  // 6. The same identity or contact cannot enroll twice. Start does not say
+  // that the NIN has a Health ID; a correct holder code does, with the
+  // recovery text, and the enrollment and its cookie are gone (ADR-062).
+  const startedBound = await post('/identity/patient-enrollments', startBody(ninA), { key: randomUUID(),
+    network: '198.51.100.22' });
+  expectProblem(startedBound, 200);
+  assert.equal(startedBound.body.stage, 'verify_holder');
+  const cookieBound = enrollmentCookie(startedBound);
+  const sentBound = await sendHolder(cookieBound, '198.51.100.22');
+  expectProblem(sentBound, 200);
+  const deliveredBound = lastCode('NIN_HOLDER_VERIFY', holderPhone(ninA));
+  const existingA = await verifyHolder(cookieBound, sentBound.body.challengeId, deliveredBound.code, '198.51.100.22');
+  expectProblem(existingA, 409, 'NIN_ALREADY_REGISTERED');
+  assert.equal(existingA.body.detail, 'This NIN already has a Health ID. Use account recovery to sign in.');
+  for (const value of [hidA, patientA, emailA, 'pending']) {
+    assert(!JSON.stringify(existingA.body).includes(value), 'the existing-identity answer names no Health ID, patient, contact or pending state');
+  }
+  expiresEnrollmentCookie(existingA, 'the existing-identity answer');
+  expectProblem(await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieBound), 404, 'ENROLLMENT_NOT_FOUND');
+  assert.equal(await enrollmentRows(), 1, 'the existing-identity proof must delete its enrollment');
+  assert.deepEqual((await owner.query(`select details->>'method' as method, details->>'existingBinding' as binding
+    from audit.events where action = 'identity.public-patient-enrollment.existing-identity'`)).rows,
+  [{ method: 'registry_phone_otp', binding: 'registry_phone_otp' }]);
   const keyB = randomUUID();
   const startedB = await post('/identity/patient-enrollments', startBody('90000000002'),
     { key: keyB, network: '198.51.100.23' });
   expectProblem(startedB, 200);
   const cookieB = enrollmentCookie(startedB);
+  // The registry phone 234... is normalized to +234....
+  await proveHolder(cookieB, '90000000002', { network: '198.51.100.23' });
   expectProblem(await post('/identity/patient-enrollments/contact', { channel: 'email', contact: emailA },
     { cookie: cookieB, network: '198.51.100.23' }), 409, 'CONTACT_ALREADY_REGISTERED');
-  check('an enrolled NIN is 409 NIN_ALREADY_REGISTERED and an enrolled email is 409 CONTACT_ALREADY_REGISTERED for another enrollment');
+  check('a start for an enrolled NIN answers verify_holder; its correct holder code answers 409 NIN_ALREADY_REGISTERED with the recovery text and no HID, patient, contact or pending state, expires the cookie and deletes the enrollment (audited existing-identity); a registry phone 234... is normalized; an enrolled email is 409 CONTACT_ALREADY_REGISTERED for another enrollment');
 
   // 7. A phone-only patient: the HID is the sign-in identifier.
   const phoneB = '08030000002';
@@ -607,13 +768,16 @@ try {
   expectProblem(afterLockout, 200); assert.equal(afterLockout.body.actor.patientId, patientA);
   check('five wrong passwords across the email and the HID lock the account: the correct password is refused by either identifier with the same 401 inside the window and accepted after it');
 
-  // 13. Durable evidence. Every successful start (A, its replay, B) and
-  // activation (A and its replays within the budget, B) is audited as a
-  // success, refusals as failures, and the database records each new
-  // patient's activation once, naming no self-reported field.
+  // 13. Durable evidence. Every successful start (A, its replay, A's second
+  // enrollment, the start for the enrolled NIN, B), holder send (A twice, the
+  // enrolled NIN, B), holder proof (A, B) and activation (A and its replays
+  // within the budget, B) is audited as a success, refusals as failures, and
+  // the database records each new patient's activation once, with its holder
+  // method and naming no self-reported field.
   const audited = (action, outcome) => count(`select count(*) from audit.events
     where action = $1 and outcome = $2 and ($2 <> 'success' or details->>'status' = '200')`, [action, outcome]);
-  for (const [action, successes] of [['api.identity.patient-enrollment.start', 3],
+  for (const [action, successes] of [['api.identity.patient-enrollment.start', 5],
+    ['api.identity.patient-enrollment.holder', 4], ['api.identity.patient-enrollment.holder-verify', 2],
     ['api.identity.patient-enrollment.activate', activationBudget]]) {
     assert.equal(await audited(action, 'success'), successes, `${action}: every successful call is audited`);
     assert(await audited(action, 'failure') >= 1, `${action}: refusals are audited`);
@@ -624,17 +788,27 @@ try {
     where action = 'identity.public-patient-enrollment.activated' and outcome = 'success'
       and details -> 'selfReportedFields' = '[]'::jsonb`), 2,
   'an activation from a complete NIN record must audit selfReportedFields []');
+  assert.equal(await count(`select count(*) from audit.events
+    where action = 'identity.public-patient-enrollment.activated' and outcome = 'success'
+      and details->>'holderMethod' = 'registry_phone_otp'`), 2, 'each activation must audit its holder method');
+  // The NIN verification time is the holder proof's (0093), not the lookup's.
+  assert.equal(await count(`select count(*) from identity.public_patient_enrollments enrollment
+    join identity.patient_assurance_states assurance on assurance.patient_id = enrollment.patient_id
+    where enrollment.state = 'active' and assurance.nin_verified_at = enrollment.holder_verified_at`), 2,
+  'each activated NIN must be verified at its holder proof');
   const auditText = (await owner.query(`select coalesce(string_agg(details::text, ' '), '') as text from audit.events`)).rows[0].text;
-  for (const secret of [ninA, '90000000002', passwordA, newPassword, deliveredA.code]) {
+  for (const secret of [ninA, '90000000002', passwordA, newPassword, deliveredA.code, '+2348031110001',
+    '08031110001', '+2348031110002', '2348031110002']) {
     assert(!auditText.includes(secret), 'audit details must not contain a NIN, password or code');
   }
   assert.equal(await count('select count(*) from identity.patients where source_system = $1',
     ['hid-public-qoreid-enrollment']), 2);
-  check('every successful enrollment start (three) and activation (one per patient and each replay within the budget) is audited as a success and refusals as failures, each new patient\'s activation is recorded once with selfReportedFields [], and no audit detail contains a NIN, password or code');
+  check('every successful enrollment start (five), holder send (four), holder proof (two) and activation (one per patient and each replay within the budget) is audited as a success and refusals as failures, each new patient\'s activation is recorded once with selfReportedFields [] and holderMethod registry_phone_otp, its NIN verified at the holder proof, and no audit detail contains a NIN, registry phone, password or code');
 
-  // 13b. A NIN record with only the name, the NIN and its reference (ADR-061,
-  // 0092): start names the fields the patient must enter; the contact and its
-  // code work as for any record; activation refuses a missing field and a date
+  // 13b. A NIN record with only the name and a phone, the NIN and its
+  // reference (ADR-061, 0092): the holder proof (a registry phone written with
+  // spaces) names the fields the patient must enter, never before it; the
+  // contact and its code work as for any record; activation refuses a missing field and a date
   // of birth that is not a real date up to today, then stores what the patient
   // entered, audits only the field names and keeps the authoritative profile
   // as QoreID returned it; and the patient signs in with the new HID or contact.
@@ -642,16 +816,21 @@ try {
   const startedD = await post('/identity/patient-enrollments', startBody(NAME_ONLY), { key: randomUUID(),
     network: networkD });
   expectProblem(startedD, 200);
-  assert.equal(startedD.body.stage, 'verify_contact');
-  assert.deepEqual(startedD.body.requiredProfileFields, ['dateOfBirth', 'gender'],
-    'a NIN record without a date of birth or gender must ask for both');
-  for (const field of ['nin', 'firstName', 'lastName', 'dateOfBirth', 'gender', 'patientId', 'hidCode']) {
+  assert.equal(startedD.body.stage, 'verify_holder');
+  for (const field of ['nin', 'firstName', 'lastName', 'dateOfBirth', 'gender', 'patientId', 'hidCode',
+    'requiredProfileFields']) {
     assert(!(field in startedD.body), `enrollment start must not return ${field}`);
   }
   const cookieD = enrollmentCookie(startedD);
+  const holderD = await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieD);
+  expectProblem(holderD, 200);
+  assert(!('requiredProfileFields' in holderD.body), 'no profile field before the holder proof');
+  await proveHolder(cookieD, NAME_ONLY, { network: networkD, requiredProfileFields: ['dateOfBirth', 'gender'] });
   const currentD = await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', cookieD);
   expectProblem(currentD, 200);
-  assert.deepEqual(currentD.body.requiredProfileFields, ['dateOfBirth', 'gender']);
+  assert.equal(currentD.body.stage, 'verify_contact');
+  assert.deepEqual(currentD.body.requiredProfileFields, ['dateOfBirth', 'gender'],
+    'a NIN record without a date of birth or gender must ask for both');
   // A contact of its own, not the first journey's.
   const emailD = `patient-d-${randomUUID().slice(0, 8)}@example.invalid`;
   const contactD = await post('/identity/patient-enrollments/contact', { channel: 'email', contact: emailD },
@@ -719,7 +898,7 @@ try {
   decipher.setAuthTag(sealed.subarray(sealed.length - 16));
   const recordD = JSON.parse(Buffer.concat([decipher.update(sealed.subarray(13, sealed.length - 16)),
     decipher.final()]).toString('utf8'));
-  assert.deepEqual(Object.keys(recordD).sort(), ['firstName', 'lastName', 'nin', 'providerReference'],
+  assert.deepEqual(Object.keys(recordD).sort(), ['firstName', 'lastName', 'nin', 'phoneNumber', 'providerReference'],
     'the authoritative profile must be the NIN record as returned, without the entered fields');
   // The new patient signs in with the HID and with the contact, a fresh Turnstile token each time.
   const loginD = identifier => http.post('/api/v1/auth/patient/login').set('Origin', origin)
@@ -734,7 +913,7 @@ try {
     assert.equal(profileD.body.hid, hidD);
     assert.equal(profileD.body.dateOfBirth, '1994-05-06'); assert.equal(profileD.body.gender, 'female');
   }
-  check('a NIN record with only the name: start, GET /current and the contact proof answer requiredProfileFields ["dateOfBirth","gender"]; activation without them is 400 ENROLLMENT_PROFILE_REQUIRED, with a date of birth tomorrow or before 1900 400 DATE_OF_BIRTH_INVALID (a malformed date or gender 400 VALIDATION_FAILED), none of which creates a patient; with both it activates, stores them on the patient, audits selfReportedFields ["dateOfBirth","gender"] without values, keeps the authoritative profile as QoreID returned it, and the patient signs in by HID and by contact and reads them on its profile');
+  check('a NIN record with only the name and a phone: start and GET /current name no profile field before the holder proof; the holder proof (registry phone written with spaces), GET /current and the contact proof answer requiredProfileFields ["dateOfBirth","gender"]; activation without them is 400 ENROLLMENT_PROFILE_REQUIRED, with a date of birth tomorrow or before 1900 400 DATE_OF_BIRTH_INVALID (a malformed date or gender 400 VALIDATION_FAILED), none of which creates a patient; with both it activates, stores them on the patient, audits selfReportedFields ["dateOfBirth","gender"] without values, keeps the authoritative profile as QoreID returned it, and the patient signs in by HID and by contact and reads them on its profile');
 
   // 14. One contact-code failure budget per recipient, across its challenges
   // and whatever network each guess comes from (in production every client
@@ -746,6 +925,8 @@ try {
     { key: randomUUID(), network: networkC });
   expectProblem(startedC, 200);
   const cookieC = enrollmentCookie(startedC);
+  // The registry phone +234... as given.
+  await proveHolder(cookieC, '90000000003', { network: networkC });
   const emailC = `patient-c-${randomUUID().slice(0, 8)}@example.invalid`;
   const contactC = () => post('/identity/patient-enrollments/contact', { channel: 'email', contact: emailC },
     { cookie: cookieC, network: networkC });
@@ -754,7 +935,6 @@ try {
   // Fixture, as the owner: ends a challenge's resend cooldown (not under test here); its expiry is unchanged.
   const endCooldown = async challengeId => assert.equal((await owner.query(`update identity.public_patient_enrollment_otps
     set created_at = created_at - interval '2 minutes' where id = $1`, [challengeId])).rowCount, 1);
-  const otherCode = code => (code === '000000' ? '000001' : '000000');
   const rateRowsBefore = await count('select count(*) from auth.otp_rate_limits');
   const firstC = await contactC();
   expectProblem(firstC, 200);
@@ -803,6 +983,203 @@ try {
   const verifiedC = await verifyC(secondC.body.challengeId, secondCodeC.code, networkC);
   expectProblem(verifiedC, 200); assert.equal(verifiedC.body.stage, 'set_password');
   check('the contact code has one failure budget per recipient across its challenges and networks: after five wrong codes (three on a challenge, two on its resend, each from another network) the correct code is refused 422 OTP_INVALID with its challenge left open, the contact step sends that recipient no code (429 ENROLLMENT_RATE_LIMITED), the budget is one recipient-keyed rate row, and once the block is lifted the same code verifies');
+  // 14b. The online holder route is closed, with one text and without a code,
+  // for a record whose phone is null, '', absent or unusable, and for a
+  // record under 18 (ADR-062). Such a person registers at a facility.
+  const routeUnavailable = 'We cannot send a code to the phone on your NIN record. Use a participating facility to register.';
+  const startNin = async (nin, network) => {
+    const started = await post('/identity/patient-enrollments', startBody(nin), { key: randomUUID(), network });
+    expectProblem(started, 200);
+    assert.equal(started.body.stage, 'verify_holder');
+    return { cookie: enrollmentCookie(started), body: started.body, id: enrollmentCookie(started).split('=')[1].split('.')[0] };
+  };
+  let closedHost = 100;
+  for (const nin of [NULL_PHONE, EMPTY_PHONE, NO_PHONE, BAD_PHONE, MINOR]) {
+    closedHost += 1;
+    const network = `198.51.100.${closedHost}`;
+    const closed = await startNin(nin, network);
+    assert.deepEqual([closed.body.online, closed.body.facility], [{ available: false }, { available: false }],
+      `${nin}: the online route must be closed`);
+    const progressClosed = await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', closed.cookie);
+    assert.deepEqual(progressClosed.body.online, { available: false });
+    const before = deliveries.length;
+    const refused = await sendHolder(closed.cookie, network);
+    expectProblem(refused, 409, 'NIN_HOLDER_ROUTE_UNAVAILABLE');
+    assert.equal(refused.body.detail, routeUnavailable);
+    assert.equal(deliveries.length, before, 'a closed online route sends nothing');
+    expectProblem(await post('/identity/patient-enrollments/contact', { channel: 'email',
+      contact: `closed-${nin}@example.invalid` }, { cookie: closed.cookie, network }), 409, 'ENROLLMENT_STAGE_INVALID');
+  }
+  assert.equal(await count(`select count(*) from identity.public_patient_enrollment_otps otp
+    join identity.public_patient_enrollments enrollment on enrollment.id = otp.enrollment_id
+    where enrollment.nin_last4 in ('0006', '0007', '0008', '0010', '0011')`), 0);
+  check('a NIN record whose phone is null, \'\', absent or unusable, or whose date of birth is under 18 years, starts at verify_holder with online.available false; its holder send is 409 NIN_HOLDER_ROUTE_UNAVAILABLE with one text and no code, and its contact step stays closed');
+
+  // 14c. The holder budgets, checked at send only (ADR-062): three codes per
+  // enrollment; five sends per registry phone in 24 hours, across the NIN's
+  // enrollments; and the NIN's daily failure budget. A spent budget sends
+  // nothing and answers 429 NIN_HOLDER_ROUTE_LIMITED; an issued code keeps
+  // its attempts.
+  const routeLimited = 'Use a participating facility to register.';
+  const sendUntil = async (enrollment, network, sends) => {
+    let last;
+    for (let send = 1; send <= sends; send += 1) {
+      if (last) await endHolderCooldown(last);
+      const sent = await sendHolder(enrollment.cookie, network);
+      expectProblem(sent, 200);
+      last = sent.body.challengeId;
+    }
+    await endHolderCooldown(last);
+    return last;
+  };
+  const budgetS1 = await startNin(SEND_BUDGET, '198.51.100.111');
+  await sendUntil(budgetS1, '198.51.100.111', 3);
+  let holderDeliveriesBefore = deliveries.length;
+  const capped = await sendHolder(budgetS1.cookie, '198.51.100.111');
+  expectProblem(capped, 429, 'NIN_HOLDER_ROUTE_LIMITED');
+  assert.equal(capped.body.detail, routeLimited);
+  assert.equal(deliveries.length, holderDeliveriesBefore, 'the fourth code of one enrollment must not be sent');
+  const budgetS2 = await startNin(SEND_BUDGET, '198.51.100.112');
+  const lastS2 = await sendUntil(budgetS2, '198.51.100.112', 2);
+  const codeS2 = lastCode('NIN_HOLDER_VERIFY', holderPhone(SEND_BUDGET));
+  assert.equal(codeS2.challengeId, lastS2);
+  assert.equal(await count(`select count(*) from identity.public_patient_holder_events event
+    join identity.public_patient_enrollments enrollment on enrollment.holder_recipient_hmac = event.phone_digest
+    where enrollment.id = $1 and event.kind = 'send'`, [budgetS2.id]), 5);
+  const budgetS3 = await startNin(SEND_BUDGET, '198.51.100.113');
+  holderDeliveriesBefore = deliveries.length;
+  for (const enrollment of [budgetS2, budgetS3]) {
+    const spent = await sendHolder(enrollment.cookie, '198.51.100.114');
+    expectProblem(spent, 429, 'NIN_HOLDER_ROUTE_LIMITED');
+    assert.equal(spent.body.detail, routeLimited);
+  }
+  assert.equal(deliveries.length, holderDeliveriesBefore, 'a spent phone budget must send nothing');
+  assert.equal(await count(`select count(*) from identity.public_patient_enrollment_otps where enrollment_id = $1`,
+    [budgetS3.id]), 0, 'a refused send must store no code');
+  assert.equal((await owner.query(`select holder_recipient_hmac from identity.public_patient_enrollments where id = $1`,
+    [budgetS3.id])).rows[0].holder_recipient_hmac, null, 'a refused send must store no recipient');
+  // The code issued before the budget was spent still proves the holder.
+  expectProblem(await verifyHolder(budgetS2.cookie, codeS2.challengeId, codeS2.code, '198.51.100.112'), 200);
+  // The failure budget: as the owner, nine failures of this NIN earlier today;
+  // one wrong code over HTTP spends the tenth and closes the online route.
+  const budgetF = await startNin(FAILURE_BUDGET, '198.51.100.115');
+  const sentF = await sendHolder(budgetF.cookie, '198.51.100.115');
+  expectProblem(sentF, 200);
+  const codeF = lastCode('NIN_HOLDER_VERIFY', holderPhone(FAILURE_BUDGET));
+  const digestsF = (await owner.query(`select nin_digest, phone_digest from identity.public_patient_holder_events
+    where kind = 'send' and phone_digest = (select holder_recipient_hmac from identity.public_patient_enrollments
+      where id = $1)`, [budgetF.id])).rows[0];
+  const failuresDaily = getEnvironment().NIN_HOLDER_FAILURES_DAILY_MAX;
+  await owner.query(`insert into identity.public_patient_holder_events(kind, nin_digest, phone_digest, method, occurred_at)
+    select 'failure', $1, $2, 'registry_phone_otp', clock_timestamp() - interval '2 hours' from generate_series(1, $3)`,
+  [digestsF.nin_digest, digestsF.phone_digest, failuresDaily - 1]);
+  expectProblem(await verifyHolder(budgetF.cookie, sentF.body.challengeId, otherCode(codeF.code), '198.51.100.115'),
+    422, 'OTP_INVALID');
+  assert.deepEqual((await owner.query(`select details->>'window' as window, details->>'ninDigest' = $1 as same_nin
+    from audit.events where action = 'identity.public-patient-enrollment.holder-route-closed'`, [digestsF.nin_digest])).rows,
+  [{ window: 'day', same_nin: true }], 'the closed route must be audited once, by its window');
+  await endHolderCooldown(sentF.body.challengeId);
+  holderDeliveriesBefore = deliveries.length;
+  expectProblem(await sendHolder(budgetF.cookie, '198.51.100.115'), 429, 'NIN_HOLDER_ROUTE_LIMITED');
+  assert.equal(deliveries.length, holderDeliveriesBefore, 'a spent failure budget must send nothing');
+  expectProblem(await verifyHolder(budgetF.cookie, sentF.body.challengeId, codeF.code, '198.51.100.115'), 200);
+  check('the holder budgets are checked at send only: an enrollment\'s fourth code, a sixth send to one registry phone in 24 hours (across the NIN\'s enrollments) and a send after the NIN\'s tenth failure of the day are 429 NIN_HOLDER_ROUTE_LIMITED with one text, sending and storing nothing; the closed route is audited with its window; a code issued before still proves the holder');
+
+  // 14d. A later proof supersedes an earlier registry-phone proof of the same
+  // NIN, and two proofs that race on one NIN finish one after the other under
+  // the NIN lock: one wins, the other enrollment is gone (ADR-062).
+  const superseded1 = await startNin(SUPERSEDED, '198.51.100.120');
+  await proveHolder(superseded1.cookie, SUPERSEDED, { network: '198.51.100.120' });
+  const superseded2 = await startNin(SUPERSEDED, '198.51.100.121');
+  await proveHolder(superseded2.cookie, SUPERSEDED, { network: '198.51.100.121' });
+  expectProblem(await http.get('/api/v1/identity/patient-enrollments/current').set('Cookie', superseded1.cookie),
+    404, 'ENROLLMENT_NOT_FOUND');
+  assert.deepEqual((await owner.query(`select action, details->'methods' as methods, details->>'count' as count
+    from audit.events where resource_id = $1 and action in ('identity.public-patient-enrollment.superseded',
+      'identity.public-patient-enrollment.contested')`, [superseded2.id])).rows,
+  [{ action: 'identity.public-patient-enrollment.superseded', methods: ['registry_phone_otp'], count: '1' }]);
+  // Fixture, as the owner: hold the NIN lock, so that both requests wait on it.
+  const ninLockWaiters = () => count(`select count(*) from pg_locks lock
+    where lock.locktype = 'advisory' and not lock.granted
+      and lock.database = (select oid from pg_database where datname = current_database())`);
+  const holdNinLock = async enrollmentId => {
+    const client = await owner.connect();
+    await client.query('begin');
+    await client.query(`select pg_advisory_xact_lock(hashtextextended('patient-nin:' || nin_lookup_hmac, 0))
+      from identity.public_patient_enrollments where id = $1`, [enrollmentId]);
+    return client;
+  };
+  const releaseWhenWaiting = async (client, waiters) => {
+    const deadline = Date.now() + 20_000;
+    while (await ninLockWaiters() < waiters) {
+      assert(Date.now() < deadline, `${waiters} requests did not wait on the NIN lock`);
+      await new Promise(resolveWait => setTimeout(resolveWait, 25));
+    }
+    await client.query('commit');
+    client.release();
+  };
+  const racer1 = await startNin(SUPERSEDED, '198.51.100.122');
+  expectProblem(await sendHolder(racer1.cookie, '198.51.100.122'), 200);
+  const raceCode1 = lastCode('NIN_HOLDER_VERIFY', holderPhone(SUPERSEDED));
+  const racer2 = await startNin(SUPERSEDED, '198.51.100.123');
+  expectProblem(await sendHolder(racer2.cookie, '198.51.100.123'), 200);
+  const raceCode2 = lastCode('NIN_HOLDER_VERIFY', holderPhone(SUPERSEDED));
+  const lockedRace = await holdNinLock(racer1.id);
+  const proofs = [verifyHolder(racer1.cookie, raceCode1.challengeId, raceCode1.code, '198.51.100.122'),
+    verifyHolder(racer2.cookie, raceCode2.challengeId, raceCode2.code, '198.51.100.123')].map(call => call.then(response => response));
+  await releaseWhenWaiting(lockedRace, 2);
+  const raced = await Promise.all(proofs);
+  const winners = raced.filter(response => response.status === 200);
+  const losers = raced.filter(response => response.status !== 200);
+  assert.equal(winners.length, 1, `exactly one racing proof must win: ${raced.map(response => response.status)}`);
+  assert.deepEqual(winners[0].body, { stage: 'verify_contact', requiredProfileFields: [] });
+  expectProblem(losers[0], 404, 'ENROLLMENT_NOT_FOUND');
+  assert.deepEqual((await owner.query(`select state, holder_method from identity.public_patient_enrollments
+    where nin_last4 = '0014'`)).rows, [{ state: 'verify_contact', holder_method: 'registry_phone_otp' }],
+  'one proven enrollment of the NIN must remain');
+  check('a later registry-phone proof deletes an earlier proven enrollment of the NIN (audited superseded with its method); two correct holder codes for one NIN that wait on the NIN lock together finish in turn: one answers verify_contact, the other 404 ENROLLMENT_NOT_FOUND, and one proven enrollment remains');
+
+  // 14e. A holder proof racing an activation of the same NIN: either the
+  // activation wins and the proof then finds the Health ID (409, enrollment
+  // gone), or the proof wins and removes the waiting enrollment, whose
+  // activation then creates nothing. Never two patients, never a deadlock.
+  const racingA = await startNin(RACING, '198.51.100.130');
+  await proveHolder(racingA.cookie, RACING, { network: '198.51.100.130' });
+  const emailR = `patient-r-${randomUUID().slice(0, 8)}@example.invalid`;
+  const contactR = await post('/identity/patient-enrollments/contact', { channel: 'email', contact: emailR },
+    { cookie: racingA.cookie, network: '198.51.100.130' });
+  expectProblem(contactR, 200);
+  expectProblem(await post('/identity/patient-enrollments/contact/verify', { challengeId: contactR.body.challengeId,
+    code: lastCode('SIGNUP_VERIFY', emailR).code }, { cookie: racingA.cookie, network: '198.51.100.130' }), 200);
+  const racingB = await startNin(RACING, '198.51.100.131');
+  expectProblem(await sendHolder(racingB.cookie, '198.51.100.131'), 200);
+  const racingCode = lastCode('NIN_HOLDER_VERIFY', holderPhone(RACING));
+  const patientsBeforeRace = await count('select count(*) from identity.patients where source_system = $1',
+    ['hid-public-qoreid-enrollment']);
+  const lockedActivation = await holdNinLock(racingA.id);
+  const racing = [post('/identity/patient-enrollments/activate', { password: 'Synthetic-Patient-Pass-R5' },
+    { cookie: racingA.cookie, network: '198.51.100.130' }),
+  verifyHolder(racingB.cookie, racingCode.challengeId, racingCode.code, '198.51.100.131')].map(call => call.then(response => response));
+  await releaseWhenWaiting(lockedActivation, 2);
+  const [raceActivation, raceProof] = await Promise.all(racing);
+  const patientsAfterRace = await count('select count(*) from identity.patients where source_system = $1',
+    ['hid-public-qoreid-enrollment']);
+  if (raceActivation.status === 200) {
+    expectProblem(raceProof, 409, 'NIN_ALREADY_REGISTERED');
+    expiresEnrollmentCookie(raceProof, 'a proof after a racing activation');
+    assert.equal(patientsAfterRace, patientsBeforeRace + 1);
+    assert.deepEqual((await owner.query(`select state from identity.public_patient_enrollments where nin_last4 = '0015'`))
+      .rows, [{ state: 'active' }]);
+  } else {
+    expectProblem(raceProof, 200);
+    assert([403, 404].includes(raceActivation.status), `the losing activation: ${raceActivation.status} ${JSON.stringify(raceActivation.body)}`);
+    assert(!('hidCode' in raceActivation.body));
+    assert.equal(patientsAfterRace, patientsBeforeRace, 'the losing activation must create no patient');
+    assert.deepEqual((await owner.query(`select state from identity.public_patient_enrollments where nin_last4 = '0015'`))
+      .rows, [{ state: 'verify_contact' }]);
+  }
+  check(`a holder proof and an activation of one NIN that wait on the NIN lock together finish in turn, without a deadlock and with at most one patient (this run: ${raceActivation.status === 200 ? 'the activation won and the proof answered 409 NIN_ALREADY_REGISTERED' : 'the proof won and the activation created nothing'})`);
+
   // 15. The enrollment gate comes before any registration lookup (ENR-4): while
   // QoreID is paused or NIN-only enrollment is switched off, a bound NIN (A), a
   // pending one (C, waiting for its password) and one never seen get the same
@@ -934,14 +1311,15 @@ try {
   resetEnvironmentForTests();
   check('the QoreID lookup quota counts exactly the lookups made (none for a replay, duplicate or refusal), refuses the next lookup from an IPv6 /64 over its hourly limit (set to 2 for this check) and any lookup over the platform daily cap with 429 VERIFICATION_QUOTA_EXCEEDED before QoreID is called, and audits every decision');
 
-  // 19. Availability (FE-4): GET /availability answers { open } from the
-  // checks start makes before it reads a NIN, to any caller that passes CORS,
-  // with no input, audit row or cookie. While QoreID is disabled or NIN-only
-  // enrollment is off (the production setting: Identity refuses it on in
-  // production until the N1 holder step ships) it is closed and start answers
-  // 503 with the registration-not-open copy, which Health-id shows as sent
-  // once the gateway passes upstream errors through (ADR-055). A runtime
-  // pause closes it too; start keeps the generic 5xx detail for that.
+  // 19. Availability (FE-4, ADR-062): GET /availability answers { open,
+  // online, facility } from the checks start makes before it reads a NIN, to
+  // any caller that passes CORS, with no input, audit row or cookie. online is
+  // the holder SMS route; facility stays false until the facility route
+  // exists. While QoreID is disabled, NIN-only enrollment is off (the default
+  // everywhere) or no holder route is on, it is closed and start answers 503
+  // with the registration-not-open copy, which Health-id shows as sent once
+  // the gateway passes upstream errors through (ADR-055). A runtime pause
+  // closes it too; start keeps the generic 5xx detail for that.
   const NOT_OPEN = 'New Health ID registration is not open yet. If you already have a Health ID, sign in.';
   const availabilityPath = '/api/v1/identity/patient-enrollments/availability';
   const availability = (headers = {}) => {
@@ -949,10 +1327,10 @@ try {
     for (const [name, value] of Object.entries(headers)) call = call.set(name, value);
     return call;
   };
-  const expectAvailability = async (open, label, headers) => {
+  const expectAvailability = async (open, label, headers, online = true) => {
     const response = await availability(headers);
     assert.equal(response.status, 200, `${label}: ${response.status} ${JSON.stringify(response.body)}`);
-    assert.deepEqual(response.body, { open }, label);
+    assert.deepEqual(response.body, { open, online, facility: false }, label);
     assert.equal(response.headers['cache-control'], 'public, max-age=30', `${label}: briefly cacheable`);
     for (const name of ['pragma', 'expires', 'surrogate-control', 'set-cookie']) {
       assert.equal(response.headers[name], undefined, `${label}: no ${name}`);
@@ -979,10 +1357,17 @@ try {
     assert.match(String(response.headers['cache-control']), /no-store/, `${label}: a refusal is not cacheable`);
     return response.body.detail;
   };
-  // The production setting.
+  // The default setting.
   process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'false'; resetEnvironmentForTests();
   await expectAvailability(false, 'NIN-only enrollment off');
   assert.equal(await closedStart('QOREID_NIN_ONLY_DISABLED', 'NIN-only enrollment off'), NOT_OPEN);
+  // No holder route: the online route off and no facility route yet (ADR-062).
+  Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'false',
+    ASSISTED_REGISTRATION_ENABLED: 'true' }); resetEnvironmentForTests();
+  await expectAvailability(false, 'no holder route', {}, false);
+  assert.equal(await closedStart('PATIENT_REGISTRATION_NOT_OPEN', 'no holder route'), NOT_OPEN);
+  Object.assign(process.env, { NIN_HOLDER_SMS_ENABLED: 'true', QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false' });
+  delete process.env.ASSISTED_REGISTRATION_ENABLED; resetEnvironmentForTests();
   // QoreID disabled (the infrastructure default).
   process.env.QOREID_ENABLED = 'false'; resetEnvironmentForTests();
   await expectAvailability(false, 'QoreID disabled');
@@ -999,7 +1384,7 @@ try {
   assert.equal(await enrollmentRows(), enrollmentsBeforeAvailability);
   assert.equal(await rateTotal(), ratesBeforeAvailability, 'availability and a closed start must charge no rate bucket');
   assert.equal(await availabilityAudit(), 0, 'an availability read must write no audit row');
-  check('GET /identity/patient-enrollments/availability answers 200 { open } to every caller the route sees (no Origin, the allowed Origin, a signed-in caller; the route itself does not refuse a foreign Origin, which the CORS middleware of main.ts, not mounted here, refuses first when deployed) with Cache-Control public, max-age=30, no cookie and no audit row: open with QoreID and NIN-only enrollment on, closed with NIN-only enrollment off (the production setting), QoreID disabled or QoreID paused at runtime; while it is closed by a flag, start answers 503 QOREID_NIN_ONLY_DISABLED or QOREID_DISABLED with the registration-not-open detail, and nothing is looked up, charged or stored');
+  check('GET /identity/patient-enrollments/availability answers 200 { open, online, facility } (facility false) to every caller the route sees (no Origin, the allowed Origin, a signed-in caller; the route itself does not refuse a foreign Origin, which the CORS middleware of main.ts, not mounted here, refuses first when deployed) with Cache-Control public, max-age=30, no cookie and no audit row: open with QoreID, NIN-only enrollment and the online holder route on, closed with NIN-only enrollment off (the default), with no holder route (online false), with QoreID disabled or QoreID paused at runtime; while it is closed by a flag, start answers 503 QOREID_NIN_ONLY_DISABLED, PATIENT_REGISTRATION_NOT_OPEN or QOREID_DISABLED with the registration-not-open detail, and nothing is looked up, charged or stored');
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: runtimeRole,
     qoreid: 'local stub behind the real adapter; no QoreID call', turnstile: 'local Siteverify stub',
     notification: 'local stub; no delivery', nin_lookups: ninLookups.length, deliveries: deliveries.length,

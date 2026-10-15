@@ -19,7 +19,7 @@ const patientRequest = {
   header: () => undefined,
 } as unknown as HidRequest;
 
-function setup(enabled: boolean) {
+function setup(enabled: boolean, selfBinding = true) {
   let profileDateOfBirth: string | null = '1991-03-04';
   let ninEligibility: 'bound_exact' | 'legacy_unbound' | 'denied' = 'bound_exact';
   const query = jest.fn(async (sql: string, _values?: readonly unknown[]) => {
@@ -55,7 +55,8 @@ function setup(enabled: boolean) {
       ciphertext: Buffer.alloc(32, 1), keyVersion: 'test-v1', last4: '8901' }),
     protectPatientSelfProfile: jest.fn().mockReturnValue({ ciphertext: Buffer.alloc(64, 2),
       sha256: 'b'.repeat(64), keyVersion: 'test-v1' }) } as unknown as NinIdentifierProtector;
-  jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: enabled } as environment.Environment);
+  jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: enabled,
+    QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: selfBinding } as environment.Environment);
   return { service: new QoreIdVerificationService(database, provider, integrations, ninProtector), provider, query, database,
     integrations, ninProtector,
     setProfileDateOfBirth: (value: string | null) => { profileDateOfBirth = value; },
@@ -64,6 +65,29 @@ function setup(enabled: boolean) {
 
 describe('QoreID verification service', () => {
   afterEach(() => jest.restoreAllMocks());
+
+  // ADR-062: the signed-in route binds a NIN on a name and date-of-birth
+  // match, with no proof that the patient holds the NIN. While its flag is
+  // off it refuses first: no lookup, no quota charge, no evidence row.
+  it.each([[true], [false]])('refuses the signed-in NIN binding while its flag is off (QoreID enabled: %s)', async (enabled) => {
+    const { service, provider, integrations, query, database, ninProtector } = setup(enabled, false);
+    const refusal = await service.verifyPatientNin(patientRequest, '12345678901').catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ status: 503, code: 'QOREID_PATIENT_NIN_BINDING_DISABLED',
+      message: 'Verifying a NIN from your account is not available' });
+    expect(provider.verifyNin).not.toHaveBeenCalled();
+    expect(integrations.assertAvailable).not.toHaveBeenCalled();
+    expect(integrations.consumePatientQuota).not.toHaveBeenCalled();
+    expect(ninProtector.lookup).not.toHaveBeenCalled();
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    expect(database.withTransaction).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('refuses a caller that is not a patient before the binding flag', async () => {
+    const { service } = setup(true, false);
+    await expect(service.verifyPatientNin({ ...patientRequest, actor: undefined } as unknown as typeof patientRequest, '12345678901'))
+      .rejects.not.toMatchObject({ code: 'QOREID_PATIENT_NIN_BINDING_DISABLED' });
+  });
 
   it('does not call QoreID while disabled, but records only a disabled evidence state', async () => {
     const { service, provider, query } = setup(false);

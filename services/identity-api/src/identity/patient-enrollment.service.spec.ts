@@ -7,14 +7,14 @@ jest.mock('argon2', () => ({ argon2id: 2, hash: jest.fn() }));
 
 import * as argon2 from 'argon2';
 import type { PoolClient } from 'pg';
-import { DomainProblem } from '../common/problem';
+import { DomainProblem, PublicDetailProblem } from '../common/problem';
 import * as environment from '../config/environment';
 import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { NotificationOtpClient } from '../auth/notification-otp.client';
 import type { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
-import { PatientEnrollmentService } from './patient-enrollment.service';
+import { PatientEnrollmentService, normalizeRegistryPhone, underEighteen } from './patient-enrollment.service';
 import { QoreIdPublicPatientIdentityProvider, type PublicPatientIdentityProvider } from './patient-enrollment.provider';
 import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import type { NinIdentifierProtector } from './nin-identifier-protector';
@@ -39,8 +39,14 @@ type OtpRateRow = { request_count: number; window_started_at: Date; blocked_unti
 
 function fixture(otpRates = new Map<string, OtpRateRow>(),
   identityProvider?: PublicPatientIdentityProvider) {
+  // Each start inserts its own enrollment (0093); `enrollment` is the latest.
+  const enrollments = new Map<string, Record<string, unknown>>();
   let enrollment: Record<string, unknown> | undefined;
   let activationFailure: unknown;
+  // What identity.record_public_patient_holder_send and _proof answer (0093).
+  let holderSendAllowed = true;
+  let holderProofOutcome = 'verified';
+  const holderCalls: { command: string; values: readonly unknown[] }[] = [];
   const challenges: Record<string, unknown>[] = [];
   let bound = false;
   let contactBound = false;
@@ -73,46 +79,93 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes('from identity.public_patient_enrollments where nin_lookup_hmac')) {
-      return { rows: enrollment && values[0] === enrollment.nin_lookup_hmac ? [enrollment] : [] };
+      return { rows: [...enrollments.values()].filter((row) => values[0] === row.nin_lookup_hmac) };
     }
     if (sql.includes('from identity.public_patient_enrollments where request_hmac')) {
-      return { rows: enrollment && values[0] === enrollment.request_hmac ? [enrollment] : [] };
+      return { rows: [...enrollments.values()].filter((row) => values[0] === row.request_hmac) };
+    }
+    if (sql.includes('select nin_lookup_hmac from identity.public_patient_enrollments where id=$1')) {
+      const row = enrollments.get(String(values[0]));
+      return { rows: row ? [{ nin_lookup_hmac: row.nin_lookup_hmac }] : [] };
     }
     if (sql.includes('from identity.public_patient_enrollments where id=$1')) {
-      return { rows: enrollment && values[0] === enrollment.id ? [enrollment] : [] };
+      const row = enrollments.get(String(values[0]));
+      return { rows: row ? [row] : [] };
     }
     if (sql.includes('insert into identity.public_patient_enrollments')) {
-      if (enrollment) throw Object.assign(new Error('duplicate enrollment'), { code: '23505' });
+      if ([...enrollments.values()].some((row) => row.request_hmac === values[8])) {
+        throw Object.assign(new Error('duplicate key value violates unique constraint'),
+          { code: '23505', constraint: 'public_patient_enrollment_request_uq' });
+      }
       enrollment = {
         id: values[0], nin_lookup_hmac: values[1], nin_last4: values[2],
         nin_ciphertext: values[3], profile_ciphertext: values[4], profile_sha256: values[5],
         provider_reference: values[7], request_hmac: values[8], token_hmac: values[9],
-        state: 'verify_contact', expires_at: new Date(Date.now() + 86_400_000),
+        state: 'verify_holder', expires_at: new Date(Date.now() + 86_400_000),
         contact_channel: null, contact_hmac: null, contact_lookup_hmac: null, contact_ciphertext: null,
-        contact_verified_at: null,
+        contact_verified_at: null, holder_recipient_hmac: null,
       };
+      enrollments.set(String(values[0]), enrollment);
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes('from identity.public_patient_enrollment_otps where id=$1')) {
       const challenge = challenges.find((candidate) => candidate.id === values[0]
-        && !candidate.consumed_at && !candidate.invalidated_at);
+        && candidate.enrollment_id === values[1] && !candidate.consumed_at && !candidate.invalidated_at
+        && (!sql.includes('purpose=') || sql.includes(`purpose='${String(candidate.purpose)}'`)));
       return { rows: challenge ? [challenge] : [] };
     }
     if (sql.includes('from identity.public_patient_enrollment_otps where enrollment_id=$1')) {
-      const challenge = [...challenges].reverse().find((candidate) => !candidate.consumed_at
-        && !candidate.invalidated_at);
+      const challenge = [...challenges].reverse().find((candidate) => candidate.enrollment_id === values[0]
+        && !candidate.consumed_at && !candidate.invalidated_at
+        && (!sql.includes('purpose=') || sql.includes(`purpose='${String(candidate.purpose)}'`)));
       return { rows: challenge ? [challenge] : [] };
     }
+    if (sql.includes('as sent from identity.public_patient_enrollment_otps')) {
+      return { rows: [{ sent: challenges.filter((candidate) => candidate.enrollment_id === values[0]
+        && candidate.purpose === 'nin_holder').length }] };
+    }
     if (sql.includes('update identity.public_patient_enrollments set contact_channel=')) {
-      Object.assign(enrollment!, { contact_channel: values[1], contact_hmac: values[2],
+      Object.assign(enrollments.get(String(values[0]))!, { contact_channel: values[1], contact_hmac: values[2],
         contact_lookup_hmac: values[3], contact_ciphertext: values[4] });
       return { rows: [], rowCount: 1 };
     }
+    if (sql.includes('update identity.public_patient_enrollments set holder_recipient_hmac=')) {
+      Object.assign(enrollments.get(String(values[0]))!, { holder_recipient_hmac: values[1] });
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes('identity.record_public_patient_holder_send')) {
+      holderCalls.push({ command: 'send', values });
+      return { rows: [{ allowed: holderSendAllowed }] };
+    }
+    if (sql.includes('identity.record_public_patient_holder_failure')) {
+      holderCalls.push({ command: 'failure', values });
+      return { rows: [{}] };
+    }
+    if (sql.includes('identity.record_public_patient_holder_proof')) {
+      holderCalls.push({ command: 'proof', values });
+      const row = enrollments.get(String(values[0]))!;
+      const challenge = challenges.find((candidate) => candidate.id === values[2])!;
+      if (holderProofOutcome === 'verified') {
+        Object.assign(challenge, { verified_at: new Date(), consumed_at: new Date() });
+        Object.assign(row, { state: 'verify_contact', holder_method: 'registry_phone_otp',
+          holder_challenge_id: challenge.id, holder_verified_at: new Date() });
+      } else if (holderProofOutcome === 'existing_identity') {
+        enrollments.delete(String(row.id));
+        for (const candidate of challenges) if (candidate.enrollment_id === row.id) candidate.deleted = true;
+      }
+      return { rows: [{ outcome: holderProofOutcome }] };
+    }
     if (sql.includes('insert into identity.public_patient_enrollment_otps')) {
-      challenges.push({ id: values[0], recipient_hmac: values[2], channel: values[3],
-        verifier_hmac: values[4], expires_at: new Date(Date.now() + 300_000),
-        created_at: new Date(Date.now() - 61_000), failed_attempts: 0,
-        max_attempts: 5, delivery_outcome: 'unknown' });
+      // A holder code names its channel and purpose in the statement (0093).
+      challenges.push(sql.includes("'nin_holder'")
+        ? { id: values[0], enrollment_id: values[1], recipient_hmac: values[2], channel: 'phone',
+          purpose: 'nin_holder', verifier_hmac: values[3], expires_at: new Date(Date.now() + 300_000),
+          created_at: new Date(Date.now() - 61_000), failed_attempts: 0, max_attempts: 5,
+          delivery_outcome: 'unknown' }
+        : { id: values[0], enrollment_id: values[1], recipient_hmac: values[2], channel: values[3],
+          purpose: 'contact', verifier_hmac: values[4], expires_at: new Date(Date.now() + 300_000),
+          created_at: new Date(Date.now() - 61_000), failed_attempts: 0,
+          max_attempts: 5, delivery_outcome: 'unknown' });
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes('set delivery_outcome=$2')) {
@@ -140,7 +193,7 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes("set state='set_password'")) {
-      Object.assign(enrollment!, { state: 'set_password', contact_verified_at: new Date() });
+      Object.assign(enrollments.get(String(values[0]))!, { state: 'set_password', contact_verified_at: new Date() });
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes('select hid_code from identity.patients')) {
@@ -148,19 +201,21 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
     }
     // A contact proof too old for activation sends the enrollment back to the contact step.
     if (sql.includes("set state='verify_contact'") && sql.includes("state='set_password' and contact_verified_at")) {
-      if (enrollment?.state !== 'set_password') return { rows: [], rowCount: 0 };
-      Object.assign(enrollment, { state: 'verify_contact', contact_channel: null, contact_hmac: null,
+      const row = enrollments.get(String(values[0]));
+      if (row?.state !== 'set_password') return { rows: [], rowCount: 0 };
+      Object.assign(row, { state: 'verify_contact', contact_channel: null, contact_hmac: null,
         contact_lookup_hmac: null, contact_ciphertext: null, contact_verified_at: null,
         verified_challenge_id: null });
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes('identity.activate_public_patient_enrollment')) {
       if (activationFailure) throw activationFailure;
+      const row = enrollments.get(String(values[0]));
       // An active enrollment replays: the stored HID, the password ignored (0058).
-      if (enrollment?.state === 'active') return { rows: [{ patient_id: 'patient-7',
+      if (row?.state === 'active') return { rows: [{ patient_id: 'patient-7',
         account_id: 'account-7', hid_code: 'HID-TEST-00000001', replayed: true }] };
       // A first activation records when it happened, as the command does.
-      Object.assign(enrollment!, { activated_at: new Date() });
+      Object.assign(row!, { activated_at: new Date() });
       return { rows: [{ patient_id: 'patient-7', account_id: 'account-7',
         hid_code: values[4], replayed: false }] };
     }
@@ -178,9 +233,12 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
   const service = new PatientEnrollmentService(database, protector as unknown as NinIdentifierProtector,
     identityProvider ?? provider as PublicPatientIdentityProvider, notification as unknown as NotificationOtpClient,
     hidCodes as unknown as HidCodeGenerator, google as unknown as GoogleAuthenticationService);
-  return { service, client, queries, provider, notification, protector, google, otpRates,
+  return { service, client, queries, provider, notification, protector, google, otpRates, holderCalls,
+    enrollments,
     get enrollment() { return enrollment; }, get challenge() { return challenges.at(-1); },
     challenges,
+    set holderSendAllowed(value: boolean) { holderSendAllowed = value; },
+    set holderProofOutcome(value: string) { holderProofOutcome = value; },
     set bound(value: boolean) { bound = value; },
     set contactBound(value: boolean) { contactBound = value; },
     set ready(value: boolean) { ready = value; },
@@ -190,9 +248,29 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
 
 function passwordHash(): jest.Mock { return argon2.hash as unknown as jest.Mock; }
 
+/**
+ * Proves that the caller holds the NIN with the code sent to the registry
+ * phone (0093), then forgets that delivery, so a test's first delivery is
+ * its own.
+ */
+async function proveHolder(f: ReturnType<typeof fixture>, cookie: string, ip = '203.0.113.10') {
+  const sent = await f.service.sendHolderCode(cookie, ip, correlationId);
+  const delivered = f.notification.deliver.mock.calls.at(-1)?.[0] as { code: string };
+  await f.service.verifyHolderCode(cookie, sent.challengeId, delivered.code, correlationId);
+  f.notification.deliver.mockClear();
+}
+
+/** A started enrollment whose holder is proved, at the contact step. */
+async function provenStart(f: ReturnType<typeof fixture>, key = requestKey, ip = '203.0.113.10',
+  googleCookie?: string) {
+  const started = await f.service.start(nin, key, ip, correlationId, googleCookie);
+  await proveHolder(f, started.cookie, ip);
+  return started;
+}
+
 /** An enrollment whose contact is verified, ready for its password. */
 async function verifiedEnrollment(f: ReturnType<typeof fixture>) {
-  const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+  const started = await provenStart(f);
   const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
     '203.0.113.10', correlationId);
   const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
@@ -227,6 +305,8 @@ describe('PatientEnrollmentService', () => {
       NIN_ENCRYPTION_KEY_B64: Buffer.alloc(32, 2).toString('base64'),
       CONTACT_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 4).toString('base64'),
       OTP_HMAC_KEY_B64: Buffer.alloc(32, 3).toString('base64'),
+      // The online holder route (ADR-062) is on unless a test turns it off.
+      NIN_HOLDER_SMS_ENABLED: 'true',
     });
     resetEnvironmentForTests();
     passwordHash().mockReset();
@@ -241,35 +321,46 @@ describe('PatientEnrollmentService', () => {
     jest.restoreAllMocks();
   });
 
-  it('starts with NIN alone and stores opaque encrypted evidence', async () => {
+  it('starts with NIN alone at the holder step and stores opaque encrypted evidence', async () => {
     const f = fixture();
     const result = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
 
     expect(f.provider.verifyNin).toHaveBeenCalledWith(nin,
       { correlationId, networkDigest: expect.stringMatching(/^[0-9a-f]{64}$/) });
-    expect(result.progress.stage).toBe('verify_contact');
+    // ADR-062: the holder step first; no registry value, masked digit or
+    // required profile field before the proof.
+    expect(result.progress).toEqual({ stage: 'verify_holder', expiresAt: expect.any(String),
+      googleOnboardingRequired: false, online: { available: true }, facility: { available: false } });
     expect(result.cookie).toMatch(/^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
     const insert = f.queries.find(({ sql }) => sql.includes('insert into identity.public_patient_enrollments'))!;
+    // The runtime inserts the start columns only: the state is the verify_holder default.
+    expect(insert.sql).not.toMatch(/\bstate\b/);
     expect(insert.values[2]).toBe('8901');
     expect(insert.values[3]).toBeInstanceOf(Buffer);
     expect(insert.values[4]).toBeInstanceOf(Buffer);
     expect(JSON.stringify(f.queries.map(({ values }) => values.map((value) => Buffer.isBuffer(value)
       ? value.toString('hex') : value)))).not.toContain(nin);
     expect((insert.values[4] as Buffer).toString('utf8')).not.toContain('Amina');
+    expect(JSON.stringify(result)).not.toMatch(/08076543210|7654|3210|Amina|Okafor/);
   });
 
-  it('replays the same idempotency key without another provider call and rejects a second key', async () => {
+  it('replays the same idempotency key without another provider call; another key starts another enrollment', async () => {
     const f = fixture();
     const first = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
     const replay = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
     expect(replay.cookie).toBe(first.cookie);
+    expect(replay.progress).toMatchObject({ stage: 'verify_holder', online: { available: true } });
     expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
-    await expect(f.service.start(nin, '49ebcc73-3aa3-47aa-b1e4-f8944ab6eab0',
-      '203.0.113.10', correlationId)).rejects.toMatchObject({ code: 'NIN_ALREADY_REGISTERED' });
-    expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
+    // A start never answers NIN_ALREADY_REGISTERED (ADR-062): another key for
+    // the same NIN is another enrollment, after another lookup.
+    const second = await f.service.start(nin, '49ebcc73-3aa3-47aa-b1e4-f8944ab6eab0',
+      '203.0.113.10', correlationId);
+    expect(second.cookie).not.toBe(first.cookie);
+    expect(f.provider.verifyNin).toHaveBeenCalledTimes(2);
+    expect(f.enrollments.size).toBe(2);
   });
 
-  it('settles simultaneous starts for the same NIN through the database uniqueness boundary', async () => {
+  it('settles two simultaneous starts with one key by resuming the one the database kept', async () => {
     const f = fixture();
     let releaseVerification!: () => void;
     const verificationGate = new Promise<void>((resolve) => { releaseVerification = resolve; });
@@ -278,20 +369,26 @@ describe('PatientEnrollmentService', () => {
       await verificationGate;
       return identity;
     });
-    const secondKey = '49ebcc73-3aa3-47aa-b1e4-f8944ab6eab0';
-    const attempts = await Promise.allSettled([
+    const attempts = await Promise.all([
       f.service.start(nin, requestKey, '203.0.113.10', correlationId),
-      f.service.start(nin, secondKey, '203.0.113.11', correlationId),
+      f.service.start(nin, requestKey, '203.0.113.11', correlationId),
     ]);
-    expect(attempts.filter((attempt) => attempt.status === 'fulfilled')).toHaveLength(1);
-    expect(attempts.filter((attempt) => attempt.status === 'rejected')).toEqual([
-      expect.objectContaining({ status: 'rejected', reason: expect.objectContaining({
-        code: 'NIN_ALREADY_REGISTERED',
-      }) }),
-    ]);
+    expect(attempts[0]?.cookie).toBe(attempts[1]?.cookie);
+    expect(f.enrollments.size).toBe(1);
     expect(f.provider.verifyNin).toHaveBeenCalledTimes(2);
-    expect(f.queries.filter(({ sql }) => sql.includes('insert into identity.public_patient_enrollments')))
-      .toHaveLength(2);
+  });
+
+  it('answers 503 ENROLLMENT_UNAVAILABLE, never NIN_ALREADY_REGISTERED, for any other unique violation at start', async () => {
+    const f = fixture();
+    const original = (f.client.query as unknown as jest.Mock).getMockImplementation()!;
+    (f.client.query as unknown as jest.Mock).mockImplementation(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('insert into identity.public_patient_enrollments')) {
+        throw Object.assign(new Error('duplicate'), { code: '23505', constraint: 'public_patient_enrollments_proven_nin_uq' });
+      }
+      return original(sql, values);
+    });
+    await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+      .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_UNAVAILABLE' });
   });
 
   it('rejects a retry key reused with a different NIN before provider verification', async () => {
@@ -303,16 +400,40 @@ describe('PatientEnrollmentService', () => {
     expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
   });
 
-  it('with the enrollment gate open, rejects an already bound NIN before contacting the provider', async () => {
+  it('never reads whether the NIN is bound or pending at start', async () => {
     const f = fixture();
     f.bound = true;
     await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
-      .rejects.toMatchObject({ code: 'NIN_ALREADY_REGISTERED' });
-    // The gate is checked first and was open; the registry lookup is never made.
-    expect(f.provider.assertAvailable).toHaveBeenCalledTimes(1);
+      .resolves.toMatchObject({ progress: { stage: 'verify_holder' } });
+    expect(f.queries.some(({ sql }) => sql.includes('public_patient_nin_already_bound'))).toBe(false);
+    expect(f.queries.some(({ sql }) => sql.includes('where nin_lookup_hmac'))).toBe(false);
+    // The gate is checked first.
     expect(f.provider.assertAvailable.mock.invocationCallOrder[0])
       .toBeLessThan((f.client.query as unknown as jest.Mock).mock.invocationCallOrder[0] ?? 0);
+  });
+
+  it.each([
+    ['QOREID_PROVIDER_RESPONSE_INVALID', 502], ['QOREID_PROVIDER_UNAVAILABLE', 503], ['QOREID_TIMEOUT', 504],
+  ])('shows one fixed patient text when the lookup fails with %s', async (code, status) => {
+    const f = fixture();
+    f.provider.verifyNin.mockRejectedValue(new DomainProblem(status, code, 'internal detail'));
+    const refusal = await f.service.start(nin, requestKey, '203.0.113.10', correlationId).catch((error) => error);
+    expect(refusal).toBeInstanceOf(PublicDetailProblem);
+    expect(refusal).toMatchObject({ code, status, message: 'We could not check your NIN now. Try again later.' });
+  });
+
+  it('refuses a start with 503 PATIENT_REGISTRATION_NOT_OPEN before QoreID when no ownership route is open', async () => {
+    Object.assign(process.env, { NIN_HOLDER_SMS_ENABLED: 'false', ASSISTED_REGISTRATION_ENABLED: 'true' });
+    resetEnvironmentForTests();
+    const f = fixture();
+    const refusal = await f.service.start(nin, requestKey, '203.0.113.10', correlationId).catch((error) => error);
+    expect(refusal).toBeInstanceOf(PublicDetailProblem);
+    expect(refusal).toMatchObject({ status: 503, code: 'PATIENT_REGISTRATION_NOT_OPEN',
+      message: 'New Health ID registration is not open yet. If you already have a Health ID, sign in.' });
+    expect(f.provider.assertAvailable).not.toHaveBeenCalled();
     expect(f.provider.verifyNin).not.toHaveBeenCalled();
+    expect(f.queries).toEqual([]);
+    await expect(f.service.availability()).resolves.toEqual({ open: false, online: false, facility: false });
   });
 
   it('blocks a new identity before QoreID when cross-cohort reconciliation is unsealed', async () => {
@@ -325,7 +446,7 @@ describe('PatientEnrollmentService', () => {
 
   it('rejects an existing patient contact before delivering an OTP', async () => {
     const f = fixture();
-    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+    const started = await provenStart(f);
     f.contactBound = true;
     await expect(f.service.startContact(started.cookie, 'phone', '08012345678',
       '203.0.113.10', correlationId)).rejects.toMatchObject({ code: 'CONTACT_ALREADY_REGISTERED' });
@@ -385,7 +506,7 @@ describe('PatientEnrollmentService', () => {
 
   it('binds an SMS challenge to contact, counts a wrong code, then activates through the database command', async () => {
     const f = fixture();
-    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+    const started = await provenStart(f);
     const contact = await f.service.startContact(started.cookie, 'phone', '08012345678',
       '203.0.113.10', correlationId);
     expect(f.notification.deliver).toHaveBeenCalledWith(expect.objectContaining({
@@ -419,8 +540,7 @@ describe('PatientEnrollmentService', () => {
   it('binds Google pending proof on start and retry, then consumes it inside the account activation transaction', async () => {
     const f = fixture();
     const googleCookie = '30000000-0000-4000-8000-000000000001.' + 'A'.repeat(43);
-    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId,
-      googleCookie);
+    const started = await provenStart(f, requestKey, '203.0.113.10', googleCookie);
     expect(f.google.bindPendingInTransaction).toHaveBeenCalledWith(f.client, googleCookie,
       f.enrollment?.id, f.enrollment?.token_hmac);
     await f.service.start(nin, requestKey, '203.0.113.10', correlationId, googleCookie);
@@ -457,8 +577,7 @@ describe('PatientEnrollmentService', () => {
   it('does not complete activation when a bound pending Google capability cannot be consumed', async () => {
     const f = fixture();
     const googleCookie = '30000000-0000-4000-8000-000000000001.' + 'A'.repeat(43);
-    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId,
-      googleCookie);
+    const started = await provenStart(f, requestKey, '203.0.113.10', googleCookie);
     const contact = await f.service.startContact(started.cookie, 'email',
       'google-patient@example.test', '203.0.113.10', correlationId);
     const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
@@ -474,7 +593,7 @@ describe('PatientEnrollmentService', () => {
 
   it('rejects an expired code without advancing the enrollment', async () => {
     const f = fixture();
-    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+    const started = await provenStart(f);
     const contact = await f.service.startContact(started.cookie, 'phone', '08012345678',
       '203.0.113.10', correlationId);
     const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
@@ -489,7 +608,7 @@ describe('PatientEnrollmentService', () => {
 
   it('invalidates a challenge after excessive failures, even if the correct code is supplied later', async () => {
     const f = fixture();
-    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+    const started = await provenStart(f);
     const contact = await f.service.startContact(started.cookie, 'email', 'Patient@Example.test',
       '203.0.113.10', correlationId);
     const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
@@ -519,7 +638,7 @@ describe('PatientEnrollmentService', () => {
 
     it('refuses even the correct code once five wrong codes across its challenges spend the recipient budget', async () => {
       const f = fixture();
-      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const started = await provenStart(f);
       const first = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
         '203.0.113.10', correlationId);
       const firstCode = lastCode(f);
@@ -530,7 +649,8 @@ describe('PatientEnrollmentService', () => {
       const second = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
         '198.51.100.7', correlationId);
       const secondCode = lastCode(f);
-      expect(f.challenges[0]?.invalidated_at).toBeInstanceOf(Date);
+      // challenges[0] is the holder code (0093); [1] the first contact code.
+      expect(f.challenges[1]?.invalidated_at).toBeInstanceOf(Date);
       for (let attempt = 0; attempt < 2; attempt += 1) {
         await refusesCode(f, started.cookie, second.challengeId, wrong(secondCode));
       }
@@ -553,14 +673,14 @@ describe('PatientEnrollmentService', () => {
     it('keys one budget on the recipient alone, across enrollments and networks, never on the client IP', async () => {
       const otpRates = new Map<string, OtpRateRow>();
       const [a, b, other] = [fixture(otpRates), fixture(otpRates), fixture(otpRates)];
-      const startedA = await a.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const startedA = await provenStart(a);
       const contactA = await a.service.startContact(startedA.cookie, 'email', 'patient@example.test',
         '203.0.113.10', correlationId);
       for (let attempt = 0; attempt < 3; attempt += 1) {
         await refusesCode(a, startedA.cookie, contactA.challengeId, wrong(lastCode(a)));
       }
       // Another enrollment, from another network, with the same contact written differently.
-      const startedB = await b.service.start(nin, requestKey, '198.51.100.7', correlationId);
+      const startedB = await provenStart(b, requestKey, '198.51.100.7');
       const contactB = await b.service.startContact(startedB.cookie, 'email', '  Patient@Example.TEST ',
         '198.51.100.7', correlationId);
       expect(b.challenge?.recipient_hmac).toBe(a.challenge?.recipient_hmac);
@@ -571,7 +691,7 @@ describe('PatientEnrollmentService', () => {
       expect(b.enrollment?.state).toBe('verify_contact');
 
       // Another recipient keeps its own budget.
-      const startedOther = await other.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const startedOther = await provenStart(other);
       const contactOther = await other.service.startContact(startedOther.cookie, 'email',
         'someone-else@example.test', '203.0.113.10', correlationId);
       await expect(other.service.verifyContact(startedOther.cookie, contactOther.challengeId,
@@ -589,7 +709,7 @@ describe('PatientEnrollmentService', () => {
 
     it('sends no new code to a recipient whose budget is spent, and leaves other recipients alone', async () => {
       const f = fixture();
-      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const started = await provenStart(f);
       const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
         '203.0.113.10', correlationId);
       const code = lastCode(f);
@@ -601,7 +721,8 @@ describe('PatientEnrollmentService', () => {
       await expect(f.service.startContact(started.cookie, 'email', 'Patient@Example.test',
         '198.51.100.7', correlationId)).rejects.toMatchObject({ status: 429, code: 'ENROLLMENT_RATE_LIMITED' });
       expect(f.notification.deliver).toHaveBeenCalledTimes(1);
-      expect(f.challenges).toHaveLength(1);
+      // The holder code and the one contact code (0093).
+      expect(f.challenges).toHaveLength(2);
       await expect(f.service.startContact(started.cookie, 'phone', '08012345678',
         '203.0.113.10', correlationId)).resolves.toMatchObject({ challengeId: expect.any(String) });
       expect(f.notification.deliver).toHaveBeenCalledTimes(2);
@@ -609,7 +730,7 @@ describe('PatientEnrollmentService', () => {
 
     it('touches no budget for an unknown or expired challenge', async () => {
       const f = fixture();
-      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const started = await provenStart(f);
       const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
         '203.0.113.10', correlationId);
       const code = lastCode(f);
@@ -623,7 +744,7 @@ describe('PatientEnrollmentService', () => {
 
     it('reads, compares and counts under the bucket lock taken after the challenge lock, writing no other challenge', async () => {
       const f = fixture();
-      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const started = await provenStart(f);
       const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
         '203.0.113.10', correlationId);
       const code = lastCode(f);
@@ -660,7 +781,7 @@ describe('PatientEnrollmentService', () => {
         PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: '1800' });
       resetEnvironmentForTests();
       const f = fixture();
-      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const started = await provenStart(f);
       const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
         '203.0.113.10', correlationId);
       const code = lastCode(f);
@@ -678,7 +799,7 @@ describe('PatientEnrollmentService', () => {
 
   it('invalidates the old challenge when the applicant changes the selected account contact', async () => {
     const f = fixture();
-    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+    const started = await provenStart(f);
     const phone = await f.service.startContact(started.cookie, 'phone', '08012345678',
       '203.0.113.10', correlationId);
     const phoneCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
@@ -686,7 +807,8 @@ describe('PatientEnrollmentService', () => {
       '203.0.113.10', correlationId);
     const emailCode = f.notification.deliver.mock.calls[1]?.[0].code as string;
 
-    expect(f.challenges[0]?.invalidated_at).toBeInstanceOf(Date);
+    // challenges[0] is the holder code (0093); [1] the phone contact code.
+    expect(f.challenges[1]?.invalidated_at).toBeInstanceOf(Date);
     expect(f.notification.deliver).toHaveBeenLastCalledWith(expect.objectContaining({
       channel: 'email', recipient: 'patient@example.test', challengeId: email.challengeId,
     }));
@@ -703,7 +825,7 @@ describe('PatientEnrollmentService', () => {
 
   it('does not accept replay of a consumed contact challenge', async () => {
     const f = fixture();
-    const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+    const started = await provenStart(f);
     const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
       '203.0.113.10', correlationId);
     const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
@@ -819,7 +941,7 @@ describe('PatientEnrollmentService', () => {
 
     it('refuses a forged cookie or an unverified contact before charging the budget', async () => {
       const f = fixture();
-      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const started = await provenStart(f);
       f.queries.length = 0;
       const forged = started.cookie.replace(/.$/, (last) => (last === 'A' ? 'B' : 'A'));
       await expect(f.service.activate(forged, 'a-strong-test-password', correlationId))
@@ -961,7 +1083,7 @@ describe('PatientEnrollmentService', () => {
         expect(integrations.consumePublicPatientNinQuota).toHaveBeenCalledTimes(1);
         // The pending enrollment itself is untouched and still resumable through its cookie.
         await expect(f.service.current(started.cookie, correlationId))
-          .resolves.toMatchObject({ stage: 'verify_contact' });
+          .resolves.toMatchObject({ stage: 'verify_holder' });
       });
 
     it('refuses a same-key resume while the gate is closed, and resumes once it opens again', async () => {
@@ -985,10 +1107,10 @@ describe('PatientEnrollmentService', () => {
       async (_label, closed, pause, status, code) => {
         Object.assign(process.env, open); resetEnvironmentForTests();
         const { f, adapter, integrations, pause: pauseQoreId } = gated();
-        await expect(f.service.availability()).resolves.toEqual({ open: true });
+        await expect(f.service.availability()).resolves.toEqual({ open: true, online: true, facility: false });
         Object.assign(process.env, closed); resetEnvironmentForTests();
         if (pause) pauseQoreId();
-        await expect(f.service.availability()).resolves.toEqual({ open: false });
+        await expect(f.service.availability()).resolves.toEqual({ open: false, online: true, facility: false });
         expect(f.queries).toEqual([]);
         await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
           .rejects.toMatchObject({ status, code });
@@ -1001,7 +1123,7 @@ describe('PatientEnrollmentService', () => {
       Object.assign(process.env, open); resetEnvironmentForTests();
       delete process.env.NIN_ENCRYPTION_KEY_B64; resetEnvironmentForTests();
       const { f, integrations } = gated();
-      await expect(f.service.availability()).resolves.toEqual({ open: false });
+      await expect(f.service.availability()).resolves.toEqual({ open: false, online: true, facility: false });
       await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
         .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_CONFIGURATION_UNAVAILABLE' });
       expect(integrations.assertAvailable).not.toHaveBeenCalled();
@@ -1026,27 +1148,26 @@ describe('PatientEnrollmentService', () => {
       return { digest: charge!.networkDigest, ipBucket: rateLookups(f.queries).find(({ scope }) => scope === 'ip')?.bucket };
     };
 
-    it('charges the lookup only on the path that calls QoreID: never on a resume, a duplicate or a refusal', async () => {
+    it('charges the lookup only on the path that calls QoreID: never on a resume or a refusal', async () => {
       const f = fixture();
       f.protector.lookup.mockImplementation((value: string) => value === nin ? 'a'.repeat(64) : 'b'.repeat(64));
       await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
       expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
       expect(f.provider.verifyNin).toHaveBeenLastCalledWith(nin,
         { correlationId, networkDigest: expect.stringMatching(/^[0-9a-f]{64}$/) });
-      // Same-key resume, another key for the pending NIN, the key reused for another NIN.
+      // A same-key resume and the key reused for another NIN ask QoreID nothing.
       await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
-      await expect(f.service.start(nin, '49ebcc73-3aa3-47aa-b1e4-f8944ab6eab0', '203.0.113.10', correlationId))
-        .rejects.toMatchObject({ code: 'NIN_ALREADY_REGISTERED' });
       await expect(f.service.start('98765432109', requestKey, '203.0.113.10', correlationId))
         .rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
-      // A bound NIN and a rate-limited client.
-      f.bound = true;
-      await expect(f.service.start('98765432109', '5f0bd2a4-63c4-4f43-9f6f-0b8f7f1e2a10', '203.0.113.10',
-        correlationId)).rejects.toMatchObject({ code: 'NIN_ALREADY_REGISTERED' });
-      f.bound = false; f.rateCount = 5;
+      expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
+      // Another key for the same NIN is another enrollment and another charged lookup (ADR-062).
+      await f.service.start(nin, '49ebcc73-3aa3-47aa-b1e4-f8944ab6eab0', '203.0.113.10', correlationId);
+      expect(f.provider.verifyNin).toHaveBeenCalledTimes(2);
+      // A rate-limited client asks nothing.
+      f.rateCount = 5;
       await expect(f.service.start('98765432109', '5f0bd2a4-63c4-4f43-9f6f-0b8f7f1e2a10', '203.0.113.10',
         correlationId)).rejects.toMatchObject({ code: 'ENROLLMENT_RATE_LIMITED' });
-      expect(f.provider.verifyNin).toHaveBeenCalledTimes(1);
+      expect(f.provider.verifyNin).toHaveBeenCalledTimes(2);
     });
 
     it('keys an IPv6 client by its /64 and an IPv4 client by its address, in a keyed digest of its own', async () => {
@@ -1205,9 +1326,16 @@ describe('PatientEnrollmentService', () => {
       const f = fixture();
       f.provider.verifyNin.mockResolvedValue(record);
       const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
-      expect(started.progress).toMatchObject({ stage: 'verify_contact', requiredProfileFields: required });
+      // No required profile field before the holder proof (ADR-062).
+      expect(started.progress).toMatchObject({ stage: 'verify_holder' });
+      expect(started.progress).not.toHaveProperty('requiredProfileFields');
+      const sent = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      const holderCode = f.notification.deliver.mock.calls.at(-1)?.[0].code as string;
+      const proved = await f.service.verifyHolderCode(started.cookie, sent.challengeId, holderCode, correlationId);
+      expect(proved).toEqual({ stage: 'verify_contact', requiredProfileFields: required });
+      f.notification.deliver.mockClear();
       for (const value of ['Amina', 'Okafor', '1990-01-02', 'female', nin]) {
-        expect(JSON.stringify(started.progress)).not.toContain(value);
+        expect(JSON.stringify([started.progress, proved])).not.toContain(value);
       }
       // The resumed start, GET /current at each stage before activation and the
       // contact proof all answer the same list, read from the stored profile.
@@ -1376,6 +1504,268 @@ describe('PatientEnrollmentService', () => {
       await expect(activateWith(f, cookie, {}))
         .rejects.toMatchObject({ status: 409, code: 'ENROLLMENT_STAGE_INVALID' });
       expect(activation(f.queries)).toHaveLength(0);
+    });
+  });
+
+  describe('holder proof by the registry phone (ADR-062)', () => {
+    type Fixture = ReturnType<typeof fixture>;
+    const lastDelivery = (f: Fixture) => f.notification.deliver.mock.calls.at(-1)?.[0] as
+      { code: string; recipient: string; purpose: string; channel: string; challengeId: string };
+    const holderSql = (f: Fixture) => f.queries.map(({ sql }) => sql);
+    const routeUnavailable = 'We cannot send a code to the phone on your NIN record. Use a participating facility to register.';
+
+    it.each([
+      ['08031234567', '+2348031234567'], ['2348031234567', '+2348031234567'], ['+2348031234567', '+2348031234567'],
+      ['0803 123 4567', '+2348031234567'], ['+234 (803) 123-4567', '+2348031234567'], ['234-803-123-4567', '+2348031234567'],
+    ])('normalizes the registry phone %s to %s', (raw, normalized) => {
+      expect(normalizeRegistryPhone(raw)).toBe(normalized);
+    });
+
+    it.each([[undefined], [null], [''], [8031234567], [{ phone: '08031234567' }], ['0803123456'], ['080312345678'],
+      ['+2358031234567'], ['+44 7700 900123'], ['0803-123-456a'], ['80312345678']])(
+      'treats the registry phone %p as unusable', (raw) => {
+        expect(normalizeRegistryPhone(raw)).toBeNull();
+      });
+
+    it('treats a registry date of birth under 18 years as a minor, and an absent one as not shown', () => {
+      const now = new Date('2026-10-15T12:00:00Z');
+      expect(underEighteen('2008-10-15', now)).toBe(false);
+      expect(underEighteen('2008-10-16', now)).toBe(true);
+      expect(underEighteen('2015-01-01', now)).toBe(true);
+      expect(underEighteen('1990-01-02', now)).toBe(false);
+      expect(underEighteen(undefined, now)).toBe(false);
+      expect(underEighteen('not-a-date', now)).toBe(false);
+    });
+
+    it('shows only route availability before a code, then the open code’s timing, never a registry value', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      await expect(f.service.current(started.cookie, correlationId)).resolves.toEqual({
+        stage: 'verify_holder', expiresAt: expect.any(String), googleOnboardingRequired: false,
+        online: { available: true }, facility: { available: false } });
+      const sent = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      const progress = await f.service.current(started.cookie, correlationId);
+      expect(progress).toEqual({ stage: 'verify_holder', expiresAt: expect.any(String),
+        googleOnboardingRequired: false, facility: { available: false },
+        online: { available: true, challengeId: sent.challengeId, expiresInSeconds: expect.any(Number),
+          resendAfterSeconds: expect.any(Number) } });
+      expect(JSON.stringify(progress)).not.toMatch(/0807|3210|\+234|Amina|Okafor|1990|requiredProfileFields|masked/);
+    });
+
+    it('sends a six-digit code by SMS to the normalized registry phone, storing only digests', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      f.queries.length = 0;
+      const sent = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      expect(sent).toEqual({ challengeId: expect.any(String), expiresInSeconds: 300, resendAfterSeconds: 60 });
+      const delivery = lastDelivery(f);
+      expect(delivery).toMatchObject({ recipient: '+2348076543210', channel: 'sms', purpose: 'NIN_HOLDER_VERIFY',
+        challengeId: sent.challengeId });
+      expect(delivery.code).toMatch(/^\d{6}$/);
+      const challenge = f.challenge!;
+      expect(challenge).toMatchObject({ purpose: 'nin_holder', channel: 'phone', id: sent.challengeId });
+      expect(challenge.recipient_hmac).toMatch(/^[0-9a-f]{64}$/);
+      expect(f.enrollment?.holder_recipient_hmac).toBe(challenge.recipient_hmac);
+      expect(challenge.verifier_hmac).toMatch(/^[0-9a-f]{64}$/);
+      // The send budgets are checked by the database command, with the configured limits.
+      const send = f.holderCalls.find(({ command }) => command === 'send')!;
+      expect(send.values).toEqual([f.enrollment?.id, f.enrollment?.token_hmac, expect.stringMatching(/^[0-9a-f]{64}$/),
+        5, 10, 30]);
+      expect(send.values[2]).not.toBe(f.enrollment?.nin_lookup_hmac);
+      // Neither the raw nor the normalized phone, nor the code, reaches the database.
+      const written = JSON.stringify(f.queries.map(({ values }) => values));
+      for (const value of ['08076543210', '+2348076543210', delivery.code]) expect(written).not.toContain(value);
+      // The NIN lock before the enrollment row lock (ADR-062).
+      const sqls = holderSql(f);
+      const located = sqls.findIndex((sql) => sql.includes('select nin_lookup_hmac from identity.public_patient_enrollments'));
+      const ninLock = sqls.findIndex((sql) => sql.includes("hashtextextended('patient-nin:' || $1, 0)"));
+      const rowLock = sqls.findIndex((sql) => sql.includes('from identity.public_patient_enrollments where id=$1 for update'));
+      expect(located).toBeGreaterThanOrEqual(0);
+      expect(ninLock).toBeGreaterThan(located);
+      expect(rowLock).toBeGreaterThan(ninLock);
+    });
+
+    it.each([
+      ['the record has no phone', { phoneNumber: undefined }, 409],
+      ['the registry phone is unusable', { phoneNumber: '12345' }, 409],
+      ['the registry date of birth shows a minor', { dateOfBirth: `${new Date().getUTCFullYear() - 17}-01-01` }, 409],
+    ])('refuses the send with one text and online.available false when %s', async (_label, change, status) => {
+      const f = fixture();
+      f.provider.verifyNin.mockResolvedValue({ ...identity, ...change });
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(started.progress).toMatchObject({ online: { available: false } });
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'verify_holder', online: { available: false } });
+      await expect(f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status, code: 'NIN_HOLDER_ROUTE_UNAVAILABLE', message: routeUnavailable });
+      expect(f.notification.deliver).not.toHaveBeenCalled();
+      expect(f.holderCalls).toEqual([]);
+    });
+
+    it('refuses the send with the same text while the online route is off, and outside the holder step', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      Object.assign(process.env, { NIN_HOLDER_SMS_ENABLED: 'false', ASSISTED_REGISTRATION_ENABLED: 'true' });
+      resetEnvironmentForTests();
+      const off = fixture();
+      off.enrollments.set(String(f.enrollment!.id), f.enrollment!);
+      await expect(off.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'NIN_HOLDER_ROUTE_UNAVAILABLE', message: routeUnavailable });
+      await expect(off.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ online: { available: false } });
+      Object.assign(process.env, { NIN_HOLDER_SMS_ENABLED: 'true' }); resetEnvironmentForTests();
+      const on = fixture();
+      on.enrollments.set(String(f.enrollment!.id), f.enrollment!);
+      await proveHolder(on, started.cookie);
+      await expect(on.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 409, code: 'NIN_HOLDER_ROUTE_UNAVAILABLE', message: routeUnavailable });
+    });
+
+    it('keeps one open code with a resend cooldown, and sends at most three codes per enrollment', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const first = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      f.challenge!.created_at = new Date();
+      await expect(f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 429, code: 'OTP_RESEND_COOLDOWN' });
+      f.challenge!.created_at = new Date(Date.now() - 61_000);
+      const second = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      expect(f.challenges.find(({ id }) => id === first.challengeId)?.invalidated_at).toBeInstanceOf(Date);
+      expect(second.challengeId).not.toBe(first.challengeId);
+      await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      await expect(f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 429, code: 'NIN_HOLDER_ROUTE_LIMITED',
+          message: 'Use a participating facility to register.' });
+      expect(f.notification.deliver).toHaveBeenCalledTimes(3);
+    });
+
+    it('sends nothing when a send or failure budget is spent', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      f.holderSendAllowed = false;
+      await expect(f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 429, code: 'NIN_HOLDER_ROUTE_LIMITED',
+          message: 'Use a participating facility to register.' });
+      expect(f.notification.deliver).not.toHaveBeenCalled();
+      expect(f.challenges).toEqual([]);
+    });
+
+    it('counts a wrong code on the challenge and as a failure of the NIN, and closes the challenge after five', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const sent = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      const code = lastDelivery(f).code;
+      const wrong = code === '000000' ? '000001' : '000000';
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await expect(f.service.verifyHolderCode(started.cookie, sent.challengeId, wrong, correlationId))
+          .rejects.toMatchObject({ status: 422, code: 'OTP_INVALID' });
+      }
+      expect(f.challenge?.failed_attempts).toBe(5);
+      expect(f.challenge?.invalidated_at).toBeInstanceOf(Date);
+      const failures = f.holderCalls.filter(({ command }) => command === 'failure');
+      expect(failures).toHaveLength(5);
+      expect(failures[0]?.values).toEqual([f.enrollment?.id, f.enrollment?.token_hmac, sent.challengeId,
+        expect.stringMatching(/^[0-9a-f]{64}$/), 10, 30]);
+      await expect(f.service.verifyHolderCode(started.cookie, sent.challengeId, code, correlationId))
+        .rejects.toMatchObject({ status: 422, code: 'OTP_INVALID' });
+      expect(f.holderCalls.some(({ command }) => command === 'proof')).toBe(false);
+      expect(f.enrollment?.state).toBe('verify_holder');
+    });
+
+    it('records a correct code through the proof command under the NIN lock and answers the contact step', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const sent = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      const code = lastDelivery(f).code;
+      f.queries.length = 0;
+      await expect(f.service.verifyHolderCode(started.cookie, sent.challengeId, code, correlationId))
+        .resolves.toEqual({ stage: 'verify_contact', requiredProfileFields: [] });
+      const proof = f.holderCalls.find(({ command }) => command === 'proof')!;
+      expect(proof.values).toEqual([f.enrollment?.id, f.enrollment?.token_hmac, sent.challengeId,
+        expect.stringMatching(/^[0-9a-f]{64}$/), 5]);
+      const sqls = holderSql(f);
+      const ninLock = sqls.findIndex((sql) => sql.includes("hashtextextended('patient-nin:' || $1, 0)"));
+      const rowLock = sqls.findIndex((sql) => sql.includes('from identity.public_patient_enrollments where id=$1 for update'));
+      const proofAt = sqls.findIndex((sql) => sql.includes('record_public_patient_holder_proof'));
+      expect(ninLock).toBeGreaterThanOrEqual(0);
+      expect(rowLock).toBeGreaterThan(ninLock);
+      expect(proofAt).toBeGreaterThan(rowLock);
+      // The same code cannot prove twice.
+      await expect(f.service.verifyHolderCode(started.cookie, sent.challengeId, code, correlationId))
+        .rejects.toMatchObject({ status: 422, code: 'OTP_INVALID' });
+      expect(f.holderCalls.filter(({ command }) => command === 'proof')).toHaveLength(1);
+    });
+
+    it('refuses an expired code without a proof or a failure', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const sent = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      f.challenge!.expires_at = new Date(Date.now() - 1000);
+      await expect(f.service.verifyHolderCode(started.cookie, sent.challengeId, lastDelivery(f).code, correlationId))
+        .rejects.toMatchObject({ status: 422, code: 'OTP_INVALID' });
+      expect(f.holderCalls.filter(({ command }) => command !== 'send')).toEqual([]);
+    });
+
+    it('checks readiness first and the online route, counting nothing', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const sent = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      f.ready = false;
+      await expect(f.service.verifyHolderCode(started.cookie, sent.challengeId, '000000', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_RECONCILIATION_REQUIRED' });
+      f.ready = true;
+      Object.assign(process.env, { NIN_HOLDER_SMS_ENABLED: 'false', ASSISTED_REGISTRATION_ENABLED: 'true' });
+      resetEnvironmentForTests();
+      const off = fixture();
+      off.enrollments.set(String(f.enrollment!.id), f.enrollment!);
+      off.challenges.push(f.challenge!);
+      await expect(off.service.verifyHolderCode(started.cookie, sent.challengeId, '000000', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'NIN_HOLDER_ROUTE_UNAVAILABLE' });
+      expect(f.challenge?.failed_attempts).toBe(0);
+      expect([...f.holderCalls, ...off.holderCalls].filter(({ command }) => command !== 'send')).toEqual([]);
+    });
+
+    it.each([
+      ['existing_identity', 409, 'NIN_ALREADY_REGISTERED', 'This NIN already has a Health ID. Use account recovery to sign in.'],
+      ['facility_conflict', 409, 'NIN_HOLDER_PROOF_CONFLICT', 'Registration for this NIN is in progress at a facility.'],
+      ['route_limited', 429, 'NIN_HOLDER_ROUTE_LIMITED', 'Use a participating facility to register.'],
+    ])('answers a %s proof with %s %s', async (outcome, status, code, message) => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const sent = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      f.holderProofOutcome = outcome;
+      const refusal = await f.service.verifyHolderCode(started.cookie, sent.challengeId, lastDelivery(f).code,
+        correlationId).catch((error: unknown) => error);
+      expect(refusal).toMatchObject({ status, code, message });
+      expect(JSON.stringify(refusal)).not.toMatch(/HID-|patient-|account-|pending/);
+    });
+
+    it('refuses the contact step and activation before the holder proof', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      await expect(f.service.startContact(started.cookie, 'email', 'patient@example.test', '203.0.113.10',
+        correlationId)).rejects.toMatchObject({ status: 409, code: 'ENROLLMENT_STAGE_INVALID' });
+      await expect(f.service.activate(started.cookie, 'a-strong-test-password', correlationId))
+        .rejects.toMatchObject({ status: 409, code: 'ENROLLMENT_STAGE_INVALID' });
+      expect(f.notification.deliver).not.toHaveBeenCalled();
+    });
+
+    it('answers an activation the database refuses for its holder proof with 409 ENROLLMENT_HOLDER_PROOF_REQUIRED', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      f.activationFailure = Object.assign(new Error('PATIENT_HOLDER_PROOF_INVALID'), { code: '23514' });
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .rejects.toMatchObject({ status: 409, code: 'ENROLLMENT_HOLDER_PROOF_REQUIRED' });
+    });
+
+    it('answers a NIN bound at activation with the recovery text, never "pending"', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      f.activationFailure = Object.assign(new Error('PATIENT_NIN_ALREADY_BOUND'), { code: '23505' });
+      const refusal = await f.service.activate(cookie, 'a-strong-test-password', correlationId)
+        .catch((error: unknown) => error);
+      expect(refusal).toMatchObject({ status: 409, code: 'NIN_ALREADY_REGISTERED',
+        message: 'This NIN already has a Health ID. Use account recovery to sign in.' });
     });
   });
 });

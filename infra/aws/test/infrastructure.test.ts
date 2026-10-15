@@ -1265,33 +1265,66 @@ test('production OTP delivery injects only the otp-email-sms provider fields', (
   assert.ok(containerOf(stagingRegional, 'notification-worker').secrets.some(item => item.Name === 'NOVU_API_KEY'));
 });
 
-test('NIN-only enrollment is an explicit synth input that defaults to false and requires QoreID', () => {
-  assert.equal(environmentConfig('production').qoreIdNinOnlyEnrollmentEnabled, false);
-  // CFG-PROD and N1: production refuses the flag, even with QoreID on, until
-  // the change that ships the registry-phone holder step lifts this refusal.
+test('NIN-only enrollment and the NIN holder routes are explicit synth inputs that default to false (ADR-062)', () => {
   const productionTopic = { operationalAlarmTopicArn: 'arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts' };
+  const production = environmentConfig('production');
+  assert.deepEqual([production.qoreIdNinOnlyEnrollmentEnabled, production.ninHolderSmsEnabled,
+    production.assistedRegistrationEnabled, production.qoreIdPatientSelfNinBindingEnabled], [false, false, false, false]);
+  const flags = ['QOREID_NIN_ONLY_ENROLLMENT_ENABLED', 'NIN_HOLDER_SMS_ENABLED', 'ASSISTED_REGISTRATION_ENABLED',
+    'QOREID_PATIENT_SELF_NIN_BINDING_ENABLED'];
+  for (const template of [regional, stagingRegional]) {
+    for (const flag of flags) assert.equal(containerOf(template, 'identity-api').environment[flag], 'false', flag);
+  }
+  // NIN-only enrollment needs QoreID and a route to prove that a person holds the NIN.
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined,
+    { qoreIdNinOnlyEnrollmentEnabled: 'true', assistedRegistrationEnabled: 'true' }),
+  /HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED.*HID_QOREID_ENABLED/);
+  assert.throws(() => environmentConfig('staging', 'economy', 'true', undefined, { qoreIdNinOnlyEnrollmentEnabled: 'true' }),
+    /requires HID_NIN_HOLDER_SMS_ENABLED=true or HID_ASSISTED_REGISTRATION_ENABLED=true/);
+  for (const [input, value] of [['qoreIdNinOnlyEnrollmentEnabled', 'yes'], ['ninHolderSmsEnabled', 'on'],
+    ['assistedRegistrationEnabled', '1'], ['qoreIdPatientSelfNinBindingEnabled', 'TRUE']] as const) {
+    assert.throws(() => environmentConfig('staging', 'economy', 'true', undefined, { [input]: value }), /must be true or false/);
+  }
+  // Staging's notification-api sends email only: no holder SMS there.
+  assert.throws(() => environmentConfig('staging', 'economy', 'true', undefined, { ninHolderSmsEnabled: 'true' }),
+    /HID_NIN_HOLDER_SMS_ENABLED=true is refused on staging/);
+  // Production: the blanket NIN-only refusal is replaced by the route rules.
   assert.throws(() => environmentConfig('production', undefined, 'true', undefined,
-    { ...productionTopic, qoreIdNinOnlyEnrollmentEnabled: 'true' }),
-  /HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production/);
-  assert.equal(environmentConfig('production', undefined, 'true', undefined,
-    { ...productionTopic, qoreIdNinOnlyEnrollmentEnabled: 'false' }).qoreIdNinOnlyEnrollmentEnabled, false);
-  // The regional stack refuses it too, for a configuration built by hand.
-  assert.throws(() => new HidRegionalStack(new App(), 'NinOnlyProduction', { configuration: {
-    ...environmentConfig('production', undefined, 'true', undefined, productionTopic), qoreIdNinOnlyEnrollmentEnabled: true,
-  } }), /HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production/);
-  assert.equal(containerOf(regional, 'identity-api').environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED, 'false');
-  assert.equal(containerOf(stagingRegional, 'identity-api').environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED, 'false');
-  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { qoreIdNinOnlyEnrollmentEnabled: 'true' }),
-    /HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED.*HID_QOREID_ENABLED/);
-  assert.throws(() => environmentConfig('staging', 'economy', 'true', undefined, { qoreIdNinOnlyEnrollmentEnabled: 'yes' }),
-    /HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED/);
-  const enabled = environmentConfig('staging', 'economy', 'true', undefined, { qoreIdNinOnlyEnrollmentEnabled: 'true' });
-  assert.equal(enabled.qoreIdNinOnlyEnrollmentEnabled, true);
+    { ...productionTopic, qoreIdNinOnlyEnrollmentEnabled: 'true', ninHolderSmsEnabled: 'true' }),
+  /HID_NIN_HOLDER_SMS_ENABLED=true requires HID_ASSISTED_REGISTRATION_ENABLED=true in production/);
+  const bothRoutes = environmentConfig('production', undefined, 'true', undefined, { ...productionTopic,
+    qoreIdNinOnlyEnrollmentEnabled: 'true', ninHolderSmsEnabled: 'true', assistedRegistrationEnabled: 'true' });
+  assert.deepEqual([bothRoutes.qoreIdNinOnlyEnrollmentEnabled, bothRoutes.ninHolderSmsEnabled,
+    bothRoutes.assistedRegistrationEnabled], [true, true, true]);
+  assert.throws(() => environmentConfig('production', undefined, 'true', undefined,
+    { ...productionTopic, qoreIdPatientSelfNinBindingEnabled: 'true' }),
+  /HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=true is refused in production/);
+  assert.equal(environmentConfig('staging', 'economy', 'true', undefined,
+    { qoreIdPatientSelfNinBindingEnabled: 'true' }).qoreIdPatientSelfNinBindingEnabled, true);
+  // The regional stack refuses the same, for a configuration built by hand.
+  const productionConfiguration = environmentConfig('production', undefined, 'true', undefined, productionTopic);
+  for (const [label, change, message] of [
+    ['online route without the facility route', { ninHolderSmsEnabled: true },
+      /HID_NIN_HOLDER_SMS_ENABLED=true requires HID_ASSISTED_REGISTRATION_ENABLED=true in production/],
+    ['signed-in NIN binding', { qoreIdPatientSelfNinBindingEnabled: true },
+      /HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=true is refused in production/],
+    ['NIN-only enrollment without a route', { qoreIdNinOnlyEnrollmentEnabled: true },
+      /requires HID_NIN_HOLDER_SMS_ENABLED=true or HID_ASSISTED_REGISTRATION_ENABLED=true/],
+  ] as const) {
+    assert.throws(() => new HidRegionalStack(new App(), `Holder${label.replace(/[^A-Za-z]/g, '')}`, {
+      configuration: { ...productionConfiguration, ...change } }), message, label);
+  }
+  const enabled = environmentConfig('staging', 'economy', 'true', undefined,
+    { qoreIdNinOnlyEnrollmentEnabled: 'true', assistedRegistrationEnabled: 'true' });
+  assert.deepEqual([enabled.qoreIdNinOnlyEnrollmentEnabled, enabled.assistedRegistrationEnabled], [true, true]);
   const template = Template.fromStack(new HidRegionalStack(new App(), 'NinOnlyStaging', { configuration: enabled }))
     .toJSON() as typeof regional;
   assert.equal(containerOf(template, 'identity-api').environment.QOREID_NIN_ONLY_ENROLLMENT_ENABLED, 'true');
+  assert.equal(containerOf(template, 'identity-api').environment.ASSISTED_REGISTRATION_ENABLED, 'true');
+  assert.equal(containerOf(template, 'identity-api').environment.NIN_HOLDER_SMS_ENABLED, 'false');
   for (const name of workloadNames.filter(item => item !== 'identity-api')) {
-    assert.doesNotMatch(JSON.stringify(containerOf(template, name)), /QOREID_NIN_ONLY/);
+    assert.doesNotMatch(JSON.stringify(containerOf(template, name)),
+      /QOREID_NIN_ONLY|NIN_HOLDER|ASSISTED_REGISTRATION|PATIENT_SELF_NIN_BINDING/);
   }
 });
 
