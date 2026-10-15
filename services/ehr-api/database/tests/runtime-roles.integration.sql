@@ -396,6 +396,7 @@ begin
          'identity.verify_clinician_application_signup_code(uuid,character,text,character,character)',
          'identity.verify_clinician_application_status_code(uuid,character,character,character)',
          'identity.clinician_application_session(character)',
+         'identity.clinician_application_submit_probe(character,character,text,character)',
          'identity.search_clinician_application_facilities(character,text)',
          'identity.submit_clinician_application(character,character,text,character,text,character,text,text,text,text,text,date,uuid,integer)',
          'identity.bind_clinician_application_mfa_challenge(character,uuid)',

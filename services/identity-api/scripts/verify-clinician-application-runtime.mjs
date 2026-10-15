@@ -478,9 +478,27 @@ try {
   const submitKey = key('submit');
   const signup = { ...details(ids.x, { licenceNumber: 'MDCN/R/40001' }), email: fresh, fullName: 'Runtime Fresh Clinician',
     password };
+  // A forged capability (well-formed, unknown) on submit or apply-again is
+  // refused before the submit quota is charged (and before the password is
+  // hashed): no counter moves.
+  const submitCharges = async () => (await one(`select coalesce(sum(attempt_count), 0)::int as n
+    from platform.clinician_application_quota_counters where operation = 'submit' and scope = 'network'`)).n;
+  const platformCreated = async () => (await one(`select coalesce(sum(attempt_count), 0)::int as n
+    from platform.clinician_application_quota_counters where operation = 'submit' and scope = 'platform'`)).n;
+  const forged = `hid_clinician_application=${'A'.repeat(43)}`;
+  const chargesBefore = await submitCharges();
+  const createdBefore = await platformCreated();
+  expectStatus(await call('post', '', { cookie: forged, network: enumeration, headers: { 'Idempotency-Key': key('forged') },
+    body: signup }), 401, 'CLINICIAN_APPLICATION_SESSION_INVALID');
+  expectStatus(await call('post', '/current/applications', { cookie: forged, network: enumeration,
+    headers: { 'Idempotency-Key': key('forged-apply') }, body: details(ids.y, { licenceNumber: 'MDCN/R/40001' }) }), 401,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+  assert.deepEqual([await submitCharges(), await platformCreated()], [chargesBefore, createdBefore],
+    'a forged capability charged the submit quota');
   const submitted = await call('post', '', { cookie: draft, network: enumeration, headers: { 'Idempotency-Key': submitKey },
     body: signup });
   expectStatus(submitted, 201);
+  assert.equal(await platformCreated(), createdBefore + 1, 'the platform did not count the created application');
   assert.equal(submitted.body.state, 'awaiting_authenticator');
   assert.deepEqual([submitted.body.next, submitted.body.authenticator.purpose, submitted.body.replayed],
     ['authenticator', 'enroll', false]);
@@ -500,12 +518,14 @@ try {
     body: signup });
   expectStatus(replay, 201);
   assert.deepEqual([replay.body.applicationId, replay.body.replayed], [submitted.body.applicationId, true]);
+  assert.equal(await platformCreated(), createdBefore + 1, 'a replay counted against the platform\'s daily cap');
   const capability = capabilityOf(replay, 1800);
   expectStatus(await call('post', '', { cookie: draft, network: enumeration, headers: { 'Idempotency-Key': key('other') },
     body: signup }), 401, 'CLINICIAN_APPLICATION_SESSION_INVALID');
   // The replay re-opened the enrolment: the first capability's challenge was superseded.
   expectStatus(await call('post', '/authenticator/email-code', { cookie: firstCapability, network: enumeration }), 401,
     'MFA_CHALLENGE_INVALID');
+  checks.push('a forged capability on submit or apply-again is 401 before the submit quota is charged (no counter moves); the platform\'s daily cap counts the created application once, not its replay');
   checks.push('submit (Idempotency-Key) creates an active account (subject workforce:<id>, verified email, argon2id 64 MiB/3/1), a pending staff record with the licence, no membership and no session, and answers awaiting_authenticator with the enrolment next; the capability rotates (30 minutes); the same key replays the same application with a fresh capability (the earlier challenge is superseded); another key on a spent draft is 401');
 
   // 7. No sign-in before approval.

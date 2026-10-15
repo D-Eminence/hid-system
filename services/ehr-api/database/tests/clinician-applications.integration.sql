@@ -257,6 +257,7 @@ begin
     'identity.verify_clinician_application_signup_code(uuid,character,text,character,character)',
     'identity.verify_clinician_application_status_code(uuid,character,character,character)',
     'identity.clinician_application_session(character)',
+    'identity.clinician_application_submit_probe(character,character,text,character)',
     'identity.search_clinician_application_facilities(character,text)',
     'identity.submit_clinician_application(character,character,text,character,text,character,text,text,text,text,text,date,uuid,integer)',
     'identity.bind_clinician_application_mfa_challenge(character,uuid)',
@@ -671,6 +672,13 @@ begin
     insert into platform.clinician_application_quota_counters (scope, operation, scope_key, bucket_period, bucket_start,
       attempt_count)
     values ('network', op, pg_temp.ca_h('network-day:' || op), 'day', date_trunc('day', statement_timestamp()), 10);
+    -- The platform has created three applications today (C8 and C13 count them).
+    if op = 'submit' then
+      insert into platform.clinician_application_quota_counters as counter (scope, operation, scope_key, bucket_period,
+        bucket_start, attempt_count)
+      values ('platform', 'submit', 'all', 'day', date_trunc('day', statement_timestamp()), 3)
+      on conflict (scope, operation, scope_key, bucket_period, bucket_start) do update set attempt_count = 3;
+    end if;
     -- The platform has made this many calls today; one more is allowed.
     perform set_config('ca_suite.platform_' || op, (coalesce((select counter.attempt_count
       from platform.clinician_application_quota_counters counter
@@ -690,7 +698,15 @@ begin
       raise exception 'the network daily quota of % did not deny', op;
     end if;
     platform_limit := current_setting('ca_suite.platform_' || op)::integer;
-    if not platform.consume_clinician_application_quota(pg_temp.ca_h('platform-a:' || op), op, 5, 10, platform_limit)
+    if op = 'submit' then
+      -- The platform's daily submit cap counts created applications, not
+      -- attempts: two attempts under it leave it as it was, and one at it is denied.
+      if not platform.consume_clinician_application_quota(pg_temp.ca_h('platform-a:' || op), op, 5, 10, platform_limit)
+         or not platform.consume_clinician_application_quota(pg_temp.ca_h('platform-b:' || op), op, 5, 10, platform_limit)
+         or platform.consume_clinician_application_quota(pg_temp.ca_h('platform-c:' || op), op, 5, 10, platform_limit - 1) then
+        raise exception 'the platform daily submit cap counted an attempt, or did not deny at the cap';
+      end if;
+    elsif not platform.consume_clinician_application_quota(pg_temp.ca_h('platform-a:' || op), op, 5, 10, platform_limit)
        or platform.consume_clinician_application_quota(pg_temp.ca_h('platform-b:' || op), op, 5, 10, platform_limit) then
       raise exception 'the platform daily quota of % did not deny the call over it', op;
     end if;
@@ -739,7 +755,17 @@ do $$ begin
        and details->>'exhaustedLimit' not in ('network_hour', 'network_day', 'platform_day')) then
     raise exception 'quota audit rows are not as specified';
   end if;
+  if (select attempt_count from platform.clinician_application_quota_counters
+       where scope = 'platform' and operation = 'submit' and bucket_start = date_trunc('day', statement_timestamp())) <> 3 then
+    raise exception 'a submit attempt changed the platform''s count of created applications';
+  end if;
 end $$;
+-- The count of applications the platform created today (as the owner).
+create function pg_temp.ca_platform_submits() returns integer language sql as $$
+  select coalesce((select attempt_count from platform.clinician_application_quota_counters
+    where scope = 'platform' and operation = 'submit' and scope_key = 'all' and bucket_period = 'day'
+      and bucket_start = date_trunc('day', statement_timestamp())), 0)
+$$;
 
 -- 5. Facility search (a draft; account capabilities in section 9).
 set local role hid_identity_api_runtime;
@@ -790,8 +816,27 @@ reset role;
 update identity.clinician_application_sessions set facility_searches = 6 where token_hmac = pg_temp.ca_h('session:p1');
 
 -- 6. Submit.
+select set_config('ca_suite.submits_before', pg_temp.ca_platform_submits()::text, true);
 set local role hid_identity_api_runtime;
 select pg_temp.ca_system('submit');
+-- The submit probe, before Identity charges the quota or hashes the
+-- password: 'new' for a live draft of the address; no draft, another
+-- address or an account capability is refused as the submission would be.
+do $$ begin
+  if identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'), pg_temp.ca_h('email:doctor1@ca.invalid'),
+       'clinician-suite-key-p1', pg_temp.ca_h('sha:p1')) <> 'new' then
+    raise exception 'the submit probe did not accept a live draft';
+  end if;
+end $$;
+select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:none'),
+  pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'),
+  pg_temp.ca_h('email:other@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe('not-a-digest',
+  pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
 -- Only doctor with MDCN and nurse with NMCN; an argon2id hash with the
 -- Identity parameters; a licence date after today (Lagos) and within five years.
 select pg_temp.ca_refused(format($c$select pg_temp.ca_submit('p1', 'doctor1@ca.invalid', 'Doctor One', %L, %L, 'MDCN/12345',
@@ -832,6 +877,13 @@ begin
   perform set_config('ca_suite.p1_application', created::text, true);
 end $$;
 reset role;
+-- The refused submissions above did not count against the platform's cap; the one created did.
+do $$ begin
+  if pg_temp.ca_platform_submits() <> current_setting('ca_suite.submits_before')::integer + 1 then
+    raise exception 'the platform counted % created applications, not one', pg_temp.ca_platform_submits()
+      - current_setting('ca_suite.submits_before')::integer;
+  end if;
+end $$;
 do $$
 declare
   account_row auth.accounts%rowtype;
@@ -917,7 +969,21 @@ begin
      or replay.session_stage <> 'enrolment_required' or replay.state <> 'awaiting_authenticator' then
     raise exception 'a submission replay was not answered with the same application: %', row_to_json(replay);
   end if;
+  -- The spent draft: the same key and request probe as a replay; any other is refused.
+  if identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'), pg_temp.ca_h('email:doctor1@ca.invalid'),
+       'clinician-suite-key-p1', pg_temp.ca_h('sha:p1')) <> 'replay' then
+    raise exception 'the submit probe did not recognise a replay';
+  end if;
 end $$;
+select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'),
+  pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1-other', pg_temp.ca_h('sha:p1'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'),
+  pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1-other'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1-account'),
+  pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
 select pg_temp.ca_refused($c$select * from identity.submit_clinician_application(pg_temp.ca_h('session:p1'),
   pg_temp.ca_h('session:p1-other'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1-other'), 'doctor1@ca.invalid',
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'Doctor One',
@@ -941,6 +1007,9 @@ update identity.clinician_application_sessions set created_at = created_at - int
   expires_at = expires_at - interval '61 minutes' where token_hmac = pg_temp.ca_h('session:p1');
 set local role hid_identity_api_runtime;
 select pg_temp.ca_system('submit-late');
+select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'),
+  pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
 select pg_temp.ca_refused($c$select * from identity.submit_clinician_application(pg_temp.ca_h('session:p1'),
   pg_temp.ca_h('session:p1-late'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'), 'doctor1@ca.invalid',
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'Doctor One',
@@ -980,6 +1049,11 @@ do $$ begin
      or (pg_temp.ca_application('nurse2@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).licence_key <> 'NMCN:777'
      or identity.clinician_licence_key('MDCN', '12345') <> 'MDCN:12345' then
     raise exception 'the canonical licence key is not as specified';
+  end if;
+  -- P1 to P5 created; the replay, the late replay and the refusals did not count.
+  if pg_temp.ca_platform_submits() <> current_setting('ca_suite.submits_before')::integer + 5 then
+    raise exception 'the platform counted % created applications, not five', pg_temp.ca_platform_submits()
+      - current_setting('ca_suite.submits_before')::integer;
   end if;
 end $$;
 
@@ -1222,6 +1296,7 @@ select pg_temp.ca_capability('orgadmin-ready', 'ca200000-0000-4000-8000-00000000
 select pg_temp.ca_capability('patient-ready', 'ca200000-0000-4000-8000-000000000007', 'ready');
 select pg_temp.ca_capability('p4-ready', pg_temp.ca_account('doctor4@ca.invalid'), 'ready');
 select pg_temp.ca_capability('p3-enrol', pg_temp.ca_account('doctor3@ca.invalid'), 'enrolment_required');
+select set_config('ca_suite.files_before', pg_temp.ca_platform_submits()::text, true);
 set local role hid_identity_api_runtime;
 select pg_temp.ca_system('file');
 create function pg_temp.ca_file(tag text, session_tag text, facility uuid, key_suffix text default '') returns jsonb
@@ -1305,6 +1380,11 @@ do $$ begin
      or (select count(*) from identity.clinician_applications
           where account_id = pg_temp.ca_account('doctor1@ca.invalid')) <> 3 then
     raise exception 'applying again did not create exactly two additional applications';
+  end if;
+  -- Only the two created count against the platform's cap: no refusal or replay does.
+  if pg_temp.ca_platform_submits() <> current_setting('ca_suite.files_before')::integer + 2 then
+    raise exception 'the platform counted % applications filed again, not two', pg_temp.ca_platform_submits()
+      - current_setting('ca_suite.files_before')::integer;
   end if;
 end $$;
 
